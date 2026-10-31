@@ -122,14 +122,18 @@ NavierStokesVMSIntegrands navierStokesVMSIntegrands(const NavierStokesTerms& t,
     const auto w = s.ale ? w_mesh : zero;                                 // mesh velocity
     const auto a = s.convection ? (s.ale ? (u - w_mesh) : u) : zero;      // velocity relative to the mesh
     const auto chi = s.moving_control_volume ? (div(w) * u) : zero;       // moving control volume
+    // (a.grad) u, plus div(a) u for the conservative transport (div(a) taken
+    // term by term, as divergences of the fields).
+    const auto div_a = [&] { return s.ale ? div(u) - div(w_mesh) : div(u); };
+    const auto transport = [&] { return s.conservative_transport ? advect(a, u) + div_a() * u : advect(a, u); };
 
     // Strong momentum residual without and with the pressure gradient.
-    const auto R_np = rho * (dt(u) + advect(a, u) + chi - f) - div(FormExpr::constant(2.0) * mu * symgrad(u));
+    const auto R_np = rho * (dt(u) + transport() + chi - f) - div(FormExpr::constant(2.0) * mu * symgrad(u));
     const auto R_m = R_np + grad(p);
 
     const auto inertia = rho * inner(dt(u), v);
     const auto mcv = s.moving_control_volume ? rho * div(w_mesh) * inner(u, v) : FormExpr::constant(0.0);
-    const auto convection = rho * inner(advect(a, u), v);
+    const auto convection = rho * inner(transport(), v);
     const auto viscous = FormExpr::constant(2.0) * mu * inner(symgrad(u), symgrad(v));
     const auto pressure = -p * div(v);
     const auto forcing = -rho * inner(f, v);
@@ -163,7 +167,8 @@ NavierStokesVMSIntegrands navierStokesVMSIntegrands(const NavierStokesTerms& t,
     const auto p_s = -tau_c * div(u);                                      // p'
     const auto u_adv = s.convection ? (u + u_s - w) : a;
 
-    const auto convection_adv = rho * inner(advect(u_adv, u), v);
+    const auto convection_adv = s.conservative_transport ? rho * inner(advect(u_adv, u) + div_a() * u, v)
+                                                         : rho * inner(advect(u_adv, u), v);
     const auto pressure_adv = -(p + p_s) * div(v);
     const auto supg = -rho * inner(advect(u_adv, v), u_s);
     // Cross stress (u'.grad v) . tau_B (u'.grad) u,  tau_B = rho / sqrt(u'.K u').
@@ -409,10 +414,14 @@ void IncompressibleNavierStokesVMSModule::registerOn(fs::FESystem& system) const
     const auto g = constantVector(o.body_force, dim);
     const NavierStokesTerms t{u, p, v, q, rho, viscosity(o, u),
                               bodyForce(o, g, dim, body_force, u), dim};
-    const bool mcv = o.enable_ale && o.include_moving_control_volume_transient;
+    const bool mcv = o.enable_ale &&
+                     (o.ale_momentum_form == ALEMomentumForm::Conservative ||
+                      (o.ale_momentum_form == ALEMomentumForm::Legacy && o.include_moving_control_volume_transient));
+    const bool conservative = o.enable_ale && o.enable_convection &&
+                              o.ale_momentum_form == ALEMomentumForm::Conservative;
     const auto r = navierStokesVMSIntegrands(
         t, {.convection = o.enable_convection, .ale = o.enable_ale, .moving_control_volume = mcv,
-            .vms = preflight.enable_vms,
+            .conservative_transport = conservative, .vms = preflight.enable_vms,
             .ct_m = o.ct_m, .ct_c = o.ct_c, .epsilon = o.stabilization_epsilon});
     FormExpr M = r.momentum.dx(Omega);
     FormExpr C = r.continuity.dx(Omega);

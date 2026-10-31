@@ -39,6 +39,7 @@
 #include <span>
 #include <stdexcept>
 #include <string>
+#include <utility>
 #include <vector>
 
 #if defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH
@@ -867,23 +868,29 @@ TEST(FittedFreeSurfaceALE, CoupledJacobianLacksPartOfTheShapeDerivativeInEveryRo
 }
 
 // Free-stream preservation on a moving mesh: a uniform velocity U with zero
-// pressure on a non-uniformly moving mesh.  Every term of the ALE momentum
-// and continuity residual vanishes for it except the moving-control-volume
-// term rho div(w) U.v (and its share of the VMS strong residual), so the
-// fluid rows are round-off without that term and are not with it, under
-// Backward Euler and the first-order generalized-alpha stage alike.
-TEST(FittedFreeSurfaceALE, FreeStreamOnAMovingMeshIsKeptOnlyWithoutTheMovingControlVolumeTerm)
+// pressure on a non-uniformly moving mesh.  The non-conservative and the
+// conservative ALE momentum forms leave the fluid rows at round-off; the
+// legacy form, the default, adds the moving-control-volume term
+// rho div(w) U.v (and its share of the VMS strong residual) to the
+// non-conservative transport and does not, under Backward Euler and the
+// first-order generalized-alpha stage alike.
+TEST(FittedFreeSurfaceALE, FreeStreamOnAMovingMeshIsKeptByTheNonConservativeAndConservativeForms)
 {
     const auto alpha = FE::timestepping::utils::generalizedAlphaFirstOrderFromRhoInf(0.5);
     const FE::timestepping::GeneralizedAlphaFirstOrderIntegrator generalized_alpha(
         FE::timestepping::GeneralizedAlphaFirstOrderIntegratorOptions{
             .alpha_m = alpha.alpha_m, .alpha_f = alpha.alpha_f, .gamma = alpha.gamma, .history_rate_order = 0});
+    const std::array<std::pair<ns::ALEMomentumForm, const char*>, 3> forms{{
+        {ns::ALEMomentumForm::Legacy, "legacy"},
+        {ns::ALEMomentumForm::NonConservative, "non-conservative"},
+        {ns::ALEMomentumForm::Conservative, "conservative"},
+    }};
     for (const bool use_generalized_alpha : {false, true}) {
-        for (const bool moving_control_volume : {false, true}) {
+        for (const auto& [form, form_name] : forms) {
             auto opts = coupledALEOptions();
             opts.enable_convection = true;
             opts.enable_vms = true;
-            opts.include_moving_control_volume_transient = moving_control_volume;
+            opts.ale_momentum_form = form;
             FittedALEFixture ale(makeRectangleTriangleMesh(), std::nullopt, opts);
             const auto n = static_cast<FE::GlobalIndex>(ale.solution.size());
             for (FE::GlobalIndex v = 0; v < static_cast<FE::GlobalIndex>(ale.mesh->n_vertices()); ++v) {
@@ -913,12 +920,11 @@ TEST(FittedFreeSurfaceALE, FreeStreamOnAMovingMeshIsKeptOnlyWithoutTheMovingCont
                 }
             }
             const FE::Real fluid = std::sqrt(fluid2);
-            std::cout << "[ free stream ] " << (use_generalized_alpha ? "generalized-alpha" : "Backward Euler")
-                      << (moving_control_volume ? ", with" : ", without")
-                      << " the moving-control-volume term: |R_fluid| = " << fluid << "\n";
-            SCOPED_TRACE(std::string(use_generalized_alpha ? "generalized-alpha" : "Backward Euler") +
-                         (moving_control_volume ? " with" : " without") + " the moving-control-volume term");
-            if (moving_control_volume) {
+            const std::string scheme = use_generalized_alpha ? "generalized-alpha" : "Backward Euler";
+            std::cout << "[ free stream ] " << scheme << ", " << form_name << " ALE momentum form: |R_fluid| = "
+                      << fluid << "\n";
+            SCOPED_TRACE(scheme + ", " + form_name);
+            if (form == ns::ALEMomentumForm::Legacy) {
                 EXPECT_GT(fluid, 1e-3);
             } else {
                 EXPECT_LT(fluid, 1e-13);

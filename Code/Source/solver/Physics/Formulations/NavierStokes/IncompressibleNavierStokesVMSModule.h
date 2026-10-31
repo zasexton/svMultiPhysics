@@ -362,6 +362,25 @@ enum class ALEMeshVelocitySource {
 };
 
 /**
+ * @brief The momentum transport of a moving domain (ALE), set in code only
+ *
+ * With w the mesh velocity and a = u - w the velocity relative to the mesh:
+ * - Legacy: rho (dt(u) + (a.grad) u + div(w) u), the moving-control-volume
+ *   term on the non-conservative transport (the default; a uniform flow on a
+ *   non-uniformly moving mesh leaves the residual rho div(w) u);
+ * - NonConservative: rho (dt(u) + (a.grad) u);
+ * - Conservative: rho (dt(u) + (a.grad) u + div(a) u + div(w) u), the time
+ *   derivative and the transport both in conservation form, so the two
+ *   divergence terms cancel for a uniform flow.
+ * The strong residual of the VMS subscales follows the same choice.
+ */
+enum class ALEMomentumForm : std::uint8_t {
+    Legacy,
+    NonConservative,
+    Conservative
+};
+
+/**
  * @brief Named velocity-row operators for the conservative free-surface split
  *
  * These diagnostic operators are installed only when they are requested
@@ -620,7 +639,8 @@ struct IncompressibleNavierStokesVMSOptions {
     // FE Forms moving-domain terminals. Physics remains responsible for the
     // ALE-specific residual choices.
     bool enable_ale{false};
-    bool include_moving_control_volume_transient{true};
+    bool include_moving_control_volume_transient{true};   // Legacy only
+    ALEMomentumForm ale_momentum_form{ALEMomentumForm::Legacy};
     ALEMeshVelocitySource mesh_velocity_source{ALEMeshVelocitySource::PrescribedData};
     std::string mesh_velocity_field_name{"mesh_velocity"};
     std::string mesh_displacement_field_name{"mesh_displacement"};
@@ -1081,6 +1101,7 @@ struct NavierStokesVMSSettings {
     bool convection{true};
     bool ale{false};
     bool moving_control_volume{false};      // chi = div(w) u (ALE only)
+    bool conservative_transport{false};     // adds div(a) u to the transport (ALE only)
     bool vms{true};
     FE::Real ct_m{1.0};
     FE::Real ct_c{36.0};
