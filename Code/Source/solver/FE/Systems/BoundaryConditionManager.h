@@ -8,6 +8,7 @@
 
 #include "Analysis/FormExprScanner.h"
 #include "Forms/BoundaryCondition.h"
+#include "Forms/StandardBCs.h"
 #include "Systems/FESystem.h"
 #include "Systems/FormsInstaller.h"
 #include "Constraints/SystemConstraint.h"
@@ -110,10 +111,23 @@ private:
  */
 class BoundaryConditionManager {
 public:
+    /// Adds @p bc.  A strong component condition joins an earlier one of the
+    /// same boundary (forms::bc::Dirichlet::mergeComponents): the components
+    /// of one boundary may be stated apart, each at most once.
     void add(std::unique_ptr<forms::bc::BoundaryCondition> bc)
     {
         if (!bc) {
             throw std::invalid_argument("BoundaryConditionManager::add: null boundary condition");
+        }
+        if (const auto* condition = dynamic_cast<const forms::bc::Dirichlet*>(bc.get());
+            condition != nullptr && condition->mergesComponents()) {
+            for (auto& existing : bcs_) {
+                auto* earlier = dynamic_cast<forms::bc::Dirichlet*>(existing.get());
+                if (earlier != nullptr && earlier->mergesComponents() && earlier->sameTarget(*condition)) {
+                    earlier->mergeComponents(*condition);
+                    return;
+                }
+            }
         }
         bcs_.push_back(std::move(bc));
     }

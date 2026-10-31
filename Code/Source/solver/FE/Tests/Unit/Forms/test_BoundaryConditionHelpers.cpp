@@ -14,6 +14,7 @@
 #include "Spaces/H1Space.h"
 #include "Spaces/HDivSpace.h"
 #include "Spaces/ProductSpace.h"
+#include "Systems/BoundaryConditionManager.h"
 #include "Systems/FESystem.h"
 #include "Systems/SystemManifest.h"
 #include "Tests/Unit/Forms/FormsTestHelpers.h"
@@ -425,6 +426,90 @@ TEST(FormsBoundaryConditions, DirichletNitscheOfAStressEntersTheVelocityAndPress
     FormExpr R = (inner(grad(u), grad(v))).dx();
     EXPECT_THROW(bc::Dirichlet(measure, uD, bc::Nitsche{}, flux).contributeToResidual(R, u, v),
                  std::invalid_argument);
+}
+
+TEST(FormsBoundaryConditions, StrongComponentConditionsOfOneBoundaryMerge)
+{
+    namespace forms = svmp::FE::forms;
+    namespace bc = forms::bc;
+    using forms::FormExpr;
+    const auto one = [](int marker, int component, double value) {
+        return std::make_unique<bc::Dirichlet>(marker, std::vector<std::pair<int, FormExpr>>{{component, FormExpr::constant(value)}},
+                                               "d", "Wall");
+    };
+    std::vector<std::unique_ptr<bc::Dirichlet>> conditions;
+    conditions.push_back(one(4, 2, 3.0));
+    conditions.push_back(one(5, 1, 7.0));
+    conditions.push_back(one(4, 0, 1.0));
+    const auto merged = bc::mergeComponents(std::move(conditions));
+    ASSERT_EQ(merged.size(), 2u);
+    const auto strong = merged[0]->getStrongConstraints(/*field_id=*/3);
+    ASSERT_EQ(strong.size(), 2u);
+    EXPECT_EQ(strong[0].component, 0);
+    EXPECT_EQ(strong[1].component, 2);
+    EXPECT_EQ(*strong[1].value.node()->constantValue(), 3.0);
+    EXPECT_EQ(merged[0]->label(), "ComponentEssentialBC");
+    EXPECT_EQ(merged[1]->boundaryMarker(), 5);
+
+    std::vector<std::unique_ptr<bc::Dirichlet>> twice;
+    twice.push_back(one(4, 1, 0.0));
+    twice.push_back(one(4, 1, 0.0));
+    EXPECT_THROW((void)bc::mergeComponents(std::move(twice)), std::invalid_argument);
+
+    // The manager merges them too: one condition of the boundary.
+    svmp::FE::systems::BoundaryConditionManager manager;
+    manager.add(one(4, 2, 3.0));
+    manager.add(one(4, 0, 1.0));
+    EXPECT_NO_THROW(manager.validate());
+    const auto installed = manager.getStrongConstraints(/*field_id=*/3);
+    ASSERT_EQ(installed.size(), 2u);
+    EXPECT_EQ(installed[0].component, 0);
+    EXPECT_EQ(installed[1].component, 2);
+    EXPECT_THROW(manager.add(one(4, 2, 3.0)), std::invalid_argument);
+}
+
+TEST(FormsBoundaryConditions, RateConditionsFollowFromValueConditions)
+{
+    namespace forms = svmp::FE::forms;
+    namespace bc = forms::bc;
+    using forms::FormExpr;
+    const auto conditions = [](int marker, std::vector<std::pair<int, FormExpr>> components, std::string symbol) {
+        return std::make_unique<bc::Dirichlet>(marker, std::move(components), symbol, "Source " + symbol);
+    };
+    const forms::TimeScalarCoefficient varying = [](svmp::FE::Real, svmp::FE::Real, svmp::FE::Real, svmp::FE::Real t) {
+        return t;
+    };
+    std::vector<std::unique_ptr<bc::Dirichlet>> values;
+    values.push_back(conditions(4, {{0, FormExpr::constant(0.5)}, {2, FormExpr::constant(0.0)}}, "d"));
+    values.push_back(conditions(6, {{1, FormExpr::constant(2.0)}}, "d"));
+    std::vector<std::unique_ptr<bc::Dirichlet>> rates;
+    rates.push_back(conditions(4, {{2, FormExpr::constant(0.0)}}, "v"));
+    const auto derived = bc::derivedRateConditions(values, std::move(rates), "v", "Source v");
+    ASSERT_EQ(derived.size(), 2u);
+    // Marker 4: the explicit rate of component 2 and the derived zero of component 0, in index order.
+    const auto four = derived[0]->getStrongConstraints(/*field_id=*/1);
+    ASSERT_EQ(four.size(), 2u);
+    EXPECT_EQ(four[0].component, 0);
+    EXPECT_EQ(*four[0].value.node()->constantValue(), 0.0);
+    EXPECT_EQ(four[1].component, 2);
+    // Marker 6: a new rate condition.
+    EXPECT_EQ(derived[1]->boundaryMarker(), 6);
+    const auto six = derived[1]->getStrongConstraints(/*field_id=*/1);
+    ASSERT_EQ(six.size(), 1u);
+    EXPECT_EQ(six[0].component, 1);
+    EXPECT_EQ(six[0].symbol, "v");
+    EXPECT_EQ(derived[1]->analysisMetadata(1, nullptr).front().source, "Source v comp 1 on marker 6");
+
+    // A fixed value refuses a nonzero rate; a varying value needs its own rate.
+    std::vector<std::unique_ptr<bc::Dirichlet>> nonzero;
+    nonzero.push_back(conditions(4, {{0, FormExpr::constant(1.0)}}, "v"));
+    EXPECT_THROW((void)bc::derivedRateConditions(values, std::move(nonzero), "v", "Source v"), std::invalid_argument);
+    std::vector<std::unique_ptr<bc::Dirichlet>> moving;
+    moving.push_back(conditions(7, {{0, bc::toScalarExpr(varying, "g")}}, "d"));
+    EXPECT_THROW((void)bc::derivedRateConditions(moving, {}, "v", "Source v"), std::invalid_argument);
+    std::vector<std::unique_ptr<bc::Dirichlet>> explicit_rate;
+    explicit_rate.push_back(conditions(7, {{0, FormExpr::constant(0.25)}}, "v"));
+    EXPECT_EQ(bc::derivedRateConditions(moving, std::move(explicit_rate), "v", "Source v").size(), 1u);
 }
 
 TEST(FormsBoundaryConditions, NormalEssentialBCInstallsTheNormalComponentConstraint)

@@ -231,12 +231,12 @@ void UstructModule::registerOn(FE::systems::FESystem& system) const
     load_bc_manager.install(options_.normal_traction, Factories::toNormalTractionBC);
     load_bc_manager.applyAll(system, momentum_form, momentum_field, momentum_test, momentum_field_id);
 
-    const auto dirichlet_bcs = Factories::prepareDirichletBCs(options_, dim);
+    auto dirichlet = Factories::dirichletConditions(options_, dim);
 
     FE::systems::BoundaryConditionManager d_bc_manager;
-    d_bc_manager.install(dirichlet_bcs.displacement, [&](const auto& bc) {
-        return Factories::toDisplacementEssentialBC(bc, dim, options_.displacement_field_name);
-    });
+    for (auto& bc : dirichlet.displacement) {
+        d_bc_manager.add(std::move(bc));
+    }
     if (kinematic_form) {
         d_bc_manager.applyAll(system, *kinematic_form, d, z, d_id);
     } else {
@@ -245,9 +245,9 @@ void UstructModule::registerOn(FE::systems::FESystem& system) const
 
     if (v_id) {
         FE::systems::BoundaryConditionManager v_bc_manager;
-        v_bc_manager.install(dirichlet_bcs.velocity, [&](const auto& bc) {
-            return Factories::toVelocityEssentialBC(bc, dim, options_.velocity_field_name);
-        });
+        for (auto& bc : dirichlet.velocity) {
+            v_bc_manager.add(std::move(bc));
+        }
         v_bc_manager.applyAll(system, *v_id);
     }
 

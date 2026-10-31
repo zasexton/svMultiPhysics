@@ -27,164 +27,7 @@ namespace formulations {
 namespace ustruct {
 namespace Factories {
 
-namespace detail {
-
-template <class BC>
-[[nodiscard]] inline BC& findOrAppendByMarker(std::vector<BC>& bcs, int marker)
-{
-    for (auto& bc : bcs) {
-        if (bc.boundary_marker == marker) {
-            return bc;
-        }
-    }
-
-    BC bc{};
-    bc.boundary_marker = marker;
-    bc.active_components = {false, false, false};
-    bcs.push_back(std::move(bc));
-    return bcs.back();
-}
-
-template <class BC>
-inline void mergeComponentBC(std::vector<BC>& merged,
-                             const BC& source,
-                             int dim,
-                             std::string_view description)
-{
-    auto& target = findOrAppendByMarker(merged, source.boundary_marker);
-    for (int c = 0; c < dim; ++c) {
-        const auto idx = static_cast<std::size_t>(c);
-        if (!source.active_components[idx]) {
-            continue;
-        }
-        if (target.active_components[idx]) {
-            throw std::invalid_argument(
-                std::string("ustruct::Factories::prepareDirichletBCs: duplicate ") + std::string(description) +
-                " constraint for boundary marker " + std::to_string(source.boundary_marker) +
-                ", component " + std::to_string(c));
-        }
-        target.active_components[idx] = true;
-        target.value[idx] = source.value[idx];
-    }
-}
-
-[[nodiscard]] inline bool hasActiveComponent(const UstructOptions::VelocityDirichletBC& bc,
-                                             int component)
-{
-    return bc.active_components[static_cast<std::size_t>(component)];
-}
-
-[[nodiscard]] inline std::vector<UstructOptions::DisplacementDirichletBC>
-mergeDisplacementDirichletBCs(const std::vector<UstructOptions::DisplacementDirichletBC>& input,
-                              int dim)
-{
-    std::vector<UstructOptions::DisplacementDirichletBC> merged;
-    merged.reserve(input.size());
-    for (const auto& bc : input) {
-        mergeComponentBC(merged, bc, dim, "displacement Dirichlet");
-    }
-    return merged;
-}
-
-[[nodiscard]] inline std::vector<UstructOptions::VelocityDirichletBC>
-mergeVelocityDirichletBCs(const std::vector<UstructOptions::VelocityDirichletBC>& input,
-                          int dim)
-{
-    std::vector<UstructOptions::VelocityDirichletBC> merged;
-    merged.reserve(input.size());
-    for (const auto& bc : input) {
-        mergeComponentBC(merged, bc, dim, "velocity Dirichlet");
-    }
-    return merged;
-}
-
-inline void validateQuasiStaticVelocityDirichletBCs(
-    const std::vector<UstructOptions::VelocityDirichletBC>& velocity_input,
-    int dim)
-{
-    for (const auto& bc : velocity_input) {
-        for (int c = 0; c < dim; ++c) {
-            const auto idx = static_cast<std::size_t>(c);
-            if (!bc.active_components[idx]) {
-                continue;
-            }
-            if (!FE::forms::bc::isZeroConstantScalarValue(bc.value[idx])) {
-                throw std::invalid_argument(
-                    "ustruct::Factories::prepareDirichletBCs: quasi-static ustruct disables time-derivative terms, "
-                    "so velocity Dirichlet constraints must be constant zero values");
-            }
-        }
-    }
-}
-
-[[nodiscard]] inline std::vector<UstructOptions::VelocityDirichletBC>
-compatibleVelocityDirichletBCs(
-    const std::vector<UstructOptions::VelocityDirichletBC>& velocity_input,
-    const std::vector<UstructOptions::DisplacementDirichletBC>& displacement_input,
-    int dim)
-{
-    std::vector<UstructOptions::VelocityDirichletBC> merged;
-    merged.reserve(velocity_input.size() + displacement_input.size());
-
-    for (const auto& bc : velocity_input) {
-        mergeComponentBC(merged, bc, dim, "velocity Dirichlet");
-    }
-
-    for (const auto& disp : displacement_input) {
-        auto& velocity = findOrAppendByMarker(merged, disp.boundary_marker);
-        for (int c = 0; c < dim; ++c) {
-            const auto idx = static_cast<std::size_t>(c);
-            if (!disp.active_components[idx]) {
-                continue;
-            }
-
-            if (hasActiveComponent(velocity, c)) {
-                if (FE::forms::bc::isConstantScalarValue(disp.value[idx]) &&
-                    !FE::forms::bc::isZeroConstantScalarValue(velocity.value[idx])) {
-                    throw std::invalid_argument(
-                        "ustruct::Factories::prepareDirichletBCs: fixed displacement Dirichlet constraints require "
-                        "zero velocity Dirichlet constraints on the same components");
-                }
-                continue;
-            }
-
-            if (!FE::forms::bc::isConstantScalarValue(disp.value[idx])) {
-                throw std::invalid_argument(
-                    "ustruct::Factories::prepareDirichletBCs: time- or space-dependent displacement Dirichlet "
-                    "constraints require an explicit compatible velocity Dirichlet constraint");
-            }
-
-            velocity.active_components[idx] = true;
-            velocity.value[idx] = UstructOptions::ScalarValue{FE::Real{0.0}};
-        }
-    }
-
-    return merged;
-}
-
-} // namespace detail
-
-struct PreparedDirichletBCs {
-    std::vector<UstructOptions::DisplacementDirichletBC> displacement{};
-    std::vector<UstructOptions::VelocityDirichletBC> velocity{};
-};
-
-[[nodiscard]] inline PreparedDirichletBCs prepareDirichletBCs(const UstructOptions& options,
-                                                             int dim)
-{
-    PreparedDirichletBCs prepared;
-    prepared.displacement = detail::mergeDisplacementDirichletBCs(options.displacement_dirichlet, dim);
-    prepared.velocity =
-        options.enable_time_derivative_terms
-            ? detail::compatibleVelocityDirichletBCs(options.velocity_dirichlet, prepared.displacement, dim)
-            : detail::mergeVelocityDirichletBCs(options.velocity_dirichlet, dim);
-    if (!options.enable_time_derivative_terms) {
-        detail::validateQuasiStaticVelocityDirichletBCs(prepared.velocity, dim);
-    }
-    return prepared;
-}
-
-[[nodiscard]] inline std::unique_ptr<FE::forms::bc::BoundaryCondition>
+[[nodiscard]] inline std::unique_ptr<FE::forms::bc::Dirichlet>
 toDisplacementEssentialBC(const UstructOptions::DisplacementDirichletBC& bc,
                           int dim,
                           std::string_view symbol)
@@ -195,7 +38,7 @@ toDisplacementEssentialBC(const UstructOptions::DisplacementDirichletBC& bc,
         bc.value, bc.active_components, dim, marker, "ustruct_dirichlet", symbol, "Ustruct displacement Dirichlet");
 }
 
-[[nodiscard]] inline std::unique_ptr<FE::forms::bc::BoundaryCondition>
+[[nodiscard]] inline std::unique_ptr<FE::forms::bc::Dirichlet>
 toVelocityEssentialBC(const UstructOptions::VelocityDirichletBC& bc,
                       int dim,
                       std::string_view symbol)
@@ -204,6 +47,48 @@ toVelocityEssentialBC(const UstructOptions::VelocityDirichletBC& bc,
         FE::forms::bc::boundaryMarkerOrThrow(bc, "ustruct::Factories::toVelocityEssentialBC");
     return FE::forms::bc::componentDirichlet(
         bc.value, bc.active_components, dim, marker, "ustruct_velocity_dirichlet", symbol, "Ustruct velocity Dirichlet");
+}
+
+struct DirichletConditions {
+    std::vector<std::unique_ptr<FE::forms::bc::Dirichlet>> displacement{};
+    std::vector<std::unique_ptr<FE::forms::bc::Dirichlet>> velocity{};
+};
+
+/// The strong conditions of the displacement and of the velocity, the
+/// components of each boundary merged (forms::bc::mergeComponents).  With the
+/// time-derivative terms the displacement conditions imply velocity
+/// conditions (forms::bc::derivedRateConditions); without them a velocity
+/// condition holds the velocity at zero.
+[[nodiscard]] inline DirichletConditions dirichletConditions(const UstructOptions& options, int dim)
+{
+    if (!options.enable_time_derivative_terms) {
+        for (const auto& bc : options.velocity_dirichlet) {
+            for (int c = 0; c < dim; ++c) {
+                const auto idx = static_cast<std::size_t>(c);
+                if (bc.active_components[idx] && !FE::forms::bc::isZeroConstantScalarValue(bc.value[idx])) {
+                    throw std::invalid_argument(
+                        "ustruct::Factories::dirichletConditions: quasi-static ustruct disables time-derivative "
+                        "terms, so velocity Dirichlet constraints must be constant zero values");
+                }
+            }
+        }
+    }
+    std::vector<std::unique_ptr<FE::forms::bc::Dirichlet>> displacement;
+    std::vector<std::unique_ptr<FE::forms::bc::Dirichlet>> velocity;
+    for (const auto& bc : options.displacement_dirichlet) {
+        displacement.push_back(toDisplacementEssentialBC(bc, dim, options.displacement_field_name));
+    }
+    for (const auto& bc : options.velocity_dirichlet) {
+        velocity.push_back(toVelocityEssentialBC(bc, dim, options.velocity_field_name));
+    }
+    DirichletConditions conditions;
+    conditions.displacement = FE::forms::bc::mergeComponents(std::move(displacement));
+    conditions.velocity = options.enable_time_derivative_terms
+                              ? FE::forms::bc::derivedRateConditions(conditions.displacement, std::move(velocity),
+                                                                     options.velocity_field_name,
+                                                                     "Ustruct velocity Dirichlet")
+                              : FE::forms::bc::mergeComponents(std::move(velocity));
+    return conditions;
 }
 
 [[nodiscard]] inline std::unique_ptr<FE::forms::bc::BoundaryCondition>

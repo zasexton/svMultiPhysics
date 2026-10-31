@@ -12,6 +12,7 @@
 #include "Forms/ResidualContributions.h"
 #include "Systems/FESystem.h"
 
+#include <algorithm>
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
@@ -358,7 +359,9 @@ private:
  * The target is a Boundary: a marker or an exterior measure (the generated
  * wet part of a cut boundary: weak enforcement only).  The value is the whole field (a
  * scalar, or a vector expression), every component of a vector field, or, for
- * strong enforcement, some components.  The manifest names the condition by
+ * strong enforcement, some components; strong component conditions of one
+ * boundary merge (mergeComponents, BoundaryConditionManager::add).  The
+ * manifest names the condition by
  * its enforcement: EssentialBC (strong, the whole field or every component),
  * ComponentEssentialBC (strong, some components), NitscheBC, PenaltyBC.
  */
@@ -435,6 +438,62 @@ public:
     [[nodiscard]] bool hasWeakTerms() const override { return !isStrong(); }
 
     [[nodiscard]] const Enforcement& enforcement() const noexcept { return how_; }
+
+    /// Whether this is a strong condition of listed components, which others
+    /// on its target can join (mergeComponents).
+    [[nodiscard]] bool mergesComponents() const noexcept { return isStrong() && some_components_; }
+
+    /// Whether @p other targets the same boundary with the same symbol.
+    [[nodiscard]] bool sameTarget(const Dirichlet& other) const noexcept
+    {
+        return boundary_marker_ == other.boundary_marker_ && measure_ == other.measure_ &&
+               symbol_ == other.symbol_;
+    }
+
+    /// The value of @p component, when the condition prescribes it.
+    [[nodiscard]] const FormExpr* componentValue(int component) const noexcept
+    {
+        for (const auto& [c, value] : components_) {
+            if (c == component) {
+                return &value;
+            }
+        }
+        return nullptr;
+    }
+
+    /// The prescribed components and their values, in order.
+    [[nodiscard]] const std::vector<std::pair<int, FormExpr>>& components() const noexcept { return components_; }
+
+    /// Adds the components of @p other, a strong component condition of the
+    /// same target, to this one; the components stay in index order.  A
+    /// component both prescribe is refused.
+    void mergeComponents(const Dirichlet& other)
+    {
+        if (!mergesComponents() || !other.mergesComponents() || !sameTarget(other)) {
+            throw std::invalid_argument(
+                "bc::Dirichlet::mergeComponents: two strong component conditions of one target merge");
+        }
+        for (const auto& [component, value] : other.components_) {
+            addComponent(component, value);
+        }
+    }
+
+    /// Adds @p component with @p value to a strong component condition, in
+    /// index order; a component already prescribed is refused.
+    void addComponent(int component, FormExpr value)
+    {
+        if (!mergesComponents()) {
+            throw std::invalid_argument("bc::Dirichlet::addComponent: not a strong component condition");
+        }
+        if (componentValue(component) != nullptr) {
+            throw std::invalid_argument("bc::Dirichlet: component " + std::to_string(component) +
+                                        " of boundary marker " + std::to_string(boundary_marker_) +
+                                        " is prescribed twice");
+        }
+        const auto at = std::find_if(components_.begin(), components_.end(),
+                                     [component](const auto& entry) { return entry.first > component; });
+        components_.emplace(at, component, std::move(value));
+    }
 
     void contributeToResidual(FormExpr& residual, const FormExpr& u, const FormExpr& v) const override
     {
@@ -717,7 +776,7 @@ private:
 /// The strong Dirichlet condition of the active components of @p values on
 /// @p marker, named @p source_name in its descriptors.
 template <class Values, class ActiveComponents>
-[[nodiscard]] inline std::unique_ptr<BoundaryCondition>
+[[nodiscard]] inline std::unique_ptr<Dirichlet>
 componentDirichlet(const Values& values,
                    const ActiveComponents& active_components,
                    int dim,
@@ -740,6 +799,95 @@ componentDirichlet(const Values& values,
     }
 
     return std::make_unique<Dirichlet>(marker, std::move(components), std::string(symbol), std::string(source_name));
+}
+
+/// Strong component conditions merged by target: each condition in order,
+/// a later component condition on the target of an earlier one added to it
+/// (Dirichlet::mergeComponents); other conditions are kept as they are.
+[[nodiscard]] inline std::vector<std::unique_ptr<Dirichlet>>
+mergeComponents(std::vector<std::unique_ptr<Dirichlet>> conditions)
+{
+    std::vector<std::unique_ptr<Dirichlet>> merged;
+    merged.reserve(conditions.size());
+    for (auto& condition : conditions) {
+        if (!condition) {
+            throw std::invalid_argument("forms::bc::mergeComponents: null condition");
+        }
+        const auto earlier = std::find_if(merged.begin(), merged.end(), [&](const auto& existing) {
+            return condition->mergesComponents() && existing->mergesComponents() && existing->sameTarget(*condition);
+        });
+        if (earlier != merged.end()) {
+            (*earlier)->mergeComponents(*condition);
+        } else {
+            merged.push_back(std::move(condition));
+        }
+    }
+    return merged;
+}
+
+/**
+ * @brief The strong conditions on a rate r = dt(u) implied by those on u
+ *
+ * @p rates are the rate conditions stated explicitly; they are merged by
+ * target and kept.  On each component that a condition of @p values
+ * prescribes and no rate condition does, a constant value gives the rate
+ * zero: the component joins the rate condition of its boundary, or a new one
+ * named @p symbol and @p source_name.  A value that varies in time or space
+ * needs a rate condition of its own, and a constant value refuses a nonzero
+ * rate on the same component.  The value conditions are strong component
+ * conditions (componentDirichlet).
+ */
+[[nodiscard]] inline std::vector<std::unique_ptr<Dirichlet>>
+derivedRateConditions(const std::vector<std::unique_ptr<Dirichlet>>& values,
+                      std::vector<std::unique_ptr<Dirichlet>> rates,
+                      const std::string& symbol,
+                      const std::string& source_name)
+{
+    const auto constant = [](const FormExpr& value) {
+        return value.node() != nullptr ? value.node()->constantValue() : std::optional<Real>{};
+    };
+    auto merged = mergeComponents(std::move(rates));
+    for (const auto& value : values) {
+        if (!value || !value->mergesComponents()) {
+            throw std::invalid_argument("forms::bc::derivedRateConditions: values are strong component conditions");
+        }
+        Dirichlet* rate = nullptr;
+        for (const auto& existing : merged) {
+            if (existing->mergesComponents() && existing->boundaryMarker() == value->boundaryMarker()) {
+                rate = existing.get();
+                break;
+            }
+        }
+        for (const auto& [component, g] : value->components()) {
+            const auto fixed = constant(g);
+            if (const FormExpr* prescribed = rate != nullptr ? rate->componentValue(component) : nullptr) {
+                const auto r = constant(*prescribed);
+                if (fixed.has_value() && !(r.has_value() && *r == Real{0.0})) {
+                    throw std::invalid_argument(
+                        "forms::bc::derivedRateConditions: a fixed value needs rate zero on the same component "
+                        "(boundary marker " + std::to_string(value->boundaryMarker()) + ", component " +
+                        std::to_string(component) + ")");
+                }
+                continue;
+            }
+            if (!fixed.has_value()) {
+                throw std::invalid_argument(
+                    "forms::bc::derivedRateConditions: a value that varies in time or space needs a rate condition "
+                    "of its own (boundary marker " + std::to_string(value->boundaryMarker()) + ", component " +
+                    std::to_string(component) + ")");
+            }
+            if (rate == nullptr) {
+                merged.push_back(std::make_unique<Dirichlet>(
+                    value->boundaryMarker(),
+                    std::vector<std::pair<int, FormExpr>>{{component, FormExpr::constant(0.0)}}, symbol,
+                    source_name));
+                rate = merged.back().get();
+                continue;
+            }
+            rate->addComponent(component, FormExpr::constant(0.0));
+        }
+    }
+    return merged;
 }
 
 // ---- Conditions from typed boundary data (BoundaryConditions.h BoundaryData) ----
