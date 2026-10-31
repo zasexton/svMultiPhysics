@@ -28,6 +28,7 @@
 #include <string>
 #include <map>
 #include <memory>
+#include <tuple>
 #include <vector>
 
 namespace {
@@ -196,6 +197,198 @@ TEST(LevelSetPdeVelocityExtensionMPI, TwoRankResultMatchesSerialOnEveryLocalVert
     int failures = 0;
     MPI_Allreduce(&local_failures, &failures, 1, MPI_INT, MPI_SUM, MPI_COMM_WORLD);
     EXPECT_EQ(failures, 0) << svmp::FE::level_set::pdeVelocityExtensionOperatorName(op);
+  }
+}
+
+namespace {
+
+// The square of makePdeArrays() with Quad9 cells, or two Triangle6 cells per
+// square, in the VTK node order (corners, edge midpoints, centre).
+PdeMeshArrays makeQuadraticPdeArrays(bool quads)
+{
+  PdeMeshArrays a;
+  const int m = 2 * kPdeCells;
+  for (int j = 0; j <= m; ++j) {
+    for (int i = 0; i <= m; ++i) {
+      a.x.push_back(static_cast<svmp::real_t>(i) / m);
+      a.x.push_back(static_cast<svmp::real_t>(j) / m);
+    }
+  }
+  const auto vid = [m](int i, int j) {
+    return static_cast<svmp::index_t>(j * (m + 1) + i);
+  };
+  svmp::CellShape shape{};
+  shape.family = quads ? svmp::CellFamily::Quad : svmp::CellFamily::Triangle;
+  shape.num_corners = quads ? 4 : 3;
+  shape.order = 2;
+  std::vector<std::vector<svmp::index_t>> cells;
+  for (int j = 0; j < kPdeCells; ++j) {
+    for (int i = 0; i < kPdeCells; ++i) {
+      const int p = 2 * i, q = 2 * j;
+      if (quads) {
+        cells.push_back({vid(p, q), vid(p + 2, q), vid(p + 2, q + 2),
+                         vid(p, q + 2), vid(p + 1, q), vid(p + 2, q + 1),
+                         vid(p + 1, q + 2), vid(p, q + 1), vid(p + 1, q + 1)});
+      } else {
+        cells.push_back({vid(p, q), vid(p + 2, q), vid(p + 2, q + 2),
+                         vid(p + 1, q), vid(p + 2, q + 1), vid(p + 1, q + 1)});
+        cells.push_back({vid(p, q), vid(p + 2, q + 2), vid(p, q + 2),
+                         vid(p + 1, q + 1), vid(p + 1, q + 2), vid(p, q + 1)});
+      }
+    }
+  }
+  for (const auto& cell : cells) {
+    a.connectivity.insert(a.connectivity.end(), cell.begin(), cell.end());
+    a.offsets.push_back(static_cast<svmp::offset_t>(a.connectivity.size()));
+    a.shapes.push_back(shape);
+  }
+  return a;
+}
+
+using LatticeKey = std::pair<long long, long long>;
+
+// The extension and its rows keyed by vertex position (half-cell lattice),
+// so runs on different partitions compare vertex by vertex.
+struct KeyedExtension {
+  std::map<LatticeKey, std::array<double, 2>> values;
+  // (vertex, component) -> sorted (field, vertex, component, coefficient).
+  std::map<std::tuple<long long, long long, int>,
+           std::vector<std::tuple<int, long long, long long, int, double>>>
+      rows;
+  std::size_t local_rows{0u};
+};
+
+KeyedExtension extendQuadratic(const svmp::Mesh& mesh,
+                               const svmp::MeshComm& comm,
+                               PdeVelocityExtensionOperator op)
+{
+  const auto n = mesh.n_vertices();
+  const auto& X = mesh.X_ref();
+  const auto key = [&](std::size_t v) {
+    return LatticeKey{std::llround(X[2 * v] * 2 * kPdeCells),
+                      std::llround(X[2 * v + 1] * 2 * kPdeCells)};
+  };
+  std::vector<double> phi(n), source(2 * n);
+  std::vector<std::uint8_t> known(n, 0u);
+  for (std::size_t v = 0; v < n; ++v) {
+    const double x = X[2 * v], y = X[2 * v + 1];
+    phi[v] = phiAt(x, y);
+    const auto u = uAt(x, y);
+    source[2 * v] = u[0];
+    source[2 * v + 1] = u[1];
+    known[v] = phi[v] < 0.0 ? 1u : 0u;
+  }
+  const auto& local = mesh.local_mesh();
+  for (svmp::index_t c = 0; c < local.n_cells(); ++c) {
+    auto [cv, count] = local.cell_vertices_span(c);
+    bool neg = false, pos = false;
+    for (std::size_t i = 0; i < count; ++i) {
+      neg = neg || phi[static_cast<std::size_t>(cv[i])] < 0.0;
+      pos = pos || phi[static_cast<std::size_t>(cv[i])] >= 0.0;
+    }
+    if (neg && pos) {
+      for (std::size_t i = 0; i < count; ++i) {
+        known[static_cast<std::size_t>(cv[i])] = 1u;
+      }
+    }
+  }
+  const std::vector<WallVelocityExtensionConstraint> walls{
+      {.boundary_label = kPdeSideWall,
+       .constrained_components = {true, false, false}}};
+  PdeVelocityExtensionOptions options;
+  options.op = op;
+  std::vector<double> out;
+  std::vector<svmp::FE::level_set::VelocityExtensionConstraintRow> rows;
+  (void)svmp::FE::level_set::extendVelocityByPde(
+      mesh, comm, phi, source, 2u, known, 2u,
+      std::span<const WallVelocityExtensionConstraint>(walls), options, out,
+      &rows);
+  KeyedExtension result;
+  for (std::size_t v = 0; v < n; ++v) {
+    result.values[key(v)] = {out[2 * v], out[2 * v + 1]};
+  }
+  result.local_rows = rows.size();
+  for (const auto& row : rows) {
+    const auto at = key(static_cast<std::size_t>(row.vertex));
+    auto& dependencies = result.rows[{at.first, at.second, row.component}];
+    for (const auto& dependency : row.dependencies) {
+      const auto from = key(static_cast<std::size_t>(dependency.vertex));
+      dependencies.emplace_back(static_cast<int>(dependency.field),
+                                from.first, from.second,
+                                dependency.component, dependency.coefficient);
+    }
+    std::sort(dependencies.begin(), dependencies.end());
+  }
+  return result;
+}
+
+int globalSum(int value);
+
+} // namespace
+
+// Quadratic cells on two ranks: the extension on every local vertex (owned
+// and ghost, corner and mid-edge/centre alike) and every owner-local row
+// equal the serial ones bit for bit, and each row is emitted by exactly one
+// rank.
+TEST(LevelSetPdeVelocityExtensionMPI, TwoRankQuadraticCellsMatchSerialOnEveryVertexAndRow)
+{
+  int size = 1;
+  MPI_Comm_size(MPI_COMM_WORLD, &size);
+  ASSERT_EQ(size, 2) << "This parity test requires exactly two ranks.";
+
+  for (const bool quads : {true, false}) {
+    SCOPED_TRACE(quads ? "Quad9" : "Triangle6");
+    const auto arrays = makeQuadraticPdeArrays(quads);
+    auto distributed =
+        std::make_shared<svmp::Mesh>(svmp::MeshComm(MPI_COMM_WORLD));
+    // A row needs the whole cell star of its vertex on the owner rank.  One
+    // face-neighbour layer holds it for quads (mid-edge and centre nodes
+    // included); a triangle that touches the partition only at a corner
+    // needs a second layer.
+    distributed->build_from_arrays_global_and_partition(
+        2, arrays.x, arrays.offsets, arrays.connectivity, arrays.shapes,
+        svmp::PartitionHint::Cells, /*ghost_layers=*/quads ? 1 : 2,
+        {{"partition_method", "block"}});
+    labelSideWalls(*distributed);
+    ASSERT_LT(distributed->n_vertices(), arrays.x.size() / 2u);
+    auto base = std::make_shared<svmp::MeshBase>();
+    base->build_from_arrays(2, arrays.x, arrays.offsets, arrays.connectivity,
+                            arrays.shapes);
+    base->finalize();
+    auto serial = svmp::create_mesh(std::move(base));
+    labelSideWalls(*serial);
+
+    for (const auto op : {PdeVelocityExtensionOperator::Harmonic,
+                          PdeVelocityExtensionOperator::LeastSquaresNormal}) {
+      const auto reference =
+          extendQuadratic(*serial, svmp::MeshComm::self(), op);
+      const auto parallel =
+          extendQuadratic(*distributed, svmp::MeshComm(MPI_COMM_WORLD), op);
+      int local_failures = 0;
+      for (const auto& [key, value] : parallel.values) {
+        const auto found = reference.values.find(key);
+        ASSERT_NE(found, reference.values.end());
+        for (std::size_t c = 0; c < 2u; ++c) {
+          if (std::memcmp(&value[c], &found->second[c], sizeof(double)) != 0) {
+            ++local_failures;
+          }
+        }
+      }
+      int local_high_order_rows = 0;
+      for (const auto& [key, dependencies] : parallel.rows) {
+        const auto found = reference.rows.find(key);
+        if (found == reference.rows.end() || found->second != dependencies) {
+          ++local_failures;
+        }
+        local_high_order_rows +=
+            (std::get<0>(key) % 2 != 0 || std::get<1>(key) % 2 != 0) ? 1 : 0;
+      }
+      EXPECT_EQ(globalSum(local_failures), 0)
+          << svmp::FE::level_set::pdeVelocityExtensionOperatorName(op);
+      EXPECT_EQ(globalSum(static_cast<int>(parallel.local_rows)),
+                static_cast<int>(reference.local_rows));
+      EXPECT_GT(globalSum(local_high_order_rows), 0);
+    }
   }
 }
 

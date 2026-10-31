@@ -641,6 +641,51 @@ std::shared_ptr<svmp::Mesh> makeWorkflowThreeQuadStripMesh()
   return svmp::create_mesh(std::move(base));
 }
 
+// The three-quad strip with biquadratic (Quad9) cells: the corners, edge
+// midpoints and centres of [0,3]x[0,1] on a half-unit lattice, in the VTK
+// node order.
+std::shared_ptr<svmp::Mesh> makeWorkflowBiquadraticQuadStripMesh()
+{
+  auto base = std::make_shared<svmp::MeshBase>();
+
+  std::vector<svmp::real_t> x_ref;
+  for (int j = 0; j <= 2; ++j) {
+    for (int i = 0; i <= 6; ++i) {
+      x_ref.push_back(static_cast<svmp::real_t>(0.5 * i));
+      x_ref.push_back(static_cast<svmp::real_t>(0.5 * j));
+    }
+  }
+  const auto vid = [](int i, int j) {
+    return static_cast<svmp::index_t>(j * 7 + i);
+  };
+  std::vector<svmp::offset_t> cell2vertex_offsets = {0};
+  std::vector<svmp::index_t> cell2vertex;
+  for (int cell = 0; cell < 3; ++cell) {
+    const int i = 2 * cell;
+    for (const auto vertex :
+         {vid(i, 0), vid(i + 2, 0), vid(i + 2, 2), vid(i, 2), vid(i + 1, 0),
+          vid(i + 2, 1), vid(i + 1, 2), vid(i, 1), vid(i + 1, 1)}) {
+      cell2vertex.push_back(vertex);
+    }
+    cell2vertex_offsets.push_back(
+        static_cast<svmp::offset_t>(cell2vertex.size()));
+  }
+
+  svmp::CellShape shape{};
+  shape.family = svmp::CellFamily::Quad;
+  shape.num_corners = 4;
+  shape.order = 2;
+  base->build_from_arrays(
+      /*spatial_dim=*/2,
+      x_ref,
+      cell2vertex_offsets,
+      cell2vertex,
+      {shape, shape, shape});
+  base->finalize();
+
+  return svmp::create_mesh(std::move(base));
+}
+
 // The three-quad strip with every quad split along its lower-left to
 // upper-right diagonal (the PDE velocity extension needs simplices).
 std::shared_ptr<svmp::Mesh> makeWorkflowThreeQuadStripTriangleMesh()
@@ -10376,6 +10421,144 @@ TEST(ApplicationDriverLevelSetWorkflows,
                   extension_offset + local_dof)],
               -999.0);
   }
+#endif
+}
+
+TEST(ApplicationDriverLevelSetWorkflows,
+     AlgebraicExtensionOnQuad9CellsReprojectsEveryP2Dof)
+{
+#if !(defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH)
+  GTEST_SKIP() << "Requires FE built with Mesh integration.";
+#else
+  // P2 fields on a strip of three Quad9 cells: the monolithic extension
+  // installs rows for the corner, mid-edge and centre vertices, and the
+  // least-squares normal extension of a field constant along the normal
+  // reprojects every P2 DOF of the extension to the source value.
+  auto mesh = makeWorkflowBiquadraticQuadStripMesh();
+  auto scalar_space = std::make_shared<svmp::FE::spaces::H1Space>(
+      svmp::FE::ElementType::Quad4,
+      /*order=*/2);
+  auto vector_space =
+      std::make_shared<svmp::FE::spaces::ProductSpace>(scalar_space, 2);
+  auto system = std::make_unique<svmp::FE::systems::FESystem>(mesh);
+  const auto source_velocity = system->addField(
+      svmp::FE::systems::FieldSpec{
+          .name = "Velocity", .space = vector_space, .components = 2});
+  const auto phi = system->addField(svmp::FE::systems::FieldSpec{
+      .name = "phi", .space = scalar_space, .components = 1});
+  system->addOperator("level_set");
+
+  svmp::FE::level_set::LevelSetTransportOptions transport{};
+  transport.operator_tag = "level_set";
+  transport.level_set.field_name = "phi";
+  transport.level_set.auto_register_field = false;
+  transport.velocity.field_name = "LevelSetAdvectionVelocity";
+  transport.velocity.source =
+      svmp::FE::level_set::LevelSetVelocitySource::CoupledField;
+  transport.velocity.auto_register_field = true;
+  transport.velocity.space = vector_space;
+  transport.velocity.algebraic_extension_source_field_name = "Velocity";
+  transport.supg.enabled = false;
+  (void)svmp::FE::level_set::installLevelSetTransport(
+      *system, scalar_space, transport);
+  const auto extension_velocity =
+      system->findFieldByName("LevelSetAdvectionVelocity");
+  ASSERT_NE(extension_velocity, svmp::FE::INVALID_FIELD_ID);
+  const auto extension_kernel =
+      svmp::FE::level_set::findLevelSetVelocityExtensionConstraintKernel(
+          *system, "level_set", extension_velocity);
+  ASSERT_TRUE(extension_kernel);
+  // Setup registers the kernel's couplings of the mid-edge and centre
+  // vertices.
+  ASSERT_NO_THROW(system->setup({}));
+
+  std::vector<svmp::FE::Real> phi_values(mesh->n_vertices(), 0.0);
+  std::vector<svmp::FE::Real> source_values(mesh->n_vertices() * 2u, 0.0);
+  for (std::size_t vertex = 0; vertex < mesh->n_vertices(); ++vertex) {
+    const auto point = workflowVertexPoint(*mesh, vertex);
+    phi_values[vertex] = point[0] - 0.8;
+    source_values[2u * vertex] = 2.0 + 3.0 * point[1] - point[1] * point[1];
+    source_values[2u * vertex + 1u] = -1.0 + 0.5 * point[1];
+  }
+  std::vector<svmp::FE::Real> initial(
+      static_cast<std::size_t>(system->dofHandler().getNumDofs()), 777.0);
+  writeWorkflowFieldSlice(
+      *system, phi,
+      projectWorkflowVertexValues(*system, phi, phi_values, 1u,
+                                  "Quad9 algebraic extension phi"),
+      initial);
+  writeWorkflowFieldSlice(
+      *system, source_velocity,
+      projectWorkflowVertexValues(*system, source_velocity, source_values, 2u,
+                                  "Quad9 algebraic extension source"),
+      initial);
+
+  std::unique_ptr<svmp::FE::backends::BackendFactory> factory;
+  try {
+    factory = svmp::FE::backends::BackendFactory::create(
+        svmp::FE::backends::BackendKind::FSILS);
+  } catch (const std::exception&) {
+    GTEST_SKIP() << "Requires an available FE vector backend.";
+  }
+  auto state_vector = factory->createVector(
+      system->dofHandler().getNumDofs());
+  ASSERT_TRUE(state_vector);
+  scatterFeOrderedSolution(*state_vector, initial);
+
+  application::core::SimulationComponents sim;
+  sim.primary_mesh = mesh;
+  sim.fe_system = std::move(system);
+  svmp::FE::systems::SystemStateView state{};
+  state.u_vector = state_vector.get();
+  LevelSetAdvectionVelocityRequest request{};
+  request.level_set_field_name = "phi";
+  request.source_velocity_field_name = "Velocity";
+  request.target_velocity_field_name = "LevelSetAdvectionVelocity";
+  request.operator_tag = "level_set";
+  request.extension_method = "pde_normal";
+  request.enforce_wall_impermeability = false;
+
+  ASSERT_TRUE(updateLevelSetAdvectionVelocitiesFromState(
+      sim, state, {request}));
+  ASSERT_TRUE(extension_kernel->hasFrozenMap());
+  EXPECT_EQ(extension_kernel->frozenRows().size(), 2u * mesh->n_vertices());
+
+  const auto solution = gatherFeOrderedSolution(*state_vector);
+  const auto extension_offset =
+      sim.fe_system->fieldDofOffset(extension_velocity);
+  const auto vertex_dofs =
+      sim.fe_system->fieldDofsAtMeshVertices(extension_velocity);
+  ASSERT_EQ(vertex_dofs.size(), 2u * mesh->n_vertices());
+  ASSERT_EQ(static_cast<std::size_t>(
+                sim.fe_system->fieldDofHandler(extension_velocity)
+                    .getNumDofs()),
+            2u * mesh->n_vertices());
+  for (std::size_t vertex = 0; vertex < mesh->n_vertices(); ++vertex) {
+    for (std::size_t component = 0; component < 2u; ++component) {
+      const auto dof = vertex_dofs[2u * vertex + component];
+      ASSERT_GE(dof, 0);
+      EXPECT_NEAR(solution[static_cast<std::size_t>(extension_offset + dof)],
+                  source_values[2u * vertex + component], 1.0e-12)
+          << "vertex " << vertex << " component " << component;
+    }
+  }
+
+  // The frozen rows hold at the reprojected state.
+  const auto n = sim.fe_system->dofHandler().getNumDofs();
+  svmp::FE::assembly::DenseVectorView residual(n);
+  residual.zero();
+  svmp::FE::systems::AssemblyRequest assembly_request;
+  assembly_request.op = "level_set";
+  assembly_request.want_vector = true;
+  assembly_request.suppress_constraint_inhomogeneity = true;
+  (void)extension_kernel->assemble(
+      *sim.fe_system, assembly_request, state, nullptr, &residual);
+  double max_residual = 0.0;
+  for (svmp::FE::GlobalIndex row = 0; row < n; ++row) {
+    max_residual =
+        std::max(max_residual, std::abs(residual.getVectorEntry(row)));
+  }
+  EXPECT_LT(max_residual, 1.0e-12);
 #endif
 }
 

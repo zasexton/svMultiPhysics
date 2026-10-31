@@ -7,12 +7,16 @@
 
 #include <gtest/gtest.h>
 
+#include "Assembly/GlobalSystemView.h"
+#include "Basis/NodeOrderingConventions.h"
 #include "LevelSet/Extension/LevelSetPdeVelocityExtension.h"
 #include "LevelSet/Extension/LevelSetVelocityExtensionRefresh.h"
 #include "LevelSet/Extension/LevelSetVelocityExtensionSeed.h"
 #include "LevelSet/LevelSetGeometryService.h"
+#include "LevelSet/LevelSetVelocityExtensionConstraint.h"
 #include "Spaces/H1Space.h"
 #include "Spaces/ProductSpace.h"
+#include "Sparsity/SparsityPattern.h"
 #include "Systems/FESystem.h"
 #include "Systems/SystemState.h"
 #include "Mesh/Core/MeshBase.h"
@@ -25,6 +29,7 @@
 #include <cstring>
 #include <functional>
 #include <limits>
+#include <map>
 #include <memory>
 #include <numbers>
 #include <optional>
@@ -987,6 +992,617 @@ TEST(LevelSetPdeVelocityExtensionCells, HarmonicKeepsConstantsAndKnownValues)
         }
       }
     }
+  }
+}
+
+// ---- high-order Lagrange cells -------------------------------------------
+
+namespace {
+
+// The unit square (Quad9, or two Triangle6 per square) or the unit cube
+// (Hex27, or six Tetra10 per cube around its main diagonal) split into n
+// cells per side.  Every cell places its nodes by the FE reference node
+// layout of its type, the node order Mesh and FE share, so the mid-edge,
+// face and centre nodes are mesh vertices like the corners.  curve > 0 then
+// moves every vertex by curve * sin(pi x) sin(pi y) [sin(pi z)] along x:
+// the boundary stays, the interior cells become curved isoparametric cells.
+// Boundary faces are labelled like makeSquareTriangleMesh: kSideWall at
+// x = 0 and x = 1, kBottomWall at the lowest last coordinate, kTopWall
+// elsewhere.
+std::shared_ptr<svmp::Mesh> makeQuadraticBoxMesh(svmp::CellFamily family,
+                                                 int n, double curve = 0.0)
+{
+  const bool simplex = family == svmp::CellFamily::Triangle ||
+                       family == svmp::CellFamily::Tetra;
+  const int dim = (family == svmp::CellFamily::Hex ||
+                   family == svmp::CellFamily::Tetra)
+                      ? 3
+                      : 2;
+  const auto canonical =
+      family == svmp::CellFamily::Quad       ? svmp::FE::ElementType::Quad4
+      : family == svmp::CellFamily::Triangle ? svmp::FE::ElementType::Triangle3
+      : family == svmp::CellFamily::Hex      ? svmp::FE::ElementType::Hex8
+                                             : svmp::FE::ElementType::Tetra4;
+  const auto reference =
+      svmp::FE::basis::ReferenceNodeLayout::get_lagrange_node_coords(canonical,
+                                                                      2);
+  // Corners of one box cell in lattice units (one unit = half a cell).
+  std::vector<std::vector<std::array<int, 3>>> pieces;
+  const auto corner = [](int a, int b, int c) {
+    return std::array<int, 3>{2 * a, 2 * b, 2 * c};
+  };
+  if (!simplex) {
+    pieces.push_back({corner(0, 0, 0)});
+  } else if (dim == 2) {
+    pieces.push_back({corner(0, 0, 0), corner(1, 0, 0), corner(1, 1, 0)});
+    pieces.push_back({corner(0, 0, 0), corner(1, 1, 0), corner(0, 1, 0)});
+  } else {
+    // The six paths from (0,0,0) to (1,1,1) along the axes.
+    const std::array<std::array<int, 3>, 6> orders{
+        {{0, 1, 2}, {0, 2, 1}, {1, 0, 2}, {1, 2, 0}, {2, 0, 1}, {2, 1, 0}}};
+    for (const auto& order : orders) {
+      std::array<int, 3> p{0, 0, 0};
+      std::vector<std::array<int, 3>> tet{p};
+      for (const int axis : order) {
+        p[static_cast<std::size_t>(axis)] += 2;
+        tet.push_back(p);
+      }
+      // Positive volume: swap two vertices of a left-handed path.
+      const auto edge = [&](int k) {
+        return std::array<int, 3>{tet[k][0] - tet[0][0], tet[k][1] - tet[0][1],
+                                  tet[k][2] - tet[0][2]};
+      };
+      const auto a = edge(1), b = edge(2), c = edge(3);
+      const int volume = a[0] * (b[1] * c[2] - b[2] * c[1]) -
+                         a[1] * (b[0] * c[2] - b[2] * c[0]) +
+                         a[2] * (b[0] * c[1] - b[1] * c[0]);
+      if (volume < 0) {
+        std::swap(tet[1], tet[2]);
+      }
+      pieces.push_back(tet);
+    }
+  }
+
+  std::map<std::array<int, 3>, svmp::index_t> index_of;
+  std::vector<std::array<int, 3>> lattice;
+  std::vector<std::vector<svmp::index_t>> cells;
+  const int nz = dim == 3 ? n : 1;
+  for (int k = 0; k < nz; ++k) {
+    for (int j = 0; j < n; ++j) {
+      for (int i = 0; i < n; ++i) {
+        const std::array<int, 3> origin{2 * i, 2 * j, dim == 3 ? 2 * k : 0};
+        for (const auto& piece : pieces) {
+          std::vector<svmp::index_t> cell;
+          for (const auto& xi : reference) {
+            std::array<int, 3> point{};
+            for (int d = 0; d < 3; ++d) {
+              const auto c = static_cast<std::size_t>(d);
+              double value = 0.0;
+              if (!simplex) {
+                // [-1, 1] -> [0, 2] lattice units.
+                value = d < dim ? static_cast<double>(xi[c]) + 1.0 : 0.0;
+              } else {
+                value = piece[0][c];
+                for (int m = 0; m < dim; ++m) {
+                  value += static_cast<double>(xi[static_cast<std::size_t>(m)]) *
+                           (piece[static_cast<std::size_t>(m + 1)][c] -
+                            piece[0][c]);
+                }
+              }
+              point[c] = origin[c] + static_cast<int>(std::lround(value));
+            }
+            const auto [found, inserted] = index_of.try_emplace(
+                point, static_cast<svmp::index_t>(lattice.size()));
+            if (inserted) {
+              lattice.push_back(point);
+            }
+            cell.push_back(found->second);
+          }
+          cells.push_back(std::move(cell));
+        }
+      }
+    }
+  }
+  std::vector<double> x;
+  for (const auto& point : lattice) {
+    std::array<double, 3> p{};
+    for (int d = 0; d < dim; ++d) {
+      p[static_cast<std::size_t>(d)] =
+          static_cast<double>(point[static_cast<std::size_t>(d)]) / (2.0 * n);
+    }
+    double bump = std::sin(std::numbers::pi * p[0]) *
+                  std::sin(std::numbers::pi * p[1]);
+    if (dim == 3) {
+      bump *= std::sin(std::numbers::pi * p[2]);
+    }
+    p[0] += curve * bump;
+    x.insert(x.end(), p.begin(), p.begin() + dim);
+  }
+  svmp::CellShape shape{};
+  shape.family = family;
+  shape.num_corners = family == svmp::CellFamily::Quad       ? 4
+                      : family == svmp::CellFamily::Triangle ? 3
+                      : family == svmp::CellFamily::Hex      ? 8
+                                                             : 4;
+  shape.order = 2;
+  auto mesh = makeCellMesh(dim, x, cells,
+                           std::vector<svmp::CellShape>(cells.size(), shape));
+  auto& local = mesh->local_mesh();
+  for (const auto face : local.boundary_faces()) {
+    const auto center = local.face_center(face);
+    if (std::abs(center[0]) < 1e-12 || std::abs(center[0] - 1.0) < 1e-12) {
+      mesh->set_boundary_label(face, kSideWall);
+    } else if (std::abs(center[static_cast<std::size_t>(dim - 1)]) < 1e-12) {
+      mesh->set_boundary_label(face, kBottomWall);
+    } else {
+      mesh->set_boundary_label(face, kTopWall);
+    }
+  }
+  return mesh;
+}
+
+// Quadratic meshes of every high-order cell type FE builds cheaply.
+std::vector<NamedMesh> everyQuadraticCellMesh(double curve = 0.0)
+{
+  return {
+      {"Quad9", makeQuadraticBoxMesh(svmp::CellFamily::Quad, 4, curve)},
+      {"Triangle6", makeQuadraticBoxMesh(svmp::CellFamily::Triangle, 4, curve)},
+      {"Hex27", makeQuadraticBoxMesh(svmp::CellFamily::Hex, 2, curve)},
+      {"Tetra10", makeQuadraticBoxMesh(svmp::CellFamily::Tetra, 2, curve)},
+  };
+}
+
+} // namespace
+
+// Every boundary vertex known: a harmonic quadratic field lies in the P2/Q2
+// space and is its own discrete harmonic extension, at the corner, mid-edge,
+// face and centre vertices alike.  A wrong node order of any cell type would
+// break this.
+TEST(LevelSetPdeVelocityExtensionHighOrderCells, HarmonicReproducesQuadraticHarmonicFields)
+{
+  for (const auto& [name, mesh] : everyQuadraticCellMesh()) {
+    SCOPED_TRACE(name);
+    const int dim = mesh->dim();
+    const auto s = makeCellSetup(
+        *mesh,
+        [dim](const std::array<double, 3>& p) {
+          return p[static_cast<std::size_t>(dim - 1)] -
+                 (dim == 2 ? 0.43 : 0.37);
+        },
+        // Harmonic in 2D (z = 0) and in 3D.
+        [](const std::array<double, 3>& p) {
+          return std::array<double, 3>{
+              p[0] * p[0] - p[1] * p[1] + 0.3 * p[0] + 0.2 * p[2],
+              2.0 * p[0] * p[1] - 0.5 * p[1] + p[1] * p[2] + 0.2,
+              p[0] * p[0] - p[2] * p[2] + p[0] * p[1] - 0.7};
+        },
+        /*boundary_known=*/true);
+    svmp::FE::level_set::PdeVelocityExtensionReport report;
+    const auto w =
+        runCells(*mesh, s, PdeVelocityExtensionOperator::Harmonic, &report);
+    EXPECT_GT(report.extension_vertices, 0u);
+    EXPECT_GT(report.extension_cells, 0u);
+    EXPECT_LT(report.max_relative_residual, 1e-10);
+    ASSERT_EQ(w.size(), s.source.size());
+    for (std::size_t i = 0; i < w.size(); ++i) {
+      EXPECT_NEAR(w[i], s.source[i], 1e-10) << "entry " << i;
+    }
+  }
+}
+
+// On curved isoparametric cells the space still holds the linear fields and
+// the stiffness quadrature integrates them exactly, so they are reproduced.
+TEST(LevelSetPdeVelocityExtensionHighOrderCells, HarmonicReproducesLinearFieldsOnCurvedCells)
+{
+  for (const auto& [name, mesh] : everyQuadraticCellMesh(/*curve=*/0.04)) {
+    SCOPED_TRACE(name);
+    const int dim = mesh->dim();
+    const auto s = makeCellSetup(
+        *mesh,
+        [dim](const std::array<double, 3>& p) {
+          return p[static_cast<std::size_t>(dim - 1)] -
+                 (dim == 2 ? 0.43 : 0.37);
+        },
+        [](const std::array<double, 3>& p) {
+          return std::array<double, 3>{0.3 + 1.7 * p[0] - 0.4 * p[1] + 0.2 * p[2],
+                                       -0.2 + 0.5 * p[0] + 2.1 * p[1] - 0.3 * p[2],
+                                       0.9 - 0.6 * p[0] + 0.1 * p[1] + 1.1 * p[2]};
+        },
+        /*boundary_known=*/true);
+    svmp::FE::level_set::PdeVelocityExtensionReport report;
+    const auto w =
+        runCells(*mesh, s, PdeVelocityExtensionOperator::Harmonic, &report);
+    EXPECT_GT(report.extension_vertices, 0u);
+    EXPECT_LT(report.max_relative_residual, 1e-10);
+    for (std::size_t i = 0; i < w.size(); ++i) {
+      EXPECT_NEAR(w[i], s.source[i], 1e-10) << "entry " << i;
+    }
+  }
+}
+
+// A field that is quadratic along the level set and constant along its
+// (tilted) normal lies in the space and is its own least-squares normal
+// extension; the normal of the P2 level set is evaluated at every
+// quadrature point.
+TEST(LevelSetPdeVelocityExtensionHighOrderCells, NormalExtensionIsConstantAlongNormals)
+{
+  for (const auto& [name, mesh] : everyQuadraticCellMesh()) {
+    SCOPED_TRACE(name);
+    const int dim = mesh->dim();
+    const auto phi = [dim](const std::array<double, 3>& p) {
+      return dim == 2 ? (p[1] - 0.4) - 0.2 * (p[0] - 0.5)
+                      : (p[2] - 0.37) - 0.2 * (p[0] - 0.5) + 0.1 * (p[1] - 0.5);
+    };
+    const auto u = [dim](const std::array<double, 3>& p) {
+      const double t = p[0] + 0.2 * (dim == 2 ? p[1] : p[2]);
+      const double r = dim == 2 ? 0.0 : p[1] - 0.1 * p[2];
+      return std::array<double, 3>{0.7 - 1.3 * t + 0.4 * r + 0.8 * t * t,
+                                   0.1 + 2.2 * t - r - 0.6 * t * r,
+                                   -0.5 + 0.3 * t + 0.6 * r + 0.5 * r * r};
+    };
+    const auto s = makeCellSetup(*mesh, phi, u, /*boundary_known=*/true);
+    svmp::FE::level_set::PdeVelocityExtensionReport report;
+    const auto w = runCells(
+        *mesh, s, PdeVelocityExtensionOperator::LeastSquaresNormal, &report);
+    EXPECT_GT(report.extension_vertices, 0u);
+    EXPECT_LT(report.max_relative_residual, 1e-10);
+    for (std::size_t i = 0; i < w.size(); ++i) {
+      EXPECT_NEAR(w[i], s.source[i], 1e-10) << "entry " << i;
+    }
+  }
+}
+
+// With the natural condition on the outer boundary of the dry region a
+// constant field is reproduced, and the known vertices (every node of the
+// cut cells) keep their values bit for bit.
+TEST(LevelSetPdeVelocityExtensionHighOrderCells, HarmonicKeepsConstantsAndKnownValues)
+{
+  for (const auto& [name, mesh] : everyQuadraticCellMesh(/*curve=*/0.04)) {
+    SCOPED_TRACE(name);
+    const int dim = mesh->dim();
+    auto s = makeCellSetup(
+        *mesh,
+        [dim](const std::array<double, 3>& p) {
+          return p[static_cast<std::size_t>(dim - 1)] -
+                 (dim == 2 ? 0.43 : 0.37);
+        },
+        [](const std::array<double, 3>&) {
+          return std::array<double, 3>{0.25, -1.5, 3.0};
+        },
+        /*boundary_known=*/false);
+    const auto w = runCells(*mesh, s, PdeVelocityExtensionOperator::Harmonic);
+    for (std::size_t v = 0; v < mesh->n_vertices(); ++v) {
+      for (std::size_t c = 0; c < s.components; ++c) {
+        const auto i = v * s.components + c;
+        if (s.known[v] != 0u) {
+          EXPECT_EQ(w[i], s.source[i]) << "known vertex " << v;
+        } else {
+          EXPECT_NEAR(w[i], s.source[i], 1e-12) << "dry vertex " << v;
+        }
+      }
+    }
+  }
+}
+
+// The owner-local rows of a quadratic mesh: one per vertex (corner, mid-edge
+// and centre) and component, satisfied by the solved extension, with the
+// strong wall masks on the high-order wall nodes as well.
+TEST(LevelSetPdeVelocityExtensionHighOrderCells, AlgebraicRowsAreSatisfiedAndWallNodesAreMasked)
+{
+  for (const auto family :
+       {svmp::CellFamily::Quad, svmp::CellFamily::Triangle}) {
+    const auto mesh = makeQuadraticBoxMesh(family, 6, /*curve=*/0.03);
+    SCOPED_TRACE(family == svmp::CellFamily::Quad ? "Quad9" : "Triangle6");
+    const auto s = makeSetup(
+        *mesh,
+        [](double x, double y) { return y - 0.41 - 0.05 * std::sin(5 * x); },
+        [](double x, double y) {
+          return std::array<double, 2>{std::sin(2 * x) * std::cosh(y),
+                                       std::cos(2 * x) * std::sinh(y)};
+        });
+    const std::vector<WallVelocityExtensionConstraint> walls{
+        {.boundary_label = kSideWall,
+         .constrained_components = {true, false, false}},
+        {.boundary_label = kBottomWall,
+         .constrained_components = {false, true, false}}};
+    for (const auto op : {PdeVelocityExtensionOperator::Harmonic,
+                          PdeVelocityExtensionOperator::LeastSquaresNormal}) {
+      std::vector<double> w;
+      std::vector<svmp::FE::level_set::VelocityExtensionConstraintRow> rows;
+      PdeVelocityExtensionOptions options;
+      options.op = op;
+      (void)extendVelocityByPde(
+          *mesh, svmp::MeshComm::self(), s.phi, s.source, 2u, s.known, 2u,
+          std::span<const WallVelocityExtensionConstraint>(walls), options, w,
+          &rows);
+      ASSERT_EQ(rows.size(), 2u * mesh->n_vertices());
+      double max_residual = 0.0;
+      for (const auto& row : rows) {
+        double residual = w[2 * static_cast<std::size_t>(row.vertex) +
+                            static_cast<std::size_t>(row.component)];
+        double sum = 0.0;
+        bool from_extension = false;
+        for (const auto& dep : row.dependencies) {
+          const auto index = 2 * static_cast<std::size_t>(dep.vertex) +
+                             static_cast<std::size_t>(dep.component);
+          const bool source = dep.field == svmp::FE::level_set::
+                                               VelocityExtensionDependencyField::
+                                                   SourceVelocity;
+          residual -= dep.coefficient * (source ? s.source[index] : w[index]);
+          sum += dep.coefficient;
+          from_extension = from_extension || !source;
+        }
+        if (from_extension) {
+          EXPECT_NEAR(sum, 1.0, 1e-12);  // constants are reproduced
+        }
+        max_residual = std::max(max_residual, std::abs(residual));
+      }
+      EXPECT_LT(max_residual, 1e-11)
+          << svmp::FE::level_set::pdeVelocityExtensionOperatorName(op);
+
+      // Dry vertices on the side walls, mid-edge nodes included, carry no
+      // normal velocity.
+      std::size_t masked_mid_edge = 0u;
+      for (std::size_t v = 0; v < mesh->n_vertices(); ++v) {
+        const auto p = vertexPoint(*mesh, v);
+        if (s.known[v] != 0u ||
+            (std::abs(p[0]) > 1e-12 && std::abs(p[0] - 1.0) > 1e-12)) {
+          continue;
+        }
+        EXPECT_EQ(w[2 * v], 0.0) << "dry side-wall vertex " << v;
+        const double steps = p[1] * 6.0;
+        masked_mid_edge +=
+            std::abs(steps - std::round(steps)) > 0.25 ? 1u : 0u;
+      }
+      EXPECT_GT(masked_mid_edge, 0u);
+    }
+  }
+}
+
+namespace {
+
+std::shared_ptr<svmp::FE::spaces::H1Space> quadraticScalarSpace(
+    svmp::CellFamily family)
+{
+  return std::make_shared<svmp::FE::spaces::H1Space>(
+      family == svmp::CellFamily::Quad ? svmp::FE::ElementType::Quad4
+                                       : svmp::FE::ElementType::Triangle3,
+      /*order=*/2);
+}
+
+// The field coefficients of mesh-vertex values (every DOF of a nodal field
+// whose nodes are the mesh vertices).
+std::vector<svmp::FE::Real> vertexCoefficients(
+    const svmp::FE::systems::FESystem& system, svmp::FE::FieldId field,
+    const std::vector<double>& vertex_values, std::size_t components)
+{
+  std::vector<svmp::FE::Real> coefficients(
+      static_cast<std::size_t>(system.fieldDofHandler(field).getNumDofs()),
+      0.0);
+  const auto projection = system.projectMeshVertexValuesToFieldCoefficients(
+      field, vertex_values, components, coefficients);
+  EXPECT_EQ(projection.unassigned_dofs, 0u);
+  return coefficients;
+}
+
+} // namespace
+
+// P2 level-set, source and target fields on quadratic cells: the prescribed
+// refresh writes the direct extension of the vertex values, at the corner,
+// mid-edge and centre DOFs alike.
+TEST(LevelSetVelocityExtensionRefresh, PrescribedP2FieldMatchesTheDirectExtension)
+{
+  using svmp::FE::level_set::LevelSetVelocityExtensionRefreshOptions;
+  using svmp::FE::level_set::LevelSetVelocityExtensionRequest;
+  using svmp::FE::level_set::PdeVelocityExtensionCaches;
+
+  for (const auto family :
+       {svmp::CellFamily::Quad, svmp::CellFamily::Triangle}) {
+    SCOPED_TRACE(family == svmp::CellFamily::Quad ? "Quad9" : "Triangle6");
+    const auto mesh = makeQuadraticBoxMesh(family, 4, /*curve=*/0.03);
+    const auto setup = makeSetup(
+        *mesh, [](double x, double y) { return x - 0.41 + 0.05 * y; },
+        [](double x, double y) {
+          return std::array<double, 2>{1.0 + x * y, 0.5 - 2.0 * y * y};
+        });
+    const auto expected =
+        run(*mesh, setup, PdeVelocityExtensionOperator::Harmonic, {});
+
+    const auto scalar_space = quadraticScalarSpace(family);
+    auto vector_space =
+        std::make_shared<svmp::FE::spaces::ProductSpace>(scalar_space, 2);
+    svmp::FE::systems::FESystem system(mesh);
+    const auto prescribed = svmp::FE::systems::FieldSourceKind::PrescribedData;
+    const auto phi = system.addField(svmp::FE::systems::FieldSpec{
+        .name = "phi", .space = scalar_space, .components = 1,
+        .source_kind = prescribed});
+    const auto velocity = system.addField(svmp::FE::systems::FieldSpec{
+        .name = "Velocity", .space = vector_space, .components = 2,
+        .source_kind = prescribed});
+    const auto extension = system.addField(svmp::FE::systems::FieldSpec{
+        .name = "LevelSetAdvectionVelocity", .space = vector_space,
+        .components = 2, .source_kind = prescribed});
+    ASSERT_NO_THROW(system.setup());
+    system.setPrescribedFieldCoefficients(
+        phi, vertexCoefficients(system, phi, setup.phi, 1u));
+    system.setPrescribedFieldCoefficients(
+        velocity, vertexCoefficients(system, velocity, setup.source, 2u));
+    system.setPrescribedFieldCoefficients(
+        extension, std::vector<svmp::FE::Real>(
+                       static_cast<std::size_t>(
+                           system.fieldDofHandler(extension).getNumDofs()),
+                       0.0));
+    // Every P2 DOF is a mesh vertex.
+    EXPECT_EQ(static_cast<std::size_t>(
+                  system.fieldDofHandler(phi).getNumDofs()),
+              mesh->n_vertices());
+
+    LevelSetVelocityExtensionRequest request{};
+    request.level_set_field_name = "phi";
+    request.source_velocity_field_name = "Velocity";
+    request.target_velocity_field_name = "LevelSetAdvectionVelocity";
+    request.extension_method = "pde_harmonic";
+    request.enforce_wall_impermeability = false;
+    PdeVelocityExtensionCaches caches;
+    EXPECT_TRUE(svmp::FE::level_set::refreshLevelSetVelocityExtensions(
+        system, *mesh, svmp::FE::systems::SystemStateView{},
+        std::span<const LevelSetVelocityExtensionRequest>(&request, 1u),
+        LevelSetVelocityExtensionRefreshOptions{}, caches));
+    const auto refreshed = svmp::FE::level_set::evaluateVertexField(
+        system, *mesh, extension, svmp::FE::systems::SystemStateView{}, 2u,
+        "velocity-extension P2 refresh test");
+    ASSERT_EQ(refreshed.size(), expected.size());
+    for (std::size_t i = 0; i < expected.size(); ++i) {
+      EXPECT_DOUBLE_EQ(refreshed[i], expected[i]) << "value " << i;
+    }
+  }
+}
+
+// A P1 field on quadratic cells has no DOF at the mid-edge and centre
+// vertices: the refresh names the requirement instead of extending a
+// partial node set.
+TEST(LevelSetVelocityExtensionRefresh, RejectsFieldsWhoseNodesAreNotTheMeshVertices)
+{
+  using svmp::FE::level_set::LevelSetVelocityExtensionRefreshOptions;
+  using svmp::FE::level_set::LevelSetVelocityExtensionRequest;
+  using svmp::FE::level_set::PdeVelocityExtensionCaches;
+
+  const auto mesh = makeQuadraticBoxMesh(svmp::CellFamily::Quad, 2);
+  auto scalar_space = std::make_shared<svmp::FE::spaces::H1Space>(
+      svmp::FE::ElementType::Quad4, /*order=*/1);
+  auto vector_space =
+      std::make_shared<svmp::FE::spaces::ProductSpace>(scalar_space, 2);
+  svmp::FE::systems::FESystem system(mesh);
+  const auto prescribed = svmp::FE::systems::FieldSourceKind::PrescribedData;
+  (void)system.addField(svmp::FE::systems::FieldSpec{
+      .name = "phi", .space = scalar_space, .components = 1,
+      .source_kind = prescribed});
+  (void)system.addField(svmp::FE::systems::FieldSpec{
+      .name = "Velocity", .space = vector_space, .components = 2,
+      .source_kind = prescribed});
+  (void)system.addField(svmp::FE::systems::FieldSpec{
+      .name = "LevelSetAdvectionVelocity", .space = vector_space,
+      .components = 2, .source_kind = prescribed});
+  ASSERT_NO_THROW(system.setup());
+  LevelSetVelocityExtensionRequest request{};
+  request.level_set_field_name = "phi";
+  request.source_velocity_field_name = "Velocity";
+  request.target_velocity_field_name = "LevelSetAdvectionVelocity";
+  request.extension_method = "pde_harmonic";
+  request.enforce_wall_impermeability = false;
+  PdeVelocityExtensionCaches caches;
+  try {
+    (void)svmp::FE::level_set::refreshLevelSetVelocityExtensions(
+        system, *mesh, svmp::FE::systems::SystemStateView{},
+        std::span<const LevelSetVelocityExtensionRequest>(&request, 1u),
+        LevelSetVelocityExtensionRefreshOptions{}, caches);
+    ADD_FAILURE() << "P1 fields on Quad9 cells accepted";
+  } catch (const std::runtime_error& error) {
+    EXPECT_NE(std::string(error.what()).find("at every mesh vertex"),
+              std::string::npos)
+        << error.what();
+  }
+}
+
+// The constraint kernel on quadratic cells: rows of mid-edge and centre
+// vertices resolve to the edge and cell-interior DOFs whose node they are,
+// the kernel's sparsity holds every coupling of the rows, and the residual
+// vanishes at the solved extension.
+TEST(LevelSetVelocityExtensionConstraint, QuadraticCellRowsResolveEveryNodeDof)
+{
+  for (const auto family :
+       {svmp::CellFamily::Quad, svmp::CellFamily::Triangle}) {
+    SCOPED_TRACE(family == svmp::CellFamily::Quad ? "Quad9" : "Triangle6");
+    const auto mesh = makeQuadraticBoxMesh(family, 4, /*curve=*/0.03);
+    const auto s = makeSetup(
+        *mesh,
+        [](double x, double y) { return y - 0.41 - 0.05 * std::sin(5 * x); },
+        [](double x, double y) {
+          return std::array<double, 2>{std::sin(2 * x) * std::cosh(y),
+                                       std::cos(2 * x) * std::sinh(y)};
+        });
+    const std::vector<WallVelocityExtensionConstraint> walls{
+        {.boundary_label = kSideWall,
+         .constrained_components = {true, false, false}},
+        {.boundary_label = kBottomWall,
+         .constrained_components = {false, true, false}}};
+    std::vector<double> w;
+    std::vector<svmp::FE::level_set::VelocityExtensionConstraintRow> rows;
+    (void)extendVelocityByPde(
+        *mesh, svmp::MeshComm::self(), s.phi, s.source, 2u, s.known, 2u,
+        std::span<const WallVelocityExtensionConstraint>(walls),
+        PdeVelocityExtensionOptions{}, w, &rows);
+
+    const auto scalar_space = quadraticScalarSpace(family);
+    auto vector_space =
+        std::make_shared<svmp::FE::spaces::ProductSpace>(scalar_space, 2);
+    svmp::FE::systems::FESystem system(mesh);
+    const auto velocity = system.addField(svmp::FE::systems::FieldSpec{
+        .name = "Velocity", .space = vector_space, .components = 2});
+    const auto extension = system.addField(svmp::FE::systems::FieldSpec{
+        .name = "LevelSetAdvectionVelocity", .space = vector_space,
+        .components = 2});
+    ASSERT_NO_THROW(system.setup());
+
+    svmp::FE::level_set::LevelSetVelocityExtensionConstraintKernel kernel({
+        .extension_field = extension,
+        .source_velocity_field = velocity,
+        .components = 2,
+        .operator_tag = "equations",
+    });
+    kernel.setFrozenRows(rows, /*revision=*/1u);
+    const auto n = system.dofHandler().getNumDofs();
+    svmp::FE::sparsity::SparsityPattern pattern(n);
+    ASSERT_NO_THROW(kernel.addSparsityCouplings(system, pattern));
+    pattern.finalize();
+
+    std::vector<svmp::FE::Real> u(static_cast<std::size_t>(n), 0.0);
+    const auto place = [&](svmp::FE::FieldId field,
+                           const std::vector<double>& vertex_values) {
+      const auto coefficients =
+          vertexCoefficients(system, field, vertex_values, 2u);
+      const auto offset = system.fieldDofOffset(field);
+      for (std::size_t i = 0; i < coefficients.size(); ++i) {
+        u[static_cast<std::size_t>(offset) + i] = coefficients[i];
+      }
+    };
+    place(velocity, s.source);
+    place(extension, w);
+    svmp::FE::systems::SystemStateView state;
+    state.u = std::span<const svmp::FE::Real>(u);
+    svmp::FE::assembly::DenseMatrixView jacobian(n);
+    svmp::FE::assembly::DenseVectorView residual(n);
+    jacobian.zero();
+    residual.zero();
+    svmp::FE::systems::AssemblyRequest request;
+    request.op = "equations";
+    request.want_matrix = true;
+    request.want_vector = true;
+    request.suppress_constraint_inhomogeneity = true;
+    (void)kernel.assemble(system, request, state, &jacobian, &residual);
+
+    const auto begin = system.fieldDofOffset(extension);
+    const auto end =
+        begin + system.fieldDofHandler(extension).getNumDofs();
+    double max_residual = 0.0;
+    std::size_t missing_couplings = 0u;
+    for (svmp::FE::GlobalIndex row = 0; row < n; ++row) {
+      if (row < begin || row >= end) {
+        EXPECT_EQ(residual.getVectorEntry(row), 0.0) << "row " << row;
+        continue;
+      }
+      // One row per extension DOF: every P2 DOF is some vertex's.
+      EXPECT_EQ(jacobian(row, row), 1.0) << "row " << row;
+      max_residual =
+          std::max(max_residual, std::abs(residual.getVectorEntry(row)));
+      for (svmp::FE::GlobalIndex column = 0; column < n; ++column) {
+        if (jacobian(row, column) != 0.0 && !pattern.hasEntry(row, column)) {
+          ++missing_couplings;
+        }
+      }
+    }
+    EXPECT_LT(max_residual, 1e-11);
+    EXPECT_EQ(missing_couplings, 0u);
   }
 }
 
