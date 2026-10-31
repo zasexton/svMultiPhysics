@@ -4614,7 +4614,7 @@ TEST(FormsInstaller, FormsInstaller_InstallResidualForm_ADModeForward)
     }
 }
 
-TEST(FormsInstaller, FormsInstaller_InstallResidualForm_ADModeReverse)
+TEST(FormsInstaller, FormsInstaller_ReverseAndTaylorADModesAreRefused)
 {
     auto mesh = std::make_shared<svmp::FE::forms::test::SingleTetraMeshAccess>();
     auto space = std::make_shared<svmp::FE::spaces::H1Space>(ElementType::Tetra4, /*order=*/1);
@@ -4623,62 +4623,22 @@ TEST(FormsInstaller, FormsInstaller_InstallResidualForm_ADModeReverse)
     const auto u_field = sys.addField(svmp::FE::systems::FieldSpec{.name = "u", .space = space, .components = 1});
     sys.addOperator("op");
 
+    // Only forward-mode dual numbers are implemented; the other modes were
+    // accepted and silently assembled as forward mode.
     const auto u = svmp::FE::forms::FormExpr::trialFunction(*space, "u");
     const auto v = svmp::FE::forms::FormExpr::testFunction(*space, "v");
-    const auto residual_form = (u * u * v).dx();
-
-    auto installed = svmp::FE::systems::installResidualForm(
-        sys, "op", u_field, u_field, residual_form,
-        svmp::FE::systems::FormInstallOptions{.ad_mode = svmp::FE::forms::ADMode::Reverse});
-    ASSERT_NE(installed, nullptr);
-    EXPECT_NE(unwrapNonlinearKernel(installed), nullptr);
-
-    svmp::FE::systems::SetupInputs inputs;
-    inputs.topology_override = singleTetraTopology();
-    sys.setup({}, inputs);
-
-    const auto n_dofs = sys.dofHandler().getNumDofs();
-    ASSERT_EQ(n_dofs, 4);
-
-    std::vector<Real> U = {0.1, 0.2, 0.3, 0.4};
-    svmp::FE::systems::SystemStateView state;
-    state.u = U;
-
-    svmp::FE::systems::AssemblyRequest req;
-    req.op = "op";
-    req.want_matrix = true;
-    req.want_vector = true;
-
-    svmp::FE::assembly::DenseSystemView out(n_dofs);
-    out.zero();
-    (void)sys.assemble(req, state, &out, &out);
-
-    std::vector<Real> R0(static_cast<std::size_t>(n_dofs), 0.0);
-    for (GlobalIndex i = 0; i < n_dofs; ++i) {
-        R0[static_cast<std::size_t>(i)] = out.getVectorEntry(i);
+    const auto u_state = svmp::FE::forms::StateField(u_field, *space, "u");
+    for (const auto mode : {svmp::FE::forms::ADMode::Reverse, svmp::FE::forms::ADMode::Taylor}) {
+        EXPECT_THROW((void)svmp::FE::systems::installResidualForm(
+                         sys, "op", u_field, u_field, (u * u * v).dx(),
+                         svmp::FE::systems::FormInstallOptions{.ad_mode = mode}),
+                     std::invalid_argument);
+        EXPECT_THROW((void)svmp::FE::systems::installFormulation(
+                         sys, "op", {u_field}, (u_state * u_state * v).dx(),
+                         svmp::FE::systems::FormInstallOptions{.ad_mode = mode}),
+                     svmp::FE::InvalidArgumentException);
     }
-
-    const Real eps = 1e-7;
-    svmp::FE::systems::AssemblyRequest req_vec;
-    req_vec.op = "op";
-    req_vec.want_vector = true;
-
-    for (GlobalIndex j = 0; j < n_dofs; ++j) {
-        auto U_plus = U;
-        U_plus[static_cast<std::size_t>(j)] += eps;
-
-        svmp::FE::systems::SystemStateView state_plus;
-        state_plus.u = U_plus;
-
-        svmp::FE::assembly::DenseVectorView Rp(n_dofs);
-        Rp.zero();
-        (void)sys.assemble(req_vec, state_plus, nullptr, &Rp);
-
-        for (GlobalIndex i = 0; i < n_dofs; ++i) {
-            const Real fd = (Rp.getVectorEntry(i) - R0[static_cast<std::size_t>(i)]) / eps;
-            EXPECT_NEAR(out.getMatrixEntry(i, j), fd, 5e-6);
-        }
-    }
+    EXPECT_TRUE(sys.operatorDefinition("op").cells.empty());
 }
 
 TEST(FormsInstaller, MovingMeshSymbolicWithADCheckInstallsJITPrimaryAndPassesRuntimeReference)

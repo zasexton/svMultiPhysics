@@ -15081,6 +15081,11 @@ NonlinearFormKernel::NonlinearFormKernel(FormIR residual_ir, ADMode ad_mode, Non
     , ad_mode_(ad_mode)
     , output_(output)
 {
+    if (ad_mode_ == ADMode::Reverse || ad_mode_ == ADMode::Taylor) {
+        throw std::invalid_argument(
+            "NonlinearFormKernel: ADMode::Reverse and ADMode::Taylor are not implemented; the Jacobian is "
+            "assembled with forward-mode dual numbers (ADMode::Forward) or the symbolic tangent");
+    }
     if (!residual_ir_.isCompiled()) {
         throw std::invalid_argument("NonlinearFormKernel: residual IR is not compiled");
     }

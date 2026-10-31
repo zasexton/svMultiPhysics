@@ -4257,6 +4257,10 @@ CoupledResidualKernels installFormulation(
                 "installFormulation: empty field list");
     FE_THROW_IF(!residual.isValid(), InvalidArgumentException,
                 "installFormulation: invalid residual expression");
+    FE_THROW_IF(options.ad_mode == forms::ADMode::Reverse || options.ad_mode == forms::ADMode::Taylor,
+                InvalidArgumentException,
+                "installFormulation: ADMode::Reverse and ADMode::Taylor are not implemented; the Jacobian is "
+                "assembled with forward-mode dual numbers (ADMode::Forward) or the symbolic tangent");
 
     auto form_bound_exterior_boundary_measure_policies =
         makeFormBoundExteriorBoundaryMeasurePolicies(
