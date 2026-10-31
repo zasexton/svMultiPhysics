@@ -33,19 +33,16 @@ levelSetEquationInput(const svmp::Physics::ParameterMap &parameters);
 levelSetEquationInput(const EquationParameters &equation);
 
 /// The input of a domain element: its defined entries without the keys that
-/// only the equation element gives (Level_set_isovalue, the keys of the
-/// advection-velocity extension and of the static-capillary
-/// initialization).
+/// only the equation element gives (the keys of the advection-velocity
+/// extension and of the static-capillary initialization).
 [[nodiscard]] svmp::FE::options::OptionInput
 levelSetDomainInput(const svmp::Physics::ParameterMap &parameters);
 
 /// Resolves the keys of one element over the values of the elements before
 /// it, then sets the values that a key selects beyond its own field: Coupled
 /// routes the transport to the monolithic operator, Constant_velocity
-/// selects a constant velocity without a registered field,
-/// Interface_kinematic_marker enables the interface kinematic term, and a
-/// stated Conservative_phase_impermeable_normal_velocity_tolerance is marked
-/// as requested (the phase transport rejects it).
+/// selects a constant velocity without a registered field, and
+/// Interface_kinematic_marker enables the interface kinematic term.
 [[nodiscard]] svmp::FE::options::ResolvedOptions<
     application::core::LevelSetEquationKeys>
 resolveLevelSetEquationKeys(const svmp::FE::options::OptionInput &input,

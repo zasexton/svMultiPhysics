@@ -69,11 +69,19 @@ makeInstallation(const MaintenanceTestInput &legacy,
   return installation;
 }
 
+// The maintenance isovalue is a C++ option of the equation keys (decision
+// 18A): `isovalue` sets it on the installation.
 std::optional<application::core::LevelSetMaintenanceConfigurationHandle>
 resolveInstalled(const MaintenanceTestInput &input,
-                 std::span<const ActiveCutVolumeRequest> active_requests = {}) {
+                 std::span<const ActiveCutVolumeRequest> active_requests = {},
+                 std::optional<double> isovalue = std::nullopt) {
+  auto installation = makeInstallation(input);
+  if (isovalue.has_value()) {
+    std::const_pointer_cast<ResolvedLevelSetEquationConfiguration>(installation)
+        ->equation_keys.level_set_isovalue = *isovalue;
+  }
   return application::core::resolveLegacyLevelSetMaintenanceConfiguration(
-      input, active_requests, makeInstallation(input));
+      input, active_requests, installation);
 }
 
 template <typename ExpectedException, typename Action>
@@ -99,13 +107,10 @@ TEST(LevelSetMaintenanceConfiguration,
      ProducesEquationOnlyTypedViewAndRetainsLayeredInstallation) {
   auto legacy = makeLegacyInput(" Level_Set-Transport ");
   put(legacy.equation_parameters, "Level_set_field_name", " phi_equation ");
-  put(legacy.equation_parameters, "Level_set_isovalue", "0.25");
   put(legacy.equation_parameters, "Transport_form", "advective");
   put(legacy.equation_parameters, "Enable_kinematic_reconciliation", "true");
   put(legacy.equation_parameters,
       "Conservative_phase_flux_artifact_cadence_steps", "2");
-  put(legacy.equation_parameters,
-      "Conservative_phase_geometry_measure_tolerance", "1.23457");
   // A parameter that is not defined does not count.
   put(legacy.equation_parameters, "Enable_sign_definite_patch_bounds", "true",
       false);
@@ -114,6 +119,11 @@ TEST(LevelSetMaintenanceConfiguration,
   auto mutable_installation =
       std::const_pointer_cast<ResolvedLevelSetEquationConfiguration>(
           installation);
+  // The maintenance isovalue and the geometry tolerance are C++ options of
+  // the equation keys (decision 18A).
+  mutable_installation->equation_keys.level_set_isovalue = 0.25;
+  mutable_installation->equation_keys.transport.conservative_phase
+      .geometry_measure_tolerance = 1.23457;
   mutable_installation->options.operator_tag = "domain_transport";
   mutable_installation->options.transport_form =
       svmp::FE::level_set::LevelSetTransportForm::ConservativeDivergence;
@@ -207,10 +217,9 @@ TEST(LevelSetMaintenanceConfiguration,
     put(input.equation_parameters, "Enable_kinematic_reconciliation", "true");
     put(input.equation_parameters,
         "Conservative_phase_flux_artifact_cadence_steps", test_case.cadence);
+    put(input.equation_parameters, "Static_capillary_max_iterations", "2");
     put(input.equation_parameters,
-        "Conservative_phase_geometry_correction_max_iterations", "2");
-    put(input.equation_parameters,
-        "Conservative_phase_geometry_measure_tolerance", "1.25");
+        "Conservative_phase_momentum_relative_tolerance", "1.25");
     put(input.equation_parameters, "Enable_sign_definite_patch_bounds",
         "unrecognized");
     put(input.equation_parameters, "Static_capillary_volume_tolerance", "nan");
@@ -225,9 +234,8 @@ TEST(LevelSetMaintenanceConfiguration,
     EXPECT_EQ(transport.velocity.constant_value, test_case.expected_vector);
     EXPECT_EQ(transport.conservative_phase.flux_artifact_cadence_steps,
               test_case.expected_cadence);
-    EXPECT_EQ(transport.conservative_phase.geometry_correction_max_iterations,
-              2);
-    EXPECT_DOUBLE_EQ(transport.conservative_phase.geometry_measure_tolerance,
+    EXPECT_EQ((*resolved)->static_capillary_equilibrium.max_iterations, 2);
+    EXPECT_DOUBLE_EQ(transport.conservative_phase.momentum_relative_tolerance,
                      1.25);
     EXPECT_FALSE(transport.sign_definite_patch_bounds.enabled);
     EXPECT_TRUE(std::isnan(
@@ -360,7 +368,6 @@ TEST(LevelSetMaintenanceConfiguration,
      AssociatesExactActiveCutBeforeFieldFallbackAndPreservesOptionals) {
   auto input = makeLegacyInput();
   put(input.equation_parameters, "Level_set_field_name", "phi");
-  put(input.equation_parameters, "Level_set_isovalue", "0.5");
   put(input.equation_parameters, "Enable_kinematic_reconciliation", "true");
 
   ActiveCutVolumeRequest other{};
@@ -379,7 +386,7 @@ TEST(LevelSetMaintenanceConfiguration,
   exact.requested_interface_marker = 17;
 
   const std::array<ActiveCutVolumeRequest, 3> requests{other, fallback, exact};
-  auto resolved = resolveInstalled(input, requests);
+  auto resolved = resolveInstalled(input, requests, 0.5);
   ASSERT_TRUE(resolved.has_value());
   ASSERT_TRUE((*resolved)->volume_cut_request.has_value());
   EXPECT_EQ((*resolved)->volume_cut_request->domain_id, "exact_domain");
@@ -392,7 +399,7 @@ TEST(LevelSetMaintenanceConfiguration,
 
   const std::array<ActiveCutVolumeRequest, 2> fallback_requests{other,
                                                                 fallback};
-  resolved = resolveInstalled(input, fallback_requests);
+  resolved = resolveInstalled(input, fallback_requests, 0.5);
   ASSERT_TRUE(resolved.has_value());
   ASSERT_TRUE((*resolved)->volume_cut_request.has_value());
   EXPECT_EQ((*resolved)->volume_cut_request->domain_id, "fallback_domain");

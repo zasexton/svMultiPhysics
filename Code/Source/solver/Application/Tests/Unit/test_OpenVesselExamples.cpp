@@ -845,20 +845,12 @@ TEST(EquationParameters,
           "underscore",
           R"xml(
 <Add_equation type="level_set">
-  <Conservative_phase_component_activity_tolerance>4e-7</Conservative_phase_component_activity_tolerance>
   <Conservative_phase_write_flux_artifacts>true</Conservative_phase_write_flux_artifacts>
   <Conservative_phase_flux_artifact_cadence_steps>3</Conservative_phase_flux_artifact_cadence_steps>
-  <Conservative_phase_classify_nonprimary_components_as_satellites>true</Conservative_phase_classify_nonprimary_components_as_satellites>
-  <Conservative_phase_fixed_flux_regions>film|wall_film|0|1|0|0.1|*|*</Conservative_phase_fixed_flux_regions>
 </Add_equation>
 )xml",
-          {{"Conservative_phase_component_activity_tolerance", "4e-7"},
-           {"Conservative_phase_write_flux_artifacts", "true"},
-           {"Conservative_phase_flux_artifact_cadence_steps", "3"},
-           {"Conservative_phase_classify_nonprimary_components_as_satellites",
-            "true"},
-           {"Conservative_phase_fixed_flux_regions",
-            "film|wall_film|0|1|0|0.1|*|*"}}},
+          {{"Conservative_phase_write_flux_artifacts", "true"},
+           {"Conservative_phase_flux_artifact_cadence_steps", "3"}}},
   };
 
   for (const auto& fixture : fixtures) {
@@ -872,6 +864,19 @@ TEST(EquationParameters,
       ASSERT_NE(entry, parsed.end()) << name;
       EXPECT_EQ(entry->second, value) << name;
     }
+  }
+
+  // The component activity tolerance, the satellite classification and the
+  // fixed-flux regions are C++ options of the phase transport (decision 18A
+  // of 2026-10-31): the XML reader rejects them.
+  for (const std::string key :
+       {"Conservative_phase_component_activity_tolerance",
+        "Conservative_phase_classify_nonprimary_components_as_satellites",
+        "Conservative_phase_fixed_flux_regions"}) {
+    SCOPED_TRACE(key);
+    const auto xml = "<Add_equation type=\"level_set\"><" + key + ">1</" + key +
+                     "></Add_equation>";
+    EXPECT_THROW((void)equationParametersFromText(xml.c_str()), std::runtime_error);
   }
 
   // The compact (CamelCase) spellings were removed (decision D47): the XML

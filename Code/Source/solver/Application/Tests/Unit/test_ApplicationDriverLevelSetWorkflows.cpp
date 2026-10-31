@@ -3758,8 +3758,8 @@ TEST(ApplicationDriverLevelSetWorkflows,
     <Constant_velocity>1.25, -0.5, 3.0</Constant_velocity>
     <Enable_kinematic_reconciliation>true</Enable_kinematic_reconciliation>
     <Conservative_phase_flux_artifact_cadence_steps>-1</Conservative_phase_flux_artifact_cadence_steps>
-    <Conservative_phase_geometry_correction_max_iterations>2</Conservative_phase_geometry_correction_max_iterations>
-    <Conservative_phase_geometry_measure_tolerance>1.25</Conservative_phase_geometry_measure_tolerance>
+    <Static_capillary_max_iterations>2</Static_capillary_max_iterations>
+    <Conservative_phase_momentum_relative_tolerance>1.25</Conservative_phase_momentum_relative_tolerance>
     <Enable_sign_definite_patch_bounds>unrecognized</Enable_sign_definite_patch_bounds>
     <Static_capillary_volume_tolerance>nan</Static_capillary_volume_tolerance>
   </Add_equation>
@@ -3785,8 +3785,9 @@ TEST(ApplicationDriverLevelSetWorkflows,
   const auto& first_phase =
       requests[0].configuration->transport.conservative_phase;
   EXPECT_EQ(first_phase.flux_artifact_cadence_steps, -1);
-  EXPECT_EQ(first_phase.geometry_correction_max_iterations, 2);
-  EXPECT_DOUBLE_EQ(first_phase.geometry_measure_tolerance, 1.25);
+  EXPECT_EQ(
+      requests[0].configuration->static_capillary_equilibrium.max_iterations, 2);
+  EXPECT_DOUBLE_EQ(first_phase.momentum_relative_tolerance, 1.25);
   EXPECT_FALSE(
       requests[0].configuration->transport.sign_definite_patch_bounds.enabled);
   EXPECT_TRUE(std::isnan(
@@ -3842,9 +3843,9 @@ TEST(ApplicationDriverLevelSetWorkflows,
                   [&] { (void)legacyMaintenanceRequestsForTest(*invalid); })),
               "[Level-set equation] " + std::string(key) + ": " + reason);
   };
-  expect_key_error("Conservative_phase_geometry_measure_tolerance", "invalid",
+  expect_key_error("Conservative_phase_momentum_relative_tolerance", "invalid",
                    "expected a number, got 'invalid'");
-  expect_key_error("Conservative_phase_geometry_measure_tolerance", "1e9999",
+  expect_key_error("Conservative_phase_momentum_relative_tolerance", "1e9999",
                    "expected a number, got '1e9999'");
   expect_key_error("Conservative_phase_flux_artifact_cadence_steps",
                    "999999999999999999999",
@@ -3915,7 +3916,7 @@ TEST(ApplicationDriverLevelSetWorkflows,
 <svMultiPhysicsFile>
   <Add_equation type="level_set">
     <Velocity_source>invalid_velocity</Velocity_source>
-    <Conservative_phase_liquid_side>invalid_phase</Conservative_phase_liquid_side>
+    <Conservative_phase_boundary_flux_policy>invalid_phase</Conservative_phase_boundary_flux_policy>
     <Enable_kinematic_reconciliation>true</Enable_kinematic_reconciliation>
   </Add_equation>
 </svMultiPhysicsFile>
@@ -3923,8 +3924,9 @@ TEST(ApplicationDriverLevelSetWorkflows,
   EXPECT_EQ(
       (maintenanceCompatibilityExceptionMessage<std::runtime_error>(
           [&] { (void)legacyMaintenanceRequestsForTest(*phase_before_velocity); })),
-      "[Level-set equation] Conservative_phase_liquid_side: expected one of "
-      "negative | positive, got 'invalid_phase'");
+      "[Level-set equation] Conservative_phase_boundary_flux_policy: expected "
+      "one of closed_domain_discrete_q_flux_only | "
+      "globally_balanced_discrete_q_flux, got 'invalid_phase'");
 
   auto invalid_boundary = parseWorkflowParametersXml(R"xml(
 <svMultiPhysicsFile>
@@ -3957,7 +3959,7 @@ TEST(ApplicationDriverLevelSetWorkflows,
     <Enable_kinematic_reconciliation>true</Enable_kinematic_reconciliation>
   </Add_equation>
   <Add_equation type="level_set">
-    <Conservative_phase_liquid_side>invalid_phase</Conservative_phase_liquid_side>
+    <Conservative_phase_boundary_flux_policy>invalid_phase</Conservative_phase_boundary_flux_policy>
     <Enable_kinematic_reconciliation>true</Enable_kinematic_reconciliation>
   </Add_equation>
 </svMultiPhysicsFile>
@@ -3972,7 +3974,7 @@ TEST(ApplicationDriverLevelSetWorkflows,
   auto phase_first = parseWorkflowParametersXml(R"xml(
 <svMultiPhysicsFile>
   <Add_equation type="level_set">
-    <Conservative_phase_liquid_side>invalid_phase</Conservative_phase_liquid_side>
+    <Conservative_phase_boundary_flux_policy>invalid_phase</Conservative_phase_boundary_flux_policy>
     <Enable_kinematic_reconciliation>true</Enable_kinematic_reconciliation>
   </Add_equation>
   <Add_equation type="level_set">
@@ -3984,8 +3986,9 @@ TEST(ApplicationDriverLevelSetWorkflows,
   EXPECT_EQ(
       (maintenanceCompatibilityExceptionMessage<std::runtime_error>(
           [&] { (void)legacyMaintenanceRequestsForTest(*phase_first); })),
-      "[Level-set equation] Conservative_phase_liquid_side: expected one of "
-      "negative | positive, got 'invalid_phase'");
+      "[Level-set equation] Conservative_phase_boundary_flux_policy: expected "
+      "one of closed_domain_discrete_q_flux_only | "
+      "globally_balanced_discrete_q_flux, got 'invalid_phase'");
 }
 
 TEST(ApplicationDriverLevelSetWorkflows,
@@ -4106,27 +4109,33 @@ TEST(ApplicationDriverLevelSetWorkflows,
     <Static_capillary_physical_equilibrium_max_residual_norm>3.875e-10</Static_capillary_physical_equilibrium_max_residual_norm>
     <Static_capillary_constant_pressure_kkt_max_residual_norm>4.0e-10</Static_capillary_constant_pressure_kkt_max_residual_norm>
     <Static_capillary_constant_pressure_kkt_max_relative_distance>5.0e-9</Static_capillary_constant_pressure_kkt_max_relative_distance>
-    <Static_capillary_finite_difference_reference_coefficient_scale>0.25</Static_capillary_finite_difference_reference_coefficient_scale>
     <Static_capillary_finite_difference_relative_step>6.0e-6</Static_capillary_finite_difference_relative_step>
-    <Static_capillary_minimum_finite_difference_step>7.0e-12</Static_capillary_minimum_finite_difference_step>
-    <Static_capillary_finite_difference_max_shrinks>8</Static_capillary_finite_difference_max_shrinks>
     <Static_capillary_max_iterations>9</Static_capillary_max_iterations>
-    <Static_capillary_max_line_search_iterations>10</Static_capillary_max_line_search_iterations>
     <Static_capillary_max_topology_epoch_transitions>11</Static_capillary_max_topology_epoch_transitions>
-    <Static_capillary_projected_gradient_inverse_stiffness>0.75</Static_capillary_projected_gradient_inverse_stiffness>
-    <Static_capillary_tangent_trust_radius>0.125</Static_capillary_tangent_trust_radius>
-    <Static_capillary_maximum_coefficient_update_linf>0.375</Static_capillary_maximum_coefficient_update_linf>
-    <Static_capillary_line_search_shrink>0.4</Static_capillary_line_search_shrink>
-    <Static_capillary_armijo_fraction>2.0e-4</Static_capillary_armijo_fraction>
     <Static_capillary_limited_memory_history_size>6</Static_capillary_limited_memory_history_size>
     <Static_capillary_limited_memory_curvature_tolerance>1.25e-11</Static_capillary_limited_memory_curvature_tolerance>
-    <Static_capillary_minimum_volume_merit_penalty>2.5</Static_capillary_minimum_volume_merit_penalty>
   </Add_equation>
 </svMultiPhysicsFile>
 )xml");
 
-  const auto requests = legacyMaintenanceRequestsForTest(*params);
+  auto requests = legacyMaintenanceRequestsForTest(*params);
   ASSERT_EQ(requests.size(), 1u);
+  // The step and line-search controls of the minimizer are C++ options
+  // (decision 18A): set them on the resolved configuration.
+  requests.front() = withMaintenanceConfiguration(
+      requests.front(), [](auto& configured) {
+        auto& minimizer = configured.static_capillary_equilibrium;
+        minimizer.finite_difference_reference_coefficient_scale = 0.25;
+        minimizer.minimum_finite_difference_step = 7.0e-12;
+        minimizer.finite_difference_max_shrinks = 8;
+        minimizer.max_line_search_iterations = 10;
+        minimizer.projected_gradient_inverse_stiffness = 0.75;
+        minimizer.tangent_trust_radius = 0.125;
+        minimizer.maximum_coefficient_update_linf = 0.375;
+        minimizer.line_search_shrink = 0.4;
+        minimizer.armijo_fraction = 2.0e-4;
+        minimizer.minimum_volume_merit_penalty = 2.5;
+      });
   const auto& request = requests.front();
   EXPECT_TRUE(request.configuration->static_capillary_equilibrium_enabled);
   EXPECT_FALSE(request.runtime.static_capillary_equilibrium_initialized);
@@ -10949,7 +10958,6 @@ TEST(ApplicationDriverLevelSetWorkflows,
     <Velocity_field_name>LevelSetAdvectionVelocity</Velocity_field_name>
     <Source_velocity_field_name>Velocity</Source_velocity_field_name>
     <Advection_velocity_extension_method>pde_harmonic</Advection_velocity_extension_method>
-    <Wet_extension_wall_faces>moving_lid</Wet_extension_wall_faces>
   </Add_equation>
   <Add_equation type="fluid">
     <Add_BC name="moving_lid">
@@ -10959,11 +10967,17 @@ TEST(ApplicationDriverLevelSetWorkflows,
   </Add_equation>
 </svMultiPhysicsFile>
 )xml");
+  // The wall-face list is a C++ option of the equation keys (decision 18A).
+  auto resolved = level_set_configuration::resolveLevelSetEquationKeys(
+      level_set_configuration::levelSetEquationInput(
+          *params->equation_parameters.front()));
+  resolved.value.wet_extension_wall_faces = "moving_lid";
 
   EXPECT_THROW(
       {
         try {
-          (void)levelSetAdvectionVelocityRequests(*params);
+          (void)levelSetAdvectionVelocityRequest(
+              *params, activeCutVolumeRequests(*params), resolved);
         } catch (const std::runtime_error& error) {
           EXPECT_NE(std::string(error.what()).find("nonzero"),
                     std::string::npos);

@@ -50,13 +50,13 @@ struct LevelSetEquationKeys {
   svmp::FE::level_set::LevelSetTransportOptions transport{};
   // Coupled: the transport joins the monolithic operator ("equations").
   bool coupled{false};
-  // Level_set_isovalue: the interface of the maintained field and of the
-  // extension.
+  // The interface of the maintained field and of the extension; a C++
+  // option, not a key of the equation (decision 18A of 2026-10-31).
   double level_set_isovalue{0.0};
   // The PDE extension of the advection velocity into the dry region: its
   // method, its coupling, the physical velocity it extends (empty: not
   // given) and the wall faces of its impermeability rows (empty: the walls
-  // with a strong zero velocity).
+  // with a strong zero velocity; the list is a C++ option, decision 18A).
   std::optional<svmp::FE::level_set::PdeVelocityExtensionOperator>
       advection_velocity_extension_method{};
   std::optional<LevelSetVelocityExtensionCoupling>
@@ -64,7 +64,10 @@ struct LevelSetEquationKeys {
   std::string source_velocity_field_name{};
   std::string wet_extension_wall_faces{};
   // The static-capillary initialization of the field (a Navier-Stokes
-  // free-surface option read from the level-set equation).
+  // free-surface option read from the level-set equation).  The step and
+  // line-search controls of the minimizer are C++ options (decision 18A);
+  // the input states the switch, the tolerances, the certificate limits and
+  // the iteration and limited-memory controls.
   bool static_capillary_equilibrium_enabled{false};
   StaticCapillaryEquilibriumOptions static_capillary_equilibrium{};
 };

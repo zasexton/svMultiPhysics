@@ -6,7 +6,6 @@
 #include <cctype>
 #include <cmath>
 #include <initializer_list>
-#include <limits>
 #include <optional>
 #include <stdexcept>
 #include <string_view>
@@ -69,55 +68,12 @@ template <class Codec> struct SetOptionalCodec {
   [[nodiscard]] std::string describe() const { return inner.describe(); }
 };
 
-// Fixed-flux region boxes, "name|kind|xmin|xmax|ymin|ymax|zmin|zmax"
-// separated by ';' (ls::parseLevelSetPhaseRegionBoxes); '*' leaves a side
-// unbounded.
-struct PhaseRegionBoxesCodec {
-  using value_type = std::vector<ls::LevelSetPhaseRegionBox>;
-  static constexpr opt::EmptyPolicy empty_policy = opt::EmptyPolicy::Absent;
-
-  [[nodiscard]] value_type parse(std::string_view text,
-                                 std::string &error) const {
-    try {
-      return ls::parseLevelSetPhaseRegionBoxes(text);
-    } catch (const std::exception &failure) {
-      error = failure.what();
-      return {};
-    }
-  }
-  [[nodiscard]] std::string format(const value_type &boxes) const {
-    const opt::RealCodec coordinate{};
-    const auto bound = [&](svmp::FE::Real value, svmp::FE::Real unbounded) {
-      return value == unbounded ? std::string("*") : coordinate.format(value);
-    };
-    std::string out;
-    for (const auto &box : boxes) {
-      if (!out.empty()) {
-        out += "; ";
-      }
-      out += box.name + '|' + ls::levelSetPhaseRegionKindName(box.kind);
-      for (std::size_t d = 0; d < 3u; ++d) {
-        out += '|' + bound(box.minimum[d],
-                           std::numeric_limits<svmp::FE::Real>::lowest());
-        out += '|' + bound(box.maximum[d],
-                           std::numeric_limits<svmp::FE::Real>::max());
-      }
-    }
-    return out;
-  }
-  [[nodiscard]] std::string describe() const {
-    return "list of name|kind|xmin|xmax|ymin|ymax|zmin|zmax";
-  }
-};
-
 // The keys that only the equation element gives: the domain elements of
 // the installation do not read them.
 const std::initializer_list<std::string_view> kEquationElementKeys{
-    "Level_set_isovalue",
     "Advection_velocity_extension_method",
     "Advection_velocity_extension_coupling",
     "Source_velocity_field_name",
-    "Wet_extension_wall_faces",
     "Enable_static_capillary_equilibrium_initialization",
     "Static_capillary_volume_tolerance",
     "Static_capillary_projected_gradient_tolerance",
@@ -126,27 +82,16 @@ const std::initializer_list<std::string_view> kEquationElementKeys{
     "Static_capillary_physical_equilibrium_max_residual_norm",
     "Static_capillary_constant_pressure_kkt_max_residual_norm",
     "Static_capillary_constant_pressure_kkt_max_relative_distance",
-    "Static_capillary_finite_difference_reference_coefficient_scale",
     "Static_capillary_finite_difference_relative_step",
-    "Static_capillary_minimum_finite_difference_step",
-    "Static_capillary_finite_difference_max_shrinks",
     "Static_capillary_max_iterations",
-    "Static_capillary_max_line_search_iterations",
     "Static_capillary_max_topology_epoch_transitions",
-    "Static_capillary_projected_gradient_inverse_stiffness",
-    "Static_capillary_tangent_trust_radius",
-    "Static_capillary_maximum_coefficient_update_linf",
-    "Static_capillary_line_search_shrink",
-    "Static_capillary_armijo_fraction",
     "Static_capillary_limited_memory_history_size",
-    "Static_capillary_limited_memory_curvature_tolerance",
-    "Static_capillary_minimum_volume_merit_penalty"};
+    "Static_capillary_limited_memory_curvature_tolerance"};
 
 opt::OptionSchema<Keys> makeLevelSetEquationSchema() {
   using Form = ls::LevelSetTransportForm;
   using FieldSource = ls::LevelSetFieldSource;
   using VelocitySource = ls::LevelSetVelocitySource;
-  using Side = ls::LevelSetPhaseSide;
   using FluxPolicy = ls::LevelSetConservativePhaseBoundaryFluxPolicy;
   using Extension = ls::PdeVelocityExtensionOperator;
   using Coupling = application::core::LevelSetVelocityExtensionCoupling;
@@ -166,8 +111,7 @@ opt::OptionSchema<Keys> makeLevelSetEquationSchema() {
       .key("Level_set_field_name",
            [](Keys &keys) -> auto & { return keys.transport.level_set.field_name; },
            opt::StringCodec{},
-           setting("name of the level-set field",
-                   {{"Level_set_field_name", false}, {"Field_name", false}}))
+           setting("name of the level-set field"))
       .key("Level_set_source",
            [](Keys &keys) -> auto & { return keys.transport.level_set.source; },
            opt::EnumCodec<FieldSource>{{
@@ -200,45 +144,6 @@ opt::OptionSchema<Keys> makeLevelSetEquationSchema() {
                  .auto_register_field;
            },
            relaxedBool(), setting("register the liquid-indicator field if missing"))
-      .key("Conservative_phase_liquid_side",
-           [](Keys &keys) -> auto & {
-             return keys.transport.conservative_phase.liquid_side;
-           },
-           opt::EnumCodec<Side>{{
-               token(Side::Negative, "negative", {"minus"}),
-               token(Side::Positive, "positive", {"plus"}),
-           }},
-           setting("side of the level set that holds the liquid"))
-      .key("Conservative_phase_invariant_tolerance",
-           [](Keys &keys) -> auto & {
-             return keys.transport.conservative_phase.invariant_tolerance;
-           },
-           opt::RealCodec{},
-           setting("tolerance of the phase invariants and boundary flux"))
-      .key("Conservative_phase_component_activity_tolerance",
-           [](Keys &keys) -> auto & {
-             return keys.transport.conservative_phase
-                 .component_activity_tolerance;
-           },
-           opt::RealCodec{},
-           setting("indicator measure below which a component is inactive"))
-      .key("Conservative_phase_maximum_courant",
-           [](Keys &keys) -> auto & {
-             return keys.transport.conservative_phase.maximum_courant;
-           },
-           opt::RealCodec{}, setting("largest graph Courant number of a stage"))
-      .key("Conservative_phase_enforce_courant_limit",
-           [](Keys &keys) -> auto & {
-             return keys.transport.conservative_phase.enforce_courant_limit;
-           },
-           relaxedBool(), setting("fail a stage above the Courant limit"))
-      .key("Conservative_phase_require_constant_preservation",
-           [](Keys &keys) -> auto & {
-             return keys.transport.conservative_phase
-                 .require_constant_preservation;
-           },
-           relaxedBool(),
-           setting("require that a stage keeps a constant indicator"))
       .key("Conservative_phase_momentum_relative_tolerance",
            [](Keys &keys) -> auto & {
              return keys.transport.conservative_phase
@@ -257,13 +162,6 @@ opt::OptionSchema<Keys> makeLevelSetEquationSchema() {
                  .flux_artifact_cadence_steps;
            },
            opt::IntCodec{}, setting("steps between two flux artifacts"))
-      .key("Conservative_phase_classify_nonprimary_components_as_satellites",
-           [](Keys &keys) -> auto & {
-             return keys.transport.conservative_phase
-                 .classify_nonprimary_components_as_satellites;
-           },
-           relaxedBool(),
-           setting("ledger every component but the largest as a satellite"))
       .key("Conservative_phase_boundary_flux_policy",
            [](Keys &keys) -> auto & {
              return keys.transport.conservative_phase.boundary_flux_policy;
@@ -275,47 +173,12 @@ opt::OptionSchema<Keys> makeLevelSetEquationSchema() {
                      "globally_balanced_discrete_q_flux"),
            }},
            setting("discrete boundary flux that a stage admits"))
-      .key("Conservative_phase_fixed_flux_regions",
-           [](Keys &keys) -> auto & {
-             return keys.transport.conservative_phase.fixed_flux_regions;
-           },
-           PhaseRegionBoxesCodec{},
-           setting("fixed box regions of the flux ledger"))
-      .key("Conservative_phase_impermeable_normal_velocity_tolerance",
-           [](Keys &keys) -> auto & {
-             return keys.transport.conservative_phase
-                 .impermeable_normal_velocity_tolerance;
-           },
-           opt::RealCodec{},
-           setting("pointwise wall-velocity tolerance (not implemented: "
-                   "stating it fails with the phase transport)"))
       .key("Conservative_phase_reconcile_geometry",
            [](Keys &keys) -> auto & {
              return keys.transport.conservative_phase.reconcile_geometry;
            },
            relaxedBool(),
            setting("reconcile the level set with the indicator measure"))
-      .key("Conservative_phase_geometry_measure_tolerance",
-           [](Keys &keys) -> auto & {
-             return keys.transport.conservative_phase
-                 .geometry_measure_tolerance;
-           },
-           opt::RealCodec{}, setting("tolerance of the reconciled measure"))
-      .key("Conservative_phase_geometry_correction_max_iterations",
-           [](Keys &keys) -> auto & {
-             return keys.transport.conservative_phase
-                 .geometry_correction_max_iterations;
-           },
-           opt::IntCodec{.minimum = 1},
-           setting("iterations of the geometry correction"))
-      .key("Conservative_phase_maximum_geometry_displacement_fraction",
-           [](Keys &keys) -> auto & {
-             return keys.transport.conservative_phase
-                 .maximum_geometry_displacement_fraction;
-           },
-           opt::RealCodec{},
-           setting("largest correction displacement, as a fraction of a "
-                   "cell"))
       .key("Velocity_field_name",
            [](Keys &keys) -> auto & { return keys.transport.velocity.field_name; },
            opt::StringCodec{}, setting("name of the advection velocity field"))
@@ -389,8 +252,6 @@ opt::OptionSchema<Keys> makeLevelSetEquationSchema() {
            relaxedBool(),
            setting("triggered accepted-step interface-preserving redistancing"))
       // Read from the equation element only (levelSetDomainInput).
-      .key("Level_set_isovalue", &Keys::level_set_isovalue, anyReal(),
-           setting("isovalue of the interface of the maintained field"))
       .key("Advection_velocity_extension_method",
            &Keys::advection_velocity_extension_method,
            SetOptionalCodec<opt::EnumCodec<Extension>>{{{
@@ -412,10 +273,6 @@ opt::OptionSchema<Keys> makeLevelSetEquationSchema() {
            opt::StringCodec{},
            setting("physical velocity that the extension extends (default "
                    "Velocity)"))
-      .key("Wet_extension_wall_faces", &Keys::wet_extension_wall_faces,
-           opt::StringCodec{},
-           setting("wall faces of the extension's impermeability rows, "
-                   "separated by ';' or ','"))
       .key("Enable_static_capillary_equilibrium_initialization",
            &Keys::static_capillary_equilibrium_enabled, relaxedBool(),
            setting("start from the discrete static capillary equilibrium"))
@@ -450,46 +307,16 @@ opt::OptionSchema<Keys> makeLevelSetEquationSchema() {
            anyReal(),
            setting("constant-pressure KKT certificate: largest relative "
                    "distance"))
-      .key("Static_capillary_finite_difference_reference_coefficient_scale",
-           staticCapillary(
-               &Static::finite_difference_reference_coefficient_scale),
-           anyReal(),
-           setting("coefficient scale of the finite-difference step"))
       .key("Static_capillary_finite_difference_relative_step",
            staticCapillary(&Static::finite_difference_relative_step),
            anyReal(), setting("relative finite-difference step"))
-      .key("Static_capillary_minimum_finite_difference_step",
-           staticCapillary(&Static::minimum_finite_difference_step),
-           anyReal(), setting("smallest finite-difference step"))
-      .key("Static_capillary_finite_difference_max_shrinks",
-           staticCapillary(&Static::finite_difference_max_shrinks),
-           opt::IntCodec{}, setting("reductions of the finite-difference step"))
       .key("Static_capillary_max_iterations",
            staticCapillary(&Static::max_iterations), opt::IntCodec{},
            setting("iterations of the minimizer"))
-      .key("Static_capillary_max_line_search_iterations",
-           staticCapillary(&Static::max_line_search_iterations),
-           opt::IntCodec{}, setting("line-search iterations"))
       .key("Static_capillary_max_topology_epoch_transitions",
            staticCapillary(&Static::max_topology_epoch_transitions),
            opt::IntCodec{},
            setting("cut-topology epochs of an exact derivative"))
-      .key("Static_capillary_projected_gradient_inverse_stiffness",
-           staticCapillary(&Static::projected_gradient_inverse_stiffness),
-           anyReal(),
-           setting("inverse stiffness of the projected-gradient step"))
-      .key("Static_capillary_tangent_trust_radius",
-           staticCapillary(&Static::tangent_trust_radius), anyReal(),
-           setting("trust radius of the tangent step"))
-      .key("Static_capillary_maximum_coefficient_update_linf",
-           staticCapillary(&Static::maximum_coefficient_update_linf),
-           anyReal(), setting("largest coefficient update (max norm)"))
-      .key("Static_capillary_line_search_shrink",
-           staticCapillary(&Static::line_search_shrink), anyReal(),
-           setting("shrink factor of the line search"))
-      .key("Static_capillary_armijo_fraction",
-           staticCapillary(&Static::armijo_fraction), anyReal(),
-           setting("Armijo fraction of the line search"))
       .key("Static_capillary_limited_memory_history_size",
            staticCapillary(&Static::limited_memory_history_size),
            opt::IntCodec{},
@@ -497,9 +324,6 @@ opt::OptionSchema<Keys> makeLevelSetEquationSchema() {
       .key("Static_capillary_limited_memory_curvature_tolerance",
            staticCapillary(&Static::limited_memory_curvature_tolerance),
            anyReal(), setting("curvature tolerance of the limited-memory update"))
-      .key("Static_capillary_minimum_volume_merit_penalty",
-           staticCapillary(&Static::minimum_volume_merit_penalty), anyReal(),
-           setting("smallest penalty of the volume merit"))
       // A velocity source decides whether the velocity field is registered,
       // unless the element states it.
       .implies("Velocity_source", "Auto_register_velocity_field", "true",
@@ -578,11 +402,6 @@ opt::ResolvedOptions<Keys> resolveLevelSetEquationKeys(const opt::OptionInput &i
   }
   if (resolved.isExplicit("Interface_kinematic_marker")) {
     transport.interface_kinematic.enabled = true;
-  }
-  if (resolved.isExplicit(
-          "Conservative_phase_impermeable_normal_velocity_tolerance")) {
-    transport.conservative_phase
-        .pointwise_impermeable_velocity_tolerance_explicitly_requested = true;
   }
   return resolved;
 }

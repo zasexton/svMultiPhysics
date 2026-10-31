@@ -127,14 +127,20 @@ contain reusable transport, volume, maintenance, diagnostics, or restart
 algorithms. The keys of a `level_set` equation are declared once, in the
 option schema `levelSetEquationSchema()`
 (`Application/Translators/LevelSetConfigurationParsing.h`, decision D47 step
-P3): 67 keys with their spellings, codec, FE default and a documentation
-line, over `LevelSetEquationKeys` (the transport options with the
-conservative-phase controls and the accepted-step switches, `Coupled`,
-`Level_set_isovalue`, the PDE velocity-extension keys and the
-static-capillary options). The installation resolves the equation element and
-then its domain elements, each over the values before it; the
-interface isovalue, the extension and the static-capillary keys come from the
-equation element only. The maintenance of the field, the driver's
+P3): 43 keys, one spelling each, with their codec, FE default and a
+documentation line, over `LevelSetEquationKeys` (the transport options with
+the conservative-phase controls and the accepted-step switches, `Coupled`,
+the PDE velocity-extension keys and the static-capillary options). The
+installation resolves the equation element and then its domain elements, each
+over the values before it; the extension and the static-capillary keys come
+from the equation element only. The options that only C++ tests set are C++
+options, not keys (decision 18A of 2026-10-31): the maintenance isovalue
+(`LevelSetEquationKeys::level_set_isovalue`), the wall faces of the
+extension's impermeability rows, the conservative-phase liquid side,
+invariant, activity, Courant, constant-preservation, satellite, fixed-flux
+region, pointwise wall-velocity and geometry-correction controls, and the
+step and line-search controls of the static-capillary minimizer; the level
+set is a nodal Lagrange field (no key selects its basis). The maintenance of the field, the driver's
 extension requests and the static-capillary switch read the keys of the
 equation element as the installation resolved them, and the transport's
 effective-configuration artifact ends with a `resolved` section that lists

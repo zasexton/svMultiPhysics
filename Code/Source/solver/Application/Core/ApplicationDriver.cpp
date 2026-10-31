@@ -1275,6 +1275,212 @@ void requireCollectivePhasePreparation(
     const svmp::MeshComm& comm,
     std::string_view phase);
 
+/// The extension request of one level-set equation from the keys of its
+/// equation element, as the translator resolves them
+/// (levelSetEquationSchema()), or std::nullopt when they name no PDE
+/// extension.  The schema rejects any other method and a source velocity
+/// field without one.  The wall-face list of the impermeability rows is a
+/// C++ option of the keys (empty: the walls with a strong zero velocity).
+std::optional<LevelSetAdvectionVelocityRequest> levelSetAdvectionVelocityRequest(
+    const Parameters& params,
+    const std::vector<ActiveCutVolumeRequest>& active_requests,
+    const svmp::FE::options::ResolvedOptions<application::core::LevelSetEquationKeys>&
+        resolved)
+{
+  const auto& keys = resolved.value;
+  if (!keys.advection_velocity_extension_method.has_value()) {
+    return std::nullopt;
+  }
+
+  LevelSetAdvectionVelocityRequest request{};
+  request.level_set_field_name = keys.transport.level_set.field_name;
+  if (!keys.source_velocity_field_name.empty()) {
+    request.source_velocity_field_name = keys.source_velocity_field_name;
+  }
+  if (resolved.isExplicit("Velocity_field_name")) {
+    request.target_velocity_field_name = keys.transport.velocity.field_name;
+  }
+  request.operator_tag = keys.transport.operator_tag;
+  if (request.operator_tag.empty()) {
+    throw std::runtime_error(
+        "[svMultiPhysics::Application] Wet-extension operator tag must be non-empty.");
+  }
+  if (request.target_velocity_field_name == request.source_velocity_field_name) {
+    throw std::runtime_error(
+        "[svMultiPhysics::Application] Wet-extension level-set advection requires "
+        "Velocity_field_name to be distinct from the physical source velocity field.");
+  }
+
+  if (keys.transport.velocity.source !=
+      svmp::FE::level_set::LevelSetVelocitySource::PrescribedData) {
+    throw std::runtime_error(
+        "[svMultiPhysics::Application] Wet-extension level-set advection requires "
+        "<Velocity_source>prescribed_data</Velocity_source> so the transport equation uses "
+        "the generated prescribed advection field.");
+  }
+
+  request.extension_method =
+      std::string(application::core::pdeVelocityExtensionOperatorName(
+          *keys.advection_velocity_extension_method));
+  // Wet_extension_band_layers and Wet_extension_enforce_wall_impermeability,
+  // which no deck, runner or test set, were removed (decision D47): the
+  // extension covers every dry vertex and enforces wall impermeability.
+  bool explicit_wall_faces = false;
+  if (!keys.wet_extension_wall_faces.empty()) {
+    request.wall_face_names = splitFaceNameList(keys.wet_extension_wall_faces);
+    explicit_wall_faces = true;
+    if (request.enforce_wall_impermeability &&
+        request.wall_face_names.empty()) {
+      throw std::runtime_error(
+          "[svMultiPhysics::Application] Wet-extension wall-face list is empty.");
+    }
+  }
+  if (request.enforce_wall_impermeability) {
+    const auto append_wall_faces = [&](std::string_view raw) {
+      for (auto name : splitFaceNameList(raw)) {
+        if (std::find(request.wall_face_names.begin(),
+                      request.wall_face_names.end(),
+                      name) == request.wall_face_names.end()) {
+          request.wall_face_names.push_back(std::move(name));
+        }
+      }
+    };
+    const auto incompatibility = [](
+        const BoundaryConditionParameters& boundary)
+        -> std::optional<std::string> {
+      if (!boundary.type.defined()) {
+        return std::string{"has no boundary-condition type"};
+      }
+      const auto boundary_type = normalized_token(boundary.type.value());
+      if (boundary_type != "dir" && boundary_type != "dirichlet") {
+        return std::string{"is not a velocity Dirichlet condition"};
+      }
+      if (boundary.weakly_applied.value()) {
+        return std::string{"is weakly applied, not a strong constraint"};
+      }
+      const auto time_dependence =
+          normalized_token(boundary.time_dependence.value());
+      if (!time_dependence.empty() && time_dependence != "steady") {
+        return std::string{"is time/spatially varying and cannot be proven homogeneous"};
+      }
+      const auto value = boundary.value.value();
+      if (!std::isfinite(value) || std::abs(value) > 1.0e-14) {
+        return std::string{"prescribes a nonzero or non-finite velocity"};
+      }
+      if ((boundary.temporal_and_spatial_values_file_path.defined() &&
+           !trim_copy(boundary.temporal_and_spatial_values_file_path.value())
+                .empty()) ||
+          (boundary.temporal_values_file_path.defined() &&
+           !trim_copy(boundary.temporal_values_file_path.value()).empty()) ||
+          (boundary.spatial_values_file_path.defined() &&
+           !trim_copy(boundary.spatial_values_file_path.value()).empty()) ||
+          (boundary.bct_file_path.defined() &&
+           !trim_copy(boundary.bct_file_path.value()).empty())) {
+        return std::string{"uses prescribed data whose zero component mask is not statically known"};
+      }
+      return std::nullopt;
+    };
+
+    const EquationParameters* velocity_equation = nullptr;
+    for (const auto* candidate_equation : params.equation_parameters) {
+      if (candidate_equation == nullptr ||
+          !candidate_equation->type.defined() ||
+          lower_copy(candidate_equation->type.value()) != "fluid") {
+        continue;
+      }
+      if (velocity_equation != nullptr) {
+        throw std::runtime_error(
+            "[svMultiPhysics::Application] Wet-extension wall constraint "
+            "discovery found multiple fluid equations. The owner of source "
+            "velocity field '" + request.source_velocity_field_name +
+            "' is ambiguous.");
+      }
+      velocity_equation = candidate_equation;
+    }
+    if (velocity_equation == nullptr) {
+      throw std::runtime_error(
+          "[svMultiPhysics::Application] Wet-extension wall constraint "
+          "discovery requires exactly one fluid equation owning source "
+          "velocity field '" + request.source_velocity_field_name + "'.");
+    }
+
+    for (auto* boundary : velocity_equation->boundary_conditions) {
+      if (boundary == nullptr) {
+        continue;
+      }
+      if (!explicit_wall_faces && boundary->name.defined() &&
+          !incompatibility(*boundary).has_value()) {
+          append_wall_faces(boundary->name.value());
+      }
+      // The plural contact-wall face spellings read here were removed
+      // (decision D47); the singular Contact_line_wall_face was never read
+      // by this discovery, so no accepted deck changes.
+    }
+
+    for (const auto& wall_face_name : request.wall_face_names) {
+      const BoundaryConditionParameters* matching_dirichlet = nullptr;
+      for (auto* boundary : velocity_equation->boundary_conditions) {
+        if (boundary == nullptr || !boundary->name.defined() ||
+            trim_copy(boundary->name.value()) != wall_face_name ||
+            !boundary->type.defined()) {
+          continue;
+        }
+        const auto boundary_type = normalized_token(boundary->type.value());
+        if (boundary_type != "dir" && boundary_type != "dirichlet") {
+          continue;
+        }
+        if (matching_dirichlet != nullptr) {
+          throw std::runtime_error(
+              "[svMultiPhysics::Application] Wet-extension wall face '" +
+              wall_face_name +
+              "' has multiple velocity Dirichlet records in its owning "
+              "fluid equation; its strong zero-component mask is ambiguous.");
+        }
+        matching_dirichlet = boundary;
+      }
+      if (matching_dirichlet == nullptr) {
+        throw std::runtime_error(
+            "[svMultiPhysics::Application] Wet-extension wall face '" +
+            wall_face_name +
+            "' has no matching velocity Dirichlet condition. Wall-compatible "
+            "extension requires an actual strong homogeneous velocity constraint.");
+      }
+      if (const auto reason = incompatibility(*matching_dirichlet)) {
+        throw std::runtime_error(
+            "[svMultiPhysics::Application] Wet-extension wall face '" +
+            wall_face_name + "' " + *reason + ".");
+      }
+      request.wall_constraints.push_back(
+          LevelSetAdvectionVelocityRequest::WallConstraint{
+              .face_name = wall_face_name,
+              .effective_direction =
+                  matching_dirichlet->effective_direction.defined()
+                      ? matching_dirichlet->effective_direction.value()
+                      : std::vector<int>{}});
+    }
+  }
+
+  request.isovalue = keys.level_set_isovalue;
+
+  for (std::size_t active_request_index = 0u;
+       active_request_index < active_requests.size();
+       ++active_request_index) {
+    const auto& active_request = active_requests[active_request_index];
+    if (active_request.level_set_field_name != request.level_set_field_name) {
+      continue;
+    }
+    request.domain_id = active_request.domain_id;
+    request.isovalue = active_request.isovalue;
+    request.requested_interface_marker =
+        active_request.requested_interface_marker;
+    request.active_cut_request_index = active_request_index;
+    request.active_side = active_request.active_side;
+    break;
+  }
+
+  return request;
+}
+
 std::vector<LevelSetAdvectionVelocityRequest>
 levelSetAdvectionVelocityRequests(const Parameters& params)
 {
@@ -1289,205 +1495,12 @@ levelSetAdvectionVelocityRequests(const Parameters& params)
     if (type != "levelset" && type != "levelsettransport") {
       continue;
     }
-
-    // The keys of the equation element, as the translator resolves them
-    // (levelSetEquationSchema()).  The extension needs an explicit PDE method:
-    // the schema rejects any other method and a source velocity field
-    // without one.
-    const auto resolved = level_set_configuration::resolveLevelSetEquationKeys(
-        level_set_configuration::levelSetEquationInput(*eq));
-    const auto& keys = resolved.value;
-    if (!keys.advection_velocity_extension_method.has_value()) {
-      continue;
+    if (auto request = levelSetAdvectionVelocityRequest(
+            params, active_requests,
+            level_set_configuration::resolveLevelSetEquationKeys(
+                level_set_configuration::levelSetEquationInput(*eq)))) {
+      requests.push_back(std::move(*request));
     }
-
-    LevelSetAdvectionVelocityRequest request{};
-    request.level_set_field_name = keys.transport.level_set.field_name;
-    if (!keys.source_velocity_field_name.empty()) {
-      request.source_velocity_field_name = keys.source_velocity_field_name;
-    }
-    if (resolved.isExplicit("Velocity_field_name")) {
-      request.target_velocity_field_name = keys.transport.velocity.field_name;
-    }
-    request.operator_tag = keys.transport.operator_tag;
-    if (request.operator_tag.empty()) {
-      throw std::runtime_error(
-          "[svMultiPhysics::Application] Wet-extension operator tag must be non-empty.");
-    }
-    if (request.target_velocity_field_name == request.source_velocity_field_name) {
-      throw std::runtime_error(
-          "[svMultiPhysics::Application] Wet-extension level-set advection requires "
-          "Velocity_field_name to be distinct from the physical source velocity field.");
-    }
-
-    if (keys.transport.velocity.source !=
-        svmp::FE::level_set::LevelSetVelocitySource::PrescribedData) {
-      throw std::runtime_error(
-          "[svMultiPhysics::Application] Wet-extension level-set advection requires "
-          "<Velocity_source>prescribed_data</Velocity_source> so the transport equation uses "
-          "the generated prescribed advection field.");
-    }
-
-    request.extension_method =
-        std::string(application::core::pdeVelocityExtensionOperatorName(
-            *keys.advection_velocity_extension_method));
-    // Wet_extension_band_layers and Wet_extension_enforce_wall_impermeability,
-    // which no deck, runner or test set, were removed (decision D47): the
-    // extension covers every dry vertex and enforces wall impermeability.
-    bool explicit_wall_faces = false;
-    if (!keys.wet_extension_wall_faces.empty()) {
-      request.wall_face_names = splitFaceNameList(keys.wet_extension_wall_faces);
-      explicit_wall_faces = true;
-      if (request.enforce_wall_impermeability &&
-          request.wall_face_names.empty()) {
-        throw std::runtime_error(
-            "[svMultiPhysics::Application] Wet-extension wall-face list is empty.");
-      }
-    }
-    if (request.enforce_wall_impermeability) {
-      const auto append_wall_faces = [&](std::string_view raw) {
-        for (auto name : splitFaceNameList(raw)) {
-          if (std::find(request.wall_face_names.begin(),
-                        request.wall_face_names.end(),
-                        name) == request.wall_face_names.end()) {
-            request.wall_face_names.push_back(std::move(name));
-          }
-        }
-      };
-      const auto incompatibility = [](
-          const BoundaryConditionParameters& boundary)
-          -> std::optional<std::string> {
-        if (!boundary.type.defined()) {
-          return std::string{"has no boundary-condition type"};
-        }
-        const auto boundary_type = normalized_token(boundary.type.value());
-        if (boundary_type != "dir" && boundary_type != "dirichlet") {
-          return std::string{"is not a velocity Dirichlet condition"};
-        }
-        if (boundary.weakly_applied.value()) {
-          return std::string{"is weakly applied, not a strong constraint"};
-        }
-        const auto time_dependence =
-            normalized_token(boundary.time_dependence.value());
-        if (!time_dependence.empty() && time_dependence != "steady") {
-          return std::string{"is time/spatially varying and cannot be proven homogeneous"};
-        }
-        const auto value = boundary.value.value();
-        if (!std::isfinite(value) || std::abs(value) > 1.0e-14) {
-          return std::string{"prescribes a nonzero or non-finite velocity"};
-        }
-        if ((boundary.temporal_and_spatial_values_file_path.defined() &&
-             !trim_copy(boundary.temporal_and_spatial_values_file_path.value())
-                  .empty()) ||
-            (boundary.temporal_values_file_path.defined() &&
-             !trim_copy(boundary.temporal_values_file_path.value()).empty()) ||
-            (boundary.spatial_values_file_path.defined() &&
-             !trim_copy(boundary.spatial_values_file_path.value()).empty()) ||
-            (boundary.bct_file_path.defined() &&
-             !trim_copy(boundary.bct_file_path.value()).empty())) {
-          return std::string{"uses prescribed data whose zero component mask is not statically known"};
-        }
-        return std::nullopt;
-      };
-
-      const EquationParameters* velocity_equation = nullptr;
-      for (const auto* candidate_equation : params.equation_parameters) {
-        if (candidate_equation == nullptr ||
-            !candidate_equation->type.defined() ||
-            lower_copy(candidate_equation->type.value()) != "fluid") {
-          continue;
-        }
-        if (velocity_equation != nullptr) {
-          throw std::runtime_error(
-              "[svMultiPhysics::Application] Wet-extension wall constraint "
-              "discovery found multiple fluid equations. The owner of source "
-              "velocity field '" + request.source_velocity_field_name +
-              "' is ambiguous.");
-        }
-        velocity_equation = candidate_equation;
-      }
-      if (velocity_equation == nullptr) {
-        throw std::runtime_error(
-            "[svMultiPhysics::Application] Wet-extension wall constraint "
-            "discovery requires exactly one fluid equation owning source "
-            "velocity field '" + request.source_velocity_field_name + "'.");
-      }
-
-      for (auto* boundary : velocity_equation->boundary_conditions) {
-        if (boundary == nullptr) {
-          continue;
-        }
-        if (!explicit_wall_faces && boundary->name.defined() &&
-            !incompatibility(*boundary).has_value()) {
-            append_wall_faces(boundary->name.value());
-        }
-        // The plural contact-wall face spellings read here were removed
-        // (decision D47); the singular Contact_line_wall_face was never read
-        // by this discovery, so no accepted deck changes.
-      }
-
-      for (const auto& wall_face_name : request.wall_face_names) {
-        const BoundaryConditionParameters* matching_dirichlet = nullptr;
-        for (auto* boundary : velocity_equation->boundary_conditions) {
-          if (boundary == nullptr || !boundary->name.defined() ||
-              trim_copy(boundary->name.value()) != wall_face_name ||
-              !boundary->type.defined()) {
-            continue;
-          }
-          const auto boundary_type = normalized_token(boundary->type.value());
-          if (boundary_type != "dir" && boundary_type != "dirichlet") {
-            continue;
-          }
-          if (matching_dirichlet != nullptr) {
-            throw std::runtime_error(
-                "[svMultiPhysics::Application] Wet-extension wall face '" +
-                wall_face_name +
-                "' has multiple velocity Dirichlet records in its owning "
-                "fluid equation; its strong zero-component mask is ambiguous.");
-          }
-          matching_dirichlet = boundary;
-        }
-        if (matching_dirichlet == nullptr) {
-          throw std::runtime_error(
-              "[svMultiPhysics::Application] Wet-extension wall face '" +
-              wall_face_name +
-              "' has no matching velocity Dirichlet condition. Wall-compatible "
-              "extension requires an actual strong homogeneous velocity constraint.");
-        }
-        if (const auto reason = incompatibility(*matching_dirichlet)) {
-          throw std::runtime_error(
-              "[svMultiPhysics::Application] Wet-extension wall face '" +
-              wall_face_name + "' " + *reason + ".");
-        }
-        request.wall_constraints.push_back(
-            LevelSetAdvectionVelocityRequest::WallConstraint{
-                .face_name = wall_face_name,
-                .effective_direction =
-                    matching_dirichlet->effective_direction.defined()
-                        ? matching_dirichlet->effective_direction.value()
-                        : std::vector<int>{}});
-      }
-    }
-
-    request.isovalue = keys.level_set_isovalue;
-
-    for (std::size_t active_request_index = 0u;
-         active_request_index < active_requests.size();
-         ++active_request_index) {
-      const auto& active_request = active_requests[active_request_index];
-      if (active_request.level_set_field_name != request.level_set_field_name) {
-        continue;
-      }
-      request.domain_id = active_request.domain_id;
-      request.isovalue = active_request.isovalue;
-      request.requested_interface_marker =
-          active_request.requested_interface_marker;
-      request.active_cut_request_index = active_request_index;
-      request.active_side = active_request.active_side;
-      break;
-    }
-
-    requests.push_back(std::move(request));
   }
 
   return requests;
@@ -2247,8 +2260,7 @@ void applyCoupledLevelSetFieldResidualCriteria(
     const auto equation_parameters = equation->get_parameter_list();
     if (const auto configured_name = first_defined_parameter(
             equation_parameters,
-            {"Level_set_field_name",
-             "Field_name"})) {
+            {"Level_set_field_name"})) {
       field_name = trim_copy(*configured_name);
     }
 

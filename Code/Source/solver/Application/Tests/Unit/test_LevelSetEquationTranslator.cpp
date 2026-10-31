@@ -10,6 +10,7 @@
 #include "FE/Forms/JIT/JITKernelWrapper.h"
 #include "FE/Forms/JIT/LLVMJITBuildInfo.h"
 #include "FE/Interfaces/MaterialInterfaceTransportVelocity.h"
+#include "FE/LevelSet/LevelSetConservativePhaseRegions.h"
 #include "FE/Spaces/SpaceFactory.h"
 #include "FE/Systems/FESystem.h"
 #include "Interfaces/GeneratedActiveBoundaryDomain.h"
@@ -324,7 +325,7 @@ TEST(LevelSetEquationTranslator,
   auto mesh = makeRegistryTriangleMesh();
   EquationParameters equation;
   equation.type.set("level_set");
-  Parameter<double> precise_tolerance("Conservative_phase_invariant_tolerance",
+  Parameter<double> precise_tolerance("Conservative_phase_momentum_relative_tolerance",
                                       1.2345678901234567, false);
   precise_tolerance.set_raw_value(1.2345678901234567);
   Parameter<std::string> undefined_velocity_source("Velocity_source",
@@ -339,12 +340,14 @@ TEST(LevelSetEquationTranslator,
   const auto input = application::translators::EquationTranslator::buildInput(
       equation, meshes);
 
-  ASSERT_EQ(legacy_text.at("Conservative_phase_invariant_tolerance"),
+  ASSERT_EQ(legacy_text.at("Conservative_phase_momentum_relative_tolerance"),
             "1.23457");
-  ASSERT_EQ(
-      input.equation_params.at("Conservative_phase_invariant_tolerance").value,
-      "1.2345678901234567");
-  EXPECT_TRUE(input.equation_params.at("Conservative_phase_invariant_tolerance")
+  ASSERT_EQ(input.equation_params
+                .at("Conservative_phase_momentum_relative_tolerance")
+                .value,
+            "1.2345678901234567");
+  EXPECT_TRUE(input.equation_params
+                  .at("Conservative_phase_momentum_relative_tolerance")
                   .defined);
   EXPECT_EQ(legacy_text.at("Velocity_source"), "constant");
   EXPECT_FALSE(input.equation_params.at("Velocity_source").defined);
@@ -368,7 +371,7 @@ TEST(LevelSetEquationTranslator,
   auto input = makeMaintenanceCompatibilityInput(mesh);
   input.equation_params["Level_set_field_name"] =
       svmp::Physics::ParameterValue{true, "phi_equation"};
-  input.equation_params["Conservative_phase_geometry_correction_max_iterations"] =
+  input.equation_params["Conservative_phase_flux_artifact_cadence_steps"] =
       svmp::Physics::ParameterValue{true, "2"};
   input.default_domain.params["Level_set_field_name"] =
       svmp::Physics::ParameterValue{true, "phi_default"};
@@ -378,7 +381,7 @@ TEST(LevelSetEquationTranslator,
   domain.id = "liquid";
   domain.params["Level_set_field_name"] =
       svmp::Physics::ParameterValue{true, "phi_domain"};
-  domain.params["Conservative_phase_geometry_correction_max_iterations"] =
+  domain.params["Conservative_phase_flux_artifact_cadence_steps"] =
       svmp::Physics::ParameterValue{true, "7"};
   input.domains.push_back(std::move(domain));
 
@@ -389,9 +392,8 @@ TEST(LevelSetEquationTranslator,
   EXPECT_EQ(resolved->options.level_set.field_name, "phi_domain");
   EXPECT_EQ(resolved->options.transport_form,
             svmp::FE::level_set::LevelSetTransportForm::ConservativeDivergence);
-  EXPECT_EQ(
-      resolved->options.conservative_phase.geometry_correction_max_iterations,
-      7);
+  EXPECT_EQ(resolved->options.conservative_phase.flux_artifact_cadence_steps,
+            7);
 #endif
 }
 
@@ -441,9 +443,7 @@ TEST(LevelSetEquationTranslator,
   expect_error("SUPG_tau_scale", "nan", "expected a finite number, got 'nan'");
   expect_error("SUPG_tau_scale", "1e9999", "expected a number, got '1e9999'");
 
-  const char* count = "Conservative_phase_geometry_correction_max_iterations";
-  expect_error(count, "-1", "integer -1 outside [1, inf]");
-  expect_error(count, "0", "integer 0 outside [1, inf]");
+  const char* count = "Conservative_phase_flux_artifact_cadence_steps";
   expect_error(count, "2tail", "expected an integer, got '2tail'");
   expect_error(count, "999999999999999999999",
                "integer '999999999999999999999' out of range");
@@ -452,21 +452,17 @@ TEST(LevelSetEquationTranslator,
   input.equation_params["Enable_SUPG"] =
       svmp::Physics::ParameterValue{true, "unrecognized"};
   // A whitespace-only value counts as absent: the default count applies.
-  input.equation_params["Conservative_phase_geometry_correction_max_iterations"] =
+  input.equation_params["Conservative_phase_flux_artifact_cadence_steps"] =
       svmp::Physics::ParameterValue{true, "   "};
   resolved = application::translators::level_set::resolveConfiguration(input);
   ASSERT_TRUE(resolved);
   EXPECT_FALSE(resolved->options.supg.enabled);
-  EXPECT_EQ(
-      resolved->options.conservative_phase.geometry_correction_max_iterations,
-      50);
-  input.equation_params["Conservative_phase_geometry_correction_max_iterations"] =
+  EXPECT_EQ(resolved->options.conservative_phase.flux_artifact_cadence_steps, 1);
+  input.equation_params["Conservative_phase_flux_artifact_cadence_steps"] =
       svmp::Physics::ParameterValue{true, "3"};
   resolved = application::translators::level_set::resolveConfiguration(input);
   ASSERT_TRUE(resolved);
-  EXPECT_EQ(
-      resolved->options.conservative_phase.geometry_correction_max_iterations,
-      3);
+  EXPECT_EQ(resolved->options.conservative_phase.flux_artifact_cadence_steps, 3);
 #endif
 }
 
@@ -687,15 +683,16 @@ TEST(LevelSetEquationTranslator,
   input.equation_params.erase("Constant_velocity");
   input.equation_params["Velocity_source"] =
       svmp::Physics::ParameterValue{true, "invalid_velocity"};
-  input.equation_params["Conservative_phase_liquid_side"] =
+  input.equation_params["Conservative_phase_boundary_flux_policy"] =
       svmp::Physics::ParameterValue{true, "invalid_phase"};
 
   EXPECT_EQ(
       (maintenanceCompatibilityExceptionMessage<std::runtime_error>([&] {
         (void)application::translators::level_set::resolveConfiguration(input);
       })),
-      "[Level-set equation] Conservative_phase_liquid_side: expected one of "
-      "negative | positive, got 'invalid_phase'");
+      "[Level-set equation] Conservative_phase_boundary_flux_policy: expected "
+      "one of closed_domain_discrete_q_flux_only | "
+      "globally_balanced_discrete_q_flux, got 'invalid_phase'");
 #endif
 }
 
@@ -1459,20 +1456,6 @@ TEST(LevelSetEquationTranslator, TranslatesConservativePhaseControls)
       svmp::Physics::ParameterValue{true, "true"};
   input.equation_params["Conservative_phase_field_name"] =
       svmp::Physics::ParameterValue{true, "phase_fraction"};
-  input.equation_params["Conservative_phase_liquid_side"] =
-      svmp::Physics::ParameterValue{true, "positive"};
-  input.equation_params["Conservative_phase_invariant_tolerance"] =
-      svmp::Physics::ParameterValue{true, "3.0e-11"};
-  input.equation_params[
-      "Conservative_phase_component_activity_tolerance"] =
-      svmp::Physics::ParameterValue{true, "4.0e-7"};
-  input.equation_params["Conservative_phase_maximum_courant"] =
-      svmp::Physics::ParameterValue{true, "0.45"};
-  input.equation_params["Conservative_phase_enforce_courant_limit"] =
-      svmp::Physics::ParameterValue{true, "false"};
-  input.equation_params[
-      "Conservative_phase_require_constant_preservation"] =
-      svmp::Physics::ParameterValue{true, "false"};
   input.equation_params[
       "Conservative_phase_momentum_relative_tolerance"] =
       svmp::Physics::ParameterValue{true, "7.5e-9"};
@@ -1486,28 +1469,34 @@ TEST(LevelSetEquationTranslator, TranslatesConservativePhaseControls)
   input.equation_params[
       "Conservative_phase_flux_artifact_cadence_steps"] =
       svmp::Physics::ParameterValue{true, "3"};
-  input.equation_params[
-      "Conservative_phase_classify_nonprimary_components_as_satellites"] =
-      svmp::Physics::ParameterValue{true, "true"};
-  input.equation_params[
-      "Conservative_phase_fixed_flux_regions"] =
-      svmp::Physics::ParameterValue{
-          true,
-          "film|wall_film|0|1|0|0.1|*|*;rim|rim|0.8|1|0.5|1|*|*"};
   input.equation_params["Conservative_phase_reconcile_geometry"] =
       svmp::Physics::ParameterValue{true, "false"};
-  input.equation_params[
-      "Conservative_phase_geometry_measure_tolerance"] =
-      svmp::Physics::ParameterValue{true, "2.0e-9"};
-  input.equation_params[
-      "Conservative_phase_geometry_correction_max_iterations"] =
-      svmp::Physics::ParameterValue{true, "19"};
-  input.equation_params[
-      "Conservative_phase_maximum_geometry_displacement_fraction"] =
-      svmp::Physics::ParameterValue{true, "0.075"};
+
+  // The liquid side, the tolerances, the Courant controls, the satellite
+  // classification, the fixed-flux regions and the geometry-correction
+  // controls are C++ options of the phase transport (decision 18A).
+  const auto resolved =
+      application::translators::level_set::resolveConfiguration(input);
+  ASSERT_TRUE(resolved);
+  auto configuration = *resolved;
+  auto& phase_options = configuration.options.conservative_phase;
+  phase_options.liquid_side = svmp::FE::level_set::LevelSetPhaseSide::Positive;
+  phase_options.invariant_tolerance = 3.0e-11;
+  phase_options.component_activity_tolerance = 4.0e-7;
+  phase_options.maximum_courant = 0.45;
+  phase_options.enforce_courant_limit = false;
+  phase_options.require_constant_preservation = false;
+  phase_options.classify_nonprimary_components_as_satellites = true;
+  phase_options.fixed_flux_regions =
+      svmp::FE::level_set::parseLevelSetPhaseRegionBoxes(
+          "film|wall_film|0|1|0|0.1|*|*;rim|rim|0.8|1|0.5|1|*|*");
+  phase_options.geometry_measure_tolerance = 2.0e-9;
+  phase_options.geometry_correction_max_iterations = 19;
+  phase_options.maximum_geometry_displacement_fraction = 0.075;
 
   svmp::FE::systems::FESystem system(mesh);
-  auto module = application::translators::level_set::createModule(input, system);
+  auto module =
+      application::translators::level_set::createModule(configuration, system);
 
   ASSERT_TRUE(module);
   const auto phase = system.findFieldByName("phase_fraction");
@@ -1639,18 +1628,25 @@ TEST(LevelSetEquationTranslator,
       svmp::Physics::ParameterValue{true, "0.0 0.0 0.0"};
   input.equation_params["Enable_conservative_phase_transport"] =
       svmp::Physics::ParameterValue{true, "true"};
-  input.equation_params[
-      "Conservative_phase_impermeable_normal_velocity_tolerance"] =
-      svmp::Physics::ParameterValue{true, "7.0e-9"};
+  // The pointwise wall tolerance is a C++ option (decision 18A); the phase
+  // transport rejects a request for it at installation.
+  const auto resolved =
+      application::translators::level_set::resolveConfiguration(input);
+  ASSERT_TRUE(resolved);
+  auto configuration = *resolved;
+  configuration.options.conservative_phase.impermeable_normal_velocity_tolerance =
+      7.0e-9;
+  configuration.options.conservative_phase
+      .pointwise_impermeable_velocity_tolerance_explicitly_requested = true;
 
   svmp::FE::systems::FESystem system(mesh);
   try {
     static_cast<void>(
-        application::translators::level_set::createModule(input, system));
+        application::translators::level_set::createModule(configuration, system));
     FAIL() << "Expected an unsupported pointwise wall contract to fail closed";
-  } catch (const std::runtime_error& error) {
+  } catch (const std::invalid_argument& error) {
     EXPECT_NE(std::string{error.what()}.find(
-                  "pointwise velocity-normal wall contract"),
+                  "pointwise velocity-normal wall enforcement is unsupported"),
               std::string::npos);
     EXPECT_NE(std::string{error.what()}.find(
                   "discrete q-flux"),
@@ -1680,19 +1676,31 @@ TEST(LevelSetEquationTranslator,
       svmp::Physics::ParameterValue{true, "constant"};
   input.equation_params["Constant_velocity"] =
       svmp::Physics::ParameterValue{true, "0.0 0.0 0.0"};
-  input.equation_params[
-      "Conservative_phase_fixed_flux_regions"] =
-      svmp::Physics::ParameterValue{
-          true, "film|wall_film|1|0|0|0.1|*|*"};
+  input.equation_params["Enable_conservative_phase_transport"] =
+      svmp::Physics::ParameterValue{true, "true"};
+  // The fixed-flux regions are a C++ option (decision 18A); the phase
+  // transport validates them at installation.
+  const auto resolved =
+      application::translators::level_set::resolveConfiguration(input);
+  ASSERT_TRUE(resolved);
+  auto configuration = *resolved;
+  svmp::FE::level_set::LevelSetPhaseRegionBox box{};
+  box.name = "film";
+  box.kind = svmp::FE::level_set::LevelSetPhaseRegionKind::WallFilm;
+  box.minimum = {1.0, 0.0, -1.0};
+  box.maximum = {0.0, 0.1, 1.0};
+  configuration.options.conservative_phase.fixed_flux_regions = {box};
 
   svmp::FE::systems::FESystem system(mesh);
-  EXPECT_EQ(
-      (maintenanceCompatibilityExceptionMessage<std::runtime_error>([&] {
+  EXPECT_NE(
+      (maintenanceCompatibilityExceptionMessage<std::invalid_argument>([&] {
         static_cast<void>(
-            application::translators::level_set::createModule(input, system));
-      })),
-      "[Level-set equation] Conservative_phase_fixed_flux_regions: "
-      "conservative phase region box minimum exceeds its maximum");
+            application::translators::level_set::createModule(configuration,
+                                                              system));
+      }))
+          .find("installLevelSetTransport: invalid conservative phase fixed "
+                "flux region: "),
+      std::string::npos);
   EXPECT_EQ(system.findFieldByName("phi"), svmp::FE::INVALID_FIELD_ID);
 #endif
 }
@@ -1897,11 +1905,20 @@ TEST(LevelSetEquationTranslator,
       svmp::Physics::ParameterValue{true, "constant"};
   input.equation_params["Constant_velocity"] =
       svmp::Physics::ParameterValue{true, "0.0 0.0 0.0"};
-  input.equation_params["Basis_type"] =
-      svmp::Physics::ParameterValue{true, "hierarchical"};
+  // No input selects the basis; install the resolved transport on a
+  // hierarchical space of the same element and order.
+  const auto resolved =
+      application::translators::level_set::resolveConfiguration(input);
+  ASSERT_TRUE(resolved);
+  auto configuration = *resolved;
+  configuration.level_set_space = svmp::FE::spaces::SpaceFactory::create_h1(
+      resolved->level_set_space->element_type(),
+      resolved->level_set_space->polynomial_order(),
+      svmp::FE::BasisType::Hierarchical);
 
   svmp::FE::systems::FESystem system(mesh);
-  auto module = application::translators::level_set::createModule(input, system);
+  auto module =
+      application::translators::level_set::createModule(configuration, system);
   ASSERT_TRUE(module);
   ASSERT_NO_THROW(system.setup({}));
 

@@ -933,35 +933,6 @@ int resolve_element_order(const svmp::Physics::EquationModuleInput& input, int i
   return inferred_order;
 }
 
-svmp::FE::BasisType resolve_basis_type(const svmp::Physics::EquationModuleInput& input)
-{
-  const auto basis = get_defined_string(
-      input.equation_params,
-      {"Basis_type",
-       "BasisType",
-       "Level_set_basis_type",
-       "LevelSetBasisType",
-       "Element_basis_type",
-       "ElementBasisType"});
-  if (!basis.has_value()) {
-    return svmp::FE::BasisType::Lagrange;
-  }
-
-  const auto value = normalized_token(*basis);
-  if (value == "lagrange" || value == "nodal") {
-    return svmp::FE::BasisType::Lagrange;
-  }
-  if (value == "serendipity") {
-    return svmp::FE::BasisType::Serendipity;
-  }
-  if (value == "hierarchical" || value == "modal") {
-    return svmp::FE::BasisType::Hierarchical;
-  }
-  throw std::runtime_error(
-      "[svMultiPhysics::Application] Unsupported level-set Basis_type '" +
-      *basis + "'. Supported values are Lagrange, Serendipity, and Hierarchical.");
-}
-
 void apply_level_set_bcs(const svmp::Physics::EquationModuleInput& input,
                          ls::LevelSetTransportOptions& options)
 {
@@ -1044,7 +1015,9 @@ translate_level_set_transport_input(
 
   const auto element_type = infer_base_element_type(*input.mesh);
   const int order = resolve_element_order(input, infer_polynomial_order(*input.mesh));
-  const auto basis_type = resolve_basis_type(input);
+  // A level-set field is a nodal Lagrange field (no input selects another
+  // basis).
+  const auto basis_type = svmp::FE::BasisType::Lagrange;
   const int dim = input.mesh->dim();
   if (dim < 1 || dim > 3) {
     throw std::runtime_error("[svMultiPhysics::Application] Level-set transport requires a mesh dimension in [1, 3].");
@@ -1121,13 +1094,6 @@ translate_level_set_transport_input(
       throw std::runtime_error(
           "[svMultiPhysics::Application] Material-interface phase-pair velocity requires advective-form conservative phase transport with geometry reconciliation, interface kinematic enforcement, no separate velocity registration or extension, and no declared inflow or outflow boundary.");
     }
-  }
-
-  if (options.conservative_phase.enabled &&
-      options.conservative_phase
-          .pointwise_impermeable_velocity_tolerance_explicitly_requested) {
-    throw std::runtime_error(
-        "[svMultiPhysics::Application] Conservative_phase_impermeable_normal_velocity_tolerance requests a pointwise velocity-normal wall contract that the current conservative-phase split does not implement; the configured boundary policy enforces only discrete q-flux at invariant_tolerance and can be blind where q=0.");
   }
 
   // The extension keys of the equation element.  The PDE extension is
