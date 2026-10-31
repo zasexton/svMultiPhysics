@@ -7,6 +7,7 @@
 
 #include "Systems/FieldBinding.h"
 
+#include "Forms/Vocabulary.h"
 #include "Spaces/FunctionSpace.h"
 #include "Spaces/GlobalSpace.h"
 #include "Spaces/MortarSpace.h"
@@ -14,6 +15,8 @@
 
 #include <stdexcept>
 #include <unordered_map>
+#include <utility>
+#include <vector>
 
 namespace svmp {
 namespace FE {
@@ -70,6 +73,27 @@ void requireSourceKind(const FieldSpec& spec, FieldSourceKind expected, std::str
 }
 
 } // namespace
+
+forms::FormExpr derivative(const forms::FormExpr& form, const BoundUnknown& unknown)
+{
+    return forms::derivative(form, unknown.state, unknown.test);
+}
+
+forms::FormExpr derivative(const forms::FormExpr& form, const BoundUnknown& unknown,
+                           const forms::FormExpr& direction)
+{
+    return forms::derivative(form, unknown.state, direction);
+}
+
+forms::FormExpr derivative(const forms::FormExpr& form, std::initializer_list<BoundUnknown> unknowns)
+{
+    std::vector<std::pair<forms::FormExpr, forms::FormExpr>> variations;
+    variations.reserve(unknowns.size());
+    for (const auto& unknown : unknowns) {
+        variations.emplace_back(unknown.state, unknown.test);
+    }
+    return forms::derivative(form, variations);
+}
 
 FieldBinding::FieldBinding(FESystem& system, std::string owner)
     : system_(&system)

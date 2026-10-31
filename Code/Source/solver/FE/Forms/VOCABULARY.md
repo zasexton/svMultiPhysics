@@ -733,13 +733,29 @@ Status: `implemented/public` for normal residual-to-Jacobian workflows and
 | Vocabulary | Notes |
 |------------|-------|
 | Residual form to Jacobian | Forward-mode dual evaluation in nonlinear kernels (`ADMode::Forward`), or the symbolic tangent with `use_symbolic_tangent` |
+| `derivative(form, u, w)` | `implemented/public` (`Vocabulary.h`); the Gateaux derivative `d/de form(u + e w)` at `e = 0` in the field of the StateField `u`: with a measured 0-form (an energy `Pi`) and `w = v` the residual `dPi/du[v]`, with `w = u` the rate of a dissipation potential (`2 D` for a quadratic one). Every StateField of the field varies; its frozen values (DiscreteField, `frozen()`), test functions, other fields and the geometry are held fixed. Simplified (zero terms dropped); refused for a variable that is not a StateField, a Constitutive call (write the law as a FormExpr) and a form that does not depend on the field |
+| `derivative(form, {{u, v}, {lam, mu}})` | The sum over the pairs, the stationarity (KKT) residual of a Lagrangian, with D54 multipliers and `.dGlobal()` terms; fields the form does not depend on drop out |
+| `systems::derivative(form, U[, w])`, `systems::derivative(form, {U, Lambda})` | `Systems/FieldBinding.h`; the same for `BoundUnknown`s, `w` defaulting to `U.test` |
+| `frozen(e)` | `implemented/public` (`Vocabulary.h`); `e` at the current iterate, held fixed in the Jacobian: every StateField becomes the DiscreteField of the same field, space and name (data to the dual numbers and the symbolic tangent), so `frozen(u)` is the tree `FormExpr::discreteField(u_id, V, "u")` and its kernels. Picard convection `advect(frozen(u), u)`, a frozen stabilization parameter `frozen(tau(u))`, or `(u - frozen(u)) * v` (a residual zero to round-off, the mass matrix as Jacobian). Refused for a TrialFunction, a test function, an integral and a current-configuration geometry terminal |
 | `differentiateResidual(...)` | Symbolic residual differentiation helper |
-| `directionalDerivativeWrtField(...)` | Directional derivative helper |
+| `directionalDerivativeWrtField(expr, field, w[, discrete_fields_vary])` | Directional derivative helper; field-bound test functions keep their binding |
 | `directionalDerivativeWrtNormal(...)`, `directionalDerivativeWrtSpatialCoordinate(...)` | Geometry directional derivatives used by the symbolic geometry tangent |
 | `differentiateResidualHessianVector(...)` | Hessian-vector helper |
 | `differentiateWrtAuxiliaryOutput(...)` | Auxiliary-output sensitivity helper |
 | `simplify(...)`, `extractTermsReferencing(...)` | Symbolic utility helpers |
 | `checkSymbolicDifferentiability(...)`, `canDifferentiateSymbolically(...)` | Validation helpers |
+
+What the Jacobian linearizes is stated by the symbols: it differentiates
+every StateField of a trial field of the install (the field list, the extra
+trial fields and the geometry-sensitivity fields), and treats DiscreteFields
+and `frozen()` values as data. In the installed forms of the code base
+(audit of 2026-10-30) every DiscreteField reads a prescribed field (the
+prescribed level-set velocity, the semi-implicit free-surface reference
+velocity) or sits in a functional; the StateFields of unknowns outside an
+install's trial fields are in the free-surface residual-work channels and
+the Navier-Stokes free-surface diagnostic operators, which are assembled for
+their vectors only. `SymbolicOptions::simplify_expressions`,
+`exploit_sparsity` and `cache_expressions` are read nowhere.
 
 ### Auxiliary Coupling, Functionals, and Derived Results
 

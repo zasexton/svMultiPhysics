@@ -1953,7 +1953,8 @@ FormExpr differentiateResidual(const FormExpr& residual_form,
 
 FormExpr directionalDerivativeWrtField(const FormExpr& expr,
                                        FieldId field,
-                                       const FormExpr& direction)
+                                       const FormExpr& direction,
+                                       bool discrete_fields_vary)
 {
     if (!expr.isValid() || expr.node() == nullptr) {
         throw std::invalid_argument("directionalDerivativeWrtField: invalid expression");
@@ -2074,7 +2075,11 @@ FormExpr directionalDerivativeWrtField(const FormExpr& expr,
                 break;
 
             case FormExprType::TestFunction:
-                out.primal = FormExpr::testFunction(*node->spaceSignature(), node->toString());
+                // A field-bound test function keeps its field: the derivative
+                // of a multi-field form maps its rows by it.
+                out.primal = node->fieldId().has_value()
+                                 ? FormExpr(node)
+                                 : FormExpr::testFunction(*node->spaceSignature(), node->toString());
                 out.deriv = zeroOf(out.primal);
                 break;
 
@@ -2095,7 +2100,9 @@ FormExpr directionalDerivativeWrtField(const FormExpr& expr,
                     throw std::invalid_argument("directionalDerivativeWrtField: DiscreteField missing metadata");
                 }
                 out.primal = FormExpr::discreteField(*fid, *sig, node->toString());
-                out.deriv = isWrtField(*sig, *fid, node->toString()) ? direction : zeroOf(out.primal);
+                out.deriv = discrete_fields_vary && isWrtField(*sig, *fid, node->toString())
+                                ? direction
+                                : zeroOf(out.primal);
                 break;
             }
 

@@ -104,15 +104,18 @@ struct SymbolicDiffResult {
  * @brief Directional derivative of an expression w.r.t. a FieldId
  *
  * This computes: d(expr)/d(field)[direction], treating all TrialFunction/TestFunction
- * terminals as constants. Only `StateField(field)` / `DiscreteField(field)` terminals
- * participate in the differentiation.
+ * terminals as constants. Only `StateField(field)` terminals, and with
+ * @p discrete_fields_vary the `DiscreteField(field)` terminals too, participate in
+ * the differentiation.  Field-bound test functions keep their binding.
  *
  * This is intended as a building block for higher-order derivatives such as
- * Hessian-vector products.
+ * Hessian-vector products, and for derivative() (Vocabulary.h), which holds
+ * DiscreteFields fixed.
  */
 [[nodiscard]] FormExpr directionalDerivativeWrtField(const FormExpr& expr,
                                                      FieldId field,
-                                                     const FormExpr& direction);
+                                                     const FormExpr& direction,
+                                                     bool discrete_fields_vary = true);
 
 /**
  * @brief Directional derivative of an expression w.r.t. the geometric normal terminal.

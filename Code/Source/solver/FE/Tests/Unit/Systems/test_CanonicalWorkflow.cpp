@@ -28,10 +28,13 @@
 
 #include "Tests/Unit/Forms/FormsTestHelpers.h"
 
+#include <algorithm>
 #include <array>
 #include <cmath>
 #include <set>
 #include <span>
+#include <stdexcept>
+#include <vector>
 
 using svmp::FE::ElementType;
 using svmp::FE::FieldId;
@@ -422,6 +425,193 @@ TEST(CanonicalWorkflow, AShapeErrorOfAProductNamesTheTerm)
         EXPECT_NE(message.find("unsupported multiplication kinds"), std::string::npos) << message;
         EXPECT_NE(message.find("lhs=Vector"), std::string::npos) << message;
     }
+}
+
+// ============================================================================
+// Variations and linearization: derivative() and frozen()
+// ============================================================================
+
+namespace {
+
+struct AssembledSystem {
+    std::vector<Real> vector;
+    std::vector<Real> matrix;
+};
+
+/// Residual and Jacobian of @p residual of the unknown @p field at a fixed
+/// state, on the single tetrahedron.
+AssembledSystem assembleAtState(svmp::FE::systems::FESystem& sys, const std::vector<FieldId>& fields,
+                                const FormExpr& residual, bool jit)
+{
+    svmp::FE::systems::FormInstallOptions options;
+    options.compiler_options.jit.enable = jit;
+    svmp::FE::systems::installFormulation(sys, "op", std::span<const FieldId>(fields), residual, options);
+    svmp::FE::systems::SetupInputs inputs;
+    inputs.topology_override = singleTetraTopology();
+    sys.setup({}, inputs);
+    const auto n = sys.dofHandler().getNumDofs();
+    std::vector<Real> U(static_cast<std::size_t>(n));
+    for (std::size_t i = 0; i < U.size(); ++i) {
+        U[i] = 0.05 * std::sin(0.9 * static_cast<Real>(i) + 0.4);
+    }
+    svmp::FE::systems::SystemStateView state;
+    state.u = U;
+    svmp::FE::systems::AssemblyRequest req;
+    req.op = "op";
+    req.want_matrix = true;
+    req.want_vector = true;
+    svmp::FE::assembly::DenseSystemView out(n);
+    out.zero();
+    (void)sys.assemble(req, state, &out, &out);
+    AssembledSystem assembled;
+    for (GlobalIndex i = 0; i < n; ++i) {
+        assembled.vector.push_back(out.getVectorEntry(i));
+        for (GlobalIndex j = 0; j < n; ++j) {
+            assembled.matrix.push_back(out.getMatrixEntry(i, j));
+        }
+    }
+    return assembled;
+}
+
+Real maxRelativeDifference(const std::vector<Real>& a, const std::vector<Real>& b)
+{
+    EXPECT_EQ(a.size(), b.size());
+    Real scale = 0.0;
+    Real difference = 0.0;
+    for (std::size_t i = 0; i < a.size() && i < b.size(); ++i) {
+        scale = std::max(scale, std::abs(a[i]));
+        difference = std::max(difference, std::abs(a[i] - b[i]));
+    }
+    return scale > 0.0 ? difference / scale : difference;
+}
+
+} // namespace
+
+TEST(CanonicalWorkflow, TheDerivativeOfThePoissonEnergyIsItsResidual)
+{
+    for (const bool jit : {false, true}) {
+        const auto build = [&](bool from_energy) {
+            auto mesh = std::make_shared<svmp::FE::forms::test::SingleTetraMeshAccess>();
+            auto space = std::make_shared<svmp::FE::spaces::H1Space>(ElementType::Tetra4, 1);
+            svmp::FE::systems::FESystem sys(mesh);
+            const auto u_id = sys.addField({.name = "u", .space = space});
+            sys.addOperator("op");
+            const auto u = StateField(u_id, *space, "u");
+            const auto v = TestField(u_id, *space, "v");
+            const auto f = 1.0 + x().component(0);
+            const auto energy = (0.5 * inner(grad(u), grad(u)) + 0.25 * u * u * u * u - f * u).dx();
+            const auto residual = from_energy ? derivative(energy, u, v)
+                                              : (inner(grad(u), grad(v)) + u * u * u * v - f * v).dx();
+            return assembleAtState(sys, {u_id}, residual, jit);
+        };
+        const auto derived = build(true);
+        const auto hand = build(false);
+        EXPECT_LE(maxRelativeDifference(derived.vector, hand.vector), 1e-14) << "jit=" << jit;
+        EXPECT_LE(maxRelativeDifference(derived.matrix, hand.matrix), 1e-14) << "jit=" << jit;
+    }
+}
+
+TEST(CanonicalWorkflow, TheDerivativeOfTheNeoHookeanEnergyIsItsFirstPiolaResidual)
+{
+    const auto build = [&](bool from_energy) {
+        auto mesh = std::make_shared<svmp::FE::forms::test::SingleTetraMeshAccess>();
+        auto scalar = std::make_shared<svmp::FE::spaces::H1Space>(ElementType::Tetra4, 1);
+        auto vector = std::make_shared<svmp::FE::spaces::ProductSpace>(scalar, 3);
+        svmp::FE::systems::FESystem sys(mesh);
+        const auto u_id = sys.addField({.name = "u", .space = vector, .components = 3});
+        sys.addOperator("op");
+        const auto u = StateField(u_id, *vector, "u");
+        const auto v = TestField(u_id, *vector, "v");
+        const Real mu = 1.5;
+        const Real lambda = 4.0;
+        const auto F = FormExpr::identity(3) + grad(u);
+        const auto J = det(F);
+        const auto C = transpose(F) * F;
+        const auto FinvT = transpose(inv(F));
+        if (from_energy) {
+            const auto psi = 0.5 * mu * (trace(C) - 3.0) - mu * log(J) + 0.5 * lambda * log(J) * log(J);
+            return assembleAtState(sys, {u_id}, derivative(psi.dx(), u, v), false);
+        }
+        const auto P = mu * (F - FinvT) + lambda * log(J) * FinvT;
+        return assembleAtState(sys, {u_id}, doubleContraction(P, grad(v)).dx(), false);
+    };
+    const auto derived = build(true);
+    const auto hand = build(false);
+    EXPECT_LE(maxRelativeDifference(derived.vector, hand.vector), 1e-12);
+    EXPECT_LE(maxRelativeDifference(derived.matrix, hand.matrix), 1e-12);
+}
+
+TEST(CanonicalWorkflow, DerivativeRefusesWhatIsNotAVariation)
+{
+    auto space = std::make_shared<svmp::FE::spaces::H1Space>(ElementType::Tetra4, 1);
+    const auto u = StateField(0, *space, "u");
+    const auto w = StateField(1, *space, "w");
+    const auto v = TestField(0, *space, "v");
+    const auto energy = (0.5 * u * u).dx();
+    EXPECT_THROW((void)derivative(energy, TrialFunction(*space, "u"), v), std::invalid_argument);
+    EXPECT_THROW((void)derivative(energy, w, v), std::invalid_argument);
+    // A field the form does not depend on drops out of the sum.
+    const auto both = derivative(energy, {{u, v}, {w, TestField(1, *space, "q")}});
+    EXPECT_EQ(both.toString(), derivative(energy, u, v).toString());
+}
+
+TEST(CanonicalWorkflow, FrozenIsTheDiscreteFieldOfTheSameField)
+{
+    auto space = std::make_shared<svmp::FE::spaces::H1Space>(ElementType::Tetra4, 1);
+    const auto u = StateField(3, *space, "u");
+    const auto frozen_u = frozen(u);
+    const auto discrete_u = FormExpr::discreteField(3, *space, "u");
+    ASSERT_EQ(frozen_u.node()->type(), FormExprType::DiscreteField);
+    EXPECT_EQ(frozen_u.toString(), discrete_u.toString());
+    EXPECT_EQ(frozen_u.node()->fieldId(), discrete_u.node()->fieldId());
+    EXPECT_EQ(frozen(u * grad(u)).toString(), (discrete_u * grad(discrete_u)).toString());
+    EXPECT_THROW((void)frozen(TrialFunction(*space, "u")), std::invalid_argument);
+    EXPECT_THROW((void)frozen(TestFunction(*space, "v")), std::invalid_argument);
+    EXPECT_THROW((void)frozen((u * u).dx()), std::invalid_argument);
+    EXPECT_THROW((void)frozen(u * currentJacobianDeterminant()), std::invalid_argument);
+}
+
+TEST(CanonicalWorkflow, AFrozenStateGivesAZeroResidualAndTheMassMatrix)
+{
+    const auto build = [&](bool frozen_difference) {
+        auto mesh = std::make_shared<svmp::FE::forms::test::SingleTetraMeshAccess>();
+        auto space = std::make_shared<svmp::FE::spaces::H1Space>(ElementType::Tetra4, 1);
+        svmp::FE::systems::FESystem sys(mesh);
+        const auto u_id = sys.addField({.name = "u", .space = space});
+        sys.addOperator("op");
+        const auto u = StateField(u_id, *space, "u");
+        const auto v = TestField(u_id, *space, "v");
+        const auto residual = frozen_difference ? ((u - frozen(u)) * v).dx() : (u * v).dx();
+        return assembleAtState(sys, {u_id}, residual, false);
+    };
+    const auto difference = build(true);
+    const auto mass = build(false);
+    // u and its frozen value are evaluated by two paths, equal to round-off.
+    for (const auto value : difference.vector) {
+        EXPECT_NEAR(value, 0.0, 1e-16);
+    }
+    EXPECT_LE(maxRelativeDifference(difference.matrix, mass.matrix), 1e-15);
+}
+
+TEST(CanonicalWorkflow, PicardConvectionWithFrozenIsTheDiscreteFieldSpelling)
+{
+    const auto build = [&](bool with_frozen) {
+        auto mesh = std::make_shared<svmp::FE::forms::test::SingleTetraMeshAccess>();
+        auto scalar = std::make_shared<svmp::FE::spaces::H1Space>(ElementType::Tetra4, 1);
+        auto vector = std::make_shared<svmp::FE::spaces::ProductSpace>(scalar, 3);
+        svmp::FE::systems::FESystem sys(mesh);
+        const auto u_id = sys.addField({.name = "u", .space = vector, .components = 3});
+        sys.addOperator("op");
+        const auto u = StateField(u_id, *vector, "u");
+        const auto v = TestField(u_id, *vector, "v");
+        const auto a = with_frozen ? frozen(u) : FormExpr::discreteField(u_id, *vector, "u");
+        const auto residual = (inner(advect(a, u), v) + 0.1 * inner(grad(u), grad(v))).dx();
+        return assembleAtState(sys, {u_id}, residual, false);
+    };
+    const auto with_frozen = build(true);
+    const auto discrete = build(false);
+    EXPECT_EQ(with_frozen.vector, discrete.vector);
+    EXPECT_EQ(with_frozen.matrix, discrete.matrix);
 }
 
 // ============================================================================

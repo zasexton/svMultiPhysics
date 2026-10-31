@@ -53,6 +53,20 @@ struct BoundPrescribed {
     forms::FormExpr value;
 };
 
+/// d form/du[v] for the unknown U = {u, v}: forms::derivative(form, U.state,
+/// U.test), the residual of an energy or the term of a dissipation potential.
+[[nodiscard]] forms::FormExpr derivative(const forms::FormExpr& form, const BoundUnknown& unknown);
+
+/// d form/du[direction], e.g. derivative(D, U, U.state), the rate of D.
+[[nodiscard]] forms::FormExpr derivative(const forms::FormExpr& form, const BoundUnknown& unknown,
+                                         const forms::FormExpr& direction);
+
+/// The sum over @p unknowns of d form/du[v]: the stationarity residual of a
+/// Lagrangian, systems::derivative(L, {U, Lambda}).  An unknown the form does
+/// not depend on contributes nothing.
+[[nodiscard]] forms::FormExpr derivative(const forms::FormExpr& form,
+                                         std::initializer_list<BoundUnknown> unknowns);
+
 /// Same space type, field type, value and topological dimension, polynomial
 /// order and element type.
 [[nodiscard]] bool spacesCompatible(const spaces::FunctionSpace& lhs,

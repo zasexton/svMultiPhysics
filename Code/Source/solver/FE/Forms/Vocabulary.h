@@ -12,6 +12,7 @@
 
 #include "Forms/FormExpr.h"
 #include "Forms/IntegrationDomain.h"
+#include "Forms/SymbolicDifferentiation.h"
 #include "Spaces/MixedSpace.h"
 
 #include <cstdint>
@@ -21,6 +22,7 @@
 #include <stdexcept>
 #include <string>
 #include <type_traits>
+#include <utility>
 #include <vector>
 
 namespace svmp {
@@ -729,6 +731,138 @@ inline SidePair operator*(const FormExpr& a, const SidePair& b) { return {a * b.
 inline SidePair operator+(const SidePair& a, const SidePair& b) { return {a.neg + b.neg, a.pos + b.pos}; }
 inline SidePair operator-(const SidePair& a, const SidePair& b) { return {a.neg - b.neg, a.pos - b.pos}; }
 inline SidePair operator-(const SidePair& a) { return {-a.neg, -a.pos}; }
+
+// ---------------------------------------------------------------------------
+// Variations and linearization
+// ---------------------------------------------------------------------------
+
+/**
+ * @brief The Gateaux derivative of @p form in the field of @p u along @p direction
+ *
+ * d/de form(u + e w)|_{e=0} with w = @p direction.  With @p form a measured
+ * 0-form, such as an energy Pi or a Lagrangian, and w the test function of u,
+ * it is the residual dPi/du[v]; with w = u it is the rate D'(u)[u] (2 D for a
+ * quadratic dissipation potential D).  @p u is the field's StateField: every
+ * StateField of its field varies, while its frozen values (DiscreteField,
+ * frozen()), test functions, other fields and the geometry are held fixed.
+ * The result is simplified (zero terms dropped).  Throws when @p u is not a StateField, when @p form holds a
+ * Constitutive call (write the law as a FormExpr), and when the derivative is
+ * zero (the form does not depend on the field).
+ */
+[[nodiscard]] inline FormExpr derivative(const FormExpr& form, const FormExpr& u, const FormExpr& direction)
+{
+    if (!form.isValid()) {
+        throw std::invalid_argument("derivative: empty form");
+    }
+    if (!u.isValid() || u.node()->type() != FormExprType::StateField || !u.node()->fieldId()) {
+        throw std::invalid_argument("derivative: the variable is a field's StateField, but it is '" +
+                                    u.toString() + "'");
+    }
+    if (!direction.isValid()) {
+        throw std::invalid_argument("derivative: empty direction");
+    }
+    auto result = directionalDerivativeWrtField(form, *u.node()->fieldId(), direction,
+                                                /*discrete_fields_vary=*/false);
+    const auto value = result.isValid() ? result.node()->constantValue() : std::optional<Real>{Real(0.0)};
+    if (value.has_value() && *value == Real(0.0)) {
+        throw std::invalid_argument("derivative: '" + form.toString() + "' does not depend on '" +
+                                    u.toString() + "'");
+    }
+    return result;
+}
+
+/// The sum of the derivatives in several fields, sum_i dform/du_i[w_i] for
+/// the pairs (u_i, w_i): the stationarity residual of a Lagrangian, e.g.
+/// derivative(L, {{u, v}, {lam, mu}}).  A field the form does not depend on
+/// contributes nothing.
+[[nodiscard]] inline FormExpr derivative(const FormExpr& form,
+                                         std::span<const std::pair<FormExpr, FormExpr>> variations)
+{
+    FormExpr sum;
+    for (const auto& [u, direction] : variations) {
+        if (!u.isValid() || u.node()->type() != FormExprType::StateField || !u.node()->fieldId()) {
+            throw std::invalid_argument("derivative: the variable is a field's StateField, but it is '" +
+                                        u.toString() + "'");
+        }
+        auto part = directionalDerivativeWrtField(form, *u.node()->fieldId(), direction,
+                                                  /*discrete_fields_vary=*/false);
+        const auto value = part.isValid() ? part.node()->constantValue() : std::optional<Real>{Real(0.0)};
+        if (value.has_value() && *value == Real(0.0)) {
+            continue;
+        }
+        sum = sumOf(sum, part);
+    }
+    if (!sum.isValid()) {
+        throw std::invalid_argument("derivative: '" + form.toString() + "' depends on none of the fields");
+    }
+    return sum;
+}
+
+[[nodiscard]] inline FormExpr derivative(const FormExpr& form,
+                                         std::initializer_list<std::pair<FormExpr, FormExpr>> variations)
+{
+    return derivative(form, std::span<const std::pair<FormExpr, FormExpr>>(variations.begin(), variations.size()));
+}
+
+/**
+ * @brief @p expr at the current iterate, held fixed in the Jacobian
+ *
+ * Every StateField of @p expr becomes the DiscreteField of the same field,
+ * space and name, which the kernels evaluate as data (a constant of the
+ * dual numbers and of the symbolic tangent), so frozen(u) builds exactly the
+ * tree FormExpr::discreteField(u_id, V, "u") and the same kernels: Picard
+ * convection advect(frozen(u), u), a stabilization parameter frozen(tau(u))
+ * kept out of the Jacobian, or (u - frozen(u)) * v, a residual zero to round-off
+ * whose Jacobian is the mass matrix.  The residual is unchanged.  Refused for a
+ * TrialFunction (state the unknown as a StateField), a test function, an
+ * integral, and a current-configuration geometry terminal (the moving-domain
+ * tangent would still differentiate it).
+ */
+[[nodiscard]] inline FormExpr frozen(const FormExpr& expr)
+{
+    if (!expr.isValid()) {
+        throw std::invalid_argument("frozen: empty expression");
+    }
+    return expr.transformNodes([&](const FormExprNode& n) -> std::optional<FormExpr> {
+        const auto refuse = [&](const char* what) {
+            throw std::invalid_argument(std::string("frozen: '") + expr.toString() + "' holds " + what +
+                                        " ('" + n.toString() + "')");
+        };
+        switch (n.type()) {
+        case FormExprType::StateField:
+            if (!n.fieldId() || n.spaceSignature() == nullptr) {
+                refuse("a StateField without its field");
+            }
+            return FormExpr::discreteField(*n.fieldId(), *n.spaceSignature(), n.toString());
+        case FormExprType::TrialFunction:
+            refuse("a TrialFunction; freeze the field's StateField");
+            break;
+        case FormExprType::TestFunction:
+            refuse("a test function");
+            break;
+        case FormExprType::CellIntegral:
+        case FormExprType::BoundaryIntegral:
+        case FormExprType::InteriorFaceIntegral:
+        case FormExprType::InterfaceIntegral:
+        case FormExprType::CutVolumeIntegral:
+        case FormExprType::GlobalIntegral:
+            refuse("an integral; freeze its integrand's terms");
+            break;
+        case FormExprType::CurrentCoordinate:
+        case FormExprType::CurrentJacobian:
+        case FormExprType::CurrentJacobianDeterminant:
+        case FormExprType::CurrentNormal:
+        case FormExprType::CurrentMeasure:
+        case FormExprType::SurfaceJacobian:
+        case FormExprType::MeshVelocity:
+            refuse("a current-configuration geometry terminal, which the moving-domain tangent differentiates");
+            break;
+        default:
+            break;
+        }
+        return std::nullopt;
+    });
+}
 
 // ---------------------------------------------------------------------------
 // Auxiliary state vocabulary (generalized, physics-agnostic)

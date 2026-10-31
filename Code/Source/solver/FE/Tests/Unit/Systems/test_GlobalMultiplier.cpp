@@ -880,6 +880,74 @@ std::vector<Real> solveConstrainedFromZero(FESystem& sys, const OperatorTag& op 
 
 } // namespace
 
+TEST(GlobalMultiplierG1, TheStationarityOfTheLagrangianIsTheMeanConstrainedResidual)
+{
+    // L = 1/2 |grad u|^2 dx - lambda u dx + lambda c |Omega| dGlobal: its
+    // derivative in (u, lambda) along (v, mu) is the residual of
+    // buildMeanConstrainedPoisson.
+    const Real c = 0.75;
+    const Real height = 0.5;
+    auto expected = buildMeanConstrainedPoisson(4, 2, height, 1, c);
+
+    MeanConstrainedPoisson derived;
+    derived.mesh = buildGrid(4, 2, Real(1.0), height, 1);
+    derived.u_space = quadSpace(1);
+    derived.r1 = std::make_shared<spaces::GlobalSpace>(1);
+    derived.system = std::make_unique<FESystem>(derived.mesh);
+    auto& sys = *derived.system;
+    FieldBinding fields(sys, "test");
+    const auto U = fields.unknownSymbols(FieldSpec{.name = "u", .space = derived.u_space}, "u", "u", "v");
+    const auto Lambda = fields.unknownSymbols(
+        FieldSpec{.name = "lambda", .space = derived.r1, .scope = FieldScope::Global}, "lambda", "lambda", "mu");
+    sys.addOperator("poisson");
+    const auto lagrangian = (0.5 * forms::inner(forms::grad(U.state), forms::grad(U.state)) - Lambda.state * U.state).dx() +
+                            (Lambda.state * FormExpr::constant(c * height)).dGlobal();
+    (void)installFormulation(sys, "poisson", {U.id, Lambda.id}, derivative(lagrangian, {U, Lambda}));
+    const std::array<forms::bc::StrongDirichlet, 2> bcs{
+        forms::bc::strongDirichlet(U.id, kLeft, FormExpr::constant(0.0), "u"),
+        forms::bc::strongDirichlet(U.id, kRight, FormExpr::constant(0.0), "u")};
+    installStrongDirichlet(sys, std::span<const forms::bc::StrongDirichlet>(bcs));
+    sys.setup();
+
+    const auto n = static_cast<std::size_t>(sys.dofHandler().getNumDofs());
+    ASSERT_EQ(n, static_cast<std::size_t>(expected.system->dofHandler().getNumDofs()));
+    std::vector<Real> state(n);
+    for (std::size_t i = 0; i < n; ++i) {
+        state[i] = std::sin(0.7 * static_cast<Real>(i) + 0.3);
+    }
+    sys.constraints().distribute(state);
+    const auto a = assembleAt(sys, state);
+    const auto b = assembleAt(*expected.system, state);
+    for (std::size_t i = 0; i < a.vector.size(); ++i) {
+        EXPECT_NEAR(a.vector[i], b.vector[i], 1e-12) << "row " << i;
+    }
+    for (std::size_t i = 0; i < a.matrix.size(); ++i) {
+        EXPECT_NEAR(a.matrix[i], b.matrix[i], 1e-12) << "entry " << i;
+    }
+}
+
+TEST(GlobalMultiplierG1, TheRateOfAQuadraticPotentialIsTwiceItsValue)
+{
+    // D = 1/2 k |grad u|^2: derivative(D, U, u) = k |grad u|^2 = 2 D, and its
+    // value is the exact rank-independent sum of the functional evaluator.
+    auto problem = buildMeanConstrainedPoisson(4, 2, 0.5, 1, 1.0);
+    auto& sys = *problem.system;
+    const BoundUnknown U{problem.u, forms::StateField(problem.u, *problem.u_space, "u"),
+                         forms::TestField(problem.u, *problem.u_space, "v")};
+    const auto potential = (0.5 * 3.0 * forms::inner(forms::grad(U.state), forms::grad(U.state))).dx();
+    const auto rate = derivative(potential, U, U.state);
+    const auto n = static_cast<std::size_t>(sys.dofHandler().getNumDofs());
+    std::vector<Real> state(n);
+    for (std::size_t i = 0; i < n; ++i) {
+        state[i] = std::cos(0.4 * static_cast<Real>(i));
+    }
+    SystemStateView view;
+    view.u = state;
+    const std::array<FormExpr, 2> forms{potential, rate};
+    const auto values = evaluateFunctionalForms(sys, forms, view, CollectiveCommunicator{});
+    EXPECT_NEAR(values[1].value, 2.0 * values[0].value, 1e-13 * std::abs(values[0].value));
+}
+
 TEST(GlobalMultiplierG2, MeanZeroMultiplierMatchesTheAutomaticGauge)
 {
     // u = cos(pi x) cos(pi y) on the unit square: -Delta u = 2 pi^2 u with
