@@ -55,6 +55,9 @@ FormInstallOptions DiagnosticRegistry::operatorOptions(const FormInstallOptions&
                                                        const DiagnosticOperatorOptions& options)
 {
     FormInstallOptions install = formulation_options;
+    // A diagnostic operator is a measurement: it does not take part in the
+    // analysis of the solved problem (gauges, well-posedness).
+    install.contributes_to_problem_analysis = false;
     install.generated_boundary_nitsche_trace_requests.clear();
     if (!options.source_component_tag.empty()) {
         install.source_component_tag = options.source_component_tag;

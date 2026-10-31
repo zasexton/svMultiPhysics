@@ -359,8 +359,53 @@ TEST(CanonicalWorkflow, ATermNonlinearInTwoTestFieldsIsRefused)
 }
 
 // ============================================================================
-// Install-time checks: history reads, shape errors
+// Install-time checks: unknowns outside the trial fields, history reads, shape errors
 // ============================================================================
+
+TEST(CanonicalWorkflow, AnUnknownOutsideTheTrialFieldsIsRefusedNamingTheTerm)
+{
+    auto mesh = std::make_shared<svmp::FE::forms::test::SingleTetraMeshAccess>();
+    auto space = std::make_shared<svmp::FE::spaces::H1Space>(ElementType::Tetra4, 1);
+    svmp::FE::systems::FESystem sys(mesh);
+    const auto T_f = sys.addField({.name = "T", .space = space});
+    const auto C_f = sys.addField({.name = "C", .space = space});
+    const auto g_f = sys.addField({.name = "g", .space = space,
+                                   .source_kind = svmp::FE::systems::FieldSourceKind::PrescribedData});
+    sys.addOperator("op");
+    sys.addOperator("work");
+    const auto T = StateField(T_f, *space, "T");
+    const auto C = StateField(C_f, *space, "C");
+    const auto w = TestField(T_f, *space, "w");
+    const auto coupling = (C * w).dx();
+    try {
+        svmp::FE::systems::installFormulation(sys, "op", {T_f}, (inner(grad(T), grad(w))).dx() + coupling);
+        FAIL() << "the columns of C would be dropped";
+    } catch (const svmp::FE::InvalidArgumentException& error) {
+        const std::string message = error.what();
+        EXPECT_NE(message.find("the term '" + coupling.toString() + "'"), std::string::npos) << message;
+        EXPECT_NE(message.find("holds the unknown 'C'"), std::string::npos) << message;
+        EXPECT_NE(message.find("frozen()"), std::string::npos) << message;
+    }
+    EXPECT_TRUE(sys.operatorDefinition("op").cells.empty());
+    EXPECT_TRUE(sys.formulationRecords().empty());
+
+    // C as a trial field, C held fixed as data (frozen() or a DiscreteField),
+    // a prescribed field's StateField, and a measurement install that is
+    // assembled for its vector all install.
+    svmp::FE::systems::FormInstallOptions with_c;
+    with_c.extra_trial_fields = {C_f};
+    EXPECT_NO_THROW(svmp::FE::systems::installFormulation(sys, "op", {T_f}, (inner(grad(T), grad(w))).dx() + coupling,
+                                                          with_c));
+    EXPECT_NO_THROW(svmp::FE::systems::installFormulation(
+        sys, "op", {T_f}, (inner(grad(T), grad(w)) + FormExpr::discreteField(C_f, *space, "C") * w).dx()));
+    EXPECT_NO_THROW(svmp::FE::systems::installFormulation(
+        sys, "op", {T_f}, (inner(grad(T), grad(w)) + frozen(C) * w).dx()));
+    EXPECT_NO_THROW(svmp::FE::systems::installFormulation(
+        sys, "op", {T_f}, (inner(grad(T), grad(w)) + StateField(g_f, *space, "g") * w).dx()));
+    svmp::FE::systems::FormInstallOptions measurement;
+    measurement.contributes_to_problem_analysis = false;
+    EXPECT_NO_THROW(svmp::FE::systems::installFormulation(sys, "work", {T_f}, coupling, measurement));
+}
 
 TEST(CanonicalWorkflow, PreviousSolutionInARowOfTwoUnknownsIsRefused)
 {

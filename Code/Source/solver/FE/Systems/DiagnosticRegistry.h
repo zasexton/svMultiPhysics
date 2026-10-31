@@ -63,7 +63,9 @@ public:
     /// Whether @p set is switched on now; throws std::invalid_argument for an undeclared set.
     [[nodiscard]] bool enabled(std::string_view set) const;
 
-    /// The install options of a diagnostic operator.
+    /// The install options of a diagnostic operator: the formulation's, as
+    /// a measurement outside the problem analysis
+    /// (contributes_to_problem_analysis = false), without trace requests.
     [[nodiscard]] static FormInstallOptions operatorOptions(const FormInstallOptions& formulation_options,
                                                             const DiagnosticOperatorOptions& options);
 

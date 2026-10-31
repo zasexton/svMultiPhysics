@@ -1705,7 +1705,8 @@ TEST(FormulationBuilder, SpanGroupsInheritCurrentOptionsAndKeepDiagnosticsIsolat
     ASSERT_EQ(sys.formulationRecords().size(), 3u);
     EXPECT_TRUE(sys.formulationRecords()[0].contributes_to_problem_analysis);
     EXPECT_TRUE(sys.formulationRecords()[1].contributes_to_problem_analysis);
-    EXPECT_TRUE(sys.formulationRecords()[2].contributes_to_problem_analysis);
+    // A diagnostic operator is a measurement outside the problem analysis.
+    EXPECT_FALSE(sys.formulationRecords()[2].contributes_to_problem_analysis);
     EXPECT_EQ(sys.formulationRecords()[2].active_fields, std::vector<FieldId>({p_field, w_field}));
     EXPECT_EQ(F.options().source_component_tag, "late_base");
     EXPECT_TRUE(F.options().extra_trial_fields.empty());

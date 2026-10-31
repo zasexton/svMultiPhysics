@@ -1690,6 +1690,50 @@ void traceMixedKernelPlan(const char* prefix, const MixedKernelPlan& plan)
     return terms;
 }
 
+/**
+ * @brief Refuses a residual that holds an unknown outside its trial fields
+ *
+ * A StateField is the unknown itself: its Jacobian columns are assembled
+ * when its field is a trial field of the install (a field of the list, an
+ * extra trial field or a geometry-sensitivity field).  Otherwise the
+ * installer would evaluate it as data and drop those columns without a
+ * word; the error names the first term that holds it.  A value
+ * deliberately held fixed during the solve is data (frozen(),
+ * FormExpr::discreteField), and StateFields of prescribed fields are data.
+ * Checked for the installs that contribute to the problem analysis; a
+ * measurement operator (a residual-work channel, a diagnostic) is assembled
+ * for its vector, which drops no column.
+ */
+void requireUnknownsAreTrialFields(const FESystem& system,
+                                   std::span<const FieldId> trial_fields,
+                                   const forms::FormExpr& residual)
+{
+    for (const auto& term : additiveTerms(residual)) {
+        const auto visit = [&](const auto& self, const forms::FormExprNode& n) -> void {
+            if (n.type() == forms::FormExprType::StateField) {
+                const auto fid = n.fieldId();
+                if (fid && *fid != CURRENT_SOLUTION_FIELD_ID &&
+                    system.fieldParticipatesInUnknownVector(*fid) &&
+                    std::find(trial_fields.begin(), trial_fields.end(), *fid) == trial_fields.end()) {
+                    throw InvalidArgumentException(
+                        "installFormulation: the term '" + term->toString() + "' holds the unknown '" +
+                        system.fieldRecord(*fid).name + "' (StateField '" + n.toString() +
+                        "'), which is not a trial field of the install, so its Jacobian columns would be "
+                        "dropped; add the field to the field list or to "
+                        "FormInstallOptions::extra_trial_fields, or hold its value fixed as data with "
+                        "frozen()");
+                }
+            }
+            for (const auto& child : n.childrenShared()) {
+                if (child) {
+                    self(self, *child);
+                }
+            }
+        };
+        visit(visit, *term);
+    }
+}
+
 [[nodiscard]] bool readsTrialHistory(const forms::FormExprNode& node)
 {
     switch (node.type()) {
@@ -4719,6 +4763,10 @@ CoupledResidualKernels installFormulation(
         if (rec.contributes_to_problem_analysis) {
             pending_contributions = analysis::lowerFormulation(rec);
         }
+    }
+
+    if (options.contributes_to_problem_analysis) {
+        requireUnknownsAreTrialFields(system, std::span<const FieldId>(trial_fields), resolved);
     }
 
     const auto num_test = countUniqueTestSpaces(*resolved.node());
