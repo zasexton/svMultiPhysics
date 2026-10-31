@@ -33,15 +33,16 @@ UNFITTED_SURFACE_TENSION = 0.0
 # capillary-rise protocols, with no parameter of its own.  With the
 # reconciliation (D14) and the sign-definite patch bounds (D21) it is the
 # accepted-step maintenance of the M1-M4 protocols (D35 item 1; D39 item 4: on in
-# the generators).  "--interface-preserving-redistancing off" writes the decks of
-# b94af982 byte for byte.
+# the generators).  "--interface-preserving-redistancing off" writes the same
+# decks without that one line.
 INTERFACE_PRESERVING_REDISTANCING = True
 # Wall model of the SPHERIC validation decks (decision D58): free-slip on every
 # wall, the Test 10 lid and the Test 02 obstacle included.  Only the normal
 # velocity is fixed: a zero Dirichlet value whose Effective_direction selects the
 # component along the face normal, so the obstacle is written as one face file per
 # face plane.  No-slip pins the contact lines of the sharp level set at the walls.
-# "--wall-condition no-slip" writes the no-slip decks of 8f145c4c byte for byte.
+# "--wall-condition no-slip" writes no-slip walls (a zero velocity, no
+# Effective_direction) and one obstacle face file.
 SPHERIC_FREE_SLIP_WALLS = True
 # Ghost layers of the 3D SPHERIC decks.  Distributed small-cut aggregation needs
 # every rank that condenses a slave DOF to hold the masters of its root cell: the
@@ -53,7 +54,7 @@ SPHERIC_FREE_SLIP_WALLS = True
 # 4 ranks stopped at 0.358 s with roots 7-8 steps away whose masters the
 # condensing rank did not hold (job 324).  While the halo covers the stencil,
 # ghost layers move no value (12, 15 and 18 layers are bitwise equal at 4 ranks);
-# 0 writes no key, the solver's default, as the decks of 9802903f.
+# 0 writes no key (the solver's default).
 SPHERIC_3D_GHOST_LAYERS = 18
 # The coordinate axis of each face file's normal (free-slip component masks).
 FACE_NORMAL_AXIS = {
@@ -2139,7 +2140,7 @@ def main() -> None:
         default="on" if INTERFACE_PRESERVING_REDISTANCING else "off",
         help=(
             "triggered interface-preserving redistancing in the unfitted SPHERIC decks (decision "
-            "D39, the protocol value); off writes the decks of b94af982 byte for byte"
+            "D39, the protocol value); off writes the same decks without that line"
         ),
     )
     parser.add_argument(
@@ -2149,7 +2150,7 @@ def main() -> None:
         help=(
             "velocity condition on the walls of the unfitted SPHERIC decks: free-slip (decision D58, "
             "only the normal velocity fixed, the Test 02 obstacle written per face plane) or no-slip, "
-            "which writes the decks of 8f145c4c byte for byte"
+            "which writes a zero velocity on every wall and one obstacle face file"
         ),
     )
     parser.add_argument(
@@ -2160,7 +2161,7 @@ def main() -> None:
             "<Ghost_layers> of the 3D SPHERIC decks (Test 02 and 10): 1 + S + 8 layers cover the "
             "small-cut aggregation stencil at the root-path guard 8, S the vertex-star depth (7 on "
             "the Test 02 mesh, 9 on mirrored Kuhn meshes); 18 covers both; 0 writes no key (the "
-            "solver's default), as the decks of 9802903f"
+            "solver's default)"
         ),
     )
     args = parser.parse_args()

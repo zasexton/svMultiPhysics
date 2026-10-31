@@ -215,7 +215,7 @@ def test_validation_solver_generator_declares_the_face_overlap_opt_out_only_for_
 def test_validation_solver_generator_writes_the_triggered_redistancing_by_default(tmp_path):
     # Decision D39 (D35 item 1): the SPHERIC decks enable the triggered
     # interface-preserving redistancing with the reconciliation and the patch
-    # bounds; off writes the decks of b94af982 (only that line differs).
+    # bounds; off writes the same decks without that one line.
     generator = _load_validation_mesh_generator()
     assert generator.INTERFACE_PRESERVING_REDISTANCING is True
     common = dict(
@@ -248,7 +248,7 @@ def test_validation_solver_generator_writes_the_triggered_redistancing_by_defaul
 def test_validation_generator_writes_free_slip_walls_by_default(tmp_path):
     # Decision D58: the SPHERIC decks fix only the normal velocity on every
     # wall, the obstacle included (one face file per obstacle plane);
-    # "--wall-condition no-slip" writes the no-slip decks of 8f145c4c.
+    # "--wall-condition no-slip" writes no-slip walls.
     generator = _load_validation_mesh_generator()
     assert generator.SPHERIC_FREE_SLIP_WALLS is True
     assert generator.SPHERIC_3D_GHOST_LAYERS == 1 + 9 + 8
