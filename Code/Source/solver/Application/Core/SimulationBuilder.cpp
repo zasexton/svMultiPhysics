@@ -1765,6 +1765,17 @@ void SimulationBuilder::createSolvers()
   const auto backend_kind = selectBackend(params_);
   oopCout() << "[svMultiPhysics::Application] SimulationBuilder: backend="
             << svmp::FE::backends::backendKindToString(backend_kind) << std::endl;
+  // Eigen holds the whole system on each rank but every rank assembles only
+  // its own cells: on more than one rank the rows of the other ranks stay
+  // empty.  Refuse it here rather than at the first factorization or
+  // collective state capture.
+  if (const int ranks = svmp::MeshComm::world().size();
+      backend_kind == svmp::FE::backends::BackendKind::Eigen && ranks > 1) {
+    throw std::runtime_error(
+        "[svMultiPhysics::Application] SimulationBuilder: Linear_algebra type=eigen is a serial backend and "
+        "this run has " + std::to_string(ranks) +
+        " ranks; run it on one rank or select fsils, petsc or trilinos.");
+  }
 
   svmp::FE::backends::BackendFactory::CreateOptions create_options{};
   create_options.dof_per_node = 1;
