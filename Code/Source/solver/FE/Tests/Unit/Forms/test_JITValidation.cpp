@@ -366,7 +366,8 @@ TEST(JITValidation, RejectsTimeDerivativeOrderTooHigh)
 {
     using namespace svmp::FE::forms;
 
-    const auto expr = FormExpr::parameterRef(0).dt(9);
+    svmp::FE::spaces::H1Space space(svmp::FE::ElementType::Tetra4, 1);
+    const auto expr = FormExpr::stateField(0, space, "u").dt(9);
     const auto r = jit::canCompile(expr, jit::ValidationOptions{.strictness = jit::Strictness::Strict});
     EXPECT_FALSE(r.ok);
     ASSERT_TRUE(r.first_issue.has_value());

@@ -28,6 +28,22 @@ FormExpr diagonalTensor(Real a, Real b, Real c)
 
 } // namespace
 
+TEST(FiniteDeformationForms, DimensionIsThePassedOneOrThatOfTheFieldsSpace)
+{
+    auto vector_space = spaces::VectorSpace(spaces::SpaceType::H1,
+                                            ElementType::Tetra4,
+                                            /*order=*/1,
+                                            /*components=*/3);
+    const auto u = FormExpr::trialFunction(*vector_space, "u");
+    EXPECT_EQ(finite_deformation::finiteDeformationDimension(u), 3);
+    EXPECT_EQ(finite_deformation::finiteDeformationDimension(u, 2), 2);
+    // Neither a dimension outside 1-3 nor a guess for a composite.
+    EXPECT_THROW((void)finite_deformation::finiteDeformationDimension(u, 4), std::invalid_argument);
+    EXPECT_THROW((void)finite_deformation::finiteDeformationDimension(u, -1), std::invalid_argument);
+    EXPECT_THROW((void)finite_deformation::finiteDeformationDimension(u + u), std::invalid_argument);
+    EXPECT_THROW((void)finite_deformation::deformationGradient(FormExpr::constant(1.0)), std::invalid_argument);
+}
+
 TEST(FiniteDeformationForms, BuildsFrameExplicitKinematicTerminals)
 {
     auto vector_space = spaces::VectorSpace(spaces::SpaceType::H1,

@@ -126,6 +126,23 @@ std::string invalidArgumentMessage(F&& f)
 
 } // namespace
 
+TEST(FormExprOperators, TheTimeDerivativeOfACompositeIsRefusedWhereItIsBuilt)
+{
+    auto space = std::make_shared<spaces::H1Space>(ElementType::Tetra4, 1);
+    const auto u = FormExpr::stateField(0, *space, "u");
+    EXPECT_NO_THROW((void)dt(u));
+    EXPECT_NO_THROW((void)dt(FormExpr::trialFunction(*space, "w"), 2));
+    EXPECT_NO_THROW((void)dt(FormExpr::discreteField(0, *space, "u")));
+    try {
+        (void)dt(2.0 * u);
+        FAIL() << "dt() of a composite builds a term no stencil evaluates";
+    } catch (const std::invalid_argument& error) {
+        const std::string message = error.what();
+        EXPECT_NE(message.find("the operand of dt() is a field"), std::string::npos) << message;
+        EXPECT_NE(message.find((2.0 * u).toString()), std::string::npos) << message;
+    }
+}
+
 TEST(FormExprEmptyOperands, CombiningAnEmptyFormThrowsAndNamesTheOperation)
 {
     Symbols s;

@@ -16,6 +16,8 @@
 #include "Forms/FormExpr.h"
 
 #include <algorithm>
+#include <stdexcept>
+#include <string>
 
 namespace svmp {
 namespace FE {
@@ -45,18 +47,33 @@ struct FiniteDeformationLinearizationExpressions {
     FormExpr dAlmansi{};
 };
 
+/// @p requested_dim when it is 1, 2 or 3; with 0, the topological dimension
+/// of the displacement's space.  Throws for any other dimension, and with 0
+/// when the displacement is not a field symbol (no space signature).
 [[nodiscard]] inline int finiteDeformationDimension(const FormExpr& displacement,
                                                     int requested_dim = 0)
 {
-    if (requested_dim > 0) {
-        return std::clamp(requested_dim, 1, 3);
-    }
-    if (displacement.isValid() && displacement.node() != nullptr) {
-        if (const auto* sig = displacement.node()->spaceSignature(); sig != nullptr) {
-            return std::clamp(sig->topological_dimension, 1, 3);
+    if (requested_dim != 0) {
+        if (requested_dim < 1 || requested_dim > 3) {
+            throw std::invalid_argument("finiteDeformationDimension: dimension " +
+                                        std::to_string(requested_dim) + " is not 1, 2 or 3");
         }
+        return requested_dim;
     }
-    return 3;
+    const auto* sig = displacement.isValid() && displacement.node() != nullptr
+                          ? displacement.node()->spaceSignature()
+                          : nullptr;
+    if (sig == nullptr) {
+        throw std::invalid_argument(
+            "finiteDeformationDimension: cannot infer the dimension of '" + displacement.toString() +
+            "', which is not a field symbol; pass the dimension");
+    }
+    if (sig->topological_dimension < 1 || sig->topological_dimension > 3) {
+        throw std::invalid_argument("finiteDeformationDimension: the space of '" + displacement.toString() +
+                                    "' has topological dimension " +
+                                    std::to_string(sig->topological_dimension));
+    }
+    return sig->topological_dimension;
 }
 
 [[nodiscard]] inline FormExpr deformationGradient(const FormExpr& displacement,

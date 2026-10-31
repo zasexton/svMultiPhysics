@@ -14312,12 +14312,13 @@ TEST(MovingDomainPhysics, ALEIncompressibleNavierStokesManufacturedResidualUsesM
     const auto q = FormExpr::constant(2.0);
     const auto rho = FormExpr::constant(1.25);
     const auto mu = FormExpr::constant(0.02);
+    const auto dudt = constantVector3(1.0, 0.0, -0.25);
     const auto stress = FormExpr::constant(2.0) * mu * sym(grad(u));
     const auto w_mesh = meshVelocity();
     const auto relative_advection = u - w_mesh;
 
     const auto momentum =
-        rho * inner(dt(u) + grad(u) * relative_advection, v) +
+        rho * inner(dudt + grad(u) * relative_advection, v) +
         rho * div(w_mesh) * inner(u, v) +
         FormExpr::constant(2.0) * mu * inner(sym(grad(u)), sym(grad(v))) -
         p * div(v);

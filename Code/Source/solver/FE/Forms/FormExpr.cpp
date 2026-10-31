@@ -2684,6 +2684,17 @@ FormExpr FormExpr::dt(int order) const
     if (order <= 0) {
         throw std::invalid_argument("FormExpr::dt: order must be >= 1");
     }
+    // The stencil of dt() combines the history of a field, so its operand is
+    // a field terminal (as the form compiler requires); refuse anything else
+    // here, where the author builds it, rather than at installation.
+    const auto type = node_->type();
+    if (type != FormExprType::TrialFunction && type != FormExprType::StateField &&
+        type != FormExprType::DiscreteField) {
+        throw std::invalid_argument(
+            "FormExpr::dt: the operand of dt() is a field (StateField, TrialFunction or DiscreteField), "
+            "but it is '" + node_->toString() + "'; write the time derivative of a composite through the "
+            "fields it holds, e.g. dt(c * u) as c * dt(u) for a constant c");
+    }
     return FormExpr(std::make_shared<TimeDerivativeNode>(node_, order));
 }
 

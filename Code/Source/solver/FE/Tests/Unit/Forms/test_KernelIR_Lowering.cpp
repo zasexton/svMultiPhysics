@@ -395,8 +395,16 @@ TEST(KernelIROptimize, NegateOfZeroCollapses)
 TEST(KernelIROptimize, TimeDerivativeOfZeroCollapses)
 {
     // dt(0) → TypedZero (TimeDerivative is truly shape-preserving:
-    // scalar→scalar for shapeless TypedZero input)
-    const auto expr = dt(FormExpr::typedZero());
+    // scalar→scalar for shapeless TypedZero input).  dt() takes a field, so
+    // the zero operand comes from a rewrite of dt(u), as lowering makes it.
+    spaces::H1Space space(ElementType::Tetra4, 1);
+    const auto expr = dt(FormExpr::stateField(0, space, "u"))
+                          .transformNodes([](const FormExprNode& n) -> std::optional<FormExpr> {
+                              if (n.type() == FormExprType::StateField) {
+                                  return FormExpr::typedZero();
+                              }
+                              return std::nullopt;
+                          });
     auto r = jit::lowerToKernelIR(expr);
     r.ir.optimize();
 

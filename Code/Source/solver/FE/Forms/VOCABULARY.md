@@ -361,7 +361,7 @@ Status: `implemented/public`.
 | `div(u)`, `curl(u)` | Vector differential operators |
 | `hessian(u)` | Spatial Hessian support for supported scalar/composite expressions and mappings |
 | `laplacian(u)` | `trace(hessian(u))` helper |
-| `dt(u, order)` | Symbolic time derivative; the stencil comes from the time integrator of the transient system |
+| `dt(u, order)` | Symbolic time derivative; the stencil comes from the time integrator of the transient system. Its operand is a field (`StateField`, `TrialFunction` or `DiscreteField`); `dt()` of anything else is refused where it is built |
 | `surfaceGradient(f, n)` | Projected surface gradient helper |
 | `surfaceDivergence(u, n)` | Projected surface divergence `div(u) - (grad(u) n).n` |
 | `surfaceLaplacian(f, n)` | Surface Laplacian helper |
@@ -806,7 +806,7 @@ Status: `implemented/public` helper header, namespace
 |------------|-------|
 | `deformationGradient(u[, dim])` | `F = I + grad(u)` |
 | `deformationGradientVariation(du)` | Variation of `F` |
-| `finiteDeformationDimension(u[, dim])` | Dimension from the space signature; 3 when it cannot be inferred |
+| `finiteDeformationDimension(u[, dim])` | `dim` when given (1, 2 or 3), otherwise the topological dimension of `u`'s space; throws for another `dim` and, without one, when `u` is not a field symbol |
 | `jacobian(F)` | `det(F)` helper in finite-deformation namespace |
 | `inverseDeformationGradient(F)` | `F^{-1}` |
 | `inverseTransposeDeformationGradient(F)` | `F^{-T}` |
