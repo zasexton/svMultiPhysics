@@ -4,6 +4,7 @@
 #include "Physics/Core/EquationModuleRegistry.h"
 #include "Physics/Core/JITRuntimePolicy.h"
 #include "Physics/Core/TemporalValues.h"
+#include "Physics/Options/InputReaders.h"
 #include "Physics/Materials/Solid/IsochoricNeoHookeanPK1.h"
 
 #include "FE/Spaces/SpaceFactory.h"
@@ -25,6 +26,9 @@
 
 namespace {
 
+// The generic readers of equation input (decision D52).
+using namespace svmp::Physics::options;
+
 struct SolidMaterialProperties {
   svmp::FE::Real density{1.0};
   svmp::FE::Real elasticity_modulus{1.0};
@@ -34,21 +38,6 @@ struct SolidMaterialProperties {
   svmp::FE::Real bulk_wave_speed{0.0};
 };
 
-std::string trim_copy(std::string s)
-{
-  auto not_space = [](unsigned char ch) { return !std::isspace(ch); };
-  s.erase(s.begin(), std::find_if(s.begin(), s.end(), not_space));
-  s.erase(std::find_if(s.rbegin(), s.rend(), not_space).base(), s.end());
-  return s;
-}
-
-std::string lower_copy(std::string s)
-{
-  std::transform(s.begin(), s.end(), s.begin(),
-                 [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
-  return s;
-}
-
 std::string normalize_output_name(std::string s)
 {
   s = lower_copy(trim_copy(std::move(s)));
@@ -57,86 +46,6 @@ std::string normalize_output_name(std::string s)
           }),
           s.end());
   return s;
-}
-
-const svmp::Physics::ParameterValue* find_param(const svmp::Physics::ParameterMap& params,
-                                                std::string_view key)
-{
-  const auto it = params.find(std::string(key));
-  return (it == params.end()) ? nullptr : &it->second;
-}
-
-bool parse_bool_relaxed(std::string_view raw)
-{
-  const auto v = lower_copy(trim_copy(std::string(raw)));
-  return v == "true" || v == "1" || v == "yes" || v == "on";
-}
-
-double parse_double(std::string_view raw, std::string_view context)
-{
-  const auto s = trim_copy(std::string(raw));
-  try {
-    size_t pos = 0;
-    const double v = std::stod(s, &pos);
-    if (pos != s.size()) {
-      throw std::runtime_error("");
-    }
-    return v;
-  } catch (...) {
-    throw std::runtime_error("[svMultiPhysics::Physics] Failed to parse numeric value '" + std::string(raw) +
-                             "' for " + std::string(context) + ".");
-  }
-}
-
-int parse_positive_int(std::string_view raw, std::string_view context)
-{
-  const auto s = trim_copy(std::string(raw));
-  try {
-    size_t pos = 0;
-    const int v = std::stoi(s, &pos);
-    if (pos != s.size() || v < 1) {
-      throw std::runtime_error("");
-    }
-    return v;
-  } catch (...) {
-    throw std::runtime_error("[svMultiPhysics::Physics] Failed to parse positive integer value '" +
-                             std::string(raw) + "' for " + std::string(context) + ".");
-  }
-}
-
-std::optional<double> get_defined_double(const svmp::Physics::ParameterMap& params, std::string_view key)
-{
-  const auto* p = find_param(params, key);
-  if (!p || !p->defined) {
-    return std::nullopt;
-  }
-  return parse_double(p->value, key);
-}
-
-std::optional<std::string> get_defined_string(const svmp::Physics::ParameterMap& params, std::string_view key)
-{
-  const auto* p = find_param(params, key);
-  if (!p || !p->defined) {
-    return std::nullopt;
-  }
-  auto value = trim_copy(p->value);
-  if (value.empty()) {
-    return std::nullopt;
-  }
-  return value;
-}
-
-std::optional<bool> get_defined_bool(const svmp::Physics::ParameterMap& params, std::string_view key)
-{
-  const auto* p = find_param(params, key);
-  if (!p || !p->defined) {
-    return std::nullopt;
-  }
-  const auto value = trim_copy(p->value);
-  if (value.empty()) {
-    return std::nullopt;
-  }
-  return parse_bool_relaxed(value);
 }
 
 std::optional<bool> module_option_bool(std::string_view module_options,
@@ -224,35 +133,6 @@ bool resolve_ustruct_time_derivative_terms(const svmp::Physics::EquationModuleIn
   return default_enabled;
 }
 
-std::vector<int> parse_int_list(std::string raw)
-{
-  for (char& ch : raw) {
-    if (ch == '(' || ch == ')' || ch == ',' || ch == ';') {
-      ch = ' ';
-    }
-  }
-
-  std::istringstream in(raw);
-  std::vector<int> out;
-  int value = 0;
-  while (in >> value) {
-    out.push_back(value);
-  }
-  return out;
-}
-
-svmp::FE::Real direction_component(const std::vector<int>& effective_dir, int component)
-{
-  if (component < 0) {
-    return static_cast<svmp::FE::Real>(0.0);
-  }
-  const auto idx = static_cast<std::size_t>(component);
-  if (idx >= effective_dir.size()) {
-    return static_cast<svmp::FE::Real>(1.0);
-  }
-  return static_cast<svmp::FE::Real>(effective_dir[idx]);
-}
-
 template <class ScalarValue>
 void fill_vector(std::array<ScalarValue, 3>& dst,
                  int dim,
@@ -286,88 +166,6 @@ std::array<bool, 3> fill_dirichlet_vector(std::array<ScalarValue, 3>& dst,
     }
   }
   return active;
-}
-
-const svmp::Physics::DomainInput&
-select_single_domain(const svmp::Physics::EquationModuleInput& input)
-{
-  if (!input.domains.empty()) {
-    if (input.domains.size() != 1u) {
-      throw std::runtime_error(
-          "[svMultiPhysics::Physics] Multiple <Domain> blocks are not supported for the new solver ustruct module yet. "
-          "Set <Use_new_OOP_solver>false</Use_new_OOP_solver> to use the legacy solver.");
-    }
-    return input.domains.front();
-  }
-  return input.default_domain;
-}
-
-svmp::FE::ElementType infer_base_element_type(const svmp::MeshBase& mesh)
-{
-  if (mesh.n_cells() == 0) {
-    throw std::runtime_error("[svMultiPhysics::Physics] Mesh has no cells; cannot infer FE element type.");
-  }
-
-  const auto& shapes = mesh.cell_shapes();
-  if (shapes.empty()) {
-    throw std::runtime_error("[svMultiPhysics::Physics] Mesh has no cell shapes; cannot infer FE element type.");
-  }
-
-  if (shapes.front().is_mixed_order) {
-    throw std::runtime_error(
-        "[svMultiPhysics::Physics] Mixed-order meshes are not supported by the new solver yet. "
-        "Set <Use_new_OOP_solver>false</Use_new_OOP_solver> to use the legacy solver.");
-  }
-
-  const auto family = shapes.front().family;
-  for (const auto& s : shapes) {
-    if (s.family != family) {
-      throw std::runtime_error(
-          "[svMultiPhysics::Physics] Mixed cell families are not supported by the new solver yet. "
-          "Set <Use_new_OOP_solver>false</Use_new_OOP_solver> to use the legacy solver.");
-    }
-  }
-
-  switch (family) {
-    case svmp::CellFamily::Triangle: return svmp::FE::ElementType::Triangle3;
-    case svmp::CellFamily::Quad: return svmp::FE::ElementType::Quad4;
-    case svmp::CellFamily::Tetra: return svmp::FE::ElementType::Tetra4;
-    case svmp::CellFamily::Hex: return svmp::FE::ElementType::Hex8;
-    case svmp::CellFamily::Wedge: return svmp::FE::ElementType::Wedge6;
-    case svmp::CellFamily::Pyramid: return svmp::FE::ElementType::Pyramid5;
-    default: break;
-  }
-
-  throw std::runtime_error(
-      "[svMultiPhysics::Physics] Unsupported mesh cell family for new solver ustruct module. "
-      "Set <Use_new_OOP_solver>false</Use_new_OOP_solver> to use the legacy solver.");
-}
-
-int infer_polynomial_order(const svmp::MeshBase& mesh)
-{
-  const auto& shapes = mesh.cell_shapes();
-  if (shapes.empty()) {
-    return 1;
-  }
-
-  const int order = shapes.front().order > 0 ? shapes.front().order : 1;
-  for (const auto& s : shapes) {
-    const int s_order = s.order > 0 ? s.order : 1;
-    if (s_order != order) {
-      throw std::runtime_error(
-          "[svMultiPhysics::Physics] Mixed polynomial orders are not supported by the new solver yet. "
-          "Set <Use_new_OOP_solver>false</Use_new_OOP_solver> to use the legacy solver.");
-    }
-  }
-  return order;
-}
-
-int resolve_element_order(const svmp::Physics::EquationModuleInput& input, int inferred_order)
-{
-  if (const auto* p = find_param(input.equation_params, "Element_order"); p && p->defined) {
-    return parse_positive_int(p->value, "Element_order");
-  }
-  return inferred_order;
 }
 
 svmp::Physics::formulations::ustruct::VolumetricPenaltyModel
@@ -695,7 +493,7 @@ create_ustruct_from_input(const svmp::Physics::EquationModuleInput& input,
     throw std::runtime_error("[svMultiPhysics::Physics] ustruct module factory received null mesh.");
   }
 
-  const auto& domain = select_single_domain(input);
+  const auto& domain = select_single_domain(input, "ustruct");
   const int dim = input.mesh->dim();
   if (dim != 2 && dim != 3) {
     throw std::runtime_error(

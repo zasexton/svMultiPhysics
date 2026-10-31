@@ -81,6 +81,22 @@ double parse_double(std::string_view raw, std::string_view context)
   }
 }
 
+double parse_finite_double(std::string_view raw, std::string_view context)
+{
+  const auto s = trim_copy(std::string(raw));
+  try {
+    size_t pos = 0;
+    const double v = std::stod(s, &pos);
+    if (pos != s.size() || !std::isfinite(v)) {
+      throw std::runtime_error("");
+    }
+    return v;
+  } catch (...) {
+    throw std::runtime_error("[svMultiPhysics::Physics] Failed to parse numeric value '" + std::string(raw) +
+                             "' for " + std::string(context) + ".");
+  }
+}
+
 int parse_positive_int(std::string_view raw, std::string_view context)
 {
   const auto s = trim_copy(std::string(raw));
@@ -152,7 +168,11 @@ std::optional<bool> get_defined_bool(const svmp::Physics::ParameterMap& params, 
   if (!p || !p->defined) {
     return std::nullopt;
   }
-  return parse_bool_relaxed(p->value);
+  const auto value = trim_copy(p->value);
+  if (value.empty()) {
+    return std::nullopt;
+  }
+  return parse_bool_relaxed(value);
 }
 
 std::optional<std::string> get_defined_string(const svmp::Physics::ParameterMap& params, std::string_view key)

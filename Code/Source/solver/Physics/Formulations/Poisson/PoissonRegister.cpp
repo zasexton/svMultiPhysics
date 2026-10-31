@@ -3,6 +3,7 @@
 #include "Physics/Core/EquationModuleInput.h"
 #include "Physics/Core/JITRuntimePolicy.h"
 #include "Physics/Core/EquationModuleRegistry.h"
+#include "Physics/Options/InputReaders.h"
 
 #include "FE/Spaces/SpaceFactory.h"
 #include "Mesh/Core/MeshBase.h"
@@ -21,100 +22,8 @@
 
 namespace {
 
-std::string trim_copy(std::string s)
-{
-  auto not_space = [](unsigned char ch) { return !std::isspace(ch); };
-  s.erase(s.begin(), std::find_if(s.begin(), s.end(), not_space));
-  s.erase(std::find_if(s.rbegin(), s.rend(), not_space).base(), s.end());
-  return s;
-}
-
-std::string lower_copy(std::string s)
-{
-  std::transform(s.begin(), s.end(), s.begin(),
-                 [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
-  return s;
-}
-
-const svmp::Physics::ParameterValue* find_param(const svmp::Physics::ParameterMap& params,
-                                                std::string_view key)
-{
-  const auto it = params.find(std::string(key));
-  if (it == params.end()) {
-    return nullptr;
-  }
-  return &it->second;
-}
-
-double parse_double(std::string_view raw, std::string_view context)
-{
-  const auto s = trim_copy(std::string(raw));
-  try {
-    size_t pos = 0;
-    const double v = std::stod(s, &pos);
-    if (pos != s.size()) {
-      throw std::runtime_error("");
-    }
-    return v;
-  } catch (...) {
-    throw std::runtime_error("[svMultiPhysics::Physics] Failed to parse numeric value '" + std::string(raw) +
-                             "' for " + std::string(context) + ".");
-  }
-}
-
-int parse_positive_int(std::string_view raw, std::string_view context)
-{
-  const auto s = trim_copy(std::string(raw));
-  try {
-    size_t pos = 0;
-    const int v = std::stoi(s, &pos);
-    if (pos != s.size() || v < 1) {
-      throw std::runtime_error("");
-    }
-    return v;
-  } catch (...) {
-    throw std::runtime_error("[svMultiPhysics::Physics] Failed to parse positive integer value '" +
-                             std::string(raw) + "' for " + std::string(context) + ".");
-  }
-}
-
-std::vector<std::string> split_csv_line(const std::string& line)
-{
-  std::vector<std::string> out;
-  std::string field;
-  std::istringstream in(line);
-  while (std::getline(in, field, ',')) {
-    out.push_back(trim_copy(field));
-  }
-  if (!line.empty() && line.back() == ',') {
-    out.emplace_back();
-  }
-  return out;
-}
-
-svmp::FE::GlobalIndex parse_global_index(std::string_view raw, std::string_view context)
-{
-  const auto s = trim_copy(std::string(raw));
-  try {
-    size_t pos = 0;
-    const long long value = std::stoll(s, &pos);
-    if (pos != s.size() || value < 0) {
-      throw std::runtime_error("");
-    }
-    return static_cast<svmp::FE::GlobalIndex>(value);
-  } catch (...) {
-    throw std::runtime_error("[svMultiPhysics::Physics] Failed to parse non-negative integer value '" +
-                             std::string(raw) + "' for " + std::string(context) + ".");
-  }
-}
-
-bool values_match(svmp::FE::Real a, svmp::FE::Real b)
-{
-  const double da = static_cast<double>(a);
-  const double db = static_cast<double>(b);
-  const double scale = 1.0 + std::max(std::abs(da), std::abs(db));
-  return std::abs(da - db) <= 1e-12 * scale;
-}
+// The generic readers of equation input (decision D52).
+using namespace svmp::Physics::options;
 
 svmp::Physics::formulations::poisson::NodeIdType parse_node_id_type(std::string_view id_type)
 {
@@ -228,110 +137,10 @@ read_node_pressure_csv(const std::string& path)
   return out;
 }
 
-svmp::FE::ElementType infer_base_element_type(const svmp::MeshBase& mesh)
-{
-  if (mesh.n_cells() == 0) {
-    throw std::runtime_error("[svMultiPhysics::Physics] Mesh has no cells; cannot infer FE element type.");
-  }
-
-  const auto& shapes = mesh.cell_shapes();
-  if (shapes.empty()) {
-    throw std::runtime_error("[svMultiPhysics::Physics] Mesh has no cell shapes; cannot infer FE element type.");
-  }
-
-  if (shapes.front().is_mixed_order) {
-    throw std::runtime_error(
-        "[svMultiPhysics::Physics] Mixed-order meshes are not supported by the new solver yet. "
-        "Set <Use_new_OOP_solver>false</Use_new_OOP_solver> to use the legacy solver.");
-  }
-
-  const auto family = shapes.front().family;
-  for (const auto& s : shapes) {
-    if (s.family != family) {
-      throw std::runtime_error(
-          "[svMultiPhysics::Physics] Mixed cell families are not supported by the new solver yet. "
-          "Set <Use_new_OOP_solver>false</Use_new_OOP_solver> to use the legacy solver.");
-    }
-  }
-
-  switch (family) {
-    case svmp::CellFamily::Line: return svmp::FE::ElementType::Line2;
-    case svmp::CellFamily::Triangle: return svmp::FE::ElementType::Triangle3;
-    case svmp::CellFamily::Quad: return svmp::FE::ElementType::Quad4;
-    case svmp::CellFamily::Tetra: return svmp::FE::ElementType::Tetra4;
-    case svmp::CellFamily::Hex: return svmp::FE::ElementType::Hex8;
-    case svmp::CellFamily::Wedge: return svmp::FE::ElementType::Wedge6;
-    case svmp::CellFamily::Pyramid: return svmp::FE::ElementType::Pyramid5;
-    default:
-      break;
-  }
-
-  throw std::runtime_error(
-      "[svMultiPhysics::Physics] Unsupported mesh cell family for new solver. "
-      "Set <Use_new_OOP_solver>false</Use_new_OOP_solver> to use the legacy solver.");
-}
-
-int infer_polynomial_order(const svmp::MeshBase& mesh)
-{
-  const auto& shapes = mesh.cell_shapes();
-  if (shapes.empty()) {
-    return 1;
-  }
-
-  const int order = shapes.front().order > 0 ? shapes.front().order : 1;
-  for (const auto& s : shapes) {
-    const int s_order = s.order > 0 ? s.order : 1;
-    if (s_order != order) {
-      throw std::runtime_error(
-          "[svMultiPhysics::Physics] Mixed polynomial orders are not supported by the new solver yet. "
-          "Set <Use_new_OOP_solver>false</Use_new_OOP_solver> to use the legacy solver.");
-    }
-  }
-
-  return order;
-}
-
-int resolve_element_order(const svmp::Physics::EquationModuleInput& input, int inferred_order)
-{
-  if (const auto* p = find_param(input.equation_params, "Element_order"); p && p->defined) {
-    return parse_positive_int(p->value, "Element_order");
-  }
-  return inferred_order;
-}
-
 void apply_thermal_properties(const svmp::Physics::EquationModuleInput& input,
                               svmp::Physics::formulations::poisson::PoissonOptions& options)
 {
-  using svmp::Physics::ParameterValue;
-
-  if (!input.domains.empty()) {
-    if (input.domains.size() != 1) {
-      throw std::runtime_error(
-          "[svMultiPhysics::Physics] Multiple <Domain> blocks are not supported for the new solver Poisson module yet. "
-          "Set <Use_new_OOP_solver>false</Use_new_OOP_solver> to use the legacy solver.");
-    }
-
-    const auto& dom = input.domains.front();
-    if (const auto* p = find_param(dom.params, "Conductivity"); p && p->defined) {
-      options.diffusion = static_cast<svmp::FE::Real>(parse_double(p->value, "Domain/Conductivity"));
-    } else if (const auto* q = find_param(dom.params, "Isotropic_conductivity"); q && q->defined) {
-      options.diffusion = static_cast<svmp::FE::Real>(parse_double(q->value, "Domain/Isotropic_conductivity"));
-    }
-
-    if (const auto* p = find_param(dom.params, "Source_term"); p && p->defined) {
-      options.source = static_cast<svmp::FE::Real>(parse_double(p->value, "Domain/Source_term"));
-    }
-
-    if (const auto* p = find_param(dom.params, "Anisotropic_conductivity"); p && p->defined &&
-                           !trim_copy(p->value).empty()) {
-      throw std::runtime_error(
-          "[svMultiPhysics::Physics] Anisotropic_conductivity is not supported for the new solver Poisson module yet. "
-          "Set <Use_new_OOP_solver>false</Use_new_OOP_solver> to use the legacy solver.");
-    }
-    return;
-  }
-
-  const auto& dom = input.default_domain;
+  const auto& dom = select_single_domain(input, "Poisson");
   if (const auto* p = find_param(dom.params, "Conductivity"); p && p->defined) {
     options.diffusion = static_cast<svmp::FE::Real>(parse_double(p->value, "Domain/Conductivity"));
   } else if (const auto* q = find_param(dom.params, "Isotropic_conductivity"); q && q->defined) {
@@ -342,8 +151,7 @@ void apply_thermal_properties(const svmp::Physics::EquationModuleInput& input,
     options.source = static_cast<svmp::FE::Real>(parse_double(p->value, "Domain/Source_term"));
   }
 
-  if (const auto* p = find_param(dom.params, "Anisotropic_conductivity"); p && p->defined &&
-                         !trim_copy(p->value).empty()) {
+  if (has_nonempty_defined(dom.params, "Anisotropic_conductivity")) {
     throw std::runtime_error(
         "[svMultiPhysics::Physics] Anisotropic_conductivity is not supported for the new solver Poisson module yet. "
         "Set <Use_new_OOP_solver>false</Use_new_OOP_solver> to use the legacy solver.");
@@ -372,13 +180,10 @@ void apply_scalar_bcs(const svmp::Physics::EquationModuleInput& input,
           time_value + "'). Set <Use_new_OOP_solver>false</Use_new_OOP_solver> to use the legacy solver.");
     }
 
-    const auto has_nonempty_defined = [&](std::string_view key) {
-      const auto* p = find_param(bc.params, key);
-      return (p && p->defined && !trim_copy(p->value).empty());
-    };
-
-    if (has_nonempty_defined("Temporal_values_file_path") || has_nonempty_defined("Spatial_values_file_path") ||
-        has_nonempty_defined("Temporal_and_spatial_values_file_path") || has_nonempty_defined("Bct_file_path")) {
+    if (has_nonempty_defined(bc.params, "Temporal_values_file_path") ||
+        has_nonempty_defined(bc.params, "Spatial_values_file_path") ||
+        has_nonempty_defined(bc.params, "Temporal_and_spatial_values_file_path") ||
+        has_nonempty_defined(bc.params, "Bct_file_path")) {
       throw std::runtime_error(
           "[svMultiPhysics::Physics] Spatial/temporal boundary condition files are not supported for the new solver "
           "Poisson module yet. Set <Use_new_OOP_solver>false</Use_new_OOP_solver> to use the legacy solver.");
@@ -391,11 +196,7 @@ void apply_scalar_bcs(const svmp::Physics::EquationModuleInput& input,
     const svmp::FE::Real value =
         static_cast<svmp::FE::Real>(value_param ? parse_double(value_param->value, "Add_BC/Value") : 0.0);
 
-    const auto* weak_param = find_param(bc.params, "Weakly_applied");
-    const bool weak = weak_param && weak_param->defined && (lower_copy(trim_copy(weak_param->value)) == "1" ||
-                                                            lower_copy(trim_copy(weak_param->value)) == "true" ||
-                                                            lower_copy(trim_copy(weak_param->value)) == "yes" ||
-                                                            lower_copy(trim_copy(weak_param->value)) == "on");
+    const bool weak = get_defined_bool(bc.params, "Weakly_applied").value_or(false);
 
     if (bc_type == "Dirichlet" || bc_type == "Dir") {
       PoissonOptions::DirichletBC dir{};

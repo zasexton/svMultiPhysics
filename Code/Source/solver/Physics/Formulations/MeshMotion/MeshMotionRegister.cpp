@@ -4,6 +4,7 @@
 #include "Physics/Core/EquationModuleInput.h"
 #include "Physics/Core/EquationModuleRegistry.h"
 #include "Physics/Core/JITRuntimePolicy.h"
+#include "Physics/Options/InputReaders.h"
 
 #include "FE/Spaces/SpaceFactory.h"
 #include "Mesh/Core/MeshBase.h"
@@ -26,20 +27,8 @@ namespace {
 
 namespace mm = svmp::Physics::formulations::mesh_motion;
 
-std::string trim_copy(std::string s)
-{
-  auto not_space = [](unsigned char ch) { return !std::isspace(ch); };
-  s.erase(s.begin(), std::find_if(s.begin(), s.end(), not_space));
-  s.erase(std::find_if(s.rbegin(), s.rend(), not_space).base(), s.end());
-  return s;
-}
-
-std::string lower_copy(std::string s)
-{
-  std::transform(s.begin(), s.end(), s.begin(),
-                 [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
-  return s;
-}
+// The generic readers of equation input (decision D52).
+using namespace svmp::Physics::options;
 
 std::string normalized_token(std::string s)
 {
@@ -49,68 +38,6 @@ std::string normalized_token(std::string s)
           }),
           s.end());
   return s;
-}
-
-const svmp::Physics::ParameterValue* find_param(const svmp::Physics::ParameterMap& params,
-                                                std::string_view key)
-{
-  const auto it = params.find(std::string(key));
-  return (it == params.end()) ? nullptr : &it->second;
-}
-
-std::optional<std::string> get_defined_string(
-    const svmp::Physics::ParameterMap& params,
-    std::initializer_list<std::string_view> keys)
-{
-  for (const auto key : keys) {
-    const auto* p = find_param(params, key);
-    if (!p || !p->defined) {
-      continue;
-    }
-    auto value = trim_copy(p->value);
-    if (!value.empty()) {
-      return value;
-    }
-  }
-  return std::nullopt;
-}
-
-bool parse_bool_relaxed(std::string_view raw)
-{
-  const auto value = lower_copy(trim_copy(std::string(raw)));
-  return value == "true" || value == "1" || value == "yes" || value == "on";
-}
-
-std::optional<bool> get_defined_bool(const svmp::Physics::ParameterMap& params,
-                                     std::initializer_list<std::string_view> keys)
-{
-  for (const auto key : keys) {
-    const auto* p = find_param(params, key);
-    if (!p || !p->defined) {
-      continue;
-    }
-    const auto value = trim_copy(p->value);
-    if (!value.empty()) {
-      return parse_bool_relaxed(value);
-    }
-  }
-  return std::nullopt;
-}
-
-double parse_double(std::string_view raw, std::string_view context)
-{
-  const auto s = trim_copy(std::string(raw));
-  try {
-    size_t pos = 0;
-    const double v = std::stod(s, &pos);
-    if (pos != s.size() || !std::isfinite(v)) {
-      throw std::runtime_error("");
-    }
-    return v;
-  } catch (...) {
-    throw std::runtime_error("[svMultiPhysics::Physics] Failed to parse numeric value '" +
-                             std::string(raw) + "' for " + std::string(context) + ".");
-  }
 }
 
 std::optional<svmp::FE::Real> get_defined_real(
@@ -125,43 +52,10 @@ std::optional<svmp::FE::Real> get_defined_real(
     }
     const auto value = trim_copy(p->value);
     if (!value.empty()) {
-      return static_cast<svmp::FE::Real>(parse_double(value, context));
+      return static_cast<svmp::FE::Real>(parse_finite_double(value, context));
     }
   }
   return std::nullopt;
-}
-
-int parse_positive_int(std::string_view raw, std::string_view context)
-{
-  const auto s = trim_copy(std::string(raw));
-  try {
-    size_t pos = 0;
-    const int v = std::stoi(s, &pos);
-    if (pos != s.size() || v < 1) {
-      throw std::runtime_error("");
-    }
-    return v;
-  } catch (...) {
-    throw std::runtime_error("[svMultiPhysics::Physics] Failed to parse positive integer value '" +
-                             std::string(raw) + "' for " + std::string(context) + ".");
-  }
-}
-
-std::vector<int> parse_int_list(std::string raw)
-{
-  for (char& ch : raw) {
-    if (ch == '(' || ch == ')' || ch == ',' || ch == ';') {
-      ch = ' ';
-    }
-  }
-
-  std::istringstream in(raw);
-  std::vector<int> out;
-  int value = 0;
-  while (in >> value) {
-    out.push_back(value);
-  }
-  return out;
 }
 
 std::vector<svmp::FE::Real> parse_real_list(std::string raw, std::string_view context)
@@ -189,18 +83,6 @@ std::vector<svmp::FE::Real> parse_real_list(std::string raw, std::string_view co
   return out;
 }
 
-svmp::FE::Real direction_component(const std::vector<int>& effective_dir, int component)
-{
-  if (component < 0) {
-    return static_cast<svmp::FE::Real>(0.0);
-  }
-  const auto idx = static_cast<std::size_t>(component);
-  if (idx >= effective_dir.size()) {
-    return static_cast<svmp::FE::Real>(1.0);
-  }
-  return static_cast<svmp::FE::Real>(effective_dir[idx]);
-}
-
 std::array<mm::HarmonicMeshMotionOptions::ScalarValue, 3>
 parse_vector_value(const svmp::Physics::ParameterMap& params,
                    std::initializer_list<std::string_view> keys,
@@ -211,12 +93,12 @@ parse_vector_value(const svmp::Physics::ParameterMap& params,
       mm::HarmonicMeshMotionOptions::ScalarValue{0.0},
       mm::HarmonicMeshMotionOptions::ScalarValue{0.0},
       mm::HarmonicMeshMotionOptions::ScalarValue{0.0}};
-  const auto raw = get_defined_string(params, keys).value_or("0.0");
+  const auto raw = first_defined_string(params, keys).value_or("0.0");
   const auto parsed = parse_real_list(raw, context);
   if (parsed.size() == 1u) {
     std::vector<int> effective_dir;
     if (const auto raw_direction =
-            get_defined_string(params, {"Effective_direction", "EffectiveDirection"})) {
+            first_defined_string(params, {"Effective_direction", "EffectiveDirection"})) {
       effective_dir = parse_int_list(*raw_direction);
     }
     for (int d = 0; d < dim; ++d) {
@@ -256,11 +138,11 @@ std::array<bool, 3> parse_zero_dirichlet_component_mask(const svmp::Physics::Par
 {
   std::array<bool, 3> active{true, true, true};
   const auto raw_direction =
-      get_defined_string(params, {"Effective_direction", "EffectiveDirection"});
+      first_defined_string(params, {"Effective_direction", "EffectiveDirection"});
   if (!raw_direction) {
     return active;
   }
-  const auto parsed = parse_real_list(get_defined_string(params, {"Value"}).value_or("0.0"), context);
+  const auto parsed = parse_real_list(first_defined_string(params, {"Value"}).value_or("0.0"), context);
   if (parsed.size() != 1u || parsed.front() != 0.0) {
     return active;
   }
@@ -324,77 +206,20 @@ mm::TangentialMeshPolicy parse_tangential_policy(std::string_view raw,
                            " policy must be 'free', 'smoothing_only', or 'prescribed'.");
 }
 
-svmp::FE::ElementType infer_base_element_type(const svmp::MeshBase& mesh)
-{
-  if (mesh.n_cells() == 0) {
-    throw std::runtime_error("[svMultiPhysics::Physics] Mesh has no cells; cannot infer FE element type.");
-  }
-  const auto& shapes = mesh.cell_shapes();
-  if (shapes.empty()) {
-    throw std::runtime_error("[svMultiPhysics::Physics] Mesh has no cell shapes; cannot infer FE element type.");
-  }
-  if (shapes.front().is_mixed_order) {
-    throw std::runtime_error("[svMultiPhysics::Physics] Mixed-order meshes are not supported by mesh motion.");
-  }
-
-  const auto family = shapes.front().family;
-  for (const auto& s : shapes) {
-    if (s.family != family) {
-      throw std::runtime_error("[svMultiPhysics::Physics] Mixed cell families are not supported by mesh motion.");
-    }
-  }
-
-  switch (family) {
-    case svmp::CellFamily::Line: return svmp::FE::ElementType::Line2;
-    case svmp::CellFamily::Triangle: return svmp::FE::ElementType::Triangle3;
-    case svmp::CellFamily::Quad: return svmp::FE::ElementType::Quad4;
-    case svmp::CellFamily::Tetra: return svmp::FE::ElementType::Tetra4;
-    case svmp::CellFamily::Hex: return svmp::FE::ElementType::Hex8;
-    case svmp::CellFamily::Wedge: return svmp::FE::ElementType::Wedge6;
-    case svmp::CellFamily::Pyramid: return svmp::FE::ElementType::Pyramid5;
-    default: break;
-  }
-  throw std::runtime_error("[svMultiPhysics::Physics] Unsupported mesh cell family for mesh motion.");
-}
-
-int infer_polynomial_order(const svmp::MeshBase& mesh)
-{
-  const auto& shapes = mesh.cell_shapes();
-  if (shapes.empty()) {
-    return 1;
-  }
-  const int order = shapes.front().order > 0 ? shapes.front().order : 1;
-  for (const auto& s : shapes) {
-    const int s_order = s.order > 0 ? s.order : 1;
-    if (s_order != order) {
-      throw std::runtime_error("[svMultiPhysics::Physics] Mixed polynomial orders are not supported by mesh motion.");
-    }
-  }
-  return order;
-}
-
-int resolve_element_order(const svmp::Physics::EquationModuleInput& input, int inferred_order)
-{
-  if (const auto* p = find_param(input.equation_params, "Element_order"); p && p->defined) {
-    return parse_positive_int(p->value, "Element_order");
-  }
-  return inferred_order;
-}
-
 template <class Options>
 void apply_common_params(const svmp::Physics::ParameterMap& params, Options& options)
 {
-  if (const auto value = get_defined_string(
+  if (const auto value = first_defined_string(
           params,
           {"Field_name", "Mesh_displacement_field"})) {
     options.field_name = *value;
   }
-  if (const auto value = get_defined_bool(
+  if (const auto value = first_defined_bool(
           params,
           {"Auto_register_field", "Auto_register_mesh_displacement_field"})) {
     options.auto_register_field = *value;
   }
-  if (const auto value = get_defined_bool(
+  if (const auto value = first_defined_bool(
           params,
           {"Bind_as_mesh_displacement"})) {
     options.bind_as_mesh_displacement = *value;
@@ -411,7 +236,7 @@ void apply_harmonic_params(const svmp::Physics::ParameterMap& params,
   if (const auto value = get_defined_real(params, {"Stiffness"}, "Stiffness")) {
     options.stiffness = *value;
   }
-  if (const auto value = get_defined_string(params, {"Harmonic_quantity"})) {
+  if (const auto value = first_defined_string(params, {"Harmonic_quantity"})) {
     const auto token = normalized_token(*value);
     if (token == "displacement" || token == "meshdisplacement") {
       options.quantity = mm::HarmonicQuantity::Displacement;
@@ -441,7 +266,7 @@ mm::NormalConstraintBC parse_normal_constraint_bc(const svmp::Physics::BoundaryC
   mm::NormalConstraintBC out{};
   out.boundary_marker = bc.boundary_marker;
   out.quantity = parse_normal_quantity(
-      get_defined_string(bc.params, {"Quantity"}).value_or("displacement"),
+      first_defined_string(bc.params, {"Quantity"}).value_or("displacement"),
       "mesh-motion normal constraint");
   out.target = get_defined_real(bc.params, {"Target", "Value"}, "Normal_constraint/Target").value_or(0.0);
   out.penalty = get_defined_real(bc.params, {"Penalty"}, "Normal_constraint/Penalty")
@@ -458,10 +283,10 @@ mm::TangentialPolicyBC parse_tangential_policy_bc(const svmp::Physics::BoundaryC
   mm::TangentialPolicyBC out{};
   out.boundary_marker = bc.boundary_marker;
   out.policy = parse_tangential_policy(
-      get_defined_string(bc.params, {"Tangential_policy"}).value_or("smoothing_only"),
+      first_defined_string(bc.params, {"Tangential_policy"}).value_or("smoothing_only"),
       "mesh-motion tangential policy");
   out.quantity = parse_tangential_quantity(
-      get_defined_string(bc.params, {"Quantity"}).value_or("displacement"),
+      first_defined_string(bc.params, {"Quantity"}).value_or("displacement"),
       "mesh-motion tangential policy");
   out.target = parse_vector_value(bc.params, {"Target", "Value"}, dim, "Tangential_policy/Target");
   out.penalty =
@@ -485,7 +310,7 @@ void apply_mesh_motion_bcs(const svmp::Physics::EquationModuleInput& input,
     }
 
     const auto type = normalized_token(
-        get_defined_string(bc.params, {"Type"}).value_or(std::string{}));
+        first_defined_string(bc.params, {"Type"}).value_or(std::string{}));
 
     if (type == "dir" || type == "dirichlet") {
       typename Options::DirichletBC dirichlet{};
@@ -528,14 +353,14 @@ void apply_mesh_motion_bcs(const svmp::Physics::EquationModuleInput& input,
 
     throw std::runtime_error(
         "[svMultiPhysics::Physics] Boundary condition type '" +
-        get_defined_string(bc.params, {"Type"}).value_or(std::string{}) +
+        first_defined_string(bc.params, {"Type"}).value_or(std::string{}) +
         "' is not supported for mesh motion. Supported types: Dir, Neumann, Robin, NormalConstraint, TangentialPolicy.");
   }
 }
 
 std::string resolve_model_token(const svmp::Physics::EquationModuleInput& input)
 {
-  if (const auto model = get_defined_string(
+  if (const auto model = first_defined_string(
           input.equation_params,
           {"Model"})) {
     return normalized_token(*model);

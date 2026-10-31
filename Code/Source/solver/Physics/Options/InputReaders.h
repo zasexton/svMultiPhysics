@@ -48,6 +48,8 @@ void navierStokesTraceLog(const std::string& message);
 [[nodiscard]] bool temporalSpatialBcTraceEnabled() noexcept;
 
 double parse_double(std::string_view raw, std::string_view context);
+/// parse_double that also refuses an infinite or NaN value, with the same message.
+double parse_finite_double(std::string_view raw, std::string_view context);
 int parse_positive_int(std::string_view raw, std::string_view context);
 svmp::FE::GlobalIndex parse_global_index(std::string_view raw, std::string_view context);
 bool values_match(svmp::FE::Real a, svmp::FE::Real b);
@@ -61,6 +63,7 @@ const svmp::Physics::ParameterValue* find_param(const svmp::Physics::ParameterMa
 bool has_nonempty_defined(const svmp::Physics::ParameterMap& params, std::string_view key);
 std::optional<double> get_defined_double(const svmp::Physics::ParameterMap& params, std::string_view key);
 std::optional<int> get_defined_int(const svmp::Physics::ParameterMap& params, std::string_view key);
+/// The boolean of a defined, nonblank value (parse_bool_relaxed); nullopt otherwise.
 std::optional<bool> get_defined_bool(const svmp::Physics::ParameterMap& params, std::string_view key);
 std::optional<std::string> get_defined_string(const svmp::Physics::ParameterMap& params, std::string_view key);
 std::optional<double> first_defined_double(const svmp::Physics::ParameterMap& params,
