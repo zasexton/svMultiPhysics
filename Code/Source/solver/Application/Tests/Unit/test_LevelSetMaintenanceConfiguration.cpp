@@ -288,6 +288,10 @@ TEST(LevelSetMaintenanceConfiguration, TakesTheVelocityFromTheEquationKeys) {
   put(input.equation_parameters, "Velocity_source", "prescribed_data");
   put(input.equation_parameters, "Source_velocity_field_name",
       "physical_velocity");
+  put(input.equation_parameters, "Advection_velocity_extension_method",
+      "pde_harmonic");
+  put(input.equation_parameters, "Advection_velocity_extension_coupling",
+      "monolithic");
   put(input.equation_parameters, "Enable_kinematic_reconciliation", "true");
   resolved = resolveInstalled(input);
   ASSERT_TRUE(resolved.has_value());

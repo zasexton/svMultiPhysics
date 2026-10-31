@@ -1,11 +1,17 @@
 #include "Application/Translators/LevelSetConfigurationParsing.h"
 
+#include "Parameters.h"
+
 #include <algorithm>
 #include <cctype>
 #include <cmath>
+#include <initializer_list>
+#include <optional>
 #include <sstream>
 #include <stdexcept>
+#include <string_view>
 #include <utility>
+#include <variant>
 
 namespace application::translators::level_set::configuration {
 namespace {
@@ -32,10 +38,36 @@ opt::EnumToken<E> token(E value, std::string canonical,
   return opt::EnumToken<E>{value, std::move(canonical), std::move(synonyms)};
 }
 
+// A value that the input can only set: unset unless given ("none" is not an
+// accepted text, unlike opt::OptionalCodec).
+template <class Codec> struct SetOptionalCodec {
+  using value_type = std::optional<typename Codec::value_type>;
+  static constexpr opt::EmptyPolicy empty_policy = opt::EmptyPolicy::Absent;
+  Codec inner{};
+
+  [[nodiscard]] value_type parse(std::string_view text,
+                                 std::string &error) const {
+    return inner.parse(text, error);
+  }
+  [[nodiscard]] std::string format(const value_type &value) const {
+    return value ? inner.format(*value) : std::string("none");
+  }
+  [[nodiscard]] std::string describe() const { return inner.describe(); }
+};
+
+// The keys that only the equation element gives: the domain elements of
+// the installation do not read them.
+const std::initializer_list<std::string_view> kEquationElementKeys{
+    "Level_set_isovalue", "Advection_velocity_extension_method",
+    "Advection_velocity_extension_coupling", "Source_velocity_field_name",
+    "Wet_extension_wall_faces"};
+
 opt::OptionSchema<Keys> makeLevelSetEquationSchema() {
   using Form = ls::LevelSetTransportForm;
   using FieldSource = ls::LevelSetFieldSource;
   using VelocitySource = ls::LevelSetVelocitySource;
+  using Extension = ls::PdeVelocityExtensionOperator;
+  using Coupling = application::core::LevelSetVelocityExtensionCoupling;
   opt::OptionSchema<Keys> schema("Level-set equation");
   schema
       .key("Coupled", &Keys::coupled, relaxedBool(),
@@ -142,6 +174,31 @@ opt::OptionSchema<Keys> makeLevelSetEquationSchema() {
       .key("Level_set_isovalue", &Keys::level_set_isovalue,
            opt::RealCodec{.require_finite = false},
            setting("isovalue of the interface of the maintained field"))
+      .key("Advection_velocity_extension_method",
+           &Keys::advection_velocity_extension_method,
+           SetOptionalCodec<opt::EnumCodec<Extension>>{{{
+               token(Extension::Harmonic, "pde_harmonic"),
+               token(Extension::LeastSquaresNormal, "pde_normal",
+                     {"pde_least_squares_normal"}),
+           }}},
+           setting("PDE extension of the advection velocity into the dry "
+                   "region"))
+      .key("Advection_velocity_extension_coupling",
+           &Keys::advection_velocity_extension_coupling,
+           SetOptionalCodec<opt::EnumCodec<Coupling>>{{{
+               token(Coupling::Monolithic, "monolithic"),
+               token(Coupling::Prescribed, "prescribed"),
+           }}},
+           setting("frozen rows of an extension unknown, or a prescribed "
+                   "advection field"))
+      .key("Source_velocity_field_name", &Keys::source_velocity_field_name,
+           opt::StringCodec{},
+           setting("physical velocity that the extension extends (default "
+                   "Velocity)"))
+      .key("Wet_extension_wall_faces", &Keys::wet_extension_wall_faces,
+           opt::StringCodec{},
+           setting("wall faces of the extension's impermeability rows, "
+                   "separated by ';' or ','"))
       // A velocity source decides whether the velocity field is registered,
       // unless the element states it.
       .implies("Velocity_source", "Auto_register_velocity_field", "true",
@@ -150,7 +207,15 @@ opt::OptionSchema<Keys> makeLevelSetEquationSchema() {
                opt::ImplicationSettings{.when_trigger_is = "constant_vector"})
       .implies("Velocity_source", "Auto_register_velocity_field", "false",
                opt::ImplicationSettings{
-                   .when_trigger_is = "material_interface_phase_pair"});
+                   .when_trigger_is = "material_interface_phase_pair"})
+      .rule("Source_velocity_field_name", [](const opt::ResolvedOptions<Keys>
+                                                 &resolved) {
+        return !resolved.value.source_velocity_field_name.empty() &&
+                       !resolved.value.advection_velocity_extension_method
+                   ? std::string(
+                         "requires Advection_velocity_extension_method")
+                   : std::string{};
+      });
   return schema;
 }
 
@@ -184,10 +249,24 @@ levelSetEquationInput(const svmp::Physics::ParameterMap &parameters) {
   return input;
 }
 
+opt::OptionInput levelSetEquationInput(const EquationParameters &equation) {
+  opt::OptionInput input;
+  for (const auto &[name, parameter] : equation.params_map) {
+    std::visit(
+        [&](const auto *value) {
+          if (value != nullptr && value->defined()) {
+            input.add(name, value->svalue());
+          }
+        },
+        parameter);
+  }
+  return input;
+}
+
 opt::OptionInput
 levelSetDomainInput(const svmp::Physics::ParameterMap &parameters) {
   return levelSetEquationInput(parameters).excludeSpellings(
-      levelSetEquationSchema().spellings({"Level_set_isovalue"}));
+      levelSetEquationSchema().spellings(kEquationElementKeys));
 }
 
 opt::ResolvedOptions<Keys> resolveLevelSetEquationKeys(const opt::OptionInput &input,

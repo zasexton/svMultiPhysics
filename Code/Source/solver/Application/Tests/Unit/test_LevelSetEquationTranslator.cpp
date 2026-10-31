@@ -1187,21 +1187,28 @@ TEST(LevelSetEquationTranslator,
 #endif
 }
 
-TEST(LevelSetEquationTranslator, RejectsRetiredWetExtensionSettings)
+TEST(LevelSetEquationTranslator, RejectsExtensionSettingsWithoutAPdeMethod)
 {
 #if !(defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH)
   GTEST_SKIP() << "Requires FE built with Mesh integration.";
 #else
-  // Decisions D47 and D55 retired the algebraic wall-compatible wet
-  // extension: the extension needs an explicit PDE method.  Naming a retired
-  // method, or naming a source velocity field without a method, fails.
-  const std::vector<std::pair<std::string, std::string>> cases{
-      {"Advection_velocity_extension_method", "wall_compatible_normal"},
-      {"Advection_velocity_extension_method", "nearest_interface_point"},
-      {"Advection_velocity_extension_method", "nearest_active_vertex"},
-      {"Source_velocity_field_name", "physical_velocity"},
+  // The extension needs an explicit PDE method (decisions D47 and D55):
+  // another method, or a source velocity field without a method, fails.
+  const std::string methods =
+      "Advection_velocity_extension_method: expected one of pde_harmonic | "
+      "pde_normal, got '";
+  const std::vector<std::array<std::string, 3>> cases{
+      {"Advection_velocity_extension_method", "wall_compatible_normal",
+       methods + "wall_compatible_normal'"},
+      {"Advection_velocity_extension_method", "nearest_interface_point",
+       methods + "nearest_interface_point'"},
+      {"Advection_velocity_extension_method", "nearest_active_vertex",
+       methods + "nearest_active_vertex'"},
+      {"Source_velocity_field_name", "physical_velocity",
+       "Source_velocity_field_name: requires "
+       "Advection_velocity_extension_method"},
   };
-  for (const auto& [key, value] : cases) {
+  for (const auto& [key, value, reason] : cases) {
     auto mesh = makeRegistryQuadMesh();
     svmp::Physics::EquationModuleInput input{};
     input.equation_type = "level_set";
@@ -1216,14 +1223,12 @@ TEST(LevelSetEquationTranslator, RejectsRetiredWetExtensionSettings)
     input.equation_params[key] = svmp::Physics::ParameterValue{true, value};
 
     svmp::FE::systems::FESystem system(mesh);
-    try {
-      (void)application::translators::level_set::createModule(input, system);
-      ADD_FAILURE() << key << '=' << value << " was accepted";
-    } catch (const std::exception& error) {
-      EXPECT_NE(std::string(error.what()).find("decisions D47 and D55"),
-                std::string::npos)
-          << key << '=' << value << ": " << error.what();
-    }
+    EXPECT_EQ(
+        (maintenanceCompatibilityExceptionMessage<std::runtime_error>([&] {
+          (void)application::translators::level_set::createModule(input,
+                                                                  system);
+        })),
+        "[Level-set equation] " + reason);
   }
 #endif
 }

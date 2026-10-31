@@ -14,21 +14,7 @@
 
 #include "FE/LevelSet/Extension/LevelSetPdeVelocityExtension.h"
 
-#include <string_view>
-
 namespace application::core {
-
-// A velocity extension without a PDE method (an algebraic method of the
-// retired wall-compatible wet extension, or a source velocity field without
-// an extension method) fails with this message, at translation and when the
-// extension requests are read.
-inline constexpr std::string_view kRetiredWetExtensionMessage =
-    "[svMultiPhysics::Application] The algebraic wall-compatible wet "
-    "extension (Advection_velocity_extension_method=wall_compatible_normal "
-    "or a nearest-* method, or a source velocity field without an extension "
-    "method) was retired (decisions D47 and D55).  Set "
-    "Advection_velocity_extension_method=pde_harmonic or pde_normal with "
-    "Advection_velocity_extension_coupling=monolithic or prescribed.";
 
 using svmp::FE::level_set::PdeVelocityExtensionCache;
 using svmp::FE::level_set::PdeVelocityExtensionFactorization;

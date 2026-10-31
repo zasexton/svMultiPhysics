@@ -1,10 +1,13 @@
 #pragma once
 
 #include "Application/Core/LevelSetEquationInputSnapshot.h"
+#include "FE/LevelSet/Extension/LevelSetPdeVelocityExtension.h"
 #include "FE/LevelSet/LevelSetOptions.h"
 #include "FE/Systems/FormsInstaller.h"
 
+#include <cstdint>
 #include <memory>
+#include <optional>
 #include <string>
 
 namespace svmp {
@@ -17,6 +20,15 @@ class FunctionSpace;
 
 namespace application::core {
 
+// How the transport sees the PDE extension of its advection velocity:
+// written into a prescribed advection field (lagged by one outer pass), or
+// installed as frozen rows of an algebraic extension unknown, so that Newton
+// sees dR_phi/du.
+enum class LevelSetVelocityExtensionCoupling : std::uint8_t {
+  Monolithic,
+  Prescribed,
+};
+
 // The keys of a level-set equation as one value, as levelSetEquationSchema()
 // (Application/Translators/LevelSetConfigurationParsing.h) resolves them
 // (decision D47, step P3): the transport options and the keys that select a
@@ -25,8 +37,19 @@ struct LevelSetEquationKeys {
   svmp::FE::level_set::LevelSetTransportOptions transport{};
   // Coupled: the transport joins the monolithic operator ("equations").
   bool coupled{false};
-  // Level_set_isovalue: the interface of the maintained field.
+  // Level_set_isovalue: the interface of the maintained field and of the
+  // extension.
   double level_set_isovalue{0.0};
+  // The PDE extension of the advection velocity into the dry region: its
+  // method, its coupling, the physical velocity it extends (empty: not
+  // given) and the wall faces of its impermeability rows (empty: the walls
+  // with a strong zero velocity).
+  std::optional<svmp::FE::level_set::PdeVelocityExtensionOperator>
+      advection_velocity_extension_method{};
+  std::optional<LevelSetVelocityExtensionCoupling>
+      advection_velocity_extension_coupling{};
+  std::string source_velocity_field_name{};
+  std::string wet_extension_wall_faces{};
 };
 
 struct ResolvedLevelSetEquationConfiguration {

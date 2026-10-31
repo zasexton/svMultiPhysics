@@ -82,6 +82,12 @@ resolveLegacyLevelSetMaintenanceConfiguration(
   transport.interface_preserving_redistancing =
       keys.transport.interface_preserving_redistancing;
   result->isovalue = keys.level_set_isovalue;
+  // A source velocity field selects the velocity extension, whose field is
+  // a coupled unknown; a constant velocity stays constant.
+  if (!keys.source_velocity_field_name.empty() &&
+      transport.velocity.source != ls::LevelSetVelocitySource::ConstantVector) {
+    transport.velocity.source = ls::LevelSetVelocitySource::CoupledField;
+  }
 
   Reader reader(input.equation_parameters, kLegacyPolicy);
   const auto apply_boolean = [&](auto names, std::string_view canonical,
@@ -124,12 +130,6 @@ resolveLegacyLevelSetMaintenanceConfiguration(
         }
       };
 
-  // A source velocity field selects the velocity extension, whose field is
-  // a coupled unknown; a constant velocity stays constant.
-  if (reader.selected(aliases::wet_extension_source).has_value() &&
-      transport.velocity.source != ls::LevelSetVelocitySource::ConstantVector) {
-    transport.velocity.source = ls::LevelSetVelocitySource::CoupledField;
-  }
 
   apply_boolean(aliases::conservative_phase_enable,
                 "enable_conservative_phase_transport",

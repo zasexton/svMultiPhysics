@@ -1294,68 +1294,37 @@ translate_level_set_transport_input(
         "[svMultiPhysics::Application] Conservative_phase_impermeable_normal_velocity_tolerance requests a pointwise velocity-normal wall contract that the current conservative-phase split does not implement; the configured boundary policy enforces only discrete q-flux at invariant_tolerance and can be blind where q=0.");
   }
 
-  parsing::LevelSetConfigurationReader wet_reader(
-      input.equation_params, parsing::LevelSetInputPolicy::Installation);
-  const auto extension_method = wet_reader.string(
-      level_set_aliases::advection_velocity_extension_method,
-      "advection_velocity_extension_method");
-  const bool pde_velocity_extension =
-      extension_method.has_value() &&
-      application::core::pdeVelocityExtensionOperatorFromToken(
-          extension_method->text)
-          .has_value();
-  // The velocity extension needs an explicit PDE method (the algebraic
-  // wall-compatible wet extension was retired, decisions D47 and D55).
-  if ((extension_method.has_value() ||
-       wet_reader
-           .selected(level_set_aliases::wet_extension_source,
-                     "advection_velocity_from_field")
-           .has_value()) &&
-      !pde_velocity_extension) {
-    throw std::runtime_error(
-        std::string(application::core::kRetiredWetExtensionMessage));
-  }
-  std::optional<parsing::LevelSetSelectedParameter> wet_source;
-  if (pde_velocity_extension) {
-    // The PDE extension is recomputed from the physical velocity at every
-    // geometry refresh.  Its coupling is explicit: "prescribed" writes it into
-    // a prescribed advection field (the transport sees it lagged by one outer
-    // pass); "monolithic" installs the same discrete problem as frozen rows of
-    // an algebraic extension unknown, so Newton sees dR_phi/du.
+  // The extension keys of the equation element.  The PDE extension is
+  // recomputed from the physical velocity at every geometry refresh; its
+  // coupling is explicit (LevelSetVelocityExtensionCoupling).
+  if (const auto& method = equation_keys.advection_velocity_extension_method) {
     if (options.velocity.source !=
         ls::LevelSetVelocitySource::PrescribedData) {
       throw std::runtime_error(
           "[svMultiPhysics::Application] The PDE velocity extension requires "
           "Velocity_source=prescribed_data.");
     }
-    wet_source = wet_reader.string(level_set_aliases::wet_extension_source,
-                                   "advection_velocity_from_field");
-    const auto coupling = wet_reader.string(
-        level_set_aliases::advection_velocity_extension_coupling,
-        "advection_velocity_extension_coupling");
-    const auto coupling_token =
-        coupling.has_value() ? normalized_token(coupling->text) : std::string{};
-    if (coupling_token == "monolithic") {
+    const auto coupling = equation_keys.advection_velocity_extension_coupling;
+    if (coupling == application::core::LevelSetVelocityExtensionCoupling::
+                        Monolithic) {
       options.velocity.algebraic_extension_source_field_name =
-          wet_source.has_value() ? trim_copy(wet_source->text)
-                                 : std::string{"Velocity"};
-      if (options.velocity.algebraic_extension_source_field_name.empty() ||
-          options.velocity.algebraic_extension_source_field_name ==
-              options.velocity.field_name) {
+          equation_keys.source_velocity_field_name.empty()
+              ? std::string{"Velocity"}
+              : equation_keys.source_velocity_field_name;
+      if (options.velocity.algebraic_extension_source_field_name ==
+          options.velocity.field_name) {
         throw std::runtime_error(
             "[svMultiPhysics::Application] The PDE velocity extension source "
             "must name a distinct physical velocity field.");
       }
       options.velocity.source = ls::LevelSetVelocitySource::CoupledField;
-    } else if (coupling_token != "prescribed") {
+    } else if (!coupling.has_value()) {
       throw std::runtime_error(
           "[svMultiPhysics::Application] Advection_velocity_extension_method=" +
-          trim_copy(extension_method->text) +
+          std::string(application::core::pdeVelocityExtensionOperatorName(
+              *method)) +
           " requires Advection_velocity_extension_coupling=monolithic or "
-          "prescribed" +
-          (coupling.has_value() ? " (got '" + trim_copy(coupling->text) + "')"
-                                : std::string{}) +
-          ".");
+          "prescribed.");
     }
     options.velocity.auto_register_field = true;
   }

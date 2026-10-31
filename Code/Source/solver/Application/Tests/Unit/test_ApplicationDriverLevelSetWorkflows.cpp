@@ -3867,6 +3867,8 @@ TEST(ApplicationDriverLevelSetWorkflows,
     <Velocity_field_name>extended_velocity</Velocity_field_name>
     <Velocity_source>prescribed_data</Velocity_source>
     <Source_velocity_field_name>physical_velocity</Source_velocity_field_name>
+    <Advection_velocity_extension_method>pde_harmonic</Advection_velocity_extension_method>
+    <Advection_velocity_extension_coupling>monolithic</Advection_velocity_extension_coupling>
     <Enable_kinematic_reconciliation>true</Enable_kinematic_reconciliation>
   </Add_equation>
 </svMultiPhysicsFile>
@@ -10871,8 +10873,7 @@ TEST(ApplicationDriverLevelSetWorkflows,
   }
 
   // The algebraic wet extension was retired (decisions D47 and D55): its
-  // methods and a source field without a method fail with the retirement
-  // message.
+  // methods fail as values of the schema, with or without a source field.
   const auto expect_retired = [&](const std::string& method,
                                   const std::string& extra) {
     SCOPED_TRACE(method + extra);
@@ -10881,9 +10882,10 @@ TEST(ApplicationDriverLevelSetWorkflows,
       (void)levelSetAdvectionVelocityRequests(*retired);
       ADD_FAILURE() << "retired wet-extension setting accepted";
     } catch (const std::runtime_error& error) {
-      EXPECT_NE(std::string(error.what()).find("decisions D47 and D55"),
-                std::string::npos)
-          << error.what();
+      EXPECT_EQ(std::string(error.what()),
+                "[Level-set equation] Advection_velocity_extension_method: "
+                "expected one of pde_harmonic | pde_normal, got '" +
+                    method + "'");
     }
   };
   for (const std::string method :
@@ -10919,8 +10921,14 @@ TEST(ApplicationDriverLevelSetWorkflows,
   </Add_equation>
 </svMultiPhysicsFile>
 )xml");
-  EXPECT_THROW((void)levelSetAdvectionVelocityRequests(*source_only),
-               std::runtime_error);
+  try {
+    (void)levelSetAdvectionVelocityRequests(*source_only);
+    ADD_FAILURE() << "source field without a method accepted";
+  } catch (const std::runtime_error& error) {
+    EXPECT_EQ(std::string(error.what()),
+              "[Level-set equation] Source_velocity_field_name: requires "
+              "Advection_velocity_extension_method");
+  }
 
   // Without a method value, no PDE request is created silently.
   auto none = parseWorkflowParametersXml(R"xml(

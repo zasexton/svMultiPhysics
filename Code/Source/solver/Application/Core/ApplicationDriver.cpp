@@ -9,6 +9,7 @@
 #include "Application/Core/LevelSetPdeVelocityExtension.h"
 #include "Application/Core/OopMpiLog.h"
 #include "Application/Core/SimulationBuilder.h"
+#include "Application/Translators/LevelSetConfigurationParsing.h"
 
 #include "FE/Assembly/Assembler.h"
 #include "FE/Assembly/CutIntegrationContext.h"
@@ -789,32 +790,12 @@ std::optional<std::string> first_defined_parameter(
   return std::nullopt;
 }
 
-std::optional<double> first_defined_double_parameter(
-    const std::map<std::string, std::string>& params,
-    std::initializer_list<const char*> keys)
-{
-  if (const auto value = first_defined_parameter(params, keys)) {
-    return std::stod(*value);
-  }
-  return std::nullopt;
-}
-
 std::optional<int> first_defined_int_parameter(
     const std::map<std::string, std::string>& params,
     std::initializer_list<const char*> keys)
 {
   if (const auto value = first_defined_parameter(params, keys)) {
     return std::stoi(*value);
-  }
-  return std::nullopt;
-}
-
-std::optional<bool> first_defined_bool_parameter(
-    const std::map<std::string, std::string>& params,
-    std::initializer_list<const char*> keys)
-{
-  if (const auto value = first_defined_parameter(params, keys)) {
-    return parse_bool_relaxed(*value);
   }
   return std::nullopt;
 }
@@ -1214,6 +1195,9 @@ void requireCollectiveLevelSetMaintenanceRequestSchedule(
 using LevelSetAdvectionVelocityRequest =
     svmp::FE::level_set::LevelSetVelocityExtensionRequest;
 
+namespace level_set_configuration =
+    application::translators::level_set::configuration;
+
 std::vector<std::string> splitFaceNameList(std::string_view raw)
 {
   std::vector<std::string> names;
@@ -1305,50 +1289,26 @@ levelSetAdvectionVelocityRequests(const Parameters& params)
       continue;
     }
 
-    const auto eq_params = eq->get_parameter_list();
-    const auto source_field =
-        first_defined_parameter(
-            eq_params,
-            {"Source_velocity_field_name"});
-    const auto method_parameter =
-        first_defined_parameter(eq_params, {"Advection_velocity_extension_method"});
-    const auto pde_operator =
-        method_parameter.has_value()
-            ? application::core::pdeVelocityExtensionOperatorFromToken(
-                  *method_parameter)
-            : std::nullopt;
-    // The extension needs an explicit PDE method (the algebraic
-    // wall-compatible wet extension was retired, decisions D47 and D55).  The
-    // translator rejects these settings first.
-    if ((method_parameter.has_value() || source_field.has_value()) &&
-        !pde_operator.has_value()) {
-      throw std::runtime_error(
-          std::string(application::core::kRetiredWetExtensionMessage));
-    }
-    if (!pde_operator.has_value()) {
+    // The keys of the equation element, as the translator resolves them
+    // (levelSetEquationSchema()).  The extension needs an explicit PDE method:
+    // the schema rejects any other method and a source velocity field
+    // without one.
+    const auto resolved = level_set_configuration::resolveLevelSetEquationKeys(
+        level_set_configuration::levelSetEquationInput(*eq));
+    const auto& keys = resolved.value;
+    if (!keys.advection_velocity_extension_method.has_value()) {
       continue;
     }
 
     LevelSetAdvectionVelocityRequest request{};
-    if (const auto field =
-            first_defined_parameter(eq_params, {"Level_set_field_name",
-                                               "Field_name"})) {
-      request.level_set_field_name = trim_copy(*field);
+    request.level_set_field_name = keys.transport.level_set.field_name;
+    if (!keys.source_velocity_field_name.empty()) {
+      request.source_velocity_field_name = keys.source_velocity_field_name;
     }
-    if (source_field.has_value()) {
-      request.source_velocity_field_name = trim_copy(*source_field);
+    if (resolved.isExplicit("Velocity_field_name")) {
+      request.target_velocity_field_name = keys.transport.velocity.field_name;
     }
-    if (const auto target =
-            first_defined_parameter(eq_params, {"Velocity_field_name"})) {
-      request.target_velocity_field_name = trim_copy(*target);
-    }
-    if (request.target_velocity_field_name.empty()) {
-      request.target_velocity_field_name = "LevelSetAdvectionVelocity";
-    }
-    if (first_defined_bool_parameter(eq_params, {"Coupled"})
-            .value_or(false)) {
-      request.operator_tag = "equations";
-    }
+    request.operator_tag = keys.transport.operator_tag;
     if (request.operator_tag.empty()) {
       throw std::runtime_error(
           "[svMultiPhysics::Application] Wet-extension operator tag must be non-empty.");
@@ -1359,26 +1319,23 @@ levelSetAdvectionVelocityRequests(const Parameters& params)
           "Velocity_field_name to be distinct from the physical source velocity field.");
     }
 
-    const auto velocity_source =
-        first_defined_parameter(eq_params, {"Velocity_source"});
-    if (!velocity_source.has_value() ||
-        normalized_token(*velocity_source) != "prescribeddata") {
+    if (keys.transport.velocity.source !=
+        svmp::FE::level_set::LevelSetVelocitySource::PrescribedData) {
       throw std::runtime_error(
           "[svMultiPhysics::Application] Wet-extension level-set advection requires "
           "<Velocity_source>prescribed_data</Velocity_source> so the transport equation uses "
           "the generated prescribed advection field.");
     }
 
-    request.extension_method = std::string(
-        application::core::pdeVelocityExtensionOperatorName(*pde_operator));
+    request.extension_method =
+        std::string(application::core::pdeVelocityExtensionOperatorName(
+            *keys.advection_velocity_extension_method));
     // Wet_extension_band_layers and Wet_extension_enforce_wall_impermeability,
     // which no deck, runner or test set, were removed (decision D47): the
     // extension covers every dry vertex and enforces wall impermeability.
     bool explicit_wall_faces = false;
-    if (const auto wall_faces = first_defined_parameter(
-            eq_params,
-            {"Wet_extension_wall_faces"})) {
-      request.wall_face_names = splitFaceNameList(*wall_faces);
+    if (!keys.wet_extension_wall_faces.empty()) {
+      request.wall_face_names = splitFaceNameList(keys.wet_extension_wall_faces);
       explicit_wall_faces = true;
       if (request.enforce_wall_impermeability &&
           request.wall_face_names.empty()) {
@@ -1511,10 +1468,7 @@ levelSetAdvectionVelocityRequests(const Parameters& params)
       }
     }
 
-    if (const auto isovalue =
-            first_defined_double_parameter(eq_params, {"Level_set_isovalue"})) {
-      request.isovalue = *isovalue;
-    }
+    request.isovalue = keys.level_set_isovalue;
 
     for (std::size_t active_request_index = 0u;
          active_request_index < active_requests.size();

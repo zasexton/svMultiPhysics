@@ -13,6 +13,8 @@
 #include <string_view>
 #include <vector>
 
+class EquationParameters;
+
 namespace application::translators::level_set::configuration {
 
 /// The keys of a level-set equation (decision D47, step P3), declared once:
@@ -29,8 +31,15 @@ levelSetEquationSchema();
 [[nodiscard]] svmp::FE::options::OptionInput
 levelSetEquationInput(const svmp::Physics::ParameterMap &parameters);
 
+/// The defined parameters of an equation element of the input file, as
+/// schema input (for readers of the element that run without the
+/// installation, such as the driver's extension requests).
+[[nodiscard]] svmp::FE::options::OptionInput
+levelSetEquationInput(const EquationParameters &equation);
+
 /// The input of a domain element: its defined entries without the keys that
-/// only the equation element gives (Level_set_isovalue).
+/// only the equation element gives (Level_set_isovalue and the keys of the
+/// advection-velocity extension).
 [[nodiscard]] svmp::FE::options::OptionInput
 levelSetDomainInput(const svmp::Physics::ParameterMap &parameters);
 
@@ -142,14 +151,6 @@ parseConservativePhaseBoundaryFluxPolicy(std::string_view raw);
 
 namespace aliases {
 
-inline constexpr std::array<std::string_view, 1>
-    advection_velocity_extension_method{
-        "Advection_velocity_extension_method"};
-inline constexpr std::array<std::string_view, 1>
-    advection_velocity_extension_coupling{
-        "Advection_velocity_extension_coupling"};
-inline constexpr std::array<std::string_view, 1> wet_extension_source{
-    "Source_velocity_field_name"};
 inline constexpr std::array<std::string_view, 1> conservative_phase_enable{
     "Enable_conservative_phase_transport"};
 inline constexpr std::array<std::string_view, 1> conservative_phase_field{
