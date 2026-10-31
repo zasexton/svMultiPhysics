@@ -8,8 +8,10 @@
 #include "Systems/MeshBoundaryKinematics.h"
 
 #include "Analysis/BoundaryConditionDescriptor.h"
+#include "Forms/Vocabulary.h"
 #include "Systems/MeshNormalConstraintStageMeasurements.h"
 
+#include <set>
 #include <stdexcept>
 #include <string>
 #include <utility>
@@ -154,6 +156,100 @@ void declareMeshBoundaryRowDescriptors(
         rows.tangential_policy,
         operator_tag,
         rows.tangential_source);
+}
+
+MeshNormalBoundaryConstraintDeclaration normalRateRelation(FieldId d_field,
+                                                           int boundary_marker,
+                                                           FieldId related_field,
+                                                           const forms::FormExpr& related,
+                                                           Real nitsche_gamma,
+                                                           std::string owner_component)
+{
+    return MeshNormalBoundaryConstraintDeclaration{
+        .mesh_displacement_field = d_field,
+        .boundary_marker = boundary_marker,
+        .quantity = MeshNormalBoundaryQuantity::MeshVelocityTrace,
+        .target_kind = MeshNormalBoundaryTargetKind::FluidNormalVelocity,
+        .target_expression = forms::normalTrace(related, forms::currentNormal()),
+        .enforcement_kind = analysis::EnforcementKind::WeakPenalty,
+        .related_velocity_field = related_field,
+        .owner_component = std::move(owner_component),
+        .requires_mesh_flux_consistency = true,
+        .mesh_flux_consistency_nitsche_gamma = nitsche_gamma};
+}
+
+forms::FormExpr normalRateRelationRow(const forms::FormExpr& d,
+                                      const forms::FormExpr& related,
+                                      const forms::FormExpr& psi,
+                                      Real nitsche_gamma,
+                                      const forms::FormExpr& normal,
+                                      const forms::BoundaryDomain& boundary)
+{
+    using namespace forms;
+    const auto penalty = FormExpr::constant(nitsche_gamma) / hNormal();
+    return (penalty * normalTrace(dt(d) - related, normal) * normalTrace(psi, normal)).ds(boundary);
+}
+
+void requireNormalRateRelationsConsumable(const FESystem& system,
+                                          const NormalRateRelationConsumer& consumer)
+{
+    for (const auto& declaration : system.meshNormalBoundaryConstraints()) {
+        if (!declaration.requires_mesh_flux_consistency ||
+            (consumer.field.has_value() && declaration.mesh_displacement_field != *consumer.field)) {
+            continue;
+        }
+        const auto marker = std::to_string(declaration.boundary_marker);
+        if (consumer.own_normal_markers.count(declaration.boundary_marker) != 0u) {
+            throw std::invalid_argument(
+                consumer.context + ": boundary " + marker +
+                " has both a mesh-motion normal constraint and a consistent "
+                "kinematic owner '" + declaration.owner_component + "'");
+        }
+        if (!consumer.flux_of_rate) {
+            throw std::invalid_argument(
+                consumer.context + ": boundary " + marker +
+                " has a consistent kinematic owner '" + declaration.owner_component +
+                "' that constrains the normal rate of the field; " + consumer.rate_flux_hint);
+        }
+        const auto gamma = declaration.mesh_flux_consistency_nitsche_gamma;
+        if (!consumer.literal_kappa || !(gamma > 2.0 * *consumer.literal_kappa)) {
+            throw std::invalid_argument(
+                consumer.context + ": the consistent Nitsche row on boundary " + marker +
+                " requires a literal kappa with gamma_N > 2 kappa (gamma_N = " +
+                std::to_string(gamma) + ")");
+        }
+    }
+}
+
+forms::FormExpr addNormalRateRelationConsistency(const FESystem& system,
+                                                 FieldId field,
+                                                 forms::FormExpr residual,
+                                                 const forms::FormExpr& kappa,
+                                                 const forms::FormExpr& flux_gradient,
+                                                 const forms::FormExpr& psi)
+{
+    using namespace forms;
+    for (const int marker : normalRateRelationMarkers(system, field)) {
+        const auto n = currentNormal();
+        residual = residual - (kappa * inner(flux_gradient * n, n) * inner(psi, n)).ds(marker);
+    }
+    return residual;
+}
+
+std::vector<int> normalRateRelationMarkers(const FESystem& system, std::optional<FieldId> field)
+{
+    std::vector<int> markers;
+    std::set<int> seen;
+    for (const auto& declaration : system.meshNormalBoundaryConstraints()) {
+        if (!declaration.requires_mesh_flux_consistency ||
+            (field.has_value() && declaration.mesh_displacement_field != *field)) {
+            continue;
+        }
+        if (seen.insert(declaration.boundary_marker).second) {
+            markers.push_back(declaration.boundary_marker);
+        }
+    }
+    return markers;
 }
 
 } // namespace systems

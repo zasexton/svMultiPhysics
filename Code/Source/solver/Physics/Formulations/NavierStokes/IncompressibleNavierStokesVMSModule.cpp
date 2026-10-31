@@ -383,21 +383,14 @@ void IncompressibleNavierStokesVMSModule::registerOn(fs::FESystem& system) const
     const auto ale = fs::resolveALEBinding(system, preflight.ale_options);
     std::vector<fs::MeshNormalKinematicDeclaration> fitted_normal_kinematics;
     if (ale.coupled()) {
+        // The kinematic condition (w - u).n = 0 of each fitted free surface (MeshNitsche, validated): one
+        // normal-rate relation; its row is installed with the free surface, its consistency term by the mesh motion.
         for (const auto& prepared : preflight.fitted_normal_boundaries) {
             const auto& b = free_surfaces[prepared.boundary_index];
-            const bool mesh_nitsche = b.kinematic_enforcement == FreeSurfaceKinematicEnforcement::MeshNitsche;
             fitted_normal_kinematics.push_back({
-                .constraint = {
-                    .mesh_displacement_field = ale.mesh_displacement_field,
-                    .boundary_marker = b.boundary_marker,
-                    .quantity = fs::MeshNormalBoundaryQuantity::MeshVelocityTrace,
-                    .target_kind = fs::MeshNormalBoundaryTargetKind::FluidNormalVelocity,
-                    .target_expression = normalTrace(u, currentNormal()),
-                    .enforcement_kind = FE::analysis::EnforcementKind::WeakPenalty,
-                    .related_velocity_field = u_id,
-                    .owner_component = "IncompressibleNavierStokesVMSModule.FreeSurfaceBoundary",
-                    .requires_mesh_flux_consistency = mesh_nitsche,
-                    .mesh_flux_consistency_nitsche_gamma = mesh_nitsche ? b.kinematic_nitsche_gamma : Real{0.0}},
+                .constraint = fs::normalRateRelation(ale.mesh_displacement_field, b.boundary_marker, u_id, u,
+                                                     b.kinematic_nitsche_gamma,
+                                                     "IncompressibleNavierStokesVMSModule.FreeSurfaceBoundary"),
                 .binding = prepared.binding});
         }
     }

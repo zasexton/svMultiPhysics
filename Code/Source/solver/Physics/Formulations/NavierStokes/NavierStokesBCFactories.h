@@ -1441,9 +1441,8 @@ inline void addFittedFreeSurface(FE::forms::FormExpr& M, FE::systems::FESystem& 
     const auto psi = TestField(ale.mesh_displacement_field, *rec.space, "psi_free_surface_mesh");
     const auto d = StateField(ale.mesh_displacement_field, *rec.space, "d_mesh_free_surface");
     const auto nc = currentNormal();
-    // (dt d - u).n = 0 on the mesh rows
-    const auto penalty = FormExpr::constant(b.kinematic_nitsche_gamma) / hNormal();
-    FormExpr rows = (penalty * normalTrace(dt(d) - u, nc) * normalTrace(psi, nc)).ds(Gamma);
+    // (dt d - u).n = 0 on the mesh rows: the Nitsche row of the normal-rate relation (MeshBoundaryKinematics.h)
+    FormExpr rows = fs::normalRateRelationRow(d, u, psi, b.kinematic_nitsche_gamma, nc, Gamma);
     if (const auto tangential = Factories::tangentialMeshPolicyResidual(b, d, psi, nc, rec.components, Gamma);
         tangential.isValid()) {
         rows = sumOf(rows, tangential);

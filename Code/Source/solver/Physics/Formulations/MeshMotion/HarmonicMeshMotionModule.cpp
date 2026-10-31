@@ -13,11 +13,11 @@
 #include "FE/Systems/BoundaryConditionManager.h"
 #include "FE/Systems/FESystem.h"
 #include "FE/Systems/FormulationBuilder.h"
+#include "FE/Systems/MeshBoundaryKinematics.h"
 #include "FE/Systems/MeshDisplacementBinding.h"
 
 #include <cmath>
 #include <optional>
-#include <set>
 #include <stdexcept>
 #include <string>
 #include <utility>
@@ -109,44 +109,22 @@ void HarmonicMeshMotionModule::registerOn(FE::systems::FESystem& system) const
         options_.normal_constraint,
         "HarmonicMeshMotionModule::registerOn");
 
-    // Consistent kinematic owners (fitted MeshNitsche free surfaces) of the
-    // target displacement: validate before any system mutation.  Their row
-    // constrains the normal mesh velocity, so the operator must act on the
-    // velocity as well (a displacement operator would leave a per-step P1
-    // flux defect that accumulates), and the combined boundary row must be
-    // coercive, gamma_N > 2 kappa.
-    for (const auto& declaration : system.meshNormalBoundaryConstraints()) {
-        if (!declaration.requires_mesh_flux_consistency ||
-            (normal_preparation.candidate_displacement.has_value() &&
-             declaration.mesh_displacement_field != *normal_preparation.candidate_displacement)) {
-            continue;
-        }
-        if (normal_preparation.markers.count(declaration.boundary_marker) != 0u) {
-            throw std::invalid_argument(
-                "HarmonicMeshMotionModule::registerOn: boundary " +
-                std::to_string(declaration.boundary_marker) +
-                " has both a mesh-motion normal constraint and a consistent "
-                "kinematic owner '" + declaration.owner_component + "'");
-        }
-        if (options_.quantity != HarmonicQuantity::Velocity) {
-            throw std::invalid_argument(
-                "HarmonicMeshMotionModule::registerOn: boundary " +
-                std::to_string(declaration.boundary_marker) +
-                " has a consistent kinematic owner (fitted MeshNitsche) that "
-                "constrains the normal mesh velocity; set the harmonic "
-                "quantity to velocity (Harmonic_quantity=velocity)");
-        }
-        const auto kappa_literal = literal_real(effective_kappa);
-        const auto gamma = declaration.mesh_flux_consistency_nitsche_gamma;
-        if (!kappa_literal || !(gamma > 2.0 * *kappa_literal)) {
-            throw std::invalid_argument(
-                "HarmonicMeshMotionModule::registerOn: the consistent Nitsche "
-                "row on boundary " +
-                std::to_string(declaration.boundary_marker) +
-                " requires a literal kappa with gamma_N > 2 kappa (gamma_N = " +
-                std::to_string(gamma) + ")");
-        }
-    }
+    // The normal-rate relations on the target displacement (fitted MeshNitsche
+    // free surfaces, MeshBoundaryKinematics.h): validate before any system
+    // mutation.  They constrain the normal mesh velocity, so the operator must
+    // act on the velocity as well (a displacement operator would leave a
+    // per-step P1 flux defect that accumulates), and the combined boundary row
+    // must be coercive, gamma_N > 2 kappa.
+    FE::systems::requireNormalRateRelationsConsumable(
+        system,
+        FE::systems::NormalRateRelationConsumer{
+            .field = normal_preparation.candidate_displacement,
+            .own_normal_markers = normal_preparation.markers,
+            .flux_of_rate = options_.quantity == HarmonicQuantity::Velocity,
+            .literal_kappa = literal_real(effective_kappa),
+            .context = "HarmonicMeshMotionModule::registerOn",
+            .rate_flux_hint = "set the harmonic quantity to velocity (Harmonic_quantity=velocity)",
+        });
 
     const auto binding = FE::systems::resolveMeshDisplacementBinding(
         system,
@@ -184,27 +162,13 @@ void HarmonicMeshMotionModule::registerOn(FE::systems::FESystem& system) const
         options_.quantity == HarmonicQuantity::Velocity ? dt(d_mesh) : d_mesh;
     auto residual = (kappa * inner(grad(q_mesh), grad(psi))).dx();
 
-    // Nitsche consistency on boundaries whose normal mesh displacement is
-    // owned by another operator's consistent kinematic row (fitted-ALE
-    // MeshNitsche free surfaces).  That row penalizes the normal mismatch;
-    // removing this operator's own normal flux kappa ((grad d) n . n) there
-    // makes the boundary equation reduce to the kinematic relation, so the
-    // enforcement error does not depend on the penalty.  The tangential
-    // flux stays natural (the Free tangential policy).
-    std::set<int> flux_consistency_markers;
-    for (const auto& declaration : system.meshNormalBoundaryConstraints()) {
-        if (declaration.mesh_displacement_field != binding.displacement_field ||
-            !declaration.requires_mesh_flux_consistency) {
-            continue;
-        }
-        if (!flux_consistency_markers.insert(declaration.boundary_marker).second) {
-            continue;
-        }
-        const auto n = currentNormal();
-        residual = residual -
-                   (kappa * inner(grad(q_mesh) * n, n) * inner(psi, n))
-                       .ds(declaration.boundary_marker);
-    }
+    // Nitsche consistency on the boundaries of the normal-rate relations: the
+    // relation's row penalizes the normal mismatch; removing this operator's
+    // own normal flux kappa ((grad q) n . n) there makes the boundary equation
+    // reduce to the relation, so the enforcement error does not depend on the
+    // penalty.  The tangential flux stays natural (the Free tangential policy).
+    residual = FE::systems::addNormalRateRelationConsistency(
+        system, binding.displacement_field, residual, kappa, grad(q_mesh), psi);
 
     FE::systems::BoundaryConditionManager bc_manager;
     BoundaryPreparation::populateBoundaryConditions(

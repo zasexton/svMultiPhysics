@@ -13,6 +13,7 @@
 #include "FE/Systems/BoundaryConditionManager.h"
 #include "FE/Systems/FESystem.h"
 #include "FE/Systems/FormulationBuilder.h"
+#include "FE/Systems/MeshBoundaryKinematics.h"
 #include "FE/Systems/MeshDisplacementBinding.h"
 
 #include <stdexcept>
@@ -55,15 +56,13 @@ void PseudoElasticMeshMotionModule::registerOn(FE::systems::FESystem& system) co
             "cannot be installed after accepted normal-constraint history "
             "has begun");
     }
-    for (const auto& declaration : system.meshNormalBoundaryConstraints()) {
-        if (declaration.requires_mesh_flux_consistency) {
-            throw std::invalid_argument(
-                "PseudoElasticMeshMotionModule::registerOn: boundary " +
-                std::to_string(declaration.boundary_marker) +
-                " requires the mesh-motion Nitsche consistency term of a "
-                "consistent kinematic owner (fitted MeshNitsche); only the "
-                "harmonic mesh motion provides it");
-        }
+    if (const auto markers = FE::systems::normalRateRelationMarkers(system); !markers.empty()) {
+        throw std::invalid_argument(
+            "PseudoElasticMeshMotionModule::registerOn: boundary " +
+            std::to_string(markers.front()) +
+            " requires the mesh-motion Nitsche consistency term of a "
+            "consistent kinematic owner (fitted MeshNitsche); only the "
+            "harmonic mesh motion provides it");
     }
 
     const auto validate_positive_literal =

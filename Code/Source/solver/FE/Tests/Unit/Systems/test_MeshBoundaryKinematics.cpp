@@ -285,3 +285,75 @@ TEST(GeneratedBoundaryAggregateTraceCertificate, CertifiedTraceSpacesAreLinearSi
     EXPECT_FALSE(isCertifiedGeneratedBoundaryTraceSpace(ProductSpace(tet2, 3), 3));
     EXPECT_FALSE(isCertifiedGeneratedBoundaryTraceSpace(*tet1, 1));
 }
+
+TEST(MeshBoundaryKinematics, NormalRateRelationStatesTheRowTheDeclarationAndTheConsistencyTerm)
+{
+    using namespace svmp::FE;
+    using namespace svmp::FE::forms;
+    MovingBoundaryDeclarations fixture;
+    const auto& space = *fixture.space;
+    const auto d = StateField(fixture.displacement, space, "d");
+    const auto u = StateField(fixture.velocity, space, "u");
+    const auto psi = TestField(fixture.displacement, space, "psi");
+
+    // The owner's statement: one relation, its declaration and its Nitsche row.
+    const auto relation = systems::normalRateRelation(fixture.displacement, 7, fixture.velocity, u, 8.0, "owner");
+    EXPECT_EQ(relation.mesh_displacement_field, fixture.displacement);
+    EXPECT_EQ(relation.boundary_marker, 7);
+    EXPECT_EQ(relation.quantity, systems::MeshNormalBoundaryQuantity::MeshVelocityTrace);
+    EXPECT_EQ(relation.target_kind, systems::MeshNormalBoundaryTargetKind::FluidNormalVelocity);
+    EXPECT_EQ(relation.target_expression.toString(), normalTrace(u, currentNormal()).toString());
+    EXPECT_EQ(relation.related_velocity_field, fixture.velocity);
+    EXPECT_EQ(relation.owner_component, "owner");
+    EXPECT_TRUE(relation.requires_mesh_flux_consistency);
+    EXPECT_EQ(relation.mesh_flux_consistency_nitsche_gamma, 8.0);
+    const auto n = currentNormal();
+    const auto Gamma = BoundaryDomain::fullPhysical(7);
+    EXPECT_EQ(systems::normalRateRelationRow(d, u, psi, 8.0, n, Gamma).toString(),
+              ((FormExpr::constant(8.0) / hNormal()) * normalTrace(dt(d) - u, n) * normalTrace(psi, n))
+                  .ds(Gamma).toString());
+
+    // The consumer's view: marker 7 carries a relation, marker 3 a plain constraint.
+    systems::declareMeshNormalKinematics(fixture.system, "moving", fixture.declarations);
+    EXPECT_EQ(systems::normalRateRelationMarkers(fixture.system), (std::vector<int>{7}));
+    EXPECT_EQ(systems::normalRateRelationMarkers(fixture.system, fixture.displacement), (std::vector<int>{7}));
+    EXPECT_TRUE(systems::normalRateRelationMarkers(fixture.system, fixture.velocity).empty());
+
+    const auto kappa = FormExpr::constant(1.5);
+    const auto R = inner(grad(dt(d)), grad(psi)).dx();
+    EXPECT_EQ(systems::addNormalRateRelationConsistency(fixture.system, fixture.displacement, R, kappa,
+                                                        grad(dt(d)), psi).toString(),
+              (R - (kappa * inner(grad(dt(d)) * currentNormal(), currentNormal()) * inner(psi, currentNormal()))
+                       .ds(7)).toString());
+    EXPECT_EQ(systems::addNormalRateRelationConsistency(fixture.system, fixture.velocity, R, kappa,
+                                                        grad(dt(d)), psi).toString(),
+              R.toString());
+
+    systems::NormalRateRelationConsumer consumer{.field = fixture.displacement,
+                                                 .flux_of_rate = true,
+                                                 .literal_kappa = 1.5,
+                                                 .context = "Consumer",
+                                                 .rate_flux_hint = "act on the rate"};
+    EXPECT_NO_THROW(systems::requireNormalRateRelationsConsumable(fixture.system, consumer));
+    auto own = consumer;
+    own.own_normal_markers = {7};
+    EXPECT_NE(invalidArgumentMessage([&] { systems::requireNormalRateRelationsConsumable(fixture.system, own); })
+                  .find("Consumer: boundary 7 has both a mesh-motion normal constraint"),
+              std::string::npos);
+    auto displacement_flux = consumer;
+    displacement_flux.flux_of_rate = false;
+    EXPECT_NE(invalidArgumentMessage(
+                  [&] { systems::requireNormalRateRelationsConsumable(fixture.system, displacement_flux); })
+                  .find("act on the rate"),
+              std::string::npos);
+    for (const auto kappa_value : {std::optional<Real>{}, std::optional<Real>{4.0}}) {
+        auto weak = consumer;
+        weak.literal_kappa = kappa_value;
+        EXPECT_NE(invalidArgumentMessage([&] { systems::requireNormalRateRelationsConsumable(fixture.system, weak); })
+                      .find("gamma_N > 2 kappa"),
+                  std::string::npos);
+    }
+    auto other_field = displacement_flux;
+    other_field.field = fixture.velocity;
+    EXPECT_NO_THROW(systems::requireNormalRateRelationsConsumable(fixture.system, other_field));
+}
