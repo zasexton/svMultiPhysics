@@ -36,6 +36,22 @@ def _log_records():
         spec.loader.exec_module(module)
     return module
 
+def _profile_decks():
+    """The method-profile helpers of the free-surface decks (decision D47,
+    P4; tests/cases/fluid/free_surface_profile_decks.py)."""
+    import importlib.util
+
+    name = "free_surface_profile_decks"
+    module = sys.modules.get(name)
+    if module is None:
+        path = next(parent / f"{name}.py" for parent in Path(__file__).resolve().parents
+                    if (parent / f"{name}.py").is_file())
+        spec = importlib.util.spec_from_file_location(name, path)
+        module = importlib.util.module_from_spec(spec)
+        sys.modules[name] = module
+        spec.loader.exec_module(module)
+    return module
+
 import numpy as np
 import pyvista as pv
 
@@ -814,7 +830,10 @@ def configure_solver(solver_xml: Path,
                      int | None = None,
                      static_capillary_limited_memory_curvature_tolerance:
                      float | None = None) -> None:
-    tree = ET.parse(solver_xml)
+    # The committed decks name a method profile; the checks and patches below
+    # read and write the keys it states, so work on the explicit form.
+    tree = ET.ElementTree(ET.fromstring(
+        _profile_decks().explicit_form(solver_xml.read_text()).encode("utf-8")))
     root = tree.getroot()
     general = root.find("GeneralSimulationParameters")
     if general is None:

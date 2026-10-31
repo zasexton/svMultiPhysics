@@ -10,6 +10,22 @@ import xml.etree.ElementTree as ET
 
 
 ROOT = Path(__file__).resolve().parent
+
+
+def _profile_decks():
+    """The method-profile helpers of the free-surface decks
+    (tests/cases/fluid/free_surface_profile_decks.py)."""
+    import importlib.util
+    import sys
+
+    name = "free_surface_profile_decks"
+    if name not in sys.modules:
+        spec = importlib.util.spec_from_file_location(
+            name, ROOT.parent / "free_surface_profile_decks.py")
+        module = importlib.util.module_from_spec(spec)
+        sys.modules[name] = module
+        spec.loader.exec_module(module)
+    return sys.modules[name]
 CASES = (
     ROOT / "unfitted_level_set" / "spheric_test05_wet_bed_d18",
     ROOT / "unfitted_level_set" / "spheric_test05_wet_bed_d38",
@@ -116,7 +132,9 @@ def check_case(case_dir: Path) -> dict[str, object]:
     if verification["diagnostic_pressure_matches_previous_invalid_error_range"]:
         raise ValueError(f"{metadata_path} still lies in the previous invalid D18 error range")
 
-    root = ET.parse(solver_path).getroot()
+    # The deck names a method profile (decision D47, P4): check the keys it
+    # states as written out.
+    root = ET.fromstring(_profile_decks().explicit_form(solver_path.read_text()).encode("utf-8"))
     general = root.find("GeneralSimulationParameters")
     if general is None:
         raise ValueError(f"{solver_path} is missing GeneralSimulationParameters")

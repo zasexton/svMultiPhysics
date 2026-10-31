@@ -380,10 +380,12 @@ def test_spheric_unfitted_decks_state_the_current_level_set_protocol(case_name):
         / case_name
         / "solver.xml"
     )
-    level_set = smoke.level_set_equation(ET.parse(solver_xml).getroot())
-
-    # The PDE extension is stated explicitly (D55), with the accepted-step
-    # maintenance of the M1-M4 protocols (D14, D21, D39).
+    # The decks name the Gravity_wave method profile (decision D47, P4); with
+    # it they state the PDE extension (D55) and the accepted-step maintenance
+    # of the M1-M4 protocols (D14, D21, D39).
+    explicit = ET.fromstring(smoke._profile_decks().explicit_form(solver_xml.read_text()))
+    assert "<Free_surface_profile>Gravity_wave@1</Free_surface_profile>" in solver_xml.read_text()
+    level_set = smoke.level_set_equation(explicit)
     assert level_set.findtext("Advection_velocity_extension_method") == "pde_harmonic"
     assert level_set.findtext("Advection_velocity_extension_coupling") == "monolithic"
     assert level_set.findtext("Enable_kinematic_reconciliation") == "true"

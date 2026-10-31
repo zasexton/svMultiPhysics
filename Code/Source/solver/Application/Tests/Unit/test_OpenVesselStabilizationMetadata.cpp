@@ -1,5 +1,6 @@
 #include <gtest/gtest.h>
 
+#include "Physics/Options/FreeSurfaceProfiles.h"
 #include "tinyxml2.h"
 
 #include <array>
@@ -61,6 +62,26 @@ void expectText(const tinyxml2::XMLElement& parent,
   EXPECT_EQ(text(parent, name), expected) << "element " << name;
 }
 
+// The text of a key of a free-surface boundary, or the value of the method
+// profile it names when it leaves the key to the profile (decision D47, P4).
+std::string resolvedText(const tinyxml2::XMLElement& free_surface, const char* name)
+{
+  if (free_surface.FirstChildElement(name) != nullptr) {
+    return text(free_surface, name);
+  }
+  const auto profile = text(free_surface, "Free_surface_profile");
+  if (profile.empty()) {
+    return {};
+  }
+  for (const auto& value : svmp::Physics::options::freeSurfaceProfile(profile).values) {
+    if (value.element == svmp::Physics::options::FreeSurfaceProfileElement::Boundary &&
+        value.key == name) {
+      return value.value;
+    }
+  }
+  return {};
+}
+
 } // namespace
 
 TEST(OpenVesselStabilizationMetadata, D18D38UseActiveCutStabilization)
@@ -90,7 +111,8 @@ TEST(OpenVesselStabilizationMetadata, D18D38UseActiveCutStabilization)
     expectText(free_surface, "Implementation", "UnfittedLevelSet");
     expectText(free_surface, "Generated_interface_domain_id", "open_vessel_surface");
     expectText(free_surface, "Active_domain", "LevelSetNegative");
-    expectText(free_surface, "Enable_cut_cell_stabilization", "true");
+    expectText(free_surface, "Free_surface_profile", "Gravity_wave@1");
+    EXPECT_EQ(resolvedText(free_surface, "Enable_cut_cell_stabilization"), "true");
     // The ghost-penalty coefficients carry the transient scaling
     // (mu + rho*h^2/dt) directly; there is no cut metadata scale on top of
     // them, and the decks state none of the removed keys.
@@ -100,6 +122,6 @@ TEST(OpenVesselStabilizationMetadata, D18D38UseActiveCutStabilization)
     // it); only the pressure jump penalty remains configurable.
     EXPECT_EQ(free_surface.FirstChildElement("Cut_cell_velocity_gradient_penalty"),
               nullptr);
-    expectText(free_surface, "Cut_cell_pressure_gradient_penalty", "1.0");
+    EXPECT_EQ(resolvedText(free_surface, "Cut_cell_pressure_gradient_penalty"), "1.0");
   }
 }

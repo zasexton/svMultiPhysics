@@ -881,6 +881,22 @@ def hydrostatic_pressure_at_point(point: np.ndarray, fill_height: float) -> floa
     return WATER_DENSITY * GRAVITY * max(0.0, fill_height - float(point[1]))
 
 
+# Decks are written in the method-profile form (decision D47, step P4): the
+# explicit deck text passes through free_surface_profile_decks.profile_form,
+# which names the profile and drops the keys it states (the converted decks
+# resolve to the same input).
+def _profile_decks():
+    import importlib.util
+    import sys
+    name = "free_surface_profile_decks"
+    if name not in sys.modules:
+        spec = importlib.util.spec_from_file_location(name, ROOT.parent / "free_surface_profile_decks.py")
+        module = importlib.util.module_from_spec(spec)
+        sys.modules[name] = module
+        spec.loader.exec_module(module)
+    return sys.modules[name]
+
+
 def write_solver_xml(
     case_dir: Path,
     *,
@@ -1294,7 +1310,7 @@ def write_solver_xml(
 
 </svMultiPhysicsFile>
 """
-    (case_dir / "solver.xml").write_text(xml)
+    (case_dir / "solver.xml").write_text(_profile_decks().profile_form(xml))
 
 
 def prepare_case_dir(path: Path) -> None:

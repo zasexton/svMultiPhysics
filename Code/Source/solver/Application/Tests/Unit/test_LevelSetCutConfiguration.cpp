@@ -1,6 +1,7 @@
 #include <gtest/gtest.h>
 
 #include "Application/Core/LevelSetCutConfiguration.h"
+#include "Application/Translators/EquationTranslator.h"
 #include "FE/Systems/FESystem.h"
 #include "Mesh/Core/MeshBase.h"
 #include "Mesh/Mesh.h"
@@ -346,6 +347,8 @@ void loadEquationParameters(const fs::path& path, Parameters& params)
     throw std::runtime_error("missing root solver element in " + path.string());
   }
   params.set_equation_values(root);
+  // As the driver reads a deck: a named free-surface profile states its values.
+  application::translators::EquationTranslator::applyFreeSurfaceProfiles(params);
 }
 
 std::shared_ptr<svmp::Mesh> buildSingleQuadMesh()

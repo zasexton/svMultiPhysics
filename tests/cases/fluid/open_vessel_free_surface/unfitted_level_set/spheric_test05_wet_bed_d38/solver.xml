@@ -59,17 +59,6 @@
   <Module_options>jit=true; jit_specialization=true</Module_options>
 
   <Level_set_field_name>phi</Level_set_field_name>
-  <Level_set_source>prescribed_data</Level_set_source>
-  <Velocity_source>prescribed_data</Velocity_source>
-  <Velocity_field_name>LevelSetAdvectionVelocity</Velocity_field_name>
-  <Auto_register_velocity_field>true</Auto_register_velocity_field>
-  <Source_velocity_field_name>Velocity</Source_velocity_field_name>
-  <Advection_velocity_extension_method>pde_harmonic</Advection_velocity_extension_method>
-  <Advection_velocity_extension_coupling>monolithic</Advection_velocity_extension_coupling>
-  <Enable_SUPG>true</Enable_SUPG>
-  <SUPG_tau_scale>0.5</SUPG_tau_scale>
-  <SUPG_transient_scale>2.0</SUPG_transient_scale>
-  <Enable_kinematic_reconciliation>true</Enable_kinematic_reconciliation>
   <Enable_interface_preserving_redistancing>true</Enable_interface_preserving_redistancing>
   <Enable_sign_definite_patch_bounds>true</Enable_sign_definite_patch_bounds>
 
@@ -155,15 +144,12 @@
   <Add_BC name="free_surface">
     <Type>Free_surface</Type>
     <Implementation>UnfittedLevelSet</Implementation>
+    <Free_surface_profile>Gravity_wave@1</Free_surface_profile>
     <Level_set_field_name>phi</Level_set_field_name>
     <Generated_interface_domain_id>open_vessel_surface</Generated_interface_domain_id>
-    <Level_set_isovalue>0.0</Level_set_isovalue>
     <Active_domain>LevelSetNegative</Active_domain>
     <External_pressure>0.0</External_pressure>
     <Surface_tension>0.0</Surface_tension>
-    <Enable_cut_cell_stabilization>true</Enable_cut_cell_stabilization>
-    <Small_cut_aggregation>true</Small_cut_aggregation>
-    <Cut_cell_pressure_gradient_penalty>1.0</Cut_cell_pressure_gradient_penalty>
   </Add_BC>
 </Add_equation>
 

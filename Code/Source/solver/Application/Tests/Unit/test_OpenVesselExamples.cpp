@@ -17,6 +17,7 @@
 #include "Mesh/Mesh.h"
 #include "Mesh/Topology/CellShape.h"
 #include "Parameters.h"
+#include "Physics/Options/FreeSurfaceProfiles.h"
 #include "tinyxml2.h"
 
 #if FE_HAS_MPI || defined(MESH_HAS_MPI)
@@ -291,6 +292,28 @@ std::unique_ptr<EquationParameters> equationParametersFromElement(
   return params;
 }
 
+std::unique_ptr<Parameters> profileEquations(tinyxml2::XMLElement& root)
+{
+  auto params = std::make_unique<Parameters>();
+  for (auto* equation = root.FirstChildElement("Add_equation"); equation != nullptr;
+       equation = equation->NextSiblingElement("Add_equation")) {
+    params->equation_parameters.push_back(
+        equationParametersFromElement(*equation).release());
+  }
+  application::translators::EquationTranslator::applyFreeSurfaceProfiles(*params);
+  return params;
+}
+
+EquationParameters& profileEquation(Parameters& params, std::string_view type)
+{
+  for (auto* equation : params.equation_parameters) {
+    if (equation != nullptr && equation->type.value() == type) {
+      return *equation;
+    }
+  }
+  throw std::runtime_error("missing equation " + std::string(type));
+}
+
 std::unique_ptr<EquationParameters> equationParametersFromText(
     const char* xml)
 {
@@ -381,12 +404,50 @@ void expectText(const tinyxml2::XMLElement& parent,
   EXPECT_EQ(text(parent, name), expected) << name;
 }
 
-void expectReviewedP1LevelSetTransportControls(
-    const tinyxml2::XMLElement& level_set)
+using svmp::Physics::options::FreeSurfaceProfileElement;
+
+// The text of a key of a deck element, or the value the deck's method
+// profile states when the element leaves the key to the profile (decision
+// D47, P4).
+std::string resolvedText(const tinyxml2::XMLElement& parent,
+                         const char* name,
+                         std::string_view profile,
+                         FreeSurfaceProfileElement element)
 {
-  expectText(level_set, "Enable_SUPG", "true");
-  expectText(level_set, "SUPG_tau_scale", "0.5");
-  expectText(level_set, "SUPG_transient_scale", "2.0");
+  if (parent.FirstChildElement(name) != nullptr) {
+    return text(parent, name);
+  }
+  for (const auto& value :
+       svmp::Physics::options::freeSurfaceProfile(profile).values) {
+    if (value.element == element && value.key == name) {
+      return value.value;
+    }
+  }
+  return {};
+}
+
+void expectResolvedText(const tinyxml2::XMLElement& parent,
+                        const char* name,
+                        std::string_view expected,
+                        std::string_view profile,
+                        FreeSurfaceProfileElement element)
+{
+  EXPECT_EQ(resolvedText(parent, name, profile, element), expected) << name;
+}
+
+// The equations of a deck with the values of the method profile its
+// free-surface boundary names stated as parameters, as the driver does after
+// reading the input (decision D47, P4).
+std::unique_ptr<Parameters> profileEquations(tinyxml2::XMLElement& root);
+
+void expectReviewedP1LevelSetTransportControls(
+    const tinyxml2::XMLElement& level_set,
+    std::string_view profile)
+{
+  constexpr auto element = FreeSurfaceProfileElement::LevelSetEquation;
+  expectResolvedText(level_set, "Enable_SUPG", "true", profile, element);
+  expectResolvedText(level_set, "SUPG_tau_scale", "0.5", profile, element);
+  expectResolvedText(level_set, "SUPG_transient_scale", "2.0", profile, element);
   // Level-set discontinuity capturing (decision D47) and the
   // bound-preserving limiter (decision D51) were retired; the decks state
   // none of their keys.
@@ -1039,12 +1100,15 @@ TEST(OpenVesselExamples, UnfittedLevelSetCaseDeclaresRequiredControls)
   EXPECT_TRUE(fileContains(mesh_path, "Name=\"Pressure\""));
   EXPECT_TRUE(fileContains(mesh_path, "Name=\"Velocity\""));
 
+  // The deck names the Gravity_wave method profile (decision D47, P4).
+  constexpr std::string_view profile = "Gravity_wave@1";
   const auto& level_set = childWithAttribute(*root, "Add_equation", "type", "level_set");
   expectText(level_set, "Level_set_field_name", "phi");
-  expectText(level_set, "Level_set_source", "prescribed_data");
+  expectResolvedText(level_set, "Level_set_source", "prescribed_data", profile,
+                     FreeSurfaceProfileElement::LevelSetEquation);
   expectText(level_set, "Velocity_source", "constant");
   expectText(level_set, "Constant_velocity", "0.0 0.0 0.0");
-  expectReviewedP1LevelSetTransportControls(level_set);
+  expectReviewedP1LevelSetTransportControls(level_set, profile);
   // Projection reinitialization was retired (decision D47).
   EXPECT_EQ(level_set.FirstChildElement("Enable_reinitialization"), nullptr);
   EXPECT_EQ(level_set.FirstChildElement("Reinitialization_method"), nullptr);
@@ -1076,18 +1140,21 @@ TEST(OpenVesselExamples, UnfittedLevelSetCaseDeclaresRequiredControls)
   expectBoundaryCondition(fluid, "wall_right", "Dir");
   expectBoundaryCondition(fluid, "wall_bottom", "Dir");
   const auto& free_surface = expectBoundaryCondition(fluid, "free_surface", "Free_surface");
+  constexpr auto boundary = FreeSurfaceProfileElement::Boundary;
   expectText(free_surface, "Implementation", "UnfittedLevelSet");
-  expectText(free_surface, "Small_cut_aggregation", "true");
+  expectText(free_surface, "Free_surface_profile", profile);
+  expectResolvedText(free_surface, "Small_cut_aggregation", "true", profile, boundary);
   expectText(free_surface, "Level_set_field_name", "phi");
   expectText(free_surface, "Generated_interface_domain_id", "open_vessel_surface");
-  expectText(free_surface, "Level_set_isovalue", "0.0");
+  expectResolvedText(free_surface, "Level_set_isovalue", "0.0", profile, boundary);
   expectText(free_surface, "External_pressure", "0.0");
   expectText(free_surface, "Surface_tension", "0.0");
-  expectText(free_surface, "Enable_cut_cell_stabilization", "true");
+  expectResolvedText(free_surface, "Enable_cut_cell_stabilization", "true", profile, boundary);
   EXPECT_EQ(free_surface.FirstChildElement("Use_cut_metadata_scale"), nullptr);
   EXPECT_EQ(free_surface.FirstChildElement("Cut_cell_velocity_gradient_penalty"),
             nullptr);
-  expectText(free_surface, "Cut_cell_pressure_gradient_penalty", "1.0");
+  expectResolvedText(free_surface, "Cut_cell_pressure_gradient_penalty", "1.0", profile,
+                     boundary);
 }
 
 TEST(OpenVesselExamples, UnfittedLevelSetCaseBuildsOopInputs)
@@ -1102,8 +1169,8 @@ TEST(OpenVesselExamples, UnfittedLevelSetCaseBuildsOopInputs)
       /*register_free_surface_label=*/false);
   const std::map<std::string, std::shared_ptr<svmp::Mesh>> meshes{{"tank", mesh}};
 
-  auto level_set_params = equationParametersFromElement(
-      mutableChildWithAttribute(*root, "Add_equation", "type", "level_set"));
+  auto profile_params = profileEquations(*root);
+  auto* level_set_params = &profileEquation(*profile_params, "level_set");
   const auto level_set_input =
       application::translators::EquationTranslator::buildInput(
           *level_set_params,
@@ -1127,8 +1194,7 @@ TEST(OpenVesselExamples, UnfittedLevelSetCaseBuildsOopInputs)
   EXPECT_TRUE(system.hasOperator("equations"));
   EXPECT_FALSE(system.hasOperator("level_set"));
 
-  auto fluid_params = equationParametersFromElement(
-      mutableChildWithAttribute(*root, "Add_equation", "type", "fluid"));
+  auto* fluid_params = &profileEquation(*profile_params, "fluid");
   const auto fluid_input =
       application::translators::EquationTranslator::buildInput(
           *fluid_params,
@@ -1171,8 +1237,8 @@ TEST(OpenVesselExamples, ScopedEquationCutDomainRegistersWithUnfittedFreeSurface
   auto mesh = makeTranslatorQuadMesh();
   const std::map<std::string, std::shared_ptr<svmp::Mesh>> meshes{{"tank", mesh}};
 
-  auto level_set_params = equationParametersFromElement(
-      mutableChildWithAttribute(*root, "Add_equation", "type", "level_set"));
+  auto profile_params = profileEquations(*root);
+  auto* level_set_params = &profileEquation(*profile_params, "level_set");
   svmp::FE::systems::FESystem system(mesh);
   auto level_set_module =
       application::translators::EquationTranslator::createModule(
@@ -1181,7 +1247,7 @@ TEST(OpenVesselExamples, ScopedEquationCutDomainRegistersWithUnfittedFreeSurface
           meshes);
   ASSERT_TRUE(level_set_module);
 
-  auto fluid_params = equationParametersFromElement(fluid);
+  auto* fluid_params = &profileEquation(*profile_params, "fluid");
   const auto requests = application::core::activeCutVolumeRequests(*fluid_params);
   const auto equation_request = std::find_if(
       requests.begin(),
@@ -2840,10 +2906,15 @@ TEST(OpenVesselExamples, FittedAleMeshNitscheDecksDeclareSlidingWallsAndDisjoint
     const auto& free_surface = expectBoundaryCondition(fluid, "free_surface", "Free_surface");
     expectText(free_surface, "Implementation", "FittedALE");
     // A fitted free surface always uses the MeshNitsche normal enforcement;
-    // the decks state no enforcement or normal kinematic policy.
+    // the decks state no enforcement or normal kinematic policy, and the
+    // Fitted_ALE profile states gamma_N = 10 and a free tangential mesh
+    // (decision D47, P4).
     EXPECT_EQ(free_surface.FirstChildElement("Kinematic_enforcement"), nullptr);
-    expectText(free_surface, "Kinematic_nitsche_gamma", "10");
-    expectText(free_surface, "Tangential_mesh_policy", "Free");
+    expectText(free_surface, "Free_surface_profile", "Fitted_ALE@1");
+    expectResolvedText(free_surface, "Kinematic_nitsche_gamma", "10", "Fitted_ALE@1",
+                       FreeSurfaceProfileElement::Boundary);
+    expectResolvedText(free_surface, "Tangential_mesh_policy", "Free", "Fitted_ALE@1",
+                       FreeSurfaceProfileElement::Boundary);
     EXPECT_EQ(free_surface.FirstChildElement("Normal_kinematic_policy"),
               nullptr);
     expectText(free_surface, "Surface_tension", "0.0");
@@ -3038,17 +3109,23 @@ TEST(OpenVesselExamples, LiteratureValidationCasesDeclareGeneratedMeshes)
         std::string("jit=true; jit_specialization=true");
     expectText(level_set, "Module_options", expected_jit_options);
     expectText(fluid, "Module_options", expected_jit_options);
+    // The decks name the Gravity_wave method profile (decision D47, P4).
+    constexpr std::string_view profile = "Gravity_wave@1";
+    constexpr auto equation = FreeSurfaceProfileElement::LevelSetEquation;
+    expectText(free_surface, "Free_surface_profile", profile);
     expectText(level_set, "Level_set_field_name", "phi");
-    expectText(level_set, "Velocity_source", expected.level_set_velocity_source);
-    expectText(level_set, "Enable_SUPG", "true");
-    expectText(level_set, "SUPG_tau_scale", "0.5");
-    expectText(level_set, "SUPG_transient_scale", "2.0");
+    expectResolvedText(level_set, "Velocity_source", expected.level_set_velocity_source,
+                       profile, equation);
+    expectReviewedP1LevelSetTransportControls(level_set, profile);
     // The current level-set protocol: the harmonic PDE extension (D55), the
     // kinematic reconciliation (D14), the sign-definite patch bounds (D21) and
     // the triggered interface-preserving redistancing (D39).
-    expectText(level_set, "Advection_velocity_extension_method", "pde_harmonic");
-    expectText(level_set, "Advection_velocity_extension_coupling", "monolithic");
-    expectText(level_set, "Enable_kinematic_reconciliation", "true");
+    expectResolvedText(level_set, "Advection_velocity_extension_method", "pde_harmonic",
+                       profile, equation);
+    expectResolvedText(level_set, "Advection_velocity_extension_coupling", "monolithic",
+                       profile, equation);
+    expectResolvedText(level_set, "Enable_kinematic_reconciliation", "true", profile,
+                       equation);
     expectText(level_set, "Enable_sign_definite_patch_bounds", "true");
     expectText(level_set, "Enable_interface_preserving_redistancing", "true");
     // The retired algorithms (D47, D51, D55) are not mentioned at all.
@@ -3077,7 +3154,8 @@ TEST(OpenVesselExamples, LiteratureValidationCasesDeclareGeneratedMeshes)
     // The hydrostatic field is the Navier-Stokes pressure (decision D60).
     EXPECT_EQ(fluid.FirstChildElement("Hydrostatic_pressure_field_name"), nullptr);
     expectText(free_surface, "Generated_interface_domain_id", "open_vessel_surface");
-    expectText(free_surface, "Small_cut_aggregation", "true");
+    expectResolvedText(free_surface, "Small_cut_aggregation", "true", profile,
+                       FreeSurfaceProfileElement::Boundary);
     expectText(free_surface, "Active_domain", "LevelSetNegative");
     for (const char* name : {"Active_domain_method", "Enable_velocity_extension",
                              "Velocity_extension_diffusivity", "Kinematic_enforcement"}) {

@@ -117,10 +117,9 @@
   <Add_BC name="free_surface">
     <Type>Free_surface</Type>
     <Implementation>FittedALE</Implementation>
+    <Free_surface_profile>Fitted_ALE@1</Free_surface_profile>
     <External_pressure>0.0</External_pressure>
     <Surface_tension>0.0</Surface_tension>
-    <Tangential_mesh_policy>Free</Tangential_mesh_policy>
-    <Kinematic_nitsche_gamma>10</Kinematic_nitsche_gamma>
   </Add_BC>
 </Add_equation>
 

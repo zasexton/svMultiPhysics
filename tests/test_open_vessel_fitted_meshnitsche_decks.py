@@ -92,7 +92,10 @@ def test_decks_use_mesh_nitsche_sliding_walls_and_rest(dim):
     assert fluid.find("Node_pressure_constraints") is None
     assert fluid.find("Momentum_source_temporal_and_spatial_values_file_path") is None
     surface = [bc for bc in fluid.iter("Add_BC") if bc.get("name") == "free_surface"][0]
-    assert surface.find("Tangential_mesh_policy").text == "Free"
+    # The Fitted_ALE profile states MeshNitsche with gamma_N = 10 and a free
+    # tangential mesh (decision D47, P4).
+    assert surface.find("Free_surface_profile").text == "Fitted_ALE@1"
+    assert surface.find("Tangential_mesh_policy") is None
     assert mesh.find("Harmonic_quantity").text == "velocity"
     walls = gen.WALLS_2D if dim == 2 else gen.WALLS_3D
     for eq in (fluid, mesh):
