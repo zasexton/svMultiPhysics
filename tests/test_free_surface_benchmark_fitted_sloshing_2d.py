@@ -3,6 +3,7 @@
 import importlib.util
 import json
 import math
+import sys
 import xml.etree.ElementTree as ET
 from pathlib import Path
 
@@ -24,6 +25,18 @@ def load(directory, name):
 gen = load(BENCHMARK, "generate_case")
 ver = load(BENCHMARK, "verify")
 unfitted = load(CASES / "linear_sloshing_2d", "generate_case")
+# The Python mirror of the free-surface method profiles (decision D47, P4).
+_profiles_spec = importlib.util.spec_from_file_location(
+    "free_surface_profile_decks", CASES.parent / "free_surface_profile_decks.py")
+profiles = importlib.util.module_from_spec(_profiles_spec)
+sys.modules[_profiles_spec.name] = profiles
+_profiles_spec.loader.exec_module(profiles)
+
+
+def deck_keys(text):
+    """The free-surface and level-set keys a deck resolves to (its profile's
+    values for the keys it does not state)."""
+    return profiles.effective_deck_keys(text)
 
 
 def test_reference_is_the_linear_sloshing_reference():
@@ -64,8 +77,13 @@ def test_generated_case_uses_mesh_nitsche_and_sliding_walls(tmp_path):
         assert bcs["wall_bottom"].find("Effective_direction").text == "0 1"
     surface = {bc.get("name"): bc for bc in fluid.iter("Add_BC")}["free_surface"]
     assert surface.find("Implementation").text == "FittedALE"
-    assert float(surface.find("Kinematic_nitsche_gamma").text) == 10.0
-    assert surface.find("Tangential_mesh_policy").text == "Free"
+    # The Fitted_ALE profile states MeshNitsche with gamma_N = 10 and a free
+    # tangential mesh (decision D47, P4).
+    assert surface.find("Free_surface_profile").text == "Fitted_ALE@1"
+    resolved, _ = deck_keys((tmp_path / "c/solver.xml").read_text())
+    assert float(resolved["Kinematic_nitsche_gamma"]) == 10.0
+    assert resolved["Tangential_mesh_policy"] == "Free"
+    assert surface.find("Kinematic_nitsche_gamma") is None
     assert float(surface.find("Surface_tension").text) == 0.0
     assert mesh.find("Model").text == "Harmonic" and float(mesh.find("Kappa").text) == 1.0
     assert case["study"] == "spatial" and case["protocol_run"]

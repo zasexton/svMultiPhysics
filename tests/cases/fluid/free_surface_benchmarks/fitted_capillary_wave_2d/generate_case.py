@@ -75,6 +75,11 @@ EXTERNAL_PRESSURE = CW.EXTERNAL_PRESSURE
 MESH_MOTION_KAPPA = 1.0                     # only scales the harmonic mesh equation
 KINEMATIC_NITSCHE_GAMMA = 10.0              # as fitted_sloshing_2d (P1 trace inverse inequality)
 TANGENTIAL_MESH_POLICY = "Free"
+# The method profile of the fitted protocol (decision D47, step P4): it
+# states MeshNitsche with gamma_N = KINEMATIC_NITSCHE_GAMMA and
+# Tangential_mesh_policy = TANGENTIAL_MESH_POLICY
+# (Physics/Options/FreeSurfaceProfiles.cpp).
+FREE_SURFACE_PROFILE = "Fitted_ALE@1"
 WALLS = ("wall_left", "wall_right", "wall_bottom")
 FREE_SURFACE = "free_surface"
 # Free slip for the fluid and sliding for the mesh: strong zero wall-normal
@@ -248,10 +253,9 @@ def solver_xml(schedule: dict, steps: int, cadence: int) -> str:
     <Add_BC name="{FREE_SURFACE}">
       <Type>Free_surface</Type>
       <Implementation>FittedALE</Implementation>
+      <Free_surface_profile>{FREE_SURFACE_PROFILE}</Free_surface_profile>
       <External_pressure>{EXTERNAL_PRESSURE:.17g}</External_pressure>
       <Surface_tension>{SURFACE_TENSION:.17g}</Surface_tension>
-      <Tangential_mesh_policy>{TANGENTIAL_MESH_POLICY}</Tangential_mesh_policy>
-      <Kinematic_nitsche_gamma>{KINEMATIC_NITSCHE_GAMMA:.17g}</Kinematic_nitsche_gamma>
     </Add_BC>
   </Add_equation>
 

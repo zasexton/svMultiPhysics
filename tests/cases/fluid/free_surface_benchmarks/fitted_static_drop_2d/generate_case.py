@@ -49,6 +49,10 @@ END_TIME = 1.0
 OUTPUT_CADENCE = 10
 MESH_MOTION_KAPPA = 1.0
 KINEMATIC_NITSCHE_GAMMA = 10.0              # as fitted_sloshing_2d
+# The method profile of the fitted protocol (decision D47, step P4): it
+# states MeshNitsche with gamma_N = KINEMATIC_NITSCHE_GAMMA and a free
+# tangential mesh (Physics/Options/FreeSurfaceProfiles.cpp).
+FREE_SURFACE_PROFILE = "Fitted_ALE@1"
 FREE_SURFACE = "free_surface"
 
 
@@ -164,10 +168,9 @@ def solver_xml(steps: int) -> str:
     <Add_BC name="{FREE_SURFACE}">
       <Type>Free_surface</Type>
       <Implementation>FittedALE</Implementation>
+      <Free_surface_profile>{FREE_SURFACE_PROFILE}</Free_surface_profile>
       <External_pressure>0.0</External_pressure>
       <Surface_tension>{SURFACE_TENSION:.17g}</Surface_tension>
-      <Tangential_mesh_policy>Free</Tangential_mesh_policy>
-      <Kinematic_nitsche_gamma>{KINEMATIC_NITSCHE_GAMMA:.17g}</Kinematic_nitsche_gamma>
     </Add_BC>
   </Add_equation>
 

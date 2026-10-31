@@ -74,6 +74,12 @@ KINEMATIC_NITSCHE_GAMMA = 10.0
 # The older fitted modes Nitsche and Penalty were retired by decision D47 (Q9).
 KINEMATIC_ENFORCEMENT = ("MeshNitsche",)
 TANGENTIAL_MESH_POLICY = "Free"
+# The method profile of the fitted protocol (decision D47, step P4): it
+# states MeshNitsche with gamma_N = KINEMATIC_NITSCHE_GAMMA and
+# Tangential_mesh_policy = TANGENTIAL_MESH_POLICY
+# (Physics/Options/FreeSurfaceProfiles.cpp); a deck writes gamma_N only
+# when --kinematic-nitsche-gamma differs.
+FREE_SURFACE_PROFILE = "Fitted_ALE@1"
 WALLS = ("wall_left", "wall_right", "wall_bottom")
 FREE_SURFACE = "free_surface"
 # Free slip for the fluid and sliding for the mesh: strong zero wall-normal
@@ -182,15 +188,16 @@ def linear_solver_block() -> str:
 
 def free_surface_block(nitsche_gamma: float = KINEMATIC_NITSCHE_GAMMA) -> str:
     # A FittedALE free surface always enforces the normal kinematic condition
-    # by MeshNitsche; the deck only sets its Nitsche constant.
-    kinematic = f"""      <Kinematic_nitsche_gamma>{nitsche_gamma:.17g}</Kinematic_nitsche_gamma>"""
+    # by MeshNitsche; the profile states its Nitsche constant, and the deck
+    # overrides it only for another value.
+    kinematic = ("" if nitsche_gamma == KINEMATIC_NITSCHE_GAMMA else
+                 f"""\n      <Kinematic_nitsche_gamma>{nitsche_gamma:.17g}</Kinematic_nitsche_gamma>""")
     return f"""    <Add_BC name="{FREE_SURFACE}">
       <Type>Free_surface</Type>
       <Implementation>FittedALE</Implementation>
+      <Free_surface_profile>{FREE_SURFACE_PROFILE}</Free_surface_profile>
       <External_pressure>{EXTERNAL_PRESSURE:.17g}</External_pressure>
-      <Surface_tension>0.0</Surface_tension>
-      <Tangential_mesh_policy>{TANGENTIAL_MESH_POLICY}</Tangential_mesh_policy>
-{kinematic}
+      <Surface_tension>0.0</Surface_tension>{kinematic}
     </Add_BC>"""
 
 
