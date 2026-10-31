@@ -18,7 +18,9 @@
 #include "Forms/FormExpr.h"
 #include "Forms/FormKernels.h"  // for BoundaryFunctionalGradientKernel
 #include "Forms/JIT/ExternalCalls.h"
+#include "Systems/ExactAccumulator.h"
 #include "Systems/FESystem.h"
+#include "Systems/SystemCollectives.h"
 #include "Dofs/EntityDofMap.h"
 #include "Spaces/H1Space.h"
 #include "Systems/SystemsExceptions.h"
@@ -33,6 +35,7 @@
 #include <cstdlib>
 #include <exception>
 #include <numeric>
+#include <optional>
 #include <string>
 #include <unordered_set>
 #include <utility>
@@ -94,6 +97,58 @@ bool mpiUsesMultipleRanks(MPI_Comm comm)
     return size > 1;
 }
 #endif
+
+/// Forwards to a boundary functional's kernel and adds each boundary face's
+/// total to an exact accumulator; the totals it returns to the assembler are
+/// zero.  A face's total does not depend on the partition, so neither does
+/// their exact sum.
+class ExactFaceSumKernel final : public assembly::FunctionalKernel {
+public:
+    explicit ExactFaceSumKernel(assembly::FunctionalKernel& kernel)
+        : kernel_(kernel)
+    {
+    }
+
+    [[nodiscard]] assembly::RequiredData getRequiredData() const noexcept override
+    {
+        return kernel_.getRequiredData();
+    }
+
+    [[nodiscard]] std::vector<assembly::FieldRequirement> fieldRequirements() const override
+    {
+        return kernel_.fieldRequirements();
+    }
+
+    [[nodiscard]] bool hasCell() const noexcept override { return kernel_.hasCell(); }
+    [[nodiscard]] bool hasBoundaryFace() const noexcept override { return kernel_.hasBoundaryFace(); }
+
+    [[nodiscard]] Real evaluateCell(const assembly::AssemblyContext& ctx, LocalIndex q) override
+    {
+        return kernel_.evaluateCell(ctx, q);
+    }
+
+    [[nodiscard]] Real evaluateBoundaryFace(const assembly::AssemblyContext& ctx,
+                                            LocalIndex q,
+                                            int boundary_marker) override
+    {
+        return kernel_.evaluateBoundaryFace(ctx, q, boundary_marker);
+    }
+
+    [[nodiscard]] Real evaluateBoundaryFaceTotal(const assembly::AssemblyContext& ctx,
+                                                 int boundary_marker) override
+    {
+        sum_.add(kernel_.evaluateBoundaryFaceTotal(ctx, boundary_marker));
+        return Real{0.0};
+    }
+
+    [[nodiscard]] std::string name() const override { return kernel_.name(); }
+
+    [[nodiscard]] const ExactAccumulator& sum() const noexcept { return sum_; }
+
+private:
+    assembly::FunctionalKernel& kernel_;
+    ExactAccumulator sum_{};
+};
 
 void coordinateBoundaryReductionLocalFailure(
     const FESystem& system,
@@ -1251,7 +1306,8 @@ void BoundaryReductionService::requireCollectiveRequest(
 
 Real BoundaryReductionService::evaluateFunctionalEntryPreflighted(
     CompiledFunctional& entry,
-    const SystemStateView& state)
+    const SystemStateView& state,
+    FaceSummation summation)
 {
     std::exception_ptr local_compile_exception;
     try {
@@ -1271,6 +1327,7 @@ Real BoundaryReductionService::evaluateFunctionalEntryPreflighted(
     Real raw = Real{0.0};
     assembly::FunctionalResult local_result;
     std::exception_ptr local_assembly_exception;
+    std::optional<ExactFaceSumKernel> exact_faces;
 
     std::exception_ptr local_ghost_exception;
     try {
@@ -1418,6 +1475,9 @@ Real BoundaryReductionService::evaluateFunctionalEntryPreflighted(
                         " is not a generated active-boundary marker");
         raw = assembler.assembleCutInterfaceScalar(
             *entry.kernel, *cut_context, marker);
+    } else if (summation == FaceSummation::Exact) {
+        exact_faces.emplace(*entry.kernel);
+        (void)assembler.assembleBoundaryScalar(*exact_faces, entry.def.boundary_marker);
     } else {
         raw = assembler.assembleBoundaryScalar(*entry.kernel, entry.def.boundary_marker);
     }
@@ -1450,8 +1510,17 @@ Real BoundaryReductionService::evaluateFunctionalEntryPreflighted(
             (local_result.error_message.empty()
                  ? std::string(" on at least one rank")
                  : std::string(": ") + local_result.error_message));
+    if (exact_faces.has_value()) {
 #if FE_HAS_MPI
-    if (mpi_initialized) {
+        const auto comm = mpi_initialized ? CollectiveCommunicator(system_.dofHandler().mpiComm())
+                                          : CollectiveCommunicator();
+#else
+        const CollectiveCommunicator comm;
+#endif
+        raw = static_cast<Real>(collectiveExactSum(exact_faces->sum(), comm));
+    }
+#if FE_HAS_MPI
+    else if (mpi_initialized) {
         raw = allreduceSum(raw, system_.dofHandler().mpiComm());
     }
 #endif
@@ -1483,7 +1552,9 @@ Real BoundaryReductionService::evaluateFunctionalEntryPreflighted(
     return raw;
 }
 
-Real BoundaryReductionService::evaluateFunctional(std::string_view name, const SystemStateView& state)
+Real BoundaryReductionService::evaluateFunctional(std::string_view name,
+                                                  const SystemStateView& state,
+                                                  FaceSummation summation)
 {
     auto& entry = requireCollectiveFunctional(
         name,
@@ -1491,7 +1562,7 @@ Real BoundaryReductionService::evaluateFunctional(std::string_view name, const S
         state);
     system_.requireCurrentBoundaryReductionExteriorMeasures();
     return evaluateFunctionalEntryPreflighted(
-        entry, state);
+        entry, state, summation);
 }
 
 Real BoundaryReductionService::evaluateFunctionalOverCells(

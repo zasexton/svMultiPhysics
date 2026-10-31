@@ -1310,6 +1310,11 @@ public:
     void clearAuxiliaryVariantSelection(std::string_view group);
 
     // ---- Handle-returning auxiliary input registration ----
+    //
+    // A boundary integral input enters the discrete system (an outlet's flow
+    // rate drives its 0D model), so the faces of its physical marker are
+    // summed exactly (BoundaryReductionService::FaceSummation::Exact): the
+    // input is the same at any rank count.
 
     /**
      * @brief Register a boundary integral as an auxiliary input and return a handle.

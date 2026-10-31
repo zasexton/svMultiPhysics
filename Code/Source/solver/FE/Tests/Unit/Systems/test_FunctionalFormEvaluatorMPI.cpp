@@ -11,10 +11,13 @@
 
 #include "Assembly/CutIntegrationContext.h"
 #include "Assembly/FunctionalAssembler.h"
+#include "Dofs/EntityDofMap.h"
 #include "Forms/BoundaryFunctional.h"
 #include "Forms/FormExpr.h"
 #include "Forms/IntegrationDomain.h"
 #include "Spaces/H1Space.h"
+#include "Systems/BoundaryReductionService.h"
+#include "Systems/FESystem.h"
 #include "Systems/FunctionalFormEvaluator.h"
 #include "Systems/SystemCollectives.h"
 #include "Tests/Unit/Systems/FunctionalFormEvaluatorFixtures.h"
@@ -258,6 +261,75 @@ private:
     return std::nextafter(magnitude, std::numeric_limits<Real>::infinity()) - magnitude;
 }
 
+/// The strip as a set-up system on @p comm: cell c owned by rank c % size,
+/// DOFs numbered by global vertex ids (the same at any rank count), and
+/// u = 1 + 2x + 3y + x y at the vertices.
+struct StripSystem {
+    std::shared_ptr<fixture::QuadStripMeshAccess> mesh{};
+    std::unique_ptr<systems::FESystem> system{};
+    svmp::FE::FieldId u{svmp::FE::INVALID_FIELD_ID};
+    std::vector<Real> u_values{};
+};
+
+[[nodiscard]] StripSystem stripSystem(MPI_Comm comm)
+{
+    int rank = 0;
+    int size = 1;
+    MPI_Comm_rank(comm, &rank);
+    MPI_Comm_size(comm, &size);
+    StripSystem out;
+    out.mesh = std::make_shared<fixture::QuadStripMeshAccess>(
+        rank, size, kCellCount, kExtent, [](Real x) { return Real{0.15} * std::sin(Real{1.3} * x); });
+    auto space = std::make_shared<svmp::FE::spaces::H1Space>(svmp::FE::ElementType::Quad4, 1);
+    out.system = std::make_unique<systems::FESystem>(out.mesh);
+    auto& sys = *out.system;
+    out.u = sys.addField(systems::FieldSpec{.name = "u", .space = space, .components = 1});
+
+    svmp::FE::dofs::MeshTopologyInfo topology;
+    topology.n_cells = kCellCount;
+    topology.n_vertices = out.mesh->numVertices();
+    topology.dim = 2;
+    using Offset = decltype(topology.cell2vertex_offsets)::value_type;
+    using Vertex = decltype(topology.cell2vertex_data)::value_type;
+    using Gid = decltype(topology.vertex_gids)::value_type;
+    for (GlobalIndex cell = 0; cell < kCellCount; ++cell) {
+        std::vector<GlobalIndex> nodes;
+        out.mesh->getCellNodes(cell, nodes);
+        topology.cell2vertex_offsets.push_back(static_cast<Offset>(topology.cell2vertex_data.size()));
+        for (const auto node : nodes) {
+            topology.cell2vertex_data.push_back(static_cast<Vertex>(node));
+        }
+        topology.cell_gids.push_back(static_cast<Gid>(out.mesh->getCellGlobalId(cell)));
+        topology.cell_owner_ranks.push_back(out.mesh->getCellOwnerRank(cell));
+    }
+    topology.cell2vertex_offsets.push_back(static_cast<Offset>(topology.cell2vertex_data.size()));
+    for (GlobalIndex vertex = 0; vertex < out.mesh->numVertices(); ++vertex) {
+        topology.vertex_gids.push_back(static_cast<Gid>(vertex));
+    }
+    systems::SetupOptions options;
+    options.dof_options.global_numbering = svmp::FE::dofs::GlobalNumberingMode::GlobalIds;
+    options.dof_options.ownership = svmp::FE::dofs::OwnershipStrategy::VertexGID;
+    options.dof_options.my_rank = rank;
+    options.dof_options.world_size = size;
+    options.dof_options.mpi_comm = comm;
+    systems::SetupInputs inputs;
+    inputs.topology_override = topology;
+    sys.setup(options, inputs);
+
+    out.u_values.assign(static_cast<std::size_t>(sys.dofHandler().getNumDofs()), Real{0.0});
+    const auto* vertex_dofs = sys.fieldDofHandler(out.u).getEntityDofMap();
+    EXPECT_NE(vertex_dofs, nullptr);
+    for (GlobalIndex vertex = 0; vertex < out.mesh->numVertices(); ++vertex) {
+        const auto p = out.mesh->getNodeCoordinates(vertex);
+        for (const auto dof : vertex_dofs->getVertexDofs(vertex)) {
+            out.u_values[static_cast<std::size_t>(sys.fieldDofOffset(out.u) + dof)] =
+                Real{1.0} + Real{2.0} * p[0] + Real{3.0} * p[1] + p[0] * p[1];
+        }
+    }
+    return out;
+}
+
+
 } // namespace
 
 TEST(FunctionalFormEvaluatorMPI, ValuesAreTheSameAtEveryRankCount)
@@ -353,4 +425,50 @@ TEST(FunctionalFormEvaluatorMPI, AMarkerNoRankKnowsIsRejectedOnEveryRank)
     int everywhere = 0;
     MPI_Allreduce(&rejected, &everywhere, 1, MPI_INT, MPI_MIN, MPI_COMM_WORLD);
     EXPECT_EQ(everywhere, 1);
+}
+
+// A coupled boundary input (FESystem::boundaryIntegral) is evaluated with
+// FaceSummation::Exact: each face's total is computed as before and the
+// totals are summed exactly, so the value is the same at any rank count, bit
+// for bit, where the per-rank sum agrees only to round-off.
+TEST(FunctionalFormEvaluatorMPI, ExactBoundaryFaceSumIsTheSameAtEveryRankCount)
+{
+    int rank = 0;
+    int size = 1;
+    MPI_Comm_rank(MPI_COMM_WORLD, &rank);
+    MPI_Comm_size(MPI_COMM_WORLD, &size);
+    using Summation = systems::BoundaryReductionService::FaceSummation;
+
+    auto distributed = stripSystem(MPI_COMM_WORLD);
+    auto one_rank = stripSystem(MPI_COMM_SELF);
+    const auto value = [&](StripSystem& strip, Summation summation) {
+        auto& service = strip.system->boundaryReductionService(strip.u);
+        if (!service.hasFunctional("flux")) {
+            const auto u = FormExpr::discreteField(strip.u, *strip.system->fieldRecord(strip.u).space, "u");
+            forms::BoundaryFunctional functional;
+            functional.integrand = u * u + FormExpr::coordinate().component(0) * u;
+            functional.boundary_marker = fixture::kWallMarker;
+            functional.name = "flux";
+            functional.reduction = forms::BoundaryFunctional::Reduction::Sum;
+            service.addBoundaryFunctional(functional);
+        }
+        systems::SystemStateView state;
+        state.u = strip.u_values;
+        return service.evaluateFunctional("flux", state, summation);
+    };
+
+    const Real exact = value(distributed, Summation::Exact);
+    const Real per_rank = value(distributed, Summation::PerRank);
+    const Real one_rank_exact = value(one_rank, Summation::Exact);
+    EXPECT_EQ(std::bit_cast<std::uint64_t>(exact), std::bit_cast<std::uint64_t>(one_rank_exact))
+        << exact << " vs " << one_rank_exact;
+    EXPECT_NEAR(per_rank, exact, Real{8.0} * std::numeric_limits<Real>::epsilon() * std::abs(exact));
+    EXPECT_GT(std::abs(exact), Real{1.0});
+
+    // Every rank holds the same value.
+    double low = exact;
+    double high = exact;
+    MPI_Allreduce(MPI_IN_PLACE, &low, 1, MPI_DOUBLE, MPI_MIN, MPI_COMM_WORLD);
+    MPI_Allreduce(MPI_IN_PLACE, &high, 1, MPI_DOUBLE, MPI_MAX, MPI_COMM_WORLD);
+    EXPECT_EQ(low, high);
 }

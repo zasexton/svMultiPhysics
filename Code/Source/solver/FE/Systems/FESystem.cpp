@@ -19216,9 +19216,12 @@ void FESystem::registerBoundaryIntegralInput(
             state.time_integration = cached_time_integration_;
             state.user_data = cached_user_data_;
 
+            // A coupled input enters the discrete system: its faces are
+            // summed exactly, so it is the same at any rank count.
             auto it = boundary_reduction_services_.find(captured_fid);
             if (it != boundary_reduction_services_.end() && it->second) {
-                out[0] = it->second->evaluateFunctional(func_name, state);
+                out[0] = it->second->evaluateFunctional(
+                    func_name, state, BoundaryReductionService::FaceSummation::Exact);
             } else {
                 out[0] = 0.0;
             }

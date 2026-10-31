@@ -40,6 +40,7 @@
 #include "Systems/SystemState.h"
 
 #include <array>
+#include <cstdint>
 #include <memory>
 #include <span>
 #include <string>
@@ -69,13 +70,26 @@ class FESystem;
  * - Registration of named boundary functionals with integrand, marker,
  *   and reduction mode.
  * - Lazy compilation of functional kernels (interpreter or JIT).
- * - Evaluation of boundary integrals with MPI global reduction.
+ * - Evaluation of boundary integrals with MPI global reduction, the faces
+ *   of a physical marker summed per rank or exactly (FaceSummation; the
+ *   boundary integral inputs of FESystem use the exact sum).
  * - Boundary measure (area/length) computation and caching.
  * - Multi-field secondary field bindings for integrands that reference
  *   fields beyond the primary field.
  */
 class BoundaryReductionService {
 public:
+    /// How the boundary faces' contributions to a functional are added up.
+    enum class FaceSummation : std::uint8_t {
+        /// In face order on each rank, then MPI_Allreduce(SUM): the value
+        /// depends on the partition at round-off.
+        PerRank,
+        /// Each face's total into an exact accumulator, the ranks' sums
+        /// combined exactly (collectiveExactSum) and rounded once: the value
+        /// is the same at any rank count.
+        Exact,
+    };
+
     BoundaryReductionService(FESystem& system, FieldId primary_field);
     ~BoundaryReductionService();
 
@@ -166,11 +180,16 @@ public:
      * evaluates the boundary integral with MPI reduction and applies
      * the reduction mode (Sum, Average).
      *
-     * @param name  Name of the registered functional.
-     * @param state System state providing solution, time, parameters.
+     * @param name      Name of the registered functional.
+     * @param state     System state providing solution, time, parameters.
+     * @param summation How the faces of a physical boundary marker are
+     *                  summed (domain and generated active-boundary
+     *                  functionals are always summed per rank).
      * @return The reduced scalar value.
      */
-    [[nodiscard]] Real evaluateFunctional(std::string_view name, const SystemStateView& state);
+    [[nodiscard]] Real evaluateFunctional(std::string_view name,
+                                          const SystemStateView& state,
+                                          FaceSummation summation = FaceSummation::PerRank);
 
     /**
      * @brief Evaluate a domain functional over an explicit cell subset.
@@ -328,7 +347,8 @@ private:
         bool apply_constraints = false) const;
     Real evaluateFunctionalEntryPreflighted(
         CompiledFunctional& entry,
-        const SystemStateView& state);
+        const SystemStateView& state,
+        FaceSummation summation = FaceSummation::PerRank);
     Real boundaryMeasurePreflighted(
         const forms::BoundaryFunctional& functional,
         const SystemStateView& state);
