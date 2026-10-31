@@ -2213,3 +2213,42 @@ TEST(EquationTranslatorFreeSurface, ProfileErrorsNameTheProfileAndTheBoundary)
                                replaced(kProfileFluidXml, ">Capillary<", ">None<").c_str())
                   .empty());
 }
+
+TEST(EquationTranslatorFreeSurface, AcceptanceListsHoldTheSpellingsOfTheSchemas)
+{
+  // The XML reader accepts the Free_surface boundary keys and the level-set
+  // equation keys from hand lists (Parameters.cpp); every spelling of the
+  // option schemas must be on them, except Contact_line_wall_markers, which
+  // the application derives from Contact_line_wall_face (decision D47).
+  namespace parsing = application::translators::level_set::configuration;
+  namespace ns = svmp::Physics::formulations::navier_stokes;
+  const auto accepted = [](const std::string& xml) {
+    try {
+      (void)parseEquationXml(xml.c_str());
+      return true;
+    } catch (const std::runtime_error&) {
+      return false;
+    }
+  };
+  std::vector<std::string> boundary = ns::freeSurfaceBoundarySchema().spellings();
+  for (const auto& spelling : ns::freeSurfaceContactLineInputSchema().spellings()) {
+    if (spelling != "Contact_line_wall_markers") {
+      boundary.push_back(spelling);
+    }
+  }
+  boundary.emplace_back(svmp::Physics::options::kFreeSurfaceProfileKey);
+  for (const auto& spelling : boundary) {
+    EXPECT_TRUE(accepted("<Add_equation type=\"fluid\"><Add_BC name=\"free_surface\">"
+                         "<Type>Free_surface</Type><" + spelling + ">1</" + spelling +
+                         "></Add_BC></Add_equation>"))
+        << spelling;
+  }
+  EXPECT_FALSE(accepted("<Add_equation type=\"fluid\"><Add_BC name=\"free_surface\">"
+                        "<Type>Free_surface</Type><Contact_line_wall_markers>1"
+                        "</Contact_line_wall_markers></Add_BC></Add_equation>"));
+  for (const auto& spelling : parsing::levelSetEquationSchema().spellings()) {
+    EXPECT_TRUE(accepted("<Add_equation type=\"level_set\"><" + spelling + ">1</" +
+                         spelling + "></Add_equation>"))
+        << spelling;
+  }
+}
