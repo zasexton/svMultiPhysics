@@ -111,9 +111,9 @@ TEST(CanonicalWorkflow, SameSpaceWeightedInterfaceSplitsByTestField)
         (-inner(avg(map(traction, U, P), wn, wp), jump(V)) -
          inner(avg(map(traction, V, Q), wn, wp), jump(U)) +
          penalty * inner(jump(U), jump(V))).dI(marker);
-    // The record's block couplings follow the test functions' order of
-    // appearance (v_neg, v_pos, q_neg, q_pos), so the fields are listed in it.
-    const std::array compact_fields{un_id, up_id, pn_id, pp_id};
+    // In another order than the test functions appear (v_neg, v_pos, q_neg,
+    // q_pos): the record pairs each row with its field all the same.
+    const std::array compact_fields{pp_id, up_id, pn_id, un_id};
     svmp::FE::systems::CoupledResidualKernels compact_installed;
     ASSERT_NO_THROW(compact_installed = svmp::FE::systems::installFormulation(
         sys, "compact", compact_fields, compact));
@@ -333,6 +333,33 @@ TEST(CanonicalWorkflow, OneIntegralOverTwoTestFieldsAssemblesAsOneIntegralPerFie
     const auto two = assembleTwoField(/*one_integral=*/false);
     EXPECT_EQ(one.vector, two.vector);
     EXPECT_EQ(one.matrix, two.matrix);
+}
+
+TEST(CanonicalWorkflow, TheRecordPairsEachRowWithItsFieldInAnyFieldOrder)
+{
+    auto mesh = std::make_shared<svmp::FE::forms::test::SingleTetraMeshAccess>();
+    auto space = std::make_shared<svmp::FE::spaces::H1Space>(ElementType::Tetra4, 1);
+    svmp::FE::systems::FESystem sys(mesh);
+    const auto T_f = sys.addField({.name = "T", .space = space});
+    const auto C_f = sys.addField({.name = "C", .space = space});
+    sys.addOperator("op");
+    const auto T = StateField(T_f, *space, "T");
+    const auto C = StateField(C_f, *space, "C");
+    const auto w = TestField(T_f, *space, "w");
+    const auto r = TestField(C_f, *space, "r");
+    // C's row is written first, the field list puts T first.
+    const auto c_row = (inner(grad(C), grad(r))).dx();
+    const auto t_row = (inner(grad(T), grad(w)) + C * w).dx();
+    svmp::FE::systems::installFormulation(sys, "op", {T_f, C_f}, c_row + t_row);
+    ASSERT_EQ(sys.formulationRecords().size(), 1u);
+    const auto& record = sys.formulationRecords().front();
+    const std::set<std::pair<FieldId, FieldId>> couplings(record.block_couplings.begin(), record.block_couplings.end());
+    const std::set<std::pair<FieldId, FieldId>> expected{{T_f, T_f}, {T_f, C_f}, {C_f, C_f}};
+    EXPECT_EQ(couplings, expected);
+    ASSERT_EQ(record.block_residual_exprs.size(), 2u);
+    for (const auto& [block, node] : record.block_residual_exprs) {
+        EXPECT_EQ(node.get(), (block.first == T_f ? t_row : c_row).node());
+    }
 }
 
 TEST(CanonicalWorkflow, ATermNonlinearInTwoTestFieldsIsRefused)

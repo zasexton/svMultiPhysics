@@ -4137,14 +4137,18 @@ bool hasStateFieldNodes(const forms::FormExprNode& root)
 /**
  * @brief Split a multi-test-function residual into per-test-function sub-expressions.
  *
- * Returns one FormExpr per test function, in the same order as the test functions
- * appear in the expression. Returns empty if the expression has only one test
- * function (no splitting needed) or if splitting fails.
+ * Returns one FormExpr per field of @p fields, the terms of that field's test
+ * function: a field-bound test function goes to its field, an unbound one to
+ * the one field of its space, as installCoupledResidualMixed maps them.  Returns
+ * empty if the expression has only one test function (no splitting needed) or
+ * if splitting or the mapping fails.
  *
  * This is a lightweight version of the decomposition in installCoupledResidualMixed
  * that only does the symbolic tree splitting without any compilation.
  */
-std::vector<forms::FormExpr> splitByTestFunction(const forms::FormExpr& mixed_residual)
+std::vector<forms::FormExpr> splitByTestFunction(const forms::FormExpr& mixed_residual,
+                                                 const FESystem& system,
+                                                 std::span<const FieldId> fields)
 {
     if (!mixed_residual.isValid() || !mixed_residual.node()) return {};
 
@@ -4286,7 +4290,38 @@ std::vector<forms::FormExpr> splitByTestFunction(const forms::FormExpr& mixed_re
 
     if (!decompose(decompose, mixed_residual, +1)) return {};
 
-    return blocks;
+    // The blocks in the order of the field list: by binding first, then by
+    // the space of an unbound test function when one free field has it.
+    if (test_infos.size() != fields.size()) return {};
+    std::vector<forms::FormExpr> by_field(fields.size());
+    std::vector<bool> used(fields.size(), false);
+    std::vector<bool> placed(test_infos.size(), false);
+    for (std::size_t ti = 0; ti < test_infos.size(); ++ti) {
+        if (!test_infos[ti].bound_field) continue;
+        const auto it = std::find(fields.begin(), fields.end(), *test_infos[ti].bound_field);
+        if (it == fields.end()) return {};
+        const auto ci = static_cast<std::size_t>(it - fields.begin());
+        if (used[ci]) return {};
+        by_field[ci] = blocks[ti];
+        used[ci] = true;
+        placed[ti] = true;
+    }
+    for (std::size_t ti = 0; ti < test_infos.size(); ++ti) {
+        if (placed[ti]) continue;
+        std::size_t match = fields.size();
+        std::size_t matches = 0;
+        for (std::size_t ci = 0; ci < fields.size(); ++ci) {
+            const auto& rec = system.fieldRecord(fields[ci]);
+            if (!used[ci] && rec.space && signaturesMatch(test_infos[ti].sig, signatureFromSpace(*rec.space))) {
+                match = ci;
+                ++matches;
+            }
+        }
+        if (matches != 1u) return {};
+        by_field[match] = blocks[ti];
+        used[match] = true;
+    }
+    return by_field;
 }
 
 } // namespace
@@ -4633,7 +4668,7 @@ CoupledResidualKernels installFormulation(
         // symbols appear to determine the actual (test, trial) couplings.
         // This avoids false dense NxN coupling for zero blocks.
         if (fields.size() > 1) {
-            auto test_blocks = splitByTestFunction(resolved);
+            auto test_blocks = splitByTestFunction(resolved, system, fields);
             if (test_blocks.size() == fields.size()) {
                 for (std::size_t ti = 0; ti < fields.size(); ++ti) {
                     if (!test_blocks[ti].isValid()) continue;
@@ -4745,7 +4780,7 @@ CoupledResidualKernels installFormulation(
             // Each sub-expression F_i(u1,...,uN; v_i) contains terms for one test field.
             // We store them keyed by (test_field, test_field) — the trial splitting
             // is done by the form compiler during Jacobian block compilation.
-            auto test_blocks = splitByTestFunction(metadata_resolved);
+            auto test_blocks = splitByTestFunction(metadata_resolved, system, fields);
             if (test_blocks.size() == fields.size()) {
                 for (std::size_t i = 0; i < fields.size(); ++i) {
                     if (test_blocks[i].isValid()) {
