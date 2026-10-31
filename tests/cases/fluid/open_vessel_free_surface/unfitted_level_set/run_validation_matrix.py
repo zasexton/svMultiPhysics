@@ -142,7 +142,6 @@ SOLVER_XML_CONTROL_TAGS = {
     "Linear_algebra",
     "Max_iterations",
     "Number_of_time_steps",
-    "Operator_tag",
     "Output_frequency",
     "Preconditioner",
     "SUPG_tau_scale",
@@ -308,7 +307,6 @@ HIGH_ORDER_MMS_CONSTANT_CONSERVATIVE_XML_CONTROLS = HIGH_ORDER_MMS_CONSTANT_XML_
     ("Enable_SUPG", "true"),
 )
 HIGH_ORDER_MMS_LEVEL_SET_ONLY_CONSTANT_XML_CONTROLS = (
-    ("Operator_tag", "equations"),
     ("Level_set_source", "prescribed_data"),
     ("Velocity_source", "constant"),
     ("Constant_velocity", "0.1 0 0"),
@@ -317,7 +315,6 @@ HIGH_ORDER_MMS_LEVEL_SET_ONLY_CONSTANT_XML_CONTROLS = (
     ("SUPG_tau_scale", "0.5"),
 )
 HIGH_ORDER_MMS_LEVEL_SET_ONLY_CONSTANT_NO_SUPG_XML_CONTROLS = (
-    ("Operator_tag", "equations"),
     ("Level_set_source", "prescribed_data"),
     ("Velocity_source", "constant"),
     ("Constant_velocity", "0.1 0 0"),
@@ -333,7 +330,6 @@ HIGH_ORDER_MMS_LEVEL_SET_ONLY_CONSTANT_NO_SUPG_EXACT_INFLOW_XML_CONTROLS = (
     )
 )
 HIGH_ORDER_MMS_LEVEL_SET_ONLY_STATIC_XML_CONTROLS = (
-    ("Operator_tag", "equations"),
     ("Level_set_source", "prescribed_data"),
     ("Velocity_source", "constant"),
     ("Constant_velocity", "0 0 0"),

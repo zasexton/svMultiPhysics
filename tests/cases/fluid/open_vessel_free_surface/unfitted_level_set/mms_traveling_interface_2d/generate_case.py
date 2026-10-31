@@ -531,7 +531,6 @@ def write_solver_xml(args: argparse.Namespace) -> None:
     level_set_velocity_block = level_set_velocity_xml(args)
     level_set_exact_inflow_block = level_set_exact_inflow_xml(args)
     level_set_coupled = "false" if args.level_set_only else "true"
-    level_set_operator_tag = "  <Operator_tag>equations</Operator_tag>\n"
     p1_transport_safety_block = ""
     if args.enable_p1_transport_safety:
         p1_transport_safety_block = """  <SUPG_transient_scale>2.0</SUPG_transient_scale>
@@ -554,7 +553,6 @@ def write_solver_xml(args: argparse.Namespace) -> None:
   <Force_z>0.0</Force_z>
   <Momentum_source_temporal_and_spatial_values_file_path>bc/momentum_source.dat</Momentum_source_temporal_and_spatial_values_file_path>
   <Hydrostatic_pressure_initialization>false</Hydrostatic_pressure_initialization>
-  <Hydrostatic_pressure_field_name>Pressure</Hydrostatic_pressure_field_name>
   <Node_pressure_constraints>
     <Id_type>Global_vertex_gid</Id_type>
     <Values_file_path>pressure_gauge.csv</Values_file_path>
@@ -655,7 +653,7 @@ def write_solver_xml(args: argparse.Namespace) -> None:
   <Tolerance>1.0e-5</Tolerance>
   <Module_options>jit=true; jit_specialization=true</Module_options>
   <Level_set_field_name>phi</Level_set_field_name>
-{level_set_operator_tag}  <Transport_form>{args.level_set_transport_form}</Transport_form>
+  <Transport_form>{args.level_set_transport_form}</Transport_form>
   <Level_set_source>prescribed_data</Level_set_source>
 {level_set_velocity_block}
   <Enable_SUPG>{str(not args.disable_level_set_supg).lower()}</Enable_SUPG>
