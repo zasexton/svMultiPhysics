@@ -173,7 +173,8 @@ std::shared_ptr<svmp::Mesh> buildShearedTriangleMesh(int n)
 
 // One level-set field on a sheared mesh and one generated-interface
 // lifecycle, so that successive builds carry new source value revisions
-// exactly as successive outer passes do.
+// exactly as successive outer passes do.  The assembly thread count of the
+// system sets the geometry threads.
 struct ReuseFixture {
     std::shared_ptr<svmp::Mesh> mesh;
     FE::systems::FESystem system;
@@ -182,7 +183,7 @@ struct ReuseFixture {
     level_set::LevelSetGeneratedInterfaceLifecycle lifecycle{};
     std::vector<FE::Real> solution{};
 
-    explicit ReuseFixture(int dim)
+    explicit ReuseFixture(int dim, int assembly_threads = 1)
         : mesh(dim == 3 ? buildShearedTetraMesh(6)
                         : buildShearedTriangleMesh(12)),
           system(mesh), dimension(dim)
@@ -195,7 +196,9 @@ struct ReuseFixture {
                 /*order=*/1),
             .components = 1,
         });
-        system.setup();
+        FE::systems::SetupOptions setup_options{};
+        setup_options.assembly_options.num_threads = assembly_threads;
+        system.setup(setup_options);
         solution.assign(
             static_cast<std::size_t>(system.dofHandler().getNumDofs()),
             FE::Real{0.0});
@@ -230,12 +233,8 @@ struct ReuseFixture {
     // One generated-interface rebuild, snapshotted with and without the
     // reuse cache.
     Pair build(interfaces::FreeSurfaceGeometrySnapshotReuseCache& cache,
-               const interfaces::FreeSurfaceGeometrySnapshotPolicy& policy,
-               level_set::LevelSetGeneratedInterfaceLifecycle* other_lifecycle =
-                   nullptr)
+               const interfaces::FreeSurfaceGeometrySnapshotPolicy& policy)
     {
-        auto& active_lifecycle =
-            other_lifecycle != nullptr ? *other_lifecycle : lifecycle;
         level_set::LevelSetGeneratedInterfaceOptions options{};
         options.level_set_field_name = "phi";
         options.domain_id = "snapshot_reuse";
@@ -244,7 +243,7 @@ struct ReuseFixture {
         options.interface_quadrature_order = 2;
         options.volume_quadrature_order = 2;
         const auto generated =
-            active_lifecycle.build(system, options, solution);
+            lifecycle.build(system, options, solution);
         EXPECT_TRUE(generated.success) << generated.diagnostic;
         auto evaluator = std::make_shared<level_set::LevelSetCellEvaluator>(
             level_set::makeLevelSetCellEvaluator(system, phi, solution));
@@ -277,7 +276,8 @@ struct ReuseFixture {
             "snapshot_reuse", {}, nullptr, 1);
         pair.reused = interfaces::buildFreeSurfaceGeometrySnapshot(
             generated.domain, {}, {}, system.meshAccess(), policy, scalar,
-            "snapshot_reuse", {}, &cache, FE::geometryThreadCount());
+            "snapshot_reuse", {}, &cache,
+            FE::geometryThreadCount(system.assemblyThreadCount()));
         return pair;
     }
 };
@@ -556,33 +556,6 @@ TEST(FreeSurfaceSnapshotReuse, ClassificationOnlyContextRuleMeasuresMatchMateria
     }
 }
 
-// Sets SVMP_ASSEMBLY_THREADS for the lifetime of the object.
-class ScopedGeometryThreads {
-public:
-    explicit ScopedGeometryThreads(int threads)
-    {
-        if (const char* old = std::getenv("SVMP_ASSEMBLY_THREADS")) {
-            previous_ = old;
-            had_previous_ = true;
-        }
-        ::setenv("SVMP_ASSEMBLY_THREADS", std::to_string(threads).c_str(), 1);
-    }
-    ~ScopedGeometryThreads()
-    {
-        if (had_previous_) {
-            ::setenv("SVMP_ASSEMBLY_THREADS", previous_.c_str(), 1);
-        } else {
-            ::unsetenv("SVMP_ASSEMBLY_THREADS");
-        }
-    }
-    ScopedGeometryThreads(const ScopedGeometryThreads&) = delete;
-    ScopedGeometryThreads& operator=(const ScopedGeometryThreads&) = delete;
-
-private:
-    std::string previous_{};
-    bool had_previous_{false};
-};
-
 [[nodiscard]] bool sameRealArray(const Point& a, const Point& b) noexcept
 {
     return std::memcmp(a.data(), b.data(), sizeof(Point)) == 0;
@@ -655,9 +628,9 @@ TEST(FreeSurfaceSnapshotReuse, GeneratedGeometryIsIndependentOfTheThreadCount)
 {
     for (const int dimension : {2, 3}) {
         for (const int threads : {2, 3, 8}) {
-            // One mesh and system; two lifecycles, one per thread count.
+            // Two systems on the same mesh, one per thread count.
             ReuseFixture fixture(dimension);
-            level_set::LevelSetGeneratedInterfaceLifecycle threaded_lifecycle;
+            ReuseFixture threaded(dimension, threads);
             interfaces::FreeSurfaceGeometrySnapshotReuseCache serial_cache;
             interfaces::FreeSurfaceGeometrySnapshotReuseCache threaded_cache;
             interfaces::FreeSurfaceGeometrySnapshotPolicy policy;
@@ -676,17 +649,9 @@ TEST(FreeSurfaceSnapshotReuse, GeneratedGeometryIsIndependentOfTheThreadCount)
                     std::to_string(dimension) + "D threads " +
                     std::to_string(threads) + " step " + std::to_string(step);
                 fixture.setLevelSet(motion[step].first, motion[step].second);
-                ReuseFixture::Pair a;
-                ReuseFixture::Pair b;
-                {
-                    ScopedGeometryThreads one(1);
-                    a = fixture.build(serial_cache, policy);
-                }
-                {
-                    ScopedGeometryThreads many(threads);
-                    b = fixture.build(threaded_cache, policy,
-                                      &threaded_lifecycle);
-                }
+                threaded.setLevelSet(motion[step].first, motion[step].second);
+                auto a = fixture.build(serial_cache, policy);
+                auto b = threaded.build(threaded_cache, policy);
                 expectSameDomains(a.full->interfaceDomain(),
                                   b.full->interfaceDomain(),
                                   label);

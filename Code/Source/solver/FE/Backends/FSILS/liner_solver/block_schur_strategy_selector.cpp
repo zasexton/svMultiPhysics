@@ -35,15 +35,12 @@ BlockSchurStrategySelection BlockSchurStrategySelector::select(
       !force_schur_bicgstab;
   const bool force_exact_schur_path = force_schur_gmres;
 
-  const bool disable_face_only_legacy =
-      env_enabled("SVMP_FSILS_BLOCKSCHUR_DISABLE_FACE_ONLY_LEGACY") ||
-      force_exact_schur_path;
   selection.use_face_only_legacy_scalar_schur =
       (con_ncomp == 1) &&
       (low_rank_profile.active_face_corrections > 0) &&
       (low_rank_profile.active_reduced_corrections == 0) &&
       !low_rank_profile.has_grouped_bordered &&
-      !disable_face_only_legacy;
+      !force_exact_schur_path;
 
   selection.require_exact_momentum_low_rank_path =
       low_rank_profile.has_grouped_bordered ||
@@ -72,24 +69,6 @@ BlockSchurStrategySelection BlockSchurStrategySelector::select(
   if (force_schur_bicgstab) {
     selection.prefer_schur_gmres = false;
   }
-
-  const bool disable_auto_coupled_outer_fgmres =
-      env_enabled("SVMP_FSILS_DISABLE_COUPLED_OUTER_FGMRES");
-  selection.auto_enable_coupled_outer_fgmres_scalar =
-      low_rank_profile.distributed &&
-      !selection.native_face_duplicates_only &&
-      (low_rank_profile.projected_mode_count > 1 ||
-       low_rank_profile.active_face_corrections > 1) &&
-      env_enabled("SVMP_FSILS_AUTO_COUPLED_OUTER_FGMRES") &&
-      !disable_auto_coupled_outer_fgmres;
-
-  selection.force_enable_coupled_outer_fgmres_scalar =
-      env_enabled("SVMP_FSILS_ENABLE_COUPLED_OUTER_FGMRES");
-  selection.use_coupled_outer_fgmres_scalar =
-      selection.auto_enable_coupled_outer_fgmres_scalar ||
-      (selection.force_enable_coupled_outer_fgmres_scalar &&
-       (low_rank_profile.active_face_corrections > 0 ||
-        low_rank_profile.has_explicit_corrections()));
 
   return selection;
 }

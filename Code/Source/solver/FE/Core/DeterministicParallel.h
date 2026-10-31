@@ -28,8 +28,8 @@
  *  - with one thread, or fewer items than a threshold, the loop is the plain
  *    serial loop.
  *
- * The thread count is the threaded-assembly setting: SVMP_ASSEMBLY_THREADS
- * when it is set, otherwise the caller's AssemblyOptions::num_threads.
+ * The thread count is the threaded-assembly setting, the caller's
+ * AssemblyOptions::num_threads.
  * Threads are a team of std::thread workers created on first use
  * (ParallelTeam); each worker keeps OpenMP at one thread.  The same team
  * runs the threaded assembly (assembly::AssemblyThreadPool forwards to
@@ -72,9 +72,8 @@ public:
 [[nodiscard]] int parallelTeamWorkerCount();
 
 /**
- * Threads for per-item geometry work: SVMP_ASSEMBLY_THREADS when it holds
- * an integer >= 1, otherwise `assembly_threads` (AssemblyOptions::num_threads
- * of the caller), at least one.
+ * Threads for per-item geometry work: `assembly_threads`
+ * (AssemblyOptions::num_threads of the caller), at least one.
  */
 [[nodiscard]] int geometryThreadCount(int assembly_threads = 1) noexcept;
 

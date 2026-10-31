@@ -547,6 +547,8 @@ class Probe:
     expect_verifier_pass: bool | None
     description: str
     solver_env: tuple[tuple[str, str], ...] = ()
+    # GeneralSimulationParameters keys written into the generated deck.
+    solver_general_keys: tuple[tuple[str, str], ...] = ()
     verify_history: bool = False
     required_solver_features: tuple[str, ...] = ()
     required_solver_xml_controls: tuple[tuple[str, str], ...] = ()
@@ -2603,11 +2605,11 @@ PROBES: dict[str, Probe] = {
             "to cross the fixed-step event, but the latest output still fails "
             "interface-pressure gates, so this remains diagnostic-only."
         ),
-        solver_env=(
-            ("SVMP_TIMELOOP_ADAPTIVE", "1"),
-            ("SVMP_TIMELOOP_MIN_DT", "0.000125"),
-            ("SVMP_TIMELOOP_MAX_DT", "0.001"),
-            ("SVMP_TIMELOOP_MAX_RETRIES", "8"),
+        solver_general_keys=(
+            ("Enable_adaptive_time_loop", "true"),
+            ("Adaptive_time_loop_min_dt", "0.000125"),
+            ("Adaptive_time_loop_max_dt", "0.001"),
+            ("Adaptive_time_loop_max_retries", "8"),
         ),
         validation_scope="expected_failure_diagnostic",
     ),
@@ -2735,11 +2737,13 @@ PROBES: dict[str, Probe] = {
             "recording the remaining final-time wall-adjacent pressure-quality "
             "blocker as an expected diagnostic failure."
         ),
+        solver_general_keys=(
+            ("Enable_adaptive_time_loop", "true"),
+            ("Adaptive_time_loop_min_dt", "0.000125"),
+            ("Adaptive_time_loop_max_dt", "0.0005"),
+            ("Adaptive_time_loop_max_retries", "10"),
+        ),
         solver_env=(
-            ("SVMP_TIMELOOP_ADAPTIVE", "1"),
-            ("SVMP_TIMELOOP_MIN_DT", "0.000125"),
-            ("SVMP_TIMELOOP_MAX_DT", "0.0005"),
-            ("SVMP_TIMELOOP_MAX_RETRIES", "10"),
             ("SVMP_NEWTON_LINE_SEARCH_FAIL_ON_NO_REDUCTION", "1"),
         ),
         validation_scope="expected_failure_diagnostic",
@@ -2763,11 +2767,13 @@ PROBES: dict[str, Probe] = {
             "pressure trace away from wall-contact and one-cell near-wall "
             "subsets while keeping both regions under bounded-pressure guards."
         ),
+        solver_general_keys=(
+            ("Enable_adaptive_time_loop", "true"),
+            ("Adaptive_time_loop_min_dt", "0.000125"),
+            ("Adaptive_time_loop_max_dt", "0.0005"),
+            ("Adaptive_time_loop_max_retries", "10"),
+        ),
         solver_env=(
-            ("SVMP_TIMELOOP_ADAPTIVE", "1"),
-            ("SVMP_TIMELOOP_MIN_DT", "0.000125"),
-            ("SVMP_TIMELOOP_MAX_DT", "0.0005"),
-            ("SVMP_TIMELOOP_MAX_RETRIES", "10"),
             ("SVMP_NEWTON_LINE_SEARCH_FAIL_ON_NO_REDUCTION", "1"),
         ),
     ),
@@ -2790,11 +2796,13 @@ PROBES: dict[str, Probe] = {
             "passing t=0.5 staged target to the long-transient production horizon "
             "without allowing timeout diagnostics to count as broad validation."
         ),
+        solver_general_keys=(
+            ("Enable_adaptive_time_loop", "true"),
+            ("Adaptive_time_loop_min_dt", "0.000125"),
+            ("Adaptive_time_loop_max_dt", "0.0005"),
+            ("Adaptive_time_loop_max_retries", "10"),
+        ),
         solver_env=(
-            ("SVMP_TIMELOOP_ADAPTIVE", "1"),
-            ("SVMP_TIMELOOP_MIN_DT", "0.000125"),
-            ("SVMP_TIMELOOP_MAX_DT", "0.0005"),
-            ("SVMP_TIMELOOP_MAX_RETRIES", "10"),
             ("SVMP_NEWTON_LINE_SEARCH_FAIL_ON_NO_REDUCTION", "1"),
         ),
         validation_scope="open_performance_target",
@@ -2821,11 +2829,13 @@ PROBES: dict[str, Probe] = {
             "reachability miss as a step-floor issue rather than a pressure "
             "or interface-state failure."
         ),
+        solver_general_keys=(
+            ("Enable_adaptive_time_loop", "true"),
+            ("Adaptive_time_loop_min_dt", "0.0000625"),
+            ("Adaptive_time_loop_max_dt", "0.0005"),
+            ("Adaptive_time_loop_max_retries", "10"),
+        ),
         solver_env=(
-            ("SVMP_TIMELOOP_ADAPTIVE", "1"),
-            ("SVMP_TIMELOOP_MIN_DT", "0.0000625"),
-            ("SVMP_TIMELOOP_MAX_DT", "0.0005"),
-            ("SVMP_TIMELOOP_MAX_RETRIES", "10"),
             ("SVMP_NEWTON_LINE_SEARCH_FAIL_ON_NO_REDUCTION", "1"),
         ),
     ),
@@ -2849,11 +2859,13 @@ PROBES: dict[str, Probe] = {
             "line-search failure handling does not improve pressure quality "
             "relative to the fixed half-step target."
         ),
+        solver_general_keys=(
+            ("Enable_adaptive_time_loop", "true"),
+            ("Adaptive_time_loop_min_dt", "0.000125"),
+            ("Adaptive_time_loop_max_dt", "0.0005"),
+            ("Adaptive_time_loop_max_retries", "10"),
+        ),
         solver_env=(
-            ("SVMP_TIMELOOP_ADAPTIVE", "1"),
-            ("SVMP_TIMELOOP_MIN_DT", "0.000125"),
-            ("SVMP_TIMELOOP_MAX_DT", "0.0005"),
-            ("SVMP_TIMELOOP_MAX_RETRIES", "10"),
             ("SVMP_NEWTON_LINE_SEARCH_FAIL_ON_NO_REDUCTION", "1"),
         ),
         validation_scope="expected_failure_diagnostic",
@@ -3513,6 +3525,37 @@ def direct_child(element: ET.Element, tag_name: str) -> ET.Element | None:
         if strip_xml_namespace(child.tag) == tag_name:
             return child
     return None
+
+
+def apply_general_keys_for_probe(case_dir: Path, probe: Probe) -> list[dict[str, Any]]:
+    """Write the probe's GeneralSimulationParameters keys into the deck."""
+    if not probe.solver_general_keys:
+        return []
+    xml_path = case_dir / "solver.xml"
+    if not xml_path.exists():
+        return []
+    tree = ET.parse(xml_path)
+    general = direct_child(tree.getroot(), "GeneralSimulationParameters")
+    if general is None:
+        return []
+    patches: list[dict[str, Any]] = []
+    for key, value in probe.solver_general_keys:
+        element = direct_child(general, key)
+        old = None if element is None else (element.text or "").strip()
+        if element is None:
+            element = ET.SubElement(general, key)
+        element.text = value
+        patches.append(
+            {
+                "equation_type": None,
+                "control": f"GeneralSimulationParameters/{key}",
+                "old": old,
+                "new": value,
+                "reason": "probe_general_simulation_parameter",
+            }
+        )
+    tree.write(xml_path, encoding="UTF-8", xml_declaration=True)
+    return patches
 
 
 def patch_solver_xml_for_probe(case_dir: Path, probe: Probe) -> list[dict[str, Any]]:
@@ -5734,7 +5777,8 @@ def run_probe(
     )
     solver_xml_patches = []
     if generate_status == 0 and not generate_timeout:
-        solver_xml_patches = patch_solver_xml_for_probe(case_dir, probe)
+        solver_xml_patches = apply_general_keys_for_probe(case_dir, probe)
+        solver_xml_patches += patch_solver_xml_for_probe(case_dir, probe)
     solver_xml_controls = collect_solver_xml_controls(case_dir / "solver.xml")
     solver_xml_control_check = check_solver_xml_controls(
         solver_xml_controls,

@@ -48,10 +48,9 @@
     ]
   },
   "contact_motion_check": "The measured wall-contact motion per step (between 1 ms outputs) must stay below the level limit at every output; a violation is reported and disqualifies that level as a temporal level.",
-  "failure_policy": "A run stopped by the outer fixed-point cap is recorded (case, step, passes) and retried once with SVMP_GENERATED_STATE_OUTER_DYNAMIC_RELAXATION=1 for diagnosis only; the diagnostic run is not a candidate.",
+  "failure_policy": "A run stopped by the outer fixed-point cap is recorded (case, step, passes) and retried once with <Outer_fixed_point_relaxation_start_pass>1</Outer_fixed_point_relaxation_start_pass> (every update relaxed) for diagnosis only; the diagnostic run is not a candidate.",
   "run_environment": {
-    "SVMP_GENERALIZED_ALPHA_PDE_UDOT_INIT": "0",
-    "reason": "start from rest with a zero initial rate; the PDE rate solve holds the closed-inlet preload pressure fixed and returns a non-solenoidal impulsive rate at the opened inlet"
+    "reason": "start from rest with a zero initial rate (the deck key <Generalized_alpha_initial_rate>Zero, which capillary_rise_2d.py writes); the PDE rate solve holds the closed-inlet preload pressure fixed and returns a non-solenoidal impulsive rate at the opened inlet"
   },
   "revisions": [
     {
@@ -67,6 +66,13 @@
       "before_candidate_execution": true,
       "change": "the deck returns to the default aggregation guards (the provisional 6 / 12 of D-W7 are retired, D33); the clean comparison window [0, 0.416] s is declared",
       "evidence": "jobs 47000495 (vertex-order-invariant extrapolation guard: level 10 passes t = 0.306 s), 47009235 (opt-in rootless fallback: level 10 completes 0.69 s with 8,004 fallback candidate events from 0.416 s; apex RMS 0.216 -> 1.23 mm)."
+    },
+    {
+      "revision": 4,
+      "date": "2026-10-30",
+      "before_candidate_execution": true,
+      "change": "the zero initial rate and the diagnostic relaxation are named by their deck keys; their environment variables were removed (decision D60)",
+      "evidence": "the keys set the same solver options as the removed variables did."
     }
   ],
   "clean_comparison_window_s": [

@@ -1162,8 +1162,8 @@ bool inputRequestsCoupledDisplacementALE(const Parameters& params)
   return false;
 }
 
-// Assembly threads per rank: <Assembly_threads> in GeneralSimulationParameters,
-// overridden by SVMP_ASSEMBLY_THREADS. Values below one are ignored.
+// Assembly threads per rank: <Assembly_threads> in GeneralSimulationParameters.
+// Values below one are ignored.
 int requestedAssemblyThreads(const Parameters& params, std::string& source)
 {
   int threads = 1;
@@ -1172,16 +1172,6 @@ int requestedAssemblyThreads(const Parameters& params, std::string& source)
   if (deck.defined() && deck.value() >= 1) {
     threads = deck.value();
     source = "Assembly_threads";
-  }
-  if (const char* env = std::getenv("SVMP_ASSEMBLY_THREADS"); env != nullptr && *env != '\0') {
-    char* end = nullptr;
-    const long value = std::strtol(env, &end, 10);
-    if (end != env && *end == '\0' && value >= 1 && value <= 4096) {
-      threads = static_cast<int>(value);
-      source = "SVMP_ASSEMBLY_THREADS";
-    } else {
-      source += " (ignored invalid SVMP_ASSEMBLY_THREADS)";
-    }
   }
   return threads;
 }

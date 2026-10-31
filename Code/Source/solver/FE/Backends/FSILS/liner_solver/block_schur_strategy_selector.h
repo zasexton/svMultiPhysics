@@ -11,9 +11,6 @@ struct BlockSchurStrategySelection {
   bool require_exact_momentum_low_rank_path{false};
   bool prefer_schur_gmres{false};
   bool native_face_duplicates_only{false};
-  bool auto_enable_coupled_outer_fgmres_scalar{false};
-  bool force_enable_coupled_outer_fgmres_scalar{false};
-  bool use_coupled_outer_fgmres_scalar{false};
 
   [[nodiscard]] bool use_legacy_scalar_schur() const noexcept
   {

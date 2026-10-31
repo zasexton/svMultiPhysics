@@ -167,54 +167,6 @@ double secondsSince(Clock::time_point start)
   return std::chrono::duration<double>(Clock::now() - start).count();
 }
 
-// A deprecated input that the run accepted (decision D47): a legacy
-// environment variable that a key replaced.
-struct InputDeprecation {
-  std::string input;
-  std::string replacement;
-  std::string location;
-};
-
-std::vector<InputDeprecation> collectInputDeprecations()
-{
-  std::vector<InputDeprecation> deprecations;
-  if (std::getenv("SVMP_GENERALIZED_ALPHA_PDE_UDOT_INIT") != nullptr) {
-    deprecations.push_back({"SVMP_GENERALIZED_ALPHA_PDE_UDOT_INIT",
-                            "Generalized_alpha_initial_rate", "environment"});
-  }
-  return deprecations;
-}
-
-void warnInputDeprecations(const std::vector<InputDeprecation>& deprecations)
-{
-  for (const auto& deprecation : deprecations) {
-    svmp::FE::LogRecord record("ApplicationDriver",
-                               "deprecated input setting",
-                               svmp::FE::LogLevel::WARNING);
-    record.diagnostic("input_deprecation")
-        .quoted("setting", deprecation.input)
-        .quoted("location", deprecation.location)
-        .text("decision", "D47")
-        .quoted("replacement", deprecation.replacement);
-    svmp::FE::logRecord(record.rootOnly());
-  }
-}
-
-std::string jsonQuoted(std::string_view text)
-{
-  std::string quoted;
-  quoted.reserve(text.size() + 2u);
-  quoted.push_back('"');
-  for (const char ch : text) {
-    if (ch == '"' || ch == '\\') {
-      quoted.push_back('\\');
-    }
-    quoted.push_back(ch);
-  }
-  quoted.push_back('"');
-  return quoted;
-}
-
 void writeEffectiveConfigurationArtifact(
     const application::core::SimulationComponents& sim,
     const Parameters& params,
@@ -272,23 +224,6 @@ void writeEffectiveConfigurationArtifact(
       output << artifacts[i].json;
     }
     output << "]";
-    // Written only when the run accepted a deprecated input, so the
-    // artifact of every other run is unchanged.
-    const auto deprecations = collectInputDeprecations();
-    if (!deprecations.empty()) {
-      output << ",\"input_deprecations\":[";
-      for (std::size_t i = 0; i < deprecations.size(); ++i) {
-        if (i != 0u) {
-          output << ',';
-        }
-        output << "{\"input\":" << jsonQuoted(deprecations[i].input)
-               << ",\"replacement\":"
-               << jsonQuoted(deprecations[i].replacement)
-               << ",\"location\":" << jsonQuoted(deprecations[i].location)
-               << ",\"decision\":\"D47\"}";
-      }
-      output << "]";
-    }
     output << "}\n";
     output.flush();
     if (!output.good()) {
@@ -504,72 +439,28 @@ bool parseBoolEnv(const char* name, bool default_value)
   return default_value;
 }
 
-// The environment variable SVMP_GENERATED_STATE_MAX_DISCONTINUITY_RESTARTS was
-// replaced by GeneralSimulationParameters/Max_cut_topology_restarts_per_step
-// (decision D35).  A run that still sets it stops, so that the variable does
-// not silently stop applying.
-void rejectRemovedCutTopologyRestartEnvironment()
-{
-  if (std::getenv("SVMP_GENERATED_STATE_MAX_DISCONTINUITY_RESTARTS") !=
-      nullptr) {
-    throw std::runtime_error(
-        "[svMultiPhysics::Application] The environment variable "
-        "SVMP_GENERATED_STATE_MAX_DISCONTINUITY_RESTARTS was removed; set "
-        "<Max_cut_topology_restarts_per_step> in "
-        "<GeneralSimulationParameters> instead (default: the outer "
-        "fixed-point iteration limit; 0 stops and rejects the step at a "
-        "cut-topology change) and unset the variable.");
-  }
-}
-
 // <Generalized_alpha_initial_rate> chooses the first generalized-alpha rate
 // uDot_0: Consistent (default) solves the PDE-consistent rate, Zero starts
-// from zero.  It replaces SVMP_GENERALIZED_ALPHA_PDE_UDOT_INIT (decision D47),
-// which stays a deprecated alias for one release: it applies only when the
-// key is absent, and a value that contradicts the key stops the run.
-constexpr const char* kLegacyInitialRateEnvironment =
-    "SVMP_GENERALIZED_ALPHA_PDE_UDOT_INIT";
-
+// from zero.
 bool generalizedAlphaInitialRateIsConsistent(
     const GeneralSimulationParameters& general)
 {
-  const char* legacy = std::getenv(kLegacyInitialRateEnvironment);
-  const bool legacy_consistent =
-      parseBoolEnv(kLegacyInitialRateEnvironment, true);
   const auto& key = general.generalized_alpha_initial_rate;
   if (!key.defined()) {
-    return legacy_consistent;
+    return true;
   }
   std::string token = trim_copy(key.value());
   std::transform(token.begin(), token.end(), token.begin(),
                  [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
-  bool consistent = true;
   if (token == "consistent") {
-    consistent = true;
-  } else if (token == "zero") {
-    consistent = false;
-  } else {
-    throw std::runtime_error(
-        "[svMultiPhysics::Application] <Generalized_alpha_initial_rate> must "
-        "be Consistent or Zero; got '" + key.value() + "'.");
+    return true;
   }
-  if (legacy != nullptr) {
-    std::string value(legacy);
-    std::transform(value.begin(), value.end(), value.begin(),
-                   [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
-    const bool recognized = value == "1" || value == "true" || value == "on" ||
-                            value == "yes" || value == "0" || value == "false" ||
-                            value == "off" || value == "no";
-    if (recognized && legacy_consistent != consistent) {
-      throw std::runtime_error(
-          std::string("[svMultiPhysics::Application] ") +
-          kLegacyInitialRateEnvironment + "=" + legacy +
-          " contradicts <Generalized_alpha_initial_rate>" + key.value() +
-          "</Generalized_alpha_initial_rate>; unset the deprecated "
-          "environment variable.");
-    }
+  if (token == "zero") {
+    return false;
   }
-  return consistent;
+  throw std::runtime_error(
+      "[svMultiPhysics::Application] <Generalized_alpha_initial_rate> must "
+      "be Consistent or Zero; got '" + key.value() + "'.");
 }
 
 bool generalizedAlphaPdeRateInitializationRequested(
@@ -698,42 +589,6 @@ int parseIntEnv(const char* name, int default_value)
   return static_cast<int>(value);
 }
 
-void applyGeneratedStateOuterRelaxationEnvOptions(
-    svmp::FE::timestepping::NewtonOptions& opts)
-{
-  auto& relaxation =
-      opts.external_state_fixed_point.dynamic_relaxation;
-  if (std::getenv("SVMP_GENERATED_STATE_OUTER_DYNAMIC_RELAXATION") !=
-      nullptr) {
-    // An explicit switch keeps its original meaning: relax every update
-    // (on) or none (off).
-    relaxation.enabled = parseBoolEnv(
-        "SVMP_GENERATED_STATE_OUTER_DYNAMIC_RELAXATION",
-        relaxation.enabled);
-    relaxation.start_iteration = 0;
-  }
-  if (std::getenv("SVMP_GENERATED_STATE_OUTER_DYNAMIC_RELAXATION_START_PASS") !=
-      nullptr) {
-    // 1-based pass whose update is the first relaxed one; 0 disables.
-    const int start_pass = parseIntEnv(
-        "SVMP_GENERATED_STATE_OUTER_DYNAMIC_RELAXATION_START_PASS", 0);
-    relaxation.enabled = start_pass > 0;
-    relaxation.start_iteration = std::max(0, start_pass - 1);
-  }
-  relaxation.initial_factor = parseDoubleEnv(
-      "SVMP_GENERATED_STATE_OUTER_DYNAMIC_RELAXATION_INITIAL_FACTOR",
-      relaxation.initial_factor);
-  relaxation.minimum_factor = parseDoubleEnv(
-      "SVMP_GENERATED_STATE_OUTER_DYNAMIC_RELAXATION_MINIMUM_FACTOR",
-      relaxation.minimum_factor);
-  relaxation.maximum_factor = parseDoubleEnv(
-      "SVMP_GENERATED_STATE_OUTER_DYNAMIC_RELAXATION_MAXIMUM_FACTOR",
-      relaxation.maximum_factor);
-  relaxation.denominator_relative_tolerance = parseDoubleEnv(
-      "SVMP_GENERATED_STATE_OUTER_DYNAMIC_RELAXATION_DENOMINATOR_RELATIVE_TOLERANCE",
-      relaxation.denominator_relative_tolerance);
-}
-
 void applyNewtonLineSearchEnvOptions(svmp::FE::timestepping::NewtonOptions& opts)
 {
   opts.line_search_max_iterations =
@@ -751,24 +606,6 @@ void applyNewtonLineSearchEnvOptions(svmp::FE::timestepping::NewtonOptions& opts
   opts.line_search_fail_on_no_reduction =
       parseBoolEnv("SVMP_NEWTON_LINE_SEARCH_FAIL_ON_NO_REDUCTION",
                    opts.line_search_fail_on_no_reduction);
-}
-
-void applyNewtonToleranceEnvOptions(svmp::FE::timestepping::NewtonOptions& opts)
-{
-  if (std::getenv("SVMP_NEWTON_ABS_TOLERANCE")) {
-    const double value =
-        parseDoubleEnv("SVMP_NEWTON_ABS_TOLERANCE", opts.abs_tolerance);
-    if (value >= 0.0) {
-      opts.abs_tolerance = value;
-    }
-  }
-  if (std::getenv("SVMP_NEWTON_REL_TOLERANCE")) {
-    const double value =
-        parseDoubleEnv("SVMP_NEWTON_REL_TOLERANCE", opts.rel_tolerance);
-    if (value >= 0.0) {
-      opts.rel_tolerance = value;
-    }
-  }
 }
 
 void applyNewtonToleranceXmlOptions(
@@ -2641,271 +2478,6 @@ std::vector<svmp::FE::Real> gatherFeOrderedSolution(
 
 double globalMaxDouble(double local, const svmp::MeshComm& comm);
 std::size_t globalSumSize(std::size_t local, const svmp::MeshComm& comm);
-
-bool acceptedPressureUpdateDiagnosticEnabled()
-{
-  return parseBoolEnv("SVMP_ACTIVE_PRESSURE_UPDATE_DIAGNOSTIC", false) ||
-         parseBoolEnv("SVMP_ACTIVE_PRESSURE_UPDATE_GUARD", false) ||
-         parseBoolEnv("SVMP_ACTIVE_PRESSURE_UPDATE_REJECT_ON_TRIGGER", false) ||
-         parseDoubleEnv("SVMP_ACTIVE_PRESSURE_UPDATE_THRESHOLD_PA", -1.0) >
-             0.0;
-}
-
-bool activePressureUpdateRejectOnTriggerEnabled()
-{
-  return parseBoolEnv("SVMP_ACTIVE_PRESSURE_UPDATE_REJECT_ON_TRIGGER", false);
-}
-
-const char* activePressureUpdateSupportClass(double max_wet_fraction,
-                                             double min_positive_wet_fraction)
-{
-  constexpr double tiny_fraction = 1.0e-4;
-  constexpr double full_wet_tolerance = 1.0e-12;
-  if (!std::isfinite(max_wet_fraction) || max_wet_fraction <= 0.0) {
-    return "active_support_no_wet_fraction";
-  }
-  if (max_wet_fraction <= tiny_fraction) {
-    return "tiny_cut_supported";
-  }
-  if (std::isfinite(min_positive_wet_fraction) &&
-      min_positive_wet_fraction >= 1.0 - full_wet_tolerance) {
-    return "full_wet_supported";
-  }
-  return "cut_supported";
-}
-
-bool logAcceptedPressureUpdateDiagnostic(
-    const svmp::FE::systems::FESystem& system,
-    const Parameters& params,
-    std::span<const svmp::FE::Real> previous_solution,
-    std::span<const svmp::FE::Real> current_solution,
-    int step,
-    double time,
-    double dt,
-    std::string_view phase,
-    bool honor_fail_on_trigger)
-{
-  if (!acceptedPressureUpdateDiagnosticEnabled()) {
-    return false;
-  }
-  if (previous_solution.size() != current_solution.size()) {
-    svmp::FE::logRecord(
-        svmp::FE::LogRecord("ApplicationDriver", "accepted pressure update diagnostic skipped", svmp::FE::LogLevel::WARNING)
-            .diagnostic("accepted_pressure_update_guard_skipped")
-            .text("reason", "solution_size_mismatch")
-            .quoted("phase", phase)
-            .value("previous_size", previous_solution.size())
-            .value("current_size", current_solution.size())
-            .rootOnly());
-    return false;
-  }
-
-  const char* pressure_field_env =
-      std::getenv("SVMP_ACTIVE_PRESSURE_UPDATE_FIELD");
-  const std::string pressure_field_name =
-      pressure_field_env != nullptr && *pressure_field_env != '\0'
-          ? std::string(pressure_field_env)
-          : std::string("Pressure");
-  const auto pressure_field = system.findFieldByName(pressure_field_name);
-  if (pressure_field == svmp::FE::INVALID_FIELD_ID) {
-    svmp::FE::logRecord(
-        svmp::FE::LogRecord("ApplicationDriver", "accepted pressure update diagnostic skipped", svmp::FE::LogLevel::WARNING)
-            .diagnostic("accepted_pressure_update_guard_skipped")
-            .text("reason", "pressure_field_not_found")
-            .quoted("phase", phase)
-            .quoted("field", pressure_field_name)
-            .rootOnly());
-    return false;
-  }
-
-  const auto& pressure_dofs = system.fieldDofHandler(pressure_field);
-  const auto* pressure_entity_map = pressure_dofs.getEntityDofMap();
-  if (pressure_entity_map == nullptr) {
-    svmp::FE::logRecord(
-        svmp::FE::LogRecord("ApplicationDriver", "accepted pressure update diagnostic skipped", svmp::FE::LogLevel::WARNING)
-            .diagnostic("accepted_pressure_update_guard_skipped")
-            .text("reason", "no_entity_dof_map")
-            .quoted("phase", phase)
-            .quoted("field", pressure_field_name)
-            .rootOnly());
-    return false;
-  }
-
-  const auto requests = activeCutVolumeRequests(params);
-  const auto* cut_context = system.cutIntegrationContext();
-  if (requests.empty() || cut_context == nullptr) {
-    svmp::FE::logRecord(
-        svmp::FE::LogRecord("ApplicationDriver", "accepted pressure update diagnostic skipped", svmp::FE::LogLevel::WARNING)
-            .diagnostic("accepted_pressure_update_guard_skipped")
-            .text("reason", "no_active_cut_context")
-            .quoted("phase", phase)
-            .value("active_requests", requests.size())
-            .value("has_cut_context", (cut_context != nullptr ? 1 : 0))
-            .rootOnly());
-    return false;
-  }
-
-  const auto& mesh = system.meshAccess();
-  cut_context->assertAllFreeSurfaceGeometrySnapshotsCurrent(mesh);
-  const auto n_vertices = static_cast<std::size_t>(
-      std::max<svmp::FE::GlobalIndex>(0, mesh.numVertices()));
-  std::vector<unsigned char> active_support(n_vertices, 0u);
-  std::vector<double> max_wet_fraction(
-      n_vertices, -std::numeric_limits<double>::infinity());
-  std::vector<double> min_positive_wet_fraction(
-      n_vertices, std::numeric_limits<double>::infinity());
-  std::vector<svmp::FE::GlobalIndex> cell_nodes;
-  std::size_t retained_rule_count = 0u;
-
-  for (std::size_t i = 0; i < requests.size(); ++i) {
-    const auto& request = requests[i];
-    const auto marker = generatedVolumeMarkerForRequest(*cut_context, request, i);
-    if (!marker.has_value()) {
-      continue;
-    }
-    const auto side = cutIntegrationSide(request.active_side);
-    const auto rules =
-        cut_context->generatedVolumeRulesForMarkerAndSide(*marker, side);
-    for (const auto* rule : rules) {
-      if (rule == nullptr || !std::isfinite(rule->volume_fraction) ||
-          rule->volume_fraction <= svmp::FE::Real{0.0}) {
-        continue;
-      }
-      const auto parent = rule->provenance.parent_entity;
-      if (parent < 0 || parent >= mesh.numCells()) {
-        continue;
-      }
-      ++retained_rule_count;
-      cell_nodes.clear();
-      mesh.getCellNodes(parent, cell_nodes);
-      for (const auto vertex : cell_nodes) {
-        if (vertex < 0 ||
-            static_cast<std::size_t>(vertex) >= active_support.size()) {
-          continue;
-        }
-        const auto v = static_cast<std::size_t>(vertex);
-        active_support[v] = 1u;
-        const auto fraction = static_cast<double>(rule->volume_fraction);
-        max_wet_fraction[v] = std::max(max_wet_fraction[v], fraction);
-        min_positive_wet_fraction[v] =
-            std::min(min_positive_wet_fraction[v], fraction);
-      }
-    }
-  }
-
-  const auto pressure_offset = system.fieldDofOffset(pressure_field);
-  const auto pressure_field_dofs = pressure_dofs.getNumDofs();
-  const auto solution_size =
-      static_cast<svmp::FE::GlobalIndex>(current_solution.size());
-  if (pressure_offset < 0 ||
-      pressure_offset + pressure_field_dofs > solution_size) {
-    svmp::FE::logRecord(
-        svmp::FE::LogRecord("ApplicationDriver", "accepted pressure update diagnostic skipped", svmp::FE::LogLevel::WARNING)
-            .diagnostic("accepted_pressure_update_guard_skipped")
-            .text("reason", "dofs_outside_solution")
-            .quoted("phase", phase)
-            .quoted("field", pressure_field_name)
-            .value("pressure_offset", pressure_offset)
-            .value("pressure_dofs", pressure_field_dofs)
-            .value("solution_size", current_solution.size())
-            .rootOnly());
-    return false;
-  }
-
-  std::size_t supported_vertices = 0u;
-  std::size_t compared_vertices = 0u;
-  std::size_t skipped_nonvertex_pressure_dofs = 0u;
-  double local_max_abs_delta = 0.0;
-  double local_signed_delta = 0.0;
-  svmp::FE::GlobalIndex local_vertex = -1;
-  svmp::FE::GlobalIndex local_dof = -1;
-  double local_from_pressure = 0.0;
-  double local_to_pressure = 0.0;
-  double local_max_wet = std::numeric_limits<double>::quiet_NaN();
-  double local_min_positive_wet = std::numeric_limits<double>::quiet_NaN();
-
-  for (std::size_t vertex = 0; vertex < active_support.size(); ++vertex) {
-    if (active_support[vertex] == 0u) {
-      continue;
-    }
-    ++supported_vertices;
-    const auto vertex_dofs = pressure_entity_map->getVertexDofs(
-        static_cast<svmp::FE::GlobalIndex>(vertex));
-    if (vertex_dofs.size() != 1u) {
-      ++skipped_nonvertex_pressure_dofs;
-      continue;
-    }
-    const auto global_dof = pressure_offset + vertex_dofs.front();
-    if (global_dof < 0 ||
-        static_cast<std::size_t>(global_dof) >= current_solution.size()) {
-      ++skipped_nonvertex_pressure_dofs;
-      continue;
-    }
-    ++compared_vertices;
-    const auto previous = static_cast<double>(
-        previous_solution[static_cast<std::size_t>(global_dof)]);
-    const auto current = static_cast<double>(
-        current_solution[static_cast<std::size_t>(global_dof)]);
-    const auto delta = current - previous;
-    const auto abs_delta = std::abs(delta);
-    if (abs_delta > local_max_abs_delta) {
-      local_max_abs_delta = abs_delta;
-      local_signed_delta = delta;
-      local_vertex = static_cast<svmp::FE::GlobalIndex>(vertex);
-      local_dof = global_dof;
-      local_from_pressure = previous;
-      local_to_pressure = current;
-      local_max_wet = max_wet_fraction[vertex];
-      local_min_positive_wet = min_positive_wet_fraction[vertex];
-    }
-  }
-
-  const auto comm = activeFESystemCommunicator(system);
-  const auto global_supported_vertices = globalSumSize(supported_vertices, comm);
-  const auto global_compared_vertices = globalSumSize(compared_vertices, comm);
-  const auto global_skipped_vertices =
-      globalSumSize(skipped_nonvertex_pressure_dofs, comm);
-  const auto global_retained_rules = globalSumSize(retained_rule_count, comm);
-  const auto global_max_abs_delta = globalMaxDouble(local_max_abs_delta, comm);
-  const auto threshold =
-      parseDoubleEnv("SVMP_ACTIVE_PRESSURE_UPDATE_THRESHOLD_PA", -1.0);
-  const bool triggered = threshold > 0.0 && global_max_abs_delta > threshold;
-
-  svmp::FE::logRecord(
-      svmp::FE::LogRecord("ApplicationDriver", "accepted pressure update")
-          .diagnostic("accepted_pressure_update_guard")
-          .quoted("phase", phase)
-          .value("step", step)
-          .value("time", time)
-          .value("dt", dt)
-          .quoted("field", pressure_field_name)
-          .value("retained_active_volume_rules", global_retained_rules)
-          .value("active_supported_vertices", global_supported_vertices)
-          .value("compared_vertex_pressure_dofs", global_compared_vertices)
-          .value("skipped_nonvertex_pressure_vertices", global_skipped_vertices)
-          .value("local_worst_vertex", local_vertex)
-          .value("local_worst_dof", local_dof)
-          .value("local_abs_pressure_delta_pa", local_max_abs_delta)
-          .value("global_abs_pressure_delta_pa", global_max_abs_delta)
-          .value("local_pressure_delta_pa", local_signed_delta)
-          .value("local_from_pressure_pa", local_from_pressure)
-          .value("local_to_pressure_pa", local_to_pressure)
-          .value("support_class", activePressureUpdateSupportClass(local_max_wet, local_min_positive_wet))
-          .value("incident_wet_fraction_max", local_max_wet)
-          .value("incident_wet_fraction_min_positive", local_min_positive_wet)
-          .value("threshold_pa", threshold)
-          .value("triggered", (triggered ? 1 : 0))
-          .rootOnly());
-
-  if (triggered &&
-      honor_fail_on_trigger &&
-      parseBoolEnv("SVMP_ACTIVE_PRESSURE_UPDATE_FAIL_ON_TRIGGER", false)) {
-    throw std::runtime_error(
-        "[svMultiPhysics::Application] Accepted active pressure update "
-        "exceeded SVMP_ACTIVE_PRESSURE_UPDATE_THRESHOLD_PA.");
-  }
-  return triggered;
-}
 
 void scatterFeOrderedSolution(
     svmp::FE::backends::GenericVector& solution,
@@ -7107,7 +6679,7 @@ void ApplicationDriver::runWithParameters(const Parameters& params, RunMode mode
 
   // Auto-configure OpenMP threads: hardware_cores / MPI_ranks_per_node.
   // Respects OMP_NUM_THREADS if the user has set it explicitly. With threaded
-  // assembly requested (<Assembly_threads> or SVMP_ASSEMBLY_THREADS above one)
+  // assembly requested (<Assembly_threads> above one)
   // OpenMP stays at one thread instead: OpenMP threads change the FSILS
   // reduction order and select the coloured cell assembly, so results would
   // depend on the core count (FE/Docs/ThreadedAssembly.md).
@@ -7116,13 +6688,6 @@ void ApplicationDriver::runWithParameters(const Parameters& params, RunMode mode
     const auto& deck = params.general_simulation_parameters.assembly_threads;
     if (deck.defined() && deck.value() >= 1) {
       assembly_threads = deck.value();
-    }
-    if (const char* env = std::getenv("SVMP_ASSEMBLY_THREADS"); env != nullptr && *env != '\0') {
-      char* end = nullptr;
-      const long value = std::strtol(env, &end, 10);
-      if (end != env && *end == '\0' && value >= 1 && value <= 4096) {
-        assembly_threads = static_cast<int>(value);
-      }
     }
   }
   if (assembly_threads > 1 && std::getenv("OMP_NUM_THREADS") == nullptr) {
@@ -7167,9 +6732,8 @@ void ApplicationDriver::runWithParameters(const Parameters& params, RunMode mode
                                      [](const auto* p) { return p != nullptr; }));
   oopCout() << "[svMultiPhysics::Application] Input summary: meshes=" << mesh_blocks
             << " equations=" << equation_blocks << std::endl;
-  warnInputDeprecations(collectInputDeprecations());
-  // Validate the initial-rate key against its legacy environment alias
-  // before the setup work (it is applied by the transient solve).
+  // Validate the initial-rate key before the setup work (it is applied by
+  // the transient solve).
   (void)generalizedAlphaInitialRateIsConsistent(params.general_simulation_parameters);
 
   SimulationBuilder builder(params);
@@ -7307,7 +6871,6 @@ void ApplicationDriver::runSteadyState(SimulationComponents& sim, const Paramete
                                  newton_opts);
   applyNewtonIterationXmlOptions(params.general_simulation_parameters,
                                  newton_opts);
-  applyNewtonToleranceEnvOptions(newton_opts);
   newton_opts.accept_inexact_linear_solutions =
       parseBoolEnv("SVMP_NEWTON_ACCEPT_INEXACT_LINEAR", false);
   applyNewtonPseudoTransientEnvOptions(newton_opts);
@@ -7359,17 +6922,12 @@ void ApplicationDriver::runSteadyState(SimulationComponents& sim, const Paramete
       !steady_active_cut_requests.empty() || !level_set_maintenance.empty() ||
       !steady_level_set_advection_velocity.empty();
   const bool use_steady_external_state_fixed_point =
-      steady_has_generated_state &&
-      parseBoolEnv("SVMP_GENERATED_STATE_OUTER_FIXED_POINT", true);
+      steady_has_generated_state;
   newton_opts.external_state_fixed_point.enabled =
       use_steady_external_state_fixed_point;
-  newton_opts.external_state_fixed_point.max_iterations = std::max(
-      1,
-      parseIntEnv("SVMP_GENERATED_STATE_OUTER_MAX_ITERATIONS", 12));
-  applyGeneratedStateOuterRelaxationEnvOptions(newton_opts);
-  // Legacy refreshed/quasi-Newton mode remains available for controlled
-  // comparisons.  Production generated geometry uses an outer Picard loop so
-  // each inner Newton residual and Jacobian share exactly one frozen G.
+  newton_opts.external_state_fixed_point.max_iterations = 12;
+  // Generated geometry uses an outer Picard loop so each inner Newton
+  // residual and Jacobian share exactly one frozen G.
   newton_opts.accepted_state_sync_invalidates_residual =
       steady_has_generated_state &&
       !use_steady_external_state_fixed_point;
@@ -7643,7 +7201,6 @@ void ApplicationDriver::runTransient(SimulationComponents& sim, const Parameters
                                  opts.newton);
   applyNewtonIterationXmlOptions(params.general_simulation_parameters,
                                  opts.newton);
-  applyNewtonToleranceEnvOptions(opts.newton);
   opts.newton.accept_inexact_linear_solutions =
       parseBoolEnv("SVMP_NEWTON_ACCEPT_INEXACT_LINEAR", false);
 
@@ -7663,47 +7220,38 @@ void ApplicationDriver::runTransient(SimulationComponents& sim, const Parameters
   const bool adaptive_time_loop_from_xml =
       general_params.enable_adaptive_time_loop.defined() &&
       general_params.enable_adaptive_time_loop.value();
-  if (parseBoolEnv("SVMP_TIMELOOP_ADAPTIVE", adaptive_time_loop_from_xml)) {
+  if (adaptive_time_loop_from_xml) {
     svmp::FE::timestepping::SimpleStepControllerOptions controller_opts{};
-    const double default_min_dt =
+    controller_opts.min_dt =
         general_params.adaptive_time_loop_min_dt.defined()
             ? general_params.adaptive_time_loop_min_dt.value()
             : dt * 0.0625;
-    const double default_max_dt =
+    controller_opts.max_dt =
         general_params.adaptive_time_loop_max_dt.defined()
             ? general_params.adaptive_time_loop_max_dt.value()
             : dt;
-    const int default_max_retries =
-        general_params.adaptive_time_loop_max_retries.defined()
-            ? general_params.adaptive_time_loop_max_retries.value()
-            : 8;
-    const double default_decrease_factor =
+    controller_opts.max_retries = std::max(
+        0, general_params.adaptive_time_loop_max_retries.defined()
+               ? general_params.adaptive_time_loop_max_retries.value()
+               : 8);
+    controller_opts.decrease_factor =
         general_params.adaptive_time_loop_decrease_factor.defined()
             ? general_params.adaptive_time_loop_decrease_factor.value()
             : 0.5;
-    const double default_increase_factor =
+    controller_opts.increase_factor =
         general_params.adaptive_time_loop_increase_factor.defined()
             ? general_params.adaptive_time_loop_increase_factor.value()
             : 1.0;
-    const int default_target_newton_iterations =
-        general_params.adaptive_time_loop_target_newton_iterations.defined()
-            ? general_params.adaptive_time_loop_target_newton_iterations.value()
-            : 6;
-    const int default_max_steps_multiplier =
-        general_params.adaptive_time_loop_max_steps_multiplier.defined()
-            ? general_params.adaptive_time_loop_max_steps_multiplier.value()
-            : 8;
-    controller_opts.min_dt = parseDoubleEnv("SVMP_TIMELOOP_MIN_DT", default_min_dt);
-    controller_opts.max_dt = parseDoubleEnv("SVMP_TIMELOOP_MAX_DT", default_max_dt);
-    controller_opts.max_retries = std::max(0, parseIntEnv("SVMP_TIMELOOP_MAX_RETRIES", default_max_retries));
-    controller_opts.decrease_factor = parseDoubleEnv("SVMP_TIMELOOP_DECREASE_FACTOR", default_decrease_factor);
-    controller_opts.increase_factor = parseDoubleEnv("SVMP_TIMELOOP_INCREASE_FACTOR", default_increase_factor);
-    controller_opts.target_newton_iterations =
-        std::max(1, parseIntEnv("SVMP_TIMELOOP_TARGET_NEWTON_ITERATIONS", default_target_newton_iterations));
+    controller_opts.target_newton_iterations = std::max(
+        1, general_params.adaptive_time_loop_target_newton_iterations.defined()
+               ? general_params.adaptive_time_loop_target_newton_iterations.value()
+               : 6);
     opts.step_controller =
         std::make_shared<svmp::FE::timestepping::SimpleStepController>(controller_opts);
-    const int max_steps_multiplier =
-        std::max(1, parseIntEnv("SVMP_TIMELOOP_MAX_STEPS_MULTIPLIER", default_max_steps_multiplier));
+    const int max_steps_multiplier = std::max(
+        1, general_params.adaptive_time_loop_max_steps_multiplier.defined()
+               ? general_params.adaptive_time_loop_max_steps_multiplier.value()
+               : 8);
     opts.max_steps = std::max(opts.max_steps, num_steps * max_steps_multiplier);
     oopCout() << "[svMultiPhysics::Application] TimeLoop adaptive controller enabled:"
               << " min_dt=" << controller_opts.min_dt
@@ -7787,8 +7335,7 @@ void ApplicationDriver::runTransient(SimulationComponents& sim, const Parameters
       parseBoolEnv("SVMP_CUT_REFRESH_PER_STEP_ONLY", false);
   const bool use_transient_external_state_fixed_point =
       has_transient_generated_state &&
-      !per_step_only_generated_state &&
-      parseBoolEnv("SVMP_GENERATED_STATE_OUTER_FIXED_POINT", true);
+      !per_step_only_generated_state;
   opts.newton.external_state_fixed_point.enabled =
       use_transient_external_state_fixed_point;
   // Outer fixed-point budget and relaxation. Default: at most
@@ -7799,16 +7346,11 @@ void ApplicationDriver::runTransient(SimulationComponents& sim, const Parameters
   // cap; only steps that would have hit it continue, relaxed. XML keys
   // Outer_fixed_point_max_passes and Outer_fixed_point_relaxation_start_pass
   // (1-based pass whose update is the first relaxed one; 0 disables, 1
-  // relaxes every update) take precedence over the environment variables
-  // SVMP_GENERATED_STATE_OUTER_MAX_ITERATIONS,
-  // SVMP_GENERATED_STATE_OUTER_DYNAMIC_RELAXATION and
-  // SVMP_GENERATED_STATE_OUTER_DYNAMIC_RELAXATION_START_PASS.
+  // relaxes every update) override the defaults.
   constexpr int kOuterFixedPointPlainPasses = 12;
   constexpr int kOuterFixedPointDefaultMaxPasses = 30;
-  opts.newton.external_state_fixed_point.max_iterations = std::max(
-      1,
-      parseIntEnv("SVMP_GENERATED_STATE_OUTER_MAX_ITERATIONS",
-                  kOuterFixedPointDefaultMaxPasses));
+  opts.newton.external_state_fixed_point.max_iterations =
+      kOuterFixedPointDefaultMaxPasses;
   opts.newton.external_state_fixed_point.dynamic_relaxation.enabled = true;
   opts.newton.external_state_fixed_point.dynamic_relaxation.start_iteration =
       kOuterFixedPointPlainPasses - 1;
@@ -7825,7 +7367,6 @@ void ApplicationDriver::runTransient(SimulationComponents& sim, const Parameters
   // therefore bounded by the outer iteration limit, which is the default.
   // Max_cut_topology_restarts_per_step overrides it (0 restores the
   // stop-and-reject behavior).
-  rejectRemovedCutTopologyRestartEnvironment();
   const char* cut_topology_restart_limit_source = "outer_iteration_limit";
   int cut_topology_restart_limit =
       opts.newton.external_state_fixed_point.max_iterations;
@@ -7840,7 +7381,6 @@ void ApplicationDriver::runTransient(SimulationComponents& sim, const Parameters
   }
   opts.newton.external_state_fixed_point.max_discontinuity_restarts =
       cut_topology_restart_limit;
-  applyGeneratedStateOuterRelaxationEnvOptions(opts.newton);
   {
     const auto& start_parameter = params.general_simulation_parameters
                                       .outer_fixed_point_relaxation_start_pass;
@@ -7856,15 +7396,9 @@ void ApplicationDriver::runTransient(SimulationComponents& sim, const Parameters
   // Default: from the first refresh beyond the plain passes, so a step that
   // converges within them is unaffected. XML key
   // Outer_fixed_point_constraint_cycle_exit_pass (1-based refresh; 0
-  // disables) takes precedence over the environment variable
-  // SVMP_GENERATED_STATE_OUTER_CONSTRAINT_CYCLE_EXIT_PASS.
+  // disables) overrides the default.
   {
     int exit_pass = kOuterFixedPointPlainPasses + 1;
-    if (std::getenv("SVMP_GENERATED_STATE_OUTER_CONSTRAINT_CYCLE_EXIT_PASS") !=
-        nullptr) {
-      exit_pass = parseIntEnv(
-          "SVMP_GENERATED_STATE_OUTER_CONSTRAINT_CYCLE_EXIT_PASS", exit_pass);
-    }
     const auto& exit_parameter = params.general_simulation_parameters
                                      .outer_fixed_point_constraint_cycle_exit_pass;
     if (exit_parameter.defined()) {
@@ -8008,7 +7542,6 @@ void ApplicationDriver::runTransient(SimulationComponents& sim, const Parameters
       initial_wet_volume_by_key);
 
   svmp::FE::timestepping::TimeLoopCallbacks callbacks{};
-  std::vector<svmp::FE::Real> accepted_pressure_update_previous_solution;
   application::core::LevelSetMaintenanceWorkLedger
       level_set_maintenance_work;
   std::uint64_t level_set_maintenance_transaction_sequence{0u};
@@ -8358,13 +7891,6 @@ void ApplicationDriver::runTransient(SimulationComponents& sim, const Parameters
               stateViewForHistory(h));
         }
         energy.recordInitialBaseline(h);
-        if (acceptedPressureUpdateDiagnosticEnabled()) {
-          accepted_pressure_update_previous_solution =
-              gatherFeOrderedSolution(
-                  h.u(), velocity_extension_artifact_comm);
-        } else {
-          accepted_pressure_update_previous_solution.clear();
-        }
         return true;
       };
   callbacks.on_nonlinear_done = [&](const svmp::FE::timestepping::TimeHistory& h,
@@ -8739,33 +8265,6 @@ void ApplicationDriver::runTransient(SimulationComponents& sim, const Parameters
             rollback_and_reject_pending_phase(
                 h, "candidate_contract_rejection");
             return false;
-          }
-          if (activePressureUpdateRejectOnTriggerEnabled() &&
-              acceptedPressureUpdateDiagnosticEnabled() &&
-              !accepted_pressure_update_previous_solution.empty()) {
-            const auto current_solution = gatherFeOrderedSolution(
-                h.u(), velocity_extension_artifact_comm);
-            const bool triggered = logAcceptedPressureUpdateDiagnostic(
-                *sim.fe_system,
-                params,
-                std::span<const svmp::FE::Real>(
-                    accepted_pressure_update_previous_solution.data(),
-                    accepted_pressure_update_previous_solution.size()),
-                std::span<const svmp::FE::Real>(
-                    current_solution.data(),
-                    current_solution.size()),
-                h.stepIndex() + 1,
-                h.time() + h.dt(),
-                h.dt(),
-                "pre_commit",
-                /*honor_fail_on_trigger=*/false);
-            if (triggered) {
-              clear_pending_contact_provenance();
-              pending_dynamic_contact_generalized_alpha_observation.reset();
-              rollback_and_reject_pending_phase(
-                  h, "pressure_update_rejection");
-              return false;
-            }
           }
           if (reconcile_two_fluid_momentum) {
             const auto corrected_solution = gatherFeOrderedSolution(
@@ -9356,25 +8855,6 @@ void ApplicationDriver::runTransient(SimulationComponents& sim, const Parameters
     pending_phase_geometry_commit_required = false;
     pending_phase_geometry_commit_returned = false;
     pending_phase_ledger_transaction_inactive = false;
-    if (acceptedPressureUpdateDiagnosticEnabled() &&
-        !accepted_pressure_update_previous_solution.empty()) {
-      const auto current_solution = gatherFeOrderedSolution(
-          h.u(), velocity_extension_artifact_comm);
-      logAcceptedPressureUpdateDiagnostic(
-          *sim.fe_system,
-          params,
-          std::span<const svmp::FE::Real>(
-              accepted_pressure_update_previous_solution.data(),
-              accepted_pressure_update_previous_solution.size()),
-          std::span<const svmp::FE::Real>(
-              current_solution.data(),
-              current_solution.size()),
-          h.stepIndex(),
-          h.time(),
-          h.dt(),
-          "post_accept",
-          /*honor_fail_on_trigger=*/true);
-    }
     const bool maintenance_work_due = std::any_of(
         level_set_maintenance.begin(),
         level_set_maintenance.end(),

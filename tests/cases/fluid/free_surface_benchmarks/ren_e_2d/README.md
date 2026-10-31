@@ -73,7 +73,8 @@ by construction, so the test is whether the transported interface follows it:
   most 2% between dt0/2 and dt0/4.
 * Liquid area: maximum relative drift <= 1e-4 in every run (D11).
 * Completion: every run reaches t = 0.25; an outer-cap failure is retried once
-  with `SVMP_GENERATED_STATE_OUTER_DYNAMIC_RELAXATION=1` for diagnosis only.
+  with `<Outer_fixed_point_relaxation_start_pass>1</Outer_fixed_point_relaxation_start_pass>`
+  (every update relaxed) for diagnosis only.
 
 The 10% and 2% values are proposals (no published discrete benchmark exists for
 this constitutive check): 10% is a fifth of the pilot's loose gate and the size of

@@ -104,7 +104,6 @@ constexpr NewtonCommunicator kSerialNewtonCommunicator = 0;
 {
     static const bool enabled =
         envBoolEnabled("SVMP_NEWTON_FIELD_RESIDUAL_DIAGNOSTIC") ||
-        envBoolEnabled("SVMP_ACTIVE_PRESSURE_RESIDUAL_DIAGNOSTIC") ||
         envBoolEnabled("SVMP_NS_PRESSURE_ROW_CONTRIBUTION_DIAGNOSTIC") ||
         envBoolEnabled("SVMP_PRESSURE_ROW_CONTRIBUTION_DIAGNOSTIC");
     return enabled;
@@ -275,87 +274,6 @@ inline constexpr std::string_view
     return enabled;
 }
 
-[[nodiscard]] double activePressureSupportRankTolerance() noexcept
-{
-    static const double tolerance = [] {
-        const char* env =
-            std::getenv("SVMP_ACTIVE_PRESSURE_SUPPORT_RANK_TOLERANCE");
-        if (env == nullptr || env[0] == '\0') {
-            return 1.0e-14;
-        }
-        try {
-            const double parsed = std::stod(env);
-            if (parsed >= 0.0 && std::isfinite(parsed)) {
-                return parsed;
-            }
-        } catch (const std::exception&) {
-        }
-        return 1.0e-14;
-    }();
-    return tolerance;
-}
-
-[[nodiscard]] double activePressureUpdateSupportWeakVelocityThreshold() noexcept
-{
-    static const double threshold = [] {
-        const char* env =
-            std::getenv("SVMP_ACTIVE_PRESSURE_UPDATE_SUPPORT_WEAK_VELOCITY_ROW_SUM");
-        if (env == nullptr || env[0] == '\0') {
-            return -1.0;
-        }
-        try {
-            const double parsed = std::stod(env);
-            if (parsed >= 0.0 && std::isfinite(parsed)) {
-                return parsed;
-            }
-        } catch (const std::exception&) {
-        }
-        return -1.0;
-    }();
-    return threshold;
-}
-
-[[nodiscard]] double activePressureUpdateSupportWeakSelfThreshold() noexcept
-{
-    static const double threshold = [] {
-        const char* env =
-            std::getenv("SVMP_ACTIVE_PRESSURE_UPDATE_SUPPORT_WEAK_PRESSURE_SELF_ROW_SUM");
-        if (env == nullptr || env[0] == '\0') {
-            env = std::getenv("SVMP_ACTIVE_PRESSURE_UPDATE_SUPPORT_WEAK_SELF_ROW_SUM");
-        }
-        if (env == nullptr || env[0] == '\0') {
-            return -1.0;
-        }
-        try {
-            const double parsed = std::stod(env);
-            if (parsed >= 0.0 && std::isfinite(parsed)) {
-                return parsed;
-            }
-        } catch (const std::exception&) {
-        }
-        return -1.0;
-    }();
-    return threshold;
-}
-
-[[nodiscard]] int activePressureSupportRankSampleLimit() noexcept
-{
-    static const int limit = [] {
-        const char* env =
-            std::getenv("SVMP_ACTIVE_PRESSURE_SUPPORT_RANK_SAMPLE_LIMIT");
-        if (env == nullptr || env[0] == '\0') {
-            return 16;
-        }
-        try {
-            const int parsed = std::stoi(env);
-            return parsed < 0 ? -1 : parsed;
-        } catch (const std::exception&) {
-            return 16;
-        }
-    }();
-    return limit;
-}
-
 [[nodiscard]] const std::string& newtonFieldResidualDiagnosticFieldName()
 {
     static const std::string field_name = [] {
@@ -364,32 +282,6 @@ inline constexpr std::string_view
             return std::string(env);
         }
         return std::string("Pressure");
-    }();
-    return field_name;
-}
-
-[[nodiscard]] const std::string& activePressureSupportRankPressureFieldName()
-{
-    static const std::string field_name = [] {
-        const char* env =
-            std::getenv("SVMP_ACTIVE_PRESSURE_SUPPORT_RANK_PRESSURE_FIELD");
-        if (env != nullptr && env[0] != '\0') {
-            return std::string(env);
-        }
-        return std::string("Pressure");
-    }();
-    return field_name;
-}
-
-[[nodiscard]] const std::string& activePressureSupportRankCouplingFieldName()
-{
-    static const std::string field_name = [] {
-        const char* env =
-            std::getenv("SVMP_ACTIVE_PRESSURE_SUPPORT_RANK_COUPLING_FIELD");
-        if (env != nullptr && env[0] != '\0') {
-            return std::string(env);
-        }
-        return std::string("Velocity");
     }();
     return field_name;
 }
@@ -464,18 +356,6 @@ std::vector<GlobalIndex> parseGlobalIndexList(std::string_view text)
     return dofs;
 }
 
-[[nodiscard]] const std::vector<GlobalIndex>& newtonMatrixSupportPressureLocalSampleDofs()
-{
-    static const std::vector<GlobalIndex> dofs = [] {
-        const char* env = std::getenv("SVMP_ACTIVE_PRESSURE_CONSTRAINT_SAMPLE_DOFS");
-        if (env == nullptr || env[0] == '\0') {
-            return std::vector<GlobalIndex>{};
-        }
-        return parseGlobalIndexList(env);
-    }();
-    return dofs;
-}
-
 [[nodiscard]] bool pressureRowContributionMatrixDiagnosticEnabled() noexcept
 {
     static const bool enabled =
@@ -485,8 +365,7 @@ std::vector<GlobalIndex> parseGlobalIndexList(std::string_view text)
          envBoolEnabled("SVMP_NS_PRESSURE_ROW_CONTRIBUTION_MATRIX_SUMMARY_DIAGNOSTIC") ||
          envBoolEnabled("SVMP_PRESSURE_ROW_CONTRIBUTION_MATRIX_SUMMARY_DIAGNOSTIC") ||
          std::getenv("SVMP_PRESSURE_ROW_CONTRIBUTION_SAMPLE_DOFS") != nullptr ||
-         std::getenv("SVMP_NEWTON_MATRIX_SUPPORT_SAMPLE_DOFS") != nullptr ||
-         std::getenv("SVMP_ACTIVE_PRESSURE_CONSTRAINT_SAMPLE_DOFS") != nullptr);
+         std::getenv("SVMP_NEWTON_MATRIX_SUPPORT_SAMPLE_DOFS") != nullptr);
     return enabled;
 }
 
@@ -3864,12 +3743,6 @@ void logNewtonMatrixSupportDiagnostic(const systems::FESystem& sys,
     if (pressure_field != INVALID_FIELD_ID) {
         pressure_offset = sys.fieldDofOffset(pressure_field);
         pressure_dofs = sys.fieldDofHandler(pressure_field).getNumDofs();
-        for (const auto local_dof : newtonMatrixSupportPressureLocalSampleDofs()) {
-            if (local_dof < 0 || local_dof >= pressure_dofs || pressure_offset < 0) {
-                continue;
-            }
-            sample_dofs.push_back(pressure_offset + local_dof);
-        }
     }
 
     std::sort(sample_dofs.begin(), sample_dofs.end());
@@ -4094,9 +3967,6 @@ struct ActivePressureSupportRankSummary {
     GlobalIndex zero_self_col_block_count = 0;
     GlobalIndex positive_coupling_row_block_count = 0;
     GlobalIndex positive_self_row_block_count = 0;
-    GlobalIndex weak_coupling_row_block_count = 0;
-    GlobalIndex weak_self_row_block_count = 0;
-    GlobalIndex weak_coupling_and_self_row_block_count = 0;
     GlobalIndex pressure_only_row_block_count = 0;
     GlobalIndex pressure_only_col_block_count = 0;
     double min_positive_coupling_row_abs_sum =
@@ -4106,12 +3976,10 @@ struct ActivePressureSupportRankSummary {
         std::numeric_limits<double>::infinity();
     double max_self_row_abs_sum = 0.0;
     std::vector<GlobalIndex> zero_coupling_row_global_dofs;
-    std::vector<GlobalIndex> clamp_candidate_row_global_dofs;
     std::vector<ActivePressureSupportRankRow> zero_coupling_row_samples;
     std::vector<ActivePressureSupportRankRow> zero_row_samples;
     std::vector<ActivePressureSupportRankRow> weakest_coupling_row_samples;
     std::vector<ActivePressureSupportRankRow> weakest_self_row_samples;
-    std::vector<ActivePressureSupportRankRow> clamp_candidate_row_samples;
 };
 
 [[nodiscard]] std::string formatActivePressureSupportRankDofSamples(
@@ -4131,9 +3999,7 @@ struct ActivePressureSupportRankSummary {
     return oss.str();
 }
 
-[[nodiscard]] std::vector<GlobalIndex>
-pressureOperatorMatrixSupportSampleDofs(
-    const NewtonMatrixSupportFieldRange& pressure_range)
+[[nodiscard]] std::vector<GlobalIndex> pressureOperatorMatrixSupportSampleDofs()
 {
     std::vector<GlobalIndex> sample_dofs =
         newtonFieldResidualDiagnosticSampleDofs();
@@ -4142,15 +4008,6 @@ pressureOperatorMatrixSupportSampleDofs(
     sample_dofs.insert(sample_dofs.end(),
                        matrix_sample_dofs.begin(),
                        matrix_sample_dofs.end());
-
-    for (const auto local_dof : newtonMatrixSupportPressureLocalSampleDofs()) {
-        if (local_dof < 0 ||
-            local_dof >= pressure_range.end - pressure_range.begin ||
-            pressure_range.begin < 0) {
-            continue;
-        }
-        sample_dofs.push_back(pressure_range.begin + local_dof);
-    }
 
     std::sort(sample_dofs.begin(), sample_dofs.end());
     sample_dofs.erase(std::unique(sample_dofs.begin(), sample_dofs.end()),
@@ -4186,8 +4043,7 @@ void logPressureRowOperatorMatrixSupportDiagnostic(
         return;
     }
 
-    const auto sample_dofs =
-        pressureOperatorMatrixSupportSampleDofs(*pressure_range);
+    const auto sample_dofs = pressureOperatorMatrixSupportSampleDofs();
     if (sample_dofs.empty()) {
         return;
     }
@@ -4331,9 +4187,7 @@ void logPressureRowOperatorMatrixSupportDiagnostic(
     std::string_view pressure_field_name,
     std::string_view coupling_field_name,
     double tolerance,
-    int sample_limit,
-    double clamp_coupling_threshold = -1.0,
-    double clamp_self_threshold = -1.0)
+    int sample_limit)
 {
     ActivePressureSupportRankSummary summary;
     summary.pressure_field = std::string(pressure_field_name);
@@ -4473,14 +4327,6 @@ void logPressureRowOperatorMatrixSupportDiagnostic(
             std::abs(row.col_coupling_abs_sum) <= tolerance;
         const bool zero_self_row = std::abs(row.row_self_abs_sum) <= tolerance;
         const bool zero_self_col = std::abs(row.col_self_abs_sum) <= tolerance;
-        const bool weak_coupling_row =
-            !zero_coupling_row &&
-            clamp_coupling_threshold >= 0.0 &&
-            row.row_coupling_abs_sum <= clamp_coupling_threshold;
-        const bool weak_self_row =
-            !zero_self_row &&
-            clamp_self_threshold >= 0.0 &&
-            row.row_self_abs_sum <= clamp_self_threshold;
         if (zero_row) {
             ++summary.zero_row_count;
             if (can_add_sample(summary.zero_row_samples)) {
@@ -4510,9 +4356,6 @@ void logPressureRowOperatorMatrixSupportDiagnostic(
             add_weakest_coupling_sample(
                 summary.weakest_coupling_row_samples, row);
         }
-        if (weak_coupling_row) {
-            ++summary.weak_coupling_row_block_count;
-        }
         if (zero_coupling_col) {
             ++summary.zero_coupling_col_block_count;
         }
@@ -4528,12 +4371,6 @@ void logPressureRowOperatorMatrixSupportDiagnostic(
                          row.row_self_abs_sum);
             add_weakest_self_sample(summary.weakest_self_row_samples, row);
         }
-        if (weak_self_row) {
-            ++summary.weak_self_row_block_count;
-        }
-        if (weak_coupling_row && weak_self_row) {
-            ++summary.weak_coupling_and_self_row_block_count;
-        }
         if (zero_self_col) {
             ++summary.zero_self_col_block_count;
         }
@@ -4542,18 +4379,6 @@ void logPressureRowOperatorMatrixSupportDiagnostic(
         }
         if (zero_coupling_col && !zero_self_col) {
             ++summary.pressure_only_col_block_count;
-        }
-        const bool clamp_coupling_candidate =
-            clamp_coupling_threshold >= 0.0 &&
-            row.row_coupling_abs_sum <= clamp_coupling_threshold;
-        const bool clamp_self_candidate =
-            clamp_self_threshold >= 0.0 &&
-            row.row_self_abs_sum <= clamp_self_threshold;
-        if (clamp_coupling_candidate || clamp_self_candidate) {
-            summary.clamp_candidate_row_global_dofs.push_back(global_dof);
-            if (can_add_sample(summary.clamp_candidate_row_samples)) {
-                summary.clamp_candidate_row_samples.push_back(row);
-            }
         }
     }
 
@@ -4575,14 +4400,10 @@ void logPressureRowOperatorMatrixSummaryDiagnostic(
         return;
     }
 
-    const auto& pressure_field = activePressureSupportRankPressureFieldName();
-    const auto& coupling_field = activePressureSupportRankCouplingFieldName();
-    const double tolerance = activePressureSupportRankTolerance();
-    const double weak_coupling_threshold =
-        activePressureUpdateSupportWeakVelocityThreshold();
-    const double weak_self_threshold =
-        activePressureUpdateSupportWeakSelfThreshold();
-    const int sample_limit = activePressureSupportRankSampleLimit();
+    const std::string pressure_field{"Pressure"};
+    const std::string coupling_field{"Velocity"};
+    constexpr double tolerance = 1.0e-14;
+    constexpr int sample_limit = 16;
     const auto summary = scanActivePressureSupportRank(
         sys,
         matrix,
@@ -4590,9 +4411,7 @@ void logPressureRowOperatorMatrixSummaryDiagnostic(
         pressure_field,
         coupling_field,
         tolerance,
-        sample_limit,
-        weak_coupling_threshold,
-        weak_self_threshold);
+        sample_limit);
 
     if (summary.pressure_dofs <= 0 || summary.coupling_dofs <= 0) {
         FE_LOG_INFO(
@@ -4640,12 +4459,6 @@ void logPressureRowOperatorMatrixSummaryDiagnostic(
         << summary.positive_coupling_row_block_count
         << " positive_self_row_block_count="
         << summary.positive_self_row_block_count
-        << " weak_coupling_row_block_count="
-        << summary.weak_coupling_row_block_count
-        << " weak_self_row_block_count="
-        << summary.weak_self_row_block_count
-        << " weak_coupling_and_self_row_block_count="
-        << summary.weak_coupling_and_self_row_block_count
         << " min_positive_coupling_row_abs_sum="
         << (std::isfinite(summary.min_positive_coupling_row_abs_sum)
                 ? summary.min_positive_coupling_row_abs_sum
@@ -4663,8 +4476,6 @@ void logPressureRowOperatorMatrixSummaryDiagnostic(
         << " pressure_only_col_block_count="
         << summary.pressure_only_col_block_count
         << " tolerance=" << tolerance
-        << " weak_coupling_threshold=" << weak_coupling_threshold
-        << " weak_self_threshold=" << weak_self_threshold
         << " sample_limit=" << sample_limit
         << " zero_coupling_row_local_dofs="
         << formatActivePressureSupportRankDofSamples(

@@ -214,22 +214,6 @@ private:
     bool stop_{false};
 };
 
-[[nodiscard]] bool positiveEnvInteger(const char* name, int& value) noexcept
-{
-    const char* text = std::getenv(name);
-    if (text == nullptr || text[0] == '\0') {
-        return false;
-    }
-    char* end = nullptr;
-    const long parsed = std::strtol(text, &end, 10);
-    if (end == text || *end != '\0' || parsed < 1 ||
-        parsed > static_cast<long>(std::numeric_limits<int>::max())) {
-        return false;
-    }
-    value = static_cast<int>(parsed);
-    return true;
-}
-
 ThreadTeam& processThreadTeam()
 {
     static ThreadTeam team;
@@ -255,10 +239,6 @@ int parallelTeamWorkerCount()
 
 int geometryThreadCount(int assembly_threads) noexcept
 {
-    int threads = 0;
-    if (positiveEnvInteger("SVMP_ASSEMBLY_THREADS", threads)) {
-        return threads;
-    }
     return std::max(1, assembly_threads);
 }
 

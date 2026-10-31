@@ -41,7 +41,6 @@
 
 #include "add_bc_mul.h"
 #include "bicgs.h"
-#include "block_schur_strategy_selector.h"
 #include "distributed_mpi_ops.h"
 #include "distributed_low_rank_correction.h"
 #include "distributed_sparse_operator.h"
@@ -1961,22 +1960,15 @@ void ns_solver(fe_fsi_linear_solver::FSILS_lhsType& lhs, fe_fsi_linear_solver::F
     build_explicit_block_corrections(lhs, mom_start, mom_ncomp, con_start, /*con_ncomp=*/1,
                                      explicit_low_rank_correction);
   }
-  const auto strategy =
-      fe_fsi_linear_solver::BlockSchurStrategySelector::select(
-          lhs, explicit_low_rank_correction.profile, /*con_ncomp=*/1);
-  const bool use_coupled_outer_fgmres =
-      strategy.use_coupled_outer_fgmres_scalar ||
-      ls.use_coupled_outer_fgmres_scalar;
+  const bool use_coupled_outer_fgmres = ls.use_coupled_outer_fgmres_scalar;
   if (lhs.commu.masF && fsilsTraceEnabled()) {
     std::fprintf(stderr,
-                 "[NS_SOLVER] explicit_block_modes=%zu coupled_face_modes=%zu native_face_rank_one_count=%d native_face_duplicate_modes=%zu auto_outer_fgmres=%d force_outer_fgmres=%d configured_outer_fgmres=%d\n",
+                 "[NS_SOLVER] explicit_block_modes=%zu coupled_face_modes=%zu native_face_rank_one_count=%d native_face_duplicate_modes=%zu configured_outer_fgmres=%d\n",
                  static_cast<std::size_t>(explicit_low_rank_correction.profile.projected_mode_count),
                  static_cast<std::size_t>(explicit_low_rank_correction.profile.active_face_corrections),
                  lhs.native_face_rank_one_count,
                  static_cast<std::size_t>(
                      explicit_low_rank_correction.profile.active_duplicate_reduced_corrections),
-                 strategy.auto_enable_coupled_outer_fgmres_scalar ? 1 : 0,
-                 strategy.force_enable_coupled_outer_fgmres_scalar ? 1 : 0,
                  ls.use_coupled_outer_fgmres_scalar ? 1 : 0);
   }
   if (use_coupled_outer_fgmres) {

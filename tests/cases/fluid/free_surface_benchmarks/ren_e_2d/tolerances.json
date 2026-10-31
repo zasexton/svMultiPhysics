@@ -15,7 +15,7 @@
   "signs": "Every window sample of every run: the wall fluid speed and the geometric speed have the sign of the Ren-E prediction (advancing positive).",
   "max_area_drift": 0.0001,
   "max_area_drift_note": "Maximum relative change of the exact P1 liquid area over the run, every run (decision D11).",
-  "completion": "Every run reaches its end time; an outer fixed-point cap failure is recorded and retried once with SVMP_GENERATED_STATE_OUTER_DYNAMIC_RELAXATION=1 for diagnosis only (the retry is not a protocol result).",
+  "completion": "Every run reaches its end time; an outer fixed-point cap failure is recorded and retried once with Outer_fixed_point_relaxation_start_pass=1 (every update relaxed) for diagnosis only (the retry is not a protocol result).",
   "superseded_weak_law_criteria": {
     "finest_rms_relative_error": 0.1,
     "finest_rms_relative_error_note": "RMS over the measurement window and both contact points of |V_measured - V_RenE(theta_d)| / |V_RenE(theta_d)|, for the wall fluid speed and for the geometric contact-line speed, at R/h = 32 and dt0/4, for the advancing and the receding case.",

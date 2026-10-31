@@ -179,16 +179,11 @@ void appendSampleDofsFromEnv(const char* raw, std::vector<GlobalIndex>& out)
     }
 }
 
-[[nodiscard]] std::vector<GlobalIndex> sampledConstraintDofs(
-    const std::string& field_name)
+[[nodiscard]] std::vector<GlobalIndex> sampledConstraintDofs()
 {
     std::vector<GlobalIndex> out;
     appendSampleDofsFromEnv(
         std::getenv("SVMP_LEVEL_SET_ACTIVE_CONSTRAINT_SAMPLE_DOFS"), out);
-    if (field_name == "Pressure" || field_name == "p") {
-        appendSampleDofsFromEnv(
-            std::getenv("SVMP_ACTIVE_PRESSURE_CONSTRAINT_SAMPLE_DOFS"), out);
-    }
     std::sort(out.begin(), out.end());
     out.erase(std::unique(out.begin(), out.end()), out.end());
     return out;
@@ -758,7 +753,7 @@ void LevelSetActiveSideVertexDirichletConstraint::apply(
         }
     }
 
-    for (const auto local_dof : sampledConstraintDofs(rec.name)) {
+    for (const auto local_dof : sampledConstraintDofs()) {
         svmp::FE::LogRecord sample("LevelSetActiveSideVertexDirichletConstraint", "active-side vertex constraint sample");
         sample.diagnostic("level_set_active_side_vertex_constraint_sample")
             .quoted("field", rec.name)

@@ -170,9 +170,8 @@ The default (one thread) runs the same kernels with the same dispatch tables.
 
 - Deck: `<Assembly_threads>N</Assembly_threads>` in
   `<GeneralSimulationParameters>` (default 1).
-- Environment: `SVMP_ASSEMBLY_THREADS=N` overrides the deck value.
 
-Both set `AssemblyOptions::num_threads`; values below 1 are ignored, and
+It sets `AssemblyOptions::num_threads`; values below 1 are ignored, and
 the solver log reports the value and its source.  Assembly threads are used
 only with one OpenMP thread.  OpenMP threads change the results of the FSILS
 OpenMP reductions, enable the existing coloured cell path in
@@ -212,11 +211,12 @@ threads: 18.1 s against 18.4 s), and 50 ms of polling made the run slower.
 
 Ranks and threads combine: each rank assembles its own cells with `N`
 threads.  On Slurm, request ranks with `--ntasks` and threads with
-`--cpus-per-task`, and give each rank its cores:
+`--cpus-per-task`, set `<Assembly_threads>` to the CPUs per task, and give
+each rank its cores:
 
 ```bash
-#SBATCH --ntasks=4 --cpus-per-task=4
-export OMP_NUM_THREADS=1 SVMP_ASSEMBLY_THREADS=$SLURM_CPUS_PER_TASK
+#SBATCH --ntasks=4 --cpus-per-task=4   # with <Assembly_threads>4</Assembly_threads>
+export OMP_NUM_THREADS=1
 mpiexec -n $SLURM_NTASKS --map-by slot:PE=$SLURM_CPUS_PER_TASK --bind-to core svmultiphysics solver.xml
 # or, without binding: mpiexec -n $SLURM_NTASKS --bind-to none ...
 ```
@@ -363,13 +363,12 @@ Recommended for the 3D production runs (R/h = 16 on one node):
 
 ```bash
 #SBATCH --nodes=1 --ntasks=8 --cpus-per-task=3 --mem=75G   # 56 GB measured, x1.3
-export OMP_NUM_THREADS=1 SVMP_ASSEMBLY_THREADS=$SLURM_CPUS_PER_TASK
+export OMP_NUM_THREADS=1
 mpiexec -n $SLURM_NTASKS --map-by slot:PE=$SLURM_CPUS_PER_TASK --bind-to core svmultiphysics solver.xml
 ```
 
-or `<Assembly_threads>3</Assembly_threads>` in the deck instead of the
-variable.  The thread count does not change results, so a run may also
-change it on restart.
+with `<Assembly_threads>3</Assembly_threads>` in the deck.  The thread count
+does not change results, so a run may also change it on restart.
 
 ## Verification
 

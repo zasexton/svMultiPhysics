@@ -80,11 +80,11 @@ change it once, with a one-line justification in the tracker.
 - **Run configurations (tracker D35).**
   - **Gated protocol runs** keep FSILS GMRES with row-column scaling, so their results stay comparable with earlier runs.
   - **Development runs** may use the opt-in aggregation multigrid preconditioner (`<Right_preconditioner>amg</Right_preconditioner>` in `<LS type="GMRES">`). It gives the same results on every rank count up to round-off, and changes results only within the linear tolerance.
-  - **3D production runs** use 8 ranks × 3 assembly threads per node:
+  - **3D production runs** use 8 ranks × 3 assembly threads per node (`<Assembly_threads>3</Assembly_threads>` in the deck):
 
     ```
     #SBATCH --nodes=1 --ntasks=8 --cpus-per-task=3
-    export OMP_NUM_THREADS=1 SVMP_ASSEMBLY_THREADS=$SLURM_CPUS_PER_TASK
+    export OMP_NUM_THREADS=1
     mpiexec -n $SLURM_NTASKS --map-by slot:PE=$SLURM_CPUS_PER_TASK --bind-to core svmultiphysics solver.xml
     ```
 

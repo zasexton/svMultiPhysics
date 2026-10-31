@@ -195,8 +195,8 @@ for L in 8 16; do python3 $B/generate_case.py --level $L --contact-angle $A --ou
 python3 $B/generate_case.py --level 16 --contact-angle $A --dt-divisor 2 --output-dir $OUT/L16_dt2   # time-step check (D43)
 python3 $B/generate_case.py --level 8 --contact-angle $A --dt-divisor 2 --output-dir $OUT/L8_dt2     # reported, not gated
 # 3D production configuration (free_surface_benchmarks/README.md, "Run configurations"):
-#   #SBATCH --nodes=1 --ntasks=8 --cpus-per-task=3
-#   export OMP_NUM_THREADS=1 SVMP_ASSEMBLY_THREADS=$SLURM_CPUS_PER_TASK
+#   #SBATCH --nodes=1 --ntasks=8 --cpus-per-task=3   # with <Assembly_threads>3</Assembly_threads> in the deck
+#   export OMP_NUM_THREADS=1
 #   export SVMP_PDE_EXTENSION_FACTORIZATION=mumps_serial   # with ScaLAPACK and METIS on LD_LIBRARY_PATH
 #   mpiexec -n 8 --map-by slot:PE=3 --bind-to core svmultiphysics solver.xml 2>&1 | gzip -1 > solver_run.log.gz
 python3 $B/verify.py $OUT/L8 $OUT/L16 $OUT/L16_dt2 $OUT/L8_dt2 --json $OUT/verify.json

@@ -1798,7 +1798,6 @@ TEST(FsilsBackendStrategy, ForceSchurGmresBypassesLegacyScalarPath)
 {
     ScopedEnvVar force_gmres("SVMP_FSILS_BLOCKSCHUR_FORCE_SCHUR_GMRES", "1");
     ScopedUnsetEnvVar force_bicgstab("SVMP_FSILS_BLOCKSCHUR_FORCE_SCHUR_BICGSTAB");
-    ScopedUnsetEnvVar disable_face_legacy("SVMP_FSILS_BLOCKSCHUR_DISABLE_FACE_ONLY_LEGACY");
 
     fe_fsi_linear_solver::FSILS_lhsType lhs{};
     fe_fsi_linear_solver::distributed_low_rank_correction::Profile profile{};

@@ -51,8 +51,8 @@ The per-cell work of a rebuild runs on `N` threads of one MPI rank:
 - the snapshot records to build (moment certificates, mapping, identity),
   their rule checks and their content digests.
 
-`N` is the threaded-assembly setting: `SVMP_ASSEMBLY_THREADS` when it is set,
-otherwise `AssemblyOptions::num_threads` (`FESystem::assemblyThreadCount()`).
+`N` is the threaded-assembly setting, `AssemblyOptions::num_threads`
+(`FESystem::assemblyThreadCount()`, the deck key `<Assembly_threads>`).
 The contract is the one of the threaded assembly (`ThreadedAssembly.md`):
 
 - every item (cell, rule, record) is computed by the same code as in the
@@ -77,5 +77,4 @@ assembly thread pool provide the threads.
 |---|---|
 | `SVMP_DISABLE_INCREMENTAL_REBUILD=1` | build every snapshot record |
 | `SVMP_INCREMENTAL_REBUILD_SELF_CHECK=1` | also build every snapshot without the cache on one thread; fail unless identical (`compareFreeSurfaceGeometrySnapshots`) |
-| `SVMP_ASSEMBLY_THREADS=N` | `N` geometry (and assembly) threads |
 | `SVMP_GEOMETRY_THREADS_SELF_CHECK=1` | recompute every threaded generated-domain cell serially; fail unless identical |

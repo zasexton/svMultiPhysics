@@ -1271,23 +1271,39 @@ def solver_environment(args: argparse.Namespace) -> dict[str, str]:
     if args.trace_level_set_advection_velocity:
         env["SVMP_TRACE_LEVEL_SET_ADVECTION"] = "1"
     if args.enable_adaptive_time_loop:
-        env["SVMP_TIMELOOP_ADAPTIVE"] = "1"
         env["SVMP_VTK_OUTPUT_FINAL_TIME"] = "1"
-        for arg_name, env_name in (
-            ("adaptive_time_loop_min_dt", "SVMP_TIMELOOP_MIN_DT"),
-            ("adaptive_time_loop_max_dt", "SVMP_TIMELOOP_MAX_DT"),
-            ("adaptive_time_loop_max_retries", "SVMP_TIMELOOP_MAX_RETRIES"),
-            ("adaptive_time_loop_decrease_factor", "SVMP_TIMELOOP_DECREASE_FACTOR"),
-            ("adaptive_time_loop_increase_factor", "SVMP_TIMELOOP_INCREASE_FACTOR"),
-            ("adaptive_time_loop_target_newton_iterations",
-             "SVMP_TIMELOOP_TARGET_NEWTON_ITERATIONS"),
-            ("adaptive_time_loop_max_steps_multiplier",
-             "SVMP_TIMELOOP_MAX_STEPS_MULTIPLIER"),
-        ):
-            value = getattr(args, arg_name)
-            if value is not None:
-                env[env_name] = f"{value:.16g}" if isinstance(value, float) else str(value)
     return env
+
+
+ADAPTIVE_TIME_LOOP_DECK_KEYS = (
+    ("adaptive_time_loop_min_dt", "Adaptive_time_loop_min_dt"),
+    ("adaptive_time_loop_max_dt", "Adaptive_time_loop_max_dt"),
+    ("adaptive_time_loop_max_retries", "Adaptive_time_loop_max_retries"),
+    ("adaptive_time_loop_decrease_factor", "Adaptive_time_loop_decrease_factor"),
+    ("adaptive_time_loop_increase_factor", "Adaptive_time_loop_increase_factor"),
+    ("adaptive_time_loop_target_newton_iterations",
+     "Adaptive_time_loop_target_newton_iterations"),
+    ("adaptive_time_loop_max_steps_multiplier",
+     "Adaptive_time_loop_max_steps_multiplier"),
+)
+
+
+def configure_adaptive_time_loop(solver_xml: Path,
+                                 args: argparse.Namespace) -> None:
+    """Write the adaptive time-step controller requested by the options."""
+    if not getattr(args, "enable_adaptive_time_loop", False):
+        return
+    tree = ET.parse(solver_xml)
+    general = tree.getroot().find("GeneralSimulationParameters")
+    if general is None:
+        raise ValueError(f"{solver_xml} is missing GeneralSimulationParameters")
+    set_text(general, "Enable_adaptive_time_loop", "true")
+    for arg_name, key in ADAPTIVE_TIME_LOOP_DECK_KEYS:
+        value = getattr(args, arg_name, None)
+        if value is not None:
+            set_text(general, key,
+                     f"{value:.16g}" if isinstance(value, float) else str(value))
+    tree.write(solver_xml, encoding="UTF-8", xml_declaration=True)
 
 
 def case_artifact_ignore(_path: str, names: list[str]) -> set[str]:
@@ -12075,6 +12091,7 @@ def configure_case_solver_xml(run_dir: Path, args: argparse.Namespace) -> None:
             None,
         ),
     )
+    configure_adaptive_time_loop(run_dir / "solver.xml", args)
 
 
 def run_case(case_name: str, solver: Path, args: argparse.Namespace) -> dict[str, Any]:
