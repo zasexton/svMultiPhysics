@@ -31,6 +31,11 @@ constexpr const char* kFSIRelationName = "fsi_interface";
 constexpr const char* kFSIOrigin = "FSICouplingModule";
 constexpr const char* kFSIEnforcementStrategy = "velocity_traction_balance";
 constexpr const char* kFSITractionContribution = "fluid_traction_balance";
+constexpr const char* kFSIMonolithicUnavailable =
+    "the monolithic FSI forms are not a consistent coupling: velocity continuity "
+    "enters the fluid rows as a unit-weight Robin penalty int (u_f - v_s).w_f "
+    "without the interface traction, and the traction-balance form cannot be "
+    "assembled";
 
 std::string fsiContributionName(const FSICouplingOptions& options,
                                 std::string local_name)
@@ -221,6 +226,7 @@ fec::CouplingSidePairedPDEBuilder fsiInterfaceCoupling(
         .between(options.fluid_name, options.solid_name)
         .mode(options.mode)
         .enforcement(kFSIEnforcementStrategy)
+        .monolithicUnavailable(kFSIMonolithicUnavailable)
         .partitionedStrategies({
             fec::CouplingPartitionedSolveStrategy::ExplicitLagged,
             fec::CouplingPartitionedSolveStrategy::StaggeredFixedPoint,

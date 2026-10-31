@@ -94,9 +94,13 @@ std::vector<CouplingRelationLoweringCapability> sidePairedLoweringCapabilities(
 {
     std::vector<CouplingRelationLoweringCapability> capabilities;
     if (request.supports_monolithic_forms) {
+        const bool unavailable = !request.monolithic_unavailable_reason.empty();
         capabilities.push_back(CouplingRelationLoweringCapability{
             .lowering_kind = CouplingRelationLoweringKind::MonolithicForms,
-            .fidelity = request.monolithic_fidelity,
+            .fidelity = unavailable ? CouplingRelationLoweringFidelity::Unavailable
+                                    : request.monolithic_fidelity,
+            .supported = !unavailable,
+            .unsupported_reason = request.monolithic_unavailable_reason,
             .enforcement_strategies = {request.enforcement_strategy},
         });
     }
@@ -794,6 +798,15 @@ CouplingSidePairedPDEBuilder::partitionedStrategies(
     std::vector<CouplingPartitionedSolveStrategy> strategies)
 {
     request_.interface.partitioned_solve_strategies = std::move(strategies);
+    return *this;
+}
+
+CouplingSidePairedPDEBuilder& CouplingSidePairedPDEBuilder::monolithicUnavailable(
+    std::string reason)
+{
+    FE_THROW_IF(reason.empty(), InvalidArgumentException,
+                "side-paired PDE coupling: an unavailable monolithic lowering requires a reason");
+    request_.interface.monolithic_unavailable_reason = std::move(reason);
     return *this;
 }
 

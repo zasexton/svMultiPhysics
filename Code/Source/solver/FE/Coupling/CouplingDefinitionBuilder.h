@@ -37,6 +37,7 @@ struct CouplingSidePairedInterfaceRequest {
     std::string enforcement_strategy;
     CouplingRelationLoweringFidelity monolithic_fidelity{
         CouplingRelationLoweringFidelity::Exact};
+    std::string monolithic_unavailable_reason;   ///< non-empty: the monolithic lowering is declared unavailable
     CouplingRelationLoweringFidelity partitioned_fidelity{
         CouplingRelationLoweringFidelity::Lagged};
     std::vector<CouplingPartitionedSolveStrategy>
@@ -250,6 +251,10 @@ public:
         std::string enforcement_strategy);
     CouplingSidePairedPDEBuilder& partitionedStrategies(
         std::vector<CouplingPartitionedSolveStrategy> strategies);
+    /// Declares the monolithic lowering unavailable for @p reason; the forms
+    /// stay available to partitioned payload extraction, and selecting the
+    /// monolithic lowering fails validation with the reason.
+    CouplingSidePairedPDEBuilder& monolithicUnavailable(std::string reason);
 
     [[nodiscard]] CouplingFieldRoleHandle scalarField(
         std::string participant_name,

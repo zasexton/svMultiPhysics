@@ -74,12 +74,20 @@ struct FSICouplingOptions {
     FE::coupling::CouplingTransferDeclaration fluid_to_solid_transfer{};
 };
 
+/**
+ * The monolithic lowering is declared unavailable (decision 9A): its
+ * velocity-continuity form is a unit-weight Robin penalty on the fluid rows,
+ * not velocity continuity, and its traction-balance form cannot be
+ * assembled.  Selecting it fails validation with that reason.  The forms
+ * remain the residual recipe of the partitioned fluid-load payload.
+ */
 class FSICouplingModule final
     : public FE::coupling::DefinitionBackedCouplingContract {
 public:
     explicit FSICouplingModule(FSICouplingOptions options = {});
 
     [[nodiscard]] std::string name() const override;
+    [[nodiscard]] bool supportsMonolithicLowering() const override { return false; }
 
 protected:
     [[nodiscard]] std::string contractInstanceName() const override;

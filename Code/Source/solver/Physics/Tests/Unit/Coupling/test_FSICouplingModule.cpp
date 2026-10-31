@@ -525,6 +525,21 @@ void expectValidationFailureContaining(const FSICouplingModule& module,
     }
 }
 
+// The monolithic lowering is declared unavailable (decision 9A): the graph
+// of a monolithic FSI contract reports that refusal and nothing else.
+void expectOnlyTheMonolithicRefusal(const fec::CouplingValidationResult& validation)
+{
+    EXPECT_FALSE(validation.ok());
+    for (const auto& diagnostic : validation.diagnostics) {
+        if (diagnostic.severity != fec::CouplingDiagnosticSeverity::Error) {
+            continue;
+        }
+        EXPECT_NE(diagnostic.message.find("selected relation lowering is declared unsupported"), std::string::npos)
+            << diagnostic.message;
+        EXPECT_NE(diagnostic.message.find("unit-weight Robin penalty"), std::string::npos) << diagnostic.message;
+    }
+}
+
 std::string validationFailureText(const FSICouplingModule& module,
                                   const fec::CouplingContext& context)
 {
@@ -650,7 +665,11 @@ TEST(FSICouplingModule, DeclaresRelationLoweringCapabilities)
         fec::CouplingRelationLoweringKind::MonolithicForms);
     ASSERT_NE(monolithic_capability, nullptr);
     EXPECT_EQ(monolithic_capability->fidelity,
-              fec::CouplingRelationLoweringFidelity::Exact);
+              fec::CouplingRelationLoweringFidelity::Unavailable);
+    EXPECT_FALSE(monolithic_capability->supported);
+    EXPECT_NE(monolithic_capability->unsupported_reason.find("unit-weight Robin penalty"), std::string::npos);
+    EXPECT_FALSE(monolithic_module.supportsMonolithicLowering());
+    EXPECT_FALSE(monolithic_module.supportsCouplingMode(fec::CouplingMode::Monolithic));
     const auto* partitioned_capability = findCapability(
         relation,
         fec::CouplingRelationLoweringKind::PartitionedExchange);
@@ -955,7 +974,7 @@ TEST(FSICouplingModule, BuildsFormsAuthoredVelocityContinuity)
     const fec::CouplingFormBuilder form_builder(fixture.context);
     const FSICouplingModule module;
 
-    EXPECT_TRUE(module.supportsMonolithicLowering());
+    EXPECT_FALSE(module.supportsMonolithicLowering());
     const auto contributions = module.buildMonolithicForms(fixture.context,
                                                            form_builder);
     ASSERT_EQ(contributions.size(), 2u);
@@ -1114,7 +1133,7 @@ TEST(FSICouplingModule, FinalizesFormsAuthoredMonolithicDependencies)
         fixture.context,
         std::span<const fec::CouplingContractDeclaration>(declarations),
         std::span<const fec::CouplingFormAnalysisMetadata>(installed));
-    ASSERT_TRUE(validation.ok()) << fec::formatDiagnostics(validation);
+    expectOnlyTheMonolithicRefusal(validation);
 
     const auto fluid_velocity =
         fieldVariable(fixture.context, "fluid", "velocity");
@@ -1231,7 +1250,7 @@ TEST(FSICouplingModule, ReportsALEGeometrySensitivityProvenance)
         fixture.context,
         std::span<const fec::CouplingContractDeclaration>(declarations),
         std::span<const fec::CouplingFormAnalysisMetadata>(installed));
-    EXPECT_TRUE(validation.ok()) << fec::formatDiagnostics(validation);
+    expectOnlyTheMonolithicRefusal(validation);
 }
 
 TEST(FSICouplingModule, BuildsDisplacementDerivativeVelocityContinuity)
@@ -1277,7 +1296,7 @@ TEST(FSICouplingModule, BuildsDisplacementDerivativeVelocityContinuity)
         fixture.context,
         std::span<const fec::CouplingContractDeclaration>(declarations),
         std::span<const fec::CouplingFormAnalysisMetadata>(installed));
-    EXPECT_TRUE(validation.ok()) << fec::formatDiagnostics(validation);
+    expectOnlyTheMonolithicRefusal(validation);
 }
 
 TEST(FSICouplingModule, ReportsMonolithicIncompatibleSystemsThroughGraph)
@@ -1329,7 +1348,9 @@ TEST(FSICouplingModule, ValidatesFieldComponentCountsThroughGraph)
     const FSICouplingModule module(options);
 
     FSIContextFixture valid_fixture(FSIFieldComponents{}, true);
-    EXPECT_NO_THROW(module.validate(valid_fixture.context));
+    const auto refusal = validationFailureText(module, valid_fixture.context);
+    EXPECT_NE(refusal.find("selected relation lowering is declared unsupported"), std::string::npos) << refusal;
+    EXPECT_EQ(refusal.find("component count"), std::string::npos) << refusal;
 
     auto components = FSIFieldComponents{};
     components.fluid_velocity = 2;
