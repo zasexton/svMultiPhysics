@@ -62,22 +62,6 @@ namespace detail {
 
 } // namespace detail
 
-[[nodiscard]] inline std::unique_ptr<FE::forms::bc::BoundaryCondition> toNitscheBC(
-    const PoissonOptions::DirichletBC& bc,
-    const FE::forms::FormExpr& diffusion_coeff,
-    FE::Real penalty_gamma,
-    bool symmetric,
-    bool scale_with_p)
-{
-    return std::make_unique<FE::forms::bc::ScalarNitscheBC>(
-        bc.boundary_marker,
-        FE::forms::bc::value(bc, "poisson_nitsche_dirichlet"),
-        diffusion_coeff,
-        penalty_gamma,
-        symmetric,
-        scale_with_p);
-}
-
 /**
  * @brief Coupled Neumann RCR (Windkessel) BC via deployed auxiliary models
  */

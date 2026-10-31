@@ -35,7 +35,7 @@
  * @endcode
  *
  * The condition is exclusive on its marker: the BoundaryConditionManager
- * refuses it together with an EssentialBC (or any other condition) on the
+ * refuses it together with a strong Dirichlet (or any other condition) on the
  * same boundary of the field.  The multiplier's rows anchor the constant of u
  * (setup reads them), so a problem whose only Dirichlet condition is this one
  * gets no automatic gauge.  Scalar fields only.

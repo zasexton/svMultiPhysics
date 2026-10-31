@@ -760,10 +760,10 @@ TEST(CanonicalWorkflow, BC_StrongDirichlet_Constraints)
 }
 
 // ============================================================================
-// BC convenience: applyAll with a real EssentialBC object
+// BC convenience: applyAll with a real strong Dirichlet condition
 // ============================================================================
 
-TEST(CanonicalWorkflow, BCApplyAll_WithEssentialBC)
+TEST(CanonicalWorkflow, BCApplyAll_WithStrongDirichlet)
 {
     const int marker = 5;
     auto mesh = std::make_shared<svmp::FE::forms::test::SingleTetraOneBoundaryFaceMeshAccess>(marker);
@@ -777,10 +777,11 @@ TEST(CanonicalWorkflow, BCApplyAll_WithEssentialBC)
     auto v = TestField(u_f, *space, "v");
     auto residual = (inner(grad(u), grad(v))).dx();
 
-    // Use BoundaryConditionManager with a concrete EssentialBC
+    // Use BoundaryConditionManager with a concrete strong Dirichlet condition
     svmp::FE::systems::BoundaryConditionManager bc_manager;
-    bc_manager.add(std::make_unique<svmp::FE::forms::bc::EssentialBC>(
-        marker, FormExpr::constant(3.0), "u"));
+    bc_manager.add(std::make_unique<svmp::FE::forms::bc::Dirichlet>(
+        marker, FormExpr::constant(3.0), svmp::FE::forms::bc::Strong{},
+        svmp::FE::forms::bc::NaturalFlux{}, "u"));
 
     // One-call convenience: validate + apply weak terms + install strong constraints
     bc_manager.applyAll(sys, residual, u, v, u_f);
@@ -827,8 +828,9 @@ TEST(CanonicalWorkflow, BCApplyAll_FieldOnly_StrongBCsSucceed)
 
     // 2-arg overload with a strong-only BC should succeed
     svmp::FE::systems::BoundaryConditionManager bc_manager;
-    bc_manager.add(std::make_unique<svmp::FE::forms::bc::EssentialBC>(
-        marker, FormExpr::constant(1.0), "p"));
+    bc_manager.add(std::make_unique<svmp::FE::forms::bc::Dirichlet>(
+        marker, FormExpr::constant(1.0), svmp::FE::forms::bc::Strong{},
+        svmp::FE::forms::bc::NaturalFlux{}, "p"));
 
     EXPECT_NO_THROW(bc_manager.applyAll(sys, p_f));
 
@@ -901,8 +903,9 @@ TEST(CanonicalWorkflow, BCApplyAll_FieldOnly_MixedStrongAndWeakThrows)
 
     // Mix of strong + weak — must still reject
     svmp::FE::systems::BoundaryConditionManager bc_manager;
-    bc_manager.add(std::make_unique<svmp::FE::forms::bc::EssentialBC>(
-        marker_d, FormExpr::constant(0.0), "u"));
+    bc_manager.add(std::make_unique<svmp::FE::forms::bc::Dirichlet>(
+        marker_d, FormExpr::constant(0.0), svmp::FE::forms::bc::Strong{},
+        svmp::FE::forms::bc::NaturalFlux{}, "u"));
     bc_manager.add(std::make_unique<svmp::FE::forms::bc::NaturalBC>(
         marker_n, FormExpr::constant(1.0)));
 

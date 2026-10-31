@@ -361,10 +361,11 @@ inline void declareVelocityDirichletTimeFunctions(
         all_active = all_active && bc.active_components[static_cast<std::size_t>(d)];
     }
     if (all_active) {
-        return std::make_unique<FE::forms::bc::EssentialBC>(marker, std::move(uD_comp), std::string(symbol));
+        return std::make_unique<FE::forms::bc::Dirichlet>(marker, std::move(uD_comp), FE::forms::bc::Strong{},
+                                                          FE::forms::bc::NaturalFlux{}, std::string(symbol));
     }
 
-    return FE::forms::bc::vectorComponentEssentialBC(
+    return FE::forms::bc::componentDirichlet(
         bc.value,
         bc.active_components,
         dim,
@@ -383,7 +384,8 @@ inline void declareVelocityDirichletTimeFunctions(
         FE::forms::bc::detail::boundaryMarkerOrThrow(bc, "navier_stokes::Factories::toPressureEssentialBC");
     const auto value =
         FE::forms::bc::toScalarExpr(bc.value, FE::forms::bc::markerValueName("ns_p_dirichlet", marker));
-    return std::make_unique<FE::forms::bc::EssentialBC>(marker, value, std::string(symbol));
+    return std::make_unique<FE::forms::bc::Dirichlet>(marker, value, FE::forms::bc::Strong{},
+                                                      FE::forms::bc::NaturalFlux{}, std::string(symbol));
 }
 
 [[nodiscard]] inline std::unique_ptr<FE::forms::bc::BoundaryCondition> toOutflowBC(
@@ -601,7 +603,7 @@ inline void appendVelocityNitscheBoundaries(
     const auto penalty = FE::forms::bc::buildTraceNitschePenalty(
         mu / FE::forms::hNormal(),
         u,
-        FE::forms::bc::TraceNitscheOptions{
+        FE::forms::bc::Nitsche{
             .gamma = options.nitsche_gamma,
             .variant = options.nitsche_symmetric
                 ? FE::forms::bc::NitscheVariant::Symmetric
@@ -646,7 +648,7 @@ inline void appendVelocityNitscheBoundaries(
                         FE::forms::bc::symmetricGradientForm(mu),   // the viscous form 2 mu eps(u) : eps(v)
                         marker,
                         *generated_marker,
-                        FE::forms::bc::TraceNitscheOptions{
+                        FE::forms::bc::Nitsche{
                             .gamma = options.nitsche_gamma,
                             .variant = options.nitsche_symmetric
                                 ? FE::forms::bc::

@@ -9,14 +9,19 @@
 #include "Constraints/HDivNormalConstraint.h"
 #include "Constraints/NormalComponentConstraint.h"
 #include "Forms/BoundaryCondition.h"
+#include "Forms/ResidualContributions.h"
 #include "Systems/FESystem.h"
 
+#include <cmath>
 #include <cstddef>
+#include <cstdint>
+#include <functional>
 #include <memory>
 #include <optional>
 #include <stdexcept>
 #include <string>
 #include <utility>
+#include <variant>
 #include <vector>
 
 namespace svmp {
@@ -288,164 +293,273 @@ protected:
         exterior_boundary_measure_{};
 };
 
+// ---- Dirichlet conditions: one condition, the enforcement an argument ----
+
+/// Strong enforcement: the constrained degrees of freedom take the value.
+struct Strong {};
+
+/// Penalty enforcement: the residual term beta (u - g) . v.
+struct Penalty {
+    FormExpr beta{};
+};
+
+/// How a condition u = g is enforced: strongly, by Nitsche's method
+/// (BoundaryConditions.h, with the operator's NaturalFlux) or by a penalty.
+using Enforcement = std::variant<Strong, Nitsche, Penalty>;
+
+/// A part of a flux as a linear function of its unknown: applied to the
+/// unknown's state it is the part of the flux; applied to the unknown's test
+/// function it is the matching part of the adjoint flux.
+using LinearFlux = std::function<FormExpr(const FormExpr&)>;
+
 /**
- * @brief Essential (Dirichlet) BC: declares u = g on ds(marker)
+ * @brief One part of an operator's conormal flux on a boundary
  *
- * For vector-valued fields, this returns one StrongDirichlet per component.
+ * The part is linear in one unknown: the condition's own field, or another
+ * unknown named by its field and symbols (the pressure of a stress).  Nitsche's
+ * method pairs the part of the unknown's state with the condition's test
+ * function (consistency) and the part of the unknown's test function with
+ * u - g in that unknown's row (adjoint consistency).
  */
-class EssentialBC final : public BoundaryCondition {
+struct FluxPart {
+    enum class Kind : std::uint8_t {
+        Normal,    ///< q(u), the normal flux of a scalar field (k grad(u).n)
+        Conormal,  ///< T(u) n, the conormal of a tensor of a vector field (2 mu eps(u) n)
+        Isotropic, ///< -s n, with s an unknown (the pressure part -p n of a stress)
+    };
+    Kind kind{Kind::Normal};
+    LinearFlux of{};                ///< q or T (Normal, Conormal)
+    FieldId field{INVALID_FIELD_ID}; ///< Isotropic: the unknown s
+    FormExpr state{};               ///< Isotropic: the state of s
+    FormExpr test{};                ///< Isotropic: the test function of s
+    /// Conormal: the bilinear form whose flux T n is.  A Nitsche route on a
+    /// generated boundary that the formulation certifies is built from it.
+    std::optional<GeneratedBoundaryNitscheBilinearForm> form{};
+};
+
+/// q(u): the normal flux of a scalar field.
+[[nodiscard]] inline FluxPart normalFlux(LinearFlux q)
+{
+    return FluxPart{.kind = FluxPart::Kind::Normal, .of = std::move(q)};
+}
+
+/// T(u) n: the conormal flux of a vector field, with the bilinear form T
+/// derives from when a certified generated-boundary route needs it.
+[[nodiscard]] inline FluxPart conormalFlux(LinearFlux T,
+                                           std::optional<GeneratedBoundaryNitscheBilinearForm> form = std::nullopt)
+{
+    return FluxPart{.kind = FluxPart::Kind::Conormal, .of = std::move(T), .form = std::move(form)};
+}
+
+/// -s n: the isotropic part of a flux in the unknown s (field, state, test).
+[[nodiscard]] inline FluxPart isotropicFlux(FieldId field, FormExpr state, FormExpr test)
+{
+    return FluxPart{.kind = FluxPart::Kind::Isotropic,
+                    .field = field,
+                    .state = std::move(state),
+                    .test = std::move(test)};
+}
+
+/**
+ * @brief The conormal flux of an operator on its field, stated once
+ *
+ * The flux is the sum of its parts, in the order Nitsche's terms are emitted;
+ * the penalty weight w scales the Nitsche penalty gamma p^2 w.
+ */
+struct NaturalFlux {
+    std::vector<FluxPart> parts{};
+    FormExpr penalty_weight{};
+};
+
+/// The diffusion flux k grad(u).n of a scalar field, penalty weight k / h_n.
+[[nodiscard]] inline NaturalFlux diffusionFlux(FormExpr k)
+{
+    const auto n = FormExpr::normal();
+    const auto h = (2.0 * FormExpr::cellVolume()) / FormExpr::facetArea();
+    auto q = [k, n](const FormExpr& w) { return k * inner(grad(w), n); };
+    return NaturalFlux{.parts = {normalFlux(std::move(q))}, .penalty_weight = k / h};
+}
+
+/**
+ * @brief The residual rows a condition's weak terms enter
+ *
+ * One row per unknown.  A condition adds or subtracts integrals in the rows of
+ * the unknowns its terms test.  A sink that certifies generated-boundary
+ * Nitsche routes receives their bindings.
+ */
+class RowSink {
 public:
-    EssentialBC(int boundary_marker, FormExpr value, std::string symbol = "u")
-        : boundary_marker_(boundary_marker)
-        , value_components_{std::move(value)}
-        , symbol_(std::move(symbol))
+    virtual ~RowSink() = default;
+    virtual void add(FieldId row, const FormExpr& integral) = 0;
+    virtual void subtract(FieldId row, const FormExpr& integral) = 0;
+    [[nodiscard]] virtual bool certifiesGeneratedRoutes() const { return false; }
+    virtual void certify(GeneratedBoundaryNitscheTraceFormBinding /*binding*/)
     {
-        if (boundary_marker_ < 0) {
-            throw std::invalid_argument("EssentialBC: boundary_marker must be >= 0");
-        }
-        if (!value_components_.front().isValid()) {
-            throw std::invalid_argument("EssentialBC: invalid value expression");
-        }
+        throw std::logic_error("forms::bc::RowSink::certify: this sink does not certify generated routes");
     }
+};
 
-    EssentialBC(int boundary_marker, std::vector<FormExpr> value_components, std::string symbol = "u")
-        : boundary_marker_(boundary_marker)
-        , value_components_(std::move(value_components))
-        , symbol_(std::move(symbol))
-    {
-        if (boundary_marker_ < 0) {
-            throw std::invalid_argument("EssentialBC: boundary_marker must be >= 0");
-        }
-        if (value_components_.empty()) {
-            throw std::invalid_argument("EssentialBC: empty value component list");
-        }
-        for (const auto& c : value_components_) {
-            if (!c.isValid()) {
-                throw std::invalid_argument("EssentialBC: invalid value component expression");
-            }
-        }
-    }
-
-    [[nodiscard]] int boundaryMarker() const override { return boundary_marker_; }
-    [[nodiscard]] std::string_view label() const override { return "EssentialBC"; }
-    [[nodiscard]] bool hasWeakTerms() const override { return false; }
-
-    void contributeToResidual(FormExpr& /*residual*/,
-                              const FormExpr& /*u*/,
-                              const FormExpr& /*v*/) const override
+/// The rows of a ResidualContributions sink: an added integral is appended,
+/// a subtracted one appended negated.  With @p bindings, generated-boundary
+/// routes are certified and their bindings collected there.
+class ResidualRows final : public RowSink {
+public:
+    explicit ResidualRows(ResidualContributions& rows,
+                          std::vector<GeneratedBoundaryNitscheTraceFormBinding>* bindings = nullptr)
+        : rows_(rows)
+        , bindings_(bindings)
     {
     }
 
-    [[nodiscard]] std::vector<StrongDirichlet> getStrongConstraints(FieldId field_id) const override
+    void add(FieldId row, const FormExpr& integral) override { rows_.append(row, integral); }
+    void subtract(FieldId row, const FormExpr& integral) override { rows_.append(row, -integral); }
+    [[nodiscard]] bool certifiesGeneratedRoutes() const override { return bindings_ != nullptr; }
+    void certify(GeneratedBoundaryNitscheTraceFormBinding binding) override
     {
-        std::vector<StrongDirichlet> out;
-        out.reserve(value_components_.size());
-
-        if (value_components_.size() == 1u) {
-            out.push_back(strongDirichlet(field_id, boundary_marker_, value_components_.front(), symbol_));
-            return out;
-        }
-
-        for (std::size_t comp = 0; comp < value_components_.size(); ++comp) {
-            out.push_back(strongDirichlet(field_id,
-                                          boundary_marker_,
-                                          value_components_[comp],
-                                          symbol_,
-                                          static_cast<int>(comp)));
-        }
-        return out;
-    }
-
-    [[nodiscard]] std::vector<analysis::BoundaryConditionDescriptor>
-    analysisMetadata(FieldId field_id, const systems::FESystem* /*system*/) const override
-    {
-        std::vector<analysis::BoundaryConditionDescriptor> descs;
-
-        if (value_components_.size() <= 1u) {
-            // Scalar field or single-component vector: field-wide descriptor
-            analysis::BoundaryConditionDescriptor d;
-            d.primary_variable = analysis::VariableKey::field(field_id);
-            d.component = -1;
-            d.boundary_marker = boundary_marker_;
-            d.trace_kind = analysis::TraceKind::Value;
-            d.enforcement_kind = analysis::EnforcementKind::Strong;
-            d.anchors_constant_mode = true;
-            d.anchors_rigid_body_translation = true;
-            d.anchors_rigid_body_rotation = false;
-            d.source = "EssentialBC on marker " + std::to_string(boundary_marker_);
-            descs.push_back(std::move(d));
-        } else {
-            // Multi-component: emit one descriptor per component so that
-            // partially constrained vector fields are correctly analyzed.
-            for (std::size_t comp = 0; comp < value_components_.size(); ++comp) {
-                analysis::BoundaryConditionDescriptor d;
-                d.primary_variable = analysis::VariableKey::field(field_id, static_cast<int>(comp));
-                d.component = static_cast<int>(comp);
-                d.boundary_marker = boundary_marker_;
-                d.trace_kind = analysis::TraceKind::Value;
-                d.enforcement_kind = analysis::EnforcementKind::Strong;
-                d.anchors_constant_mode = true;
-                d.anchors_rigid_body_translation = true;
-                d.anchors_rigid_body_rotation = false;
-                d.source = "EssentialBC comp " + std::to_string(comp) +
-                           " on marker " + std::to_string(boundary_marker_);
-                descs.push_back(std::move(d));
-            }
-        }
-        return descs;
+        bindings_->push_back(std::move(binding));
     }
 
 private:
-    int boundary_marker_{-1};
-    std::vector<FormExpr> value_components_{};
-    std::string symbol_{"u"};
+    ResidualContributions& rows_;
+    std::vector<GeneratedBoundaryNitscheTraceFormBinding>* bindings_{nullptr};
 };
 
 /**
- * @brief Essential BC on selected components of a vector-valued field
+ * @brief The Dirichlet condition u = g on a boundary, enforced as declared
  *
- * Unlike EssentialBC's dense vector constructor, this class can constrain a
- * sparse subset of components on a marker.
+ * One condition for every enforcement:
+ * - Strong{}: the degrees of freedom on the boundary take g (one declaration
+ *   per component of a component list).
+ * - Nitsche{...}: weak, from the operator's NaturalFlux: the consistency
+ *   terms of the parts in u's row, in part order; the adjoint terms in the
+ *   row of each part's unknown, the parts in u first; then the penalty
+ *   gamma p^2 w (u - g) . v.  A flux with parts in other
+ *   unknowns makes the condition multi-row (contributeToRows).
+ * - Penalty{beta}: weak, beta (u - g) . v.
+ *
+ * The boundary is a marker or an exterior measure (generated wet parts of a
+ * cut boundary: weak enforcement only).  The value is the whole field (a
+ * scalar, or a vector expression), every component of a vector field, or, for
+ * strong enforcement, some components.  The manifest names the condition by
+ * its enforcement: EssentialBC (strong, the whole field or every component),
+ * ComponentEssentialBC (strong, some components), NitscheBC, PenaltyBC.
  */
-class ComponentEssentialBC final : public BoundaryCondition {
+class Dirichlet final : public BoundaryCondition {
 public:
-    ComponentEssentialBC(int boundary_marker,
-                         std::vector<std::pair<int, FormExpr>> components,
-                         std::string symbol = "u",
-                         std::string source_name = "ComponentEssentialBC")
-        : boundary_marker_(boundary_marker)
-        , components_(std::move(components))
-        , symbol_(std::move(symbol))
-        , source_name_(std::move(source_name))
+    using Target = std::variant<int, ExteriorBoundaryMeasure>;
+
+    /// u = g for the whole field.
+    Dirichlet(Target target,
+              FormExpr value,
+              Enforcement how = Strong{},
+              NaturalFlux flux = {},
+              std::string symbol = "u")
+        : Dirichlet(std::move(target), std::vector<FormExpr>{std::move(value)}, std::move(how), std::move(flux),
+                    std::move(symbol))
     {
-        if (boundary_marker_ < 0) {
-            throw std::invalid_argument("ComponentEssentialBC: boundary_marker must be >= 0");
+    }
+
+    /// u_i = g_i for every component i of a vector field.
+    Dirichlet(Target target,
+              std::vector<FormExpr> components,
+              Enforcement how = Strong{},
+              NaturalFlux flux = {},
+              std::string symbol = "u")
+        : how_(std::move(how))
+        , flux_(std::move(flux))
+        , symbol_(std::move(symbol))
+    {
+        setTarget(std::move(target));
+        if (components.empty()) {
+            throw std::invalid_argument("bc::Dirichlet: empty value component list");
         }
-        if (components_.empty()) {
-            throw std::invalid_argument("ComponentEssentialBC: empty component list");
+        components_.reserve(components.size());
+        for (std::size_t c = 0; c < components.size(); ++c) {
+            components_.emplace_back(components.size() == 1u ? -1 : static_cast<int>(c), std::move(components[c]));
         }
-        for (const auto& [component, value] : components_) {
+        validate();
+    }
+
+    /// u_i = g_i for the listed components i (strong enforcement); the
+    /// descriptors name the condition @p source_name.
+    Dirichlet(Target target,
+              std::vector<std::pair<int, FormExpr>> components,
+              std::string symbol,
+              std::string source_name)
+        : symbol_(std::move(symbol))
+        , source_name_(std::move(source_name))
+        , some_components_(true)
+    {
+        setTarget(std::move(target));
+        if (components.empty()) {
+            throw std::invalid_argument("bc::Dirichlet: empty component list");
+        }
+        for (const auto& [component, value] : components) {
             if (component < 0) {
-                throw std::invalid_argument("ComponentEssentialBC: component must be >= 0");
-            }
-            if (!value.isValid()) {
-                throw std::invalid_argument("ComponentEssentialBC: invalid value expression");
+                throw std::invalid_argument("bc::Dirichlet: component must be >= 0");
             }
         }
+        components_ = std::move(components);
+        validate();
     }
 
     [[nodiscard]] int boundaryMarker() const override { return boundary_marker_; }
-    [[nodiscard]] std::string_view label() const override { return "ComponentEssentialBC"; }
-    [[nodiscard]] bool hasWeakTerms() const override { return false; }
 
-    void contributeToResidual(FormExpr& /*residual*/,
-                              const FormExpr& /*u*/,
-                              const FormExpr& /*v*/) const override
+    [[nodiscard]] std::string_view label() const override
     {
+        if (isStrong()) {
+            return some_components_ ? "ComponentEssentialBC" : "EssentialBC";
+        }
+        if (std::holds_alternative<Penalty>(how_)) {
+            return "PenaltyBC";
+        }
+        return "NitscheBC";
+    }
+
+    [[nodiscard]] bool hasWeakTerms() const override { return !isStrong(); }
+
+    [[nodiscard]] const Enforcement& enforcement() const noexcept { return how_; }
+
+    void contributeToResidual(FormExpr& residual, const FormExpr& u, const FormExpr& v) const override
+    {
+        if (isStrong()) {
+            return;
+        }
+        class OneRow final : public RowSink {
+        public:
+            explicit OneRow(FormExpr& residual)
+                : residual_(residual)
+            {
+            }
+            void add(FieldId /*row*/, const FormExpr& integral) override { residual_ = residual_ + integral; }
+            void subtract(FieldId /*row*/, const FormExpr& integral) override { residual_ = residual_ - integral; }
+
+        private:
+            FormExpr& residual_;
+        } row(residual);
+        for (const auto& part : flux_.parts) {
+            if (part.kind == FluxPart::Kind::Isotropic) {
+                throw std::invalid_argument(
+                    "bc::Dirichlet: a flux with a part in another unknown is multi-row; use contributeToRows");
+            }
+        }
+        emit(row, u, v, fieldOf(u));
+    }
+
+    /// The weak terms into the rows of @p field (u, v) and of the unknowns of
+    /// the flux's parts.
+    void contributeToRows(RowSink& rows, const FormExpr& u, const FormExpr& v, FieldId field) const
+    {
+        if (!isStrong()) {
+            emit(rows, u, v, field);
+        }
     }
 
     [[nodiscard]] std::vector<StrongDirichlet> getStrongConstraints(FieldId field_id) const override
     {
+        if (!isStrong()) {
+            return {};
+        }
         std::vector<StrongDirichlet> out;
         out.reserve(components_.size());
         for (const auto& [component, value] : components_) {
@@ -457,42 +571,248 @@ public:
     [[nodiscard]] std::vector<analysis::BoundaryConditionDescriptor>
     analysisMetadata(FieldId field_id, const systems::FESystem* /*system*/) const override
     {
-        std::vector<analysis::BoundaryConditionDescriptor> descs;
-        descs.reserve(components_.size());
-        for (const auto& [component, _] : components_) {
+        const std::string name = source_name_.empty() ? std::string(label()) : source_name_;
+        const std::string on_marker = " on marker " + std::to_string(boundary_marker_);
+        auto descriptor = [&](int component) {
             analysis::BoundaryConditionDescriptor d;
-            d.primary_variable = analysis::VariableKey::field(field_id, component);
+            d.primary_variable = component < 0 ? analysis::VariableKey::field(field_id)
+                                               : analysis::VariableKey::field(field_id, component);
             d.component = component;
             d.boundary_marker = boundary_marker_;
             d.trace_kind = analysis::TraceKind::Value;
-            d.enforcement_kind = analysis::EnforcementKind::Strong;
             d.anchors_constant_mode = true;
             d.anchors_rigid_body_translation = true;
             d.anchors_rigid_body_rotation = false;
-            d.source = source_name_ + " comp " + std::to_string(component) +
-                       " on marker " + std::to_string(boundary_marker_);
-            descs.push_back(std::move(d));
+            d.source = component < 0 ? name + on_marker : name + " comp " + std::to_string(component) + on_marker;
+            return d;
+        };
+        std::vector<analysis::BoundaryConditionDescriptor> out;
+        if (isStrong()) {
+            out.reserve(components_.size());
+            for (const auto& [component, value] : components_) {
+                auto d = descriptor(component);
+                d.enforcement_kind = analysis::EnforcementKind::Strong;
+                out.push_back(std::move(d));
+            }
+            return out;
         }
-        return descs;
+        auto d = descriptor(-1);
+        if (std::holds_alternative<Penalty>(how_)) {
+            d.enforcement_kind = analysis::EnforcementKind::WeakPenalty;
+            out.push_back(std::move(d));
+            return out;
+        }
+        const auto& nitsche = std::get<Nitsche>(how_);
+        const bool symmetric = nitsche.variant == NitscheVariant::Symmetric;
+        d.enforcement_kind = analysis::EnforcementKind::WeakNitsche;
+        analysis::NitscheMetadata metadata;
+        metadata.variant = symmetric ? analysis::NitscheVariant::Symmetric : analysis::NitscheVariant::Nonsymmetric;
+        metadata.primal_consistency_terms_present = true;
+        metadata.adjoint_consistency_terms_present = symmetric;
+        metadata.rhs_consistency_terms_present = true;
+        metadata.penalty_positive = nitsche.gamma > Real(0.0);
+        metadata.penalty_scaling_verified =
+            nitsche.scale_with_p && (!measure_.has_value() || measure_->isFullPhysical());
+        d.nitsche = metadata;
+        out.push_back(std::move(d));
+        return out;
     }
 
 private:
+    [[nodiscard]] bool isStrong() const noexcept { return std::holds_alternative<Strong>(how_); }
+
+    void setTarget(Target target)
+    {
+        if (const auto* marker = std::get_if<int>(&target)) {
+            boundary_marker_ = *marker;
+        } else {
+            measure_ = std::get<ExteriorBoundaryMeasure>(target);
+            boundary_marker_ = measure_->physicalBoundaryMarker();
+        }
+        if (boundary_marker_ < 0) {
+            throw std::invalid_argument("bc::Dirichlet: boundary_marker must be >= 0");
+        }
+    }
+
+    void validate() const
+    {
+        for (const auto& [component, value] : components_) {
+            if (!value.isValid()) {
+                throw std::invalid_argument("bc::Dirichlet: invalid value expression");
+            }
+        }
+        if (isStrong()) {
+            if (measure_.has_value() && !measure_->isFullPhysical()) {
+                throw std::invalid_argument(
+                    "bc::Dirichlet: strong enforcement acts on the mesh faces of a marker; a generated active "
+                    "subset needs Nitsche{} or Penalty{}");
+            }
+            return;
+        }
+        if (some_components_) {
+            throw std::invalid_argument("bc::Dirichlet: weak enforcement of some components is not supported");
+        }
+        for (const auto& [component, value] : components_) {
+            if (value.hasTest() || value.hasTrial()) {
+                throw std::invalid_argument("bc::Dirichlet: value must not contain test/trial functions");
+            }
+        }
+        if (const auto* penalty = std::get_if<Penalty>(&how_)) {
+            if (!penalty->beta.isValid()) {
+                throw std::invalid_argument("bc::Dirichlet: invalid penalty coefficient");
+            }
+            return;
+        }
+        const auto& nitsche = std::get<Nitsche>(how_);
+        if (!(nitsche.gamma > Real(0.0)) || !std::isfinite(nitsche.gamma)) {
+            throw std::invalid_argument("bc::Dirichlet: Nitsche gamma must be finite and > 0");
+        }
+        if (flux_.parts.empty() || !flux_.penalty_weight.isValid()) {
+            throw std::invalid_argument("bc::Dirichlet: Nitsche enforcement needs the operator's flux");
+        }
+        if (flux_.penalty_weight.hasTest() || flux_.penalty_weight.hasTrial()) {
+            throw std::invalid_argument("bc::Dirichlet: the penalty weight must not contain test/trial functions");
+        }
+        for (const auto& part : flux_.parts) {
+            const bool isotropic = part.kind == FluxPart::Kind::Isotropic;
+            if (isotropic ? (part.field == INVALID_FIELD_ID || !part.state.isValid() || !part.test.isValid())
+                          : !part.of) {
+                throw std::invalid_argument("bc::Dirichlet: incomplete flux part");
+            }
+        }
+    }
+
+    [[nodiscard]] static FieldId fieldOf(const FormExpr& u)
+    {
+        const auto* node = u.node();
+        const auto field = node == nullptr ? std::optional<FieldId>{} : node->fieldId();
+        return field.value_or(INVALID_FIELD_ID);
+    }
+
+    [[nodiscard]] static bool isVectorField(const FormExpr& u)
+    {
+        const auto* node = u.node();
+        const auto* signature = node == nullptr ? nullptr : node->spaceSignature();
+        return signature != nullptr && signature->value_dimension > 1;
+    }
+
+    [[nodiscard]] FormExpr integrate(const FormExpr& integrand) const
+    {
+        return measure_.has_value() ? integrand.dExteriorBoundary(*measure_) : integrand.ds(boundary_marker_);
+    }
+
+    void emit(RowSink& rows, const FormExpr& u, const FormExpr& v, FieldId field) const
+    {
+        const bool vector = isVectorField(u);
+        if (!vector && components_.size() > 1u) {
+            throw std::invalid_argument("bc::Dirichlet: a component list needs a vector field");
+        }
+        const auto value =
+            components_.size() == 1u ? components_.front().second : FormExpr::asVector(values());
+        const auto diff = u - value;
+        if (const auto* penalty = std::get_if<Penalty>(&how_)) {
+            rows.add(field, integrate(vector ? penalty->beta * inner(diff, v) : penalty->beta * diff * v));
+            return;
+        }
+
+        const auto& nitsche = std::get<Nitsche>(how_);
+        const bool symmetric = nitsche.variant == NitscheVariant::Symmetric;
+        const auto n = FormExpr::normal();
+        const bool certified_route =
+            measure_.has_value() && !measure_->isFullPhysical() && rows.certifiesGeneratedRoutes();
+
+        // Consistency, part by part: -(flux . v).  A certified generated
+        // route replaces the conormal part's three terms.
+        for (const auto& part : flux_.parts) {
+            switch (part.kind) {
+            case FluxPart::Kind::Normal:
+                if (certified_route) {
+                    throw std::invalid_argument(
+                        "bc::Dirichlet: a certified generated-boundary route needs a conormal flux");
+                }
+                rows.subtract(field, integrate(part.of(u) * v));
+                break;
+            case FluxPart::Kind::Conormal:
+                if (certified_route) {
+                    if (!part.form.has_value()) {
+                        throw std::invalid_argument(
+                            "bc::Dirichlet: a certified generated-boundary route needs the flux's bilinear form");
+                    }
+                    auto route = buildGeneratedBoundaryNitscheTraceTerms(
+                        u, v, value, *part.form, boundary_marker_, measure_->generatedActiveBoundaryMarker(),
+                        nitsche);
+                    rows.add(field, route.route_contribution);
+                    rows.certify(std::move(route.binding));
+                    break;
+                }
+                rows.subtract(field, integrate(inner(part.of(u) * n, v)));
+                break;
+            case FluxPart::Kind::Isotropic:
+                rows.add(field, integrate(part.state * inner(n, v)));
+                break;
+            }
+        }
+        // Adjoint consistency in the row of each part's unknown,
+        // -(adjoint flux . (u - g)) when symmetric, + otherwise: the parts in
+        // u first, then the parts in other unknowns, each in part order.
+        const auto adjoint = [&](FieldId row, bool flux_sign_positive, const FormExpr& integral) {
+            if (flux_sign_positive == symmetric) {
+                rows.subtract(row, integral);
+            } else {
+                rows.add(row, integral);
+            }
+        };
+        for (const auto& part : flux_.parts) {
+            if (part.kind == FluxPart::Kind::Normal) {
+                adjoint(field, true, integrate(part.of(v) * diff));
+            } else if (part.kind == FluxPart::Kind::Conormal && !certified_route) {
+                adjoint(field, true, integrate(inner(part.of(v) * n, diff)));
+            }
+        }
+        for (const auto& part : flux_.parts) {
+            if (part.kind == FluxPart::Kind::Isotropic) {
+                adjoint(part.field, false, integrate(part.test * inner(n, diff)));
+            }
+        }
+        if (certified_route) {
+            return;
+        }
+        const auto penalty = buildTraceNitschePenalty(flux_.penalty_weight, u, nitsche);
+        rows.add(field, integrate(vector ? penalty * inner(diff, v) : penalty * diff * v));
+    }
+
+    [[nodiscard]] std::vector<FormExpr> values() const
+    {
+        std::vector<FormExpr> out;
+        out.reserve(components_.size());
+        for (const auto& [component, value] : components_) {
+            out.push_back(value);
+        }
+        return out;
+    }
+
     int boundary_marker_{-1};
+    std::optional<ExteriorBoundaryMeasure> measure_{};
     std::vector<std::pair<int, FormExpr>> components_{};
+    Enforcement how_{Strong{}};
+    NaturalFlux flux_{};
     std::string symbol_{"u"};
-    std::string source_name_{"ComponentEssentialBC"};
+    std::string source_name_{};
+    bool some_components_{false};
 };
 
+/// The strong Dirichlet condition of the active components of @p values on
+/// @p marker, named @p source_name in its descriptors.
 template <class Values, class ActiveComponents>
 [[nodiscard]] inline std::unique_ptr<BoundaryCondition>
-vectorComponentEssentialBC(const Values& values,
-                           const ActiveComponents& active_components,
-                           int dim,
-                           int marker,
-                           std::string_view value_prefix,
-                           std::string_view symbol,
-                           std::string_view source_name,
-                           ComponentValueNameStyle name_style = ComponentValueNameStyle::Indexed)
+componentDirichlet(const Values& values,
+                   const ActiveComponents& active_components,
+                   int dim,
+                   int marker,
+                   std::string_view value_prefix,
+                   std::string_view symbol,
+                   std::string_view source_name,
+                   ComponentValueNameStyle name_style = ComponentValueNameStyle::Indexed)
 {
     std::vector<std::pair<int, FormExpr>> components;
     components.reserve(static_cast<std::size_t>(dim));
@@ -506,8 +826,7 @@ vectorComponentEssentialBC(const Values& values,
                          detail::makeComponentValueName(value_prefix, marker, d, name_style)));
     }
 
-    return std::make_unique<ComponentEssentialBC>(
-        marker, std::move(components), std::string(symbol), std::string(source_name));
+    return std::make_unique<Dirichlet>(marker, std::move(components), std::string(symbol), std::string(source_name));
 }
 
 // ---- Conditions from typed boundary data (BoundaryConditions.h BoundaryData) ----
@@ -545,43 +864,40 @@ robinBC(const BoundaryData<RobinValue>& data, std::string_view alpha_prefix, std
                                      toScalarExpr(data.value.rhs, markerValueName(rhs_prefix, marker)));
 }
 
-/// EssentialBC(marker, g, symbol): u = g on the marker.
+/// Dirichlet(marker, g, how, flux, symbol): u = g on the marker.
 [[nodiscard]] inline std::unique_ptr<BoundaryCondition>
-essentialBC(const BoundaryData<ScalarValue>& data, std::string_view prefix, std::string symbol = "u")
+dirichlet(const BoundaryData<ScalarValue>& data,
+          std::string_view prefix,
+          Enforcement how = Strong{},
+          NaturalFlux flux = {},
+          std::string symbol = "u")
 {
-    return std::make_unique<EssentialBC>(data.boundary_marker, value(data, prefix), std::move(symbol));
+    return std::make_unique<Dirichlet>(data.boundary_marker, value(data, prefix), std::move(how), std::move(flux),
+                                       std::move(symbol));
 }
 
-/// EssentialBC(marker, {g_0, ..., g_{dim-1}}, symbol); every component must be active.
+/// The strong Dirichlet condition of the active components: every component
+/// gives Dirichlet(marker, {g_0, ..., g_{dim-1}}, Strong{}, {}, symbol), some
+/// give the components named @p source_name (componentDirichlet).
 [[nodiscard]] inline std::unique_ptr<BoundaryCondition>
-essentialBC(const BoundaryData<ComponentValues>& data,
-            int dim,
-            std::string_view prefix,
-            std::string symbol = "u",
-            ComponentValueNameStyle name_style = ComponentValueNameStyle::Indexed)
+dirichlet(const BoundaryData<ComponentValues>& data,
+          int dim,
+          std::string_view prefix,
+          std::string_view symbol,
+          std::string_view source_name,
+          ComponentValueNameStyle name_style = ComponentValueNameStyle::Indexed)
 {
+    const int marker = boundaryMarkerOrThrow(data, "forms::bc::dirichlet");
+    bool every_component = true;
     for (int d = 0; d < dim; ++d) {
-        if (!data.value.active[static_cast<std::size_t>(d)]) {
-            throw std::invalid_argument(
-                "forms::bc::essentialBC: an inactive component needs componentEssentialBC");
-        }
+        every_component = every_component && data.value.active[static_cast<std::size_t>(d)];
     }
-    return std::make_unique<EssentialBC>(data.boundary_marker, values(data, dim, prefix, name_style),
-                                         std::move(symbol));
-}
-
-/// ComponentEssentialBC of the active components (vectorComponentEssentialBC).
-[[nodiscard]] inline std::unique_ptr<BoundaryCondition>
-componentEssentialBC(const BoundaryData<ComponentValues>& data,
-                     int dim,
-                     std::string_view prefix,
-                     std::string_view symbol,
-                     std::string_view source_name,
-                     ComponentValueNameStyle name_style = ComponentValueNameStyle::Indexed)
-{
-    const int marker = boundaryMarkerOrThrow(data, "forms::bc::componentEssentialBC");
-    return vectorComponentEssentialBC(data.value.values, data.value.active, dim, marker, prefix, symbol,
-                                      source_name, name_style);
+    if (every_component) {
+        return std::make_unique<Dirichlet>(marker, values(data, dim, prefix, name_style), Strong{}, NaturalFlux{},
+                                           std::string(symbol));
+    }
+    return componentDirichlet(data.value.values, data.value.active, dim, marker, prefix, symbol, source_name,
+                              name_style);
 }
 
 /**

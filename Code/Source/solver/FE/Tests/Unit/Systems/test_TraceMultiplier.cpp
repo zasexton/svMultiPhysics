@@ -674,7 +674,7 @@ TEST(TraceMultiplierSetup, TheConditionIsExclusiveOnItsBoundary)
     auto residual = (forms::inner(forms::grad(u), forms::grad(v))).dx();
     systems::BoundaryConditionManager bcs;
     bcs.add(forms::bc::makeLagrangeDirichletBC(kLeft, FormExpr::constant(0.0), lam_id));
-    bcs.add(std::make_unique<forms::bc::EssentialBC>(kLeft, FormExpr::constant(0.0)));
+    bcs.add(std::make_unique<forms::bc::Dirichlet>(kLeft, FormExpr::constant(0.0)));
     EXPECT_THROW(bcs.applyAll(sys, residual, u, v, u_id), std::invalid_argument);
 }
 

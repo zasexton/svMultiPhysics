@@ -268,15 +268,15 @@ TEST(SystemManifest, BoundaryDataFactoriesGiveTheManifestsOfTheSpelledOutConditi
             5,
             bc::toScalarExpr(d.robin.value.alpha, bc::markerValueName("heat_robin_alpha", 5)),
             bc::toScalarExpr(d.robin.value.rhs, bc::markerValueName("heat_robin_rhs", 5))));
-        out.push_back(std::make_unique<bc::EssentialBC>(
-            4, bc::toScalarExpr(d.dirichlet.value, bc::markerValueName("heat_dirichlet", 4)), "u"));
+        out.push_back(std::make_unique<bc::Dirichlet>(
+            4, bc::toScalarExpr(d.dirichlet.value, bc::markerValueName("heat_dirichlet", 4))));
         return out;
     };
     const auto typed = [](const Data& d) {
         Conditions out;
         out.push_back(bc::naturalBC(d.flux, "heat_neumann"));
         out.push_back(bc::robinBC(d.robin, "heat_robin_alpha", "heat_robin_rhs"));
-        out.push_back(bc::essentialBC(d.dirichlet, "heat_dirichlet", "u"));
+        out.push_back(bc::dirichlet(d.dirichlet, "heat_dirichlet"));
         return out;
     };
 

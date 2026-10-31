@@ -105,7 +105,7 @@ void installFormBoundTracePolicy(
                 forms::bc::symmetricGradientForm(forms::FormExpr::constant(Real{2.5})),
                 kWallMarker,
                 kActiveBoundaryMarker,
-                forms::bc::TraceNitscheOptions{
+                forms::bc::Nitsche{
                     .gamma = gamma,
                     .variant =
                         forms::bc::NitscheVariant::Symmetric,

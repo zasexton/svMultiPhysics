@@ -149,7 +149,7 @@ void registerHeat(fe::systems::FESystem& system,
     auto R = (k * inner(grad(T), grad(v)) - f * v).dx();
 
     fe::systems::BoundaryConditionManager bcs;
-    bcs.add(std::make_unique<bc::EssentialBC>(o.wall, FormExpr::constant(o.wall_temperature), "T"));
+    bcs.add(std::make_unique<bc::Dirichlet>(o.wall, FormExpr::constant(o.wall_temperature)));
     bcs.add(std::make_unique<bc::NaturalBC>(o.inlet, FormExpr::constant(o.inflow)));
 
     fe::constraints::ConstraintPlan plan(system);
@@ -611,11 +611,11 @@ namespace `forms::bc`.
 | `applyTraceNitsche(...)` | `BoundaryConditions.h` | Boundary Nitsche scalar trace imposition with explicit consistency flux, adjoint flux, and penalty weight |
 | `applyInterfaceTraceNitsche(...)` | `BoundaryConditions.h` | Interface Nitsche scalar trace imposition |
 | `buildTraceNitschePenalty(...)` | `BoundaryConditions.h` | `gamma p^2 * penalty_weight` |
-| `bc::NitscheVariant`, `NitscheDirichletOptions` (`TraceNitscheOptions`) | `BoundaryConditions.h` | Symmetric/unsymmetric Nitsche options |
+| `bc::NitscheVariant`, `bc::Nitsche{gamma, variant, scale_with_p}` | `BoundaryConditions.h` | Nitsche's method: an enforcement of `bc::Dirichlet` and the options of the trace helpers |
 | `TraceInequalitySense`, `TraceInequalityLinearization`, `TraceInequalityOptions` | `BoundaryConditions.h` | One-sided trace-law options |
 | `buildGeneratedBoundaryNitscheTraceTerms(u, v, g, form, ...)`, `symmetricGradientForm(k)`, `GeneratedBoundaryNitscheTraceFormBinding` | `BoundaryConditions.h`, `NitscheTraceBilinearForm.h` | `implemented/expert`; Nitsche terms on a generated boundary consistent with a declared bilinear form (`NitscheTraceBilinearForm::SymmetricGradient`, 2 k eps(u) : eps(v)), with an immutable binding for the installer's trace certificate, which bounds the form's flux by its energy |
-| `EssentialBC`, `ComponentEssentialBC`, `vectorComponentEssentialBC(...)` | `StandardBCs.h` | Strong values: scalar, dense vector, or selected components |
-| `bc::naturalBC(data, prefix)`, `robinBC(data, alpha_prefix, rhs_prefix)`, `essentialBC(data, prefix, symbol)`, `componentEssentialBC(data, dim, prefix, symbol, source)` | `StandardBCs.h` | The conditions of typed `BoundaryData`; the same objects, trees, manifests and JIT keys as the spelled-out `NaturalBC(m, toScalarExpr(g, markerValueName(prefix, m)))` and its siblings (Poisson builds its conditions so) |
+| `bc::Dirichlet(target, g, how = Strong{}, flux = {}, symbol)`, `componentDirichlet(...)` | `StandardBCs.h` | u = g, enforced as declared (see Boundary conditions, wave 2): strong values of a scalar, a dense vector or selected components; Nitsche; penalty |
+| `bc::naturalBC(data, prefix)`, `robinBC(data, alpha_prefix, rhs_prefix)`, `dirichlet(data, prefix, how, flux, symbol)`, `dirichlet(data, dim, prefix, symbol, source)` | `StandardBCs.h` | The conditions of typed `BoundaryData`; the same objects, trees, manifests and JIT keys as the spelled-out `NaturalBC(m, toScalarExpr(g, markerValueName(prefix, m)))` and its siblings (Poisson builds its conditions so) |
 | `NaturalBC`, `RobinBC` | `StandardBCs.h` | Weak flux and Robin terms on `ds(marker)` or an `ExteriorBoundaryMeasure` |
 | `ReservedBC` | `StandardBCs.h` | Reserves a marker for conflict validation; contributes nothing |
 | `NormalTraceEssentialBC` | `StandardBCs.h` | Strong `H(div)` normal-trace data (`HDivNormalConstraint`) |
@@ -624,10 +624,10 @@ namespace `forms::bc`.
 | `TraceLoadBC`, `TraceRobinBC`, `TraceInequalityBC` | `StandardBCs.h` | Boundary scalar trace wrappers |
 | `InterfaceTraceLoadBC`, `InterfaceTraceRobinBC`, `InterfaceTraceJumpPenaltyBC` | `StandardBCs.h` | Interface scalar trace wrappers |
 | `makeNormalTraceEssentialBC`, `makeTraceLoadBC`, `makeTraceRobinBC`, `makeTraceInequalityBC`, `makeInterfaceTrace*BC` | `StandardBCs.h` | Factory helpers for the trace wrappers |
-| `ScalarNitscheBC`, `TraceNitscheBC`, `InterfaceTraceNitscheBC` | `NitscheBC.h` | Nitsche wrapper types; `ScalarNitscheBC` is a legacy scalar-diffusion convenience |
+| `TraceNitscheBC`, `InterfaceTraceNitscheBC` | `NitscheBC.h` | Scalar-trace Nitsche wrapper types with explicit fluxes |
 | `LagrangeDirichletBC`, `makeLagrangeDirichletBC(marker, g, lambda, beta = 0, k = 1)` | `LagrangeDirichletBC.h` | u = g on a physical boundary through a multiplier field restricted to it (D54 T1): `(lambda * v).ds + (mu * (u - g)).ds`, lambda = -k du/dn; with beta > 0 the Barbosa-Hughes term `-(beta h (lambda + k du/dn)(mu + k dv/dn)).ds` (equal-order pairs). Install the residual with lambda in the field list; exclusive on its marker. A multiplier continuous around a corner cannot follow the jump of du/dn there: give each side its own multiplier |
 | `PeriodicBC`, `MultiPointConstraintBC` | `ConstraintBCs.h` | Affine constraints installed through `BoundaryConditionManager` |
-| `bc::BoundaryCondition` | `BoundaryCondition.h` | `implemented/expert`; interface for new BC wrappers. Each wrapper names its kind in `label()` (its class name), which the system manifest prints for the conditions a manager installs as affine constraints |
+| `bc::BoundaryCondition` | `BoundaryCondition.h` | `implemented/expert`; interface for new BC wrappers. Each wrapper names its kind in `label()` (its class name; a `Dirichlet` its enforcement), which the system manifest prints for the conditions a manager installs as affine constraints |
 | `interface::NitscheVariant`, `NitscheInterfaceOptions` | `InterfaceConditions.h` | Interface Poisson Nitsche options |
 | `interface::scalarContinuityPenaltyTerms(...)` | `InterfaceConditions.h` | Equal-and-opposite continuity penalty terms of two traced sides |
 | `interface::nitschePoissonIntegrand(...)` | `InterfaceConditions.h` | Legacy interface Poisson integrand helper; prefer explicit interface trace terms |
@@ -679,6 +679,33 @@ and not in the row of a global field); it takes no `.minus()`, `.plus()`,
 its side; a product of the two sides, or of the interface-owned unknown with
 another unknown, is refused, as is `dI()` without a marker.  The kernels are
 interpreted AD kernels, also with the JIT on and with symbolic tangents.
+
+### Boundary Conditions, Wave 2 (D63)
+
+One Dirichlet condition; the enforcement is an argument, not a class.
+
+```cpp
+bcs.add(std::make_unique<bc::Dirichlet>(inlet, uD));                                    // Strong{} (default)
+bcs.add(std::make_unique<bc::Dirichlet>(wall, g, bc::Nitsche{.gamma = 10}, bc::diffusionFlux(k)));
+bcs.add(std::make_unique<bc::Dirichlet>(cap, g, bc::Penalty{beta}));
+// A Stokes wall by Nitsche: the flux 2 mu eps(u) n - p n enters the velocity and pressure rows.
+const bc::NaturalFlux sigma_n{.parts = {bc::isotropicFlux(P.id, P.state, P.test),
+                                        bc::conormalFlux([&](const FormExpr& w) { return 2.0 * mu * symgrad(w); },
+                                                         bc::symmetricGradientForm(mu))},
+                              .penalty_weight = mu / hNormal()};
+bc::ResidualRows rows(contributions);
+bc::Dirichlet(wall, uD, bc::Nitsche{}, sigma_n).contributeToRows(rows, U.state, U.test, U.id);
+```
+
+| Construct | Header | Meaning |
+|---|---|---|
+| `bc::Dirichlet(target, g, how = Strong{}, flux = {}, symbol = "u")` | `StandardBCs.h` | u = g on a marker or an `ExteriorBoundaryMeasure`; g is the whole field (a scalar or a vector expression) or a list of every component. `Strong{}`: the strong declarations (`getStrongConstraints`), refused on a generated active subset. `Nitsche{...}`: the consistency terms of the flux parts in u's row, in part order; the adjoint terms in the row of each part's unknown, the parts in u first; then the penalty `gamma p^2 w (u - g) . v` (w the flux's penalty weight). `Penalty{beta}`: `beta (u - g) . v`. The manifest label names the enforcement: `EssentialBC`, `ComponentEssentialBC`, `NitscheBC`, `PenaltyBC` |
+| `bc::Dirichlet(target, {{i, g_i}, ...}, symbol, source)`, `componentDirichlet(values, active, dim, marker, prefix, symbol, source[, style])` | `StandardBCs.h` | Strong values of selected components; the descriptors are named `source` |
+| `bc::Strong`, `bc::Nitsche`, `bc::Penalty`, `bc::Enforcement` | `StandardBCs.h`, `BoundaryConditions.h` | The enforcement of an equality condition, a `std::variant` |
+| `bc::NaturalFlux{parts, penalty_weight}` | `StandardBCs.h` | An operator's conormal flux on its field, stated once; Nitsche's terms follow the order of the parts |
+| `bc::normalFlux(q)`, `conormalFlux(T[, form])`, `isotropicFlux(field, s, s_test)` | `StandardBCs.h` | Flux parts: `q(u)` of a scalar field, `T(u) n` of a vector field (with the bilinear form a certified generated-boundary route is built from), `-s n` in another unknown s. `q` and `T` are linear functions of their argument, applied to the state and to the test function |
+| `bc::diffusionFlux(k)` | `StandardBCs.h` | `k grad(u).n`, penalty weight `k / h_n` |
+| `bc::RowSink`, `bc::ResidualRows(contributions[, bindings])` | `StandardBCs.h` | The residual rows a multi-row condition adds to (`Dirichlet::contributeToRows`); with `bindings`, a Nitsche route on a generated boundary is built from the conormal part's bilinear form and its binding collected for the installer's certificate |
 
 ### Constraint Plan and Gauge Anchors
 

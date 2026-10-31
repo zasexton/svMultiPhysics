@@ -181,7 +181,7 @@ toVectorEssentialBC(const DirichletBC& bc,
         // Component-selected essential condition, e.g. a sliding wall that
         // constrains only the wall-normal displacement of an axis-aligned
         // boundary.  The unselected components keep the natural condition.
-        return FE::forms::bc::vectorComponentEssentialBC(
+        return FE::forms::bc::componentDirichlet(
             bc.value,
             bc.active_components,
             dim,
@@ -197,9 +197,11 @@ toVectorEssentialBC(const DirichletBC& bc,
         value_prefix,
         marker,
         FE::forms::bc::ComponentValueNameStyle::Component);
-    return std::make_unique<FE::forms::bc::EssentialBC>(
+    return std::make_unique<FE::forms::bc::Dirichlet>(
         marker,
         std::move(values),
+        FE::forms::bc::Strong{},
+        FE::forms::bc::NaturalFlux{},
         std::string(field_symbol));
 }
 

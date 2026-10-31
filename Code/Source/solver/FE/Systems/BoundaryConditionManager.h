@@ -96,7 +96,7 @@ private:
  * Usage (single-field or primary field of a coupled system):
  * @code
  *   BoundaryConditionManager bc_manager;
- *   bc_manager.add(std::make_unique<EssentialBC>(1, ...));
+ *   bc_manager.add(std::make_unique<Dirichlet>(1, ...));
  *   bc_manager.add(std::make_unique<NaturalBC>(2, ...));
  *   bc_manager.applyAll(system, residual, u, v, u_id);
  * @endcode
@@ -104,7 +104,7 @@ private:
  * Usage (secondary field with strong BCs only, e.g., pressure Dirichlet):
  * @code
  *   BoundaryConditionManager p_bc_manager;
- *   p_bc_manager.add(std::make_unique<EssentialBC>(3, ...));
+ *   p_bc_manager.add(std::make_unique<Dirichlet>(3, ...));
  *   p_bc_manager.applyAll(system, p_id);
  * @endcode
  */

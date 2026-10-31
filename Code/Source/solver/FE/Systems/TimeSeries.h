@@ -16,7 +16,7 @@
  *
  *   const auto Q = systems::timeFunction(system, "Q_inlet",
  *                                        systems::readTimeSeries("inflow.flw", TimeSeriesEnd::Periodic));
- *   bcs.add(std::make_unique<bc::EssentialBC>(inlet, Q * profile, "u"));   // strong value
+ *   bcs.add(std::make_unique<bc::Dirichlet>(inlet, Q * profile));          // strong value
  *   R = R - (Q * inner(n, v)).ds(outlet);                                   // weak term
  *
  * In a weak form the parameter is a slot of the system's parameter registry,

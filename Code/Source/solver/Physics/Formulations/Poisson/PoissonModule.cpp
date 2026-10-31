@@ -91,14 +91,14 @@ void PoissonModule::registerOn(FE::systems::FESystem& system) const
         return bc::robinBC(r, "poisson_robin_alpha", "poisson_robin_rhs");
     });
     bc_manager.install(options_.dirichlet, [&](const auto& uD) {
-        return bc::essentialBC(uD, "poisson_dirichlet", options_.field_name);
+        return bc::dirichlet(uD, "poisson_dirichlet", bc::Strong{}, {}, options_.field_name);
     });
-    bc_manager.install(options_.dirichlet_weak, [&](const auto& bc) {
-        return Factories::toNitscheBC(bc,
-                                      k,
-                                      options_.nitsche_gamma,
-                                      options_.nitsche_symmetric,
-                                      options_.nitsche_scale_with_p);
+    const bc::Nitsche nitsche{.gamma = options_.nitsche_gamma,
+                              .variant = options_.nitsche_symmetric ? bc::NitscheVariant::Symmetric
+                                                                    : bc::NitscheVariant::Unsymmetric,
+                              .scale_with_p = options_.nitsche_scale_with_p};
+    bc_manager.install(options_.dirichlet_weak, [&](const auto& uD) {
+        return bc::dirichlet(uD, "poisson_nitsche_dirichlet", nitsche, bc::diffusionFlux(k));
     });
     bc_manager.install(options_.coupled_neumann_rcr, [&](const auto& bc) {
         return Factories::toWindkesselBC(bc, system, u);

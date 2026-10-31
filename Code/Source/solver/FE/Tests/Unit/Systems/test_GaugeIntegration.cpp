@@ -767,11 +767,11 @@ TEST(GaugeIntegration, ScalarReactionDiffusion_NoNullspace)
 
 TEST(GaugeIntegration, EssentialBC_DescriptorAnchorsConstantAndTranslation)
 {
-    // EssentialBC descriptor has anchors_constant_mode=true and
+    // The strong Dirichlet descriptor has anchors_constant_mode=true and
     // anchors_rigid_body_translation=true. descriptorToVerdict returns
     // Anchored for ScalarConstant/ComponentwiseConstant, PartiallyAnchored
     // for KernelOfSymGrad (translation anchored, rotation not).
-    bc::EssentialBC bc(1, FormExpr::constant(0.0));
+    bc::Dirichlet bc(1, FormExpr::constant(0.0));
     auto descs = bc.analysisMetadata(0, nullptr);
     ASSERT_EQ(descs.size(), 1u);
     EXPECT_EQ(descriptorToVerdict(descs[0], NullspaceModeFamily::ScalarConstant), AnchoringVerdict::Anchored);

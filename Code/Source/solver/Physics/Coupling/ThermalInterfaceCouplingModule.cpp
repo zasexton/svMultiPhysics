@@ -189,7 +189,7 @@ ThermalPenaltyEquations thermalPenaltyEquations(
     const auto T_b = side_b.state(options.side_b_temperature_field, "T_b");
     const auto w_b = side_b.test(options.side_b_temperature_field, "w_b");
 
-    forms::bc::TraceNitscheOptions penalty_options;
+    forms::bc::Nitsche penalty_options;
     penalty_options.gamma = options.temperature_penalty;
     penalty_options.scale_with_p = false;
     const auto penalty_terms = forms::interface::scalarContinuityPenaltyTerms(

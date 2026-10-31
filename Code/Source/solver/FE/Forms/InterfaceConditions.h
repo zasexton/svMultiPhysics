@@ -48,7 +48,7 @@ struct ScalarContinuityPenaltyTerms {
     const FormExpr& second_value,
     const FormExpr& second_test,
     const FormExpr& penalty_weight,
-    const bc::TraceNitscheOptions& opts = {})
+    const bc::Nitsche& opts = {})
 {
     const auto jump = first_value - second_value;
     const auto penalty =
@@ -121,7 +121,7 @@ struct ScalarContinuityPenaltyTerms {
         throw std::invalid_argument("forms::interface::applyNitscheInterfacePoisson: interface_marker must be >= 0");
     }
 
-    bc::TraceNitscheOptions trace_opts;
+    bc::Nitsche trace_opts;
     trace_opts.gamma = opts.gamma;
     trace_opts.variant = (opts.variant == NitscheVariant::Symmetric)
                              ? bc::NitscheVariant::Symmetric

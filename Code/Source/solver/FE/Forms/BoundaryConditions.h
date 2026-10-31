@@ -591,21 +591,21 @@ inline StrongDirichlet strongDirichlet(FieldId field,
     return StrongDirichlet{field, boundary_marker, component, std::move(value), std::move(symbol)};
 }
 
-/**
- * @brief Options for weak Dirichlet enforcement via Nitsche's method
- */
+/// The two variants of Nitsche's method: the adjoint consistency term with
+/// the sign of the primal one (symmetric) or the opposite sign.
 enum class NitscheVariant {
     Symmetric,
     Unsymmetric
 };
 
-struct NitscheDirichletOptions {
+/// Nitsche's method as the enforcement of an equality condition tau(u) = g
+/// (bc::Dirichlet, the trace helpers below): the consistency and adjoint terms
+/// of the operator's flux, and the penalty gamma p^2 w (tau(u) - g) tau(v).
+struct Nitsche {
     Real gamma{10.0};  ///< Penalty parameter multiplier (scaled by k/h and optionally p^2)
     NitscheVariant variant{NitscheVariant::Symmetric};
     bool scale_with_p{true};  ///< Scale penalty by p^2 using TrialFunction polynomial order when available
 };
-
-using TraceNitscheOptions = NitscheDirichletOptions;
 
 /// The bilinear form of a generated-boundary Nitsche route
 /// (NitscheTraceBilinearForm.h) with its coefficient.
@@ -636,7 +636,7 @@ buildGeneratedBoundaryNitscheTraceTerms(
     const GeneratedBoundaryNitscheBilinearForm& form,
     int physical_boundary_marker,
     int generated_active_boundary_marker,
-    const TraceNitscheOptions& opts = {});
+    const Nitsche& opts = {});
 
 /**
  * Immutable proof that a generated-boundary Nitsche contribution consistent
@@ -760,7 +760,7 @@ private:
         const GeneratedBoundaryNitscheBilinearForm&,
         int,
         int,
-        const TraceNitscheOptions&);
+        const Nitsche&);
 
     FieldId velocity_field_{INVALID_FIELD_ID};
     SpaceSignature velocity_space_signature_{};
@@ -793,7 +793,7 @@ buildGeneratedBoundaryNitscheTraceTerms(
     const GeneratedBoundaryNitscheBilinearForm& form,
     int physical_boundary_marker,
     int generated_active_boundary_marker,
-    const TraceNitscheOptions& opts)
+    const Nitsche& opts)
 {
     const FormExpr& coefficient = form.coefficient;
     if (!u.isValid() || !v.isValid() ||
@@ -1113,7 +1113,7 @@ struct TraceInequalityOptions {
 
 [[nodiscard]] inline FormExpr buildTraceNitschePenalty(const FormExpr& penalty_weight,
                                                        const FormExpr& trial_trace_source,
-                                                       const TraceNitscheOptions& opts = {})
+                                                       const Nitsche& opts = {})
 {
     if (opts.gamma <= Real(0.0)) {
         throw std::invalid_argument("forms::bc::buildTraceNitschePenalty: gamma must be > 0");
@@ -1141,7 +1141,7 @@ struct TraceInequalityOptions {
                                                 const FormExpr& penalty_weight,
                                                 ScalarTraceOperator trace_operator =
                                                     ScalarTraceOperator::NormalComponent,
-                                                const TraceNitscheOptions& opts = {})
+                                                const Nitsche& opts = {})
 {
     const auto tau_u = applyScalarTrace(u, trace_operator);
     const auto tau_v = applyScalarTrace(v, trace_operator);
@@ -1176,7 +1176,7 @@ struct TraceInequalityOptions {
                                                 const FormExpr& penalty_weight,
                                                 ScalarTraceOperator trace_operator =
                                                     ScalarTraceOperator::NormalComponent,
-                                                const TraceNitscheOptions& opts = {})
+                                                const Nitsche& opts = {})
 {
     if (boundary_marker < 0) {
         throw std::invalid_argument(
@@ -1215,7 +1215,7 @@ struct TraceInequalityOptions {
     const FormExpr& penalty_weight,
     ScalarTraceOperator trace_operator = ScalarTraceOperator::NormalComponent,
     InterfaceTraceReduction reduction = InterfaceTraceReduction::Jump,
-    const TraceNitscheOptions& opts = {})
+    const Nitsche& opts = {})
 {
     if (interface_marker < 0) {
         throw std::invalid_argument("forms::bc::applyInterfaceTraceNitsche: interface_marker must be >= 0");

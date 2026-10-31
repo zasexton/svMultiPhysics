@@ -60,11 +60,11 @@ TEST(BoundaryConditionDescriptor, ToString_NitscheVariant) {
 }
 
 // ============================================================================
-// EssentialBC descriptor
+// Strong Dirichlet descriptor
 // ============================================================================
 
 TEST(BoundaryConditionDescriptor, EssentialBC_StrongValueAnchorsAll) {
-    bc::EssentialBC bc(3, FormExpr::constant(0.0));
+    bc::Dirichlet bc(3, FormExpr::constant(0.0));
     auto descs = bc.analysisMetadata(/*field_id=*/0, nullptr);
 
     ASSERT_EQ(descs.size(), 1u);
@@ -87,7 +87,7 @@ TEST(BoundaryConditionDescriptor, EssentialBC_MultiComponent_PerComponentDescrip
         FormExpr::constant(0.0),
         FormExpr::constant(0.0)
     };
-    bc::EssentialBC bc(5, std::move(comps));
+    bc::Dirichlet bc(5, std::move(comps));
     auto descs = bc.analysisMetadata(/*field_id=*/0, nullptr);
 
     // Should produce 3 per-component descriptors
@@ -248,8 +248,8 @@ TEST(BoundaryConditionDescriptor, InterfaceTraceJumpPenaltyBC_WeakPenaltyNormalC
 // ============================================================================
 
 TEST(BoundaryConditionDescriptor, NitscheBC_WeakNitscheAnchorsAll) {
-    bc::ScalarNitscheBC bc(7, FormExpr::constant(0.0), FormExpr::constant(1.0),
-                           /*penalty=*/10.0, /*symmetric=*/true);
+    bc::Dirichlet bc(7, FormExpr::constant(0.0), bc::Nitsche{.gamma = 10.0},
+                     bc::diffusionFlux(FormExpr::constant(1.0)));
     auto descs = bc.analysisMetadata(/*field_id=*/0, nullptr);
 
     ASSERT_EQ(descs.size(), 1u);

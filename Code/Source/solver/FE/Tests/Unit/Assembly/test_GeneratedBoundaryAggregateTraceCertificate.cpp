@@ -172,7 +172,7 @@ void installFormBoundTracePolicy(
                 forms::bc::symmetricGradientForm(forms::FormExpr::constant(Real{2.5})),
                 kWallMarker,
                 kActiveBoundaryMarker,
-                forms::bc::TraceNitscheOptions{
+                forms::bc::Nitsche{
                     .gamma = gamma,
                     .variant = symmetric
                         ? forms::bc::NitscheVariant::Symmetric
@@ -1094,7 +1094,7 @@ TEST(GeneratedBoundaryAggregateTraceCertificate,
                                 Real{2.5})),
                             kWallMarker,
                             kActiveBoundaryMarker,
-                            forms::bc::TraceNitscheOptions{
+                            forms::bc::Nitsche{
                                 .gamma = Real{8.0},
                                 .variant =
                                     static_cast<
@@ -1222,7 +1222,7 @@ TEST(GeneratedBoundaryAggregateTraceCertificate,
                                 Real{2.5})),
                             kWallMarker,
                             kActiveBoundaryMarker,
-                            forms::bc::TraceNitscheOptions{
+                            forms::bc::Nitsche{
                                 .gamma = Real{8.0},
                                 .variant =
                                     forms::bc::
@@ -1269,7 +1269,7 @@ TEST(GeneratedBoundaryAggregateTraceCertificate,
                         forms::bc::symmetricGradientForm(forms::FormExpr::constant(Real{2.5})),
                         kWallMarker,
                         kActiveBoundaryMarker,
-                        forms::bc::TraceNitscheOptions{
+                        forms::bc::Nitsche{
                             .gamma = Real{8.0},
                             .variant =
                                 forms::bc::NitscheVariant::Symmetric,
@@ -3451,7 +3451,7 @@ TEST(GeneratedBoundaryAggregateTraceCertificate,
                                 Real{2.5})),
                             kWallMarker,
                             kActiveBoundaryMarker,
-                            forms::bc::TraceNitscheOptions{
+                            forms::bc::Nitsche{
                                 .gamma = gamma,
                                 .variant = forms::bc::
                                     NitscheVariant::Symmetric,

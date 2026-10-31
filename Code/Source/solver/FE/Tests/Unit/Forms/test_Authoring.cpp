@@ -45,7 +45,7 @@ void registerHeat(fe::systems::FESystem& system,
     auto R = (k * inner(grad(T), grad(v)) - f * v).dx();
 
     fe::systems::BoundaryConditionManager bcs;
-    bcs.add(std::make_unique<bc::EssentialBC>(o.wall, FormExpr::constant(o.wall_temperature), "T"));
+    bcs.add(std::make_unique<bc::Dirichlet>(o.wall, FormExpr::constant(o.wall_temperature)));
     bcs.add(std::make_unique<bc::NaturalBC>(o.inlet, FormExpr::constant(o.inflow)));
 
     fe::constraints::ConstraintPlan plan(system);

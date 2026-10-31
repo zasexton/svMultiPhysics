@@ -13510,7 +13510,7 @@ TEST(MovingDomainPhysics, MeshMotionDirichletComponentCoefficientNamesUseCompone
         "mesh_displacement",
         marker,
         FE::forms::bc::ComponentValueNameStyle::Component);
-    FE::forms::bc::EssentialBC bc(marker, std::move(components), "d_mesh");
+    FE::forms::bc::Dirichlet bc(marker, std::move(components), FE::forms::bc::Strong{}, {}, "d_mesh");
     const auto strong = bc.getStrongConstraints(/*field_id=*/123);
 
     ASSERT_EQ(strong.size(), 3u);

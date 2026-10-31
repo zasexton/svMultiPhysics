@@ -164,7 +164,7 @@ TEST(ConstraintPlan, TypedResidualEssentialsMatchCallbackIncludingWeakTermsAndMe
     PlanSystem typed;
     PlanSystem callback;
     const auto populate = [](systems::BoundaryConditionManager& manager) {
-        manager.add(std::make_unique<forms::bc::EssentialBC>(2, forms::FormExpr::constant(3.0), "p"));
+        manager.add(std::make_unique<forms::bc::Dirichlet>(2, forms::FormExpr::constant(3.0), forms::bc::Strong{}, forms::bc::NaturalFlux{}, "p"));
         manager.add(std::make_unique<forms::bc::NaturalBC>(4, forms::FormExpr::constant(5.0)));
         manager.add(std::make_unique<forms::bc::NaturalBC>(4, forms::FormExpr::constant(7.0)));
     };
@@ -232,8 +232,8 @@ TEST(ConstraintPlan, TypedFieldEssentialsMatchCallbackAndAllowSamePhaseOperation
     for (const int marker : {3, 6}) {
         systems::BoundaryConditionManager typed_manager;
         systems::BoundaryConditionManager callback_manager;
-        typed_manager.add(std::make_unique<forms::bc::EssentialBC>(marker, forms::FormExpr::constant(2.0), "p"));
-        callback_manager.add(std::make_unique<forms::bc::EssentialBC>(marker, forms::FormExpr::constant(2.0), "p"));
+        typed_manager.add(std::make_unique<forms::bc::Dirichlet>(marker, forms::FormExpr::constant(2.0), forms::bc::Strong{}, forms::bc::NaturalFlux{}, "p"));
+        callback_manager.add(std::make_unique<forms::bc::Dirichlet>(marker, forms::FormExpr::constant(2.0), forms::bc::Strong{}, forms::bc::NaturalFlux{}, "p"));
         EXPECT_EQ(&typed_plan.essentials(typed_manager, typed.p), &typed_plan);
         callback_plan.essentials([&](systems::FESystem& system) { callback_manager.applyAll(system, callback.p); });
     }
@@ -278,7 +278,7 @@ TEST(ConstraintPlan, TypedFieldWeakRejectionStillCommitsEarlierPlanConstraints)
 {
     PlanSystem s;
     systems::BoundaryConditionManager manager;
-    manager.add(std::make_unique<forms::bc::EssentialBC>(2, forms::FormExpr::constant(1.0), "p"));
+    manager.add(std::make_unique<forms::bc::Dirichlet>(2, forms::FormExpr::constant(1.0), forms::bc::Strong{}, forms::bc::NaturalFlux{}, "p"));
     manager.add(std::make_unique<forms::bc::NaturalBC>(3, forms::FormExpr::constant(2.0)));
     ConstraintPlan plan(*s.system);
     plan.vertexValues(s.p, {{0, 9.0}})
@@ -300,7 +300,7 @@ TEST(ConstraintPlan, TypedEssentialsPreserveMarkerConflictPrecheck)
     for (const bool strong_first : {false, true}) {
         PlanSystem s;
         systems::BoundaryConditionManager manager;
-        auto strong = std::make_unique<forms::bc::EssentialBC>(2, forms::FormExpr::constant(1.0), "p");
+        auto strong = std::make_unique<forms::bc::Dirichlet>(2, forms::FormExpr::constant(1.0), forms::bc::Strong{}, forms::bc::NaturalFlux{}, "p");
         auto weak = std::make_unique<forms::bc::NaturalBC>(2, forms::FormExpr::constant(2.0));
         if (strong_first) {
             manager.add(std::move(strong));
@@ -330,7 +330,7 @@ TEST(ConstraintPlan, TypedEssentialsRejectPassedPhaseBeforeMutatingManagersOrBat
     ConstraintPlan plan(*s.system);
     plan.commitThrough(ConstraintPhase::InactiveSupport);
     systems::BoundaryConditionManager manager;
-    manager.add(std::make_unique<forms::bc::EssentialBC>(2, forms::FormExpr::constant(1.0), "p"));
+    manager.add(std::make_unique<forms::bc::Dirichlet>(2, forms::FormExpr::constant(1.0), forms::bc::Strong{}, forms::bc::NaturalFlux{}, "p"));
     const auto state = forms::StateField(s.p, *s.scalar, "p");
     const auto test = forms::TestField(s.p, *s.scalar, "q");
     auto residual = (state * test).dx();

@@ -191,7 +191,7 @@ toDisplacementEssentialBC(const UstructOptions::DisplacementDirichletBC& bc,
 {
     const int marker =
         FE::forms::bc::boundaryMarkerOrThrow(bc, "ustruct::Factories::toDisplacementEssentialBC");
-    return FE::forms::bc::vectorComponentEssentialBC(
+    return FE::forms::bc::componentDirichlet(
         bc.value, bc.active_components, dim, marker, "ustruct_dirichlet", symbol, "Ustruct displacement Dirichlet");
 }
 
@@ -202,7 +202,7 @@ toVelocityEssentialBC(const UstructOptions::VelocityDirichletBC& bc,
 {
     const int marker =
         FE::forms::bc::boundaryMarkerOrThrow(bc, "ustruct::Factories::toVelocityEssentialBC");
-    return FE::forms::bc::vectorComponentEssentialBC(
+    return FE::forms::bc::componentDirichlet(
         bc.value, bc.active_components, dim, marker, "ustruct_velocity_dirichlet", symbol, "Ustruct velocity Dirichlet");
 }
 
@@ -214,7 +214,8 @@ toPressureEssentialBC(const UstructOptions::PressureDirichletBC& bc,
         FE::forms::bc::boundaryMarkerOrThrow(bc, "ustruct::Factories::toPressureEssentialBC");
     const auto value =
         FE::forms::bc::toScalarExpr(bc.value, FE::forms::bc::markerValueName("ustruct_pressure_dirichlet", marker));
-    return std::make_unique<FE::forms::bc::EssentialBC>(marker, value, std::string(symbol));
+    return std::make_unique<FE::forms::bc::Dirichlet>(marker, value, FE::forms::bc::Strong{}, FE::forms::bc::NaturalFlux{},
+                                                      std::string(symbol));
 }
 
 [[nodiscard]] inline std::unique_ptr<FE::forms::bc::BoundaryCondition>
