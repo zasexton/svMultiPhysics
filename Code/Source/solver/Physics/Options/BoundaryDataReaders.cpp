@@ -1082,4 +1082,26 @@ double integrate_parabolic_weight_over_marker(const svmp::MeshBase& mesh,
   return sum;
 }
 
+void set_strong_unsteady_inflow(
+    svmp::Physics::formulations::navier_stokes::IncompressibleNavierStokesVMSOptions::VelocityDirichletBC& dir,
+    int dim,
+    std::shared_ptr<const svmp::FE::systems::TimeSeries> flow_rate,
+    std::shared_ptr<const InletProfileContext> ctx)
+{
+  namespace forms = svmp::FE::forms;
+  const auto name = forms::bc::markerValueName("ns_u_dirichlet_flow_rate", dir.boundary_marker);
+  dir.time_functions.push_back({name, [flow_rate](svmp::FE::Real t) { return (*flow_rate)(t); }});
+  const auto q = forms::FormExpr::parameter(name);
+  for (int d = 0; d < dim; ++d) {
+    const int comp = d;
+    const auto profile = forms::FormExpr::coefficient(
+        forms::bc::componentValueName("ns_u_dirichlet", dir.boundary_marker, d),
+        forms::ScalarCoefficient([ctx, comp](svmp::FE::Real x, svmp::FE::Real y, svmp::FE::Real z) -> svmp::FE::Real {
+          const Vec3d p{static_cast<double>(x), static_cast<double>(y), static_cast<double>(z)};
+          return static_cast<svmp::FE::Real>(ctx->componentValue(comp, p));
+        }));
+    dir.value[static_cast<std::size_t>(d)] = q * profile;
+  }
+}
+
 } // namespace svmp::Physics::options

@@ -329,6 +329,22 @@ namespace detail {
         generated_active_boundary_marker);
 }
 
+/// Declares the time functions of @p bcs on @p system.  A condition the two
+/// phases of a two-fluid pair share reaches both phase modules; its time
+/// functions are declared once.
+inline void declareVelocityDirichletTimeFunctions(
+    FE::systems::FESystem& system,
+    std::span<const IncompressibleNavierStokesVMSOptions::VelocityDirichletBC> bcs)
+{
+    for (const auto& bc : bcs) {
+        for (const auto& f : bc.time_functions) {
+            if (FE::systems::findTimeFunction(system, f.name) == nullptr) {
+                (void)FE::systems::timeFunction(system, f.name, f.function);
+            }
+        }
+    }
+}
+
 [[nodiscard]] inline std::unique_ptr<FE::forms::bc::BoundaryCondition> toVelocityEssentialBC(
     const IncompressibleNavierStokesVMSOptions::VelocityDirichletBC& bc,
     int dim,

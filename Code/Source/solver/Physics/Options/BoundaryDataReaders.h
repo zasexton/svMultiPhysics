@@ -660,6 +660,21 @@ struct InletProfileContext {
   }
 };
 
+/**
+ * @brief The strong velocity data of an unsteady inflow
+ *
+ * The flow rate @p flow_rate becomes a time function of the system
+ * (declared through dir.time_functions) and component d of the velocity the
+ * flow rate times the profile of @p ctx, a coefficient of space.  At every
+ * node and time each value is the product the time callback of a weak inflow
+ * forms, bit for bit.
+ */
+void set_strong_unsteady_inflow(
+    svmp::Physics::formulations::navier_stokes::IncompressibleNavierStokesVMSOptions::VelocityDirichletBC& dir,
+    int dim,
+    std::shared_ptr<const svmp::FE::systems::TimeSeries> flow_rate,
+    std::shared_ptr<const InletProfileContext> ctx);
+
 template <class ScalarValue>
 void fill_vector(std::array<ScalarValue, 3>& dst, int dim, const std::vector<int>& effective_dir,
                  svmp::FE::Real magnitude)

@@ -45,6 +45,7 @@
 #include "FE/Forms/FormExpr.h"
 #include "FE/Interfaces/ContactLineGeometryCertificate.h"
 #include "FE/Spaces/FunctionSpace.h"
+#include "FE/Systems/TimeSeries.h"
 
 #include <algorithm>
 #include <array>
@@ -456,6 +457,9 @@ struct IncompressibleNavierStokesVMSOptions {
         int boundary_marker{-1};
         std::array<ScalarValue, 3> value{ScalarValue{0.0}, ScalarValue{0.0}, ScalarValue{0.0}};
         std::array<bool, 3> active_components{true, true, true};
+        /// The time functions the values read (FormExpr::parameter), declared
+        /// on the system before the condition is installed.
+        std::vector<FE::systems::TimeFunctionDeclaration> time_functions{};
     };
 
     struct PressureDirichletBC {

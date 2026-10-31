@@ -26,6 +26,7 @@
 #include "FE/Spaces/SpaceFactory.h"
 #include "FE/Systems/FESystem.h"
 #include "FE/Systems/FieldBinding.h"
+#include "FE/Systems/TimeSeries.h"
 #include "Mesh/Core/MeshBase.h"
 #include "Mesh/Topology/CellTopology.h"
 
@@ -1287,7 +1288,10 @@ void apply_fluid_bcs(const svmp::Physics::EquationModuleInput& input,
         continue;
       }
 
+      // A strong unsteady inflow reads its flow rate as a time function of
+      // the system (set_strong_unsteady_inflow); a weak one keeps the callback.
       std::shared_ptr<svmp::Physics::TemporalValues> temporal;
+      std::shared_ptr<const svmp::FE::systems::TimeSeries> flow_rate;
       if (is_unsteady) {
         const auto* file_param = find_param(bc.params, "Temporal_values_file_path");
         const std::string flow_file =
@@ -1297,8 +1301,13 @@ void apply_fluid_bcs(const svmp::Physics::EquationModuleInput& input,
               "[svMultiPhysics::Physics] Unsteady Dirichlet BC '" + bc.name +
               "' is missing <Temporal_values_file_path>.");
         }
-        temporal = svmp::Physics::readTemporalValuesFile(
-            flow_file, /*num_components=*/1, svmp::Physics::TemporalEndBehavior::Periodic);
+        if (weak) {
+          temporal = svmp::Physics::readTemporalValuesFile(
+              flow_file, /*num_components=*/1, svmp::Physics::TemporalEndBehavior::Periodic);
+        } else {
+          flow_rate = std::make_shared<const svmp::FE::systems::TimeSeries>(
+              svmp::FE::systems::readTimeSeries(flow_file, svmp::FE::systems::TimeSeriesEnd::Periodic));
+        }
       }
 
       // Legacy-style Dirichlet velocity BCs use the boundary outward normal
@@ -1447,6 +1456,11 @@ void apply_fluid_bcs(const svmp::Physics::EquationModuleInput& input,
         navierStokesTraceLog(oss.str());
       }
 
+      if (is_unsteady && !weak) {
+        set_strong_unsteady_inflow(dir, dim, std::move(flow_rate), std::move(ctx));
+        options.velocity_dirichlet.push_back(std::move(dir));
+        continue;
+      }
       for (int d = 0; d < dim; ++d) {
         const int comp = d;
         if (is_unsteady) {

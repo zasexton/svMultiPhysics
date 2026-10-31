@@ -468,6 +468,7 @@ void IncompressibleNavierStokesVMSModule::registerOn(fs::FESystem& system) const
     const auto rcr = [&](const auto& bc) { return Factories::toCoupledOutflowBC(bc, system, u, rho, on(bc)); };
     bcs.install(o.coupled_outflow_rcr, rcr);
     bcs.install(o.coupled_outflow_rcrcr, rcr);
+    Factories::declareVelocityDirichletTimeFunctions(system, o.velocity_dirichlet);
     bcs.install(o.velocity_dirichlet,
                 [&](const auto& bc) { return Factories::toVelocityEssentialBC(bc, dim, o.velocity_field_name); });
     plan.essentials(bcs, M, u, v, u_id);   // weak terms into M

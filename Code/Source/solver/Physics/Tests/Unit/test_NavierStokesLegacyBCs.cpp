@@ -16,6 +16,7 @@
 #include "Assembly/GlobalSystemView.h"
 #include "FE/Forms/FormExpr.h"
 #include "FE/Forms/JIT/LLVMJITBuildInfo.h"
+#include "FE/Forms/PointEvaluator.h"
 #include "FE/Forms/Vocabulary.h"
 #include "Interfaces/GeneratedActiveBoundaryDomain.h"
 #include "Interfaces/GeneratedInterfaceBoundaryIntersectionDomain.h"
@@ -29,8 +30,10 @@
 #include <algorithm>
 #include <array>
 #include <atomic>
+#include <bit>
 #include <cmath>
 #include <cstddef>
+#include <cstdint>
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
@@ -437,6 +440,40 @@ void expectGeneralVelocityFileRejected(
 }
 
 #endif
+
+/// Component @p component of a velocity Dirichlet value at (x, t): a callback
+/// directly, an expression with its time functions read as the strong
+/// constraint reads them (slot values at t).
+double velocityValueAt(
+    const svmp::Physics::formulations::navier_stokes::IncompressibleNavierStokesVMSOptions::VelocityDirichletBC& bc,
+    std::size_t component,
+    const std::array<svmp::FE::Real, 3>& x,
+    svmp::FE::Real t)
+{
+    using svmp::FE::forms::FormExpr;
+    const auto& value = bc.value[component];
+    if (const auto* callback = std::get_if<svmp::FE::forms::TimeScalarCoefficient>(&value)) {
+        return (*callback)(x[0], x[1], x[2], t);
+    }
+    std::vector<svmp::FE::Real> slots;
+    const auto expr = std::get<FormExpr>(value).transformNodes(
+        [&](const svmp::FE::forms::FormExprNode& node) -> std::optional<FormExpr> {
+            if (node.type() != svmp::FE::forms::FormExprType::ParameterSymbol) {
+                return std::nullopt;
+            }
+            const auto name = node.symbolName().value_or(std::string_view{});
+            const auto f = std::find_if(bc.time_functions.begin(), bc.time_functions.end(),
+                                        [&](const auto& declaration) { return declaration.name == name; });
+            EXPECT_NE(f, bc.time_functions.end()) << name;
+            slots.push_back(f == bc.time_functions.end() ? 0.0 : f->function(t));
+            return FormExpr::parameterRef(static_cast<std::uint32_t>(slots.size() - 1u));
+        });
+    svmp::FE::forms::PointEvalContext context;
+    context.x = x;
+    context.time = t;
+    context.jit_constants = slots;
+    return svmp::FE::forms::evaluateScalarAt(expr, context);
+}
 
 void expectParabolicInflowVaries(const svmp::FE::systems::FESystem& system, int component)
 {
@@ -1218,9 +1255,11 @@ TEST(NavierStokesLegacyBCs, VelocityInletFlatNormalizationAndDirectionMasks)
                     const std::array<double, 3> expected =
                         masked ? std::array<double, 3>{0.0, amplitude, 0.0}
                                : std::array<double, 3>{-amplitude, 0.0, 0.0};
+                    // A strong unsteady inflow is an expression with a time
+                    // function, the others callbacks.
+                    EXPECT_EQ(inlet.time_functions.size(), unsteady && !weak ? 1u : 0u);
                     for (std::size_t component = 0; component < 3; ++component) {
-                        const auto& value = std::get<svmp::FE::forms::TimeScalarCoefficient>(inlet.value[component]);
-                        EXPECT_EQ(value(0.0, 0.2, 0.3, 7.0), expected[component]);
+                        EXPECT_EQ(velocityValueAt(inlet, component, {0.0, 0.2, 0.3}, 7.0), expected[component]);
                     }
                 }
             }
@@ -1258,8 +1297,11 @@ TEST(NavierStokesLegacyBCs, VelocityInletParabolicScalingAndPeriodicTimeOrigin)
     boundary.params["Temporal_values_file_path"] = defined(path.string());
     const auto unsteady = resolveVelocityInlet(mesh, boundary);
     ASSERT_EQ(unsteady.velocity_dirichlet.size(), 1u);
-    const auto& unsteady_value = std::get<svmp::FE::forms::TimeScalarCoefficient>(
-        unsteady.velocity_dirichlet.front().value[0]);
+    // The flow rate is a time function of the system, the profile a
+    // coefficient of space: their product is the callback's, bit for bit.
+    const auto unsteady_value = [&](double x, double y, double z, double t) {
+        return velocityValueAt(unsteady.velocity_dirichlet.front(), 0u, {x, y, z}, t);
+    };
     // The temporal amplitude multiplies the already normalized profile;
     // for 3.1 this differs by one bit from the steady division above.
     for (const auto [time, expected] : std::array<std::pair<double, double>, 7>{{
@@ -1273,6 +1315,94 @@ TEST(NavierStokesLegacyBCs, VelocityInletParabolicScalingAndPeriodicTimeOrigin)
         EXPECT_EQ(unsteady_value(0.0, 1.0 / 3.0, 1.0 / 3.0, time), expected) << time;
     }
     EXPECT_EQ(unsteady_value(0.0, 0.0, 0.0, 3.0), 0.0);
+#endif
+}
+
+// A strong unsteady inflow reads the flow rate of its file as a time function
+// of the system.  Its constraints are those of the callback the weak inflow
+// keeps (the callback the strong inflow used), installed as a strong
+// condition: the same DOFs and inhomogeneities, bit for bit, at setup and
+// over two periods of the RCR pipe's inflow file.
+TEST(NavierStokesLegacyBCs, StrongUnsteadyInflowTimeFunctionGivesTheCallbackConstraints)
+{
+#if !(defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH)
+    GTEST_SKIP() << "Requires FE built with Mesh integration (FE_WITH_MESH=ON).";
+#else
+    using Module = svmp::Physics::formulations::navier_stokes::IncompressibleNavierStokesVMSModule;
+    auto root = std::filesystem::path(__FILE__).parent_path();
+    for (int i = 0; i < 6; ++i) {
+        root = root.parent_path();
+    }
+    const auto flow_file = root / "tests" / "cases" / "fluid" / "pipe_RCR_3d" / "lumen_inlet.flow";
+    ASSERT_TRUE(std::filesystem::exists(flow_file)) << flow_file;
+    auto mesh = loadBeamMesh();
+    ASSERT_TRUE(mesh);
+    const auto markers = labelBeamInletOutlet(*mesh);
+
+    for (const char* profile : {"Flat", "Parabolic"}) {
+        SCOPED_TRACE(profile);
+        const auto build = [&](svmp::FE::systems::FESystem& system, bool callback) {
+            svmp::Physics::EquationModuleInput input{};
+            input.equation_type = "fluid";
+            input.mesh_name = "beam";
+            input.mesh = mesh->local_mesh_ptr();
+            input.default_domain.params["Density"] = defined("1.06");
+            input.default_domain.params["Viscosity.model"] = defined("Constant");
+            input.default_domain.params["Viscosity.Value"] = defined("0.04");
+            svmp::Physics::BoundaryConditionInput bc{};
+            bc.name = "inflow";
+            bc.boundary_marker = static_cast<int>(markers.inlet);
+            bc.params["Type"] = defined("Dir");
+            bc.params["Time_dependence"] = defined("Unsteady");
+            bc.params["Temporal_values_file_path"] = defined(flow_file.string());
+            bc.params["Profile"] = defined(profile);
+            bc.params["Impose_flux"] = defined("true");
+            bc.params["Weakly_applied"] = defined(callback ? "true" : "false");
+            input.boundary_conditions.push_back(std::move(bc));
+            auto resolved = svmp::Physics::options::resolveNavierStokesInput(input, system);
+            auto& one_phase = *resolved.one_phase;
+            auto& options = one_phase.options;
+            if (callback) {
+                EXPECT_EQ(options.velocity_dirichlet_weak.size(), 1u);
+                options.velocity_dirichlet = std::move(options.velocity_dirichlet_weak);
+                options.velocity_dirichlet_weak.clear();
+            }
+            EXPECT_EQ(options.velocity_dirichlet.size(), 1u);
+            auto module = std::make_unique<Module>(one_phase.velocity_space, one_phase.pressure_space, options);
+            module->registerOn(system);
+            system.setup();
+            return module;
+        };
+        svmp::FE::systems::FESystem with_time_function(mesh);
+        svmp::FE::systems::FESystem with_callback(mesh);
+        const auto time_function_module = build(with_time_function, /*callback=*/false);
+        const auto callback_module = build(with_callback, /*callback=*/true);
+        EXPECT_EQ(svmp::FE::systems::timeFunctions(with_time_function).size(), 1u);
+        EXPECT_TRUE(svmp::FE::systems::timeFunctions(with_callback).empty());
+
+        std::size_t nonzero = 0;
+        const auto expect_same_constraints = [&](double time) {
+            const auto dofs = with_time_function.constraints().getConstrainedDofs();
+            ASSERT_EQ(dofs, with_callback.constraints().getConstrainedDofs()) << "t=" << time;
+            for (const auto dof : dofs) {
+                const double value = with_time_function.constraints().getInhomogeneity(dof);
+                EXPECT_EQ(std::bit_cast<std::uint64_t>(value),
+                          std::bit_cast<std::uint64_t>(with_callback.constraints().getInhomogeneity(dof)))
+                    << "t=" << time << " dof=" << dof;
+                nonzero += value != 0.0 ? 1u : 0u;
+            }
+        };
+        expect_same_constraints(0.0);
+        // The table spans one period, [0, 1]: times before it and over two periods.
+        for (int k = -4; k <= 72; ++k) {
+            const double time = 0.0293 * static_cast<double>(k);
+            with_time_function.updateConstraints(time, 0.0293);
+            with_callback.updateConstraints(time, 0.0293);
+            expect_same_constraints(time);
+        }
+        // The flow rate is zero at whole periods only.
+        EXPECT_GT(nonzero, 0u);
+    }
 #endif
 }
 
