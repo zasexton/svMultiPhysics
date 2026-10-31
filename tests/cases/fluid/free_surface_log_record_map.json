@@ -1247,8 +1247,7 @@
     "scope": "every"
    },
    "renames": {
-    "Active_domain": "active_domain",
-    "Active_domain_method": "active_domain_method"
+    "Active_domain": "active_domain"
    },
    "split": [],
    "identifying": [],
@@ -1287,9 +1286,7 @@
     "level": "INFO",
     "scope": "every"
    },
-   "renames": {
-    "Active_domain_method": "active_domain_method"
-   },
+   "renames": {},
    "split": [],
    "identifying": [],
    "special": null

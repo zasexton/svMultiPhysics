@@ -108,21 +108,6 @@ void appendTwoFluidDiagnosticDeclaration(
         tokens,
         generatedBoundaryTraceRealBits(
             declaration.pressure_stabilization_coefficient));
-    appendMeshBoundaryToken(
-        tokens,
-        declaration.pressure_stabilization_use_cut_metadata_scale ? 1u : 0u);
-    appendMeshBoundaryToken(
-        tokens,
-        declaration.pressure_stabilization_cut_metadata_scale_cap.has_value()
-            ? 1u
-            : 0u);
-    if (declaration.pressure_stabilization_cut_metadata_scale_cap.has_value()) {
-        appendMeshBoundaryToken(
-            tokens,
-            generatedBoundaryTraceRealBits(
-                *declaration
-                     .pressure_stabilization_cut_metadata_scale_cap));
-    }
     appendTwoFluidDiagnosticParameters(tokens, declaration.parameters);
     appendMeshBoundaryString(tokens, declaration.owner_component);
 }
@@ -557,16 +542,6 @@ void appendTwoFluidAcceptedStagePhaseNumerics(
     const auto& stabilization = phase.pressure_stabilization;
     appendMeshBoundaryToken(
         tokens, generatedBoundaryTraceRealBits(stabilization.coefficient));
-    appendMeshBoundaryToken(
-        tokens, stabilization.use_cut_metadata_scale ? 1u : 0u);
-    appendMeshBoundaryToken(
-        tokens, stabilization.cut_metadata_scale_cap.has_value() ? 1u : 0u);
-    if (stabilization.cut_metadata_scale_cap.has_value()) {
-        appendMeshBoundaryToken(
-            tokens,
-            generatedBoundaryTraceRealBits(
-                *stabilization.cut_metadata_scale_cap));
-    }
     appendMeshBoundaryToken(
         tokens, stabilization.accepted_stage_work.has_value() ? 1u : 0u);
     if (stabilization.accepted_stage_work.has_value()) {
@@ -1069,14 +1044,6 @@ void TwoFluidStageRecords::declareTwoFluidAcceptedStageDiagnostics(
                   declaration.pressure_stabilization_coefficient) ||
               declaration.pressure_stabilization_coefficient <
                   Real{0.0})) ||
-            (declaration.pressure_stabilization_cut_metadata_scale_cap
-                 .has_value() &&
-             (!std::isfinite(
-                  *declaration
-                       .pressure_stabilization_cut_metadata_scale_cap) ||
-              *declaration
-                   .pressure_stabilization_cut_metadata_scale_cap <
-                  Real{1.0})) ||
             (parameters.prescribed_pressure_jump.has_value() &&
              !std::isfinite(*parameters.prescribed_pressure_jump)) ||
             !finite_vector(parameters.body_force) ||
@@ -1973,10 +1940,6 @@ void TwoFluidStageRecords::bindPendingTwoFluidAcceptedStageNumerics(
                 return TwoFluidAcceptedStagePressureStabilizationTelemetry{
                     .coefficient =
                         declaration.pressure_stabilization_coefficient,
-                    .use_cut_metadata_scale = declaration
-                        .pressure_stabilization_use_cut_metadata_scale,
-                    .cut_metadata_scale_cap = declaration
-                        .pressure_stabilization_cut_metadata_scale_cap,
                     .accepted_stage_work = std::nullopt,
                     .work_reason =
                         "not_separately_resolved_by_coupled_operator",
@@ -2163,14 +2126,6 @@ void TwoFluidStageRecords::commitPendingTwoFluidAcceptedStageDiagnostics(
                                phase.pressure_stabilization.coefficient ==
                                    pending.declaration
                                        .pressure_stabilization_coefficient &&
-                               phase.pressure_stabilization
-                                       .use_cut_metadata_scale ==
-                                   pending.declaration
-                                       .pressure_stabilization_use_cut_metadata_scale &&
-                               phase.pressure_stabilization
-                                       .cut_metadata_scale_cap ==
-                                   pending.declaration
-                                       .pressure_stabilization_cut_metadata_scale_cap &&
                                !phase.pressure_stabilization
                                     .accepted_stage_work.has_value() &&
                                phase.linear_iteration_scope ==

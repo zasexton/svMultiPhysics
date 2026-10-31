@@ -51,8 +51,6 @@ struct TwoFluidAcceptedStageDiagnosticDeclaration {
     bool require_conservative_phase_momentum_reconciliation{false};
     bool require_accepted_stage_numerics{false};
     Real pressure_stabilization_coefficient{0.0};
-    bool pressure_stabilization_use_cut_metadata_scale{false};
-    std::optional<Real> pressure_stabilization_cut_metadata_scale_cap{};
     interfaces::IncompressibleTwoFluidDiagnosticParameters parameters{};
     std::string owner_component{};
 
@@ -232,8 +230,6 @@ struct TwoFluidAcceptedStageAggregationTelemetry {
 
 struct TwoFluidAcceptedStagePressureStabilizationTelemetry {
     Real coefficient{0.0};
-    bool use_cut_metadata_scale{false};
-    std::optional<Real> cut_metadata_scale_cap{};
     std::optional<Real> accepted_stage_work{};
     std::string work_reason{};
 

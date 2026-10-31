@@ -1068,9 +1068,6 @@ inline void applyFreeSurfaceContactLineConstraints(
     const bool has_dynamic_stress =
         !FE::forms::bc::isZeroConstantScalarValue(bc.external_pressure) ||
         !FE::forms::bc::isZeroConstantScalarValue(bc.surface_tension);
-    // active_domain_method, surface_tension_form and the pressure
-    // stabilization policy are no longer options; their fields print the
-    // fixed values so that the record keeps its format.
     return post::navierStokesLog("unfitted free-surface boundary mode")
         .diagnostic("unfitted_free_surface_boundary_mode")
         .integer("marker", bc.interface_marker)
@@ -1080,14 +1077,11 @@ inline void applyFreeSurfaceContactLineConstraints(
               freeSurfaceGeneratedInterfaceGeometryName(bc.generated_interface_geometry))
         .text("geometry_tangent_policy", freeSurfaceGeometryTangentPolicyName(bc.geometry_tangent_policy))
         .text("active_domain", activeDomainName(bc.active_domain))
-        .text("active_domain_method", "CutVolume")
         .text("dynamic_stress", has_dynamic_stress ? "enabled" : "natural_zero")
-        .text("surface_tension_form", "SurfaceStress")
         .text("curvature_policy", freeSurfaceCurvaturePolicyName(bc))
         .text("curvature_tangent_policy", freeSurfaceCurvatureTangentPolicyName(bc))
         .text("kinematic_enforcement", kinematicEnforcementName(bc.kinematic_enforcement))
         .text("cut_cell_stabilization", bc.cut_cell_stabilization.enabled ? "enabled" : "disabled")
-        .text("pressure_stabilization_policy", "Enabled")
         .text("pressure_stabilization", pressureStabilizationActive(bc) ? "active" : "inactive")
         .text("pressure_stabilization_disabled_reason", "none");
 }
@@ -1111,7 +1105,6 @@ inline void applyFreeSurfaceContactLineConstraints(
     if (!surfaceStressActive(bc)) {
         logs.push_back(post::navierStokesLog("installed pressure-only free-surface stress")
                            .integer("marker", freeSurfaceMarker(bc))
-                           .text("surface_tension_form", "SurfaceStress")
                            .text("normal_source", "integration_rule_geometry")
                            .text("form", "p_external_n_dot_v")
                            .text("surface_energy_form", "omitted_literal_zero_gamma")
@@ -1119,7 +1112,6 @@ inline void applyFreeSurfaceContactLineConstraints(
     } else {
         logs.push_back(post::navierStokesLog("installed variational free-surface stress")
                            .integer("marker", freeSurfaceMarker(bc))
-                           .text("surface_tension_form", "SurfaceStress")
                            .text("normal_source", "integration_rule_geometry")
                            .text("form", "gamma_I_minus_n_outer_n_colon_grad_v")
                            .text("capillary_balance_method", "discrete_energy_volume_stationarity")
@@ -1133,7 +1125,6 @@ inline void applyFreeSurfaceContactLineConstraints(
                            .integer("marker", freeSurfaceMarker(bc))
                            .text("surface_tension_semi_implicit",
                                  freeSurfaceSurfaceTensionSemiImplicitName(bc.surface_tension_semi_implicit))
-                           .text("surface_tension_form", "SurfaceStress")
                            .text("form", "gamma_dt_eff_grad_gamma_du_dot_n_dot_grad_gamma_v_dot_n")
                            .text("reference_velocity_field", kFreeSurfaceSemiImplicitReferenceVelocityFieldName)
                            .text("reference_refresh", "every_generated_state_refresh")
@@ -1159,7 +1150,6 @@ inline void applyFreeSurfaceContactLineConstraints(
         logs.push_back(post::navierStokesLog("installed prescribed-angle wall-energy momentum term")
                            .integer("interface_marker", bc.interface_marker)
                            .integer("contact_marker", contact_marker)
-                           .text("surface_tension_form", "SurfaceStress")
                            .text("contact_force_discretization", kContactForce)
                            .diagnostic("navier_stokes_prescribed_contact_wall_energy"));
         if (contactLineHasNavierSlip(contact_line)) {
@@ -1186,7 +1176,6 @@ inline void applyFreeSurfaceContactLineConstraints(
                        .integer("wall_marker", contactLineWallBoundaryMarker(contact_line))
                        .text("convention", "theta_through_liquid_n_outward_liquid_nw_fluid_to_solid")
                        .text("law", "xi_Vcl_equals_gamma_cos_thetae_minus_cos_thetad")
-                       .text("surface_tension_form", "SurfaceStress")
                        .text("contact_force_discretization", kContactForce)
                        .integer("active_wall_marker", active_wall_marker)
                        .text("wetted_wall_domain", "sharp_generated_active_boundary")
@@ -1239,9 +1228,6 @@ inline void applyFreeSurfaceContactLineConstraints(
                                                           : cutVolumeSideName(activeDomainSide(bc.active_domain));
 
     std::vector<FE::LogRecord> logs;
-    // The active-domain method, the cut-metadata scale and the pressure
-    // stabilization policy are no longer options; their fields print the
-    // fixed values so that the record keeps its format.
     auto log = post::navierStokesLog("cut-cell stabilization");
     log.diagnostic("cut_cell_stabilization")
         .integer("marker", bc.interface_marker)
@@ -1249,13 +1235,9 @@ inline void applyFreeSurfaceContactLineConstraints(
         .text("interface_side", interface_side)
         .text("active_domain", activeDomainName(bc.active_domain))
         .text("active_domain_side", active_domain_side)
-        .text("active_domain_method", "CutVolume")
         .text("generated_interface_geometry",
               freeSurfaceGeneratedInterfaceGeometryName(bc.generated_interface_geometry))
         .text("geometry_tangent_policy", freeSurfaceGeometryTangentPolicyName(bc.geometry_tangent_policy))
-        .text("use_cut_metadata_scale", "false");
-    log.text("cut_metadata_scale_cap", "unbounded");
-    log.text("pressure_stabilization_policy", "Enabled")
         .text("pressure_stabilization", pressure_stabilization_enabled ? "enabled" : "disabled")
         .text("pressure_stabilization_form", pressure_stabilization_enabled ? "absolute" : "disabled")
         .text("pressure_disabled_reason", "none")

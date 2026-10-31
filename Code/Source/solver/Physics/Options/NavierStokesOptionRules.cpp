@@ -2035,7 +2035,6 @@ NavierStokesPreflight preflightNavierStokes(
             .real("isovalue", boundary.level_set_isovalue)
             .quoted("generated_interface_domain_id", boundary.generated_interface_domain_id)
             .text("active_domain", activeDomainName(boundary.active_domain))
-            .text("active_domain_method", "CutVolume")
             .text("side", cutVolumeSideName(side));
     }
 

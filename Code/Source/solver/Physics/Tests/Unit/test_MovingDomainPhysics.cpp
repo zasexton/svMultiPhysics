@@ -3240,8 +3240,6 @@ TEST(MovingDomainPhysics,
         structural_system, interface_marker, FormExprType::OuterProduct));
     EXPECT_FALSE(formulationRecordsInterfaceIntegralContainsExprType(
         structural_system, interface_marker, FormExprType::Gradient));
-    EXPECT_NE(log_output.find("surface_tension_form=SurfaceStress"),
-              std::string::npos);
     EXPECT_NE(log_output.find("normal_source=integration_rule_geometry"),
               std::string::npos);
     EXPECT_NE(log_output.find(
@@ -7436,7 +7434,6 @@ TEST(MovingDomainPhysics, NavierStokesUnfittedFreeSurfaceAddsCutCellStabilizatio
     EXPECT_NE(log_output.find("cut-cell stabilization"), std::string::npos);
     EXPECT_NE(log_output.find("interface_side=Minus"), std::string::npos);
     EXPECT_NE(log_output.find("active_domain_side=Negative"), std::string::npos);
-    EXPECT_NE(log_output.find("use_cut_metadata_scale=false"), std::string::npos);
     EXPECT_NE(log_output.find("velocity_polynomial_order=1"), std::string::npos);
     EXPECT_NE(log_output.find("pressure_polynomial_order=1"), std::string::npos);
     EXPECT_NE(log_output.find("derivative_orders=1"), std::string::npos);
