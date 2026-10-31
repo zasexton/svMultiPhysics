@@ -64,11 +64,6 @@ public:
     }
 
     /**
-     * @brief Optional quantities-of-interest (QoI) registration hook
-     */
-    virtual void registerFunctionals(FE::systems::FESystem& /*system*/) const {}
-
-    /**
      * @brief Validated, defaults-expanded configuration for provenance output
      *
      * Modules that expose an artifact return deterministic JSON only after a

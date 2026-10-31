@@ -68,7 +68,6 @@ Physics/
   Core/                      # common infrastructure (no equation-specific code)
     PhysicsModule.h          # interface: “register into FESystem”
     Domain.h                 # boundary IDs, subdomain filters, marker utilities
-    ParameterSchema.h        # declare/validate parameter sets per physics
 
   Materials/                 # simulation-ready constitutive models
     Fluid/                   # viscosity models, turbulence closures (future)
@@ -118,10 +117,6 @@ public:
     // Default implementation is a no-op.
     virtual void applyInitialConditions(const svmp::FE::systems::FESystem& system,
                                         std::span<svmp::FE::Real> u0) const {}
-
-    // Optional: quantities of interest (QoIs) / post-processing registration.
-    // Default implementation is a no-op.
-    virtual void registerFunctionals(svmp::FE::systems::FESystem& system) const {}
 };
 
 } // namespace svmp::Physics

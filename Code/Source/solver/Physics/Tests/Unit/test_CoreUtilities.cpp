@@ -9,14 +9,11 @@
 
 #include "Physics/Core/Domain.h"
 #include "Physics/Core/JITRuntimePolicy.h"
-#include "Physics/Core/ParameterSchema.h"
 #include "Physics/Core/PhysicsModule.h"
 #include "Physics/Core/TemporalValues.h"
 
-#include "FE/Core/FEException.h"
 #include "FE/Forms/JIT/LLVMJITBuildInfo.h"
 #include "FE/Systems/FormsInstaller.h"
-#include "FE/Systems/SystemState.h"
 
 #include <cstdlib>
 #include <filesystem>
@@ -138,53 +135,6 @@ TEST(MarkerSet, ContainsSpecificMarkers)
     EXPECT_TRUE(s.contains(1));
     EXPECT_TRUE(s.contains(7));
     EXPECT_FALSE(s.contains(2));
-}
-
-TEST(ParameterSchema, ValidateHonorsDefaults)
-{
-    ParameterSchema schema;
-
-    FE::params::Spec s;
-    s.key = "alpha";
-    s.type = FE::params::ValueType::Real;
-    s.required = true;
-    s.default_value = FE::params::Value{FE::Real(2.0)};
-    schema.add(std::move(s), "test");
-
-    FE::systems::SystemStateView state;
-    EXPECT_NO_THROW(schema.validate(state));
-}
-
-TEST(ParameterSchema, ValidateThrowsWhenMissingRequired)
-{
-    ParameterSchema schema;
-
-    FE::params::Spec s;
-    s.key = "alpha";
-    s.type = FE::params::ValueType::Real;
-    s.required = true;
-    schema.add(std::move(s), "test");
-
-    FE::systems::SystemStateView state;
-    EXPECT_THROW(schema.validate(state), FE::InvalidArgumentException);
-}
-
-TEST(ParameterSchema, FindAndClear)
-{
-    ParameterSchema schema;
-
-    FE::params::Spec s;
-    s.key = "alpha";
-    s.type = FE::params::ValueType::Real;
-    s.required = false;
-    schema.add(std::move(s), "test");
-
-    ASSERT_NE(schema.find("alpha"), nullptr);
-    EXPECT_EQ(schema.find("alpha")->type, FE::params::ValueType::Real);
-
-    schema.clear();
-    EXPECT_TRUE(schema.specs().empty());
-    EXPECT_EQ(schema.find("alpha"), nullptr);
 }
 
 TEST(JitRuntimePolicy, ModuleOptionsOverrideEnvironment)
