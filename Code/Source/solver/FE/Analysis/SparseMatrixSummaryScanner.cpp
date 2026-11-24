@@ -11,6 +11,7 @@
 
 #include "Backends/Interfaces/GenericMatrix.h"
 #include "Core/MpiCollectiveTrace.h"
+#include "Core/EnvironmentNames.h"
 
 #if defined(FE_HAS_FSILS)
 #include "Backends/FSILS/FsilsMatrix.h"
@@ -718,7 +719,7 @@ private:
 #if defined(FE_HAS_FSILS)
 [[nodiscard]] bool scanSelfCheckEnabled() noexcept
 {
-    const char* text = std::getenv("SVMP_ANALYSIS_SCAN_SELF_CHECK");
+    const char* text = environment::value("SVMP_ANALYSIS_SCAN_SELF_CHECK");
     return text != nullptr && text[0] != '\0' &&
            !(text[0] == '0' && text[1] == '\0');
 }

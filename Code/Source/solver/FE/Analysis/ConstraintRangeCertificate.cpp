@@ -24,6 +24,7 @@
 #include "Systems/SystemCollectives.h"
 #include "Systems/SystemsExceptions.h"
 #include "Systems/TransientSystem.h"
+#include "Core/EnvironmentNames.h"
 
 #if defined(FE_HAS_FSILS)
 #  include "Backends/FSILS/FsilsMatrix.h"
@@ -50,18 +51,6 @@ namespace svmp {
 namespace FE {
 namespace analysis {
 namespace {
-
-bool environmentFlagEnabled(const char* name) noexcept
-{
-    const char* env = std::getenv(name);
-    if (env == nullptr || env[0] == '\0') {
-        return false;
-    }
-    std::string v(env);
-    std::transform(v.begin(), v.end(), v.begin(),
-                   [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
-    return !(v == "0" || v == "false" || v == "off" || v == "no");
-}
 
 void axpy(backends::GenericVector& y, Real alpha, const backends::GenericVector& x)
 {
@@ -987,9 +976,9 @@ bool staticCertificateDiagnosticEnabled() noexcept
         "SVMP_FREE_SURFACE_EQUILIBRIUM_DIAGNOSTIC",
     };
     for (const char* name : names) {
-        const char* value = std::getenv(name);
+        const char* value = environment::value(name);
         if (value != nullptr && value[0] != '\0') {
-            return environmentFlagEnabled(name);
+            return environment::enabled(name);
         }
     }
     return false;
@@ -1002,7 +991,7 @@ std::optional<double> staticCertificateRepresentabilityDistance() noexcept
         "SVMP_FREE_SURFACE_PRESSURE_REPRESENTABILITY_MAX_RELATIVE_DISTANCE",
     };
     for (const char* name : names) {
-        const char* text = std::getenv(name);
+        const char* text = environment::value(name);
         if (text == nullptr || text[0] == '\0') {
             continue;
         }
@@ -1023,7 +1012,7 @@ std::optional<double> staticCertificateConstantKktDistance() noexcept
         "SVMP_FREE_SURFACE_CONSTANT_PRESSURE_KKT_MAX_RELATIVE_DISTANCE",
     };
     for (const char* name : names) {
-        const char* text = std::getenv(name);
+        const char* text = environment::value(name);
         if (text == nullptr || text[0] == '\0') {
             continue;
         }
@@ -1044,9 +1033,9 @@ bool staticCertificateInitializerRequested() noexcept
         "SVMP_FREE_SURFACE_STATIC_COMPATIBLE_PRESSURE_INITIALIZER",
     };
     for (const char* name : names) {
-        const char* value = std::getenv(name);
+        const char* value = environment::value(name);
         if (value != nullptr && value[0] != '\0') {
-            return environmentFlagEnabled(name);
+            return environment::enabled(name);
         }
     }
     return false;
@@ -1063,9 +1052,9 @@ bool staticCertificateEveryAssembly() noexcept
         "SVMP_FREE_SURFACE_CONSERVATIVE_BALANCE_DIAGNOSTIC_EVERY_ASSEMBLY",
     };
     for (const char* name : names) {
-        const char* value = std::getenv(name);
+        const char* value = environment::value(name);
         if (value != nullptr && value[0] != '\0') {
-            return environmentFlagEnabled(name);
+            return environment::enabled(name);
         }
     }
     return false;

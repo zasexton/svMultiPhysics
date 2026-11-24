@@ -31,6 +31,7 @@
  * (findDeclaration), so the names stay with the formulation.
  */
 
+#include "Core/EnvironmentNames.h"
 #include "Core/Types.h"
 #include "Systems/FormsInstaller.h"
 #include "Systems/OperatorRegistry.h"
@@ -81,8 +82,15 @@ public:
     /// others it throws std::invalid_argument.
     void declareSet(std::string set, std::vector<std::string> environment_switches);
 
-    /// Whether @p set is switched on now; throws std::invalid_argument for an undeclared set.
+    /// Whether @p set is switched on now: the first of its environment
+    /// switches that is set to a nonempty value decides.  The switches are
+    /// read through the solver's environment-name registry, which declares
+    /// them.  Throws std::invalid_argument for an undeclared set.
     [[nodiscard]] bool enabled(std::string_view set) const;
+
+    /// enabled(@p set), reading the switches through @p names.
+    [[nodiscard]] bool enabled(std::string_view set,
+                               const environment::EnvironmentNameRegistry& names) const;
 
     /// The install options of a diagnostic operator: the formulation's, as
     /// a measurement outside the problem analysis

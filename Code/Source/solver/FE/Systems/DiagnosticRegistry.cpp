@@ -43,8 +43,14 @@ void DiagnosticRegistry::declareSet(std::string set, std::vector<std::string> en
 
 bool DiagnosticRegistry::enabled(std::string_view set) const
 {
+    return enabled(set, environment::EnvironmentNameRegistry::solver());
+}
+
+bool DiagnosticRegistry::enabled(std::string_view set,
+                                 const environment::EnvironmentNameRegistry& names) const
+{
     for (const auto& name : find(set).environment_switches) {
-        const char* env = std::getenv(name.c_str());
+        const char* env = names.value(name);
         if (env == nullptr || env[0] == '\0') {
             continue;
         }

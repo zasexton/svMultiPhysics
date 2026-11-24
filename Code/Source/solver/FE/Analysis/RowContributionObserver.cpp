@@ -17,6 +17,7 @@
 #include "Systems/FESystem.h"
 #include "Systems/SystemsExceptions.h"
 #include "Systems/TransientSystem.h"
+#include "Core/EnvironmentNames.h"
 
 #if defined(FE_HAS_FSILS)
 #  include "Backends/FSILS/FsilsVector.h"
@@ -59,39 +60,27 @@ using timestepping::stateSynchronizationPointName;
     return stateSynchronizationPointName(point);
 }
 
-[[nodiscard]] bool envBoolEnabled(const char* name) noexcept
-{
-    const char* env = std::getenv(name);
-    if (env == nullptr || env[0] == '\0') {
-        return false;
-    }
-    std::string v(env);
-    std::transform(v.begin(), v.end(), v.begin(),
-                   [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
-    return !(v == "0" || v == "false" || v == "off" || v == "no");
-}
-
 [[nodiscard]] bool newtonFieldResidualDiagnosticEnabled() noexcept
 {
     static const bool enabled =
-        envBoolEnabled("SVMP_NEWTON_FIELD_RESIDUAL_DIAGNOSTIC") ||
-        envBoolEnabled("SVMP_NS_PRESSURE_ROW_CONTRIBUTION_DIAGNOSTIC") ||
-        envBoolEnabled("SVMP_PRESSURE_ROW_CONTRIBUTION_DIAGNOSTIC");
+        environment::enabled("SVMP_NEWTON_FIELD_RESIDUAL_DIAGNOSTIC") ||
+        environment::enabled("SVMP_NS_PRESSURE_ROW_CONTRIBUTION_DIAGNOSTIC") ||
+        environment::enabled("SVMP_PRESSURE_ROW_CONTRIBUTION_DIAGNOSTIC");
     return enabled;
 }
 
 [[nodiscard]] bool pressureRowContributionDiagnosticEnabled() noexcept
 {
     static const bool enabled =
-        envBoolEnabled("SVMP_NS_PRESSURE_ROW_CONTRIBUTION_DIAGNOSTIC") ||
-        envBoolEnabled("SVMP_PRESSURE_ROW_CONTRIBUTION_DIAGNOSTIC");
+        environment::enabled("SVMP_NS_PRESSURE_ROW_CONTRIBUTION_DIAGNOSTIC") ||
+        environment::enabled("SVMP_PRESSURE_ROW_CONTRIBUTION_DIAGNOSTIC");
     return enabled;
 }
 
 [[nodiscard]] const std::string& newtonFieldResidualDiagnosticFieldName()
 {
     static const std::string field_name = [] {
-        const char* env = std::getenv("SVMP_NEWTON_FIELD_RESIDUAL_FIELD");
+        const char* env = environment::value("SVMP_NEWTON_FIELD_RESIDUAL_FIELD");
         if (env != nullptr && env[0] != '\0') {
             return std::string(env);
         }
@@ -146,9 +135,9 @@ std::vector<GlobalIndex> parseGlobalIndexList(std::string_view text)
 [[nodiscard]] const std::vector<GlobalIndex>& newtonFieldResidualDiagnosticSampleDofs()
 {
     static const std::vector<GlobalIndex> dofs = [] {
-        const char* env = std::getenv("SVMP_NEWTON_FIELD_RESIDUAL_SAMPLE_DOFS");
+        const char* env = environment::value("SVMP_NEWTON_FIELD_RESIDUAL_SAMPLE_DOFS");
         if (env == nullptr || env[0] == '\0') {
-            env = std::getenv("SVMP_PRESSURE_ROW_CONTRIBUTION_SAMPLE_DOFS");
+            env = environment::value("SVMP_PRESSURE_ROW_CONTRIBUTION_SAMPLE_DOFS");
         }
         if (env == nullptr || env[0] == '\0') {
             return std::vector<GlobalIndex>{};
@@ -161,7 +150,7 @@ std::vector<GlobalIndex> parseGlobalIndexList(std::string_view text)
 [[nodiscard]] const std::vector<GlobalIndex>& newtonMatrixSupportGlobalSampleDofs()
 {
     static const std::vector<GlobalIndex> dofs = [] {
-        const char* env = std::getenv("SVMP_NEWTON_MATRIX_SUPPORT_SAMPLE_DOFS");
+        const char* env = environment::value("SVMP_NEWTON_MATRIX_SUPPORT_SAMPLE_DOFS");
         if (env == nullptr || env[0] == '\0') {
             return std::vector<GlobalIndex>{};
         }
@@ -174,12 +163,12 @@ std::vector<GlobalIndex> parseGlobalIndexList(std::string_view text)
 {
     static const bool enabled =
         pressureRowContributionDiagnosticEnabled() &&
-        (envBoolEnabled("SVMP_NS_PRESSURE_ROW_CONTRIBUTION_MATRIX_DIAGNOSTIC") ||
-         envBoolEnabled("SVMP_PRESSURE_ROW_CONTRIBUTION_MATRIX_DIAGNOSTIC") ||
-         envBoolEnabled("SVMP_NS_PRESSURE_ROW_CONTRIBUTION_MATRIX_SUMMARY_DIAGNOSTIC") ||
-         envBoolEnabled("SVMP_PRESSURE_ROW_CONTRIBUTION_MATRIX_SUMMARY_DIAGNOSTIC") ||
-         std::getenv("SVMP_PRESSURE_ROW_CONTRIBUTION_SAMPLE_DOFS") != nullptr ||
-         std::getenv("SVMP_NEWTON_MATRIX_SUPPORT_SAMPLE_DOFS") != nullptr);
+        (environment::enabled("SVMP_NS_PRESSURE_ROW_CONTRIBUTION_MATRIX_DIAGNOSTIC") ||
+         environment::enabled("SVMP_PRESSURE_ROW_CONTRIBUTION_MATRIX_DIAGNOSTIC") ||
+         environment::enabled("SVMP_NS_PRESSURE_ROW_CONTRIBUTION_MATRIX_SUMMARY_DIAGNOSTIC") ||
+         environment::enabled("SVMP_PRESSURE_ROW_CONTRIBUTION_MATRIX_SUMMARY_DIAGNOSTIC") ||
+         environment::isSet("SVMP_PRESSURE_ROW_CONTRIBUTION_SAMPLE_DOFS") ||
+         environment::isSet("SVMP_NEWTON_MATRIX_SUPPORT_SAMPLE_DOFS"));
     return enabled;
 }
 
@@ -187,8 +176,8 @@ std::vector<GlobalIndex> parseGlobalIndexList(std::string_view text)
 {
     static const bool enabled =
         pressureRowContributionDiagnosticEnabled() &&
-        (envBoolEnabled("SVMP_NS_PRESSURE_ROW_CONTRIBUTION_MATRIX_SUMMARY_DIAGNOSTIC") ||
-         envBoolEnabled("SVMP_PRESSURE_ROW_CONTRIBUTION_MATRIX_SUMMARY_DIAGNOSTIC"));
+        (environment::enabled("SVMP_NS_PRESSURE_ROW_CONTRIBUTION_MATRIX_SUMMARY_DIAGNOSTIC") ||
+         environment::enabled("SVMP_PRESSURE_ROW_CONTRIBUTION_MATRIX_SUMMARY_DIAGNOSTIC"));
     return enabled;
 }
 
@@ -196,9 +185,9 @@ std::vector<GlobalIndex> parseGlobalIndexList(std::string_view text)
     std::string_view op)
 {
     const char* env =
-        std::getenv("SVMP_NS_PRESSURE_ROW_CONTRIBUTION_MATRIX_SUMMARY_OPS");
+        environment::value("SVMP_NS_PRESSURE_ROW_CONTRIBUTION_MATRIX_SUMMARY_OPS");
     if (env == nullptr || env[0] == '\0') {
-        env = std::getenv("SVMP_PRESSURE_ROW_CONTRIBUTION_MATRIX_SUMMARY_OPS");
+        env = environment::value("SVMP_PRESSURE_ROW_CONTRIBUTION_MATRIX_SUMMARY_OPS");
     }
     if (env == nullptr || env[0] == '\0') {
         return true;

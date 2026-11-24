@@ -38,6 +38,9 @@ std::span<const NameDeclaration> solverCatalogue() noexcept
     [[maybe_unused]] constexpr auto NonReference = RunStatus::NonReference;
 
     // Owning services.
+    constexpr const char* kAnalysis = "FE/Analysis";
+    constexpr const char* kCertificate = "FE/Analysis/ConstraintRangeCertificate";
+    constexpr const char* kRowObserver = "FE/Analysis/RowContributionObserver";
     constexpr const char* kAssembly = "FE/Assembly";
     constexpr const char* kEigen = "FE/Backends/Eigen";
     constexpr const char* kFsils = "FE/Backends/FSILS";
@@ -48,6 +51,72 @@ std::span<const NameDeclaration> solverCatalogue() noexcept
     constexpr const char* kSystemAssembly = "FE/Systems/SystemAssembly";
 
     static constexpr NameDeclaration kSolverNames[] = {
+        // FE/Analysis: the constraint-range certificate and the row-contribution
+        // observers.  The six certificate gates (D61 item 7) mark a run as
+        // non-reference.
+        {"SVMP_ANALYSIS_SCAN_SELF_CHECK", Diagnostic, kAnalysis, Flag, "the first 256 reads", Reference,
+         "checks every direct matrix read of the analysis scan against getEntry and throws on a "
+         "difference"},
+        {"SVMP_FREE_SURFACE_CONSERVATIVE_BALANCE_DIAGNOSTIC", Diagnostic, kCertificate, Flag, "off", Reference,
+         "second spelling of SVMP_NS_FREE_SURFACE_CONSERVATIVE_BALANCE_DIAGNOSTIC"},
+        {"SVMP_FREE_SURFACE_CONSERVATIVE_BALANCE_DIAGNOSTIC_EVERY_ASSEMBLY", Performance, kCertificate, Flag,
+         "off", Reference,
+         "second spelling of SVMP_NS_FREE_SURFACE_CONSERVATIVE_BALANCE_DIAGNOSTIC_EVERY_ASSEMBLY"},
+        {"SVMP_FREE_SURFACE_CONSTANT_PRESSURE_KKT_MAX_RELATIVE_DISTANCE", NumericalOverride, kCertificate, Real,
+         "no gate", NonReference,
+         "second spelling of SVMP_NS_FREE_SURFACE_CONSTANT_PRESSURE_KKT_MAX_RELATIVE_DISTANCE"},
+        {"SVMP_FREE_SURFACE_EQUILIBRIUM_DIAGNOSTIC", Diagnostic, kCertificate, Flag, "off", Reference,
+         "fourth spelling of SVMP_NS_FREE_SURFACE_CONSERVATIVE_BALANCE_DIAGNOSTIC"},
+        {"SVMP_FREE_SURFACE_PRESSURE_REPRESENTABILITY_MAX_RELATIVE_DISTANCE", NumericalOverride, kCertificate,
+         Real, "no gate", NonReference,
+         "second spelling of SVMP_NS_FREE_SURFACE_PRESSURE_REPRESENTABILITY_MAX_RELATIVE_DISTANCE"},
+        {"SVMP_FREE_SURFACE_STATIC_COMPATIBLE_PRESSURE_INITIALIZER", NumericalOverride, kCertificate, Flag,
+         "off", NonReference,
+         "second spelling of SVMP_NS_FREE_SURFACE_STATIC_COMPATIBLE_PRESSURE_INITIALIZER"},
+        {"SVMP_NEWTON_FIELD_RESIDUAL_DIAGNOSTIC", Diagnostic, kRowObserver, Flag, "off", Reference,
+         "logs the residual of one field per Newton assembly"},
+        {"SVMP_NEWTON_FIELD_RESIDUAL_FIELD", Diagnostic, kRowObserver, Text, "Pressure", Reference,
+         "field of the field-residual log"},
+        {"SVMP_NEWTON_FIELD_RESIDUAL_SAMPLE_DOFS", Diagnostic, kRowObserver, List, "none", Reference,
+         "global DOFs sampled by the field-residual log"},
+        {"SVMP_NEWTON_MATRIX_SUPPORT_SAMPLE_DOFS", Diagnostic, kRowObserver, List, "none", Reference,
+         "global DOFs whose matrix support is logged"},
+        {"SVMP_NS_FREE_SURFACE_CONSERVATIVE_BALANCE_DIAGNOSTIC", Diagnostic, kCertificate, Flag, "off",
+         Reference,
+         "logs the constraint-range certificate (representability and constant-field KKT distances); "
+         "the first set spelling of the four decides"},
+        {"SVMP_NS_FREE_SURFACE_CONSERVATIVE_BALANCE_DIAGNOSTIC_EVERY_ASSEMBLY", Performance, kCertificate, Flag,
+         "off", Reference, "recomputes the certificate's pair matrix and least-squares solve for every sample"},
+        {"SVMP_NS_FREE_SURFACE_CONSTANT_PRESSURE_KKT_MAX_RELATIVE_DISTANCE", NumericalOverride, kCertificate,
+         Real, "no gate", NonReference,
+         "accepts a converged step only if the constant-field KKT distance is at most this value"},
+        {"SVMP_NS_FREE_SURFACE_EQUILIBRIUM_DIAGNOSTIC", Diagnostic, kCertificate, Flag, "off", Reference,
+         "third spelling of SVMP_NS_FREE_SURFACE_CONSERVATIVE_BALANCE_DIAGNOSTIC"},
+        {"SVMP_NS_FREE_SURFACE_PRESSURE_REPRESENTABILITY_MAX_RELATIVE_DISTANCE", NumericalOverride, kCertificate,
+         Real, "no gate", NonReference,
+         "accepts a converged step only if the representability distance is at most this value"},
+        {"SVMP_NS_FREE_SURFACE_STATIC_COMPATIBLE_PRESSURE_INITIALIZER", NumericalOverride, kCertificate, Flag,
+         "off", NonReference, "replaces the initial guess by the static-compatible least-squares correction"},
+        {"SVMP_NS_PRESSURE_ROW_CONTRIBUTION_DIAGNOSTIC", Diagnostic, kRowObserver, Flag, "off", Reference,
+         "logs the declared row-contribution operators per assembly, and the field-residual log"},
+        {"SVMP_NS_PRESSURE_ROW_CONTRIBUTION_MATRIX_DIAGNOSTIC", Diagnostic, kRowObserver, Flag, "off",
+         Reference, "adds the matrix support of the sampled rows to the row-contribution log"},
+        {"SVMP_NS_PRESSURE_ROW_CONTRIBUTION_MATRIX_SUMMARY_DIAGNOSTIC", Diagnostic, kRowObserver, Flag, "off",
+         Reference, "adds matrix summaries of the row-contribution operators"},
+        {"SVMP_NS_PRESSURE_ROW_CONTRIBUTION_MATRIX_SUMMARY_OPS", Diagnostic, kRowObserver, List,
+         "every operator", Reference, "operators of the matrix summaries"},
+        {"SVMP_PRESSURE_ROW_CONTRIBUTION_DIAGNOSTIC", Diagnostic, kRowObserver, Flag, "off", Reference,
+         "second spelling of SVMP_NS_PRESSURE_ROW_CONTRIBUTION_DIAGNOSTIC"},
+        {"SVMP_PRESSURE_ROW_CONTRIBUTION_MATRIX_DIAGNOSTIC", Diagnostic, kRowObserver, Flag, "off", Reference,
+         "second spelling of SVMP_NS_PRESSURE_ROW_CONTRIBUTION_MATRIX_DIAGNOSTIC"},
+        {"SVMP_PRESSURE_ROW_CONTRIBUTION_MATRIX_SUMMARY_DIAGNOSTIC", Diagnostic, kRowObserver, Flag, "off",
+         Reference, "second spelling of SVMP_NS_PRESSURE_ROW_CONTRIBUTION_MATRIX_SUMMARY_DIAGNOSTIC"},
+        {"SVMP_PRESSURE_ROW_CONTRIBUTION_MATRIX_SUMMARY_OPS", Diagnostic, kRowObserver, List,
+         "every operator", Reference, "second spelling of SVMP_NS_PRESSURE_ROW_CONTRIBUTION_MATRIX_SUMMARY_OPS"},
+        {"SVMP_PRESSURE_ROW_CONTRIBUTION_SAMPLE_DOFS", Diagnostic, kRowObserver, List, "none", Reference,
+         "second spelling of SVMP_NEWTON_FIELD_RESIDUAL_SAMPLE_DOFS; setting it also adds the matrix "
+         "support log"},
+
         // FE/Assembly and FE/Systems/SystemAssembly: assembly and cut-cell numerics.
         {"SVMP_ASSEMBLY_SPIN_US", Performance, kAssembly, Integer, "0", Reference,
          "busy-wait of a threaded-assembly worker before it blocks, in microseconds"},

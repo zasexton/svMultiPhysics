@@ -1967,7 +1967,7 @@ TEST(FormulationBuilder, InstallsDiagnosticOperatorsThroughTheSystemRegistry)
     EXPECT_EQ(systems::findDiagnosticRegistry(sys), nullptr);
 
     systems::FormulationBuilder F(sys, "op", systems::FormInstallOptions{});
-    F.diagnostics().declareSet("unit_set", {"SVMP_UNIT_DIAGNOSTIC_SWITCH_THAT_IS_NEVER_SET"});
+    F.diagnostics().declareSet("unit_set", {});
     EXPECT_EQ(systems::findDiagnosticRegistry(sys), &systems::diagnosticRegistry(sys));
     EXPECT_FALSE(systems::diagnosticRegistry(sys).enabled("unit_set"));
     const auto kernels = F.diagnostic("unit_set", "op_diagnostic", {u_field}, (u * v).dx(),
@@ -2103,20 +2103,32 @@ TEST(DiagnosticRegistry, SwitchesSetsAndRecordsTheirOperators)
     const auto u_field = sys.addField(systems::FieldSpec{.name = "u", .space = space, .components = 1});
     const auto w_field = sys.addField(systems::FieldSpec{.name = "w", .space = space, .components = 1});
 
+    // The switches are environment names, declared in a registry of the
+    // test's own; the solver's registry declares no such names.
+    namespace environment = svmp::FE::environment;
+    static constexpr environment::NameDeclaration switches[] = {
+        {"FE_UNIT_DIAGNOSTIC_REGISTRY_A", environment::NameKind::Diagnostic, "test",
+         environment::ValueType::Flag, "off", environment::RunStatus::Reference, "unit switch A"},
+        {"FE_UNIT_DIAGNOSTIC_REGISTRY_B", environment::NameKind::Diagnostic, "test",
+         environment::ValueType::Flag, "off", environment::RunStatus::Reference, "unit switch B"},
+    };
+    const environment::EnvironmentNameRegistry names(switches);
     systems::DiagnosticRegistry registry;
     registry.declareSet("unit", {"FE_UNIT_DIAGNOSTIC_REGISTRY_A", "FE_UNIT_DIAGNOSTIC_REGISTRY_B"});
     ::unsetenv("FE_UNIT_DIAGNOSTIC_REGISTRY_A");
     ::unsetenv("FE_UNIT_DIAGNOSTIC_REGISTRY_B");
-    EXPECT_FALSE(registry.enabled("unit"));
+    EXPECT_FALSE(registry.enabled("unit", names));
     ::setenv("FE_UNIT_DIAGNOSTIC_REGISTRY_B", "Yes", 1);
-    EXPECT_TRUE(registry.enabled("unit"));
+    EXPECT_TRUE(registry.enabled("unit", names));
     ::setenv("FE_UNIT_DIAGNOSTIC_REGISTRY_A", "OFF", 1);
-    EXPECT_FALSE(registry.enabled("unit"));
+    EXPECT_FALSE(registry.enabled("unit", names));
     ::setenv("FE_UNIT_DIAGNOSTIC_REGISTRY_A", "", 1);
-    EXPECT_TRUE(registry.enabled("unit"));
+    EXPECT_TRUE(registry.enabled("unit", names));
     ::unsetenv("FE_UNIT_DIAGNOSTIC_REGISTRY_A");
     ::unsetenv("FE_UNIT_DIAGNOSTIC_REGISTRY_B");
     EXPECT_THROW((void)registry.enabled("undeclared"), std::invalid_argument);
+    // A switch the solver's registry does not declare is a programming error.
+    EXPECT_THROW((void)registry.enabled("unit"), std::logic_error);
 
     systems::FormInstallOptions formulation;
     formulation.source_component_tag = "residual";

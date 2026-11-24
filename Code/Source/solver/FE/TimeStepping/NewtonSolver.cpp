@@ -22,6 +22,7 @@
 #include "Basis/BasisCache.h"
 #include "Spaces/FunctionSpace.h"
 #include "Systems/SystemsExceptions.h"
+#include "Core/EnvironmentNames.h"
 
 #if defined(FE_HAS_FSILS)
 #  include "Backends/FSILS/FsilsMatrix.h"
@@ -137,7 +138,7 @@ constexpr NewtonCommunicator kSerialNewtonCommunicator = 0;
 {
     static const bool enabled =
         envBoolEnabled("SVMP_NEWTON_MATRIX_SUPPORT_DIAGNOSTIC") ||
-        std::getenv("SVMP_NEWTON_MATRIX_SUPPORT_SAMPLE_DOFS") != nullptr;
+        environment::isSet("SVMP_NEWTON_MATRIX_SUPPORT_SAMPLE_DOFS");
     return enabled;
 }
 
@@ -187,7 +188,7 @@ std::vector<GlobalIndex> parseGlobalIndexList(std::string_view text)
 [[nodiscard]] const std::vector<GlobalIndex>& newtonMatrixSupportGlobalSampleDofs()
 {
     static const std::vector<GlobalIndex> dofs = [] {
-        const char* env = std::getenv("SVMP_NEWTON_MATRIX_SUPPORT_SAMPLE_DOFS");
+        const char* env = environment::value("SVMP_NEWTON_MATRIX_SUPPORT_SAMPLE_DOFS");
         if (env == nullptr || env[0] == '\0') {
             return std::vector<GlobalIndex>{};
         }

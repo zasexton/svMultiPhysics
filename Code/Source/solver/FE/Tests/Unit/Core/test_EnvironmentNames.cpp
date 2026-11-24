@@ -284,7 +284,8 @@ std::set<std::string> quotedNames(const std::string& text)
 /// registry and the rest through local helpers; their remaining names follow.
 bool partiallyConverted(const std::filesystem::path& path)
 {
-    return path.filename() == "ApplicationDriver.cpp";
+    // NewtonSolver.cpp: until the time-stepping family converts.
+    return path.filename() == "ApplicationDriver.cpp" || path.filename() == "NewtonSolver.cpp";
 }
 
 /// The names that @p text reads with std::getenv and a literal argument.
