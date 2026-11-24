@@ -657,7 +657,7 @@ inline void appendVelocityNitscheBoundaries(
     if (!FE::numeric::isPositive(options.nitsche_gamma) ||
         !FE::numeric::isFinite(options.nitsche_gamma)) {
         throw std::invalid_argument(
-            "applyVelocityNitscheBCs: nitsche_gamma must be finite and > 0");
+            "navier_stokes::Factories: nitsche_gamma must be finite and > 0");
     }
 
     using Rows = MomentumContinuityRows<std::remove_reference_t<AppendMomentum>,
@@ -682,107 +682,7 @@ inline void appendVelocityNitscheBoundaries(
     }
 }
 
-// Compatibility destinations may alias one another. Preserve their sequential
-// updates rather than passing them through the stricter production-row sink.
-template <class Boundaries, class ResolveBoundary>
-inline void applyVelocityNitscheBoundaries(
-    FE::forms::FormExpr& momentum_form,
-    FE::forms::FormExpr& continuity_form,
-    const IncompressibleNavierStokesVMSOptions& options,
-    const Boundaries& boundaries,
-    ResolveBoundary&& resolve_boundary,
-    const FE::forms::FormExpr& u,
-    const FE::forms::FormExpr& p,
-    const FE::forms::FormExpr& v,
-    const FE::forms::FormExpr& q,
-    const FE::forms::FormExpr& mu,
-    std::vector<FE::forms::bc::GeneratedBoundaryNitscheTraceFormBinding>* generated_trace_bindings,
-    FE::forms::FormExpr* momentum_residual_work_form,
-    FE::forms::FormExpr* continuity_residual_work_form,
-    std::vector<PreparedWeakVelocityBoundary>* prepared_boundaries)
-{
-    const auto append_momentum = [&](const FE::forms::FormExpr& contribution) {
-        momentum_form = FE::forms::sumOf(momentum_form, contribution);
-        if (momentum_residual_work_form != nullptr) {
-            *momentum_residual_work_form = FE::forms::sumOf(
-                *momentum_residual_work_form, contribution);
-        }
-    };
-    const auto append_continuity = [&](const FE::forms::FormExpr& contribution) {
-        continuity_form = FE::forms::sumOf(continuity_form, contribution);
-        if (continuity_residual_work_form != nullptr) {
-            *continuity_residual_work_form = FE::forms::sumOf(
-                *continuity_residual_work_form, contribution);
-        }
-    };
-    appendVelocityNitscheBoundaries(options, boundaries, std::forward<ResolveBoundary>(resolve_boundary),
-        u, p, v, q, mu, generated_trace_bindings, append_momentum, append_continuity, prepared_boundaries);
-}
-
 } // namespace detail
-
-inline void applyVelocityNitscheBCs(
-    FE::forms::FormExpr& momentum_form,
-    FE::forms::FormExpr& continuity_form,
-    const IncompressibleNavierStokesVMSOptions& options,
-    int dim,
-    const FE::forms::FormExpr& u,
-    const FE::forms::FormExpr& p,
-    const FE::forms::FormExpr& v,
-    const FE::forms::FormExpr& q,
-    const FE::forms::FormExpr& mu,
-    const std::function<std::optional<int>(int)>& generated_active_boundary_marker = {},
-    std::vector<FE::forms::bc::GeneratedBoundaryNitscheTraceFormBinding>* generated_trace_bindings = nullptr,
-    FE::forms::FormExpr* momentum_residual_work_form = nullptr,
-    FE::forms::FormExpr* continuity_residual_work_form = nullptr,
-    std::vector<PreparedWeakVelocityBoundary>* prepared_boundaries = nullptr)
-{
-    const auto resolve_boundary = [&](const auto& bc) {
-        const int marker = FE::forms::bc::boundaryMarkerOrThrow(
-            bc, "navier_stokes::Factories::applyVelocityNitscheBCs");
-        const auto generated_marker = generated_active_boundary_marker
-            ? generated_active_boundary_marker(marker) : std::nullopt;
-        for (int d = 0; d < dim; ++d) {
-            if (!bc.active_components[static_cast<std::size_t>(d)]) {
-                throw std::invalid_argument(
-                    "applyVelocityNitscheBCs: partial-component weak velocity Dirichlet is not supported");
-            }
-        }
-        auto uD_comp = FE::forms::bc::toVectorExpr(
-            bc.value, dim, "ns_uD", marker, FE::forms::bc::ComponentValueNameStyle::Component);
-        return PreparedWeakVelocityBoundary{
-            .physical_marker = marker,
-            .generated_marker = generated_marker,
-            .prescribed_velocity = FE::forms::FormExpr::asVector(std::move(uD_comp))};
-    };
-    detail::applyVelocityNitscheBoundaries(
-        momentum_form, continuity_form, options, options.velocity_dirichlet_weak, resolve_boundary,
-        u, p, v, q, mu, generated_trace_bindings, momentum_residual_work_form,
-        continuity_residual_work_form, prepared_boundaries);
-}
-
-/// Consume inputs prepared in this registration's preflight. The generated
-/// viscous route and its immutable binding are rebuilt with the actual fields.
-inline void applyVelocityNitscheBCs(
-    FE::forms::FormExpr& momentum_form,
-    FE::forms::FormExpr& continuity_form,
-    const IncompressibleNavierStokesVMSOptions& options,
-    std::span<const PreparedWeakVelocityBoundary> prepared_boundaries,
-    const FE::forms::FormExpr& u,
-    const FE::forms::FormExpr& p,
-    const FE::forms::FormExpr& v,
-    const FE::forms::FormExpr& q,
-    const FE::forms::FormExpr& mu,
-    std::vector<FE::forms::bc::GeneratedBoundaryNitscheTraceFormBinding>* generated_trace_bindings = nullptr,
-    FE::forms::FormExpr* momentum_residual_work_form = nullptr,
-    FE::forms::FormExpr* continuity_residual_work_form = nullptr)
-{
-    detail::applyVelocityNitscheBoundaries(
-        momentum_form, continuity_form, options, prepared_boundaries,
-        [](const PreparedWeakVelocityBoundary& boundary) -> const PreparedWeakVelocityBoundary& { return boundary; },
-        u, p, v, q, mu, generated_trace_bindings, momentum_residual_work_form,
-        continuity_residual_work_form, nullptr);
-}
 
 enum class GeneratedTraceCertification { None, Required };
 
@@ -807,6 +707,47 @@ appendVelocityNitscheBCs(
         certification == GeneratedTraceCertification::Required ? &bindings : nullptr,
         momentum, continuity, nullptr);
     return bindings;
+}
+
+/// The weak velocity conditions of @p options prepared for registration, each
+/// in turn: its marker, the generated wetted part of its boundary when
+/// @p generated_active_boundary_for names one, every component prescribed and
+/// the prescribed velocity; then its Nitsche route is stated with @p velocity
+/// and @p pressure and dropped, so a rejected route fails before the next
+/// condition is read.  The bindings of the certified generated routes are
+/// appended to @p bindings.  No prescribed value is sampled.
+[[nodiscard]] inline std::vector<PreparedWeakVelocityBoundary> prepareWeakVelocityBoundaries(
+    const IncompressibleNavierStokesVMSOptions& options,
+    int dim,
+    const std::function<std::optional<int>(int)>& generated_active_boundary_for,
+    const FE::systems::BoundUnknown& velocity,
+    const FE::systems::BoundUnknown& pressure,
+    const FE::forms::FormExpr& mu,
+    std::vector<FE::forms::bc::GeneratedBoundaryNitscheTraceFormBinding>& bindings)
+{
+    const auto resolve_boundary = [&](const auto& bc) {
+        const int marker = FE::forms::bc::boundaryMarkerOrThrow(
+            bc, "navier_stokes::Factories::prepareWeakVelocityBoundaries");
+        const auto generated_marker = generated_active_boundary_for
+            ? generated_active_boundary_for(marker) : std::nullopt;
+        for (int d = 0; d < dim; ++d) {
+            if (!bc.active_components[static_cast<std::size_t>(d)]) {
+                throw std::invalid_argument(
+                    "prepareWeakVelocityBoundaries: partial-component weak velocity Dirichlet is not supported");
+            }
+        }
+        auto uD_comp = FE::forms::bc::toVectorExpr(
+            bc.value, dim, "ns_uD", marker, FE::forms::bc::ComponentValueNameStyle::Component);
+        return PreparedWeakVelocityBoundary{
+            .physical_marker = marker,
+            .generated_marker = generated_marker,
+            .prescribed_velocity = FE::forms::FormExpr::asVector(std::move(uD_comp))};
+    };
+    const auto drop = [](const FE::forms::FormExpr&) {};
+    std::vector<PreparedWeakVelocityBoundary> prepared;
+    detail::appendVelocityNitscheBoundaries(options, options.velocity_dirichlet_weak, resolve_boundary,
+        velocity.state, pressure.state, velocity.test, pressure.test, mu, &bindings, drop, drop, &prepared);
+    return prepared;
 }
 
 // ---------------------------------------------------------------------------

@@ -1460,28 +1460,21 @@ void validateNavierStokesBoundaryConfiguration(
     });
     pressure_conditions.validate();
 
-    FormExpr momentum_preflight;
-    FormExpr continuity_preflight;
-    std::vector<PreparedWeakVelocityBoundary> prepared_boundaries;
+    // Each weak velocity condition, prepared and its Nitsche route stated
+    // with the preflight symbols in turn.
     std::vector<
         FE::forms::bc::
             GeneratedBoundaryNitscheTraceFormBinding>
         generated_nitsche_trace_binding_preflight;
-    Factories::applyVelocityNitscheBCs(
-        momentum_preflight,
-        continuity_preflight,
-        options,
-        dim,
-        u,
-        p,
-        v,
-        q,
-        FormExpr::constant(options.viscosity),
-        generated_active_boundary_for,
-        &generated_nitsche_trace_binding_preflight,
-        nullptr,
-        nullptr,
-        &prepared_boundaries);
+    auto prepared_boundaries =
+        Factories::prepareWeakVelocityBoundaries(
+            options,
+            dim,
+            generated_active_boundary_for,
+            FE::systems::BoundUnknown{FE::FieldId{0}, u, v},
+            FE::systems::BoundUnknown{FE::FieldId{1}, p, q},
+            FormExpr::constant(options.viscosity),
+            generated_nitsche_trace_binding_preflight);
     std::vector<FE::forms::BoundaryDomain> routes;
     for (const auto& boundary : prepared_boundaries) {
         if (boundary.generated_marker.has_value()) {
