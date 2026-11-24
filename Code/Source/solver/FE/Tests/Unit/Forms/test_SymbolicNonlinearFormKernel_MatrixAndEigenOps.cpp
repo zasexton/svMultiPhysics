@@ -21,6 +21,8 @@
 #include "Spaces/H1Space.h"
 #include "Tests/Unit/Forms/FormsTestHelpers.h"
 
+#include <cmath>
+#include <exception>
 #include <vector>
 
 namespace svmp {
@@ -265,6 +267,57 @@ TEST(SymbolicEigenJacobianTest, SymmetricEigenvalue_Tetra4_3x3_Index2_MatchesCen
     const std::vector<Real> U = {0.12, -0.08, 0.15, 0.02};
 
     expectSymbolicJacobianMatchesCentralDifferences(mesh, space, residual, U, /*eps=*/1e-6, /*tol=*/5e-6);
+}
+
+/**
+ * eigenvalue(A, i) and A.symmetricEigenvalue(i) are the eigenvalues of the
+ * symmetric part (A + A^T)/2, in descending order.  For A = [[1, 4], [0, 2]]
+ * the eigenvalues of A are 2 and 1; those of its symmetric part [[1, 2], [2, 2]]
+ * are (3 + sqrt(17))/2 and (3 - sqrt(17))/2.  An index outside [0, n) is
+ * refused by the evaluator, as by the JIT validator.
+ */
+TEST(SymbolicEigenJacobianTest, EigenvalueOfANonsymmetricMatrixIsThatOfItsSymmetricPart)
+{
+    SingleTriangleMeshAccess mesh;
+    spaces::H1Space space(ElementType::Triangle3, /*order=*/1);
+    auto dof_map = makeSingleCellDofMap(3);
+
+    const auto u = TrialFunction(space, "u");
+    const auto v = TestFunction(space, "v");
+    const auto A = FormExpr::asTensor({{FormExpr::constant(1.0), FormExpr::constant(4.0)},
+                                       {FormExpr::constant(0.0), FormExpr::constant(2.0)}});
+
+    // The entries of the mass matrix of one triangle sum to its area, 1/2.
+    const auto assembled = [&](const FormExpr& lambda) {
+        FormCompiler compiler;
+        FormKernel kernel(compiler.compileBilinear((lambda * u * v).dx()));
+        assembly::StandardAssembler assembler;
+        assembler.setDofMap(dof_map);
+        assembly::DenseMatrixView M(3);
+        M.zero();
+        (void)assembler.assembleMatrix(mesh, space, space, kernel, M);
+        Real sum = 0.0;
+        for (GlobalIndex i = 0; i < 3; ++i) {
+            for (GlobalIndex j = 0; j < 3; ++j) {
+                sum += M.getMatrixEntry(i, j);
+            }
+        }
+        return sum / 0.5;
+    };
+
+    const Real largest = 0.5 * (3.0 + std::sqrt(17.0));
+    const Real smallest = 0.5 * (3.0 - std::sqrt(17.0));
+    EXPECT_NEAR(assembled(eigenvalue(A, 0)), largest, 1e-12);
+    EXPECT_NEAR(assembled(eigenvalue(A, 1)), smallest, 1e-12);
+    EXPECT_NEAR(assembled(A.symmetricEigenvalue(0)), largest, 1e-12);
+    EXPECT_NEAR(assembled(A.symmetricEigenvalue(1)), smallest, 1e-12);
+
+    for (const int which : {-1, 2}) {
+        EXPECT_THROW((void)assembled(eigenvalue(A, which)), std::exception) << "index " << which;
+        EXPECT_THROW((void)assembled(A.symmetricEigenvalue(which)), std::exception) << "index " << which;
+        EXPECT_THROW((void)assembled(A.symmetricEigenvector(which).component(0)), std::exception)
+            << "index " << which;
+    }
 }
 
 } // namespace test

@@ -908,10 +908,12 @@ public:
     [[nodiscard]] FormExpr smoothMin(const FormExpr& rhs, const FormExpr& eps) const;
     [[nodiscard]] FormExpr smoothMax(const FormExpr& rhs, const FormExpr& eps) const;
 
-    // Symmetric eigenvalue access (2x2 and 3x3 only; eigenvalues sorted descending).
+    // Eigenvalue `which` of the symmetric part (A + A^T)/2 (2x2 and 3x3 only;
+    // eigenvalues sorted descending; 0 <= which < n, other indices refused).
     [[nodiscard]] FormExpr symmetricEigenvalue(int which) const;
 
-	    // General eigendecomposition accessors (initial support: symmetric 2x2/3x3).
+	    // The values of symmetricEigenvalue(which), as an Eigenvalue node: the
+	    // eigenvalues of the symmetric part, not of a nonsymmetric matrix.
 	    [[nodiscard]] FormExpr eigenvalue(int which) const;
 	    [[nodiscard]] FormExpr symmetricEigenvector(int which) const;
 	    [[nodiscard]] FormExpr spectralDecomposition() const; // eigenvectors as columns

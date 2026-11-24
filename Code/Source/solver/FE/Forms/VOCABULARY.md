@@ -559,11 +559,12 @@ differentiability are validated by the relevant evaluators/JIT paths.
 | `sqrtm(A)`, `A.matrixSqrt()` | Matrix square root |
 | `powm(A, p)`, `A.matrixPow(p)` | Matrix power |
 | `FormExpr::matrix*DirectionalDerivative(A, dA)` | Directional derivatives for matrix functions |
-| `A.symmetricEigenvalue(which)` | Symmetric eigenvalue (2x2 and 3x3, sorted descending) |
-| `eigenvalue(A, which)`, `A.eigenvalue(which)` | General eigenvalue helper |
-| `eigvec_sym(A, which)`, `A.symmetricEigenvector(which)` | Symmetric eigenvector |
+| `A.symmetricEigenvalue(which)` | Eigenvalue `which` of the symmetric part `(A + A^T)/2` (2x2 and 3x3, sorted descending); `A` itself for a symmetric `A` |
+| `eigenvalue(A, which)`, `A.eigenvalue(which)` | The same values as `A.symmetricEigenvalue(which)`, as a node of its own: not the eigenvalues of a nonsymmetric `A` (for `[[1, 4], [0, 2]]` it gives `(3 ± sqrt(17))/2`, not 2 and 1) |
+| `eigvec_sym(A, which)`, `A.symmetricEigenvector(which)` | Eigenvector `which` of the symmetric part |
 | `spectralDecomp(A)`, `A.spectralDecomposition()` | Spectral decomposition/eigenvectors-as-columns |
 | `FormExpr::symmetricEigen*DirectionalDerivative(...)`, `spectralDecompositionDirectionalDerivative(...)` | Directional derivatives for supported eigen operations |
+| Eigen index rule | `0 <= which < n` for an `n x n` matrix, in the interpreter and the JIT validator alike; another index is refused when the term is evaluated or validated, never clamped (`test_SymbolicNonlinearFormKernel_MatrixAndEigenOps.cpp`) |
 | `FormExpr::previousSolution(k)` | Previous solution value, `k >= 1`, of the trial field of the block being assembled (not field-bound); history slot k, refused at assembly where the integrator puts a rate or a scheme constant there (slot 2 of first-order generalized-alpha, slots 1 and 2 of second-order generalized-alpha and Newmark). In a multi-field install it (and `historyWeightedSum`, `historyConvolution`) may appear only in a row that depends on no unknown but its own field, where it is that field's history; elsewhere the install is refused, naming the term |
 | `FormExpr::historyWeightedSum(weights)` | Weighted history sum |
 | `FormExpr::historyConvolution(weights)` | History convolution helper |

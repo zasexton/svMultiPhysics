@@ -72,6 +72,21 @@ struct ConstitutiveStateLayout {
 
 namespace {
 
+/// The eigen index of an eigenvalue or eigenvector node of an n x n matrix.
+/// One rule for the interpreter and the JIT validator (eigenIndexInRange):
+/// 0 <= which < n; any other index is refused, not clamped.
+[[nodiscard]] std::int32_t checkedEigenIndex(const FormExprNode& node, std::size_t n, const char* op)
+{
+    const int which = node.eigenIndex().value_or(0);
+    if (which < 0 || static_cast<std::size_t>(which) >= n) {
+        throw FEException(std::string("Forms: ") + op + " index " + std::to_string(which) +
+                              " is outside [0, " + std::to_string(n) + ") for a " + std::to_string(n) + "x" +
+                              std::to_string(n) + " matrix",
+                          __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
+    }
+    return static_cast<std::int32_t>(which);
+}
+
 struct RequestedKernelOutputs {
     bool matrix{false};
     bool vector{false};
@@ -7983,7 +7998,7 @@ EvalValue<Real> evalRealSwitchImpl(const FormExprNode& node,
                                   __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
             }
 
-            const auto which = static_cast<std::int32_t>(node.eigenIndex().value_or(0));
+            const auto which = checkedEigenIndex(node, rows, "eigvec_sym_dd()");
             if (rows == 2u) {
                 std::array<double, 4> A{};
                 std::array<double, 4> dA{};
@@ -8142,7 +8157,7 @@ EvalValue<Real> evalRealSwitchImpl(const FormExprNode& node,
                 throw FEException("Forms: eig_sym() expects a 2x2 or 3x3 square matrix",
                                   __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
             }
-            const auto which = static_cast<std::int32_t>(node.eigenIndex().value_or(0));
+            const auto which = checkedEigenIndex(node, rows, "eig_sym()");
             if (rows == 2u) {
                 std::array<double, 4> A{};
                 for (std::size_t r = 0; r < 2u; ++r) {
@@ -8173,7 +8188,7 @@ EvalValue<Real> evalRealSwitchImpl(const FormExprNode& node,
                 throw FEException("Forms: eig() expects a 2x2 or 3x3 square matrix",
                                   __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
             }
-            const auto which = static_cast<std::int32_t>(node.eigenIndex().value_or(0));
+            const auto which = checkedEigenIndex(node, rows, "eig()");
             if (rows == 2u) {
                 std::array<double, 4> A{};
                 for (std::size_t r = 0; r < 2u; ++r) {
@@ -8206,7 +8221,7 @@ EvalValue<Real> evalRealSwitchImpl(const FormExprNode& node,
                 throw FEException("Forms: eigvec_sym() expects a 2x2 or 3x3 square matrix",
                                   __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
             }
-            const auto which = static_cast<std::int32_t>(node.eigenIndex().value_or(0));
+            const auto which = checkedEigenIndex(node, rows, "eigvec_sym()");
             if (rows == 2u) {
                 std::array<double, 4> A{};
                 double evals[2]{};
@@ -8217,7 +8232,7 @@ EvalValue<Real> evalRealSwitchImpl(const FormExprNode& node,
                     }
                 }
                 jit::svmp_fe_jit_eig_sym_2x2_v1(A.data(), evals, evecs);
-                const std::int32_t w = std::clamp(which, std::int32_t(0), std::int32_t(1));
+                const std::int32_t w = which;
                 EvalValue<Real> out;
                 out.kind = EvalValue<Real>::Kind::Vector;
                 out.resizeVector(2u);
@@ -8234,7 +8249,7 @@ EvalValue<Real> evalRealSwitchImpl(const FormExprNode& node,
                 }
             }
             jit::svmp_fe_jit_eig_sym_3x3_v1(A.data(), evals, evecs);
-            const std::int32_t w = std::clamp(which, std::int32_t(0), std::int32_t(2));
+            const std::int32_t w = which;
             EvalValue<Real> out;
             out.kind = EvalValue<Real>::Kind::Vector;
             out.resizeVector(3u);
@@ -8385,7 +8400,7 @@ EvalValue<Real> evalRealSwitchImpl(const FormExprNode& node,
                 throw FEException("Forms: eig_sym_dd() expects two 2x2 or 3x3 square matrices with matching dims",
                                   __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
             }
-            const auto which = static_cast<std::int32_t>(node.eigenIndex().value_or(0));
+            const auto which = checkedEigenIndex(node, rows, "eig_sym_dd()");
             if (rows == 2u) {
                 std::array<double, 4> A{};
                 std::array<double, 4> dA{};
@@ -8429,7 +8444,7 @@ EvalValue<Real> evalRealSwitchImpl(const FormExprNode& node,
                 throw FEException("Forms: eig_sym_ddA() expects three 2x2 or 3x3 square matrices with matching dims",
                                   __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
             }
-            const auto which = static_cast<std::int32_t>(node.eigenIndex().value_or(0));
+            const auto which = checkedEigenIndex(node, rows, "eig_sym_ddA()");
             if (rows == 2u) {
                 std::array<double, 4> A{};
                 std::array<double, 4> B{};
@@ -12295,10 +12310,7 @@ EvalValue<Dual> evalDualSwitchImpl(const FormExprNode& node,
             }
             FE_THROW_IF(env.ws == nullptr, FEException, "Forms: eig_sym() missing DualWorkspace");
 
-            const std::int32_t which_raw = static_cast<std::int32_t>(node.eigenIndex().value_or(0));
-            const std::int32_t which = (rows == 2u)
-                ? std::clamp(which_raw, std::int32_t(0), std::int32_t(1))
-                : std::clamp(which_raw, std::int32_t(0), std::int32_t(2));
+            const std::int32_t which = checkedEigenIndex(node, rows, "eig_sym()");
 
             Dual out = makeDualConstant(0.0, env.ws->alloc());
 
