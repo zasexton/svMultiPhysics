@@ -8289,7 +8289,11 @@ void FESystem::buildAssemblyPlans()
                 // including cross derivatives.  Expand to the exact fallback
                 // blocks in this case, matching the safe MixedBlockSet
                 // semantics below; the sole-term case retains coupled JIT.
-                if (def.cells.size() > 1u) {
+                // A parent that reads moving-domain data is expanded as well:
+                // StandardAssembler assembles such terms one at a time, which
+                // reaches the same compatibility entry point.
+                if (def.cells.size() > 1u ||
+                    assembly::requiresMovingDomainData(monolithic->getRequiredData())) {
                     for (std::size_t bi = 0; bi < monolithic->numBlocks();
                          ++bi) {
                         const auto& bs = monolithic->blockSpec(bi);
@@ -8422,8 +8426,11 @@ void FESystem::buildAssemblyPlans()
                 // cross blocks such as dR_phi/dE.  Preserve correctness in
                 // that case by expanding the semantic set into its exact
                 // fallback blocks; the single-term case below retains the
-                // fused optimization.
-                if (def.cells.size() > 1u) {
+                // fused optimization. A set that reads moving-domain data is
+                // expanded as well: StandardAssembler assembles such terms one
+                // at a time, which reaches the same compatibility entry point.
+                if (def.cells.size() > 1u ||
+                    assembly::requiresMovingDomainData(mixed_block->getRequiredData())) {
                     for (std::size_t bi = 0; bi < mixed_block->numBlocks();
                          ++bi) {
                         const auto& bs = mixed_block->blockSpec(bi);

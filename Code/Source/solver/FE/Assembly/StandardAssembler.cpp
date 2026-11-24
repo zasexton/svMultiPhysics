@@ -13166,31 +13166,8 @@ AssemblyResult StandardAssembler::assembleCellsFused(
         }
     }
 
-    auto needs_moving_domain_data = [](RequiredData data) {
-        return hasFlag(data, RequiredData::MeshDisplacement) ||
-               hasFlag(data, RequiredData::MeshVelocity) ||
-               hasFlag(data, RequiredData::MeshAcceleration) ||
-               hasFlag(data, RequiredData::MeshDisplacementGradient) ||
-               hasFlag(data, RequiredData::MeshVelocityGradient) ||
-               hasFlag(data, RequiredData::MeshAccelerationGradient) ||
-               hasFlag(data, RequiredData::PreviousPhysicalPoints) ||
-               hasFlag(data, RequiredData::PreviousMeshVelocity) ||
-               hasFlag(data, RequiredData::PredictedMeshVelocity) ||
-               hasFlag(data, RequiredData::PreviousMeshVelocityGradient) ||
-               hasFlag(data, RequiredData::PredictedMeshVelocityGradient) ||
-               hasFlag(data, RequiredData::ReferencePhysicalPoints) ||
-               hasFlag(data, RequiredData::CurrentPhysicalPoints) ||
-               hasFlag(data, RequiredData::ReferenceJacobians) ||
-               hasFlag(data, RequiredData::CurrentJacobians) ||
-               hasFlag(data, RequiredData::ReferenceNormals) ||
-               hasFlag(data, RequiredData::CurrentNormals) ||
-               hasFlag(data, RequiredData::ReferenceMeasures) ||
-               hasFlag(data, RequiredData::CurrentMeasures) ||
-               hasFlag(data, RequiredData::SurfaceJacobians) ||
-               hasFlag(data, RequiredData::ConfigurationTransforms);
-    };
     for (const auto& t : terms) {
-        if (t.kernel->hasCell() && needs_moving_domain_data(t.kernel->getRequiredData())) {
+        if (t.kernel->hasCell() && requiresMovingDomainData(t.kernel->getRequiredData())) {
             return Assembler::assembleCellsFused(mesh, terms);
         }
     }

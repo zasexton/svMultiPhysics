@@ -243,6 +243,39 @@ inline constexpr bool hasFlag(RequiredData flags, RequiredData flag) {
     return (static_cast<std::uint64_t>(flags) & static_cast<std::uint64_t>(flag)) != 0;
 }
 
+/**
+ * @brief Whether a kernel reads moving-domain data: the mesh-motion fields
+ * (displacement, velocity, acceleration, their previous and predicted values
+ * and gradients) or the configuration frame (reference and current points,
+ * Jacobians, normals, measures, surface Jacobians, configuration transforms).
+ *
+ * The fused cell paths of StandardAssembler prepare neither, so it assembles
+ * such kernels one term at a time.
+ */
+inline constexpr bool requiresMovingDomainData(RequiredData data) {
+    return hasFlag(data, RequiredData::MeshDisplacement) ||
+           hasFlag(data, RequiredData::MeshVelocity) ||
+           hasFlag(data, RequiredData::MeshAcceleration) ||
+           hasFlag(data, RequiredData::MeshDisplacementGradient) ||
+           hasFlag(data, RequiredData::MeshVelocityGradient) ||
+           hasFlag(data, RequiredData::MeshAccelerationGradient) ||
+           hasFlag(data, RequiredData::PreviousPhysicalPoints) ||
+           hasFlag(data, RequiredData::PreviousMeshVelocity) ||
+           hasFlag(data, RequiredData::PredictedMeshVelocity) ||
+           hasFlag(data, RequiredData::PreviousMeshVelocityGradient) ||
+           hasFlag(data, RequiredData::PredictedMeshVelocityGradient) ||
+           hasFlag(data, RequiredData::ReferencePhysicalPoints) ||
+           hasFlag(data, RequiredData::CurrentPhysicalPoints) ||
+           hasFlag(data, RequiredData::ReferenceJacobians) ||
+           hasFlag(data, RequiredData::CurrentJacobians) ||
+           hasFlag(data, RequiredData::ReferenceNormals) ||
+           hasFlag(data, RequiredData::CurrentNormals) ||
+           hasFlag(data, RequiredData::ReferenceMeasures) ||
+           hasFlag(data, RequiredData::CurrentMeasures) ||
+           hasFlag(data, RequiredData::SurfaceJacobians) ||
+           hasFlag(data, RequiredData::ConfigurationTransforms);
+}
+
 // ============================================================================
 // Material State Specification (optional)
 // ============================================================================

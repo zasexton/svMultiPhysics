@@ -1302,3 +1302,132 @@ TEST(MovingDomainCompiledKernelTest, AffineSpecializationKeepsMovingFramePointVa
         }
     }
 }
+
+namespace {
+
+/// The u and p residual rows of int (meshVelocity().v + q div(meshVelocity())) dx
+/// on the two moving triangles, installed as one formulation of {u, p}, by
+/// (field 0 = u or 1 = p, node of kTwoTriangleNodes, component). With
+/// @p mesh_rows a mesh equation on d is installed in the same operator, so the
+/// {u, p} formulation is not its only cell term.
+std::map<std::tuple<int, int, int>, Real> movingFrameBundleResidual(bool jit, bool mesh_rows)
+{
+    using namespace svmp::FE::forms;
+    auto mesh = makeTwoTriangleMesh(/*reversed=*/false);
+    auto scalar = std::make_shared<svmp::FE::spaces::H1Space>(ElementType::Triangle3, 1);
+    auto vector = std::make_shared<svmp::FE::spaces::ProductSpace>(scalar, 2);
+
+    systems::FESystem system(mesh, svmp::Configuration::Current);
+    const auto u_id = system.addField(systems::FieldSpec{.name = "u", .space = vector, .components = 2});
+    const auto p_id = system.addField(systems::FieldSpec{.name = "p", .space = scalar, .components = 1});
+    systems::ALEBindingOptions ale_options;
+    ale_options.enabled = true;
+    ale_options.dimension = 2;
+    ale_options.mesh_velocity_space = vector;
+    ale_options.mesh_displacement_space = vector;
+    ale_options.auto_register_mesh_displacement_field = true;
+    const auto ale = systems::resolveALEBinding(system, ale_options);
+    const auto d_id = ale.mesh_displacement_field;
+
+    const auto u = FormExpr::stateField(u_id, *vector, "u");
+    const auto v = FormExpr::testFunction(u_id, *vector, "v");
+    const auto p = FormExpr::stateField(p_id, *scalar, "p");
+    const auto q = FormExpr::testFunction(p_id, *scalar, "q");
+    const auto d = FormExpr::stateField(d_id, *vector, "d");
+    const auto psi = FormExpr::testFunction(d_id, *vector, "psi");
+    systems::FormInstallOptions install;
+    install.compiler_options.jit = svmp::FE::forms::test::makeUnitTestJITOptions();
+    install.compiler_options.jit.vectorize = true;
+    install.compiler_options.jit.enable = jit;
+    system.addOperator("probe");
+    (void)systems::installFormulation(system, "probe", {u_id, p_id},
+                                      (inner(meshVelocity(), v) + q * div(meshVelocity()) +
+                                       FormExpr::constant(0.0) * (inner(u, v) + p * q)).dx(),
+                                      install);
+    if (mesh_rows) {
+        (void)systems::installFormulation(system, "probe", {d_id}, inner(grad(d), grad(psi)).dx(),
+                                          systems::FormInstallOptions{});
+    }
+    systems::SetupOptions setup_options;
+    setup_options.use_constraints_in_assembly = false;
+    system.setup(setup_options);
+
+    const auto& local = mesh->local_mesh();
+    const auto& X_ref = local.X_ref();
+    std::vector<int> node_of(local.n_vertices(), -1);
+    for (std::size_t vtx = 0; vtx < local.n_vertices(); ++vtx) {
+        for (std::size_t n = 0; n < kTwoTriangleNodes.size(); ++n) {
+            if (std::abs(X_ref[2 * vtx] - kTwoTriangleNodes[n][0]) < 1e-14 &&
+                std::abs(X_ref[2 * vtx + 1] - kTwoTriangleNodes[n][1]) < 1e-14) {
+                node_of[vtx] = static_cast<int>(n);
+            }
+        }
+    }
+    const auto dof = [&](svmp::FE::FieldId field, std::size_t vtx, int component) {
+        const auto dofs = system.fieldDofHandler(field).getEntityDofMap()->getVertexDofs(static_cast<GlobalIndex>(vtx));
+        return system.fieldDofOffset(field) + dofs[static_cast<std::size_t>(component)];
+    };
+    const auto n = system.dofHandler().getNumDofs();
+    std::vector<Real> values(static_cast<std::size_t>(n), 0.0);
+    for (std::size_t vtx = 0; vtx < local.n_vertices(); ++vtx) {
+        const auto displacement = twoTriangleDisplacement(kTwoTriangleNodes[static_cast<std::size_t>(node_of[vtx])]);
+        for (int k = 0; k < 2; ++k) {
+            values[static_cast<std::size_t>(dof(d_id, vtx, k))] = displacement[static_cast<std::size_t>(k)];
+        }
+    }
+    const std::vector<Real> previous(static_cast<std::size_t>(n), 0.0);
+    systems::SystemStateView state;
+    state.dt = 0.5;
+    state.u = std::span<const Real>(values);
+    state.u_prev = std::span<const Real>(previous);
+    const systems::BackwardDifferenceIntegrator integrator;
+    const auto context = integrator.buildContext(1, state);
+    state.time_integration = &context;
+    (void)system.updateCurrentCoordinatesFromMeshDisplacement(state);
+    systems::AssemblyRequest request;
+    request.op = "probe";
+    request.want_vector = true;
+    svmp::FE::assembly::DenseVectorView R(n);
+    R.zero();
+    const auto result = system.assemble(request, state, nullptr, &R);
+    EXPECT_TRUE(result.success) << result.error_message;
+    std::map<std::tuple<int, int, int>, Real> out;
+    for (std::size_t vtx = 0; vtx < local.n_vertices(); ++vtx) {
+        for (int k = 0; k < 2; ++k) {
+            out[{0, node_of[vtx], k}] = R.getVectorEntry(dof(u_id, vtx, k));
+        }
+        out[{1, node_of[vtx], 0}] = R.getVectorEntry(dof(p_id, vtx, 0));
+    }
+    return out;
+}
+
+} // namespace
+
+// A formulation of several fields with a moving-frame terminal assembles every
+// one of its blocks when it is the only cell term of its operator, as it does
+// next to another cell term.
+TEST(MovingDomainBundleTest, SoleMovingFrameFormulationAssemblesEveryBlock)
+{
+    std::vector<bool> kernel_modes{false};
+    if (svmp::FE::forms::jit::llvmJITEnabled()) {
+        kernel_modes.push_back(true);
+    }
+    for (const bool jit : kernel_modes) {
+        SCOPED_TRACE(::testing::Message() << "compiled kernels " << jit);
+        const auto reference = movingFrameBundleResidual(jit, /*mesh_rows=*/true);
+        const auto sole = movingFrameBundleResidual(jit, /*mesh_rows=*/false);
+        Real velocity_scale = 0.0;
+        Real pressure_scale = 0.0;
+        for (const auto& [key, value] : reference) {
+            (std::get<0>(key) == 0 ? velocity_scale : pressure_scale) =
+                std::max(std::get<0>(key) == 0 ? velocity_scale : pressure_scale, std::abs(value));
+        }
+        ASSERT_GT(velocity_scale, 1e-3);
+        ASSERT_GT(pressure_scale, 1e-3);
+        for (const auto& [key, value] : reference) {
+            const auto& [field, node, k] = key;
+            EXPECT_NEAR(sole.at(key), value, 1e-14 * std::max(velocity_scale, pressure_scale))
+                << (field == 0 ? "velocity" : "pressure") << " row of node " << node << " component " << k;
+        }
+    }
+}
