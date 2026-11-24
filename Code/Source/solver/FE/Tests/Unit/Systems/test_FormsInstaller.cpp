@@ -6518,6 +6518,30 @@ TEST(FormsInstaller, InlinedBoundaryLawOutputNamesItsInstanceState)
     EXPECT_EQ(values[1], 2.0);
 }
 
+// The in-memory auxiliary checkpoint packs blocks by position and size, so
+// it restores only into a system whose applications were declared in the
+// same order.  Into the reversed declaration order, the equal-sized blocks
+// of law_a and law_c exchange their values; a durable restart must key the
+// blocks by instance (AuxiliaryStateManager::restartSchema).
+TEST(FormsInstaller, AuxiliaryCheckpointRestoresBlocksByPosition)
+{
+    using namespace boundary_law_instances;
+    auto forward_apps = lawApplications();
+    auto reverse_apps = forward_apps;
+    std::reverse(reverse_apps.begin(), reverse_apps.end());
+    auto forward = buildLawSystem(forward_apps);
+    auto reverse = buildLawSystem(reverse_apps);
+
+    forward.sys->auxiliaryStateManager().getBlock("law_a").work()[0] = 5.5;
+    forward.sys->auxiliaryStateManager().getBlock("law_c").work()[0] = -3.25;
+    const auto checkpoint = forward.sys->checkpointAuxiliaryState();
+    reverse.sys->restoreAuxiliaryState(checkpoint);
+
+    EXPECT_EQ(reverse.sys->auxiliaryStateManager().getBlock("law_c").work()[0], 5.5);
+    EXPECT_EQ(reverse.sys->auxiliaryStateManager().getBlock("law_a").work()[0], -3.25);
+    EXPECT_EQ(reverse.sys->auxiliaryStateManager().getBlock("law_b").work()[0], 2.0);
+}
+
 namespace {
 
 void collectAuxiliaryInputSlots(const svmp::FE::forms::FormExprNode& node,
