@@ -330,11 +330,6 @@ struct ConstraintRangeReport {
     Initializer initializer{};
 };
 
-/// The record of the first constraint-range certificate in @p report (a
-/// default record when none recorded one), for a consumer without the
-/// certificate at hand.
-[[nodiscard]] const ConstraintRangeReport& constraintRangeRecord(const timestepping::NewtonReport& report);
-
 /**
  * What a consumer of one probe of the certificate reads (the static
  * startup): the range certificate, the production residual of the probed

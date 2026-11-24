@@ -92,6 +92,14 @@ namespace {
 
 namespace {
 
+// What the certificate of a static-capillary probe recorded in its report,
+// read through the certificate.
+const svmp::FE::analysis::ConstraintRangeReport& probeRecord(
+    const StaticCapillaryPressureCertificate& probe)
+{
+  return probe.certificate->record(probe.report);
+}
+
 using MaintenanceConfiguration = application::core::
     ResolvedLevelSetMaintenanceCompatibilityConfiguration;
 
@@ -7399,8 +7407,8 @@ TEST(ApplicationDriverLevelSetWorkflows,
           effectiveStaticCapillaryEquilibriumOptions(requests.front()),
           /*initialize_compatible_pressure=*/true);
   ASSERT_TRUE(
-      svmp::FE::analysis::constraintRangeRecord(expected_pressure_certificate.report).initializer.passed)
-      << svmp::FE::analysis::constraintRangeRecord(expected_pressure_certificate.report).initializer.reason;
+      probeRecord(expected_pressure_certificate).initializer.passed)
+      << probeRecord(expected_pressure_certificate).initializer.reason;
   const auto& expected_current =
       expected_pressure_certificate.certified_solution;
   ASSERT_EQ(expected_current.size(), current.size());
@@ -7907,14 +7915,13 @@ TEST(ApplicationDriverLevelSetWorkflows,
                 certified_solution,
                 effectiveStaticCapillaryEquilibriumOptions(requests.front()),
                 /*initialize_compatible_pressure=*/false);
-        const auto& certificate = pressure_certificate.report;
-        ASSERT_TRUE(svmp::FE::analysis::constraintRangeRecord(certificate).sampled);
-        ASSERT_TRUE(svmp::FE::analysis::constraintRangeRecord(certificate).constant_field_kkt.available)
-            << svmp::FE::analysis::constraintRangeRecord(certificate).constant_field_kkt.reason;
-        EXPECT_LE(svmp::FE::analysis::constraintRangeRecord(certificate).constant_field_kkt.residual_norm, 2.0e-10);
-        EXPECT_LE(svmp::FE::analysis::constraintRangeRecord(certificate).constant_field_kkt.relative_distance, 2.0e-10);
+        ASSERT_TRUE(probeRecord(pressure_certificate).sampled);
+        ASSERT_TRUE(probeRecord(pressure_certificate).constant_field_kkt.available)
+            << probeRecord(pressure_certificate).constant_field_kkt.reason;
+        EXPECT_LE(probeRecord(pressure_certificate).constant_field_kkt.residual_norm, 2.0e-10);
+        EXPECT_LE(probeRecord(pressure_certificate).constant_field_kkt.relative_distance, 2.0e-10);
         EXPECT_NEAR(
-            svmp::FE::analysis::constraintRangeRecord(certificate).constant_field_kkt.jump, 0.0, 2.0e-10);
+            probeRecord(pressure_certificate).constant_field_kkt.jump, 0.0, 2.0e-10);
 
         const auto final_functionals =
             evaluateDeclaredAcceptedFunctionals(sim, {});
@@ -7947,15 +7954,15 @@ TEST(ApplicationDriverLevelSetWorkflows,
         maximum_kkt_residual =
             std::max(maximum_kkt_residual,
                      static_cast<svmp::FE::Real>(
-                         svmp::FE::analysis::constraintRangeRecord(certificate).constant_field_kkt.residual_norm));
+                         probeRecord(pressure_certificate).constant_field_kkt.residual_norm));
         maximum_kkt_relative_distance =
             std::max(maximum_kkt_relative_distance,
                      static_cast<svmp::FE::Real>(
-                         svmp::FE::analysis::constraintRangeRecord(certificate).constant_field_kkt.relative_distance));
+                         probeRecord(pressure_certificate).constant_field_kkt.relative_distance));
         maximum_pressure_jump_error =
             std::max(maximum_pressure_jump_error,
                      static_cast<svmp::FE::Real>(std::abs(
-                         svmp::FE::analysis::constraintRangeRecord(certificate).constant_field_kkt.jump)));
+                         probeRecord(pressure_certificate).constant_field_kkt.jump)));
         maximum_volume_error = std::max(maximum_volume_error, volume_error);
         maximum_surface_energy_error =
             std::max(maximum_surface_energy_error, surface_energy_error);
@@ -8507,7 +8514,7 @@ TEST(ApplicationDriverLevelSetWorkflows,
             effectiveStaticCapillaryEquilibriumOptions(requests.front()),
             /*initialize_compatible_pressure=*/false);
     const auto& exact_certificate = exact_pressure_certificate.report;
-    ASSERT_TRUE(svmp::FE::analysis::constraintRangeRecord(exact_certificate).sampled);
+    ASSERT_TRUE(probeRecord(exact_pressure_certificate).sampled);
     EXPECT_LE(exact_certificate.residual_norm, 2.0e-12);
 
     const auto exact_initialized_pressure_certificate =
@@ -8519,9 +8526,9 @@ TEST(ApplicationDriverLevelSetWorkflows,
     const auto& exact_initialized_report =
         exact_initialized_pressure_certificate.report;
     ASSERT_TRUE(
-        svmp::FE::analysis::constraintRangeRecord(exact_initialized_report).initializer.applied);
+        probeRecord(exact_initialized_pressure_certificate).initializer.applied);
     ASSERT_TRUE(
-        svmp::FE::analysis::constraintRangeRecord(exact_initialized_report).initializer.passed);
+        probeRecord(exact_initialized_pressure_certificate).initializer.passed);
     EXPECT_LE(exact_initialized_report.residual_norm, 2.0e-12);
     ASSERT_EQ(exact_initialized_pressure_certificate.certified_solution.size(),
               exact_solution.size());
@@ -8556,17 +8563,17 @@ TEST(ApplicationDriverLevelSetWorkflows,
             effectiveStaticCapillaryEquilibriumOptions(requests.front()),
             /*initialize_compatible_pressure=*/false);
     const auto& certificate = pressure_certificate.report;
-    ASSERT_TRUE(svmp::FE::analysis::constraintRangeRecord(certificate).sampled);
-    ASSERT_TRUE(svmp::FE::analysis::constraintRangeRecord(certificate).range.available)
-        << svmp::FE::analysis::constraintRangeRecord(certificate).range.reason;
-    EXPECT_TRUE(svmp::FE::analysis::constraintRangeRecord(certificate).range.converged);
-    EXPECT_FALSE(svmp::FE::analysis::constraintRangeRecord(certificate).range.breakdown);
-    EXPECT_LE(svmp::FE::analysis::constraintRangeRecord(certificate).range.residual_norm, 2.0e-10);
-    EXPECT_LE(svmp::FE::analysis::constraintRangeRecord(certificate).range.relative_distance,
+    ASSERT_TRUE(probeRecord(pressure_certificate).sampled);
+    ASSERT_TRUE(probeRecord(pressure_certificate).range.available)
+        << probeRecord(pressure_certificate).range.reason;
+    EXPECT_TRUE(probeRecord(pressure_certificate).range.converged);
+    EXPECT_FALSE(probeRecord(pressure_certificate).range.breakdown);
+    EXPECT_LE(probeRecord(pressure_certificate).range.residual_norm, 2.0e-10);
+    EXPECT_LE(probeRecord(pressure_certificate).range.relative_distance,
               2.0e-10);
     EXPECT_LE(certificate.residual_norm, 2.0e-10);
-    EXPECT_FALSE(svmp::FE::analysis::constraintRangeRecord(certificate).constant_field_kkt.constraints_preserve_constants);
-    EXPECT_FALSE(svmp::FE::analysis::constraintRangeRecord(certificate).constant_field_kkt.available);
+    EXPECT_FALSE(probeRecord(pressure_certificate).constant_field_kkt.constraints_preserve_constants);
+    EXPECT_FALSE(probeRecord(pressure_certificate).constant_field_kkt.available);
 
     svmp::FE::Real initializer_pressure_representative_distance = 0.0;
     for (std::size_t i = 0u; i < expected_pressure_coefficients.size(); ++i) {
@@ -8611,11 +8618,11 @@ TEST(ApplicationDriverLevelSetWorkflows,
     maximum_pressure_residual =
         std::max(maximum_pressure_residual,
                  static_cast<svmp::FE::Real>(
-                     svmp::FE::analysis::constraintRangeRecord(certificate).range.residual_norm));
+                     probeRecord(pressure_certificate).range.residual_norm));
     maximum_pressure_relative_distance =
         std::max(maximum_pressure_relative_distance,
                  static_cast<svmp::FE::Real>(
-                     svmp::FE::analysis::constraintRangeRecord(certificate).range.relative_distance));
+                     probeRecord(pressure_certificate).range.relative_distance));
     maximum_exact_field_production_residual =
         std::max(maximum_exact_field_production_residual,
                  static_cast<svmp::FE::Real>(exact_certificate.residual_norm));

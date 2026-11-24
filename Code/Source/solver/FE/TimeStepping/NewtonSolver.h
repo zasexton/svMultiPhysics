@@ -477,18 +477,6 @@ public:
         return const_cast<NewtonExtensionRecord*>(std::as_const(*this).find(owner));
     }
 
-    /// The first record of type Record, whoever recorded it, or null.
-    template <class Record>
-    [[nodiscard]] const Record* findFirst() const noexcept
-    {
-        for (const auto& entry : entries_) {
-            if (const auto* record = dynamic_cast<const Record*>(entry.record.get())) {
-                return record;
-            }
-        }
-        return nullptr;
-    }
-
     /// Records @p record for @p owner, replacing an earlier one.
     void set(const NewtonExtension& owner, std::unique_ptr<NewtonExtensionRecord> record)
     {

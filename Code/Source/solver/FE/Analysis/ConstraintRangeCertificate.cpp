@@ -1343,12 +1343,6 @@ public:
 
 } // namespace
 
-const ConstraintRangeReport& constraintRangeRecord(const timestepping::NewtonReport& report)
-{
-    const auto* record = report.extension_records.findFirst<ConstraintRangeRecord>();
-    return record != nullptr ? record->value : defaultConstraintRangeReport();
-}
-
 const ConstraintRangeReport& ConstraintRangeCertificate::record(
     const timestepping::NewtonReport& report) const
 {

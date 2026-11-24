@@ -2592,6 +2592,7 @@ makePressureRepresentabilityProblem(
 struct CapturedPressureDiagnostic {
     svmp::FE::timestepping::NewtonReport report{};
     std::string telemetry{};
+    std::shared_ptr<svmp::FE::analysis::ConstraintRangeCertificate> certificate{};
 };
 
 [[nodiscard]] CapturedPressureDiagnostic runPressureDiagnostic(
@@ -2604,7 +2605,7 @@ struct CapturedPressureDiagnostic {
     options.abs_tolerance = 1.0e-14;
     options.rel_tolerance = 0.0;
     options.use_line_search = false;
-    installTestCertificate(options, *problem.sys);
+    auto certificate = installTestCertificate(options, *problem.sys);
     svmp::FE::timestepping::NewtonSolver newton(options);
     svmp::FE::timestepping::NewtonWorkspace workspace;
     newton.allocateWorkspace(
@@ -2623,7 +2624,8 @@ struct CapturedPressureDiagnostic {
     telemetry += testing::internal::GetCapturedStderr();
     return CapturedPressureDiagnostic{
         .report = std::move(report),
-        .telemetry = std::move(telemetry)};
+        .telemetry = std::move(telemetry),
+        .certificate = std::move(certificate)};
 }
 
 [[nodiscard]] PressureRepresentabilityProblem
@@ -7721,7 +7723,8 @@ TEST(NewtonSolver,
     options.rel_tolerance = 0.0;
     options.use_line_search = false;
 
-    installTestCertificate(options, *problem.sys);
+    const auto certificate = installTestCertificate(options, *problem.sys);
+    ASSERT_NE(certificate, nullptr);
     svmp::FE::timestepping::NewtonSolver newton(options);
     svmp::FE::timestepping::NewtonWorkspace workspace;
     newton.allocateWorkspace(
@@ -7807,23 +7810,23 @@ TEST(NewtonSolver,
     EXPECT_NE(telemetry.find("pressure_representability_iteration_cap=4"),
               std::string::npos);
     EXPECT_NEAR(
-        svmp::FE::analysis::constraintRangeRecord(report).range.residual_norm, 0.0, 1.0e-13);
-    EXPECT_TRUE(svmp::FE::analysis::constraintRangeRecord(report).constant_field_kkt.available);
+        certificate->record(report).range.residual_norm, 0.0, 1.0e-13);
+    EXPECT_TRUE(certificate->record(report).constant_field_kkt.available);
     EXPECT_TRUE(
-        svmp::FE::analysis::constraintRangeRecord(report).constant_field_kkt.unit_coefficients_represent_constant);
+        certificate->record(report).constant_field_kkt.unit_coefficients_represent_constant);
     EXPECT_TRUE(
-        svmp::FE::analysis::constraintRangeRecord(report).constant_field_kkt.constraints_preserve_constants);
+        certificate->record(report).constant_field_kkt.constraints_preserve_constants);
     EXPECT_NEAR(
-        svmp::FE::analysis::constraintRangeRecord(report).constant_field_kkt.jump, 2.0, 1.0e-12);
+        certificate->record(report).constant_field_kkt.jump, 2.0, 1.0e-12);
     EXPECT_NEAR(
-        svmp::FE::analysis::constraintRangeRecord(report).constant_field_kkt.multiplier, -2.0, 1.0e-12);
+        certificate->record(report).constant_field_kkt.multiplier, -2.0, 1.0e-12);
     EXPECT_NEAR(
-        svmp::FE::analysis::constraintRangeRecord(report).constant_field_kkt.residual_norm, 0.0, 1.0e-13);
+        certificate->record(report).constant_field_kkt.residual_norm, 0.0, 1.0e-13);
     EXPECT_LE(
-        svmp::FE::analysis::constraintRangeRecord(report).constant_field_kkt.relative_distance, 1.0e-12);
+        certificate->record(report).constant_field_kkt.relative_distance, 1.0e-12);
     EXPECT_LE(
-        svmp::FE::analysis::constraintRangeRecord(report).constant_field_kkt.relative_orthogonality, 1.0e-12);
-    EXPECT_EQ(svmp::FE::analysis::constraintRangeRecord(report).constant_field_kkt.reason, "available");
+        certificate->record(report).constant_field_kkt.relative_orthogonality, 1.0e-12);
+    EXPECT_EQ(certificate->record(report).constant_field_kkt.reason, "available");
     EXPECT_NE(telemetry.find("constant_pressure_kkt_available=1"),
               std::string::npos);
     EXPECT_NE(
@@ -7953,7 +7956,8 @@ TEST(NewtonSolver,
     options.abs_tolerance = 1.0e-14;
     options.rel_tolerance = 0.0;
     options.use_line_search = false;
-    installTestCertificate(options, *problem.sys);
+    const auto certificate = installTestCertificate(options, *problem.sys);
+    ASSERT_NE(certificate, nullptr);
     svmp::FE::timestepping::NewtonSolver newton(options);
     svmp::FE::timestepping::NewtonWorkspace workspace;
     newton.allocateWorkspace(*problem.sys, *problem.factory, workspace);
@@ -7973,16 +7977,16 @@ TEST(NewtonSolver,
 
     EXPECT_TRUE(report.converged);
     EXPECT_TRUE(
-        svmp::FE::analysis::constraintRangeRecord(report).constant_field_kkt.unit_coefficients_represent_constant);
-    EXPECT_TRUE(svmp::FE::analysis::constraintRangeRecord(report).constant_field_kkt.constraints_preserve_constants);
-    EXPECT_TRUE(svmp::FE::analysis::constraintRangeRecord(report).constant_field_kkt.available);
-    EXPECT_NEAR(svmp::FE::analysis::constraintRangeRecord(report).constant_field_kkt.jump, 2.0, 1.0e-12);
-    EXPECT_NEAR(svmp::FE::analysis::constraintRangeRecord(report).constant_field_kkt.multiplier, -2.0,
+        certificate->record(report).constant_field_kkt.unit_coefficients_represent_constant);
+    EXPECT_TRUE(certificate->record(report).constant_field_kkt.constraints_preserve_constants);
+    EXPECT_TRUE(certificate->record(report).constant_field_kkt.available);
+    EXPECT_NEAR(certificate->record(report).constant_field_kkt.jump, 2.0, 1.0e-12);
+    EXPECT_NEAR(certificate->record(report).constant_field_kkt.multiplier, -2.0,
                 1.0e-12);
-    EXPECT_EQ(svmp::FE::analysis::constraintRangeRecord(report).constant_field_kkt.reason, "available");
-    EXPECT_EQ(svmp::FE::analysis::constraintRangeRecord(report).constant_field_kkt.constraint_scope,
+    EXPECT_EQ(certificate->record(report).constant_field_kkt.reason, "available");
+    EXPECT_EQ(certificate->record(report).constant_field_kkt.constraint_scope,
               "retained_volume");
-    EXPECT_EQ(svmp::FE::analysis::constraintRangeRecord(report).constant_field_kkt.constraint_scope_reason,
+    EXPECT_EQ(certificate->record(report).constant_field_kkt.constraint_scope_reason,
               "available");
     EXPECT_NE(
         telemetry.find("constant_pressure_constraint_scope=retained_volume"),
@@ -8033,16 +8037,18 @@ TEST(NewtonSolver,
         }));
 
     const auto captured = runPressureDiagnostic(problem);
+
+    ASSERT_NE(captured.certificate, nullptr);
     EXPECT_TRUE(captured.report.converged);
-    EXPECT_TRUE(svmp::FE::analysis::constraintRangeRecord(captured.report).constant_field_kkt.unit_coefficients_represent_constant);
-    EXPECT_FALSE(svmp::FE::analysis::constraintRangeRecord(captured.report).constant_field_kkt.constraints_preserve_constants);
-    EXPECT_FALSE(svmp::FE::analysis::constraintRangeRecord(captured.report).constant_field_kkt.available);
-    EXPECT_EQ(svmp::FE::analysis::constraintRangeRecord(captured.report).constant_field_kkt.constraint_scope,
+    EXPECT_TRUE(captured.certificate->record(captured.report).constant_field_kkt.unit_coefficients_represent_constant);
+    EXPECT_FALSE(captured.certificate->record(captured.report).constant_field_kkt.constraints_preserve_constants);
+    EXPECT_FALSE(captured.certificate->record(captured.report).constant_field_kkt.available);
+    EXPECT_EQ(captured.certificate->record(captured.report).constant_field_kkt.constraint_scope,
               "retained_volume");
-    EXPECT_EQ(svmp::FE::analysis::constraintRangeRecord(captured.report).constant_field_kkt.constraint_scope_reason,
+    EXPECT_EQ(captured.certificate->record(captured.report).constant_field_kkt.constraint_scope_reason,
               "available");
     EXPECT_EQ(
-        svmp::FE::analysis::constraintRangeRecord(captured.report).constant_field_kkt.reason,
+        captured.certificate->record(captured.report).constant_field_kkt.reason,
         "pressure_constraints_do_not_preserve_constants");
 #endif
 }
@@ -8065,10 +8071,12 @@ TEST(NewtonSolver,
                     .empty());
 
     const auto captured = runPressureDiagnostic(problem);
-    EXPECT_FALSE(svmp::FE::analysis::constraintRangeRecord(captured.report).constant_field_kkt.available);
-    EXPECT_EQ(svmp::FE::analysis::constraintRangeRecord(captured.report).constant_field_kkt.constraint_scope,
+
+    ASSERT_NE(captured.certificate, nullptr);
+    EXPECT_FALSE(captured.certificate->record(captured.report).constant_field_kkt.available);
+    EXPECT_EQ(captured.certificate->record(captured.report).constant_field_kkt.constraint_scope,
               "full_field");
-    EXPECT_EQ(svmp::FE::analysis::constraintRangeRecord(captured.report).constant_field_kkt.constraint_scope_reason,
+    EXPECT_EQ(captured.certificate->record(captured.report).constant_field_kkt.constraint_scope_reason,
               "aggregation_report_unavailable");
 #endif
 }
@@ -8121,10 +8129,12 @@ TEST(NewtonSolver,
     ASSERT_FALSE(reports.front()->trace_bound_eligible);
 
     const auto captured = runPressureDiagnostic(problem);
-    EXPECT_FALSE(svmp::FE::analysis::constraintRangeRecord(captured.report).constant_field_kkt.available);
-    EXPECT_EQ(svmp::FE::analysis::constraintRangeRecord(captured.report).constant_field_kkt.constraint_scope,
+
+    ASSERT_NE(captured.certificate, nullptr);
+    EXPECT_FALSE(captured.certificate->record(captured.report).constant_field_kkt.available);
+    EXPECT_EQ(captured.certificate->record(captured.report).constant_field_kkt.constraint_scope,
               "full_field");
-    EXPECT_EQ(svmp::FE::analysis::constraintRangeRecord(captured.report).constant_field_kkt.constraint_scope_reason,
+    EXPECT_EQ(captured.certificate->record(captured.report).constant_field_kkt.constraint_scope_reason,
               "aggregation_report_ineligible");
 #endif
 }
@@ -8147,10 +8157,12 @@ TEST(NewtonSolver,
         2u);
 
     const auto captured = runPressureDiagnostic(problem);
-    EXPECT_FALSE(svmp::FE::analysis::constraintRangeRecord(captured.report).constant_field_kkt.available);
-    EXPECT_EQ(svmp::FE::analysis::constraintRangeRecord(captured.report).constant_field_kkt.constraint_scope,
+
+    ASSERT_NE(captured.certificate, nullptr);
+    EXPECT_FALSE(captured.certificate->record(captured.report).constant_field_kkt.available);
+    EXPECT_EQ(captured.certificate->record(captured.report).constant_field_kkt.constraint_scope,
               "full_field");
-    EXPECT_EQ(svmp::FE::analysis::constraintRangeRecord(captured.report).constant_field_kkt.constraint_scope_reason,
+    EXPECT_EQ(captured.certificate->record(captured.report).constant_field_kkt.constraint_scope_reason,
               "aggregation_report_ambiguous");
 #endif
 }
@@ -8176,10 +8188,12 @@ TEST(NewtonSolver,
         1u);
 
     const auto captured = runPressureDiagnostic(problem);
-    EXPECT_FALSE(svmp::FE::analysis::constraintRangeRecord(captured.report).constant_field_kkt.available);
-    EXPECT_EQ(svmp::FE::analysis::constraintRangeRecord(captured.report).constant_field_kkt.constraint_scope,
+
+    ASSERT_NE(captured.certificate, nullptr);
+    EXPECT_FALSE(captured.certificate->record(captured.report).constant_field_kkt.available);
+    EXPECT_EQ(captured.certificate->record(captured.report).constant_field_kkt.constraint_scope,
               "full_field");
-    EXPECT_EQ(svmp::FE::analysis::constraintRangeRecord(captured.report).constant_field_kkt.constraint_scope_reason,
+    EXPECT_EQ(captured.certificate->record(captured.report).constant_field_kkt.constraint_scope_reason,
               "pair_support_unavailable");
 #endif
 }
@@ -8216,7 +8230,8 @@ TEST(NewtonSolver,
     options.rel_tolerance = 0.0;
     options.use_line_search = false;
 
-    installTestCertificate(options, *problem.sys);
+    const auto certificate = installTestCertificate(options, *problem.sys);
+    ASSERT_NE(certificate, nullptr);
     svmp::FE::timestepping::NewtonSolver newton(options);
     svmp::FE::timestepping::NewtonWorkspace workspace;
     newton.allocateWorkspace(
@@ -8233,11 +8248,11 @@ TEST(NewtonSolver,
     const auto telemetry = testing::internal::GetCapturedStdout();
 
     EXPECT_TRUE(report.converged);
-    EXPECT_TRUE(svmp::FE::analysis::constraintRangeRecord(report).range.available);
-    EXPECT_TRUE(svmp::FE::analysis::constraintRangeRecord(report).range.converged);
-    EXPECT_FALSE(svmp::FE::analysis::constraintRangeRecord(report).range.breakdown);
+    EXPECT_TRUE(certificate->record(report).range.available);
+    EXPECT_TRUE(certificate->record(report).range.converged);
+    EXPECT_FALSE(certificate->record(report).range.breakdown);
     EXPECT_NEAR(
-        svmp::FE::analysis::constraintRangeRecord(report).range.residual_norm, 0.0, 1.0e-13);
+        certificate->record(report).range.residual_norm, 0.0, 1.0e-13);
     ASSERT_NE(testCertificateStorage(workspace).vectors.solution, nullptr);
     const auto pressure_dof =
         problem.sys->fieldDofOffset(problem.pressure_field);
@@ -8248,7 +8263,7 @@ TEST(NewtonSolver,
     EXPECT_NEAR(
         solution[static_cast<std::size_t>(pressure_dof)], 3.0, 1.0e-12);
     EXPECT_NEAR(
-        svmp::FE::analysis::constraintRangeRecord(report).constant_field_kkt.jump, 3.0, 1.0e-12);
+        certificate->record(report).constant_field_kkt.jump, 3.0, 1.0e-12);
     EXPECT_NE(
         telemetry.find(
             "pressure_representability_load=prescribed_external_pressure_plus_surface_area_variation_plus_young_wall_energy_plus_gravitational_potential"),
@@ -8298,7 +8313,8 @@ TEST(NewtonSolver,
     options.rel_tolerance = 0.0;
     options.use_line_search = false;
 
-    installTestCertificate(options, *problem.sys);
+    const auto certificate = installTestCertificate(options, *problem.sys);
+    ASSERT_NE(certificate, nullptr);
     svmp::FE::timestepping::NewtonSolver newton(options);
     svmp::FE::timestepping::NewtonWorkspace workspace;
     newton.allocateWorkspace(
@@ -8313,11 +8329,11 @@ TEST(NewtonSolver,
         workspace);
 
     EXPECT_TRUE(report.converged);
-    EXPECT_TRUE(svmp::FE::analysis::constraintRangeRecord(report).range.available);
-    EXPECT_TRUE(svmp::FE::analysis::constraintRangeRecord(report).range.converged);
-    EXPECT_FALSE(svmp::FE::analysis::constraintRangeRecord(report).range.breakdown);
+    EXPECT_TRUE(certificate->record(report).range.available);
+    EXPECT_TRUE(certificate->record(report).range.converged);
+    EXPECT_FALSE(certificate->record(report).range.breakdown);
     EXPECT_NEAR(
-        svmp::FE::analysis::constraintRangeRecord(report).range.residual_norm, 0.0, 1.0e-13);
+        certificate->record(report).range.residual_norm, 0.0, 1.0e-13);
     ASSERT_NE(testCertificateStorage(workspace).vectors.solution, nullptr);
     const auto pressure_dof =
         problem.sys->fieldDofOffset(problem.pressure_field);
@@ -8328,7 +8344,7 @@ TEST(NewtonSolver,
     EXPECT_NEAR(
         solution[static_cast<std::size_t>(pressure_dof)], 4.5, 1.0e-12);
     EXPECT_NEAR(
-        svmp::FE::analysis::constraintRangeRecord(report).constant_field_kkt.jump, 4.5, 1.0e-12);
+        certificate->record(report).constant_field_kkt.jump, 4.5, 1.0e-12);
 }
 
 TEST(NewtonSolver,
@@ -8358,7 +8374,8 @@ TEST(NewtonSolver,
     options.rel_tolerance = 0.0;
     options.use_line_search = false;
 
-    installTestCertificate(options, *problem.sys);
+    const auto certificate = installTestCertificate(options, *problem.sys);
+    ASSERT_NE(certificate, nullptr);
     svmp::FE::timestepping::NewtonSolver newton(options);
     svmp::FE::timestepping::NewtonWorkspace workspace;
     newton.allocateWorkspace(
@@ -8378,30 +8395,30 @@ TEST(NewtonSolver,
     const auto telemetry = stdout_text + stderr_text;
 
     EXPECT_TRUE(report.converged);
-    EXPECT_TRUE(svmp::FE::analysis::constraintRangeRecord(report).range.available);
-    EXPECT_TRUE(svmp::FE::analysis::constraintRangeRecord(report).range.converged);
-    EXPECT_LE(svmp::FE::analysis::constraintRangeRecord(report).range.relative_distance, 1.0e-10);
-    EXPECT_TRUE(svmp::FE::analysis::constraintRangeRecord(report).constant_field_kkt.available);
+    EXPECT_TRUE(certificate->record(report).range.available);
+    EXPECT_TRUE(certificate->record(report).range.converged);
+    EXPECT_LE(certificate->record(report).range.relative_distance, 1.0e-10);
+    EXPECT_TRUE(certificate->record(report).constant_field_kkt.available);
     EXPECT_TRUE(
-        svmp::FE::analysis::constraintRangeRecord(report).constant_field_kkt.unit_coefficients_represent_constant);
+        certificate->record(report).constant_field_kkt.unit_coefficients_represent_constant);
     EXPECT_TRUE(
-        svmp::FE::analysis::constraintRangeRecord(report).constant_field_kkt.constraints_preserve_constants);
+        certificate->record(report).constant_field_kkt.constraints_preserve_constants);
     EXPECT_NEAR(
-        svmp::FE::analysis::constraintRangeRecord(report).constant_field_kkt.jump,
+        certificate->record(report).constant_field_kkt.jump,
         -1.0 / 3.0,
         1.0e-13);
     EXPECT_NEAR(
-        svmp::FE::analysis::constraintRangeRecord(report).constant_field_kkt.multiplier,
+        certificate->record(report).constant_field_kkt.multiplier,
         1.0 / 3.0,
         1.0e-13);
     EXPECT_NEAR(
-        svmp::FE::analysis::constraintRangeRecord(report).constant_field_kkt.relative_distance,
+        certificate->record(report).constant_field_kkt.relative_distance,
         std::sqrt(1.0 / 6.0),
         1.0e-13);
     EXPECT_LE(
-        svmp::FE::analysis::constraintRangeRecord(report).constant_field_kkt.relative_orthogonality, 1.0e-13);
-    EXPECT_GT(svmp::FE::analysis::constraintRangeRecord(report).constant_field_kkt.residual_norm, 0.0);
-    EXPECT_GT(svmp::FE::analysis::constraintRangeRecord(report).constant_field_kkt.relative_distance, 0.4);
+        certificate->record(report).constant_field_kkt.relative_orthogonality, 1.0e-13);
+    EXPECT_GT(certificate->record(report).constant_field_kkt.residual_norm, 0.0);
+    EXPECT_GT(certificate->record(report).constant_field_kkt.relative_distance, 0.4);
     EXPECT_NE(telemetry.find("constant_pressure_kkt_available=1"),
               std::string::npos);
     EXPECT_NE(
@@ -8410,7 +8427,7 @@ TEST(NewtonSolver,
     RecordProperty(
         "constant_pressure_kkt_nonconstant_remainder_relative_distance",
         ::testing::PrintToString(
-            svmp::FE::analysis::constraintRangeRecord(report).constant_field_kkt.relative_distance));
+            certificate->record(report).constant_field_kkt.relative_distance));
     RecordProperty(
         "constant_pressure_kkt_production_load_projected", 0);
 }
@@ -8435,7 +8452,8 @@ TEST(NewtonSolver,
     options.abs_tolerance = 1.0e-14;
     options.rel_tolerance = 0.0;
     options.use_line_search = false;
-    installTestCertificate(options, *problem.sys, {.max_range_distance = 1.0e-10, .max_constant_field_kkt_distance = 1.0e-10});
+    const auto certificate = installTestCertificate(options, *problem.sys, {.max_range_distance = 1.0e-10, .max_constant_field_kkt_distance = 1.0e-10});
+    ASSERT_NE(certificate, nullptr);
     svmp::FE::timestepping::NewtonSolver newton(options);
     svmp::FE::timestepping::NewtonWorkspace workspace;
     newton.allocateWorkspace(
@@ -8461,16 +8479,16 @@ TEST(NewtonSolver,
     EXPECT_EQ(
         report.linear.message,
         "not required: entry state satisfies nonlinear tolerances");
-    EXPECT_TRUE(svmp::FE::analysis::constraintRangeRecord(report).sampled);
-    EXPECT_TRUE(svmp::FE::analysis::constraintRangeRecord(report).constant_field_kkt.available);
-    EXPECT_TRUE(svmp::FE::analysis::constraintRangeRecord(report).constant_field_kkt_gate.applied);
-    EXPECT_TRUE(svmp::FE::analysis::constraintRangeRecord(report).constant_field_kkt_gate.passed);
-    EXPECT_TRUE(svmp::FE::analysis::constraintRangeRecord(report).range_gate.applied);
-    EXPECT_TRUE(svmp::FE::analysis::constraintRangeRecord(report).range_gate.passed);
-    EXPECT_LE(svmp::FE::analysis::constraintRangeRecord(report).range.relative_distance, 1.0e-10);
-    EXPECT_LE(svmp::FE::analysis::constraintRangeRecord(report).constant_field_kkt.relative_distance, 1.0e-10);
+    EXPECT_TRUE(certificate->record(report).sampled);
+    EXPECT_TRUE(certificate->record(report).constant_field_kkt.available);
+    EXPECT_TRUE(certificate->record(report).constant_field_kkt_gate.applied);
+    EXPECT_TRUE(certificate->record(report).constant_field_kkt_gate.passed);
+    EXPECT_TRUE(certificate->record(report).range_gate.applied);
+    EXPECT_TRUE(certificate->record(report).range_gate.passed);
+    EXPECT_LE(certificate->record(report).range.relative_distance, 1.0e-10);
+    EXPECT_LE(certificate->record(report).constant_field_kkt.relative_distance, 1.0e-10);
     EXPECT_NEAR(
-        svmp::FE::analysis::constraintRangeRecord(report).constant_field_kkt_gate.max_relative_distance, 1.0e-10, 0.0);
+        certificate->record(report).constant_field_kkt_gate.max_relative_distance, 1.0e-10, 0.0);
     EXPECT_NE(
         telemetry.find(
             "diagnostic=free_surface_constant_pressure_kkt_distance_gate"),
@@ -8518,7 +8536,8 @@ TEST(NewtonSolver,
     options.abs_tolerance = 1.0e-14;
     options.rel_tolerance = 0.0;
     options.use_line_search = false;
-    installTestCertificate(options, *problem.sys, {.max_range_distance = 1.0e-10, .max_constant_field_kkt_distance = 1.0e-10});
+    const auto certificate = installTestCertificate(options, *problem.sys, {.max_range_distance = 1.0e-10, .max_constant_field_kkt_distance = 1.0e-10});
+    ASSERT_NE(certificate, nullptr);
     svmp::FE::timestepping::NewtonSolver newton(options);
     svmp::FE::timestepping::NewtonWorkspace workspace;
     newton.allocateWorkspace(
@@ -8533,20 +8552,20 @@ TEST(NewtonSolver,
         workspace);
 
     EXPECT_TRUE(report.converged);
-    EXPECT_TRUE(svmp::FE::analysis::constraintRangeRecord(report).range.available);
-    EXPECT_TRUE(svmp::FE::analysis::constraintRangeRecord(report).range.converged);
-    EXPECT_TRUE(svmp::FE::analysis::constraintRangeRecord(report).range_gate.applied);
-    EXPECT_TRUE(svmp::FE::analysis::constraintRangeRecord(report).range_gate.passed);
-    EXPECT_GT(svmp::FE::analysis::constraintRangeRecord(report).range.residual_norm, 0.0);
-    EXPECT_LT(svmp::FE::analysis::constraintRangeRecord(report).range.residual_norm, 1.0e-14);
-    EXPECT_EQ(svmp::FE::analysis::constraintRangeRecord(report).range.relative_distance, 0.0);
-    EXPECT_TRUE(svmp::FE::analysis::constraintRangeRecord(report).constant_field_kkt.available);
-    EXPECT_TRUE(svmp::FE::analysis::constraintRangeRecord(report).constant_field_kkt_gate.applied);
-    EXPECT_TRUE(svmp::FE::analysis::constraintRangeRecord(report).constant_field_kkt_gate.passed);
-    EXPECT_GT(svmp::FE::analysis::constraintRangeRecord(report).constant_field_kkt.residual_norm, 0.0);
-    EXPECT_LT(svmp::FE::analysis::constraintRangeRecord(report).constant_field_kkt.residual_norm, 1.0e-14);
-    EXPECT_EQ(svmp::FE::analysis::constraintRangeRecord(report).constant_field_kkt.relative_distance, 0.0);
-    EXPECT_EQ(svmp::FE::analysis::constraintRangeRecord(report).constant_field_kkt.reason, "available");
+    EXPECT_TRUE(certificate->record(report).range.available);
+    EXPECT_TRUE(certificate->record(report).range.converged);
+    EXPECT_TRUE(certificate->record(report).range_gate.applied);
+    EXPECT_TRUE(certificate->record(report).range_gate.passed);
+    EXPECT_GT(certificate->record(report).range.residual_norm, 0.0);
+    EXPECT_LT(certificate->record(report).range.residual_norm, 1.0e-14);
+    EXPECT_EQ(certificate->record(report).range.relative_distance, 0.0);
+    EXPECT_TRUE(certificate->record(report).constant_field_kkt.available);
+    EXPECT_TRUE(certificate->record(report).constant_field_kkt_gate.applied);
+    EXPECT_TRUE(certificate->record(report).constant_field_kkt_gate.passed);
+    EXPECT_GT(certificate->record(report).constant_field_kkt.residual_norm, 0.0);
+    EXPECT_LT(certificate->record(report).constant_field_kkt.residual_norm, 1.0e-14);
+    EXPECT_EQ(certificate->record(report).constant_field_kkt.relative_distance, 0.0);
+    EXPECT_EQ(certificate->record(report).constant_field_kkt.reason, "available");
 }
 
 TEST(NewtonSolver,
@@ -8591,7 +8610,8 @@ TEST(NewtonSolver,
                 point == SyncPoint::JacobianAndResidualAssembly ? 1 : 0;
         };
 
-    installTestCertificate(options, *problem.sys, {.max_constant_field_kkt_distance = 1.0e-10}, /*read_environment=*/false);
+    const auto certificate = installTestCertificate(options, *problem.sys, {.max_constant_field_kkt_distance = 1.0e-10}, /*read_environment=*/false);
+    ASSERT_NE(certificate, nullptr);
     svmp::FE::timestepping::NewtonSolver newton(options);
     svmp::FE::timestepping::NewtonWorkspace workspace;
     newton.allocateWorkspace(
@@ -8607,7 +8627,7 @@ TEST(NewtonSolver,
 
     EXPECT_TRUE(report.converged);
     EXPECT_EQ(report.iterations, 0);
-    EXPECT_TRUE(svmp::FE::analysis::constraintRangeRecord(report).constant_field_kkt.available);
+    EXPECT_TRUE(certificate->record(report).constant_field_kkt.available);
     EXPECT_EQ(jacobian_synchronizations, 0);
     EXPECT_EQ(combined_synchronizations, 0);
     EXPECT_GT(residual_synchronizations, 0);
@@ -8647,7 +8667,8 @@ TEST(NewtonSolver,
     options.abs_tolerance = 1.0e-14;
     options.rel_tolerance = 0.0;
     options.use_line_search = false;
-    installTestCertificate(options, *problem.sys, {.max_constant_field_kkt_distance = 0.1});
+    const auto certificate = installTestCertificate(options, *problem.sys, {.max_constant_field_kkt_distance = 0.1});
+    ASSERT_NE(certificate, nullptr);
     svmp::FE::timestepping::NewtonSolver newton(options);
     svmp::FE::timestepping::NewtonWorkspace workspace;
     newton.allocateWorkspace(
@@ -8668,15 +8689,15 @@ TEST(NewtonSolver,
 
     EXPECT_FALSE(report.converged);
     EXPECT_EQ(report.iterations, 0);
-    EXPECT_TRUE(svmp::FE::analysis::constraintRangeRecord(report).range.available);
-    EXPECT_TRUE(svmp::FE::analysis::constraintRangeRecord(report).range.converged);
-    EXPECT_LE(svmp::FE::analysis::constraintRangeRecord(report).range.relative_distance, 1.0e-10);
-    EXPECT_FALSE(svmp::FE::analysis::constraintRangeRecord(report).range_gate.applied);
-    EXPECT_TRUE(svmp::FE::analysis::constraintRangeRecord(report).constant_field_kkt.available);
-    EXPECT_TRUE(svmp::FE::analysis::constraintRangeRecord(report).constant_field_kkt_gate.applied);
-    EXPECT_FALSE(svmp::FE::analysis::constraintRangeRecord(report).constant_field_kkt_gate.passed);
+    EXPECT_TRUE(certificate->record(report).range.available);
+    EXPECT_TRUE(certificate->record(report).range.converged);
+    EXPECT_LE(certificate->record(report).range.relative_distance, 1.0e-10);
+    EXPECT_FALSE(certificate->record(report).range_gate.applied);
+    EXPECT_TRUE(certificate->record(report).constant_field_kkt.available);
+    EXPECT_TRUE(certificate->record(report).constant_field_kkt_gate.applied);
+    EXPECT_FALSE(certificate->record(report).constant_field_kkt_gate.passed);
     EXPECT_NEAR(
-        svmp::FE::analysis::constraintRangeRecord(report).constant_field_kkt.relative_distance,
+        certificate->record(report).constant_field_kkt.relative_distance,
         std::sqrt(1.0 / 6.0),
         1.0e-13);
     EXPECT_NE(
@@ -8692,7 +8713,7 @@ TEST(NewtonSolver,
     RecordProperty(
         "constant_pressure_kkt_distance_gate_nonconstant_relative_distance",
         ::testing::PrintToString(
-            svmp::FE::analysis::constraintRangeRecord(report).constant_field_kkt.relative_distance));
+            certificate->record(report).constant_field_kkt.relative_distance));
 }
 
 TEST(NewtonSolver,
@@ -8722,7 +8743,8 @@ TEST(NewtonSolver,
     options.abs_tolerance = 1.0e-14;
     options.rel_tolerance = 0.0;
     options.use_line_search = false;
-    installTestCertificate(options, *problem.sys, {.max_constant_field_kkt_distance = 0.5});
+    const auto certificate = installTestCertificate(options, *problem.sys, {.max_constant_field_kkt_distance = 0.5});
+    ASSERT_NE(certificate, nullptr);
     svmp::FE::timestepping::NewtonSolver newton(options);
     svmp::FE::timestepping::NewtonWorkspace workspace;
     newton.allocateWorkspace(
@@ -8743,15 +8765,15 @@ TEST(NewtonSolver,
 
     EXPECT_FALSE(report.converged);
     EXPECT_EQ(report.iterations, 0);
-    EXPECT_TRUE(svmp::FE::analysis::constraintRangeRecord(report).sampled);
-    EXPECT_FALSE(svmp::FE::analysis::constraintRangeRecord(report).constant_field_kkt.available);
+    EXPECT_TRUE(certificate->record(report).sampled);
+    EXPECT_FALSE(certificate->record(report).constant_field_kkt.available);
     EXPECT_FALSE(
-        svmp::FE::analysis::constraintRangeRecord(report).constant_field_kkt.constraints_preserve_constants);
+        certificate->record(report).constant_field_kkt.constraints_preserve_constants);
     EXPECT_EQ(
-        svmp::FE::analysis::constraintRangeRecord(report).constant_field_kkt.reason,
+        certificate->record(report).constant_field_kkt.reason,
         "pressure_constraints_do_not_preserve_constants");
-    EXPECT_TRUE(svmp::FE::analysis::constraintRangeRecord(report).constant_field_kkt_gate.applied);
-    EXPECT_FALSE(svmp::FE::analysis::constraintRangeRecord(report).constant_field_kkt_gate.passed);
+    EXPECT_TRUE(certificate->record(report).constant_field_kkt_gate.applied);
+    EXPECT_FALSE(certificate->record(report).constant_field_kkt_gate.passed);
     EXPECT_NE(
         telemetry.find("reason=constant_pressure_kkt_unavailable"),
         std::string::npos);
@@ -8938,7 +8960,8 @@ TEST(NewtonSolver,
     options.rel_tolerance = 0.0;
     options.use_line_search = false;
 
-    installTestCertificate(options, *problem.sys);
+    const auto certificate = installTestCertificate(options, *problem.sys);
+    ASSERT_NE(certificate, nullptr);
     svmp::FE::timestepping::NewtonSolver newton(options);
     svmp::FE::timestepping::NewtonWorkspace workspace;
     newton.allocateWorkspace(
@@ -8953,15 +8976,15 @@ TEST(NewtonSolver,
         workspace);
 
     EXPECT_TRUE(report.converged);
-    EXPECT_TRUE(svmp::FE::analysis::constraintRangeRecord(report).range.available);
-    EXPECT_TRUE(svmp::FE::analysis::constraintRangeRecord(report).range.converged);
-    EXPECT_FALSE(svmp::FE::analysis::constraintRangeRecord(report).range.breakdown);
+    EXPECT_TRUE(certificate->record(report).range.available);
+    EXPECT_TRUE(certificate->record(report).range.converged);
+    EXPECT_FALSE(certificate->record(report).range.breakdown);
     EXPECT_NEAR(
-        svmp::FE::analysis::constraintRangeRecord(report).range.residual_norm,
+        certificate->record(report).range.residual_norm,
         std::sqrt(3.0),
         1.0e-12);
     EXPECT_NEAR(
-        svmp::FE::analysis::constraintRangeRecord(report).range.relative_distance,
+        certificate->record(report).range.relative_distance,
         std::sqrt(3.0) / 2.0,
         1.0e-12);
 }
@@ -8997,7 +9020,8 @@ TEST(NewtonSolver,
     options.rel_tolerance = 0.0;
     options.use_line_search = false;
 
-    installTestCertificate(options, *problem.sys, {.max_range_distance = 1.0e-9});
+    const auto certificate = installTestCertificate(options, *problem.sys, {.max_range_distance = 1.0e-9});
+    ASSERT_NE(certificate, nullptr);
     svmp::FE::timestepping::NewtonSolver newton(options);
     svmp::FE::timestepping::NewtonWorkspace workspace;
     newton.allocateWorkspace(
@@ -9017,11 +9041,11 @@ TEST(NewtonSolver,
     const auto telemetry = stdout_text + stderr_text;
 
     EXPECT_TRUE(report.converged);
-    EXPECT_TRUE(svmp::FE::analysis::constraintRangeRecord(report).range.converged);
-    EXPECT_FALSE(svmp::FE::analysis::constraintRangeRecord(report).range.breakdown);
-    EXPECT_TRUE(svmp::FE::analysis::constraintRangeRecord(report).range_gate.applied);
-    EXPECT_TRUE(svmp::FE::analysis::constraintRangeRecord(report).range_gate.passed);
-    EXPECT_LE(svmp::FE::analysis::constraintRangeRecord(report).range.relative_distance, 1.0e-9);
+    EXPECT_TRUE(certificate->record(report).range.converged);
+    EXPECT_FALSE(certificate->record(report).range.breakdown);
+    EXPECT_TRUE(certificate->record(report).range_gate.applied);
+    EXPECT_TRUE(certificate->record(report).range_gate.passed);
+    EXPECT_LE(certificate->record(report).range.relative_distance, 1.0e-9);
 
     const auto iteration_token =
         std::string{"pressure_representability_iterations="};
@@ -9064,7 +9088,8 @@ TEST(NewtonSolver,
     options.abs_tolerance = 1.0e-14;
     options.rel_tolerance = 0.0;
     options.use_line_search = false;
-    installTestCertificate(options, *problem.sys);
+    const auto certificate = installTestCertificate(options, *problem.sys);
+    ASSERT_NE(certificate, nullptr);
     svmp::FE::timestepping::NewtonSolver newton(options);
     svmp::FE::timestepping::NewtonWorkspace workspace;
     newton.allocateWorkspace(
@@ -9132,13 +9157,13 @@ TEST(NewtonSolver,
         std::string::npos);
     EXPECT_NE(telemetry.find("pressure_representability_claimed=0"),
               std::string::npos);
-    EXPECT_FALSE(svmp::FE::analysis::constraintRangeRecord(report).constant_field_kkt.available);
+    EXPECT_FALSE(certificate->record(report).constant_field_kkt.available);
     EXPECT_TRUE(
-        svmp::FE::analysis::constraintRangeRecord(report).constant_field_kkt.unit_coefficients_represent_constant);
+        certificate->record(report).constant_field_kkt.unit_coefficients_represent_constant);
     EXPECT_FALSE(
-        svmp::FE::analysis::constraintRangeRecord(report).constant_field_kkt.constraints_preserve_constants);
+        certificate->record(report).constant_field_kkt.constraints_preserve_constants);
     EXPECT_EQ(
-        svmp::FE::analysis::constraintRangeRecord(report).constant_field_kkt.reason,
+        certificate->record(report).constant_field_kkt.reason,
         "pressure_constraints_do_not_preserve_constants");
     EXPECT_NE(telemetry.find("constant_pressure_kkt_available=0"),
               std::string::npos);
@@ -9168,7 +9193,8 @@ TEST(NewtonSolver,
     options.abs_tolerance = 1.0e-14;
     options.rel_tolerance = 0.0;
     options.use_line_search = false;
-    installTestCertificate(options, *problem.sys, {.max_range_distance = 1.0e-10});
+    const auto certificate = installTestCertificate(options, *problem.sys, {.max_range_distance = 1.0e-10});
+    ASSERT_NE(certificate, nullptr);
     svmp::FE::timestepping::NewtonSolver newton(options);
     svmp::FE::timestepping::NewtonWorkspace workspace;
     newton.allocateWorkspace(
@@ -9189,13 +9215,13 @@ TEST(NewtonSolver,
 
     EXPECT_TRUE(report.converged);
     EXPECT_EQ(report.iterations, 0);
-    EXPECT_TRUE(svmp::FE::analysis::constraintRangeRecord(report).sampled);
-    EXPECT_TRUE(svmp::FE::analysis::constraintRangeRecord(report).range.available);
-    EXPECT_TRUE(svmp::FE::analysis::constraintRangeRecord(report).range.converged);
-    EXPECT_FALSE(svmp::FE::analysis::constraintRangeRecord(report).range.breakdown);
-    EXPECT_TRUE(svmp::FE::analysis::constraintRangeRecord(report).range_gate.applied);
-    EXPECT_TRUE(svmp::FE::analysis::constraintRangeRecord(report).range_gate.passed);
-    EXPECT_LE(svmp::FE::analysis::constraintRangeRecord(report).range.relative_distance, 1.0e-10);
+    EXPECT_TRUE(certificate->record(report).sampled);
+    EXPECT_TRUE(certificate->record(report).range.available);
+    EXPECT_TRUE(certificate->record(report).range.converged);
+    EXPECT_FALSE(certificate->record(report).range.breakdown);
+    EXPECT_TRUE(certificate->record(report).range_gate.applied);
+    EXPECT_TRUE(certificate->record(report).range_gate.passed);
+    EXPECT_LE(certificate->record(report).range.relative_distance, 1.0e-10);
     EXPECT_NE(
         telemetry.find(
             "diagnostic=free_surface_pressure_representability_distance_gate"),
@@ -9210,7 +9236,7 @@ TEST(NewtonSolver,
     RecordProperty(
         "pressure_representability_distance_gate_in_range_relative_distance",
         ::testing::PrintToString(
-            svmp::FE::analysis::constraintRangeRecord(report).range.relative_distance));
+            certificate->record(report).range.relative_distance));
 }
 
 TEST(NewtonSolver,
@@ -9240,7 +9266,8 @@ TEST(NewtonSolver,
     options.abs_tolerance = 1.0e-14;
     options.rel_tolerance = 0.0;
     options.use_line_search = false;
-    installTestCertificate(options, *problem.sys, {.max_range_distance = 0.5});
+    const auto certificate = installTestCertificate(options, *problem.sys, {.max_range_distance = 0.5});
+    ASSERT_NE(certificate, nullptr);
     svmp::FE::timestepping::NewtonSolver newton(options);
     svmp::FE::timestepping::NewtonWorkspace workspace;
     newton.allocateWorkspace(
@@ -9261,14 +9288,14 @@ TEST(NewtonSolver,
 
     EXPECT_FALSE(report.converged);
     EXPECT_EQ(report.iterations, 0);
-    EXPECT_TRUE(svmp::FE::analysis::constraintRangeRecord(report).sampled);
-    EXPECT_TRUE(svmp::FE::analysis::constraintRangeRecord(report).range.available);
-    EXPECT_TRUE(svmp::FE::analysis::constraintRangeRecord(report).range.converged);
-    EXPECT_FALSE(svmp::FE::analysis::constraintRangeRecord(report).range.breakdown);
-    EXPECT_TRUE(svmp::FE::analysis::constraintRangeRecord(report).range_gate.applied);
-    EXPECT_FALSE(svmp::FE::analysis::constraintRangeRecord(report).range_gate.passed);
+    EXPECT_TRUE(certificate->record(report).sampled);
+    EXPECT_TRUE(certificate->record(report).range.available);
+    EXPECT_TRUE(certificate->record(report).range.converged);
+    EXPECT_FALSE(certificate->record(report).range.breakdown);
+    EXPECT_TRUE(certificate->record(report).range_gate.applied);
+    EXPECT_FALSE(certificate->record(report).range_gate.passed);
     EXPECT_NEAR(
-        svmp::FE::analysis::constraintRangeRecord(report).range.relative_distance, 1.0, 1.0e-13);
+        certificate->record(report).range.relative_distance, 1.0, 1.0e-13);
     EXPECT_NE(
         telemetry.find("reason=relative_distance_exceeds_threshold"),
         std::string::npos);
@@ -9283,7 +9310,7 @@ TEST(NewtonSolver,
     RecordProperty(
         "pressure_representability_distance_gate_out_of_range_relative_distance",
         ::testing::PrintToString(
-            svmp::FE::analysis::constraintRangeRecord(report).range.relative_distance));
+            certificate->record(report).range.relative_distance));
 }
 
 TEST(NewtonSolver,
@@ -9313,7 +9340,8 @@ TEST(NewtonSolver,
     options.abs_tolerance = 1.0e-14;
     options.rel_tolerance = 0.0;
     options.use_line_search = false;
-    installTestCertificate(options, *problem.sys, {.max_range_distance = 0.5});
+    const auto certificate = installTestCertificate(options, *problem.sys, {.max_range_distance = 0.5});
+    ASSERT_NE(certificate, nullptr);
     svmp::FE::timestepping::NewtonSolver newton(options);
     svmp::FE::timestepping::NewtonWorkspace workspace;
     newton.allocateWorkspace(
@@ -9334,11 +9362,11 @@ TEST(NewtonSolver,
 
     EXPECT_FALSE(report.converged);
     EXPECT_EQ(report.iterations, 0);
-    EXPECT_TRUE(svmp::FE::analysis::constraintRangeRecord(report).sampled);
-    EXPECT_FALSE(svmp::FE::analysis::constraintRangeRecord(report).range.available);
-    EXPECT_TRUE(svmp::FE::analysis::constraintRangeRecord(report).range_gate.applied);
-    EXPECT_FALSE(svmp::FE::analysis::constraintRangeRecord(report).range_gate.passed);
-    EXPECT_EQ(svmp::FE::analysis::constraintRangeRecord(report).range.reason,
+    EXPECT_TRUE(certificate->record(report).sampled);
+    EXPECT_FALSE(certificate->record(report).range.available);
+    EXPECT_TRUE(certificate->record(report).range_gate.applied);
+    EXPECT_FALSE(certificate->record(report).range_gate.passed);
+    EXPECT_EQ(certificate->record(report).range.reason,
               "nonzero_pressure_constraint_inhomogeneity");
     // The veto is one decision, for missing evidence.
     ASSERT_EQ(report.certificates.size(), 1u);
@@ -9394,7 +9422,7 @@ TEST(NewtonSolver, ConstraintRangeProbeReportsFiniteRankUniformEvidence)
     (void)testing::internal::GetCapturedStdout();
     (void)testing::internal::GetCapturedStderr();
     EXPECT_EQ(ts_test::getVectorByDof(problem.history.u()), entry_state);
-    ASSERT_TRUE(svmp::FE::analysis::constraintRangeRecord(report).range.available);
+    ASSERT_TRUE(certificate->record(report).range.available);
 
     using Defect = svmp::FE::analysis::ConstraintRangeProbeEvidence::Defect;
     const auto evidence = certificate->probeEvidence(
@@ -9404,11 +9432,11 @@ TEST(NewtonSolver, ConstraintRangeProbeReportsFiniteRankUniformEvidence)
     EXPECT_TRUE(evidence.range_available);
     EXPECT_EQ(evidence.constraint_field, problem.pressure_field);
     EXPECT_EQ(evidence.range_relative_distance,
-              svmp::FE::analysis::constraintRangeRecord(report).range.relative_distance);
+              certificate->record(report).range.relative_distance);
     EXPECT_EQ(evidence.production_residual_norm, report.residual_norm);
     EXPECT_EQ(evidence.constant_field_kkt_required,
-              svmp::FE::analysis::constraintRangeRecord(report).constant_field_kkt.unit_coefficients_represent_constant &&
-                  svmp::FE::analysis::constraintRangeRecord(report).constant_field_kkt.constraints_preserve_constants);
+              certificate->record(report).constant_field_kkt.unit_coefficients_represent_constant &&
+                  certificate->record(report).constant_field_kkt.constraints_preserve_constants);
     EXPECT_FALSE(certificate
                      ->probeEvidence(report, *problem.sys,
                                      /*constant_field_is_physical=*/false,
@@ -9469,7 +9497,8 @@ TEST(NewtonSolver,
     options.abs_tolerance = 1.0e-13;
     options.rel_tolerance = 0.0;
     options.use_line_search = false;
-    installTestCertificate(options, *problem.sys, {.max_range_distance = 1.0e-10, .initialize_constraint_field = true});
+    const auto certificate = installTestCertificate(options, *problem.sys, {.max_range_distance = 1.0e-10, .initialize_constraint_field = true});
+    ASSERT_NE(certificate, nullptr);
     svmp::FE::timestepping::NewtonSolver newton(options);
     svmp::FE::timestepping::NewtonWorkspace workspace;
     newton.allocateWorkspace(
@@ -9518,15 +9547,15 @@ TEST(NewtonSolver,
 
     EXPECT_TRUE(report.converged);
     EXPECT_EQ(report.iterations, 0);
-    EXPECT_TRUE(svmp::FE::analysis::constraintRangeRecord(report).initializer.requested);
-    EXPECT_TRUE(svmp::FE::analysis::constraintRangeRecord(report).initializer.applied);
-    EXPECT_TRUE(svmp::FE::analysis::constraintRangeRecord(report).initializer.passed);
-    EXPECT_EQ(svmp::FE::analysis::constraintRangeRecord(report).initializer.reason,
+    EXPECT_TRUE(certificate->record(report).initializer.requested);
+    EXPECT_TRUE(certificate->record(report).initializer.applied);
+    EXPECT_TRUE(certificate->record(report).initializer.passed);
+    EXPECT_EQ(certificate->record(report).initializer.reason,
               "additive_initial_guess_within_threshold");
-    EXPECT_EQ(svmp::FE::analysis::constraintRangeRecord(report).range.constraint_field,
+    EXPECT_EQ(certificate->record(report).range.constraint_field,
               problem.pressure_field);
     EXPECT_TRUE(workspace.initializer_ledger.isConsumed(0));
-    EXPECT_LE(svmp::FE::analysis::constraintRangeRecord(report).range.relative_distance, 1.0e-10);
+    EXPECT_LE(certificate->record(report).range.relative_distance, 1.0e-10);
     EXPECT_NE(
         telemetry.find(
             "diagnostic=free_surface_static_compatible_pressure_initializer"),
@@ -9604,9 +9633,9 @@ TEST(NewtonSolver,
     const auto repeated_stdout = testing::internal::GetCapturedStdout();
     EXPECT_TRUE(repeated_report.converged);
     EXPECT_FALSE(
-        svmp::FE::analysis::constraintRangeRecord(repeated_report).initializer.applied);
-    EXPECT_TRUE(svmp::FE::analysis::constraintRangeRecord(repeated_report).initializer.passed);
-    EXPECT_EQ(svmp::FE::analysis::constraintRangeRecord(repeated_report).initializer.reason,
+        certificate->record(repeated_report).initializer.applied);
+    EXPECT_TRUE(certificate->record(repeated_report).initializer.passed);
+    EXPECT_EQ(certificate->record(repeated_report).initializer.reason,
               "already_initialized");
     EXPECT_NE(
         (repeated_stdout + repeated_stderr).find("reason=already_initialized"),
@@ -9627,7 +9656,7 @@ TEST(NewtonSolver,
     RecordProperty(
         "static_compatible_pressure_initializer_relative_distance",
         ::testing::PrintToString(
-            svmp::FE::analysis::constraintRangeRecord(report).range.relative_distance));
+            certificate->record(report).range.relative_distance));
     RecordProperty(
         "static_compatible_pressure_initializer_nonpressure_preserved", 1);
     RecordProperty(
@@ -9698,7 +9727,8 @@ TEST(NewtonSolver,
     options.abs_tolerance = 100.0;
     options.rel_tolerance = 0.0;
     options.use_line_search = false;
-    installTestCertificate(options, *problem.sys, {.max_range_distance = 1.0e-12, .initialize_constraint_field = true});
+    const auto certificate = installTestCertificate(options, *problem.sys, {.max_range_distance = 1.0e-12, .initialize_constraint_field = true});
+    ASSERT_NE(certificate, nullptr);
     svmp::FE::timestepping::NewtonSolver newton(options);
     svmp::FE::timestepping::NewtonWorkspace workspace;
     newton.allocateWorkspace(
@@ -9719,11 +9749,11 @@ TEST(NewtonSolver,
 
     EXPECT_TRUE(report.converged);
     EXPECT_EQ(report.iterations, 0);
-    EXPECT_TRUE(svmp::FE::analysis::constraintRangeRecord(report).initializer.applied);
-    EXPECT_TRUE(svmp::FE::analysis::constraintRangeRecord(report).initializer.passed);
-    EXPECT_EQ(svmp::FE::analysis::constraintRangeRecord(report).initializer.reason,
+    EXPECT_TRUE(certificate->record(report).initializer.applied);
+    EXPECT_TRUE(certificate->record(report).initializer.passed);
+    EXPECT_EQ(certificate->record(report).initializer.reason,
               "additive_initial_guess_within_threshold");
-    EXPECT_LE(svmp::FE::analysis::constraintRangeRecord(report).range.relative_distance, 1.0e-12);
+    EXPECT_LE(certificate->record(report).range.relative_distance, 1.0e-12);
     EXPECT_EQ(ts_test::getVectorByDof(problem.history.u()),
               exact_entry_state);
     ASSERT_NE(testCertificateStorage(workspace).vectors.correction_load, nullptr);
@@ -9765,7 +9795,8 @@ TEST(NewtonSolver,
     options.abs_tolerance = 1.0e-13;
     options.rel_tolerance = 0.0;
     options.use_line_search = false;
-    installTestCertificate(options, *problem.sys, {.max_range_distance = 1.0e-10, .initialize_constraint_field = true});
+    const auto certificate = installTestCertificate(options, *problem.sys, {.max_range_distance = 1.0e-10, .initialize_constraint_field = true});
+    ASSERT_NE(certificate, nullptr);
     svmp::FE::timestepping::NewtonSolver one_iteration_newton(options);
     svmp::FE::timestepping::NewtonWorkspace workspace;
     one_iteration_newton.allocateWorkspace(
@@ -9788,7 +9819,7 @@ TEST(NewtonSolver,
     EXPECT_FALSE(failed_report.converged);
     EXPECT_EQ(failed_report.iterations, 1);
     EXPECT_TRUE(
-        svmp::FE::analysis::constraintRangeRecord(failed_report).initializer.applied);
+        certificate->record(failed_report).initializer.applied);
     EXPECT_FALSE(workspace.initializer_ledger.isConsumed(0));
     EXPECT_EQ(ts_test::getVectorByDof(problem.history.u()), entry_current);
     EXPECT_EQ(ts_test::getVectorByDof(problem.history.uPrev()),
@@ -9807,7 +9838,7 @@ TEST(NewtonSolver,
     EXPECT_TRUE(retry_report.converged);
     EXPECT_EQ(retry_report.iterations, 1);
     EXPECT_TRUE(
-        svmp::FE::analysis::constraintRangeRecord(retry_report).initializer.applied);
+        certificate->record(retry_report).initializer.applied);
     EXPECT_TRUE(workspace.initializer_ledger.isConsumed(0));
 
     const auto retry_state =
@@ -9961,7 +9992,8 @@ TEST(NewtonSolver,
                 "synthetic post-pressure-initial-guess synchronization failure");
         };
 
-    installTestCertificate(options, *problem.sys, {.max_range_distance = 1.0e-10, .initialize_constraint_field = true});
+    const auto certificate = installTestCertificate(options, *problem.sys, {.max_range_distance = 1.0e-10, .initialize_constraint_field = true});
+    ASSERT_NE(certificate, nullptr);
     svmp::FE::timestepping::NewtonSolver newton(options);
     svmp::FE::timestepping::NewtonWorkspace workspace;
     newton.allocateWorkspace(
@@ -10009,7 +10041,7 @@ TEST(NewtonSolver,
         workspace);
     EXPECT_TRUE(retry_report.converged);
     EXPECT_TRUE(
-        svmp::FE::analysis::constraintRangeRecord(retry_report).initializer.applied);
+        certificate->record(retry_report).initializer.applied);
     EXPECT_TRUE(workspace.initializer_ledger.isConsumed(0));
     EXPECT_EQ(injected_failures, 1);
     EXPECT_EQ(restored_effect_count, 2);
@@ -10061,6 +10093,9 @@ TEST(NewtonSolver,
     loop_options.newton.rel_tolerance = 0.0;
     loop_options.newton.use_line_search = false;
 
+    const auto certificate = installTestCertificate(loop_options.newton, *problem.sys, {.max_range_distance = 1.0e-10, .initialize_constraint_field = true});
+    ASSERT_NE(certificate, nullptr);
+
     std::vector<bool> initializer_applied;
     std::vector<std::string> initializer_reasons;
     int candidate_checks = 0;
@@ -10070,9 +10105,9 @@ TEST(NewtonSolver,
             const svmp::FE::timestepping::NewtonReport& report) {
             EXPECT_TRUE(report.converged);
             initializer_applied.push_back(
-                svmp::FE::analysis::constraintRangeRecord(report).initializer.applied);
+                certificate->record(report).initializer.applied);
             initializer_reasons.push_back(
-                svmp::FE::analysis::constraintRangeRecord(report).initializer.reason);
+                certificate->record(report).initializer.reason);
         };
     callbacks.on_before_step_accept =
         [&](svmp::FE::timestepping::TimeHistory&,
@@ -10081,7 +10116,6 @@ TEST(NewtonSolver,
             return candidate_checks > 1;
         };
 
-    installTestCertificate(loop_options.newton, *problem.sys, {.max_range_distance = 1.0e-10, .initialize_constraint_field = true});
     svmp::FE::timestepping::TimeLoop loop(loop_options);
     const auto loop_report = loop.run(
         *problem.transient,
@@ -10187,7 +10221,8 @@ TEST(NewtonSolver,
             }
         };
 
-    installTestCertificate(options, *problem.sys, {.max_range_distance = 1.0e-10, .initialize_constraint_field = true});
+    const auto certificate = installTestCertificate(options, *problem.sys, {.max_range_distance = 1.0e-10, .initialize_constraint_field = true});
+    ASSERT_NE(certificate, nullptr);
     svmp::FE::timestepping::NewtonSolver newton(options);
     svmp::FE::timestepping::NewtonWorkspace workspace;
     newton.allocateWorkspace(
@@ -10215,7 +10250,7 @@ TEST(NewtonSolver,
         workspace);
     EXPECT_TRUE(retry_report.converged);
     EXPECT_TRUE(
-        svmp::FE::analysis::constraintRangeRecord(retry_report).initializer.applied);
+        certificate->record(retry_report).initializer.applied);
     EXPECT_FALSE(
         problem.sys->meshCoordinateTransactionActive());
 #endif
@@ -10275,6 +10310,9 @@ TEST(NewtonSolver,
     loop_options.newton.rel_tolerance = 0.0;
     loop_options.newton.use_line_search = false;
 
+    const auto certificate = installTestCertificate(loop_options.newton, *problem.sys, {.max_range_distance = 1.0e-10, .initialize_constraint_field = true});
+    ASSERT_NE(certificate, nullptr);
+
     std::vector<bool> candidate_initializer_applied;
     std::vector<std::string> candidate_initializer_reasons;
     int candidate_checks = 0;
@@ -10284,9 +10322,9 @@ TEST(NewtonSolver,
             const svmp::FE::timestepping::NewtonReport& report) {
             EXPECT_TRUE(report.converged);
             candidate_initializer_applied.push_back(
-                svmp::FE::analysis::constraintRangeRecord(report).initializer.applied);
+                certificate->record(report).initializer.applied);
             candidate_initializer_reasons.push_back(
-                svmp::FE::analysis::constraintRangeRecord(report).initializer.reason);
+                certificate->record(report).initializer.reason);
         };
     callbacks.on_before_step_accept =
         [&](svmp::FE::timestepping::TimeHistory&,
@@ -10295,7 +10333,6 @@ TEST(NewtonSolver,
             return candidate_checks > 1;
         };
 
-    installTestCertificate(loop_options.newton, *problem.sys, {.max_range_distance = 1.0e-10, .initialize_constraint_field = true});
     svmp::FE::timestepping::TimeLoop loop(loop_options);
     const auto loop_report = loop.run(
         *problem.transient,
@@ -10386,7 +10423,8 @@ TEST(NewtonSolver,
             }
         };
 
-    installTestCertificate(options, *problem.sys, {.max_range_distance = 1.0e-10, .max_constant_field_kkt_distance = 1.0e-10, .initialize_constraint_field = true});
+    const auto certificate = installTestCertificate(options, *problem.sys, {.max_range_distance = 1.0e-10, .max_constant_field_kkt_distance = 1.0e-10, .initialize_constraint_field = true});
+    ASSERT_NE(certificate, nullptr);
     svmp::FE::timestepping::NewtonSolver newton(options);
     newton.allocateWorkspace(
         *problem.sys, *problem.factory, workspace);
@@ -10411,11 +10449,11 @@ TEST(NewtonSolver,
         workspace);
     EXPECT_TRUE(retry_report.converged);
     EXPECT_TRUE(
-        svmp::FE::analysis::constraintRangeRecord(retry_report).range_gate.applied);
+        certificate->record(retry_report).range_gate.applied);
     EXPECT_TRUE(
-        svmp::FE::analysis::constraintRangeRecord(retry_report).range_gate.passed);
-    EXPECT_TRUE(svmp::FE::analysis::constraintRangeRecord(retry_report).constant_field_kkt_gate.applied);
-    EXPECT_TRUE(svmp::FE::analysis::constraintRangeRecord(retry_report).constant_field_kkt_gate.passed);
+        certificate->record(retry_report).range_gate.passed);
+    EXPECT_TRUE(certificate->record(retry_report).constant_field_kkt_gate.applied);
+    EXPECT_TRUE(certificate->record(retry_report).constant_field_kkt_gate.passed);
     // The outer acceptance recorded both decisions of the certificate.
     ASSERT_EQ(retry_report.certificates.size(), 2u);
     EXPECT_EQ(retry_report.certificates[0].id, "constraint_range.range_distance");
@@ -10462,7 +10500,8 @@ TEST(NewtonSolver,
     options.abs_tolerance = 1.0e-13;
     options.rel_tolerance = 0.0;
     options.use_line_search = false;
-    installTestCertificate(options, *problem.sys, {.max_range_distance = 1.0e-10, .initialize_constraint_field = true});
+    const auto certificate = installTestCertificate(options, *problem.sys, {.max_range_distance = 1.0e-10, .initialize_constraint_field = true});
+    ASSERT_NE(certificate, nullptr);
     svmp::FE::timestepping::NewtonSolver newton(options);
     svmp::FE::timestepping::NewtonWorkspace workspace;
     newton.allocateWorkspace(
@@ -10477,7 +10516,7 @@ TEST(NewtonSolver,
         workspace);
     ASSERT_TRUE(initial_report.converged);
     ASSERT_TRUE(
-        svmp::FE::analysis::constraintRangeRecord(initial_report).initializer.applied);
+        certificate->record(initial_report).initializer.applied);
     ASSERT_TRUE(workspace.initializer_ledger.isConsumed(0));
 
     newton.allocateWorkspace(
@@ -10491,9 +10530,9 @@ TEST(NewtonSolver,
         workspace);
     ASSERT_TRUE(workspace_reallocated_report.converged);
     EXPECT_FALSE(
-        svmp::FE::analysis::constraintRangeRecord(workspace_reallocated_report).initializer.applied);
+        certificate->record(workspace_reallocated_report).initializer.applied);
     EXPECT_EQ(
-        svmp::FE::analysis::constraintRangeRecord(workspace_reallocated_report).initializer.reason,
+        certificate->record(workspace_reallocated_report).initializer.reason,
         "already_initialized");
 
     const auto entry_sparsity_revision =
@@ -10516,9 +10555,9 @@ TEST(NewtonSolver,
     const auto stdout_text = testing::internal::GetCapturedStdout();
     EXPECT_TRUE(jacobian_reallocated_report.converged);
     EXPECT_FALSE(
-        svmp::FE::analysis::constraintRangeRecord(jacobian_reallocated_report).initializer.applied);
+        certificate->record(jacobian_reallocated_report).initializer.applied);
     EXPECT_EQ(
-        svmp::FE::analysis::constraintRangeRecord(jacobian_reallocated_report).initializer.reason,
+        certificate->record(jacobian_reallocated_report).initializer.reason,
         "already_initialized");
     EXPECT_TRUE(workspace.initializer_ledger.isConsumed(0));
     EXPECT_EQ(
@@ -10568,7 +10607,8 @@ TEST(NewtonSolver,
     options.abs_tolerance = 1.0e-14;
     options.rel_tolerance = 0.0;
     options.use_line_search = false;
-    installTestCertificate(options, *problem.sys, {.max_range_distance = 0.5, .initialize_constraint_field = true});
+    const auto certificate = installTestCertificate(options, *problem.sys, {.max_range_distance = 0.5, .initialize_constraint_field = true});
+    ASSERT_NE(certificate, nullptr);
     svmp::FE::timestepping::NewtonSolver newton(options);
     svmp::FE::timestepping::NewtonWorkspace workspace;
     newton.allocateWorkspace(
@@ -10588,14 +10628,14 @@ TEST(NewtonSolver,
     const auto telemetry = stdout_text + stderr_text;
 
     EXPECT_FALSE(report.converged);
-    EXPECT_TRUE(svmp::FE::analysis::constraintRangeRecord(report).initializer.requested);
-    EXPECT_FALSE(svmp::FE::analysis::constraintRangeRecord(report).initializer.applied);
-    EXPECT_FALSE(svmp::FE::analysis::constraintRangeRecord(report).initializer.passed);
-    EXPECT_EQ(svmp::FE::analysis::constraintRangeRecord(report).initializer.reason,
+    EXPECT_TRUE(certificate->record(report).initializer.requested);
+    EXPECT_FALSE(certificate->record(report).initializer.applied);
+    EXPECT_FALSE(certificate->record(report).initializer.passed);
+    EXPECT_EQ(certificate->record(report).initializer.reason,
               "relative_distance_exceeds_threshold");
     EXPECT_FALSE(workspace.initializer_ledger.isConsumed(0));
     EXPECT_NEAR(
-        svmp::FE::analysis::constraintRangeRecord(report).range.relative_distance, 1.0, 1.0e-13);
+        certificate->record(report).range.relative_distance, 1.0, 1.0e-13);
     EXPECT_EQ(ts_test::getVectorByDof(problem.history.u()), entry_current);
     EXPECT_EQ(ts_test::getVectorByDof(problem.history.uPrev()),
               entry_previous);
@@ -10827,7 +10867,8 @@ TEST(NewtonSolver,
     options.rel_tolerance = 0.0;
     options.use_line_search = false;
 
-    installTestCertificate(options, *problem.sys);
+    const auto certificate = installTestCertificate(options, *problem.sys);
+    ASSERT_NE(certificate, nullptr);
     svmp::FE::timestepping::NewtonSolver newton(options);
     svmp::FE::timestepping::NewtonWorkspace workspace;
     newton.allocateWorkspace(
@@ -10871,10 +10912,10 @@ TEST(NewtonSolver,
     EXPECT_EQ(workspace.sparsity_revision,
               problem.sys->sparsityPatternRevision());
     EXPECT_TRUE(
-        svmp::FE::analysis::constraintRangeRecord(report).constant_field_kkt.unit_coefficients_represent_constant);
+        certificate->record(report).constant_field_kkt.unit_coefficients_represent_constant);
     EXPECT_TRUE(
-        svmp::FE::analysis::constraintRangeRecord(report).constant_field_kkt.constraints_preserve_constants);
-    EXPECT_TRUE(svmp::FE::analysis::constraintRangeRecord(report).constant_field_kkt.available);
+        certificate->record(report).constant_field_kkt.constraints_preserve_constants);
+    EXPECT_TRUE(certificate->record(report).constant_field_kkt.available);
 
     const std::array<const void*, 9> refreshed_vectors{
         testCertificateStorage(workspace).vectors.load.get(),
