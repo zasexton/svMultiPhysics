@@ -13,6 +13,7 @@
 #include <array>
 #include <cctype>
 #include <cmath>
+#include <cstdint>
 #include <initializer_list>
 #include <memory>
 #include <optional>
@@ -29,6 +30,142 @@ namespace mm = svmp::Physics::formulations::mesh_motion;
 
 // The generic readers of equation input (decision D52).
 using namespace svmp::Physics::options;
+namespace opt = svmp::FE::options;
+using svmp::FE::Real;
+
+enum class MeshMotionModel : std::uint8_t { FromEquationType, Harmonic, PseudoElastic };
+
+// The equation-only key of mesh motion.
+struct MeshMotionEquationKeys {
+  MeshMotionModel model{MeshMotionModel::FromEquationType};
+};
+
+// The keys of the equation, read from the equation, then the default domain,
+// then the domain, each overriding the earlier ones.
+struct MeshMotionKeys {
+  std::string field_name{"mesh_displacement"};
+  bool auto_register_field{true};
+  bool bind_as_mesh_displacement{true};
+  Real kappa{1.0};
+  std::optional<Real> stiffness{};
+  mm::HarmonicQuantity harmonic_quantity{mm::HarmonicQuantity::Displacement};
+  Real lambda_mesh{1.0};
+  Real mu_mesh{1.0};
+};
+
+enum class MeshMotionBoundaryType : std::uint8_t { None, Dirichlet, Natural, Robin, NormalConstraint, TangentialPolicy };
+enum class MeshMotionQuantity : std::uint8_t { Displacement, Velocity };
+
+// The keys of one boundary condition.  Value and Target are kept as text:
+// one number along Effective_direction, or two or three components.
+struct MeshMotionBoundaryKeys {
+  MeshMotionBoundaryType type{MeshMotionBoundaryType::None};
+  std::string value{};
+  std::string target{};
+  std::string effective_direction{};
+  MeshMotionQuantity quantity{MeshMotionQuantity::Displacement};
+  std::optional<Real> alpha{};
+  std::optional<Real> penalty{};
+  Real velocity_time_scale{1.0};
+  mm::TangentialMeshPolicy tangential_policy{mm::TangentialMeshPolicy::SmoothingOnly};
+};
+
+const opt::OptionSchema<MeshMotionEquationKeys>& mesh_motion_equation_schema()
+{
+  static const auto schema = [] {
+    opt::OptionSchema<MeshMotionEquationKeys> out("Mesh motion equation");
+    out.key("Model", &MeshMotionEquationKeys::model,
+            opt::EnumCodec<MeshMotionModel>{{{MeshMotionModel::Harmonic, "harmonic", {"laplace", "laplacian"}},
+                                             {MeshMotionModel::PseudoElastic, "pseudo_elastic",
+                                              {"elastic", "linear_elastic"}}}},
+            {.doc = "the mesh-motion operator (default: from the equation type)"});
+    return out;
+  }();
+  return schema;
+}
+
+void add_common_mesh_motion_keys(opt::OptionSchema<MeshMotionKeys>& schema)
+{
+  const auto relaxed = opt::BoolCodec{opt::BoolLexicon::Relaxed};
+  schema
+      .key("Field_name", &MeshMotionKeys::field_name, opt::StringCodec{},
+           {.spellings = {{"Field_name"}, {"Mesh_displacement_field"}}, .doc = "the mesh displacement field"})
+      .key("Auto_register_field", &MeshMotionKeys::auto_register_field, relaxed,
+           {.spellings = {{"Auto_register_field"}, {"Auto_register_mesh_displacement_field"}},
+            .empty = opt::EmptyPolicy::Absent,
+            .doc = "register the field when missing"})
+      .key("Bind_as_mesh_displacement", &MeshMotionKeys::bind_as_mesh_displacement, relaxed,
+           {.empty = opt::EmptyPolicy::Absent, .doc = "the field moves the mesh"});
+}
+
+const opt::OptionSchema<MeshMotionKeys>& harmonic_mesh_motion_schema()
+{
+  static const auto schema = [] {
+    opt::OptionSchema<MeshMotionKeys> out("Harmonic mesh motion");
+    add_common_mesh_motion_keys(out);
+    out.key("Kappa", &MeshMotionKeys::kappa, opt::RealCodec{}, {.empty = opt::EmptyPolicy::Absent, .doc = "kappa"})
+        .key("Stiffness", &MeshMotionKeys::stiffness, opt::OptionalCodec<opt::RealCodec>{},
+             {.doc = "the older name of Kappa (none: unset)"})
+        .key("Harmonic_quantity", &MeshMotionKeys::harmonic_quantity,
+             opt::EnumCodec<mm::HarmonicQuantity>{
+                 {{mm::HarmonicQuantity::Displacement, "displacement", {"mesh_displacement"}},
+                  {mm::HarmonicQuantity::Velocity, "velocity", {"mesh_velocity"}}}},
+             {.doc = "the harmonic unknown"});
+    return out;
+  }();
+  return schema;
+}
+
+const opt::OptionSchema<MeshMotionKeys>& pseudo_elastic_mesh_motion_schema()
+{
+  static const auto schema = [] {
+    opt::OptionSchema<MeshMotionKeys> out("Pseudo-elastic mesh motion");
+    add_common_mesh_motion_keys(out);
+    out.key("Lambda_mesh", &MeshMotionKeys::lambda_mesh, opt::RealCodec{},
+            {.empty = opt::EmptyPolicy::Absent, .doc = "the Lame lambda"})
+        .key("Mu_mesh", &MeshMotionKeys::mu_mesh, opt::RealCodec{},
+             {.empty = opt::EmptyPolicy::Absent, .doc = "the Lame mu"});
+    return out;
+  }();
+  return schema;
+}
+
+const opt::OptionSchema<MeshMotionBoundaryKeys>& mesh_motion_boundary_schema()
+{
+  using K = MeshMotionBoundaryKeys;
+  using Type = MeshMotionBoundaryType;
+  using Policy = mm::TangentialMeshPolicy;
+  static const auto schema = [] {
+    opt::OptionSchema<K> out("Mesh-motion boundary condition");
+    const opt::KeySettings finite_real{.empty = opt::EmptyPolicy::Absent};
+    out.key("Type", &K::type,
+            opt::EnumCodec<Type>{{{Type::Dirichlet, "Dirichlet", {"Dir"}},
+                                  {Type::Natural, "Natural", {"Neumann", "Neu", "Traction", "Trac"}},
+                                  {Type::Robin, "Robin", {}},
+                                  {Type::NormalConstraint, "NormalConstraint", {"Normal"}},
+                                  {Type::TangentialPolicy, "TangentialPolicy", {"Tangential"}}}},
+            {.doc = "the condition"})
+        .key("Value", &K::value, opt::StringCodec{}, {.doc = "one number, or two or three components"})
+        .key("Target", &K::target, opt::StringCodec{}, {.doc = "the Robin or constraint target (default: Value)"})
+        .key("Effective_direction", &K::effective_direction, opt::StringCodec{},
+             {.spellings = {{"Effective_direction"}, {"EffectiveDirection"}},
+              .doc = "integer direction of a single number"})
+        .key("Quantity", &K::quantity,
+             opt::EnumCodec<MeshMotionQuantity>{{{MeshMotionQuantity::Displacement, "displacement", {"mesh_displacement"}},
+                                                 {MeshMotionQuantity::Velocity, "velocity", {"mesh_velocity"}}}},
+             {.doc = "the constrained quantity"})
+        .key("Alpha", &K::alpha, opt::OptionalCodec<opt::RealCodec>{}, {.doc = "the Robin alpha (default: Penalty, 1)"})
+        .key("Penalty", &K::penalty, opt::OptionalCodec<opt::RealCodec>{}, {.doc = "the constraint penalty (default 1)"})
+        .key("Velocity_time_scale", &K::velocity_time_scale, opt::RealCodec{}, finite_real)
+        .key("Tangential_policy", &K::tangential_policy,
+             opt::EnumCodec<Policy>{{{Policy::SmoothingOnly, "smoothing_only", {"smoothing", "mesh_smoothing", "smooth"}},
+                                     {Policy::Free, "free", {}},
+                                     {Policy::Prescribed, "prescribed", {}}}},
+             {.doc = "the tangential motion"});
+    return out;
+  }();
+  return schema;
+}
 
 std::string normalized_token(std::string s)
 {
@@ -38,24 +175,6 @@ std::string normalized_token(std::string s)
           }),
           s.end());
   return s;
-}
-
-std::optional<svmp::FE::Real> get_defined_real(
-    const svmp::Physics::ParameterMap& params,
-    std::initializer_list<std::string_view> keys,
-    std::string_view context)
-{
-  for (const auto key : keys) {
-    const auto* p = find_param(params, key);
-    if (!p || !p->defined) {
-      continue;
-    }
-    const auto value = trim_copy(p->value);
-    if (!value.empty()) {
-      return static_cast<svmp::FE::Real>(parse_finite_double(value, context));
-    }
-  }
-  return std::nullopt;
 }
 
 std::vector<svmp::FE::Real> parse_real_list(std::string raw, std::string_view context)
@@ -83,27 +202,22 @@ std::vector<svmp::FE::Real> parse_real_list(std::string raw, std::string_view co
   return out;
 }
 
-std::array<mm::HarmonicMeshMotionOptions::ScalarValue, 3>
-parse_vector_value(const svmp::Physics::ParameterMap& params,
-                   std::initializer_list<std::string_view> keys,
-                   int dim,
-                   std::string_view context)
+// One number along the direction, or two or three components (Value or Target).
+std::array<mm::HarmonicMeshMotionOptions::ScalarValue, 3> vector_value(const std::string& text,
+                                                                     const std::string& direction,
+                                                                     int dim,
+                                                                     std::string_view context)
 {
-  std::array<mm::HarmonicMeshMotionOptions::ScalarValue, 3> values{
-      mm::HarmonicMeshMotionOptions::ScalarValue{0.0},
-      mm::HarmonicMeshMotionOptions::ScalarValue{0.0},
-      mm::HarmonicMeshMotionOptions::ScalarValue{0.0}};
-  const auto raw = first_defined_string(params, keys).value_or("0.0");
-  const auto parsed = parse_real_list(raw, context);
+  using ScalarValue = mm::HarmonicMeshMotionOptions::ScalarValue;
+  std::array<ScalarValue, 3> values{ScalarValue{0.0}, ScalarValue{0.0}, ScalarValue{0.0}};
+  const auto parsed = parse_real_list(text.empty() ? std::string("0.0") : text, context);
   if (parsed.size() == 1u) {
     std::vector<int> effective_dir;
-    if (const auto raw_direction =
-            first_defined_string(params, {"Effective_direction", "EffectiveDirection"})) {
-      effective_dir = parse_int_list(*raw_direction);
+    if (!direction.empty()) {
+      effective_dir = parse_int_list(direction);
     }
     for (int d = 0; d < dim; ++d) {
-      values[static_cast<std::size_t>(d)] =
-          parsed.front() * direction_component(effective_dir, d);
+      values[static_cast<std::size_t>(d)] = parsed.front() * direction_component(effective_dir, d);
     }
     return values;
   }
@@ -132,21 +246,19 @@ parse_vector_value(const svmp::Physics::ParameterMap& params,
 // (the historical behavior).  For a nonzero single value the direction keeps
 // its historical meaning as the direction of the prescribed displacement and
 // every component is constrained.
-std::array<bool, 3> parse_zero_dirichlet_component_mask(const svmp::Physics::ParameterMap& params,
-                                                        int dim,
-                                                        const std::string& context)
+std::array<bool, 3> zero_dirichlet_component_mask(const MeshMotionBoundaryKeys& keys,
+                                                  int dim,
+                                                  const std::string& context)
 {
   std::array<bool, 3> active{true, true, true};
-  const auto raw_direction =
-      first_defined_string(params, {"Effective_direction", "EffectiveDirection"});
-  if (!raw_direction) {
+  if (keys.effective_direction.empty()) {
     return active;
   }
-  const auto parsed = parse_real_list(first_defined_string(params, {"Value"}).value_or("0.0"), context);
+  const auto parsed = parse_real_list(keys.value.empty() ? std::string("0.0") : keys.value, context);
   if (parsed.size() != 1u || parsed.front() != 0.0) {
     return active;
   }
-  const auto direction = parse_int_list(*raw_direction);
+  const auto direction = parse_int_list(keys.effective_direction);
   int selected = 0;
   std::array<bool, 3> mask{false, false, false};
   for (int d = 0; d < dim; ++d) {
@@ -160,141 +272,10 @@ std::array<bool, 3> parse_zero_dirichlet_component_mask(const svmp::Physics::Par
   return mask;
 }
 
-mm::NormalConstraintQuantity parse_normal_quantity(std::string_view raw,
-                                                   std::string_view context)
+// Target, or Value when Target is absent.
+const std::string& target_text(const MeshMotionBoundaryKeys& keys)
 {
-  const auto token = normalized_token(std::string(raw));
-  if (token.empty() || token == "displacement" || token == "meshdisplacement") {
-    return mm::NormalConstraintQuantity::Displacement;
-  }
-  if (token == "velocity" || token == "meshvelocity") {
-    return mm::NormalConstraintQuantity::Velocity;
-  }
-  throw std::runtime_error("[svMultiPhysics::Physics] " + std::string(context) +
-                           " quantity must be 'displacement' or 'velocity'.");
-}
-
-mm::TangentialConstraintQuantity parse_tangential_quantity(std::string_view raw,
-                                                           std::string_view context)
-{
-  const auto token = normalized_token(std::string(raw));
-  if (token.empty() || token == "displacement" || token == "meshdisplacement") {
-    return mm::TangentialConstraintQuantity::Displacement;
-  }
-  if (token == "velocity" || token == "meshvelocity") {
-    return mm::TangentialConstraintQuantity::Velocity;
-  }
-  throw std::runtime_error("[svMultiPhysics::Physics] " + std::string(context) +
-                           " quantity must be 'displacement' or 'velocity'.");
-}
-
-mm::TangentialMeshPolicy parse_tangential_policy(std::string_view raw,
-                                                 std::string_view context)
-{
-  const auto token = normalized_token(std::string(raw));
-  if (token.empty() || token == "smoothing" || token == "smoothingonly" ||
-      token == "meshsmoothing" || token == "smooth") {
-    return mm::TangentialMeshPolicy::SmoothingOnly;
-  }
-  if (token == "free") {
-    return mm::TangentialMeshPolicy::Free;
-  }
-  if (token == "prescribed") {
-    return mm::TangentialMeshPolicy::Prescribed;
-  }
-  throw std::runtime_error("[svMultiPhysics::Physics] " + std::string(context) +
-                           " policy must be 'free', 'smoothing_only', or 'prescribed'.");
-}
-
-template <class Options>
-void apply_common_params(const svmp::Physics::ParameterMap& params, Options& options)
-{
-  if (const auto value = first_defined_string(
-          params,
-          {"Field_name", "Mesh_displacement_field"})) {
-    options.field_name = *value;
-  }
-  if (const auto value = first_defined_bool(
-          params,
-          {"Auto_register_field", "Auto_register_mesh_displacement_field"})) {
-    options.auto_register_field = *value;
-  }
-  if (const auto value = first_defined_bool(
-          params,
-          {"Bind_as_mesh_displacement"})) {
-    options.bind_as_mesh_displacement = *value;
-  }
-}
-
-void apply_harmonic_params(const svmp::Physics::ParameterMap& params,
-                           mm::HarmonicMeshMotionOptions& options)
-{
-  apply_common_params(params, options);
-  if (const auto value = get_defined_real(params, {"Kappa"}, "Kappa")) {
-    options.kappa = *value;
-  }
-  if (const auto value = get_defined_real(params, {"Stiffness"}, "Stiffness")) {
-    options.stiffness = *value;
-  }
-  if (const auto value = first_defined_string(params, {"Harmonic_quantity"})) {
-    const auto token = normalized_token(*value);
-    if (token == "displacement" || token == "meshdisplacement") {
-      options.quantity = mm::HarmonicQuantity::Displacement;
-    } else if (token == "velocity" || token == "meshvelocity") {
-      options.quantity = mm::HarmonicQuantity::Velocity;
-    } else {
-      throw std::runtime_error(
-          "[svMultiPhysics::Physics] Harmonic_quantity must be 'displacement' or 'velocity'.");
-    }
-  }
-}
-
-void apply_pseudo_elastic_params(const svmp::Physics::ParameterMap& params,
-                                 mm::PseudoElasticMeshMotionOptions& options)
-{
-  apply_common_params(params, options);
-  if (const auto value = get_defined_real(params, {"Lambda_mesh"}, "Lambda_mesh")) {
-    options.lambda_mesh = *value;
-  }
-  if (const auto value = get_defined_real(params, {"Mu_mesh"}, "Mu_mesh")) {
-    options.mu_mesh = *value;
-  }
-}
-
-mm::NormalConstraintBC parse_normal_constraint_bc(const svmp::Physics::BoundaryConditionInput& bc)
-{
-  mm::NormalConstraintBC out{};
-  out.boundary_marker = bc.boundary_marker;
-  out.quantity = parse_normal_quantity(
-      first_defined_string(bc.params, {"Quantity"}).value_or("displacement"),
-      "mesh-motion normal constraint");
-  out.target = get_defined_real(bc.params, {"Target", "Value"}, "Normal_constraint/Target").value_or(0.0);
-  out.penalty = get_defined_real(bc.params, {"Penalty"}, "Normal_constraint/Penalty")
-                    .value_or(1.0);
-  out.velocity_time_scale =
-      get_defined_real(bc.params, {"Velocity_time_scale"}, "Normal_constraint/Velocity_time_scale")
-          .value_or(1.0);
-  return out;
-}
-
-mm::TangentialPolicyBC parse_tangential_policy_bc(const svmp::Physics::BoundaryConditionInput& bc,
-                                                  int dim)
-{
-  mm::TangentialPolicyBC out{};
-  out.boundary_marker = bc.boundary_marker;
-  out.policy = parse_tangential_policy(
-      first_defined_string(bc.params, {"Tangential_policy"}).value_or("smoothing_only"),
-      "mesh-motion tangential policy");
-  out.quantity = parse_tangential_quantity(
-      first_defined_string(bc.params, {"Quantity"}).value_or("displacement"),
-      "mesh-motion tangential policy");
-  out.target = parse_vector_value(bc.params, {"Target", "Value"}, dim, "Tangential_policy/Target");
-  out.penalty =
-      get_defined_real(bc.params, {"Penalty"}, "Tangential_policy/Penalty").value_or(1.0);
-  out.velocity_time_scale =
-      get_defined_real(bc.params, {"Velocity_time_scale"}, "Tangential_policy/Velocity_time_scale")
-          .value_or(1.0);
-  return out;
+  return keys.target.empty() ? keys.value : keys.target;
 }
 
 template <class Options>
@@ -302,6 +283,7 @@ void apply_mesh_motion_bcs(const svmp::Physics::EquationModuleInput& input,
                            Options& options,
                            int dim)
 {
+  using Type = MeshMotionBoundaryType;
   for (const auto& bc : input.boundary_conditions) {
     if (bc.boundary_marker == svmp::INVALID_LABEL) {
       throw std::runtime_error(
@@ -309,67 +291,89 @@ void apply_mesh_motion_bcs(const svmp::Physics::EquationModuleInput& input,
           "' has invalid boundary marker; ensure <Add_face name=\"...\"> exists and is referenced correctly.");
     }
 
-    const auto type = normalized_token(
-        first_defined_string(bc.params, {"Type"}).value_or(std::string{}));
-
-    if (type == "dir" || type == "dirichlet") {
+    const auto keys = mesh_motion_boundary_schema().resolve(option_input(bc.params)).value;
+    switch (keys.type) {
+    case Type::Dirichlet: {
       typename Options::DirichletBC dirichlet{};
       dirichlet.boundary_marker = bc.boundary_marker;
-      dirichlet.value = parse_vector_value(bc.params, {"Value"}, dim, "Mesh-motion Dirichlet Value");
-      dirichlet.active_components = parse_zero_dirichlet_component_mask(
-          bc.params, dim, "Mesh-motion Dirichlet '" + bc.name + "'");
+      dirichlet.value = vector_value(keys.value, keys.effective_direction, dim, "Mesh-motion Dirichlet Value");
+      dirichlet.active_components =
+          zero_dirichlet_component_mask(keys, dim, "Mesh-motion Dirichlet '" + bc.name + "'");
       options.dirichlet.push_back(std::move(dirichlet));
-      continue;
+      break;
     }
-
-    if (type == "natural" || type == "neumann" || type == "neu" ||
-        type == "traction" || type == "trac") {
+    case Type::Natural: {
       typename Options::NaturalBC natural{};
       natural.boundary_marker = bc.boundary_marker;
-      natural.value = parse_vector_value(bc.params, {"Value"}, dim, "Mesh-motion natural Value");
+      natural.value = vector_value(keys.value, keys.effective_direction, dim, "Mesh-motion natural Value");
       options.natural.push_back(std::move(natural));
-      continue;
+      break;
     }
-
-    if (type == "robin") {
+    case Type::Robin: {
       typename Options::RobinBC robin{};
       robin.boundary_marker = bc.boundary_marker;
-      robin.alpha = get_defined_real(bc.params, {"Alpha", "Penalty"}, "Mesh-motion Robin Alpha")
-                        .value_or(1.0);
-      robin.target = parse_vector_value(bc.params, {"Target", "Value"}, dim, "Mesh-motion Robin Target");
+      robin.alpha = keys.alpha.value_or(keys.penalty.value_or(1.0));
+      robin.target = vector_value(target_text(keys), keys.effective_direction, dim, "Mesh-motion Robin Target");
       options.robin.push_back(std::move(robin));
-      continue;
+      break;
     }
-
-    if (type == "normalconstraint" || type == "normal") {
-      options.normal_constraint.push_back(parse_normal_constraint_bc(bc));
-      continue;
+    case Type::NormalConstraint: {
+      mm::NormalConstraintBC normal{};
+      normal.boundary_marker = bc.boundary_marker;
+      normal.quantity = keys.quantity == MeshMotionQuantity::Velocity ? mm::NormalConstraintQuantity::Velocity
+                                                                      : mm::NormalConstraintQuantity::Displacement;
+      const auto& target = target_text(keys);
+      normal.target = target.empty() ? 0.0 : parse_finite_double(target, "Normal_constraint/Target");
+      normal.penalty = keys.penalty.value_or(1.0);
+      normal.velocity_time_scale = keys.velocity_time_scale;
+      options.normal_constraint.push_back(std::move(normal));
+      break;
     }
-
-    if (type == "tangentialpolicy" || type == "tangential") {
-      options.tangential_policy.push_back(parse_tangential_policy_bc(bc, dim));
-      continue;
+    case Type::TangentialPolicy: {
+      mm::TangentialPolicyBC tangential{};
+      tangential.boundary_marker = bc.boundary_marker;
+      tangential.policy = keys.tangential_policy;
+      tangential.quantity = keys.quantity == MeshMotionQuantity::Velocity
+                                ? mm::TangentialConstraintQuantity::Velocity
+                                : mm::TangentialConstraintQuantity::Displacement;
+      tangential.target = vector_value(target_text(keys), keys.effective_direction, dim, "Tangential_policy/Target");
+      tangential.penalty = keys.penalty.value_or(1.0);
+      tangential.velocity_time_scale = keys.velocity_time_scale;
+      options.tangential_policy.push_back(std::move(tangential));
+      break;
     }
-
-    throw std::runtime_error(
-        "[svMultiPhysics::Physics] Boundary condition type '" +
-        first_defined_string(bc.params, {"Type"}).value_or(std::string{}) +
-        "' is not supported for mesh motion. Supported types: Dir, Neumann, Robin, NormalConstraint, TangentialPolicy.");
+    case Type::None:
+      throw std::runtime_error(
+          "[svMultiPhysics::Physics] Mesh-motion boundary condition '" + bc.name +
+          "' has no Type. Supported types: Dir, Neumann, Robin, NormalConstraint, TangentialPolicy.");
+    }
   }
 }
 
-std::string resolve_model_token(const svmp::Physics::EquationModuleInput& input)
+// The keys of the equation, then of the default domain, then of the domain.
+MeshMotionKeys mesh_motion_keys(const svmp::Physics::EquationModuleInput& input,
+                                const opt::OptionSchema<MeshMotionKeys>& schema)
 {
-  if (const auto model = first_defined_string(
-          input.equation_params,
-          {"Model"})) {
-    return normalized_token(*model);
+  auto keys = schema.resolve(option_input(input.equation_params)).value;
+  keys = schema.resolve(option_input(input.default_domain.params), keys).value;
+  if (!input.domains.empty()) {
+    if (input.domains.size() != 1u) {
+      throw std::runtime_error("[svMultiPhysics::Physics] Multiple <Domain> blocks are not supported by mesh motion.");
+    }
+    keys = schema.resolve(option_input(input.domains.front().params), keys).value;
   }
-  const auto type = normalized_token(input.equation_type);
-  if (type.find("pseudoelastic") != std::string::npos) {
-    return "pseudoelastic";
+  return keys;
+}
+
+MeshMotionModel mesh_motion_model(const svmp::Physics::EquationModuleInput& input)
+{
+  const auto model = mesh_motion_equation_schema().resolve(option_input(input.equation_params)).value.model;
+  if (model != MeshMotionModel::FromEquationType) {
+    return model;
   }
-  return "harmonic";
+  return normalized_token(input.equation_type).find("pseudoelastic") != std::string::npos
+             ? MeshMotionModel::PseudoElastic
+             : MeshMotionModel::Harmonic;
 }
 
 std::unique_ptr<svmp::Physics::PhysicsModule>
@@ -388,19 +392,19 @@ create_mesh_motion_from_input(const svmp::Physics::EquationModuleInput& input,
   }
 
   auto displacement_space = svmp::FE::spaces::SpaceFactory::create_vector_h1(element_type, order, dim);
-  const auto model = resolve_model_token(input);
 
-  if (model == "harmonic" || model == "laplace" || model == "laplacian") {
+  if (mesh_motion_model(input) == MeshMotionModel::Harmonic) {
+    const auto keys = mesh_motion_keys(input, harmonic_mesh_motion_schema());
     mm::HarmonicMeshMotionOptions options{};
     options.jit_policy = svmp::Physics::core::resolveOopJitPolicy(input, options.jit_policy);
-    apply_harmonic_params(input.equation_params, options);
-    apply_harmonic_params(input.default_domain.params, options);
-    if (!input.domains.empty()) {
-      if (input.domains.size() != 1u) {
-        throw std::runtime_error("[svMultiPhysics::Physics] Multiple <Domain> blocks are not supported by mesh motion.");
-      }
-      apply_harmonic_params(input.domains.front().params, options);
+    options.field_name = keys.field_name;
+    options.auto_register_field = keys.auto_register_field;
+    options.bind_as_mesh_displacement = keys.bind_as_mesh_displacement;
+    options.kappa = keys.kappa;
+    if (keys.stiffness) {
+      options.stiffness = mm::HarmonicMeshMotionOptions::ScalarValue{*keys.stiffness};
     }
+    options.quantity = keys.harmonic_quantity;
     apply_mesh_motion_bcs(input, options, dim);
 
     auto module = std::make_unique<mm::HarmonicMeshMotionModule>(
@@ -409,28 +413,22 @@ create_mesh_motion_from_input(const svmp::Physics::EquationModuleInput& input,
     return module;
   }
 
-  if (model == "pseudoelastic" || model == "elastic" || model == "linearelastic") {
-    mm::PseudoElasticMeshMotionOptions options{};
-    options.jit_policy = svmp::Physics::core::resolveOopJitPolicy(input, options.jit_policy);
-    apply_pseudo_elastic_params(input.equation_params, options);
-    apply_pseudo_elastic_params(input.default_domain.params, options);
-    if (!input.domains.empty()) {
-      if (input.domains.size() != 1u) {
-        throw std::runtime_error("[svMultiPhysics::Physics] Multiple <Domain> blocks are not supported by mesh motion.");
-      }
-      apply_pseudo_elastic_params(input.domains.front().params, options);
-    }
-    apply_mesh_motion_bcs(input, options, dim);
+  const auto keys = mesh_motion_keys(input, pseudo_elastic_mesh_motion_schema());
+  mm::PseudoElasticMeshMotionOptions options{};
+  options.jit_policy = svmp::Physics::core::resolveOopJitPolicy(input, options.jit_policy);
+  options.field_name = keys.field_name;
+  options.auto_register_field = keys.auto_register_field;
+  options.bind_as_mesh_displacement = keys.bind_as_mesh_displacement;
+  options.lambda_mesh = keys.lambda_mesh;
+  options.mu_mesh = keys.mu_mesh;
+  apply_mesh_motion_bcs(input, options, dim);
 
-    auto module = std::make_unique<mm::PseudoElasticMeshMotionModule>(
-        std::move(displacement_space), std::move(options));
-    module->registerOn(system);
-    return module;
-  }
-
-  throw std::runtime_error(
-      "[svMultiPhysics::Physics] Mesh_motion model must be one of 'harmonic' or 'pseudo_elastic'.");
+  auto module = std::make_unique<mm::PseudoElasticMeshMotionModule>(
+      std::move(displacement_space), std::move(options));
+  module->registerOn(system);
+  return module;
 }
+
 
 } // namespace
 
@@ -444,5 +442,23 @@ SVMP_REGISTER_EQUATION("mesh_motion_pseudo_elastic", &create_mesh_motion_from_in
 namespace svmp::Physics::formulations::mesh_motion {
 
 void forceLink_MeshMotionRegister() {}
+
+std::string resolvedInputKeys(const EquationModuleInput& input)
+{
+  const auto& equation_schema = mesh_motion_equation_schema();
+  const auto& model_schema = mesh_motion_model(input) == MeshMotionModel::Harmonic
+                                 ? harmonic_mesh_motion_schema()
+                                 : pseudo_elastic_mesh_motion_schema();
+  const auto& boundary_schema = mesh_motion_boundary_schema();
+  std::string out = option_line(
+      equation_schema.element(),
+      equation_schema.serialize(equation_schema.resolve(option_input(input.equation_params)).value));
+  out += option_line(model_schema.element(), model_schema.serialize(mesh_motion_keys(input, model_schema)));
+  for (const auto& bc : input.boundary_conditions) {
+    out += option_line(boundary_schema.element() + " '" + bc.name + "'",
+                           boundary_schema.serialize(boundary_schema.resolve(option_input(bc.params)).value));
+  }
+  return out;
+}
 
 } // namespace svmp::Physics::formulations::mesh_motion

@@ -21,6 +21,7 @@
 
 namespace svmp {
 namespace Physics {
+struct EquationModuleInput;
 namespace formulations {
 namespace ustruct {
 
@@ -133,6 +134,12 @@ private:
     std::shared_ptr<const FE::spaces::FunctionSpace> pressure_space_{};
     UstructOptions options_{};
 };
+
+
+/// The deck keys of a ustruct equation as its register resolves them with its option
+/// schemas, in their canonical text, one element per line: the domain, then each boundary condition.
+/// For tests of the input (the golden test of every deck).
+[[nodiscard]] std::string resolvedInputKeys(const EquationModuleInput& input);
 
 } // namespace ustruct
 } // namespace formulations

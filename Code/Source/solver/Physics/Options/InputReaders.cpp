@@ -113,6 +113,27 @@ int parse_positive_int(std::string_view raw, std::string_view context)
   }
 }
 
+svmp::FE::options::OptionInput option_input(const svmp::Physics::ParameterMap& params)
+{
+  svmp::FE::options::OptionInput input;
+  for (const auto& [name, parameter] : params) {
+    if (parameter.defined) {
+      input.add(name, parameter.value, parameter.origin);
+    }
+  }
+  return input;
+}
+
+std::string option_line(const std::string& element,
+                        const std::vector<std::pair<std::string, std::string>>& keys)
+{
+  std::string out = element + ":";
+  for (const auto& [key, value] : keys) {
+    out += " " + key + "=" + value + ";";
+  }
+  return out + "\n";
+}
+
 const svmp::Physics::ParameterValue* find_param(const svmp::Physics::ParameterMap& params,
                                                 std::string_view key)
 {

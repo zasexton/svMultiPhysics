@@ -21,6 +21,7 @@
  * keys gave way to the schema codecs (D47 P2).
  */
 
+#include "FE/Core/OptionSchema.h"
 #include "FE/Core/Types.h"
 #include "Physics/Core/EquationModuleInput.h"
 
@@ -30,6 +31,7 @@
 #include <optional>
 #include <string>
 #include <string_view>
+#include <utility>
 #include <vector>
 
 namespace svmp {
@@ -57,6 +59,15 @@ std::vector<std::string> split_csv_line(std::string_view line);
 std::vector<int> parse_int_list(std::string_view raw);
 std::array<svmp::FE::Real, 3> parse_real_vector3(std::string_view raw,
                                                  std::string_view context);
+
+/// The defined parameters of @p params as the input of an option schema
+/// (FE/Core/OptionSchema.h), each with the profile that stated it.
+[[nodiscard]] svmp::FE::options::OptionInput option_input(const svmp::Physics::ParameterMap& params);
+
+/// "<element>: <key>=<text>; ...\n", the canonical text of resolved options
+/// (OptionSchema::serialize) on one line.
+[[nodiscard]] std::string option_line(const std::string& element,
+                                      const std::vector<std::pair<std::string, std::string>>& keys);
 
 const svmp::Physics::ParameterValue* find_param(const svmp::Physics::ParameterMap& params,
                                                 std::string_view key);

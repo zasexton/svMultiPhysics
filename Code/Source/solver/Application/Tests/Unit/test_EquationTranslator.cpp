@@ -9,6 +9,9 @@
 #include "Mesh/Topology/CellShape.h"
 #include "Parameters.h"
 #include "Physics/Core/EquationModuleInput.h"
+#include "Physics/Formulations/MeshMotion/HarmonicMeshMotionModule.h"
+#include "Physics/Formulations/Poisson/PoissonModule.h"
+#include "Physics/Formulations/Ustruct/UstructModule.h"
 #include "Physics/Options/FreeSurfaceProfiles.h"
 #include "Physics/Options/NavierStokesOptionSchema.h"
 #include "Physics/Options/NavierStokesRegistration.h"
@@ -19,7 +22,9 @@
 #include <array>
 #include <filesystem>
 #include <fstream>
+#include <functional>
 #include <map>
+#include <sstream>
 #include <memory>
 #include <stdexcept>
 #include <string>
@@ -2274,4 +2279,88 @@ TEST(EquationTranslatorFreeSurface, LevelSetEquationRejectsKeysItDoesNotRead)
   EXPECT_EQ(error_of("<Add_equation type=\"mesh_motion\"><Field_name>mesh_displacement</Field_name>"
                      "</Add_equation>"),
             "");
+}
+
+// The deck keys of every new-solver deck with a Poisson (heatS, heatF,
+// darcy), ustruct or mesh-motion equation under tests/cases and
+// Physics/Tests/Unit/Data, as the registers resolve them with their option
+// schemas (resolvedInputKeys), against the record
+// Application/Tests/Unit/Data/peer_equation_keys.txt.  A deck that changes,
+// or a new deck, changes the text: the record is updated with it.
+TEST(PeerEquationKeys, EveryDeckResolvesToTheRecordedKeys)
+{
+  namespace fs = std::filesystem;
+  namespace formulations = svmp::Physics::formulations;
+  const fs::path root = SVMP_REPOSITORY_ROOT;
+  const auto reader = [](const std::string& type)
+      -> std::function<std::string(const svmp::Physics::EquationModuleInput&)> {
+    if (type == "heatS" || type == "heatF" || type == "darcy") {
+      return formulations::poisson::resolvedInputKeys;
+    }
+    if (type == "ustruct") {
+      return formulations::ustruct::resolvedInputKeys;
+    }
+    if (type == "mesh_motion" || type == "meshMotion" || type == "harmonic_mesh_motion" ||
+        type == "mesh_motion_harmonic" || type == "pseudo_elastic_mesh_motion" ||
+        type == "mesh_motion_pseudo_elastic") {
+      return formulations::mesh_motion::resolvedInputKeys;
+    }
+    return {};
+  };
+  const auto text_of = [](const tinyxml2::XMLElement* element) {
+    const char* text = element != nullptr ? element->GetText() : nullptr;
+    std::string out = text != nullptr ? text : "";
+    out.erase(std::remove_if(out.begin(), out.end(), [](unsigned char c) { return std::isspace(c) != 0; }),
+              out.end());
+    return out;
+  };
+
+  std::vector<fs::path> decks;
+  for (const auto* directory : {"tests/cases", "Code/Source/solver/Physics/Tests/Unit/Data"}) {
+    for (const auto& entry : fs::recursive_directory_iterator(root / directory)) {
+      if (entry.is_regular_file() && entry.path().extension() == ".xml") {
+        decks.push_back(fs::relative(entry.path(), root));
+      }
+    }
+  }
+  std::sort(decks.begin(), decks.end());
+
+  std::string text;
+  for (const auto& deck : decks) {
+    tinyxml2::XMLDocument doc;
+    if (doc.LoadFile((root / deck).string().c_str()) != tinyxml2::XML_SUCCESS) {
+      continue;
+    }
+    const auto* file = doc.FirstChildElement("svMultiPhysicsFile");
+    const auto* general = file != nullptr ? file->FirstChildElement("GeneralSimulationParameters") : nullptr;
+    const auto oop = general != nullptr ? text_of(general->FirstChildElement("Use_new_OOP_solver")) : "";
+    if (oop != "true" && oop != "1") {
+      continue;
+    }
+    for (auto* equation = file->FirstChildElement(EquationParameters::xml_element_name_.c_str());
+         equation != nullptr;
+         equation = equation->NextSiblingElement(EquationParameters::xml_element_name_.c_str())) {
+      const char* type = equation->Attribute("type");
+      const auto keys = reader(type != nullptr ? type : "");
+      if (!keys) {
+        continue;
+      }
+      EquationParameters params;
+      params.type.set(std::string(type));
+      params.set_values(equation);
+      auto mesh = buildTranslatorMesh();
+      int label = 1;
+      for (const auto* bc : params.boundary_conditions) {
+        mesh->local_mesh().register_label(bc->name.value(), label++);
+      }
+      const auto input = application::translators::EquationTranslator::buildInput(params, singleMeshMap(mesh));
+      text += "== " + deck.generic_string() + " " + type + "\n" + keys(input);
+    }
+  }
+
+  std::ifstream record(root / "Code/Source/solver/Application/Tests/Unit/Data/peer_equation_keys.txt");
+  ASSERT_TRUE(record.good());
+  std::stringstream expected;
+  expected << record.rdbuf();
+  EXPECT_EQ(text, expected.str());
 }

@@ -23,6 +23,7 @@
 
 namespace svmp {
 namespace Physics {
+struct EquationModuleInput;
 namespace formulations {
 namespace mesh_motion {
 
@@ -90,6 +91,12 @@ private:
     std::shared_ptr<const FE::spaces::FunctionSpace> displacement_space_{};
     HarmonicMeshMotionOptions options_{};
 };
+
+
+/// The deck keys of a mesh-motion equation (harmonic or pseudo-elastic) as its register resolves them with its option
+/// schemas, in their canonical text, one element per line: the equation, the model's keys, then each boundary condition.
+/// For tests of the input (the golden test of every deck).
+[[nodiscard]] std::string resolvedInputKeys(const EquationModuleInput& input);
 
 } // namespace mesh_motion
 } // namespace formulations

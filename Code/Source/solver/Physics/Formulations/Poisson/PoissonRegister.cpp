@@ -11,6 +11,7 @@
 #include <algorithm>
 #include <cctype>
 #include <cmath>
+#include <cstdint>
 #include <fstream>
 #include <sstream>
 #include <stdexcept>
@@ -24,6 +25,71 @@ namespace {
 
 // The generic readers of equation input (decision D52).
 using namespace svmp::Physics::options;
+namespace opt = svmp::FE::options;
+using svmp::FE::Real;
+
+// The domain keys of a Poisson (heat, Darcy) equation.
+struct PoissonDomainKeys {
+  Real conductivity{1.0};
+  Real source_term{0.0};
+};
+
+enum class PoissonBoundaryType : std::uint8_t { None, Dirichlet, Neumann, Robin };
+
+// The keys of one boundary condition.  An omitted Value or Stiffness has the
+// default of the input element (0 and 1).
+struct PoissonBoundaryKeys {
+  std::string time_dependence{"Steady"};
+  PoissonBoundaryType type{PoissonBoundaryType::None};
+  Real value{0.0};
+  bool weakly_applied{false};
+  Real stiffness{1.0};
+};
+
+// A number as std::stod reads it, infinite values included.
+opt::RealCodec any_real()
+{
+  opt::RealCodec codec;
+  codec.require_finite = false;
+  return codec;
+}
+
+const opt::OptionSchema<PoissonDomainKeys>& poisson_domain_schema()
+{
+  static const auto schema = [] {
+    opt::OptionSchema<PoissonDomainKeys> out("Poisson domain");
+    out.key("Conductivity", &PoissonDomainKeys::conductivity, any_real(),
+            {.spellings = {{"Conductivity"}, {"Isotropic_conductivity"}}, .doc = "the conductivity k"})
+        .key("Source_term", &PoissonDomainKeys::source_term, any_real(), {.doc = "the source f"})
+        .retired({"Anisotropic_conductivity"},
+                 "Anisotropic_conductivity is not supported for the new solver Poisson module yet. "
+                 "Set <Use_new_OOP_solver>false</Use_new_OOP_solver> to use the legacy solver.",
+                 {.value = std::string{}});
+    return out;
+  }();
+  return schema;
+}
+
+const opt::OptionSchema<PoissonBoundaryKeys>& poisson_boundary_schema()
+{
+  using Type = PoissonBoundaryType;
+  static const auto schema = [] {
+    opt::OptionSchema<PoissonBoundaryKeys> out("Poisson boundary condition");
+    out.key("Time_dependence", &PoissonBoundaryKeys::time_dependence, opt::StringCodec{},
+            {.empty = opt::EmptyPolicy::Parse, .doc = "Steady (the only one supported)"})
+        .key("Type", &PoissonBoundaryKeys::type,
+             opt::EnumCodec<Type>{{{Type::Dirichlet, "Dirichlet", {"Dir"}},
+                                   {Type::Neumann, "Neumann", {"Neu"}},
+                                   {Type::Robin, "Robin", {"Rbn"}}}},
+             {.doc = "the condition"})
+        .key("Value", &PoissonBoundaryKeys::value, any_real(), {.doc = "u_D, the flux g or the Robin r"})
+        .key("Weakly_applied", &PoissonBoundaryKeys::weakly_applied, opt::BoolCodec{opt::BoolLexicon::Relaxed},
+             {.empty = opt::EmptyPolicy::Absent, .doc = "a Dirichlet value imposed by Nitsche"})
+        .key("Stiffness", &PoissonBoundaryKeys::stiffness, any_real(), {.doc = "the Robin alpha"});
+    return out;
+  }();
+  return schema;
+}
 
 svmp::Physics::formulations::poisson::NodeIdType parse_node_id_type(std::string_view id_type)
 {
@@ -141,21 +207,12 @@ void apply_thermal_properties(const svmp::Physics::EquationModuleInput& input,
                               svmp::Physics::formulations::poisson::PoissonOptions& options)
 {
   const auto& dom = select_single_domain(input, "Poisson");
-  if (const auto* p = find_param(dom.params, "Conductivity"); p && p->defined) {
-    options.diffusion = static_cast<svmp::FE::Real>(parse_double(p->value, "Domain/Conductivity"));
-  } else if (const auto* q = find_param(dom.params, "Isotropic_conductivity"); q && q->defined) {
-    options.diffusion = static_cast<svmp::FE::Real>(parse_double(q->value, "Domain/Isotropic_conductivity"));
-  }
-
-  if (const auto* p = find_param(dom.params, "Source_term"); p && p->defined) {
-    options.source = static_cast<svmp::FE::Real>(parse_double(p->value, "Domain/Source_term"));
-  }
-
-  if (has_nonempty_defined(dom.params, "Anisotropic_conductivity")) {
-    throw std::runtime_error(
-        "[svMultiPhysics::Physics] Anisotropic_conductivity is not supported for the new solver Poisson module yet. "
-        "Set <Use_new_OOP_solver>false</Use_new_OOP_solver> to use the legacy solver.");
-  }
+  const auto keys =
+      poisson_domain_schema()
+          .resolve(option_input(dom.params), PoissonDomainKeys{options.diffusion, options.source})
+          .value;
+  options.diffusion = keys.conductivity;
+  options.source = keys.source_term;
 }
 
 void apply_scalar_bcs(const svmp::Physics::EquationModuleInput& input,
@@ -170,14 +227,12 @@ void apply_scalar_bcs(const svmp::Physics::EquationModuleInput& input,
           "' has invalid boundary marker; ensure <Add_face name=\"...\"> exists and is referenced correctly.");
     }
 
-    const auto* time_dep = find_param(bc.params, "Time_dependence");
-    const std::string time_value =
-        (time_dep && time_dep->defined) ? trim_copy(time_dep->value) : std::string("Steady");
-    if (time_value != "Steady") {
+    const auto keys = poisson_boundary_schema().resolve(option_input(bc.params)).value;
+    if (keys.time_dependence != "Steady") {
       throw std::runtime_error(
           "[svMultiPhysics::Physics] Only steady boundary conditions are supported for the new solver Poisson module "
           "(got Time_dependence='" +
-          time_value + "'). Set <Use_new_OOP_solver>false</Use_new_OOP_solver> to use the legacy solver.");
+          keys.time_dependence + "'). Set <Use_new_OOP_solver>false</Use_new_OOP_solver> to use the legacy solver.");
     }
 
     if (has_nonempty_defined(bc.params, "Temporal_values_file_path") ||
@@ -189,52 +244,34 @@ void apply_scalar_bcs(const svmp::Physics::EquationModuleInput& input,
           "Poisson module yet. Set <Use_new_OOP_solver>false</Use_new_OOP_solver> to use the legacy solver.");
     }
 
-    const auto* type_param = find_param(bc.params, "Type");
-    const std::string bc_type = type_param ? trim_copy(type_param->value) : std::string{};
-
-    const auto* value_param = find_param(bc.params, "Value");
-    const svmp::FE::Real value =
-        static_cast<svmp::FE::Real>(value_param ? parse_double(value_param->value, "Add_BC/Value") : 0.0);
-
-    const bool weak = get_defined_bool(bc.params, "Weakly_applied").value_or(false);
-
-    if (bc_type == "Dirichlet" || bc_type == "Dir") {
+    switch (keys.type) {
+    case PoissonBoundaryType::Dirichlet: {
       PoissonOptions::DirichletBC dir{};
       dir.boundary_marker = bc.boundary_marker;
-      dir.value = value;
-      if (weak) {
-        options.dirichlet_weak.push_back(std::move(dir));
-      } else {
-        options.dirichlet.push_back(std::move(dir));
-      }
-      continue;
+      dir.value = keys.value;
+      (keys.weakly_applied ? options.dirichlet_weak : options.dirichlet).push_back(std::move(dir));
+      break;
     }
-
-    if (bc_type == "Neumann" || bc_type == "Neu") {
+    case PoissonBoundaryType::Neumann: {
       PoissonOptions::NeumannBC neu{};
       neu.boundary_marker = bc.boundary_marker;
-      neu.value = value;
+      neu.value = keys.value;
       options.neumann.push_back(std::move(neu));
-      continue;
+      break;
     }
-
-    if (bc_type == "Robin" || bc_type == "Rbn") {
-      const auto* stiff_param = find_param(bc.params, "Stiffness");
-      const svmp::FE::Real stiff =
-          static_cast<svmp::FE::Real>(stiff_param ? parse_double(stiff_param->value, "Add_BC/Stiffness") : 0.0);
-
+    case PoissonBoundaryType::Robin: {
       PoissonOptions::RobinBC robin{};
       robin.boundary_marker = bc.boundary_marker;
-      robin.value.alpha = stiff;
-      robin.value.rhs = value;
+      robin.value.alpha = keys.stiffness;
+      robin.value.rhs = keys.value;
       options.robin.push_back(std::move(robin));
-      continue;
+      break;
     }
-
-    throw std::runtime_error(
-        "[svMultiPhysics::Physics] Boundary condition type '" + bc_type +
-        "' is not supported for the new solver Poisson module. Supported types: Dir, Dirichlet, Neu, Neumann, Robin, Rbn. "
-        "Set <Use_new_OOP_solver>false</Use_new_OOP_solver> to use the legacy solver.");
+    case PoissonBoundaryType::None:
+      throw std::runtime_error(
+          "[svMultiPhysics::Physics] Boundary condition '" + bc.name +
+          "' has no Type. Supported types: Dir, Dirichlet, Neu, Neumann, Robin, Rbn.");
+    }
   }
 }
 
@@ -303,5 +340,19 @@ SVMP_REGISTER_EQUATION("darcy", &create_darcy_pressure_from_input);
 namespace svmp::Physics::formulations::poisson {
 
 void forceLink_PoissonRegister() {}
+
+std::string resolvedInputKeys(const EquationModuleInput& input)
+{
+  const auto& domain_schema = poisson_domain_schema();
+  const auto& boundary_schema = poisson_boundary_schema();
+  const auto& domain = select_single_domain(input, "Poisson");
+  std::string out = option_line(domain_schema.element(),
+                                    domain_schema.serialize(domain_schema.resolve(option_input(domain.params)).value));
+  for (const auto& bc : input.boundary_conditions) {
+    out += option_line(boundary_schema.element() + " '" + bc.name + "'",
+                           boundary_schema.serialize(boundary_schema.resolve(option_input(bc.params)).value));
+  }
+  return out;
+}
 
 } // namespace svmp::Physics::formulations::poisson

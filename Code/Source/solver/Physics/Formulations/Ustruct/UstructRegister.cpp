@@ -14,6 +14,7 @@
 #include <array>
 #include <cctype>
 #include <cmath>
+#include <cstdint>
 #include <initializer_list>
 #include <memory>
 #include <optional>
@@ -28,6 +29,114 @@ namespace {
 
 // The generic readers of equation input (decision D52).
 using namespace svmp::Physics::options;
+namespace opt = svmp::FE::options;
+using svmp::FE::Real;
+using svmp::Physics::formulations::ustruct::VolumetricPenaltyModel;
+
+enum class SolidModel : std::uint8_t { NeoHookean };
+
+// The domain keys of a ustruct equation.
+struct UstructDomainKeys {
+  SolidModel constitutive_model{SolidModel::NeoHookean};
+  Real density{1.0};
+  Real elasticity_modulus{1.0};
+  Real poisson_ratio{0.49};
+  std::optional<Real> penalty_parameter{};  // none: the bulk modulus
+  VolumetricPenaltyModel volumetric_model{VolumetricPenaltyModel::ST91};
+  Real force_x{0.0};
+  Real force_y{0.0};
+  Real force_z{0.0};
+  Real momentum_stabilization_coefficient{0.0};
+  Real continuity_stabilization_coefficient{0.0};
+};
+
+enum class UstructBoundaryType : std::uint8_t { None, Dirichlet, Neumann, PressureDirichlet };
+
+// The keys of one boundary condition.  An omitted Value is 0, the default of
+// the input element.
+struct UstructBoundaryKeys {
+  std::string time_dependence{"Steady"};
+  UstructBoundaryType type{UstructBoundaryType::None};
+  Real value{0.0};
+  std::string effective_direction{};
+  bool follower_pressure_load{false};
+  bool apply_along_normal_direction{false};
+  bool impose_on_state_variable_integral{false};
+  bool ramp_function{false};
+  std::string temporal_values_file_path{};
+};
+
+// A number as std::stod reads it, infinite values included.
+opt::RealCodec any_real()
+{
+  opt::RealCodec codec;
+  codec.require_finite = false;
+  return codec;
+}
+
+const opt::OptionSchema<UstructDomainKeys>& ustruct_domain_schema()
+{
+  using K = UstructDomainKeys;
+  using Model = VolumetricPenaltyModel;
+  static const auto schema = [] {
+    opt::OptionSchema<K> out("ustruct domain");
+    out.key("Constitutive_model.type", &K::constitutive_model,
+            opt::EnumCodec<SolidModel>{{{SolidModel::NeoHookean, "neoHookean", {"nhk"}}}},
+            {.doc = "the deviatoric model"})
+        .key("Solid_density", &K::density, any_real(),
+             {.spellings = {{"Solid_density"}, {"Density"}}, .doc = "the density rho"})
+        .key("Elasticity_modulus", &K::elasticity_modulus, any_real(), {.doc = "Young's modulus E"})
+        .key("Poisson_ratio", &K::poisson_ratio, any_real(), {.doc = "Poisson's ratio nu"})
+        .key("Penalty_parameter", &K::penalty_parameter, opt::OptionalCodec<opt::RealCodec>{any_real()},
+             {.empty = opt::EmptyPolicy::Parse, .doc = "the volumetric penalty (default: the bulk modulus)"})
+        .key("Dilational_penalty_model", &K::volumetric_model,
+             opt::EnumCodec<Model>{{{Model::ST91, "ST91", {"Simo-Taylor91"}},
+                                    {Model::Quadratic, "quadratic", {"quad"}},
+                                    {Model::M94, "M94", {"Miehe94"}},
+                                    {Model::None, "none", {"na"}}}},
+             {.doc = "the volumetric energy"})
+        .key("Force_x", &K::force_x, any_real(), {.doc = "body force, x"})
+        .key("Force_y", &K::force_y, any_real(), {.doc = "body force, y"})
+        .key("Force_z", &K::force_z, any_real(), {.doc = "body force, z"})
+        .key("Momentum_stabilization_coefficient", &K::momentum_stabilization_coefficient, any_real(),
+             {.doc = "ct_m"})
+        .key("Continuity_stabilization_coefficient", &K::continuity_stabilization_coefficient, any_real(),
+             {.doc = "ct_c"});
+    return out;
+  }();
+  return schema;
+}
+
+const opt::OptionSchema<UstructBoundaryKeys>& ustruct_boundary_schema()
+{
+  using K = UstructBoundaryKeys;
+  using Type = UstructBoundaryType;
+  const auto relaxed = opt::BoolCodec{opt::BoolLexicon::Relaxed};
+  static const auto schema = [relaxed] {
+    opt::OptionSchema<K> out("ustruct boundary condition");
+    out.key("Time_dependence", &K::time_dependence, opt::StringCodec{},
+            {.doc = "Steady, or Unsteady for a file-driven follower pressure"})
+        .key("Type", &K::type,
+             opt::EnumCodec<Type>{{{Type::Dirichlet, "Dirichlet", {"Dir"}},
+                                   {Type::Neumann, "Neumann", {"Neu", "Traction", "Trac"}},
+                                   {Type::PressureDirichlet, "Pressure_dirichlet", {}}}},
+             {.doc = "the condition"})
+        .key("Value", &K::value, any_real(), {.doc = "the magnitude"})
+        .key("Effective_direction", &K::effective_direction, opt::StringCodec{},
+             {.doc = "integer direction of a vector value"})
+        .key("Follower_pressure_load", &K::follower_pressure_load, relaxed, {.doc = "a follower pressure"})
+        .key("Apply_along_normal_direction", &K::apply_along_normal_direction, relaxed,
+             {.doc = "a traction along the normal"})
+        .key("Impose_on_state_variable_integral", &K::impose_on_state_variable_integral, relaxed,
+             {.empty = opt::EmptyPolicy::Absent, .doc = "a Dirichlet value on the displacement"})
+        .key("Ramp_function", &K::ramp_function, relaxed,
+             {.empty = opt::EmptyPolicy::Absent, .doc = "a linear ramp between the file's end values"})
+        .key("Temporal_values_file_path", &K::temporal_values_file_path, opt::StringCodec{},
+             {.doc = "the follower pressure in time"});
+    return out;
+  }();
+  return schema;
+}
 
 struct SolidMaterialProperties {
   svmp::FE::Real density{1.0};
@@ -168,126 +277,6 @@ std::array<bool, 3> fill_dirichlet_vector(std::array<ScalarValue, 3>& dst,
   return active;
 }
 
-svmp::Physics::formulations::ustruct::VolumetricPenaltyModel
-parse_volumetric_model(std::string_view raw)
-{
-  const auto value = lower_copy(trim_copy(std::string(raw)));
-  if (value.empty() || value == "st91" || value == "simo-taylor91") {
-    return svmp::Physics::formulations::ustruct::VolumetricPenaltyModel::ST91;
-  }
-  if (value == "quad" || value == "quadratic") {
-    return svmp::Physics::formulations::ustruct::VolumetricPenaltyModel::Quadratic;
-  }
-  if (value == "m94" || value == "miehe94") {
-    return svmp::Physics::formulations::ustruct::VolumetricPenaltyModel::M94;
-  }
-  if (value == "none" || value == "na") {
-    return svmp::Physics::formulations::ustruct::VolumetricPenaltyModel::None;
-  }
-  throw std::runtime_error("[svMultiPhysics::Physics] Unsupported ustruct Dilational_penalty_model '" +
-                           std::string(raw) + "'. Supported values: ST91, quadratic, M94, none.");
-}
-
-SolidMaterialProperties parse_solid_properties(const svmp::Physics::DomainInput& domain)
-{
-  SolidMaterialProperties props{};
-
-  if (const auto model = get_defined_string(domain.params, "Constitutive_model.type")) {
-    const auto lower = lower_copy(*model);
-    if (lower != "neohookean" && lower != "nhk") {
-      throw std::runtime_error(
-          "[svMultiPhysics::Physics] The new solver ustruct module currently supports only "
-          "Constitutive_model type='neoHookean'.");
-    }
-  }
-
-  if (const auto rho = get_defined_double(domain.params, "Solid_density")) {
-    props.density = static_cast<svmp::FE::Real>(*rho);
-  } else if (const auto rho_generic = get_defined_double(domain.params, "Density")) {
-    props.density = static_cast<svmp::FE::Real>(*rho_generic);
-  }
-
-  if (const auto E = get_defined_double(domain.params, "Elasticity_modulus")) {
-    props.elasticity_modulus = static_cast<svmp::FE::Real>(*E);
-  }
-  if (const auto nu = get_defined_double(domain.params, "Poisson_ratio")) {
-    props.poisson_ratio = static_cast<svmp::FE::Real>(*nu);
-  }
-
-  if (!(props.density > 0.0)) {
-    throw std::runtime_error("[svMultiPhysics::Physics] ustruct density must be > 0.");
-  }
-  if (!(props.elasticity_modulus > 0.0)) {
-    throw std::runtime_error("[svMultiPhysics::Physics] ustruct Elasticity_modulus must be > 0.");
-  }
-  if (!(props.poisson_ratio > -1.0 && props.poisson_ratio <= 0.5)) {
-    throw std::runtime_error("[svMultiPhysics::Physics] ustruct Poisson_ratio must be in (-1, 0.5].");
-  }
-
-  props.shear_modulus = static_cast<svmp::FE::Real>(0.5) * props.elasticity_modulus /
-                        (static_cast<svmp::FE::Real>(1.0) + props.poisson_ratio);
-
-  if (std::abs(props.poisson_ratio - static_cast<svmp::FE::Real>(0.5)) <=
-      static_cast<svmp::FE::Real>(1e-12)) {
-    props.bulk_modulus = 0.0;
-    props.bulk_wave_speed = std::sqrt(props.shear_modulus / props.density);
-  } else {
-    props.bulk_modulus = props.elasticity_modulus /
-                         (static_cast<svmp::FE::Real>(3.0) *
-                          (static_cast<svmp::FE::Real>(1.0) -
-                           static_cast<svmp::FE::Real>(2.0) * props.poisson_ratio));
-    const auto lambda = props.elasticity_modulus * props.poisson_ratio /
-                        ((static_cast<svmp::FE::Real>(1.0) + props.poisson_ratio) *
-                         (static_cast<svmp::FE::Real>(1.0) -
-                          static_cast<svmp::FE::Real>(2.0) * props.poisson_ratio));
-    props.bulk_wave_speed =
-        std::sqrt((lambda + static_cast<svmp::FE::Real>(2.0) * props.shear_modulus) / props.density);
-  }
-
-  return props;
-}
-
-void apply_solid_options(const svmp::Physics::DomainInput& domain,
-                         const SolidMaterialProperties& props,
-                         svmp::Physics::formulations::ustruct::UstructOptions& options)
-{
-  options.density = props.density;
-  options.bulk_wave_speed = props.bulk_wave_speed;
-  options.kinematic_residual_scale = std::sqrt(props.density * props.shear_modulus);
-  options.deviatoric_pk1_model =
-      svmp::Physics::materials::solid::isochoricNeoHookeanPK1(props.shear_modulus).model();
-
-  if (const auto penalty = get_defined_double(domain.params, "Penalty_parameter")) {
-    options.penalty_parameter = static_cast<svmp::FE::Real>(*penalty);
-  } else {
-    options.penalty_parameter = props.bulk_modulus;
-  }
-  if (options.penalty_parameter < 0.0) {
-    throw std::runtime_error("[svMultiPhysics::Physics] ustruct Penalty_parameter must be >= 0.");
-  }
-
-  if (const auto model = get_defined_string(domain.params, "Dilational_penalty_model")) {
-    options.volumetric_model = parse_volumetric_model(*model);
-  }
-
-  if (const auto fx = get_defined_double(domain.params, "Force_x")) {
-    options.body_force[0] = static_cast<svmp::FE::Real>(*fx);
-  }
-  if (const auto fy = get_defined_double(domain.params, "Force_y")) {
-    options.body_force[1] = static_cast<svmp::FE::Real>(*fy);
-  }
-  if (const auto fz = get_defined_double(domain.params, "Force_z")) {
-    options.body_force[2] = static_cast<svmp::FE::Real>(*fz);
-  }
-
-  if (const auto ct_m = get_defined_double(domain.params, "Momentum_stabilization_coefficient")) {
-    options.ct_m = static_cast<svmp::FE::Real>(*ct_m);
-  }
-  if (const auto ct_c = get_defined_double(domain.params, "Continuity_stabilization_coefficient")) {
-    options.ct_c = static_cast<svmp::FE::Real>(*ct_c);
-  }
-}
-
 void apply_ustruct_output_options(const svmp::Physics::EquationModuleInput& input,
                                   svmp::Physics::formulations::ustruct::UstructOptions& options)
 {
@@ -307,6 +296,64 @@ void apply_ustruct_output_options(const svmp::Physics::EquationModuleInput& inpu
       spatial_output_bool(input, {"vonmisesstress", "vonmises", "misesstress"}).value_or(false);
 }
 
+// Validates the moduli and derives the shear and bulk moduli and the bulk wave speed.
+SolidMaterialProperties solid_properties(const UstructDomainKeys& keys)
+{
+  SolidMaterialProperties props{};
+  props.density = keys.density;
+  props.elasticity_modulus = keys.elasticity_modulus;
+  props.poisson_ratio = keys.poisson_ratio;
+
+  if (!(props.density > 0.0)) {
+    throw std::runtime_error("[svMultiPhysics::Physics] ustruct density must be > 0.");
+  }
+  if (!(props.elasticity_modulus > 0.0)) {
+    throw std::runtime_error("[svMultiPhysics::Physics] ustruct Elasticity_modulus must be > 0.");
+  }
+  if (!(props.poisson_ratio > -1.0 && props.poisson_ratio <= 0.5)) {
+    throw std::runtime_error("[svMultiPhysics::Physics] ustruct Poisson_ratio must be in (-1, 0.5].");
+  }
+
+  props.shear_modulus = static_cast<Real>(0.5) * props.elasticity_modulus /
+                        (static_cast<Real>(1.0) + props.poisson_ratio);
+
+  if (std::abs(props.poisson_ratio - static_cast<Real>(0.5)) <= static_cast<Real>(1e-12)) {
+    props.bulk_modulus = 0.0;
+    props.bulk_wave_speed = std::sqrt(props.shear_modulus / props.density);
+  } else {
+    props.bulk_modulus = props.elasticity_modulus /
+                         (static_cast<Real>(3.0) *
+                          (static_cast<Real>(1.0) - static_cast<Real>(2.0) * props.poisson_ratio));
+    const auto lambda = props.elasticity_modulus * props.poisson_ratio /
+                        ((static_cast<Real>(1.0) + props.poisson_ratio) *
+                         (static_cast<Real>(1.0) - static_cast<Real>(2.0) * props.poisson_ratio));
+    props.bulk_wave_speed =
+        std::sqrt((lambda + static_cast<Real>(2.0) * props.shear_modulus) / props.density);
+  }
+
+  return props;
+}
+
+void apply_solid_options(const UstructDomainKeys& keys,
+                         const SolidMaterialProperties& props,
+                         svmp::Physics::formulations::ustruct::UstructOptions& options)
+{
+  options.density = props.density;
+  options.bulk_wave_speed = props.bulk_wave_speed;
+  options.kinematic_residual_scale = std::sqrt(props.density * props.shear_modulus);
+  options.deviatoric_pk1_model =
+      svmp::Physics::materials::solid::isochoricNeoHookeanPK1(props.shear_modulus).model();
+
+  options.penalty_parameter = keys.penalty_parameter.value_or(props.bulk_modulus);
+  if (options.penalty_parameter < 0.0) {
+    throw std::runtime_error("[svMultiPhysics::Physics] ustruct Penalty_parameter must be >= 0.");
+  }
+  options.volumetric_model = keys.volumetric_model;
+  options.body_force = {keys.force_x, keys.force_y, keys.force_z};
+  options.ct_m = keys.momentum_stabilization_coefficient;
+  options.ct_c = keys.continuity_stabilization_coefficient;
+}
+
 void apply_ustruct_bcs(const svmp::Physics::EquationModuleInput& input,
                        svmp::Physics::formulations::ustruct::UstructOptions& options)
 {
@@ -324,40 +371,23 @@ void apply_ustruct_bcs(const svmp::Physics::EquationModuleInput& input,
           "' has invalid boundary marker; ensure <Add_face name=\"...\"> exists and is referenced correctly.");
     }
 
-    const auto* time_dep = find_param(bc.params, "Time_dependence");
-    const std::string time_value =
-        (time_dep && time_dep->defined) ? trim_copy(time_dep->value) : std::string("Steady");
-    const auto time_value_lc = lower_copy(time_value);
-    const bool is_steady = time_value_lc.empty() || time_value_lc == "steady";
+    const auto keys = ustruct_boundary_schema().resolve(option_input(bc.params)).value;
+    const auto time_value_lc = lower_copy(keys.time_dependence);
+    const bool is_steady = time_value_lc == "steady";
     const bool is_unsteady = time_value_lc == "unsteady";
-
-    const auto has_nonempty_defined = [&](std::string_view key) {
-      const auto* p = find_param(bc.params, key);
-      return p && p->defined && !trim_copy(p->value).empty();
-    };
-    const bool has_temporal_values_file = has_nonempty_defined("Temporal_values_file_path");
+    const bool has_temporal_values_file = !keys.temporal_values_file_path.empty();
     const bool has_unsupported_file =
-        has_nonempty_defined("Spatial_values_file_path") ||
-        has_nonempty_defined("Temporal_and_spatial_values_file_path") ||
-        has_nonempty_defined("Bct_file_path") ||
-        has_nonempty_defined("Traction_values_file_path");
-
-    const auto* type_param = find_param(bc.params, "Type");
-    const std::string bc_type = type_param ? trim_copy(type_param->value) : std::string{};
-    const auto bc_type_lc = lower_copy(bc_type);
-    const bool is_neumann_like =
-        (bc_type_lc == "neumann" || bc_type_lc == "neu" ||
-         bc_type_lc == "traction" || bc_type_lc == "trac");
-
-    const bool follower_pressure =
-        (find_param(bc.params, "Follower_pressure_load") &&
-         find_param(bc.params, "Follower_pressure_load")->defined &&
-         parse_bool_relaxed(find_param(bc.params, "Follower_pressure_load")->value));
+        has_nonempty_defined(bc.params, "Spatial_values_file_path") ||
+        has_nonempty_defined(bc.params, "Temporal_and_spatial_values_file_path") ||
+        has_nonempty_defined(bc.params, "Bct_file_path") ||
+        has_nonempty_defined(bc.params, "Traction_values_file_path");
+    const bool is_neumann_like = keys.type == UstructBoundaryType::Neumann;
+    const bool follower_pressure = keys.follower_pressure_load;
 
     if (!is_steady && !is_unsteady) {
       throw std::runtime_error(
           "[svMultiPhysics::Physics] Only Steady ustruct boundary conditions and Unsteady file-driven follower-pressure "
-          "BCs are supported for the new solver ustruct module (got Time_dependence='" + time_value +
+          "BCs are supported for the new solver ustruct module (got Time_dependence='" + keys.time_dependence +
           "'). Set <Use_new_OOP_solver>false</Use_new_OOP_solver> to use the legacy solver.");
     }
 
@@ -375,25 +405,16 @@ void apply_ustruct_bcs(const svmp::Physics::EquationModuleInput& input,
           "to use the legacy solver.");
     }
 
-    const auto* value_param = find_param(bc.params, "Value");
-    const auto value =
-        static_cast<svmp::FE::Real>(value_param ? parse_double(value_param->value, "Add_BC/Value") : 0.0);
-
+    const auto value = keys.value;
     std::vector<int> effective_dir;
-    if (const auto* p = find_param(bc.params, "Effective_direction");
-        p && !trim_copy(p->value).empty()) {
-      effective_dir = parse_int_list(p->value);
+    if (!keys.effective_direction.empty()) {
+      effective_dir = parse_int_list(keys.effective_direction);
     }
 
-    const bool along_normal =
-        (find_param(bc.params, "Apply_along_normal_direction") &&
-         find_param(bc.params, "Apply_along_normal_direction")->defined &&
-         parse_bool_relaxed(find_param(bc.params, "Apply_along_normal_direction")->value));
-
-    if (bc_type_lc == "dirichlet" || bc_type_lc == "dir") {
+    switch (keys.type) {
+    case UstructBoundaryType::Dirichlet: {
       const bool impose_on_integral =
-          !options.enable_time_derivative_terms ||
-          get_defined_bool(bc.params, "Impose_on_state_variable_integral").value_or(false);
+          !options.enable_time_derivative_terms || keys.impose_on_state_variable_integral;
       if (impose_on_integral) {
         UstructOptions::DisplacementDirichletBC dir{};
         dir.boundary_marker = bc.boundary_marker;
@@ -404,8 +425,7 @@ void apply_ustruct_bcs(const svmp::Physics::EquationModuleInput& input,
 
         UstructOptions::VelocityDirichletBC vel{};
         vel.boundary_marker = bc.boundary_marker;
-        vel.active_components =
-            fill_dirichlet_vector(vel.value, dim, effective_dir, static_cast<svmp::FE::Real>(0.0));
+        vel.active_components = fill_dirichlet_vector(vel.value, dim, effective_dir, static_cast<Real>(0.0));
         if (std::any_of(vel.active_components.begin(), vel.active_components.end(), [](bool b) { return b; })) {
           options.velocity_dirichlet.push_back(std::move(vel));
         }
@@ -417,46 +437,33 @@ void apply_ustruct_bcs(const svmp::Physics::EquationModuleInput& input,
           options.velocity_dirichlet.push_back(std::move(vel));
         }
       }
-      continue;
+      break;
     }
-
-    if (bc_type_lc == "neumann" || bc_type_lc == "neu" ||
-        bc_type_lc == "traction" || bc_type_lc == "trac") {
+    case UstructBoundaryType::Neumann: {
       if (follower_pressure) {
         UstructOptions::FollowerPressureBC pressure{};
         pressure.boundary_marker = bc.boundary_marker;
         if (is_unsteady) {
-          const auto file_path = get_defined_string(bc.params, "Temporal_values_file_path");
-          if (!file_path.has_value()) {
-            throw std::runtime_error(
-                "[svMultiPhysics::Physics] Unsteady follower-pressure BC '" + bc.name +
-                "' is missing <Temporal_values_file_path>.");
-          }
-
           auto temporal = svmp::Physics::readTemporalValuesFile(
-              *file_path, /*num_components=*/1, svmp::Physics::TemporalEndBehavior::Clamp);
-          const bool ramp = get_defined_bool(bc.params, "Ramp_function").value_or(false);
-          if (ramp) {
+              keys.temporal_values_file_path, /*num_components=*/1, svmp::Physics::TemporalEndBehavior::Clamp);
+          if (keys.ramp_function) {
             pressure.ramp = UstructOptions::FollowerPressureBC::LinearRamp{
-                static_cast<svmp::FE::Real>(temporal->firstTime()),
-                static_cast<svmp::FE::Real>(temporal->lastTime()),
-                static_cast<svmp::FE::Real>(temporal->firstValue()),
-                static_cast<svmp::FE::Real>(temporal->lastValue())};
+                static_cast<Real>(temporal->firstTime()),
+                static_cast<Real>(temporal->lastTime()),
+                static_cast<Real>(temporal->firstValue()),
+                static_cast<Real>(temporal->lastValue())};
           } else {
             pressure.pressure = UstructOptions::ScalarValue{
                 svmp::FE::forms::TimeScalarCoefficient(
-                    [temporal](svmp::FE::Real /*x*/,
-                               svmp::FE::Real /*y*/,
-                               svmp::FE::Real /*z*/,
-                               svmp::FE::Real t) -> svmp::FE::Real {
-                      return static_cast<svmp::FE::Real>(temporal->interpolate(static_cast<double>(t)));
+                    [temporal](Real /*x*/, Real /*y*/, Real /*z*/, Real t) -> Real {
+                      return static_cast<Real>(temporal->interpolate(static_cast<double>(t)));
                     })};
           }
         } else {
           pressure.pressure = UstructOptions::ScalarValue{value};
         }
         options.follower_pressure.push_back(std::move(pressure));
-      } else if (along_normal) {
+      } else if (keys.apply_along_normal_direction) {
         UstructOptions::NormalTractionBC normal{};
         normal.boundary_marker = bc.boundary_marker;
         normal.traction = UstructOptions::ScalarValue{value};
@@ -467,21 +474,20 @@ void apply_ustruct_bcs(const svmp::Physics::EquationModuleInput& input,
         fill_vector(traction.traction, dim, effective_dir, value);
         options.traction_neumann.push_back(std::move(traction));
       }
-      continue;
+      break;
     }
-
-    if (bc_type_lc == "pressure_dirichlet" || bc_type_lc == "pressure-dirichlet") {
+    case UstructBoundaryType::PressureDirichlet: {
       UstructOptions::PressureDirichletBC pbc{};
       pbc.boundary_marker = bc.boundary_marker;
       pbc.value = UstructOptions::ScalarValue{value};
       options.pressure_dirichlet.push_back(std::move(pbc));
-      continue;
+      break;
     }
-
-    throw std::runtime_error(
-        "[svMultiPhysics::Physics] Boundary condition type '" + bc_type +
-        "' is not supported for the new solver ustruct module. Supported types: Dir, Dirichlet, Neu, Neumann, Trac, Traction. "
-        "Set <Use_new_OOP_solver>false</Use_new_OOP_solver> to use the legacy solver.");
+    case UstructBoundaryType::None:
+      throw std::runtime_error(
+          "[svMultiPhysics::Physics] Boundary condition '" + bc.name +
+          "' has no Type. Supported types: Dir, Dirichlet, Neu, Neumann, Trac, Traction.");
+    }
   }
 }
 
@@ -513,8 +519,8 @@ create_ustruct_from_input(const svmp::Physics::EquationModuleInput& input,
   options.enable_time_derivative_terms =
       resolve_ustruct_time_derivative_terms(input, options.enable_time_derivative_terms);
 
-  const auto solid_props = parse_solid_properties(domain);
-  apply_solid_options(domain, solid_props, options);
+  const auto domain_keys = ustruct_domain_schema().resolve(option_input(domain.params)).value;
+  apply_solid_options(domain_keys, solid_properties(domain_keys), options);
   apply_ustruct_output_options(input, options);
   apply_ustruct_bcs(input, options);
 
@@ -531,5 +537,19 @@ SVMP_REGISTER_EQUATION("ustruct", &create_ustruct_from_input);
 namespace svmp::Physics::formulations::ustruct {
 
 void forceLink_UstructRegister() {}
+
+std::string resolvedInputKeys(const EquationModuleInput& input)
+{
+  const auto& domain_schema = ustruct_domain_schema();
+  const auto& boundary_schema = ustruct_boundary_schema();
+  const auto& domain = select_single_domain(input, "ustruct");
+  std::string out = option_line(domain_schema.element(),
+                                    domain_schema.serialize(domain_schema.resolve(option_input(domain.params)).value));
+  for (const auto& bc : input.boundary_conditions) {
+    out += option_line(boundary_schema.element() + " '" + bc.name + "'",
+                           boundary_schema.serialize(boundary_schema.resolve(option_input(bc.params)).value));
+  }
+  return out;
+}
 
 } // namespace svmp::Physics::formulations::ustruct

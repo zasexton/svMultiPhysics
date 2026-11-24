@@ -47,6 +47,10 @@ target_link_libraries(test_application
     ${TINYXML_LIBRARY_NAME}
 )
 
+# The repository, for the tests that read every deck of a module.
+target_compile_definitions(test_application
+  PRIVATE SVMP_REPOSITORY_ROOT="${CMAKE_SOURCE_DIR}/..")
+
 if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
   target_compile_options(test_application PRIVATE -ffunction-sections -fdata-sections)
   target_link_options(test_application PRIVATE -Wl,--gc-sections)
