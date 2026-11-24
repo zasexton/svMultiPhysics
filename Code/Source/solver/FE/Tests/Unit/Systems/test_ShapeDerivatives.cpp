@@ -7,6 +7,14 @@
  * to a direction dd of the mesh columns is compared with central differences
  * of the residual, the coordinates moved for every perturbed state by the
  * coordinate update Newton uses (updateCurrentCoordinatesFromMeshDisplacement).
+ *
+ * The CompleteShapeDerivative suite runs representative cells in CTest.  The
+ * full sweep over every cell type and order (Tri3, Quad4, Tet4, Hex8, Wedge6,
+ * Pyr5; straight cells with P1 and P2 fields, curved P2 cells) is the suite
+ * CompleteShapeDerivativeSweep, which the CTest entry leaves out; run it on
+ * demand (about 12 minutes):
+ *
+ *     test_fe_systems --gtest_filter='CompleteShapeDerivativeSweep.*'
  */
 
 #include <gtest/gtest.h>
@@ -567,6 +575,16 @@ std::vector<MeshCase> everyMeshCase()
     return out;
 }
 
+// The representative cases of the CTest suite: one per cell family on
+// straight (P1-geometry) cells with P1 fields, and one curved P2 case with P2
+// fields per dimension.  CompleteShapeDerivativeSweep runs every case of
+// everyMeshCase() on demand.
+std::vector<MeshCase> representativeMeshCases()
+{
+    return {{Cell::Triangle, 1, 1, 2}, {Cell::Quad, 1, 1, 2}, {Cell::Tetra, 1, 1, 1}, {Cell::Hex, 1, 1, 1},
+            {Cell::Wedge, 1, 1, 1},    {Cell::Pyramid, 1, 1, 1}, {Cell::Triangle, 2, 2, 1}, {Cell::Tetra, 2, 2, 1}};
+}
+
 void runProbes(const std::vector<Probe>& probes, const char* label,
                const std::vector<MeshCase>& mesh_cases = everyMeshCase())
 {
@@ -615,6 +633,11 @@ void runProbes(const std::vector<Probe>& probes, const char* label,
 // Volume terms: the gradient, divergence, Hessian, det J, J^{-1}, cell-size and
 // measure rules on every element type, straight and curved, P1 and P2.
 TEST(CompleteShapeDerivative, VolumeTermsMatchDirectionalDifferences)
+{
+    runProbes(volumeProbes(), "volume terms", representativeMeshCases());
+}
+
+TEST(CompleteShapeDerivativeSweep, VolumeTermsOnEveryCellAndOrder)
 {
     runProbes(volumeProbes(), "volume terms");
 }
@@ -672,10 +695,12 @@ std::vector<Probe> facetProbes()
 // Facet terms: the surface measure, current normals, facet scales (area,
 // hNormal) and the cell scales read on facets, on boundary, interior-facet
 // and fitted-interface integrals of every element type, straight and curved.
-TEST(CompleteShapeDerivative, FacetTermsMatchDirectionalDifferences)
+namespace {
+
+void runFacetProbes(const std::vector<MeshCase>& mesh_cases)
 {
     const auto probes = facetProbes();
-    for (const auto& mesh_case : everyMeshCase()) {
+    for (const auto& mesh_case : mesh_cases) {
         Real worst = 0.0;
         std::string worst_probe;
         // Interface meshes of curved (P2) cells are not assembled.
@@ -706,6 +731,20 @@ TEST(CompleteShapeDerivative, FacetTermsMatchDirectionalDifferences)
         std::cout << "[ shape derivative ] facet terms, " << caseName(mesh_case)
                   << ": worst relative error of J dd " << worst << " (" << worst_probe << ")\n";
     }
+}
+
+} // namespace
+
+TEST(CompleteShapeDerivative, FacetTermsMatchDirectionalDifferences)
+{
+    // Every facet kind (boundary, interior facet, fitted interface) in 2D and
+    // 3D on straight cells, and boundary and interior facets of curved cells.
+    runFacetProbes({{Cell::Triangle, 1, 1, 1}, {Cell::Hex, 1, 1, 1}, {Cell::Triangle, 2, 2, 1}});
+}
+
+TEST(CompleteShapeDerivativeSweep, FacetTermsOnEveryCellAndOrder)
+{
+    runFacetProbes(everyMeshCase());
 }
 
 namespace {
@@ -886,8 +925,15 @@ std::vector<Probe> stabilizationProbes()
 // and cross-stress terms built from them, match directional differences.
 TEST(CompleteShapeDerivative, StabilizationMetricAndParametersMatchDirectionalDifferences)
 {
+    // Every term on non-affine cells, where the metric varies in the cell and
+    // P1 fields have second derivatives.
+    runProbes(stabilizationProbes(), "stabilization", {{Cell::Quad, 1, 1, 2}});
+}
+
+TEST(CompleteShapeDerivativeSweep, StabilizationOnEveryCellType)
+{
     // Every cell type with P1 fields, and curved P2 cells in 2D (the volume
-    // test covers P2 fields and curved cells in 3D for the same rules).
+    // sweep covers P2 fields and curved cells in 3D for the same rules).
     std::vector<MeshCase> cases;
     for (const auto& mesh_case : everyMeshCase()) {
         if (mesh_case.field_order == 1 || cellDimension(mesh_case.cell) == 2) {
@@ -900,7 +946,9 @@ TEST(CompleteShapeDerivative, StabilizationMetricAndParametersMatchDirectionalDi
 // The mesh blocks of a complete shape derivative are interpreted: with the
 // JIT on, their J dd is the interpreter's (to round-off), while the other
 // blocks of the same installs keep their JIT kernels.
-TEST(CompleteShapeDerivative, MeshBlocksAreInterpretedWithTheJITOn)
+namespace {
+
+void checkMeshBlocksInterpreted(const std::vector<MeshCase>& mesh_cases)
 {
     using namespace svmp::FE::forms;
     const auto n = FormExpr::normal();
@@ -916,8 +964,7 @@ TEST(CompleteShapeDerivative, MeshBlocksAreInterpretedWithTheJITOn)
         {"div(2 sym(grad(u))).v dx", Rows::Vector,
          [](const Symbols& s) { return inner(div(FormExpr::constant(2.0) * sym(grad(s.u))), s.v).dx(); }},
     };
-    for (const auto& mesh_case : {MeshCase{Cell::Triangle, 1, 1, 2}, MeshCase{Cell::Quad, 2, 2, 2},
-                                  MeshCase{Cell::Hex, 1, 1, 1}, MeshCase{Cell::Tetra, 2, 2, 1}}) {
+    for (const auto& mesh_case : mesh_cases) {
         for (const auto& probe : probes) {
             SCOPED_TRACE(caseName(mesh_case) + ": " + probe.name);
             ProbeSetup setup;
@@ -936,4 +983,16 @@ TEST(CompleteShapeDerivative, MeshBlocksAreInterpretedWithTheJITOn)
             }
         }
     }
+}
+
+} // namespace
+
+TEST(CompleteShapeDerivative, MeshBlocksAreInterpretedWithTheJITOn)
+{
+    checkMeshBlocksInterpreted({{Cell::Quad, 1, 1, 1}});
+}
+
+TEST(CompleteShapeDerivativeSweep, MeshBlocksAreInterpretedWithTheJITOnSeveralCells)
+{
+    checkMeshBlocksInterpreted({{Cell::Triangle, 1, 1, 2}, {Cell::Quad, 2, 2, 2}, {Cell::Hex, 1, 1, 1}, {Cell::Tetra, 2, 2, 1}});
 }

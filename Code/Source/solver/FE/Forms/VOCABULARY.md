@@ -324,8 +324,10 @@ predicted mesh velocity,
 curvature, functionals of other integrals (boundary integrals, auxiliary
 inputs and outputs), and spatial derivatives of cellwise-constant geometry.
 `Tests/Unit/Systems/test_ShapeDerivatives.cpp` compares J dd with residual
-differences under the coordinate update on Tri3, Quad4, Tet4, Hex8, Wedge6
-and Pyr5 cells, straight and curved P2, P1 and P2 fields.
+differences under the coordinate update on representative cells in CTest; its
+suite `CompleteShapeDerivativeSweep`, left out of CTest, covers Tri3, Quad4,
+Tet4, Hex8, Wedge6 and Pyr5 cells, straight and curved P2, with P1 and P2
+fields: `test_fe_systems --gtest_filter='CompleteShapeDerivativeSweep.*'`.
 
 ### Trace and Projection Helpers
 

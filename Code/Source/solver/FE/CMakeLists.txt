@@ -3140,7 +3140,10 @@ if(FE_BUILD_TESTS)
 	                    svfe
 	                    ${GTEST_LIBRARIES}
             )
-            svmp_add_gtest(FE_Systems_Tests TARGET test_fe_systems COST 62)
+            # The full sweep of the complete shape-derivative tests runs on demand
+            # (test_ShapeDerivatives.cpp): --gtest_filter='CompleteShapeDerivativeSweep.*'.
+            svmp_add_gtest(FE_Systems_Tests TARGET test_fe_systems COST 62
+                           FILTER "-CompleteShapeDerivativeSweep.*")
 
             # Trace multipliers written as restricted volume fields (D54 LM3):
             # the support restriction, the multiplier rows at setup, the
