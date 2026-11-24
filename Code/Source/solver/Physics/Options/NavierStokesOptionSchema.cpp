@@ -458,6 +458,18 @@ const opt::OptionSchema<NavierStokesInputView>& navierStokesDomainSchema()
     return schema;
 }
 
+const opt::OptionSchema<WeakVelocityDirichletKeys>& weakVelocityDirichletSchema()
+{
+    static const auto schema = [] {
+        opt::OptionSchema<WeakVelocityDirichletKeys> out("Navier-Stokes weak velocity Dirichlet");
+        out.key("Penalty_parameter", &WeakVelocityDirichletKeys::nitsche_gamma,
+                opt::OptionalCodec<opt::RealCodec>{opt::RealCodec{.minimum = 0.0, .open_minimum = true}},
+                doc("the Nitsche penalty multiplier gamma of gamma p^2 mu / h_n"));
+        return out;
+    }();
+    return schema;
+}
+
 const opt::OptionSchema<IncompressibleTwoFluidInputView>& incompressibleTwoFluidSchema()
 {
     static const auto schema = makeIncompressibleTwoFluidSchema();
@@ -833,6 +845,23 @@ namespace {
         "IncompressibleNavierStokesVMSModule: effective configuration contains a non-finite scalar");
 }
 
+/// The weak velocity conditions that set their own Nitsche gamma
+/// (<Penalty_parameter>), as an artifact member; empty when none does.
+std::string weakVelocityConditionGammas(const IncompressibleNavierStokesVMSOptions& options)
+{
+    std::string out;
+    for (const auto& condition : options.velocity_dirichlet_weak) {
+        if (!condition.nitsche_gamma.has_value()) {
+            continue;
+        }
+        out += out.empty() ? ",\"conditions\":[" : ",";
+        out += "{\"boundary_marker\":" + std::to_string(condition.boundary_marker) +
+               ",\"gamma\":" + jsonReal(*condition.nitsche_gamma) + ",\"source\":\"Penalty_parameter\"}";
+    }
+    return out.empty() ? out : out + "]";
+}
+
+
 [[nodiscard]] std::string jsonScalarValue(
     const IncompressibleNavierStokesVMSOptions::ScalarValue& value)
 {
@@ -1099,6 +1128,7 @@ tangentialPolicyProvenance(
         << jsonReal(
                options
                    .generated_boundary_nitsche_minimum_energy_ratio)
+        << weakVelocityConditionGammas(options)
         << '}'
         << ",\"stabilization\":{\"vms_enabled\":"
         << json::boolean(effective_enable_vms)

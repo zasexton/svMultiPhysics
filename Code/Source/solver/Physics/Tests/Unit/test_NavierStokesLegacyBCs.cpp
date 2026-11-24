@@ -1181,6 +1181,42 @@ TEST(NavierStokesLegacyBCs, VelocityInletZeroSkipsMissingMarkerGeometry)
 #endif
 }
 
+TEST(NavierStokesLegacyBCs, WeakVelocityDirichletReadsPenaltyParameterAsTheNitscheGamma)
+{
+#if !(defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH)
+    GTEST_SKIP() << "Requires FE built with Mesh integration (FE_WITH_MESH=ON).";
+#else
+    // A weak condition's Penalty_parameter is its Nitsche gamma; without it
+    // the condition keeps the module's gamma; a strong condition ignores it.
+    // The legacy tangential and normal keys are refused (one multiplier for
+    // every direction), as is a gamma that is not positive.
+    auto mesh = buildSingleTetraTwoWallMesh(76, 77, 78);
+    const auto resolve = [&](bool weak, std::vector<std::pair<std::string, std::string>> keys) {
+        auto boundary = velocityInlet(999);
+        boundary.params["Value"] = defined("0");
+        boundary.params["Weakly_applied"] = defined(weak ? "true" : "false");
+        for (const auto& [key, value] : keys) {
+            boundary.params[key] = defined(value);
+        }
+        return resolveVelocityInlet(mesh, boundary);
+    };
+    EXPECT_FALSE(resolve(true, {}).velocity_dirichlet_weak.front().nitsche_gamma.has_value());
+    EXPECT_EQ(resolve(true, {{"Penalty_parameter", "1000"}}).velocity_dirichlet_weak.front().nitsche_gamma,
+              std::optional<svmp::FE::Real>(1000.0));
+    EXPECT_FALSE(resolve(false, {{"Penalty_parameter", "1000"}}).velocity_dirichlet.front().nitsche_gamma.has_value());
+    for (const char* key : {"Penalty_parameter_tangential", "Penalty_parameter_normal"}) {
+        try {
+            (void)resolve(true, {{key, "40"}});
+            ADD_FAILURE() << key << " was accepted";
+        } catch (const std::exception& error) {
+            EXPECT_NE(std::string(error.what()).find("<Penalty_parameter>"), std::string::npos) << error.what();
+        }
+    }
+    EXPECT_ANY_THROW((void)resolve(true, {{"Penalty_parameter", "0"}}));
+    EXPECT_ANY_THROW((void)resolve(true, {{"Penalty_parameter", "-1"}}));
+#endif
+}
+
 TEST(NavierStokesLegacyBCs, VelocityInletProfileErrorsPrecedeZeroShortcutAndFollowFlowFile)
 {
 #if !(defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH)

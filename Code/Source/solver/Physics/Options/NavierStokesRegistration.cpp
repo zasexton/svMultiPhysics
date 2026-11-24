@@ -1342,6 +1342,18 @@ void apply_fluid_bcs(const svmp::Physics::EquationModuleInput& input,
 
       IncompressibleNavierStokesVMSOptions::VelocityDirichletBC dir{};
       dir.boundary_marker = bc.boundary_marker;
+      if (weak) {
+        for (const char* key : {"Penalty_parameter_tangential", "Penalty_parameter_normal"}) {
+          if (const auto* p = find_param(bc.params, key); p && p->defined) {
+            throw std::runtime_error(
+                "[svMultiPhysics::Physics] Weak velocity Dirichlet BC '" + bc.name + "' sets <" + key +
+                ">: the new solver's Nitsche penalty has one multiplier for every direction; set "
+                "<Penalty_parameter> (the Nitsche gamma).");
+          }
+        }
+        dir.nitsche_gamma =
+            ns::weakVelocityDirichletSchema().resolve(option_input(bc.params)).value.nitsche_gamma;
+      }
       dir.active_components = use_normal_direction
                                   ? std::array<bool, 3>{true, true, true}
                                   : active_components_from_flags(active, dim);

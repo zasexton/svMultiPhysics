@@ -474,6 +474,9 @@ struct IncompressibleNavierStokesVMSOptions {
         /// The time functions the values read (FormExpr::parameter), declared
         /// on the system before the condition is installed.
         std::vector<FE::systems::TimeFunctionDeclaration> time_functions{};
+        /// The Nitsche penalty multiplier gamma of a weak condition
+        /// (<Penalty_parameter>); unset: nitsche_gamma.
+        std::optional<FE::Real> nitsche_gamma{};
     };
 
     struct PressureDirichletBC {

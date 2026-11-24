@@ -676,7 +676,11 @@ inline void appendVelocityNitscheBoundaries(
     const auto flux = wallStressFlux(Rows::continuity, p, q, mu);
     for (const auto& boundary : boundaries) {
         const auto& prepared = resolve_boundary(boundary);
-        FE::forms::bc::Dirichlet(prepared.target, prepared.prescribed_velocity, nitsche, flux)
+        auto condition_nitsche = nitsche;
+        if (prepared.nitsche_gamma.has_value()) {
+            condition_nitsche.gamma = *prepared.nitsche_gamma;
+        }
+        FE::forms::bc::Dirichlet(prepared.target, prepared.prescribed_velocity, condition_nitsche, flux)
             .contributeToRows(rows, u, v, Rows::momentum);
         if (prepared_boundaries != nullptr) {
             prepared_boundaries->push_back(prepared);
@@ -744,7 +748,8 @@ appendVelocityNitscheBCs(
             .target = generated_marker.has_value()
                           ? FE::forms::ExteriorBoundaryMeasure::generatedActiveSubset(marker, *generated_marker)
                           : FE::forms::ExteriorBoundaryMeasure::fullPhysical(marker),
-            .prescribed_velocity = FE::forms::FormExpr::asVector(std::move(uD_comp))};
+            .prescribed_velocity = FE::forms::FormExpr::asVector(std::move(uD_comp)),
+            .nitsche_gamma = bc.nitsche_gamma};
     };
     const auto drop = [](const FE::forms::FormExpr&) {};
     std::vector<PreparedWeakVelocityBoundary> prepared;

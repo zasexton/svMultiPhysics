@@ -4127,3 +4127,135 @@ TEST(NavierStokesPostProcessing, DeclaresSelectedEnergiesFromRegisteredFunctiona
     EXPECT_EQ(walls[0].prefix, "free_surface.9.");
     EXPECT_EQ(walls[1].prefix, "free_surface.7.");
 }
+
+TEST(NavierStokesWeakVelocityDirichlet, ConditionGammaScalesTheNitschePenalty)
+{
+    // A weak wall's own Nitsche gamma (<Penalty_parameter>) against the
+    // symmetric Nitsche form written out, gamma mu / h_n (u - g).v the
+    // penalty, for a condition that sets gamma = 1000 and one that keeps the
+    // module's 10; and the tangent of the first against finite differences.
+    using svmp::FE::systems::BoundUnknown;
+    const int marker = 4;
+    const Real mu = 0.04;
+    const std::array<Real, 3> g{0.1, -0.2, 0.05};
+    auto mesh = std::make_shared<svmp::FE::forms::test::SingleTetraOneBoundaryFaceMeshAccess>(marker);
+    auto u_space = svmp::FE::spaces::VectorSpace(svmp::FE::spaces::SpaceType::H1, mesh, 1, 3);
+    auto p_space = std::make_shared<svmp::FE::spaces::H1Space>(ElementType::Tetra4, 1);
+
+    struct Assembled {
+        std::vector<Real> matrix;
+        std::vector<Real> vector;
+    };
+    const auto assemble = [&](const std::function<FormExpr(const BoundUnknown&, const BoundUnknown&)>& rows,
+                              int perturbed = -1, Real eps = 0.0) {
+        FESystem sys(mesh);
+        const auto u_id = sys.addField(FieldSpec{.name = "Velocity", .space = u_space, .components = 3});
+        const auto p_id = sys.addField(FieldSpec{.name = "Pressure", .space = p_space, .components = 1});
+        sys.addOperator("op");
+        const BoundUnknown U{u_id, FormExpr::stateField(u_id, *u_space, "u"), FormExpr::testFunction(u_id, *u_space, "v")};
+        const BoundUnknown P{p_id, FormExpr::stateField(p_id, *p_space, "p"), FormExpr::testFunction(p_id, *p_space, "q")};
+        (void)installFormulation(sys, "op", {u_id, p_id}, rows(U, P));
+        SetupInputs si;
+        si.topology_override = singleTetraTopology();
+        sys.setup({}, si);
+
+        const auto n = static_cast<std::size_t>(sys.dofHandler().getNumDofs());
+        std::vector<Real> x(n, 0.0);
+        assignComponentPattern(x, sys, "Velocity", 0, Real(0.05), Real(0.01));
+        assignComponentPattern(x, sys, "Velocity", 1, Real(-0.03), Real(0.02));
+        assignComponentPattern(x, sys, "Velocity", 2, Real(0.40), Real(0.05));
+        assignComponentPattern(x, sys, "Pressure", 0, Real(0.20), Real(0.15));
+        if (perturbed >= 0) {
+            x[static_cast<std::size_t>(perturbed)] += eps;
+        }
+        SystemStateView state;
+        state.time = 0.0;
+        state.dt = 0.1;
+        state.u = x;
+        svmp::FE::assembly::DenseMatrixView J(static_cast<svmp::FE::GlobalIndex>(n));
+        svmp::FE::assembly::DenseVectorView R(static_cast<svmp::FE::GlobalIndex>(n));
+        J.zero();
+        R.zero();
+        AssemblyRequest req;
+        req.op = "op";
+        req.want_matrix = true;
+        req.want_vector = true;
+        EXPECT_TRUE(sys.assemble(req, state, &J, &R).success);
+        Assembled out;
+        for (std::size_t i = 0; i < n; ++i) {
+            out.vector.push_back(R.getVectorEntry(static_cast<svmp::FE::GlobalIndex>(i)));
+            for (std::size_t j = 0; j < n; ++j) {
+                out.matrix.push_back(J.getMatrixEntry(static_cast<svmp::FE::GlobalIndex>(i),
+                                                      static_cast<svmp::FE::GlobalIndex>(j)));
+            }
+        }
+        return out;
+    };
+
+    const auto factories = [&](std::optional<Real> gamma) {
+        return [&, gamma](const BoundUnknown& U, const BoundUnknown& P) {
+            Opts opts;
+            Opts::VelocityDirichletBC wall;
+            wall.boundary_marker = marker;
+            wall.value = {Opts::ScalarValue{g[0]}, Opts::ScalarValue{g[1]}, Opts::ScalarValue{g[2]}};
+            wall.nitsche_gamma = gamma;
+            opts.velocity_dirichlet_weak.push_back(wall);
+            std::vector<bc::GeneratedBoundaryNitscheTraceFormBinding> bindings;
+            const auto prepared =
+                Factories::prepareWeakVelocityBoundaries(opts, 3, {}, U, P, FormExpr::constant(mu), bindings);
+            FormExpr rows;
+            const auto add = [&](const FormExpr& term) { rows = sumOf(rows, term); };
+            (void)Factories::appendVelocityNitscheBCs(add, add, opts, prepared, U, P, FormExpr::constant(mu),
+                                                      Factories::GeneratedTraceCertification::None);
+            return rows;
+        };
+    };
+    const auto written = [&](Real gamma) {
+        return [&, gamma](const BoundUnknown& U, const BoundUnknown& P) {
+            const auto& u = U.state;
+            const auto& v = U.test;
+            const auto n = FormExpr::normal();
+            const auto diff =
+                u - FormExpr::asVector({FormExpr::constant(g[0]), FormExpr::constant(g[1]), FormExpr::constant(g[2])});
+            const auto two_mu = FormExpr::constant(2.0 * mu);
+            // Consistency -(sigma(u, p) n).v, adjoint -(2 mu eps(v) n).(u - g) and +q (u - g).n,
+            // penalty gamma p^2 mu / h_n (u - g).v with p = 1.
+            const auto momentum = P.state * inner(n, v) - inner(two_mu * symgrad(u) * n, v) -
+                                  inner(two_mu * symgrad(v) * n, diff) +
+                                  FormExpr::constant(gamma) * (FormExpr::constant(mu) / hNormal()) * inner(diff, v);
+            const auto continuity = P.test * inner(diff, n);
+            return (momentum + continuity).ds(marker);
+        };
+    };
+
+    const auto expect_equal = [](const Assembled& a, const Assembled& b, const char* what) {
+        ASSERT_EQ(a.vector.size(), b.vector.size());
+        Real scale = 0.0;
+        for (const auto value : b.matrix) {
+            scale = std::max(scale, std::abs(value));
+        }
+        ASSERT_GT(scale, 0.0);
+        for (std::size_t i = 0; i < b.vector.size(); ++i) {
+            EXPECT_NEAR(a.vector[i], b.vector[i], 1e-12 * scale) << what << " residual row " << i;
+        }
+        for (std::size_t k = 0; k < b.matrix.size(); ++k) {
+            EXPECT_NEAR(a.matrix[k], b.matrix[k], 1e-12 * scale) << what << " Jacobian entry " << k;
+        }
+    };
+    const auto own = assemble(factories(Real(1000.0)));
+    expect_equal(own, assemble(written(1000.0)), "gamma 1000");
+    expect_equal(assemble(factories(std::nullopt)), assemble(written(10.0)), "default gamma");
+
+    // The tangent of the gamma = 1000 rows against central differences.
+    const auto n = own.vector.size();
+    const Real eps = 1e-6;
+    for (std::size_t j = 0; j < n; ++j) {
+        const auto plus = assemble(factories(Real(1000.0)), static_cast<int>(j), eps);
+        const auto minus = assemble(factories(Real(1000.0)), static_cast<int>(j), -eps);
+        for (std::size_t i = 0; i < n; ++i) {
+            const Real fd = (plus.vector[i] - minus.vector[i]) / (2.0 * eps);
+            EXPECT_NEAR(own.matrix[i * n + j], fd, 1e-7 * std::max(Real(1.0), std::abs(fd)))
+                << "tangent entry (" << i << ", " << j << ")";
+        }
+    }
+}

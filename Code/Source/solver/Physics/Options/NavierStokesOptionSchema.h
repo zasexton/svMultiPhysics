@@ -168,6 +168,14 @@ struct NavierStokesInputView {
 /// The keys of the domain element of a one-phase Navier-Stokes input.
 [[nodiscard]] const FE::options::OptionSchema<NavierStokesInputView>& navierStokesDomainSchema();
 
+/// The keys of a weakly applied velocity Dirichlet condition: its Nitsche
+/// penalty multiplier gamma (Penalty_parameter; unset: the module's 10).
+struct WeakVelocityDirichletKeys {
+    std::optional<FE::Real> nitsche_gamma{};
+};
+
+[[nodiscard]] const FE::options::OptionSchema<WeakVelocityDirichletKeys>& weakVelocityDirichletSchema();
+
 /// The keys of the equation element of the incompressible two-fluid mode
 /// (Free_surface_physical_model=IncompressibleTwoFluid).
 struct IncompressibleTwoFluidInputView {

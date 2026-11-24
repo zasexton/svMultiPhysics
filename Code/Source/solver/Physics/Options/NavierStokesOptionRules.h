@@ -162,12 +162,14 @@ void validateFreeSurfaceBoundary(const FreeSurfaceBoundary& bc,
                                  PreparedSurfaceIdentity& identity);
 
 /// Resolved weak-boundary input for this registration transaction: the
-/// boundary (the whole physical boundary, or its generated wetted part) and the
-/// prescribed velocity. Certified route bindings are built separately with the
-/// actual registered fields.
+/// boundary (the whole physical boundary, or its generated wetted part), the
+/// prescribed velocity and the condition's own Nitsche gamma when it sets one.
+/// Certified route bindings are built separately with the actual registered
+/// fields.
 struct PreparedWeakVelocityBoundary {
     FE::forms::bc::Boundary target;
     FE::forms::FormExpr prescribed_velocity{};
+    std::optional<FE::Real> nitsche_gamma{};
 };
 
 void validateNavierStokesBoundaryConfiguration(
