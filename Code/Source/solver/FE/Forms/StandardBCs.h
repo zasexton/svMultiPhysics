@@ -53,6 +53,31 @@ namespace detail {
     return analysis::InequalitySense::None;
 }
 
+/// A Robin coefficient that is the constant zero: the condition is its
+/// natural load alone, a weakly consistent flux that anchors no mode.
+[[nodiscard]] inline bool isZeroRobinCoefficient(const FormExpr& alpha)
+{
+    if (!alpha.isValid() || alpha.node() == nullptr) {
+        return false;
+    }
+    const auto value = alpha.node()->constantValue();
+    return value.has_value() && *value == Real(0.0);
+}
+
+/// The anchoring claim of a Robin condition with coefficient @p alpha: a
+/// weak penalty that anchors the constant mode and the translations, or, for
+/// the constant zero, the natural condition's claim (a weakly consistent
+/// flux that anchors nothing).
+inline void setRobinAnchoring(analysis::BoundaryConditionDescriptor& d, const FormExpr& alpha)
+{
+    const bool natural = isZeroRobinCoefficient(alpha);
+    d.enforcement_kind = natural ? analysis::EnforcementKind::WeakConsistent
+                                 : analysis::EnforcementKind::WeakPenalty;
+    d.anchors_constant_mode = !natural;
+    d.anchors_rigid_body_translation = !natural;
+    d.anchors_rigid_body_rotation = false;
+}
+
 [[nodiscard]] inline std::string sourceFor(std::string_view name,
                                            analysis::DomainKind domain,
                                            int marker)
@@ -170,7 +195,10 @@ private:
  *
  * The conormal flux of NaturalBC set to rhs - alpha u: for the heat equation
  * k grad(T).n = rhs - alpha T, a heat transfer coefficient alpha to an
- * ambient temperature T_inf with rhs = alpha T_inf.
+ * ambient temperature T_inf with rhs = alpha T_inf.  The condition anchors
+ * the constant mode and the translations; with alpha the constant zero it is
+ * the natural load -∫ rhs · v ds alone and claims no more than NaturalBC
+ * (analysisMetadata).
  */
 class RobinBC : public BoundaryCondition {
 public:
@@ -211,11 +239,9 @@ public:
         analysis::BoundaryConditionDescriptor d;
         d.primary_variable = analysis::VariableKey::field(field_id);
         d.boundary_marker = target_.marker();
-        d.trace_kind = analysis::TraceKind::Mixed;
-        d.enforcement_kind = analysis::EnforcementKind::WeakPenalty;
-        d.anchors_constant_mode = true;
-        d.anchors_rigid_body_translation = true;
-        d.anchors_rigid_body_rotation = false;
+        d.trace_kind = detail::isZeroRobinCoefficient(alpha_) ? analysis::TraceKind::Flux
+                                                              : analysis::TraceKind::Mixed;
+        detail::setRobinAnchoring(d, alpha_);
         d.source = "RobinBC on marker " + std::to_string(target_.marker());
         return {d};
     }
@@ -1522,10 +1548,7 @@ public:
         d.primary_variable = analysis::VariableKey::field(field_id);
         d.boundary_marker = boundary_marker_;
         d.trace_kind = detail::traceKindFor(trace_operator_);
-        d.enforcement_kind = analysis::EnforcementKind::WeakPenalty;
-        d.anchors_constant_mode = true;
-        d.anchors_rigid_body_translation = true;
-        d.anchors_rigid_body_rotation = false;
+        detail::setRobinAnchoring(d, alpha_);
         d.source = "TraceRobinBC on marker " + std::to_string(boundary_marker_);
         return {d};
     }
@@ -1789,10 +1812,7 @@ public:
         d.domain = analysis::DomainKind::InterfaceFace;
         d.interface_marker = interface_marker_;
         d.trace_kind = detail::traceKindFor(trace_operator_);
-        d.enforcement_kind = analysis::EnforcementKind::WeakPenalty;
-        d.anchors_constant_mode = true;
-        d.anchors_rigid_body_translation = true;
-        d.anchors_rigid_body_rotation = false;
+        detail::setRobinAnchoring(d, alpha_);
         d.source = detail::sourceFor("InterfaceTraceRobinBC",
                                      analysis::DomainKind::InterfaceFace,
                                      interface_marker_);

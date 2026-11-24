@@ -1743,6 +1743,82 @@ TEST(GaugeIntegration, TwoRegions_RobinOnRegionA_RegionBGetsGauge)
         << "Region B (no Robin BC) should have an auto-gauge constraint";
 }
 
+/**
+ * A Robin condition whose coefficient is the constant zero is its natural
+ * load alone: its analysis claim and the automatic gauge are those of the
+ * natural condition.  On two disconnected tetrahedra with the condition on
+ * region A (marker 1), both regions keep their constant mode and are gauged,
+ * where a positive coefficient anchors region A.
+ */
+TEST(GaugeIntegration, ZeroCoefficientRobinGaugesAsTheNaturalCondition)
+{
+    const auto zero = FormExpr::constant(0.0);
+    const auto load = FormExpr::constant(3.0);
+    const bc::NaturalBC natural(1, load);
+    const bc::RobinBC robin(1, zero, load);
+    const bc::TraceRobinBC trace_robin(1, zero, load, bc::ScalarTraceOperator::Identity);
+    const bc::InterfaceTraceRobinBC interface_robin(2, zero, load);
+    for (const auto family : {NullspaceModeFamily::ScalarConstant,
+                              NullspaceModeFamily::ComponentwiseConstant,
+                              NullspaceModeFamily::KernelOfSymGrad}) {
+        const auto expected = descriptorToVerdict(natural.analysisMetadata(0, nullptr).front(), family);
+        EXPECT_EQ(expected, AnchoringVerdict::Preserved);
+        EXPECT_EQ(descriptorToVerdict(robin.analysisMetadata(0, nullptr).front(), family), expected);
+        EXPECT_EQ(descriptorToVerdict(trace_robin.analysisMetadata(0, nullptr).front(), family), expected);
+        EXPECT_EQ(descriptorToVerdict(interface_robin.analysisMetadata(0, nullptr).front(), family), expected);
+    }
+
+    struct Gauge {
+        int anchored{0};
+        int exact_nullspace{0};
+        std::vector<GlobalIndex> constrained{};
+    };
+    const auto gauge = [](std::unique_ptr<bc::BoundaryCondition> condition) {
+        auto mesh = std::make_shared<TwoTetraOneBoundaryMeshAccess>();
+        auto space = std::make_shared<spaces::H1Space>(ElementType::Tetra4, 1);
+        systems::FESystem sys(mesh);
+        const auto u_field = sys.addField(systems::FieldSpec{.name = "u", .space = space, .components = 1});
+        sys.addOperator("op");
+        auto u = FormExpr::stateField(u_field, *space, "u");
+        auto v = FormExpr::testFunction(*space, "v");
+        auto residual = inner(grad(u), grad(v)).dx();
+        systems::BoundaryConditionManager bc_mgr;
+        bc_mgr.add(std::move(condition));
+        bc_mgr.apply(sys, residual, u, v, u_field);
+        systems::installFormulation(sys, "op", {u_field}, residual);
+        systems::SetupInputs inputs;
+        inputs.topology_override = twoDisconnectedTetraTopology();
+        sys.setup({}, inputs);
+        Gauge out;
+        const auto* reg = sys.gaugeRegistryIfPresent();
+        EXPECT_NE(reg, nullptr);
+        if (reg == nullptr) {
+            return out;
+        }
+        for (const auto& mode : reg->resolvedModes()) {
+            out.anchored += mode.status == GaugeStatus::Anchored ? 1 : 0;
+            out.exact_nullspace += mode.status == GaugeStatus::ExactNullspace ? 1 : 0;
+        }
+        for (GlobalIndex d = 0; d < 8; ++d) {
+            if (sys.constraints().isConstrained(d)) {
+                out.constrained.push_back(d);
+            }
+        }
+        return out;
+    };
+
+    const auto with_natural = gauge(std::make_unique<bc::NaturalBC>(1, load));
+    const auto with_zero_robin = gauge(std::make_unique<bc::RobinBC>(1, zero, load));
+    const auto with_robin = gauge(std::make_unique<bc::RobinBC>(1, FormExpr::constant(1.0), load));
+    EXPECT_EQ(with_natural.anchored, 0);
+    EXPECT_EQ(with_natural.exact_nullspace, 2);
+    EXPECT_EQ(with_zero_robin.anchored, with_natural.anchored);
+    EXPECT_EQ(with_zero_robin.exact_nullspace, with_natural.exact_nullspace);
+    EXPECT_EQ(with_zero_robin.constrained, with_natural.constrained);
+    EXPECT_EQ(with_robin.anchored, 1);
+    EXPECT_EQ(with_robin.exact_nullspace, 1);
+}
+
 TEST(GaugeIntegration, TwoRegions_VectorFieldFirst_RegionScopingUsesMeshTopology)
 {
     auto mesh = std::make_shared<TwoDisconnectedTetraMeshAccess>();
