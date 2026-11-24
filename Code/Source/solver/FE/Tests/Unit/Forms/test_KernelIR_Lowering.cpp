@@ -1598,6 +1598,29 @@ TEST(HardwareProfile, DefaultBytesPerOpIs300)
     EXPECT_EQ(jit::HardwareProfile::kBytesPerOp, 300u);
 }
 
+// The code generator reuses a hoisted value across terms only when the two
+// subtrees are the same expression: sameSubtree decides that exactly, with
+// the operands of a commutative op in either order.
+TEST(KernelIRLowering, SameSubtreeTellsSignFlippedConstantsApart)
+{
+    spaces::L2Space space(ElementType::Quad4, 1);
+    const auto c = FormExpr::trialFunction(space, "c");
+    const auto v = FormExpr::testFunction(space, "v");
+    const auto lowered = [&](Real bx, Real by, bool swapped) {
+        const auto beta = FormExpr::asVector({FormExpr::constant(bx), FormExpr::constant(by)});
+        auto ir = jit::lowerToKernelIR(swapped ? -c * inner(grad(v), beta) : -c * inner(beta, grad(v))).ir;
+        ir.optimize();
+        return ir;
+    };
+    const auto a = lowered(1.0, 0.5, false);
+    const auto b = lowered(1.0, 0.5, false);
+    const auto flipped = lowered(-1.0, -0.5, false);
+    const auto swapped = lowered(1.0, 0.5, true);
+    EXPECT_TRUE(jit::sameSubtree(a, a.root, b, b.root));
+    EXPECT_TRUE(jit::sameSubtree(a, a.root, swapped, swapped.root));
+    EXPECT_FALSE(jit::sameSubtree(a, a.root, flipped, flipped.root));
+}
+
 } // namespace test
 } // namespace forms
 } // namespace FE

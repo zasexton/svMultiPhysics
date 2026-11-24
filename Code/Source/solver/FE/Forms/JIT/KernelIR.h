@@ -79,6 +79,15 @@ struct KernelIR {
     [[nodiscard]] std::vector<std::uint32_t> subtreeCosts() const;
 };
 
+/**
+ * @brief Whether op @p ia of @p a and op @p ib of @p b are the same expression
+ *
+ * The same op types, immediates and children, the two operands of a
+ * commutative op in either order: the equivalence that
+ * KernelIR::perOpStructuralHashes() hashes, decided exactly.
+ */
+[[nodiscard]] bool sameSubtree(const KernelIR& a, std::uint32_t ia, const KernelIR& b, std::uint32_t ib);
+
 // ============================================================================
 // Shaped-zero encoding for TypedZero imm1
 // ============================================================================

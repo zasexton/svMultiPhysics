@@ -39,6 +39,7 @@
 #include "Forms/IntegrationDomain.h"
 #include "Forms/InterfaceConditions.h"
 #include "Forms/JIT/JITKernelWrapper.h"
+#include "Forms/JIT/LLVMGen.h"
 #include "Forms/JIT/LLVMJITBuildInfo.h"
 #include "Forms/StandardBCs.h"
 #include "Forms/Vocabulary.h"
@@ -8334,4 +8335,116 @@ TEST(CompiledResidualHessians, LaplacianOfTheCurrentSolutionInASymbolicKernel)
         SCOPED_TRACE(::testing::Message() << (vectorize ? "batched" : "unbatched"));
         expectSameHessianRows(residualRowsForHessians(true, true, vectorize, true, install), interpreted);
     }
+}
+
+// ---------------------------------------------------------------------------
+// Cross-term reuse in the code generator
+// ---------------------------------------------------------------------------
+//
+// With its quadrature loops rolled, a compiled kernel stores a hoisted value of
+// one term and reuses it for an op of a later term with the same structural
+// hash.  It reused it on the hash alone, and the hash confused subtrees that
+// differ by two sign flips of constants: in exp(b . grad u) v + exp(-b . grad u) v
+// the second term was served the exponential of the first (0.37 off against a
+// residual of 0.82).  A value is now reused only for the same subtree.
+
+namespace {
+
+/// The residual of exp(b1 . grad u) v + exp(b2 . grad u) v on two Tri3 cells,
+/// P2, at a fixed state; compiled kernels are specialized with their
+/// quadrature loops rolled, which turns the cross-term reuse on.
+std::vector<Real> twoExponentialRows(bool compiled, const std::array<Real, 2>& b1, const std::array<Real, 2>& b2)
+{
+    using namespace svmp::FE::forms;
+    auto base = std::make_shared<svmp::MeshBase>();
+    const std::vector<svmp::real_t> coordinates = {0.0, 0.0, 1.3, 0.0, 0.2, 0.9, 1.1, 1.0};
+    svmp::CellShape shape{};
+    shape.family = svmp::CellFamily::Triangle;
+    shape.num_corners = 3;
+    shape.order = 1;
+    base->build_from_arrays(2, coordinates, {0, 3, 6}, {0, 1, 2, 1, 3, 2}, std::vector<svmp::CellShape>(2, shape));
+    base->finalize();
+    auto mesh = svmp::create_mesh(std::move(base));
+
+    auto space = std::make_shared<svmp::FE::spaces::H1Space>(ElementType::Triangle3, 2);
+    svmp::FE::systems::FESystem system(mesh, svmp::Configuration::Current);
+    const auto u_id = system.addField(svmp::FE::systems::FieldSpec{.name = "u", .space = space, .components = 1});
+    const auto u = FormExpr::stateField(u_id, *space, "u");
+    const auto v = FormExpr::testFunction(u_id, *space, "v");
+    const auto vector_of = [](const std::array<Real, 2>& b) {
+        return FormExpr::asVector({FormExpr::constant(b[0]), FormExpr::constant(b[1])});
+    };
+    svmp::FE::systems::FormInstallOptions install;
+    install.compiler_options.jit = svmp::FE::forms::test::makeUnitTestJITOptions();
+    install.compiler_options.jit.enable = compiled;
+    install.compiler_options.jit.specialization.enable = true;
+    install.compiler_options.jit.specialization.text_budget_bytes = 1;
+    system.addOperator("rows");
+    (void)svmp::FE::systems::installFormulation(
+        system, "rows", {u_id},
+        (exp(inner(vector_of(b1), grad(u))) * v + exp(inner(vector_of(b2), grad(u))) * v).dx(), install);
+    svmp::FE::systems::SetupOptions setup_options;
+    setup_options.use_constraints_in_assembly = false;
+    system.setup(setup_options);
+
+    const auto n = system.dofHandler().getNumDofs();
+    std::vector<Real> values(static_cast<std::size_t>(n));
+    for (std::size_t i = 0; i < values.size(); ++i) {
+        values[i] = 0.3 * std::sin(0.7 * static_cast<Real>(i) + 0.2);
+    }
+    svmp::FE::systems::SystemStateView state;
+    state.u = values;
+    svmp::FE::assembly::DenseVectorView residual(n);
+    residual.zero();
+    svmp::FE::systems::AssemblyRequest request;
+    request.op = "rows";
+    request.want_vector = true;
+    EXPECT_TRUE(system.assemble(request, state, nullptr, &residual).success);
+    std::vector<Real> rows;
+    for (GlobalIndex i = 0; i < n; ++i) {
+        rows.push_back(residual.getVectorEntry(i));
+    }
+    return rows;
+}
+
+void expectSameExponentialRows(const std::vector<Real>& actual, const std::vector<Real>& expected)
+{
+    ASSERT_EQ(actual.size(), expected.size());
+    Real scale = 0.0;
+    for (const auto value : expected) {
+        scale = std::max(scale, std::abs(value));
+    }
+    ASSERT_GT(scale, 0.1);
+    for (std::size_t i = 0; i < expected.size(); ++i) {
+        EXPECT_NEAR(actual[i], expected[i], 1e-13 * scale) << "row " << i;
+    }
+}
+
+} // namespace
+
+TEST(CrossTermReuse, ASignFlippedPairOfTermsIsCompiledAsWritten)
+{
+    if (!svmp::FE::forms::jit::llvmJITEnabled()) {
+        GTEST_SKIP();
+    }
+    const std::array<Real, 2> b{0.7, 0.35};
+    const std::array<Real, 2> minus_b{-0.7, -0.35};
+    expectSameExponentialRows(twoExponentialRows(true, b, minus_b), twoExponentialRows(false, b, minus_b));
+}
+
+TEST(CrossTermReuse, AValueIsReusedOnlyForTheSameSubtree)
+{
+    // Every op is given one structural hash, so every hoisted value of a shape
+    // lands in one bucket and only the comparison of the subtrees keeps the
+    // terms apart.  (Constants no other test compiles, so that the kernel is
+    // generated here and not served from a cache.)
+    if (!svmp::FE::forms::jit::llvmJITEnabled()) {
+        GTEST_SKIP();
+    }
+    const std::array<Real, 2> b1{0.43, -0.21};
+    const std::array<Real, 2> b2{-0.17, 0.59};
+    svmp::FE::forms::jit::setUniformStructuralHashesForTesting(true);
+    const auto compiled = twoExponentialRows(true, b1, b2);
+    svmp::FE::forms::jit::setUniformStructuralHashesForTesting(false);
+    expectSameExponentialRows(compiled, twoExponentialRows(false, b1, b2));
 }

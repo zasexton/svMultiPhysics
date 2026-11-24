@@ -12,6 +12,7 @@
 #include "Forms/Tensor/TensorIndex.h"
 
 #include <algorithm>
+#include <functional>
 #include <bit>
 #include <cmath>
 #include <cstddef>
@@ -618,6 +619,42 @@ std::uint64_t KernelIR::stableHash64() const
     }
 
     return op_hash[root];
+}
+
+bool sameSubtree(const KernelIR& a, std::uint32_t ia, const KernelIR& b, std::uint32_t ib)
+{
+    if (ia >= a.ops.size() || ib >= b.ops.size()) {
+        return false;
+    }
+    std::unordered_map<std::uint64_t, bool> memo;
+    const std::function<bool(std::uint32_t, std::uint32_t)> same = [&](std::uint32_t x, std::uint32_t y) {
+        if (&a == &b && x == y) {
+            return true;
+        }
+        const std::uint64_t key = (static_cast<std::uint64_t>(x) << 32u) | y;
+        if (const auto it = memo.find(key); it != memo.end()) {
+            return it->second;
+        }
+        const auto& ox = a.ops[x];
+        const auto& oy = b.ops[y];
+        bool equal = ox.type == oy.type && ox.imm0 == oy.imm0 && ox.imm1 == oy.imm1 &&
+                     ox.child_count == oy.child_count;
+        if (equal) {
+            const auto child_x = [&](std::size_t k) { return a.children[static_cast<std::size_t>(ox.first_child) + k]; };
+            const auto child_y = [&](std::size_t k) { return b.children[static_cast<std::size_t>(oy.first_child) + k]; };
+            if (ox.child_count == 2u && isCommutative(ox.type)) {
+                equal = (same(child_x(0), child_y(0)) && same(child_x(1), child_y(1))) ||
+                        (same(child_x(0), child_y(1)) && same(child_x(1), child_y(0)));
+            } else {
+                for (std::size_t k = 0; k < ox.child_count && equal; ++k) {
+                    equal = same(child_x(k), child_y(k));
+                }
+            }
+        }
+        memo.emplace(key, equal);
+        return equal;
+    };
+    return same(ia, ib);
 }
 
 std::vector<std::uint64_t> KernelIR::perOpStructuralHashes() const

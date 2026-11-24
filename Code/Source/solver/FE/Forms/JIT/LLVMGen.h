@@ -105,6 +105,16 @@ private:
     JITOptions options_{};
 };
 
+/**
+ * @brief Testing: give every op of the kernels generated from now on one and the
+ * same structural hash
+ *
+ * Every hoisted value of a shape then shares one bucket of the cross-term reuse
+ * table, so only the structural comparison of the subtrees decides whether a
+ * value is reused.  Kernels compiled meanwhile must not be served from a cache.
+ */
+void setUniformStructuralHashesForTesting(bool enabled) noexcept;
+
 } // namespace jit
 } // namespace forms
 } // namespace FE

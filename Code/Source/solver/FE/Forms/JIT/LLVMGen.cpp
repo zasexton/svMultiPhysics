@@ -21,6 +21,7 @@
 
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <bit>
 #include <cstddef>
 #include <cstdlib>
@@ -66,6 +67,8 @@ namespace jit {
 
 namespace {
 
+std::atomic<bool> g_uniform_structural_hashes{false};
+
 /// Packed integer value of CURRENT_SOLUTION_FIELD_ID for comparison against
 /// the int returned by unpackFieldIdImm1().
 constexpr int kCurrentSolutionFid = static_cast<int>(CURRENT_SOLUTION_FIELD_ID);
@@ -78,6 +81,16 @@ constexpr int kCurrentSolutionFid = static_cast<int>(CURRENT_SOLUTION_FIELD_ID);
 }
 
 #if SVMP_FE_ENABLE_LLVM_JIT
+
+[[nodiscard]] std::vector<std::uint64_t> structuralHashesForCodegen(const KernelIR& ir)
+{
+    auto hashes = ir.perOpStructuralHashes();
+    if (g_uniform_structural_hashes.load(std::memory_order_relaxed)) {
+        std::fill(hashes.begin(), hashes.end(), std::uint64_t{0});
+    }
+    return hashes;
+}
+
 [[nodiscard]] std::string sanitizeFilename(std::string_view s)
 {
     std::string out;
@@ -1886,7 +1899,7 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
             }
 
             // Compute per-op structural hashes and subtree costs for cross-term CSE.
-            auto per_op_hashes = lowered.ir.perOpStructuralHashes();
+            auto per_op_hashes = structuralHashesForCodegen(lowered.ir);
             auto costs = lowered.ir.subtreeCosts();
 
             // Diagnostic: dump per-term dep_mask breakdown
@@ -9757,6 +9770,11 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
             std::uint32_t n_elems{0};         // doubles per QP point
             bool populated{false};            // C++ flag: has store code been generated?
             std::uint32_t buffer_offset{0};   // offset in doubles into shared buffer (helper mode)
+            // Cross-term entries: the op whose value is stored, so that a later
+            // op of the same structural hash is reused only when it is the same
+            // expression (sameSubtree), not merely the same hash.
+            const KernelIR* source_ir{nullptr};
+            std::uint32_t source_op{0};
         };
         // QP caches are indexed by the runtime QP loop counter. They are safe
         // only when the loop trip count is specialized at codegen time and the
@@ -9952,6 +9970,18 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
                         qp_cache_trial_group, term.time_derivative_order,
                         op_hash, term.shapes[op_idx]);
                     auto it = dep0_xblock_cache.find(xblock_key);
+                    if (it != dep0_xblock_cache.end() && it->second.source_ir != nullptr &&
+                        !sameSubtree(*it->second.source_ir, it->second.source_op,
+                                     term.ir, static_cast<std::uint32_t>(op_idx))) {
+                        // The same hash, another expression: compute it here.
+                        static const bool jit_tel = environment::isSet("SVMP_JIT_TELEMETRY");
+                        if (jit_tel) {
+                            std::cerr << "[JIT dep0-xblock] REJECT hash=0x" << std::hex << op_hash << std::dec
+                                      << " tg=" << qp_cache_trial_group
+                                      << " op=" << op_idx << " (same hash, another subtree)\n";
+                        }
+                        it = dep0_xblock_cache.end();
+                    }
                     if (it != dep0_xblock_cache.end()) {
                         // In buffer mode, re-derive data pointer for current function.
                         if (active_xblock_cache_base) {
@@ -12359,7 +12389,8 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
                                 } else {
                                     data_ptr = allocaInEntry(xb_elem_ty, builder.getInt32(total), "xb_cache");
                                 }
-                                QPCacheEntry entry{data_ptr, n_elems, true, buf_off};
+                                QPCacheEntry entry{data_ptr, n_elems, true, buf_off,
+                                                   &term.ir, static_cast<std::uint32_t>(op_idx)};
                                 storeToCacheEntry(entry, q_index, values[op_idx]);
                                 dep0_xblock_cache[xblock_key] = entry;
                                 xblock_cache_bytes_allocated += alloc_bytes;
@@ -21067,7 +21098,7 @@ LLVMGenResult LLVMGen::compileAndAddCoupledKernel(JITEngine& engine,
                 }
 
                 // Compute per-op structural hashes and subtree costs
-                auto per_op_hashes = lowered.ir.perOpStructuralHashes();
+                auto per_op_hashes = structuralHashesForCodegen(lowered.ir);
                 auto costs = lowered.ir.subtreeCosts();
 
                 blk_terms.terms.push_back(LoweredTerm{
@@ -21271,6 +21302,11 @@ LLVMGenResult LLVMGen::compileAndAddColocatedKernels(
                              .message = std::string("LLVMGen(colocated): exception: ") + e.what()};
     }
 #endif
+}
+
+void setUniformStructuralHashesForTesting(bool enabled) noexcept
+{
+    g_uniform_structural_hashes.store(enabled, std::memory_order_relaxed);
 }
 
 } // namespace jit
