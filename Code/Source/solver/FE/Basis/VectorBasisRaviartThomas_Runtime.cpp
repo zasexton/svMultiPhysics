@@ -200,13 +200,18 @@ void RaviartThomasBasis::evaluate_vector_values(const math::Vector<Real, 3>& xi,
     }
 
     if (is_wedge(element_type_)) {
-        // Minimal RT0 on wedge6: five basis functions, one per face.
+        // Minimal RT0 on wedge6: one function per face of the reference
+        // element (bottom, top, y=0, x+y=1, x=0), with unit flux along the
+        // face's right-hand normal (as the tetrahedron and hexahedron
+        // functions) and no normal component on the other faces.  The lateral
+        // ones are the triangle's RT0 fields, so the span holds every field
+        // (a + b x, c + b y, d + e z).
         values.resize(5);
-        values[0] = math::Vector<Real, 3>{Real(0), Real(0), z - Real(1)}; // bottom face
-        values[1] = math::Vector<Real, 3>{Real(0), Real(0), z + Real(1)}; // top face
-        values[2] = math::Vector<Real, 3>{x, -Real(0.5), Real(0)};        // y=0 face
-        values[3] = math::Vector<Real, 3>{Real(0.5) - x, Real(0), Real(0)}; // x=0 face
-        values[4] = math::Vector<Real, 3>{-x, Real(0), Real(0)};          // x+y=1 face
+        values[0] = math::Vector<Real, 3>{Real(0), Real(0), Real(1) - z};                        // bottom
+        values[1] = math::Vector<Real, 3>{Real(0), Real(0), Real(1) + z};                        // top
+        values[2] = math::Vector<Real, 3>{Real(0.5) * x, Real(0.5) * (y - Real(1)), Real(0)};    // y=0
+        values[3] = math::Vector<Real, 3>{Real(0.5) * x, Real(0.5) * y, Real(0)};                // x+y=1
+        values[4] = math::Vector<Real, 3>{Real(0.5) * (x - Real(1)), Real(0.5) * y, Real(0)};    // x=0
         return;
     }
 
@@ -353,11 +358,12 @@ void RaviartThomasBasis::evaluate_vector_jacobians(const math::Vector<Real, 3>& 
     }
 
     if (is_wedge(element_type_)) {
-        jacobians[0](2, 2) = Real(1);
+        jacobians[0](2, 2) = -Real(1);
         jacobians[1](2, 2) = Real(1);
-        jacobians[2](0, 0) = Real(1);
-        jacobians[3](0, 0) = -Real(1);
-        jacobians[4](0, 0) = -Real(1);
+        for (std::size_t i = 2; i < 5; ++i) {
+            jacobians[i](0, 0) = Real(0.5);
+            jacobians[i](1, 1) = Real(0.5);
+        }
         return;
     }
 
@@ -467,7 +473,7 @@ void RaviartThomasBasis::evaluate_divergence(const math::Vector<Real, 3>& xi,
                           Real(-6)};
         } else if (is_wedge(element_type_)) {
             // Divergences of the minimal RT0 wedge basis
-            divergence = {Real(1), Real(1), Real(1), Real(-1), Real(-1)};
+            divergence = {Real(-1), Real(1), Real(1), Real(1), Real(1)};
         } else if (is_pyramid(element_type_)) {
             eval_pyramid_rational_rt0_divergence(divergence);
         } else {

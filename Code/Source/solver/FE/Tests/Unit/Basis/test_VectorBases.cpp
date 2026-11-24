@@ -2063,7 +2063,7 @@ static double integrate_wedge_face_flux(const RaviartThomasBasis& basis,
     if (face_id == 0 || face_id == 1) {
         TriangleQuadrature tri(tri_order);
         const double z = (face_id == 0) ? -1.0 : 1.0;
-        const double nz = (face_id == 0) ? -1.0 : 1.0;
+        const double nz = 1.0;  // right-hand normal of both triangles: +z
         for (std::size_t q = 0; q < tri.num_points(); ++q) {
             const auto& pt = tri.point(q);
             Vector<Real,3> xi{pt[0], pt[1], static_cast<Real>(z)};
@@ -2090,18 +2090,18 @@ static double integrate_wedge_face_flux(const RaviartThomasBasis& basis,
             const double z = eta;
             x_ref = Vector<Real,3>{static_cast<Real>(t), Real(0), static_cast<Real>(z)};
             cross = Vector<Real,3>{Real(0), Real(-0.5), Real(0)};
-        } else if (face_id == 3) { // x=0
+        } else if (face_id == 4) { // x=0 face: nodes 2,0,3,5
             const double t = 0.5 * (xi + 1.0);
             const double z = eta;
             x_ref = Vector<Real,3>{Real(0), static_cast<Real>(t), static_cast<Real>(z)};
-            cross = Vector<Real,3>{Real(0.5), Real(0), Real(0)};
-        } else { // face_id == 4, x+y=1
+            cross = Vector<Real,3>{Real(-0.5), Real(0), Real(0)};
+        } else { // face_id == 3, x+y=1 face: nodes 1,2,5,4
             const double t = 0.5 * (xi + 1.0);
             const double z = eta;
             const double x = t;
             const double y = 1.0 - t;
             x_ref = Vector<Real,3>{static_cast<Real>(x), static_cast<Real>(y), static_cast<Real>(z)};
-            cross = Vector<Real,3>{Real(-0.5), Real(-0.5), Real(0)};
+            cross = Vector<Real,3>{Real(0.5), Real(0.5), Real(0)};
         }
 
         std::vector<Vector<Real,3>> vals;
@@ -2477,6 +2477,62 @@ TEST(RaviartThomasBasis, WedgeMinimalFaceFluxDofs) {
     }
 }
 
+
+// The wedge RT0 functions have no normal component on the faces other than
+// their own (the reference element's faces: bottom, top, y=0, x+y=1, x=0),
+// pointwise, and their span holds the linear field x: with the fluxes of x
+// along the faces' right-hand normals as coefficients (-1/2, 1/2, 0, 2, 0) the
+// functions sum to x everywhere.
+TEST(RaviartThomasBasis, WedgeMinimalBasisIsNormalConformingAndReproducesALinearField) {
+    using svmp::FE::math::Vector;
+    RaviartThomasBasis basis(ElementType::Wedge6, 0);
+    ASSERT_EQ(basis.size(), 5u);
+
+    // Points on each face, and the face's normal direction.
+    const std::array<Vector<Real, 3>, 5> normals{Vector<Real, 3>{Real(0), Real(0), Real(1)},
+                                                 Vector<Real, 3>{Real(0), Real(0), Real(1)},
+                                                 Vector<Real, 3>{Real(0), Real(-1), Real(0)},
+                                                 Vector<Real, 3>{Real(1), Real(1), Real(0)},
+                                                 Vector<Real, 3>{Real(-1), Real(0), Real(0)}};
+    const auto face_point = [](int face, Real s, Real t) {
+        switch (face) {
+        case 0: return Vector<Real, 3>{s, t * (Real(1) - s), Real(-1)};
+        case 1: return Vector<Real, 3>{s, t * (Real(1) - s), Real(1)};
+        case 2: return Vector<Real, 3>{s, Real(0), Real(2) * t - Real(1)};
+        case 3: return Vector<Real, 3>{s, Real(1) - s, Real(2) * t - Real(1)};
+        default: return Vector<Real, 3>{Real(0), s, Real(2) * t - Real(1)};
+        }
+    };
+    std::vector<Vector<Real, 3>> values;
+    for (int face = 0; face < 5; ++face) {
+        for (const Real s : {Real(0.1), Real(0.45), Real(0.8)}) {
+            for (const Real t : {Real(0.2), Real(0.7)}) {
+                basis.evaluate_vector_values(face_point(face, s, t), values);
+                for (int i = 0; i < 5; ++i) {
+                    if (i == face) {
+                        continue;
+                    }
+                    EXPECT_NEAR(values[static_cast<std::size_t>(i)].dot(normals[static_cast<std::size_t>(face)]), 0.0, 1e-14)
+                        << "function " << i << " on face " << face;
+                }
+            }
+        }
+    }
+
+    const std::array<Real, 5> fluxes{Real(-0.5), Real(0.5), Real(0), Real(2), Real(0)};
+    for (const auto& xi : {Vector<Real, 3>{Real(0.2), Real(0.3), Real(-0.4)},
+                           Vector<Real, 3>{Real(0.6), Real(0.1), Real(0.7)},
+                           Vector<Real, 3>{Real(0.05), Real(0.9), Real(0.0)}}) {
+        basis.evaluate_vector_values(xi, values);
+        Vector<Real, 3> sum{Real(0), Real(0), Real(0)};
+        for (std::size_t i = 0; i < 5u; ++i) {
+            sum = sum + values[i] * fluxes[i];
+        }
+        for (int d = 0; d < 3; ++d) {
+            EXPECT_NEAR(sum[d], xi[d], 1e-14) << "component " << d;
+        }
+    }
+}
 
 static double integrate_pyramid_face_flux(const RaviartThomasBasis& basis,
                                           int face_id,

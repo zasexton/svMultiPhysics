@@ -48,7 +48,7 @@ static double integrate_wedge_face_flux(const RaviartThomasBasis& basis,
     if (face_id == 0 || face_id == 1) {
         TriangleQuadrature tri(tri_order);
         const double z = (face_id == 0) ? -1.0 : 1.0;
-        const double nz = (face_id == 0) ? -1.0 : 1.0;
+        const double nz = 1.0;  // right-hand normal of both triangles: +z
         for (std::size_t q = 0; q < tri.num_points(); ++q) {
             const auto& pt = tri.point(q);
             Vector<Real,3> xi{pt[0], pt[1], static_cast<Real>(z)};
@@ -76,18 +76,18 @@ static double integrate_wedge_face_flux(const RaviartThomasBasis& basis,
             const double z = eta;
             x_ref = Vector<Real,3>{static_cast<Real>(t), Real(0), static_cast<Real>(z)};
             cross = Vector<Real,3>{Real(0), Real(-0.5), Real(0)};
-        } else if (face_id == 3) { // x=0 face: nodes 1,2,5,4
+        } else if (face_id == 4) { // x=0 face: nodes 2,0,3,5
             const double t = 0.5 * (xi_q + 1.0);
             const double z = eta;
             x_ref = Vector<Real,3>{Real(0), static_cast<Real>(t), static_cast<Real>(z)};
-            cross = Vector<Real,3>{Real(0.5), Real(0), Real(0)};
-        } else {                   // face_id == 4, x+y=1 face: nodes 2,0,3,5
+            cross = Vector<Real,3>{Real(-0.5), Real(0), Real(0)};
+        } else {                   // face_id == 3, x+y=1 face: nodes 1,2,5,4
             const double t = 0.5 * (xi_q + 1.0);
             const double z = eta;
             const double x = t;
             const double y = 1.0 - t;
             x_ref = Vector<Real,3>{static_cast<Real>(x), static_cast<Real>(y), static_cast<Real>(z)};
-            cross = Vector<Real,3>{Real(-0.5), Real(-0.5), Real(0)};
+            cross = Vector<Real,3>{Real(0.5), Real(0.5), Real(0)};
         }
 
         std::vector<Vector<Real,3>> vals;
@@ -1907,9 +1907,11 @@ TEST(HigherOrderWedgePyramid, PyramidND3CurlFinite) {
 // =============================================================================
 
 TEST(HigherOrderWedgePyramid, WedgeRT0FaceNormalMoment) {
-    // Verify RT(0) on wedge: integral of N_i . n over face j = delta_ij
+    // Verify RT(0) on wedge: integral of N_i . n over face j = delta_ij, in
+    // the reference element's face order and orientation (as RT(1) below)
     RaviartThomasBasis basis(ElementType::Wedge6, 0);
     ASSERT_EQ(basis.size(), 5u);
+    expect_rt_face_kronecker(basis, ElementType::Wedge6, 1e-10);
 
     constexpr int n_faces = 5;
     for (int i = 0; i < static_cast<int>(basis.size()); ++i) {
