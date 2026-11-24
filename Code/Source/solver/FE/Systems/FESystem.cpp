@@ -6196,6 +6196,25 @@ private:
     return options;
 }
 
+/// A derivative assembled in the constrained test space is zero on every
+/// constrained row: that row's equation is the constraint, which does not
+/// depend on the quantity differentiated. Distributing an element vector
+/// through the constraints writes the inhomogeneity into those rows (what a
+/// residual needs, and an accumulator that adds each write sums it once per
+/// element), so a derivative sets them back to zero after assembly.
+static void zeroConstrainedDerivativeRows(std::unordered_map<GlobalIndex, Real>& entries,
+                                          const constraints::AffineConstraints* constraints)
+{
+    if (constraints == nullptr) {
+        return;
+    }
+    for (auto& [dof, value] : entries) {
+        if (constraints->isConstrained(dof)) {
+            value = Real(0.0);
+        }
+    }
+}
+
 [[nodiscard]] std::vector<Real> reconstructRateFromHistory(
     std::span<const Real> committed,
     std::span<const std::span<const Real>> history,
@@ -21185,6 +21204,7 @@ void FESystem::assembleMixedAuxiliaryIntoGlobal(
                                     }
                                 }
                                 assembler_->setConstraints(restore_constraints);
+                                zeroConstrainedDerivativeRows(dR_vec.entries, restore_constraints);
 
                                 Real residual_output_weight = Real(1.0);
                                 if (state.time_integration) {
@@ -24726,6 +24746,7 @@ FESystem::assembleBoundaryGradient(FieldId field,
                  : std::string(": ") +
                        gradient_assembly_result
                            .error_message));
+    zeroConstrainedDerivativeRows(accum.entries, restore_constraints);
 
     // Convert to SensitivityEntry pairs.
     std::vector<BoundaryReductionService::SensitivityEntry> result;

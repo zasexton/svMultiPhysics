@@ -5222,12 +5222,14 @@ TEST(MonolithicCoupling, TwoStateVectorOutletBorderedReductionMatchesDenseSolve)
     }
 }
 
-TEST(MonolithicCoupling, TwoStateVectorOutletDirectCouplingRespectsConstrainedOutletDofs)
+// The outlet flux support overlaps a constrained velocity DOF (the
+// outlet-edge intersection of a pipe) that takes @p constrained_value. The
+// monolithic direct coupling must assemble dQ/du and dR/dP_out in the same
+// constrained space as the PDE operator: zero on the constrained row whatever
+// value the constraint prescribes, and the field Jacobian with the low-rank
+// updates must match finite differences of the residual.
+static void checkOutletDirectCouplingAroundConstrainedDof(Real constrained_value)
 {
-    // Regression for the real pipe outlet case where the outlet flux support
-    // overlaps constrained velocity DOFs on the outlet-edge intersection.
-    // The monolithic direct-coupling path must assemble dQ/du in the same
-    // constrained trial space as the PDE operator.
     const int marker = 9;
     auto mesh = std::make_shared<svmp::FE::forms::test::SingleTetraOneBoundaryFaceMeshAccess>(marker);
     auto u_space = svmp::FE::spaces::VectorSpace(svmp::FE::spaces::SpaceType::H1, mesh, 1, 3);
@@ -5287,7 +5289,7 @@ TEST(MonolithicCoupling, TwoStateVectorOutletDirectCouplingRespectsConstrainedOu
         outlet_vertex_dofs[2] + sys.fieldDofOffset(u_field);
 
     sys.addConstraint(std::make_unique<svmp::FE::constraints::DirichletBC>(
-        constrained_dof, 0.0));
+        constrained_dof, constrained_value));
     sys.setup({}, si);
     sys.finalizeAuxiliaryLayout();
 
@@ -5356,7 +5358,33 @@ TEST(MonolithicCoupling, TwoStateVectorOutletDirectCouplingRespectsConstrainedOu
         }
     }
 
+    const auto& bordered = sys.borderedCoupling();
+    if (bordered.active && bordered.B.size() == n_field * static_cast<std::size_t>(bordered.n_aux)) {
+        for (int a = 0; a < bordered.n_aux; ++a) {
+            EXPECT_EQ(bordered.B[static_cast<std::size_t>(constrained_dof) +
+                                 n_field * static_cast<std::size_t>(a)],
+                      Real(0.0))
+                << "dR/dP_out has an entry on the constrained row (aux " << a << ")";
+        }
+    }
+
     const auto packed_base = sys.checkpointAuxiliaryState();
+
+    // Difference residuals assembled the same way: a vector-only assembly
+    // does not lift the prescribed value into the free rows (-K g), which
+    // the joint matrix-and-vector assembly above does.
+    {
+        sys.auxiliaryInputRegistryIfPresent()->invalidateAll();
+        svmp::FE::assembly::DenseVectorView rhs_base(static_cast<svmp::FE::GlobalIndex>(n_field));
+        rhs_base.zero();
+        AssemblyRequest req_base = req;
+        req_base.want_matrix = false;
+        ASSERT_TRUE(sys.assemble(req_base, state, nullptr, &rhs_base).success);
+        for (std::size_t i = 0; i < n_field; ++i) {
+            base_residual[i] = rhs_base.getVectorEntry(static_cast<svmp::FE::GlobalIndex>(i));
+        }
+    }
+
     const Real eps = 1e-7;
     for (std::size_t col = 0; col < n_field; ++col) {
         if (sys.constraints().isConstrained(static_cast<svmp::FE::GlobalIndex>(col))) {
@@ -5399,6 +5427,18 @@ TEST(MonolithicCoupling, TwoStateVectorOutletDirectCouplingRespectsConstrainedOu
                 << " fd=" << fd;
         }
     }
+}
+
+TEST(MonolithicCoupling, TwoStateVectorOutletDirectCouplingRespectsConstrainedOutletDofs)
+{
+    checkOutletDirectCouplingAroundConstrainedDof(/*constrained_value=*/0.0);
+}
+
+TEST(MonolithicCoupling, OutletDirectCouplingDerivativesVanishOnAnInhomogeneousConstrainedRow)
+{
+    // Distributing an element vector through the constraints writes the
+    // prescribed value into the constrained row; a derivative must not keep it.
+    checkOutletDirectCouplingAroundConstrainedDof(/*constrained_value=*/-0.5);
 }
 
 TEST(MonolithicCoupling, DirectCouplingReducedUpdateUsesActualOutputSensitivity)
