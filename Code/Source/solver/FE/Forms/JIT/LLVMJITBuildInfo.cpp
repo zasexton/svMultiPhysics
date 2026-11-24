@@ -7,6 +7,8 @@
 
 #include "Forms/JIT/LLVMJITBuildInfo.h"
 
+#include "Forms/JIT/JITCodegenFingerprint.h"
+
 #include <string>
 
 #ifndef SVMP_FE_ENABLE_LLVM_JIT
@@ -34,6 +36,11 @@ std::string llvmVersionString()
 #else
     return {};
 #endif
+}
+
+std::string jitCodegenFingerprint()
+{
+    return SVMP_FE_JIT_CODEGEN_FINGERPRINT;
 }
 
 } // namespace jit

@@ -21,6 +21,17 @@ namespace jit {
 /// LLVM version string when enabled, otherwise empty.
 [[nodiscard]] std::string llvmVersionString();
 
+/**
+ * @brief SHA-256 fingerprint of the compiled-kernel code generator sources
+ *        (Forms/JIT and the kernel argument layout of Assembly/JIT) this
+ *        binary was built from, as 64 lowercase hex digits.
+ *
+ * Part of every JIT object-cache key: binaries built from different
+ * code-generator sources must not load each other's cached kernels for the
+ * same IR, while binaries built from the same sources share them.
+ */
+[[nodiscard]] std::string jitCodegenFingerprint();
+
 } // namespace jit
 } // namespace forms
 } // namespace FE

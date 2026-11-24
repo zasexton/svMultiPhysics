@@ -8,6 +8,8 @@
 #include "Forms/JIT/JITObjectCacheFile.h"
 #include "Core/EnvironmentNames.h"
 
+#include "Forms/JIT/LLVMJITBuildInfo.h"
+
 #include <algorithm>
 #include <atomic>
 #include <chrono>
@@ -347,7 +349,7 @@ std::string resolveCacheDirectory(std::string_view configured_directory, bool ca
         return std::string(env_dir);
     }
     if (const char* home = std::getenv("HOME"); home != nullptr && *home != '\0') {
-        return std::string(home) + "/.cache/svMultiPhysics/jit_cache";
+        return std::string(home) + "/.cache/svMultiPhysics/jit_cache/" + jitCodegenFingerprint();
     }
     return {};
 }

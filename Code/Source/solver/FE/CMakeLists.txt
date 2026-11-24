@@ -1720,6 +1720,36 @@ endif()
 # Add an alias for consistency
 add_library(svfe::svfe ALIAS svfe)
 
+# Fingerprint of the compiled-kernel code generator (the sources under
+# Forms/JIT and the kernel argument layout under Assembly/JIT). The JIT object
+# cache folds it into its keys (LLVMJITBuildInfo.h, jitCodegenFingerprint()),
+# so a cache directory shared by binaries of different code-generator sources
+# never serves one binary the kernels another one generated. Regenerated at
+# build time whenever one of these sources changes.
+file(GLOB _svmp_fe_jit_codegen_files CONFIGURE_DEPENDS
+     "${CMAKE_CURRENT_SOURCE_DIR}/Forms/JIT/*.h"
+     "${CMAKE_CURRENT_SOURCE_DIR}/Forms/JIT/*.cpp"
+     "${CMAKE_CURRENT_SOURCE_DIR}/Assembly/JIT/*.h")
+set(_svmp_fe_jit_codegen_relative "")
+foreach(_svmp_fe_jit_codegen_file IN LISTS _svmp_fe_jit_codegen_files)
+    file(RELATIVE_PATH _svmp_fe_jit_codegen_rel "${CMAKE_CURRENT_SOURCE_DIR}" "${_svmp_fe_jit_codegen_file}")
+    list(APPEND _svmp_fe_jit_codegen_relative "${_svmp_fe_jit_codegen_rel}")
+endforeach()
+set(SVMP_FE_JIT_CODEGEN_FINGERPRINT_HEADER
+    "${CMAKE_CURRENT_BINARY_DIR}/generated/Forms/JIT/JITCodegenFingerprint.h")
+add_custom_command(
+    OUTPUT "${SVMP_FE_JIT_CODEGEN_FINGERPRINT_HEADER}"
+    COMMAND ${CMAKE_COMMAND}
+            "-DFINGERPRINT_ROOT=${CMAKE_CURRENT_SOURCE_DIR}"
+            "-DFINGERPRINT_SOURCES=${_svmp_fe_jit_codegen_relative}"
+            "-DFINGERPRINT_OUTPUT=${SVMP_FE_JIT_CODEGEN_FINGERPRINT_HEADER}"
+            -P "${CMAKE_CURRENT_SOURCE_DIR}/cmake/JITCodegenFingerprint.cmake"
+    DEPENDS ${_svmp_fe_jit_codegen_files} "${CMAKE_CURRENT_SOURCE_DIR}/cmake/JITCodegenFingerprint.cmake"
+    COMMENT "Fingerprinting the FE JIT code generator"
+    VERBATIM)
+target_sources(svfe PRIVATE "${SVMP_FE_JIT_CODEGEN_FINGERPRINT_HEADER}")
+target_include_directories(svfe PRIVATE "${CMAKE_CURRENT_BINARY_DIR}/generated")
+
 if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
     set(_SVMP_PRODUCER_ARITHMETIC_OPTIONS
         -fno-fast-math

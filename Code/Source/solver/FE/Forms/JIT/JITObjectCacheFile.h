@@ -93,7 +93,11 @@ struct DecodedFile {
 
 /// Effective cache root: @p configured_directory when non-empty; otherwise,
 /// when @p cache_kernels is true, $SVMP_JIT_CACHE_DIR when set and non-empty,
-/// else $HOME/.cache/svMultiPhysics/jit_cache; otherwise empty (no disk cache).
+/// else $HOME/.cache/svMultiPhysics/jit_cache/<jitCodegenFingerprint()>;
+/// otherwise empty (no disk cache). The default directory is per code
+/// generator: the cache keys do not name the code-generator sources, so
+/// binaries built from different ones must not share a directory. A directory
+/// given explicitly is used as given.
 [[nodiscard]] std::string resolveCacheDirectory(std::string_view configured_directory,
                                                 bool cache_kernels);
 

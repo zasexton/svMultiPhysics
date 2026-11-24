@@ -14,6 +14,7 @@
 #include <gtest/gtest.h>
 
 #include "Forms/JIT/JITObjectCacheFile.h"
+#include "Forms/JIT/LLVMJITBuildInfo.h"
 
 #include <atomic>
 #include <chrono>
@@ -302,15 +303,42 @@ TEST(JITObjectCacheFile, CacheDirectoryResolutionPrecedence)
         EXPECT_EQ(oc::resolveCacheDirectory("", true), "/scratch/svmp-test/jit");
         EXPECT_EQ(oc::resolveCacheDirectory("", false), "");
     }
+    const std::string default_directory =
+        "/home/svmp-test-user/.cache/svMultiPhysics/jit_cache/" + jit::jitCodegenFingerprint();
     {
         ScopedObjectCacheEnvVar env(oc::kCacheDirectoryEnvVar, "");
-        EXPECT_EQ(oc::resolveCacheDirectory("", true), "/home/svmp-test-user/.cache/svMultiPhysics/jit_cache");
+        EXPECT_EQ(oc::resolveCacheDirectory("", true), default_directory);
     }
     {
         ScopedObjectCacheEnvVar env(oc::kCacheDirectoryEnvVar, nullptr);
-        EXPECT_EQ(oc::resolveCacheDirectory("", true), "/home/svmp-test-user/.cache/svMultiPhysics/jit_cache");
+        EXPECT_EQ(oc::resolveCacheDirectory("", true), default_directory);
         ScopedObjectCacheEnvVar no_home("HOME", nullptr);
         EXPECT_EQ(oc::resolveCacheDirectory("", true), "");
+    }
+}
+
+// The default cache directory is per code generator: the cache keys do not
+// name the code-generator sources, so binaries built from different ones keep
+// their kernels apart, while binaries built from the same sources share them.
+// A directory given explicitly (the S0 manifests set SVMP_JIT_CACHE_DIR) is
+// used as given.
+TEST(JITObjectCacheFile, DefaultCacheDirectoryIsPerCodeGenerator)
+{
+    const auto fingerprint = jit::jitCodegenFingerprint();
+    ASSERT_EQ(fingerprint.size(), 64u);
+    EXPECT_EQ(fingerprint.find_first_not_of("0123456789abcdef"), std::string::npos);
+
+    ScopedObjectCacheEnvVar home("HOME", "/home/svmp-test-user");
+    {
+        ScopedObjectCacheEnvVar env(oc::kCacheDirectoryEnvVar, nullptr);
+        const std::filesystem::path directory = oc::resolveCacheDirectory("", true);
+        EXPECT_EQ(directory.filename().string(), fingerprint);
+        EXPECT_EQ(directory.parent_path().string(), "/home/svmp-test-user/.cache/svMultiPhysics/jit_cache");
+    }
+    {
+        ScopedObjectCacheEnvVar env(oc::kCacheDirectoryEnvVar, "/scratch/svmp-test/jit");
+        EXPECT_EQ(oc::resolveCacheDirectory("", true), "/scratch/svmp-test/jit");
+        EXPECT_EQ(oc::resolveCacheDirectory("/explicit/cache", true), "/explicit/cache");
     }
 }
 
