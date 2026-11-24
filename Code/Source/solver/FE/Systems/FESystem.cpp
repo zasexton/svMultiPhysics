@@ -75,6 +75,7 @@
 #include "Analysis/FormExprScanner.h"
 #include "Analysis/SparseMatrixSummaryScanner.h"
 #include "Math/FiniteDifference.h"
+#include "Core/EnvironmentNames.h"
 
 #include <algorithm>
 #include <array>
@@ -5418,7 +5419,7 @@ constexpr Real kDirectCouplingEntryTol = static_cast<Real>(1e-30);
 [[nodiscard]] bool monolithicAuxTraceEnabled() noexcept
 {
     static const bool enabled = [] {
-        const char* env = std::getenv("SVMP_MONO_AUX_TRACE");
+        const char* env = environment::value("SVMP_MONO_AUX_TRACE");
         if (env == nullptr) {
             return false;
         }

@@ -52,7 +52,11 @@ std::span<const NameDeclaration> solverCatalogue() noexcept
     constexpr const char* kLevelSetExtension = "FE/LevelSet/Extension";
     constexpr const char* kLevelSetGeometry = "FE/LevelSet/LevelSetGeometryService";
     constexpr const char* kLevelSetMaintenance = "FE/LevelSet/Maintenance";
+    constexpr const char* kSystems = "FE/Systems";
+    constexpr const char* kBoundaryReduction = "FE/Systems/BoundaryReductionService";
+    constexpr const char* kFormsInstaller = "FE/Systems/FormsInstaller";
     constexpr const char* kSystemAssembly = "FE/Systems/SystemAssembly";
+    constexpr const char* kSystemSetup = "FE/Systems/SystemSetup";
     constexpr const char* kGeneratedState = "FE/TimeStepping/GeneratedState";
     constexpr const char* kNewton = "FE/TimeStepping/NewtonSolver";
     constexpr const char* kTimeLoop = "FE/TimeStepping/TimeLoop";
@@ -560,6 +564,22 @@ std::span<const NameDeclaration> solverCatalogue() noexcept
          "interface motion, in cut-cell edges, that triggers interface-preserving redistancing"},
         {"SVMP_TRACE_LEVEL_SET_ADVECTION", Diagnostic, kLevelSetExtension, Flag, "off", Reference,
          "logs the velocity-extension updates of level-set advection, with every MUMPS factorization"},
+
+        // FE/Systems: system setup, form installation and boundary reductions.
+        {"SVMP_ASSEMBLY_GHOST_POLICY", NumericalOverride, kSystemSetup, Text, "reverse scatter", NonReference,
+         "assembly ghost policy (owned or ownedrowsonly, reverse or reversescatter)"},
+        {"SVMP_FE_FORM_BLOCK_DIAGNOSTICS", Diagnostic, kFormsInstaller, Flag, "off", Reference,
+         "logs the coupled block dependencies of installed forms"},
+        {"SVMP_MONO_AUX_TRACE_DOFS", Diagnostic, kBoundaryReduction, List, "none", Reference,
+         "global DOFs whose values are printed by the boundary reductions"},
+        {"SVMP_SPARSITY_FULL_REBUILD", Performance, kSystemSetup, Flag, "off", Reference,
+         "rebuilds the active sparsity fully when the constraint structure changes"},
+        {"SVMP_SPARSITY_REFRESH_CHECK", Diagnostic, kSystemSetup, Flag, "off", Reference,
+         "compares the replayed sparsity with a full rebuild and throws on a difference"},
+        {"SVMP_TRACE_DOF_PERMUTATION", Diagnostic, kSystemSetup, Flag, "off", Reference,
+         "logs why the nodal DOF permutation was or was not built"},
+        {"SVMP_MONO_AUX_TRACE", Diagnostic, kSystems, Flag, "off", Reference,
+         "traces the monolithic auxiliary coupling (vector gathers, boundary functionals, their assembly)"},
 
         // FE/TimeStepping: the generated-state schedule, the Newton solver and the
         // time loop.

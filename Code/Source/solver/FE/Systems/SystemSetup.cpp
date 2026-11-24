@@ -66,6 +66,7 @@
 #include "Forms/MonolithicCellKernel.h"
 #include "Forms/JIT/JITCacheKey.h"
 #include "Forms/JIT/JITKernelWrapper.h"
+#include "Core/EnvironmentNames.h"
 
 #include <algorithm>
 #include <array>
@@ -466,7 +467,7 @@ void requireConsistentConstraintCallbackShape(
 
 [[nodiscard]] std::optional<assembly::GhostPolicy> assemblyGhostPolicyOverrideFromEnv()
 {
-    const char* env = std::getenv("SVMP_ASSEMBLY_GHOST_POLICY");
+    const char* env = environment::value("SVMP_ASSEMBLY_GHOST_POLICY");
     if (env == nullptr || *env == '\0') {
         return std::nullopt;
     }
@@ -490,7 +491,7 @@ void requireConsistentConstraintCallbackShape(
 
 [[nodiscard]] bool dofPermutationTraceEnabled() noexcept
 {
-    const char* env = std::getenv("SVMP_TRACE_DOF_PERMUTATION");
+    const char* env = environment::value("SVMP_TRACE_DOF_PERMUTATION");
     if (env == nullptr || *env == '\0') {
         return false;
     }
@@ -2542,7 +2543,7 @@ LocalIndex maxInteriorFaceQuadraturePoints(const assembly::IMeshAccess& mesh,
 
 [[nodiscard]] bool sparsityRefreshEnvFlag(const char* name)
 {
-    const char* env = std::getenv(name);
+    const char* env = environment::value(name);
     return env != nullptr && env[0] != '\0' && std::string(env) != "0";
 }
 

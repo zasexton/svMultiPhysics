@@ -104,7 +104,7 @@ void resolveFsilsVectorEntriesUncached(const FsilsVector& vec,
     static bool trace_init = false;
     if (!trace_init) {
         trace_init = true;
-        if (std::getenv("SVMP_MONO_AUX_TRACE") != nullptr) {
+        if (environment::isSet("SVMP_MONO_AUX_TRACE")) {
             trace_budget = 100000;
         }
     }
@@ -188,7 +188,7 @@ void gatherFsilsVectorEntries(const FsilsVector& vec,
     const auto data_size = static_cast<GlobalIndex>(data.size());
     static int trace_budget = -1;
     if (trace_budget < 0) {
-        trace_budget = (std::getenv("SVMP_MONO_AUX_TRACE") != nullptr) ? 128 : 0;
+        trace_budget = (environment::isSet("SVMP_MONO_AUX_TRACE")) ? 128 : 0;
     }
     const auto* shared = vec.shared();
     const int dof = shared ? shared->dof : 1;

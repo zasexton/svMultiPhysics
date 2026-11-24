@@ -2760,7 +2760,7 @@ Real FunctionalAssembler::assembleBoundaryCore(
 	                                              local_solution,
 	                                              "FunctionalAssembler::assembleBoundaryCore");
 	                context_.setSolutionCoefficients(local_solution);
-                    if (std::getenv("SVMP_MONO_AUX_TRACE") != nullptr && result.faces_processed < 8) {
+                    if (environment::isSet("SVMP_MONO_AUX_TRACE") && result.faces_processed < 8) {
                         Real coeff_sq = 0.0;
                         for (const auto value : local_solution) {
                             coeff_sq += value * value;

@@ -6,6 +6,7 @@
  */
 
 #include "Systems/FormsInstaller.h"
+#include "Core/EnvironmentNames.h"
 
 #include <cctype>
 #include <cstddef>
@@ -187,7 +188,7 @@ makeFormBoundExteriorBoundaryMeasurePolicies(
 [[nodiscard]] bool formBlockDiagnosticsEnabled() noexcept
 {
     static const bool enabled = [] {
-        const char* env = std::getenv("SVMP_FE_FORM_BLOCK_DIAGNOSTICS");
+        const char* env = environment::value("SVMP_FE_FORM_BLOCK_DIAGNOSTICS");
         if (env == nullptr) {
             return false;
         }

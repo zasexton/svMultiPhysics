@@ -26,6 +26,7 @@
 #include "Systems/SystemsExceptions.h"
 #include "Core/FEConfig.h"
 #include "Core/MpiCollectiveTrace.h"
+#include "Core/EnvironmentNames.h"
 
 #include <algorithm>
 #include <array>
@@ -471,7 +472,7 @@ void traceSampledVectorDofs(const FESystem& system,
                             const forms::BoundaryFunctional& functional,
                             const backends::GenericVector* vec_ptr)
 {
-    const char* trace_dofs_env = std::getenv("SVMP_MONO_AUX_TRACE_DOFS");
+    const char* trace_dofs_env = environment::value("SVMP_MONO_AUX_TRACE_DOFS");
     if (trace_dofs_env == nullptr || *trace_dofs_env == '\0' || vec_ptr == nullptr) {
         return;
     }
@@ -1386,7 +1387,7 @@ Real BoundaryReductionService::evaluateFunctionalEntryPreflighted(
         assembler.setSolutionView(solution_view.get());
     }
 
-    if (const char* trace_dofs_env = std::getenv("SVMP_MONO_AUX_TRACE_DOFS");
+    if (const char* trace_dofs_env = environment::value("SVMP_MONO_AUX_TRACE_DOFS");
         trace_dofs_env != nullptr && *trace_dofs_env != '\0' && solution_view != nullptr) {
         static thread_local int trace_budget = 32;
         if (trace_budget > 0) {
@@ -1527,7 +1528,7 @@ Real BoundaryReductionService::evaluateFunctionalEntryPreflighted(
 
     switch (entry.def.reduction) {
         case forms::BoundaryFunctional::Reduction::Sum:
-            if (std::getenv("SVMP_MONO_AUX_TRACE") != nullptr) {
+            if (environment::isSet("SVMP_MONO_AUX_TRACE")) {
                 std::fprintf(stderr,
                              "[BoundaryReductionService] functional='%s' marker=%d local_faces=%lld local_raw=%.17g\n",
                              entry.def.name.c_str(),
