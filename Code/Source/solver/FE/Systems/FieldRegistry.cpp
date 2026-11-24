@@ -68,9 +68,10 @@ FieldId FieldRegistry::add(FieldSpec spec)
     if (rec.scope == FieldScope::Global) {
         FE_THROW_IF(rec.space->space_type() != spaces::SpaceType::Global, InvalidArgumentException,
                     "FieldRegistry::add: global field '" + rec.name + "' must be on a GlobalSpace");
-        FE_THROW_IF(rec.source_kind != FieldSourceKind::Unknown, InvalidArgumentException,
+        FE_THROW_IF(rec.source_kind != FieldSourceKind::Unknown && rec.source_kind != FieldSourceKind::PrescribedData,
+                    InvalidArgumentException,
                     "FieldRegistry::add: global field '" + rec.name +
-                        "' must be an unknown (state a known global value as a parameter)");
+                        "' must be an unknown or prescribed data (state a known global value as a parameter)");
         FE_THROW_IF(rec.participant_name.has_value() || rec.participant_domain_id.has_value(),
                     InvalidArgumentException,
                     "FieldRegistry::add: global field '" + rec.name +

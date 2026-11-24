@@ -2645,10 +2645,17 @@ LocalIndex maxInteriorFaceQuadraturePoints(const assembly::IMeshAccess& mesh,
              *value == Real(0.0));
 }
 
+/// Whether @p rec is a global unknown (a multiplier).  A global field of
+/// prescribed data (the previous or lagged value of one) has no DOF in the
+/// unknowns, the matrix or the bordered block.
+[[nodiscard]] bool isGlobalUnknown(const FieldRecord& rec) noexcept
+{
+    return rec.scope == FieldScope::Global && rec.source_kind == FieldSourceKind::Unknown;
+}
+
 [[nodiscard]] bool hasGlobalFieldRecords(const FieldRegistry& registry) noexcept
 {
-    return std::any_of(registry.records().begin(), registry.records().end(),
-                       [](const FieldRecord& rec) { return rec.scope == FieldScope::Global; });
+    return std::any_of(registry.records().begin(), registry.records().end(), isGlobalUnknown);
 }
 
 /**
@@ -2793,7 +2800,7 @@ void FESystem::validateGlobalMultiplierConstraints() const
 #endif
     std::vector<std::pair<GlobalIndex, GlobalIndex>> global_ranges;
     for (const auto& rec : field_registry_.records()) {
-        if (rec.scope != FieldScope::Global) {
+        if (!isGlobalUnknown(rec)) {
             continue;
         }
         const auto offset = field_dof_offsets_[static_cast<std::size_t>(rec.id)];
@@ -3267,7 +3274,8 @@ void FESystem::setup(const SetupOptions& user_opts, const SetupInputs& inputs)
                     "FESystem::setup: field registry contains invalid FieldId");
         field_dof_handlers_[idx] = distribute_field(rec);
     }
-    if (hasGlobalFieldRecords(field_registry_)) {
+    if (std::any_of(field_registry_.records().begin(), field_registry_.records().end(),
+                    [](const FieldRecord& rec) { return rec.scope == FieldScope::Global; })) {
         bindGlobalSpaceQuadrature(field_registry_, meshAccess(), opts.dof_options);
     }
     {
@@ -3337,7 +3345,7 @@ void FESystem::setup(const SetupOptions& user_opts, const SetupInputs& inputs)
         GlobalIndex bordered_dofs = 0;
         if (bordered_globals) {
             for (const auto& rec : field_registry_.records()) {
-                if (rec.scope != FieldScope::Global) {
+                if (!isGlobalUnknown(rec)) {
                     continue;
                 }
                 const auto idx = static_cast<std::size_t>(rec.id);

@@ -57,10 +57,12 @@
 #include "Spaces/H1Space.h"
 #include "Systems/ExactAccumulator.h"
 #include "Systems/FESystem.h"
+#include "Systems/FieldBinding.h"
 #include "Systems/FormsInstaller.h"
 #include "Systems/SystemCollectives.h"
 #include "Systems/TimeIntegrator.h"
 #include "Systems/TransientSystem.h"
+#include "TimeStepping/GeneratedState.h"
 #include "TimeStepping/NewtonSolver.h"
 #include "TimeStepping/TimeHistory.h"
 
@@ -215,7 +217,8 @@ struct Problem {
 Problem buildProblem(MPI_Comm comm, int rank, int size,
                      MultiplierLowering lowering = MultiplierLowering::Auto,
                      bool owner_contiguous = false,
-                     Real stabilization = 0.0)
+                     Real stabilization = 0.0,
+                     bool history_terms = false)
 {
     Problem out;
     auto mesh = std::make_shared<StripMeshAccess>(rank, size);
@@ -234,6 +237,15 @@ Problem buildProblem(MPI_Comm comm, int rank, int size,
                     (mu * FormExpr::constant(kMean * kHeight)).dGlobal();
     if (stabilization != 0.0) {
         residual = residual - (FormExpr::constant(stabilization) * lam * mu).dGlobal();
+    }
+    if (history_terms) {
+        // Global data: lambda one step back in the global row, and lambda at
+        // the last refresh in the volume rows.
+        FieldBinding fields(sys, "test");
+        const BoundUnknown Lambda{out.lambda, lam, mu};
+        residual = residual - (FormExpr::constant(0.25) * (lam - fields.previous(Lambda, 1)) * mu).dGlobal() +
+                   (FormExpr::constant(0.5) * fields.lagged(Lambda, Refresh::GeneratedState) * v).dx() +
+                   (FormExpr::constant(0.125) * lam.dt(1) * mu).dGlobal();
     }
     (void)installFormulation(sys, "poisson", {out.u, out.lambda}, residual);
     // The DOF of a wall vertex is the vertex itself under GlobalIds numbering;
@@ -901,6 +913,82 @@ void expectOneRankValues(FESystem& one, FESystem& many, FieldId lambda, const Op
 }
 
 } // namespace
+
+TEST(GlobalMultiplierG1MPI, PreviousAndLaggedOfTheMultiplierAreTheOneRankData)
+{
+    MPI_Comm comm = MPI_COMM_WORLD;
+    int rank = 0;
+    int size = 1;
+    MPI_Comm_rank(comm, &rank);
+    MPI_Comm_size(comm, &size);
+
+    auto reference = buildProblem(MPI_COMM_SELF, 0, 1, MultiplierLowering::Auto, false, 0.0, true);
+    auto parallel = buildProblem(comm, rank, size, MultiplierLowering::Auto, false, 0.0, true);
+    auto& one = *reference.system;
+    auto& many = *parallel.system;
+    const auto n = one.dofHandler().getNumDofs();
+    ASSERT_EQ(many.dofHandler().getNumDofs(), n);
+    const auto nn = static_cast<std::size_t>(n);
+    const auto lam = static_cast<std::size_t>(one.fieldDofOffset(reference.lambda));
+
+    std::vector<Real> state(nn);
+    std::vector<Real> previous(nn);
+    for (std::size_t i = 0; i < nn; ++i) {
+        state[i] = std::sin(0.37 * static_cast<Real>(i) + 0.1);
+        previous[i] = std::cos(0.29 * static_cast<Real>(i) + 0.4);
+    }
+    one.constraints().distribute(state);
+    one.constraints().distribute(previous);
+    SystemStateView view;
+    view.u = state;
+    view.u_prev = previous;
+    view.time = 0.3;
+    view.dt = 0.1;
+    const BackwardDifferenceIntegrator integrator;
+    const auto time_context = integrator.buildContext(1, view);
+    view.time_integration = &time_context;
+
+    // Every rank holds the data of the global field after a refresh.
+    using Point = timestepping::NewtonOptions::StateSynchronizationPoint;
+    for (auto* system : {&one, &many}) {
+        auto registry = std::make_shared<timestepping::GeneratedStateRegistry>(timestepping::GeneratedStatePolicy{
+            .solve = timestepping::GeneratedStateSolve::Transient, .refresh_within_solve = true});
+        registry->add(timestepping::makeShadowFieldParticipant(*system));
+        registry->synchronize(view, Point::ResidualAssembly);
+        for (const auto& shadow : shadowFields(*system)) {
+            const auto values = system->prescribedFieldCoefficients(shadow.shadow);
+            ASSERT_EQ(values.size(), 1u);
+            EXPECT_EQ(values[0], shadow.kind == ShadowField::Kind::Previous ? previous[lam] : state[lam]);
+        }
+    }
+
+    // The data enter the residual, not the matrix: the exact assembly equals
+    // the one-rank assembly at any rank count.
+    const auto request = jacobianAndResidual();
+    ExactDenseView one_exact(n);
+    one_exact.zero();
+    ASSERT_TRUE(one.assemble(request, view, &one_exact, &one_exact).success);
+    ExactDenseView many_exact(n);
+    many_exact.zero();
+    ASSERT_TRUE(many.assemble(request, view, &many_exact, &many_exact).success);
+    const auto [one_a, one_b] = one_exact.reduce(CollectiveCommunicator{});
+    const auto [many_a, many_b] = many_exact.reduce(CollectiveCommunicator(comm));
+    EXPECT_EQ(many_a, one_a);
+    EXPECT_EQ(many_b, one_b);
+
+    // And the matrix is that of the system without them, apart from the
+    // global row's own diagonal: -0.25, and 0.125 / dt from dt(lambda).
+    auto plain = buildProblem(MPI_COMM_SELF, 0, 1);
+    ExactDenseView plain_exact(n);
+    plain_exact.zero();
+    ASSERT_TRUE(plain.system->assemble(request, view, &plain_exact, &plain_exact).success);
+    const auto [plain_a, plain_b] = plain_exact.reduce(CollectiveCommunicator{});
+    for (std::size_t i = 0; i < nn * nn; ++i) {
+        const Real expected = plain_a[i] + (i == lam * nn + lam ? Real(-0.25) + Real(0.125) / Real(0.1) : Real(0.0));
+        EXPECT_NEAR(one_a[i], expected, 1e-14) << "entry " << i;
+    }
+    (void)plain_b;
+}
 
 TEST(GlobalMultiplierG4MPI, G2MeanZeroMultiplierIsTheOneRankSolution)
 {

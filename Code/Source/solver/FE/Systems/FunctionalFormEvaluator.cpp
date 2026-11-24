@@ -438,7 +438,8 @@ std::vector<FunctionalFormValue> evaluateOnSystem(
     if (system.hasBorderedGlobalFields()) {
         // Bordered global fields are not in the DOF map; they follow it.
         for (FieldId field = 0; static_cast<std::size_t>(field) < system.registeredFieldCount(); ++field) {
-            if (system.fieldRecord(field).scope == FieldScope::Global) {
+            const auto& record = system.fieldRecord(field);
+            if (record.scope == FieldScope::Global && record.source_kind == FieldSourceKind::Unknown) {
                 fields.push_back(field);
             }
         }

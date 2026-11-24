@@ -418,7 +418,7 @@ void prepareBorderedGlobalCoupling(const FESystem& system,
         bordered.aux_blocks.clear();
         for (FieldId field = 0; static_cast<std::size_t>(field) < system.registeredFieldCount(); ++field) {
             const auto& rec = system.fieldRecord(field);
-            if (rec.scope != FieldScope::Global) {
+            if (rec.scope != FieldScope::Global || rec.source_kind != FieldSourceKind::Unknown) {
                 continue;
             }
             bordered.aux_blocks.push_back(

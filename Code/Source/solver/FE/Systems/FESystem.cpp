@@ -8222,7 +8222,7 @@ bool FESystem::hasGlobalFields() const noexcept
 {
     const auto& records = field_registry_.records();
     return std::any_of(records.begin(), records.end(), [](const FieldRecord& rec) {
-        return rec.scope == FieldScope::Global;
+        return rec.scope == FieldScope::Global && rec.source_kind == FieldSourceKind::Unknown;
     });
 }
 
@@ -8246,6 +8246,11 @@ std::vector<Real> FESystem::globalFieldValues(FieldId field, const SystemStateVi
     FE_THROW_IF(!field_registry_.has(field) || field_registry_.get(field).scope != FieldScope::Global,
                 InvalidArgumentException,
                 "FESystem::globalFieldValues: field " + std::to_string(field) + " is not a global field");
+    if (field_registry_.get(field).source_kind == FieldSourceKind::PrescribedData) {
+        // Global data (a previous or lagged value): every rank holds it.
+        const auto coefficients = prescribedFieldCoefficients(field);
+        return std::vector<Real>(coefficients.begin(), coefficients.end());
+    }
     const auto idx = static_cast<std::size_t>(field);
     const auto offset = field_dof_offsets_[idx];
     const auto count = field_dof_handlers_[idx].getNumDofs();

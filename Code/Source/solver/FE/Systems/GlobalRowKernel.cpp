@@ -65,10 +65,10 @@ using forms::FormExprType;
     return signature != nullptr && signature->space_type == spaces::SpaceType::Global;
 }
 
+/// The global unknowns of @p node (StateField): its columns.
 void collectGlobalStateFields(const FormExprNode& node, std::vector<FieldId>& out)
 {
-    if ((node.type() == FormExprType::StateField || node.type() == FormExprType::DiscreteField) &&
-        node.fieldId().has_value()) {
+    if (node.type() == FormExprType::StateField && node.fieldId().has_value()) {
         const auto field = *node.fieldId();
         if (std::find(out.begin(), out.end(), field) == out.end()) {
             out.push_back(field);
@@ -77,6 +77,23 @@ void collectGlobalStateFields(const FormExprNode& node, std::vector<FieldId>& ou
     for (const auto& child : node.childrenShared()) {
         if (child) {
             collectGlobalStateFields(*child, out);
+        }
+    }
+}
+
+/// The global data of @p node (DiscreteField, such as previous(X) or
+/// lagged(X)): values without a column.
+void collectGlobalDataFields(const FormExprNode& node, std::vector<FieldId>& out)
+{
+    if (node.type() == FormExprType::DiscreteField && node.fieldId().has_value()) {
+        const auto field = *node.fieldId();
+        if (std::find(out.begin(), out.end(), field) == out.end()) {
+            out.push_back(field);
+        }
+    }
+    for (const auto& child : node.childrenShared()) {
+        if (child) {
+            collectGlobalDataFields(*child, out);
         }
     }
 }
@@ -234,6 +251,25 @@ void collectSignedTerms(const FormExpr& expr, bool negated, std::vector<FormExpr
         entry.field = field;
         entry.n_components = 1;
         entry.components[0] = stateValue(system, state, system.fieldDofOffset(field));
+        field_values.push_back(entry);
+    }
+    // Global data: a prescribed field's value (every rank holds it), or the
+    // state's value of an unknown read as data.
+    std::vector<FieldId> data_fields;
+    collectGlobalDataFields(*resolved.node(), data_fields);
+    for (const auto field : data_fields) {
+        FieldValueEntry entry;
+        entry.field = field;
+        entry.n_components = 1;
+        if (system.fieldRecord(field).source_kind == FieldSourceKind::PrescribedData) {
+            const auto coefficients = system.prescribedFieldCoefficients(field);
+            FE_THROW_IF(coefficients.empty(), InvalidStateException,
+                        "GlobalRowKernel: the global data field '" + system.fieldRecord(field).name +
+                            "' has no value");
+            entry.components[0] = coefficients.front();
+        } else {
+            entry.components[0] = stateValue(system, state, system.fieldDofOffset(field));
+        }
         field_values.push_back(entry);
     }
 
@@ -443,8 +479,7 @@ void GlobalRowKernel::validatePointIntegrand(const forms::FormExpr& integrand,
             break;
         case FormExprType::TimeDerivative: {
             const auto kids = node.childrenShared();
-            if (kids.size() != 1u || !kids[0] ||
-                (kids[0]->type() != FormExprType::StateField && kids[0]->type() != FormExprType::DiscreteField) ||
+            if (kids.size() != 1u || !kids[0] || kids[0]->type() != FormExprType::StateField ||
                 !kids[0]->fieldId().has_value() || !isGlobalSymbol(*kids[0])) {
                 fail(node, "a time derivative of something other than a global field");
             }

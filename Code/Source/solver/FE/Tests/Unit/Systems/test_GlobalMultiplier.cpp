@@ -56,7 +56,9 @@
 #include "Systems/TimeIntegrator.h"
 #include "Systems/TransientSystem.h"
 #include "PostProcessing/ScalarHistory.h"
+#include "TimeStepping/GeneratedState.h"
 #include "TimeStepping/NewtonSolver.h"
+#include "TimeStepping/StepController.h"
 #include "TimeStepping/StepParticipants.h"
 #include "TimeStepping/TimeHistory.h"
 #include "TimeStepping/TimeLoop.h"
@@ -444,13 +446,19 @@ TEST(GlobalField, ScopeFollowsTheGlobalSpace)
                                               .scope = FieldScope::InterfaceFace,
                                               .interface_marker = 3}),
                  FEException);
-    EXPECT_THROW((void)sys.addField(FieldSpec{.name = "d",
+    // Global data (the previous or lagged value of a multiplier) is a
+    // prescribed global field: no unknown, and not a multiplier.
+    const auto data = sys.addField(FieldSpec{.name = "d", .space = r1, .source_kind = FieldSourceKind::PrescribedData});
+    EXPECT_EQ(sys.fieldRecord(data).scope, FieldScope::Global);
+    EXPECT_FALSE(sys.fieldParticipatesInUnknownVector(data));
+    EXPECT_THROW((void)sys.addField(FieldSpec{.name = "e",
                                               .space = r1,
-                                              .source_kind = FieldSourceKind::PrescribedData}),
+                                              .source_kind = FieldSourceKind::DerivedFromUnknown}),
                  FEException);
 
     FESystem plain(mesh);
     (void)plain.addField(FieldSpec{.name = "u", .space = h1});
+    (void)plain.addField(FieldSpec{.name = "d", .space = r1, .source_kind = FieldSourceKind::PrescribedData});
     EXPECT_FALSE(plain.hasGlobalFields());
 }
 
@@ -1847,6 +1855,228 @@ TEST(GlobalField, ScalarHistoryRowsHoldTheValuesTheyRead)
     refused([&] { post::record(sys, quantity("a,b", FunctionalKind::Integral, u_disc.dx())); }, "comma");
     refused([&] { post::record(sys, quantity("", FunctionalKind::Integral, u_disc.dx())); }, "nonempty");
     refused([&] { post::record(sys, problem.u); }, "not a global field");
+}
+
+namespace {
+
+/// How the global row of the scalar ODE C X' + X/R = f states X' and X/R.
+enum class GlobalRowForm {
+    TimeDerivative,  ///< C dt(X) + X/R - f, the integrator's stencil
+    Previous,        ///< C (X - previous(X)) / dt + X/R - f, backward Euler by hand
+    Lagged,          ///< C dt(X) + lagged(X)/R - f, a fixed point in X/R
+};
+
+struct GlobalRowRun {
+    std::vector<Real> x{};          ///< X after each accepted step
+    std::vector<int> iterations{};  ///< Newton iterations of each step
+    std::vector<std::array<Real, 2>> previous{};  ///< previous(X, 1) and previous(X, 2) at each solve
+    int rejections{0};
+};
+
+/// Retries a rejected step with the same dt and keeps dt on acceptance.
+class SameStepController final : public timestepping::StepController {
+public:
+    [[nodiscard]] int maxRetries() const noexcept override { return 2; }
+    [[nodiscard]] timestepping::StepDecision onAccepted(const timestepping::StepAttemptInfo& info) override
+    {
+        return {.accept = true, .retry = false, .next_dt = info.dt};
+    }
+    [[nodiscard]] timestepping::StepDecision onRejected(const timestepping::StepAttemptInfo& info,
+                                                        timestepping::StepRejectReason) override
+    {
+        return {.accept = false, .retry = true, .next_dt = info.dt};
+    }
+};
+
+/// The scalar ODE of buildScalarOde with its global row written as @p form,
+/// through the time loop with @p scheme (the shadow fields refreshed by the
+/// generated state); the volume row stays C w' + w/R = f.
+GlobalRowRun runGlobalRow(timestepping::SchemeKind scheme, GlobalRowForm form, int max_iterations = 4,
+                          std::vector<int> rejected_steps = {})
+{
+    GlobalRowRun out;
+    auto h1 = quadSpace(1);
+    auto r1 = std::make_shared<spaces::GlobalSpace>(1);
+    FESystem sys(buildGrid(2, 1, 1.0, 0.5, 1));
+    FieldBinding fields(sys, "test");
+    const auto w_id = sys.addField(FieldSpec{.name = "w", .space = h1});
+    const auto x_id = fields.global("X", "state");
+    sys.addOperator("ode");
+    const auto w = forms::StateField(w_id, *h1, "w");
+    const auto v = forms::TestField(w_id, *h1, "v");
+    const BoundUnknown X{x_id, forms::StateField(x_id, *sys.fieldRecord(x_id).space, "X"),
+                         forms::TestField(x_id, *sys.fieldRecord(x_id).space, "z")};
+    const auto& x = X.state;
+    const auto& z = X.test;
+    const auto C = FormExpr::constant(kCapacitance);
+    const auto R = FormExpr::constant(kResistance);
+    const auto f = FormExpr::constant(2.0) + FormExpr::time() * FormExpr::time().exp();
+    FormExpr row;
+    switch (form) {
+    case GlobalRowForm::TimeDerivative:
+        row = C * x.dt(1) + x / R - f;
+        break;
+    case GlobalRowForm::Previous:
+        row = C * (x - fields.previous(X, 1)) / FormExpr::timeStep() + x / R - f;
+        (void)fields.previous(X, 2);  // refreshed with the other, in no row
+        break;
+    case GlobalRowForm::Lagged:
+        row = C * x.dt(1) + fields.lagged(X, Refresh::GeneratedState) / R - f;
+        break;
+    }
+    (void)installFormulation(sys, "ode", {w_id, x_id}, ((C * w.dt(1) + w / R - f) * v).dx() + (z * row).dGlobal());
+    sys.setup();
+
+    auto factory = backends::BackendFactory::create(backends::BackendKind::Eigen);
+    EXPECT_NE(factory, nullptr);
+    if (!factory) {
+        return out;
+    }
+    backends::SolverOptions direct;
+    direct.method = backends::SolverMethod::Direct;
+    direct.preconditioner = backends::PreconditionerType::None;
+    auto linear = factory->createLinearSolver(direct);
+    TransientSystem transient(sys, std::make_shared<BackwardDifferenceIntegrator>());
+    const auto n = sys.dofHandler().getNumDofs();
+    auto history = timestepping::TimeHistory::allocate(*factory, n, 2);
+    for (int k = 1; k <= history.historyDepth(); ++k) {
+        auto view = history.uPrevK(k).createAssemblyView();
+        view->beginAssemblyPhase();
+        for (GlobalIndex i = 0; i < n; ++i) {
+            view->addVectorEntry(i, kInitialValue, assembly::AddMode::Insert);
+        }
+        view->finalizeAssembly();
+    }
+    history.resetCurrentToPrevious();
+    const double dt = 0.05;
+    history.setPrevDt(dt);
+
+    timestepping::TimeLoopOptions options;
+    options.t0 = 0.0;
+    options.t_end = 0.5;
+    options.dt = dt;
+    options.max_steps = 100;
+    options.scheme = scheme;
+    options.generalized_alpha_rho_inf = 0.5;
+    options.newton.residual_op = "ode";
+    options.newton.jacobian_op = "ode";
+    options.newton.max_iterations = max_iterations;
+    options.newton.abs_tolerance = 1e-12;
+    options.newton.rel_tolerance = 0.0;
+    auto generated_state = std::make_shared<timestepping::GeneratedStateRegistry>(
+        timestepping::GeneratedStatePolicy{.solve = timestepping::GeneratedStateSolve::Transient,
+                                           .refresh_within_solve = true});
+    if (!shadowFields(sys).empty()) {
+        generated_state->add(timestepping::makeShadowFieldParticipant(sys));
+        generated_state->bind(options.newton);
+    }
+    if (!rejected_steps.empty()) {
+        options.step_controller = std::make_shared<SameStepController>();
+    }
+    timestepping::TimeLoop loop(options);
+    timestepping::TimeLoopCallbacks callbacks;
+    const auto x_dof = static_cast<std::size_t>(sys.fieldDofOffset(x_id));
+    const auto shadows = shadowFields(sys);
+    callbacks.on_nonlinear_done = [&](const timestepping::TimeHistory& h, const timestepping::NewtonReport& report) {
+        EXPECT_TRUE(report.converged);
+        if (form == GlobalRowForm::Previous) {
+            std::array<Real, 2> previous{};
+            for (const auto& shadow : shadows) {
+                previous[static_cast<std::size_t>(shadow.steps_back - 1)] =
+                    sys.prescribedFieldCoefficients(shadow.shadow).front();
+            }
+            out.previous.push_back(previous);
+        }
+        out.x.push_back(h.uSpan()[x_dof]);
+        out.iterations.push_back(report.iterations);
+    };
+    // A rejected first attempt is retried from the accepted state.
+    int attempts = 0;
+    callbacks.on_before_step_accept = [&](timestepping::TimeHistory&, const timestepping::NewtonReport&) {
+        const int step = static_cast<int>(out.x.size()) - out.rejections;
+        const bool reject = std::find(rejected_steps.begin(), rejected_steps.end(), step) != rejected_steps.end() &&
+                            attempts++ == 0;
+        if (reject) {
+            ++out.rejections;
+            return false;
+        }
+        attempts = 0;
+        return true;
+    };
+    const auto report = loop.run(transient, *factory, *linear, history, callbacks);
+    EXPECT_TRUE(report.success);
+    return out;
+}
+
+} // namespace
+
+TEST(GlobalTimeDerivative, PreviousAndLaggedOfAGlobalFieldAreItsHistoryAndItsIterate)
+{
+    // Backward Euler by hand with previous(X) is the integrator's dt(X).
+    const auto stencil = runGlobalRow(timestepping::SchemeKind::BackwardEuler, GlobalRowForm::TimeDerivative);
+    const auto by_hand = runGlobalRow(timestepping::SchemeKind::BackwardEuler, GlobalRowForm::Previous);
+    ASSERT_EQ(stencil.x.size(), 10u);
+    ASSERT_EQ(by_hand.x.size(), 10u);
+    for (std::size_t step = 0; step < stencil.x.size(); ++step) {
+        EXPECT_NEAR(by_hand.x[step], stencil.x[step], 1e-13) << "step " << step;
+    }
+    EXPECT_GT(std::abs(stencil.x.back() - kInitialValue), 0.1);
+
+    // previous(X, k) holds X k steps back at every solve (the initial value
+    // before the first steps).
+    ASSERT_EQ(by_hand.previous.size(), 10u);
+    for (std::size_t step = 0; step < by_hand.previous.size(); ++step) {
+        EXPECT_EQ(by_hand.previous[step][0], step >= 1 ? by_hand.x[step - 1] : kInitialValue) << "step " << step;
+        EXPECT_EQ(by_hand.previous[step][1], step >= 2 ? by_hand.x[step - 2] : kInitialValue) << "step " << step;
+    }
+
+    // lagged(X) is data in the Jacobian: Newton becomes a fixed point in X/R
+    // (contraction dt / (R C) = 0.125) and reaches the same solution.
+    const auto lagged = runGlobalRow(timestepping::SchemeKind::BackwardEuler, GlobalRowForm::Lagged, 40);
+    ASSERT_EQ(lagged.x.size(), 10u);
+    for (std::size_t step = 0; step < stencil.x.size(); ++step) {
+        EXPECT_NEAR(lagged.x[step], stencil.x[step], 1e-11) << "step " << step;
+        EXPECT_GT(lagged.iterations[step], stencil.iterations[step]) << "step " << step;
+    }
+}
+
+TEST(GlobalTimeDerivative, ARejectedStepRestoresTheGlobalStateAndItsHistory)
+{
+    // Steps 3 and 7 are rejected once and retried with the same dt: X, and
+    // previous(X) in the row, come out as without the rejections.
+    for (const auto form : {GlobalRowForm::TimeDerivative, GlobalRowForm::Previous}) {
+        SCOPED_TRACE(form == GlobalRowForm::TimeDerivative ? "dt(X)" : "previous(X)");
+        const auto plain = runGlobalRow(timestepping::SchemeKind::BackwardEuler, form);
+        const auto retried = runGlobalRow(timestepping::SchemeKind::BackwardEuler, form, 4, {3, 7});
+        EXPECT_EQ(retried.rejections, 2);
+        ASSERT_EQ(plain.x.size(), 10u);
+        ASSERT_EQ(retried.x.size(), 12u);
+        std::vector<Real> accepted;
+        for (std::size_t i = 0; i < retried.x.size(); ++i) {
+            // The rejected candidates are the solves before steps 3 and 7.
+            if (i == 2 || i == 7) {
+                continue;
+            }
+            accepted.push_back(retried.x[i]);
+        }
+        ASSERT_EQ(accepted.size(), plain.x.size());
+        for (std::size_t step = 0; step < plain.x.size(); ++step) {
+            EXPECT_EQ(accepted[step], plain.x[step]) << "step " << step;
+        }
+    }
+}
+
+TEST(GlobalTimeDerivative, AScalarOdeFollowsBdf2LikeAVolumeField)
+{
+    const auto values = runScalarOde(timestepping::SchemeKind::BDF2);
+    ASSERT_EQ(values.size(), 10u);
+    for (std::size_t step = 0; step < values.size(); ++step) {
+        EXPECT_NEAR(values[step][0], values[step][1], 1e-13) << "step " << step;
+    }
+    EXPECT_GT(std::abs(values.back()[0] - kInitialValue), 0.1);
+    // And differs from backward Euler: the scheme is BDF2's.
+    const auto euler = runScalarOde(timestepping::SchemeKind::BackwardEuler);
+    EXPECT_GT(std::abs(values.back()[0] - euler.back()[0]), 1e-6);
 }
 
 TEST(GlobalTimeDerivative, TheRowDeclaresItsTimeDerivatives)

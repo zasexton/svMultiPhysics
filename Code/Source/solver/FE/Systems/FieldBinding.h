@@ -172,6 +172,7 @@ public:
      * and returns its DiscreteField of the same name: data in the Jacobian,
      * so a term in u - lagged(U) has the residual of u - u_ref and the
      * Jacobian of u.  timestepping::makeShadowFieldParticipant refreshes it.
+     * The shadow of a global unknown is a global field of prescribed data.
      */
     [[nodiscard]] forms::FormExpr lagged(const BoundUnknown& unknown, Refresh refresh,
                                          std::string shadow_name = {});
