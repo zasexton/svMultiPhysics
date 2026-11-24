@@ -6,6 +6,7 @@
  */
 
 #include "Forms/JIT/JITObjectCacheFile.h"
+#include "Core/EnvironmentNames.h"
 
 #include <algorithm>
 #include <atomic>
@@ -342,7 +343,7 @@ std::string resolveCacheDirectory(std::string_view configured_directory, bool ca
     if (!cache_kernels) {
         return {};
     }
-    if (const char* env_dir = std::getenv(kCacheDirectoryEnvVar); env_dir != nullptr && *env_dir != '\0') {
+    if (const char* env_dir = environment::value(kCacheDirectoryEnvVar); env_dir != nullptr && *env_dir != '\0') {
         return std::string(env_dir);
     }
     if (const char* home = std::getenv("HOME"); home != nullptr && *home != '\0') {

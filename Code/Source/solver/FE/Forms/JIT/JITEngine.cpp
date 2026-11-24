@@ -14,6 +14,7 @@
 #include "Forms/JIT/JITObjectCacheFile.h"
 #include "Forms/JIT/LLVMJITBuildInfo.h"
 #include "Forms/Tensor/SpectralEigen.h"
+#include "Core/EnvironmentNames.h"
 
 #include <algorithm>
 #include <atomic>
@@ -622,7 +623,7 @@ void dumpLLVMIRBestEffort(std::string_view dump_directory,
 
 [[nodiscard]] std::string trimmedEnvironmentValue(const char* name)
 {
-    const char* raw = std::getenv(name);
+    const char* raw = environment::value(name);
     if (raw == nullptr) {
         return {};
     }

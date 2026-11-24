@@ -6,6 +6,7 @@
  */
 
 #include "Forms/JIT/HardwareProfile.h"
+#include "Core/EnvironmentNames.h"
 
 #include <cstdlib>
 #include <cstring>
@@ -102,7 +103,7 @@ namespace {
 [[nodiscard]] bool detectTargetAwarePipeline() noexcept
 {
     // Explicit override
-    if (const char* env = std::getenv("SVMP_JIT_TARGET_AWARE")) {
+    if (const char* env = environment::value("SVMP_JIT_TARGET_AWARE")) {
         return env[0] == '1' || env[0] == 'y' || env[0] == 'Y';
     }
 #if defined(__AVX512F__)
@@ -168,7 +169,7 @@ namespace {
 HardwareProfile discoverHardwareProfile()
 {
     // Allow env var override for testing/containers
-    if (const char* env = std::getenv("SVMP_CACHE_PROFILE")) {
+    if (const char* env = environment::value("SVMP_CACHE_PROFILE")) {
         // Format: "L1d:32768,L1i:32768,L2:262144,L3:8388608"
         HardwareProfile hp = defaultProfile();
         std::string s(env);

@@ -41,6 +41,7 @@ std::span<const NameDeclaration> solverCatalogue() noexcept
     constexpr const char* kAssembly = "FE/Assembly";
     constexpr const char* kEigen = "FE/Backends/Eigen";
     constexpr const char* kFsils = "FE/Backends/FSILS";
+    constexpr const char* kJit = "FE/Forms/JIT";
     constexpr const char* kLevelSetExtension = "FE/LevelSet/Extension";
     constexpr const char* kLevelSetGeometry = "FE/LevelSet/LevelSetGeometryService";
     constexpr const char* kLevelSetMaintenance = "FE/LevelSet/Maintenance";
@@ -311,6 +312,32 @@ std::span<const NameDeclaration> solverCatalogue() noexcept
          "checks the block lookup tables of a new matrix"},
         {"SVMP_FSILS_VECTOR_VIEW_TRACE", Diagnostic, kFsils, Flag, "off", Reference,
          "logs vector-view assembly counts and norms"},
+
+        // FE/Forms/JIT: the LLVM JIT of form kernels.
+        {"SVMP_CACHE_PROFILE", Performance, kJit, Text, "the detected cache sizes", NonReference,
+         "cache sizes the JIT tiles for (L1d:N,L1i:N,L2:N,L3:N in bytes)"},
+        {"SVMP_DUMP_DEP_MASK", Diagnostic, kJit, Flag, "off", Reference,
+         "prints the dependency-mask breakdown of each lowered kernel"},
+        {"SVMP_JIT_BASIS_BAKING", Performance, kJit, Flag, "the JIT options (on)", NonReference,
+         "bakes basis values into specialized cell kernels"},
+        {"SVMP_JIT_CACHE_DIAGNOSTICS", Diagnostic, kJit, Flag, "the JIT options (off)", Reference,
+         "logs JIT kernel cache hits, misses and keys"},
+        {"SVMP_JIT_CACHE_DIR", Performance, kJit, Text, "$HOME/.cache/svMultiPhysics/jit_cache", Reference,
+         "directory of the on-disk JIT object cache"},
+        {"SVMP_JIT_CPU", Performance, kJit, Text, "host", NonReference,
+         "JIT target CPU (host, x86-64, x86-64-v2, x86-64-v3, x86-64-v4)"},
+        {"SVMP_JIT_DISABLE_MARKED_INTERIOR_FACE", Performance, kJit, Flag, "off", NonReference,
+         "uses the interpreted kernel on marked interior faces"},
+        {"SVMP_JIT_FP_CONTRACT", Performance, kJit, Text, "default", NonReference,
+         "floating-point contraction of JIT code (on, off, default)"},
+        {"SVMP_JIT_OPT_LEVEL", Performance, kJit, Integer, "the JIT options", NonReference,
+         "LLVM optimization level of JIT kernels (0 to 3)"},
+        {"SVMP_JIT_TARGET_AWARE", Performance, kJit, Flag, "on for AVX-512 builds, otherwise off", NonReference,
+         "target-aware LLVM pass pipeline"},
+        {"SVMP_JIT_TELEMETRY", Diagnostic, kJit, Flag, "off", Reference,
+         "prints JIT code-generation telemetry"},
+        {"SVMP_SIMD_BATCH", Performance, kJit, Flag, "the JIT options (on)", NonReference,
+         "cross-element SIMD batching of linear JIT kernels (0 turns it off)"},
 
         // FE/LevelSet: the generated cut geometry, the PDE velocity extension and
         // level-set maintenance.

@@ -19,6 +19,7 @@
 #include "Forms/JIT/HardwareProfile.h"
 #include "Forms/JIT/JITCompiler.h"
 #include "Forms/JIT/JITValidation.h"
+#include "Core/EnvironmentNames.h"
 
 #include <array>
 #include <atomic>
@@ -120,7 +121,7 @@ struct DispatchMemoEntry {
 [[nodiscard]] bool disableMarkedInteriorFaceJIT() noexcept
 {
     static const bool disabled = [] {
-        const char* value = std::getenv("SVMP_JIT_DISABLE_MARKED_INTERIOR_FACE");
+        const char* value = environment::value("SVMP_JIT_DISABLE_MARKED_INTERIOR_FACE");
         return value != nullptr && value[0] != '\0' && value[0] != '0';
     }();
     return disabled;
@@ -128,7 +129,7 @@ struct DispatchMemoEntry {
 
 [[nodiscard]] std::optional<bool> parseOptionalBoolEnv(const char* name) noexcept
 {
-    const char* value = std::getenv(name);
+    const char* value = environment::value(name);
     if (value == nullptr) {
         return std::nullopt;
     }

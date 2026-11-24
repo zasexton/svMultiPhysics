@@ -17,6 +17,7 @@
 #include "Forms/JIT/LLVMTensorGen.h"
 #include "Forms/JIT/KernelIR.h"
 #include "Forms/Tensor/TensorIR.h"
+#include "Core/EnvironmentNames.h"
 
 #include <algorithm>
 #include <array>
@@ -1762,7 +1763,7 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
                 // KernelIR::optimize() runs shape-aware zero propagation,
                 // constant folding, post-rewrite CSE, and DCE.
                 const auto eliminated = lowered.ir.optimize();
-                static const bool jit_telemetry = (std::getenv("SVMP_JIT_TELEMETRY") != nullptr);
+                static const bool jit_telemetry = environment::isSet("SVMP_JIT_TELEMETRY");
                 if (jit_telemetry) {
                     std::cerr << "[JIT telemetry] " << symbol << " term " << tidx
                               << ": KernelIR " << ops_before << " -> " << lowered.ir.opCount()
@@ -1889,7 +1890,7 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
             auto costs = lowered.ir.subtreeCosts();
 
             // Diagnostic: dump per-term dep_mask breakdown
-            if (const char* env = std::getenv("SVMP_DUMP_DEP_MASK"); env && std::string_view(env) != "0") {
+            if (const char* env = environment::value("SVMP_DUMP_DEP_MASK"); env && std::string_view(env) != "0") {
                 std::size_t n0 = 0, n1 = 0, n2 = 0, n3 = 0;
                 for (auto d : dep) {
                     if (d == 0) ++n0;
@@ -2214,7 +2215,7 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
         // Forward-declared here so that loadF64/loadPtr/simdLoadPtr can
         // reference them via capture-by-reference.
         static const bool simd_batch_env_off = [] {
-            const char* e = std::getenv("SVMP_SIMD_BATCH");
+            const char* e = environment::value("SVMP_SIMD_BATCH");
             return e && std::string_view(e) == "0";
         }();
         const std::uint32_t simd_w = hardwareProfile().simdDoubles();  // 2 for SSE2
@@ -3002,7 +3003,7 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
                 }
             }
 
-            static const bool jit_telemetry = (std::getenv("SVMP_JIT_TELEMETRY") != nullptr);
+            static const bool jit_telemetry = environment::isSet("SVMP_JIT_TELEMETRY");
             if (jit_telemetry) {
                 const bool is_fallback = !fixed_n_test_dofs_minus.has_value()
                                       || !fixed_n_trial_dofs_minus.has_value()
@@ -3076,7 +3077,7 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
 	                                            use_batch && !coupled && simd_w == 2 &&
 	                                            !has_external_calls && !has_field_solutions;
 	                {
-	                    static const bool jit_telemetry = (std::getenv("SVMP_JIT_TELEMETRY") != nullptr);
+	                    static const bool jit_telemetry = environment::isSet("SVMP_JIT_TELEMETRY");
 	                    if (jit_telemetry) {
 	                        std::cerr << "[JIT simd_batch] " << symbol
 	                                  << ": simd_w=" << simd_w << " use_simd_batch=" << use_simd_batch
@@ -9937,7 +9938,7 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
                         values[op_idx] = cv;
                         cached[op_idx] = cv;
                         {
-                            static const bool jit_tel = (std::getenv("SVMP_JIT_TELEMETRY") != nullptr);
+                            static const bool jit_tel = environment::isSet("SVMP_JIT_TELEMETRY");
                             if (jit_tel) {
                                 std::cerr << "[JIT dep0-xblock] HIT hash=0x" << std::hex << op_hash << std::dec
                                           << " tg=" << qp_cache_trial_group
@@ -12308,7 +12309,7 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
                                 dep0_xblock_cache[xblock_key] = entry;
                                 xblock_cache_bytes_allocated += alloc_bytes;
                                 {
-                                    static const bool jit_tel = (std::getenv("SVMP_JIT_TELEMETRY") != nullptr);
+                                    static const bool jit_tel = environment::isSet("SVMP_JIT_TELEMETRY");
                                     if (jit_tel) {
                                         std::cerr << "[JIT dep0-xblock] STORE hash=0x" << std::hex << op_hash << std::dec
                                                   << " tg=" << qp_cache_trial_group
@@ -14718,7 +14719,7 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
             }
 
             {
-                static const bool jit_telemetry = (std::getenv("SVMP_JIT_TELEMETRY") != nullptr);
+                static const bool jit_telemetry = environment::isSet("SVMP_JIT_TELEMETRY");
                 if (jit_telemetry) {
                     if (nc_plan.needs_split) {
                         std::cerr << "[JIT perblock-split] " << symbol
@@ -15260,7 +15261,7 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
                 // K_ij = f(0,i,j) * Σ_q w[q] instead of Σ_q w[q]*f(q,i,j).
                 if (isTermQPHoistable(terms[t])) {
                     {
-                        static const bool jit_telemetry = (std::getenv("SVMP_JIT_TELEMETRY") != nullptr);
+                        static const bool jit_telemetry = environment::isSet("SVMP_JIT_TELEMETRY");
                         if (jit_telemetry) {
                             std::cerr << "[JIT qp-hoist] " << symbol
                                       << " term " << t << "/" << terms.size()
@@ -16578,7 +16579,7 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
                 const bool enable_xterm_cse =
                     suppress_qp_unroll && qp_cache_has_static_qpts && terms.size() > 1u;
                 {
-                    static const bool jit_tel = (std::getenv("SVMP_JIT_TELEMETRY") != nullptr);
+                    static const bool jit_tel = environment::isSet("SVMP_JIT_TELEMETRY");
                     if (jit_tel) {
                         std::cerr << "[JIT xterm-cse] " << symbol
                                   << ": enable=" << enable_xterm_cse
@@ -16965,7 +16966,7 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
 
                 // Telemetry: log split decisions
                 {
-                    static const bool jit_telemetry = (std::getenv("SVMP_JIT_TELEMETRY") != nullptr);
+                    static const bool jit_telemetry = environment::isSet("SVMP_JIT_TELEMETRY");
                     if (jit_telemetry && any_block_needs_split) {
                         for (std::size_t blk = 0; blk < split_plans.size(); ++blk) {
                             const auto& plan = split_plans[blk];
@@ -20767,7 +20768,7 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
 
             llvm::orc::ThreadSafeModule tsm(std::move(mod_owner), std::move(ctx_owner));
             {
-                static const bool jit_telemetry = (std::getenv("SVMP_JIT_TELEMETRY") != nullptr);
+                static const bool jit_telemetry = environment::isSet("SVMP_JIT_TELEMETRY");
                 if (jit_telemetry) {
                     std::cerr << "[JIT compile-start] " << symbol
                               << " suppress_dof_unroll=" << suppress_dof_unroll
@@ -20913,7 +20914,7 @@ LLVMGenResult LLVMGen::compileAndAddCoupledKernel(JITEngine& engine,
                     const auto ops_before = lowered.ir.opCount();
                     // Shape-aware KernelIR::optimize(): zero propagation, CSE, DCE.
                     const auto eliminated = lowered.ir.optimize();
-                    static const bool jit_telemetry = (std::getenv("SVMP_JIT_TELEMETRY") != nullptr);
+                    static const bool jit_telemetry = environment::isSet("SVMP_JIT_TELEMETRY");
                     if (jit_telemetry && eliminated > 0) {
                         std::cerr << "[JIT telemetry] coupled block " << bi << " term " << tidx
                                   << ": KernelIR " << ops_before << " -> " << lowered.ir.opCount()
@@ -21146,7 +21147,7 @@ LLVMGenResult LLVMGen::compileAndAddColocatedKernels(
         // Add the single module to the engine.
         llvm::orc::ThreadSafeModule tsm(std::move(mod_owner), std::move(ctx_owner));
         {
-            static const bool jit_telemetry = (std::getenv("SVMP_JIT_TELEMETRY") != nullptr);
+            static const bool jit_telemetry = environment::isSet("SVMP_JIT_TELEMETRY");
             if (jit_telemetry) {
                 std::cerr << "[JIT coloc-compile-start] n_kernels=" << specs.size() << "\n";
                 std::cerr.flush();

@@ -17,6 +17,7 @@
 #include "Forms/JIT/LLVMGen.h"
 #include "Forms/JIT/LLVMJITBuildInfo.h"
 #include "Forms/Tensor/TensorIR.h"
+#include "Core/EnvironmentNames.h"
 
 #include <algorithm>
 #include <atomic>
@@ -54,7 +55,7 @@ inline void hashMix(std::uint64_t& h, std::uint64_t v) noexcept
 
 [[nodiscard]] std::string trimmedEnvironmentValue(const char* name)
 {
-    const char* raw = std::getenv(name);
+    const char* raw = environment::value(name);
     if (raw == nullptr) {
         return {};
     }
@@ -228,7 +229,7 @@ inferFunctionalReferenceSpaceSignature(const FormExprNode& node,
 
 [[nodiscard]] bool envFlagEnabled(const char* name) noexcept
 {
-    const char* value = std::getenv(name);
+    const char* value = environment::value(name);
     if (value == nullptr) {
         return false;
     }
