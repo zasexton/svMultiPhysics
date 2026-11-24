@@ -1550,7 +1550,8 @@ TEST(GeneralityBenchmark, DISABLED_P11_TheDeclaredExchangeQuantityIsMeasured)
 
 TEST(GeneralityBenchmark, P11_ConjugateHeatCurvedProfilesConverge)
 {
-    for (const auto& [cell, n0] : std::vector<std::pair<Cell, int>>{{Cell::Tri3, 4}, {Cell::Quad4, 4}, {Cell::Tet4, 2}, {Cell::Hex8, 2}}) {
+    for (const auto& [cell, n0] : std::vector<std::pair<Cell, int>>{
+             {Cell::Tri3, 4}, {Cell::Quad4, 4}, {Cell::Tet4, 2}, {Cell::Hex8, 2}, {Cell::Wedge6, 2}, {Cell::Pyr5, 2}}) {
         std::vector<Real> ea, eb;
         for (int level = 0; level < 3; ++level) {
             const auto run = runConjugateHeat(cell, n0 << level, /*curved=*/true);
@@ -1682,7 +1683,8 @@ TransportRun runUpwindTransport(Cell cell, int order, int n, Real sign)
 TEST(GeneralityBenchmark, P03_UpwindDGTransportConvergesForBothVelocitySigns)
 {
     const std::vector<FamilyOrder> cases{{Cell::Tri3, 1, 4}, {Cell::Quad4, 1, 4}, {Cell::Tet4, 1, 2},
-                                         {Cell::Hex8, 1, 2}, {Cell::Tri3, 2, 4}, {Cell::Quad4, 2, 4}};
+                                         {Cell::Hex8, 1, 2}, {Cell::Wedge6, 1, 2}, {Cell::Pyr5, 1, 2},
+                                         {Cell::Tri3, 2, 4}, {Cell::Quad4, 2, 4}};
     for (const auto& c : cases) {
         for (const Real sign : {1.0, -1.0}) {
             std::vector<Real> l2;
@@ -1912,7 +1914,7 @@ SolidRun runIncompressibleSolid(Cell cell, int n, const SolidCase& sc, bool chec
 
 TEST(GeneralityBenchmark, P08_IncompressibleFiniteStrainReproducesAffineShear)
 {
-    for (const auto cell : {Cell::Tri3, Cell::Quad4, Cell::Tet4, Cell::Hex8}) {
+    for (const auto cell : {Cell::Tri3, Cell::Quad4, Cell::Tet4, Cell::Hex8, Cell::Wedge6, Cell::Pyr5}) {
         const auto run = runIncompressibleSolid(cell, 2, SolidCase{}, /*check_tangent=*/cell == Cell::Tri3);
         EXPECT_LT(run.d_l2, 1e-10) << cellName(cell);
         EXPECT_LT(run.p_l2, 1e-9) << cellName(cell);
@@ -1928,7 +1930,8 @@ TEST(GeneralityBenchmark, P08_IncompressibleFiniteStrainManufacturedConverges)
 {
     SolidCase sc;
     sc.affine = false;
-    for (const auto& [cell, n0] : std::vector<std::pair<Cell, int>>{{Cell::Tri3, 4}, {Cell::Quad4, 4}, {Cell::Tet4, 2}}) {
+    for (const auto& [cell, n0] : std::vector<std::pair<Cell, int>>{
+             {Cell::Tri3, 4}, {Cell::Quad4, 4}, {Cell::Tet4, 2}, {Cell::Hex8, 2}, {Cell::Wedge6, 2}, {Cell::Pyr5, 2}}) {
         std::vector<Real> dl2, dh1, pl2;
         const int levels = cellDimension(cell) == 2 ? 3 : 2;  // 3D: n = 2, 4
         for (int level = 0; level < levels; ++level) {
