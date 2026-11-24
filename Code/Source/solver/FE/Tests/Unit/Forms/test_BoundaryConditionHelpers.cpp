@@ -202,7 +202,8 @@ TEST(FormsBoundaryConditions, ComponentEssentialBC_GeneratesSparseStrongConstrai
     components.emplace_back(2, svmp::FE::forms::FormExpr::constant(3.0));
 
     svmp::FE::forms::bc::Dirichlet bc(
-        /*boundary_marker=*/5, std::move(components), "u", "unit");
+        /*boundary_marker=*/5, std::move(components), svmp::FE::forms::bc::Strong{},
+        svmp::FE::forms::bc::NaturalFlux{}, "u", "unit");
 
     const auto strong = bc.getStrongConstraints(/*field_id=*/11);
     ASSERT_EQ(strong.size(), 2u);
@@ -433,7 +434,7 @@ TEST(FormsBoundaryConditions, StrongComponentConditionsOfOneBoundaryMerge)
     using forms::FormExpr;
     const auto one = [](int marker, int component, double value) {
         return std::make_unique<bc::Dirichlet>(marker, std::vector<std::pair<int, FormExpr>>{{component, FormExpr::constant(value)}},
-                                               "d", "Wall");
+                                               bc::Strong{}, bc::NaturalFlux{}, "d", "Wall");
     };
     std::vector<std::unique_ptr<bc::Dirichlet>> conditions;
     conditions.push_back(one(4, 2, 3.0));
@@ -472,7 +473,8 @@ TEST(FormsBoundaryConditions, RateConditionsFollowFromValueConditions)
     namespace bc = forms::bc;
     using forms::FormExpr;
     const auto conditions = [](int marker, std::vector<std::pair<int, FormExpr>> components, std::string symbol) {
-        return std::make_unique<bc::Dirichlet>(marker, std::move(components), symbol, "Source " + symbol);
+        return std::make_unique<bc::Dirichlet>(marker, std::move(components), bc::Strong{}, bc::NaturalFlux{}, symbol,
+                                               "Source " + symbol);
     };
     const forms::TimeScalarCoefficient varying = [](svmp::FE::Real, svmp::FE::Real, svmp::FE::Real, svmp::FE::Real t) {
         return t;
@@ -522,11 +524,12 @@ TEST(FormsBoundaryConditions, StrongPrecedenceReachesTheDeclarations)
     EXPECT_EQ(bc::Dirichlet(4, forms::FormExpr::constant(1.0)).getStrongConstraints(1).front().precedence, 0);
 }
 
-TEST(FormsBoundaryConditions, NormalEssentialBCInstallsTheNormalComponentConstraint)
+TEST(FormsBoundaryConditions, StrongNormalTraceInstallsTheNormalComponentConstraint)
 {
     namespace forms = svmp::FE::forms;
-    forms::bc::NormalEssentialBC bc(/*boundary_marker=*/3, forms::FormExpr::constant(0.5));
+    forms::bc::Dirichlet bc(/*boundary_marker=*/3, forms::bc::Trace::Normal, forms::FormExpr::constant(0.5));
     EXPECT_EQ(bc.boundaryMarker(), 3);
+    EXPECT_EQ(bc.label(), "NormalEssentialBC");
     EXPECT_FALSE(bc.hasWeakTerms());
     EXPECT_FALSE(bc.allowsMarkerSharing());
     EXPECT_TRUE(bc.getStrongConstraints(/*field_id=*/0).empty());
@@ -549,7 +552,15 @@ TEST(FormsBoundaryConditions, NormalEssentialBCInstallsTheNormalComponentConstra
                                   line.find("markers=3") != std::string::npos);
     }
     EXPECT_TRUE(installed);
-    EXPECT_THROW(forms::bc::NormalEssentialBC(-1), std::invalid_argument);
+    EXPECT_THROW(forms::bc::Dirichlet(-1, forms::bc::Trace::Normal, forms::FormExpr::constant(0.0)),
+                 std::invalid_argument);
+
+    // The space decides the constraint: a scalar field has no normal trace;
+    // the tangential part has no strong form.
+    const auto p = system.addField({.name = "p", .space = scalar, .components = 1});
+    EXPECT_THROW(bc.installSystemConstraints(system, p), std::invalid_argument);
+    EXPECT_THROW(forms::bc::Dirichlet(3, forms::bc::Trace::Tangential, forms::FormExpr::constant(0.0)),
+                 std::invalid_argument);
 }
 
 TEST(FormsBoundaryConditions, NaturalBCUsesGeneratedActiveBoundaryWhenProvided)
@@ -1074,14 +1085,13 @@ TEST(FormsBoundaryConditions,
             .nitsche->penalty_scaling_verified);
     scalar_bc.contributeToResidual(
         residual, u, v);
-    forms::bc::TraceNitscheBC trace_bc(
+    forms::bc::Dirichlet trace_bc(
         measure,
         forms::FormExpr::constant(0.0),
-        inner(grad(u), n),
-        inner(grad(v), n),
-        forms::FormExpr::constant(1.0) /
-            forms::h(),
-        forms::bc::ScalarTraceOperator::Identity);
+        forms::bc::Nitsche{},
+        forms::bc::NaturalFlux{
+            .parts = {forms::bc::normalFlux([n](const forms::FormExpr& w) { return inner(grad(w), n); })},
+            .penalty_weight = forms::FormExpr::constant(1.0) / forms::h()});
     const auto trace_metadata =
         trace_bc.analysisMetadata(
             /*field_id=*/0, nullptr);
@@ -1153,21 +1163,20 @@ TEST(FormsBoundaryConditions, ApplyInterfaceTraceNitsche_AddsThreeInterfaceTerms
     EXPECT_EQ(count_marker_16, 3);
 }
 
-TEST(FormsBoundaryConditions, TraceNitscheBC_AddsThreeBoundaryTermsOnNormalTrace)
+TEST(FormsBoundaryConditions, WeakNormalTraceAddsThreeBoundaryTerms)
 {
+    namespace bc = svmp::FE::forms::bc;
     auto space = svmp::FE::spaces::HDivSpace(ElementType::Tetra4, /*order=*/0);
     const auto u = svmp::FE::forms::FormExpr::trialFunction(space, "u");
     const auto v = svmp::FE::forms::FormExpr::testFunction(space, "v");
 
     auto residual = svmp::FE::forms::dot(u, v).dx();
-    svmp::FE::forms::bc::TraceNitscheBC bc(
-        17,
-        svmp::FE::forms::FormExpr::constant(0.0),
-        svmp::FE::forms::bc::normalComponent(u),
-        svmp::FE::forms::bc::normalComponent(v),
-        svmp::FE::forms::FormExpr::constant(4.0),
-        svmp::FE::forms::bc::ScalarTraceOperator::NormalComponent);
-    bc.contributeToResidual(residual, u, v);
+    bc::Dirichlet condition(
+        17, bc::Trace::Normal, svmp::FE::forms::FormExpr::constant(0.0), bc::Nitsche{},
+        bc::NaturalFlux{.parts = {bc::normalFlux([](const svmp::FE::forms::FormExpr& w) { return bc::normalComponent(w); })},
+                        .penalty_weight = svmp::FE::forms::FormExpr::constant(4.0)});
+    EXPECT_EQ(condition.label(), "NormalNitscheBC");
+    condition.contributeToResidual(residual, u, v);
 
     svmp::FE::forms::FormCompiler compiler;
     const auto ir = compiler.compileResidual(residual);
@@ -1181,6 +1190,119 @@ TEST(FormsBoundaryConditions, TraceNitscheBC_AddsThreeBoundaryTermsOnNormalTrace
     }
 
     EXPECT_EQ(count_marker_17, 3);
+}
+
+TEST(FormsBoundaryConditions, WeakTracesPairTheFluxWithTheTrace)
+{
+    namespace forms = svmp::FE::forms;
+    namespace bc = forms::bc;
+    using forms::FormExpr;
+    auto scalar = std::make_shared<svmp::FE::spaces::H1Space>(ElementType::Tetra4, 1);
+    auto vector = std::make_shared<svmp::FE::spaces::ProductSpace>(scalar, 3);
+    const auto u = forms::StateField(0, *vector, "u");
+    const auto v = forms::TestField(0, *vector, "v");
+    const auto p = forms::StateField(1, *scalar, "p");
+    const auto q = forms::TestField(1, *scalar, "q");
+    const auto mu = FormExpr::constant(0.5);
+    const auto T = [mu](const FormExpr& w) { return FormExpr::constant(2.0) * mu * forms::symgrad(w); };
+    const bc::NaturalFlux sigma_n{.parts = {bc::isotropicFlux(1, p, q), bc::conormalFlux(T)},
+                                  .penalty_weight = mu / forms::hNormal()};
+    const auto n = FormExpr::normal();
+    const bc::Nitsche nitsche{.gamma = 8.0};
+    const auto penalty = bc::buildTraceNitschePenalty(sigma_n.penalty_weight, u, nitsche);
+    const auto rows_of = [&](const bc::Dirichlet& condition) {
+        FormExpr M;
+        FormExpr C;
+        bc::ResidualRows rows({{0, &M}, {1, &C}});
+        condition.contributeToRows(rows, u, v, 0);
+        return std::pair{M, C};
+    };
+    const auto c = [](double value) { return FormExpr::constant(value); };
+
+    // u . n = g: the normal components of the stress and of v; the pressure
+    // part -p n gives p (v . n) and its adjoint q (u . n - g).
+    {
+        const bc::Dirichlet condition(4, bc::Trace::Normal, c(0.25), nitsche, sigma_n);
+        EXPECT_EQ(condition.label(), "NormalNitscheBC");
+        const auto [M, C] = rows_of(condition);
+        const auto vn = forms::dot(v, n);
+        const auto diff = forms::dot(u, n) - c(0.25);
+        const auto expected_M = (p * vn).ds(4) + (-(inner(T(u) * n, n) * vn).ds(4)) +
+                                (-(inner(T(v) * n, n) * diff).ds(4)) + (penalty * diff * vn).ds(4);
+        EXPECT_EQ(M.toString(), expected_M.toString());
+        EXPECT_EQ(C.toString(), (q * diff).ds(4).toString());
+        const auto metadata = condition.analysisMetadata(0, nullptr);
+        ASSERT_EQ(metadata.size(), 1u);
+        EXPECT_EQ(metadata[0].trace_kind, svmp::FE::analysis::TraceKind::NormalComponent);
+        EXPECT_EQ(metadata[0].enforcement_kind, svmp::FE::analysis::EnforcementKind::WeakNitsche);
+        const auto [M_penalty, C_penalty] = rows_of(bc::Dirichlet(4, bc::Trace::Normal, c(0.25), bc::Penalty{c(3.0)}));
+        EXPECT_EQ(M_penalty.toString(), (c(3.0) * diff * vn).ds(4).toString());
+        EXPECT_FALSE(C_penalty.isValid());
+    }
+
+    // (I - n n) u = (I - n n) g: the tangential parts; the pressure has none.
+    {
+        const auto g = FormExpr::asVector({c(0.0), c(0.5), c(0.0)});
+        const bc::Dirichlet condition(4, bc::Trace::Tangential, g, nitsche, sigma_n);
+        EXPECT_EQ(condition.label(), "TangentialNitscheBC");
+        const auto [M, C] = rows_of(condition);
+        const auto vt = forms::tangentialProjection(v, n);
+        const auto diff = forms::tangentialProjection(u - g, n);
+        const auto expected_M = (-inner(T(u) * n, vt).ds(4)) + (-inner(T(v) * n, diff).ds(4)) +
+                                (penalty * inner(diff, vt)).ds(4);
+        EXPECT_EQ(M.toString(), expected_M.toString());
+        EXPECT_FALSE(C.isValid());
+        EXPECT_EQ(condition.analysisMetadata(0, nullptr).front().trace_kind,
+                  svmp::FE::analysis::TraceKind::TangentialComponent);
+    }
+
+    // u_0 = g_0 and u_2 = g_2 by Nitsche: the listed components.
+    {
+        const bc::Dirichlet condition(4, std::vector<std::pair<int, FormExpr>>{{0, c(1.0)}, {2, c(2.0)}}, nitsche,
+                                      sigma_n, "u", "Inlet");
+        EXPECT_EQ(condition.label(), "ComponentNitscheBC");
+        EXPECT_TRUE(condition.hasWeakTerms());
+        EXPECT_FALSE(condition.mergesComponents());
+        EXPECT_TRUE(condition.getStrongConstraints(0).empty());
+        const auto [M, C] = rows_of(condition);
+        const auto project = [&](const FormExpr& w) {
+            return FormExpr::asVector({w.component(0), c(0.0), w.component(2)});
+        };
+        const auto pv = project(v);
+        const auto diff = project(u) - FormExpr::asVector({c(1.0), c(0.0), c(2.0)});
+        const auto expected_M = (p * inner(n, pv)).ds(4) + (-inner(T(u) * n, pv).ds(4)) +
+                                (-inner(T(v) * n, diff).ds(4)) + (penalty * inner(diff, pv)).ds(4);
+        EXPECT_EQ(M.toString(), expected_M.toString());
+        EXPECT_EQ(C.toString(), (q * inner(n, diff)).ds(4).toString());
+        const auto metadata = condition.analysisMetadata(0, nullptr);
+        ASSERT_EQ(metadata.size(), 2u);
+        EXPECT_EQ(metadata[0].component, 0);
+        EXPECT_EQ(metadata[1].component, 2);
+        EXPECT_EQ(metadata[1].enforcement_kind, svmp::FE::analysis::EnforcementKind::WeakNitsche);
+        EXPECT_NE(metadata[1].source.find("Inlet comp 2"), std::string::npos);
+    }
+
+    // Refusals: a normal flux on components or on the tangential part, a
+    // component the field does not have, a scalar field, and a certified
+    // generated-boundary route of a trace.
+    const auto q_flux = bc::NaturalFlux{.parts = {bc::normalFlux([](const FormExpr& w) { return forms::dot(w, w); })},
+                                        .penalty_weight = c(1.0)};
+    EXPECT_THROW(bc::Dirichlet(4, bc::Trace::Tangential, c(0.0), nitsche, q_flux), std::invalid_argument);
+    EXPECT_THROW(bc::Dirichlet(4, std::vector<std::pair<int, FormExpr>>{{1, c(0.0)}}, nitsche, q_flux),
+                 std::invalid_argument);
+    EXPECT_THROW((void)rows_of(bc::Dirichlet(4, std::vector<std::pair<int, FormExpr>>{{3, c(0.0)}}, nitsche, sigma_n)),
+                 std::invalid_argument);
+    FormExpr R = (p * q).dx();
+    EXPECT_THROW(bc::Dirichlet(4, bc::Trace::Normal, c(0.0), bc::Penalty{c(1.0)}).contributeToResidual(R, p, q),
+                 std::invalid_argument);
+    FormExpr M;
+    FormExpr C;
+    std::vector<bc::GeneratedBoundaryNitscheTraceFormBinding> bindings;
+    bc::ResidualRows certified({{0, &M}, {1, &C}}, &bindings);
+    EXPECT_THROW(bc::Dirichlet(forms::ExteriorBoundaryMeasure::generatedActiveSubset(4, 104), bc::Trace::Normal, c(0.0),
+                               nitsche, sigma_n)
+                     .contributeToRows(certified, u, v, 0),
+                 std::invalid_argument);
 }
 
 TEST(FormsBoundaryConditions, InterfaceTraceNitscheBC_AddsThreeInterfaceTermsOnNormalTraceJump)

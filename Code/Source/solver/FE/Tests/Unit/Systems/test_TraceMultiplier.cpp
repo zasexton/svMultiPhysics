@@ -19,6 +19,10 @@
  * terms written on dI: the spaces coincide with the restricted volume
  * multipliers', so u and the multipliers equal B1's to solver tolerance.
  *
+ * B4: the Dirichlet condition's other traces by Nitsche (a component list,
+ * the normal component, the tangential part), each with the rest of the
+ * traction natural, reproduce a linear vector solution of -div grad u = 0.
+ *
  * I3 (cut interface): a circle of radius 0.5 in a square of side 2, k1 = 1
  * inside and k2 = 10 outside, u = r^2 / k_i + c_i (continuous), f = -4, so
  * the flux k du/dn on the circle is 2r = 1.  Two phase fields on the
@@ -754,6 +758,72 @@ TEST(TraceMultiplierSetup, AnUnstabilizedMultiplierIsReportedForTheIterativeSolv
     auto stabilized = buildWeakDirichletPoisson(buildQuadGrid(2, 2, 1.0, 1.0, 1, kWholeBoundary), quad1(), quad1(),
                                                 FormExpr::constant(1.0), FormExpr::constant(0.0), Real(0.1));
     EXPECT_TRUE(stabilized.system->unstabilizedTraceMultiplierFields().empty());
+}
+
+// ---------------------------------------------------------------------------
+// B4: the other traces of the Dirichlet condition (a component list, the
+// normal component, the tangential part) by Nitsche, solved
+// ---------------------------------------------------------------------------
+
+TEST(TraceMultiplierB4, WeakTracesByNitscheReproduceALinearSolution)
+{
+    // -div grad u = 0 for u* = (1 + 2x + 3y, -1 + x/2 - y) on the unit square:
+    // the left side states one trace of u weakly and the rest of the traction
+    // naturally, the other sides u = u* strongly.  Nitsche's method is
+    // consistent and u* lies in the P1 space, so u_h = u*.
+    namespace bc = forms::bc;
+    const auto c = [](Real value) { return FormExpr::constant(value); };
+    const auto ux = coefficient("u_exact_x", [](Real x, Real y) { return 1.0 + 2.0 * x + 3.0 * y; });
+    const auto uy = coefficient("u_exact_y", [](Real x, Real y) { return -1.0 + 0.5 * x - y; });
+    const auto u_exact = FormExpr::asVector({ux, uy});
+    const auto n = FormExpr::normal();
+    const bc::NaturalFlux conormal{.parts = {bc::conormalFlux([](const FormExpr& w) { return forms::grad(w); })},
+                                   .penalty_weight = c(1.0) / forms::hNormal()};
+    // The traction grad(u*) n on the left side (n = (-1, 0)) is (-2, -1/2):
+    // its normal part (-2, 0), its tangential part (0, -1/2).
+    enum class Kind { Components, Normal, Tangential };
+    for (const auto kind : {Kind::Components, Kind::Normal, Kind::Tangential}) {
+        SCOPED_TRACE(static_cast<int>(kind));
+        auto h1 = std::make_shared<spaces::H1Space>(ElementType::Quad4, 1);
+        auto vector = std::make_shared<spaces::ProductSpace>(h1, 2);
+        FESystem sys(buildQuadGrid(4, 4, 1.0, 1.0, 1));
+        const auto u_id = sys.addField(FieldSpec{.name = "u", .space = vector, .components = 2});
+        sys.addOperator("op");
+        const auto u = forms::StateField(u_id, *vector, "u");
+        const auto v = forms::TestField(u_id, *vector, "v");
+        auto residual = forms::inner(forms::grad(u), forms::grad(v)).dx();
+        systems::BoundaryConditionManager bcs;
+        switch (kind) {
+        case Kind::Components:   // u_0 = u*_0
+            bcs.add(std::make_unique<bc::Dirichlet>(kLeft, std::vector<std::pair<int, FormExpr>>{{0, ux}},
+                                                    bc::Nitsche{}, conormal));
+            bcs.add(std::make_unique<bc::NaturalBC>(kLeft, FormExpr::asVector({c(0.0), c(-0.5)})));
+            break;
+        case Kind::Normal:       // u . n = u* . n
+            bcs.add(std::make_unique<bc::Dirichlet>(kLeft, bc::Trace::Normal, forms::dot(u_exact, n), bc::Nitsche{},
+                                                    conormal));
+            bcs.add(std::make_unique<bc::NaturalBC>(kLeft, FormExpr::asVector({c(0.0), c(-0.5)})));
+            break;
+        case Kind::Tangential:   // (I - n n) u = (I - n n) u*
+            bcs.add(std::make_unique<bc::Dirichlet>(kLeft, bc::Trace::Tangential, u_exact, bc::Nitsche{}, conormal));
+            bcs.add(std::make_unique<bc::NaturalBC>(kLeft, FormExpr::asVector({c(-2.0), c(0.0)})));
+            break;
+        }
+        for (const int side : {kRight, kBottom, kTop}) {
+            bcs.add(std::make_unique<bc::Dirichlet>(side, std::vector<FormExpr>{ux, uy}));
+        }
+        bcs.applyAll(sys, residual, u, v, u_id);
+        (void)systems::installFormulation(sys, "op", {u_id}, residual);
+        sys.setup();
+        const auto state = solveLinear(sys);
+        systems::SystemStateView view;
+        view.u = state;
+        const auto e = u - u_exact;
+        const auto values = systems::evaluateFunctionalForms(sys, std::vector<FormExpr>{forms::inner(e, e).dx()}, view,
+                                                             systems::CollectiveCommunicator{});
+        ASSERT_EQ(values.size(), 1u);
+        EXPECT_LT(std::sqrt(values[0].value), 1e-10);
+    }
 }
 
 // ---------------------------------------------------------------------------

@@ -261,7 +261,7 @@ TEST(VectorBasisConstraints, HDivNormalConstraintUpdatesTimeDependentBoundaryTra
     expectBoundaryTraceEquals(sys, B, marker, /*expected=*/3.5, /*tol=*/1e-10);
 }
 
-TEST(VectorBasisConstraints, BoundaryConditionManagerInstallsNormalTraceEssentialBC)
+TEST(VectorBasisConstraints, BoundaryConditionManagerInstallsAStrongNormalTrace)
 {
     const int marker = 7;
     auto mesh = std::make_shared<forms::test::SingleTetraOneBoundaryFaceMeshAccess>(marker);
@@ -271,7 +271,7 @@ TEST(VectorBasisConstraints, BoundaryConditionManagerInstallsNormalTraceEssentia
     const auto B = sys.addField(FieldSpec{.name = "B", .space = space, .components = space->value_dimension()});
 
     BoundaryConditionManager bc_manager;
-    bc_manager.add(std::make_unique<forms::bc::NormalTraceEssentialBC>(marker, forms::FormExpr::constant(4.0)));
+    bc_manager.add(std::make_unique<forms::bc::Dirichlet>(marker, forms::bc::Trace::Normal, forms::FormExpr::constant(4.0)));
     bc_manager.applyAll(sys, B);
 
     SetupInputs inputs;
@@ -298,7 +298,7 @@ TEST(VectorBasisConstraints, BoundaryConditionManagerSupportsMixedStrongAndWeakT
 
     BoundaryConditionManager bc_manager;
     bc_manager.add(
-        std::make_unique<forms::bc::NormalTraceEssentialBC>(strong_marker, forms::FormExpr::constant(1.5)));
+        std::make_unique<forms::bc::Dirichlet>(strong_marker, forms::bc::Trace::Normal, forms::FormExpr::constant(1.5)));
     bc_manager.add(
         std::make_unique<forms::bc::TraceLoadBC>(weak_marker, forms::FormExpr::constant(2.0)));
     bc_manager.applyAll(sys, residual, u, v, B);
@@ -364,7 +364,7 @@ TEST(VectorBasisConstraints, BoundaryConditionManagerRejectsStrongAndWeakTraceCo
 {
     BoundaryConditionManager bc_manager;
     bc_manager.add(
-        std::make_unique<forms::bc::NormalTraceEssentialBC>(7, forms::FormExpr::constant(1.0)));
+        std::make_unique<forms::bc::Dirichlet>(7, forms::bc::Trace::Normal, forms::FormExpr::constant(1.0)));
     bc_manager.add(
         std::make_unique<forms::bc::TraceLoadBC>(7, forms::FormExpr::constant(2.0)));
 

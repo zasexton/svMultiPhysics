@@ -18,10 +18,9 @@ interface infrastructure.
 
 ### Boundary trace conditions
 
-- `NormalTraceEssentialBC`
+- `Dirichlet` with `Trace::Normal` (strong, or weak by `Nitsche{}`)
 - `TraceLoadBC`
 - `TraceRobinBC`
-- `TraceNitscheBC`
 - `TraceInequalityBC`
 
 ### Interface trace conditions
@@ -52,9 +51,9 @@ These names are the ones new code and new documentation should use.
 
 Use these rules when selecting the FE primitive:
 
-- Use `NormalTraceEssentialBC` when the normal trace is prescribed strongly.
+- Use `Dirichlet(b, Trace::Normal, g)` when the normal trace is prescribed strongly.
 - Use `TraceLoadBC` or `TraceRobinBC` when the trace law is weak and equality-based.
-- Use `TraceNitscheBC` when the trace law is weakly imposed through consistency, adjoint, and penalty terms.
+- Use `Dirichlet(b, Trace::Normal, g, Nitsche{}, flux)` when the trace law is weakly imposed through consistency, adjoint, and penalty terms.
 - Use `InterfaceTrace*` classes when the law lives on `.dI(marker)` rather than `.ds(marker)`.
 - Use the periodic or MPC trace helpers when the relation is algebraic and orientation-sensitive.
 - Use `TraceInequalityBC` when the law is one-sided and may switch between active and inactive states during the nonlinear solve.
@@ -77,7 +76,7 @@ auto w = TestField(q_field, *Vhdiv, "w");
 auto residual = inner(k_inv * q, w).dx();
 
 systems::BoundaryConditionManager bc_manager;
-bc_manager.add(forms::bc::makeNormalTraceEssentialBC(/*marker=*/4, FormExpr::constant(1.0)));
+bc_manager.add(std::make_unique<forms::bc::Dirichlet>(/*marker=*/4, forms::bc::Trace::Normal, FormExpr::constant(1.0)));
 bc_manager.add(forms::bc::makeTraceRobinBC(/*marker=*/7,
                                            FormExpr::constant(alpha),
                                            FormExpr::constant(rhs)));
@@ -127,12 +126,13 @@ without introducing a physics-specific wrapper.
 
 ## 3. Trace Nitsche Conditions
 
-Trace Nitsche conditions are explicit objects in `Forms/NitscheBC.h`. They are
-appropriate when the FE law should remain weak but should include consistency,
-adjoint, and penalty terms in one object.
+A boundary trace condition by Nitsche's method is `bc::Dirichlet` with the
+enforcement `bc::Nitsche{}` (`Forms/StandardBCs.h`): the consistency, adjoint
+and penalty terms follow from the operator's flux, stated once as a
+`bc::NaturalFlux`.
 
 ```cpp
-#include "FE/Forms/NitscheBC.h"
+#include "FE/Forms/StandardBCs.h"
 #include "FE/Forms/Vocabulary.h"
 
 const auto n = normal();
@@ -140,19 +140,17 @@ auto u = StateField(u_field, *V, "u");
 auto v = TestField(u_field, *V, "v");
 
 systems::BoundaryConditionManager bc_manager;
-bc_manager.add(std::make_unique<forms::bc::TraceNitscheBC>(
-    /*boundary_marker=*/9,
-    FormExpr::constant(0.0),
-    inner(grad(u), n),
-    inner(grad(v), n),
-    FormExpr::constant(1.0) / h(),
-    forms::bc::ScalarTraceOperator::Identity));
+const forms::bc::NaturalFlux flux{
+    .parts = {forms::bc::normalFlux([n](const FormExpr& w) { return inner(grad(w), n); })},
+    .penalty_weight = FormExpr::constant(1.0) / h()};
+bc_manager.add(std::make_unique<forms::bc::Dirichlet>(/*boundary_marker=*/9, FormExpr::constant(0.0),
+                                                      forms::bc::Nitsche{}, flux));
 bc_manager.applyAll(system, residual, u, v, u_field);
 ```
 
 Use `InterfaceTraceNitscheBC` for the interface counterpart. For `H(div)`,
-switch the trace operator to `ScalarTraceOperator::NormalComponent` and supply
-the formulation-specific scalar consistency and adjoint flux expressions.
+name the normal trace, `bc::Dirichlet(9, bc::Trace::Normal, g, bc::Nitsche{}, flux)`,
+with the formulation's scalar normal flux as the `normalFlux` part.
 
 ## 4. H(div) Periodic And MPC Trace Relations
 
@@ -291,8 +289,8 @@ Use this when the physical law is one-sided, for example:
 - a unilateral scalar-trace relation must participate in the nonlinear solve
 
 Do not use `TraceInequalityBC` when the intended law is an ordinary equality.
-For equality-based trace laws, prefer `NormalTraceEssentialBC`,
-`TraceLoadBC`, `TraceRobinBC`, or `TraceNitscheBC`.
+For equality-based trace laws, prefer `Dirichlet` with `Trace::Normal`,
+`TraceLoadBC` or `TraceRobinBC`.
 
 ## 8. Current Scope Boundaries
 

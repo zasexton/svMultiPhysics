@@ -103,8 +103,8 @@ TEST(BoundaryConditionDescriptor, EssentialBC_MultiComponent_PerComponentDescrip
     }
 }
 
-TEST(BoundaryConditionDescriptor, NormalTraceEssentialBC_StrongNormalComponentAnchors) {
-    bc::NormalTraceEssentialBC bc(9, FormExpr::constant(0.0));
+TEST(BoundaryConditionDescriptor, StrongNormalTrace_StrongNormalComponentAnchors) {
+    bc::Dirichlet bc(9, bc::Trace::Normal, FormExpr::constant(0.0));
     auto descs = bc.analysisMetadata(/*field_id=*/0, nullptr);
 
     ASSERT_EQ(descs.size(), 1u);
@@ -267,12 +267,13 @@ TEST(BoundaryConditionDescriptor, NitscheBC_WeakNitscheAnchorsAll) {
     EXPECT_TRUE(d.nitsche->penalty_positive);
 }
 
-TEST(BoundaryConditionDescriptor, TraceNitscheBC_WeakNitscheNormalComponentAnchorsAll) {
-    bc::TraceNitscheBC bc(10,
-                          FormExpr::constant(0.0),
-                          FormExpr::constant(1.0),
-                          FormExpr::constant(1.0),
-                          FormExpr::constant(2.0));
+TEST(BoundaryConditionDescriptor, WeakNormalTrace_WeakNitscheNormalComponentAnchorsAll) {
+    bc::Dirichlet bc(10,
+                     bc::Trace::Normal,
+                     FormExpr::constant(0.0),
+                     bc::Nitsche{},
+                     bc::NaturalFlux{.parts = {bc::normalFlux([](const FormExpr&) { return FormExpr::constant(1.0); })},
+                                     .penalty_weight = FormExpr::constant(2.0)});
     auto descs = bc.analysisMetadata(/*field_id=*/0, nullptr);
 
     ASSERT_EQ(descs.size(), 1u);

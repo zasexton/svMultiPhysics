@@ -15,9 +15,9 @@ How `FE/Forms` weak-form expressions become assembled operators in `FE/Systems`.
 | Mixed bilinear operator | `installMixedBilinear()` | `FormsInstaller.h` |
 | Mixed linear operator | `installMixedLinear()` | `FormsInstaller.h` |
 | Strong Dirichlet BCs | `installStrongDirichlet()` | `FormsInstaller.h` |
-| H(div) normal-trace BCs | `BoundaryConditionManager` + `NormalTraceEssentialBC` | `StandardBCs.h` |
+| H(div) normal-trace BCs | `BoundaryConditionManager` + `bc::Dirichlet(b, bc::Trace::Normal, g)` | `StandardBCs.h` |
 | Interface trace BCs | `BoundaryConditionManager` + `InterfaceTraceLoadBC` / `InterfaceTraceRobinBC` / `InterfaceTraceJumpPenaltyBC` | `StandardBCs.h` |
-| Trace Nitsche BCs | `TraceNitscheBC` / `InterfaceTraceNitscheBC` | `NitscheBC.h` |
+| Trace Nitsche BCs | `bc::Dirichlet(b, trace, g, bc::Nitsche{}, flux)` / `InterfaceTraceNitscheBC` | `StandardBCs.h` / `NitscheBC.h` |
 | One-sided trace laws | `TraceInequalityBC` | `StandardBCs.h` |
 | H(div) periodic/MPC trace helpers | `makeHDivTracePeriodicBC*()` / `makeHDivTracePeriodicMPC*()` | `ConstraintTools.h` |
 | Mixed-dimensional interface fields | `FESystem::addInterfaceField()`, coupled by `.dI(marker)` forms | `FESystem.h` |
@@ -218,11 +218,13 @@ throw; uncommitted held declarations are dropped on plan destruction. The
 callback overload and direct BC APIs remain supported.
 
 For `H(div)` fields, strong prescribed normal flux is not lowered through
-pointwise `StrongDirichlet`. Use `forms::bc::NormalTraceEssentialBC`, which
-installs an `H(div)` trace constraint through the BC manager. Weak trace loads
-and Robin relations are available through `forms::bc::TraceLoadBC` and
-`forms::bc::TraceRobinBC`. Trace-consistent weak imposition uses
-`forms::bc::TraceNitscheBC` or `forms::bc::InterfaceTraceNitscheBC`. One-sided
+pointwise `StrongDirichlet`. Use `forms::bc::Dirichlet` with
+`bc::Trace::Normal`, which installs an `H(div)` trace constraint through the BC
+manager. Weak trace loads and Robin relations are available through
+`forms::bc::TraceLoadBC` and `forms::bc::TraceRobinBC`. Trace-consistent weak
+imposition uses `forms::bc::Dirichlet` with `bc::Trace::Normal` and
+`bc::Nitsche{}` (the operator's flux as a `bc::NaturalFlux`), or
+`forms::bc::InterfaceTraceNitscheBC` on an interface. One-sided
 boundary behavior uses `forms::bc::TraceInequalityBC`. FE intentionally does
 not encode a special "passive outflow" primitive; that is represented by
 leaving the normal trace unconstrained or by adding a generic weak trace term.
@@ -235,7 +237,7 @@ auto w = TestField(q_field, *Vhdiv, "w");
 auto residual = inner(k_inv * q, w).dx();
 
 systems::BoundaryConditionManager bc_manager;
-bc_manager.add(forms::bc::makeNormalTraceEssentialBC(4, FormExpr::constant(1.0)));
+bc_manager.add(std::make_unique<forms::bc::Dirichlet>(4, forms::bc::Trace::Normal, FormExpr::constant(1.0)));
 bc_manager.add(forms::bc::makeTraceRobinBC(7, FormExpr::constant(alpha), FormExpr::constant(rhs)));
 bc_manager.applyAll(system, residual, q, w, q_field);
 ```
@@ -276,10 +278,9 @@ bc_manager.applyAll(system, residual, q, w, q_field);
 
 The canonical public trace-condition names are:
 
-- `NormalTraceEssentialBC`
+- `Dirichlet` with `Trace::Normal` (strong or weak)
 - `TraceLoadBC`
 - `TraceRobinBC`
-- `TraceNitscheBC`
 - `TraceInequalityBC`
 - `InterfaceTraceLoadBC`
 - `InterfaceTraceRobinBC`

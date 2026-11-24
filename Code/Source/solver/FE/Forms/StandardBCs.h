@@ -390,32 +390,51 @@ private:
     std::vector<GeneratedBoundaryNitscheTraceFormBinding>* bindings_{nullptr};
 };
 
+/// The trace tau(u) that a Dirichlet condition tau(u) = g prescribes, when it
+/// is not the field itself or a list of its components.
+enum class Trace : std::uint8_t {
+    Value,       ///< u: the whole field (the default)
+    Normal,      ///< u . n, a scalar: the normal component of a vector field, or the normal trace of an H(div) field
+    Tangential,  ///< (I - n n) u, a vector: the tangential part of a vector field
+};
+
 /**
- * @brief The Dirichlet condition u = g on a boundary, enforced as declared
+ * @brief The Dirichlet condition tau(u) = g on a boundary, enforced as declared
  *
- * One condition for every enforcement:
+ * The trace tau is the field (u = g), some of its components (u_i = g_i, a
+ * list of indexed values), its normal component (Trace::Normal, u . n = g) or
+ * its tangential part (Trace::Tangential, (I - n n) u = (I - n n) g).  One
+ * condition for every enforcement:
  * - Strong{}: the degrees of freedom on the boundary take g (one declaration
- *   per component of a component list).
- * - Nitsche{...}: weak, from the operator's NaturalFlux: the consistency
- *   terms of the parts in u's row, in part order; the adjoint terms in the
- *   row of each part's unknown, the parts in u first; then the penalty
- *   gamma p^2 w (u - g) . v.  A flux with parts in other
- *   unknowns makes the condition multi-row (contributeToRows).
- * - Penalty{beta}: weak, beta (u - g) . v.
+ *   per component of a component list); a normal trace installs the normal
+ *   constraint of the field's space (HDivNormalConstraint for H(div),
+ *   NormalComponentConstraint for a vector Lagrange field).  A tangential
+ *   trace has no strong form.
+ * - Nitsche{...}: weak, from the operator's NaturalFlux F: the consistency
+ *   terms -(F(u) . tau(v)) of the parts in u's row, in part order; the
+ *   adjoint terms -/+ (F(w) . (tau(u) - g)), w the test function of each
+ *   part's unknown, in that unknown's row, the parts in u first; then the
+ *   penalty gamma p^2 w (tau(u) - g) . tau(v).  For the normal trace a flux
+ *   is paired by its normal component (F . n); the isotropic part -s n has no
+ *   tangential component.  A flux with parts in other unknowns makes the
+ *   condition multi-row (contributeToRows).
+ * - Penalty{beta}: weak, beta (tau(u) - g) . tau(v).
  * - Multiplier{lambda, beta}: weak, through the multiplier lambda restricted
  *   to the boundary, (lambda v) + (mu (u - g)), with Barbosa and Hughes's
- *   stabilization when beta > 0.  The condition is exclusive on its boundary;
- *   the multiplier's rows anchor the constant of u (setup reads them).
+ *   stabilization when beta > 0 (the value of a scalar field only).  The
+ *   condition is exclusive on its boundary; the multiplier's rows anchor the
+ *   constant of u (setup reads them).
  *
  * The target is a Boundary: a marker or an exterior measure (the generated
- * wet part of a cut boundary: Nitsche or penalty only).  The value is the whole field (a
- * scalar, or a vector expression), every component of a vector field, or, for
- * strong enforcement, some components; strong component conditions of one
- * boundary merge (mergeComponents, BoundaryConditionManager::add).  The
- * manifest names the condition by
- * its enforcement: EssentialBC (strong, the whole field or every component),
- * ComponentEssentialBC (strong, some components), NitscheBC, PenaltyBC,
- * MultiplierBC.
+ * wet part of a cut boundary: Nitsche or penalty only).  The value is the
+ * whole field (a scalar, or a vector expression), every component of a vector
+ * field, some components, or the trace's value (a scalar for the normal
+ * trace, a vector for the tangential part); strong component conditions of
+ * one boundary merge (mergeComponents, BoundaryConditionManager::add).  The
+ * manifest names the condition by its trace and enforcement: EssentialBC
+ * (strong, the whole field or every component), ComponentEssentialBC,
+ * NormalEssentialBC, NitscheBC, ComponentNitscheBC, NormalNitscheBC,
+ * TangentialNitscheBC, the same for PenaltyBC, and MultiplierBC.
  */
 class Dirichlet final : public BoundaryCondition {
 public:
@@ -428,6 +447,25 @@ public:
         : Dirichlet(std::move(target), std::vector<FormExpr>{std::move(value)}, std::move(how), std::move(flux),
                     std::move(symbol))
     {
+    }
+
+    /// tau(u) = g for the trace @p trace: Trace::Normal, u . n = g with g a
+    /// scalar; Trace::Tangential, (I - n n) u = (I - n n) g with g a vector
+    /// (weak enforcement); Trace::Value, u = g.
+    Dirichlet(Boundary target,
+              Trace trace,
+              FormExpr value,
+              Enforcement how = Strong{},
+              NaturalFlux flux = {},
+              std::string symbol = "u")
+        : trace_(trace)
+        , how_(std::move(how))
+        , flux_(std::move(flux))
+        , symbol_(std::move(symbol))
+    {
+        setTarget(target);
+        components_.emplace_back(-1, std::move(value));
+        validate();
     }
 
     /// u_i = g_i for every component i of a vector field.
@@ -451,13 +489,17 @@ public:
         validate();
     }
 
-    /// u_i = g_i for the listed components i (strong enforcement); the
-    /// descriptors name the condition @p source_name.
+    /// u_i = g_i for the listed components i of a vector field; the
+    /// descriptors name the condition @p source_name (its label when empty).
     Dirichlet(Boundary target,
               std::vector<std::pair<int, FormExpr>> components,
-              std::string symbol,
-              std::string source_name)
-        : symbol_(std::move(symbol))
+              Enforcement how = Strong{},
+              NaturalFlux flux = {},
+              std::string symbol = "u",
+              std::string source_name = {})
+        : how_(std::move(how))
+        , flux_(std::move(flux))
+        , symbol_(std::move(symbol))
         , source_name_(std::move(source_name))
         , some_components_(true)
     {
@@ -478,17 +520,28 @@ public:
 
     [[nodiscard]] std::string_view label() const override
     {
-        if (isStrong()) {
-            return some_components_ ? "ComponentEssentialBC" : "EssentialBC";
-        }
-        if (std::holds_alternative<Penalty>(how_)) {
-            return "PenaltyBC";
-        }
         if (isMultiplier()) {
             return "MultiplierBC";
         }
-        return "NitscheBC";
+        const auto by_trace = [this](std::string_view value, std::string_view components, std::string_view normal,
+                                     std::string_view tangential) {
+            if (some_components_) {
+                return components;
+            }
+            return trace_ == Trace::Normal ? normal : trace_ == Trace::Tangential ? tangential : value;
+        };
+        if (isStrong()) {
+            return by_trace("EssentialBC", "ComponentEssentialBC", "NormalEssentialBC", "TangentialEssentialBC");
+        }
+        if (std::holds_alternative<Penalty>(how_)) {
+            return by_trace("PenaltyBC", "ComponentPenaltyBC", "NormalPenaltyBC", "TangentialPenaltyBC");
+        }
+        return by_trace("NitscheBC", "ComponentNitscheBC", "NormalNitscheBC", "TangentialNitscheBC");
     }
+
+    /// The trace the condition prescribes (Trace::Value for the field or a
+    /// component list).
+    [[nodiscard]] Trace trace() const noexcept { return trace_; }
 
     [[nodiscard]] bool hasWeakTerms() const override { return !isStrong(); }
 
@@ -519,13 +572,34 @@ public:
         multiplier_name_ = rec.name;
     }
 
-    /// Registers the multiplier's support restriction to the boundary.
-    void installSystemConstraints(systems::FESystem& system, FieldId /*field_id*/) const override
+    /// Registers the multiplier's support restriction to the boundary, or the
+    /// constraint of a strong normal trace that the field's space takes: the
+    /// H(div) normal-trace constraint, or the normal-component constraint of a
+    /// vector Lagrange field.
+    void installSystemConstraints(systems::FESystem& system, FieldId field_id) const override
     {
         if (const auto* multiplier = std::get_if<Multiplier>(&how_)) {
             system.addSystemConstraint(std::make_unique<constraints::SupportRestrictionConstraint>(
                 multiplier->field, ExteriorBoundaryMeasure::fullPhysical(boundary_marker_)));
+            return;
         }
+        if (!isStrong() || trace_ != Trace::Normal) {
+            return;
+        }
+        const auto& rec = system.fieldRecord(field_id);
+        const auto& value = components_.front().second;
+        if (rec.space && rec.space->continuity() == Continuity::H_div) {
+            system.addSystemConstraint(
+                std::make_unique<constraints::HDivNormalConstraint>(field_id, boundary_marker_, value));
+            return;
+        }
+        if (!rec.space || rec.space->continuity() == Continuity::H_curl || rec.space->value_dimension() < 2) {
+            throw std::invalid_argument("bc::Dirichlet on boundary_marker " + std::to_string(boundary_marker_) +
+                                        ": a strong normal trace needs an H(div) field or a vector Lagrange field, "
+                                        "not '" + rec.name + "'");
+        }
+        system.addSystemConstraint(std::make_unique<constraints::NormalComponentConstraint>(
+            field_id, std::vector<int>{boundary_marker_}, value));
     }
 
     [[nodiscard]] const Enforcement& enforcement() const noexcept { return how_; }
@@ -621,9 +695,11 @@ public:
         }
     }
 
+    /// The strong declarations of the field or its components (a strong
+    /// normal trace is a system constraint, installSystemConstraints).
     [[nodiscard]] std::vector<StrongDirichlet> getStrongConstraints(FieldId field_id) const override
     {
-        if (!isStrong()) {
+        if (!isStrong() || trace_ != Trace::Value) {
             return {};
         }
         std::vector<StrongDirichlet> out;
@@ -651,42 +727,45 @@ public:
                                                : analysis::VariableKey::field(field_id, component);
             d.component = component;
             d.boundary_marker = boundary_marker_;
-            d.trace_kind = analysis::TraceKind::Value;
+            d.trace_kind = trace_ == Trace::Normal       ? analysis::TraceKind::NormalComponent
+                           : trace_ == Trace::Tangential ? analysis::TraceKind::TangentialComponent
+                                                         : analysis::TraceKind::Value;
             d.anchors_constant_mode = true;
             d.anchors_rigid_body_translation = true;
             d.anchors_rigid_body_rotation = false;
             d.source = component < 0 ? name + on_marker : name + " comp " + std::to_string(component) + on_marker;
+            if (isStrong()) {
+                d.enforcement_kind = analysis::EnforcementKind::Strong;
+            } else if (std::holds_alternative<Penalty>(how_)) {
+                d.enforcement_kind = analysis::EnforcementKind::WeakPenalty;
+            } else {
+                const auto& nitsche = std::get<Nitsche>(how_);
+                const bool symmetric = nitsche.variant == NitscheVariant::Symmetric;
+                d.enforcement_kind = analysis::EnforcementKind::WeakNitsche;
+                analysis::NitscheMetadata metadata;
+                metadata.variant =
+                    symmetric ? analysis::NitscheVariant::Symmetric : analysis::NitscheVariant::Nonsymmetric;
+                metadata.primal_consistency_terms_present = true;
+                metadata.adjoint_consistency_terms_present = symmetric;
+                metadata.rhs_consistency_terms_present = true;
+                metadata.penalty_positive = nitsche.gamma > Real(0.0);
+                metadata.penalty_scaling_verified =
+                    nitsche.scale_with_p && (!measure_.has_value() || measure_->isFullPhysical());
+                d.nitsche = metadata;
+            }
             return d;
         };
+        // One descriptor per prescribed component of a strong condition or a
+        // component list; one for a weak condition of the field or a trace.
         std::vector<analysis::BoundaryConditionDescriptor> out;
-        if (isStrong()) {
+        if (isStrong() || some_components_) {
             out.reserve(components_.size());
             for (const auto& [component, value] : components_) {
-                auto d = descriptor(component);
-                d.enforcement_kind = analysis::EnforcementKind::Strong;
-                out.push_back(std::move(d));
+                out.push_back(descriptor(component));
             }
             return out;
         }
-        auto d = descriptor(-1);
-        if (std::holds_alternative<Penalty>(how_)) {
-            d.enforcement_kind = analysis::EnforcementKind::WeakPenalty;
-            out.push_back(std::move(d));
-            return out;
-        }
-        const auto& nitsche = std::get<Nitsche>(how_);
-        const bool symmetric = nitsche.variant == NitscheVariant::Symmetric;
-        d.enforcement_kind = analysis::EnforcementKind::WeakNitsche;
-        analysis::NitscheMetadata metadata;
-        metadata.variant = symmetric ? analysis::NitscheVariant::Symmetric : analysis::NitscheVariant::Nonsymmetric;
-        metadata.primal_consistency_terms_present = true;
-        metadata.adjoint_consistency_terms_present = symmetric;
-        metadata.rhs_consistency_terms_present = true;
-        metadata.penalty_positive = nitsche.gamma > Real(0.0);
-        metadata.penalty_scaling_verified =
-            nitsche.scale_with_p && (!measure_.has_value() || measure_->isFullPhysical());
-        d.nitsche = metadata;
-        out.push_back(std::move(d));
+        out.push_back(descriptor(-1));
         return out;
     }
 
@@ -722,10 +801,11 @@ private:
                     "bc::Dirichlet: strong enforcement acts on the mesh faces of a marker; a generated active "
                     "subset needs Nitsche{} or Penalty{}");
             }
+            if (trace_ == Trace::Tangential) {
+                throw std::invalid_argument(
+                    "bc::Dirichlet: a tangential trace has no strong form; enforce it with Nitsche{} or Penalty{}");
+            }
             return;
-        }
-        if (some_components_) {
-            throw std::invalid_argument("bc::Dirichlet: weak enforcement of some components is not supported");
         }
         for (const auto& [component, value] : components_) {
             if (value.hasTest() || value.hasTrial()) {
@@ -750,7 +830,7 @@ private:
                     "bc::Dirichlet: a multiplier is restricted to the mesh faces of a marker; a generated active "
                     "subset needs Nitsche{} or Penalty{}");
             }
-            if (components_.size() != 1u) {
+            if (components_.size() != 1u || some_components_ || trace_ != Trace::Value) {
                 throw std::invalid_argument("bc::Dirichlet: a multiplier enforces the value of a scalar field");
             }
             if (multiplier->stabilization > Real(0.0)) {
@@ -780,6 +860,11 @@ private:
                           : !part.of) {
                 throw std::invalid_argument("bc::Dirichlet: incomplete flux part");
             }
+            if (part.kind == FluxPart::Kind::Normal && (some_components_ || trace_ == Trace::Tangential)) {
+                throw std::invalid_argument(
+                    "bc::Dirichlet: a condition on components or on the tangential part pairs the conormal flux of "
+                    "a vector field, not a normal flux");
+            }
         }
     }
 
@@ -807,6 +892,15 @@ private:
         const bool vector = isVectorField(u);
         if (!vector && components_.size() > 1u) {
             throw std::invalid_argument("bc::Dirichlet: a component list needs a vector field");
+        }
+        if (some_components_ || trace_ != Trace::Value) {
+            if (!vector) {
+                throw std::invalid_argument(
+                    "bc::Dirichlet: a condition on components or on the normal or tangential trace needs a vector "
+                    "field");
+            }
+            emitTrace(rows, u, v, field);
+            return;
         }
         const auto value =
             components_.size() == 1u ? components_.front().second : FormExpr::asVector(values());
@@ -886,6 +980,112 @@ private:
         rows.add(field, integrate(vector ? penalty * inner(diff, v) : penalty * diff * v));
     }
 
+    /// The weak terms of tau(u) = g for a component list, the normal trace or
+    /// the tangential part of a vector field.  The trace is a projection P:
+    /// the listed components (P w keeps them and zeroes the others), n n
+    /// (paired as the scalar w . n) or I - n n.  Nitsche pairs each flux part
+    /// with P v (consistency) and with P u - g (adjoint, in the row of the
+    /// part's unknown): a vector flux F(w) by F(w) . P v, or (F(w) . n)(v . n)
+    /// for the normal trace; the isotropic part -s n by -s (n . P v), which
+    /// vanishes on the tangential part.
+    void emitTrace(RowSink& rows, const FormExpr& u, const FormExpr& v, FieldId field) const
+    {
+        const auto n = FormExpr::normal();
+        const bool normal = trace_ == Trace::Normal;
+        const int dim = u.node()->spaceSignature()->value_dimension;
+        const auto project = [&](const FormExpr& w) -> FormExpr {
+            if (normal) {
+                return dot(w, n);
+            }
+            if (trace_ == Trace::Tangential) {
+                return tangentialProjection(w, n);
+            }
+            std::vector<FormExpr> kept;
+            kept.reserve(static_cast<std::size_t>(dim));
+            for (int i = 0; i < dim; ++i) {
+                kept.push_back(componentValue(i) != nullptr ? w.component(i) : FormExpr::constant(0.0));
+            }
+            return FormExpr::asVector(std::move(kept));
+        };
+        for (const auto& [component, value] : components_) {
+            if (component >= dim) {
+                throw std::invalid_argument("bc::Dirichlet: component " + std::to_string(component) +
+                                            " of a field with " + std::to_string(dim) + " components");
+            }
+        }
+        // tau(u) - g, with g the listed components' values, the scalar of the
+        // normal trace, or the tangential part of the vector value.
+        FormExpr diff;
+        if (normal) {
+            diff = project(u) - components_.front().second;
+        } else if (trace_ == Trace::Tangential) {
+            diff = project(u - components_.front().second);
+        } else {
+            std::vector<FormExpr> g;
+            g.reserve(static_cast<std::size_t>(dim));
+            for (int i = 0; i < dim; ++i) {
+                const FormExpr* gi = componentValue(i);
+                g.push_back(gi != nullptr ? *gi : FormExpr::constant(0.0));
+            }
+            diff = project(u) - FormExpr::asVector(std::move(g));
+        }
+        const auto pv = project(v);
+        // c (tau(u) - g) . tau(v): a product for the normal trace, an inner
+        // product otherwise.
+        const auto weighted = [&](const FormExpr& c) { return normal ? c * diff * pv : c * inner(diff, pv); };
+        // The flux F paired with a trace t: (F . n) t, or F . t.
+        const auto flux_on = [&](const FormExpr& F, const FormExpr& t) { return normal ? inner(F, n) * t : inner(F, t); };
+        // The isotropic part's -s n paired with a trace t: t, or n . t.
+        const auto normal_of = [&](const FormExpr& t) { return normal ? t : inner(n, t); };
+
+        if (const auto* penalty = std::get_if<Penalty>(&how_)) {
+            rows.add(field, integrate(weighted(penalty->beta)));
+            return;
+        }
+        const auto& nitsche = std::get<Nitsche>(how_);
+        if (measure_.has_value() && !measure_->isFullPhysical() && rows.certifiesGeneratedRoutes()) {
+            throw std::invalid_argument(
+                "bc::Dirichlet: a certified generated-boundary route prescribes the whole field");
+        }
+        const bool symmetric = nitsche.variant == NitscheVariant::Symmetric;
+        const bool tangential = trace_ == Trace::Tangential;
+        for (const auto& part : flux_.parts) {
+            switch (part.kind) {
+            case FluxPart::Kind::Normal:
+                rows.subtract(field, integrate(part.of(u) * pv));
+                break;
+            case FluxPart::Kind::Conormal:
+                rows.subtract(field, integrate(flux_on(part.of(u) * n, pv)));
+                break;
+            case FluxPart::Kind::Isotropic:
+                if (!tangential) {
+                    rows.add(field, integrate(part.state * normal_of(pv)));
+                }
+                break;
+            }
+        }
+        const auto adjoint = [&](FieldId row, bool flux_sign_positive, const FormExpr& integral) {
+            if (flux_sign_positive == symmetric) {
+                rows.subtract(row, integral);
+            } else {
+                rows.add(row, integral);
+            }
+        };
+        for (const auto& part : flux_.parts) {
+            if (part.kind == FluxPart::Kind::Normal) {
+                adjoint(field, true, integrate(part.of(v) * diff));
+            } else if (part.kind == FluxPart::Kind::Conormal) {
+                adjoint(field, true, integrate(flux_on(part.of(v) * n, diff)));
+            }
+        }
+        for (const auto& part : flux_.parts) {
+            if (part.kind == FluxPart::Kind::Isotropic && !tangential) {
+                adjoint(part.field, false, integrate(part.test * normal_of(diff)));
+            }
+        }
+        rows.add(field, integrate(weighted(buildTraceNitschePenalty(flux_.penalty_weight, u, nitsche))));
+    }
+
     /// The multiplier's two rows, one integral per test function (the
     /// installer splits a residual by its integrals): (lambda v) in u's row,
     /// (mu (u - g)) in the multiplier's; then Barbosa and Hughes's
@@ -935,6 +1135,7 @@ private:
 
     int boundary_marker_{-1};
     std::optional<ExteriorBoundaryMeasure> measure_{};
+    Trace trace_{Trace::Value};
     std::vector<std::pair<int, FormExpr>> components_{};
     Enforcement how_{Strong{}};
     NaturalFlux flux_{};
@@ -970,7 +1171,8 @@ componentDirichlet(const Values& values,
                          detail::makeComponentValueName(value_prefix, marker, d, name_style)));
     }
 
-    return std::make_unique<Dirichlet>(marker, std::move(components), std::string(symbol), std::string(source_name));
+    return std::make_unique<Dirichlet>(marker, std::move(components), Strong{}, NaturalFlux{}, std::string(symbol),
+                                       std::string(source_name));
 }
 
 /// Strong component conditions merged by target: each condition in order,
@@ -1051,8 +1253,8 @@ derivedRateConditions(const std::vector<std::unique_ptr<Dirichlet>>& values,
             if (rate == nullptr) {
                 merged.push_back(std::make_unique<Dirichlet>(
                     value->boundaryMarker(),
-                    std::vector<std::pair<int, FormExpr>>{{component, FormExpr::constant(0.0)}}, symbol,
-                    source_name));
+                    std::vector<std::pair<int, FormExpr>>{{component, FormExpr::constant(0.0)}}, Strong{},
+                    NaturalFlux{}, symbol, source_name));
                 rate = merged.back().get();
                 continue;
             }
@@ -1132,131 +1334,6 @@ dirichlet(const BoundaryData<ComponentValues>& data,
     return componentDirichlet(data.value.values, data.value.active, dim, marker, prefix, symbol, source_name,
                               name_style);
 }
-
-/**
- * @brief Essential BC on the scalar normal trace of an H(div) field: u·n = g
- */
-class NormalTraceEssentialBC final : public BoundaryCondition {
-public:
-    explicit NormalTraceEssentialBC(int boundary_marker, FormExpr value)
-        : boundary_marker_(boundary_marker)
-        , value_(std::move(value))
-    {
-        if (boundary_marker_ < 0) {
-            throw std::invalid_argument("NormalTraceEssentialBC: boundary_marker must be >= 0");
-        }
-        if (!value_.isValid()) {
-            throw std::invalid_argument("NormalTraceEssentialBC: invalid value expression");
-        }
-    }
-
-    [[nodiscard]] int boundaryMarker() const override { return boundary_marker_; }
-    [[nodiscard]] std::string_view label() const override { return "NormalTraceEssentialBC"; }
-    [[nodiscard]] bool hasWeakTerms() const override { return false; }
-
-    void contributeToResidual(FormExpr& /*residual*/,
-                              const FormExpr& /*u*/,
-                              const FormExpr& /*v*/) const override
-    {
-    }
-
-    void installSystemConstraints(systems::FESystem& system, FieldId field_id) const override
-    {
-        system.addSystemConstraint(
-            std::make_unique<constraints::HDivNormalConstraint>(field_id, boundary_marker_, value_));
-    }
-
-    [[nodiscard]] std::vector<StrongDirichlet> getStrongConstraints(FieldId /*field_id*/) const override
-    {
-        return {};
-    }
-
-    [[nodiscard]] std::vector<analysis::BoundaryConditionDescriptor>
-    analysisMetadata(FieldId field_id, const systems::FESystem* /*system*/) const override
-    {
-        analysis::BoundaryConditionDescriptor d;
-        d.primary_variable = analysis::VariableKey::field(field_id);
-        d.boundary_marker = boundary_marker_;
-        d.trace_kind = analysis::TraceKind::NormalComponent;
-        d.enforcement_kind = analysis::EnforcementKind::Strong;
-        d.anchors_constant_mode = true;
-        d.anchors_rigid_body_translation = true;
-        d.anchors_rigid_body_rotation = false;
-        d.source = "NormalTraceEssentialBC on marker " + std::to_string(boundary_marker_);
-        return {d};
-    }
-
-private:
-    int boundary_marker_{-1};
-    FormExpr value_{};
-};
-
-/**
- * @brief Strong normal component of a vector Lagrange field: u·n = g
- *
- * Free slip for g = 0.  Installs a constraints::NormalComponentConstraint on
- * the marker; the tangential components keep their natural condition.
- * Walls that meet at an edge need both normals there: state them in one
- * NormalComponentConstraint with all their markers.
- */
-class NormalEssentialBC final : public BoundaryCondition {
-public:
-    explicit NormalEssentialBC(int boundary_marker,
-                               FormExpr value = FormExpr::constant(0.0),
-                               constraints::NormalComponentOptions options = {})
-        : boundary_marker_(boundary_marker)
-        , value_(std::move(value))
-        , options_(options)
-    {
-        if (boundary_marker_ < 0) {
-            throw std::invalid_argument("NormalEssentialBC: boundary_marker must be >= 0");
-        }
-        if (!value_.isValid()) {
-            throw std::invalid_argument("NormalEssentialBC: invalid value expression");
-        }
-    }
-
-    [[nodiscard]] int boundaryMarker() const override { return boundary_marker_; }
-    [[nodiscard]] std::string_view label() const override { return "NormalEssentialBC"; }
-    [[nodiscard]] bool hasWeakTerms() const override { return false; }
-
-    void contributeToResidual(FormExpr& /*residual*/,
-                              const FormExpr& /*u*/,
-                              const FormExpr& /*v*/) const override
-    {
-    }
-
-    void installSystemConstraints(systems::FESystem& system, FieldId field_id) const override
-    {
-        system.addSystemConstraint(std::make_unique<constraints::NormalComponentConstraint>(
-            field_id, std::vector<int>{boundary_marker_}, value_, options_));
-    }
-
-    [[nodiscard]] std::vector<StrongDirichlet> getStrongConstraints(FieldId /*field_id*/) const override
-    {
-        return {};
-    }
-
-    [[nodiscard]] std::vector<analysis::BoundaryConditionDescriptor>
-    analysisMetadata(FieldId field_id, const systems::FESystem* /*system*/) const override
-    {
-        analysis::BoundaryConditionDescriptor d;
-        d.primary_variable = analysis::VariableKey::field(field_id);
-        d.boundary_marker = boundary_marker_;
-        d.trace_kind = analysis::TraceKind::NormalComponent;
-        d.enforcement_kind = analysis::EnforcementKind::Strong;
-        d.anchors_constant_mode = true;
-        d.anchors_rigid_body_translation = true;
-        d.anchors_rigid_body_rotation = false;
-        d.source = "NormalEssentialBC on marker " + std::to_string(boundary_marker_);
-        return {d};
-    }
-
-private:
-    int boundary_marker_{-1};
-    FormExpr value_{};
-    constraints::NormalComponentOptions options_{};
-};
 
 /**
  * @brief Weak trace load BC: adds -∫ g * tau(v) ds(marker)
@@ -1794,18 +1871,6 @@ private:
     FormExpr rhs_{};
     ScalarTraceOperator trace_operator_{ScalarTraceOperator::NormalComponent};
 };
-
-[[nodiscard]] inline std::unique_ptr<BoundaryCondition>
-makeNormalTraceEssentialBC(int boundary_marker, FormExpr value)
-{
-    return std::make_unique<NormalTraceEssentialBC>(boundary_marker, std::move(value));
-}
-
-[[nodiscard]] inline std::unique_ptr<BoundaryCondition>
-makeNormalEssentialBC(int boundary_marker, FormExpr value = FormExpr::constant(0.0))
-{
-    return std::make_unique<NormalEssentialBC>(boundary_marker, std::move(value));
-}
 
 [[nodiscard]] inline std::unique_ptr<BoundaryCondition>
 makeTraceLoadBC(int boundary_marker,

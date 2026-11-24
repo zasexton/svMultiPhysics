@@ -46,9 +46,9 @@ FE/
 | **Mixed bilinear operator** (stiffness, mass) | `installMixedBilinear(system, op, test, trial, form)` | `Systems/FormsInstaller.h` |
 | **Mixed linear operator** (load vector) | `installMixedLinear(system, op, test, form)` | `Systems/FormsInstaller.h` |
 | **Strong Dirichlet BCs** | `installStrongDirichlet(system, bcs)` | `Systems/FormsInstaller.h` |
-| **H(div) normal-trace BCs** | `BoundaryConditionManager` + `NormalTraceEssentialBC` | `Forms/StandardBCs.h` |
+| **H(div) normal-trace BCs** | `BoundaryConditionManager` + `bc::Dirichlet(b, bc::Trace::Normal, g)` | `Forms/StandardBCs.h` |
 | **Interface trace BCs** | `BoundaryConditionManager` + `InterfaceTraceLoadBC` / `InterfaceTraceRobinBC` / `InterfaceTraceJumpPenaltyBC` | `Forms/StandardBCs.h` |
-| **Trace Nitsche BCs** | `TraceNitscheBC` / `InterfaceTraceNitscheBC` | `Forms/NitscheBC.h` |
+| **Trace Nitsche BCs** | `bc::Dirichlet(b, trace, g, bc::Nitsche{}, flux)` / `InterfaceTraceNitscheBC` | `Forms/StandardBCs.h` / `Forms/NitscheBC.h` |
 | **One-sided trace laws** | `TraceInequalityBC` | `Forms/StandardBCs.h` |
 | **H(div) periodic/MPC trace relations** | `makeHDivTracePeriodicBC*()` / `makeHDivTracePeriodicMPC*()` | `Constraints/ConstraintTools.h` |
 | **Mixed-dimensional interface fields** | `FESystem::addInterfaceField()`, coupled by `.dI(marker)` forms | `Systems/FESystem.h` |
@@ -100,8 +100,8 @@ See `Forms/SYSTEMS_INTEGRATION.md` for the full integration guide.
 
 For vector-basis trace conditions, the FE layer now distinguishes pointwise
 Dirichlet data from trace-essential data. `H(div)` normal-trace BCs should be
-authored through `forms::bc::NormalTraceEssentialBC`, `TraceLoadBC`,
-`TraceRobinBC`, `TraceNitscheBC`, and `TraceInequalityBC` rather than forced
+authored through `forms::bc::Dirichlet` with `bc::Trace::Normal` (strong, or
+weak by Nitsche), `TraceLoadBC`, `TraceRobinBC` and `TraceInequalityBC` rather than forced
 through pointwise `StrongDirichlet` declarations. Interface laws use the
 parallel `InterfaceTrace*` names. "Passive" or open outflow remains a
 physics-level choice: leave the normal trace unconstrained, or add a generic
@@ -117,7 +117,7 @@ auto w = TestField(q_id, *Vhdiv, "w");
 auto residual = inner(k_inv * q, w).dx();
 
 systems::BoundaryConditionManager bc_manager;
-bc_manager.add(forms::bc::makeNormalTraceEssentialBC(/*marker=*/4, FormExpr::constant(1.0)));
+bc_manager.add(std::make_unique<forms::bc::Dirichlet>(/*marker=*/4, forms::bc::Trace::Normal, FormExpr::constant(1.0)));
 bc_manager.add(forms::bc::makeTraceLoadBC(/*marker=*/7, FormExpr::constant(0.0)));
 bc_manager.applyAll(system, residual, q, w, q_id);
 ```
