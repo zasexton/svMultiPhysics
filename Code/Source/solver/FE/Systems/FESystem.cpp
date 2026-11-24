@@ -21225,8 +21225,14 @@ void FESystem::assembleMixedAuxiliaryIntoGlobal(
                                         }
                                     }
                                 }
-                            } catch (const std::exception&) {
-                                // Symbolic compilation may fail for complex expressions.
+                            } catch (const std::exception& error) {
+                                // The tangent needs this column: a derivative that
+                                // cannot be built is an error, not a dropped entry.
+                                FE_THROW(InvalidStateException,
+                                         "FESystem: the derivative of the residual of field '" +
+                                             fieldRecord(test_field).name + "' with respect to output '" +
+                                             oname + "' of auxiliary instance '" + entry.instance_name +
+                                             "' could not be built: " + error.what());
                             }
                         }
                     }
