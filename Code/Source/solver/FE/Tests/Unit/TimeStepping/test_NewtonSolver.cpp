@@ -7533,23 +7533,23 @@ TEST(NewtonSolver,
     EXPECT_NE(telemetry.find("pressure_representability_iteration_cap=4"),
               std::string::npos);
     EXPECT_NEAR(
-        report.pressure_representability_residual_norm, 0.0, 1.0e-13);
-    EXPECT_TRUE(report.constant_pressure_kkt_available);
+        svmp::FE::analysis::constraintRangeRecord(report).range.residual_norm, 0.0, 1.0e-13);
+    EXPECT_TRUE(svmp::FE::analysis::constraintRangeRecord(report).constant_field_kkt.available);
     EXPECT_TRUE(
-        report.constant_pressure_unit_coefficients_represent_constant);
+        svmp::FE::analysis::constraintRangeRecord(report).constant_field_kkt.unit_coefficients_represent_constant);
     EXPECT_TRUE(
-        report.constant_pressure_constraints_preserve_constants);
+        svmp::FE::analysis::constraintRangeRecord(report).constant_field_kkt.constraints_preserve_constants);
     EXPECT_NEAR(
-        report.constant_pressure_kkt_pressure_jump, 2.0, 1.0e-12);
+        svmp::FE::analysis::constraintRangeRecord(report).constant_field_kkt.jump, 2.0, 1.0e-12);
     EXPECT_NEAR(
-        report.constant_pressure_kkt_volume_multiplier, -2.0, 1.0e-12);
+        svmp::FE::analysis::constraintRangeRecord(report).constant_field_kkt.multiplier, -2.0, 1.0e-12);
     EXPECT_NEAR(
-        report.constant_pressure_kkt_residual_norm, 0.0, 1.0e-13);
+        svmp::FE::analysis::constraintRangeRecord(report).constant_field_kkt.residual_norm, 0.0, 1.0e-13);
     EXPECT_LE(
-        report.constant_pressure_kkt_relative_distance, 1.0e-12);
+        svmp::FE::analysis::constraintRangeRecord(report).constant_field_kkt.relative_distance, 1.0e-12);
     EXPECT_LE(
-        report.constant_pressure_kkt_relative_orthogonality, 1.0e-12);
-    EXPECT_EQ(report.constant_pressure_kkt_reason, "available");
+        svmp::FE::analysis::constraintRangeRecord(report).constant_field_kkt.relative_orthogonality, 1.0e-12);
+    EXPECT_EQ(svmp::FE::analysis::constraintRangeRecord(report).constant_field_kkt.reason, "available");
     EXPECT_NE(telemetry.find("constant_pressure_kkt_available=1"),
               std::string::npos);
     EXPECT_NE(
@@ -7699,16 +7699,16 @@ TEST(NewtonSolver,
 
     EXPECT_TRUE(report.converged);
     EXPECT_TRUE(
-        report.constant_pressure_unit_coefficients_represent_constant);
-    EXPECT_TRUE(report.constant_pressure_constraints_preserve_constants);
-    EXPECT_TRUE(report.constant_pressure_kkt_available);
-    EXPECT_NEAR(report.constant_pressure_kkt_pressure_jump, 2.0, 1.0e-12);
-    EXPECT_NEAR(report.constant_pressure_kkt_volume_multiplier, -2.0,
+        svmp::FE::analysis::constraintRangeRecord(report).constant_field_kkt.unit_coefficients_represent_constant);
+    EXPECT_TRUE(svmp::FE::analysis::constraintRangeRecord(report).constant_field_kkt.constraints_preserve_constants);
+    EXPECT_TRUE(svmp::FE::analysis::constraintRangeRecord(report).constant_field_kkt.available);
+    EXPECT_NEAR(svmp::FE::analysis::constraintRangeRecord(report).constant_field_kkt.jump, 2.0, 1.0e-12);
+    EXPECT_NEAR(svmp::FE::analysis::constraintRangeRecord(report).constant_field_kkt.multiplier, -2.0,
                 1.0e-12);
-    EXPECT_EQ(report.constant_pressure_kkt_reason, "available");
-    EXPECT_EQ(report.constant_pressure_constraint_scope,
+    EXPECT_EQ(svmp::FE::analysis::constraintRangeRecord(report).constant_field_kkt.reason, "available");
+    EXPECT_EQ(svmp::FE::analysis::constraintRangeRecord(report).constant_field_kkt.constraint_scope,
               "retained_volume");
-    EXPECT_EQ(report.constant_pressure_constraint_scope_reason,
+    EXPECT_EQ(svmp::FE::analysis::constraintRangeRecord(report).constant_field_kkt.constraint_scope_reason,
               "available");
     EXPECT_NE(
         telemetry.find("constant_pressure_constraint_scope=retained_volume"),
@@ -7760,17 +7760,15 @@ TEST(NewtonSolver,
 
     const auto captured = runPressureDiagnostic(problem);
     EXPECT_TRUE(captured.report.converged);
-    EXPECT_TRUE(captured.report
-                    .constant_pressure_unit_coefficients_represent_constant);
-    EXPECT_FALSE(captured.report
-                     .constant_pressure_constraints_preserve_constants);
-    EXPECT_FALSE(captured.report.constant_pressure_kkt_available);
-    EXPECT_EQ(captured.report.constant_pressure_constraint_scope,
+    EXPECT_TRUE(svmp::FE::analysis::constraintRangeRecord(captured.report).constant_field_kkt.unit_coefficients_represent_constant);
+    EXPECT_FALSE(svmp::FE::analysis::constraintRangeRecord(captured.report).constant_field_kkt.constraints_preserve_constants);
+    EXPECT_FALSE(svmp::FE::analysis::constraintRangeRecord(captured.report).constant_field_kkt.available);
+    EXPECT_EQ(svmp::FE::analysis::constraintRangeRecord(captured.report).constant_field_kkt.constraint_scope,
               "retained_volume");
-    EXPECT_EQ(captured.report.constant_pressure_constraint_scope_reason,
+    EXPECT_EQ(svmp::FE::analysis::constraintRangeRecord(captured.report).constant_field_kkt.constraint_scope_reason,
               "available");
     EXPECT_EQ(
-        captured.report.constant_pressure_kkt_reason,
+        svmp::FE::analysis::constraintRangeRecord(captured.report).constant_field_kkt.reason,
         "pressure_constraints_do_not_preserve_constants");
 #endif
 }
@@ -7793,10 +7791,10 @@ TEST(NewtonSolver,
                     .empty());
 
     const auto captured = runPressureDiagnostic(problem);
-    EXPECT_FALSE(captured.report.constant_pressure_kkt_available);
-    EXPECT_EQ(captured.report.constant_pressure_constraint_scope,
+    EXPECT_FALSE(svmp::FE::analysis::constraintRangeRecord(captured.report).constant_field_kkt.available);
+    EXPECT_EQ(svmp::FE::analysis::constraintRangeRecord(captured.report).constant_field_kkt.constraint_scope,
               "full_field");
-    EXPECT_EQ(captured.report.constant_pressure_constraint_scope_reason,
+    EXPECT_EQ(svmp::FE::analysis::constraintRangeRecord(captured.report).constant_field_kkt.constraint_scope_reason,
               "aggregation_report_unavailable");
 #endif
 }
@@ -7849,10 +7847,10 @@ TEST(NewtonSolver,
     ASSERT_FALSE(reports.front()->trace_bound_eligible);
 
     const auto captured = runPressureDiagnostic(problem);
-    EXPECT_FALSE(captured.report.constant_pressure_kkt_available);
-    EXPECT_EQ(captured.report.constant_pressure_constraint_scope,
+    EXPECT_FALSE(svmp::FE::analysis::constraintRangeRecord(captured.report).constant_field_kkt.available);
+    EXPECT_EQ(svmp::FE::analysis::constraintRangeRecord(captured.report).constant_field_kkt.constraint_scope,
               "full_field");
-    EXPECT_EQ(captured.report.constant_pressure_constraint_scope_reason,
+    EXPECT_EQ(svmp::FE::analysis::constraintRangeRecord(captured.report).constant_field_kkt.constraint_scope_reason,
               "aggregation_report_ineligible");
 #endif
 }
@@ -7875,10 +7873,10 @@ TEST(NewtonSolver,
         2u);
 
     const auto captured = runPressureDiagnostic(problem);
-    EXPECT_FALSE(captured.report.constant_pressure_kkt_available);
-    EXPECT_EQ(captured.report.constant_pressure_constraint_scope,
+    EXPECT_FALSE(svmp::FE::analysis::constraintRangeRecord(captured.report).constant_field_kkt.available);
+    EXPECT_EQ(svmp::FE::analysis::constraintRangeRecord(captured.report).constant_field_kkt.constraint_scope,
               "full_field");
-    EXPECT_EQ(captured.report.constant_pressure_constraint_scope_reason,
+    EXPECT_EQ(svmp::FE::analysis::constraintRangeRecord(captured.report).constant_field_kkt.constraint_scope_reason,
               "aggregation_report_ambiguous");
 #endif
 }
@@ -7904,10 +7902,10 @@ TEST(NewtonSolver,
         1u);
 
     const auto captured = runPressureDiagnostic(problem);
-    EXPECT_FALSE(captured.report.constant_pressure_kkt_available);
-    EXPECT_EQ(captured.report.constant_pressure_constraint_scope,
+    EXPECT_FALSE(svmp::FE::analysis::constraintRangeRecord(captured.report).constant_field_kkt.available);
+    EXPECT_EQ(svmp::FE::analysis::constraintRangeRecord(captured.report).constant_field_kkt.constraint_scope,
               "full_field");
-    EXPECT_EQ(captured.report.constant_pressure_constraint_scope_reason,
+    EXPECT_EQ(svmp::FE::analysis::constraintRangeRecord(captured.report).constant_field_kkt.constraint_scope_reason,
               "pair_support_unavailable");
 #endif
 }
@@ -7961,11 +7959,11 @@ TEST(NewtonSolver,
     const auto telemetry = testing::internal::GetCapturedStdout();
 
     EXPECT_TRUE(report.converged);
-    EXPECT_TRUE(report.pressure_representability_available);
-    EXPECT_TRUE(report.pressure_representability_converged);
-    EXPECT_FALSE(report.pressure_representability_breakdown);
+    EXPECT_TRUE(svmp::FE::analysis::constraintRangeRecord(report).range.available);
+    EXPECT_TRUE(svmp::FE::analysis::constraintRangeRecord(report).range.converged);
+    EXPECT_FALSE(svmp::FE::analysis::constraintRangeRecord(report).range.breakdown);
     EXPECT_NEAR(
-        report.pressure_representability_residual_norm, 0.0, 1.0e-13);
+        svmp::FE::analysis::constraintRangeRecord(report).range.residual_norm, 0.0, 1.0e-13);
     ASSERT_NE(testCertificateStorage(workspace).vectors.solution, nullptr);
     const auto pressure_dof =
         problem.sys->fieldDofOffset(problem.pressure_field);
@@ -7976,7 +7974,7 @@ TEST(NewtonSolver,
     EXPECT_NEAR(
         solution[static_cast<std::size_t>(pressure_dof)], 3.0, 1.0e-12);
     EXPECT_NEAR(
-        report.constant_pressure_kkt_pressure_jump, 3.0, 1.0e-12);
+        svmp::FE::analysis::constraintRangeRecord(report).constant_field_kkt.jump, 3.0, 1.0e-12);
     EXPECT_NE(
         telemetry.find(
             "pressure_representability_load=prescribed_external_pressure_plus_surface_area_variation_plus_young_wall_energy_plus_gravitational_potential"),
@@ -8041,11 +8039,11 @@ TEST(NewtonSolver,
         workspace);
 
     EXPECT_TRUE(report.converged);
-    EXPECT_TRUE(report.pressure_representability_available);
-    EXPECT_TRUE(report.pressure_representability_converged);
-    EXPECT_FALSE(report.pressure_representability_breakdown);
+    EXPECT_TRUE(svmp::FE::analysis::constraintRangeRecord(report).range.available);
+    EXPECT_TRUE(svmp::FE::analysis::constraintRangeRecord(report).range.converged);
+    EXPECT_FALSE(svmp::FE::analysis::constraintRangeRecord(report).range.breakdown);
     EXPECT_NEAR(
-        report.pressure_representability_residual_norm, 0.0, 1.0e-13);
+        svmp::FE::analysis::constraintRangeRecord(report).range.residual_norm, 0.0, 1.0e-13);
     ASSERT_NE(testCertificateStorage(workspace).vectors.solution, nullptr);
     const auto pressure_dof =
         problem.sys->fieldDofOffset(problem.pressure_field);
@@ -8056,7 +8054,7 @@ TEST(NewtonSolver,
     EXPECT_NEAR(
         solution[static_cast<std::size_t>(pressure_dof)], 4.5, 1.0e-12);
     EXPECT_NEAR(
-        report.constant_pressure_kkt_pressure_jump, 4.5, 1.0e-12);
+        svmp::FE::analysis::constraintRangeRecord(report).constant_field_kkt.jump, 4.5, 1.0e-12);
 }
 
 TEST(NewtonSolver,
@@ -8106,30 +8104,30 @@ TEST(NewtonSolver,
     const auto telemetry = stdout_text + stderr_text;
 
     EXPECT_TRUE(report.converged);
-    EXPECT_TRUE(report.pressure_representability_available);
-    EXPECT_TRUE(report.pressure_representability_converged);
-    EXPECT_LE(report.pressure_representability_relative_distance, 1.0e-10);
-    EXPECT_TRUE(report.constant_pressure_kkt_available);
+    EXPECT_TRUE(svmp::FE::analysis::constraintRangeRecord(report).range.available);
+    EXPECT_TRUE(svmp::FE::analysis::constraintRangeRecord(report).range.converged);
+    EXPECT_LE(svmp::FE::analysis::constraintRangeRecord(report).range.relative_distance, 1.0e-10);
+    EXPECT_TRUE(svmp::FE::analysis::constraintRangeRecord(report).constant_field_kkt.available);
     EXPECT_TRUE(
-        report.constant_pressure_unit_coefficients_represent_constant);
+        svmp::FE::analysis::constraintRangeRecord(report).constant_field_kkt.unit_coefficients_represent_constant);
     EXPECT_TRUE(
-        report.constant_pressure_constraints_preserve_constants);
+        svmp::FE::analysis::constraintRangeRecord(report).constant_field_kkt.constraints_preserve_constants);
     EXPECT_NEAR(
-        report.constant_pressure_kkt_pressure_jump,
+        svmp::FE::analysis::constraintRangeRecord(report).constant_field_kkt.jump,
         -1.0 / 3.0,
         1.0e-13);
     EXPECT_NEAR(
-        report.constant_pressure_kkt_volume_multiplier,
+        svmp::FE::analysis::constraintRangeRecord(report).constant_field_kkt.multiplier,
         1.0 / 3.0,
         1.0e-13);
     EXPECT_NEAR(
-        report.constant_pressure_kkt_relative_distance,
+        svmp::FE::analysis::constraintRangeRecord(report).constant_field_kkt.relative_distance,
         std::sqrt(1.0 / 6.0),
         1.0e-13);
     EXPECT_LE(
-        report.constant_pressure_kkt_relative_orthogonality, 1.0e-13);
-    EXPECT_GT(report.constant_pressure_kkt_residual_norm, 0.0);
-    EXPECT_GT(report.constant_pressure_kkt_relative_distance, 0.4);
+        svmp::FE::analysis::constraintRangeRecord(report).constant_field_kkt.relative_orthogonality, 1.0e-13);
+    EXPECT_GT(svmp::FE::analysis::constraintRangeRecord(report).constant_field_kkt.residual_norm, 0.0);
+    EXPECT_GT(svmp::FE::analysis::constraintRangeRecord(report).constant_field_kkt.relative_distance, 0.4);
     EXPECT_NE(telemetry.find("constant_pressure_kkt_available=1"),
               std::string::npos);
     EXPECT_NE(
@@ -8138,7 +8136,7 @@ TEST(NewtonSolver,
     RecordProperty(
         "constant_pressure_kkt_nonconstant_remainder_relative_distance",
         ::testing::PrintToString(
-            report.constant_pressure_kkt_relative_distance));
+            svmp::FE::analysis::constraintRangeRecord(report).constant_field_kkt.relative_distance));
     RecordProperty(
         "constant_pressure_kkt_production_load_projected", 0);
 }
@@ -8189,16 +8187,16 @@ TEST(NewtonSolver,
     EXPECT_EQ(
         report.linear.message,
         "not required: entry state satisfies nonlinear tolerances");
-    EXPECT_TRUE(report.pressure_representability_diagnostic_sampled);
-    EXPECT_TRUE(report.constant_pressure_kkt_available);
-    EXPECT_TRUE(report.constant_pressure_kkt_distance_gate_applied);
-    EXPECT_TRUE(report.constant_pressure_kkt_distance_gate_passed);
-    EXPECT_TRUE(report.pressure_representability_distance_gate_applied);
-    EXPECT_TRUE(report.pressure_representability_distance_gate_passed);
-    EXPECT_LE(report.pressure_representability_relative_distance, 1.0e-10);
-    EXPECT_LE(report.constant_pressure_kkt_relative_distance, 1.0e-10);
+    EXPECT_TRUE(svmp::FE::analysis::constraintRangeRecord(report).sampled);
+    EXPECT_TRUE(svmp::FE::analysis::constraintRangeRecord(report).constant_field_kkt.available);
+    EXPECT_TRUE(svmp::FE::analysis::constraintRangeRecord(report).constant_field_kkt_gate.applied);
+    EXPECT_TRUE(svmp::FE::analysis::constraintRangeRecord(report).constant_field_kkt_gate.passed);
+    EXPECT_TRUE(svmp::FE::analysis::constraintRangeRecord(report).range_gate.applied);
+    EXPECT_TRUE(svmp::FE::analysis::constraintRangeRecord(report).range_gate.passed);
+    EXPECT_LE(svmp::FE::analysis::constraintRangeRecord(report).range.relative_distance, 1.0e-10);
+    EXPECT_LE(svmp::FE::analysis::constraintRangeRecord(report).constant_field_kkt.relative_distance, 1.0e-10);
     EXPECT_NEAR(
-        report.constant_pressure_kkt_max_relative_distance, 1.0e-10, 0.0);
+        svmp::FE::analysis::constraintRangeRecord(report).constant_field_kkt_gate.max_relative_distance, 1.0e-10, 0.0);
     EXPECT_NE(
         telemetry.find(
             "diagnostic=free_surface_constant_pressure_kkt_distance_gate"),
@@ -8261,20 +8259,20 @@ TEST(NewtonSolver,
         workspace);
 
     EXPECT_TRUE(report.converged);
-    EXPECT_TRUE(report.pressure_representability_available);
-    EXPECT_TRUE(report.pressure_representability_converged);
-    EXPECT_TRUE(report.pressure_representability_distance_gate_applied);
-    EXPECT_TRUE(report.pressure_representability_distance_gate_passed);
-    EXPECT_GT(report.pressure_representability_residual_norm, 0.0);
-    EXPECT_LT(report.pressure_representability_residual_norm, 1.0e-14);
-    EXPECT_EQ(report.pressure_representability_relative_distance, 0.0);
-    EXPECT_TRUE(report.constant_pressure_kkt_available);
-    EXPECT_TRUE(report.constant_pressure_kkt_distance_gate_applied);
-    EXPECT_TRUE(report.constant_pressure_kkt_distance_gate_passed);
-    EXPECT_GT(report.constant_pressure_kkt_residual_norm, 0.0);
-    EXPECT_LT(report.constant_pressure_kkt_residual_norm, 1.0e-14);
-    EXPECT_EQ(report.constant_pressure_kkt_relative_distance, 0.0);
-    EXPECT_EQ(report.constant_pressure_kkt_reason, "available");
+    EXPECT_TRUE(svmp::FE::analysis::constraintRangeRecord(report).range.available);
+    EXPECT_TRUE(svmp::FE::analysis::constraintRangeRecord(report).range.converged);
+    EXPECT_TRUE(svmp::FE::analysis::constraintRangeRecord(report).range_gate.applied);
+    EXPECT_TRUE(svmp::FE::analysis::constraintRangeRecord(report).range_gate.passed);
+    EXPECT_GT(svmp::FE::analysis::constraintRangeRecord(report).range.residual_norm, 0.0);
+    EXPECT_LT(svmp::FE::analysis::constraintRangeRecord(report).range.residual_norm, 1.0e-14);
+    EXPECT_EQ(svmp::FE::analysis::constraintRangeRecord(report).range.relative_distance, 0.0);
+    EXPECT_TRUE(svmp::FE::analysis::constraintRangeRecord(report).constant_field_kkt.available);
+    EXPECT_TRUE(svmp::FE::analysis::constraintRangeRecord(report).constant_field_kkt_gate.applied);
+    EXPECT_TRUE(svmp::FE::analysis::constraintRangeRecord(report).constant_field_kkt_gate.passed);
+    EXPECT_GT(svmp::FE::analysis::constraintRangeRecord(report).constant_field_kkt.residual_norm, 0.0);
+    EXPECT_LT(svmp::FE::analysis::constraintRangeRecord(report).constant_field_kkt.residual_norm, 1.0e-14);
+    EXPECT_EQ(svmp::FE::analysis::constraintRangeRecord(report).constant_field_kkt.relative_distance, 0.0);
+    EXPECT_EQ(svmp::FE::analysis::constraintRangeRecord(report).constant_field_kkt.reason, "available");
 }
 
 TEST(NewtonSolver,
@@ -8335,7 +8333,7 @@ TEST(NewtonSolver,
 
     EXPECT_TRUE(report.converged);
     EXPECT_EQ(report.iterations, 0);
-    EXPECT_TRUE(report.constant_pressure_kkt_available);
+    EXPECT_TRUE(svmp::FE::analysis::constraintRangeRecord(report).constant_field_kkt.available);
     EXPECT_EQ(jacobian_synchronizations, 0);
     EXPECT_EQ(combined_synchronizations, 0);
     EXPECT_GT(residual_synchronizations, 0);
@@ -8396,15 +8394,15 @@ TEST(NewtonSolver,
 
     EXPECT_FALSE(report.converged);
     EXPECT_EQ(report.iterations, 0);
-    EXPECT_TRUE(report.pressure_representability_available);
-    EXPECT_TRUE(report.pressure_representability_converged);
-    EXPECT_LE(report.pressure_representability_relative_distance, 1.0e-10);
-    EXPECT_FALSE(report.pressure_representability_distance_gate_applied);
-    EXPECT_TRUE(report.constant_pressure_kkt_available);
-    EXPECT_TRUE(report.constant_pressure_kkt_distance_gate_applied);
-    EXPECT_FALSE(report.constant_pressure_kkt_distance_gate_passed);
+    EXPECT_TRUE(svmp::FE::analysis::constraintRangeRecord(report).range.available);
+    EXPECT_TRUE(svmp::FE::analysis::constraintRangeRecord(report).range.converged);
+    EXPECT_LE(svmp::FE::analysis::constraintRangeRecord(report).range.relative_distance, 1.0e-10);
+    EXPECT_FALSE(svmp::FE::analysis::constraintRangeRecord(report).range_gate.applied);
+    EXPECT_TRUE(svmp::FE::analysis::constraintRangeRecord(report).constant_field_kkt.available);
+    EXPECT_TRUE(svmp::FE::analysis::constraintRangeRecord(report).constant_field_kkt_gate.applied);
+    EXPECT_FALSE(svmp::FE::analysis::constraintRangeRecord(report).constant_field_kkt_gate.passed);
     EXPECT_NEAR(
-        report.constant_pressure_kkt_relative_distance,
+        svmp::FE::analysis::constraintRangeRecord(report).constant_field_kkt.relative_distance,
         std::sqrt(1.0 / 6.0),
         1.0e-13);
     EXPECT_NE(
@@ -8420,7 +8418,7 @@ TEST(NewtonSolver,
     RecordProperty(
         "constant_pressure_kkt_distance_gate_nonconstant_relative_distance",
         ::testing::PrintToString(
-            report.constant_pressure_kkt_relative_distance));
+            svmp::FE::analysis::constraintRangeRecord(report).constant_field_kkt.relative_distance));
 }
 
 TEST(NewtonSolver,
@@ -8471,15 +8469,15 @@ TEST(NewtonSolver,
 
     EXPECT_FALSE(report.converged);
     EXPECT_EQ(report.iterations, 0);
-    EXPECT_TRUE(report.pressure_representability_diagnostic_sampled);
-    EXPECT_FALSE(report.constant_pressure_kkt_available);
+    EXPECT_TRUE(svmp::FE::analysis::constraintRangeRecord(report).sampled);
+    EXPECT_FALSE(svmp::FE::analysis::constraintRangeRecord(report).constant_field_kkt.available);
     EXPECT_FALSE(
-        report.constant_pressure_constraints_preserve_constants);
+        svmp::FE::analysis::constraintRangeRecord(report).constant_field_kkt.constraints_preserve_constants);
     EXPECT_EQ(
-        report.constant_pressure_kkt_reason,
+        svmp::FE::analysis::constraintRangeRecord(report).constant_field_kkt.reason,
         "pressure_constraints_do_not_preserve_constants");
-    EXPECT_TRUE(report.constant_pressure_kkt_distance_gate_applied);
-    EXPECT_FALSE(report.constant_pressure_kkt_distance_gate_passed);
+    EXPECT_TRUE(svmp::FE::analysis::constraintRangeRecord(report).constant_field_kkt_gate.applied);
+    EXPECT_FALSE(svmp::FE::analysis::constraintRangeRecord(report).constant_field_kkt_gate.passed);
     EXPECT_NE(
         telemetry.find("reason=constant_pressure_kkt_unavailable"),
         std::string::npos);
@@ -8680,15 +8678,15 @@ TEST(NewtonSolver,
         workspace);
 
     EXPECT_TRUE(report.converged);
-    EXPECT_TRUE(report.pressure_representability_available);
-    EXPECT_TRUE(report.pressure_representability_converged);
-    EXPECT_FALSE(report.pressure_representability_breakdown);
+    EXPECT_TRUE(svmp::FE::analysis::constraintRangeRecord(report).range.available);
+    EXPECT_TRUE(svmp::FE::analysis::constraintRangeRecord(report).range.converged);
+    EXPECT_FALSE(svmp::FE::analysis::constraintRangeRecord(report).range.breakdown);
     EXPECT_NEAR(
-        report.pressure_representability_residual_norm,
+        svmp::FE::analysis::constraintRangeRecord(report).range.residual_norm,
         std::sqrt(3.0),
         1.0e-12);
     EXPECT_NEAR(
-        report.pressure_representability_relative_distance,
+        svmp::FE::analysis::constraintRangeRecord(report).range.relative_distance,
         std::sqrt(3.0) / 2.0,
         1.0e-12);
 }
@@ -8744,11 +8742,11 @@ TEST(NewtonSolver,
     const auto telemetry = stdout_text + stderr_text;
 
     EXPECT_TRUE(report.converged);
-    EXPECT_TRUE(report.pressure_representability_converged);
-    EXPECT_FALSE(report.pressure_representability_breakdown);
-    EXPECT_TRUE(report.pressure_representability_distance_gate_applied);
-    EXPECT_TRUE(report.pressure_representability_distance_gate_passed);
-    EXPECT_LE(report.pressure_representability_relative_distance, 1.0e-9);
+    EXPECT_TRUE(svmp::FE::analysis::constraintRangeRecord(report).range.converged);
+    EXPECT_FALSE(svmp::FE::analysis::constraintRangeRecord(report).range.breakdown);
+    EXPECT_TRUE(svmp::FE::analysis::constraintRangeRecord(report).range_gate.applied);
+    EXPECT_TRUE(svmp::FE::analysis::constraintRangeRecord(report).range_gate.passed);
+    EXPECT_LE(svmp::FE::analysis::constraintRangeRecord(report).range.relative_distance, 1.0e-9);
 
     const auto iteration_token =
         std::string{"pressure_representability_iterations="};
@@ -8859,13 +8857,13 @@ TEST(NewtonSolver,
         std::string::npos);
     EXPECT_NE(telemetry.find("pressure_representability_claimed=0"),
               std::string::npos);
-    EXPECT_FALSE(report.constant_pressure_kkt_available);
+    EXPECT_FALSE(svmp::FE::analysis::constraintRangeRecord(report).constant_field_kkt.available);
     EXPECT_TRUE(
-        report.constant_pressure_unit_coefficients_represent_constant);
+        svmp::FE::analysis::constraintRangeRecord(report).constant_field_kkt.unit_coefficients_represent_constant);
     EXPECT_FALSE(
-        report.constant_pressure_constraints_preserve_constants);
+        svmp::FE::analysis::constraintRangeRecord(report).constant_field_kkt.constraints_preserve_constants);
     EXPECT_EQ(
-        report.constant_pressure_kkt_reason,
+        svmp::FE::analysis::constraintRangeRecord(report).constant_field_kkt.reason,
         "pressure_constraints_do_not_preserve_constants");
     EXPECT_NE(telemetry.find("constant_pressure_kkt_available=0"),
               std::string::npos);
@@ -8916,13 +8914,13 @@ TEST(NewtonSolver,
 
     EXPECT_TRUE(report.converged);
     EXPECT_EQ(report.iterations, 0);
-    EXPECT_TRUE(report.pressure_representability_diagnostic_sampled);
-    EXPECT_TRUE(report.pressure_representability_available);
-    EXPECT_TRUE(report.pressure_representability_converged);
-    EXPECT_FALSE(report.pressure_representability_breakdown);
-    EXPECT_TRUE(report.pressure_representability_distance_gate_applied);
-    EXPECT_TRUE(report.pressure_representability_distance_gate_passed);
-    EXPECT_LE(report.pressure_representability_relative_distance, 1.0e-10);
+    EXPECT_TRUE(svmp::FE::analysis::constraintRangeRecord(report).sampled);
+    EXPECT_TRUE(svmp::FE::analysis::constraintRangeRecord(report).range.available);
+    EXPECT_TRUE(svmp::FE::analysis::constraintRangeRecord(report).range.converged);
+    EXPECT_FALSE(svmp::FE::analysis::constraintRangeRecord(report).range.breakdown);
+    EXPECT_TRUE(svmp::FE::analysis::constraintRangeRecord(report).range_gate.applied);
+    EXPECT_TRUE(svmp::FE::analysis::constraintRangeRecord(report).range_gate.passed);
+    EXPECT_LE(svmp::FE::analysis::constraintRangeRecord(report).range.relative_distance, 1.0e-10);
     EXPECT_NE(
         telemetry.find(
             "diagnostic=free_surface_pressure_representability_distance_gate"),
@@ -8937,7 +8935,7 @@ TEST(NewtonSolver,
     RecordProperty(
         "pressure_representability_distance_gate_in_range_relative_distance",
         ::testing::PrintToString(
-            report.pressure_representability_relative_distance));
+            svmp::FE::analysis::constraintRangeRecord(report).range.relative_distance));
 }
 
 TEST(NewtonSolver,
@@ -8988,14 +8986,14 @@ TEST(NewtonSolver,
 
     EXPECT_FALSE(report.converged);
     EXPECT_EQ(report.iterations, 0);
-    EXPECT_TRUE(report.pressure_representability_diagnostic_sampled);
-    EXPECT_TRUE(report.pressure_representability_available);
-    EXPECT_TRUE(report.pressure_representability_converged);
-    EXPECT_FALSE(report.pressure_representability_breakdown);
-    EXPECT_TRUE(report.pressure_representability_distance_gate_applied);
-    EXPECT_FALSE(report.pressure_representability_distance_gate_passed);
+    EXPECT_TRUE(svmp::FE::analysis::constraintRangeRecord(report).sampled);
+    EXPECT_TRUE(svmp::FE::analysis::constraintRangeRecord(report).range.available);
+    EXPECT_TRUE(svmp::FE::analysis::constraintRangeRecord(report).range.converged);
+    EXPECT_FALSE(svmp::FE::analysis::constraintRangeRecord(report).range.breakdown);
+    EXPECT_TRUE(svmp::FE::analysis::constraintRangeRecord(report).range_gate.applied);
+    EXPECT_FALSE(svmp::FE::analysis::constraintRangeRecord(report).range_gate.passed);
     EXPECT_NEAR(
-        report.pressure_representability_relative_distance, 1.0, 1.0e-13);
+        svmp::FE::analysis::constraintRangeRecord(report).range.relative_distance, 1.0, 1.0e-13);
     EXPECT_NE(
         telemetry.find("reason=relative_distance_exceeds_threshold"),
         std::string::npos);
@@ -9010,7 +9008,7 @@ TEST(NewtonSolver,
     RecordProperty(
         "pressure_representability_distance_gate_out_of_range_relative_distance",
         ::testing::PrintToString(
-            report.pressure_representability_relative_distance));
+            svmp::FE::analysis::constraintRangeRecord(report).range.relative_distance));
 }
 
 TEST(NewtonSolver,
@@ -9061,11 +9059,11 @@ TEST(NewtonSolver,
 
     EXPECT_FALSE(report.converged);
     EXPECT_EQ(report.iterations, 0);
-    EXPECT_TRUE(report.pressure_representability_diagnostic_sampled);
-    EXPECT_FALSE(report.pressure_representability_available);
-    EXPECT_TRUE(report.pressure_representability_distance_gate_applied);
-    EXPECT_FALSE(report.pressure_representability_distance_gate_passed);
-    EXPECT_EQ(report.pressure_representability_reason,
+    EXPECT_TRUE(svmp::FE::analysis::constraintRangeRecord(report).sampled);
+    EXPECT_FALSE(svmp::FE::analysis::constraintRangeRecord(report).range.available);
+    EXPECT_TRUE(svmp::FE::analysis::constraintRangeRecord(report).range_gate.applied);
+    EXPECT_FALSE(svmp::FE::analysis::constraintRangeRecord(report).range_gate.passed);
+    EXPECT_EQ(svmp::FE::analysis::constraintRangeRecord(report).range.reason,
               "nonzero_pressure_constraint_inhomogeneity");
     // The veto is one decision, for missing evidence.
     ASSERT_EQ(report.certificates.size(), 1u);
@@ -9120,7 +9118,7 @@ TEST(NewtonSolver, ConstraintRangeProbeReportsFiniteRankUniformEvidence)
     (void)testing::internal::GetCapturedStdout();
     (void)testing::internal::GetCapturedStderr();
     EXPECT_EQ(ts_test::getVectorByDof(problem.history.u()), entry_state);
-    ASSERT_TRUE(report.pressure_representability_available);
+    ASSERT_TRUE(svmp::FE::analysis::constraintRangeRecord(report).range.available);
 
     using Defect = svmp::FE::analysis::ConstraintRangeProbeEvidence::Defect;
     const auto evidence = certificate->probeEvidence(
@@ -9130,11 +9128,11 @@ TEST(NewtonSolver, ConstraintRangeProbeReportsFiniteRankUniformEvidence)
     EXPECT_TRUE(evidence.range_available);
     EXPECT_EQ(evidence.constraint_field, problem.pressure_field);
     EXPECT_EQ(evidence.range_relative_distance,
-              report.pressure_representability_relative_distance);
+              svmp::FE::analysis::constraintRangeRecord(report).range.relative_distance);
     EXPECT_EQ(evidence.production_residual_norm, report.residual_norm);
     EXPECT_EQ(evidence.constant_field_kkt_required,
-              report.constant_pressure_unit_coefficients_represent_constant &&
-                  report.constant_pressure_constraints_preserve_constants);
+              svmp::FE::analysis::constraintRangeRecord(report).constant_field_kkt.unit_coefficients_represent_constant &&
+                  svmp::FE::analysis::constraintRangeRecord(report).constant_field_kkt.constraints_preserve_constants);
     EXPECT_FALSE(certificate
                      ->probeEvidence(report, *problem.sys,
                                      /*constant_field_is_physical=*/false,
@@ -9244,15 +9242,15 @@ TEST(NewtonSolver,
 
     EXPECT_TRUE(report.converged);
     EXPECT_EQ(report.iterations, 0);
-    EXPECT_TRUE(report.static_compatible_pressure_initializer_requested);
-    EXPECT_TRUE(report.static_compatible_pressure_initializer_applied);
-    EXPECT_TRUE(report.static_compatible_pressure_initializer_passed);
-    EXPECT_EQ(report.static_compatible_pressure_initializer_reason,
+    EXPECT_TRUE(svmp::FE::analysis::constraintRangeRecord(report).initializer.requested);
+    EXPECT_TRUE(svmp::FE::analysis::constraintRangeRecord(report).initializer.applied);
+    EXPECT_TRUE(svmp::FE::analysis::constraintRangeRecord(report).initializer.passed);
+    EXPECT_EQ(svmp::FE::analysis::constraintRangeRecord(report).initializer.reason,
               "additive_initial_guess_within_threshold");
-    EXPECT_EQ(report.pressure_representability_pressure_field,
+    EXPECT_EQ(svmp::FE::analysis::constraintRangeRecord(report).range.constraint_field,
               problem.pressure_field);
     EXPECT_TRUE(workspace.initializer_ledger.isConsumed(0));
-    EXPECT_LE(report.pressure_representability_relative_distance, 1.0e-10);
+    EXPECT_LE(svmp::FE::analysis::constraintRangeRecord(report).range.relative_distance, 1.0e-10);
     EXPECT_NE(
         telemetry.find(
             "diagnostic=free_surface_static_compatible_pressure_initializer"),
@@ -9330,9 +9328,9 @@ TEST(NewtonSolver,
     const auto repeated_stdout = testing::internal::GetCapturedStdout();
     EXPECT_TRUE(repeated_report.converged);
     EXPECT_FALSE(
-        repeated_report.static_compatible_pressure_initializer_applied);
-    EXPECT_TRUE(repeated_report.static_compatible_pressure_initializer_passed);
-    EXPECT_EQ(repeated_report.static_compatible_pressure_initializer_reason,
+        svmp::FE::analysis::constraintRangeRecord(repeated_report).initializer.applied);
+    EXPECT_TRUE(svmp::FE::analysis::constraintRangeRecord(repeated_report).initializer.passed);
+    EXPECT_EQ(svmp::FE::analysis::constraintRangeRecord(repeated_report).initializer.reason,
               "already_initialized");
     EXPECT_NE(
         (repeated_stdout + repeated_stderr).find("reason=already_initialized"),
@@ -9353,7 +9351,7 @@ TEST(NewtonSolver,
     RecordProperty(
         "static_compatible_pressure_initializer_relative_distance",
         ::testing::PrintToString(
-            report.pressure_representability_relative_distance));
+            svmp::FE::analysis::constraintRangeRecord(report).range.relative_distance));
     RecordProperty(
         "static_compatible_pressure_initializer_nonpressure_preserved", 1);
     RecordProperty(
@@ -9445,11 +9443,11 @@ TEST(NewtonSolver,
 
     EXPECT_TRUE(report.converged);
     EXPECT_EQ(report.iterations, 0);
-    EXPECT_TRUE(report.static_compatible_pressure_initializer_applied);
-    EXPECT_TRUE(report.static_compatible_pressure_initializer_passed);
-    EXPECT_EQ(report.static_compatible_pressure_initializer_reason,
+    EXPECT_TRUE(svmp::FE::analysis::constraintRangeRecord(report).initializer.applied);
+    EXPECT_TRUE(svmp::FE::analysis::constraintRangeRecord(report).initializer.passed);
+    EXPECT_EQ(svmp::FE::analysis::constraintRangeRecord(report).initializer.reason,
               "additive_initial_guess_within_threshold");
-    EXPECT_LE(report.pressure_representability_relative_distance, 1.0e-12);
+    EXPECT_LE(svmp::FE::analysis::constraintRangeRecord(report).range.relative_distance, 1.0e-12);
     EXPECT_EQ(ts_test::getVectorByDof(problem.history.u()),
               exact_entry_state);
     ASSERT_NE(testCertificateStorage(workspace).vectors.correction_load, nullptr);
@@ -9514,7 +9512,7 @@ TEST(NewtonSolver,
     EXPECT_FALSE(failed_report.converged);
     EXPECT_EQ(failed_report.iterations, 1);
     EXPECT_TRUE(
-        failed_report.static_compatible_pressure_initializer_applied);
+        svmp::FE::analysis::constraintRangeRecord(failed_report).initializer.applied);
     EXPECT_FALSE(workspace.initializer_ledger.isConsumed(0));
     EXPECT_EQ(ts_test::getVectorByDof(problem.history.u()), entry_current);
     EXPECT_EQ(ts_test::getVectorByDof(problem.history.uPrev()),
@@ -9533,7 +9531,7 @@ TEST(NewtonSolver,
     EXPECT_TRUE(retry_report.converged);
     EXPECT_EQ(retry_report.iterations, 1);
     EXPECT_TRUE(
-        retry_report.static_compatible_pressure_initializer_applied);
+        svmp::FE::analysis::constraintRangeRecord(retry_report).initializer.applied);
     EXPECT_TRUE(workspace.initializer_ledger.isConsumed(0));
 
     const auto retry_state =
@@ -9735,7 +9733,7 @@ TEST(NewtonSolver,
         workspace);
     EXPECT_TRUE(retry_report.converged);
     EXPECT_TRUE(
-        retry_report.static_compatible_pressure_initializer_applied);
+        svmp::FE::analysis::constraintRangeRecord(retry_report).initializer.applied);
     EXPECT_TRUE(workspace.initializer_ledger.isConsumed(0));
     EXPECT_EQ(injected_failures, 1);
     EXPECT_EQ(restored_effect_count, 2);
@@ -9796,9 +9794,9 @@ TEST(NewtonSolver,
             const svmp::FE::timestepping::NewtonReport& report) {
             EXPECT_TRUE(report.converged);
             initializer_applied.push_back(
-                report.static_compatible_pressure_initializer_applied);
+                svmp::FE::analysis::constraintRangeRecord(report).initializer.applied);
             initializer_reasons.push_back(
-                report.static_compatible_pressure_initializer_reason);
+                svmp::FE::analysis::constraintRangeRecord(report).initializer.reason);
         };
     callbacks.on_before_step_accept =
         [&](svmp::FE::timestepping::TimeHistory&,
@@ -9941,7 +9939,7 @@ TEST(NewtonSolver,
         workspace);
     EXPECT_TRUE(retry_report.converged);
     EXPECT_TRUE(
-        retry_report.static_compatible_pressure_initializer_applied);
+        svmp::FE::analysis::constraintRangeRecord(retry_report).initializer.applied);
     EXPECT_FALSE(
         problem.sys->meshCoordinateTransactionActive());
 #endif
@@ -10010,9 +10008,9 @@ TEST(NewtonSolver,
             const svmp::FE::timestepping::NewtonReport& report) {
             EXPECT_TRUE(report.converged);
             candidate_initializer_applied.push_back(
-                report.static_compatible_pressure_initializer_applied);
+                svmp::FE::analysis::constraintRangeRecord(report).initializer.applied);
             candidate_initializer_reasons.push_back(
-                report.static_compatible_pressure_initializer_reason);
+                svmp::FE::analysis::constraintRangeRecord(report).initializer.reason);
         };
     callbacks.on_before_step_accept =
         [&](svmp::FE::timestepping::TimeHistory&,
@@ -10137,11 +10135,11 @@ TEST(NewtonSolver,
         workspace);
     EXPECT_TRUE(retry_report.converged);
     EXPECT_TRUE(
-        retry_report.pressure_representability_distance_gate_applied);
+        svmp::FE::analysis::constraintRangeRecord(retry_report).range_gate.applied);
     EXPECT_TRUE(
-        retry_report.pressure_representability_distance_gate_passed);
-    EXPECT_TRUE(retry_report.constant_pressure_kkt_distance_gate_applied);
-    EXPECT_TRUE(retry_report.constant_pressure_kkt_distance_gate_passed);
+        svmp::FE::analysis::constraintRangeRecord(retry_report).range_gate.passed);
+    EXPECT_TRUE(svmp::FE::analysis::constraintRangeRecord(retry_report).constant_field_kkt_gate.applied);
+    EXPECT_TRUE(svmp::FE::analysis::constraintRangeRecord(retry_report).constant_field_kkt_gate.passed);
     // The outer acceptance recorded both decisions of the certificate.
     ASSERT_EQ(retry_report.certificates.size(), 2u);
     EXPECT_EQ(retry_report.certificates[0].id, "constraint_range.range_distance");
@@ -10203,7 +10201,7 @@ TEST(NewtonSolver,
         workspace);
     ASSERT_TRUE(initial_report.converged);
     ASSERT_TRUE(
-        initial_report.static_compatible_pressure_initializer_applied);
+        svmp::FE::analysis::constraintRangeRecord(initial_report).initializer.applied);
     ASSERT_TRUE(workspace.initializer_ledger.isConsumed(0));
 
     newton.allocateWorkspace(
@@ -10217,11 +10215,9 @@ TEST(NewtonSolver,
         workspace);
     ASSERT_TRUE(workspace_reallocated_report.converged);
     EXPECT_FALSE(
-        workspace_reallocated_report
-            .static_compatible_pressure_initializer_applied);
+        svmp::FE::analysis::constraintRangeRecord(workspace_reallocated_report).initializer.applied);
     EXPECT_EQ(
-        workspace_reallocated_report
-            .static_compatible_pressure_initializer_reason,
+        svmp::FE::analysis::constraintRangeRecord(workspace_reallocated_report).initializer.reason,
         "already_initialized");
 
     const auto entry_sparsity_revision =
@@ -10244,11 +10240,9 @@ TEST(NewtonSolver,
     const auto stdout_text = testing::internal::GetCapturedStdout();
     EXPECT_TRUE(jacobian_reallocated_report.converged);
     EXPECT_FALSE(
-        jacobian_reallocated_report
-            .static_compatible_pressure_initializer_applied);
+        svmp::FE::analysis::constraintRangeRecord(jacobian_reallocated_report).initializer.applied);
     EXPECT_EQ(
-        jacobian_reallocated_report
-            .static_compatible_pressure_initializer_reason,
+        svmp::FE::analysis::constraintRangeRecord(jacobian_reallocated_report).initializer.reason,
         "already_initialized");
     EXPECT_TRUE(workspace.initializer_ledger.isConsumed(0));
     EXPECT_EQ(
@@ -10318,14 +10312,14 @@ TEST(NewtonSolver,
     const auto telemetry = stdout_text + stderr_text;
 
     EXPECT_FALSE(report.converged);
-    EXPECT_TRUE(report.static_compatible_pressure_initializer_requested);
-    EXPECT_FALSE(report.static_compatible_pressure_initializer_applied);
-    EXPECT_FALSE(report.static_compatible_pressure_initializer_passed);
-    EXPECT_EQ(report.static_compatible_pressure_initializer_reason,
+    EXPECT_TRUE(svmp::FE::analysis::constraintRangeRecord(report).initializer.requested);
+    EXPECT_FALSE(svmp::FE::analysis::constraintRangeRecord(report).initializer.applied);
+    EXPECT_FALSE(svmp::FE::analysis::constraintRangeRecord(report).initializer.passed);
+    EXPECT_EQ(svmp::FE::analysis::constraintRangeRecord(report).initializer.reason,
               "relative_distance_exceeds_threshold");
     EXPECT_FALSE(workspace.initializer_ledger.isConsumed(0));
     EXPECT_NEAR(
-        report.pressure_representability_relative_distance, 1.0, 1.0e-13);
+        svmp::FE::analysis::constraintRangeRecord(report).range.relative_distance, 1.0, 1.0e-13);
     EXPECT_EQ(ts_test::getVectorByDof(problem.history.u()), entry_current);
     EXPECT_EQ(ts_test::getVectorByDof(problem.history.uPrev()),
               entry_previous);
@@ -10601,10 +10595,10 @@ TEST(NewtonSolver,
     EXPECT_EQ(workspace.sparsity_revision,
               problem.sys->sparsityPatternRevision());
     EXPECT_TRUE(
-        report.constant_pressure_unit_coefficients_represent_constant);
+        svmp::FE::analysis::constraintRangeRecord(report).constant_field_kkt.unit_coefficients_represent_constant);
     EXPECT_TRUE(
-        report.constant_pressure_constraints_preserve_constants);
-    EXPECT_TRUE(report.constant_pressure_kkt_available);
+        svmp::FE::analysis::constraintRangeRecord(report).constant_field_kkt.constraints_preserve_constants);
+    EXPECT_TRUE(svmp::FE::analysis::constraintRangeRecord(report).constant_field_kkt.available);
 
     const std::array<const void*, 9> refreshed_vectors{
         testCertificateStorage(workspace).vectors.load.get(),

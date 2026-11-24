@@ -25,6 +25,7 @@
 #include <span>
 #include <string>
 #include <string_view>
+#include <utility>
 #include <vector>
 
 namespace svmp {
@@ -430,6 +431,84 @@ struct CertificateDecision {
     double threshold{std::numeric_limits<double>::quiet_NaN()};
 };
 
+class NewtonExtension;
+
+/// A typed result an extension records in a NewtonReport; copied with it.
+class NewtonExtensionRecord {
+public:
+    virtual ~NewtonExtensionRecord() = default;
+    [[nodiscard]] virtual std::unique_ptr<NewtonExtensionRecord> clone() const = 0;
+};
+
+/// The records of the extensions of a solve, at most one per extension.
+/// An owner is compared by identity and never dereferenced, so a record
+/// outlives its extension.
+class NewtonExtensionRecords {
+public:
+    NewtonExtensionRecords() = default;
+    NewtonExtensionRecords(const NewtonExtensionRecords& other) { *this = other; }
+    NewtonExtensionRecords& operator=(const NewtonExtensionRecords& other)
+    {
+        if (this != &other) {
+            std::vector<Entry> copies;
+            copies.reserve(other.entries_.size());
+            for (const auto& entry : other.entries_) {
+                copies.push_back(Entry{entry.owner, entry.record ? entry.record->clone() : nullptr});
+            }
+            entries_ = std::move(copies);
+        }
+        return *this;
+    }
+    NewtonExtensionRecords(NewtonExtensionRecords&&) noexcept = default;
+    NewtonExtensionRecords& operator=(NewtonExtensionRecords&&) noexcept = default;
+
+    /// The record of @p owner, or null.
+    [[nodiscard]] const NewtonExtensionRecord* find(const NewtonExtension& owner) const noexcept
+    {
+        for (const auto& entry : entries_) {
+            if (entry.owner == &owner) {
+                return entry.record.get();
+            }
+        }
+        return nullptr;
+    }
+    [[nodiscard]] NewtonExtensionRecord* find(const NewtonExtension& owner) noexcept
+    {
+        return const_cast<NewtonExtensionRecord*>(std::as_const(*this).find(owner));
+    }
+
+    /// The first record of type Record, whoever recorded it, or null.
+    template <class Record>
+    [[nodiscard]] const Record* findFirst() const noexcept
+    {
+        for (const auto& entry : entries_) {
+            if (const auto* record = dynamic_cast<const Record*>(entry.record.get())) {
+                return record;
+            }
+        }
+        return nullptr;
+    }
+
+    /// Records @p record for @p owner, replacing an earlier one.
+    void set(const NewtonExtension& owner, std::unique_ptr<NewtonExtensionRecord> record)
+    {
+        for (auto& entry : entries_) {
+            if (entry.owner == &owner) {
+                entry.record = std::move(record);
+                return;
+            }
+        }
+        entries_.push_back(Entry{&owner, std::move(record)});
+    }
+
+private:
+    struct Entry {
+        const NewtonExtension* owner{nullptr};
+        std::unique_ptr<NewtonExtensionRecord> record{};
+    };
+    std::vector<Entry> entries_{};
+};
+
 struct NewtonReport {
     bool converged{false};
     std::string failure_message{};
@@ -484,58 +563,13 @@ struct NewtonReport {
     double auxiliary_residual_norm0{0.0};
     double auxiliary_residual_norm{0.0};
     bool component_residual_convergence{false};
-    bool pressure_representability_diagnostic_sampled{false};
-    bool pressure_representability_available{false};
-    bool pressure_representability_converged{false};
-    bool pressure_representability_breakdown{false};
-    FieldId pressure_representability_pressure_field{INVALID_FIELD_ID};
-    double pressure_representability_residual_norm{
-        std::numeric_limits<double>::quiet_NaN()};
-    double pressure_representability_relative_distance{
-        std::numeric_limits<double>::quiet_NaN()};
-    std::string pressure_representability_reason{"not_sampled"};
-    /**
-     * One-dimensional equilibrium subproblem for a physical unit pressure
-     * trace.  This reports the best constant pressure jump and the residual
-     * left in the assembled prescribed exterior-pressure plus physical-
-     * potential virtual work.  It never replaces or projects the production
-     * load.
-     */
-    bool constant_pressure_kkt_available{false};
-    bool constant_pressure_unit_coefficients_represent_constant{false};
-    bool constant_pressure_constraints_preserve_constants{false};
-    std::string constant_pressure_constraint_scope{"full_field"};
-    std::string constant_pressure_constraint_scope_reason{"not_attempted"};
-    double constant_pressure_kkt_pressure_jump{
-        std::numeric_limits<double>::quiet_NaN()};
-    double constant_pressure_kkt_volume_multiplier{
-        std::numeric_limits<double>::quiet_NaN()};
-    double constant_pressure_kkt_direction_norm{
-        std::numeric_limits<double>::quiet_NaN()};
-    double constant_pressure_kkt_residual_norm{
-        std::numeric_limits<double>::quiet_NaN()};
-    double constant_pressure_kkt_relative_distance{
-        std::numeric_limits<double>::quiet_NaN()};
-    double constant_pressure_kkt_relative_orthogonality{
-        std::numeric_limits<double>::quiet_NaN()};
-    std::string constant_pressure_kkt_reason{"not_sampled"};
-    bool constant_pressure_kkt_distance_gate_applied{false};
-    bool constant_pressure_kkt_distance_gate_passed{false};
-    double constant_pressure_kkt_max_relative_distance{
-        std::numeric_limits<double>::quiet_NaN()};
-    bool pressure_representability_distance_gate_applied{false};
-    bool pressure_representability_distance_gate_passed{false};
-    double pressure_representability_max_relative_distance{
-        std::numeric_limits<double>::quiet_NaN()};
-    bool static_compatible_pressure_initializer_requested{false};
-    bool static_compatible_pressure_initializer_applied{false};
-    bool static_compatible_pressure_initializer_passed{false};
-    std::string static_compatible_pressure_initializer_reason{
-        "not_requested"};
     backends::SolverReport linear{};
     /// The decisions of the acceptance checks at the last acceptance of
     /// the solve, in check order.
     std::vector<CertificateDecision> certificates{};
+    /// The typed results of the extensions, each reached through its
+    /// extension (for example ConstraintRangeCertificate::record).
+    NewtonExtensionRecords extension_records{};
 };
 
 /// Which initializers of the options a workspace lifecycle has consumed,

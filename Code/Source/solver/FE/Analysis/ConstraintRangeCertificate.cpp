@@ -1331,6 +1331,53 @@ struct ConstraintRangeCertificate::State {
     ConstraintRangeStorage* proposal_storage{nullptr};
 };
 
+namespace {
+
+/// The record a certificate keeps in a NewtonReport.
+class ConstraintRangeRecord final : public timestepping::NewtonExtensionRecord {
+public:
+    [[nodiscard]] std::unique_ptr<timestepping::NewtonExtensionRecord> clone() const override
+    {
+        return std::make_unique<ConstraintRangeRecord>(*this);
+    }
+
+    ConstraintRangeReport value{};
+};
+
+[[nodiscard]] const ConstraintRangeReport& defaultConstraintRangeReport()
+{
+    static const ConstraintRangeReport absent{};
+    return absent;
+}
+
+} // namespace
+
+const ConstraintRangeReport& constraintRangeRecord(const timestepping::NewtonReport& report)
+{
+    const auto* record = report.extension_records.findFirst<ConstraintRangeRecord>();
+    return record != nullptr ? record->value : defaultConstraintRangeReport();
+}
+
+const ConstraintRangeReport& ConstraintRangeCertificate::record(
+    const timestepping::NewtonReport& report) const
+{
+    const auto* record =
+        dynamic_cast<const ConstraintRangeRecord*>(report.extension_records.find(*this));
+    return record != nullptr ? record->value : defaultConstraintRangeReport();
+}
+
+ConstraintRangeReport& ConstraintRangeCertificate::mutableRecord(
+    timestepping::NewtonReport& report) const
+{
+    auto* record = dynamic_cast<ConstraintRangeRecord*>(report.extension_records.find(*this));
+    if (record == nullptr) {
+        auto created = std::make_unique<ConstraintRangeRecord>();
+        record = created.get();
+        report.extension_records.set(*this, std::move(created));
+    }
+    return record->value;
+}
+
 bool constraintRangeMethodRequested(const ConstraintRangeMethod& method) noexcept
 {
     return method.observe || method.initialize_constraint_field ||
@@ -1596,7 +1643,7 @@ void ConstraintRangeCertificate::validateCommunicatorPolicy(const systems::FESys
 
 void ConstraintRangeCertificate::observe(timestepping::NewtonObservation& observation)
 {
-    auto& report = observation.report;
+    auto& report = mutableRecord(observation.report);
     auto& transient = observation.transient;
     const char* phase = observation.phase;
     const auto sync_point = observation.sync_point;
@@ -1621,40 +1668,40 @@ void ConstraintRangeCertificate::observe(timestepping::NewtonObservation& observ
     if (!diagnostic_enabled_on_any_rank) {
         return;
     }
-    report.pressure_representability_diagnostic_sampled = true;
-    report.pressure_representability_available = false;
-    report.pressure_representability_converged = false;
-    report.pressure_representability_breakdown = false;
-    report.pressure_representability_residual_norm =
+    report.sampled = true;
+    report.range.available = false;
+    report.range.converged = false;
+    report.range.breakdown = false;
+    report.range.residual_norm =
         std::numeric_limits<double>::quiet_NaN();
-    report.pressure_representability_relative_distance =
+    report.range.relative_distance =
         std::numeric_limits<double>::quiet_NaN();
-    report.pressure_representability_reason = "diagnostic_pending";
-    report.constant_pressure_kkt_available = false;
-    report.constant_pressure_unit_coefficients_represent_constant =
+    report.range.reason = "diagnostic_pending";
+    report.constant_field_kkt.available = false;
+    report.constant_field_kkt.unit_coefficients_represent_constant =
         false;
-    report.constant_pressure_constraints_preserve_constants = false;
-    report.constant_pressure_constraint_scope = "full_field";
-    report.constant_pressure_constraint_scope_reason =
+    report.constant_field_kkt.constraints_preserve_constants = false;
+    report.constant_field_kkt.constraint_scope = "full_field";
+    report.constant_field_kkt.constraint_scope_reason =
         "not_attempted";
-    report.constant_pressure_kkt_pressure_jump =
+    report.constant_field_kkt.jump =
         std::numeric_limits<double>::quiet_NaN();
-    report.constant_pressure_kkt_volume_multiplier =
+    report.constant_field_kkt.multiplier =
         std::numeric_limits<double>::quiet_NaN();
-    report.constant_pressure_kkt_direction_norm =
+    report.constant_field_kkt.direction_norm =
         std::numeric_limits<double>::quiet_NaN();
-    report.constant_pressure_kkt_residual_norm =
+    report.constant_field_kkt.residual_norm =
         std::numeric_limits<double>::quiet_NaN();
-    report.constant_pressure_kkt_relative_distance =
+    report.constant_field_kkt.relative_distance =
         std::numeric_limits<double>::quiet_NaN();
-    report.constant_pressure_kkt_relative_orthogonality =
+    report.constant_field_kkt.relative_orthogonality =
         std::numeric_limits<double>::quiet_NaN();
-    report.constant_pressure_kkt_reason = "diagnostic_pending";
+    report.constant_field_kkt.reason = "diagnostic_pending";
     state_->constraint_field.reset();
     if (!allRanks(local_diagnostic_enabled)) {
-        report.pressure_representability_reason =
+        report.range.reason =
             "diagnostic_enablement_differs_across_communicator";
-        report.constant_pressure_kkt_reason =
+        report.constant_field_kkt.reason =
             "diagnostic_enablement_differs_across_communicator";
         if (!state_->unavailable_logged &&
             communicatorRank(system_communicator) == 0) {
@@ -1699,9 +1746,9 @@ void ConstraintRangeCertificate::observe(timestepping::NewtonObservation& observ
     const auto* declaration = systems::findDiagnosticDeclaration<
         analysis::ConstraintRangeDeclaration>(transient.system());
     if (!allRanks(declaration != nullptr)) {
-        report.pressure_representability_reason =
+        report.range.reason =
             "conservative_balance_operator_unavailable";
-        report.constant_pressure_kkt_reason =
+        report.constant_field_kkt.reason =
             "conservative_balance_operator_unavailable";
         if (!state_->unavailable_logged &&
             communicatorRank(system_communicator) == 0) {
@@ -1737,9 +1784,9 @@ void ConstraintRangeCertificate::observe(timestepping::NewtonObservation& observ
         const bool local_operator_installed =
             transient.system().hasOperator(op);
         if (!allRanks(local_operator_installed)) {
-            report.pressure_representability_reason =
+            report.range.reason =
                 "conservative_balance_operator_unavailable";
-            report.constant_pressure_kkt_reason =
+            report.constant_field_kkt.reason =
                 "conservative_balance_operator_unavailable";
             if (!state_->unavailable_logged &&
                 communicatorRank(system_communicator) == 0) {
@@ -2046,7 +2093,7 @@ void ConstraintRangeCertificate::observe(timestepping::NewtonObservation& observ
         } else {
             state_->constraint_field =
                 *pressure_field;
-            report.pressure_representability_pressure_field =
+            report.range.constraint_field =
                 *pressure_field;
         }
     }
@@ -2352,49 +2399,49 @@ void ConstraintRangeCertificate::observe(timestepping::NewtonObservation& observ
             ? std::abs(norms[0] - norms[3]) / denominator
             : std::numeric_limits<double>::quiet_NaN();
 
-    report.pressure_representability_available =
+    report.range.available =
         pressure_representability_available;
-    report.pressure_representability_converged =
+    report.range.converged =
         pressure_representability_available &&
         pressure_representability.converged;
-    report.pressure_representability_breakdown =
+    report.range.breakdown =
         pressure_representability_available &&
         pressure_representability.breakdown;
-    report.pressure_representability_residual_norm =
+    report.range.residual_norm =
         pressure_representability_available
             ? pressure_representability.residual_norm
             : std::numeric_limits<double>::quiet_NaN();
-    report.pressure_representability_relative_distance =
+    report.range.relative_distance =
         pressure_representability_available
             ? pressure_representability.relative_residual
             : std::numeric_limits<double>::quiet_NaN();
-    report.pressure_representability_reason =
+    report.range.reason =
         pressure_representability_available
             ? "available"
             : pressure_representability_reason;
-    report.constant_pressure_kkt_available =
+    report.constant_field_kkt.available =
         constant_pressure_kkt.available;
-    report.constant_pressure_unit_coefficients_represent_constant =
+    report.constant_field_kkt.unit_coefficients_represent_constant =
         pressure_unit_coefficients_represent_constant;
-    report.constant_pressure_constraints_preserve_constants =
+    report.constant_field_kkt.constraints_preserve_constants =
         pressure_constraints_preserve_constants;
-    report.constant_pressure_constraint_scope =
+    report.constant_field_kkt.constraint_scope =
         pressure_constraint_scope;
-    report.constant_pressure_constraint_scope_reason =
+    report.constant_field_kkt.constraint_scope_reason =
         pressure_constraint_scope_reason;
-    report.constant_pressure_kkt_pressure_jump =
+    report.constant_field_kkt.jump =
         constant_pressure_kkt.pressure_jump;
-    report.constant_pressure_kkt_volume_multiplier =
+    report.constant_field_kkt.multiplier =
         constant_pressure_kkt.volume_multiplier;
-    report.constant_pressure_kkt_direction_norm =
+    report.constant_field_kkt.direction_norm =
         constant_pressure_kkt.direction_norm;
-    report.constant_pressure_kkt_residual_norm =
+    report.constant_field_kkt.residual_norm =
         constant_pressure_kkt.residual_norm;
-    report.constant_pressure_kkt_relative_distance =
+    report.constant_field_kkt.relative_distance =
         constant_pressure_kkt.relative_distance;
-    report.constant_pressure_kkt_relative_orthogonality =
+    report.constant_field_kkt.relative_orthogonality =
         constant_pressure_kkt.relative_orthogonality;
-    report.constant_pressure_kkt_reason =
+    report.constant_field_kkt.reason =
         constant_pressure_kkt.reason;
 
     if (communicatorRank(system_communicator) == 0) {
@@ -2534,7 +2581,7 @@ bool ConstraintRangeCertificate::requiresAcceptedObservation() const
 std::vector<CertificateDecision> ConstraintRangeCertificate::assess(
     timestepping::NewtonAcceptance& acceptance)
 {
-    auto& candidate = acceptance.candidate;
+    auto& candidate = mutableRecord(acceptance.candidate);
     const auto system_communicator = systemCommunicator(acceptance.system);
     const char* phase = acceptance.phase != nullptr ? acceptance.phase : "unknown";
     const auto write_position = [&](std::ostringstream& oss) {
@@ -2550,22 +2597,22 @@ std::vector<CertificateDecision> ConstraintRangeCertificate::assess(
     if (const auto threshold = method_.max_range_distance; threshold.has_value()) {
         bool local_passed = true;
         const char* reason = "within_threshold";
-        if (!candidate.pressure_representability_diagnostic_sampled) {
+        if (!candidate.sampled) {
             local_passed = false;
             reason = "diagnostic_not_sampled";
-        } else if (!candidate.pressure_representability_available) {
+        } else if (!candidate.range.available) {
             local_passed = false;
             reason = "diagnostic_unavailable";
-        } else if (candidate.pressure_representability_breakdown) {
+        } else if (candidate.range.breakdown) {
             local_passed = false;
             reason = "diagnostic_breakdown";
-        } else if (!candidate.pressure_representability_converged) {
+        } else if (!candidate.range.converged) {
             local_passed = false;
             reason = "normal_equation_not_stationary";
-        } else if (!std::isfinite(candidate.pressure_representability_relative_distance)) {
+        } else if (!std::isfinite(candidate.range.relative_distance)) {
             local_passed = false;
             reason = "relative_distance_nonfinite";
-        } else if (candidate.pressure_representability_relative_distance > *threshold) {
+        } else if (candidate.range.relative_distance > *threshold) {
             local_passed = false;
             reason = "relative_distance_exceeds_threshold";
         }
@@ -2574,9 +2621,9 @@ std::vector<CertificateDecision> ConstraintRangeCertificate::assess(
             reason = "remote_rank_rejected";
         }
 
-        candidate.pressure_representability_distance_gate_applied = true;
-        candidate.pressure_representability_distance_gate_passed = passed;
-        candidate.pressure_representability_max_relative_distance = *threshold;
+        candidate.range_gate.applied = true;
+        candidate.range_gate.passed = passed;
+        candidate.range_gate.max_relative_distance = *threshold;
         if (communicatorRank(system_communicator) == 0) {
             std::ostringstream oss;
             oss << std::setprecision(17)
@@ -2586,13 +2633,13 @@ std::vector<CertificateDecision> ConstraintRangeCertificate::assess(
             write_position(oss);
             oss << " pressure_representability_distance_gate_applied=1"
                 << " pressure_representability_available="
-                << (candidate.pressure_representability_available ? 1 : 0)
+                << (candidate.range.available ? 1 : 0)
                 << " pressure_representability_converged="
-                << (candidate.pressure_representability_converged ? 1 : 0)
+                << (candidate.range.converged ? 1 : 0)
                 << " pressure_representability_breakdown="
-                << (candidate.pressure_representability_breakdown ? 1 : 0)
+                << (candidate.range.breakdown ? 1 : 0)
                 << " pressure_representability_relative_residual="
-                << candidate.pressure_representability_relative_distance
+                << candidate.range.relative_distance
                 << " pressure_representability_max_relative_distance="
                 << *threshold
                 << " pressure_representability_distance_gate_passed="
@@ -2600,7 +2647,7 @@ std::vector<CertificateDecision> ConstraintRangeCertificate::assess(
                 << " pressure_representability_claimed="
                 << (passed ? 1 : 0)
                 << " pressure_representability_reason="
-                << candidate.pressure_representability_reason
+                << candidate.range.reason
                 << " reason=" << reason;
             FE_LOG_INFO(oss.str());
         }
@@ -2608,7 +2655,7 @@ std::vector<CertificateDecision> ConstraintRangeCertificate::assess(
             .id = "constraint_range.range_distance",
             .status = gateStatus(passed, reason),
             .reason = reason,
-            .value = candidate.pressure_representability_relative_distance,
+            .value = candidate.range.relative_distance,
             .threshold = *threshold});
     }
 
@@ -2616,16 +2663,16 @@ std::vector<CertificateDecision> ConstraintRangeCertificate::assess(
     if (const auto threshold = method_.max_constant_field_kkt_distance; threshold.has_value()) {
         bool local_passed = true;
         const char* reason = "within_threshold";
-        if (!candidate.pressure_representability_diagnostic_sampled) {
+        if (!candidate.sampled) {
             local_passed = false;
             reason = "diagnostic_not_sampled";
-        } else if (!candidate.constant_pressure_kkt_available) {
+        } else if (!candidate.constant_field_kkt.available) {
             local_passed = false;
             reason = "constant_pressure_kkt_unavailable";
-        } else if (!std::isfinite(candidate.constant_pressure_kkt_relative_distance)) {
+        } else if (!std::isfinite(candidate.constant_field_kkt.relative_distance)) {
             local_passed = false;
             reason = "relative_distance_nonfinite";
-        } else if (candidate.constant_pressure_kkt_relative_distance > *threshold) {
+        } else if (candidate.constant_field_kkt.relative_distance > *threshold) {
             local_passed = false;
             reason = "relative_distance_exceeds_threshold";
         }
@@ -2634,9 +2681,9 @@ std::vector<CertificateDecision> ConstraintRangeCertificate::assess(
             reason = "remote_rank_rejected";
         }
 
-        candidate.constant_pressure_kkt_distance_gate_applied = true;
-        candidate.constant_pressure_kkt_distance_gate_passed = passed;
-        candidate.constant_pressure_kkt_max_relative_distance = *threshold;
+        candidate.constant_field_kkt_gate.applied = true;
+        candidate.constant_field_kkt_gate.passed = passed;
+        candidate.constant_field_kkt_gate.max_relative_distance = *threshold;
         if (communicatorRank(system_communicator) == 0) {
             std::ostringstream oss;
             oss << std::setprecision(17)
@@ -2646,13 +2693,13 @@ std::vector<CertificateDecision> ConstraintRangeCertificate::assess(
             write_position(oss);
             oss << " constant_pressure_kkt_distance_gate_applied=1"
                 << " constant_pressure_kkt_available="
-                << (candidate.constant_pressure_kkt_available ? 1 : 0)
+                << (candidate.constant_field_kkt.available ? 1 : 0)
                 << " constant_pressure_unit_coefficients_represent_constant="
-                << (candidate.constant_pressure_unit_coefficients_represent_constant ? 1 : 0)
+                << (candidate.constant_field_kkt.unit_coefficients_represent_constant ? 1 : 0)
                 << " constant_pressure_constraints_preserve_constants="
-                << (candidate.constant_pressure_constraints_preserve_constants ? 1 : 0)
+                << (candidate.constant_field_kkt.constraints_preserve_constants ? 1 : 0)
                 << " constant_pressure_kkt_relative_distance="
-                << candidate.constant_pressure_kkt_relative_distance
+                << candidate.constant_field_kkt.relative_distance
                 << " constant_pressure_kkt_max_relative_distance="
                 << *threshold
                 << " constant_pressure_kkt_distance_gate_passed="
@@ -2660,7 +2707,7 @@ std::vector<CertificateDecision> ConstraintRangeCertificate::assess(
                 << " constant_pressure_kkt_claimed="
                 << (passed ? 1 : 0)
                 << " constant_pressure_kkt_reason="
-                << candidate.constant_pressure_kkt_reason
+                << candidate.constant_field_kkt.reason
                 << " constant_pressure_kkt_force_projection_applied=0"
                 << " reason=" << reason;
             FE_LOG_INFO(oss.str());
@@ -2669,21 +2716,23 @@ std::vector<CertificateDecision> ConstraintRangeCertificate::assess(
             .id = "constraint_range.constant_field_kkt_distance",
             .status = gateStatus(passed, reason),
             .reason = reason,
-            .value = candidate.constant_pressure_kkt_relative_distance,
+            .value = candidate.constant_field_kkt.relative_distance,
             .threshold = *threshold});
     }
     return decisions;
 }
 
 void ConstraintRangeCertificate::logInitializer(const systems::FESystem& system,
-                                                timestepping::NewtonReport& report,
+                                                timestepping::NewtonReport& newton_report,
                                                 bool applied,
                                                 bool passed,
                                                 std::string_view reason) const
 {
-    report.static_compatible_pressure_initializer_applied = applied;
-    report.static_compatible_pressure_initializer_passed = passed;
-    report.static_compatible_pressure_initializer_reason = std::string(reason);
+    auto& record = mutableRecord(newton_report);
+    record.initializer.applied = applied;
+    record.initializer.passed = passed;
+    record.initializer.reason = std::string(reason);
+    const auto& report = record;
     const auto& correction = state_->correction;
     const double threshold = *method_.max_range_distance;
     if (communicatorRank(systemCommunicator(system)) == 0) {
@@ -2696,13 +2745,13 @@ void ConstraintRangeCertificate::logInitializer(const systems::FESystem& system,
             << " passed=" << (passed ? 1 : 0)
             << " reason=" << reason
             << " pressure_representability_available="
-            << (report.pressure_representability_available ? 1 : 0)
+            << (report.range.available ? 1 : 0)
             << " pressure_representability_converged="
-            << (report.pressure_representability_converged ? 1 : 0)
+            << (report.range.converged ? 1 : 0)
             << " pressure_representability_breakdown="
-            << (report.pressure_representability_breakdown ? 1 : 0)
+            << (report.range.breakdown ? 1 : 0)
             << " pressure_representability_relative_residual="
-            << report.pressure_representability_relative_distance
+            << report.range.relative_distance
             << " pressure_representability_max_relative_distance="
             << threshold
             << " pressure_correction_residual_norm="
@@ -2735,7 +2784,7 @@ void ConstraintRangeCertificate::logInitializer(const systems::FESystem& system,
 void ConstraintRangeCertificate::reportConsumed(const systems::FESystem& system,
                                                 timestepping::NewtonReport& report)
 {
-    report.static_compatible_pressure_initializer_requested = true;
+    mutableRecord(report).initializer.requested = true;
     state_->correction = {};
     logInitializer(system, report, /*applied=*/false, /*passed=*/true, "already_initialized");
 }
@@ -2743,7 +2792,8 @@ void ConstraintRangeCertificate::reportConsumed(const systems::FESystem& system,
 bool ConstraintRangeCertificate::propose(timestepping::NewtonInitialization& initialization)
 {
     auto& observation = initialization.observation;
-    auto& report = observation.report;
+    auto& newton_report = observation.report;
+    auto& report = mutableRecord(newton_report);
     auto& transient = observation.transient;
     auto& current = initialization.current;
     const auto constrained_dofs = observation.constrained_dofs;
@@ -2751,7 +2801,7 @@ bool ConstraintRangeCertificate::propose(timestepping::NewtonInitialization& ini
     const auto allRanks = [system_communicator](bool local_value) {
         return !anyRankOf(system_communicator, !local_value);
     };
-    report.static_compatible_pressure_initializer_requested = true;
+    report.initializer.requested = true;
     state_->correction = {};
     state_->proposal_storage = nullptr;
     auto& correction_state = state_->correction;
@@ -2777,23 +2827,23 @@ bool ConstraintRangeCertificate::propose(timestepping::NewtonInitialization& ini
         storage->vectors.residual != nullptr &&
         storage->vectors.normal_residual != nullptr &&
         state_->constraint_field.has_value();
-    if (!report.pressure_representability_diagnostic_sampled) {
+    if (!report.sampled) {
         failure_reason = "diagnostic_not_sampled";
-    } else if (!report.pressure_representability_available) {
+    } else if (!report.range.available) {
         failure_reason = "diagnostic_unavailable";
-    } else if (report.pressure_representability_breakdown) {
+    } else if (report.range.breakdown) {
         failure_reason = "diagnostic_breakdown";
-    } else if (!report.pressure_representability_converged) {
+    } else if (!report.range.converged) {
         failure_reason = "normal_equation_not_stationary";
-    } else if (!std::isfinite(report.pressure_representability_relative_distance)) {
+    } else if (!std::isfinite(report.range.relative_distance)) {
         failure_reason = "relative_distance_nonfinite";
-    } else if (report.pressure_representability_relative_distance > threshold) {
+    } else if (report.range.relative_distance > threshold) {
         failure_reason = "relative_distance_exceeds_threshold";
     } else if (!allRanks(local_storage_available)) {
         failure_reason = "pressure_solution_storage_unavailable";
     }
     if (!failure_reason.empty()) {
-        logInitializer(transient.system(), report, /*applied=*/false, /*passed=*/false, failure_reason);
+        logInitializer(transient.system(), newton_report, /*applied=*/false, /*passed=*/false, failure_reason);
         return false;
     }
 
@@ -2856,18 +2906,18 @@ bool ConstraintRangeCertificate::propose(timestepping::NewtonInitialization& ini
     correction_state.solution_norm = correction.solution_norm;
     correction_state.iterations = correction.iterations;
     if (correction.breakdown) {
-        logInitializer(transient.system(), report, false, false, "pressure_correction_breakdown");
+        logInitializer(transient.system(), newton_report, false, false, "pressure_correction_breakdown");
         return false;
     }
     if (!correction.converged) {
-        logInitializer(transient.system(), report, false, false, "pressure_correction_not_stationary");
+        logInitializer(transient.system(), newton_report, false, false, "pressure_correction_not_stationary");
         return false;
     }
     if (!allRanks(std::isfinite(correction_state.load_norm) &&
                   std::isfinite(correction.residual_norm) &&
                   std::isfinite(correction.normal_residual_norm) &&
                   std::isfinite(correction.solution_norm))) {
-        logInitializer(transient.system(), report, false, false, "pressure_correction_nonfinite");
+        logInitializer(transient.system(), newton_report, false, false, "pressure_correction_nonfinite");
         return false;
     }
     const double nonincrease_tolerance =
@@ -2875,7 +2925,7 @@ bool ConstraintRangeCertificate::propose(timestepping::NewtonInitialization& ini
         std::max({1.0, correction_state.load_norm, correction_state.residual_norm});
     if (!allRanks(correction_state.residual_norm <=
                   correction_state.load_norm + nonincrease_tolerance)) {
-        logInitializer(transient.system(), report, false, false, "pressure_correction_increased_residual");
+        logInitializer(transient.system(), newton_report, false, false, "pressure_correction_increased_residual");
         return false;
     }
 
@@ -2891,7 +2941,7 @@ bool ConstraintRangeCertificate::propose(timestepping::NewtonInitialization& ini
         100.0 * std::numeric_limits<Real>::epsilon() * std::max(1.0, pressure_solution_norm);
     if (!allRanks(std::isfinite(nonpressure_solution_norm) &&
                   nonpressure_solution_norm <= subspace_tolerance)) {
-        logInitializer(transient.system(), report, false, false, "solution_outside_pressure_subspace");
+        logInitializer(transient.system(), newton_report, false, false, "solution_outside_pressure_subspace");
         return false;
     }
 
@@ -2958,6 +3008,7 @@ ConstraintRangeProbeEvidence ConstraintRangeCertificate::probeEvidence(
     };
     const auto flag = [](bool value) { return value ? 1.0 : 0.0; };
 
+    const auto& record = this->record(report);
     ConstraintRangeProbeEvidence evidence;
     evidence.production_residual_norm = report.residual_norm;
     const auto fail = [&](Defect defect) {
@@ -2972,43 +3023,43 @@ ConstraintRangeProbeEvidence ConstraintRangeCertificate::probeEvidence(
         return fail(Defect::ProductionResidualDiffersAcrossRanks);
     }
     const bool local_kkt_scalar_invalid =
-        report.constant_pressure_kkt_available &&
-        (!std::isfinite(report.constant_pressure_kkt_residual_norm) ||
-         !std::isfinite(report.constant_pressure_kkt_relative_distance) ||
-         !std::isfinite(report.constant_pressure_kkt_pressure_jump) ||
-         !std::isfinite(report.constant_pressure_kkt_volume_multiplier));
+        record.constant_field_kkt.available &&
+        (!std::isfinite(record.constant_field_kkt.residual_norm) ||
+         !std::isfinite(record.constant_field_kkt.relative_distance) ||
+         !std::isfinite(record.constant_field_kkt.jump) ||
+         !std::isfinite(record.constant_field_kkt.multiplier));
     if (any_rank(local_kkt_scalar_invalid)) {
         return fail(Defect::ConstantFieldKktNonfinite);
     }
-    const bool local_sampled = report.pressure_representability_diagnostic_sampled;
+    const bool local_sampled = record.sampled;
     const bool local_range_available =
-        local_sampled && report.pressure_representability_available;
+        local_sampled && record.range.available;
     const bool local_field_invalid =
         local_range_available &&
-        (report.pressure_representability_pressure_field == INVALID_FIELD_ID ||
-         report.pressure_representability_pressure_field == distinct_field);
+        (record.range.constraint_field == INVALID_FIELD_ID ||
+         record.range.constraint_field == distinct_field);
     if (any_rank(local_field_invalid)) {
         return fail(Defect::ConstraintFieldInvalid);
     }
     const bool local_range_scalar_invalid =
         local_range_available &&
-        (!std::isfinite(report.pressure_representability_residual_norm) ||
-         !std::isfinite(report.pressure_representability_relative_distance));
+        (!std::isfinite(record.range.residual_norm) ||
+         !std::isfinite(record.range.relative_distance));
     if (any_rank(local_range_scalar_invalid)) {
         return fail(Defect::RangeNonfinite);
     }
-    const bool local_kkt_available = local_sampled && report.constant_pressure_kkt_available;
+    const bool local_kkt_available = local_sampled && record.constant_field_kkt.available;
     const bool sampled_identical = identical(flag(local_sampled));
     const bool range_available_identical = identical(flag(local_range_available));
     const bool field_identical =
-        identical(static_cast<double>(report.pressure_representability_pressure_field));
+        identical(static_cast<double>(record.range.constraint_field));
     const bool kkt_available_identical = identical(flag(local_kkt_available));
     const bool range_convergence_identical =
-        identical(flag(report.pressure_representability_converged)) &&
-        identical(flag(report.pressure_representability_breakdown));
+        identical(flag(record.range.converged)) &&
+        identical(flag(record.range.breakdown));
     const bool constant_trace_flags_identical =
-        identical(flag(report.constant_pressure_unit_coefficients_represent_constant)) &&
-        identical(flag(report.constant_pressure_constraints_preserve_constants));
+        identical(flag(record.constant_field_kkt.unit_coefficients_represent_constant)) &&
+        identical(flag(record.constant_field_kkt.constraints_preserve_constants));
     if (!sampled_identical || !range_available_identical || !field_identical ||
         !kkt_available_identical || !range_convergence_identical ||
         !constant_trace_flags_identical) {
@@ -3016,18 +3067,18 @@ ConstraintRangeProbeEvidence ConstraintRangeCertificate::probeEvidence(
     }
     if (local_range_available) {
         const bool range_scalars_identical =
-            identical(report.pressure_representability_residual_norm) &&
-            identical(report.pressure_representability_relative_distance);
+            identical(record.range.residual_norm) &&
+            identical(record.range.relative_distance);
         if (!range_scalars_identical) {
             return fail(Defect::RangeDiffersAcrossRanks);
         }
     }
     if (local_kkt_available) {
         const bool kkt_scalars_identical =
-            identical(report.constant_pressure_kkt_residual_norm) &&
-            identical(report.constant_pressure_kkt_relative_distance) &&
-            identical(report.constant_pressure_kkt_pressure_jump) &&
-            identical(report.constant_pressure_kkt_volume_multiplier);
+            identical(record.constant_field_kkt.residual_norm) &&
+            identical(record.constant_field_kkt.relative_distance) &&
+            identical(record.constant_field_kkt.jump) &&
+            identical(record.constant_field_kkt.multiplier);
         if (!kkt_scalars_identical) {
             return fail(Defect::ConstantFieldKktDiffersAcrossRanks);
         }
@@ -3035,22 +3086,22 @@ ConstraintRangeProbeEvidence ConstraintRangeCertificate::probeEvidence(
 
     evidence.range_available = local_range_available;
     evidence.range_converged =
-        local_range_available && report.pressure_representability_converged;
+        local_range_available && record.range.converged;
     evidence.range_breakdown =
-        local_range_available && report.pressure_representability_breakdown;
-    evidence.range_residual_norm = report.pressure_representability_residual_norm;
-    evidence.range_relative_distance = report.pressure_representability_relative_distance;
-    evidence.range_reason = report.pressure_representability_reason;
-    evidence.constraint_field = report.pressure_representability_pressure_field;
+        local_range_available && record.range.breakdown;
+    evidence.range_residual_norm = record.range.residual_norm;
+    evidence.range_relative_distance = record.range.relative_distance;
+    evidence.range_reason = record.range.reason;
+    evidence.constraint_field = record.range.constraint_field;
     evidence.constant_field_kkt_required =
         constant_field_is_physical &&
-        report.constant_pressure_unit_coefficients_represent_constant &&
-        report.constant_pressure_constraints_preserve_constants;
+        record.constant_field_kkt.unit_coefficients_represent_constant &&
+        record.constant_field_kkt.constraints_preserve_constants;
     evidence.constant_field_kkt_available = local_kkt_available;
-    evidence.constant_field_kkt_residual_norm = report.constant_pressure_kkt_residual_norm;
-    evidence.constant_field_kkt_relative_distance = report.constant_pressure_kkt_relative_distance;
-    evidence.constant_field_jump = report.constant_pressure_kkt_pressure_jump;
-    evidence.constant_field_multiplier = report.constant_pressure_kkt_volume_multiplier;
+    evidence.constant_field_kkt_residual_norm = record.constant_field_kkt.residual_norm;
+    evidence.constant_field_kkt_relative_distance = record.constant_field_kkt.relative_distance;
+    evidence.constant_field_jump = record.constant_field_kkt.jump;
+    evidence.constant_field_multiplier = record.constant_field_kkt.multiplier;
     return evidence;
 }
 

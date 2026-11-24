@@ -268,6 +268,68 @@ public:
 [[nodiscard]] ConstraintRangeStorage* findConstraintRangeStorage(timestepping::NewtonWorkspace& workspace);
 
 /**
+ * What the certificate records in a Newton report: its last sample (the
+ * range distance of the load and the constant-field KKT), the gates applied
+ * at acceptance, and the initializer.  Reached through the certificate
+ * (ConstraintRangeCertificate::record).
+ */
+struct ConstraintRangeReport {
+    /// Whether a sample was taken in the solve.
+    bool sampled{false};
+
+    struct Range {
+        bool available{false};
+        bool converged{false};
+        bool breakdown{false};
+        FieldId constraint_field{INVALID_FIELD_ID};
+        double residual_norm{std::numeric_limits<double>::quiet_NaN()};
+        double relative_distance{std::numeric_limits<double>::quiet_NaN()};
+        std::string reason{"not_sampled"};
+    };
+    /// The distance of the load from range(G).
+    Range range{};
+
+    struct ConstantFieldKkt {
+        bool available{false};
+        bool unit_coefficients_represent_constant{false};
+        bool constraints_preserve_constants{false};
+        std::string constraint_scope{"full_field"};
+        std::string constraint_scope_reason{"not_attempted"};
+        double jump{std::numeric_limits<double>::quiet_NaN()};
+        double multiplier{std::numeric_limits<double>::quiet_NaN()};
+        double direction_norm{std::numeric_limits<double>::quiet_NaN()};
+        double residual_norm{std::numeric_limits<double>::quiet_NaN()};
+        double relative_distance{std::numeric_limits<double>::quiet_NaN()};
+        double relative_orthogonality{std::numeric_limits<double>::quiet_NaN()};
+        std::string reason{"not_sampled"};
+    };
+    /// The best constant constraint field and the residual it leaves; it
+    /// never replaces or projects the load.
+    ConstantFieldKkt constant_field_kkt{};
+
+    struct Gate {
+        bool applied{false};
+        bool passed{false};
+        double max_relative_distance{std::numeric_limits<double>::quiet_NaN()};
+    };
+    Gate range_gate{};
+    Gate constant_field_kkt_gate{};
+
+    struct Initializer {
+        bool requested{false};
+        bool applied{false};
+        bool passed{false};
+        std::string reason{"not_requested"};
+    };
+    Initializer initializer{};
+};
+
+/// The record of the first constraint-range certificate in @p report (a
+/// default record when none recorded one), for a consumer without the
+/// certificate at hand.
+[[nodiscard]] const ConstraintRangeReport& constraintRangeRecord(const timestepping::NewtonReport& report);
+
+/**
  * What a consumer of one probe of the certificate reads (the static
  * startup): the range certificate, the production residual of the probed
  * state, and the constant-field KKT, each checked to be finite and the same
@@ -323,6 +385,10 @@ public:
 
     [[nodiscard]] const ConstraintRangeMethod& method() const noexcept { return method_; }
 
+    /// What this certificate recorded in @p report (a default record when
+    /// it recorded nothing).
+    [[nodiscard]] const ConstraintRangeReport& record(const timestepping::NewtonReport& report) const;
+
     /// The evidence of @p report, a probe of this certificate on @p system.
     /// @p constant_field_is_physical states whether a constant constraint
     /// field is a physical mode of the problem; @p distinct_field is a field
@@ -357,6 +423,9 @@ public:
 
 private:
     struct State;
+
+    /// The record of this certificate in @p report, created on first use.
+    ConstraintRangeReport& mutableRecord(timestepping::NewtonReport& report) const;
 
     void logInitializer(const systems::FESystem& system, timestepping::NewtonReport& report,
                         bool applied, bool passed, std::string_view reason) const;

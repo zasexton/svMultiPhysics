@@ -2043,10 +2043,8 @@ TEST(ApplicationDriverLevelSetWorkflowsMPI,
           effectiveStaticCapillaryEquilibriumOptions(requests.front()),
           /*initialize_compatible_pressure=*/true);
   ASSERT_TRUE(
-      expected_pressure_certificate.report
-          .static_compatible_pressure_initializer_passed)
-      << expected_pressure_certificate.report
-             .static_compatible_pressure_initializer_reason;
+      svmp::FE::analysis::constraintRangeRecord(expected_pressure_certificate.report).initializer.passed)
+      << svmp::FE::analysis::constraintRangeRecord(expected_pressure_certificate.report).initializer.reason;
   const auto& expected_solution =
       expected_pressure_certificate.certified_solution;
   ASSERT_EQ(expected_solution.size(), solution.size());
@@ -2856,33 +2854,29 @@ TEST(ApplicationDriverLevelSetWorkflowsMPI,
                   effectiveStaticCapillaryEquilibriumOptions(requests.front()),
                   /*initialize_compatible_pressure=*/false)
                   .report;
-          ASSERT_TRUE(support_certificate
-                          .pressure_representability_diagnostic_sampled);
-          EXPECT_TRUE(support_certificate
-                          .constant_pressure_unit_coefficients_represent_constant);
-          EXPECT_EQ(support_certificate.constant_pressure_constraint_scope,
+          ASSERT_TRUE(svmp::FE::analysis::constraintRangeRecord(support_certificate).sampled);
+          EXPECT_TRUE(svmp::FE::analysis::constraintRangeRecord(support_certificate).constant_field_kkt.unit_coefficients_represent_constant);
+          EXPECT_EQ(svmp::FE::analysis::constraintRangeRecord(support_certificate).constant_field_kkt.constraint_scope,
                     "retained_volume");
           EXPECT_EQ(
-              support_certificate.constant_pressure_constraint_scope_reason,
+              svmp::FE::analysis::constraintRangeRecord(support_certificate).constant_field_kkt.constraint_scope_reason,
               "available");
           if (install_supported_pressure_gauge) {
-            EXPECT_FALSE(support_certificate
-                             .constant_pressure_constraints_preserve_constants);
+            EXPECT_FALSE(svmp::FE::analysis::constraintRangeRecord(support_certificate).constant_field_kkt.constraints_preserve_constants);
             EXPECT_FALSE(
-                support_certificate.constant_pressure_kkt_available);
+                svmp::FE::analysis::constraintRangeRecord(support_certificate).constant_field_kkt.available);
             EXPECT_EQ(
-                support_certificate.constant_pressure_kkt_reason,
+                svmp::FE::analysis::constraintRangeRecord(support_certificate).constant_field_kkt.reason,
                 "pressure_constraints_do_not_preserve_constants");
           } else {
-            EXPECT_TRUE(support_certificate
-                            .constant_pressure_constraints_preserve_constants);
+            EXPECT_TRUE(svmp::FE::analysis::constraintRangeRecord(support_certificate).constant_field_kkt.constraints_preserve_constants);
             ASSERT_TRUE(
-                support_certificate.constant_pressure_kkt_available)
-                << support_certificate.constant_pressure_kkt_reason;
-            EXPECT_EQ(support_certificate.constant_pressure_kkt_reason,
+                svmp::FE::analysis::constraintRangeRecord(support_certificate).constant_field_kkt.available)
+                << svmp::FE::analysis::constraintRangeRecord(support_certificate).constant_field_kkt.reason;
+            EXPECT_EQ(svmp::FE::analysis::constraintRangeRecord(support_certificate).constant_field_kkt.reason,
                       "available");
             EXPECT_NEAR(
-                support_certificate.constant_pressure_kkt_pressure_jump,
+                svmp::FE::analysis::constraintRangeRecord(support_certificate).constant_field_kkt.jump,
                 0.0,
                 2.0e-10);
           }
@@ -2910,18 +2904,14 @@ TEST(ApplicationDriverLevelSetWorkflowsMPI,
                     effectiveStaticCapillaryEquilibriumOptions(requests.front()),
                     /*initialize_compatible_pressure=*/false)
                     .report;
-            EXPECT_TRUE(refreshed_support_certificate
-                            .constant_pressure_constraints_preserve_constants);
+            EXPECT_TRUE(svmp::FE::analysis::constraintRangeRecord(refreshed_support_certificate).constant_field_kkt.constraints_preserve_constants);
             EXPECT_EQ(
-                refreshed_support_certificate
-                    .constant_pressure_constraint_scope,
+                svmp::FE::analysis::constraintRangeRecord(refreshed_support_certificate).constant_field_kkt.constraint_scope,
                 "retained_volume");
             EXPECT_EQ(
-                refreshed_support_certificate
-                    .constant_pressure_constraint_scope_reason,
+                svmp::FE::analysis::constraintRangeRecord(refreshed_support_certificate).constant_field_kkt.constraint_scope_reason,
                 "available");
-            EXPECT_TRUE(refreshed_support_certificate
-                            .constant_pressure_kkt_available);
+            EXPECT_TRUE(svmp::FE::analysis::constraintRangeRecord(refreshed_support_certificate).constant_field_kkt.available);
             EXPECT_FALSE(sim.fe_system
                              ->constraintStateStaleForCurrentRevisions());
             const auto refreshed_prolongations =
@@ -2984,18 +2974,17 @@ TEST(ApplicationDriverLevelSetWorkflowsMPI,
                 /*initialize_compatible_pressure=*/false);
         const auto& certificate = pressure_certificate.report;
         ASSERT_TRUE(
-            certificate
-                .pressure_representability_diagnostic_sampled);
-        ASSERT_TRUE(certificate.constant_pressure_kkt_available)
-            << certificate.constant_pressure_kkt_reason;
+            svmp::FE::analysis::constraintRangeRecord(certificate).sampled);
+        ASSERT_TRUE(svmp::FE::analysis::constraintRangeRecord(certificate).constant_field_kkt.available)
+            << svmp::FE::analysis::constraintRangeRecord(certificate).constant_field_kkt.reason;
         EXPECT_LE(
-            certificate.constant_pressure_kkt_residual_norm,
+            svmp::FE::analysis::constraintRangeRecord(certificate).constant_field_kkt.residual_norm,
             2.0e-10);
         EXPECT_LE(
-            certificate.constant_pressure_kkt_relative_distance,
+            svmp::FE::analysis::constraintRangeRecord(certificate).constant_field_kkt.relative_distance,
             2.0e-10);
         EXPECT_NEAR(
-            certificate.constant_pressure_kkt_pressure_jump,
+            svmp::FE::analysis::constraintRangeRecord(certificate).constant_field_kkt.jump,
             0.0,
             2.0e-10);
 
@@ -3033,9 +3022,9 @@ TEST(ApplicationDriverLevelSetWorkflowsMPI,
         const auto communicator =
             activeFESystemCommunicator(*sim.fe_system);
         for (const auto scalar : {
-                 certificate.constant_pressure_kkt_residual_norm,
-                 certificate.constant_pressure_kkt_relative_distance,
-                 certificate.constant_pressure_kkt_pressure_jump,
+                 svmp::FE::analysis::constraintRangeRecord(certificate).constant_field_kkt.residual_norm,
+                 svmp::FE::analysis::constraintRangeRecord(certificate).constant_field_kkt.relative_distance,
+                 svmp::FE::analysis::constraintRangeRecord(certificate).constant_field_kkt.jump,
                  static_cast<double>(volume_error),
                  static_cast<double>(surface_energy_error),
                  static_cast<double>(maximum_phi_update)}) {
@@ -3052,16 +3041,15 @@ TEST(ApplicationDriverLevelSetWorkflowsMPI,
         maximum_kkt_residual = std::max(
             maximum_kkt_residual,
             static_cast<svmp::FE::Real>(
-                certificate.constant_pressure_kkt_residual_norm));
+                svmp::FE::analysis::constraintRangeRecord(certificate).constant_field_kkt.residual_norm));
         maximum_kkt_relative_distance = std::max(
             maximum_kkt_relative_distance,
             static_cast<svmp::FE::Real>(
-                certificate
-                    .constant_pressure_kkt_relative_distance));
+                svmp::FE::analysis::constraintRangeRecord(certificate).constant_field_kkt.relative_distance));
         maximum_pressure_jump_error = std::max(
             maximum_pressure_jump_error,
             static_cast<svmp::FE::Real>(std::abs(
-                certificate.constant_pressure_kkt_pressure_jump)));
+                svmp::FE::analysis::constraintRangeRecord(certificate).constant_field_kkt.jump)));
         maximum_volume_error =
             std::max(maximum_volume_error, volume_error);
         maximum_surface_energy_error = std::max(
@@ -4121,7 +4109,7 @@ void runHydrostaticFixedGaugeMpiCase(
   const auto& exact_certificate =
       exact_pressure_certificate.report;
   ASSERT_TRUE(
-      exact_certificate.pressure_representability_diagnostic_sampled);
+      svmp::FE::analysis::constraintRangeRecord(exact_certificate).sampled);
   EXPECT_LE(exact_certificate.residual_norm, 2.0e-12);
 
   const auto exact_initialized_pressure_certificate =
@@ -4133,11 +4121,9 @@ void runHydrostaticFixedGaugeMpiCase(
   const auto& exact_initialized_report =
       exact_initialized_pressure_certificate.report;
   ASSERT_TRUE(
-      exact_initialized_report
-          .static_compatible_pressure_initializer_applied);
+      svmp::FE::analysis::constraintRangeRecord(exact_initialized_report).initializer.applied);
   ASSERT_TRUE(
-      exact_initialized_report
-          .static_compatible_pressure_initializer_passed);
+      svmp::FE::analysis::constraintRangeRecord(exact_initialized_report).initializer.passed);
   EXPECT_LE(exact_initialized_report.residual_norm, 2.0e-12);
   ASSERT_EQ(
       exact_initialized_pressure_certificate.certified_solution.size(),
@@ -4179,19 +4165,19 @@ void runHydrostaticFixedGaugeMpiCase(
           /*initialize_compatible_pressure=*/false);
   const auto& certificate = pressure_certificate.report;
   ASSERT_TRUE(
-      certificate.pressure_representability_diagnostic_sampled);
-  ASSERT_TRUE(certificate.pressure_representability_available)
-      << certificate.pressure_representability_reason;
-  EXPECT_TRUE(certificate.pressure_representability_converged);
-  EXPECT_FALSE(certificate.pressure_representability_breakdown);
-  EXPECT_LE(certificate.pressure_representability_residual_norm,
+      svmp::FE::analysis::constraintRangeRecord(certificate).sampled);
+  ASSERT_TRUE(svmp::FE::analysis::constraintRangeRecord(certificate).range.available)
+      << svmp::FE::analysis::constraintRangeRecord(certificate).range.reason;
+  EXPECT_TRUE(svmp::FE::analysis::constraintRangeRecord(certificate).range.converged);
+  EXPECT_FALSE(svmp::FE::analysis::constraintRangeRecord(certificate).range.breakdown);
+  EXPECT_LE(svmp::FE::analysis::constraintRangeRecord(certificate).range.residual_norm,
             2.0e-10);
-  EXPECT_LE(certificate.pressure_representability_relative_distance,
+  EXPECT_LE(svmp::FE::analysis::constraintRangeRecord(certificate).range.relative_distance,
             2.0e-10);
   EXPECT_LE(certificate.residual_norm, 2.0e-10);
   EXPECT_FALSE(
-      certificate.constant_pressure_constraints_preserve_constants);
-  EXPECT_FALSE(certificate.constant_pressure_kkt_available);
+      svmp::FE::analysis::constraintRangeRecord(certificate).constant_field_kkt.constraints_preserve_constants);
+  EXPECT_FALSE(svmp::FE::analysis::constraintRangeRecord(certificate).constant_field_kkt.available);
 
   svmp::FE::Real initializer_pressure_representative_distance =
       0.0;
@@ -4249,10 +4235,9 @@ void runHydrostaticFixedGaugeMpiCase(
            static_cast<double>(
                exact_initializer_pressure_update),
            static_cast<double>(
-               certificate.pressure_representability_residual_norm),
+               svmp::FE::analysis::constraintRangeRecord(certificate).range.residual_norm),
            static_cast<double>(
-               certificate
-                   .pressure_representability_relative_distance),
+               svmp::FE::analysis::constraintRangeRecord(certificate).range.relative_distance),
            static_cast<double>(certificate.residual_norm),
            static_cast<double>(
                initializer_pressure_representative_distance),
@@ -4273,13 +4258,11 @@ void runHydrostaticFixedGaugeMpiCase(
   summary.maximum_pressure_residual =
       std::max(summary.maximum_pressure_residual,
                static_cast<svmp::FE::Real>(
-                   certificate
-                       .pressure_representability_residual_norm));
+                   svmp::FE::analysis::constraintRangeRecord(certificate).range.residual_norm));
   summary.maximum_pressure_relative_distance =
       std::max(summary.maximum_pressure_relative_distance,
                static_cast<svmp::FE::Real>(
-                   certificate
-                       .pressure_representability_relative_distance));
+                   svmp::FE::analysis::constraintRangeRecord(certificate).range.relative_distance));
   summary.maximum_exact_field_production_residual =
       std::max(summary.maximum_exact_field_production_residual,
                static_cast<svmp::FE::Real>(
