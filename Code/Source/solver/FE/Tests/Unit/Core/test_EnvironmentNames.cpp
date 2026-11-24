@@ -345,6 +345,39 @@ TEST(EnvironmentNameCatalogue, DeclaredNamesAreReadOnlyThroughTheRegistry)
     }
 }
 
+// Outside the registry the solver reads only system names, and the names
+// of FESystem's auxiliary-coupling path that follow with that file.
+TEST(EnvironmentNameCatalogue, OnlySystemNamesAreReadWithoutTheRegistry)
+{
+    const auto files = productionSources();
+    if (files.empty()) {
+        GTEST_SKIP() << "solver sources not found at " << SVMP_SOLVER_SOURCE_DIR;
+    }
+    const std::set<std::string> system_names{"COMPUTERNAME", "HOME", "OMP_NUM_THREADS"};
+    const std::set<std::string> pending{
+        "SVMP_DISABLE_AUX_DIRECT_COUPLING", "SVMP_DISABLE_MPI_NATIVE_RANK1_PROMOTION",
+        "SVMP_MONO_DIRECT_TRACE", "SVMP_NEGATE_AUX_DIRECT_COUPLING",
+        "SVMP_POSITIVE_AUX_DIRECT_COUPLING"};
+    const std::string call = "getenv(";
+    for (const auto& file : files) {
+        if (file.path.filename() == "EnvironmentNames.cpp") {
+            continue;
+        }
+        for (auto at = file.text.find(call); at != std::string::npos;
+             at = file.text.find(call, at + call.size())) {
+            const auto name = literalAt(file.text, at + call.size());
+            if (name.empty()) {
+                // The MPI launchers' rank variables, tried in turn.
+                EXPECT_EQ(file.path.filename(), "PhysicsModule.cpp")
+                    << file.path.string() << " calls getenv with a computed name";
+                continue;
+            }
+            EXPECT_TRUE(system_names.count(name) != 0u || pending.count(name) != 0u)
+                << file.path.string() << " reads " << name << " without the registry";
+        }
+    }
+}
+
 TEST(EnvironmentNameCatalogue, EveryDeclaredNameHasAReader)
 {
     const auto files = productionSources();
