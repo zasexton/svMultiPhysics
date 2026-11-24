@@ -7047,6 +7047,23 @@ void FESystem::registerGeneratedEmbeddedInterfaceMarker(InterfaceId interface_ma
     invalidateAnalysisCache();
 }
 
+void FESystem::declareFieldConvergenceCriterion(FieldConvergenceCriterion criterion) {
+    const auto existing = std::find_if(
+        field_convergence_criteria_.begin(), field_convergence_criteria_.end(),
+        [&](const FieldConvergenceCriterion& entry) { return entry.field == criterion.field; });
+    if (existing == field_convergence_criteria_.end()) {
+        field_convergence_criteria_.push_back(criterion);
+        return;
+    }
+    if (criterion.abs_tolerance > 0.0 &&
+        (!(existing->abs_tolerance > 0.0) || criterion.abs_tolerance < existing->abs_tolerance)) {
+        existing->abs_tolerance = criterion.abs_tolerance;
+    }
+    if (!(existing->rel_tolerance > 0.0) || criterion.rel_tolerance < existing->rel_tolerance) {
+        existing->rel_tolerance = criterion.rel_tolerance;
+    }
+}
+
 void FESystem::setAnalysisSolverOptions(backends::SolverOptions options) {
     analysis_solver_options_.emplace(std::move(options));
     invalidateAnalysisCache();

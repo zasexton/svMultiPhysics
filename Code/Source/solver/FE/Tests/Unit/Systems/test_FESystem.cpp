@@ -2639,6 +2639,32 @@ TEST(FESystem, ResidualReadsOfShadowsNeedTheShadowParticipant)
                     .empty());
 }
 
+TEST(FESystem, FieldConvergenceCriteriaMergeToTheStrictestInDeclarationOrder)
+{
+    auto mesh = build_single_quad_mesh();
+    auto space = std::make_shared<H1Space>(ElementType::Quad4, /*order=*/1);
+    FESystem sys(mesh);
+    const auto a = sys.addField(FieldSpec{.name = "a", .space = space});
+    const auto b = sys.addField(FieldSpec{.name = "b", .space = space});
+    EXPECT_TRUE(sys.fieldConvergenceCriteria().empty());
+    sys.declareFieldConvergenceCriterion({.field = b, .abs_tolerance = 1e-8, .rel_tolerance = 1e-3});
+    sys.declareFieldConvergenceCriterion({.field = a, .abs_tolerance = 0.0, .rel_tolerance = 1e-4});
+    // A later declaration of b: a stricter relative tolerance, an absolute one
+    // that is not positive (kept), then a stricter absolute one.
+    sys.declareFieldConvergenceCriterion({.field = b, .abs_tolerance = 0.0, .rel_tolerance = 1e-5});
+    sys.declareFieldConvergenceCriterion({.field = b, .abs_tolerance = 1e-9, .rel_tolerance = 1e-2});
+    // a had no positive absolute tolerance: the first positive one is taken.
+    sys.declareFieldConvergenceCriterion({.field = a, .abs_tolerance = 1e-6, .rel_tolerance = 1e-4});
+    const auto& criteria = sys.fieldConvergenceCriteria();
+    ASSERT_EQ(criteria.size(), 2u);
+    EXPECT_EQ(criteria[0].field, b);
+    EXPECT_EQ(criteria[0].abs_tolerance, 1e-9);
+    EXPECT_EQ(criteria[0].rel_tolerance, 1e-5);
+    EXPECT_EQ(criteria[1].field, a);
+    EXPECT_EQ(criteria[1].abs_tolerance, 1e-6);
+    EXPECT_EQ(criteria[1].rel_tolerance, 1e-4);
+}
+
 TEST(FESystem, MovingDomainSetsTheFrameBindsTheMotionAndDifferentiatesTheInstalls)
 {
     using svmp::FE::forms::FormExpr;

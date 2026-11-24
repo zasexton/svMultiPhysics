@@ -11,6 +11,7 @@
 
 #include <algorithm>
 #include <cctype>
+#include <cmath>
 #include <iomanip>
 #include <initializer_list>
 #include <iostream>
@@ -499,6 +500,22 @@ EquationTranslator::snapshotLevelSetEquationInput(
   snapshot->legacy_maintenance_input =
       snapshotLegacyLevelSetMaintenanceInput(equation);
   snapshot->sole_equation = sole_equation;
+  if (equation.coupled.defined() && equation.coupled.value() &&
+      equation.tolerance.defined() && equation.tolerance.value() > 0.0) {
+    // The equation-local residual floor: a stricter tolerance of another
+    // equation does not tighten this block.  SimulationBuilder uses the same
+    // 1e-10 default when Absolute_tolerance is omitted.
+    const double absolute_tolerance =
+        equation.linear_solver.absolute_tolerance.defined()
+            ? equation.linear_solver.absolute_tolerance.value()
+            : 1.0e-10;
+    snapshot->residual_criterion = {
+        .declared = true,
+        .abs_tolerance = absolute_tolerance > 0.0 && std::isfinite(absolute_tolerance)
+                             ? absolute_tolerance
+                             : 0.0,
+        .rel_tolerance = equation.tolerance.value()};
+  }
   return snapshot;
 }
 
@@ -602,7 +619,12 @@ std::unique_ptr<svmp::Physics::PhysicsModule> EquationTranslator::createModule(
                                << "')" << std::endl;
 
   if (level_set::isEquationType(eq_type)) {
-    return level_set::createModule(input, system);
+    // Through the input snapshot, which carries the equation's convergence
+    // criterion.
+    return level_set::createModule(
+        *level_set::resolveConfiguration(snapshotLevelSetEquationInput(
+            eq_params, std::move(input), /*sole_equation=*/false)),
+        system);
   }
 
   auto& registry = svmp::Physics::EquationModuleRegistry::instance();

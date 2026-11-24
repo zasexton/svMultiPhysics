@@ -1233,6 +1233,27 @@ TEST(LevelSetTransport, AutoRegistersConfiguredFields)
               FE::systems::FieldSourceKind::PrescribedData);
     EXPECT_TRUE(system.hasOperator("level_set"));
     EXPECT_FALSE(kernels.residual.empty());
+    // Without a declared criterion the install declares none.
+    EXPECT_TRUE(system.fieldConvergenceCriteria().empty());
+}
+
+TEST(LevelSetTransport, DeclaresTheConvergenceCriterionOfItsField)
+{
+    const auto mesh = std::make_shared<SingleTetraMeshAccess>();
+    FE::systems::FESystem system(mesh);
+    level_set::LevelSetTransportOptions options{};
+    options.level_set.field_name = "phi";
+    options.velocity.field_name = "advecting_velocity";
+    options.velocity.source = level_set::LevelSetVelocitySource::PrescribedData;
+    options.velocity.auto_register_field = true;
+    options.velocity.space = vectorSpace(mesh);
+    options.residual_criterion = {.declared = true, .abs_tolerance = 1e-9, .rel_tolerance = 1e-4};
+    (void)level_set::installLevelSetTransport(system, scalarSpace(mesh), options);
+    const auto& criteria = system.fieldConvergenceCriteria();
+    ASSERT_EQ(criteria.size(), 1u);
+    EXPECT_EQ(criteria[0].field, system.findFieldByName("phi"));
+    EXPECT_EQ(criteria[0].abs_tolerance, 1e-9);
+    EXPECT_EQ(criteria[0].rel_tolerance, 1e-4);
 }
 
 TEST(LevelSetTransport,

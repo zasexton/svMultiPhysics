@@ -1290,6 +1290,7 @@ resolveConfiguration(application::core::LevelSetEquationInputHandle input)
   if (input->sole_equation) {
     configuration.options.operator_tag = "equations";
   }
+  configuration.options.residual_criterion = input->residual_criterion;
   configuration.input_snapshot = std::move(input);
   return std::make_shared<
       application::core::ResolvedLevelSetEquationConfiguration>(

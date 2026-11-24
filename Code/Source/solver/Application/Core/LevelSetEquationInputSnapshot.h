@@ -1,5 +1,6 @@
 #pragma once
 
+#include "FE/LevelSet/LevelSetOptions.h"
 #include "Physics/Core/EquationModuleInput.h"
 
 #include <memory>
@@ -31,6 +32,10 @@ struct LevelSetEquationInputSnapshot {
   // The deck has no other equation: the transport is the monolithic
   // operator whether or not it is declared Coupled.
   bool sole_equation{false};
+  // A Coupled equation with a positive Tolerance declares the convergence of
+  // its field: that relative tolerance, and the absolute tolerance of its
+  // linear solver (1e-10 when unstated, 0 when not positive and finite).
+  svmp::FE::level_set::LevelSetResidualCriterionOptions residual_criterion{};
 };
 
 using LevelSetEquationInputHandle =

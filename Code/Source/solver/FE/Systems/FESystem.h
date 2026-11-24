@@ -2127,6 +2127,20 @@ public:
     void addVariableDescriptor(analysis::VariableDescriptor desc);
     void addInvariantDomainDescriptor(analysis::InvariantDomainDescriptor desc);
     void registerGeneratedEmbeddedInterfaceMarker(InterfaceId interface_marker);
+    /**
+     * @brief Declares the nonlinear convergence criterion of an unknown field:
+     *        its residual block converges when its norm is at most
+     *        max(abs_tolerance, rel_tolerance * its first norm of the step).
+     *
+     * A later declaration of the same field keeps the strictest positive
+     * absolute and relative tolerances; the criteria keep the order of the
+     * first declaration of each field.  A field shared by several equations
+     * has one residual block, so they share one criterion.
+     */
+    void declareFieldConvergenceCriterion(FieldConvergenceCriterion criterion);
+    [[nodiscard]] const std::vector<FieldConvergenceCriterion>& fieldConvergenceCriteria() const noexcept {
+        return field_convergence_criteria_;
+    }
     [[nodiscard]] bool isGeneratedEmbeddedInterfaceMarkerRegistered(
         InterfaceId interface_marker) const noexcept {
         return generated_embedded_interface_markers_.find(interface_marker) !=
@@ -2601,6 +2615,7 @@ private:
     mutable bool
         cut_integration_context_callback_dispatch_active_{false};
     std::set<InterfaceId> generated_embedded_interface_markers_{};
+    std::vector<FieldConvergenceCriterion> field_convergence_criteria_{};
     std::vector<std::unique_ptr<constraints::Constraint>> constraint_defs_;
     std::vector<std::unique_ptr<constraints::ISystemConstraint>> system_constraint_defs_;
 

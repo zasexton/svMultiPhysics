@@ -2459,6 +2459,49 @@ void applyCoupledLevelSetFieldResidualCriteria(
   }
 }
 
+// The field convergence criteria the installs declared
+// (FESystem::fieldConvergenceCriteria), beside those the deck-type lookup
+// above derived: fields, tolerances and order must agree, or the run stops on
+// every rank.  The lookup still provides the criteria.
+void dualRunFieldResidualCriteria(
+    const svmp::FE::systems::FESystem& system,
+    const svmp::FE::timestepping::NewtonOptions& options)
+{
+  std::exception_ptr failure;
+  try {
+    const auto& declared = system.fieldConvergenceCriteria();
+    const auto& selected = options.field_residual_criteria;
+    bool same = declared.size() == selected.size();
+    for (std::size_t i = 0; same && i < declared.size(); ++i) {
+      same = declared[i].field == selected[i].field &&
+             declared[i].abs_tolerance == selected[i].abs_tolerance &&
+             declared[i].rel_tolerance == selected[i].rel_tolerance;
+    }
+    if (!same) {
+      const auto list = [&](const auto& criteria) {
+        std::ostringstream out;
+        out << std::setprecision(17);
+        for (const auto& criterion : criteria) {
+          out << " '" << system.fieldRecord(criterion.field).name
+              << "' abs=" << criterion.abs_tolerance
+              << " rel=" << criterion.rel_tolerance;
+        }
+        return out.str();
+      };
+      throw std::logic_error(
+          "[svMultiPhysics::Application] The field convergence criteria the "
+          "installs declared (" + list(declared) +
+          " ) differ from those of the coupled level-set equations (" +
+          list(selected) + " ).");
+    }
+  } catch (...) {
+    failure = std::current_exception();
+  }
+  (void)svmp::FE::systems::agreeOnLocalPhase(
+      system, failure, /*local_available=*/true, "field_residual_criteria",
+      "ApplicationDriver");
+}
+
 void logLevelSetMaintenanceCoverageDiagnostics(
     const std::vector<ActiveCutVolumeRequest>& active_requests,
     const std::vector<LevelSetMaintenanceRequest>& maintenance_requests)
@@ -7005,6 +7048,7 @@ void ApplicationDriver::runSteadyState(SimulationComponents& sim, const Paramete
       levelSetAdvectionVelocityRequests(params);
   applyCoupledLevelSetFieldResidualCriteria(
       *sim.fe_system, params, newton_opts);
+  dualRunFieldResidualCriteria(*sim.fe_system, newton_opts);
   const auto steady_selection =
       svmp::FE::timestepping::legacyGeneratedStateSelection(
           svmp::FE::timestepping::GeneratedStateRequests{
@@ -7425,6 +7469,7 @@ void ApplicationDriver::runTransient(SimulationComponents& sim, const Parameters
       activeFESystemCommunicator(*sim.fe_system));
   applyCoupledLevelSetFieldResidualCriteria(
       *sim.fe_system, params, opts.newton);
+  dualRunFieldResidualCriteria(*sim.fe_system, opts.newton);
   const bool has_frozen_algebraic_level_set_extension =
       std::any_of(
           level_set_advection_velocity.begin(),

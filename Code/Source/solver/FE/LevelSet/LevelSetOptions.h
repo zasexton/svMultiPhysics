@@ -255,6 +255,14 @@ struct LevelSetConservativePhaseOptions {
     Real maximum_geometry_displacement_fraction{0.1};
 };
 
+/// The nonlinear convergence criterion the transport declares for its field
+/// (FESystem::declareFieldConvergenceCriterion) when `declared`.
+struct LevelSetResidualCriterionOptions {
+    bool declared{false};
+    Real abs_tolerance{0.0};
+    Real rel_tolerance{0.0};
+};
+
 struct LevelSetTransportOptions {
     std::string operator_tag{"level_set"};
     LevelSetTransportForm transport_form{LevelSetTransportForm::Advective};
@@ -267,6 +275,7 @@ struct LevelSetTransportOptions {
     LevelSetKinematicReconciliationOptions kinematic_reconciliation{};
     LevelSetSignDefinitePatchBoundsOptions sign_definite_patch_bounds{};
     LevelSetInterfacePreservingRedistancingOptions interface_preserving_redistancing{};
+    LevelSetResidualCriterionOptions residual_criterion{};
 };
 
 enum class LevelSetConservationDiagnostic {

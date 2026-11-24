@@ -102,6 +102,14 @@ struct FieldSpec {
     std::string solver_block{};
 };
 
+/// The nonlinear convergence criterion an install declares for one of its
+/// unknown fields (FESystem::declareFieldConvergenceCriterion).
+struct FieldConvergenceCriterion {
+    FieldId field{INVALID_FIELD_ID};
+    Real abs_tolerance{0.0};
+    Real rel_tolerance{0.0};
+};
+
 struct FieldRecord {
     FieldId id{INVALID_FIELD_ID};
     std::string name;

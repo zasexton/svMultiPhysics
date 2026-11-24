@@ -876,6 +876,12 @@ systems::CoupledResidualKernels installLevelSetTransport(
                     .operator_tag = options.operator_tag,
                 }));
     }
+    if (options.residual_criterion.declared) {
+        system.declareFieldConvergenceCriterion(
+            {.field = phi_id,
+             .abs_tolerance = options.residual_criterion.abs_tolerance,
+             .rel_tolerance = options.residual_criterion.rel_tolerance});
+    }
     return kernels;
 }
 
