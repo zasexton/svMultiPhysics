@@ -6,7 +6,6 @@
 #include "Basis/NodeOrderingConventions.h"
 #include "Dofs/DofHandler.h"
 #include "Dofs/EntityDofMap.h"
-#include "Forms/WeakForm.h"
 #include "Interfaces/FreeSurfaceGeometrySnapshot.h"
 #include "LevelSet/LevelSetInterfaceLifecycle.h"
 #include "Mesh/Core/MeshBase.h"

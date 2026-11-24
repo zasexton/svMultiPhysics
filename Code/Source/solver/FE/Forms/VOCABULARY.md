@@ -86,7 +86,6 @@ Form language (`FE/Forms`):
 | `Forms/Index.h`, `Forms/Einsum.h`, `Forms/Tensor/*` | Indexed/tensor-calculus infrastructure |
 | `Forms/Authoring.h` | The one include of a formulation module: the form language and the FE services of the canonical workflow |
 | `Forms/Forms.h` | Umbrella include of the core form language; a formulation module includes `Forms/Authoring.h` instead |
-| `Forms/WeakForm.h` | Deprecated residual-plus-constraints bundle |
 
 Adjacent FE services a formulation calls:
 

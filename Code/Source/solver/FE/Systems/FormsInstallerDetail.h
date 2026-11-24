@@ -31,10 +31,6 @@
 namespace svmp {
 namespace FE {
 
-namespace forms {
-struct WeakForm;
-}
-
 namespace systems {
 
 KernelPtr installResidualForm(
@@ -52,22 +48,6 @@ KernelPtr installResidualForm(
     FieldId trial_field,
     const forms::FormExpr& residual_form,
     std::span<const forms::bc::StrongDirichlet> bcs,
-    const FormInstallOptions& options = {});
-
-KernelPtr installWeakForm(
-    FESystem& system,
-    const OperatorTag& op,
-    FieldId test_field,
-    FieldId trial_field,
-    const forms::WeakForm& form,
-    const FormInstallOptions& options = {});
-
-std::vector<KernelPtr> installWeakForm(
-    FESystem& system,
-    std::initializer_list<OperatorTag> ops,
-    FieldId test_field,
-    FieldId trial_field,
-    const forms::WeakForm& form,
     const FormInstallOptions& options = {});
 
 std::vector<std::vector<KernelPtr>> installResidualBlocks(

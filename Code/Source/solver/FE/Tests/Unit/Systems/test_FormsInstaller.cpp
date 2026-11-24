@@ -37,7 +37,6 @@
 #include "Forms/JIT/JITKernelWrapper.h"
 #include "Forms/StandardBCs.h"
 #include "Forms/Vocabulary.h"
-#include "Forms/WeakForm.h"
 
 #include "Interfaces/FreeSurfaceGeometrySnapshot.h"
 #include "Interfaces/ContactLineGeometryCertificate.h"
