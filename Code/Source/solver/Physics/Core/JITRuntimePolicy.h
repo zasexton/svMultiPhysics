@@ -3,6 +3,7 @@
 
 #include "Physics/Core/EquationModuleInput.h"
 #include "Physics/Core/PhysicsJITPolicy.h"
+#include "FE/Core/EnvironmentNames.h"
 
 #include <algorithm>
 #include <cctype>
@@ -156,7 +157,7 @@ inline std::optional<bool> resolveOopJitEnableOverride(const EquationModuleInput
         "SVMP_FE_JIT_ENABLE",
     };
     for (const char* key : kEnvKeys) {
-        if (const char* env = std::getenv(key); env != nullptr) {
+        if (const char* env = svmp::FE::environment::value(key); env != nullptr) {
             if (const auto value = detail::parse_bool_relaxed(env)) {
                 return value;
             }
@@ -195,7 +196,7 @@ inline bool resolveOopJitSpecializationEnable(const EquationModuleInput& input, 
         "SVMP_FE_JIT_SPECIALIZATION_ENABLE",
     };
     for (const char* key : kEnvKeys) {
-        if (const char* env = std::getenv(key); env != nullptr) {
+        if (const char* env = svmp::FE::environment::value(key); env != nullptr) {
             if (const auto value = detail::parse_bool_relaxed(env)) {
                 return *value;
             }

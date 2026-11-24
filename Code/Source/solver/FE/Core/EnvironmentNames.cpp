@@ -61,6 +61,7 @@ std::span<const NameDeclaration> solverCatalogue() noexcept
     constexpr const char* kGeneratedState = "FE/TimeStepping/GeneratedState";
     constexpr const char* kNewton = "FE/TimeStepping/NewtonSolver";
     constexpr const char* kTimeLoop = "FE/TimeStepping/TimeLoop";
+    constexpr const char* kPhysicsJit = "Physics/Core/JITRuntimePolicy";
 
     static constexpr NameDeclaration kSolverNames[] = {
         // Application/Core/ApplicationDriver: the solve setup and the step loop.
@@ -669,6 +670,16 @@ std::span<const NameDeclaration> solverCatalogue() noexcept
          "logs the constraints and norms of the initialization solves"},
         {"SVMP_ZERO_CONSTRAINED_RATES", NumericalOverride, kTimeLoop, Flag, "off", NonReference,
          "zeros the rates at constrained DOFs after every rate update"},
+
+        // Physics/Core: the JIT policy of physics modules.
+        {"SVMP_FE_JIT_ENABLE", Performance, kPhysicsJit, Flag, "the module options (on)", NonReference,
+         "second spelling of SVMP_OOP_JIT_ENABLE"},
+        {"SVMP_FE_JIT_SPECIALIZATION_ENABLE", Performance, kPhysicsJit, Flag, "the module options (on)",
+         NonReference, "second spelling of SVMP_OOP_JIT_SPECIALIZATION_ENABLE"},
+        {"SVMP_OOP_JIT_ENABLE", Performance, kPhysicsJit, Flag, "the module options (on)", NonReference,
+         "LLVM JIT form kernels, off for the interpreted kernels (after the deck and module options)"},
+        {"SVMP_OOP_JIT_SPECIALIZATION_ENABLE", Performance, kPhysicsJit, Flag, "the module options (on)",
+         NonReference, "specialized JIT kernels (after the deck and module options)"},
     };
     return kSolverNames;
 }
