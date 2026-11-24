@@ -20,6 +20,7 @@
 #include "Systems/TimeIntegrator.h"
 #include "Tests/Unit/Forms/FormsTestHelpers.h"
 #include "Tests/Unit/Forms/JITTestHelpers.h"
+#include "Tests/Unit/Systems/TraceMultiplierTestMeshes.h"
 
 #include "Mesh/Mesh.h"
 #include "Mesh/Topology/CellShape.h"
@@ -1518,5 +1519,102 @@ TEST(MovingDomainBundleTest, SoleMovingFrameFormulationAssemblesEveryBlock)
             EXPECT_NEAR(sole.at(key), value, 1e-14 * std::max(velocity_scale, pressure_scale))
                 << (field == 0 ? "velocity" : "pressure") << " row of node " << node << " component " << k;
         }
+    }
+}
+
+/**
+ * The tangent of the upwind DG transport residual
+ *   (-c beta.grad v) dx + ({beta}.n(-) upwindValue(c, beta) [v]) dS
+ *   + ((max(beta.n, 0) c + min(beta.n, 0) c_in) v) ds - (f v) dx
+ * for both signs of beta, with the data c_in and f as coefficients, on a 2 x 2
+ * grid of discontinuous Q1 cells: the symbolic tangent equals the
+ * automatic-differentiation one, and both equal central differences.
+ */
+TEST(UpwindTransportJacobianTest, SymbolicTangentEqualsAutomaticDifferentiation)
+{
+    using svmp::FE::forms::FormExpr;
+    namespace forms = svmp::FE::forms;
+    namespace systems = svmp::FE::systems;
+    for (const Real sign : {1.0, -1.0}) {
+        SCOPED_TRACE(sign > 0.0 ? "+beta" : "-beta");
+        std::vector<std::vector<Real>> jacobians;
+        std::vector<Real> fd_defects;
+        for (const bool symbolic : {false, true}) {
+            auto space = std::make_shared<svmp::FE::spaces::L2Space>(ElementType::Quad4, 1);
+            systems::FESystem sys(svmp::FE::test_trace_multiplier::buildQuadGrid(2, 2, 1.0, 1.0, 1));
+            const auto c_id = sys.addField(systems::FieldSpec{.name = "c", .space = space});
+            sys.addOperator("op");
+            const auto c = forms::StateField(c_id, *space, "c");
+            const auto v = forms::TestField(c_id, *space, "v");
+            const std::array<Real, 2> b{sign * 1.0, sign * 0.5};
+            const auto beta = forms::constantVector(b, 2);
+            const auto n = FormExpr::normal();
+            const auto bn = forms::inner(beta, n);
+            const auto c_in = FormExpr::coefficient(
+                "c_in", svmp::FE::forms::ScalarCoefficient([](Real x, Real y, Real) { return 1.0 + x * y; }));
+            const auto f = FormExpr::coefficient(
+                "f", svmp::FE::forms::ScalarCoefficient([](Real x, Real y, Real) { return x + 2.0 * y; }));
+            const auto R = (-c * forms::inner(beta, forms::grad(v))).dx() +
+                           (forms::inner(forms::avg(beta), n.minus()) * forms::upwindValue(c, beta) * forms::jump(v)).dS() +
+                           ((forms::max(bn, 0.0) * c + forms::min(bn, 0.0) * c_in) * v).ds() - (f * v).dx();
+            systems::FormInstallOptions options;
+            options.compiler_options.use_symbolic_tangent = symbolic;
+            // The interpreted kernels: the compiled path waits for the JIT key
+            // fix (tracker D75); the compiled kernels of the two signs of beta
+            // share a cache key today.
+            options.compiler_options.jit.enable = false;
+            (void)systems::installFormulation(sys, "op", {c_id}, R, options);
+            sys.setup();
+            const auto N = sys.dofHandler().getNumDofs();
+            std::vector<Real> state(static_cast<std::size_t>(N));
+            for (std::size_t i = 0; i < state.size(); ++i) {
+                state[i] = std::sin(0.37 * static_cast<Real>(i) * static_cast<Real>(i));
+            }
+            const auto assemble = [&](const std::vector<Real>& values, svmp::FE::assembly::GlobalSystemView* J,
+                                      svmp::FE::assembly::GlobalSystemView* Rv) {
+                systems::SystemStateView view;
+                view.u = std::span<const Real>(values);
+                systems::AssemblyRequest request;
+                request.op = "op";
+                request.want_matrix = J != nullptr;
+                request.want_vector = Rv != nullptr;
+                EXPECT_TRUE(sys.assemble(request, view, J, Rv).success);
+            };
+            svmp::FE::assembly::DenseMatrixView J(N);
+            J.zero();
+            assemble(state, &J, nullptr);
+            std::vector<Real> entries;
+            Real defect = 0.0;
+            for (GlobalIndex col = 0; col < N; ++col) {
+                auto plus = state;
+                auto minus = state;
+                plus[static_cast<std::size_t>(col)] += 1e-6;
+                minus[static_cast<std::size_t>(col)] -= 1e-6;
+                svmp::FE::assembly::DenseVectorView Rp(N), Rm(N);
+                Rp.zero();
+                Rm.zero();
+                assemble(plus, nullptr, &Rp);
+                assemble(minus, nullptr, &Rm);
+                for (GlobalIndex row = 0; row < N; ++row) {
+                    const Real fd = (Rp.getVectorEntry(row) - Rm.getVectorEntry(row)) / 2e-6;
+                    defect = std::max(defect, std::abs(J.getMatrixEntry(row, col) - fd));
+                }
+            }
+            for (GlobalIndex row = 0; row < N; ++row) {
+                for (GlobalIndex col = 0; col < N; ++col) {
+                    entries.push_back(J.getMatrixEntry(row, col));
+                }
+            }
+            jacobians.push_back(std::move(entries));
+            fd_defects.push_back(defect);
+        }
+        EXPECT_LT(fd_defects[0], 1e-7) << "automatic differentiation";
+        EXPECT_LT(fd_defects[1], 1e-7) << "symbolic tangent";
+        ASSERT_EQ(jacobians[0].size(), jacobians[1].size());
+        Real difference = 0.0;
+        for (std::size_t k = 0; k < jacobians[0].size(); ++k) {
+            difference = std::max(difference, std::abs(jacobians[0][k] - jacobians[1][k]));
+        }
+        EXPECT_LT(difference, 1e-12);
     }
 }

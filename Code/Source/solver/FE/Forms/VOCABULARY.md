@@ -1211,6 +1211,13 @@ Status: `implemented/public`.
   intersection (`.dL`, `dInterfaceBoundary`); general embedded-curve, point,
   and quadrature-rule-per-measure vocabulary is not public. Cut quadrature
   orders are inputs of the cut-volume request, not of the form.
+- Known compiled-kernel defects (interpreted kernels are right): the JIT
+  cache key of a kernel, a word-level hash of its expression, is the same for
+  two kernels whose constants differ by an even number of sign flips, so one
+  is served the other's code (an upwind DG tangent with -beta took the +beta
+  kernel; the key fix is tracker D75); and the compiled
+  residual of a symbolic-tangent kernel evaluates the Laplacian of the
+  current solution on interior facets to zero (`test_InterfaceTraceConventions.cpp`).
 - Interface-owned fields enter forms only linearly with one unknown per
   product on one side (see Mixed-Dimensional Transfer Operators above); their
   single-sided kernels are interpreted (D54 LM4).  Global scalar multipliers

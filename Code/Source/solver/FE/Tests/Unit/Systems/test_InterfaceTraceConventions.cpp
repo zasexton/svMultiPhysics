@@ -279,6 +279,79 @@ TEST(InterfaceTraceConventions, UpwindValueOnAFittedInterfaceCarriesTheUpstreamS
     EXPECT_NEAR(leftward.right, 100.0, 1e-10);
 }
 
+TEST(InterfaceTraceConventions, AverageOfALaplacianOnAnInteriorFacetIsAssembled)
+{
+    // (avg(laplacian(u)) avg(v) + avg(laplacian(u)) jv).dS, jv the slope jump
+    // of v along n(-), for continuous Q2 u = x^2 + 2 y^2 (laplacian 6) on the
+    // two unit squares, whose interior facet x = 1 has length 1: the residual
+    // sums to 6 over the DOFs (jv sums to zero), and, the residual being linear
+    // in u, the tangent times the state is the residual; with the
+    // automatic-differentiation and with the symbolic tangent, interpreted.
+    // (Compiled, the symbolic-tangent kernel's residual evaluates the facet
+    // Laplacian to zero; the automatic-differentiation kernel is not compiled,
+    // "cached Hessian operand not supported", and runs interpreted.)
+    using forms::FormExpr;
+    for (const bool symbolic : {false, true}) {
+        SCOPED_TRACE(symbolic ? "symbolic tangent" : "automatic differentiation");
+        auto space = std::make_shared<spaces::H1Space>(ElementType::Quad4, 2);
+        FESystem sys(twoUnitSquaresSharingAnInterface());
+        const FieldId u_id = sys.addField(FieldSpec{.name = "u", .space = space});
+        sys.addOperator("op");
+        const auto u = forms::StateField(u_id, *space, "u");
+        const auto v = forms::TestField(u_id, *space, "v");
+        const auto jv = forms::inner(forms::jump(forms::grad(v)), FormExpr::normal().minus());
+        const auto residual = (FormExpr::constant(0.0) * u * v).dx() +
+                              (forms::avg(forms::laplacian(u)) * forms::avg(v)).dS() +
+                              (forms::avg(forms::laplacian(u)) * jv).dS();
+        FormInstallOptions options;
+        options.compiler_options.jit.enable = false;
+        options.compiler_options.use_symbolic_tangent = symbolic;
+        (void)installFormulation(sys, "op", {u_id}, residual, options);
+        sys.setup();
+
+        const auto n_dofs = sys.dofHandler().getNumDofs();
+        const auto offset = sys.fieldDofOffset(u_id);
+        std::vector<Real> state(static_cast<std::size_t>(n_dofs), 0.0);
+        for (GlobalIndex cell = 0; cell < 2; ++cell) {
+            std::vector<Real> local;
+            space->interpolate_scalar(
+                [&](const spaces::FunctionSpace::Value& xi) {
+                    const Real x = static_cast<Real>(cell) + Real(0.5) * (xi[0] + Real(1.0));
+                    const Real y = Real(0.5) * (xi[1] + Real(1.0));
+                    return x * x + Real(2.0) * y * y;
+                },
+                local);
+            const auto dofs = sys.fieldDofHandler(u_id).getCellDofs(cell);
+            for (std::size_t i = 0; i < dofs.size() && i < local.size(); ++i) {
+                state[static_cast<std::size_t>(offset + dofs[i])] = local[i];
+            }
+        }
+        SystemStateView view;
+        view.u = state;
+        AssemblyRequest request;
+        request.op = "op";
+        request.want_vector = true;
+        request.want_matrix = true;
+        assembly::DenseMatrixView J(n_dofs);
+        assembly::DenseVectorView R(n_dofs);
+        J.zero();
+        R.zero();
+        ASSERT_TRUE(sys.assemble(request, view, &J, &R).success);
+        Real sum = 0.0;
+        Real defect = 0.0;
+        for (GlobalIndex i = 0; i < n_dofs; ++i) {
+            sum += R.getVectorEntry(i);
+            Real Ju = 0.0;
+            for (GlobalIndex j = 0; j < n_dofs; ++j) {
+                Ju += J.getMatrixEntry(i, j) * state[static_cast<std::size_t>(j)];
+            }
+            defect = std::max(defect, std::abs(Ju - R.getVectorEntry(i)));
+        }
+        EXPECT_NEAR(sum, 6.0, 1e-10);
+        EXPECT_LT(defect, 1e-10);
+    }
+}
+
 TEST(InterfaceTraceConventions, IdentityJumpReductionIsTheCoreJump)
 {
     // One jump convention: the Identity Jump reduction of the BC helpers is
