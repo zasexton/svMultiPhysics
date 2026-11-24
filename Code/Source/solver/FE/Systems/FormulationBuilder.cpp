@@ -208,9 +208,131 @@ void FormulationBuilder::registerGeneratedBoundaries(const forms::FormExpr& resi
     }
 }
 
+void FormulationBuilder::verifyTaggedOccurrences(const forms::FormExpr& residual)
+{
+    if (tagged_terms_.empty() || !residual.isValid() || residual.node() == nullptr) {
+        return;
+    }
+    using FT = forms::FormExprType;
+    const auto first_record = [&](const forms::FormExprNode* node) -> const TaggedTerm* {
+        for (const auto& tagged_term : tagged_terms_) {
+            if (tagged_term.term.node() == node) {
+                return &tagged_term;
+            }
+        }
+        return nullptr;
+    };
+    const auto describe = [&](const TaggedTerm& tagged_term) {
+        return "the term tagged '" + tagged_term.label + "' in the row of '" +
+               system_->fieldRecord(tagged_term.test_field).name + "'";
+    };
+    // Whether a subtree holds a tagged term (memoized: residuals share subtrees).
+    std::unordered_map<const forms::FormExprNode*, bool> holds;
+    const auto holds_tagged = [&](const auto& self, const forms::FormExprNode& node) -> bool {
+        if (const auto it = holds.find(&node); it != holds.end()) {
+            return it->second;
+        }
+        bool found = first_record(&node) != nullptr;
+        for (const auto* child : node.children()) {
+            if (!found && child != nullptr) {
+                found = self(self, *child);
+            }
+        }
+        holds.emplace(&node, found);
+        return found;
+    };
+    // The summands of sign +1 of each tagged term along the additive spine:
+    // sums, differences, negations and measures (an integral is linear in
+    // its integrand); a tagged term anywhere else is refused.
+    std::unordered_map<const forms::FormExprNode*, std::size_t> installed;
+    const auto walk = [&](const auto& self, const forms::FormExprNode& node, int sign) -> void {
+        if (!holds_tagged(holds_tagged, node)) {
+            return;
+        }
+        if (const auto* tagged_term = first_record(&node)) {
+            if (sign < 0) {
+                throw std::invalid_argument(
+                    "FormulationBuilder: " + describe(*tagged_term) +
+                    " is installed with sign -1 (R - F.tag(label, a) installs -a); tag the signed term, "
+                    "R + F.tag(label, -a), so the channel records what the residual installs");
+            }
+            ++installed[&node];
+            return;
+        }
+        const auto kids = node.children();
+        switch (node.type()) {
+            case FT::Add:
+                self(self, *kids[0], sign);
+                self(self, *kids[1], sign);
+                return;
+            case FT::Subtract:
+                self(self, *kids[0], sign);
+                self(self, *kids[1], -sign);
+                return;
+            case FT::Negate:
+            case FT::CellIntegral:
+            case FT::BoundaryIntegral:
+            case FT::InteriorFaceIntegral:
+            case FT::InterfaceIntegral:
+            case FT::CutVolumeIntegral:
+            case FT::GlobalIntegral:
+                self(self, *kids[0], node.type() == FT::Negate ? -sign : sign);
+                return;
+            default:
+                break;
+        }
+        const auto inner_tagged = [&](const auto& find, const forms::FormExprNode& n) -> const TaggedTerm* {
+            if (const auto* tagged_term = first_record(&n)) {
+                return tagged_term;
+            }
+            for (const auto* child : n.children()) {
+                if (child != nullptr && holds_tagged(holds_tagged, *child)) {
+                    return find(find, *child);
+                }
+            }
+            return nullptr;
+        };
+        throw std::invalid_argument("FormulationBuilder: " + describe(*inner_tagged(inner_tagged, node)) +
+                                    " is installed inside '" + node.toString() +
+                                    "', not as a summand of the residual");
+    };
+    walk(walk, *residual.node(), +1);
+    for (const auto& [node, count] : installed) {
+        const auto total = (tagged_installed_[node] += count);
+        const auto tagged = static_cast<std::size_t>(
+            std::count_if(tagged_terms_.begin(), tagged_terms_.end(),
+                          [node = node](const TaggedTerm& t) { return t.term.node() == node; }));
+        if (total > tagged) {
+            throw std::invalid_argument("FormulationBuilder: " + describe(*first_record(node)) + " is installed " +
+                                        std::to_string(total) + " times but tagged " + std::to_string(tagged) +
+                                        " times; tag each summand the channel records");
+        }
+    }
+}
+
+void FormulationBuilder::requireTaggedTermsInstalled(std::string_view context) const
+{
+    for (const auto& tagged_term : tagged_terms_) {
+        const auto* node = tagged_term.term.node();
+        const auto tagged = static_cast<std::size_t>(
+            std::count_if(tagged_terms_.begin(), tagged_terms_.end(),
+                          [node](const TaggedTerm& t) { return t.term.node() == node; }));
+        const auto it = tagged_installed_.find(node);
+        const std::size_t installed = it == tagged_installed_.end() ? 0u : it->second;
+        if (installed < tagged) {
+            throw std::invalid_argument("FormulationBuilder::" + std::string(context) + ": the term tagged '" +
+                                        tagged_term.label + "' in the row of '" +
+                                        system_->fieldRecord(tagged_term.test_field).name + "' is installed " +
+                                        std::to_string(installed) + " times but tagged " + std::to_string(tagged) +
+                                        " times; a work channel reports terms of the installed residual");
+        }
+    }
+}
+
 CoupledResidualKernels FormulationBuilder::install(std::span<const FieldId> fields,
                                                    const forms::FormExpr& residual)
 {
+    verifyTaggedOccurrences(residual);
     registerGeneratedBoundaries(residual);
     return installFormulation(*system_, operator_tag_, fields, residual, options_);
 }
@@ -218,6 +340,7 @@ CoupledResidualKernels FormulationBuilder::install(std::span<const FieldId> fiel
 CoupledResidualKernels FormulationBuilder::residual(const forms::FormExpr& residual)
 {
     const auto inferred = inferInstallFields(*system_, residual);
+    verifyTaggedOccurrences(residual);
     registerGeneratedBoundaries(residual);
     auto options = options_;
     for (const auto field : inferred.extra_trial_fields) {
@@ -239,6 +362,7 @@ CoupledResidualKernels FormulationBuilder::installGroup(std::span<const FieldId>
                                                         const forms::FormExpr& residual,
                                                         const FormulationGroup& group)
 {
+    verifyTaggedOccurrences(residual);
     registerGeneratedBoundaries(residual);
     return installFormulation(*system_, operator_tag_, fields, residual, groupOptions(group));
 }
@@ -252,6 +376,7 @@ CoupledResidualKernels FormulationBuilder::installGroup(std::initializer_list<Fi
 
 OperatorTag FormulationBuilder::workChannel(std::string_view suffix, std::initializer_list<WorkChannelPart> parts)
 {
+    requireTaggedTermsInstalled("workChannel");
     const OperatorTag channel_tag = operator_tag_ + "_" + std::string(suffix);
     bool installed = false;
     for (const auto& part : parts) {

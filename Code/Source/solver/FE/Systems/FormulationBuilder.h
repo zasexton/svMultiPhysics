@@ -54,6 +54,7 @@
 #include <span>
 #include <string>
 #include <string_view>
+#include <unordered_map>
 #include <vector>
 
 namespace svmp {
@@ -210,7 +211,13 @@ public:
      *
      * The term holds the test function of one field.  A residual built as
      * R = sumOf(R, F.tag(label, term)) is the residual without the tags, and
-     * tagged() derives the channel from the same terms.
+     * tagged() derives the channel from the same terms.  The recorded term is
+     * the installed one: install(), residual() and installGroup() refuse a
+     * residual that holds a tagged term other than as a summand of sign +1
+     * (R - F.tag(label, a) installs -a; tag the signed term,
+     * R + F.tag(label, -a)) or more often than it was tagged, and
+     * workChannel() refuses while a tagged term is installed fewer times than
+     * it was tagged.  Nothing of this enters the residual's tree or the logs.
      */
     [[nodiscard]] forms::FormExpr tag(std::string_view label, forms::FormExpr term);
 
@@ -241,6 +248,14 @@ private:
     /// measure of @p residual with the system.
     void registerGeneratedBoundaries(const forms::FormExpr& residual);
 
+    /// Counts the installed occurrences of the tagged terms in @p residual
+    /// and refuses a tagged term that @p residual holds with sign -1, inside a
+    /// product or function, or more often in all than it was tagged.
+    void verifyTaggedOccurrences(const forms::FormExpr& residual);
+
+    /// Refuses while a tagged term is installed fewer times than it was tagged.
+    void requireTaggedTermsInstalled(std::string_view context) const;
+
     struct TaggedTerm {
         std::string label;
         FieldId test_field{INVALID_FIELD_ID};
@@ -251,6 +266,8 @@ private:
     OperatorTag operator_tag_{};
     FormInstallOptions options_{};
     std::vector<TaggedTerm> tagged_terms_{};
+    /// Summands of sign +1 installed so far, by the node of a tagged term.
+    std::unordered_map<const forms::FormExprNode*, std::size_t> tagged_installed_{};
 };
 
 } // namespace systems

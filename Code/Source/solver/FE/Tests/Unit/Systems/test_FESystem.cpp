@@ -1245,6 +1245,72 @@ TEST(FESystem, AFunctionalOfALawWrittenAsFormsIsTheFunctionalOfItsBody)
     EXPECT_GT(values[1].value, 0.0);
 }
 
+/**
+ * The term a tag records is the term the residual installs: R - F.tag(l, a)
+ * installs -a and is refused, R + F.tag(l, -a) records -a; a tagged term
+ * installed twice, inside a product, or not at all before its work channel is
+ * refused, naming the label and the row.
+ */
+TEST(FESystem, TaggedTermsAreTheInstalledSummands)
+{
+    using svmp::FE::forms::FormExpr;
+    auto mesh = build_single_quad_mesh();
+    auto scalar_space = std::make_shared<H1Space>(ElementType::Quad4, /*order=*/1);
+    FESystem sys(mesh);
+    const auto u = sys.addField(FieldSpec{.name = "u", .space = scalar_space, .components = 1});
+    const auto U = svmp::FE::forms::StateField(u, *scalar_space, "u");
+    const auto v = svmp::FE::forms::TestField(u, *scalar_space, "v");
+    const auto seed = (U * v).dx();
+    const auto a = (FormExpr::constant(2.0) * U * v).ds(1);
+
+    const auto refusal = [](const std::function<void()>& install) -> std::string {
+        try {
+            install();
+        } catch (const std::invalid_argument& e) {
+            return e.what();
+        }
+        return {};
+    };
+    const auto names = [](const std::string& message, const std::string& what) {
+        return message.find("the term tagged 'load' in the row of 'u'") != std::string::npos &&
+               message.find(what) != std::string::npos;
+    };
+
+    {
+        svmp::FE::systems::FormulationBuilder F(sys, "subtracted", {});
+        const auto R = seed - F.tag("load", a);
+        const auto message = refusal([&] { (void)F.install({u}, R); });
+        EXPECT_TRUE(names(message, "installed with sign -1")) << message;
+    }
+    {
+        svmp::FE::systems::FormulationBuilder F(sys, "signed", {});
+        const auto R = seed + F.tag("load", -a);
+        EXPECT_NO_THROW((void)F.install({u}, R));
+        EXPECT_EQ(F.tagged("load", u).toString(), (-a).toString());
+        EXPECT_FALSE(F.workChannel("work", {{.test_field = u, .form = F.tagged("load", u)}}).empty());
+    }
+    {
+        svmp::FE::systems::FormulationBuilder F(sys, "twice", {});
+        const auto t = F.tag("load", a);
+        const auto message = refusal([&] { (void)F.residual(seed + t + t); });
+        EXPECT_TRUE(names(message, "installed 2 times but tagged 1 times")) << message;
+    }
+    {
+        svmp::FE::systems::FormulationBuilder F(sys, "scaled", {});
+        const auto R = seed + FormExpr::constant(2.0) * F.tag("load", a);
+        const auto message = refusal([&] { (void)F.installGroup({u}, R, {}); });
+        EXPECT_TRUE(names(message, "not as a summand of the residual")) << message;
+    }
+    {
+        svmp::FE::systems::FormulationBuilder F(sys, "dropped", {});
+        (void)F.tag("load", a);
+        EXPECT_NO_THROW((void)F.install({u}, seed));
+        const auto message =
+            refusal([&] { (void)F.workChannel("work", {{.test_field = u, .form = F.tagged("load", u)}}); });
+        EXPECT_TRUE(names(message, "installed 0 times but tagged 1 times")) << message;
+    }
+}
+
 TEST(FESystem, DerivedMeshVelocityIsExcludedFromUnknownLayout)
 {
     auto mesh = build_single_quad_mesh();
