@@ -250,7 +250,7 @@ TEST(GeneralityBenchmark, P01_AnisotropicPoissonWithSignedFluxConvergesOnEveryFa
     const std::vector<FamilyOrder> cases{
         {Cell::Tri3, 1, 4}, {Cell::Quad4, 1, 4}, {Cell::Tet4, 1, 2}, {Cell::Hex8, 1, 2},
         {Cell::Wedge6, 1, 2}, {Cell::Pyr5, 1, 2}, {Cell::Tri3, 2, 2}, {Cell::Quad4, 2, 2},
-        {Cell::Tet4, 2, 2},  {Cell::Hex8, 2, 2}};
+        {Cell::Tet4, 2, 2},  {Cell::Hex8, 2, 2}, {Cell::Wedge6, 2, 2}, {Cell::Pyr5, 2, 2}};
     for (const auto& c : cases) {
         std::vector<Real> l2, h1, flux_gap;
         for (int level = 0; level < 3; ++level) {
