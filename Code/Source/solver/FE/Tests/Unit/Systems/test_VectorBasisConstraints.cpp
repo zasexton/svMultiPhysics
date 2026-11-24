@@ -895,6 +895,69 @@ TEST(MonolithicAffineClassification, FieldGradientOnAFaceOfATaperedCell)
 
 
 
+// An operator whose quadrature rule differs from the rule of the operator
+// assembled before it: the first cell of its loop maps its own points (it
+// took the previous rule's geometry tabulation, and read past its end when the
+// new rule has more points).
+TEST(QuadratureRuleSwitch, FirstCellAfterAnotherRuleMapsItsOwnPoints)
+{
+    const auto rows = [](bool other_rule_first) {
+        FESystem system(unitBoxSimplexMesh(2, 2));
+        FieldBinding fields(system, "QuadratureRuleSwitch");
+        const auto U = fields.unknown("u", std::make_shared<spaces::H1Space>(ElementType::Triangle3, 1));
+        const auto W = fields.unknown("w", std::make_shared<spaces::L2Space>(ElementType::Triangle3, 2));
+        {
+            FormulationBuilder F(system, "equations", {});
+            (void)F.residual((U.state * U.test).dx() + (W.state * W.test).dx());
+        }
+        FormInstallOptions measurement;
+        measurement.contributes_to_problem_analysis = false;
+        {
+            // Rows of the P1 field: a rule of 4 points.
+            FormulationBuilder F(system, "first", measurement);
+            (void)F.residual((forms::x().component(0) * U.test).dx());
+        }
+        {
+            // Rows of the DG2 field: a rule of more points.
+            FormulationBuilder F(system, "second", measurement);
+            (void)F.residual((forms::x().component(0) * forms::x().component(1) * W.test).dx());
+        }
+        system.setup();
+        const auto n = system.dofHandler().getNumDofs();
+        const std::vector<Real> U0(static_cast<std::size_t>(n), 0.0);
+        SystemStateView state;
+        state.u = U0;
+        const auto assemble = [&](const char* op) {
+            assembly::DenseVectorView R(n);
+            R.zero();
+            AssemblyRequest request;
+            request.op = op;
+            request.want_vector = true;
+            EXPECT_TRUE(system.assemble(request, state, nullptr, &R).success);
+            std::vector<Real> out;
+            const auto w0 = system.fieldDofOffset(W.id);
+            for (GlobalIndex i = w0; i < w0 + system.fieldDofHandler(W.id).getNumDofs(); ++i) {
+                out.push_back(R.getVectorEntry(i));
+            }
+            return out;
+        };
+        if (other_rule_first) {
+            (void)assemble("first");
+        }
+        return assemble("second");
+    };
+    const auto alone = rows(false);
+    const auto after = rows(true);
+    ASSERT_EQ(after.size(), alone.size());
+    Real total = 0.0;
+    for (std::size_t i = 0; i < after.size(); ++i) {
+        EXPECT_NEAR(after[i], alone[i], 1e-15) << "row " << i;
+        total += alone[i];
+    }
+    EXPECT_NEAR(total, 0.25, 1e-14);  // the DG2 rows sum to the integral of x y
+}
+
+
 } // namespace test
 } // namespace systems
 } // namespace FE

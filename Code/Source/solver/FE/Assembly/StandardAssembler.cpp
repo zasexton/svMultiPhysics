@@ -12082,6 +12082,10 @@ void StandardAssembler::copyMonolithicCallStateFrom(
     coupled_scalar_basis_values_ = owner.coupled_scalar_basis_values_;
     coupled_space_qpt_caches_ = owner.coupled_space_qpt_caches_;
     if (cached_quad_rule_.get() != quad_rule.get()) {
+        // The geometry tabulation belongs to the previous rule; prepareGeometry
+        // compares the rule it is given with cached_quad_rule_ only.
+        cached_geom_bcache_handle_ = basis::BasisCacheHandle{};
+        cached_geom_bcache_ = nullptr;
         cached_field_bcache_.clear();
         cached_field_recipes_valid_ = false;
     }
@@ -13277,6 +13281,10 @@ AssemblyResult StandardAssembler::assembleCellsFused(
         }
     }
     if (cached_quad_rule_.get() != fused_quad_rule.get()) {
+        // The geometry tabulation belongs to the previous rule; prepareGeometry
+        // compares the rule it is given with cached_quad_rule_ only.
+        cached_geom_bcache_handle_ = basis::BasisCacheHandle{};
+        cached_geom_bcache_ = nullptr;
         cached_field_bcache_.clear();
         cached_field_recipes_valid_ = false;
     }
