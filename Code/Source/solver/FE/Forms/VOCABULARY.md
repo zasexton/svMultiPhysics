@@ -141,7 +141,9 @@ void registerHeat(fe::systems::FESystem& system,
                   const HeatOptions& o)
 {
     fe::systems::FieldBinding fields(system, "Heat::registerOn");
-    const auto [T_id, T, v] = fields.unknownSymbols({.name = "T", .space = V}, "temperature", "T", "v");
+    const auto U = fields.unknown("T", V, "temperature");
+    const auto& T = U.state;
+    const auto& v = U.test;
 
     const auto k = FormExpr::constant(o.conductivity);
     const auto f = FormExpr::constant(o.source);
@@ -152,30 +154,31 @@ void registerHeat(fe::systems::FESystem& system,
     bcs.add(std::make_unique<bc::NaturalBC>(o.inlet, FormExpr::constant(o.inflow)));
 
     fe::constraints::ConstraintPlan plan(system);
-    plan.essentials(bcs, R, T, v, T_id);
+    plan.essentials(bcs, R, T, v, U.id);
     plan.commit();
 
     fe::systems::FormulationBuilder F(system, "equations", {});
-    (void)F.quantity("conduction_energy", fe::systems::FunctionalKind::Stored,
-                     (0.5 * k * inner(grad(T), grad(T))).dx());
+    F.record(F.quantity("conduction_energy", fe::systems::FunctionalKind::Stored,
+                        (0.5 * k * inner(grad(T), grad(T))).dx()));
     F.symbolicTangent();
-    (void)F.install({T_id}, R);
+    (void)F.residual(R);
 
     system.addDerivedResult(fe::post::DerivedResultBuilder("heat_flux")
                                 .scope(fe::post::DerivedResultScope::Cell)
                                 .policy(fe::post::DerivedResultPolicy::CellAverage)
                                 .shape(fe::systems::FEQuantityShape::vector(V->topological_dimension()))
                                 .expression(-k * grad(T))
-                                .referencedField(T_id)
+                                .referencedField(U.id)
                                 .build());
 }
 ```
 
 `Forms/SYSTEMS_INTEGRATION.md` explains each step (section 2) and the path from
 a deck key to a running equation (section 8). A module with several unknowns
-binds each, sums their rows and installs them together,
-`F.install({u_id, p_id}, R)`; `IncompressibleNavierStokesVMSModule::registerOn`
-is the multi-field example.
+binds each, sums their rows and installs them together with `F.residual(R)`,
+which reads the fields from the residual, or `F.install({u_id, p_id}, R)` where
+the order of the kernel groups matters;
+`IncompressibleNavierStokesVMSModule::registerOn` is the multi-field example.
 
 Use unbound `TrialFunction`/`TestFunction` for explicit operator authoring
 (`installMixedBilinear`, `installMixedLinear`) and `StateField`/`TestField` for

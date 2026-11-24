@@ -88,7 +88,9 @@ void registerHeat(fe::systems::FESystem& system,
                   const HeatOptions& o)
 {
     fe::systems::FieldBinding fields(system, "Heat::registerOn");
-    const auto [T_id, T, v] = fields.unknownSymbols({.name = "T", .space = V}, "temperature", "T", "v");
+    const auto U = fields.unknown("T", V, "temperature");
+    const auto& T = U.state;
+    const auto& v = U.test;
 
     const auto k = FormExpr::constant(o.conductivity);
     const auto f = FormExpr::constant(o.source);
@@ -99,37 +101,42 @@ void registerHeat(fe::systems::FESystem& system,
     bcs.add(std::make_unique<bc::NaturalBC>(o.inlet, FormExpr::constant(o.inflow)));
 
     fe::constraints::ConstraintPlan plan(system);
-    plan.essentials(bcs, R, T, v, T_id);
+    plan.essentials(bcs, R, T, v, U.id);
     plan.commit();
 
     fe::systems::FormulationBuilder F(system, "equations", {});
-    (void)F.quantity("conduction_energy", fe::systems::FunctionalKind::Stored,
-                     (0.5 * k * inner(grad(T), grad(T))).dx());
+    F.record(F.quantity("conduction_energy", fe::systems::FunctionalKind::Stored,
+                        (0.5 * k * inner(grad(T), grad(T))).dx()));
     F.symbolicTangent();
-    (void)F.install({T_id}, R);
+    (void)F.residual(R);
 
     system.addDerivedResult(fe::post::DerivedResultBuilder("heat_flux")
                                 .scope(fe::post::DerivedResultScope::Cell)
                                 .policy(fe::post::DerivedResultPolicy::CellAverage)
                                 .shape(fe::systems::FEQuantityShape::vector(V->topological_dimension()))
                                 .expression(-k * grad(T))
-                                .referencedField(T_id)
+                                .referencedField(U.id)
                                 .build());
 }
 ```
 
-- `FieldBinding::unknownSymbols` registers the unknown (or reuses a compatible
-  one) and returns `{id, state, test}`.
+- `FieldBinding::unknown(name, space, role)` registers the unknown (or reuses
+  a compatible one) and returns `{id, state, test}`.
 - The residual is a sum of integrals. Boundary data enter as forms on `.ds(m)`
   or as condition objects on a `BoundaryConditionManager`.
 - `ConstraintPlan::essentials` adds the manager's weak terms to `R` and
   installs its strong constraints, in the plan's phase order.
-- `FormulationBuilder` holds the install options; `functional` declares a
-  measured 0-form and `install` compiles and registers the kernels.
+- `FormulationBuilder` holds the install options; `quantity` declares a
+  measured 0-form, `record` makes it a column of the scalar history
+  (written with `<Write_scalar_history>`), and `residual` compiles and
+  registers the kernels of the fields the residual implies: its test
+  functions' fields, with the other unknowns it holds as extra trial fields
+  (`inferInstallFields`). `install(fields, R)` states the field list where
+  its order matters.
 - `addDerivedResult` declares an output. Unknowns are written without output
   code (section 8).
 
-`bcs.applyAll(system, R, T, v, T_id)` is the direct BC route when no constraint
+`bcs.applyAll(system, R, T, v, U.id)` is the direct BC route when no constraint
 plan is needed. `StateField`, `TestField`, `FESystem::addField`, and direct
 `installFormulation()` also remain available. These authoring services do not
 choose physical BCs, material laws, observation membership, or compiler policy.
