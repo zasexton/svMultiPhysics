@@ -14,7 +14,9 @@
 #include "Systems/FESystem.h"
 
 #include <algorithm>
+#include <optional>
 #include <stdexcept>
+#include <string>
 #include <unordered_map>
 #include <utility>
 #include <vector>
@@ -23,15 +25,101 @@ namespace svmp {
 namespace FE {
 namespace systems {
 
+namespace {
+
+/// The basis family of @p space's element, when it has one.
+[[nodiscard]] std::optional<BasisType> basisFamily(const spaces::FunctionSpace& space) noexcept
+{
+    const auto element = space.element_ptr();
+    if (!element) {
+        return std::nullopt;
+    }
+    const auto basis = element->basis_ptr();
+    if (!basis) {
+        return std::nullopt;
+    }
+    return basis->basis_type();
+}
+
+[[nodiscard]] std::string spaceKindText(spaces::SpaceType type)
+{
+    switch (type) {
+    case spaces::SpaceType::H1: return "H1";
+    case spaces::SpaceType::C1: return "C1";
+    case spaces::SpaceType::L2: return "L2";
+    case spaces::SpaceType::HCurl: return "H(curl)";
+    case spaces::SpaceType::HDiv: return "H(div)";
+    case spaces::SpaceType::Mixed: return "mixed";
+    case spaces::SpaceType::Product: return "product";
+    case spaces::SpaceType::Trace: return "trace";
+    case spaces::SpaceType::Mortar: return "mortar";
+    case spaces::SpaceType::Composite: return "composite";
+    case spaces::SpaceType::Enriched: return "enriched";
+    case spaces::SpaceType::Adaptive: return "adaptive";
+    case spaces::SpaceType::GenericBasis: return "generic-basis";
+    case spaces::SpaceType::Global: return "global";
+    }
+    return "unknown";
+}
+
+[[nodiscard]] std::string basisText(std::optional<BasisType> basis)
+{
+    if (!basis) {
+        return "no basis";
+    }
+    switch (*basis) {
+    case BasisType::Lagrange: return "Lagrange";
+    case BasisType::Hierarchical: return "hierarchical";
+    case BasisType::Bernstein: return "Bernstein";
+    case BasisType::NURBS: return "NURBS";
+    case BasisType::BSpline: return "B-spline";
+    case BasisType::Spectral: return "spectral";
+    case BasisType::Serendipity: return "serendipity";
+    case BasisType::Hermite: return "Hermite";
+    case BasisType::RaviartThomas: return "Raviart-Thomas";
+    case BasisType::Nedelec: return "Nedelec";
+    case BasisType::BDM: return "BDM";
+    case BasisType::Bubble: return "bubble";
+    case BasisType::Custom: return "custom";
+    }
+    return "unknown basis";
+}
+
+/// "H(div) Raviart-Thomas order 1, 3 DOFs on element type 1".
+[[nodiscard]] std::string declarationText(const spaces::FunctionSpace& space)
+{
+    return spaceKindText(space.space_type()) + " " + basisText(basisFamily(space)) + " order " +
+           std::to_string(space.polynomial_order()) + ", " + std::to_string(space.dofs_per_element()) +
+           " DOFs on element type " + std::to_string(static_cast<int>(space.element_type()));
+}
+
+[[nodiscard]] std::string supportText(const std::optional<std::string>& participant,
+                                      const std::optional<int>& domain)
+{
+    if (participant) {
+        return "participant '" + *participant + "'";
+    }
+    if (domain) {
+        return "domain " + std::to_string(*domain);
+    }
+    return "the whole mesh";
+}
+
+} // namespace
+
 bool spacesCompatible(const spaces::FunctionSpace& lhs,
                       const spaces::FunctionSpace& rhs) noexcept
 {
+    // The mapping of the basis (identity, covariant or contravariant Piola)
+    // follows the space type.
     return lhs.space_type() == rhs.space_type() &&
            lhs.field_type() == rhs.field_type() &&
            lhs.value_dimension() == rhs.value_dimension() &&
            lhs.topological_dimension() == rhs.topological_dimension() &&
            lhs.polynomial_order() == rhs.polynomial_order() &&
-           lhs.element_type() == rhs.element_type();
+           lhs.element_type() == rhs.element_type() &&
+           basisFamily(lhs) == basisFamily(rhs) &&
+           lhs.dofs_per_element() == rhs.dofs_per_element();
 }
 
 namespace {
@@ -158,7 +246,15 @@ void FieldBinding::check(const FESystem& system,
     if (!rec.space || !spacesCompatible(*rec.space, *spec.space)) {
         throw std::invalid_argument(
             std::string(context) + ": existing field '" + rec.name +
-            "' uses an incompatible function space");
+            "' uses an incompatible function space: declared as " +
+            (rec.space ? declarationText(*rec.space) : std::string("no space")) + ", requested as " +
+            declarationText(*spec.space));
+    }
+    if (rec.participant_name != spec.participant_name || rec.participant_domain_id != spec.participant_domain_id) {
+        throw std::invalid_argument(
+            std::string(context) + ": existing field '" + rec.name + "' is declared on " +
+            supportText(rec.participant_name, rec.participant_domain_id) + ", requested on " +
+            supportText(spec.participant_name, spec.participant_domain_id));
     }
     if (spec.solver_role && rec.solver_role && *spec.solver_role != *rec.solver_role) {
         throw std::invalid_argument(

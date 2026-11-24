@@ -28,6 +28,7 @@
 #include "Dofs/EntityDofMap.h"
 
 #include "Spaces/H1Space.h"
+#include "Spaces/HDivSpace.h"
 #include "Spaces/L2Space.h"
 #include "Spaces/ProductSpace.h"
 
@@ -1428,12 +1429,68 @@ TEST(FESystem, FieldSymbolBundlesPreserveCompatibilityErrorOrder)
     }), "Owner solution: existing field 'u' has component count 1, expected 2");
     EXPECT_EQ(invalidArgumentText([&] {
         (void)fields.unknownSymbols(FieldSpec{.name = "u", .space = quadratic}, "solution", "u", "v");
-    }), "Owner solution: existing field 'u' uses an incompatible function space");
+    }), "Owner solution: existing field 'u' uses an incompatible function space: declared as H1 Lagrange "
+        "order 1, 4 DOFs on element type 2, requested as H1 Lagrange order 2, 9 DOFs on element type 2");
     EXPECT_EQ(invalidArgumentText([&] {
         (void)fields.prescribedSymbol(
             FieldSpec{.name = "f", .space = quadratic, .source_kind = FieldSourceKind::PrescribedData}, true, "data", "f");
-    }), "Owner data: existing field 'f' uses an incompatible function space");
+    }), "Owner data: existing field 'f' uses an incompatible function space: declared as H1 Lagrange "
+        "order 1, 4 DOFs on element type 2, requested as H1 Lagrange order 2, 9 DOFs on element type 2");
     EXPECT_EQ(sys.registeredFieldCount(), 2u);
+}
+
+TEST(FESystem, AFieldReusedByNameNamesTheSameBasisAndSupport)
+{
+    // Raviart-Thomas and BDM spaces of one order on one cell agree on the
+    // space type, field type, dimensions, order and cell; reuse by name
+    // compares the basis too, in either order of declaration, names both
+    // declarations, and leaves the field numbering as it was.
+    using svmp::FE::BasisType;
+    using svmp::FE::spaces::HDivSpace;
+    const auto rt = std::make_shared<HDivSpace>(ElementType::Triangle3, 1, BasisType::RaviartThomas);
+    const auto bdm = std::make_shared<HDivSpace>(ElementType::Triangle3, 1, BasisType::BDM);
+    ASSERT_EQ(rt->space_type(), bdm->space_type());
+    ASSERT_EQ(rt->polynomial_order(), bdm->polynomial_order());
+    ASSERT_EQ(rt->value_dimension(), bdm->value_dimension());
+    EXPECT_FALSE(svmp::FE::systems::spacesCompatible(*rt, *bdm));
+    const auto text = [](const std::shared_ptr<HDivSpace>& space, const char* family) {
+        return std::string("H(div) ") + family + " order 1, " + std::to_string(space->dofs_per_element()) +
+               " DOFs on element type 1";
+    };
+    for (const bool rt_first : {true, false}) {
+        SCOPED_TRACE(rt_first ? "RT, then BDM" : "BDM, then RT");
+        const auto& first = rt_first ? rt : bdm;
+        const auto& second = rt_first ? bdm : rt;
+        FESystem sys(build_single_quad_mesh());
+        FieldBinding wall(sys, "PorousWall");
+        FieldBinding flux(sys, "Darcy");
+        const auto q = flux.unknown("q", first, "flux");
+        EXPECT_EQ(invalidArgumentText([&] { (void)wall.unknown("q", second, "flux"); }),
+                  "PorousWall flux: existing field 'q' uses an incompatible function space: declared as " +
+                      text(first, rt_first ? "Raviart-Thomas" : "BDM") + ", requested as " +
+                      text(second, rt_first ? "BDM" : "Raviart-Thomas"));
+        // The refusal registered nothing: the next field takes the next id.
+        EXPECT_EQ(sys.registeredFieldCount(), 1u);
+        const auto p = flux.unknown("p", std::make_shared<svmp::FE::spaces::L2Space>(ElementType::Triangle3, 0),
+                                    "pressure");
+        EXPECT_EQ(q.id, 0);
+        EXPECT_EQ(p.id, 1);
+        // The same declaration is reused.
+        EXPECT_EQ(wall.unknown("q", first, "flux").id, q.id);
+    }
+
+    // A field declared on one domain is not the field of another.
+    FESystem sys(build_single_quad_mesh());
+    FieldBinding fields(sys, "Owner");
+    const auto scalar = std::make_shared<H1Space>(ElementType::Quad4, 1);
+    (void)fields.unknown(FieldSpec{.name = "c", .space = scalar, .participant_domain_id = 1}, "solution");
+    EXPECT_EQ(invalidArgumentText([&] {
+        (void)fields.unknown(FieldSpec{.name = "c", .space = scalar, .participant_domain_id = 2}, "solution");
+    }), "Owner solution: existing field 'c' is declared on domain 1, requested on domain 2");
+    EXPECT_EQ(invalidArgumentText([&] {
+        (void)fields.unknown(FieldSpec{.name = "c", .space = scalar}, "solution");
+    }), "Owner solution: existing field 'c' is declared on domain 1, requested on the whole mesh");
+    EXPECT_EQ(sys.registeredFieldCount(), 1u);
 }
 
 TEST(FESystem, PrescribedFieldSymbolRetainsSourceKindAndRegistrationPolicy)

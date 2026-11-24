@@ -97,8 +97,9 @@ struct ShadowField {
 /// The shadow fields of @p system, in registration order.
 [[nodiscard]] std::vector<ShadowField> shadowFields(const FESystem& system);
 
-/// Same space type, field type, value and topological dimension, polynomial
-/// order and element type.
+/// Same space type (and so the same mapping of the basis), field type, value
+/// and topological dimension, polynomial order, element type, basis family
+/// and DOFs per element: an RT and a BDM space of one order on one cell differ.
 [[nodiscard]] bool spacesCompatible(const spaces::FunctionSpace& lhs,
                                     const spaces::FunctionSpace& rhs) noexcept;
 
