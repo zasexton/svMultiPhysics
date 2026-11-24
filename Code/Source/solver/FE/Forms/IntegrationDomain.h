@@ -290,22 +290,18 @@ public:
     /**
      * The unit normal pointing out of @p side toward the other side.
      *
-     * Fitted: normal().minus() is the outward normal of the minus cell, so
-     * the minus side gets normal().minus() and the plus side
-     * -normal().minus().  Generated: in a two-sided term normal().plus() is
-     * the level-set normal grad(phi)/|grad(phi)|, which points out of the
-     * negative side, so the negative side gets normal().plus() and the
-     * positive side -normal().plus().  Both sides read the one normal, so
-     * normalFrom(otherSide(A)) is exactly -normalFrom(A).  The plus
-     * restriction also makes the term two-sided, where normal().minus() is
-     * -grad(phi)/|grad(phi)|; in a kernel without a plus restriction, jump()
-     * or avg() a generated interface is assembled one-sided, and there
-     * normal().minus() is the level-set normal itself.
+     * normal().minus() is the outward normal of the minus side on both kinds
+     * of interface: of the minus cell on a fitted one, the level-set normal
+     * grad(phi)/|grad(phi)| on a generated one, in a one-sided and in a
+     * two-sided evaluation alike (D70).  So the minus side gets
+     * normal().minus() and the plus side -normal().minus(); both read the
+     * one normal, and normalFrom(otherSide(A)) is exactly -normalFrom(A).
+     * The minus restriction fixes the direction also in a plus row.
      */
     [[nodiscard]] FormExpr normalFrom(const VolumeIntegrationDomain& side) const
     {
         const bool minus = isMinus(side, "normalFrom");
-        const auto out_of_minus = generated_ ? FormExpr::normal().plus() : FormExpr::normal().minus();
+        const auto out_of_minus = FormExpr::normal().minus();
         return minus ? out_of_minus : -out_of_minus;
     }
 

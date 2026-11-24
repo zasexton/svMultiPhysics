@@ -666,7 +666,7 @@ on a generated one, whichever side the assembler calls minus.
 | `InterfaceBetween::generated(marker)` | The two-sided generated interface of a level set: the minus side `VolumeDomain::cut(marker, Negative)` (phi < c), the plus side `cut(marker, Positive)`; both sides retained (a one-sided boundary uses `L.outwardNormal()`) |
 | `I.minusSide()`, `I.plusSide()`, `I.otherSide(A)`, `I.domain()` | The side volumes, the side that is not `A`, and `InterfaceDomain(marker)` |
 | `I.trace(u, A)` | The trace of `u` from `A`: `u.minus()` or `u.plus()` |
-| `I.normalFrom(A)` | The unit normal pointing out of `A` toward `I.otherSide(A)`: fitted `normal().minus()` for the minus side and `-normal().minus()` for the plus side; generated `normal().plus()` (the level-set normal grad(phi)/\|grad(phi)\|) for the negative side and `-normal().plus()` for the positive side. `I.normalFrom(I.otherSide(A))` is exactly `-I.normalFrom(A)` |
+| `I.normalFrom(A)` | The unit normal pointing out of `A` toward `I.otherSide(A)`: `normal().minus()` for the minus side and `-normal().minus()` for the plus side, on a fitted interface and on a generated one (where `normal().minus()` is the level-set normal grad(phi)/\|grad(phi)\|, D70). `I.normalFrom(I.otherSide(A))` is exactly `-I.normalFrom(A)` |
 | `I.average(u, {A, wA}, {B, wB})` | `wA I.trace(u, A) + wB I.trace(u, B)` (`SideWeight`, a weight named by its side, `FormExpr` or `Real`); the two sides in either order give the same value, the same side twice is refused |
 
 ```cpp

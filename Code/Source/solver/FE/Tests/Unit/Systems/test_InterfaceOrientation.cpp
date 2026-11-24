@@ -4,9 +4,8 @@
  *
  * "From A toward B" is stated once and means the same on a fitted interface,
  * whichever subdomain the interface mesh puts on the minus side, and on a
- * generated interface, where the native normal of the minus side points into
- * that side.  Each case assembles a residual and sums it over the test
- * functions of each side.
+ * generated interface, whose minus side is the negative one.  Each case
+ * assembles a residual and sums it over the test functions of each side.
  *
  * Fitted: the unit square split at x = 1/2 into the subdomains 1 (left) and 2
  * (right), a discontinuous P1 field c = 2 on the left cells and 5 on the right
@@ -437,9 +436,9 @@ TEST(InterfaceOrientationGenerated, TheSidesAreTheCutVolumes)
     EXPECT_EQ(systems::formExprTreeHash(I.trace(c, I.minusSide())), systems::formExprTreeHash(c.minus()));
     EXPECT_EQ(systems::formExprTreeHash(I.trace(c, I.plusSide())), systems::formExprTreeHash(c.plus()));
     EXPECT_EQ(systems::formExprTreeHash(I.normalFrom(I.minusSide())),
-              systems::formExprTreeHash(FormExpr::normal().plus()));
+              systems::formExprTreeHash(FormExpr::normal().minus()));
     EXPECT_EQ(systems::formExprTreeHash(I.normalFrom(I.plusSide())),
-              systems::formExprTreeHash(-FormExpr::normal().plus()));
+              systems::formExprTreeHash(-FormExpr::normal().minus()));
     EXPECT_THROW((void)InterfaceBetween::generated(-1), std::invalid_argument);
     EXPECT_THROW((void)I.trace(c, VolumeDomain::cut(kGenerated + 1, forms::CutVolumeSide::Negative)),
                  std::invalid_argument);
@@ -458,8 +457,8 @@ TEST(InterfaceOrientationGenerated, NormalFromPointsOutOfTheNamedSide)
     EXPECT_NEAR(sums.left, 1.0, 1e-12);
     EXPECT_NEAR(sums.right, -1.0, 1e-12);
 
-    // The same with a jump term in the same kernel: normalFrom() is read on
-    // the two-sided path either way.
+    // The same with a jump term in the same kernel, which makes the
+    // evaluation two-sided: a term means the same either way (D70).
     const auto with_jump = generatedResidualSums([](const InterfaceBetween& I, const forms::SidePair& c,
                                                     const forms::SidePair& v) {
         const auto N = I.minusSide();
