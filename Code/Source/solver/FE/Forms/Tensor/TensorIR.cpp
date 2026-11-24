@@ -9,6 +9,7 @@
 
 #include "Core/Logger.h"
 #include "Forms/Einsum.h"
+#include "Forms/JIT/JITCacheKey.h"
 #include "Forms/JIT/KernelIR.h"
 
 #include <algorithm>
@@ -31,12 +32,10 @@ namespace tensor {
 namespace {
 
 constexpr std::uint64_t kFNVOffset = 14695981039346656037ULL;
-constexpr std::uint64_t kFNVPrime = 1099511628211ULL;
 
 inline void hashMix(std::uint64_t& h, std::uint64_t v) noexcept
 {
-    h ^= v;
-    h *= kFNVPrime;
+    forms::jit::mixCacheKey(h, v);
 }
 
 [[nodiscard]] std::uint64_t hashBool(bool v) noexcept { return v ? 1ULL : 0ULL; }

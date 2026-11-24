@@ -10,10 +10,30 @@ namespace FE {
 namespace forms {
 namespace jit {
 
+namespace {
+
+// The finalizer of splitmix64: a bijection of 64-bit words in which every bit
+// of the input reaches every bit of the output.
+[[nodiscard]] constexpr std::uint64_t avalanche64(std::uint64_t x) noexcept
+{
+    x ^= x >> 30;
+    x *= 0xbf58476d1ce4e5b9ULL;
+    x ^= x >> 27;
+    x *= 0x94d049bb133111ebULL;
+    x ^= x >> 31;
+    return x;
+}
+
+} // namespace
+
 void mixCacheKey(std::uint64_t& h, std::uint64_t v) noexcept
 {
-    h ^= v;
-    h *= kCacheKeyFNVPrime;
+    // Every bit of the word reaches every bit of the key, and the order of the
+    // words matters.  With h = (h ^ v) * p a difference in the high bits of a
+    // word never reached the low bits (multiplication carries upwards only):
+    // flipping the signs of two constants changed bit 63 twice and left the
+    // key unchanged.
+    h = avalanche64(h ^ avalanche64(v + 0x9e3779b97f4a7c15ULL));
 }
 
 [[nodiscard]] std::uint64_t hashStringForCacheKey(std::string_view s) noexcept

@@ -27,7 +27,8 @@ inline constexpr std::uint64_t kCacheKeyFNVOffset = 14695981039346656037ULL;
 inline constexpr std::uint64_t kCacheKeyFNVPrime = 1099511628211ULL;
 
 // Increment this when cache-key inputs or generated kernel semantics change.
-inline constexpr std::uint64_t kKernelCacheKeySchemaVersion = 10ULL;
+// 11: mixCacheKey diffuses every bit of a word (every key changed).
+inline constexpr std::uint64_t kKernelCacheKeySchemaVersion = 11ULL;
 
 struct KernelCacheKeyInputs {
     std::uint64_t cache_key_schema_version{kKernelCacheKeySchemaVersion};
@@ -55,6 +56,10 @@ struct KernelCacheKeyInputs {
     const JITCompileSpecialization* specialization{nullptr};
 };
 
+/// Mixes one 64-bit word into the running key @p h (start from
+/// kCacheKeyFNVOffset).  Every bit of the word reaches every bit of the key,
+/// and the order of the words matters, so the keys of two different word
+/// sequences agree only by chance (about 2^-64).
 void mixCacheKey(std::uint64_t& h, std::uint64_t v) noexcept;
 
 [[nodiscard]] std::uint64_t hashStringForCacheKey(std::string_view s) noexcept;

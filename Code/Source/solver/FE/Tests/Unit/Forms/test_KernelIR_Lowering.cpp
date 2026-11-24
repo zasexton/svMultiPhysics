@@ -8,14 +8,16 @@
 #include <gtest/gtest.h>
 
 #include "Forms/FormExpr.h"
-#include "Forms/JIT/KernelIR.h"
 #include "Forms/JIT/HardwareProfile.h"
+#include "Forms/JIT/JITCacheKey.h"
+#include "Forms/JIT/KernelIR.h"
 #include "Spaces/H1Space.h"
 #include "Spaces/L2Space.h"
 
 #include <bit>
 #include <cmath>
 #include <cstdint>
+#include <initializer_list>
 #include <limits>
 #include <stdexcept>
 #include <vector>
@@ -1619,6 +1621,84 @@ TEST(KernelIRLowering, SameSubtreeTellsSignFlippedConstantsApart)
     EXPECT_TRUE(jit::sameSubtree(a, a.root, b, b.root));
     EXPECT_TRUE(jit::sameSubtree(a, a.root, swapped, swapped.root));
     EXPECT_FALSE(jit::sameSubtree(a, a.root, flipped, flipped.root));
+}
+
+// The key combine carries every bit of a word to every bit of the key.  The
+// combine h = (h ^ v) * p kept a difference in bit 63 of a word in bit 63, so
+// two sign flips cancelled: -c inner((1, 1/2), grad v) and
+// -c inner((-1, -1/2), grad v) had one structural hash and one JIT key.
+TEST(KernelIRLowering, SignFlippedConstantsHaveTheirOwnHashes)
+{
+    spaces::L2Space space(ElementType::Quad4, 1);
+    const auto c = FormExpr::trialFunction(space, "c");
+    const auto v = FormExpr::testFunction(space, "v");
+    const auto lowered = [&](Real bx, Real by) {
+        const auto beta = FormExpr::asVector({FormExpr::constant(bx), FormExpr::constant(by)});
+        auto ir = jit::lowerToKernelIR(-c * inner(beta, grad(v))).ir;
+        ir.optimize();
+        return ir;
+    };
+    const auto plus = lowered(1.0, 0.5);
+    const auto minus = lowered(-1.0, -0.5);
+    EXPECT_NE(plus.stableHash64(), minus.stableHash64());
+    EXPECT_NE(plus.perOpStructuralHashes()[plus.root], minus.perOpStructuralHashes()[minus.root]);
+    EXPECT_NE(plus.stableHash64(), lowered(-1.0, 0.5).stableHash64());
+
+    // Two words that differ only in their sign bits, and two words in the
+    // other order, give other keys.
+    const auto key = [](std::initializer_list<std::uint64_t> words) {
+        std::uint64_t h = jit::kCacheKeyFNVOffset;
+        for (const auto w : words) {
+            jit::mixCacheKey(h, w);
+        }
+        return h;
+    };
+    const std::uint64_t sign = std::uint64_t{1} << 63u;
+    const std::uint64_t a = std::bit_cast<std::uint64_t>(Real(1.0));
+    const std::uint64_t b = std::bit_cast<std::uint64_t>(Real(0.5));
+    EXPECT_NE(key({a, b}), key({a ^ sign, b ^ sign}));
+    EXPECT_NE(key({a, b}), key({b, a}));
+}
+
+// A scan over a family of lowered forms: the structural hashes of two IRs
+// agree exactly when the IRs are the same expression.  The family takes every
+// sign pattern of three constants in five templates, at two magnitudes, the
+// patterns under which the old combine confused even numbers of sign flips.
+TEST(KernelIRLowering, StructuralHashesAgreeOnlyForTheSameExpression)
+{
+    spaces::H1Space space(ElementType::Quad4, 1);
+    const auto u = FormExpr::trialFunction(space, "u");
+    const auto v = FormExpr::testFunction(space, "v");
+    std::vector<jit::KernelIR> irs;
+    for (const Real magnitude : {1.0, 0.25}) {
+        for (int pattern = 0; pattern < 8; ++pattern) {
+            const auto k = [&](int bit, Real value) {
+                return FormExpr::constant(((pattern >> bit) & 1) != 0 ? -magnitude * value : magnitude * value);
+            };
+            const auto beta = FormExpr::asVector({k(0, 1.0), k(1, 0.5)});
+            const std::vector<FormExpr> forms{
+                inner(beta, grad(u)) * v * k(2, 2.0),
+                -u * inner(beta, grad(v)) + k(2, 2.0) * u * v,
+                exp(inner(beta, grad(u))) * v + k(2, 2.0) * v,
+                inner(beta, grad(u)) * inner(beta, grad(v)) * k(2, 2.0),
+                (k(0, 1.0) * u + k(1, 0.5)) * (k(2, 2.0) * v),
+            };
+            for (const auto& form : forms) {
+                auto ir = jit::lowerToKernelIR(form).ir;
+                ir.optimize();
+                irs.push_back(std::move(ir));
+            }
+        }
+    }
+    std::size_t distinct_pairs = 0;
+    for (std::size_t i = 0; i < irs.size(); ++i) {
+        for (std::size_t j = i + 1; j < irs.size(); ++j) {
+            const bool same = jit::sameSubtree(irs[i], irs[i].root, irs[j], irs[j].root);
+            EXPECT_EQ(irs[i].stableHash64() == irs[j].stableHash64(), same) << "forms " << i << " and " << j;
+            distinct_pairs += same ? 0u : 1u;
+        }
+    }
+    EXPECT_GT(distinct_pairs, irs.size() * (irs.size() - 1) / 4);
 }
 
 } // namespace test

@@ -8432,6 +8432,20 @@ TEST(CrossTermReuse, ASignFlippedPairOfTermsIsCompiledAsWritten)
     expectSameExponentialRows(twoExponentialRows(true, b, minus_b), twoExponentialRows(false, b, minus_b));
 }
 
+TEST(CrossTermReuse, KernelsOfASignFlippedPairHaveTheirOwnKeys)
+{
+    // exp(b . grad u) v + exp(-b . grad u) v and exp(b . grad u) v twice had
+    // one JIT key, so in one process the second was served the kernel of the
+    // first.
+    if (!svmp::FE::forms::jit::llvmJITEnabled()) {
+        GTEST_SKIP();
+    }
+    const std::array<Real, 2> b{0.31, 0.83};
+    const std::array<Real, 2> minus_b{-0.31, -0.83};
+    expectSameExponentialRows(twoExponentialRows(true, b, minus_b), twoExponentialRows(false, b, minus_b));
+    expectSameExponentialRows(twoExponentialRows(true, b, b), twoExponentialRows(false, b, b));
+}
+
 TEST(CrossTermReuse, AValueIsReusedOnlyForTheSameSubtree)
 {
     // Every op is given one structural hash, so every hoisted value of a shape

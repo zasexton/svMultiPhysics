@@ -6,6 +6,7 @@
  */
 
 #include "Forms/JIT/KernelIR.h"
+#include "Forms/JIT/JITCacheKey.h"
 
 #include "Core/FEException.h"
 #include "Forms/IndexExtent.h"
@@ -34,6 +35,9 @@ namespace {
 constexpr std::uint64_t kFNVOffset = 14695981039346656037ULL;
 constexpr std::uint64_t kFNVPrime = 1099511628211ULL;
 
+// The bucket hash of the lowering and CSE tables, whose candidates are then
+// compared op by op.  The structural hashes that identify an IR (the JIT key
+// and the cross-block CSE of the code generator) use mixCacheKey.
 inline void hashMix(std::uint64_t& h, std::uint64_t v) noexcept
 {
     h ^= v;
@@ -587,11 +591,11 @@ std::uint64_t KernelIR::stableHash64() const
         const auto& op = ops[i];
 
         std::uint64_t h = kFNVOffset;
-        hashMix(h, 0x4b49525f5631ULL); // "KIR_V1" tag
-        hashMix(h, static_cast<std::uint64_t>(op.type));
-        hashMix(h, op.imm0);
-        hashMix(h, op.imm1);
-        hashMix(h, static_cast<std::uint64_t>(op.child_count));
+        mixCacheKey(h, 0x4b49525f5631ULL); // "KIR_V1" tag
+        mixCacheKey(h, static_cast<std::uint64_t>(op.type));
+        mixCacheKey(h, op.imm0);
+        mixCacheKey(h, op.imm1);
+        mixCacheKey(h, static_cast<std::uint64_t>(op.child_count));
 
         if (op.child_count == 2u && isCommutative(op.type)) {
             const auto a_idx = children[static_cast<std::size_t>(op.first_child) + 0];
@@ -603,15 +607,15 @@ std::uint64_t KernelIR::stableHash64() const
             const auto hb = op_hash[b_idx];
             const auto lo = std::min(ha, hb);
             const auto hi = std::max(ha, hb);
-            hashMix(h, lo);
-            hashMix(h, hi);
+            mixCacheKey(h, lo);
+            mixCacheKey(h, hi);
         } else {
             for (std::size_t c = 0; c < op.child_count; ++c) {
                 const auto child_idx = children[static_cast<std::size_t>(op.first_child) + c];
                 if (child_idx >= i) {
                     throw std::logic_error("KernelIR::stableHash64: non-topological child index");
                 }
-                hashMix(h, op_hash[child_idx]);
+                mixCacheKey(h, op_hash[child_idx]);
             }
         }
 
@@ -663,23 +667,23 @@ std::vector<std::uint64_t> KernelIR::perOpStructuralHashes() const
     for (std::size_t i = 0; i < ops.size(); ++i) {
         const auto& op = ops[i];
         std::uint64_t h = kFNVOffset;
-        hashMix(h, 0x4b49525f5631ULL);
-        hashMix(h, static_cast<std::uint64_t>(op.type));
-        hashMix(h, op.imm0);
-        hashMix(h, op.imm1);
-        hashMix(h, static_cast<std::uint64_t>(op.child_count));
+        mixCacheKey(h, 0x4b49525f5631ULL);
+        mixCacheKey(h, static_cast<std::uint64_t>(op.type));
+        mixCacheKey(h, op.imm0);
+        mixCacheKey(h, op.imm1);
+        mixCacheKey(h, static_cast<std::uint64_t>(op.child_count));
 
         if (op.child_count == 2u && isCommutative(op.type)) {
             const auto a_idx = children[static_cast<std::size_t>(op.first_child) + 0];
             const auto b_idx = children[static_cast<std::size_t>(op.first_child) + 1];
             const auto ha = op_hash[a_idx];
             const auto hb = op_hash[b_idx];
-            hashMix(h, std::min(ha, hb));
-            hashMix(h, std::max(ha, hb));
+            mixCacheKey(h, std::min(ha, hb));
+            mixCacheKey(h, std::max(ha, hb));
         } else {
             for (std::size_t c = 0; c < op.child_count; ++c) {
                 const auto child_idx = children[static_cast<std::size_t>(op.first_child) + c];
-                hashMix(h, op_hash[child_idx]);
+                mixCacheKey(h, op_hash[child_idx]);
             }
         }
         op_hash[i] = h;
