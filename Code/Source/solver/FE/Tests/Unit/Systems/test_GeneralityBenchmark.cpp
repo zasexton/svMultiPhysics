@@ -293,5 +293,236 @@ TEST(GeneralityBenchmark, P01_NaturalBCAndZeroRobinAreTheWrittenFluxTerm)
     }
 }
 
+// ===========================================================================
+// 4. Taylor-Hood Stokes through bound fields
+// ===========================================================================
+//
+// -div(2 nu eps(u)) + grad p = f, div u = 0 in the unit square or cube, u = 0
+// on the boundary, p of mean zero through a global multiplier.  With
+// S(t) = sin^2(pi t) and phi = S(x) S(y) [S(z)] the velocity
+// u = (d phi/dy, -d phi/dx, 0) is divergence free and vanishes on the
+// boundary; p = cos(pi x) cos(pi y) [cos(pi z)] has mean zero.
+
+constexpr Real kPi = 3.14159265358979323846;
+
+struct StreamFactors {
+    Real s0, s1, s2, s3;  ///< S and its first three derivatives
+};
+
+StreamFactors streamFactors(Real t)
+{
+    return {std::sin(kPi * t) * std::sin(kPi * t), kPi * std::sin(2.0 * kPi * t),
+            2.0 * kPi * kPi * std::cos(2.0 * kPi * t), -4.0 * kPi * kPi * kPi * std::sin(2.0 * kPi * t)};
+}
+
+/// The exact velocity (component i), its gradient (i, j) and Laplacian (i).
+struct StokesExact {
+    int dim;
+
+    [[nodiscard]] StreamFactors zf(Real z) const
+    {
+        return dim == 3 ? streamFactors(z) : StreamFactors{1.0, 0.0, 0.0, 0.0};
+    }
+
+    [[nodiscard]] Real velocity(const Point& p, int i) const
+    {
+        const auto X = streamFactors(p[0]), Y = streamFactors(p[1]), Z = zf(p[2]);
+        if (i == 0) {
+            return X.s0 * Y.s1 * Z.s0;
+        }
+        if (i == 1) {
+            return -X.s1 * Y.s0 * Z.s0;
+        }
+        return 0.0;
+    }
+
+    [[nodiscard]] Real gradient(const Point& p, int i, int j) const
+    {
+        const auto X = streamFactors(p[0]), Y = streamFactors(p[1]), Z = zf(p[2]);
+        const std::array<std::array<Real, 3>, 2> g{{{X.s1 * Y.s1 * Z.s0, X.s0 * Y.s2 * Z.s0, X.s0 * Y.s1 * Z.s1},
+                                                     {-X.s2 * Y.s0 * Z.s0, -X.s1 * Y.s1 * Z.s0, -X.s1 * Y.s0 * Z.s1}}};
+        return i < 2 ? g[static_cast<std::size_t>(i)][static_cast<std::size_t>(j)] : 0.0;
+    }
+
+    [[nodiscard]] Real laplacian(const Point& p, int i) const
+    {
+        const auto X = streamFactors(p[0]), Y = streamFactors(p[1]), Z = zf(p[2]);
+        if (i == 0) {
+            return X.s2 * Y.s1 * Z.s0 + X.s0 * Y.s3 * Z.s0 + X.s0 * Y.s1 * Z.s2;
+        }
+        if (i == 1) {
+            return -(X.s3 * Y.s0 * Z.s0 + X.s1 * Y.s2 * Z.s0 + X.s1 * Y.s0 * Z.s2);
+        }
+        return 0.0;
+    }
+
+    [[nodiscard]] Real pressure(const Point& p) const
+    {
+        return std::cos(kPi * p[0]) * std::cos(kPi * p[1]) * (dim == 3 ? std::cos(kPi * p[2]) : 1.0);
+    }
+
+    [[nodiscard]] Real pressureGradient(const Point& p, int i) const
+    {
+        std::array<Real, 3> c{std::cos(kPi * p[0]), std::cos(kPi * p[1]), dim == 3 ? std::cos(kPi * p[2]) : 1.0};
+        c[static_cast<std::size_t>(i)] = -kPi * std::sin(kPi * p[static_cast<std::size_t>(i)]);
+        return c[0] * c[1] * c[2];
+    }
+};
+
+// ---------------------------------------------------------------------------
+// The formulation: everything an author writes for problem 4.
+// ---------------------------------------------------------------------------
+struct StokesInstall {
+    FieldId u{INVALID_FIELD_ID};
+    FieldId p{INVALID_FIELD_ID};
+    FieldId lambda{INVALID_FIELD_ID};
+};
+
+StokesInstall defineStokes(FESystem& system,
+                           std::shared_ptr<const spaces::FunctionSpace> velocity_space,
+                           std::shared_ptr<const spaces::FunctionSpace> pressure_space,
+                           Real viscosity,
+                           const FormExpr& body_force,
+                           const std::vector<int>& walls)
+{
+    using namespace forms;
+    FieldBinding fields(system, "Stokes");
+    const auto U = fields.unknown("u", std::move(velocity_space));
+    const auto P = fields.unknown("p", std::move(pressure_space));
+    const auto lambda_id = fields.global("lambda", "pressure mean multiplier");
+    const auto& R1 = *system.fieldRecord(lambda_id).space;
+    const BoundUnknown Lambda{lambda_id, StateField(lambda_id, R1, "lambda"), TestField(lambda_id, R1, "m")};
+    const auto& u = U.state;
+    const auto& v = U.test;
+    const auto& p = P.state;
+    const auto& q = P.test;
+    const auto nu = FormExpr::constant(viscosity);
+
+    auto R = (2.0 * nu * inner(symgrad(u), symgrad(v)) - p * div(v) + q * div(u) - inner(body_force, v)).dx() +
+             (Lambda.state * q + Lambda.test * p).dx();  // the mean of p is zero
+    const int dim = system.fieldRecord(U.id).components;
+    BoundaryConditionManager bcs;
+    for (const int wall : walls) {
+        bcs.add(std::make_unique<bc::Dirichlet>(wall, std::vector<FormExpr>(static_cast<std::size_t>(dim),
+                                                                            FormExpr::constant(0.0))));
+    }
+    constraints::ConstraintPlan plan(system);
+    plan.essentials(bcs, R, u, v, U.id);
+    plan.commit();
+    FormulationBuilder F(system, "equations", {});
+    F.symbolicTangent();
+    (void)F.residual(R);
+    return {U.id, P.id, lambda_id};
+}
+// ---------------------------------------------------------------------------
+
+struct StokesRun {
+    Real velocity_l2{0.0};
+    Real velocity_h1{0.0};
+    Real pressure_l2{0.0};
+    Real pressure_mean{0.0};
+    Real multiplier{0.0};
+    Real transpose_defect{-1.0};  ///< max |B_qu + B_vp^T| over free velocity DOFs (n small)
+    Real coupling_scale{0.0};
+};
+
+StokesRun runStokes(Cell cell, int n, bool check_blocks = false)
+{
+    const int dim = cellDimension(cell);
+    const StokesExact exact{dim};
+    const Real nu = 0.5;
+    FESystem system(boxMesh(cell, n, boxSides()));
+    const auto body_force = vectorOf("f", dim, [exact, nu](const Point& p, int i) {
+        return -nu * exact.laplacian(p, i) + exact.pressureGradient(p, i);
+    });
+    auto p2 = std::make_shared<spaces::H1Space>(elementType(cell), 2);
+    auto velocity_space = std::make_shared<spaces::ProductSpace>(p2, dim);
+    auto pressure_space = std::make_shared<spaces::H1Space>(elementType(cell), 1);
+    std::vector<int> walls;
+    for (int face = 1; face <= 2 * dim; ++face) {
+        walls.push_back(face);
+    }
+    const auto install = defineStokes(system, velocity_space, pressure_space, nu, body_force, walls);
+    system.setup();
+    const auto solved = solveSteady(system, "equations");
+    EXPECT_TRUE(solved.converged) << cellName(cell) << " n=" << n;
+
+    const auto u_h = FormExpr::discreteField(install.u, *velocity_space, "u");
+    const auto p_h = FormExpr::discreteField(install.p, *pressure_space, "p");
+    const auto eu = u_h - vectorOf("u_exact", dim, [exact](const Point& p, int i) { return exact.velocity(p, i); });
+    std::vector<std::vector<FormExpr>> rows(static_cast<std::size_t>(dim));
+    for (int i = 0; i < dim; ++i) {
+        for (int j = 0; j < dim; ++j) {
+            rows[static_cast<std::size_t>(i)].push_back(scalarCoefficient(
+                "grad_u_" + std::to_string(i) + std::to_string(j),
+                [exact, i, j](const Point& p) { return exact.gradient(p, i, j); }));
+        }
+    }
+    const auto egu = forms::grad(u_h) - FormExpr::asTensor(std::move(rows));
+    const auto ep = p_h - scalarCoefficient("p_exact", [exact](const Point& p) { return exact.pressure(p); });
+    StokesRun run;
+    run.velocity_l2 = norm(system, forms::inner(eu, eu).dx(), solved.u);
+    run.velocity_h1 = norm(system, forms::inner(egu, egu).dx(), solved.u);
+    run.pressure_l2 = norm(system, (ep * ep).dx(), solved.u);
+    run.pressure_mean = integrate(system, p_h.dx(), solved.u);
+    run.multiplier = solved.u[static_cast<std::size_t>(system.fieldDofOffset(install.lambda))];
+    if (check_blocks) {
+        // -p div(v) in the momentum rows and +q div(u) in the continuity rows:
+        // the coupling blocks are opposite transposes.
+        const auto J = assembleDense(system, "equations", solved.u);
+        const auto u0 = system.fieldDofOffset(install.u);
+        const auto nu_dofs = system.fieldDofHandler(install.u).getNumDofs();
+        const auto p0 = system.fieldDofOffset(install.p);
+        const auto np_dofs = system.fieldDofHandler(install.p).getNumDofs();
+        run.transpose_defect = 0.0;
+        for (GlobalIndex a = u0; a < u0 + nu_dofs; ++a) {
+            if (system.constraints().isConstrained(a)) {
+                continue;
+            }
+            for (GlobalIndex b = p0; b < p0 + np_dofs; ++b) {
+                run.transpose_defect = std::max(run.transpose_defect, std::abs(J(b, a) + J(a, b)));
+                run.coupling_scale = std::max(run.coupling_scale, std::abs(J(a, b)));
+            }
+        }
+    }
+    return run;
+}
+
+TEST(GeneralityBenchmark, P04_TaylorHoodStokesThroughBoundFieldsConverges)
+{
+    // Three meshes in 2D; two in 3D (n = 2, 4), where the velocity H1 rate is
+    // still pre-asymptotic.
+    const std::vector<std::pair<Cell, int>> cases{{Cell::Tri3, 4}, {Cell::Quad4, 4}, {Cell::Tet4, 2}, {Cell::Hex8, 2}};
+    for (const auto& [cell, n0] : cases) {
+        const auto started = std::chrono::steady_clock::now();
+        const int levels = cellDimension(cell) == 2 ? 3 : 2;
+        std::vector<Real> ul2, uh1, pl2;
+        for (int level = 0; level < levels; ++level) {
+            const auto run = runStokes(cell, n0 << level, level == 0);
+            ul2.push_back(run.velocity_l2);
+            uh1.push_back(run.velocity_h1);
+            pl2.push_back(run.pressure_l2);
+            // The gauge: the pressure has mean zero and the multiplier
+            // vanishes (the divergence of a velocity zero on the boundary
+            // integrates to zero).
+            EXPECT_LT(std::abs(run.pressure_mean), 1e-10) << cellName(cell);
+            EXPECT_LT(std::abs(run.multiplier), 1e-9) << cellName(cell);
+            if (level == 0) {
+                EXPECT_GT(run.coupling_scale, 0.0) << cellName(cell);
+                EXPECT_LT(run.transpose_defect, 1e-13 * run.coupling_scale) << cellName(cell);
+            }
+        }
+        const std::string label = cellName(cell);
+        RecordProperty("p04_" + label + "_seconds",
+                       std::to_string(std::chrono::duration<double>(std::chrono::steady_clock::now() - started).count()));
+        RecordProperty("p04_" + label + "_velocity_l2_rates", join(rates(ul2)));
+        RecordProperty("p04_" + label + "_velocity_h1_rates", join(rates(uh1)));
+        RecordProperty("p04_" + label + "_pressure_l2_rates", join(rates(pl2)));
+        EXPECT_GT(rates(ul2).back(), 2.6) << label << " velocity L2 " << join(ul2);
+        EXPECT_GT(rates(uh1).back(), cellDimension(cell) == 2 ? 1.8 : 1.5) << label << " velocity H1 " << join(uh1);
+        EXPECT_GT(rates(pl2).back(), 1.7) << label << " pressure L2 " << join(pl2);
+    }
+}
+
 } // namespace
 } // namespace svmp::FE::systems::generality
