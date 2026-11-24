@@ -124,6 +124,67 @@ bool synchronizeTransientLineSearchTrials(
 }
 
 // ---------------------------------------------------------------------------
+// Selection of the generated-state schedule
+// ---------------------------------------------------------------------------
+
+// Moved from Application/Core/ApplicationDriver.cpp (runSteady and
+// runTransient) with the predicates unchanged.
+
+bool perStepOnlyGeneratedState()
+{
+  return parseBoolEnv("SVMP_CUT_REFRESH_PER_STEP_ONLY", false);
+}
+
+GeneratedStateSelection legacyGeneratedStateSelection(
+    const GeneratedStateRequests& requests,
+    GeneratedStateSolve solve,
+    bool per_step_only)
+{
+  GeneratedStateSelection selection;
+  selection.policy.solve = solve;
+  selection.generated_state =
+      requests.cut_geometry || requests.maintenance || requests.extension;
+  if (solve == GeneratedStateSolve::Steady) {
+    // Generated geometry uses an outer Picard loop so each inner Newton
+    // residual and Jacobian share exactly one frozen G.
+    const bool use_steady_external_state_fixed_point = selection.generated_state;
+    selection.policy.outer_fixed_point = use_steady_external_state_fixed_point;
+    selection.accepted_state_sync_invalidates_residual =
+        selection.generated_state && !use_steady_external_state_fixed_point;
+    selection.jacobian_check_refreshes_geometry_within_solve =
+        !use_steady_external_state_fixed_point;
+    selection.jacobian_check_frozen_algebraic_extension = false;
+    return selection;
+  }
+  // Generated cut rules, active-set constraints, and the wet-extension map
+  // form one residual-defining package G(u).  The assembled tangent
+  // differentiates R(u,G) at fixed G; it does not contain every shape,
+  // projection, or active-set derivative.  Solve the consistent nested
+  // problem with outer regeneration and inner frozen-geometry Newton solves.
+  const bool use_transient_external_state_fixed_point =
+      selection.generated_state && !per_step_only;
+  const bool refresh_generated_geometry_within_solve =
+      selection.generated_state && !use_transient_external_state_fixed_point &&
+      !requests.monolithic_extension;
+  // When generated data is refreshed at accepted iterates, reassemble the
+  // residual after that refresh before deciding that Newton has converged.
+  selection.accepted_state_sync_invalidates_residual =
+      refresh_generated_geometry_within_solve && selection.generated_state;
+  selection.policy.outer_fixed_point = use_transient_external_state_fixed_point;
+  selection.policy.refresh_within_solve = refresh_generated_geometry_within_solve;
+  selection.policy.synchronize_line_search_trials =
+      synchronizeTransientLineSearchTrials(
+          selection.accepted_state_sync_invalidates_residual);
+  selection.policy.per_step_only = per_step_only;
+  selection.track_cut_topology = requests.cut_geometry;
+  selection.jacobian_check_refreshes_geometry_within_solve =
+      refresh_generated_geometry_within_solve;
+  selection.jacobian_check_frozen_algebraic_extension =
+      requests.monolithic_extension;
+  return selection;
+}
+
+// ---------------------------------------------------------------------------
 // Generated-state registry
 // ---------------------------------------------------------------------------
 

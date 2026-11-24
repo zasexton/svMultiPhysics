@@ -14,8 +14,9 @@
  *        residual depends on (cut geometry, projected fields, extensions,
  *        lagged references), and the policy predicates of those points.
  *
- * The predicates were moved from Application/Core/ApplicationDriver.cpp with
- * bodies and environment names unchanged.
+ * The predicates and the selection of the schedule were moved from
+ * Application/Core/ApplicationDriver.cpp with bodies and environment names
+ * unchanged.
  *
  * GeneratedStateRegistry composes the owners of generated state
  * (participants) into NewtonSolver's synchronization hook.  At a
@@ -112,6 +113,58 @@ struct GeneratedStatePolicy {
     /// Transient without the outer fixed point: refresh once per step only.
     bool per_step_only{false};
 };
+
+// ---------------------------------------------------------------------------
+// Selection of the generated-state schedule
+// ---------------------------------------------------------------------------
+
+/// The generated-state requests of a solve, as its owner finds them.
+struct GeneratedStateRequests {
+    bool cut_geometry{false};  ///< generated cut geometry (active cut volumes)
+    bool maintenance{false};   ///< accepted-step level-set maintenance
+    bool extension{false};     ///< extended level-set advection velocities
+    /// Some extension target is an unknown of the Newton block whose rows a
+    /// registered constraint kernel generates (the monolithic extension).
+    bool monolithic_extension{false};
+};
+
+/// The generated-state schedule of a solve and the Newton settings that
+/// follow from it.
+struct GeneratedStateSelection {
+    GeneratedStatePolicy policy{};
+    /// Some generated state is requested.
+    bool generated_state{false};
+    /// NewtonOptions::accepted_state_sync_invalidates_residual.
+    bool accepted_state_sync_invalidates_residual{false};
+    /// The cut geometry tracks its topology; with a transient outer fixed
+    /// point it then provides the epochs.
+    bool track_cut_topology{false};
+    /// Jacobian-check geometry provenance: the synchronization regenerates
+    /// geometry within the solve.
+    bool jacobian_check_refreshes_geometry_within_solve{false};
+    /// Jacobian-check geometry provenance: a frozen algebraic extension.
+    bool jacobian_check_frozen_algebraic_extension{false};
+};
+
+/// Whether generated state is refreshed once per step only (default false;
+/// override: SVMP_CUT_REFRESH_PER_STEP_ONLY).  It switches the transient
+/// outer fixed point off and changes Newton's fixed point.
+[[nodiscard]] bool perStepOnlyGeneratedState();
+
+/**
+ * @brief The schedule the Application's steady and transient solves select
+ *        today, from the existence of each kind of request.
+ *
+ * Steady: the outer fixed point runs iff any request exists.  Transient: the
+ * same unless @p per_step_only; without the outer fixed point the state is
+ * refreshed within the solve unless the extension is monolithic, and
+ * line-search trials synchronize as synchronizeTransientLineSearchTrials
+ * decides.  @p per_step_only is ignored by a steady solve.
+ */
+[[nodiscard]] GeneratedStateSelection legacyGeneratedStateSelection(
+    const GeneratedStateRequests& requests,
+    GeneratedStateSolve solve,
+    bool per_step_only);
 
 /// One synchronization: the point and what the Geometry role produced.
 struct GeneratedStateSync {

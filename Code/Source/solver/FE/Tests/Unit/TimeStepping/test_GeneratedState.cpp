@@ -132,6 +132,122 @@ TEST(GeneratedStateSyncPoints, LineSearchTrialSynchronizationFollowsTheResidual)
   EXPECT_FALSE(ts::synchronizeTransientLineSearchTrials(false));
 }
 
+TEST(GeneratedStateSelection, PerStepOnlyIsOffUnlessTheEnvironmentSetsIt)
+{
+  {
+    ScopedEnvironment unset("SVMP_CUT_REFRESH_PER_STEP_ONLY", nullptr);
+    EXPECT_FALSE(ts::perStepOnlyGeneratedState());
+  }
+  {
+    ScopedEnvironment on("SVMP_CUT_REFRESH_PER_STEP_ONLY", "1");
+    EXPECT_TRUE(ts::perStepOnlyGeneratedState());
+  }
+  ScopedEnvironment unknown("SVMP_CUT_REFRESH_PER_STEP_ONLY", "maybe");
+  EXPECT_FALSE(ts::perStepOnlyGeneratedState());
+}
+
+namespace {
+
+// The selection lines of the Application's steady and transient solves
+// before they moved to FE, transcribed with their variable names.
+ts::GeneratedStateSelection transcribedSelection(const ts::GeneratedStateRequests& r,
+                                                 ts::GeneratedStateSolve solve,
+                                                 bool per_step_only_generated_state)
+{
+  ts::GeneratedStateSelection s;
+  if (solve == ts::GeneratedStateSolve::Steady) {
+    const bool steady_has_generated_state = r.cut_geometry || r.maintenance || r.extension;
+    const bool use_steady_external_state_fixed_point = steady_has_generated_state;
+    s.generated_state = steady_has_generated_state;
+    s.accepted_state_sync_invalidates_residual =
+        steady_has_generated_state && !use_steady_external_state_fixed_point;
+    s.jacobian_check_refreshes_geometry_within_solve = !use_steady_external_state_fixed_point;
+    s.jacobian_check_frozen_algebraic_extension = false;
+    s.policy = ts::GeneratedStatePolicy{.solve = ts::GeneratedStateSolve::Steady,
+                                        .outer_fixed_point = use_steady_external_state_fixed_point};
+    s.track_cut_topology = false;
+    return s;
+  }
+  const bool has_frozen_algebraic_level_set_extension = r.monolithic_extension;
+  const bool has_transient_generated_state = r.cut_geometry || r.maintenance || r.extension;
+  const bool use_transient_external_state_fixed_point =
+      has_transient_generated_state && !per_step_only_generated_state;
+  const bool refresh_generated_geometry_within_solve =
+      has_transient_generated_state && !use_transient_external_state_fixed_point &&
+      !has_frozen_algebraic_level_set_extension;
+  const bool accepted_state_sync_invalidates_residual =
+      refresh_generated_geometry_within_solve && has_transient_generated_state;
+  const bool synchronize_line_search_trials =
+      ts::synchronizeTransientLineSearchTrials(accepted_state_sync_invalidates_residual);
+  s.generated_state = has_transient_generated_state;
+  s.accepted_state_sync_invalidates_residual = accepted_state_sync_invalidates_residual;
+  s.policy = ts::GeneratedStatePolicy{.solve = ts::GeneratedStateSolve::Transient,
+                                      .outer_fixed_point = use_transient_external_state_fixed_point,
+                                      .refresh_within_solve = refresh_generated_geometry_within_solve,
+                                      .synchronize_line_search_trials = synchronize_line_search_trials,
+                                      .per_step_only = per_step_only_generated_state};
+  s.track_cut_topology = r.cut_geometry;
+  s.jacobian_check_refreshes_geometry_within_solve = refresh_generated_geometry_within_solve;
+  s.jacobian_check_frozen_algebraic_extension = has_frozen_algebraic_level_set_extension;
+  return s;
+}
+
+void expectSameSelection(const ts::GeneratedStateSelection& a,
+                         const ts::GeneratedStateSelection& b,
+                         const std::string& where)
+{
+  EXPECT_EQ(a.policy.solve, b.policy.solve) << where;
+  EXPECT_EQ(a.policy.outer_fixed_point, b.policy.outer_fixed_point) << where;
+  EXPECT_EQ(a.policy.refresh_within_solve, b.policy.refresh_within_solve) << where;
+  EXPECT_EQ(a.policy.synchronize_line_search_trials, b.policy.synchronize_line_search_trials) << where;
+  EXPECT_EQ(a.policy.per_step_only, b.policy.per_step_only) << where;
+  EXPECT_EQ(a.generated_state, b.generated_state) << where;
+  EXPECT_EQ(a.accepted_state_sync_invalidates_residual, b.accepted_state_sync_invalidates_residual)
+      << where;
+  EXPECT_EQ(a.track_cut_topology, b.track_cut_topology) << where;
+  EXPECT_EQ(a.jacobian_check_refreshes_geometry_within_solve,
+            b.jacobian_check_refreshes_geometry_within_solve)
+      << where;
+  EXPECT_EQ(a.jacobian_check_frozen_algebraic_extension,
+            b.jacobian_check_frozen_algebraic_extension)
+      << where;
+}
+
+} // namespace
+
+TEST(GeneratedStateSelection, MatchesTheApplicationSelectionForEveryRequestCombination)
+{
+  for (const char* trials : {static_cast<const char*>(nullptr), "0", "1"}) {
+    ScopedEnvironment environment("SVMP_SYNC_LINE_SEARCH_TRIALS", trials);
+    for (const auto solve : {ts::GeneratedStateSolve::Steady, ts::GeneratedStateSolve::Transient}) {
+      for (int mask = 0; mask < 32; ++mask) {
+        const ts::GeneratedStateRequests requests{.cut_geometry = (mask & 1) != 0,
+                                                  .maintenance = (mask & 2) != 0,
+                                                  .extension = (mask & 4) != 0,
+                                                  .monolithic_extension = (mask & 8) != 0};
+        const bool per_step_only = (mask & 16) != 0;
+        const std::string where = std::string("trials=") + (trials ? trials : "unset") +
+                                  " solve=" + std::to_string(static_cast<int>(solve)) +
+                                  " mask=" + std::to_string(mask);
+        expectSameSelection(ts::legacyGeneratedStateSelection(requests, solve, per_step_only),
+                            transcribedSelection(requests, solve, per_step_only), where);
+      }
+    }
+  }
+  // Cases no reference deck reaches: a monolithic extension refreshed once
+  // per step, and a steady solve, which ignores per-step-only.
+  const auto lone_monolithic = ts::legacyGeneratedStateSelection(
+      {.extension = true, .monolithic_extension = true}, ts::GeneratedStateSolve::Transient,
+      /*per_step_only=*/true);
+  EXPECT_FALSE(lone_monolithic.policy.outer_fixed_point);
+  EXPECT_FALSE(lone_monolithic.policy.refresh_within_solve);
+  EXPECT_TRUE(lone_monolithic.jacobian_check_frozen_algebraic_extension);
+  const auto steady = ts::legacyGeneratedStateSelection(
+      {.maintenance = true}, ts::GeneratedStateSolve::Steady, /*per_step_only=*/true);
+  EXPECT_TRUE(steady.policy.outer_fixed_point);
+  EXPECT_FALSE(steady.policy.per_step_only);
+}
+
 // ---------------------------------------------------------------------------
 // Generated-state registry
 // ---------------------------------------------------------------------------

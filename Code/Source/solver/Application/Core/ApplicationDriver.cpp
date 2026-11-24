@@ -6890,27 +6890,27 @@ void ApplicationDriver::runSteadyState(SimulationComponents& sim, const Paramete
       levelSetAdvectionVelocityRequests(params);
   applyCoupledLevelSetFieldResidualCriteria(
       *sim.fe_system, params, newton_opts);
-  const bool steady_has_generated_state =
-      !steady_active_cut_requests.empty() || !level_set_maintenance.empty() ||
-      !steady_level_set_advection_velocity.empty();
+  const auto steady_selection =
+      svmp::FE::timestepping::legacyGeneratedStateSelection(
+          svmp::FE::timestepping::GeneratedStateRequests{
+              .cut_geometry = !steady_active_cut_requests.empty(),
+              .maintenance = !level_set_maintenance.empty(),
+              .extension = !steady_level_set_advection_velocity.empty()},
+          svmp::FE::timestepping::GeneratedStateSolve::Steady,
+          /*per_step_only=*/false);
   const bool use_steady_external_state_fixed_point =
-      steady_has_generated_state;
+      steady_selection.policy.outer_fixed_point;
   newton_opts.external_state_fixed_point.enabled =
       use_steady_external_state_fixed_point;
   newton_opts.external_state_fixed_point.max_iterations = 12;
-  // Generated geometry uses an outer Picard loop so each inner Newton
-  // residual and Jacobian share exactly one frozen G.
   newton_opts.accepted_state_sync_invalidates_residual =
-      steady_has_generated_state &&
-      !use_steady_external_state_fixed_point;
+      steady_selection.accepted_state_sync_invalidates_residual;
   applyJacobianCheckGeometryProvenance(
       newton_opts,
       steady_active_cut_requests,
-      /*refresh_generated_geometry_within_solve=*/
-          !use_steady_external_state_fixed_point,
-      /*has_frozen_algebraic_level_set_extension=*/false,
-      /*use_external_state_fixed_point=*/
-          use_steady_external_state_fixed_point);
+      steady_selection.jacobian_check_refreshes_geometry_within_solve,
+      steady_selection.jacobian_check_frozen_algebraic_extension,
+      use_steady_external_state_fixed_point);
   using StateSyncPoint =
       svmp::FE::timestepping::NewtonOptions::StateSynchronizationPoint;
   // The generated state of the solve, synchronized by the registry: the cut
@@ -6920,9 +6920,7 @@ void ApplicationDriver::runSteadyState(SimulationComponents& sim, const Paramete
   using svmp::FE::timestepping::GeneratedStateSync;
   const auto generated_state =
       std::make_shared<svmp::FE::timestepping::GeneratedStateRegistry>(
-          svmp::FE::timestepping::GeneratedStatePolicy{
-              .solve = svmp::FE::timestepping::GeneratedStateSolve::Steady,
-              .outer_fixed_point = use_steady_external_state_fixed_point});
+          steady_selection.policy);
   generated_state->add(
       std::make_shared<svmp::FE::level_set::LevelSetGeometryParticipant>(
           cut_geometry,
@@ -7304,20 +7302,17 @@ void ApplicationDriver::runTransient(SimulationComponents& sim, const Parameters
                        findLevelSetVelocityExtensionConstraintKernel(
                            *sim.fe_system, request.operator_tag, target));
           });
-  // Generated cut rules, active-set constraints, and the wet-extension map
-  // form one residual-defining package G(u).  The assembled
-  // tangent differentiates R(u,G) at fixed G; it does not contain every shape,
-  // projection, or active-set derivative.  Solve the consistent nested
-  // problem with outer regeneration and inner frozen-geometry Newton solves.
-  const bool has_transient_generated_state =
-      !transient_active_cut_requests.empty() ||
-      !level_set_maintenance.empty() ||
-      !level_set_advection_velocity.empty();
-  const bool per_step_only_generated_state =
-      parseBoolEnv("SVMP_CUT_REFRESH_PER_STEP_ONLY", false);
+  const auto transient_selection =
+      svmp::FE::timestepping::legacyGeneratedStateSelection(
+          svmp::FE::timestepping::GeneratedStateRequests{
+              .cut_geometry = !transient_active_cut_requests.empty(),
+              .maintenance = !level_set_maintenance.empty(),
+              .extension = !level_set_advection_velocity.empty(),
+              .monolithic_extension = has_frozen_algebraic_level_set_extension},
+          svmp::FE::timestepping::GeneratedStateSolve::Transient,
+          svmp::FE::timestepping::perStepOnlyGeneratedState());
   const bool use_transient_external_state_fixed_point =
-      has_transient_generated_state &&
-      !per_step_only_generated_state;
+      transient_selection.policy.outer_fixed_point;
   opts.newton.external_state_fixed_point.enabled =
       use_transient_external_state_fixed_point;
   // Outer fixed-point budget and relaxation. Default: at most
@@ -7390,10 +7385,6 @@ void ApplicationDriver::runTransient(SimulationComponents& sim, const Parameters
         .constraint_cycle_exit_start_iteration =
         exit_pass > 0 ? exit_pass - 1 : -1;
   }
-  const bool refresh_generated_geometry_within_solve =
-      has_transient_generated_state &&
-      !use_transient_external_state_fixed_point &&
-      !has_frozen_algebraic_level_set_extension;
   if (use_transient_external_state_fixed_point) {
     oopCout()
         << "[svMultiPhysics::Application] Level-set nonlinear geometry policy: "
@@ -7483,14 +7474,8 @@ void ApplicationDriver::runTransient(SimulationComponents& sim, const Parameters
                   "projected_outer|endpoint|restored|before_solve")
             .rootOnly());
   }
-  // When generated data is refreshed at accepted iterates, reassemble the
-  // residual after that refresh before deciding that Newton has converged.
   opts.newton.accepted_state_sync_invalidates_residual =
-      refresh_generated_geometry_within_solve &&
-      has_transient_generated_state;
-  const bool synchronize_line_search_trials =
-      synchronizeTransientLineSearchTrials(
-          opts.newton.accepted_state_sync_invalidates_residual);
+      transient_selection.accepted_state_sync_invalidates_residual;
   // The cut geometry of the run; the aliases keep its members' names.
   auto cut_geometry =
       std::make_shared<svmp::FE::level_set::LevelSetGeometryService>(
@@ -7728,7 +7713,7 @@ void ApplicationDriver::runTransient(SimulationComponents& sim, const Parameters
             history, expected_attempt_index, phase);
       };
   const bool track_transient_cut_topology =
-      !transient_active_cut_requests.empty();
+      transient_selection.track_cut_topology;
   auto cut_topology_attempt_tracker =
       std::shared_ptr<TransientCutTopologyAttemptTracker>(
           cut_geometry, &cut_geometry->topologyTracker());
@@ -7740,12 +7725,7 @@ void ApplicationDriver::runTransient(SimulationComponents& sim, const Parameters
   // options with the synchronization hook below.
   const auto generated_state =
       std::make_shared<svmp::FE::timestepping::GeneratedStateRegistry>(
-          svmp::FE::timestepping::GeneratedStatePolicy{
-              .solve = svmp::FE::timestepping::GeneratedStateSolve::Transient,
-              .outer_fixed_point = use_transient_external_state_fixed_point,
-              .refresh_within_solve = refresh_generated_geometry_within_solve,
-              .synchronize_line_search_trials = synchronize_line_search_trials,
-              .per_step_only = per_step_only_generated_state});
+          transient_selection.policy);
   const auto invalidate_transient_cut_topology_dependent_state = [&] {
     generated_state->invalidate();
   };
@@ -7820,8 +7800,8 @@ void ApplicationDriver::runTransient(SimulationComponents& sim, const Parameters
   applyJacobianCheckGeometryProvenance(
       opts.newton,
       transient_active_cut_requests,
-      refresh_generated_geometry_within_solve,
-      has_frozen_algebraic_level_set_extension,
+      transient_selection.jacobian_check_refreshes_geometry_within_solve,
+      transient_selection.jacobian_check_frozen_algebraic_extension,
       use_transient_external_state_fixed_point);
   const auto expected_cut_request_policy_key =
       activeCutVolumeRequestPolicyKey(transient_active_cut_requests);
