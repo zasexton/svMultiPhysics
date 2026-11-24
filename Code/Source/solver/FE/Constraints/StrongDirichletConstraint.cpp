@@ -20,6 +20,7 @@
 
 #include "Geometry/MappingFactory.h"
 #include "Spaces/FaceRestriction.h"
+#include "Core/EnvironmentNames.h"
 
 #include <algorithm>
 #include <cstdint>
@@ -110,7 +111,7 @@ void gatherStrongValueInputs(const forms::FormExprNode& node,
     if (env != nullptr && env[0] != '\0') {
         return true;
     }
-    env = std::getenv("SVMP_OOP_SOLVER_TRACE");
+    env = environment::value("SVMP_OOP_SOLVER_TRACE");
     return env != nullptr && env[0] != '\0';
 }
 

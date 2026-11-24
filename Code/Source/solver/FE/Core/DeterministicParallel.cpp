@@ -6,6 +6,7 @@
  */
 
 #include "Core/DeterministicParallel.h"
+#include "Core/EnvironmentNames.h"
 
 #include <algorithm>
 #include <condition_variable>
@@ -244,7 +245,7 @@ int geometryThreadCount(int assembly_threads) noexcept
 
 bool geometryThreadsSelfCheckEnabled() noexcept
 {
-    const char* text = std::getenv("SVMP_GEOMETRY_THREADS_SELF_CHECK");
+    const char* text = environment::value("SVMP_GEOMETRY_THREADS_SELF_CHECK");
     return text != nullptr && text[0] != '\0' && text[0] != '0';
 }
 

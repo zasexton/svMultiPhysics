@@ -6,6 +6,7 @@
  */
 
 #include "Backends/Trilinos/TrilinosLinearSolver.h"
+#include "Core/EnvironmentNames.h"
 
 #if defined(FE_HAS_TRILINOS)
 
@@ -66,7 +67,7 @@ using RowMatrix = Tpetra::RowMatrix<trilinos::Scalar, trilinos::LO, trilinos::GO
 [[nodiscard]] bool oopTraceEnabled() noexcept
 {
     static const bool enabled = [] {
-        const char* env = std::getenv("SVMP_OOP_SOLVER_TRACE");
+        const char* env = environment::value("SVMP_OOP_SOLVER_TRACE");
         if (env == nullptr) {
             return false;
         }

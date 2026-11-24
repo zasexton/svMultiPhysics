@@ -7,6 +7,7 @@
  */
 
 #include "Core/Logger.h"
+#include "Core/EnvironmentNames.h"
 
 #include <algorithm>
 #include <cctype>
@@ -40,32 +41,19 @@ inline constexpr bool hasFlag(KernelTraceChannel flags, KernelTraceChannel flag)
     return (static_cast<std::uint32_t>(flags) & static_cast<std::uint32_t>(flag)) != 0u;
 }
 
-[[nodiscard]] inline bool envEnabled(const char* name) noexcept
-{
-    const char* value = std::getenv(name);
-    if (value == nullptr || value[0] == '\0') {
-        return false;
-    }
-
-    std::string v(value);
-    std::transform(v.begin(), v.end(), v.begin(),
-                   [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
-    return !(v == "0" || v == "false" || v == "off" || v == "no");
-}
-
 [[nodiscard]] inline KernelTraceChannel configuredKernelTraceChannels() noexcept
 {
     static const KernelTraceChannel mask = [] {
         KernelTraceChannel out = KernelTraceChannel::None;
 
-        if (envEnabled("SVMP_OOP_SOLVER_TRACE")) {
+        if (environment::enabled("SVMP_OOP_SOLVER_TRACE")) {
             out = out | KernelTraceChannel::Assembly;
         }
-        if (envEnabled("SVMP_JIT_TRACE_SPECIALIZATION")) {
+        if (environment::enabled("SVMP_JIT_TRACE_SPECIALIZATION")) {
             out = out | KernelTraceChannel::Specialization;
         }
 
-        const char* value = std::getenv("SVMP_FE_KERNEL_TRACE");
+        const char* value = environment::value("SVMP_FE_KERNEL_TRACE");
         if (value == nullptr || value[0] == '\0') {
             return out;
         }

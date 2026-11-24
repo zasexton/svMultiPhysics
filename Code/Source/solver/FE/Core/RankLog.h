@@ -18,6 +18,7 @@
 
 #include "Core/FEConfig.h"
 #include "Core/Logger.h"
+#include "Core/EnvironmentNames.h"
 
 #include <algorithm>
 #include <cctype>
@@ -88,7 +89,7 @@ inline std::ostream& disabled_stream()
 
 inline bool oopTraceEnabled()
 {
-  if (const char* env = std::getenv("SVMP_OOP_SOLVER_TRACE")) {
+  if (const char* env = environment::value("SVMP_OOP_SOLVER_TRACE")) {
     return detail::parse_bool_relaxed(env);
   }
   return false;

@@ -751,7 +751,7 @@ std::string lower_copy(std::string s)
 
 bool oopStateTraceEnabled()
 {
-  const char* env = std::getenv("SVMP_OOP_SOLVER_TRACE");
+  const char* env = svmp::FE::environment::value("SVMP_OOP_SOLVER_TRACE");
   if (env == nullptr) {
     return false;
   }

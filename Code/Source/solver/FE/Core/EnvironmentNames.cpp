@@ -44,6 +44,7 @@ std::span<const NameDeclaration> solverCatalogue() noexcept
     constexpr const char* kAssembly = "FE/Assembly";
     constexpr const char* kEigen = "FE/Backends/Eigen";
     constexpr const char* kFsils = "FE/Backends/FSILS";
+    constexpr const char* kCore = "FE/Core";
     constexpr const char* kJit = "FE/Forms/JIT";
     constexpr const char* kLevelSetExtension = "FE/LevelSet/Extension";
     constexpr const char* kLevelSetGeometry = "FE/LevelSet/LevelSetGeometryService";
@@ -381,6 +382,28 @@ std::span<const NameDeclaration> solverCatalogue() noexcept
          "checks the block lookup tables of a new matrix"},
         {"SVMP_FSILS_VECTOR_VIEW_TRACE", Diagnostic, kFsils, Flag, "off", Reference,
          "logs vector-view assembly counts and norms"},
+
+        // FE/Core: the logger and the solver-wide traces and self-checks.
+        {"FE_LOG_CONSOLE", Diagnostic, kCore, Flag, "on", Reference,
+         "prints log records on the console (false or 0 turns it off)"},
+        {"FE_LOG_FILE", Diagnostic, kCore, Text, "none", Reference,
+         "also writes the log to this file"},
+        {"FE_LOG_LEVEL", Diagnostic, kCore, Text, "INFO", Reference,
+         "lowest level logged (DEBUG, INFO, WARNING, ERROR, CRITICAL, OFF)"},
+        {"FE_LOG_SHOW_RANK", Diagnostic, kCore, Flag, "on", Reference,
+         "prefixes log records with the rank (false or 0 turns it off)"},
+        {"FE_LOG_SHOW_TIME", Diagnostic, kCore, Flag, "on", Reference,
+         "prefixes log records with the time (false or 0 turns it off)"},
+        {"SVMP_FE_KERNEL_TRACE", Diagnostic, kCore, List, "no channels", Reference,
+         "kernel trace channels (all, selection, specialization, assembly, capability)"},
+        {"SVMP_GEOMETRY_THREADS_SELF_CHECK", Diagnostic, kCore, Flag, "off", Reference,
+         "rebuilds threaded cut geometry on one thread and throws unless the two agree"},
+        {"SVMP_JIT_TRACE_SPECIALIZATION", Diagnostic, kCore, Flag, "off", Reference,
+         "traces JIT kernel specialization decisions"},
+        {"SVMP_MPI_COLLECTIVE_TRACE", Diagnostic, kCore, Flag, "off", Reference,
+         "prints a line before and after each traced MPI collective"},
+        {"SVMP_OOP_SOLVER_TRACE", Diagnostic, kCore, Flag, "off", Reference,
+         "verbose solver trace (setup, Newton, linear solvers, constraints, assembly) on every rank"},
 
         // FE/Forms/JIT: the LLVM JIT of form kernels.
         {"SVMP_CACHE_PROFILE", Performance, kJit, Text, "the detected cache sizes", NonReference,

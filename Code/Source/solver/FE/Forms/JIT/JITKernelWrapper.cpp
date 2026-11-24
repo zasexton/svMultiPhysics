@@ -112,7 +112,7 @@ struct DispatchMemoEntry {
 [[nodiscard]] bool traceSpecializationEnabled() noexcept
 {
     static const bool enabled = [] {
-        const char* value = std::getenv("SVMP_JIT_TRACE_SPECIALIZATION");
+        const char* value = environment::value("SVMP_JIT_TRACE_SPECIALIZATION");
         return value != nullptr && value[0] != '\0' && value[0] != '0';
     }();
     return enabled;

@@ -2,6 +2,7 @@
 #define SVMP_FE_CORE_MPICOLLECTIVETRACE_H
 
 #include "Core/FEConfig.h"
+#include "Core/EnvironmentNames.h"
 
 #include <atomic>
 #include <cstdint>
@@ -19,7 +20,7 @@ namespace debug {
 
 [[nodiscard]] inline bool mpiCollectiveTraceEnabled() noexcept
 {
-    const char* env = std::getenv("SVMP_MPI_COLLECTIVE_TRACE");
+    const char* env = environment::value("SVMP_MPI_COLLECTIVE_TRACE");
     return env != nullptr && env[0] != '\0' && std::strcmp(env, "0") != 0;
 }
 

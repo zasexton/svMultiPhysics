@@ -39,6 +39,7 @@
  */
 
 #include "Logger.h"
+#include "Core/EnvironmentNames.h"
 #include <algorithm>
 #include <cctype>
 #include <cstdlib>
@@ -98,25 +99,25 @@ std::optional<LogLevel> parse_log_level(std::string_view name) {
 // this file: the linker omits this object file from static-library links when
 // nothing else references it, and FE_LOG_LEVEL was then silently ignored.
 void Logger::apply_environment() {
-    if (const char* env_level = std::getenv("FE_LOG_LEVEL")) {
+    if (const char* env_level = environment::value("FE_LOG_LEVEL")) {
         if (const auto level = parse_log_level(env_level)) {
             min_level_ = *level;
         }
     }
 
-    if (const char* env_file = std::getenv("FE_LOG_FILE")) {
+    if (const char* env_file = environment::value("FE_LOG_FILE")) {
         set_file_output(env_file);
     }
 
-    if (const char* env_console = std::getenv("FE_LOG_CONSOLE")) {
+    if (const char* env_console = environment::value("FE_LOG_CONSOLE")) {
         console_output_ = env_flag_enabled(env_console);
     }
 
-    if (const char* env_rank = std::getenv("FE_LOG_SHOW_RANK")) {
+    if (const char* env_rank = environment::value("FE_LOG_SHOW_RANK")) {
         show_rank_ = env_flag_enabled(env_rank);
     }
 
-    if (const char* env_time = std::getenv("FE_LOG_SHOW_TIME")) {
+    if (const char* env_time = environment::value("FE_LOG_SHOW_TIME")) {
         show_timestamp_ = env_flag_enabled(env_time);
     }
 }

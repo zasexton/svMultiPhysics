@@ -27,6 +27,7 @@
 #include "Physics/Options/NavierStokesRegistration.h"
 #include "Parameters.h"
 #include "FE/Systems/TwoFluidStageRecords.h"
+#include "FE/Core/EnvironmentNames.h"
 
 #include <algorithm>
 #include <array>
@@ -352,7 +353,7 @@ void preRegisterFutureWetExtensionVelocity(
 
 bool oopStateTraceEnabled()
 {
-  const char* env = std::getenv("SVMP_OOP_SOLVER_TRACE");
+  const char* env = svmp::FE::environment::value("SVMP_OOP_SOLVER_TRACE");
   if (env == nullptr) {
     return false;
   }

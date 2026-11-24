@@ -10,6 +10,7 @@
 #include "FE/Core/Logger.h"
 #include "Mesh/Core/MeshBase.h"
 #include "Mesh/Topology/CellTopology.h"
+#include "FE/Core/EnvironmentNames.h"
 
 #include <algorithm>
 #include <cctype>
@@ -49,7 +50,7 @@ bool parse_bool_relaxed(std::string_view raw)
 
 [[nodiscard]] bool navierStokesTraceEnabled() noexcept
 {
-  const char* env = std::getenv("SVMP_OOP_SOLVER_TRACE");
+  const char* env = svmp::FE::environment::value("SVMP_OOP_SOLVER_TRACE");
   return env != nullptr && env[0] != '\0';
 }
 

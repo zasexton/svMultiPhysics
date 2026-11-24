@@ -77,7 +77,7 @@ constexpr NewtonCommunicator kSerialNewtonCommunicator = 0;
 [[nodiscard]] bool oopTraceEnabled() noexcept
 {
     static const bool enabled = [] {
-        const char* env = std::getenv("SVMP_OOP_SOLVER_TRACE");
+        const char* env = environment::value("SVMP_OOP_SOLVER_TRACE");
         if (env == nullptr) {
             return false;
         }
