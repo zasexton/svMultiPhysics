@@ -3162,6 +3162,7 @@ if(FE_BUILD_TESTS)
 	                Tests/Unit/Systems/test_BoundaryIntegralInput.cpp
 	                Tests/Unit/Systems/test_OperatorBackends.cpp
                 Tests/Unit/Systems/test_TransientDt.cpp
+                Tests/Unit/Systems/test_GeneralityBenchmark.cpp
                 Tests/Unit/Systems/test_main.cpp
 	            )
 	            add_executable(test_fe_systems ${FE_SYSTEMS_TEST_SOURCES})
