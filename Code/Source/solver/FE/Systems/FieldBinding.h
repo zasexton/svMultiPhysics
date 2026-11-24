@@ -188,9 +188,10 @@ public:
     /**
      * @brief u^{n-k}, the unknown's accepted value @p k >= 1 steps back
      *
-     * As lagged(), with the shadow "<field>_previous<k>" holding the time
-     * history's value k steps back (what SystemStateView::u_history holds
-     * there, as the time integrator defines it).
+     * As lagged(), with the shadow "<field>_previous<k>" holding u at step
+     * n - k on every scheme: the accepted history at the attempt entry, kept
+     * through the attempt (timestepping::makeShadowFieldParticipant), also
+     * where a scheme holds a rate in a history slot during the stage solve.
      */
     [[nodiscard]] forms::FormExpr previous(const BoundUnknown& unknown, int k = 1,
                                            std::string shadow_name = {});

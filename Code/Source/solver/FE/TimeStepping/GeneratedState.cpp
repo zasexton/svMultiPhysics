@@ -535,9 +535,18 @@ public:
     return shadowFieldDescriptor(*system_, purpose);
   }
 
-  void synchronize(const systems::SystemStateView& state, GeneratedStateSync& /*sync*/) override
+  void synchronize(const systems::SystemStateView& state, GeneratedStateSync& sync) override
   {
-    for (const auto& copy : copies_) {
+    accepted_.resize(copies_.size());
+    for (std::size_t index = 0; index < copies_.size(); ++index) {
+      const auto& copy = copies_[index];
+      const bool previous = copy.field.kind == systems::ShadowField::Kind::Previous;
+      // Within an attempt the accepted history does not change: a previous
+      // value keeps what the attempt entry read.
+      if (previous && !sync.attempt_entry && accepted_valid_) {
+        system_->setPrescribedFieldCoefficients(copy.field.shadow, accepted_[index]);
+        continue;
+      }
       std::span<const Real> values = state.u;
       const backends::GenericVector* vector = state.u_vector;
       if (copy.field.kind == systems::ShadowField::Kind::Previous) {
@@ -558,6 +567,12 @@ public:
         coefficients[static_cast<std::size_t>(copy.field_dofs[i])] = read[i];
       }
       system_->setPrescribedFieldCoefficients(copy.field.shadow, coefficients);
+      if (previous && sync.attempt_entry) {
+        accepted_[index] = std::move(coefficients);
+      }
+    }
+    if (sync.attempt_entry) {
+      accepted_valid_ = true;
     }
   }
 
@@ -611,6 +626,9 @@ private:
 
   systems::FESystem* system_{nullptr};
   std::vector<ShadowCopy> copies_{};
+  /// The previous values read at the last attempt entry, by copy.
+  std::vector<std::vector<Real>> accepted_{};
+  bool accepted_valid_{false};
 };
 
 } // namespace

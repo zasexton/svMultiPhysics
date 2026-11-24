@@ -16,6 +16,7 @@
 #include "Forms/Forms.h"
 #include "Spaces/H1Space.h"
 #include "Systems/FESystem.h"
+#include "Systems/FieldBinding.h"
 #include "Systems/FormsInstaller.h"
 #include "Systems/TimeIntegrator.h"
 #include "Systems/TransientSystem.h"
@@ -24,6 +25,7 @@
 #include "TimeStepping/GeneralizedAlpha.h"
 #include "TimeStepping/GeneratedState.h"
 #include "TimeStepping/StepController.h"
+#include "TimeStepping/VSVO_BDF_Controller.h"
 #include "TimeStepping/NewmarkBeta.h"
 #include "TimeStepping/TimeHistory.h"
 #include "TimeStepping/TimeLoop.h"
@@ -621,5 +623,228 @@ TEST(GeneratedStateScheduleTimeLoop, BackwardEulerAndGeneralizedAlphaRunAlikeUnd
             // A rejected attempt restores the accepted time step.
             EXPECT_EQ(seen("restored_time_step"), overrides.max_passes.has_value()) << where;
         }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// previous(u, k) holds u at step n - k on every scheme (decision D66 item 2).
+// The shadow participant reads the accepted history at each attempt entry and
+// keeps it through the attempt, where first-order generalized-alpha and the
+// second-order schemes hold rates in history slots during the stage solve.
+// Each case runs three steps with the shadows refreshed at the attempt entry,
+// at every projected outer refresh and at the endpoint; one attempt is
+// rejected and retried, and a second loop continues from the history.  The
+// residual reads both shadows, so the explicit evaluation of the BDF2 starter
+// (a theta = 0.5 step, which refreshes no generated state) reads the values
+// of its attempt entry.
+// ---------------------------------------------------------------------------
+
+namespace {
+
+struct PreviousShadowCase {
+    std::string name;
+    gs::SchemeKind scheme;
+    int order{1};
+    double rho_inf{1.0};
+};
+
+// Every value the two shadows took, with the accepted solutions they must equal.
+struct PreviousShadowRun {
+    int mismatches{0};
+    int refreshes{0};
+    int attempts{0};
+    bool success{false};
+    std::string first_mismatch{};
+};
+
+PreviousShadowRun runPreviousShadows(const PreviousShadowCase& item)
+{
+    PreviousShadowRun run;
+    auto mesh = std::make_shared<svmp::FE::forms::test::SingleTetraMeshAccess>();
+    auto space = std::make_shared<svmp::FE::spaces::H1Space>(ElementType::Tetra4, 1);
+    svmp::FE::systems::FESystem sys(mesh);
+    svmp::FE::systems::FieldBinding fields(sys, "previous shadow test");
+    const auto U = fields.unknownSymbols(svmp::FE::systems::FieldSpec{.name = "u", .space = space}, "u", "u", "v");
+    const auto previous1 = fields.previous(U, 1);
+    const auto previous2 = fields.previous(U, 2);
+    // The residual reads both shadows, so every evaluation needs them defined,
+    // the explicit part of the BDF2 starter (a theta = 0.5 step) included.
+    const auto residual =
+        ((svmp::FE::forms::dt(U.state, item.order) + U.state +
+          svmp::FE::forms::FormExpr::constant(0.1) * (previous1 - previous2)) *
+         U.test)
+            .dx();
+    (void)svmp::FE::systems::installFormulation(sys, "op", {U.id}, residual);
+    svmp::FE::systems::SetupInputs inputs;
+    inputs.topology_override = ts_test::singleTetraTopology();
+    sys.setup({}, inputs);
+    const auto shadows = svmp::FE::systems::shadowFields(sys);
+    auto integrator = std::make_shared<svmp::FE::systems::BackwardDifferenceIntegrator>();
+    svmp::FE::systems::TransientSystem transient(sys, integrator);
+    auto factory = ts_test::createTestFactory();
+    if (!factory) {
+        ADD_FAILURE() << "Eigen backend not available";
+        return run;
+    }
+    auto linear = factory->createLinearSolver(ts_test::directSolve());
+    const auto n_dofs = sys.dofHandler().getNumDofs();
+    const double dt = 0.1;
+    auto history = item.order == 1
+        ? gs::TimeHistory::allocate(*factory, n_dofs, /*history_depth=*/3)
+        : gs::TimeHistory::allocate(*factory, n_dofs, /*history_depth=*/2, /*allocate_second_order_state=*/true);
+    const std::vector<Real> u0 = {1.0, -0.5, 0.25, 2.0};
+    std::vector<Real> u_older(u0.size());
+    for (std::size_t i = 0; i < u0.size(); ++i) {
+        u_older[i] = static_cast<Real>(0.9 * static_cast<double>(u0[i]));
+    }
+    ts_test::setVectorByDof(history.uPrev(), u0);
+    for (int k = 2; k <= history.historyDepth(); ++k) {
+        ts_test::setVectorByDof(history.uPrevK(k), item.order == 1 ? u0 : u_older);
+    }
+    if (item.order == 2) {
+        ts_test::setVectorByDof(history.uDot(), std::vector<Real>(u0.size(), 0.0));
+        std::vector<Real> a0(u0.size());
+        for (std::size_t i = 0; i < u0.size(); ++i) {
+            a0[i] = -u0[i];
+        }
+        ts_test::setVectorByDof(history.uDDot(), a0);
+    }
+    history.resetCurrentToPrevious();
+    history.setPrevDt(dt);
+
+    // The accepted solutions, oldest first: the initial history, then each
+    // accepted step.
+    std::vector<std::vector<Real>> accepted{item.order == 1 ? u0 : u_older, u0};
+    std::vector<Real> expected1, expected2;
+    const auto check = [&](const char* where) {
+        ++run.refreshes;
+        const auto previous1 = sys.prescribedFieldCoefficients(shadows[0].shadow);
+        const auto previous2 = sys.prescribedFieldCoefficients(shadows[1].shadow);
+        const bool same = std::equal(previous1.begin(), previous1.end(), expected1.begin(), expected1.end()) &&
+                          std::equal(previous2.begin(), previous2.end(), expected2.begin(), expected2.end());
+        if (!same) {
+            if (run.mismatches == 0) {
+                run.first_mismatch = std::string(where) + " attempt " + std::to_string(run.attempts);
+            }
+            ++run.mismatches;
+        }
+    };
+
+    auto shadow_participant = gs::makeShadowFieldParticipant(sys);
+    auto registry = std::make_shared<gs::GeneratedStateRegistry>(
+        gs::GeneratedStatePolicy{.solve = gs::GeneratedStateSolve::Transient, .outer_fixed_point = true});
+    registry->add(std::make_shared<gs::FunctionGeneratedStateParticipant>(
+        "geometry", gs::GeneratedStateRole::Geometry, gs::FunctionGeneratedStateParticipant::Callbacks{}));
+    registry->add(shadow_participant);
+    registry->add(std::make_shared<gs::FunctionGeneratedStateParticipant>(
+        "recorder", gs::GeneratedStateRole::Reference,
+        gs::FunctionGeneratedStateParticipant::Callbacks{
+            .synchronize = [&](const svmp::FE::systems::SystemStateView&, gs::GeneratedStateSync& sync) {
+                check(gs::generatedStateSyncPointName(sync.point));
+            }}));
+
+    const auto view = [](gs::TimeHistory& h) {
+        svmp::FE::systems::SystemStateView state;
+        state.time = h.time();
+        state.dt = h.dt();
+        state.dt_prev = h.dtPrev();
+        state.u = h.uSpan();
+        state.u_prev = h.uPrevSpan();
+        state.u_prev2 = h.uPrev2Span();
+        state.u_vector = &h.u();
+        state.u_prev_vector = &h.uPrev();
+        state.u_prev2_vector = &h.uPrev2();
+        state.u_history = h.uHistorySpans();
+        state.dt_history = h.dtHistory();
+        return state;
+    };
+    bool rejected = false;
+    gs::TimeLoopCallbacks callbacks;
+    callbacks.on_before_physics_solve = [&](gs::TimeHistory& h, double, double) {
+        ++run.attempts;
+        expected1 = accepted[accepted.size() - 1];
+        expected2 = accepted[accepted.size() - 2];
+        gs::GeneratedStateSync sync{};
+        sync.attempt_entry = true;
+        shadow_participant->synchronize(view(h), sync);
+        check("attempt_entry");
+        return true;
+    };
+    callbacks.on_before_step_accept = [&](gs::TimeHistory&, const gs::NewtonReport&) {
+        // Reject the first attempt of the second step once.
+        if (!rejected && accepted.size() == 3) {
+            rejected = true;
+            return false;
+        }
+        return true;
+    };
+    callbacks.on_step_accepted = [&](gs::TimeHistory& h) {
+        accepted.push_back(ts_test::getVectorByDof(h.uPrev()));
+    };
+
+    const auto loop_options = [&](double t0) {
+        gs::TimeLoopOptions opts;
+        opts.t0 = t0;
+        opts.t_end = t0 + 3.0 * dt;
+        opts.dt = dt;
+        opts.max_steps = 20;
+        opts.scheme = item.scheme;
+        opts.generalized_alpha_rho_inf = item.rho_inf;
+        opts.newton.residual_op = "op";
+        opts.newton.jacobian_op = "op";
+        opts.newton.max_iterations = 8;
+        opts.newton.abs_tolerance = 1e-12;
+        opts.newton.rel_tolerance = 0.0;
+        opts.newton.external_state_fixed_point =
+            gs::outerFixedPointPreset(gs::GeneratedStateSolve::Transient);
+        opts.newton.external_state_fixed_point.enabled = true;
+        if (item.scheme == gs::SchemeKind::VSVO_BDF) {
+            // Error control loose enough that only the forced rejection
+            // rejects an attempt.
+            gs::VSVO_BDF_ControllerOptions controller;
+            controller.abs_tol = 1.0e3;
+            controller.rel_tol = 1.0e3;
+            controller.max_order = 2;
+            controller.max_retries = 2;
+            opts.step_controller = std::make_shared<gs::VSVO_BDF_Controller>(controller);
+        } else {
+            opts.step_controller = std::make_shared<gs::SimpleStepController>(
+                gs::SimpleStepControllerOptions{.max_retries = 2, .increase_factor = 1.0});
+        }
+        registry->bind(opts.newton);
+        return opts;
+    };
+    gs::TimeLoop first(loop_options(0.0));
+    const auto first_report = first.run(transient, *factory, *linear, history, callbacks);
+    // A second loop continues from the history (a restart of the run).
+    gs::TimeLoop second(loop_options(history.time()));
+    const auto second_report = second.run(transient, *factory, *linear, history, callbacks);
+    run.success = first_report.success && second_report.success && rejected;
+    return run;
+}
+
+} // namespace
+
+TEST(GeneratedStatePreviousShadows, HoldTheAcceptedSolutionsOnEveryScheme)
+{
+#if !defined(FE_HAS_EIGEN) || !FE_HAS_EIGEN
+    GTEST_SKIP() << "TimeStepping tests require the Eigen backend (enable FE_ENABLE_EIGEN)";
+#endif
+    const std::vector<PreviousShadowCase> cases{
+        {"backward Euler", gs::SchemeKind::BackwardEuler},
+        {"BDF2", gs::SchemeKind::BDF2},
+        {"theta 0.5", gs::SchemeKind::ThetaMethod},
+        {"TR-BDF2", gs::SchemeKind::TRBDF2},
+        {"VSVO-BDF", gs::SchemeKind::VSVO_BDF},
+        {"generalized-alpha first order, rho_inf 0.5", gs::SchemeKind::GeneralizedAlpha, 1, 0.5},
+        {"generalized-alpha first order, rho_inf 1", gs::SchemeKind::GeneralizedAlpha, 1, 1.0},
+        {"generalized-alpha second order, rho_inf 0.5", gs::SchemeKind::GeneralizedAlpha, 2, 0.5},
+        {"Newmark", gs::SchemeKind::Newmark, 2},
+    };
+    for (const auto& item : cases) {
+        const auto run = runPreviousShadows(item);
+        EXPECT_TRUE(run.success) << item.name;
+        EXPECT_GT(run.refreshes, run.attempts) << item.name;
+        EXPECT_EQ(run.mismatches, 0) << item.name << ": first at " << run.first_mismatch;
     }
 }

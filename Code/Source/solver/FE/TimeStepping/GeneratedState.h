@@ -294,6 +294,11 @@ struct GeneratedStateSync {
     /// Source value revisions of the generated geometry, by interface marker
     /// (written by the Geometry participants).
     std::map<int, std::uint64_t> evaluated_state_source_revisions{};
+    /// The owner's synchronization before the physics solve of an attempt
+    /// (or before the first step), from the accepted state: every history
+    /// slot of the state holds an accepted solution.  The registry never
+    /// sets it.
+    bool attempt_entry{false};
 };
 
 /**
@@ -426,11 +431,17 @@ private:
  *        (systems::FieldBinding::lagged and FieldBinding::previous)
  *
  * At every synchronization it copies, DOF by DOF, the source field's
- * coefficients of the synchronized state into each lagged shadow, and the
- * source's value k steps back (SystemStateView::u_history, or u_prev and
- * u_prev2) into each previous(u, k) shadow.  The copy is rank-local, so the
- * shadows are the same at any rank count.  Created after setup; a shadow
- * whose DOF map differs from its source's is refused on every rank.
+ * coefficients of the synchronized state into each lagged shadow.  A
+ * previous(u, k) shadow holds u at step n - k on every scheme: at an attempt
+ * entry (GeneratedStateSync::attempt_entry) it copies the source's value k
+ * steps back (SystemStateView::u_history, or u_prev and u_prev2) and keeps
+ * it; at the other synchronizations of the attempt, where a scheme may hold
+ * a rate in a history slot during the stage solve (first-order
+ * generalized-alpha, Newmark), it writes the kept value.  Until the first
+ * attempt entry it copies the synchronized state's history.  The copy is
+ * rank-local, so the shadows are the same at any rank count.  Created after
+ * setup; a shadow whose DOF map differs from its source's is refused on
+ * every rank.
  */
 [[nodiscard]] std::shared_ptr<IGeneratedStateParticipant> makeShadowFieldParticipant(
     systems::FESystem& system);
