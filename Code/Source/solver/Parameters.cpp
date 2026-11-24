@@ -1915,6 +1915,10 @@ ActiveStressParameters::ActiveStressParameters() {
   set_parameter("Model", "", required, model_name);
   set_parameter("Implicit_state_coupling", false, !required,
                 implicit_state_coupling);
+  set_parameter("Calcium_scaling_factor", 1.0, !required,
+                calcium_scaling_factor);
+  set_parameter("Disable_force_strain_rate_feedback", false, !required,
+                disable_force_strain_rate_feedback);
 
   ActiveStressFactory::visit(
       [this](const std::string &name, const ActiveStress &model) {
@@ -1992,6 +1996,14 @@ bool ActiveStressParameters::get_implicit_state_coupling() const {
   return implicit_state_coupling.value();
 }
 
+double ActiveStressParameters::get_calcium_scaling_factor() const {
+  return calcium_scaling_factor.value();
+}
+
+bool ActiveStressParameters::get_disable_force_strain_rate_feedback() const {
+  return disable_force_strain_rate_feedback.value();
+}
+
 const ActiveStressModelParameters &
 ActiveStressParameters::get_parameters(const std::string &model_name) const {
   if (active_stress_models.count(model_name) == 0) {
@@ -2020,8 +2032,6 @@ DomainParameters::DomainParameters() {
   id = Parameter<std::string>("id", "", required);
 
   set_parameter("Absolute_tolerance", 1e-6, !required, absolute_tolerance);
-  set_parameter("Anisotropic_conductivity", {}, !required,
-                anisotropic_conductivity);
   set_parameter("Backflow_stabilization_coefficient", 0.2, !required,
                 backflow_stabilization_coefficient);
 
@@ -2047,8 +2057,13 @@ DomainParameters::DomainParameters() {
   set_parameter("Force_z", 0.0, !required, force_z);
 
   set_parameter("Include_xml", "", !required, include_xml);
+
   set_parameter("Isotropic_conductivity", 0.0, !required,
                 isotropic_conductivity);
+  set_parameter("Fiber_conductivity", 0.0, !required, fiber_conductivity);
+  set_parameter("Sheet_conductivity", 0.0, !required, sheet_conductivity);
+  set_parameter("Sheet_normal_conductivity", 0.0, !required,
+                sheet_normal_conductivity);
 
   set_parameter("Mass_damping", 0.0, !required, mass_damping);
   set_parameter("Maximum_iterations", 5, !required, maximum_iterations);
@@ -2192,6 +2207,14 @@ void DomainParameters::set_values(tinyxml2::XMLElement *domain_elem,
       set_values(include_parameters.root_element, true);
 
       item_found = true;
+    }
+
+    if (name == "Anisotropic_conductivity") {
+      svmp::raise<svmp::ParseException>(
+          "The domain XML element '" + name +
+          "' is no longer supported. Use Fiber_conductivity for the "
+          "fiber-direction contribution "
+          "(D = D_iso I + D_f f⊗f + D_s s⊗s + D_n n⊗n).");
     }
 
     if (item->GetText() != nullptr) {
@@ -2590,6 +2613,127 @@ void ContactParameters::set_values(tinyxml2::XMLElement *xml_elem) {
 }
 
 //////////////////////////////////////////////////////////
+//                 LineSearchParameters                 //
+//////////////////////////////////////////////////////////
+
+const std::string LineSearchParameters::xml_element_name_ =
+    "Line_search_experimental";
+
+LineSearchParameters::LineSearchParameters() {
+  // The XML element as a whole is optional, but every parameter within it has
+  // to be given.
+  bool required = true;
+
+  set_xml_element_name(xml_element_name_);
+
+  set_parameter("Minimum_decrease", 1.0e-4, required, minimum_decrease);
+  set_parameter("Step_reduction_factor", 0.5, required, step_reduction_factor);
+  set_parameter("Minimum_step_length", 1.0 / 64.0, required,
+                minimum_step_length);
+  set_parameter("Verbose", false, required, verbose);
+}
+
+void LineSearchParameters::set_values(tinyxml2::XMLElement *xml_elem) {
+  std::string error_msg = "Unknown " + xml_element_name_ + " XML element '";
+  using std::placeholders::_1;
+  using std::placeholders::_2;
+  std::function<void(const std::string &, const std::string &)> ftpr =
+      std::bind(&LineSearchParameters::set_parameter_value, *this, _1, _2);
+  xml_util_set_parameters(ftpr, xml_elem, error_msg);
+
+  check_required();
+
+  auto is_in_range = [](double value, double lower, double upper) {
+    return lower < value && value < upper;
+  };
+
+  svmp::check<svmp::ParseException>(
+      is_in_range(minimum_decrease.value(), 0.0, 1.0),
+      "Line_search Minimum_decrease must be in (0, 1).");
+  svmp::check<svmp::ParseException>(
+      is_in_range(step_reduction_factor.value(), 0.0, 1.0),
+      "Line_search Step_reduction_factor must be in (0, 1).");
+  svmp::check<svmp::ParseException>(
+      is_in_range(minimum_step_length.value(), 0.0, 1.0),
+      "Line_search Minimum_step_length must be in [0, 1].");
+
+  value_set = true;
+}
+
+void LineSearchParameters::print_parameters() {
+  std::cout << std::endl;
+  std::cout << "----------------------" << std::endl;
+  std::cout << "Line Search Parameters" << std::endl;
+  std::cout << "----------------------" << std::endl;
+
+  auto params_name_value = get_parameter_list();
+  for (auto &[key, value] : params_name_value) {
+    std::cout << key << ": " << value << std::endl;
+  }
+}
+
+//////////////////////////////////////////////////////////
+//              AdaptiveTimeStepParameters              //
+//////////////////////////////////////////////////////////
+
+const std::string AdaptiveTimeStepParameters::xml_element_name_ =
+    "Adaptive_time_step";
+
+AdaptiveTimeStepParameters::AdaptiveTimeStepParameters() {
+
+  bool required = true;
+
+  set_xml_element_name(xml_element_name_);
+
+  set_parameter("Maximum_time_step", 0.0, required, maximum_time_step);
+  set_parameter("Minimum_time_step", 0.0, !required, minimum_time_step);
+  set_parameter("Maximum_growth_factor", 0.0, !required, maximum_growth_factor);
+}
+
+void AdaptiveTimeStepParameters::set_values(tinyxml2::XMLElement *xml_elem) {
+  svmp::check<svmp::ParseException>(xml_elem->GetText() == nullptr,
+      xml_element_name_ + " takes no value of its own: it encloses "
+      "Maximum_time_step, Minimum_time_step and Maximum_growth_factor.");
+
+  std::string error_msg = "Unknown " + xml_element_name_ + " XML element '";
+  using std::placeholders::_1;
+  using std::placeholders::_2;
+  std::function<void(const std::string &, const std::string &)> ftpr =
+      std::bind(&AdaptiveTimeStepParameters::set_parameter_value, *this, _1, _2);
+  xml_util_set_parameters(ftpr, xml_elem, error_msg);
+
+  check_required();
+
+  svmp::check<svmp::ParseException>(maximum_time_step.value() > 0.0,
+      "Adaptive_time_step Maximum_time_step must be positive.");
+
+  if (minimum_time_step.defined()) {
+    svmp::check<svmp::ParseException>(minimum_time_step.value() > 0.0 &&
+        minimum_time_step.value() < maximum_time_step.value(),
+        "Adaptive_time_step Minimum_time_step must be positive and smaller than Maximum_time_step.");
+  }
+
+  if (maximum_growth_factor.defined()) {
+    svmp::check<svmp::ParseException>(maximum_growth_factor.value() > 1.0,
+        "Adaptive_time_step Maximum_growth_factor must be greater than 1.");
+  }
+
+  value_set = true;
+}
+
+void AdaptiveTimeStepParameters::print_parameters() {
+  std::cout << std::endl;
+  std::cout << "-----------------------------" << std::endl;
+  std::cout << "Adaptive Time Step Parameters" << std::endl;
+  std::cout << "-----------------------------" << std::endl;
+
+  auto params_name_value = get_parameter_list();
+  for (auto &[key, value] : params_name_value) {
+    std::cout << key << ": " << value << std::endl;
+  }
+}
+
+//////////////////////////////////////////////////////////
 //                  EquationParameters                  //
 //////////////////////////////////////////////////////////
 
@@ -2621,6 +2765,7 @@ EquationParameters::EquationParameters() {
   set_parameter("Min_iterations", 1, !required, min_iterations);
 
   set_parameter("Prestress", false, !required, prestress);
+  set_parameter("Prestrain", false, !required, prestrain);
 
   set_parameter("Tolerance", 0.5, !required, tolerance);
   set_parameter("Use_taylor_hood_type_basis", false, !required,
@@ -2727,6 +2872,9 @@ void EquationParameters::set_values(tinyxml2::XMLElement *eq_elem,
 
     } else if (name == LinearSolverParameters::xml_element_name_) {
       linear_solver.set_values(item);
+
+    } else if (name == LineSearchParameters::xml_element_name_) {
+      line_search.set_values(item);
 
     } else if (name == OutputParameters::xml_element_name_) {
       auto output_params = new OutputParameters();
@@ -2918,6 +3066,9 @@ void GeneralSimulationParameters::set_values(tinyxml2::XMLElement *xml_element,
           "GeneralSimulationParameters Include_xml requires a file name.");
       IncludeParametersFile include_parameters(value);
       set_values(include_parameters.root_element, true);
+
+    } else if (name == AdaptiveTimeStepParameters::xml_element_name_) {
+      adaptive_time_step.set_values(item);
 
     } else {
       auto value =
@@ -3114,13 +3265,15 @@ MeshParameters::MeshParameters() {
   set_parameter("Domain", 0, !required, domain_id);
   set_parameter("Domain_file_path", "", !required, domain_file_path);
 
-  // set_parameter("Fiber_direction", {}, !required, fiber_direction);
-  set_parameter("Fiber_direction_file_path", {}, !required,
-                fiber_direction_file_paths);
+  set_parameter("Fiber_direction_from_file_points", {}, !required,
+                fiber_direction_file_paths_points);
+  set_parameter("Fiber_direction_from_file_cells", {}, !required,
+                fiber_direction_file_paths_cells);
 
   set_parameter("Mesh_file_path", "", !required, mesh_file_path);
   set_parameter("Mesh_scale_factor", 1.0, !required, mesh_scale_factor);
   set_parameter("Prestress_file_path", "", !required, prestress_file_path);
+  set_parameter("Prestrain_file_path", "", !required, prestrain_file_path);
 
   set_parameter("Include_xml", "", !required, include_xml);
   set_parameter("Initial_displacements_file_path", "", !required,
@@ -3149,7 +3302,7 @@ void MeshParameters::print_parameters() {
     std::cout << key << ": " << value << std::endl;
   }
 
-  for (auto &dir : fiber_directions) {
+  for (auto &dir : fiber_direction_constant) {
     std::cout << dir.name() << ": " << dir.svalue() << std::endl;
   }
 
@@ -3173,15 +3326,23 @@ void MeshParameters::set_values(tinyxml2::XMLElement *mesh_elem,
       face_params->set_values(item);
       face_parameters.push_back(face_params);
 
-      // There may be multiple 'Fiber_direction' elements so store
+      // There may be multiple 'Fiber_direction_constant' elements so store
       // them as a list of VectorParameter<double>.
       //
-    } else if (name == "Fiber_direction") {
+    } else if (name == "Fiber_direction_constant") {
       auto value = require_xml_text(
-          item, "Mesh Fiber_direction XML element requires a value.");
-      VectorParameter<double> dir("Fiber_direction", {}, false, {});
+          item, "Mesh Fiber_direction_constant XML element requires a value.");
+      VectorParameter<double> dir("Fiber_direction_constant", {}, false, {});
       dir.set(value);
-      fiber_directions.push_back(dir);
+      fiber_direction_constant.push_back(dir);
+
+    } else if (name == "Fiber_direction" ||
+               name == "Fiber_direction_file_path") {
+      svmp::raise<svmp::ParseException>(
+          "The mesh XML element '" + name +
+          "' is no longer supported. Use Fiber_direction_constant, "
+          "Fiber_direction_from_file_points, or "
+          "Fiber_direction_from_file_cells.");
 
     } else if (name == include_xml.name()) {
       auto value =
@@ -3222,6 +3383,7 @@ PrecomputedSolutionParameters::PrecomputedSolutionParameters() {
 
   set_parameter("Field_name", "", required, field_name);
   set_parameter("File_path", "", required, file_path);
+  set_parameter("Periodic", true, !required, periodic);
   set_parameter("Time_step", 0.0, !required, time_step);
   set_parameter("Use_precomputed_solution", false, !required,
                 use_precomputed_solution);

@@ -13,6 +13,7 @@
 **[Running the svMultiPhysics Program](#running_svmultiphysics)**<br> 
 **[Docker Container](#docker_container)**<br>
 **[Testing](tests/README.md)**<br>
+**[Development Principles](DEVELOPMENT_PRINCIPLES.md)**<br>
 
 
 <!--- =================================================================================== -->
@@ -32,7 +33,6 @@ The [svMultiPhysics Developer Gude Documentation](https://simvascular.github.io/
 ## Test Data
 The `svMultiPhysics/test/cases` directory contains mesh, data and solver XML files that are used for testing changes made to the svMultiPhysics code base. The VTK files located in these directories don't initially contain data after cloning the svMultiPhysics repository. They are stored using `git lfs` and must be downloaded separately. See 
 [Testing](tests/README.md) for details about how to use `git lfs`.
-
 
 <!--- =================================================================================== -->
 <!---                       Building the svMultiPhysics                                   -->

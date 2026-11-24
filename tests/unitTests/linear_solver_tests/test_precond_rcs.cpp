@@ -40,7 +40,7 @@
  */
 
 #include "precond.h"
-#include "FE/Math/DenseLinearAlgebra.h"
+#include "math/DenseLinearAlgebra.h"
 
 #include <gtest/gtest.h>
 
@@ -101,9 +101,9 @@ TEST_P(RcsPreconditioner, PreservesConstrainedSystem) {
   face.nNo = 1;
   face.dof = dof;
   face.glob = Vector<int>{0};
-  face.val.resize(dof, 1);
+  face.free_component_mask.resize(dof, 1);
   for (int i = 0; i < dof; ++i) {
-    face.val(i, 0) = (boundary == 2 || i == 0) ? 0.0 : 1.0;
+    face.free_component_mask(i, 0) = (boundary == 2 || i == 0) ? 0.0 : 1.0;
   }
 
   Array<double> val(dof * dof, lhs.nnz), rhs(dof, 3);
@@ -152,7 +152,7 @@ TEST_P(RcsPreconditioner, PreservesConstrainedSystem) {
     }
   }
 
-  svmp::FE::math::factor_dense_matrix(matrix, n, "RCS regression").solve_in_place(solution);
+  svmp::math::factor_dense_matrix(matrix, n, "RCS regression").solve_in_place(solution);
   for (int row = 0; row < n; ++row) {
     solution[row] *= right(row % dof, row / dof);
     EXPECT_NEAR(solution[row], exact[row], 1e-11);

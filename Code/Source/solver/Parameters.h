@@ -128,6 +128,12 @@ class Parameter
     /// @brief Set the parameter value from a string.
     void set(const std::string& str_value)
     {
+      if constexpr (std::is_same_v<T, std::string>) {
+        value_ = str_value.substr(0, str_value.find_last_not_of(" \t\r\n") + 1);
+        value_.erase(0, value_.find_first_not_of(" \t\r\n"));
+        value_set_ = true;
+        return;
+      }
       if (str_value == "") {
         value_ = T{0};
       }
@@ -951,6 +957,7 @@ class PrecomputedSolutionParameters: public ParameterLists
 
     Parameter<std::string> field_name;
     Parameter<std::string> file_path;
+    Parameter<bool> periodic;
     Parameter<double> time_step;
     Parameter<bool> use_precomputed_solution;
 };
@@ -1562,6 +1569,12 @@ public:
   /// nonlinear iterations of the mechanics problem.
   bool get_implicit_state_coupling() const;
 
+  /// Get the factor applied to calcium before it is passed to the model.
+  double get_calcium_scaling_factor() const;
+
+  /// Get whether the fiber stretch rate passed to the model is set to zero.
+  bool get_disable_force_strain_rate_feedback() const;
+
   /// Get the parameters for a given active stress model.
   const ActiveStressModelParameters &
   get_parameters(const std::string &model_name) const;
@@ -1576,6 +1589,14 @@ protected:
   /// Parameter selecting whether the state of the active stress model is
   /// updated within the nonlinear iterations of the mechanics problem.
   Parameter<bool> implicit_state_coupling;
+
+  /// Parameter for the factor applied to calcium before it is passed to the
+  /// model.
+  Parameter<double> calcium_scaling_factor;
+
+  /// Parameter selecting whether the fiber stretch rate passed to the model is
+  /// set to zero, disabling the force-strain-rate feedback.
+  Parameter<bool> disable_force_strain_rate_feedback;
 
   /// Parameters for the directional distribution of active tension.
   DirectionalDistributionParameters directional_distribution;
@@ -1631,7 +1652,6 @@ class DomainParameters : public ParameterLists
     Parameter<std::string> id;
 
     Parameter<double> absolute_tolerance;
-    VectorParameter<double> anisotropic_conductivity;
     Parameter<double> backflow_stabilization_coefficient;
 
     Parameter<double> conductivity;
@@ -1652,7 +1672,18 @@ class DomainParameters : public ParameterLists
     Parameter<double> force_z;
 
     Parameter<std::string> include_xml;
+
+    /// Conductivities for CEP diffusion:
+    /// @f[
+    ///   D = D_\mathrm{iso}\, I
+    ///     + D_f\, f\otimes f
+    ///     + D_s\, s\otimes s
+    ///     + D_n\, n\otimes n.
+    /// @f]
     Parameter<double> isotropic_conductivity;
+    Parameter<double> fiber_conductivity;
+    Parameter<double> sheet_conductivity;
+    Parameter<double> sheet_normal_conductivity;
 
     Parameter<double> mass_damping;
     Parameter<int> maximum_iterations;
@@ -1739,6 +1770,95 @@ class ContactParameters : public ParameterLists
     Parameter<double> penalty_constant;
 };
 
+//----------------------
+// LineSearchParameters
+//----------------------
+/// @brief Parameters of the line search shortening the increments of the
+/// nonlinear iterations of an equation.
+///
+/// The line search is enabled by the presence of the XML element and disabled
+/// by its absence.
+///
+/// XML element: \code {.xml}
+/// <Line_search>
+///   <Minimum_decrease> 1.0e-4 </Minimum_decrease>
+///   <Step_reduction_factor> 0.5 </Step_reduction_factor>
+///   <Minimum_step_length> 0.015625 </Minimum_step_length>
+///   <Verbose> false </Verbose>
+/// </Line_search>
+/// \endcode
+//
+class LineSearchParameters : public ParameterLists
+{
+  public:
+    LineSearchParameters();
+
+    static const std::string xml_element_name_;
+
+    bool defined() const { return value_set; };
+    void set_values(tinyxml2::XMLElement* xml_elem);
+    void print_parameters();
+
+    /// @brief Decrease of the residual norm that a step length must achieve to
+    /// be accepted, as a fraction of the norm it starts from per unit step
+    /// length. Any value small enough accepts every step that decreases the
+    /// residual.
+    Parameter<double> minimum_decrease;
+
+    /// @brief Factor by which a rejected step length is multiplied.
+    Parameter<double> step_reduction_factor;
+
+    /// @brief Shortest step length that is tried. It is applied without being
+    /// measured, since there is no shorter one to fall back on.
+    Parameter<double> minimum_step_length;
+
+    /// @brief Report the step lengths that are rejected and accepted.
+    Parameter<bool> verbose;
+
+    bool value_set = false;
+};
+
+//----------------------------
+// AdaptiveTimeStepParameters
+//----------------------------
+/// @brief Parameters of the adaptive time step of a simulation.
+///
+/// The time step is adapted between steps when the XML element is present
+/// and fixed when it is absent. Within it, Maximum_time_step has to be given;
+/// Minimum_time_step and Maximum_growth_factor are optional.
+///
+/// XML element: \code {.xml}
+/// <Adaptive_time_step>
+///   <Maximum_time_step> 100.0 </Maximum_time_step>
+///   <Minimum_time_step> 1.0e-4 </Minimum_time_step>
+///   <Maximum_growth_factor> 10.0 </Maximum_growth_factor>
+/// </Adaptive_time_step>
+/// \endcode
+//
+class AdaptiveTimeStepParameters : public ParameterLists
+{
+  public:
+    AdaptiveTimeStepParameters();
+
+    static const std::string xml_element_name_;
+
+    bool defined() const { return value_set; };
+    void set_values(tinyxml2::XMLElement* xml_elem);
+    void print_parameters();
+
+    /// @brief Largest time step the adaptation may reach.
+    Parameter<double> maximum_time_step;
+
+    /// @brief Smallest time step the adaptation may reach.
+    Parameter<double> minimum_time_step;
+
+    /// @brief Largest ratio of a time step to the one before it. Does not
+    /// limit shrinking.
+    Parameter<double> maximum_growth_factor;
+
+    bool value_set = false;
+};
+
 /// @brief The EquationParameters class stores parameters for the 'Add_equation'
 /// XML element used to specify an equation to be solved (e.g. fluid).
 ///
@@ -1784,6 +1904,7 @@ class EquationParameters : public ParameterLists
     Parameter<double> penalty_parameter;
     Parameter<double> poisson_ratio;
     Parameter<bool> prestress;
+    Parameter<bool> prestrain;
 
     Parameter<double> source_term;
     Parameter<double> tolerance;
@@ -1813,6 +1934,8 @@ class EquationParameters : public ParameterLists
     std::vector<DomainParameters*> domains;
 
     LinearSolverParameters linear_solver;
+
+    LineSearchParameters line_search;
 
     std::vector<OutputParameters*> outputs;
 
@@ -1860,6 +1983,8 @@ class GeneralSimulationParameters : public ParameterLists
     void set_values(tinyxml2::XMLElement* xml_element, bool from_external_xml = false);
 
     std::string xml_element_name;
+
+    AdaptiveTimeStepParameters adaptive_time_step;
 
     Parameter<bool> check_ien_order;
     Parameter<bool> continue_previous_simulation;
@@ -1958,10 +2083,12 @@ class MeshParameters : public ParameterLists
     Parameter<int> domain_id;
     Parameter<std::string> domain_file_path;
 
-    VectorParameter<std::string> fiber_direction_file_paths;
-    //Parameter<std::string> fiber_direction_file_path;
-    std::vector<VectorParameter<double>> fiber_directions;
-    //VectorParameter<double> fiber_direction;
+    // Constant fiber directions from <Fiber_direction_constant>.
+    std::vector<VectorParameter<double>> fiber_direction_constant;
+    // Fiber VTU paths from <Fiber_direction_from_file_points>.
+    VectorParameter<std::string> fiber_direction_file_paths_points;
+    // Fiber VTU paths from <Fiber_direction_from_file_cells>.
+    VectorParameter<std::string> fiber_direction_file_paths_cells;
 
     Parameter<std::string> include_xml;
     Parameter<std::string> initial_displacements_file_path;
@@ -1972,6 +2099,7 @@ class MeshParameters : public ParameterLists
     Parameter<std::string> mesh_file_path;
     Parameter<double> mesh_scale_factor;
     Parameter<std::string> prestress_file_path;
+    Parameter<std::string> prestrain_file_path;
 
     Parameter<bool> set_mesh_as_fibers;
     Parameter<bool> set_mesh_as_shell;

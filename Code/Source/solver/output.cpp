@@ -8,6 +8,7 @@
 #include "utils.h"
 
 #include <cstdio>
+#include <filesystem>
 #include <iomanip>
 #include <limits>
 #include <math.h>
@@ -223,7 +224,7 @@ void write_restart(Simulation* simulation, std::array<double,3>& timeP, const So
   const bool ibFlag = com_mod.ibFlag;
   const bool dFlag = com_mod.dFlag;
   const bool sstEq = com_mod.sstEq; 
-  const bool pstEq = com_mod.pstEq;
+  const bool compute_prestress = com_mod.compute_prestress;
   const bool cepEq = cep_mod.cepEq;
   const bool risFlag = com_mod.risFlag;
   const bool urisFlag = com_mod.urisFlag;
@@ -238,7 +239,7 @@ void write_restart(Simulation* simulation, std::array<double,3>& timeP, const So
   dmsg << "stFileName: " << stFileName;
   dmsg << "dFlag: " << dFlag;
   dmsg << "sstEq: " << sstEq;
-  dmsg << "pstEq: " << pstEq;
+  dmsg << "compute_prestress: " << compute_prestress;
   dmsg << "cepEq: " << cepEq;
   dmsg << "stFileName: " << stFileName;
   dmsg << "stFileRepl: " << stFileRepl;
@@ -303,7 +304,7 @@ void write_restart(Simulation* simulation, std::array<double,3>& timeP, const So
 
       if (sstEq) {
 
-        if (pstEq) {
+        if (compute_prestress) {
           restart_file.write((char*)pS0.data(), pS0.msize());
           restart_file.write((char*)Ad.data(), Ad.msize());
 
@@ -327,7 +328,7 @@ void write_restart(Simulation* simulation, std::array<double,3>& timeP, const So
 
       } else {
 
-        if (pstEq) {
+        if (compute_prestress) {
           restart_file.write((char*)pS0.data(), pS0.msize());
 
         } else if (cepEq) {
@@ -361,8 +362,10 @@ void write_restart(Simulation* simulation, std::array<double,3>& timeP, const So
   // Create a soft link to the bin file for the last time step.
   //
   if (!com_mod.stFileRepl && cm.mas(cm_mod)) {
-    std::string cmd = "ln -f " + fName + " " + tmpS;
-    std::system(cmd.c_str());
+    std::error_code error;
+    std::filesystem::remove(tmpS, error);
+    std::filesystem::create_hard_link(fName, tmpS, error);
+    if (error) std::cerr << "Could not link " << tmpS << " to " << fName << ": " << error.message() << std::endl;
   }
 }
 

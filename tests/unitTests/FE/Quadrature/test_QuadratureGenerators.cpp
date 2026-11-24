@@ -3,7 +3,7 @@
 
 /**
  * @file test_QuadratureGenerators.cpp
- * @brief Tests for exactness-requested one-dimensional quadrature generators.
+ * @brief Tests for line and triangle quadrature generators.
  */
 
 #include <gtest/gtest.h>
@@ -14,21 +14,30 @@
 #include "FE/Quadrature/GaussLobattoQuadrature.h"
 #include "FE/Quadrature/GaussQuadrature.h"
 #include "FE/Quadrature/QuadratureRule.h"
+#include "FE/Quadrature/SymmetricTriangleQuadrature.h"
+#include "FE/Quadrature/TriangleQuadrature.h"
+#include "ReferenceMonomialIntegrals.h"
 
+#include <algorithm>
 #include <array>
 #include <cmath>
 #include <cstddef>
 #include <exception>
 #include <limits>
+#include <optional>
 #include <span>
+#include <stdexcept>
 #include <string_view>
 #include <type_traits>
 #include <utility>
+#include <vector>
 
 using namespace svmp::FE;
 using namespace svmp::FE::quadrature;
 
 namespace {
+
+namespace reference = svmp::FE::quadrature::test;
 
 // Exhaustive supported-domain sweeps observed structure, measure, and moment
 // errors below 1.2e-15; these envelopes retain cross-toolchain headroom
@@ -58,14 +67,6 @@ enum class LineEndpointPolicy {
     Excluded,
     Included,
 };
-
-long double analytic_line_monomial_integral(std::size_t power)
-{
-    if (power % 2u != 0u) {
-        return 0.0L;
-    }
-    return 2.0L / (static_cast<long double>(power) + 1.0L);
-}
 
 long double accumulate_line_moment(
     const QuadratureRule& rule,
@@ -191,7 +192,7 @@ void expect_advertised_line_exactness(const QuadratureRule& rule)
             static_cast<std::size_t>(power);
         const long double error = std::abs(
             accumulate_line_moment(rule, nonnegative_power) -
-            analytic_line_monomial_integral(nonnegative_power));
+            reference::line_monomial_integral(power));
         EXPECT_LE(error, static_cast<long double>(kMomentTolerance));
     }
 }
@@ -255,7 +256,7 @@ void expect_canonical_rule(
         static_cast<std::size_t>(expected_exactness + 1);
     const long double first_unadvertised_error = std::abs(
         accumulate_line_moment(rule, first_unadvertised_even_power) -
-        analytic_line_monomial_integral(first_unadvertised_even_power));
+        reference::line_monomial_integral(expected_exactness + 1));
     EXPECT_GT(first_unadvertised_error, static_cast<long double>(kMomentTolerance));
 }
 
@@ -306,12 +307,12 @@ TEST(QuadratureGeneratorTestSupport, ExercisesSharedLineRuleChecks)
         {{-1.0, 0.0, 0.0}, {1.0, 0.0, 0.0}},
         {1.0, 1.0});
 
-    EXPECT_EQ(analytic_line_monomial_integral(0u), 2.0L);
-    EXPECT_EQ(analytic_line_monomial_integral(1u), 0.0L);
+    EXPECT_EQ(reference::line_monomial_integral(0), 2.0L);
+    EXPECT_EQ(reference::line_monomial_integral(1), 0.0L);
     EXPECT_EQ(
-        analytic_line_monomial_integral(2u),
+        reference::line_monomial_integral(2),
         2.0L / 3.0L);
-    EXPECT_EQ(analytic_line_monomial_integral(255u), 0.0L);
+    EXPECT_EQ(reference::line_monomial_integral(255), 0.0L);
     EXPECT_LE(
         std::abs(accumulate_line_moment(interior_rule, 255u)),
         static_cast<long double>(kMomentTolerance));
@@ -545,5 +546,608 @@ TEST(GaussLobattoNodes, RejectsInvalidRefinementRequests)
              std::numeric_limits<double>::quiet_NaN()}) {
         EXPECT_THROW((void)detail::refine_gauss_lobatto_node(4, 0, tolerance),
                      InvalidArgumentException);
+    }
+}
+
+namespace {
+
+static_assert(max_triangle_exactness() == 254);
+static_assert(noexcept(max_triangle_exactness()));
+static_assert(std::is_same_v<decltype(&make_triangle_centroid_rule), QuadratureRule (*)()>);
+static_assert(std::is_same_v<decltype(make_triangle_rule(0, std::declval<const QuadratureRule&>())), QuadratureRule>);
+static_assert(std::is_same_v<decltype(make_triangle_rule(0,
+    std::declval<const QuadratureRule&>(), std::declval<const QuadratureRule&>())), QuadratureRule>);
+
+// Exhaustive qualification observed relative errors below 6e-14. This retains
+// over 30-fold cross-toolchain headroom and stays meaningful for tiny moments.
+constexpr long double kTriangleRelativeTolerance = 2.0e-12L;
+
+struct CompensatedSum {
+    long double sum = 0.0L;
+    long double correction = 0.0L;
+
+    void add(long double term)
+    {
+        const long double next = sum + term;
+        correction += std::abs(sum) >= std::abs(term)
+            ? (sum - next) + term : (term - next) + sum;
+        sum = next;
+    }
+
+    long double value() const { return sum + correction; }
+};
+
+// Group only samples whose actual returned x is exactly equal. For each group,
+// sum actual w*y^b, then multiply by actual x^a. This is the full sample sum,
+// algebraically regrouped: no assumption about row lengths, y, or weights.
+// Entry [a][b] holds the moment of x^a y^b for a+b <= degree.
+std::vector<std::vector<CompensatedSum>> triangle_moments(const QuadratureRule& rule, int degree)
+{
+    const std::size_t size = static_cast<std::size_t>(degree + 1);
+    std::vector<std::vector<CompensatedSum>> moments(size, std::vector<CompensatedSum>(size));
+    std::vector<CompensatedSum> row(size);
+    for (std::size_t first = 0; first < rule.num_points();) {
+        std::fill(row.begin(), row.end(), CompensatedSum{});
+        const long double x = rule.point(first)[0];
+        std::size_t end = first;
+        do {
+            const long double y = rule.point(end)[1];
+            long double power = 1.0L;
+            for (int b = 0; b <= degree; ++b) {
+                row[b].add(static_cast<long double>(rule.weight(end)) * power);
+                power *= y;
+            }
+            ++end;
+        } while (end < rule.num_points() && rule.point(end)[0] == x);
+        long double power = 1.0L;
+        for (int a = 0; a <= degree; ++a) {
+            for (int b = 0; b <= degree - a; ++b) {
+                moments[a][b].add(power * row[b].value());
+            }
+            power *= x;
+        }
+        first = end;
+    }
+    return moments;
+}
+
+// A relative bound keeps tiny high-order moments from passing as zero.
+void expect_triangle_moments(const QuadratureRule& rule, int degree)
+{
+    const auto moments = triangle_moments(rule, degree);
+    for (int a = 0; a <= degree; ++a) {
+        for (int b = 0; b <= degree - a; ++b) {
+            const long double expected = reference::triangle_monomial_integral(a, b);
+            const long double actual = moments[a][b].value();
+            EXPECT_GT(actual, 0.0L) << "a=" << a << ", b=" << b;
+            EXPECT_LE(std::abs(actual - expected) / expected, kTriangleRelativeTolerance)
+                << "a=" << a << ", b=" << b;
+        }
+    }
+}
+
+void expect_same_ordered_rule(const QuadratureRule& left, const QuadratureRule& right)
+{
+    ASSERT_EQ(left.num_points(), right.num_points());
+    EXPECT_EQ(left.cell_family(), right.cell_family());
+    EXPECT_EQ(left.dimension(), right.dimension());
+    EXPECT_EQ(left.reference_cell_measure(), right.reference_cell_measure());
+    EXPECT_EQ(left.polynomial_exactness(), right.polynomial_exactness());
+    for (std::size_t q = 0; q < left.num_points(); ++q) {
+        for (std::size_t axis = 0; axis < 3; ++axis) {
+            EXPECT_EQ(left.point(q)[axis], right.point(q)[axis]) << "point=" << q << ", axis=" << axis;
+        }
+        EXPECT_EQ(left.weight(q), right.weight(q)) << "point=" << q;
+    }
+}
+
+void expect_every_triangle_rule(LineEndpointPolicy endpoint_policy)
+{
+    const bool lobatto = endpoint_policy == LineEndpointPolicy::Included;
+    const int last_request = lobatto ? 252 : 254;
+    int distinct_rules = 0;
+    std::optional<QuadratureRule> previous;
+    for (int p = 0; p <= last_request; ++p) {
+        SCOPED_TRACE(::testing::Message() << "request=" << p << ", Lobatto=" << lobatto);
+        const auto factor = lobatto ? make_gauss_lobatto_rule(p + 1)
+                                    : make_gauss_legendre_rule(p + 1);
+        const auto rule = make_triangle_rule(p, factor);
+        expect_same_ordered_rule(rule, make_triangle_rule(p, factor, factor));
+        const std::size_t n = static_cast<std::size_t>((p + 1) / 2 + (lobatto ? 2 : 1));
+        const int degree = 2 * static_cast<int>(n) - (lobatto ? 4 : 2);
+        ASSERT_EQ(factor.num_points(), n);
+        ASSERT_EQ(rule.num_points(), n * n);
+        ASSERT_EQ(rule.polynomial_exactness(), degree);
+        EXPECT_GE(degree, p);
+        EXPECT_EQ(rule.cell_family(), svmp::CellFamily::Triangle);
+        EXPECT_EQ(rule.dimension(), 2u);
+        EXPECT_EQ(rule.reference_cell_measure(), 0.5);
+        for (std::size_t q = 0; q < rule.num_points(); ++q) {
+            const double x = rule.point(q)[0];
+            const double y = rule.point(q)[1];
+            EXPECT_TRUE(std::isfinite(x) && std::isfinite(y) && std::isfinite(rule.weight(q)));
+            EXPECT_EQ(rule.point(q)[2], 0.0);
+            if (lobatto) {
+                EXPECT_GE(x, 0.0);
+                EXPECT_GE(y, 0.0);
+                EXPECT_LE(x + y, 1.0 + kStructureTolerance);
+                EXPECT_GE(rule.weight(q), 0.0);
+            } else {
+                EXPECT_GT(x, 0.0);
+                EXPECT_GT(y, 0.0);
+                EXPECT_LT(x + y, 1.0);
+                EXPECT_GT(rule.weight(q), 0.0);
+            }
+        }
+        if (lobatto) {
+            EXPECT_EQ(rule.point(0)[0], 0.0);
+            EXPECT_EQ(rule.point(0)[1], 0.0);
+            EXPECT_EQ(rule.point(n - 1)[1], 1.0);
+            for (std::size_t j = 0; j < n; ++j) {
+                const auto q = (n - 1) * n + j;
+                EXPECT_EQ(rule.point(q)[0], 1.0);
+                EXPECT_EQ(rule.point(q)[1], 0.0);
+                EXPECT_EQ(rule.weight(q), 0.0);
+                EXPECT_EQ(rule.point(j * n)[1], 0.0);
+            }
+        }
+        if (previous && previous->polynomial_exactness() == degree) {
+            expect_same_ordered_rule(*previous, rule);
+        } else {
+            ++distinct_rules;
+            expect_triangle_moments(rule, degree);
+        }
+        previous = rule;
+    }
+    EXPECT_EQ(previous->num_points(), 16384u);
+    EXPECT_EQ(distinct_rules, lobatto ? 127 : 128);
+}
+
+} // namespace
+
+TEST(QuadratureMonomialReferences, MatchesIndependentValuesAndRejectsNegativePowers)
+{
+    EXPECT_EQ(reference::line_monomial_integral(0), 2.0L);
+    EXPECT_EQ(reference::line_monomial_integral(1), 0.0L);
+    EXPECT_EQ(reference::line_monomial_integral(254), 2.0L / 255.0L);
+    EXPECT_EQ(reference::triangle_monomial_integral(0, 0), 0.5L);
+    EXPECT_EQ(reference::triangle_monomial_integral(1, 0), 1.0L / 6.0L);
+    EXPECT_EQ(reference::triangle_monomial_integral(0, 1), 1.0L / 6.0L);
+    EXPECT_EQ(reference::triangle_monomial_integral(2, 0), 1.0L / 12.0L);
+    EXPECT_EQ(reference::triangle_monomial_integral(1, 1), 1.0L / 24.0L);
+    // Independently evaluated with exact integer factorials and 65-digit division.
+    // Headroom for at most 127 ratio multiplications, also when long double
+    // has binary64 precision.
+    constexpr long double reference_tolerance = 512.0L * std::numeric_limits<long double>::epsilon();
+    constexpr long double balanced = 1.05804760028269023389812750598454900539e-80L;
+    constexpr long double unbalanced = 6.87153782458757607635065222401753811610e-27L;
+    EXPECT_LE(std::abs(reference::triangle_monomial_integral(127, 127) / balanced - 1.0L), reference_tolerance);
+    EXPECT_LE(std::abs(reference::triangle_monomial_integral(32, 48) / unbalanced - 1.0L), reference_tolerance);
+    for (int a = 0; a <= 254; ++a) {
+        for (int b = 0; b <= 254 - a; ++b) {
+            const long double value = reference::triangle_monomial_integral(a, b);
+            EXPECT_TRUE(std::isfinite(value));
+            ASSERT_GT(value, 0.0L);
+            EXPECT_EQ(value, reference::triangle_monomial_integral(b, a));
+        }
+    }
+    EXPECT_THROW(reference::line_monomial_integral(-1), std::invalid_argument);
+    EXPECT_THROW(reference::line_monomial_integral(std::numeric_limits<int>::min()), std::invalid_argument);
+    EXPECT_THROW(reference::triangle_monomial_integral(-1, 0), std::invalid_argument);
+    EXPECT_THROW(reference::triangle_monomial_integral(0, -1), std::invalid_argument);
+}
+
+TEST(QuadratureGeneratorTestSupport, GroupsOnlyEqualActualCoordinates)
+{
+    const QuadratureRule samples(svmp::CellFamily::Triangle, 0,
+        {{0.25, 0.125, 0.0}, {0.25, 0.5, 0.0}, {0.5, 0.25, 0.0},
+         {0.25, 0.0, 0.0}, {0.0, 0.75, 0.0}}, {0.5, -0.125, 0.25, 0.0, 0.125});
+    constexpr int degree = 6;
+    const auto moments = triangle_moments(samples, degree);
+    for (int a = 0; a <= degree; ++a) {
+        for (int b = 0; b <= degree - a; ++b) {
+            CompensatedSum direct;
+            for (std::size_t q = 0; q < samples.num_points(); ++q) {
+                direct.add(samples.weight(q) * std::pow(static_cast<long double>(samples.point(q)[0]), a)
+                    * std::pow(static_cast<long double>(samples.point(q)[1]), b));
+            }
+            EXPECT_EQ(moments[a][b].value(), direct.value());
+        }
+    }
+}
+
+TEST(TriangleCentroidImplementation, IntegratesLinearButNotQuadraticMonomials)
+{
+    const auto rule = make_triangle_centroid_rule();
+    expect_same_ordered_rule(rule, QuadratureRule(svmp::CellFamily::Triangle, 1,
+        {{1.0 / 3.0, 1.0 / 3.0, 0.0}}, {0.5}));
+    const auto moments = triangle_moments(rule, 2);
+    EXPECT_EQ(moments[0][0].value(), 0.5L);
+    EXPECT_NEAR(moments[0][1].value(), 1.0L / 6.0L, kFixtureTolerance);
+    EXPECT_NEAR(moments[1][0].value(), 1.0L / 6.0L, kFixtureTolerance);
+    EXPECT_GT(std::abs(moments[2][0].value() - 1.0L / 12.0L), 0.02L);
+}
+
+TEST(TriangleDuffyImplementation, PreservesIndependentOrderedFixtureAndInputOwnership)
+{
+    const QuadratureRule factor(svmp::CellFamily::Line, 1,
+        {{-0.5, 0.0, 0.0}, {0.5, 0.0, 0.0}}, {1.0, 1.0});
+    const auto snapshot = factor;
+    const auto rule = make_triangle_rule(0, factor);
+    const QuadratureRule expected(svmp::CellFamily::Triangle, 0,
+        {{0.25, 0.1875, 0.0}, {0.25, 0.5625, 0.0}, {0.75, 0.0625, 0.0}, {0.75, 0.1875, 0.0}},
+        {0.1875, 0.1875, 0.0625, 0.0625});
+    expect_same_ordered_rule(rule, expected);
+    expect_same_ordered_rule(factor, snapshot);
+    expect_same_ordered_rule(rule, make_triangle_rule(0, factor));
+    // The temporary factor is destroyed before inspecting the result.
+    const auto owned = make_triangle_rule(0, QuadratureRule(factor));
+    expect_same_ordered_rule(owned, expected);
+    const QuadratureRule reversed(svmp::CellFamily::Line, 1,
+        {{0.5, 0.0, 0.0}, {-0.5, 0.0, 0.0}}, {1.0, 1.0});
+    expect_same_ordered_rule(make_triangle_rule(0, reversed),
+        QuadratureRule(svmp::CellFamily::Triangle, 0,
+            {expected.points().rbegin(), expected.points().rend()},
+            {expected.weights().rbegin(), expected.weights().rend()}));
+}
+
+TEST(TriangleDuffyImplementation, UsesSuppliedFactorForLowRequestsAndReportsDeliveredDegree)
+{
+    expect_same_ordered_rule(make_triangle_rule(0, make_gauss_legendre_rule(1)),
+        QuadratureRule(svmp::CellFamily::Triangle, 0, {{0.5, 0.25, 0.0}}, {0.5}));
+    const auto factor = make_gauss_legendre_rule(7);
+    const auto zero = make_triangle_rule(0, factor);
+    EXPECT_EQ(zero.num_points(), 16u);
+    EXPECT_EQ(zero.polynomial_exactness(), 6);
+    expect_same_ordered_rule(zero, make_triangle_rule(1, factor));
+    expect_same_ordered_rule(make_triangle_rule(0, make_gauss_lobatto_rule(1)),
+        QuadratureRule(svmp::CellFamily::Triangle, 0,
+            {{0.0, 0.0, 0.0}, {0.0, 1.0, 0.0}, {1.0, 0.0, 0.0}, {1.0, 0.0, 0.0}},
+            {0.25, 0.25, 0.0, 0.0}));
+}
+
+TEST(TriangleDuffyImplementation, PreservesUnequalOrderedFactorsAndOwnsTheirProduct)
+{
+    const QuadratureRule u(svmp::CellFamily::Line, 1,
+        {{-0.5, 0.0, 0.0}, {0.5, 0.0, 0.0}}, {1.0, 1.0});
+    // Unsorted endpoints, a duplicate, and signed/zero weights; only degree zero.
+    const QuadratureRule v(svmp::CellFamily::Line, 0,
+        {{1.0, 0.0, 0.0}, {-1.0, 0.0, 0.0}, {1.0, 0.0, 0.0}}, {3.0, -1.0, 0.0});
+    const auto u_snapshot = u;
+    const auto v_snapshot = v;
+    const QuadratureRule expected(svmp::CellFamily::Triangle, 0,
+        {{0.25, 0.75, 0.0}, {0.25, 0.0, 0.0}, {0.25, 0.75, 0.0},
+         {0.75, 0.25, 0.0}, {0.75, 0.0, 0.0}, {0.75, 0.25, 0.0}},
+        {0.5625, -0.1875, 0.0, 0.1875, -0.0625, 0.0});
+    expect_same_ordered_rule(make_triangle_rule(0, u, v), expected);
+    expect_same_ordered_rule(u, u_snapshot);
+    expect_same_ordered_rule(v, v_snapshot);
+    const auto owned = make_triangle_rule(0, QuadratureRule(u), QuadratureRule(v));
+    expect_same_ordered_rule(owned, expected);
+}
+
+TEST(TriangleDuffyImplementation, EnforcesDirectionalExactnessAndReportsTheLimitingFactor)
+{
+    const auto high = make_gauss_legendre_rule(7);
+    const auto low = make_gauss_legendre_rule(5);
+    const auto rule = make_triangle_rule(5, high, low);
+    EXPECT_EQ(rule.num_points(), 12u);
+    EXPECT_EQ(rule.polynomial_exactness(), 5);
+    expect_same_ordered_rule(make_triangle_rule(0, high, low), rule);
+    EXPECT_EQ(make_triangle_rule(0, low, high).polynomial_exactness(), 4);
+    expect_invalid_argument_with_message([&] { (void)make_triangle_rule(5, low, high); }, "exactness");
+    expect_invalid_argument_with_message([&] { (void)make_triangle_rule(6, high, low); }, "exactness");
+    const QuadratureRule zero(svmp::CellFamily::Line, 0, {{0.0, 0.0, 0.0}}, {2.0});
+    expect_invalid_argument_with_message([&] { (void)make_triangle_rule(0, zero, high); }, "exactness");
+}
+
+TEST(TriangleDuffyImplementation, BoundsTheProductForUnequalFactorSizes)
+{
+    const auto single = make_gauss_legendre_rule(1);
+    const auto two = make_gauss_legendre_rule(3);
+    // Non-dyadic weights also exercise accumulation error near the capacity.
+    for (const std::size_t n : {10000u, 16383u, 16384u}) {
+        SCOPED_TRACE(::testing::Message() << "factor points=" << n);
+        const QuadratureRule many(svmp::CellFamily::Line, 1,
+            std::vector<QuadPoint>(n, QuadPoint::Zero()), std::vector<double>(n, 2.0 / n));
+        const QuadratureRule expected(svmp::CellFamily::Triangle, 0,
+            std::vector<QuadPoint>(n, QuadPoint{0.5, 0.25, 0.0}), std::vector<double>(n, 0.5 / n));
+        expect_same_ordered_rule(make_triangle_rule(0, single, many), expected);
+        expect_same_ordered_rule(make_triangle_rule(0, many, single), expected);
+        EXPECT_THROW((void)make_triangle_rule(0, many, two), InvalidArgumentException);
+        EXPECT_THROW((void)make_triangle_rule(0, two, many), InvalidArgumentException);
+    }
+}
+
+TEST(TriangleDuffyImplementation, PreservesSignedZeroAndDuplicateSamples)
+{
+    const QuadratureRule factor(svmp::CellFamily::Line, 1,
+        {{0.0, 0.0, 0.0}, {0.0, 0.0, 0.0}, {0.0, 0.0, 0.0}}, {3.0, -1.0, 0.0});
+    expect_same_ordered_rule(make_triangle_rule(0, factor),
+        QuadratureRule(svmp::CellFamily::Triangle, 0,
+            std::vector<QuadPoint>(9, QuadPoint{0.5, 0.25, 0.0}),
+            {1.125, -0.375, 0.0, -0.375, 0.125, 0.0, 0.0, 0.0, 0.0}));
+}
+
+TEST(TriangleDuffyImplementation, AcceptsFiniteProductsWithLargeSignedWeights)
+{
+    const QuadratureRule factor(svmp::CellFamily::Line, 1,
+        {{0.0, 0.0, 0.0}, {0.0, 0.0, 0.0}, {0.0, 0.0, 0.0}}, {3.0e154, -3.0e154, 2.0});
+    // Each product is finite, but their absolute sum exceeds binary64 range.
+    const auto rule = make_triangle_rule(0, factor);
+    ASSERT_EQ(rule.num_points(), 9u);
+    for (double weight : rule.weights()) {
+        EXPECT_TRUE(std::isfinite(weight));
+    }
+    EXPECT_EQ(rule.weight(0), -rule.weight(1));
+    EXPECT_EQ(rule.weight(3), -rule.weight(4));
+    EXPECT_EQ(rule.weight(2), -rule.weight(5));
+    EXPECT_EQ(rule.weight(6), -rule.weight(7));
+    EXPECT_EQ(rule.weight(8), 0.5);
+}
+
+TEST(TriangleDuffyImplementation, RejectsInvalidRequestsBeforeDegreeArithmetic)
+{
+    const auto factor = make_gauss_legendre_rule(255);
+    for (const int p : {std::numeric_limits<int>::min(), -1, 255, std::numeric_limits<int>::max()}) {
+        expect_invalid_argument_with_message([&] { (void)make_triangle_rule(p, factor); }, "requested_exactness");
+        expect_invalid_argument_with_message([&] { (void)make_triangle_rule(p, factor, factor); }, "requested_exactness");
+    }
+}
+
+TEST(TriangleDuffyImplementation, RejectsInvalidFactorContracts)
+{
+    const auto qualified = make_gauss_legendre_rule(255);
+    const auto reject = [&](const QuadratureRule& invalid, std::string_view condition) {
+        expect_invalid_argument_with_message([&] { (void)make_triangle_rule(0, invalid); }, condition);
+        expect_invalid_argument_with_message([&] { (void)make_triangle_rule(0, invalid, qualified); }, condition);
+        expect_invalid_argument_with_message([&] { (void)make_triangle_rule(0, qualified, invalid); }, condition);
+    };
+    const auto insufficient = make_gauss_legendre_rule(1);
+    const auto snapshot = insufficient;
+    expect_invalid_argument_with_message([&] { (void)make_triangle_rule(1, insufficient); }, "exactness");
+    expect_same_ordered_rule(insufficient, snapshot);
+    const QuadratureRule degree_zero(svmp::CellFamily::Line, 0, {{0.0, 0.0, 0.0}}, {2.0});
+    expect_invalid_argument_with_message([&] { (void)make_triangle_rule(0, degree_zero); }, "exactness");
+    reject(make_triangle_centroid_rule(), "Line");
+    for (const double x : {-1.0001, 1.0001}) {
+        const QuadratureRule exterior(svmp::CellFamily::Line, 1, {{x, 0.0, 0.0}}, {2.0});
+        reject(exterior, "[-1,1]");
+    }
+    const QuadratureRule wrong_measure(svmp::CellFamily::Line, 1, {{0.0, 0.0, 0.0}}, {3.0});
+    reject(wrong_measure, "normalization");
+    auto emptied = make_gauss_legendre_rule(1);
+    const auto retained = std::move(emptied);
+    ASSERT_EQ(emptied.num_points(), 0u);
+    reject(emptied, "empty");
+    EXPECT_EQ(retained.num_points(), 1u);
+    const QuadratureRule oversized(svmp::CellFamily::Line, 255,
+        std::vector<QuadPoint>(129, QuadPoint::Zero()), std::vector<double>(129, 2.0 / 129.0));
+    reject(oversized, "16384");
+    const auto largest_lobatto = make_gauss_lobatto_rule(253);
+    expect_invalid_argument_with_message([&] { (void)make_triangle_rule(253, largest_lobatto); }, "exactness");
+}
+
+TEST(TriangleDuffyImplementation, ReportsNumericalFailureWithoutRepairingSamples)
+{
+    const QuadratureRule false_metadata(svmp::CellFamily::Line, 1, {{0.5, 0.0, 0.0}}, {2.0});
+    EXPECT_THROW((void)make_triangle_rule(0, false_metadata), ConvergenceException);
+    const QuadratureRule overflow(svmp::CellFamily::Line, 1,
+        {{0.0, 0.0, 0.0}, {0.0, 0.0, 0.0}, {0.0, 0.0, 0.0}}, {1.0e200, -1.0e200, 2.0});
+    EXPECT_THROW((void)make_triangle_rule(0, overflow), ConvergenceException);
+}
+
+TEST(TriangleDuffyQualification, IntegratesEveryGaussBackedRequest)
+{
+    expect_every_triangle_rule(LineEndpointPolicy::Excluded);
+}
+
+TEST(TriangleDuffyQualification, IntegratesEveryLobattoBackedRequest)
+{
+    expect_every_triangle_rule(LineEndpointPolicy::Included);
+}
+
+TEST(TriangleDuffyQualification, IntegratesIndependentGaussAndLobattoFactors)
+{
+    struct Pair {
+        bool u_lobatto;
+        bool v_lobatto;
+        int maximum_degree;
+        std::size_t degree_five_points;
+    };
+    for (const auto pair : {Pair{false, false, 254, 12}, Pair{false, true, 253, 16},
+                           Pair{true, false, 252, 15}, Pair{true, true, 252, 20}}) {
+        for (const int p : {0, 1, 2, 5, 31, 127, pair.maximum_degree}) {
+            SCOPED_TRACE(::testing::Message() << "degree=" << p
+                << ", u Lobatto=" << pair.u_lobatto << ", v Lobatto=" << pair.v_lobatto);
+            const auto u = pair.u_lobatto ? make_gauss_lobatto_rule(p + 1) : make_gauss_legendre_rule(p + 1);
+            const auto v = pair.v_lobatto ? make_gauss_lobatto_rule(p) : make_gauss_legendre_rule(p);
+            const auto rule = make_triangle_rule(p, u, v);
+            ASSERT_EQ(rule.polynomial_exactness(), p);
+            EXPECT_EQ(rule.num_points(), u.num_points() * v.num_points());
+            if (p == 5) {
+                EXPECT_EQ(rule.num_points(), pair.degree_five_points);
+            }
+            expect_triangle_moments(rule, p);
+            if (p == pair.maximum_degree) {
+                EXPECT_THROW((void)make_triangle_rule(p + 1, u, v), InvalidArgumentException);
+            }
+        }
+    }
+}
+
+static_assert(max_symmetric_triangle_exactness() == 19);
+static_assert(noexcept(max_symmetric_triangle_exactness()));
+static_assert(std::is_same_v<decltype(&make_symmetric_triangle_rule), QuadratureRule (*)(int)>);
+
+TEST(SymmetricTriangleImplementation, AdvancesEveryRequestToARetainedTable)
+{
+    constexpr std::array<int, 20> degrees{1, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 12, 12, 13, 14, 17, 17, 17, 19, 19};
+    expect_same_ordered_rule(make_symmetric_triangle_rule(0), make_triangle_centroid_rule());
+    for (int request = 0; request <= max_symmetric_triangle_exactness(); ++request) {
+        SCOPED_TRACE(request);
+        const auto rule = make_symmetric_triangle_rule(request);
+        EXPECT_EQ(rule.cell_family(), svmp::CellFamily::Triangle);
+        EXPECT_EQ(rule.polynomial_exactness(), degrees[request]);
+        expect_same_ordered_rule(rule, make_symmetric_triangle_rule(degrees[request]));
+    }
+}
+
+TEST(SymmetricTriangleImplementation, RejectsRequestsOutsideSupportedRange)
+{
+    for (const int request : {std::numeric_limits<int>::min(), -1, 20, std::numeric_limits<int>::max()}) {
+        expect_invalid_argument_with_message([request] { (void)make_symmetric_triangle_rule(request); },
+            "Symmetric triangle generator: requested_exactness must be in [0, 19]");
+    }
+}
+
+namespace {
+
+struct OrbitSignature {
+    int size;
+    double a = 0.0;
+    double b = 0.0;
+};
+
+struct TableSignature {
+    int degree;
+    std::vector<OrbitSignature> orbits;
+};
+
+// Every retained table as its orbit sizes and leading barycentric coordinates in
+// source order, taken from Dunavant (1985) rather than the production tables.
+const TableSignature kSymmetricTriangleTables[] = {
+    {1, {{1}}},
+    {2, {{3, 1.0 / 6.0}}},
+    {3, {{1}, {3, 0.2}}},
+    {4, {{3, 0.445948490915965}, {3, 0.091576213509771}}},
+    {5, {{1}, {3, 0.470142064105115}, {3, 0.101286507323456}}},
+    {6, {{3, 0.249286745170910}, {3, 0.063089014491502},
+         {6, 0.053145049844817, 0.310352451033784}}},
+    {7, {{1}, {3, 0.260345966079040}, {3, 0.065130102902216},
+         {6, 0.048690315425316, 0.312865496004874}}},
+    {8, {{1}, {3, 0.459292588292723}, {3, 0.170569307751760}, {3, 0.050547228317031},
+         {6, 0.008394777409958, 0.263112829634638}}},
+    {9, {{1}, {3, 0.489682519198738}, {3, 0.437089591492937}, {3, 0.188203535619033},
+         {3, 0.044729513394453}, {6, 0.036838412054736, 0.221962989160766}}},
+    {10, {{1}, {3, 0.485577633383657}, {3, 0.109481575485037},
+          {6, 0.141707219414880, 0.307939838764121}, {6, 0.025003534762686, 0.246672560639903},
+          {6, 0.009540815400299, 0.066803251012200}}},
+    {12, {{3, 0.488217389773805}, {3, 0.439724392294460}, {3, 0.271210385012116},
+          {3, 0.127576145541586}, {3, 0.021317350453210}, {6, 0.115343494534698, 0.275713269685514},
+          {6, 0.022838332222257, 0.281325580989940}, {6, 0.025734050548330, 0.116251915907597}}},
+    {13, {{1}, {3, 0.495048184939705}, {3, 0.468716635109574}, {3, 0.414521336801277},
+          {3, 0.229399572042831}, {3, 0.114424495196330}, {3, 0.024811391363459},
+          {6, 0.094853828379579, 0.268794997058761}, {6, 0.018100773278807, 0.291730066734288},
+          {6, 0.022233076674090, 0.126357385491669}}},
+    {14, {{3, 0.488963910362179}, {3, 0.417644719340454}, {3, 0.273477528308839},
+          {3, 0.177205532412543}, {3, 0.061799883090873}, {3, 0.019390961248701},
+          {6, 0.057124757403648, 0.172266687821356}, {6, 0.092916249356972, 0.336861459796345},
+          {6, 0.014646950055654, 0.298372882136258}, {6, 0.001268330932872, 0.118974497696957}}},
+    {17, {{1}, {3, 0.497170540556774}, {3, 0.482176322624625}, {3, 0.450239969020782},
+          {3, 0.400266239377397}, {3, 0.252141267970953}, {3, 0.162047004658461},
+          {3, 0.075875882260746}, {3, 0.015654726967822}, {6, 0.010186928826919, 0.334319867363658},
+          {6, 0.135440871671036, 0.292221537796944}, {6, 0.054423924290583, 0.319574885423190},
+          {6, 0.012868560833637, 0.190704224192292}, {6, 0.067165782413524, 0.180483211648746},
+          {6, 0.014663182224828, 0.080711313679564}}},
+    {19, {{1}, {3, 0.489609987073006}, {3, 0.454536892697893}, {3, 0.401416680649431},
+          {3, 0.255551654403098}, {3, 0.177077942152130}, {3, 0.110061053227952},
+          {3, 0.055528624251840}, {3, 0.012621863777229}, {6, 0.003611417848412, 0.395754787356943},
+          {6, 0.134466754530780, 0.307929983880436}, {6, 0.014446025776115, 0.264566948406520},
+          {6, 0.046933578838178, 0.358539352205951}, {6, 0.002861120350567, 0.157807405968595},
+          {6, 0.223861424097916, 0.075050596975911}, {6, 0.034647074816760, 0.142421601113383},
+          {6, 0.010161119296278, 0.065494628082938}}},
+};
+
+// The (x, y) samples of one orbit, in the order the generator emits them.
+std::vector<std::array<double, 2>> expected_orbit_samples(const OrbitSignature& orbit)
+{
+    const auto [size, a, b] = orbit;
+    if (size == 1) {
+        return {{1.0 / 3.0, 1.0 / 3.0}};
+    }
+    if (size == 3) {
+        const double c = 1.0 - 2.0 * a;
+        return {{a, c}, {a, a}, {c, a}};
+    }
+    const double c = 1.0 - a - b;
+    return {{b, c}, {c, b}, {a, c}, {c, a}, {a, b}, {b, a}};
+}
+
+} // namespace
+
+TEST(SymmetricTriangleQualification, FollowsSourceOrbitOrder)
+{
+    for (const auto& [degree, orbits] : kSymmetricTriangleTables) {
+        SCOPED_TRACE(degree);
+        const auto rule = make_symmetric_triangle_rule(degree);
+        std::size_t q = 0;
+        for (const auto& orbit : orbits) {
+            const auto samples = expected_orbit_samples(orbit);
+            ASSERT_LE(q + samples.size(), rule.num_points());
+            const double weight = rule.weight(q);
+            for (const auto& [x, y] : samples) {
+                EXPECT_NEAR(rule.point(q)[0], x, kFixtureTolerance) << "point=" << q;
+                EXPECT_NEAR(rule.point(q)[1], y, kFixtureTolerance) << "point=" << q;
+                EXPECT_EQ(rule.weight(q), weight) << "point=" << q;
+                ++q;
+            }
+        }
+        EXPECT_EQ(q, rule.num_points());
+    }
+}
+
+TEST(SymmetricTriangleQualification, EveryTableIsExactContainedAndNormalized)
+{
+    for (const auto& table : kSymmetricTriangleTables) {
+        SCOPED_TRACE(table.degree);
+        const auto rule = make_symmetric_triangle_rule(table.degree);
+        expect_triangle_moments(rule, table.degree);
+        CompensatedSum weights;
+        for (std::size_t q = 0; q < rule.num_points(); ++q) {
+            const double x = rule.point(q)[0];
+            const double y = rule.point(q)[1];
+            EXPECT_TRUE(x >= 0.0 && y >= 0.0 && x + y <= 1.0) << "point=" << q;
+            for (std::size_t previous = 0; previous < q; ++previous) {
+                EXPECT_TRUE(x != rule.point(previous)[0] || y != rule.point(previous)[1])
+                    << "point=" << q << " repeats " << previous;
+            }
+            weights.add(rule.weight(q));
+        }
+        // The documented bound; the largest deviation, 4.0e-15, is degree 14.
+        EXPECT_LE(std::abs(weights.value() - 0.5L), 5e-15L);
+        // Only the centroids of degrees 3 and 7 have negative weights.
+        const auto negative_weights = std::count_if(rule.weights().begin(), rule.weights().end(),
+                                                    [](double weight) { return weight < 0.0; });
+        EXPECT_EQ(negative_weights, table.degree == 3 || table.degree == 7 ? 1 : 0);
+    }
+}
+
+TEST(SymmetricTriangleCompatibility, MatchesLegacyTri3AndTri6Samples)
+{
+    // Volume/face samples of nn_elem_gip.h in legacy order, each paired with its
+    // generic index. TRI6 uses the legacy 15-digit decimals.
+    struct LegacySample {
+        int degree;
+        std::size_t generic;
+        double x;
+        double y;
+        double weight;
+    };
+    constexpr double s0 = 2.0 / 3.0, t0 = 1.0 / 6.0, w0 = 1.0 / 6.0;
+    constexpr double c = 0.333333333333333;
+    constexpr double s1 = 0.797426985353087, t1 = 0.101286507323456, w1 = 0.125939180544827 / 2.0;
+    constexpr double s2 = 0.059715871789770, t2 = 0.470142064105115, w2 = 0.132394152788506 / 2.0;
+    constexpr LegacySample legacy[] = {
+        {2, 1, t0, t0, w0}, {2, 2, s0, t0, w0}, {2, 0, t0, s0, w0},
+        {5, 0, c, c, 0.225 / 2.0}, {5, 6, s1, t1, w1}, {5, 4, t1, s1, w1}, {5, 5, t1, t1, w1},
+        {5, 3, s2, t2, w2}, {5, 1, t2, s2, w2}, {5, 2, t2, t2, w2},
+    };
+    for (const auto& [degree, generic, x, y, weight] : legacy) {
+        SCOPED_TRACE(::testing::Message() << "degree=" << degree << ", generic=" << generic);
+        const auto rule = make_symmetric_triangle_rule(degree);
+        EXPECT_NEAR(rule.point(generic)[0], x, kFixtureTolerance);
+        EXPECT_NEAR(rule.point(generic)[1], y, kFixtureTolerance);
+        EXPECT_NEAR(rule.weight(generic), weight, kFixtureTolerance);
     }
 }

@@ -10,7 +10,8 @@
 #include "Simulation.h"
 
 /**
- * @brief Integrator class encapsulates the Newton iteration loop for time integration
+ * @brief Integrator class that encapsulates the Newton iteration loop for time
+ * integration.
  *
  * This class handles the nonlinear Newton iteration scheme for solving coupled
  * multi-physics equations in svMultiPhysics. It manages:
@@ -19,7 +20,91 @@
  * - Linear system assembly and solve
  * - Boundary condition application
  *
- * Related to GitHub issue #442: Encapsulate the Newton iteration in main.cpp
+ * ## Line search
+ *
+ * The nonlinear iterations of an equation can be globalized by a backtracking
+ * line search, enabled by the `Line_search_experimental` XML element of the
+ * equation (see @ref LineSearchParameters). Without it, every iteration applies
+ * the full increment of the linear solve.
+ *
+ * At every nonlinear iteration of an equation with line search enabled, the
+ * increment @f$\delta u@f$ of the linear solve is scaled by a step length
+ * @f$\alpha@f$ before being applied, so that the solution is updated to
+ * @f$u + \alpha\,\delta u@f$. The step lengths @f$\alpha = 1, \rho, \rho^2,
+ * \dots@f$ are tried in turn, with @f$\rho@f$ the step reduction factor, and
+ * the first one satisfying
+ * @f[
+ *   \| R(u + \alpha\,\delta u) \|_W \leq (1 - c\,\alpha)\,\| R(u) \|_W
+ * @f]
+ * is applied, with @f$c@f$ the minimum decrease. Once the step length reaches
+ * the minimum step length, it is applied regardless of the residual decrease.
+ *
+ * The norm @f$\|\cdot\|_W@f$ weights every residual entry by the inverse
+ * square root of the magnitude of the corresponding diagonal entry of the
+ * tangent at @f$u@f$, as the Jacobi preconditioner of the linear solver does,
+ * so that it is dimensionally homogeneous across the degrees of freedom of the
+ * equation. Degrees of freedom constrained by a Dirichlet condition have zero
+ * weight, since their residual is the reaction of the constraint. The weights
+ * are computed once per iteration and kept fixed while step lengths are tried,
+ * so that the norms of different step lengths are comparable (see
+ * compute_residual_weights).
+ *
+ * The linear system is solved once per iteration, whatever the number of step
+ * lengths tried. Measuring a step length costs one assembly of the linear
+ * system at the trial solution, which re-advances implicitly coupled active
+ * stress models as any other assembly does. The convergence test that follows
+ * (see finalize_iteration) is the same with or without line search.
+ *
+ * Line search is not implemented for prestress simulations: the nodal
+ * prestress is accumulated over the assemblies of a time step, which would
+ * include those of the trial step lengths unless they were excluded.
+ *
+ * @warning While it is implemented for all equations, line search is currently
+ *   only tested for struct, should be regarded as experimental, and used with
+ *   caution.
+ *
+ * ## Adaptive time step
+ *
+ * The time step can be adapted between steps to the residual, so that it
+ * grows as the solution approaches equilibrium. It is enabled by the
+ * `Adaptive_time_step` XML element of GeneralSimulationParameters (see
+ * @ref AdaptiveTimeStepParameters), whose `Time_step_size` is the first
+ * time step. The settings apply to the whole simulation and are held by the
+ * Integrator.
+ *
+ * Each step is one or more Newton iterations, bounded by Max_iterations and
+ * Tolerance as in any other run. Let @f$ R_n @f$ be the first residual of
+ * step @f$ n @f$: the norm of the residual assembled at the step's first
+ * Newton iteration, before any update of that step is applied, so it
+ * measures how far the solution of the previous step is from equilibrium. It
+ * is the norm the linear solver reports for its right-hand side
+ * (`eq.FSILS.RI.iNorm`), not normalized by any other residual; the Newton
+ * stopping criterion uses the same norm relative to the first residual of
+ * the run, @f$ R_n / R_1 @f$ (`eq.pNorm`).
+ *
+ * Once a step has converged, the next time step is set by switched evolution
+ * relaxation
+ * ([Mulder & van Leer (1985)](https://doi.org/10.1016/0021-9991(85)90144-5)),
+ * the controller of pseudo-transient continuation analysed by
+ * [Kelley & Keyes (1998)](https://doi.org/10.1137/S0036142996304796):
+ * @f[
+ *   \Delta t_{n+1} = \max\left( \Delta t_{\min},\; \min\left( \Delta t_{\max},\;
+ *                    g\,\Delta t_n,\; \Delta t_n \, \frac{R_{n-1}}{R_n} \right) \right),
+ * @f]
+ * with @f$ \Delta t_{\max} @f$, @f$ \Delta t_{\min} @f$ and @f$ g @f$ given by
+ * `Maximum_time_step` and the optional `Minimum_time_step` and
+ * `Maximum_growth_factor` (see adapt_time_step). The first step has no
+ * @f$ R_{n-1} @f$ and keeps its time step, and so does a step whose first
+ * residual is not finite. A time step so large that the inertia term vanishes
+ * makes each iteration a plain Newton iteration.
+ *
+ * The controller does not rely on the problem being steady: the first
+ * residual of a step measures how well the previous solution satisfies the
+ * current equations, which is meaningful for an unsteady problem too. It is
+ * currently supported, and tested, only for a Prestrain run, where time is
+ * fictitious and the loads must be steady. The ratio it uses lags the
+ * textbook one by a step, since the residual at the end of a step is only
+ * assembled as the first residual of the next.
  */
 class Integrator {
 
@@ -102,6 +187,21 @@ private:
   /** @brief Solution states at old, current, and intermediate time levels */
   SolutionStates solutions_;
 
+  /** @brief Whether the time step is adapted to the ratio of the first residuals of successive steps */
+  bool adaptive_time_step_enabled_ = false;
+
+  /** @brief Largest time step the adaptation may reach */
+  double adaptive_time_step_maximum_ = 0.0;
+
+  /** @brief Smallest time step the adaptation may reach */
+  double adaptive_time_step_minimum_ = 0.0;
+
+  /** @brief Largest ratio of a time step to the one before it; 0 if unlimited */
+  double adaptive_time_step_maximum_growth_factor_ = 0.0;
+
+  /** @brief First residual of the previous step, which the adaptation of the time step uses */
+  double residual_prev_ = 0.0;
+
   /** @brief Residual vector for face-based quantities */
   Vector<double> res_;
 
@@ -154,11 +254,53 @@ private:
   void solve_linear_system();
 
   /**
-   * @brief Perform corrector step and check convergence of all equations
+   * @brief Search for a step length that decreases the residual.
    *
-   * @return True if all equations converged, false otherwise
+   * Measures the increment of the linear solve at decreasing step lengths,
+   * starting from one, until the residual assembled at the resulting solution
+   * falls below \p reference_norm by the margin the settings of the equation
+   * ask for, or until the shortest step length is reached, which is returned
+   * without being measured. Measuring a step length costs one assembly of the
+   * linear system, while the increment itself is reused, so the linear system
+   * is solved once per nonlinear iteration however many step lengths are
+   * tried.
+   *
+   * The solution and the increment are left as they were found, so that the
+   * caller can apply the returned step length to them.
+   *
+   * @param[in,out] eq Equation whose increment is measured, and whose settings
+   *   configure the search.
+   * @param[in] weights Weight of every residual entry in the norm, as computed
+   *   by compute_residual_weights at the solution the search starts from.
+   * @param[in] reference_norm Norm of the residual at the solution the search
+   *   starts from, measured with \p weights.
+   *
+   * @return Step length to apply to the increment.
    */
-  bool corrector_and_check_convergence();
+  double line_search_step_length(eqType &eq, const Array<double> &weights,
+                                 const double reference_norm);
+
+  /**
+   * @brief Read the adaptive time step settings and share them with all ranks.
+   *
+   * The master takes them from the `Adaptive_time_step` XML element of
+   * GeneralSimulationParameters and broadcasts them.
+   */
+  void initialize_adaptive_time_step();
+
+  /**
+   * @brief Time step of the next step, adapted to the residual.
+   *
+   * Returns the current time step multiplied by the ratio of the first
+   * residuals of the last two steps, capped by `Maximum_time_step` and
+   * `Maximum_growth_factor` and bounded below by `Minimum_time_step`. The
+   * current time step is returned unchanged after the first step and after a
+   * step whose first residual is not finite.
+   *
+   * @param[in] residual First residual of the step that has just converged.
+   * @return Time step size for the next step.
+   */
+  double adapt_time_step(const double residual);
 
   /**
    * @brief Update residual and increment arrays for linear solver
@@ -166,6 +308,77 @@ private:
    * @param eq Reference to the equation being solved
    */
   void update_residual_arrays(eqType& eq);
+
+  /**
+   * @brief Assemble the linear system of an equation
+   *
+   * Evaluates the boundary conditions of the equation, forms the solution at
+   * the intermediate generalized-alpha time levels, and assembles the residual
+   * into com_mod.R and the tangent into com_mod.Val, including the
+   * contributions of the coupled surfaces.
+   *
+   * @param[in,out] eq Equation whose linear system is assembled, and whose
+   *   active stress models are re-advanced when their state is coupled
+   *   implicitly.
+   */
+  void assemble_linear_system(eqType &eq);
+
+  /**
+   * @brief Compute the weight of every residual entry in the residual norm.
+   *
+   * The weight of a degree of freedom is the inverse square root of the
+   * magnitude of the corresponding diagonal entry of the tangent, assembled
+   * across processes, which is what the Jacobi preconditioner of the linear
+   * solver scales the rows of the linear system by. The weight of a degree of
+   * freedom constrained by a Dirichlet condition is zero, so that the residual
+   * norm ignores the rows the linear solve eliminates, whose residual is a
+   * reaction rather than an equation left to be satisfied.
+   *
+   * The resulting norm is dimensionally homogeneous across the degrees of
+   * freedom of an equation, which a norm of the residual entries themselves is
+   * not.
+   *
+   * The weights are read from the tangent assembled last, which the assembly
+   * of a further solution overwrites, so a line search computes them once at
+   * the solution it starts from and reuses them for every step length it
+   * tries. Keeping them fixed is what makes the norm a function of the
+   * solution alone, and so makes the norms of two step lengths comparable.
+   *
+   * @param[out] weights Weight of every degree of freedom of every node, in
+   *   the node numbering of the linear solver.
+   */
+  void compute_residual_weights(Array<double> &weights) const;
+
+  /**
+   * @brief Compute the weighted norm of the assembled residual
+   *
+   * Sums the squares of the weighted entries of com_mod.R belonging to the
+   * nodes owned by each process and reduces them across processes, so that the
+   * result does not depend on the partitioning. It is available as soon as the
+   * residual has been assembled, before the linear system is solved.
+   *
+   * com_mod.R holds the residual of the equation assembled last, and its rows
+   * are the degrees of freedom of that equation, numbered from zero.
+   *
+   * @param[in] weights Weight of every degree of freedom of every node, as
+   *   computed by compute_residual_weights.
+   *
+   * @return Weighted Euclidean norm of the assembled residual.
+   */
+  double residual_norm(const Array<double> &weights) const;
+
+  /**
+   * @brief Zero the weights of the degrees of freedom constrained by a
+   * Dirichlet condition
+   *
+   * The linear solve eliminates those degrees of freedom, so a norm of the
+   * residual drops them as well: their residual is the reaction of the
+   * constraint rather than an equation left to be satisfied.
+   *
+   * @param[in,out] weights Weight of every degree of freedom of every node, in
+   *   the node numbering of the linear solver.
+   */
+  void mask_constrained_dofs(Array<double> &weights) const;
 
   /**
    * @brief Compute the fiber stretch and fiber stretch rate at every node.
@@ -225,12 +438,68 @@ private:
   void initiator(SolutionStates& solutions);
 
   /**
-   * @brief Corrector function with convergence check (corrector)
+   * @brief Apply a multiple of the increment of the linear solve to the
+   * solution
    *
-   * Updates solution at n+1 time level and checks convergence of Newton
-   * iterations. Also handles equation switching for coupled problems.
+   * Advances the solution of an equation at the n+1 time level by @c
+   * step_length times the increment held in com_mod.R (and com_mod.Rd for the
+   * velocity-based formulation), and updates the quantities that are derived
+   * from the resulting solution: the Taylor-Hood pressure at edge nodes, the
+   * copy of the solution onto the solid subdomain of an FSI equation, the
+   * ionic state of an electrophysiology equation, and the wall filter of a CMM
+   * equation.
+   *
+   * The solution change is proportional to step_length, so calling this
+   * function from the same starting solution with different step lengths traces
+   * the segment between that solution and the one the full increment produces.
+   * Every quantity derived from the solution is recomputed, so any step length
+   * leaves a consistent state.
+   *
+   * Modifies:
+   * \code {.cpp}
+   *   com_mod.Ad
+   *   solutions_.current.A
+   *   solutions_.current.D
+   *   solutions_.current.Y
+   *   cep_mod.Xion
+   * \endcode
+   *
+   * @param[in] eq Equation whose solution is advanced, which selects the
+   *   degrees of freedom the increment is applied to and the coefficients of
+   *   the time integration scheme.
+   * @param[in] step_length Step length multiplying the increment. One applies
+   * the full increment of the linear solve.
    */
-  void corrector();
+  void apply_increment(const eqType &eq, const double step_length);
+
+  /**
+   * @brief Close a nonlinear iteration of the current equation
+   *
+   * Normalizes the nodal prestress accumulated during the assembly, tests the
+   * residual norm of the current equation for convergence, and selects the
+   * equation to be solved by the next iteration.
+   *
+   * The nodal quantities this function reduces are accumulated once per
+   * assembly and its convergence bookkeeping counts one iteration, so it is
+   * called once per iteration, after the solution has been advanced by
+   * apply_increment.
+   *
+   * Modifies:
+   * \code {.cpp}
+   *   com_mod.pSa
+   *   com_mod.pSn
+   *   solutions_.current.A
+   *   solutions_.current.D
+   *   solutions_.current.Y
+   *
+   *   com_mod.cEq
+   *   eq.FSILS.RI.iNorm
+   *   eq.iNorm
+   *   eq.ok
+   *   eq.pNorm
+   * \endcode
+   */
+  void finalize_iteration();
 
   /**
    * @brief Pressure correction for Taylor-Hood elements (corrector_taylor_hood)

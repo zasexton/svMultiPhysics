@@ -7,6 +7,7 @@
 #include "vtk_xml_parser.h"
 #include "VtkData.h"
 
+#include "Core/Exception.h"
 #include "all_fun.h"
 #include "consts.h"
 #include "post.h"
@@ -906,6 +907,7 @@ void write_vtu_debug(ComMod& com_mod, mshType& lM, const std::string& fName)
   delete vtk_writer;
 }
 
+
 //------------
 // write_vtus
 //------------
@@ -975,7 +977,8 @@ void write_vtus(Simulation* simulation, const SolutionStates& solutions, const b
       if (oGrp == OutputNameType::outGrp_fN) {
         nFn = 1;
         for (int iM = 0; iM < nMsh; iM++) {
-          nFn = std::max(nFn, meshes[iM].nFn);
+          nFn = std::max(nFn,
+            meshes[iM].fibers.get_num_directions());
         }
         nOut = nOut + nFn;
         outDof = outDof + eq.output[iOut].l * nFn;
@@ -1205,7 +1208,7 @@ void write_vtus(Simulation* simulation, const SolutionStates& solutions, const b
           case OutputNameType::outGrp_fN:
             cOut = cOut - 1;
             tmpV.resize(nFn*nsd,msh.nNo);
-            if (msh.nFn != 0) {
+            if (msh.fibers.has_fibers()) {
               post::fib_dir_post(simulation, msh, nFn, tmpV, solutions, iEq);
             }
             for (int iFn = 0; iFn < nFn; iFn++) {
@@ -1226,7 +1229,7 @@ void write_vtus(Simulation* simulation, const SolutionStates& solutions, const b
 
           case OutputNameType::outGrp_fA:
             tmpV.resize(1,msh.nNo);
-            if (msh.nFn == 2) {
+            if (msh.fibers.get_num_directions() >= 2) {
               post::fib_algn_post(simulation, msh, tmpV, solutions, iEq);
             }
             for (int a = 0; a < msh.nNo; a++) {
@@ -1244,7 +1247,7 @@ void write_vtus(Simulation* simulation, const SolutionStates& solutions, const b
             tmpV.resize(l,msh.nNo); 
             tmpVe.resize(msh.nEl);
 
-            if (com_mod.pstEq) {
+            if (com_mod.compute_prestress) {
               for (int a = 0; a < msh.nNo; a++) {
                 int Ac = msh.gN(a);
                 for (int i = 0; i < l; i++) {
@@ -1333,7 +1336,7 @@ void write_vtus(Simulation* simulation, const SolutionStates& solutions, const b
 
           case OutputNameType::outGrp_fibStretch: {
             Vector<double> res(msh.nNo);
-            if (msh.nFn != 0) {
+            if (msh.fibers.has_fibers()) {
               post::fib_stretch(simulation->com_mod, iEq, msh, solutions.current.get_displacement(), res);
             }
             for (int a = 0; a < msh.nNo; a++) {
@@ -1343,7 +1346,7 @@ void write_vtus(Simulation* simulation, const SolutionStates& solutions, const b
 
           case OutputNameType::outGrp_fibStretchRate: {
             Vector<double> res(msh.nNo);
-            if (msh.nFn != 0) {
+            if (msh.fibers.has_fibers()) {
               post::fib_stretch_rate(simulation->com_mod, iEq, msh, solutions, res);
             }
             for (int a = 0; a < msh.nNo; a++) {
@@ -1463,6 +1466,17 @@ void write_vtus(Simulation* simulation, const SolutionStates& solutions, const b
 
     nNo = nNo + d[iM].nNo;
     nEl = nEl + d[iM].nEl;
+  }
+
+  // The prestrain deformation gradient of a prestrain run, gathered onto
+  // the master in each mesh's original element order. A prestrain run carries
+  // one on every mesh, and every rank takes part for every mesh, also ranks
+  // that hold none of a mesh's elements: the gather is collective.
+  std::vector<Array<double>> gF0(nMsh);
+  if (com_mod.compute_prestrain) {
+    for (int iM = 0; iM < nMsh; iM++) {
+      gF0[iM] = com_mod.msh[iM].prestrain.gather(com_mod, cm_mod, com_mod.msh[iM]);
+    }
   }
 
   if (cm.slv(cm_mod)) {
@@ -1605,6 +1619,42 @@ void write_vtus(Simulation* simulation, const SolutionStates& solutions, const b
       vtk_writer->set_element_data("Mesh_ID", tmpI);
     }
   }  // if (com_mod.savedOnce || nMsh > 1)
+
+  // Prestrain deformation gradient of a prestrain run, one cell array per
+  // Gauss point of the mesh with the most; a mesh with fewer gets the
+  // identity in the arrays beyond its own.
+  if (com_mod.compute_prestrain) {
+    int nGmax = 0;
+    for (int iM = 0; iM < nMsh; iM++) {
+      nGmax = std::max(nGmax, com_mod.msh[iM].nG);
+    }
+    const int ncomp = nsd*nsd;
+
+    for (int g = 0; g < nGmax; g++) {
+      Array<double> tmpF(ncomp, nEl);
+      int Ec = 0;
+      for (int iM = 0; iM < nMsh; iM++) {
+        const auto& F0 = gF0[iM];
+        const bool has_F0 = (g < com_mod.msh[iM].nG);
+        for (int e = 0; e < d[iM].nEl; e++) {
+          if (has_F0) {
+            for (int c = 0; c < ncomp; c++) {
+              tmpF(c,Ec) = F0(g*ncomp + c, e);
+            }
+          } else {
+            for (int c = 0; c < ncomp; c++) {
+              tmpF(c,Ec) = 0.0;
+            }
+            for (int k = 0; k < nsd; k++) {
+              tmpF(k*(nsd+1),Ec) = 1.0;
+            }
+          }
+          Ec = Ec + 1;
+        }
+      }
+      vtk_writer->set_element_data("Prestrain_F_g" + std::to_string(g), tmpF);
+    }
+  }
   // Write element Jacobian and von Mises stress if necessary
   //
   for (int l = 0; l < nOute; l++) {

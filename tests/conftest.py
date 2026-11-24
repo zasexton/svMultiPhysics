@@ -10,7 +10,9 @@ import xml.etree.ElementTree as ET
 import meshio
 
 this_file_dir = os.path.abspath(os.path.dirname(__file__))
-cpp_exec = os.path.join(this_file_dir, "..", "build", "svMultiPhysics-build", "bin", "svmultiphysics")
+cpp_exec = os.environ.get("SVMP_SOLVER_EXECUTABLE") or os.path.join(
+    this_file_dir, "..", "build", "svMultiPhysics-build", "bin", "svmultiphysics"
+)
 cpp_exec_p = os.path.join(this_file_dir, "..", "build-petsc", "svMultiPhysics-build", "bin", "svmultiphysics")
 
 
@@ -38,11 +40,15 @@ def cmake_cache_path_for(exe_path):
 # CMakeCache.txt of the corresponding build (PETSc tests use the separate build
 # at cpp_exec_p; Trilinos is linked into the main build at cpp_exec). PETSc is
 # enabled when SV_PETSC_DIR is a non-empty path, Trilinos when SV_USE_TRILINOS
-# is ON. A missing cache (e.g. the build does not exist) means "not available".
+# is ON. Package validation supplies the installed executable and configuration
+# explicitly because a clean test container has no CMake build cache.
 HAS_PETSC = bool(read_cmake_cache_variable(cmake_cache_path_for(cpp_exec_p), "SV_PETSC_DIR"))
-HAS_TRILINOS = (
-    read_cmake_cache_variable(cmake_cache_path_for(cpp_exec), "SV_USE_TRILINOS") or ""
-).upper() in ("ON", "1", "TRUE", "YES")
+if os.environ.get("SVMP_SOLVER_EXECUTABLE"):
+    HAS_TRILINOS = os.environ.get("SVMP_SOLVER_CONFIGURATION") == "trilinos"
+else:
+    HAS_TRILINOS = (
+        read_cmake_cache_variable(cmake_cache_path_for(cpp_exec), "SV_USE_TRILINOS") or ""
+    ).upper() in ("ON", "1", "TRUE", "YES")
 
 # Reusable markers to decorate PETSc/Trilinos tests at their definition site.
 skip_if_no_petsc = pytest.mark.skipif(
@@ -101,6 +107,7 @@ RTOL = {
     "Active_tension_fibers": 1.0e-10,
     "Active_tension_sheets": 1.0e-10,
     "Active_tension_normal": 1.0e-10,
+    **{"Prestrain_F_g" + str(g): 1.0e-10 for g in range(27)},
 }
 
 # Relative tolerance for the TimeValue field data. The solver accumulates the
@@ -108,8 +115,10 @@ RTOL = {
 # by floating point round-off.
 RTOL_TIME_VALUE = 1.0e-12
 
-# Number of processors to test
-PROCS = [1, 3, 4]
+# MPI rank counts to test; CI selects the fast or full set.
+PROCS = [int(value) for value in os.environ.get("SVMP_TEST_PROCS", "1,3,4").split(",")]
+if not PROCS or any(value < 1 for value in PROCS):
+    raise ValueError("SVMP_TEST_PROCS must be a comma-separated list of positive integers")
 
 
 def read_time_step_size(name_inp):
@@ -138,7 +147,7 @@ def n_proc(request):
     return request.param
 
 
-def run_by_name(folder, name, t_max, n_proc=1):
+def run_by_name(folder, name, t_max, n_proc=1, clean=True, timeout=None):
     """
     Run a test case and return results
     Args:
@@ -153,12 +162,12 @@ def run_by_name(folder, name, t_max, n_proc=1):
 
     # remove old results folders if they exist
     dir_path = os.path.join(folder, str(n_proc) + "-procs")
-    if os.path.exists(dir_path):
+    if clean and os.path.exists(dir_path):
         shutil.rmtree(dir_path)
 
     # run simulation (PETSc tests use a dedicated build; see cpp_exec_p)
     exe = cpp_exec_p if "petsc" in folder else cpp_exec
-    cmd = " ".join(
+    cmd = list(filter(None,
         [
             "mpirun",
             OVERSUBSCRIBE_FLAG if n_proc > 1 else "",
@@ -167,12 +176,12 @@ def run_by_name(folder, name, t_max, n_proc=1):
             exe,
             name,
         ]
-    )
+    ))
 
     # Run the command while capturing the return code and stderr output. This
     # way, if something goes wrong, we can raise an appropriate error message.
     completed = subprocess.run(
-        cmd, cwd=folder, shell=True, stderr=subprocess.PIPE, text=True
+        cmd, cwd=folder, stderr=subprocess.PIPE, text=True, timeout=timeout
     )
 
     # Print the captured stderr to console, so it is visible. Notice that this
@@ -206,6 +215,8 @@ def run_with_reference(
     name_ref=None,
     name_inp="solver.xml",
     check_time_value=True,
+    clean=True,
+    cell_fields=(),
 ):
     """
     Run a test case and compare it to a stored reference solution
@@ -218,6 +229,7 @@ def run_with_reference(
         name_ref: name of reference file (.vtu)
         check_time_value: whether to compare the TimeValue field data against
             the time reached at time step t_max
+        cell_fields: cell array fields to compare (e.g. ["Prestrain_F_g0"])
     """
     # default reference name
     if not name_ref:
@@ -225,7 +237,7 @@ def run_with_reference(
 
     # run simulation
     folder = os.path.join("cases", base_folder, test_folder)
-    res = run_by_name(folder, name_inp, t_max, n_proc)
+    res = run_by_name(folder, name_inp, t_max, n_proc, clean)
 
     # read reference
     fname = os.path.join(folder, name_ref)
@@ -249,15 +261,17 @@ def run_with_reference(
             msg += " Result is " + str(time_value)
             msg += " instead of " + str(time_expected) + ".\n"
 
-    for f in fields:
+    for f in list(fields) + list(cell_fields):
         # extract field
-        if f not in res.point_data.keys():
+        res_data = res.cell_data if f in cell_fields else res.point_data
+        if f not in res_data.keys():
             raise ValueError("Field " + f + " not in simulation result")
-        a = res.point_data[f]
+        a = np.concatenate(res_data[f]) if f in cell_fields else res_data[f]
 
-        if f not in ref.point_data.keys():
+        ref_data = ref.cell_data if f in cell_fields else ref.point_data
+        if f not in ref_data.keys():
             raise ValueError("Field " + f + " not in reference result")
-        b = ref.point_data[f]
+        b = np.concatenate(ref_data[f]) if f in cell_fields else ref_data[f]
 
         # truncate last dimension if solution is 2D but reference is 3D
         if len(a.shape) == 2:

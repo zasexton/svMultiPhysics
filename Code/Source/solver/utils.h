@@ -36,6 +36,15 @@ int CountBits(int n);
 
 double cput();
 
+/**
+ * @brief Return the generalized-alpha force evaluation time.
+ *
+ * Time-dependent loads contributing to a residual are evaluated at
+ * \f$t_{n+\alpha_f}\f$, while \p endpoint_time is \f$t_{n+1}\f$.
+ */
+double generalized_alpha_time(double endpoint_time, double time_step,
+                              double alpha_f);
+
 Vector<double> cross(const Array<double>& V);
 
 bool dequeue(queueType& que, int& iVal);
@@ -46,6 +55,9 @@ int ibset(int value, int pos);
 bool is_zero(double value1, double value2=0.0);
 
 double mem_usage(const bool print_usage=false, const std::string& prefix="");
+
+// Run an executable with one filename argument and wait for successful completion.
+void run_process(std::string executable, std::string input_file);
 
 /**
  * @brief Compute the square of the Euclidean norm of a vector.
