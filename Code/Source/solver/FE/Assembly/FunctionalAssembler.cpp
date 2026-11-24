@@ -248,6 +248,15 @@ std::span<const GlobalIndex> gatherDofsWithOffset(std::span<const GlobalIndex> d
     return Real(1);
 }
 
+/// Whether the cells bind the solution of the primary field: not for a vector
+/// basis (H(div), H(curl)), which has no tables in a functional's context and
+/// whose integrands measured forms refuse; the other fields' data are bound
+/// apart (bindFieldSolutionData).
+[[nodiscard]] bool bindsPrimarySolution(const spaces::FunctionSpace& space)
+{
+    return !space.element().basis().is_vector_valued();
+}
+
 void prepareCellContext(AssemblyContext& context,
                         const IMeshAccess& mesh,
                         GlobalIndex cell_id,
@@ -2152,11 +2161,12 @@ std::vector<Real> FunctionalAssembler::assembleMultiple(
     }
 
     const bool need_solution =
-        hasFlag(all_required, RequiredData::SolutionCoefficients) ||
-        hasFlag(all_required, RequiredData::SolutionValues) ||
-        hasFlag(all_required, RequiredData::SolutionGradients) ||
-        hasFlag(all_required, RequiredData::SolutionHessians) ||
-        hasFlag(all_required, RequiredData::SolutionLaplacians);
+        bindsPrimarySolution(*space_) &&
+        (hasFlag(all_required, RequiredData::SolutionCoefficients) ||
+         hasFlag(all_required, RequiredData::SolutionValues) ||
+         hasFlag(all_required, RequiredData::SolutionGradients) ||
+         hasFlag(all_required, RequiredData::SolutionHessians) ||
+         hasFlag(all_required, RequiredData::SolutionLaplacians));
 
     GlobalIndex elements_processed = 0;
 
@@ -2252,12 +2262,13 @@ void FunctionalAssembler::evaluateCellFunctionals(std::span<FunctionalKernel* co
     }
 
     const bool need_solution =
-        hasFlag(required, RequiredData::SolutionCoefficients) ||
-        hasFlag(required, RequiredData::SolutionValues) ||
-        hasFlag(required, RequiredData::SolutionGradients) ||
-        hasFlag(required, RequiredData::SolutionHessians) ||
-        hasFlag(required, RequiredData::SolutionLaplacians) ||
-        !field_reqs.empty();
+        bindsPrimarySolution(*space_) &&
+        (hasFlag(required, RequiredData::SolutionCoefficients) ||
+         hasFlag(required, RequiredData::SolutionValues) ||
+         hasFlag(required, RequiredData::SolutionGradients) ||
+         hasFlag(required, RequiredData::SolutionHessians) ||
+         hasFlag(required, RequiredData::SolutionLaplacians) ||
+         !field_reqs.empty());
 
     const std::size_t requested_batch_size = std::max<std::size_t>(options_.cell_batch_size, 1u);
     const std::size_t batch_size = std::min<std::size_t>(requested_batch_size, 256u);
@@ -2298,7 +2309,7 @@ void FunctionalAssembler::evaluateCellFunctionals(std::span<FunctionalKernel* co
             ctx.setSolutionCoefficients(local_solution);
         }
 
-        if (!previous_solutions_.empty()) {
+        if (bindsPrimarySolution(*space_) && !previous_solutions_.empty()) {
             for (std::size_t k = 0; k < previous_solutions_.size(); ++k) {
                 const auto& prev = previous_solutions_[k];
                 const auto* prev_view = (k < previous_solution_views_.size())
@@ -2533,12 +2544,13 @@ Real FunctionalAssembler::assembleCellsCore(
         }
     }
     const bool need_solution =
-        hasFlag(required, RequiredData::SolutionCoefficients) ||
-        hasFlag(required, RequiredData::SolutionValues) ||
-        hasFlag(required, RequiredData::SolutionGradients) ||
-        hasFlag(required, RequiredData::SolutionHessians) ||
-        hasFlag(required, RequiredData::SolutionLaplacians) ||
-        !field_reqs.empty();
+        bindsPrimarySolution(*space_) &&
+        (hasFlag(required, RequiredData::SolutionCoefficients) ||
+         hasFlag(required, RequiredData::SolutionValues) ||
+         hasFlag(required, RequiredData::SolutionGradients) ||
+         hasFlag(required, RequiredData::SolutionHessians) ||
+         hasFlag(required, RequiredData::SolutionLaplacians) ||
+         !field_reqs.empty());
 
     Real total = 0.0;
     KahanAccumulator accumulator;
@@ -2607,7 +2619,7 @@ Real FunctionalAssembler::assembleCellsCore(
 		                                                  "FunctionalAssembler::assembleCellsCore");
 		                    thread_context.setSolutionCoefficients(local_solution);
 		                }
-		                if (!previous_solutions_.empty()) {
+		                if (bindsPrimarySolution(*space_) && !previous_solutions_.empty()) {
 		                    for (std::size_t k = 0; k < previous_solutions_.size(); ++k) {
 		                        const auto& prev = previous_solutions_[k];
 		                        const auto* prev_view = (k < previous_solution_views_.size()) ? previous_solution_views_[k] : nullptr;
@@ -2657,7 +2669,7 @@ Real FunctionalAssembler::assembleCellsCore(
 		                                              "FunctionalAssembler::assembleCellsCore");
 		                context_.setSolutionCoefficients(local_solution);
 		            }
-		            if (!previous_solutions_.empty()) {
+		            if (bindsPrimarySolution(*space_) && !previous_solutions_.empty()) {
 		                for (std::size_t k = 0; k < previous_solutions_.size(); ++k) {
 		                    const auto& prev = previous_solutions_[k];
 		                    const auto* prev_view = (k < previous_solution_views_.size()) ? previous_solution_views_[k] : nullptr;
@@ -2707,7 +2719,7 @@ Real FunctionalAssembler::assembleCellsCore(
 	                                              "FunctionalAssembler::assembleCellsCore");
 	                context_.setSolutionCoefficients(local_solution);
 	            }
-	            if (!previous_solutions_.empty()) {
+	            if (bindsPrimarySolution(*space_) && !previous_solutions_.empty()) {
 	                for (std::size_t k = 0; k < previous_solutions_.size(); ++k) {
 	                    const auto& prev = previous_solutions_[k];
 	                    const auto* prev_view = (k < previous_solution_views_.size()) ? previous_solution_views_[k] : nullptr;
@@ -2783,12 +2795,13 @@ Real FunctionalAssembler::assembleBoundaryCore(
     }
 
     const bool need_solution =
-        hasFlag(required, RequiredData::SolutionCoefficients) ||
-        hasFlag(required, RequiredData::SolutionValues) ||
-        hasFlag(required, RequiredData::SolutionGradients) ||
-        hasFlag(required, RequiredData::SolutionHessians) ||
-        hasFlag(required, RequiredData::SolutionLaplacians) ||
-        !field_reqs.empty();
+        bindsPrimarySolution(*space_) &&
+        (hasFlag(required, RequiredData::SolutionCoefficients) ||
+         hasFlag(required, RequiredData::SolutionValues) ||
+         hasFlag(required, RequiredData::SolutionGradients) ||
+         hasFlag(required, RequiredData::SolutionHessians) ||
+         hasFlag(required, RequiredData::SolutionLaplacians) ||
+         !field_reqs.empty());
 
     Real total = 0.0;
     KahanAccumulator accumulator;
@@ -2926,7 +2939,7 @@ Real FunctionalAssembler::assembleBoundaryCore(
                         std::fprintf(stderr, "\n");
                     }
 	            }
-	            if (!previous_solutions_.empty()) {
+	            if (bindsPrimarySolution(*space_) && !previous_solutions_.empty()) {
 		                for (std::size_t k = 0; k < previous_solutions_.size(); ++k) {
 		                    const auto& prev = previous_solutions_[k];
 		                    const auto* prev_view = (k < previous_solution_views_.size()) ? previous_solution_views_[k] : nullptr;
