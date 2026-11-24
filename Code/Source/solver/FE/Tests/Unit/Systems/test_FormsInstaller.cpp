@@ -66,6 +66,7 @@
 #include <algorithm>
 #include <functional>
 #include <map>
+#include <set>
 #include <array>
 #include <cmath>
 #include <cstdint>
@@ -6515,6 +6516,68 @@ TEST(FormsInstaller, InlinedBoundaryLawOutputNamesItsInstanceState)
     ASSERT_EQ(values.size(), 2u);
     EXPECT_EQ(values[0], 5.0);
     EXPECT_EQ(values[1], 2.0);
+}
+
+namespace {
+
+void collectAuxiliaryInputSlots(const svmp::FE::forms::FormExprNode& node,
+                                std::set<std::uint32_t>& slots)
+{
+    if (node.type() == svmp::FE::forms::FormExprType::AuxiliaryInputRef && node.slotIndex()) {
+        slots.insert(*node.slotIndex());
+    }
+    for (const auto& child : node.childrenShared()) {
+        if (child) {
+            collectAuxiliaryInputSlots(*child, slots);
+        }
+    }
+}
+
+} // namespace
+
+// A model whose two input ports are bound to input-registry slots 1 and 2
+// reads each port's own input once its output is inlined: a resolved
+// registry slot is not read again as a model-local port.
+TEST(FormsInstaller, InlinedOutputReadsEachInputPortFromItsOwnRegistrySlot)
+{
+    using namespace svmp::FE::systems;
+    using svmp::FE::forms::FormExpr;
+    constexpr int face_a = 41;
+    constexpr int face_b = 42;
+    auto mesh = std::make_shared<svmp::FE::forms::test::SingleTetraTwoBoundaryFaceMeshAccess>(face_a, face_b);
+    auto space = std::make_shared<svmp::FE::spaces::H1Space>(ElementType::Tetra4, 1);
+    FESystem sys(mesh);
+    const auto u_field = sys.addField(FieldSpec{.name = "u", .space = space, .components = 1});
+    sys.addOperator("op");
+    const auto u = FormExpr::stateField(u_field, *space, "u");
+    const auto v = FormExpr::testFunction(*space, "v");
+
+    const auto schedule = AuxiliaryInputUpdateSchedule::EachNonlinearIteration;
+    (void)sys.auxiliaryInput(quantity("pad_flow", FunctionalKind::Integral, u.ds(face_b)), schedule);
+    auto first = sys.auxiliaryInput(quantity("first_flow", FunctionalKind::Integral, u.ds(face_a)), schedule);
+    auto second = sys.auxiliaryInput(
+        quantity("second_flow", FunctionalKind::Integral, (FormExpr::constant(2.0) * u).ds(face_a)), schedule);
+    const auto& registry = sys.auxiliaryInputRegistry();
+    ASSERT_EQ(registry.slotOf("first_flow"), 1u);
+    ASSERT_EQ(registry.slotOf("second_flow"), 2u);
+
+    static const auto model = aux::model("two_input_law", [](ModelFacade& m) {
+        auto Q1 = m.input("Q1");
+        auto Q2 = m.input("Q2");
+        auto z = m.state("z");
+        m << ddt(z) == Q1 - z;
+        m << out("y") == Q1 + 10.0 * Q2;
+    });
+    auto law = sys.deploy(use(model).name("two_input").boundary(face_a).bind("Q1", first).bind("Q2", second)
+                              .initialState({{"z", 0.0}}));
+    (void)installFormulation(sys, "op", {u_field}, (u * v).dx() + (law.output("y") * v).ds(face_a));
+
+    const auto lowered = sys.loweredAuxiliaryOutputExpr("two_input/y");
+    ASSERT_TRUE(lowered.has_value());
+    ASSERT_NE(lowered->node(), nullptr);
+    std::set<std::uint32_t> slots;
+    collectAuxiliaryInputSlots(*lowered->node(), slots);
+    EXPECT_EQ(slots, (std::set<std::uint32_t>{1u, 2u})) << lowered->toString();
 }
 
 TEST(FormsInstaller, BoundaryConditionManagerPreservesAuxiliaryOutputMetadataUntilInstall)

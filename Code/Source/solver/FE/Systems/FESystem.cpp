@@ -25147,7 +25147,14 @@ FESystem::synthesizeLoweredAuxiliaryOutputExpr_(const DeployedAuxEntry& entry,
             return std::nullopt;
         }
 
-        auto replace_terminals =
+        // One pass resolves every model-local terminal exactly once: a
+        // resolved input slot is an input-registry slot and must not be read
+        // again as a model-local port.  An inlined state assignment is
+        // resolved recursively for the same reason.
+        bool unresolved = false;
+        std::size_t inline_depth = 0;
+        forms::FormExpr::NodeTransform replace_terminals;
+        replace_terminals =
             [&](const forms::FormExprNode& node) -> std::optional<forms::FormExpr> {
                 switch (node.type()) {
                     case forms::FormExprType::AuxiliaryStateRef: {
@@ -25159,6 +25166,7 @@ FESystem::synthesizeLoweredAuxiliaryOutputExpr_(const DeployedAuxEntry& entry,
                             const auto slot = node.slotIndex();
                             if (!slot || *slot >= state_names.size()) {
                                 trace_block("bad_state_slot");
+                                unresolved = true;
                                 return std::nullopt;
                             }
                             return AuxiliaryInstanceHandle(entry.instance_name)
@@ -25168,14 +25176,24 @@ FESystem::synthesizeLoweredAuxiliaryOutputExpr_(const DeployedAuxEntry& entry,
                         if (!slot || *slot >= explicit_state_exprs.size() ||
                             !explicit_state_exprs[*slot].isValid()) {
                             trace_block("bad_state_slot");
+                            unresolved = true;
                             return std::nullopt;
                         }
-                        return explicit_state_exprs[*slot];
+                        if (inline_depth > dim) {
+                            trace_block("cyclic_state_assignment");
+                            unresolved = true;
+                            return std::nullopt;
+                        }
+                        ++inline_depth;
+                        auto inlined = explicit_state_exprs[*slot].transformNodes(replace_terminals);
+                        --inline_depth;
+                        return inlined;
                     }
                     case forms::FormExprType::AuxiliaryInputRef: {
                         const auto slot = node.slotIndex();
                         if (!slot || *slot >= sig.inputs.size()) {
                             trace_block("bad_input_slot");
+                            unresolved = true;
                             return std::nullopt;
                         }
                         const auto& port = sig.inputs[*slot];
@@ -25212,6 +25230,7 @@ FESystem::synthesizeLoweredAuxiliaryOutputExpr_(const DeployedAuxEntry& entry,
                             return forms::FormExpr::constant(*port.default_value);
                         }
                         trace_block("unbound_input");
+                        unresolved = true;
                         return std::nullopt;
                     }
                     case forms::FormExprType::ParameterRef: {
@@ -25236,11 +25255,9 @@ FESystem::synthesizeLoweredAuxiliaryOutputExpr_(const DeployedAuxEntry& entry,
                 }
             };
 
-        auto lowered = expr;
-        const std::size_t max_passes =
-            std::max<std::size_t>(4, dim + sig.inputs.size() + sig.parameters.size() + 1);
-        for (std::size_t pass = 0; pass < max_passes; ++pass) {
-            lowered = lowered.transformNodes(replace_terminals);
+        auto lowered = expr.transformNodes(replace_terminals);
+        if (unresolved) {
+            return std::nullopt;
         }
 
         if (!lowered.isValid() || !lowered.node()) {
