@@ -2617,6 +2617,12 @@ TimeLoopReport TimeLoop::run(systems::TransientSystem& transient,
                             // term, so this construction is deliberately an estimate rather than an exact
                             // nonlinear DAE consistency solve. It still avoids the degenerate uDot=0 startup
                             // for supported transient formulations.
+                            // The separation acts on the integral terms as written: the compiler splits an
+                            // integrand at its top-level sums only, and a term that holds dt() anywhere is
+                            // a rate term as a whole.  (dt(y) - g) * v is one rate term, so g is left out of
+                            // the rate-free residual and its tangent enters the rate matrix; dt(y) * v - g * v
+                            // is a rate term and a rate-free term, as meant.  Authors write rate terms as
+                            // separate integrals (decision D71: no change of this startup in wave 3).
                             history.uDot().zero();
 
                             if (!options_.initialize_first_order_rate_from_pde) {
