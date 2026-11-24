@@ -5,8 +5,11 @@
 
 #include <gtest/gtest.h>
 
+#include "FE/Dofs/DofHandler.h"
 #include "FE/Spaces/C1Space.h"
 #include "FE/Spaces/SpaceFactory.h"
+
+#include <string>
 
 using namespace svmp::FE;
 using namespace svmp::FE::spaces;
@@ -89,4 +92,32 @@ TEST(C1Space, UnsupportedElementTypesAndOrdersThrow) {
     EXPECT_THROW(C1Space(ElementType::Line2, 2), svmp::FE::FEException);
     EXPECT_THROW(C1Space(ElementType::Quad4, 4), svmp::FE::FEException);
     EXPECT_THROW(C1Space(ElementType::Hex8, 5), svmp::FE::FEException);
+}
+
+/**
+ * Cubic Hermite on Line2 has the local DOFs u(left), u(right), du/dt(left),
+ * du/dt(right), t the cell's own parameter on [0, 1].  A globally C1 layout
+ * shares (u, du/dx) at every vertex, 6 DOFs on two cells, the slope DOFs scaled
+ * by each cell's length; the continuous layout of a Lagrange cubic shares the
+ * values and keeps the slopes per cell (7 DOFs), a C0 field.  The space is
+ * refused for a global layout, naming the missing capability.
+ */
+TEST(C1Space, IsRefusedForAGlobalDofLayout) {
+    svmp::FE::dofs::MeshTopologyInfo topo;
+    topo.n_cells = 2;
+    topo.n_vertices = 3;
+    topo.dim = 1;
+    topo.cell2vertex_offsets = {0, 2, 4};
+    topo.cell2vertex_data = {0, 1, 1, 2};
+    topo.vertex_gids = {0, 1, 2};
+
+    C1Space space(ElementType::Line2, 3);
+    svmp::FE::dofs::DofHandler handler;
+    try {
+        handler.distributeDofs(topo, space);
+        FAIL() << "a C1 Hermite space was distributed with " << handler.getNumDofs()
+               << " DOFs on two cells (a C1 layout has 6)";
+    } catch (const svmp::FE::FEException& e) {
+        EXPECT_NE(std::string(e.what()).find("Hermite"), std::string::npos) << e.what();
+    }
 }

@@ -3615,6 +3615,14 @@ DofLayoutInfo continuousScalarLayoutForSpace(const spaces::FunctionSpace& space,
                                              LocalIndex total_dofs)
 {
     const auto basis_type = space.element().basis().basis_type();
+    // Cubic Hermite (C1Space) carries per-cell slope DOFs, derivatives in the
+    // cell's own parameter.  A globally C1 layout shares the value and the
+    // physical derivatives at each vertex and scales the slopes by the cell's
+    // map; the Lagrange layout below would share the values only and leave a
+    // C0 field, so the space is refused here.
+    FE_THROW_IF(basis_type == BasisType::Hermite, FEException,
+                "DofHandler: the cubic Hermite (C1) space has per-cell slope DOFs; a global C1 layout that "
+                "shares and scales them at the vertices is not implemented");
     if (basis_type != BasisType::Serendipity) {
         auto layout = DofLayoutInfo::Lagrange(space.polynomial_order(), dim, n_verts);
         layout.total_dofs_per_element = total_dofs;
