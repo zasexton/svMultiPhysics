@@ -16612,6 +16612,7 @@ AssemblyResult StandardAssembler::assembleCellsFused(
                 ctx.setUserData(user_data_);
                 ctx.setJITConstants(jit_constants_);
                 ctx.setAuxiliaryValues(auxiliary_inputs_, auxiliary_state_, auxiliary_outputs_);
+                ctx.setLegacyCoupledValues(coupled_integrals_, coupled_aux_state_);
                 ctx.setAuxiliaryOutputBindings(auxiliary_output_bindings_);
                 ctx.clearAllPreviousSolutionData();
                 tp_fb_setters += TP() - tp0;

@@ -6159,6 +6159,104 @@ TEST(StandardAssemblerCaches, ReusedAssemblerRebuildsFlatCoordinatesAfterGeometr
     EXPECT_NEAR(third.getMatrixEntry(0, 0), Real(3.0) * first_diag, 1e-12);
 }
 
+/// Records the auxiliary state each cell sees, through the legacy alias
+/// (coupledAuxState, read by AuxiliaryStateRef) and the neutral accessor.
+class AuxiliaryStateEchoKernel final : public AssemblyKernel {
+public:
+    [[nodiscard]] bool supportsCellBatch() const noexcept override { return true; }
+    [[nodiscard]] RequiredData getRequiredData() const override { return RequiredData::None; }
+
+    void computeCell(const AssemblyContext& ctx, KernelOutput& output) override
+    {
+        record(ctx);
+        fill(ctx, output);
+    }
+
+    void computeCellBatch(std::span<const AssemblyContext* const> contexts,
+                          std::span<KernelOutput> outputs) override
+    {
+        ++batch_calls;
+        for (std::size_t idx = 0; idx < contexts.size(); ++idx) {
+            if (contexts[idx] != nullptr) {
+                record(*contexts[idx]);
+                fill(*contexts[idx], outputs[idx]);
+            }
+        }
+    }
+
+    std::vector<Real> legacy;
+    std::vector<Real> neutral;
+    int batch_calls{0};
+
+private:
+    void record(const AssemblyContext& ctx)
+    {
+        legacy.push_back(ctx.coupledAuxState().empty() ? Real(-100.0) : ctx.coupledAuxState()[0]);
+        neutral.push_back(ctx.auxiliaryState().empty() ? Real(-100.0) : ctx.auxiliaryState()[0]);
+    }
+
+    static void fill(const AssemblyContext& ctx, KernelOutput& output)
+    {
+        const auto n = ctx.numTestDofs();
+        output.local_matrix.assign(static_cast<std::size_t>(n * n), 0.0);
+        output.local_vector.assign(static_cast<std::size_t>(n), 0.0);
+        output.has_matrix = true;
+        output.has_vector = false;
+    }
+};
+
+// A batch slot of fused assembly persists from one assembly to the next.  It
+// must see the auxiliary state of the current assembly through the legacy
+// alias as well, not the buffer of the preceding one.
+TEST(StandardAssemblerCaches, FusedBatchSlotsSeeTheCurrentLegacyAuxiliaryState)
+{
+    const std::array<std::array<Real, 3>, 4> nodes = {{
+        {0.0, 0.0, 0.0},
+        {1.0, 0.0, 0.0},
+        {0.0, 1.0, 0.0},
+        {0.0, 0.0, 1.0},
+    }};
+    ConfigurableSingleTetraMeshAccess mesh(nodes, /*cell_nodes=*/{0, 1, 2, 3});
+    spaces::H1Space space(ElementType::Tetra4, /*order=*/1);
+    auto dof_map = createSingleCellDofMap(4);
+
+    StandardAssembler assembler;
+    assembler.setDofMap(dof_map);
+    assembler.initialize();
+
+    const std::vector<Real> first_state{1.5};
+    const std::vector<Real> second_state{-2.5};
+    for (const auto* state : {&first_state, &second_state}) {
+        SCOPED_TRACE(::testing::Message() << "state " << (*state)[0]);
+        // As SystemAssembly binds them before each assembly.
+        assembler.setCoupledValues({}, {});
+        assembler.setAuxiliaryValues({}, *state, {});
+        AuxiliaryStateEchoKernel kernel;
+        TestDenseSystemView view(4);
+        view.zero();
+        const FusedCellTerm term{
+            .test_space = &space,
+            .trial_space = &space,
+            .kernel = &kernel,
+            .row_dof_map = &dof_map,
+            .col_dof_map = &dof_map,
+            .row_dof_offset = 0,
+            .col_dof_offset = 0,
+            .matrix_view = &view,
+            .vector_view = nullptr,
+            .assemble_matrix = true,
+            .assemble_vector = false,
+        };
+        EXPECT_TRUE(assembler.assembleCellsFused(mesh, std::span<const FusedCellTerm>(&term, 1)).success);
+        EXPECT_GT(kernel.batch_calls, 0);
+        ASSERT_FALSE(kernel.legacy.empty());
+        for (std::size_t i = 0; i < kernel.legacy.size(); ++i) {
+            EXPECT_EQ(kernel.neutral[i], (*state)[0]);
+            EXPECT_EQ(kernel.legacy[i], (*state)[0]);
+        }
+    }
+}
+
 TEST(StandardAssemblerCaches, FlatCoordinateCacheReusedForStaticDenseMeshes)
 {
     const std::array<std::array<Real, 3>, 4> nodes = {{
