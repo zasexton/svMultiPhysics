@@ -526,5 +526,107 @@ TEST(GeneralityBenchmarkGaps, DISABLED_P12_SurfaceLaplacianOnTheSphere)
     FAIL() << "surface-owned fields with an intrinsic gradient are not vocabulary yet";
 }
 
+// ===========================================================================
+// 14. Membrane eigenmodes
+// ===========================================================================
+//
+// K = inner(grad u, grad v) dx and M = u v dx with u = 0 on the boundary of
+// the unit square: the first eigenvalue is 2 pi^2, the error O(h^{2p}).  The
+// forms are written and assembled as authored; the pencil is solved here by
+// a dense generalized eigensolver in the test, because the problem-level
+// modal entry is missing.
+
+struct MembraneOperators {
+    std::vector<Real> K;
+    std::vector<Real> M;
+    std::vector<GlobalIndex> free;
+    GlobalIndex n{0};
+};
+
+MembraneOperators assembleMembrane(Cell cell, int order, int n)
+{
+    using namespace forms;
+    FESystem system(boxMesh(cell, n, boxSides()));
+    FieldBinding fields(system, "Membrane");
+    const auto U = fields.unknown("u", std::make_shared<spaces::H1Space>(elementType(cell), order));
+    const auto& u = U.state;
+    const auto& v = U.test;
+    BoundaryConditionManager bcs;
+    for (const int wall : {1, 2, 3, 4}) {
+        bcs.add(std::make_unique<bc::Dirichlet>(wall, FormExpr::constant(0.0)));
+    }
+    constraints::ConstraintPlan plan(system);
+    auto stiffness = inner(grad(u), grad(v)).dx();
+    plan.essentials(bcs, stiffness, u, v, U.id);
+    plan.commit();
+    FormulationBuilder K(system, "stiffness", {});
+    (void)K.residual(stiffness);
+    FormulationBuilder M(system, "mass", {});
+    (void)M.residual((u * v).dx());
+    system.setup();
+    const std::vector<Real> zero(static_cast<std::size_t>(system.dofHandler().getNumDofs()), 0.0);
+    MembraneOperators out;
+    const auto k = assembleDense(system, "stiffness", zero);
+    const auto m = assembleDense(system, "mass", zero);
+    out.n = k.n;
+    out.K = k.matrix;
+    out.M = m.matrix;
+    for (GlobalIndex i = 0; i < k.n; ++i) {
+        if (!system.constraints().isConstrained(i)) {
+            out.free.push_back(i);
+        }
+    }
+    return out;
+}
+
+TEST(GeneralityBenchmarkGaps, P14_MembraneStiffnessAndMassGiveTheFirstEigenvalue)
+{
+#if defined(FE_HAS_EIGEN) && FE_HAS_EIGEN
+    const Real exact = 2.0 * kPi * kPi;
+    for (const auto& c : std::vector<std::pair<Cell, int>>{{Cell::Quad4, 1}, {Cell::Tri3, 1}, {Cell::Tri3, 2}}) {
+        std::vector<Real> errors;
+        for (const int n : {4, 8, 16}) {
+            const auto ops = assembleMembrane(c.first, c.second, n);
+            const auto m = static_cast<Eigen::Index>(ops.free.size());
+            Eigen::MatrixXd K(m, m), M(m, m);
+            for (Eigen::Index i = 0; i < m; ++i) {
+                for (Eigen::Index j = 0; j < m; ++j) {
+                    const auto a = ops.free[static_cast<std::size_t>(i)];
+                    const auto b = ops.free[static_cast<std::size_t>(j)];
+                    K(i, j) = ops.K[static_cast<std::size_t>(a * ops.n + b)];
+                    M(i, j) = ops.M[static_cast<std::size_t>(a * ops.n + b)];
+                }
+            }
+            Eigen::GeneralizedSelfAdjointEigenSolver<Eigen::MatrixXd> solver(K, M);
+            ASSERT_EQ(solver.info(), Eigen::Success);
+            const Real lambda = solver.eigenvalues()(0);
+            const Eigen::VectorXd x = solver.eigenvectors().col(0);
+            // ||K x - lambda M x|| and M-orthonormality of the mode.
+            EXPECT_LT((K * x - lambda * (M * x)).norm(), 1e-9 * lambda);
+            EXPECT_NEAR(x.dot(M * x), 1.0, 1e-10);
+            errors.push_back(lambda - exact);
+            EXPECT_GT(lambda, exact);  // conforming: an upper bound
+        }
+        const std::string label = std::string(cellName(c.first)) + "_P" + std::to_string(c.second);
+        RecordProperty("p14_" + label + "_rates", join(rates(errors)));
+        EXPECT_GT(rates(errors).back(), 2.0 * c.second - 0.2) << label << " " << join(errors);
+    }
+#else
+    GTEST_SKIP() << "the test-side eigensolver needs Eigen";
+#endif
+}
+
+TEST(GeneralityBenchmarkGaps, DISABLED_P14_ModalSolveFromAuthoredForms)
+{
+    // Missing: a problem-level eigenproblem(K, M, essential) that consumes
+    // the constrained pencil of two authored bilinear forms (the essential
+    // conditions removed, not left as identity rows), with normalization,
+    // nullspace handling and a backend eigensolver, returning eigenpairs
+    // for checks such as ||K x - lambda M x||, M-orthogonality and invariant
+    // subspaces of repeated eigenvalues.  Pointwise tensor eigenvalues
+    // (SpectralEigen) and dense analysis utilities answer other questions.
+    FAIL() << "no modal solve consumes authored forms yet";
+}
+
 } // namespace
 } // namespace svmp::FE::systems::generality
