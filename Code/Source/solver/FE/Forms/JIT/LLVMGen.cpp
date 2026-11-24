@@ -14761,8 +14761,13 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
             // Determine whether a term's integrand is QP-constant on affine elements.
             // A term is QP-hoistable when is_affine AND:
             //   1. No QP-varying dep0 ops (DiscreteField, StateField, Coordinate,
-            //      ReferenceCoordinate, PreviousSolutionRef, MaterialState*, Coefficient)
-            //   2. TestFunction/TrialFunction only appear under Gradient/Divergence/Curl/Hessian
+            //      ReferenceCoordinate, PreviousSolutionRef, MaterialState*, Coefficient,
+            //      and the point values of the moving frame: current, previous and
+            //      reference-physical coordinates, mesh displacement, velocity and
+            //      acceleration, previous and predicted mesh velocity)
+            //   2. TestFunction/TrialFunction, and the trial-basis seeds of the
+            //      mesh-motion sensitivity (geometry vector and mesh-velocity
+            //      variations), only appear under Gradient/Divergence/Curl/Hessian
             //      (bare basis values vary across QPs even for P1)
             //   3. has_indexed_access == false
             auto isTermQPHoistable = [&](const LoweredTerm& term) -> bool {
@@ -14784,6 +14789,14 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
                             case FormExprType::MaterialStateOldRef:
                             case FormExprType::MaterialStateWorkRef:
                             case FormExprType::Coefficient:
+                            case FormExprType::CurrentCoordinate:
+                            case FormExprType::PreviousCoordinate:
+                            case FormExprType::ReferencePhysicalCoordinate:
+                            case FormExprType::MeshDisplacement:
+                            case FormExprType::MeshVelocity:
+                            case FormExprType::MeshAcceleration:
+                            case FormExprType::PreviousMeshVelocity:
+                            case FormExprType::PredictedMeshVelocity:
                                 return false;  // QP-varying dep0 op
                             default:
                                 break;
@@ -14816,7 +14829,9 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
                 }
                 for (std::size_t oi = 0; oi < ops.size(); ++oi) {
                     if (ops[oi].type == FormExprType::TestFunction ||
-                        ops[oi].type == FormExprType::TrialFunction) {
+                        ops[oi].type == FormExprType::TrialFunction ||
+                        ops[oi].type == FormExprType::GeometryTrialVectorVariation ||
+                        ops[oi].type == FormExprType::MeshVelocityVariation) {
                         if (!under_grad[oi]) return false;  // Bare basis value
                     }
                 }

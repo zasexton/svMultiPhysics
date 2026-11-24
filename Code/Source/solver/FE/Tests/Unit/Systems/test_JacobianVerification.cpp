@@ -7,6 +7,7 @@
 
 #include "Assembly/GlobalSystemView.h"
 #include "Dofs/EntityDofMap.h"
+#include "Forms/JIT/LLVMJITBuildInfo.h"
 #include "Forms/Vocabulary.h"
 #include "Spaces/H1Space.h"
 #include "Spaces/ProductSpace.h"
@@ -16,6 +17,7 @@
 #include "Systems/FormsInstaller.h"
 #include "Systems/TimeIntegrator.h"
 #include "Tests/Unit/Forms/FormsTestHelpers.h"
+#include "Tests/Unit/Forms/JITTestHelpers.h"
 
 #include "Mesh/Mesh.h"
 #include "Mesh/Topology/CellShape.h"
@@ -1173,6 +1175,129 @@ TEST(MovingDomainShapeDerivativeTest, TraceOfCurrentJacobianIsExactInEveryBatchA
                 EXPECT_NEAR(columns.central_difference.at(key), value, 1e-7 * scale) << where;
                 EXPECT_NEAR(columns.assembled[0].at(key), value, 1e-13 * scale) << where << " (cold cache)";
                 EXPECT_NEAR(columns.assembled[1].at(key), value, 1e-13 * scale) << where << " (warm cache)";
+            }
+        }
+    }
+}
+
+namespace {
+
+enum class MovingFrameKernel { Interpreted, Compiled, CompiledSpecialized };
+
+/// The residual of int grad(q).(currentCoordinate() + meshVelocity()) dx on the
+/// two moving triangles, by pressure node of kTwoTriangleNodes. On an affine
+/// P1 triangle grad(q) is constant but the two point values are not: a kernel
+/// that evaluates the integrand once at the first quadrature point and scales
+/// it by the cell measure is wrong.
+std::map<int, Real> movingFramePointValueResidual(MovingFrameKernel kernel, bool batched)
+{
+    using namespace svmp::FE::forms;
+    auto mesh = makeTwoTriangleMesh(/*reversed=*/false);
+    auto scalar = std::make_shared<svmp::FE::spaces::H1Space>(ElementType::Triangle3, 1);
+    auto vector = std::make_shared<svmp::FE::spaces::ProductSpace>(scalar, 2);
+
+    systems::FESystem system(mesh, svmp::Configuration::Current);
+    const auto p_id = system.addField(systems::FieldSpec{.name = "p", .space = scalar, .components = 1});
+    systems::ALEBindingOptions ale_options;
+    ale_options.enabled = true;
+    ale_options.dimension = 2;
+    ale_options.mesh_velocity_space = vector;
+    ale_options.mesh_displacement_space = vector;
+    ale_options.auto_register_mesh_displacement_field = true;
+    const auto ale = systems::resolveALEBinding(system, ale_options);
+    const auto d_id = ale.mesh_displacement_field;
+
+    const auto p = FormExpr::stateField(p_id, *scalar, "p");
+    const auto q = FormExpr::testFunction(p_id, *scalar, "q");
+    const auto d = FormExpr::stateField(d_id, *vector, "d");
+    const auto psi = FormExpr::testFunction(d_id, *vector, "psi");
+    systems::FormInstallOptions install;
+    install.compiler_options.jit = svmp::FE::forms::test::makeUnitTestJITOptions();
+    install.compiler_options.jit.vectorize = true;
+    install.compiler_options.jit.enable = kernel != MovingFrameKernel::Interpreted;
+    install.compiler_options.jit.specialization.enable = kernel == MovingFrameKernel::CompiledSpecialized;
+    system.addOperator("probe");
+    (void)systems::installFormulation(system, "probe", {p_id},
+                                      (inner(grad(q), currentCoordinate() + meshVelocity()) +
+                                       FormExpr::constant(0.0) * p * q).dx(),
+                                      install);
+    (void)systems::installFormulation(system, "probe", {d_id}, inner(grad(d), grad(psi)).dx(),
+                                      systems::FormInstallOptions{});
+    systems::SetupOptions setup_options;
+    setup_options.use_constraints_in_assembly = false;
+    setup_options.assembly_options.use_batching = batched;
+    system.setup(setup_options);
+
+    const auto& local = mesh->local_mesh();
+    const auto& X_ref = local.X_ref();
+    std::vector<int> node_of(local.n_vertices(), -1);
+    for (std::size_t vtx = 0; vtx < local.n_vertices(); ++vtx) {
+        for (std::size_t n = 0; n < kTwoTriangleNodes.size(); ++n) {
+            if (std::abs(X_ref[2 * vtx] - kTwoTriangleNodes[n][0]) < 1e-14 &&
+                std::abs(X_ref[2 * vtx + 1] - kTwoTriangleNodes[n][1]) < 1e-14) {
+                node_of[vtx] = static_cast<int>(n);
+            }
+        }
+    }
+    const auto dof = [&](svmp::FE::FieldId field, std::size_t vtx, int component) {
+        const auto dofs = system.fieldDofHandler(field).getEntityDofMap()->getVertexDofs(static_cast<GlobalIndex>(vtx));
+        return system.fieldDofOffset(field) + dofs[static_cast<std::size_t>(component)];
+    };
+    const auto n = system.dofHandler().getNumDofs();
+    std::vector<Real> values(static_cast<std::size_t>(n), 0.0);
+    for (std::size_t vtx = 0; vtx < local.n_vertices(); ++vtx) {
+        const auto displacement = twoTriangleDisplacement(kTwoTriangleNodes[static_cast<std::size_t>(node_of[vtx])]);
+        for (int k = 0; k < 2; ++k) {
+            values[static_cast<std::size_t>(dof(d_id, vtx, k))] = displacement[static_cast<std::size_t>(k)];
+        }
+    }
+    const std::vector<Real> previous(static_cast<std::size_t>(n), 0.0);
+    systems::SystemStateView state;
+    state.dt = 0.5;
+    state.u = std::span<const Real>(values);
+    state.u_prev = std::span<const Real>(previous);
+    const systems::BackwardDifferenceIntegrator integrator;
+    const auto context = integrator.buildContext(1, state);
+    state.time_integration = &context;
+    (void)system.updateCurrentCoordinatesFromMeshDisplacement(state);
+    systems::AssemblyRequest request;
+    request.op = "probe";
+    request.want_vector = true;
+    svmp::FE::assembly::DenseVectorView R(n);
+    R.zero();
+    const auto result = system.assemble(request, state, nullptr, &R);
+    EXPECT_TRUE(result.success) << result.error_message;
+    std::map<int, Real> out;
+    for (std::size_t vtx = 0; vtx < local.n_vertices(); ++vtx) {
+        out[node_of[vtx]] = R.getVectorEntry(dof(p_id, vtx, 0));
+    }
+    return out;
+}
+
+} // namespace
+
+// A compiled kernel specialized for affine P1 cells evaluates the point
+// values of the moving frame (current coordinate, mesh velocity) at every
+// quadrature point, one cell at a time and in a batch, as the interpreter
+// does.
+TEST(MovingDomainCompiledKernelTest, AffineSpecializationKeepsMovingFramePointValues)
+{
+    if (!svmp::FE::forms::jit::llvmJITEnabled()) {
+        GTEST_SKIP() << "requires the compiled kernels (LLVM JIT)";
+    }
+    const auto interpreted = movingFramePointValueResidual(MovingFrameKernel::Interpreted, /*batched=*/false);
+    Real scale = 0.0;
+    for (const auto& [node, value] : interpreted) {
+        scale = std::max(scale, std::abs(value));
+    }
+    ASSERT_GT(scale, 1e-2);
+    for (const auto kernel : {MovingFrameKernel::Compiled, MovingFrameKernel::CompiledSpecialized}) {
+        for (const bool batched : {false, true}) {
+            SCOPED_TRACE(::testing::Message() << "specialized " << (kernel == MovingFrameKernel::CompiledSpecialized)
+                                              << ", batched " << batched);
+            const auto compiled = movingFramePointValueResidual(kernel, batched);
+            for (const auto& [node, value] : interpreted) {
+                EXPECT_NEAR(compiled.at(node), value, 1e-13 * scale) << "pressure node " << node;
             }
         }
     }
