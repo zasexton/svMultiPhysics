@@ -1246,6 +1246,95 @@ TEST(VectorBasisQuadrature, MassIsRegularAndALinearFieldIsReproduced)
     }
 }
 
+
+// A strong normal trace q.n = g on every boundary face of a mesh of several
+// cells holds in physical terms: the constrained DOFs carry the global
+// orientation of their faces and the physical face measure.  RT0 with a
+// constant g on every cell family, and RT1 with a linear g on simplices,
+// reproduce it pointwise (the boundary
+// fluxes of q.n = 1 summed to 0 on the unit square, and to -24 on the unit
+// cube, instead of 4 and 6).
+TEST(VectorBasisConstraints, StrongNormalTraceHoldsOnEveryBoundaryFaceOfAMesh)
+{
+    constexpr int marker = 3;
+    struct Case {
+        svmp::CellFamily family;
+        int order;
+    };
+    for (const auto& c : {Case{svmp::CellFamily::Triangle, 0}, Case{svmp::CellFamily::Triangle, 1},
+                          Case{svmp::CellFamily::Tetra, 0}, Case{svmp::CellFamily::Tetra, 1},
+                          Case{svmp::CellFamily::Quad, 0}, Case{svmp::CellFamily::Hex, 0},
+                          Case{svmp::CellFamily::Wedge, 0}}) {
+        const int order = c.order;
+        const bool simplex = c.family == svmp::CellFamily::Triangle || c.family == svmp::CellFamily::Tetra;
+        const int dim = (c.family == svmp::CellFamily::Triangle || c.family == svmp::CellFamily::Quad) ? 2 : 3;
+        SCOPED_TRACE(::testing::Message() << "cell family " << static_cast<int>(c.family) << " RT" << order);
+        auto mesh = simplex ? unitBoxSimplexMesh(dim, 2) : unitBoxTensorMesh(c.family, 2);
+        auto& local = mesh->local_mesh();
+        for (const auto face : local.boundary_faces()) {
+            mesh->set_boundary_label(face, marker);
+        }
+        const auto type = c.family == svmp::CellFamily::Triangle ? ElementType::Triangle3
+                          : c.family == svmp::CellFamily::Tetra  ? ElementType::Tetra4
+                          : c.family == svmp::CellFamily::Quad   ? ElementType::Quad4
+                          : c.family == svmp::CellFamily::Hex    ? ElementType::Hex8
+                                                                 : ElementType::Wedge6;
+        FESystem system(mesh);
+        FieldBinding fields(system, "StrongNormalTrace");
+        const auto Q = fields.unknown("q", std::make_shared<spaces::HDivSpace>(type, order));
+        const auto C = fields.unknown("cells", std::make_shared<spaces::L2Space>(type, 2));
+        const auto x = forms::x();
+        const auto g = order == 0 ? forms::FormExpr::constant(1.5)
+                                  : 1.0 + x.component(0) + 2.0 * x.component(1) +
+                                        (dim == 3 ? 0.5 * x.component(2) : forms::FormExpr::constant(0.0));
+        system.addSystemConstraint(std::make_unique<constraints::HDivNormalConstraint>(Q.id, marker, g));
+        {
+            FormulationBuilder F(system, "equations", {});
+            (void)F.residual((C.state * C.test).dx() + forms::inner(Q.state, Q.test).dx());
+        }
+        FormInstallOptions measurement;
+        measurement.contributes_to_problem_analysis = false;
+        const auto qn = forms::inner(Q.state, forms::FormExpr::normal());
+        {
+            FormulationBuilder F(system, "trace error", measurement);
+            (void)F.residual((C.state * C.test).dx() + ((qn - g) * (qn - g) * C.test).ds(marker));
+        }
+        {
+            FormulationBuilder F(system, "flux", measurement);
+            (void)F.residual((C.state * C.test).dx() + (qn * C.test).ds(marker));
+        }
+        system.setup();
+        const auto n = system.dofHandler().getNumDofs();
+        std::vector<Real> U(static_cast<std::size_t>(n), 0.0);
+        for (GlobalIndex dof = 0; dof < n; ++dof) {
+            if (system.constraints().isConstrained(dof)) {
+                U[static_cast<std::size_t>(dof)] = static_cast<Real>(system.constraints().getInhomogeneity(dof));
+            }
+        }
+        SystemStateView state;
+        state.u = U;
+        const auto sum = [&](const char* op) {
+            assembly::DenseVectorView R(n);
+            R.zero();
+            AssemblyRequest request;
+            request.op = op;
+            request.want_vector = true;
+            EXPECT_TRUE(system.assemble(request, state, nullptr, &R).success);
+            Real total = 0.0;
+            const auto c0 = system.fieldDofOffset(C.id);
+            for (GlobalIndex i = c0; i < c0 + system.fieldDofHandler(C.id).getNumDofs(); ++i) {
+                total += R.getVectorEntry(i);
+            }
+            return total;
+        };
+        // The flux of g out of the unit square or cube.
+        const Real expected_flux = order == 0 ? Real(1.5) * Real(2 * dim)
+                                              : (dim == 2 ? Real(10) : Real(16.5));
+        EXPECT_NEAR(sum("flux"), expected_flux, 1e-12);
+        EXPECT_NEAR(sum("trace error"), 0.0, 1e-24);
+    }
+}
+
 } // namespace test
 } // namespace systems
 } // namespace FE

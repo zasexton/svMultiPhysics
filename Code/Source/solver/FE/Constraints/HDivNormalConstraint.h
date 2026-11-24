@@ -28,6 +28,9 @@
 
 namespace svmp {
 namespace FE {
+namespace basis {
+class BasisFunction;
+}
 namespace geometry {
 class GeometryMapping;
 }
@@ -74,6 +77,15 @@ private:
         std::shared_ptr<spaces::TraceSpace> trace_space{};
         std::shared_ptr<const geometry::GeometryMapping> cell_mapping{};
         std::vector<GlobalIndex> global_dofs{};
+        int dimension{0};
+        /// The cell's vector basis and the local indices of the face's DOFs
+        /// (in the order of global_dofs).
+        std::shared_ptr<const basis::BasisFunction> basis{};
+        std::vector<int> local_face_dofs{};
+        /// The global values of the face DOFs from the cell's local ones
+        /// (row-major, both in the order of global_dofs): the orientation of
+        /// the face in the cell.
+        std::vector<Real> local_to_global{};
     };
 
     void buildFaceWorkItems_(const systems::FESystem& system);
