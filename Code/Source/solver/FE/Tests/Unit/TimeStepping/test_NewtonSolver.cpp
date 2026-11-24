@@ -6855,6 +6855,101 @@ TEST(NewtonSolver, ReportContainsResidualNormsWhenNotConverged)
     EXPECT_TRUE(rep.linear.converged);
 }
 
+namespace {
+
+struct RecordedObservation {
+    std::string phase{};
+    svmp::FE::timestepping::NewtonOptions::StateSynchronizationPoint sync_point{};
+    double residual_norm{0.0};
+    const svmp::FE::timestepping::NewtonExtensionStorage* storage{nullptr};
+};
+
+class MarkerStorage final : public svmp::FE::timestepping::NewtonExtensionStorage {
+};
+
+class RecordingObserver final : public svmp::FE::timestepping::NewtonObserver {
+public:
+    [[nodiscard]] std::string_view id() const override { return "recording"; }
+    [[nodiscard]] std::unique_ptr<svmp::FE::timestepping::NewtonExtensionStorage> allocate(
+        const svmp::FE::timestepping::NewtonStorageContext& /*context*/) const override
+    {
+        ++allocations;
+        return std::make_unique<MarkerStorage>();
+    }
+    void beginSolve() override { ++solves; }
+    void observe(svmp::FE::timestepping::NewtonObservation& observation) override
+    {
+        observations.push_back(RecordedObservation{
+            .phase = observation.phase != nullptr ? observation.phase : "",
+            .sync_point = observation.sync_point,
+            .residual_norm = observation.residual.norm(),
+            .storage = observation.storage});
+    }
+
+    mutable int allocations{0};
+    int solves{0};
+    std::vector<RecordedObservation> observations{};
+};
+
+} // namespace
+
+TEST(NewtonSolver, ObserversReadTheConstrainedResidualAtEveryResidualAssembly)
+{
+#if !defined(FE_HAS_EIGEN) || !FE_HAS_EIGEN
+    GTEST_SKIP() << "NewtonSolver tests require the Eigen backend (enable FE_ENABLE_EIGEN)";
+#endif
+    auto problem = makeScalarProblem(
+        [](const svmp::FE::forms::FormExpr& u,
+           const svmp::FE::forms::FormExpr& v) {
+            return ((u * u - svmp::FE::forms::FormExpr::constant(2.0)) * v)
+                .dx();
+        },
+        /*dt=*/0.1,
+        /*u0=*/{1.5});
+
+    auto observer = std::make_shared<RecordingObserver>();
+    svmp::FE::timestepping::NewtonOptions nopt;
+    nopt.residual_op = "op";
+    nopt.jacobian_op = "op";
+    nopt.max_iterations = 8;
+    nopt.abs_tolerance = 1.0e-12;
+    nopt.rel_tolerance = 0.0;
+    nopt.use_line_search = false;
+    // The same observer twice is one extension with one storage.
+    nopt.extensions.observers = {observer, observer};
+
+    svmp::FE::timestepping::NewtonSolver newton(nopt);
+    svmp::FE::timestepping::NewtonWorkspace workspace;
+    newton.allocateWorkspace(*problem.sys, *problem.factory, workspace);
+    problem.history.repack(*problem.factory);
+    EXPECT_EQ(observer->allocations, 1);
+    ASSERT_EQ(workspace.extension_storage.size(), 1u);
+    ASSERT_NE(workspace.extension_storage.front(), nullptr);
+
+    const auto report = newton.solveStep(
+        *problem.transient,
+        *problem.linear,
+        /*solve_time=*/problem.history.dt(),
+        problem.history,
+        workspace);
+    EXPECT_TRUE(report.converged);
+    EXPECT_EQ(observer->solves, 1);
+    // Each residual assembly is observed once per installation, in order,
+    // with the residual the solver measures.
+    ASSERT_GE(observer->observations.size(), 2u);
+    EXPECT_EQ(observer->observations.size() % 2u, 0u);
+    EXPECT_DOUBLE_EQ(observer->observations.front().residual_norm,
+                     report.residual_norm0);
+    EXPECT_DOUBLE_EQ(observer->observations.back().residual_norm,
+                     report.residual_norm);
+    for (const auto& observation : observer->observations) {
+        EXPECT_EQ(observation.storage, workspace.extension_storage.front().get());
+    }
+    EXPECT_STREQ(svmp::FE::timestepping::stateSynchronizationPointName(
+                     observer->observations.front().sync_point),
+                 "jacobian_and_residual");
+}
+
 TEST(NewtonSolver,
      FreeSurfaceConservativeBalanceDiagnosticAssemblesAllThreeResidualOperators)
 {

@@ -1015,6 +1015,11 @@ Status: `implemented/public`.
 | `DiagnosticRegistry::declare(set, declaration)`, `findDeclaration<D>()`, `systems::findDiagnosticDeclaration<D>(system)` | `Systems/DiagnosticRegistry.h` | A typed view of the operators of a set, recorded by the formulation and found by its type; an equal declaration recorded again (by another formulation of the system) is kept once |
 | `analysis::ConstraintRangeDeclaration` | `Analysis/ConstraintRangeCertificate.h` | The fields (primary, scalar constraint) and diagnostic operators of the constraint-range certificate of a saddle-point pair: constraint work, two potential-work parts and their sum, the certified load, the balance, and the pair `[0, G; G^T, 0]` |
 | `analysis::RowContributionDeclaration` | `Analysis/RowContributionObserver.h` | The diagnostic operators whose contributions to the rows of one field are sampled, with the names of that field and of the field it couples to |
+| `timestepping::NewtonExtensions`, `NewtonOptions::extensions` | `TimeStepping/NewtonSolver.h` | The extensions of a Newton solve, installed by its caller, the same on every rank in the same order (checked before any extension collective) |
+| `NewtonExtension` (`id`, `storageOrder`, `allocate`, `refreshStorage`, `beginSolve`), `NewtonExtensionStorage`, `NewtonStorageContext` | `TimeStepping/NewtonSolver.h` | What every extension provides: a stable id, storage created before the production Jacobian in storage order and refreshed before or after it, and the start of each frozen solve |
+| `NewtonObserver::observe(NewtonObservation&)` | `TimeStepping/NewtonSolver.h` | Reads the constrained residual at each residual assembly, also on rejected line-search trials; the observation offers a production-layout scratch vector, the constrained DOFs, the observer's storage and an `assemble` that writes the solver's assembly diagnostic line. No authority over the iterate |
+| `stateSynchronizationPointName(point)` | `TimeStepping/NewtonSolver.h` | The name of a synchronization point in the solver's log lines |
+| `analysis::FieldResidualObserver`, `RowContributionObserver`, `environmentResidualObservers()` | `Analysis/RowContributionObserver.h` | The field-residual and row-contribution diagnostics as observers, switched on by their environment switches; their log lines are unchanged |
 
 ### Manual Block and Complex Workflows
 

@@ -71,6 +71,7 @@
 #include "FE/TimeStepping/GeneratedState.h"
 #include "FE/TimeStepping/MeshNormalStageParticipant.h"
 #include "FE/TimeStepping/OperatorStageCapture.h"
+#include "FE/Analysis/RowContributionObserver.h"
 #include "FE/TimeStepping/NewtonSolver.h"
 #include "FE/TimeStepping/StepContext.h"
 #include "FE/TimeStepping/StepParticipants.h"
@@ -4779,6 +4780,8 @@ evaluateStaticCapillaryPressureCertificate(
         .accepted_static_pressure_representability_max_relative_distance =
         static_cast<double>(certificate_options
                                 .pressure_representability_max_relative_distance);
+    options.extensions.observers =
+        svmp::FE::analysis::environmentResidualObservers();
 
     PdeVelocityExtensionCaches probe_pde_extension_caches;
     bool probe_extension_maps_refreshed = false;
@@ -7109,6 +7112,8 @@ void ApplicationDriver::runSteadyState(SimulationComponents& sim, const Paramete
   const auto integrator = std::make_shared<const ZeroTimeDerivativeIntegrator>();
   svmp::FE::systems::TransientSystem transient(*sim.fe_system, integrator);
 
+  newton_opts.extensions.observers =
+      svmp::FE::analysis::environmentResidualObservers();
   svmp::FE::timestepping::NewtonSolver newton(newton_opts);
   svmp::FE::timestepping::NewtonWorkspace workspace;
 
@@ -7287,6 +7292,8 @@ void ApplicationDriver::runTransient(SimulationComponents& sim, const Parameters
   // number of mesh traversals per Newton iteration.
   opts.newton.residual_op = "equations";
   opts.newton.jacobian_op = "equations";
+  opts.newton.extensions.observers =
+      svmp::FE::analysis::environmentResidualObservers();
 
   const auto transient_cut_topology_preflight_comm =
       activeFESystemCommunicator(*sim.fe_system);

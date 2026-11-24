@@ -21,9 +21,11 @@
 #include <cstdint>
 #include <functional>
 #include <limits>
+#include <memory>
 #include <optional>
 #include <span>
 #include <string>
+#include <string_view>
 #include <vector>
 
 namespace svmp {
@@ -50,6 +52,21 @@ struct NewtonJacobianCheckDiagnostic {
     std::string geometry_result{};
     std::string component_filter{};
     std::string finite_difference_scheme{};
+};
+
+class NewtonObserver;
+
+/**
+ * @brief The extensions of a Newton solve, installed by its caller.
+ *
+ * Each kind has its own authority over the solve.  An observer reads the
+ * assembled constrained residual at the residual-assembly points, also on
+ * line-search trials that are later rejected; it changes neither the
+ * iterate nor any decision.  Every rank installs the same extensions in the
+ * same order, which the solver checks before any extension collective.
+ */
+struct NewtonExtensions {
+    std::vector<std::shared_ptr<NewtonObserver>> observers{};
 };
 
 struct NewtonOptions {
@@ -98,6 +115,9 @@ struct NewtonOptions {
 
     systems::OperatorTag residual_op{"residual"};
     systems::OperatorTag jacobian_op{"jacobian"};
+
+    /// The observers (and, later, other extensions) of the solve.
+    NewtonExtensions extensions{};
 
     /**
      * @brief Additional convergence requirement for one unknown FE field.
@@ -543,9 +563,19 @@ struct NewtonReport {
     backends::SolverReport linear{};
 };
 
+/// Storage an extension keeps in a NewtonWorkspace (matrices and vectors in
+/// a backend layout), created by the extension before the production
+/// Jacobian (NewtonExtension::allocate).
+class NewtonExtensionStorage {
+public:
+    virtual ~NewtonExtensionStorage() = default;
+};
+
 struct NewtonWorkspace {
     std::unique_ptr<backends::GenericMatrix> jacobian{};
-    std::unique_ptr<backends::GenericMatrix> diagnostic_jacobian_scratch{};
+    /// The storage of each extension, in NewtonSolver::extensions() order;
+    /// null for an extension that keeps none.
+    std::vector<std::unique_ptr<NewtonExtensionStorage>> extension_storage{};
     // Optional free-surface pressure-representability workspace.  The matrix
     // stores the symmetric [0,G;G^T,0] diagnostic pair; the vectors keep both
     // representability and residual-correction LSQR solves entirely in
@@ -627,6 +657,81 @@ struct ExternalStateOuterGate {
     std::span<const NewtonOptions::FieldResidualCriterion> field_criteria,
     std::span<const double> field_reference_residuals);
 
+/// The name of @p point in the solver's log lines.
+[[nodiscard]] const char* stateSynchronizationPointName(
+    NewtonOptions::StateSynchronizationPoint point) noexcept;
+
+/// The system and backend an extension allocates its storage for.
+struct NewtonStorageContext {
+    const systems::FESystem& system;
+    const backends::BackendFactory& factory;
+    const systems::OperatorTag& jacobian_op;
+};
+
+/**
+ * @brief What every Newton extension provides.
+ *
+ * An extension identifies itself by a stable id, the same on every rank.
+ * Its storage is created before the production Jacobian, in increasing
+ * storageOrder(), so a backend factory that caches the layout of the last
+ * matrix keeps that of the production operator; after a sparsity change it
+ * is refreshed before or after the production Jacobian.
+ */
+class NewtonExtension {
+public:
+    virtual ~NewtonExtension() = default;
+
+    [[nodiscard]] virtual std::string_view id() const = 0;
+
+    [[nodiscard]] virtual int storageOrder() const noexcept { return 0; }
+
+    /// The storage of this extension, or null when it keeps none.
+    [[nodiscard]] virtual std::unique_ptr<NewtonExtensionStorage> allocate(
+        const NewtonStorageContext& context) const;
+
+    /// Refreshes @p storage (null when none was allocated) after a sparsity
+    /// change, before (@p after_production false) and after (true) the
+    /// production Jacobian is refreshed.
+    virtual void refreshStorage(const NewtonStorageContext& context,
+                                NewtonExtensionStorage* storage,
+                                bool after_production) const;
+
+    /// Starts a frozen nonlinear solve: drops what an earlier solve kept.
+    virtual void beginSolve();
+};
+
+/// What an observer reads at a residual-assembly point.
+struct NewtonObservation {
+    systems::TransientSystem& transient;
+    const systems::SystemStateView& state;
+    const char* phase;   ///< null for an unnamed residual assembly
+    NewtonOptions::StateSynchronizationPoint sync_point;
+    int iteration;
+    double solve_time;
+    double dt;
+    /// The assembled residual with the residual addition applied and the
+    /// constrained rows zeroed; observers must not change it.
+    backends::GenericVector& residual;
+    /// A vector of the production layout the observer may overwrite.
+    backends::GenericVector& scratch;
+    std::span<const GlobalIndex> constrained_dofs;
+    /// The storage of the observer in the workspace, or null.
+    NewtonExtensionStorage* storage;
+    NewtonReport& report;
+    /// Assembles @p request on the observed state into the given views and
+    /// writes the solver's assembly diagnostic line under @p label.
+    std::function<assembly::AssemblyResult(std::string_view label,
+                                           const systems::AssemblyRequest& request,
+                                           assembly::GlobalSystemView* matrix,
+                                           assembly::GlobalSystemView* vector)>
+        assemble;
+};
+
+class NewtonObserver : public virtual NewtonExtension {
+public:
+    virtual void observe(NewtonObservation& observation) = 0;
+};
+
 /**
  * @brief Newton-Raphson driver for systems assembled through FE/Systems.
  */
@@ -666,6 +771,19 @@ private:
     /// Vectors are left untouched so mid-step state (u_backup etc.) survives.
     void maybeReallocateJacobianForSparsity(const systems::FESystem& system,
                                             NewtonWorkspace& workspace) const;
+
+    /// The distinct extensions of the options, in the order their storage
+    /// is kept in a workspace: observers in order of installation.
+    [[nodiscard]] std::vector<NewtonExtension*> extensions() const;
+
+    /// The storage of @p extension in @p workspace, or null.
+    [[nodiscard]] NewtonExtensionStorage* extensionStorage(
+        const NewtonExtension& extension,
+        NewtonWorkspace& workspace) const;
+
+    /// Throws unless every rank installs the same extensions in the same order.
+    void validateExtensionsAcrossCommunicator(
+        const systems::FESystem& system) const;
 
     /**
      * Verify that every rank will enter the same optional pressure diagnostic,
