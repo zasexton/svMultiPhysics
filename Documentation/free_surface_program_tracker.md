@@ -1155,6 +1155,23 @@ These are proposals. Each lists a recommended option and an alternative. Record 
     - Two-sided binding is decided per active marker, so a fitted `dI` and a generated one sharing a kernel are told apart.
     - `I.normalFrom(A)` migrates to `normal().minus()` and its negation.
   - **No shipped form is affected** (the two-fluid, kinematic, contact, wetted and outward-normal terms use no two-sided generated operator; the ghost penalty is on `dS`). The change must be bitwise on every reference deck, with unchanged production trees, JIT keys and manifests; a generated specialization whose code changes gets its own cache identity, not a global schema bump. `VOCABULARY.md` and `FE/Docs/LevelSet.md` are updated.
+- **D71, 2026-11-24 (decision window delegated by the owner; coordinator with an independent second review): the generalized-α consistent initial rate is corrected in wave 6, not now.**
+  - **Finding (outlet/authoring lane, verified by the review):**
+    - Time-scheme term weights and the GA first-rate initialization act on the integral grouping: a term's order is its highest dt order, and the weight multiplies the whole term.
+    - So a term that multiplies dt(·) with other parts drops out of the startup right-hand side, while its whole Jacobian enters the rate matrix. Writing (ẏ − g)v gives ẏ₀ = 0, while ẏ v − g v gives ẏ₀ = g.
+    - Decks reach only BE and GA, whose stages use unit weights, so only the GA consistent startup (the deck default) is affected.
+  - **Effect today:**
+    - NS-VMS: the startup is a grouping-dependent estimate, because the stabilization terms enclose R_m.
+    - Dynamic ustruct is wrong at leading order: the kinematic row loses v₀, and the body load and div v₀ drop out.
+    - Fitted ALE adds the mixed boundary row (ḋ − u)·n.
+    - 13 of 16 free-surface references and all 7 outlet references use the GA consistent startup. The size of the difference is unmeasured.
+    - At ρ∞ = 0.5 an initial-rate error e gives a first increment error Δt·e/5, which can persist in displacement or wave phase.
+  - **Decision:** no behaviour change in wave 3. The behaviour is documented as an estimate that depends on term grouping. The correction becomes a wave-6 method change, gated on its own, whose decks and tolerances the owner approves before it lands:
+    - rates as independent symbols, with F = R(U, 0) and H = R(U, r) − F;
+    - the startup differentiated with respect to r alone, iterated for rate-nonlinear VMS terms;
+    - compatible algebraic and boundary data;
+    - proofs: factored and expanded forms agree, rate tangents match finite differences, ustruct recovers rigid translation and uniform acceleration, and a pre-registered gate on startup residual, first-step fields and later wave amplitude and phase.
+  - **Alternatives rejected:** a blanket refusal of mixed terms (excludes valid affine forms); fixing ustruct alone (leaves NS-VMS and fitted ALE exposed).
 - **D16, 2026-10-05: production binaries will use LTO + PGO** (`SV_ENABLE_LTO=ON`, `SV_PGO=USE`). The outputs are bitwise identical.
   - Adoption waits until the current speed-up branches settle (post-merge hotspots, dry-cell records, constraint build), because they move the hot paths.
   - The profile is then trained on the tip and stored in group storage (not scratch, which is purged), and refreshed after hot-path changes.
