@@ -628,5 +628,151 @@ TEST(GeneralityBenchmarkGaps, DISABLED_P14_ModalSolveFromAuthoredForms)
     FAIL() << "no modal solve consumes authored forms yet";
 }
 
+// ===========================================================================
+// 15. Steady discrete adjoint with a nonsymmetric coupled Jacobian
+// ===========================================================================
+//
+// -u'' = m, -w'' = u on the unit-width strip (0,1) x (0,1/4) with u = w = 0
+// at the ends and insulated sides; Q = int w = m / 120 (per unit width) and
+// J = Q^2 / 2, dJ/dm = m / 14400.  The primal is written and solved as
+// authored.  The adjoint here is computed by the test from the dense
+// Jacobian, because the library offers no adjoint solve.
+
+// ---------------------------------------------------------------------------
+// The formulation: everything an author writes for the primal of problem 15.
+// ---------------------------------------------------------------------------
+struct CoupledPoissonInstall {
+    FieldId u{INVALID_FIELD_ID};
+    FieldId w{INVALID_FIELD_ID};
+    Quantity Q;
+};
+
+CoupledPoissonInstall defineCoupledPoisson(FESystem& system, const std::shared_ptr<const spaces::FunctionSpace>& V,
+                                           Real control)
+{
+    using namespace forms;
+    FieldBinding fields(system, "CoupledPoisson");
+    const auto U = fields.unknown("u", V);
+    const auto W = fields.unknown("w", V);
+    const auto m = FormExpr::constant(control);
+    auto R = (inner(grad(U.state), grad(U.test)) - m * U.test).dx() +
+             (inner(grad(W.state), grad(W.test)) - U.state * W.test).dx();
+    BoundaryConditionManager u_ends;
+    BoundaryConditionManager w_ends;
+    for (const int end : {1, 2}) {
+        u_ends.add(std::make_unique<bc::Dirichlet>(end, FormExpr::constant(0.0)));
+        w_ends.add(std::make_unique<bc::Dirichlet>(end, FormExpr::constant(0.0)));
+    }
+    constraints::ConstraintPlan plan(system);
+    plan.essentials(u_ends, R, U.state, U.test, U.id);
+    plan.essentials(w_ends, R, W.state, W.test, W.id);
+    plan.commit();
+    FormulationBuilder F(system, "equations", {});
+    F.symbolicTangent();
+    CoupledPoissonInstall out{U.id, W.id, F.quantity("Q", FunctionalKind::Integral, W.state.dx())};
+    F.record(out.Q);
+    (void)F.residual(R);
+    // dQ/dw[v], the objective's gradient as a form (a measurement).
+    FormInstallOptions measurement;
+    measurement.contributes_to_problem_analysis = false;
+    FormulationBuilder G(system, "objective_gradient", measurement);
+    (void)G.residual(W.test.dx());
+    return out;
+}
+// ---------------------------------------------------------------------------
+
+struct AdjointRun {
+    Real Q{0.0};
+    Real J{0.0};
+    Real adjoint_gradient{0.0};
+};
+
+AdjointRun runCoupledPoisson(int n, Real control)
+{
+    constexpr Real width = 0.25;
+    BoxOptions options;
+    options.hi = {1.0, width, 1.0};
+    FESystem system(boxMesh(Cell::Quad4, n, boxSides(options.lo, options.hi), options));
+    const auto V = std::make_shared<spaces::H1Space>(ElementType::Quad4, 2);
+    const auto install = defineCoupledPoisson(system, V, control);
+    system.setup();
+    const auto solved = solveSteady(system, "equations");
+    EXPECT_TRUE(solved.converged);
+    AdjointRun run;
+    run.Q = integrate(system, install.Q.form(), solved.u) / width;
+    run.J = 0.5 * run.Q * run.Q;
+#if defined(FE_HAS_EIGEN) && FE_HAS_EIGEN
+    // The discrete adjoint by hand: the constrained Jacobian A (free rows and
+    // columns), dJ/dU = Q dQ/dU, A^T lambda = dJ/dU, dJ/dm = -lambda . dR/dm,
+    // where dR/dm = R(0)/m (R is affine in m, zero at the solution).
+    const auto A = assembleDense(system, "equations", solved.u);
+    const std::vector<Real> zero(solved.u.size(), 0.0);
+    const auto R0 = assembleDense(system, "equations", zero).vector;
+    const auto g = assembleDense(system, "objective_gradient", zero).vector;
+    std::vector<GlobalIndex> free;
+    for (GlobalIndex i = 0; i < A.n; ++i) {
+        if (!system.constraints().isConstrained(i)) {
+            free.push_back(i);
+        }
+    }
+    const auto m = static_cast<Eigen::Index>(free.size());
+    Eigen::MatrixXd At(m, m);
+    Eigen::VectorXd dJ(m), dR(m);
+    for (Eigen::Index i = 0; i < m; ++i) {
+        const auto a = free[static_cast<std::size_t>(i)];
+        dJ(i) = run.Q * g[static_cast<std::size_t>(a)] / width;
+        dR(i) = R0[static_cast<std::size_t>(a)] / control;
+        for (Eigen::Index j = 0; j < m; ++j) {
+            At(j, i) = A(a, free[static_cast<std::size_t>(j)]);
+        }
+    }
+    const Eigen::VectorXd lambda = At.partialPivLu().solve(dJ);
+    run.adjoint_gradient = -lambda.dot(dR);
+#endif
+    return run;
+}
+
+TEST(GeneralityBenchmarkGaps, P15_PrimalAndTestSideAdjointGiveTheReducedGradient)
+{
+#if defined(FE_HAS_EIGEN) && FE_HAS_EIGEN
+    const Real m = 3.0;
+    std::vector<Real> q_err, g_err;
+    for (const int n : {2, 4, 8}) {
+        const auto run = runCoupledPoisson(n, m);
+        q_err.push_back(std::abs(run.Q - m / 120.0));
+        g_err.push_back(std::abs(run.adjoint_gradient - m / 14400.0));
+        // The reduced gradient of the discrete J by central differences in m
+        // (J is quadratic in m, so they are exact to round-off).
+        const Real delta = 1e-3;
+        const Real fd = (runCoupledPoisson(n, m + delta).J - runCoupledPoisson(n, m - delta).J) / (2.0 * delta);
+        EXPECT_NEAR(run.adjoint_gradient, fd, 1e-9 * std::abs(fd)) << n;
+        // The first-order Taylor remainder decays at second order.
+        const Real r1 = std::abs(runCoupledPoisson(n, m + 0.2).J - run.J - 0.2 * run.adjoint_gradient);
+        const Real r2 = std::abs(runCoupledPoisson(n, m + 0.1).J - run.J - 0.1 * run.adjoint_gradient);
+        EXPECT_NEAR(std::log2(r1 / r2), 2.0, 0.05) << n;
+    }
+    RecordProperty("p15_Q_errors", join(q_err));
+    RecordProperty("p15_gradient_errors", join(g_err));
+    // Q2 integrates w exactly up to the quartic part: the errors are small and decrease.
+    EXPECT_LT(q_err.back(), 1e-6);
+    EXPECT_LT(g_err.back(), 1e-7);
+#else
+    GTEST_SKIP() << "the test-side adjoint needs Eigen";
+#endif
+}
+
+TEST(GeneralityBenchmarkGaps, DISABLED_P15_AdjointSolveOfTheConstrainedResidual)
+{
+    // Missing: an adjoint service of a checked problem: the transpose of the
+    // constrained discrete Jacobian applied and solved through the backend
+    // (GenericMatrix and LinearSolver expose forward actions only), a
+    // declared objective functional with its state derivative (a Quantity is
+    // measured, not differentiated into a vector), the control derivative of
+    // the residual, and the reduced gradient they give; transient adjoints
+    // add accepted-stage replay and the transposes of transfers and local
+    // updates.
+    FAIL() << "no adjoint solve of an authored residual yet";
+}
+
 } // namespace
 } // namespace svmp::FE::systems::generality
