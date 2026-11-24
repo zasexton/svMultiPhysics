@@ -40,6 +40,7 @@
 #include "Forms/Vocabulary.h"
 #include "Spaces/GlobalSpace.h"
 #include "Spaces/H1Space.h"
+#include "Spaces/L2Space.h"
 #include "Spaces/ProductSpace.h"
 #include "Sparsity/SparsityPattern.h"
 #include "Constraints/GaugeRegistry.h"
@@ -2410,6 +2411,76 @@ TEST(GlobalBordered, PreviousLaggedAndARejectedStepKeepTheBorderedHistory)
             for (std::size_t step = 0; step < plain.x.size(); ++step) {
                 EXPECT_EQ(accepted[step], plain.x[step]) << "step " << step;
             }
+        }
+    }
+}
+
+
+// A measured term of a global row that reads the explicit reference or
+// current frame (currentCoordinate(), currentJacobianDeterminant(),
+// currentMeasure(), referencePosition()): the row holds the integral
+// the interpreted ordinary rows of a piecewise-constant field hold for the
+// same integrand (the cell functional threw "data not set": it prepared the
+// active frame only).
+TEST(GlobalRowFrameTerminals, MeasuredTermsReadTheCellFrames)
+{
+    for (const bool jit : {false, true}) {
+        for (int which = 0; which < 4; ++which) {
+            SCOPED_TRACE(::testing::Message() << "integrand " << which << (jit ? ", compiled" : ", interpreted"));
+            FESystem sys(buildGrid(2, 2, Real(1.0), Real(0.5), 1));
+            auto h1 = quadSpace(1);
+            auto dg0 = std::make_shared<spaces::L2Space>(ElementType::Quad4, 0);
+            auto r1 = std::make_shared<spaces::GlobalSpace>(1);
+            const auto u_id = sys.addField(FieldSpec{.name = "u", .space = h1});
+            const auto c_id = sys.addField(FieldSpec{.name = "cells", .space = dg0});
+            const auto l_id = sys.addField(FieldSpec{.name = "lambda", .space = r1, .scope = FieldScope::Global});
+            sys.addOperator("row");
+            sys.addOperator("cells");
+            const auto u = forms::StateField(u_id, *h1, "u");
+            const auto v = forms::TestField(u_id, *h1, "v");
+            const auto c = forms::StateField(c_id, *dg0, "c");
+            const auto w = forms::TestField(c_id, *dg0, "w");
+            const auto lam = forms::StateField(l_id, *r1, "lambda");
+            const auto mu = forms::TestField(l_id, *r1, "mu");
+            const FormExpr integrand =
+                which == 0   ? forms::currentCoordinate().component(0) * forms::currentCoordinate().component(1)
+                : which == 1 ? forms::currentJacobianDeterminant()
+                : which == 2 ? forms::currentMeasure()
+                             : forms::referencePosition().component(0);
+            FormInstallOptions install;
+            install.compiler_options.jit.enable = jit;
+            (void)installFormulation(sys, "row", {u_id, l_id},
+                                     (u * v).dx() + (mu * (integrand - lam)).dx() + (mu * lam).dGlobal(), install);
+            FormInstallOptions interpreted;
+            interpreted.compiler_options.jit.enable = false;
+            (void)installFormulation(sys, "cells", {c_id}, ((c + integrand) * w).dx(), interpreted);
+            sys.setup();
+            const auto n = sys.dofHandler().getNumDofs();
+            const std::vector<Real> U(static_cast<std::size_t>(n), 0.0);
+            SystemStateView state;
+            state.u = U;
+            const auto assemble = [&](const char* op) {
+                assembly::DenseVectorView R(n);
+                R.zero();
+                AssemblyRequest request;
+                request.op = op;
+                request.want_vector = true;
+                EXPECT_TRUE(sys.assemble(request, state, nullptr, &R).success);
+                std::vector<Real> out(static_cast<std::size_t>(n));
+                for (GlobalIndex i = 0; i < n; ++i) {
+                    out[static_cast<std::size_t>(i)] = R.getVectorEntry(i);
+                }
+                return out;
+            };
+            const auto rows = assemble("row");
+            const auto cells = assemble("cells");
+            Real expected = 0.0;
+            const auto c0 = sys.fieldDofOffset(c_id);
+            for (GlobalIndex i = c0; i < c0 + sys.fieldDofHandler(c_id).getNumDofs(); ++i) {
+                expected += cells[static_cast<std::size_t>(i)];
+            }
+            EXPECT_GT(std::abs(expected), 1e-3);
+            EXPECT_NEAR(rows[static_cast<std::size_t>(sys.fieldDofOffset(l_id))], expected, 1e-14);
         }
     }
 }

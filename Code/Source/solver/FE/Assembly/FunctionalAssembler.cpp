@@ -518,6 +518,61 @@ void prepareCellContext(AssemblyContext& context,
 
         context.setEntityMeasures(h, cell_volume, /*facet_area=*/0.0);
     }
+
+    // The explicit reference and current frames of the cell (the reference
+    // and current coordinates, their Jacobians and measures), as
+    // StandardAssembler prepares them for ordinary cells.
+    const bool need_reference =
+        hasFlag(required_data, RequiredData::ReferencePhysicalPoints) ||
+        hasFlag(required_data, RequiredData::ReferenceJacobians) ||
+        hasFlag(required_data, RequiredData::ReferenceMeasures) ||
+        hasFlag(required_data, RequiredData::ConfigurationTransforms);
+    const bool need_current =
+        hasFlag(required_data, RequiredData::CurrentPhysicalPoints) ||
+        hasFlag(required_data, RequiredData::CurrentJacobians) ||
+        hasFlag(required_data, RequiredData::CurrentMeasures) ||
+        hasFlag(required_data, RequiredData::ConfigurationTransforms);
+    if (!need_reference && !need_current && !hasFlag(required_data, RequiredData::SurfaceJacobians)) {
+        return;
+    }
+    const auto evaluate_frame = [&](CoordinateFrame frame) {
+        FE_THROW_IF(!mesh.supportsCoordinateFrame(frame), FEException,
+                    "FunctionalAssembler::prepareCellContext: mesh adapter cannot provide the requested "
+                    "coordinate frame");
+        std::vector<std::array<Real, 3>> coordinates;
+        mesh.getCellCoordinates(cell_id, frame, coordinates);
+        return geometry::evaluateCellFrame(cell_type, *quad_rule, coordinates);
+    };
+    std::optional<geometry::FrameGeometryData> reference_frame;
+    std::optional<geometry::FrameGeometryData> current_frame;
+    if (need_reference) {
+        reference_frame.emplace(evaluate_frame(CoordinateFrame::Reference));
+        context.setReferenceGeometry(reference_frame->points, reference_frame->jacobians,
+                                     reference_frame->inverse_jacobians, reference_frame->measures);
+    }
+    if (need_current) {
+        current_frame.emplace(evaluate_frame(CoordinateFrame::Current));
+        context.setCurrentGeometry(current_frame->points, current_frame->jacobians,
+                                   current_frame->inverse_jacobians, current_frame->measures);
+    }
+    if (hasFlag(required_data, RequiredData::ConfigurationTransforms)) {
+        std::vector<AssemblyContext::Matrix3x3> transforms(static_cast<std::size_t>(n_qpts));
+        for (LocalIndex q = 0; q < n_qpts; ++q) {
+            transforms[static_cast<std::size_t>(q)] = geometry::configurationTransform(
+                current_frame->jacobians[static_cast<std::size_t>(q)],
+                reference_frame->inverse_jacobians[static_cast<std::size_t>(q)]);
+        }
+        context.setConfigurationTransforms(transforms);
+    }
+    if (hasFlag(required_data, RequiredData::SurfaceJacobians)) {
+        if (current_frame.has_value()) {
+            context.setSurfaceJacobians(current_frame->jacobians);
+        } else if (reference_frame.has_value()) {
+            context.setSurfaceJacobians(reference_frame->jacobians);
+        } else {
+            context.setSurfaceJacobians(scratch.jacobians);
+        }
+    }
 }
 
 AssemblyContext::Vector3D computeFaceNormal(LocalIndex local_face_id,
