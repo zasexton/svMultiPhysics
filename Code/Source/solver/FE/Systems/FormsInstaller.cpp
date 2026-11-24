@@ -601,6 +601,60 @@ void registerKernelDomains(
     }
 }
 
+// The space whose element gives the cell rule of a coupled install: that of
+// its highest-order field (a global field has no element).  The kernels of
+// its lower-order rows take that rule, so that all its blocks are integrated
+// alike, whichever path assembles them and whichever field is listed first:
+// the coupling blocks of a Taylor-Hood pair are then opposite transposes.
+// Rows of that order keep their own rule.
+std::shared_ptr<const spaces::FunctionSpace> coupledInstallRuleSpace(
+    const FESystem& system,
+    std::span<const FieldId> test_fields,
+    std::span<const FieldId> trial_fields)
+{
+    std::shared_ptr<const spaces::FunctionSpace> rule_space;
+    const auto consider = [&](FieldId field) {
+        const auto& record = system.fieldRecord(field);
+        if (record.scope == FieldScope::Global || !record.space) {
+            return;
+        }
+        if (!rule_space || record.space->polynomial_order() > rule_space->polynomial_order()) {
+            rule_space = record.space;
+        }
+    };
+    for (const auto field : test_fields) {
+        consider(field);
+    }
+    for (const auto field : trial_fields) {
+        consider(field);
+    }
+    return rule_space;
+}
+
+void applyCoupledInstallRuleSpace(
+    const FESystem& system,
+    FieldId test_field,
+    const KernelPtr& kernel,
+    const std::shared_ptr<const spaces::FunctionSpace>& rule_space)
+{
+    if (!kernel || !rule_space) {
+        return;
+    }
+    const auto& record = system.fieldRecord(test_field);
+    if (record.scope == FieldScope::Global || !record.space ||
+        record.space->polynomial_order() >= rule_space->polynomial_order()) {
+        return;
+    }
+    kernel->setCellRuleSpace(rule_space);
+    if (core::kernelTraceEnabled(core::KernelTraceChannel::Selection)) {
+        std::ostringstream oss;
+        oss << "coupled install: the cell rule of test field '" << record.name << "' (order "
+            << record.space->polynomial_order() << ") is that of order "
+            << rule_space->polynomial_order() << ", kernel '" << kernel->name() << "'";
+        core::kernelTraceLog(core::KernelTraceChannel::Selection, oss.str());
+    }
+}
+
 [[nodiscard]] bool dispatchHasAnyTerm(const DomainDispatch& dispatch) noexcept
 {
     return dispatch.has_cell || dispatch.has_interior || dispatch.has_interface ||
@@ -2788,7 +2842,9 @@ CoupledResidualKernels installCoupledResidual(
         core::kernelTraceLog(core::KernelTraceChannel::Selection, mixed_block_disable_reason);
     }
 
+    const auto rule_space = coupledInstallRuleSpace(system, test_fields, trial_fields);
     for (const auto& pending : pending_installs) {
+        applyCoupledInstallRuleSpace(system, pending.test_field, pending.kernel, rule_space);
         registerKernelDomains(
             system,
             op,
@@ -2805,6 +2861,7 @@ CoupledResidualKernels installCoupledResidual(
         auto jit_compiler = forms::jit::JITCompiler::getOrCreate(install_options.compiler_options.jit);
         auto monolithic_kernel = std::make_shared<forms::MonolithicCellKernel>(
             std::move(monolithic_cell_blocks), std::move(jit_compiler), install_options.compiler_options.jit);
+        applyCoupledInstallRuleSpace(system, test_fields[0], monolithic_kernel, rule_space);
         system.addCellKernel(op, test_fields[0], trial_fields[0], monolithic_kernel);
     } else if (use_mixed_block_cell_kernel) {
         std::shared_ptr<forms::jit::JITCompiler> jit_compiler{};
@@ -2813,6 +2870,7 @@ CoupledResidualKernels installCoupledResidual(
         }
         auto mixed_block_kernel = std::make_shared<forms::MixedBlockKernelSet>(
             std::move(mixed_block_cell_specs), std::move(jit_compiler), install_options.compiler_options.jit);
+        applyCoupledInstallRuleSpace(system, test_fields[0], mixed_block_kernel, rule_space);
         system.addCellKernel(op, test_fields[0], trial_fields[0], mixed_block_kernel);
     }
 
@@ -3653,7 +3711,9 @@ CoupledResidualKernels installCoupledResidualMixed(
         core::kernelTraceLog(core::KernelTraceChannel::Selection, mixed_block_disable_reason);
     }
 
+    const auto rule_space = coupledInstallRuleSpace(system, test_fields, trial_fields);
     for (const auto& pending : pending_installs) {
+        applyCoupledInstallRuleSpace(system, pending.test_field, pending.kernel, rule_space);
         registerKernelDomains(
             system,
             op,
@@ -3676,6 +3736,7 @@ CoupledResidualKernels installCoupledResidualMixed(
         auto jit_compiler = forms::jit::JITCompiler::getOrCreate(install_options.compiler_options.jit);
         auto monolithic_kernel = std::make_shared<forms::MonolithicCellKernel>(
             std::move(monolithic_cell_blocks), std::move(jit_compiler), install_options.compiler_options.jit);
+        applyCoupledInstallRuleSpace(system, test_fields[0], monolithic_kernel, rule_space);
         system.addCellKernel(op, test_fields[0], trial_fields[0], monolithic_kernel);
     } else if (use_mixed_block_cell_kernel) {
         std::shared_ptr<forms::jit::JITCompiler> jit_compiler{};
@@ -3684,6 +3745,7 @@ CoupledResidualKernels installCoupledResidualMixed(
         }
         auto mixed_block_kernel = std::make_shared<forms::MixedBlockKernelSet>(
             std::move(mixed_block_cell_specs), std::move(jit_compiler), install_options.compiler_options.jit);
+        applyCoupledInstallRuleSpace(system, test_fields[0], mixed_block_kernel, rule_space);
         system.addCellKernel(op, test_fields[0], trial_fields[0], mixed_block_kernel);
     }
 
@@ -3869,7 +3931,9 @@ installMixedFormIR(
         core::kernelTraceLog(core::KernelTraceChannel::Selection, monolithic_disable_reason);
     }
 
+    const auto rule_space = coupledInstallRuleSpace(system, test_fields, trial_fields);
     for (const auto& pending : pending_installs) {
+        applyCoupledInstallRuleSpace(system, pending.test_field, pending.kernel, rule_space);
         registerKernelDomains(
             system,
             op,
@@ -3886,6 +3950,7 @@ installMixedFormIR(
         auto jit_compiler = forms::jit::JITCompiler::getOrCreate(options.compiler_options.jit);
         auto monolithic_kernel = std::make_shared<forms::MonolithicCellKernel>(
             std::move(monolithic_cell_blocks), std::move(jit_compiler), options.compiler_options.jit);
+        applyCoupledInstallRuleSpace(system, test_fields[0], monolithic_kernel, rule_space);
         system.addCellKernel(op, test_fields[0], trial_fields[0], monolithic_kernel);
     } else if (use_mixed_block_cell_kernel) {
         std::shared_ptr<forms::jit::JITCompiler> jit_compiler{};
@@ -3894,6 +3959,7 @@ installMixedFormIR(
         }
         auto mixed_block_kernel = std::make_shared<forms::MixedBlockKernelSet>(
             std::move(mixed_block_cell_specs), std::move(jit_compiler), options.compiler_options.jit);
+        applyCoupledInstallRuleSpace(system, test_fields[0], mixed_block_kernel, rule_space);
         system.addCellKernel(op, test_fields[0], trial_fields[0], mixed_block_kernel);
     }
 

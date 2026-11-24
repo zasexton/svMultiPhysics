@@ -81,6 +81,9 @@ namespace FE {
 namespace assembly {
 class AssemblyContext;
 }
+namespace spaces {
+class FunctionSpace;
+}
 
 namespace assembly {
 
@@ -824,6 +827,28 @@ public:
      * @brief Check if kernel produces only vector (no matrix)
      */
     [[nodiscard]] virtual bool isVectorOnly() const noexcept { return false; }
+
+    /**
+     * @brief The space whose element gives this kernel's cell rule, when it is
+     * not the test space
+     *
+     * A coupled install sets its highest-order field's space on the kernels
+     * of its lower-order rows, so that all its blocks take one rule: the
+     * coupling blocks of a Taylor-Hood pair are then opposite transposes, and
+     * the rule does not depend on which field is listed first.  Null: the
+     * test space's rule.
+     */
+    void setCellRuleSpace(std::shared_ptr<const spaces::FunctionSpace> space) noexcept
+    {
+        cell_rule_space_ = std::move(space);
+    }
+    [[nodiscard]] const spaces::FunctionSpace* cellRuleSpace() const noexcept
+    {
+        return cell_rule_space_.get();
+    }
+
+private:
+    std::shared_ptr<const spaces::FunctionSpace> cell_rule_space_{};
 };
 
 // ============================================================================

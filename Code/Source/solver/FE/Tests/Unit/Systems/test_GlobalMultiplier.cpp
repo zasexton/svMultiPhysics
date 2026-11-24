@@ -38,6 +38,7 @@
 #include "Dofs/EntityDofMap.h"
 #include "Forms/BoundaryConditions.h"
 #include "Forms/Vocabulary.h"
+#include "Forms/JIT/LLVMJITBuildInfo.h"
 #include "Spaces/GlobalSpace.h"
 #include "Spaces/H1Space.h"
 #include "Spaces/L2Space.h"
@@ -74,6 +75,7 @@
 #include "Mesh/Mesh.h"
 #include "Mesh/Topology/CellShape.h"
 
+#include <algorithm>
 #include <array>
 #include <cmath>
 #include <cstdlib>
@@ -1232,6 +1234,204 @@ TEST(GlobalMultiplierG3, MeanZeroPressureMultiplierMatchesTheAutomaticGauge)
         const auto integral = evaluateFunctionalForms(sys, mean, state, CollectiveCommunicator{});
         EXPECT_LT(std::abs(integral.front().value), 1e-12 * pressure_scale) << "n=" << n;
         EXPECT_LT(std::abs(a[n_u + n_p]), 1e-10 * pressure_scale) << "n=" << n;
+    }
+}
+
+// ---------------------------------------------------------------------------
+// One cell rule per coupled install
+// ---------------------------------------------------------------------------
+//
+// A coupled install integrates every block with the rule of its highest-order
+// field.  With a global field its blocks are assembled one by one (the fused
+// cell kernels do not take global rows), and each row took its own test
+// element's rule: on Wedge6 P2/P1 the continuity rows (8 points, order 2)
+// under-integrated q div u while the momentum rows (27 points) integrated
+// p div v, so B_qu was not -B_vp^T (by 4.6e-3 against entries of 2.8e-2).
+// Without a global field the fused cell kernels took the rule of the field
+// listed first: listing p first integrated the P2 velocity block with the P1
+// rule.
+
+namespace {
+
+/// n^3 unit-cube cells on (0,1)^3: Hex8, or each cube split into two Wedge6.
+std::shared_ptr<svmp::Mesh> buildBox(svmp::CellFamily family, int n)
+{
+    std::vector<svmp::real_t> X;
+    const auto vertex = [n](int i, int j, int k) {
+        return static_cast<svmp::index_t>((k * (n + 1) + j) * (n + 1) + i);
+    };
+    for (int k = 0; k <= n; ++k) {
+        for (int j = 0; j <= n; ++j) {
+            for (int i = 0; i <= n; ++i) {
+                X.push_back(static_cast<Real>(i) / n);
+                X.push_back(static_cast<Real>(j) / n);
+                X.push_back(static_cast<Real>(k) / n);
+            }
+        }
+    }
+    std::vector<svmp::offset_t> offsets{0};
+    std::vector<svmp::index_t> conn;
+    std::vector<svmp::CellShape> shapes;
+    const auto add = [&](std::initializer_list<svmp::index_t> cell) {
+        conn.insert(conn.end(), cell.begin(), cell.end());
+        offsets.push_back(static_cast<svmp::offset_t>(conn.size()));
+        svmp::CellShape shape{};
+        shape.family = family;
+        shape.num_corners = static_cast<int>(cell.size());
+        shape.order = 1;
+        shapes.push_back(shape);
+    };
+    for (int k = 0; k < n; ++k) {
+        for (int j = 0; j < n; ++j) {
+            for (int i = 0; i < n; ++i) {
+                const std::array<svmp::index_t, 8> c{vertex(i, j, k),         vertex(i + 1, j, k),
+                                                     vertex(i + 1, j + 1, k), vertex(i, j + 1, k),
+                                                     vertex(i, j, k + 1),     vertex(i + 1, j, k + 1),
+                                                     vertex(i + 1, j + 1, k + 1), vertex(i, j + 1, k + 1)};
+                if (family == svmp::CellFamily::Hex) {
+                    add({c[0], c[1], c[2], c[3], c[4], c[5], c[6], c[7]});
+                } else {
+                    add({c[0], c[1], c[2], c[4], c[5], c[6]});
+                    add({c[0], c[2], c[3], c[4], c[6], c[7]});
+                }
+            }
+        }
+    }
+    auto base = std::make_shared<svmp::MeshBase>();
+    base->build_from_arrays(/*spatial_dim=*/3, X, offsets, conn, shapes);
+    base->finalize();
+    return svmp::create_mesh(std::move(base));
+}
+
+/// The Stokes Jacobian's velocity and coupling blocks, by field-local DOF.
+struct TaylorHoodBlocks {
+    std::size_t n_u{0};
+    std::size_t n_p{0};
+    std::vector<Real> uu; ///< [a * n_u + b]
+    std::vector<Real> up; ///< B_vp, [a * n_p + b]
+    std::vector<Real> pu; ///< B_qu, [b * n_u + a]
+};
+
+/**
+ * (grad u : grad v - p div v + q div u) dx on the 2x2x2 box, u P2 and p P1,
+ * at u = p = 0; with the multiplier, + (lambda q + mu p) dx.  The fields are
+ * installed in the order given.
+ */
+TaylorHoodBlocks taylorHoodBlocks(svmp::CellFamily family, ElementType type, bool multiplier,
+                                  bool pressure_first, bool compiled)
+{
+    FESystem sys(buildBox(family, 2));
+    auto p2 = std::make_shared<spaces::H1Space>(type, 2);
+    auto velocity_space = std::make_shared<spaces::ProductSpace>(p2, 3);
+    auto pressure_space = std::make_shared<spaces::H1Space>(type, 1);
+    auto r1 = std::make_shared<spaces::GlobalSpace>(1);
+    FieldId u_id = INVALID_FIELD_ID;
+    FieldId p_id = INVALID_FIELD_ID;
+    if (pressure_first) {
+        p_id = sys.addField(FieldSpec{.name = "p", .space = pressure_space});
+        u_id = sys.addField(FieldSpec{.name = "u", .space = velocity_space, .components = 3});
+    } else {
+        u_id = sys.addField(FieldSpec{.name = "u", .space = velocity_space, .components = 3});
+        p_id = sys.addField(FieldSpec{.name = "p", .space = pressure_space});
+    }
+    FieldId lambda_id = INVALID_FIELD_ID;
+    if (multiplier) {
+        lambda_id = sys.addField(FieldSpec{.name = "lambda", .space = r1});
+    }
+    sys.addOperator("stokes");
+    const auto u = forms::StateField(u_id, *velocity_space, "u");
+    const auto v = forms::TestField(u_id, *velocity_space, "v");
+    const auto p = forms::StateField(p_id, *pressure_space, "p");
+    const auto q = forms::TestField(p_id, *pressure_space, "q");
+    auto residual = (forms::inner(forms::grad(u), forms::grad(v)) - p * forms::div(v) + q * forms::div(u)).dx();
+    std::vector<FieldId> fields = pressure_first ? std::vector<FieldId>{p_id, u_id} : std::vector<FieldId>{u_id, p_id};
+    if (multiplier) {
+        const auto lam = forms::StateField(lambda_id, *r1, "lambda");
+        const auto mu = forms::TestField(lambda_id, *r1, "mu");
+        residual = residual + (lam * q).dx() + (mu * p).dx();
+        fields.push_back(lambda_id);
+    }
+    FormInstallOptions options;
+    options.compiler_options.jit.enable = compiled;
+    (void)installFormulation(sys, "stokes", std::span<const FieldId>(fields), residual, options);
+    sys.setup();
+
+    const auto n = static_cast<std::size_t>(sys.dofHandler().getNumDofs());
+    const std::vector<Real> zero(n, 0.0);
+    const auto assembled = assembleAt(sys, zero, /*want_matrix=*/true, "stokes");
+    const auto u0 = static_cast<std::size_t>(sys.fieldDofOffset(u_id));
+    const auto p0 = static_cast<std::size_t>(sys.fieldDofOffset(p_id));
+    TaylorHoodBlocks out;
+    out.n_u = static_cast<std::size_t>(sys.fieldDofHandler(u_id).getNumDofs());
+    out.n_p = static_cast<std::size_t>(sys.fieldDofHandler(p_id).getNumDofs());
+    const auto at = [&](std::size_t row, std::size_t col) { return assembled.matrix[row * n + col]; };
+    for (std::size_t a = 0; a < out.n_u; ++a) {
+        for (std::size_t b = 0; b < out.n_u; ++b) {
+            out.uu.push_back(at(u0 + a, u0 + b));
+        }
+        for (std::size_t b = 0; b < out.n_p; ++b) {
+            out.up.push_back(at(u0 + a, p0 + b));
+        }
+    }
+    for (std::size_t b = 0; b < out.n_p; ++b) {
+        for (std::size_t a = 0; a < out.n_u; ++a) {
+            out.pu.push_back(at(p0 + b, u0 + a));
+        }
+    }
+    return out;
+}
+
+/// max |B_qu + B_vp^T| and max |B_vp|.
+std::pair<Real, Real> transposeDefect(const TaylorHoodBlocks& blocks)
+{
+    Real defect = 0.0;
+    Real scale = 0.0;
+    for (std::size_t a = 0; a < blocks.n_u; ++a) {
+        for (std::size_t b = 0; b < blocks.n_p; ++b) {
+            const Real vp = blocks.up[a * blocks.n_p + b];
+            defect = std::max(defect, std::abs(blocks.pu[b * blocks.n_u + a] + vp));
+            scale = std::max(scale, std::abs(vp));
+        }
+    }
+    return {defect, scale};
+}
+
+} // namespace
+
+TEST(CoupledInstallRule, WedgeTaylorHoodCouplingBlocksAreOppositeTransposes)
+{
+    std::vector<bool> compiled{false};
+    if (svmp::FE::forms::jit::llvmJITEnabled()) {
+        compiled.push_back(true);
+    }
+    for (const bool jit : compiled) {
+        for (const bool multiplier : {false, true}) {
+            const auto blocks = taylorHoodBlocks(svmp::CellFamily::Wedge, ElementType::Wedge6, multiplier,
+                                                 /*pressure_first=*/false, jit);
+            const auto [defect, scale] = transposeDefect(blocks);
+            ASSERT_GT(scale, 1e-3);
+            EXPECT_LE(defect, 1e-14 * scale) << "multiplier " << multiplier << " compiled " << jit;
+        }
+    }
+}
+
+TEST(CoupledInstallRule, VelocityBlockDoesNotDependOnTheFieldOrder)
+{
+    for (const auto& [family, type] : {std::pair{svmp::CellFamily::Hex, ElementType::Hex8},
+                                       std::pair{svmp::CellFamily::Wedge, ElementType::Wedge6}}) {
+        const auto u_first = taylorHoodBlocks(family, type, /*multiplier=*/false, /*pressure_first=*/false, false);
+        const auto p_first = taylorHoodBlocks(family, type, /*multiplier=*/false, /*pressure_first=*/true, false);
+        ASSERT_EQ(u_first.uu.size(), p_first.uu.size());
+        Real scale = 0.0;
+        Real difference = 0.0;
+        for (std::size_t i = 0; i < u_first.uu.size(); ++i) {
+            scale = std::max(scale, std::abs(u_first.uu[i]));
+            difference = std::max(difference, std::abs(u_first.uu[i] - p_first.uu[i]));
+        }
+        ASSERT_GT(scale, 0.1);
+        EXPECT_LE(difference, 1e-14 * scale) << "cell type " << static_cast<int>(type);
+        const auto [defect, coupling_scale] = transposeDefect(p_first);
+        EXPECT_LE(defect, 1e-14 * coupling_scale) << "cell type " << static_cast<int>(type);
     }
 }
 

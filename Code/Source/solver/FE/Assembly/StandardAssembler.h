@@ -603,7 +603,8 @@ private:
         GlobalIndex cell_id,
         const spaces::FunctionSpace& test_space,
         const spaces::FunctionSpace& trial_space,
-        RequiredData required_data);
+        RequiredData required_data,
+        const spaces::FunctionSpace* rule_space = nullptr);
 
     /**
      * @brief Resolve quadrature rule for a test space element on a cell

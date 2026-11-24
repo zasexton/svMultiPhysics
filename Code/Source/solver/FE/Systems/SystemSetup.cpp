@@ -6159,7 +6159,9 @@ void FESystem::setup(const SetupOptions& user_opts, const SetupInputs& inputs)
 
                 const auto& test_field = field_registry_.get(test_field_id);
                 FE_CHECK_NOT_NULL(test_field.space.get(), "FESystem::setup: test_field.space");
-                const auto max_qpts = maxCellQuadraturePoints(meshAccess(), *test_field.space);
+                const auto* rule_space = kernel.cellRuleSpace();
+                const auto max_qpts = maxCellQuadraturePoints(
+                    meshAccess(), rule_space != nullptr ? *rule_space : *test_field.space);
                 FE_THROW_IF(max_qpts <= 0, InvalidStateException,
                             "FESystem::setup: failed to determine max quadrature points for MaterialState allocation");
 
@@ -7060,8 +7062,9 @@ void FESystem::setup(const SetupOptions& user_opts, const SetupInputs& inputs)
                             FE_CHECK_NOT_NULL(trial_field.space.get(),
                                               "FESystem::setup: monolithic priming trial space");
 
+                            const auto* rule_space = bs.fallback_kernel->cellRuleSpace();
                             prime_cell_jit_kernel(bs.fallback_kernel,
-                                                  *test_field.space,
+                                                  rule_space != nullptr ? *rule_space : *test_field.space,
                                                   *test_field.space,
                                                   *trial_field.space);
                         }
@@ -7079,6 +7082,8 @@ void FESystem::setup(const SetupOptions& user_opts, const SetupInputs& inputs)
                         const auto& qpt_field = field_registry_.get(ref_block.test_field);
                         FE_CHECK_NOT_NULL(qpt_field.space.get(),
                                           "FESystem::setup: mixed-block priming quadrature space");
+                        const auto* rule_space = term.kernel->cellRuleSpace();
+                        const auto& qpt_space = rule_space != nullptr ? *rule_space : *qpt_field.space;
 
                         for (std::size_t bi = 0; bi < mixed_block->numBlocks(); ++bi) {
                             const auto& bs = mixed_block->blockSpec(bi);
@@ -7094,7 +7099,7 @@ void FESystem::setup(const SetupOptions& user_opts, const SetupInputs& inputs)
                                               "FESystem::setup: mixed-block priming trial space");
 
                             prime_cell_jit_kernel(bs.fallback_kernel,
-                                                  *qpt_field.space,
+                                                  qpt_space,
                                                   *test_field.space,
                                                   *trial_field.space);
                         }
@@ -7109,8 +7114,9 @@ void FESystem::setup(const SetupOptions& user_opts, const SetupInputs& inputs)
                     FE_CHECK_NOT_NULL(test_field.space.get(), "FESystem::setup: priming test space");
                     FE_CHECK_NOT_NULL(trial_field.space.get(), "FESystem::setup: priming trial space");
 
+                    const auto* rule_space = term.kernel->cellRuleSpace();
                     prime_cell_jit_kernel(term.kernel,
-                                          *test_field.space,
+                                          rule_space != nullptr ? *rule_space : *test_field.space,
                                           *test_field.space,
                                           *trial_field.space);
                 }

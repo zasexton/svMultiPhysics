@@ -6766,7 +6766,8 @@ AssemblyResult StandardAssembler::assembleCellsCore(
         tp_sub_dofmap += TP_SUB() - tp_s0;
 
         tp_s0 = TP_SUB();
-        prepareContext(ctx, mesh, cell_id, test_space, trial_space, required_data);
+        prepareContext(ctx, mesh, cell_id, test_space, trial_space, required_data,
+                       kernel.cellRuleSpace());
         tp_sub_prepare_ctx += TP_SUB() - tp_s0;
 
         tp_s0 = TP_SUB();
@@ -9623,10 +9624,12 @@ void StandardAssembler::prepareContext(
     GlobalIndex cell_id,
     const spaces::FunctionSpace& test_space,
     const spaces::FunctionSpace& trial_space,
-    RequiredData required_data)
+    RequiredData required_data,
+    const spaces::FunctionSpace* rule_space)
 {
     const ElementType cell_type = mesh.getCellType(cell_id);
-    auto quad_rule = resolveQuadratureRule(test_space, cell_id, cell_type);
+    auto quad_rule = resolveQuadratureRule(rule_space != nullptr ? *rule_space : test_space,
+                                           cell_id, cell_type);
     prepareGeometry(context, mesh, cell_id, *quad_rule);
     prepareBasis(context, mesh, cell_id, test_space, trial_space, required_data, *quad_rule);
     prepareFrameExplicitGeometry(context, mesh, cell_id, cell_type, *quad_rule, required_data);
@@ -13258,7 +13261,11 @@ AssemblyResult StandardAssembler::assembleCellsFused(
             if (first_cell < 0) first_cell = cell_id;
         });
         const auto cell_type = mesh.getCellType(first_cell);
-        fused_quad_rule = resolveQuadratureRule(*first_t.test_space, first_cell, cell_type);
+        const auto rule_space = [](const FusedCellTerm& t) -> const spaces::FunctionSpace& {
+            const auto* space = t.kernel->cellRuleSpace();
+            return space != nullptr ? *space : *t.test_space;
+        };
+        fused_quad_rule = resolveQuadratureRule(rule_space(first_t), first_cell, cell_type);
 
         // Verify all terms produce the same quad rule (the same points and
         // weights, not only as many)
@@ -13281,7 +13288,7 @@ AssemblyResult StandardAssembler::assembleCellsFused(
             return true;
         };
         for (std::size_t ti = 1; ti < terms.size(); ++ti) {
-            auto other_qr = resolveQuadratureRule(*terms[ti].test_space, first_cell, cell_type);
+            auto other_qr = resolveQuadratureRule(rule_space(terms[ti]), first_cell, cell_type);
             if (!same_rule(*other_qr, *fused_quad_rule)) {
                 // Quad rule mismatch — fall back to default sequential path
                 return Assembler::assembleCellsFused(mesh, terms);
@@ -13295,7 +13302,8 @@ AssemblyResult StandardAssembler::assembleCellsFused(
         for (const auto& t : terms) {
             if (t.kernel->hasCell() &&
                 (t.test_space->space_type() == spaces::SpaceType::Adaptive ||
-                 t.trial_space->space_type() == spaces::SpaceType::Adaptive)) {
+                 t.trial_space->space_type() == spaces::SpaceType::Adaptive ||
+                 rule_space(t).space_type() == spaces::SpaceType::Adaptive)) {
                 one_rule = false;
             }
         }
