@@ -295,7 +295,8 @@ coupled-ALE Jacobian.
 
 Complete shape derivatives (`implemented/public`, opt-in, C++ only; D61 item 4,
 D65): `MovingDomainOptions::shape_derivative = forms::ShapeDerivative::Complete`
-(or `ALEBindingOptions::shape_derivative`) makes every install on the moving domain,
+(or `ALEBindingOptions::shape_derivative`, the Navier-Stokes option
+`moving_mesh_shape_derivative`) makes every install on the moving domain,
 the geometry-constant ones included, differentiate every geometric quantity
 of x = X + d (`SymbolicDifferentiation.cpp`; dd the mesh-displacement trial
 function, G = grad(dd)):

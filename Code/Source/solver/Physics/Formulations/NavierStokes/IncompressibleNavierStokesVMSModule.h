@@ -641,6 +641,11 @@ struct IncompressibleNavierStokesVMSOptions {
     bool auto_register_mesh_displacement_field{false};
     FE::forms::GeometryTangentPath moving_mesh_tangent_path{
         FE::forms::GeometryTangentPath::SymbolicRequired};
+    // C++ only, no input key (D61 item 4, D65): Complete makes the moving
+    // domain's tangent differentiate every geometric quantity in the mesh
+    // displacement (FE::forms::ShapeDerivative); no deck selects it.
+    FE::forms::ShapeDerivative moving_mesh_shape_derivative{
+        FE::forms::ShapeDerivative::FrameExplicit};
 
     // Enable residual-based VMS stabilization (static subscales u', p').
     bool enable_vms{true};

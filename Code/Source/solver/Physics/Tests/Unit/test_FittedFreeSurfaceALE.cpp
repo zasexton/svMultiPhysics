@@ -839,6 +839,54 @@ TEST(FittedFreeSurfaceALE, CoupledJacobianLacksPartOfTheShapeDerivativeInEveryRo
     }
 }
 
+// The complete shape derivative (D61 item 4), a C++-only opt-in of the
+// Navier-Stokes moving domain: the same three configurations as above, the
+// harmonic mesh motion included, match central differences in every row and
+// column block, the continuity rows' mesh block (q div(u)) as well.  The
+// default (above) keeps today's tangent.
+TEST(FittedFreeSurfaceALE, CompleteShapeDerivativeOptInMatchesCentralDifferencesInEveryBlock)
+{
+    struct Configuration {
+        const char* name;
+        bool vms;
+        bool surface;
+    };
+    for (const auto& configuration : {Configuration{"Galerkin", false, false},
+                                      Configuration{"VMS", true, false},
+                                      Configuration{"VMS + fitted free surface", true, true}}) {
+        SCOPED_TRACE(configuration.name);
+        auto opts = coupledALEOptions();
+        opts.enable_convection = true;
+        opts.enable_vms = configuration.vms;
+        opts.moving_mesh_shape_derivative = FE::forms::ShapeDerivative::Complete;
+        // Interpreted residual kernels: on a moving domain the JIT residual of
+        // the mesh-velocity terms differs from the interpreter's (to be
+        // resolved on its own); the mesh blocks are interpreted either way.
+        opts.jit_policy.enable = false;
+        std::optional<ns::IncompressibleNavierStokesVMSOptions::FreeSurfaceBoundary> surface;
+        if (configuration.surface) {
+            surface = fittedSurface(0.0, 0.07);
+        }
+        FittedALEFixture ale(makeRectangleTriangleMesh(), surface, opts);
+        setMovingState(ale);
+        const auto defect = fixtureJacobianBlockDefects(ale, 1e-6);
+        const std::array<const char*, 3> names{"u", "p", "d"};
+        for (std::size_t r = 0; r < 3; ++r) {
+            std::cout << "[ complete shape derivative ] " << configuration.name << ", " << names[r] << " rows:";
+            for (std::size_t c = 0; c < 3; ++c) {
+                std::cout << " " << names[c] << " columns " << defect[r][c];
+            }
+            std::cout << "\n";
+        }
+        for (std::size_t r = 0; r < 3; ++r) {
+            SCOPED_TRACE(std::string("rows ") + names[r]);
+            for (std::size_t c = 0; c < 3; ++c) {
+                EXPECT_LT(defect[r][c], 1e-6) << names[c] << " columns";
+            }
+        }
+    }
+}
+
 // Free-stream preservation on a moving mesh: a uniform velocity U with zero
 // pressure on a non-uniformly moving mesh.  The non-conservative and the
 // conservative ALE momentum forms leave the fluid rows at round-off; the

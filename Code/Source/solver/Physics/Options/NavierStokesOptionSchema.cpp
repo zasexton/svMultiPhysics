@@ -1086,6 +1086,9 @@ tangentialPolicyProvenance(
         << json::quote(options.mesh_displacement_field_name)
         << ",\"geometry_tangent_path\":"
         << json::quote(geometryTangentPathName(options.moving_mesh_tangent_path))
+        << (options.moving_mesh_shape_derivative == FE::forms::ShapeDerivative::Complete
+                ? ",\"shape_derivative\":\"complete\""
+                : "")
         << '}'
         << ",\"generic_velocity_nitsche\":{\"gamma\":"
         << jsonReal(options.nitsche_gamma)

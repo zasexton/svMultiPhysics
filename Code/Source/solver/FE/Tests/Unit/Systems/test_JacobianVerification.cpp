@@ -628,7 +628,8 @@ Real relativeOrAbsolute(Real diff2, Real ref2)
 // module).  A mesh probe is installed alone, as the mesh-motion modules
 // install.
 ShapeDerivativeDefect movingDomainJacobianDefect(const MovingDomainProbe& probe,
-                                                 forms::GeometryTangentPath path)
+                                                 forms::GeometryTangentPath path,
+                                                 forms::ShapeDerivative shape = forms::ShapeDerivative::FrameExplicit)
 {
     auto mesh = makeMovingRectangleMesh();
     auto scalar = std::make_shared<svmp::FE::spaces::H1Space>(ElementType::Triangle3, 1);
@@ -641,6 +642,7 @@ ShapeDerivativeDefect movingDomainJacobianDefect(const MovingDomainProbe& probe,
     ale_options.enabled = true;
     ale_options.dimension = 2;
     ale_options.geometry_tangent_path = path;
+    ale_options.shape_derivative = shape;
     ale_options.mesh_velocity_space = vector;
     ale_options.mesh_displacement_space = vector;
     ale_options.auto_register_mesh_displacement_field = true;
@@ -658,7 +660,7 @@ ShapeDerivativeDefect movingDomainJacobianDefect(const MovingDomainProbe& probe,
     systems::FormInstallOptions install;
     install.compiler_options.use_symbolic_tangent = true;
     install.compiler_options.jit.enable = false;
-    if (probe.coupled_install) {
+    if (probe.coupled_install || shape == forms::ShapeDerivative::Complete) {
         ale.configureInstallOptions(install);
     }
     system.addOperator("probe");
@@ -669,8 +671,12 @@ ShapeDerivativeDefect movingDomainJacobianDefect(const MovingDomainProbe& probe,
         row = probe.rows == ProbeRows::Velocity ? u_id : p_id;
         const auto other = probe.rows == ProbeRows::Velocity ? (dt(s.p) * s.q).dx() : inner(dt(s.u), s.v).dx();
         (void)systems::installFormulation(system, "probe", {u_id, p_id}, probe.residual(s) + other, install);
+        systems::FormInstallOptions mesh_install;
+        if (shape == forms::ShapeDerivative::Complete) {
+            ale.configureInstallOptions(mesh_install);
+        }
         (void)systems::installFormulation(system, "probe", {d_id}, inner(grad(s.d), grad(s.psi)).dx(),
-                                          systems::FormInstallOptions{});
+                                          mesh_install);
     }
     // The probes have null spaces; compare the unconstrained operator.
     systems::SetupOptions setup_options;
@@ -850,4 +856,71 @@ TEST(MovingDomainShapeDerivativeTest, OnlyTheFrameExplicitNormalIsComplete)
             EXPECT_LT(defect.other_columns, 1e-6);
         }
     }
+}
+
+// The complete shape derivative (forms::ShapeDerivative::Complete, a C++-only
+// opt-in of the moving domain): every probe of the characterization above,
+// the continuity probe q div(u) and the geometry-constant harmonic install
+// included, matches central differences in the mesh columns.  The AD
+// reference path differentiates the frame-explicit terminals only and is
+// refused with the opt-in.
+TEST(MovingDomainShapeDerivativeTest, CompleteOptInMakesEveryProbeExact)
+{
+    using namespace svmp::FE::forms;
+    const std::vector<MovingDomainProbe> probes = {
+        {"(u.currentNormal()) q ds", ProbeRows::Pressure,
+         [](const S& s) { return (inner(s.u, currentNormal()) * s.q + zeroTimes(s.p * s.q)).ds(kMovingTop); }},
+        {"q dx", ProbeRows::Pressure, [](const S& s) { return (s.q + zeroTimes(s.p * s.q)).dx(); }},
+        {"u.v dx", ProbeRows::Velocity, [](const S& s) { return inner(s.u, s.v).dx(); }},
+        {"currentCoordinate().v dx", ProbeRows::Velocity,
+         [](const S& s) { return (inner(currentCoordinate(), s.v) + zeroTimes(inner(s.u, s.v))).dx(); }},
+        {"tr(currentJacobian()) q dx", ProbeRows::Pressure,
+         [](const S& s) { return (trace(currentJacobian()) * s.q + zeroTimes(s.p * s.q)).dx(); }},
+        {"meshVelocity().v dx", ProbeRows::Velocity,
+         [](const S& s) { return (inner(meshVelocity(), s.v) + zeroTimes(inner(s.u, s.v))).dx(); }},
+        {"div(meshVelocity()) u.v dx (moving control volume)", ProbeRows::Velocity,
+         [](const S& s) { return (div(meshVelocity()) * inner(s.u, s.v)).dx(); }},
+        {"x().v dx", ProbeRows::Velocity,
+         [](const S& s) { return (inner(x(), s.v) + zeroTimes(inner(s.u, s.v))).dx(); }},
+        {"tr(J()) q dx", ProbeRows::Pressure,
+         [](const S& s) { return (trace(J()) * s.q + zeroTimes(s.p * s.q)).dx(); }},
+        {"detJ() q dx", ProbeRows::Pressure,
+         [](const S& s) { return (detJ() * s.q + zeroTimes(s.p * s.q)).dx(); }},
+        {"(u.Jinv()^T Jinv() u) q dx (VMS metric)", ProbeRows::Pressure,
+         [](const S& s) { return (inner(s.u, transpose(Jinv()) * Jinv() * s.u) * s.q + zeroTimes(s.p * s.q)).dx(); }},
+        {"h() q dx", ProbeRows::Pressure,
+         [](const S& s) { return (h() * s.q + zeroTimes(s.p * s.q)).dx(); }},
+        {"(grad(u) u).v dx (convection)", ProbeRows::Velocity,
+         [](const S& s) { return inner(grad(s.u) * s.u, s.v).dx(); }},
+        {"(grad(u) (u - meshVelocity())).v dx (ALE convection)", ProbeRows::Velocity,
+         [](const S& s) { return inner(grad(s.u) * (s.u - meshVelocity()), s.v).dx(); }},
+        {"q div(u) dx (continuity)", ProbeRows::Pressure,
+         [](const S& s) { return (s.q * div(s.u) + zeroTimes(s.p * s.q)).dx(); }},
+        {"-p div(v) dx (pressure)", ProbeRows::Velocity,
+         [](const S& s) { return (-s.p * div(s.v) + zeroTimes(inner(s.u, s.v))).dx(); }},
+        {"grad(u):grad(v) dx (viscous)", ProbeRows::Velocity,
+         [](const S& s) { return inner(grad(s.u), grad(s.v)).dx(); }},
+        {"q ds", ProbeRows::Pressure,
+         [](const S& s) { return (s.q + zeroTimes(s.p * s.q)).ds(kMovingTop); }},
+        {"(u.normal()) q ds", ProbeRows::Pressure,
+         [](const S& s) { return (inner(s.u, FormExpr::normal()) * s.q + zeroTimes(s.p * s.q)).ds(kMovingTop); }},
+        {"q / hNormal() ds (Nitsche scale)", ProbeRows::Pressure,
+         [](const S& s) { return (s.q / hNormal() + zeroTimes(s.p * s.q)).ds(kMovingTop); }},
+        {"(grad(u) currentNormal()).v ds", ProbeRows::Velocity,
+         [](const S& s) { return inner(grad(s.u) * currentNormal(), s.v).ds(kMovingTop); }},
+        {"grad(d):grad(psi) dx (harmonic)", ProbeRows::Mesh,
+         [](const S& s) { return inner(grad(s.d), grad(s.psi)).dx(); }},
+    };
+    for (const auto& probe : probes) {
+        SCOPED_TRACE(probe.name);
+        const auto defect =
+            movingDomainJacobianDefect(probe, GeometryTangentPath::SymbolicRequired, ShapeDerivative::Complete);
+        std::cout << "[ complete shape derivative ] " << probe.name << ": relative defect of the mesh columns "
+                  << defect.mesh_columns << " (|J| " << defect.mesh_jacobian_norm << ", |FD| " << defect.mesh_fd_norm
+                  << ")\n";
+        EXPECT_LT(defect.mesh_columns, 1e-6);
+        EXPECT_LT(defect.other_columns, 1e-6);
+    }
+    EXPECT_THROW((void)movingDomainJacobianDefect(probes[1], GeometryTangentPath::ADReference, ShapeDerivative::Complete),
+                 std::exception);
 }

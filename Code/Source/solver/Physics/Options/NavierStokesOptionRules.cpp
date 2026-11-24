@@ -1580,6 +1580,7 @@ NavierStokesPreflight preflightNavierStokes(
         .enabled = options.enable_ale,
         .dimension = dim,
         .geometry_tangent_path = options.moving_mesh_tangent_path,
+        .shape_derivative = options.moving_mesh_shape_derivative,
         .mesh_velocity_field_name = options.mesh_velocity_field_name,
         .mesh_displacement_field_name =
             options.mesh_displacement_field_name,
