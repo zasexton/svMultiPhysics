@@ -86,11 +86,10 @@ Real maxDifference(const std::vector<Real>& a, const std::vector<Real>& b)
 //
 // The ordinary-application version (D65) needs, beyond this test: a deck
 // declaration of a global reservoir unknown and its coupling (an input key,
-// a user decision); the transient bordered lowering (design 10, M4) for the
-// FSILS route, which setup refuses today (SystemSetup: time derivatives with
-// bordered global fields); the global value in the checkpoint for restart
-// from file; and the reservoir value in the scalar history (F.record of the
-// global field exists, the writer is the Application's).
+// a user decision); the FSILS route through the transient bordered lowering
+// (design 10, M4); the global value in the checkpoint for restart from file;
+// and the reservoir value in the scalar history (F.record of the global
+// field exists, the writer is the Application's).
 
 struct ReservoirData {
     Real b{0.5};
@@ -233,16 +232,9 @@ TEST(GeneralityBenchmarkGaps, P02_SpeciesWithGlobalReservoirConvergesUnderBackwa
     expectSpeciesReservoirOrder(timestepping::SchemeKind::BackwardEuler, 1.0);
 }
 
-TEST(GeneralityBenchmarkGaps, DISABLED_P02_SpeciesWithGlobalReservoirConvergesUnderBDF2)
+TEST(GeneralityBenchmarkGaps, P02_SpeciesWithGlobalReservoirConvergesUnderBDF2)
 {
-    // Defect found by this benchmark (reported): with dt(z) of the global
-    // field in its .dGlobal() row (in-matrix), BDF2 converges at first order
-    // (c and z rates 1.01 and 1.00 for dt = 0.1, 0.05, 0.025), and its first
-    // step takes 8 to 11 Newton iterations on this linear problem (the
-    // tangent of that step does not match its residual); backward Euler is
-    // exact to first order and takes one iteration per step.  BDF2 of
-    // volume fields alone is second order (problem 10).
-    expectSpeciesReservoirOrder(timestepping::SchemeKind::BDF2, 2.0, 20);
+    expectSpeciesReservoirOrder(timestepping::SchemeKind::BDF2, 2.0);
 }
 
 TEST(GeneralityBenchmarkGaps, P02_SpeciesWithGlobalReservoirRejectionAndRestartKeepTheAcceptedStates)
