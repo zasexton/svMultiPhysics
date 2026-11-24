@@ -11,6 +11,10 @@
 #include "Physics/Formulations/NavierStokes/IncompressibleNavierStokesVMSModule.h"
 #include "Physics/Tests/Unit/PhysicsTestHelpers.h"
 
+#if defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH
+#include "Mesh/Observer/ObserverRegistry.h"
+#endif
+
 #include "FE/Assembly/CutIntegrationContext.h"
 #include "FE/Auxiliary/AuxiliaryBindings.h"
 #include "FE/Auxiliary/AuxiliaryInputRegistry.h"
@@ -5129,16 +5133,24 @@ using FittedTankKey = std::tuple<svmp::gid_t, int, int>;
 struct FittedTankOperator {
     std::map<FittedTankKey, FE::Real> residual;
     std::map<std::pair<FittedTankKey, FittedTankKey>, FE::Real> jacobian;
+    std::size_t partition_changes_from_motion{0};  ///< PartitionChanged events of the coordinate updates
 };
 
 [[nodiscard]] FittedTankOperator fittedTankOperator(bool partitioned, int ghost_layers,
-                                                  bool assemble_before_motion, bool jit)
+                                                  bool assemble_before_motion, bool jit,
+                                                  bool refresh_topology_ownership = false)
 {
     int rank = 0;
     int size = 1;
     MPI_Comm_rank(MPI_COMM_WORLD, &rank);
     MPI_Comm_size(MPI_COMM_WORLD, &size);
     auto mesh = makeFittedTank(partitioned, ghost_layers);
+    if (refresh_topology_ownership) {
+        // As the application does after loading a mesh: the derived face and
+        // edge ownership is refreshed, which leaves the exchange patterns to
+        // be rebuilt by the first exchange.
+        mesh->refresh_topology_ownership();
+    }
     FE::systems::FESystem system(mesh);
     const auto vector_space = FE::spaces::Space(FE::spaces::SpaceType::H1, FE::ElementType::Triangle3, 1, 2);
     const auto scalar_space = FE::spaces::Space(FE::spaces::SpaceType::H1, FE::ElementType::Triangle3, 1, 1);
@@ -5224,6 +5236,7 @@ struct FittedTankOperator {
         previous[dof(p_id, v, 0)] = 1.0 + 0.3 * x;
         key_of[dof(p_id, v, 0)] = {gid, 1, 0};
     }
+    std::size_t partition_changes = 0;
     FE::systems::SystemStateView state;
     state.time = 0.1;
     state.dt = 0.05;
@@ -5249,10 +5262,16 @@ struct FittedTankOperator {
         FE::assembly::DenseMatrixView rest_J(static_cast<FE::GlobalIndex>(n));
         rest_R.zero();
         rest_J.zero();
+        const auto events = svmp::ObserverRegistry::attach_event_counter(mesh->local_mesh().event_bus());
         (void)system.updateCurrentCoordinatesFromMeshDisplacement(rest_state);
+        partition_changes += events->count(svmp::MeshEvent::PartitionChanged);
         EXPECT_TRUE(system.assemble(rest_request, rest_state, &rest_J, &rest_R).success);
     }
-    (void)system.updateCurrentCoordinatesFromMeshDisplacement(state);
+    {
+        const auto events = svmp::ObserverRegistry::attach_event_counter(mesh->local_mesh().event_bus());
+        (void)system.updateCurrentCoordinatesFromMeshDisplacement(state);
+        partition_changes += events->count(svmp::MeshEvent::PartitionChanged);
+    }
 
     FE::systems::AssemblyRequest request;
     request.op = "equations";
@@ -5318,6 +5337,7 @@ struct FittedTankOperator {
     }
     EXPECT_EQ(key_of.size(), n);
     FittedTankOperator out;
+    out.partition_changes_from_motion = partition_changes;
     for (const auto& [row, row_key] : key_of) {
         out.residual[row_key] = r[row];
         for (const auto& [col, col_key] : key_of) {
@@ -5430,6 +5450,28 @@ TEST(MovingDomainPhysicsMPI, FittedALEInterpretedOperatorMatchesSerialOnTwoRanks
     expectFittedTankOperatorsMatch(
         fittedTankOperator(/*partitioned=*/false, 0, /*assemble_before_motion=*/false, /*jit=*/false),
         fittedTankOperator(/*partitioned=*/true, 0, /*assemble_before_motion=*/false, /*jit=*/false));
+}
+
+// The first coordinate update of a moving mesh whose exchange patterns were
+// invalidated (as refreshing the derived face and edge ownership after
+// loading does) rebuilds the patterns without announcing a partition change:
+// ownership and ghosts are unchanged, and an announced change makes the FE
+// system set itself up again in the middle of a run, with a new solver layout
+// that the time history no longer matches. The operator still matches the
+// serial one.
+TEST(MovingDomainPhysicsMPI, CoordinateUpdateAfterOwnershipRefreshKeepsThePartition)
+{
+    int rank = 0;
+    int size = 1;
+    if (!mpiWorld(rank, size) || size != 2) {
+        GTEST_SKIP() << "requires an MPI launch with exactly two ranks";
+    }
+    const bool jit = FE::forms::jit::llvmJITEnabled();
+    const auto serial = fittedTankOperator(/*partitioned=*/false, 0, /*assemble_before_motion=*/true, jit);
+    const auto parallel = fittedTankOperator(/*partitioned=*/true, 0, /*assemble_before_motion=*/true, jit,
+                                             /*refresh_topology_ownership=*/true);
+    EXPECT_EQ(parallel.partition_changes_from_motion, 0u);
+    expectFittedTankOperatorsMatch(serial, parallel);
 }
 #endif
 

@@ -1658,6 +1658,14 @@ public:
   void build_exchange_patterns();
 
 	private:
+	  // The body of build_exchange_patterns() without its PartitionChanged
+	  // announcement. An exchange that finds the patterns empty rebuilds them
+	  // with this: ownership and ghosts are unchanged, and announcing a
+	  // partition change would make observers rebuild everything that depends
+	  // on the partition (for FE, a full system setup with a new solver layout)
+	  // in the middle of a run.
+	  void rebuild_exchange_patterns_();
+
 	  // Local mesh (owned)
 	  std::shared_ptr<MeshBase> local_mesh_;
 

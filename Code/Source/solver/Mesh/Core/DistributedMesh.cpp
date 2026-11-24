@@ -5231,7 +5231,7 @@ void DistributedMesh::update_ghosts(const std::vector<FieldHandle>& fields) {
         edge_exchange_.send_ranks.empty() &&
         edge_exchange_.recv_ranks.empty()) {
         // Patterns not built - build them now
-        build_exchange_patterns();
+        rebuild_exchange_patterns_();
     }
 
     auto pattern_for = [&](EntityKind kind) -> const ExchangePattern& {
@@ -5645,7 +5645,7 @@ void DistributedMesh::update_exchange_ghost_coordinates(Configuration cfg) {
     if (vertex_exchange_.send_ranks.empty() && vertex_exchange_.recv_ranks.empty() &&
         cell_exchange_.send_ranks.empty() && cell_exchange_.recv_ranks.empty() &&
         face_exchange_.send_ranks.empty() && face_exchange_.recv_ranks.empty()) {
-        build_exchange_patterns();
+        rebuild_exchange_patterns_();
     }
 
     auto* coords = local_mesh_->X_cur_data_mutable();
@@ -9158,6 +9158,18 @@ void DistributedMesh::build_exchange_patterns() {
     if (world_size_ == 1) {
         return;
     }
+    rebuild_exchange_patterns_();
+    if (local_mesh_) {
+        local_mesh_->event_bus().notify(MeshEvent::PartitionChanged);
+    }
+#endif
+}
+
+void DistributedMesh::rebuild_exchange_patterns_() {
+#ifdef MESH_HAS_MPI
+    if (world_size_ == 1) {
+        return;
+    }
 
     // Ensure derived entity GIDs are canonical before using them for shared/ghost detection or exchange patterns.
     if (local_mesh_) {
@@ -9388,10 +9400,6 @@ void DistributedMesh::build_exchange_patterns() {
     add_neighbors(cell_exchange_);
     add_neighbors(face_exchange_);
     add_neighbors(edge_exchange_);
-
-    if (local_mesh_) {
-        local_mesh_->event_bus().notify(MeshEvent::PartitionChanged);
-    }
 #endif
 }
 
