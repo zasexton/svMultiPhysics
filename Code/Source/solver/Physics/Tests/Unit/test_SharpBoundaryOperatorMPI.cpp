@@ -17,6 +17,7 @@
 #include "FE/Dofs/EntityDofMap.h"
 #include "FE/Forms/BoundaryFunctional.h"
 #include "FE/Forms/FormExpr.h"
+#include "FE/Forms/JIT/LLVMJITBuildInfo.h"
 #include "FE/Forms/StandardBCs.h"
 #include "FE/Forms/Vocabulary.h"
 #include "FE/Spaces/SpaceFactory.h"
@@ -37,6 +38,7 @@
 #include <cstdlib>
 #include <functional>
 #include <iomanip>
+#include <iostream>
 #include <limits>
 #include <map>
 #include <memory>
@@ -47,6 +49,7 @@
 #include <stdexcept>
 #include <string>
 #include <string_view>
+#include <tuple>
 #include <type_traits>
 #include <utility>
 #include <vector>
@@ -69,6 +72,11 @@ namespace {
 
 #if FE_HAS_MPI || defined(MESH_HAS_MPI)
 #  include <mpi.h>
+#endif
+#if defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH
+#  include "Mesh/Core/MeshBase.h"
+#  include "Mesh/Mesh.h"
+#  include "Mesh/Topology/CellShape.h"
 #endif
 
 namespace svmp::Physics::test {
@@ -4990,4 +4998,440 @@ TEST(FreeSurfaceSharpBoundaryOperatorsMPI,
 }
 
 } // namespace
+
+#if FE_HAS_MPI && defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH
+namespace {
+
+constexpr int kFittedTankFreeSurface = 61;
+constexpr int kFittedTankLeftWall = 62;
+constexpr int kFittedTankRightWall = 63;
+constexpr int kFittedTankBottom = 64;
+constexpr int kFittedTankCellsX = 10;
+constexpr int kFittedTankCellsY = 4;
+
+/// The liquid of a 2D tank, [0, 1] x [0, h(x)] with a cosine free surface
+/// h(x) = 0.5 + 0.05 cos(pi x), as Triangle3 cells (each grid quad split
+/// along alternating diagonals); vertex and cell global ids are the indices.
+struct FittedTankArrays {
+    std::vector<svmp::real_t> coordinates;
+    std::vector<svmp::offset_t> offsets;
+    std::vector<svmp::index_t> connectivity;
+    std::vector<svmp::CellShape> shapes;
+};
+
+[[nodiscard]] FE::Real fittedTankSurfaceHeight(FE::Real x)
+{
+    return FE::Real{0.5} + FE::Real{0.05} * std::cos(FE::Real{3.14159265358979323846} * x);
+}
+
+[[nodiscard]] FittedTankArrays makeFittedTankArrays()
+{
+    FittedTankArrays arrays;
+    const auto vertex = [](int i, int j) {
+        return static_cast<svmp::index_t>(j * (kFittedTankCellsX + 1) + i);
+    };
+    for (int j = 0; j <= kFittedTankCellsY; ++j) {
+        for (int i = 0; i <= kFittedTankCellsX; ++i) {
+            const FE::Real x = static_cast<FE::Real>(i) / kFittedTankCellsX;
+            arrays.coordinates.push_back(static_cast<svmp::real_t>(x));
+            arrays.coordinates.push_back(static_cast<svmp::real_t>(
+                fittedTankSurfaceHeight(x) * static_cast<FE::Real>(j) / kFittedTankCellsY));
+        }
+    }
+    svmp::CellShape triangle{};
+    triangle.family = svmp::CellFamily::Triangle;
+    triangle.num_corners = 3;
+    triangle.order = 1;
+    arrays.offsets.push_back(0);
+    // Column by column, so that a block partition of the cells splits the
+    // tank across the free surface and the bottom wall. The 80 cells fill
+    // the assembler's cell batches (32 cells) differently on one rank and on
+    // two, so a batch that reads one element's data for another shows.
+    for (int i = 0; i < kFittedTankCellsX; ++i) {
+        for (int j = 0; j < kFittedTankCellsY; ++j) {
+            const auto a = vertex(i, j), b = vertex(i + 1, j), c = vertex(i + 1, j + 1), d = vertex(i, j + 1);
+            const std::array<std::array<svmp::index_t, 3>, 2> cells =
+                (i + j) % 2 == 0 ? std::array<std::array<svmp::index_t, 3>, 2>{{{a, b, c}, {a, c, d}}}
+                                 : std::array<std::array<svmp::index_t, 3>, 2>{{{a, b, d}, {b, c, d}}};
+            for (const auto& cell : cells) {
+                arrays.connectivity.insert(arrays.connectivity.end(), cell.begin(), cell.end());
+                arrays.offsets.push_back(static_cast<svmp::offset_t>(arrays.connectivity.size()));
+                arrays.shapes.push_back(triangle);
+            }
+        }
+    }
+    return arrays;
+}
+
+/// Labels the faces of the tank boundary: the free surface (both vertices on
+/// the top row), the side walls and the bottom.  Faces at the edge of a
+/// partition's ghost layer are not tank boundary and stay unlabeled.
+void labelFittedTank(svmp::Mesh& mesh)
+{
+    auto& local = mesh.local_mesh();
+    const auto& X = local.X_ref();
+    const auto x_of = [&](svmp::index_t v) { return FE::Real(X[2 * static_cast<std::size_t>(v)]); };
+    const auto y_of = [&](svmp::index_t v) { return FE::Real(X[2 * static_cast<std::size_t>(v) + 1]); };
+    const auto on_top = [&](svmp::index_t v) {
+        return std::abs(y_of(v) - fittedTankSurfaceHeight(x_of(v))) < 1e-12;
+    };
+    for (const auto face : local.boundary_faces()) {
+        const auto vertices = local.face_vertices(face);
+        if (vertices.size() != 2u) {
+            continue;
+        }
+        const auto a = vertices[0];
+        const auto b = vertices[1];
+        if (on_top(a) && on_top(b)) {
+            mesh.set_boundary_label(face, kFittedTankFreeSurface);
+        } else if (std::abs(x_of(a)) < 1e-12 && std::abs(x_of(b)) < 1e-12) {
+            mesh.set_boundary_label(face, kFittedTankLeftWall);
+        } else if (std::abs(x_of(a) - 1.0) < 1e-12 && std::abs(x_of(b) - 1.0) < 1e-12) {
+            mesh.set_boundary_label(face, kFittedTankRightWall);
+        } else if (std::abs(y_of(a)) < 1e-12 && std::abs(y_of(b)) < 1e-12) {
+            mesh.set_boundary_label(face, kFittedTankBottom);
+        }
+    }
+}
+
+[[nodiscard]] std::shared_ptr<svmp::Mesh> makeFittedTank(bool partitioned, int ghost_layers)
+{
+    const auto arrays = makeFittedTankArrays();
+    std::shared_ptr<svmp::Mesh> mesh;
+    if (partitioned) {
+        mesh = std::make_shared<svmp::Mesh>(svmp::MeshComm(MPI_COMM_WORLD));
+        mesh->build_from_arrays_global_and_partition(
+            /*spatial_dim=*/2, arrays.coordinates, arrays.offsets, arrays.connectivity, arrays.shapes,
+            svmp::PartitionHint::Cells, ghost_layers, {{"partition_method", "block"}});
+    } else {
+        auto base = std::make_shared<svmp::MeshBase>();
+        base->build_from_arrays(2, arrays.coordinates, arrays.offsets, arrays.connectivity, arrays.shapes);
+        std::vector<svmp::gid_t> vertex_gids(base->n_vertices());
+        std::iota(vertex_gids.begin(), vertex_gids.end(), svmp::gid_t{0});
+        std::vector<svmp::gid_t> cell_gids(base->n_cells());
+        std::iota(cell_gids.begin(), cell_gids.end(), svmp::gid_t{0});
+        base->set_vertex_gids(std::move(vertex_gids));
+        base->set_cell_gids(std::move(cell_gids));
+        base->finalize();
+        mesh = svmp::create_mesh(std::move(base), svmp::MeshComm(MPI_COMM_SELF));
+    }
+    labelFittedTank(*mesh);
+    return mesh;
+}
+
+/// The coupled fitted-ALE residual and Jacobian of the tank (Navier-Stokes
+/// with ALE, convection, VMS, gravity, free-slip walls and a MeshNitsche free
+/// surface with surface tension; the harmonic mesh-velocity operator with
+/// sliding walls), with the wall constraints applied, at a smooth trial
+/// state on the trial current configuration, by (vertex global id, field,
+/// component), summed over the ranks of a partitioned mesh.
+using FittedTankKey = std::tuple<svmp::gid_t, int, int>;
+struct FittedTankOperator {
+    std::map<FittedTankKey, FE::Real> residual;
+    std::map<std::pair<FittedTankKey, FittedTankKey>, FE::Real> jacobian;
+};
+
+[[nodiscard]] FittedTankOperator fittedTankOperator(bool partitioned, int ghost_layers,
+                                                  bool assemble_before_motion, bool jit)
+{
+    int rank = 0;
+    int size = 1;
+    MPI_Comm_rank(MPI_COMM_WORLD, &rank);
+    MPI_Comm_size(MPI_COMM_WORLD, &size);
+    auto mesh = makeFittedTank(partitioned, ghost_layers);
+    FE::systems::FESystem system(mesh);
+    const auto vector_space = FE::spaces::Space(FE::spaces::SpaceType::H1, FE::ElementType::Triangle3, 1, 2);
+    const auto scalar_space = FE::spaces::Space(FE::spaces::SpaceType::H1, FE::ElementType::Triangle3, 1, 1);
+
+    auto fluid = baseOptions();
+    fluid.jit_policy.enable = jit;
+    fluid.enable_convection = true;
+    fluid.enable_vms = true;
+    fluid.body_force = {0.0, -9.81, 0.0};
+    fluid.enable_ale = true;
+    fluid.mesh_displacement_field_name = "mesh_displacement";
+    fluid.mesh_velocity_field_name = "mesh_velocity";
+    fluid.auto_register_mesh_displacement_field = true;
+    fluid.free_surface.push_back(ns::IncompressibleNavierStokesVMSOptions::FreeSurfaceBoundary{
+        .implementation = ns::FreeSurfaceImplementation::FittedALE,
+        .boundary_marker = kFittedTankFreeSurface,
+        .external_pressure = FE::Real{0.0},
+        .surface_tension = FE::Real{0.07},
+        .tangential_mesh_policy = ns::FreeSurfaceTangentialMeshPolicy::Free,
+        .kinematic_enforcement = ns::FreeSurfaceKinematicEnforcement::MeshNitsche,
+    });
+    // Free-slip fluid walls and sliding mesh walls: the wall-normal component
+    // is constrained, as the fitted decks state with Effective_direction.
+    const std::array<std::pair<int, std::array<bool, 3>>, 3> walls{{
+        {kFittedTankLeftWall, {true, false, false}},
+        {kFittedTankRightWall, {true, false, false}},
+        {kFittedTankBottom, {false, true, false}},
+    }};
+    for (const auto& [marker, components] : walls) {
+        fluid.velocity_dirichlet.push_back({.boundary_marker = marker, .active_components = components});
+    }
+    ns::IncompressibleNavierStokesVMSModule(vector_space, scalar_space, std::move(fluid)).registerOn(system);
+    mm::HarmonicMeshMotionOptions mesh_options;
+    mesh_options.jit_policy.enable = jit;
+    mesh_options.field_name = "mesh_displacement";
+    mesh_options.kappa = FE::Real{1.0};
+    mesh_options.quantity = mm::HarmonicQuantity::Velocity;
+    for (const auto& [marker, components] : walls) {
+        mesh_options.dirichlet.push_back({.boundary_marker = marker, .active_components = components});
+    }
+    mm::HarmonicMeshMotionModule(vector_space, std::move(mesh_options)).registerOn(system);
+
+    const auto u_id = system.findFieldByName("u");
+    const auto p_id = system.findFieldByName("p");
+    const auto d_id = system.findFieldByName("mesh_displacement");
+    FE::systems::SetupOptions setup_options;
+    setup_options.dof_options.my_rank = partitioned ? rank : 0;
+    setup_options.dof_options.world_size = partitioned ? size : 1;
+    setup_options.dof_options.mpi_comm = partitioned ? MPI_COMM_WORLD : MPI_COMM_SELF;
+    system.setup(setup_options);
+
+    // A smooth state of the reference coordinates: u = (0.1 sin(pi x) + 0.2 y,
+    // 0.05 cos(pi y)), p = 1 + 0.3 x, d = 0.02 (sin(pi x) y, x y); the
+    // previous state holds 0.9 u and 0.5 d.
+    const auto n = static_cast<std::size_t>(system.dofHandler().getNumDofs());
+    std::vector<FE::Real> current(n, 0.0);
+    std::vector<FE::Real> previous(n, 0.0);
+    const auto& local = mesh->local_mesh();
+    const auto& X = local.X_ref();
+    const auto& gids = local.vertex_gids();
+    const auto dof = [&](FE::FieldId field, svmp::index_t vertex, int component) {
+        const auto dofs = system.fieldDofHandler(field).getEntityDofMap()->getVertexDofs(
+            static_cast<FE::GlobalIndex>(vertex));
+        return static_cast<std::size_t>(system.fieldDofOffset(field) + dofs[static_cast<std::size_t>(component)]);
+    };
+    std::map<std::size_t, FittedTankKey> key_of;
+    constexpr FE::Real pi = 3.14159265358979323846;
+    for (svmp::index_t v = 0; v < static_cast<svmp::index_t>(local.n_vertices()); ++v) {
+        const FE::Real x = X[2 * static_cast<std::size_t>(v)];
+        const FE::Real y = X[2 * static_cast<std::size_t>(v) + 1];
+        const auto gid = gids[static_cast<std::size_t>(v)];
+        const std::array<FE::Real, 2> u{0.1 * std::sin(pi * x) + 0.2 * y, 0.05 * std::cos(pi * y)};
+        const std::array<FE::Real, 2> d{0.02 * std::sin(pi * x) * y, 0.02 * x * y};
+        for (int c = 0; c < 2; ++c) {
+            current[dof(u_id, v, c)] = u[static_cast<std::size_t>(c)];
+            previous[dof(u_id, v, c)] = 0.9 * u[static_cast<std::size_t>(c)];
+            current[dof(d_id, v, c)] = d[static_cast<std::size_t>(c)];
+            previous[dof(d_id, v, c)] = 0.5 * d[static_cast<std::size_t>(c)];
+            key_of[dof(u_id, v, c)] = {gid, 0, c};
+            key_of[dof(d_id, v, c)] = {gid, 2, c};
+        }
+        current[dof(p_id, v, 0)] = 1.0 + 0.3 * x;
+        previous[dof(p_id, v, 0)] = 1.0 + 0.3 * x;
+        key_of[dof(p_id, v, 0)] = {gid, 1, 0};
+    }
+    FE::systems::SystemStateView state;
+    state.time = 0.1;
+    state.dt = 0.05;
+    state.u = std::span<const FE::Real>(current);
+    state.u_prev = std::span<const FE::Real>(previous);
+    const FE::systems::BackwardDifferenceIntegrator integrator;
+    const auto context = integrator.buildContext(1, state);
+    state.time_integration = &context;
+    if (assemble_before_motion) {
+        // As a Newton solve does: the operator at the reference coordinates
+        // first, then the trial coordinates of the moved state.
+        std::vector<FE::Real> rest(n, 0.0);
+        FE::systems::SystemStateView rest_state = state;
+        rest_state.u = std::span<const FE::Real>(rest);
+        rest_state.u_prev = std::span<const FE::Real>(rest);
+        const auto rest_context = integrator.buildContext(1, rest_state);
+        rest_state.time_integration = &rest_context;
+        FE::systems::AssemblyRequest rest_request;
+        rest_request.op = "equations";
+        rest_request.want_vector = true;
+        rest_request.want_matrix = true;
+        FE::assembly::DenseVectorView rest_R(static_cast<FE::GlobalIndex>(n));
+        FE::assembly::DenseMatrixView rest_J(static_cast<FE::GlobalIndex>(n));
+        rest_R.zero();
+        rest_J.zero();
+        (void)system.updateCurrentCoordinatesFromMeshDisplacement(rest_state);
+        EXPECT_TRUE(system.assemble(rest_request, rest_state, &rest_J, &rest_R).success);
+    }
+    (void)system.updateCurrentCoordinatesFromMeshDisplacement(state);
+
+    FE::systems::AssemblyRequest request;
+    request.op = "equations";
+    request.want_vector = true;
+    request.want_matrix = true;
+    FE::assembly::DenseVectorView R(static_cast<FE::GlobalIndex>(n));
+    FE::assembly::DenseMatrixView J(static_cast<FE::GlobalIndex>(n));
+    R.zero();
+    J.zero();
+    const auto result = system.assemble(request, state, &J, &R);
+    EXPECT_TRUE(result.success) << result.error_message;
+    // The residual alone, as a Newton solve evaluates it after an update: the
+    // residual-only cell loop must give the residual of the joint assembly.
+    {
+        FE::systems::AssemblyRequest vector_request;
+        vector_request.op = "equations";
+        vector_request.want_vector = true;
+        FE::assembly::DenseVectorView R_only(static_cast<FE::GlobalIndex>(n));
+        R_only.zero();
+        EXPECT_TRUE(system.assemble(vector_request, state, nullptr, &R_only).success);
+        FE::Real worst = 0.0;
+        FE::Real scale = 0.0;
+        for (std::size_t i = 0; i < n; ++i) {
+            worst = std::max(worst, std::abs(R_only.getVectorEntry(static_cast<FE::GlobalIndex>(i)) -
+                                             R.getVectorEntry(static_cast<FE::GlobalIndex>(i))));
+            scale = std::max(scale, std::abs(R.getVectorEntry(static_cast<FE::GlobalIndex>(i))));
+        }
+        EXPECT_LE(worst, 1e-14 * std::max(scale, FE::Real{1.0}))
+            << "residual-only assembly differs from the joint assembly by " << worst;
+    }
+    std::vector<FE::Real> r(n, 0.0);
+    std::vector<FE::Real> jac(n * n, 0.0);
+    for (std::size_t i = 0; i < n; ++i) {
+        r[i] = R.getVectorEntry(static_cast<FE::GlobalIndex>(i));
+        for (std::size_t j = 0; j < n; ++j) {
+            jac[i * n + j] = J.getMatrixEntry(static_cast<FE::GlobalIndex>(i), static_cast<FE::GlobalIndex>(j));
+        }
+    }
+    if (partitioned) {
+        MPI_Allreduce(MPI_IN_PLACE, r.data(), static_cast<int>(n), MPI_DOUBLE, MPI_SUM, MPI_COMM_WORLD);
+        MPI_Allreduce(MPI_IN_PLACE, jac.data(), static_cast<int>(n * n), MPI_DOUBLE, MPI_SUM, MPI_COMM_WORLD);
+    }
+    // Every rank holds the whole operator after the sum; name every DOF with
+    // the keys the ranks know.
+    if (partitioned) {
+        std::vector<long long> mine;
+        for (const auto& [index, key] : key_of) {
+            mine.insert(mine.end(), {static_cast<long long>(index), static_cast<long long>(std::get<0>(key)),
+                                     std::get<1>(key), std::get<2>(key)});
+        }
+        const int count = static_cast<int>(mine.size());
+        std::vector<int> counts(static_cast<std::size_t>(size), 0);
+        MPI_Allgather(&count, 1, MPI_INT, counts.data(), 1, MPI_INT, MPI_COMM_WORLD);
+        std::vector<int> displacements(static_cast<std::size_t>(size), 0);
+        std::partial_sum(counts.begin(), counts.end() - 1, displacements.begin() + 1);
+        std::vector<long long> all(static_cast<std::size_t>(displacements.back() + counts.back()));
+        MPI_Allgatherv(mine.data(), count, MPI_LONG_LONG, all.data(), counts.data(), displacements.data(),
+                       MPI_LONG_LONG, MPI_COMM_WORLD);
+        for (std::size_t k = 0; k + 3 < all.size(); k += 4) {
+            key_of[static_cast<std::size_t>(all[k])] = {static_cast<svmp::gid_t>(all[k + 1]),
+                                                        static_cast<int>(all[k + 2]), static_cast<int>(all[k + 3])};
+        }
+    }
+    EXPECT_EQ(key_of.size(), n);
+    FittedTankOperator out;
+    for (const auto& [row, row_key] : key_of) {
+        out.residual[row_key] = r[row];
+        for (const auto& [col, col_key] : key_of) {
+            if (jac[row * n + col] != 0.0) {
+                out.jacobian[{row_key, col_key}] = jac[row * n + col];
+            }
+        }
+    }
+    return out;
+}
+
+/// Expects a two-rank fitted tank operator to match the serial one entry by
+/// entry, to round-off of the largest serial entry.
+void expectFittedTankOperatorsMatch(const FittedTankOperator& serial, const FittedTankOperator& parallel)
+{
+    FE::Real residual_scale = 0.0;
+    for (const auto& entry : serial.residual) {
+        residual_scale = std::max(residual_scale, std::abs(entry.second));
+    }
+    FE::Real jacobian_scale = 0.0;
+    for (const auto& entry : serial.jacobian) {
+        jacobian_scale = std::max(jacobian_scale, std::abs(entry.second));
+    }
+    ASSERT_GT(residual_scale, 0.0);
+    ASSERT_GT(jacobian_scale, 0.0);
+    FE::Real residual_worst = 0.0;
+    for (const auto& [key, value] : parallel.residual) {
+        const auto it = serial.residual.find(key);
+        ASSERT_NE(it, serial.residual.end());
+        residual_worst = std::max(residual_worst, std::abs(value - it->second));
+        EXPECT_LE(std::abs(value - it->second), 1e-12 * residual_scale)
+            << "vertex " << std::get<0>(key) << " field " << std::get<1>(key) << " component "
+            << std::get<2>(key) << ": serial " << it->second << " two ranks " << value;
+    }
+    FE::Real jacobian_worst = 0.0;
+    std::map<std::pair<FittedTankKey, FittedTankKey>, std::pair<FE::Real, FE::Real>> entries;
+    for (const auto& [key, value] : serial.jacobian) {
+        entries[key].first = value;
+    }
+    for (const auto& [key, value] : parallel.jacobian) {
+        entries[key].second = value;
+    }
+    for (const auto& [key, values] : entries) {
+        const auto& [serial_value, value] = values;
+        jacobian_worst = std::max(jacobian_worst, std::abs(value - serial_value));
+        EXPECT_LE(std::abs(value - serial_value), 1e-12 * jacobian_scale)
+            << "row vertex " << std::get<0>(key.first) << " field " << std::get<1>(key.first)
+            << " component " << std::get<2>(key.first) << ", column vertex " << std::get<0>(key.second)
+            << " field " << std::get<1>(key.second) << " component " << std::get<2>(key.second)
+            << ": serial " << serial_value << " two ranks " << value;
+    }
+    EXPECT_EQ(parallel.residual.size(), serial.residual.size());
+    EXPECT_FALSE(parallel.residual.empty());
+    EXPECT_FALSE(parallel.jacobian.empty());
+    std::cout << "fitted-ALE two-rank operator: residual rows " << parallel.residual.size() << " worst "
+              << residual_worst << " (scale " << residual_scale << "), jacobian entries "
+              << parallel.jacobian.size() << " worst " << jacobian_worst << " (scale " << jacobian_scale << ")"
+              << std::endl;
+}
+
+/// The two-rank operator of the fitted tank, on a block partition with and
+/// without a ghost layer, and with and without a first assembly at the
+/// reference coordinates, against the serial one.
+void expectFittedTankMatchesSerialOnTwoRanks(bool jit)
+{
+    for (const bool assemble_before_motion : {false, true}) {
+        const auto serial = fittedTankOperator(/*partitioned=*/false, 0, assemble_before_motion, jit);
+        for (const int ghost_layers : {0, 1}) {
+            SCOPED_TRACE(::testing::Message() << "ghost layers " << ghost_layers
+                                              << ", assembled before the motion " << assemble_before_motion);
+            expectFittedTankOperatorsMatch(
+                serial, fittedTankOperator(/*partitioned=*/true, ghost_layers, assemble_before_motion, jit));
+        }
+    }
+}
+
+} // namespace
+
+// Fitted ALE assembles the same coupled residual and Jacobian on two ranks as
+// on one: summed over the ranks, every residual entry and every Jacobian entry
+// matches the serial entry of the same vertices, fields and components. The
+// kernels are the compiled ones the solver runs by default: they evaluate the
+// cells in batches, which fall differently on one rank and on two, and each
+// cell of a batch must see its own moving-frame data (mesh velocity, current
+// geometry).
+TEST(MovingDomainPhysicsMPI, FittedALEOperatorMatchesSerialOnTwoRanks)
+{
+    int rank = 0;
+    int size = 1;
+    if (!mpiWorld(rank, size) || size != 2) {
+        GTEST_SKIP() << "requires an MPI launch with exactly two ranks";
+    }
+    if (!FE::forms::jit::llvmJITEnabled()) {
+        GTEST_SKIP() << "requires the compiled kernels (LLVM JIT)";
+    }
+    expectFittedTankMatchesSerialOnTwoRanks(/*jit=*/true);
+}
+
+// The same with the interpreted kernels. Disabled: the fast path of
+// StandardAssembler::prepareBasis sets basis values and physical gradients
+// but skips the reference gradients and Hessians even when the kernel requires
+// RequiredData::BasisGradients, so in a batch of cells the interpreted
+// mesh-motion sensitivity (the reference-gradient seed of the current
+// Jacobian) reads zeros or another cell's data and the mesh-displacement
+// columns of the Jacobian change with the batch composition.
+TEST(MovingDomainPhysicsMPI, DISABLED_FittedALEInterpretedOperatorMatchesSerialOnTwoRanks)
+{
+    int rank = 0;
+    int size = 1;
+    if (!mpiWorld(rank, size) || size != 2) {
+        GTEST_SKIP() << "requires an MPI launch with exactly two ranks";
+    }
+    expectFittedTankMatchesSerialOnTwoRanks(/*jit=*/false);
+}
+#endif
+
 } // namespace svmp::Physics::test

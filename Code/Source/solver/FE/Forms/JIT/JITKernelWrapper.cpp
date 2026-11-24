@@ -421,6 +421,10 @@ inline void patchCellSideArgsV6(assembly::jit::KernelSideArgsV6& s,
     s.coupled_aux = ctx.coupledAuxState().empty() ? nullptr : ctx.coupledAuxState().data();
     s.num_coupled_aux = static_cast<std::uint32_t>(ctx.coupledAuxState().size());
 
+    // Auxiliary state and configuration frame (reference/current geometry,
+    // mesh displacement and velocity) of this element
+    assembly::jit::detail::packAuxiliaryAndFrameV6(ctx, s);
+
     // Material state pointers (sizes/alignment are batch-invariant)
     s.material_state_old_base = ctx.materialStateOldBase();
     s.material_state_work_base = ctx.materialStateWorkBase();

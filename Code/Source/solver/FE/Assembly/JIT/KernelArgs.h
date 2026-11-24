@@ -2017,6 +2017,38 @@ namespace detail {
     return out;
 }
 
+/// Point a V6 side at the context's auxiliary state and its configuration
+/// frame (reference and current geometry, mesh motion). These live in
+/// per-context buffers and vary from cell to cell, so a side templated from
+/// another element of a batch must be re-pointed here as well.
+inline void packAuxiliaryAndFrameV6(const AssemblyContext& ctx, KernelSideArgsV6& out) noexcept
+{
+    out.auxiliary_inputs = ctx.auxiliaryInputs().empty() ? nullptr : ctx.auxiliaryInputs().data();
+    out.num_auxiliary_inputs = static_cast<std::uint32_t>(ctx.auxiliaryInputs().size());
+    out.auxiliary_outputs = ctx.auxiliaryOutputs().empty() ? nullptr : ctx.auxiliaryOutputs().data();
+    out.num_auxiliary_outputs = static_cast<std::uint32_t>(ctx.auxiliaryOutputs().size());
+
+    out.reference_physical_points_xyz = flattenXYZ(ctx.referencePhysicalPoints());
+    out.current_physical_points_xyz = flattenXYZ(ctx.currentPhysicalPoints());
+    out.reference_jacobians = flattenMat3(ctx.referenceJacobians());
+    out.current_jacobians = flattenMat3(ctx.currentJacobians());
+    out.reference_normals_xyz = flattenXYZ(ctx.referenceNormals());
+    out.current_normals_xyz = flattenXYZ(ctx.currentNormals());
+    out.current_mean_curvatures =
+        ctx.currentMeanCurvatures().empty() ? nullptr : ctx.currentMeanCurvatures().data();
+    out.reference_measures = ctx.referenceMeasures().empty() ? nullptr : ctx.referenceMeasures().data();
+    out.current_measures = ctx.currentMeasures().empty() ? nullptr : ctx.currentMeasures().data();
+    out.surface_jacobians = flattenMat3(ctx.surfaceJacobians());
+    out.configuration_transforms = flattenMat3(ctx.configurationTransforms());
+    out.mesh_displacements_xyz = flattenXYZ(ctx.meshDisplacements());
+    out.mesh_velocities_xyz = flattenXYZ(ctx.meshVelocities());
+    out.mesh_velocity_jacobians = flattenMat3(ctx.meshVelocityJacobians());
+    out.mesh_accelerations_xyz = flattenXYZ(ctx.meshAccelerations());
+    out.previous_physical_points_xyz = flattenXYZ(ctx.previousCoordinates());
+    out.previous_mesh_velocities_xyz = flattenXYZ(ctx.previousMeshVelocities());
+    out.predicted_mesh_velocities_xyz = flattenXYZ(ctx.predictedMeshVelocities());
+}
+
 [[nodiscard]] inline KernelSideArgsV6 packSideArgsV6(const AssemblyContext& ctx,
                                                      std::optional<int> override_boundary_marker = std::nullopt,
                                                      std::optional<int> override_interface_marker = std::nullopt,
@@ -2132,30 +2164,7 @@ namespace detail {
     out.coupled_aux = ctx.coupledAuxState().empty() ? nullptr : ctx.coupledAuxState().data();
     out.num_coupled_aux = static_cast<std::uint32_t>(ctx.coupledAuxState().size());
 
-    out.auxiliary_inputs = ctx.auxiliaryInputs().empty() ? nullptr : ctx.auxiliaryInputs().data();
-    out.num_auxiliary_inputs = static_cast<std::uint32_t>(ctx.auxiliaryInputs().size());
-    out.auxiliary_outputs = ctx.auxiliaryOutputs().empty() ? nullptr : ctx.auxiliaryOutputs().data();
-    out.num_auxiliary_outputs = static_cast<std::uint32_t>(ctx.auxiliaryOutputs().size());
-
-    out.reference_physical_points_xyz = detail::flattenXYZ(ctx.referencePhysicalPoints());
-    out.current_physical_points_xyz = detail::flattenXYZ(ctx.currentPhysicalPoints());
-    out.reference_jacobians = detail::flattenMat3(ctx.referenceJacobians());
-    out.current_jacobians = detail::flattenMat3(ctx.currentJacobians());
-    out.reference_normals_xyz = detail::flattenXYZ(ctx.referenceNormals());
-    out.current_normals_xyz = detail::flattenXYZ(ctx.currentNormals());
-    out.current_mean_curvatures =
-        ctx.currentMeanCurvatures().empty() ? nullptr : ctx.currentMeanCurvatures().data();
-    out.reference_measures = ctx.referenceMeasures().empty() ? nullptr : ctx.referenceMeasures().data();
-    out.current_measures = ctx.currentMeasures().empty() ? nullptr : ctx.currentMeasures().data();
-    out.surface_jacobians = detail::flattenMat3(ctx.surfaceJacobians());
-    out.configuration_transforms = detail::flattenMat3(ctx.configurationTransforms());
-    out.mesh_displacements_xyz = detail::flattenXYZ(ctx.meshDisplacements());
-    out.mesh_velocities_xyz = detail::flattenXYZ(ctx.meshVelocities());
-    out.mesh_velocity_jacobians = detail::flattenMat3(ctx.meshVelocityJacobians());
-    out.mesh_accelerations_xyz = detail::flattenXYZ(ctx.meshAccelerations());
-    out.previous_physical_points_xyz = detail::flattenXYZ(ctx.previousCoordinates());
-    out.previous_mesh_velocities_xyz = detail::flattenXYZ(ctx.previousMeshVelocities());
-    out.predicted_mesh_velocities_xyz = detail::flattenXYZ(ctx.predictedMeshVelocities());
+    packAuxiliaryAndFrameV6(ctx, out);
 
     if (const auto* ti = ctx.timeIntegrationContext()) {
         out.time_derivative_term_weight = ti->time_derivative_term_weight;

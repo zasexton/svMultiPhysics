@@ -21,6 +21,7 @@
  *   1. ScalarLaplacian        -- inner(grad(u), grad(v)), simplest bilinear form
  *   2. NonlinearReaction      -- inner(grad(u), grad(v)) + u*u*v, nonlinear in u
  *   3. StokesVMS_VV           -- velocity-velocity VMS block (Triangle3 + ProductSpace + field_solutions)
+ *   4. MovingFrame            -- mesh velocity, its divergence and current/reference geometry, batched vs cell by cell
  */
 
 #include <gtest/gtest.h>
@@ -140,6 +141,85 @@ inline dofs::DofMap createFourTriangleVectorDofMap()
     dof_map.finalize();
     return dof_map;
 }
+
+// ============================================================================
+// The four triangles above on a moving mesh: every node has its own
+// displacement, so the current geometry differs from cell to cell
+// ============================================================================
+
+class MovingFourTriangleMeshAccess final : public assembly::IMeshAccess {
+public:
+    MovingFourTriangleMeshAccess()
+    {
+        reference_nodes_ = {
+            {0.0, 0.0, 0.0},
+            {1.2, 0.0, 0.0},
+            {0.5, 0.7, 0.0},
+            {0.0, 1.3, 0.0},
+            {1.2, 1.3, 0.0},
+        };
+        const std::array<std::array<Real, 2>, 5> displacement{{
+            {0.02, -0.01}, {-0.03, 0.04}, {0.05, 0.02}, {0.01, -0.06}, {-0.04, 0.03},
+        }};
+        current_nodes_ = reference_nodes_;
+        for (std::size_t i = 0; i < current_nodes_.size(); ++i) {
+            current_nodes_[i][0] += displacement[i][0];
+            current_nodes_[i][1] += displacement[i][1];
+        }
+        cells_ = {{0, 1, 2}, {1, 4, 2}, {4, 3, 2}, {3, 0, 2}};
+    }
+
+    [[nodiscard]] GlobalIndex numCells() const override { return 4; }
+    [[nodiscard]] GlobalIndex numOwnedCells() const override { return 4; }
+    [[nodiscard]] GlobalIndex numBoundaryFaces() const override { return 0; }
+    [[nodiscard]] GlobalIndex numInteriorFaces() const override { return 0; }
+    [[nodiscard]] int dimension() const override { return 2; }
+    [[nodiscard]] bool isOwnedCell(GlobalIndex) const override { return true; }
+    [[nodiscard]] ElementType getCellType(GlobalIndex) const override { return ElementType::Triangle3; }
+
+    void getCellNodes(GlobalIndex cell_id, std::vector<GlobalIndex>& nodes) const override
+    {
+        const auto& c = cells_.at(static_cast<std::size_t>(cell_id));
+        nodes.assign(c.begin(), c.end());
+    }
+
+    [[nodiscard]] std::array<Real, 3> getNodeCoordinates(GlobalIndex node_id) const override
+    {
+        return current_nodes_.at(static_cast<std::size_t>(node_id));
+    }
+
+    void getCellCoordinates(GlobalIndex cell_id, std::vector<std::array<Real, 3>>& coords) const override
+    {
+        getCellCoordinates(cell_id, assembly::CoordinateFrame::Current, coords);
+    }
+
+    [[nodiscard]] bool supportsCoordinateFrame(assembly::CoordinateFrame) const override { return true; }
+
+    void getCellCoordinates(GlobalIndex cell_id,
+                            assembly::CoordinateFrame frame,
+                            std::vector<std::array<Real, 3>>& coords) const override
+    {
+        const auto& nodes = frame == assembly::CoordinateFrame::Reference ? reference_nodes_ : current_nodes_;
+        const auto& c = cells_.at(static_cast<std::size_t>(cell_id));
+        coords.resize(c.size());
+        for (std::size_t i = 0; i < c.size(); ++i)
+            coords[i] = nodes.at(static_cast<std::size_t>(c[i]));
+    }
+
+    [[nodiscard]] LocalIndex getLocalFaceIndex(GlobalIndex, GlobalIndex) const override { return 0; }
+    [[nodiscard]] int getBoundaryFaceMarker(GlobalIndex) const override { return -1; }
+    [[nodiscard]] std::pair<GlobalIndex, GlobalIndex> getInteriorFaceCells(GlobalIndex) const override { return {0, 0}; }
+
+    void forEachCell(std::function<void(GlobalIndex)> cb) const override { for (GlobalIndex i = 0; i < 4; ++i) cb(i); }
+    void forEachOwnedCell(std::function<void(GlobalIndex)> cb) const override { forEachCell(std::move(cb)); }
+    void forEachBoundaryFace(int, std::function<void(GlobalIndex, GlobalIndex)>) const override {}
+    void forEachInteriorFace(std::function<void(GlobalIndex, GlobalIndex, GlobalIndex)>) const override {}
+
+private:
+    std::vector<std::array<Real, 3>> reference_nodes_;
+    std::vector<std::array<Real, 3>> current_nodes_;
+    std::vector<std::array<GlobalIndex, 3>> cells_;
+};
 
 // ============================================================================
 // DofMap for TwoTetraSharedFaceMeshAccess (shared face, 5 nodes)
@@ -589,6 +669,86 @@ TEST(JITSIMDBatchParity, StokesVMS_VV_Triangle3)
     expectSIMDBatchMatchesScalar(mesh, dof_map_u, dof_map_u, vel_space, vel_space,
                                 residual, U,
                                 /*vec_tol=*/1e-12, /*mat_tol=*/1e-12, opts);
+}
+
+// ============================================================================
+// Test 4: moving-frame data in a batch
+//
+// The batched kernel call packs its arguments from the first cell of the batch
+// and re-points the per-cell data for the others. The moving-frame data (mesh
+// velocity and its divergence, current and reference geometry) differ from cell
+// to cell, so the batched assembly must match the cell-by-cell assembly and
+// the interpreter.
+// ============================================================================
+
+TEST(JITSIMDBatchParity, BatchedCellsSeeTheirOwnMovingFrame_Triangle3)
+{
+    MovingFourTriangleMeshAccess mesh;
+    auto base = std::make_shared<spaces::H1Space>(ElementType::Triangle3, /*order=*/1);
+    spaces::ProductSpace space(base, /*components=*/2);
+    auto dof_map = createFourTriangleVectorDofMap();
+    constexpr FieldId kMeshMotionField = 17;
+
+    const auto u = TrialFunction(space, "u");
+    const auto v = TestFunction(space, "v");
+    const auto F = currentJacobian() * inv(referenceJacobian());
+    const auto residual =
+        (inner(meshVelocity(), v) +
+         div(meshVelocity()) * v.component(0) +
+         currentJacobianDeterminant() * component(F, 0, 1) * v.component(1) +
+         inner(u, v)).dx();
+
+    const std::vector<Real> U = {0.10, -0.20, 0.05, 0.15, -0.08, 0.03, -0.12, 0.07, -0.04, 0.11};
+    const std::array<assembly::FieldSolutionAccess, 1> fields = {{
+        {.field = kMeshMotionField, .space = &space, .dof_map = &dof_map, .dof_offset = 0},
+    }};
+
+    auto assemble = [&](assembly::AssemblyKernel& kernel,
+                        bool batched,
+                        assembly::DenseMatrixView& J,
+                        assembly::DenseVectorView& R) {
+        assembly::AssemblyOptions options;
+        options.use_batching = batched;
+        assembly::StandardAssembler assembler(options);
+        assembler.setDofMap(dof_map);
+        assembler.setFieldSolutionAccess(fields);
+        assembler.setMeshMotionFieldAccess(assembly::MeshMotionFieldAccess{
+            .mesh_displacement = kMeshMotionField,
+            .mesh_velocity = kMeshMotionField,
+        });
+        assembler.setCurrentSolution(U);
+        J.zero();
+        R.zero();
+        const auto result = assembler.assembleBoth(mesh, space, space, kernel, J, R);
+        EXPECT_EQ(result.elements_assembled, 4);
+    };
+
+    FormCompiler compiler;
+    auto jit_fallback = std::make_shared<SymbolicNonlinearFormKernel>(compiler.compileResidual(residual),
+                                                                      NonlinearKernelOutput::Both);
+    forms::jit::JITKernelWrapper jit_kernel(jit_fallback, makeJITOptions(/*simd_batch=*/true));
+    jit_kernel.resolveInlinableConstitutives();
+    SymbolicNonlinearFormKernel interpreted(compiler.compileResidual(residual), NonlinearKernelOutput::Both);
+    interpreted.resolveInlinableConstitutives();
+
+    const GlobalIndex n = dof_map.getNumDofs();
+    assembly::DenseMatrixView J_batched(n, n), J_cellwise(n, n), J_interpreted(n, n);
+    assembly::DenseVectorView R_batched(n), R_cellwise(n), R_interpreted(n);
+    assemble(jit_kernel, /*batched=*/true, J_batched, R_batched);
+    ASSERT_TRUE(jit_kernel.isJITReady()) << "the moving-frame form did not compile";
+    assemble(jit_kernel, /*batched=*/false, J_cellwise, R_cellwise);
+    assemble(interpreted, /*batched=*/false, J_interpreted, R_interpreted);
+
+    expectDenseNear(R_batched, R_cellwise, 1e-14, "batched vs cell-by-cell residual");
+    expectDenseNear(J_batched, J_cellwise, 1e-14, "batched vs cell-by-cell tangent");
+    expectDenseNear(R_batched, R_interpreted, 1e-13, "compiled vs interpreted residual");
+    expectDenseNear(J_batched, J_interpreted, 1e-13, "compiled vs interpreted tangent");
+
+    Real largest = 0.0;
+    for (GlobalIndex i = 0; i < n; ++i) {
+        largest = std::max(largest, std::abs(R_cellwise.getVectorEntry(i)));
+    }
+    EXPECT_GT(largest, 1e-3) << "the moving-frame residual is zero";
 }
 
 #endif // SVMP_FE_ENABLE_LLVM_JIT
