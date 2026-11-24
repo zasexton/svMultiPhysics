@@ -308,9 +308,13 @@ fields are registered on the `FESystem` and coupled to the volume fields by
 within the limits listed in `VOCABULARY.md`. The current public usage examples
 are collected in `Docs/HDIV_ADVANCED_USAGE_GUIDE.md`.
 
-For a coupled vector/scalar system, keep every measured integral in one test
-row. Here `V` is vector-valued and `Q` scalar-valued; this is a separate example
-using the same namespace setup and headers:
+For a coupled vector/scalar system with a work channel, write each tagged term
+in one test row: a term passed to `FormulationBuilder::tag` holds the test
+function of one field, and `tagged` sums a label's terms per row.  This applies
+to the tag API only; the installer itself splits an integral over several
+fields' test functions (see Mixed test-row separation).  Here `V` is
+vector-valued and `Q` scalar-valued; this is a separate example using the same
+namespace setup and headers:
 
 ```cpp
 fe::systems::FieldBinding fields(system, "CoupledExample::registerOn");
@@ -351,11 +355,19 @@ production semantic path.
 ### Mixed test-row separation
 
 The canonical residual installer identifies bound test rows by `FieldId`, so
-independent fields can share a function space and symbol name. Keep each
-integral's integrand in one test row. Top-level sums and differences of such
-integrals are separated without expanding contractions or nonlinear factors.
-For example, an interface penalty on independently bound phase fields is
-currently written as:
+independent fields can share a function space and symbol name. An integral may
+hold the test functions of several fields: `installFormulation` splits it into
+its part in each field's row, with the other fields' test functions set to zero
+and the zero terms dropped from sums, products and linear operators. A part
+that is a whole summand keeps its tree. An interface penalty on independently
+bound phase fields can therefore be written compactly,
+
+```cpp
+auto penalty_terms =
+    (penalty * inner(u_negative - u_positive, v_negative - v_positive)).dI(marker);
+```
+
+or as the four integrals of its expansion:
 
 ```cpp
 auto penalty_terms =
@@ -365,22 +377,20 @@ auto penalty_terms =
   + (penalty * inner(u_positive, v_positive)).dI(marker);
 ```
 
-The compact `penalty * inner(u_negative - u_positive,
-v_negative - v_positive)` under one `dI` contains two test rows and is rejected.
-These differences concern independently bound fields; they are not the DG
-`jump()` of one field. `CanonicalWorkflow` covers the same-space weighted
-four-field interface, its twelve installed kernel couplings with reversed caller
-field order, and rejection of its compact contraction before operator or
-formulation-record installation.
+Both install the same Jacobian blocks. The compact spelling is a different
+tree, so a production term migrated to it changes its manifest and JIT key.
+A product, quotient or other nonlinear function of two fields' test functions
+is refused, naming the term ("cannot split the term ... both factors of a
+product hold test functions"). These differences concern independently bound
+fields; they are not the DG `jump()` of one field. `CanonicalWorkflow` covers
+the same-space weighted four-field interface written both ways (its twelve
+installed kernel couplings with reversed caller field order), one integral over
+two test fields assembling as one integral per field, and the refusal.
 
-The stored `FormulationRecord::block_couplings` currently pairs the test rows in
-expression traversal order with the caller's field order. These recorded row
-IDs can therefore differ from the installed kernel bindings when those orders
-differ. Inspect the operator terms or returned `MixedKernelPlan` for the installed
-bindings; the limitation test checks both. The records also feed coupling-graph
-analysis and trace-multiplier checks, so correct kernel bindings do not establish
-correctness of those metadata consumers. The test does not establish numerical
-assembly equivalence for a compact expression, which is still rejected.
+`FormulationRecord::block_couplings` pairs each test row with its own field
+whatever the caller's field order, and `block_residual_exprs` holds each row's
+residual (`TheRecordPairsEachRowWithItsFieldInAnyFieldOrder`). The records feed
+the coupling-graph analysis and the trace-multiplier checks.
 
 Automatic linear expansion remains a separate compiler task. Besides retaining
 all test rows and nonlinear coefficient dependencies, adoption must preserve
