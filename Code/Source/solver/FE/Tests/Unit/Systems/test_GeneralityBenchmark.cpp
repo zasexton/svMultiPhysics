@@ -1124,12 +1124,18 @@ MaxwellRun runPerfectConductor(Cell cell, int n, bool rotate = false)
 
 TEST(GeneralityBenchmark, DISABLED_P06_PerfectConductorMaxwellConvergesInHCurl)
 {
-    // Defects found by this benchmark (reported; not vocabulary gaps): on a
-    // Tet4 mesh built from arrays the lowest-order Nedelec field reproduces
-    // E = (-y, x, 0) exactly, but curl(E) of the field evaluates to zero in the
-    // assembled kernels (the measured curl error is |curl E| = 2), so the
-    // curl-curl term vanishes and the solution is the L2 projection of f; the
-    // Hex8 Nedelec mass matrix is singular.
+    // Found by this benchmark (reported; not a vocabulary gap): with the JIT
+    // on, a nonlinear-kernel residual holding curl(E) of a lowest-order
+    // Nedelec unknown is compiled wrongly.  On the 2 x 2 x 2 Tet4 and Hex8
+    // meshes the compiled residual of curl(E).curl(v) + E.v - f.v (f a vector
+    // source; the symbolic tangent installs a nonlinear residual kernel)
+    // differs from the interpreted one by the whole curl-curl part (14.56 of
+    // 14.60), while the compiled matrix agrees with the interpreted one, so
+    // Newton stalls.  Interpreted (JIT off), or with forward AD (whose
+    // residual kernel the JIT refuses: "cached Curl operand not supported"),
+    // residual and tangent agree to 4e-9.  An affine residual (installed
+    // through the linear kernel) is right: the defect is in the compiled
+    // curl of the current state.
     for (const auto cell : {Cell::Tet4, Cell::Hex8}) {
         std::vector<Real> l2, curl_l2;
         for (const int n : {2, 4, 8}) {
@@ -1157,7 +1163,7 @@ TEST(GeneralityBenchmark, DISABLED_P06_PerfectConductorMaxwellConvergesInHCurl)
 
 TEST(GeneralityBenchmark, DISABLED_P06_LossyEddyCurrentsSolveBothPartsWithAntisymmetricCoupling)
 {
-    // Blocked by the same curl defect as the perfect conductor above.
+    // Blocked by the same compiled-curl defect as the perfect conductor above.
     const Real sigma = 3.0;
     const auto f_re = vector3("f_re", [sigma](const Point& p) {
         const auto g = maxwellOperator(p);
