@@ -21,6 +21,7 @@ add_executable(test_application
   Unit/test_MeshTranslator.cpp
   Unit/test_OpenVesselExamples.cpp
   Unit/test_OpenVesselStabilizationMetadata.cpp
+  Unit/test_OutletModelAccuracy.cpp
   ../Core/ActiveDomainOutput.cpp
   ../Core/LevelSetCutConfiguration.cpp
   ../Core/LevelSetMaintenanceConfiguration.cpp
