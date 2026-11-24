@@ -953,6 +953,68 @@ void inlineInlinableConstitutives(std::span<FormIR*> irs,
             stored.updates.push_back(MaterialStateUpdate{op.offset_bytes, op.value});
         }
 
+        // An output that reads back a work slot this expansion writes reads
+        // the update's own value: give it the update expression, so the
+        // tangent (automatic, symbolic or compiled) carries the update's
+        // derivative.  For a_work = a_old + dt u the output a_work then has
+        // the derivative dt.  The value is the one the slot holds, the same
+        // expression at the same point.  An update that reads a work slot of
+        // its own expansion keeps the slot read (its value depends on the
+        // order of the updates); a residual that reads such a slot back is
+        // refused, since its tangent would omit the update's derivative.
+        if (!stored.updates.empty()) {
+            const auto writes_slot = [&](std::uint32_t off) {
+                return std::any_of(stored.updates.begin(), stored.updates.end(),
+                                   [off](const MaterialStateUpdate& u) { return u.offset_bytes == off; });
+            };
+            const auto reads_own_slot = [&](const FormExprNode& root) {
+                const auto visit = [&](const auto& self, const FormExprNode& n) -> bool {
+                    if (n.type() == FormExprType::MaterialStateWorkRef) {
+                        const auto off = n.stateOffsetBytes();
+                        if (off.has_value() && writes_slot(*off)) {
+                            return true;
+                        }
+                    }
+                    for (const auto* child : n.children()) {
+                        if (child != nullptr && self(self, *child)) {
+                            return true;
+                        }
+                    }
+                    return false;
+                };
+                return visit(visit, root);
+            };
+            const bool substitutable = std::none_of(
+                stored.updates.begin(), stored.updates.end(),
+                [&](const MaterialStateUpdate& u) { return reads_own_slot(*u.value.node()); });
+            const bool output_reads_slot = std::any_of(
+                stored.outputs.begin(), stored.outputs.end(),
+                [&](const FormExpr& out) { return out.isValid() && reads_own_slot(*out.node()); });
+            FE_THROW_IF(!substitutable && output_reads_slot && allow_trial_in_updates, InvalidArgumentException,
+                        "Forms: an inlinable constitutive model returns a work slot that its state update writes "
+                        "from work slots of the same update, so the residual's tangent would omit the update's "
+                        "derivative; write the update from the old state and the inputs");
+            if (substitutable) {
+                for (auto& out : stored.outputs) {
+                    out = out.transformNodes([&](const FormExprNode& n) -> std::optional<FormExpr> {
+                        if (n.type() != FormExprType::MaterialStateWorkRef) {
+                            return std::nullopt;
+                        }
+                        const auto off = n.stateOffsetBytes();
+                        if (!off.has_value()) {
+                            return std::nullopt;
+                        }
+                        for (auto it = stored.updates.rbegin(); it != stored.updates.rend(); ++it) {
+                            if (it->offset_bytes == *off) {
+                                return it->value;
+                            }
+                        }
+                        return std::nullopt;
+                    });
+                }
+            }
+        }
+
         stored.dependencies = std::move(deps_by_call[&call_node]);
         expansion_stack.pop_back();
 

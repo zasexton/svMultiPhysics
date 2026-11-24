@@ -1001,6 +1001,7 @@ terminals are `implemented/internal`.
 | `law(name, input_kind, output_kind, body, metadata)`, `law(name, signature, body, metadata)` | `Constitutive/ExpressionLaw.h`; a law written as forms (`constitutive::FormLaw`): `body(inputs, dim)` returns the output expression, a call `mu(gamma)` is a constitutive node that setup expands into the body's tree, so the symbolic tangent and the strict JIT see the law; no pointwise evaluation; `kindId()` hashes `name`. `isochoricNeoHookeanPK1` and `newtonianViscosity` are written this way; `carreauYasudaViscosityLaw` is the opt-in forms twin of the Carreau-Yasuda class |
 | `materialStateOldRef(offset_bytes)` | `implemented/internal`; byte-offset state terminal |
 | `materialStateWorkRef(offset_bytes)` | `implemented/internal`; byte-offset state terminal |
+| Inlined local update | An inlinable model's state update writes its work slot before the integrand is evaluated. An output that reads back a slot its own expansion writes is given the update expression when the model is inlined, so the value is the slot's and the tangent (automatic, symbolic or compiled) carries the update's derivative: for `a_work = a_old + dt u` the P0 row `int a_work v` has the tangent `V dt` (`test_ConstitutiveModel.cpp`). An update that reads a work slot of its own expansion, read back by an output, is refused in a residual, whose tangent would omit that dependence |
 
 Named material-state vocabulary is not implemented. Public form code should not
 need to author raw byte offsets.

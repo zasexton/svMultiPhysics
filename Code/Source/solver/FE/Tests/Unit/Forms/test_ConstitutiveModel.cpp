@@ -36,6 +36,7 @@
 #include <memory>
 #include <stdexcept>
 #include <string_view>
+#include <utility>
 #include <vector>
 
 namespace svmp {
@@ -775,6 +776,59 @@ public:
         out.outputs.push_back(FormExpr::materialStateWorkRef(state_off));
         return out;
     }
+};
+
+/// a_work = a_old + dt u written to the material state and returned as the
+/// output, read back in the same evaluation.
+class InlinableRateUpdateModel final : public ConstitutiveModel, public InlinableConstitutiveModel {
+public:
+    explicit InlinableRateUpdateModel(Real dt) : dt_(dt) {}
+
+    [[nodiscard]] Value<Real> evaluate(const Value<Real>& /*input*/, int /*dim*/) const override
+    {
+        throw std::logic_error("InlinableRateUpdateModel: evaluate() should not be called after inlining");
+    }
+
+    [[nodiscard]] Value<Dual> evaluate(const Value<Dual>& /*input*/,
+                                       int /*dim*/,
+                                       DualWorkspace& /*ws*/) const override
+    {
+        throw std::logic_error("InlinableRateUpdateModel: evaluate() should not be called after inlining (dual)");
+    }
+
+    [[nodiscard]] StateSpec stateSpec() const noexcept override
+    {
+        StateSpec s;
+        s.bytes_per_qpt = sizeof(Real);
+        s.alignment = alignof(Real);
+        return s;
+    }
+
+    [[nodiscard]] const InlinableConstitutiveModel* inlinable() const noexcept override { return this; }
+
+    [[nodiscard]] std::uint64_t kindId() const noexcept override
+    {
+        return InlinableConstitutiveModel::fnv1a64("InlinableRateUpdateModel");
+    }
+
+    [[nodiscard]] MaterialStateAccess stateAccess() const noexcept override { return MaterialStateAccess::ReadWrite; }
+
+    [[nodiscard]] InlinedConstitutiveExpansion inlineExpand(std::span<const FormExpr> inputs,
+                                                            const InlinableConstitutiveContext& ctx) const override
+    {
+        FE_THROW_IF(inputs.size() != 1u, InvalidArgumentException,
+                    "InlinableRateUpdateModel: expected exactly 1 input");
+        const std::uint32_t off = ctx.state_base_offset_bytes;
+        InlinedConstitutiveExpansion out;
+        out.state_updates.push_back(MaterialStateUpdateOp{
+            .offset_bytes = off,
+            .value = FormExpr::materialStateOldRef(off) + FormExpr::constant(dt_) * inputs[0]});
+        out.outputs.push_back(FormExpr::materialStateWorkRef(off));
+        return out;
+    }
+
+private:
+    Real dt_{0.0};
 };
 
 static dofs::DofMap createSingleTetraP0DofMap()
@@ -1543,6 +1597,61 @@ TEST(ConstitutiveModelTest, CompiledExternalConstitutiveCallReadsUserDataAndMate
     ASSERT_EQ(actual.size(), 2u);
     EXPECT_NEAR(actual[0], expected[0], 1e-12);
     EXPECT_NEAR(actual[1], expected[1], 1e-12);
+}
+
+/**
+ * A local update written to a work slot and read back in the same evaluation
+ * keeps its derivative: for a_work = a_old + dt u (a_old = 0) the P0 row
+ * int a_work v has the residual V dt u and the tangent V dt, with the
+ * automatic-differentiation and with the symbolic tangent.
+ */
+TEST(ConstitutiveModelTest, InlinedLocalUpdateReadInTheSameEvaluationKeepsItsTangent)
+{
+    SingleTetraMeshAccess mesh;
+    auto dof_map = createSingleTetraP0DofMap();
+    spaces::L2Space space(ElementType::Tetra4, 0);
+
+    constexpr Real dt = 0.25;
+    constexpr Real u0 = 0.4;
+    const Real V = 1.0 / 6.0;
+    auto model = std::make_shared<InlinableRateUpdateModel>(dt);
+
+    const auto u = FormExpr::trialFunction(space, "u");
+    const auto v = FormExpr::testFunction(space, "v");
+    const auto residual = (FormExpr::constitutive(model, u) * v).dx();
+
+    const auto assemble = [&](assembly::AssemblyKernel& kernel) {
+        kernel.resolveInlinableConstitutives();
+        systems::MaterialStateProvider provider(/*num_cells=*/mesh.numCells());
+        provider.addKernel(kernel, kernel.materialStateSpec(), /*max_qpts=*/64);
+
+        assembly::StandardAssembler assembler;
+        assembler.setDofMap(dof_map);
+        assembler.setMaterialStateProvider(&provider);
+        const std::vector<Real> U = {u0};
+        assembler.setCurrentSolution(U);
+
+        assembly::DenseMatrixView J(1);
+        assembly::DenseVectorView R(1);
+        J.zero();
+        R.zero();
+        (void)assembler.assembleBoth(mesh, space, space, kernel, J, R);
+        return std::pair<Real, Real>{R.getVectorEntry(0), J.getMatrixEntry(0, 0)};
+    };
+
+    FormCompiler compiler;
+    {
+        NonlinearFormKernel kernel(compiler.compileResidual(residual), ADMode::Forward);
+        const auto [r, j] = assemble(kernel);
+        EXPECT_NEAR(r, V * dt * u0, 1e-14);
+        EXPECT_NEAR(j, V * dt, 1e-14) << "automatic-differentiation tangent of the inlined local update";
+    }
+    {
+        SymbolicNonlinearFormKernel kernel(compiler.compileResidual(residual));
+        const auto [r, j] = assemble(kernel);
+        EXPECT_NEAR(r, V * dt * u0, 1e-14);
+        EXPECT_NEAR(j, V * dt, 1e-14) << "symbolic tangent of the inlined local update";
+    }
 }
 
 } // namespace test
