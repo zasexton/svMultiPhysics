@@ -123,6 +123,61 @@ private:
     return dof_map;
 }
 
+/// Forwards to a compiled kernel.  Its second batch call passes the first
+/// cell and a hole (a null context) in place of the second, with the
+/// assembler's output of the second cell set to a sentinel the hole must not
+/// touch; then it computes the second cell alone.
+class HoleInSecondBatchKernel final : public assembly::AssemblyKernel {
+public:
+    explicit HoleInSecondBatchKernel(jit::JITKernelWrapper& inner) : inner_(inner) {}
+
+    [[nodiscard]] assembly::RequiredData getRequiredData() const override { return inner_.getRequiredData(); }
+    [[nodiscard]] std::vector<assembly::FieldRequirement> fieldRequirements() const override
+    {
+        return inner_.fieldRequirements();
+    }
+    [[nodiscard]] bool supportsCellBatch() const noexcept override { return true; }
+
+    void computeCell(const assembly::AssemblyContext& ctx, assembly::KernelOutput& output) override
+    {
+        inner_.computeCell(ctx, output);
+    }
+
+    void computeCellBatch(std::span<const assembly::AssemblyContext* const> contexts,
+                          std::span<assembly::KernelOutput> outputs) override
+    {
+        ++batch_calls;
+        if (contexts.size() != 2u) {
+            inner_.computeCellBatch(contexts, outputs);
+            return;
+        }
+        // The kernel's own outputs stay alive between the calls, so a slot
+        // held from the first call points at them.
+        if (batch_calls == 1) {
+            inner_.computeCellBatch(contexts, std::span<assembly::KernelOutput>(kept_));
+            outputs[0] = kept_[0];
+            outputs[1] = kept_[1];
+            return;
+        }
+        std::fill(kept_[1].local_matrix.begin(), kept_[1].local_matrix.end(), Real(12345.0));
+        const std::array<const assembly::AssemblyContext*, 2> sparse{contexts[0], nullptr};
+        std::array<assembly::KernelOutput, 2> sparse_outputs;
+        inner_.computeCellBatch(sparse, sparse_outputs);
+        outputs[0] = sparse_outputs[0];
+        hole_left_untouched = !kept_[1].local_matrix.empty() &&
+                              std::all_of(kept_[1].local_matrix.begin(), kept_[1].local_matrix.end(),
+                                          [](Real value) { return value == Real(12345.0); });
+        inner_.computeCell(*contexts[1], outputs[1]);
+    }
+
+    int batch_calls{0};
+    bool hole_left_untouched{false};
+
+private:
+    jit::JITKernelWrapper& inner_;
+    std::array<assembly::KernelOutput, 2> kept_{};
+};
+
 [[nodiscard]] std::string readFileToString(const std::filesystem::path& path)
 {
     std::ifstream in(path);
@@ -721,6 +776,44 @@ TEST(JITVectorization, TwoLaneBatchReadsEachCellsDomainId)
         for (std::size_t i = 0; i < expected.size(); ++i) {
             EXPECT_NEAR(actual[i], expected[i], 1e-14) << "entry " << i;
         }
+    }
+}
+
+// A compiled batch may hold holes (null contexts).  A hole must not run the
+// kernel on the side and output its slot held in the preceding call: the
+// output of that call's second cell keeps a sentinel through a call with a
+// hole in its place, and the assembled matrix still equals the interpreted one.
+TEST(JITVectorization, BatchHoleDoesNotReuseThePrecedingCallsSlot)
+{
+    requireLLVMJITOrSkip();
+    TwoTriangleDomainMeshAccess mesh;
+    auto dof_map = createTwoTriangleDGDofMap();
+    spaces::L2Space space(ElementType::Triangle3, 1);
+
+    FormCompiler compiler;
+    const auto u = FormExpr::trialFunction(space, "u");
+    const auto v = FormExpr::testFunction(space, "v");
+    const auto form = (u * v + inner(grad(u), grad(v))).dx();
+    for (const bool simd_batch : {false, true}) {
+        SCOPED_TRACE(::testing::Message() << "simd_batch " << simd_batch);
+        JITOptions options;
+        options.enable = true;
+        options.optimization_level = 2;
+        options.vectorize = true;
+        options.simd_batch = simd_batch;
+        options.cache_kernels = false;
+        jit::JITKernelWrapper compiled(std::make_shared<FormKernel>(compiler.compileBilinear(form)), options);
+        HoleInSecondBatchKernel kernel(compiled);
+        assembly::StandardAssembler assembler;
+        assembler.setDofMap(dof_map);
+        for (int pass = 0; pass < 2; ++pass) {
+            assembly::DenseMatrixView A(6);
+            A.zero();
+            (void)assembler.assembleMatrix(mesh, space, space, kernel, A);
+        }
+        EXPECT_TRUE(compiled.isJITReady());
+        ASSERT_EQ(kernel.batch_calls, 2);
+        EXPECT_TRUE(kernel.hole_left_untouched);
     }
 }
 

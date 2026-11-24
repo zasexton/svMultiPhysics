@@ -988,6 +988,11 @@ void JITKernelWrapper::computeCellBatch(std::span<const assembly::AssemblyContex
 
                     for (std::size_t idx = 0; idx < n; ++idx) {
                         if (contexts[idx] == nullptr) {
+                            // A hole: empty the slot, which the fill below
+                            // points at a live cell and scratch outputs (the
+                            // thread-local slot still holds the last call's).
+                            batch_sides[idx] = {};
+                            batch_outputs[idx] = {};
                             continue;
                         }
 
@@ -1131,7 +1136,12 @@ void JITKernelWrapper::computeCellBatch(std::span<const assembly::AssemblyContex
                     }
 
                     for (std::size_t idx = 0; idx < n; ++idx) {
-                        if (contexts[idx] == nullptr) continue;
+                        if (contexts[idx] == nullptr) {
+                            // A hole: empty the thread-local slot (see above).
+                            batch_sides[idx] = {};
+                            batch_outputs[idx] = {};
+                            continue;
+                        }
                         const auto& ctx = *contexts[idx];
                         auto& output = outputs[idx];
                         output.clear();
