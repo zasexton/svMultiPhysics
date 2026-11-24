@@ -707,3 +707,122 @@ TEST(CompleteShapeDerivative, FacetTermsMatchDirectionalDifferences)
                   << ": worst relative error of J dd " << worst << " (" << worst_probe << ")\n";
     }
 }
+
+namespace {
+
+// The residual-based VMS stabilization of the Navier-Stokes module, written
+// out: the element metric K = Jinv^T Jinv, tau_M and tau_C, PSPG, SUPG,
+// grad-div and cross-stress terms with the ALE transport velocity u - w.
+struct VMSTerms {
+    FormExpr K, a, tau_m, tau_c, residual, subscale;
+};
+
+VMSTerms vmsTerms(const Symbols& s)
+{
+    using namespace svmp::FE::forms;
+    const auto nu = FormExpr::constant(0.05);
+    const auto eps = FormExpr::constant(1e-12);
+    const auto dts = FormExpr::effectiveTimeStep();
+    VMSTerms t;
+    t.K = transpose(Jinv()) * Jinv();
+    t.a = s.u - meshVelocity();
+    t.tau_m = FormExpr::constant(1.0) /
+              sqrt(FormExpr::constant(4.0) / (dts * dts) + inner(t.a, t.K * t.a) +
+                   FormExpr::constant(3.0) * doubleContraction(t.K, t.K) * (nu * nu) + eps);
+    t.tau_c = FormExpr::constant(1.0) / (t.tau_m * trace(t.K) + eps);
+    t.residual = dt(s.u) + grad(s.u) * t.a - div(FormExpr::constant(2.0) * nu * sym(grad(s.u))) + grad(s.p);
+    t.subscale = -t.tau_m * t.residual;
+    return t;
+}
+
+std::vector<Probe> stabilizationProbes()
+{
+    using namespace svmp::FE::forms;
+    return {
+        {"tau_M q dx", Rows::Scalar, [](const Symbols& s) { return (vmsTerms(s).tau_m * s.q).dx(); }},
+        {"tau_C q dx", Rows::Scalar, [](const Symbols& s) { return (vmsTerms(s).tau_c * s.q).dx(); }},
+        {"tau_M grad(p).grad(q) dx (PSPG, pressure part)", Rows::Scalar,
+         [](const Symbols& s) { return inner(grad(s.q), vmsTerms(s).tau_m * grad(s.p)).dx(); }},
+        {"tau_M R_M.grad(q) dx (PSPG)", Rows::Scalar,
+         [](const Symbols& s) {
+             const auto t = vmsTerms(s);
+             return (inner(grad(s.q), t.tau_m * t.residual) + zeroTimes(s.p * s.q)).dx();
+         },
+         true},
+        {"(grad(v) a).u' dx (SUPG)", Rows::Vector,
+         [](const Symbols& s) {
+             const auto t = vmsTerms(s);
+             return (-inner(grad(s.v) * t.a, t.subscale)).dx();
+         },
+         true},
+        {"tau_C div(u) div(v) dx (grad-div)", Rows::Vector,
+         [](const Symbols& s) { return (vmsTerms(s).tau_c * div(s.u) * div(s.v)).dx(); }},
+        {"cross stress", Rows::Vector,
+         [](const Symbols& s) {
+             const auto t = vmsTerms(s);
+             const auto tau_b = FormExpr::constant(1.0) /
+                                sqrt(inner(t.subscale, t.K * t.subscale) + FormExpr::constant(1e-12));
+             return inner(grad(s.v) * t.subscale, tau_b * (grad(s.u) * t.subscale)).dx();
+         },
+         true},
+    };
+}
+
+} // namespace
+
+// Stabilization: the VMS metric K = Jinv^T Jinv and the parameters tau_M and
+// tau_C vary with J; their shape derivatives, with the PSPG, SUPG, grad-div
+// and cross-stress terms built from them, match directional differences.
+TEST(CompleteShapeDerivative, StabilizationMetricAndParametersMatchDirectionalDifferences)
+{
+    // Every cell type with P1 fields, and curved P2 cells in 2D (the volume
+    // test covers P2 fields and curved cells in 3D for the same rules).
+    std::vector<MeshCase> cases;
+    for (const auto& mesh_case : everyMeshCase()) {
+        if (mesh_case.field_order == 1 || cellDimension(mesh_case.cell) == 2) {
+            cases.push_back(mesh_case);
+        }
+    }
+    runProbes(stabilizationProbes(), "stabilization", cases);
+}
+
+// The mesh blocks of a complete shape derivative are interpreted: with the
+// JIT on, their J dd is the interpreter's (to round-off), while the other
+// blocks of the same installs keep their JIT kernels.
+TEST(CompleteShapeDerivative, MeshBlocksAreInterpretedWithTheJITOn)
+{
+    using namespace svmp::FE::forms;
+    const auto n = FormExpr::normal();
+    const std::vector<Probe> probes = {
+        {"q div(u) dx", Rows::Scalar, [](const Symbols& s) { return (s.q * div(s.u) + zeroTimes(s.p * s.q)).dx(); }},
+        {"grad(u):grad(v) dx", Rows::Vector, [](const Symbols& s) { return inner(grad(s.u), grad(s.v)).dx(); }},
+        {"tau_M grad(p).grad(q) dx", Rows::Scalar,
+         [](const Symbols& s) { return inner(grad(s.q), vmsTerms(s).tau_m * grad(s.p)).dx(); }},
+        {"(u.normal()) q ds", Rows::Scalar,
+         [n](const Symbols& s) { return (inner(s.u, n) * s.q + zeroTimes(s.p * s.q)).ds(kTop); }},
+        {"q / hNormal() ds", Rows::Scalar,
+         [](const Symbols& s) { return (s.q / hNormal() + zeroTimes(s.p * s.q)).ds(kTop); }},
+        {"div(2 sym(grad(u))).v dx", Rows::Vector,
+         [](const Symbols& s) { return inner(div(FormExpr::constant(2.0) * sym(grad(s.u))), s.v).dx(); }},
+    };
+    for (const auto& mesh_case : {MeshCase{Cell::Triangle, 1, 1, 2}, MeshCase{Cell::Quad, 2, 2, 2},
+                                  MeshCase{Cell::Hex, 1, 1, 1}, MeshCase{Cell::Tetra, 2, 2, 1}}) {
+        for (const auto& probe : probes) {
+            SCOPED_TRACE(caseName(mesh_case) + ": " + probe.name);
+            ProbeSetup setup;
+            setup.cell = mesh_case.cell;
+            setup.n = mesh_case.n;
+            setup.geometry_order = mesh_case.geometry_order;
+            setup.u_order = mesh_case.field_order;
+            setup.p_order = mesh_case.field_order;
+            setup.complete = true;
+            const auto interpreted = directionalDefect(setup, probe).jdd;
+            setup.jit = true;
+            const auto with_jit = directionalDefect(setup, probe).jdd;
+            ASSERT_EQ(interpreted.size(), with_jit.size());
+            for (std::size_t i = 0; i < interpreted.size(); ++i) {
+                EXPECT_NEAR(interpreted[i], with_jit[i], 1e-12 * (1.0 + std::abs(interpreted[i]))) << "row " << i;
+            }
+        }
+    }
+}
