@@ -774,5 +774,177 @@ TEST(GeneralityBenchmarkGaps, DISABLED_P15_AdjointSolveOfTheConstrainedResidual)
     FAIL() << "no adjoint solve of an authored residual yet";
 }
 
+// ===========================================================================
+// Remaining parts of problems 3, 8, 11 and 13
+// ===========================================================================
+
+TEST(GeneralityBenchmarkGaps, DISABLED_P03_LimitedTopHatKeepsMassAndStageBounds)
+{
+    // Missing: a conservative stage operation for DG transport: cell means,
+    // neighbor data, a limiter applied between stages that preserves mass,
+    // and admissible stage bounds for a stated limiter and time step.  The
+    // pointwise clamp() is not a limiter, and the level-set phase corrector
+    // is specific to its transport path.
+    FAIL() << "no conservative limiter stage for authored DG transport yet";
+}
+
+TEST(GeneralityBenchmarkGaps, DISABLED_P08_UnilateralContactWithARigidPlane)
+{
+    // Missing: g_n >= 0, lambda_n >= 0, lambda_n g_n = 0 as a declared
+    // inequality with equal and opposite virtual work, its search and
+    // projection, active-set changes and their rollback owned by the problem
+    // declaration.  Trace inequalities and the expert surface-contact kernel
+    // are separate pieces.
+    FAIL() << "no searched contact inequality in the vocabulary yet";
+}
+
+TEST(GeneralityBenchmarkGaps, DISABLED_P11_NonmatchingWorkPairingAndFSIVirtualWork)
+{
+    // Missing (wave-7 gates): on nonmatching interface meshes, the transfer T
+    // with its work-conjugate reverse action, <T v, t>_B = <v, T* t>_A in the
+    // interface mass pairing; and the FSI version, matched interface
+    // velocities with nonzero normal and shear traction work, solved
+    // conservatively.
+    FAIL() << "no verified work-conjugate nonmatching transfer yet";
+}
+
+// ===========================================================================
+// 13. A cut interface with conservative transfer: the static part
+// ===========================================================================
+//
+// The two transfer rows of problem 11 across a generated interface that cuts
+// the mesh: T_A on the negative side of phi = x - s, T_B on the positive
+// side, s = 0.43 between mesh lines.  The linear profiles of problem 11 are
+// exact for P1 on each side, and the two transfer rows cancel.
+
+// ---------------------------------------------------------------------------
+// The formulation: everything an author writes for the static part of problem 13.
+// ---------------------------------------------------------------------------
+struct CutTransferInstall {
+    FieldId TA{INVALID_FIELD_ID};
+    FieldId TB{INVALID_FIELD_ID};
+    Quantity heat_A_to_B;
+};
+
+CutTransferInstall defineCutTransfer(FESystem& system, const std::shared_ptr<const spaces::FunctionSpace>& V,
+                                     const level_set::CutSide& A, const level_set::CutSide& B,
+                                     const forms::InterfaceDomain& Gamma, Real kA, Real kB, Real resistance,
+                                     const FormExpr& TA_wall, const FormExpr& TB_wall)
+{
+    using namespace forms;
+    FieldBinding fields(system, "CutTransfer");
+    const auto TA = fields.unknown("T_A", V);
+    const auto TB = fields.unknown("T_B", V);
+    const auto r = FormExpr::constant(resistance);
+    const auto I = InterfaceBetween::generated(Gamma.marker());
+    const auto jumpT = I.trace(TA.state, A.volume()) - I.trace(TB.state, B.volume());
+    const auto jumpV = I.trace(TA.test, A.volume()) - I.trace(TB.test, B.volume());
+    auto R = (FormExpr::constant(kA) * inner(grad(TA.state), grad(TA.test))).dx(A.volume()) +
+             (FormExpr::constant(kB) * inner(grad(TB.state), grad(TB.test))).dx(B.volume()) +
+             (jumpT * jumpV / r).dI(Gamma);
+    BoundaryConditionManager wallA;
+    wallA.add(std::make_unique<bc::Dirichlet>(1, TA_wall));
+    BoundaryConditionManager wallB;
+    wallB.add(std::make_unique<bc::Dirichlet>(2, TB_wall));
+    constraints::ConstraintPlan plan(system);
+    plan.essentials(wallA, R, TA.state, TA.test, TA.id);
+    plan.essentials(wallB, R, TB.state, TB.test, TB.id);
+    plan.activeOn({TA.id}, A, {.aggregate = false}).activeOn({TB.id}, B, {.aggregate = false});
+    plan.commit();
+    FormulationBuilder F(system, "equations", {});
+    F.symbolicTangent();
+    CutTransferInstall out{TA.id, TB.id, F.quantity("heat_A_to_B", FunctionalKind::Integral, (jumpT / r).dI(Gamma))};
+    (void)F.residual(R);
+    // The transfer rows alone, a measurement.
+    FormInstallOptions measurement;
+    measurement.contributes_to_problem_analysis = false;
+    FormulationBuilder transfer(system, "transfer", measurement);
+    (void)transfer.residual((jumpT * jumpV / r).dI(Gamma));
+    return out;
+}
+// ---------------------------------------------------------------------------
+
+TEST(GeneralityBenchmarkGaps, P13_StaticCutInterfaceTransferIsExactAndCancels)
+{
+    const Real s = 0.43, L = 1.0, q = 0.6, kA = 2.0, kB = 0.5, r = 0.4;
+    for (const auto cell : {Cell::Tri3, Cell::Quad4}) {
+        auto mesh = boxMesh(cell, 5, boxSides());
+        FESystem system(mesh);
+        const auto V = std::make_shared<spaces::H1Space>(elementType(cell), 1);
+        const auto phi = system.addField(FieldSpec{.name = "phi", .space = V, .source_kind = FieldSourceKind::PrescribedData});
+        auto G = level_set::cutGeometry(system, *mesh, {.level_set_field_name = "phi", .domain_id = "slab"});
+        const auto A = G.side(forms::CutVolumeSide::Negative);
+        const auto B = G.side(forms::CutVolumeSide::Positive);
+        const auto exactA = scalarCoefficient("T_A_exact", [=](const Point& p) { return L - q * (p[0] - s) / kA; });
+        const auto exactB = scalarCoefficient("T_B_exact", [=](const Point& p) { return L - r * q - q * (p[0] - s) / kB; });
+        const auto install = defineCutTransfer(system, V, A, B, G.interface(), kA, kB, r, exactA, exactB);
+        system.setup();
+        std::vector<Real> phi_at_vertices(mesh->n_vertices());
+        for (std::size_t v = 0; v < phi_at_vertices.size(); ++v) {
+            phi_at_vertices[v] = static_cast<Real>(mesh->X_ref()[2 * v]) - s;
+        }
+        std::vector<Real> coefficients(static_cast<std::size_t>(system.fieldDofHandler(phi).getNumDofs()), 0.0);
+        (void)system.projectMeshVertexValuesToFieldCoefficients(phi, phi_at_vertices, 1u, coefficients);
+        system.setPrescribedFieldCoefficients(phi, coefficients);
+        (void)G.refresh();
+
+        const auto solved = solveSteady(system, "equations");
+        EXPECT_TRUE(solved.converged) << cellName(cell);
+        const auto TA_h = FormExpr::discreteField(install.TA, *V, "T_A");
+        const auto TB_h = FormExpr::discreteField(install.TB, *V, "T_B");
+        EXPECT_LT(norm(system, ((TA_h - exactA) * (TA_h - exactA)).dx(A.volume()), solved.u), 1e-11) << cellName(cell);
+        EXPECT_LT(norm(system, ((TB_h - exactB) * (TB_h - exactB)).dx(B.volume()), solved.u), 1e-11) << cellName(cell);
+        // The heat crossing Gamma, through the transfer rows of T_A (the measured
+        // form of a two-sided generated-interface integrand is not evaluated).
+        const auto at_solution = assembleVector(system, "transfer", solved.u);
+        Real heat = 0.0;
+        const auto a0 = system.fieldDofOffset(install.TA);
+        for (GlobalIndex i = a0; i < a0 + system.fieldDofHandler(install.TA).getNumDofs(); ++i) {
+            if (!system.constraints().isConstrained(i)) {
+                heat += at_solution[static_cast<std::size_t>(i)];
+            }
+        }
+        EXPECT_NEAR(heat, q, 1e-11) << cellName(cell);
+        // The transfer rows sum to zero at any state (test functions 1 on both sides).
+        std::vector<Real> state(solved.u.size());
+        for (std::size_t i = 0; i < state.size(); ++i) {
+            state[i] = std::cos(0.8 * static_cast<Real>(i));
+        }
+        const auto rows = assembleVector(system, "transfer", state);
+        Real sum = 0.0;
+        Real scale = 0.0;
+        for (std::size_t i = 0; i < rows.size(); ++i) {
+            if (system.constraints().isConstrained(static_cast<GlobalIndex>(i))) {
+                continue;  // pinned off its side or on a wall, away from the cut
+            }
+            sum += rows[i];
+            scale = std::max(scale, std::abs(rows[i]));
+        }
+        EXPECT_GT(scale, 0.0);
+        EXPECT_LT(std::abs(sum), 1e-13 * std::max(Real(1.0), scale)) << cellName(cell);
+    }
+}
+
+TEST(GeneralityBenchmarkGaps, DISABLED_P13_MovingCutInterfaceWithConservativeTransfer)
+{
+    // D65 exit problem.  Missing: a cut interface moved by a prescribed s(t)
+    // inside the time loop, the cut geometry refreshed per stage as generated
+    // state with its rollback on a rejected step (a rejected crossing) and
+    // restart; the state of DOFs that change side (no history value where a
+    // field was inactive: the transfer of accepted state across the moving
+    // interface); the interface velocity w_Gamma as a terminal of the
+    // generated interface for the relative flux j . n - c w_Gamma . n in the
+    // two transfer rows of problem 11; and measurements of each side's mass
+    // and the transfer cancellation from the equation's own quantities.
+    //
+    // The ordinary-application version needs, beyond that: a deck route for
+    // a two-sided cut transport with interface exchange (an input key, a user
+    // decision), the cut-geometry service driven by a prescribed motion
+    // rather than a solved level set, and the same accepted-state lifecycle
+    // in the Application's step participants (checkpoint, rejection,
+    // restart) that the level-set free surface uses.
+    FAIL() << "a moving cut interface with conservative two-sided transfer is not expressible yet";
+}
+
 } // namespace
 } // namespace svmp::FE::systems::generality
