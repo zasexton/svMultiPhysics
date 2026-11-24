@@ -895,6 +895,102 @@ TEST(MonolithicAffineClassification, FieldGradientOnAFaceOfATaperedCell)
 
 
 
+// div and curl of another field with a vector basis, in the rows of a
+// piecewise-constant field: they equal the trace and the antisymmetric part of
+// the field's gradient, interpreted and compiled (the interpreter gave 0 for
+// both, the compiled kernel 0 for the curl).
+TEST(OtherFieldDerivatives, DivergenceAndCurlOfAVectorBasisFieldMatchItsGradient)
+{
+    for (const int dim : {2, 3}) {
+        for (const bool curl : {false, true}) {
+            for (const bool jit : {false, true}) {
+                if (curl && dim == 2) {
+                    continue;
+                }
+                SCOPED_TRACE(::testing::Message() << "dim " << dim << (curl ? " H(curl)" : " H(div)")
+                                                  << (jit ? ", compiled" : ", interpreted"));
+                const auto type = dim == 2 ? ElementType::Triangle3 : ElementType::Tetra4;
+                FormInstallOptions install;
+                install.compiler_options.jit.enable = jit;
+                FormInstallOptions measurement = install;
+                measurement.contributes_to_problem_analysis = false;
+                FESystem system(unitBoxSimplexMesh(dim, 2));
+                FieldBinding fields(system, "OtherFieldDerivatives");
+                const auto C = fields.unknown("cells", std::make_shared<spaces::L2Space>(type, 0));
+                std::shared_ptr<const spaces::FunctionSpace> V;
+                if (curl) {
+                    V = std::make_shared<spaces::HCurlSpace>(type, 0);
+                } else {
+                    V = std::make_shared<spaces::HDivSpace>(type, 0);
+                }
+                const auto E = fields.unknown("E", V);
+                const auto G = forms::grad(E.state);
+                // The derivative of E in the rows of C, and the same from the gradient.
+                const auto derivative = curl ? forms::curl(E.state).component(0) + 2.0 * forms::curl(E.state).component(1) +
+                                                   3.0 * forms::curl(E.state).component(2)
+                                             : forms::div(E.state);
+                const auto from_gradient =
+                    curl ? (G.component(2, 1) - G.component(1, 2)) + 2.0 * (G.component(0, 2) - G.component(2, 0)) +
+                               3.0 * (G.component(1, 0) - G.component(0, 1))
+                         : forms::trace(G);
+                {
+                    // E enters the rows of C as a trial field (only E's state appears) ...
+                    FormulationBuilder F(system, "derivative", measurement);
+                    (void)F.residual((derivative * C.test).dx());
+                }
+                {
+                    FormulationBuilder F(system, "from gradient", measurement);
+                    (void)F.residual((from_gradient * C.test).dx());
+                }
+                {
+                    // ... and as another field of C's own rows.
+                    FormulationBuilder F(system, "equations", install);
+                    (void)F.residual(((C.state - derivative + from_gradient) * C.test).dx() +
+                                     forms::inner(E.state, E.test).dx());
+                }
+                system.setup();
+                const auto n = system.dofHandler().getNumDofs();
+                std::vector<Real> U(static_cast<std::size_t>(n), 0.0);
+                const auto e0 = system.fieldDofOffset(E.id);
+                const auto ne = system.fieldDofHandler(E.id).getNumDofs();
+                for (GlobalIndex i = 0; i < ne; ++i) {
+                    U[static_cast<std::size_t>(e0 + i)] = std::sin(1.0 + 0.7 * static_cast<Real>(i));
+                }
+                SystemStateView state;
+                state.u = U;
+                const auto rows = [&](const char* op) {
+                    assembly::DenseVectorView R(n);
+                    R.zero();
+                    AssemblyRequest request;
+                    request.op = op;
+                    request.want_vector = true;
+                    EXPECT_TRUE(system.assemble(request, state, nullptr, &R).success);
+                    std::vector<Real> out;
+                    const auto c0 = system.fieldDofOffset(C.id);
+                    for (GlobalIndex i = c0; i < c0 + system.fieldDofHandler(C.id).getNumDofs(); ++i) {
+                        out.push_back(R.getVectorEntry(i));
+                    }
+                    return out;
+                };
+                const auto value = rows("derivative");
+                const auto expected = rows("from gradient");
+                // The rows of C hold (C - derivative + derivative from the gradient) w: zero at C = 0.
+                const auto difference = rows("equations");
+                Real scale = 0.0;
+                for (const auto v : expected) {
+                    scale = std::max(scale, std::abs(v));
+                }
+                ASSERT_GT(scale, 1e-3);
+                for (std::size_t i = 0; i < value.size(); ++i) {
+                    EXPECT_NEAR(value[i], expected[i], 1e-12 * scale) << "row " << i;
+                    EXPECT_NEAR(difference[i], 0.0, 1e-12 * scale) << "row " << i;
+                }
+            }
+        }
+    }
+}
+
+
 // An operator whose quadrature rule differs from the rule of the operator
 // assembled before it: the first cell of its loop maps its own points (it
 // took the previous rule's geometry tabulation, and read past its end when the

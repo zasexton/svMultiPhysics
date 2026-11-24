@@ -11355,13 +11355,18 @@ EvalValue<Dual> evalDualSwitchImpl(const FormExprNode& node,
 
                     Dual divu = makeDualConstant(0.0, env.ws->alloc());
                     if (env.trial_active == side) {
+                        // The value sums over every trial DOF; the derivatives
+                        // are seeded only when a tangent is requested.
                         const auto coeffs = ctx.solutionCoefficients();
-                        FE_THROW_IF(coeffs.size() < env.n_trial_dofs, systems::InvalidStateException,
+                        const auto n_trial = static_cast<std::size_t>(ctx.numTrialDofs());
+                        FE_THROW_IF(coeffs.size() < n_trial, systems::InvalidStateException,
                                     "Forms: div(TrialFunction) missing solution coefficients (dual)");
-                        for (std::size_t j = 0; j < env.n_trial_dofs; ++j) {
+                        for (std::size_t j = 0; j < n_trial; ++j) {
                             const Real div_phi = ctx.trialBasisDivergence(static_cast<LocalIndex>(j), q);
                             divu.value += coeffs[j] * div_phi;
-                            divu.deriv[j] = div_phi;
+                            if (j < env.n_trial_dofs) {
+                                divu.deriv[j] = div_phi;
+                            }
                         }
                     }
 
@@ -11594,18 +11599,23 @@ EvalValue<Dual> evalDualSwitchImpl(const FormExprNode& node,
                         return out;
                     }
 
+                    // The value sums over every trial DOF; the derivatives are
+                    // seeded only when a tangent is requested.
                     const auto coeffs = ctx.solutionCoefficients();
-                    FE_THROW_IF(coeffs.size() < env.n_trial_dofs, systems::InvalidStateException,
+                    const auto n_trial = static_cast<std::size_t>(ctx.numTrialDofs());
+                    FE_THROW_IF(coeffs.size() < n_trial, systems::InvalidStateException,
                                 "Forms: curl(TrialFunction) missing solution coefficients (dual)");
-                    for (std::size_t j = 0; j < env.n_trial_dofs; ++j) {
+                    for (std::size_t j = 0; j < n_trial; ++j) {
                         const auto cj = ctx.trialBasisCurl(static_cast<LocalIndex>(j), q);
                         const Real coef = coeffs[j];
                         out.v[0].value += coef * cj[0];
                         out.v[1].value += coef * cj[1];
                         out.v[2].value += coef * cj[2];
-                        out.v[0].deriv[j] = cj[0];
-                        out.v[1].deriv[j] = cj[1];
-                        out.v[2].deriv[j] = cj[2];
+                        if (j < env.n_trial_dofs) {
+                            out.v[0].deriv[j] = cj[0];
+                            out.v[1].deriv[j] = cj[1];
+                            out.v[2].deriv[j] = cj[2];
+                        }
                     }
                     return out;
                 }
