@@ -14,7 +14,6 @@
 #include "Backends/Interfaces/LinearSolver.h"
 #include "Core/Types.h"
 #include "Systems/TransientSystem.h"
-#include "Analysis/ConstraintRangeCertificate.h"
 #include "TimeStepping/TimeHistory.h"
 
 #include <cstddef>
@@ -55,6 +54,8 @@ struct NewtonJacobianCheckDiagnostic {
 };
 
 class NewtonObserver;
+class NewtonAcceptanceCheck;
+class NewtonInitializer;
 
 /**
  * @brief The extensions of a Newton solve, installed by its caller.
@@ -62,11 +63,18 @@ class NewtonObserver;
  * Each kind has its own authority over the solve.  An observer reads the
  * assembled constrained residual at the residual-assembly points, also on
  * line-search trials that are later rejected; it changes neither the
- * iterate nor any decision.  Every rank installs the same extensions in the
- * same order, which the solver checks before any extension collective.
+ * iterate nor any decision.  An acceptance check can veto a converged
+ * candidate.  An initializer proposes a correction of named fields of the
+ * current guess, which the solver applies as a transaction: it is undone
+ * when the solve fails, and its consumption is recorded in the workspace's
+ * initializer ledger.  One object may play several of these parts.  Every
+ * rank installs the same extensions in the same order, which the solver
+ * checks before any extension collective.
  */
 struct NewtonExtensions {
     std::vector<std::shared_ptr<NewtonObserver>> observers{};
+    std::vector<std::shared_ptr<NewtonAcceptanceCheck>> acceptance_checks{};
+    std::vector<std::shared_ptr<NewtonInitializer>> initializers{};
 };
 
 struct NewtonOptions {
@@ -116,7 +124,7 @@ struct NewtonOptions {
     systems::OperatorTag residual_op{"residual"};
     systems::OperatorTag jacobian_op{"jacobian"};
 
-    /// The observers (and, later, other extensions) of the solve.
+    /// The observers, acceptance checks and initializers of the solve.
     NewtonExtensions extensions{};
 
     /**
@@ -288,10 +296,10 @@ struct NewtonOptions {
      * assembling the production Jacobian or applying a nonlinear update.
      *
      * This is an output-only diagnostic path for a caller that needs the
-     * conservative free-surface certificates attached to the exact supplied
-     * state. It requires `min_iterations == 0`, cannot be combined with the
-     * external-state fixed point or the static pressure initializer, and
-     * reports nonconvergence when the entry residual tolerances are not met.
+     * observations of its extensions attached to the exact supplied state.
+     * It requires `min_iterations == 0`, cannot be combined with the
+     * external-state fixed point or an enabled initializer, and reports
+     * nonconvergence when the entry residual tolerances are not met.
      */
     bool initial_residual_only_certificate{false};
 
@@ -404,58 +412,22 @@ struct NewtonOptions {
     // tests. Without this gate, a frozen-geometry trial norm can be mistaken
     // for the norm of the refreshed nonlinear problem.
     bool accepted_state_sync_invalidates_residual{false};
+};
 
-    /**
-     * Read the legacy process-environment settings for static free-surface
-     * diagnostics and pressure initialization.
-     *
-     * Ordinary solves retain the historical default. An internally owned
-     * output-only certificate can disable this so ambient settings cannot
-     * turn a diagnostic probe into a state-mutating pressure initializer.
-     */
-    bool read_static_free_surface_environment_options{true};
+/// The outcome of one acceptance check on a candidate.
+enum class CertificateStatus : std::uint8_t {
+    Passed,
+    Failed,
+    Unavailable   ///< the evidence the check needs is missing
+};
 
-    /**
-     * Maximum relative distance of the accepted static capillary load from
-     * the constrained discrete pressure-gradient range.
-     *
-     * An unset value leaves Newton convergence unchanged.  Setting a finite,
-     * nonnegative value opts a static qualification solve into a final-state
-     * acceptance gate.  The gate rejects convergence when the diagnostic is
-     * unavailable, fails to reach normal-equation stationarity, breaks down,
-     * is nonfinite, or exceeds the requested distance.
-     */
-    std::optional<double>
-        accepted_static_pressure_representability_max_relative_distance{};
-
-    /**
-     * Maximum relative KKT residual after fitting only a physical constant
-     * pressure jump to the accepted static capillary load.
-     *
-     * This is stricter than the complete pressure-space distance above and
-     * is intended for a discrete fixed-volume stationary geometry.  It does
-     * not project or replace the production capillary load.
-     */
-    std::optional<double>
-        accepted_static_constant_pressure_kkt_max_relative_distance{};
-
-    /**
-     * Add the stationary least-squares pressure correction for the remaining
-     * conservative-balance residual once.  That residual includes the current
-     * pressure together with the assembled prescribed exterior-pressure,
-     * surface/Young, and gravitational load.
-     *
-     * Existing pressure coefficients are the baseline for the correction, so
-     * an already compatible external or hydrostatic pressure receives a zero
-     * increment rather than a duplicate pressure field.  This changes only
-     * the current nonlinear initial guess; committed solution-history and
-     * rate slots are not rewritten.  It is not a force projection or
-     * balanced-force certificate: the production residual is unchanged.  The
-     * pressure-range distance gate above must also be configured, and the
-     * initial guess fails closed before mutation when either the load
-     * certificate or the residual-correction solve is unavailable.
-     */
-    bool initialize_static_compatible_free_surface_pressure{false};
+/// One decision of an acceptance check, with a stable id and reason.
+struct CertificateDecision {
+    std::string id{};
+    CertificateStatus status{CertificateStatus::Unavailable};
+    std::string reason{};
+    double value{std::numeric_limits<double>::quiet_NaN()};
+    double threshold{std::numeric_limits<double>::quiet_NaN()};
 };
 
 struct NewtonReport {
@@ -561,6 +533,32 @@ struct NewtonReport {
     std::string static_compatible_pressure_initializer_reason{
         "not_requested"};
     backends::SolverReport linear{};
+    /// The decisions of the acceptance checks at the last acceptance of
+    /// the solve, in check order.
+    std::vector<CertificateDecision> certificates{};
+};
+
+/// Which initializers of the options a workspace lifecycle has consumed,
+/// one entry per initializer in NewtonExtensions order.  A consumed
+/// initializer proposes nothing more until the ledger is restored: by the
+/// solver when its transaction fails or an outer attempt is rolled back, and
+/// by TimeLoop when a step attempt or a comparison solve is discarded.
+struct NewtonInitializerLedger {
+    std::vector<bool> consumed{};
+
+    [[nodiscard]] bool isConsumed(std::size_t index) const noexcept
+    {
+        return index < consumed.size() && consumed[index];
+    }
+    void markConsumed(std::size_t index)
+    {
+        if (consumed.size() <= index) {
+            consumed.resize(index + 1u, false);
+        }
+        consumed[index] = true;
+    }
+
+    friend bool operator==(const NewtonInitializerLedger&, const NewtonInitializerLedger&) = default;
 };
 
 /// Storage an extension keeps in a NewtonWorkspace (matrices and vectors in
@@ -576,20 +574,9 @@ struct NewtonWorkspace {
     /// The storage of each extension, in NewtonSolver::extensions() order;
     /// null for an extension that keeps none.
     std::vector<std::unique_ptr<NewtonExtensionStorage>> extension_storage{};
-    // Optional free-surface pressure-representability workspace.  The matrix
-    // stores the symmetric [0,G;G^T,0] diagnostic pair; the vectors keep both
-    // representability and residual-correction LSQR solves entirely in
-    // GenericMatrix/GenericVector operations (no backend casts, normal
-    // equations, or globally gathered dense matrices).
-    std::unique_ptr<backends::GenericMatrix>
-        pressure_representability_pair_matrix{};
-    // The vectors of the representability and residual-correction LSQR
-    // solves, in the pair layout (analysis::ConstraintRangeVectors).
-    analysis::ConstraintRangeVectors certificate_vectors{};
-    // The compatible-pressure initial guess is intentionally one-shot across
-    // solveStep calls and workspace/Jacobian reallocations.  Construct a new
-    // NewtonWorkspace to begin a new lifecycle.
-    bool static_compatible_pressure_initialized{false};
+    /// The initializers this workspace lifecycle has consumed.  Construct a
+    /// new NewtonWorkspace to begin a new lifecycle.
+    NewtonInitializerLedger initializer_ledger{};
     std::unique_ptr<backends::GenericVector> residual{};
     std::unique_ptr<backends::GenericVector> delta{};
     std::unique_ptr<backends::GenericVector> u_backup{};
@@ -698,6 +685,11 @@ public:
 
     /// Starts a frozen nonlinear solve: drops what an earlier solve kept.
     virtual void beginSolve();
+
+    /// Throws unless every rank of the active communicator of @p system
+    /// holds the same policy for this extension; called before any of its
+    /// collectives.
+    virtual void validateCommunicatorPolicy(const systems::FESystem& system) const;
 };
 
 /// What an observer reads at a residual-assembly point.
@@ -732,6 +724,66 @@ public:
     virtual void observe(NewtonObservation& observation) = 0;
 };
 
+/// The acceptance events of a solve.  Inner convergence is assessed by the
+/// solver that converged, unless an outer fixed point owns the acceptance;
+/// the outer fixed point assesses a fresh zero-update candidate and a
+/// candidate accepted on a frozen epoch, in that order of the loop.
+enum class AcceptanceStage : std::uint8_t {
+    InnerConvergence,
+    FreshOuterCandidate,
+    FrozenCycleAcceptance
+};
+
+/// The candidate an acceptance check assesses.
+struct NewtonAcceptance {
+    const systems::FESystem& system;
+    AcceptanceStage stage;
+    const char* phase;   ///< the convergence phase of the log lines
+    int iteration;       ///< the completed inner iterations of the candidate
+    std::optional<int> outer_iteration;   ///< set for an outer event
+    NewtonReport& candidate;
+};
+
+class NewtonAcceptanceCheck : public virtual NewtonExtension {
+public:
+    /// The decisions on the candidate, called on every rank; the candidate
+    /// is accepted only when every decision of every check passed.
+    [[nodiscard]] virtual std::vector<CertificateDecision> assess(NewtonAcceptance& acceptance) = 0;
+
+    /// Whether the candidate must carry an observation of the accepted
+    /// state, so convergence by step tolerance assembles its residual.
+    [[nodiscard]] virtual bool requiresAcceptedObservation() const = 0;
+};
+
+/// What an initializer reads: the synchronized current guess, observed at
+/// the accepted-state synchronization point (the initializer names the
+/// phase of its own samples), and the guess itself, which it must not change.
+struct NewtonInitialization {
+    NewtonObservation observation;
+    backends::GenericVector& current;
+};
+
+class NewtonInitializer : public virtual NewtonExtension {
+public:
+    /// Whether this initializer proposes a correction (the same on every rank).
+    [[nodiscard]] virtual bool enabled() const = 0;
+
+    /// Computes and verifies a correction of named fields of the current
+    /// guess; returns false, after reporting why, when there is none.
+    [[nodiscard]] virtual bool propose(NewtonInitialization& initialization) = 0;
+
+    /// Adds the proposed correction to the owned rows of @p current, on
+    /// every rank of @p system; the solver then updates the ghosts and
+    /// synchronizes the corrected guess.
+    virtual void apply(const systems::FESystem& system, backends::GenericVector& current) = 0;
+
+    /// Reports the applied correction, after the solver synchronized it.
+    virtual void reportApplied(const systems::FESystem& system, NewtonReport& report) = 0;
+
+    /// Reports that an earlier solve of the workspace lifecycle consumed it.
+    virtual void reportConsumed(const systems::FESystem& system, NewtonReport& report) = 0;
+};
+
 /**
  * @brief Newton-Raphson driver for systems assembled through FE/Systems.
  */
@@ -754,7 +806,7 @@ public:
 
 private:
     NewtonSolver(NewtonOptions options,
-                 bool defer_pressure_representability_distance_gate);
+                 bool defer_acceptance_to_outer_loop);
 
     [[nodiscard]] NewtonReport solveStepFrozenExternalState(
         systems::TransientSystem& transient,
@@ -773,7 +825,8 @@ private:
                                             NewtonWorkspace& workspace) const;
 
     /// The distinct extensions of the options, in the order their storage
-    /// is kept in a workspace: observers in order of installation.
+    /// is kept in a workspace: observers, acceptance checks, initializers,
+    /// each in order of installation.
     [[nodiscard]] std::vector<NewtonExtension*> extensions() const;
 
     /// The storage of @p extension in @p workspace, or null.
@@ -781,21 +834,27 @@ private:
         const NewtonExtension& extension,
         NewtonWorkspace& workspace) const;
 
-    /// Throws unless every rank installs the same extensions in the same order.
+    /// Throws unless every rank installs the same extensions in the same
+    /// order with the same policies, defers acceptance alike and holds the
+    /// same initializer ledger; called before any extension collective.
     void validateExtensionsAcrossCommunicator(
-        const systems::FESystem& system) const;
-
-    /**
-     * Verify that every rank will enter the same optional pressure diagnostic,
-     * initializer, and one-shot lifecycle branches before any such branch can
-     * issue a collective operation or invoke a synchronization callback.
-     */
-    void validateStaticPressureCommunicatorState(
         const systems::FESystem& system,
         const NewtonWorkspace& workspace) const;
 
+    /// Runs every acceptance check on @p candidate and records their
+    /// decisions in it; true when all passed.
+    [[nodiscard]] bool assessAcceptance(const systems::FESystem& system,
+                                        AcceptanceStage stage,
+                                        const char* phase,
+                                        int iteration,
+                                        std::optional<int> outer_iteration,
+                                        NewtonReport& candidate) const;
+
+    /// Whether an acceptance check needs an observation of the accepted state.
+    [[nodiscard]] bool acceptanceRequiresObservation() const;
+
     NewtonOptions options_;
-    bool defer_pressure_representability_distance_gate_{false};
+    bool defer_acceptance_to_outer_loop_{false};
 };
 
 } // namespace timestepping

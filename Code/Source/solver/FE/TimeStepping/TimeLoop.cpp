@@ -531,9 +531,9 @@ void copyVector(backends::GenericVector& dst, const backends::GenericVector& src
  * after that update and can still reject the candidate.  `u()` is reset from
  * accepted solution history on the next attempt, but rate vectors have no
  * equivalent history slot, so they require an explicit transaction guard.
- * A pressure initializer consumed by a converged implicit stage is equally
- * provisional: a rejected multistage/adaptive attempt must restore its
- * one-shot bit so the retry reconstructs that discarded pressure update.
+ * An initializer consumed by a converged implicit stage is equally
+ * provisional: a rejected multistage/adaptive attempt must restore the
+ * initializer ledger so the retry reconstructs that discarded correction.
  */
 class AttemptStateGuard {
 public:
@@ -544,8 +544,7 @@ public:
         : history_(history)
         , snapshot_(snapshot)
         , workspace_(workspace)
-        , static_pressure_initialized_(
-              workspace.static_compatible_pressure_initialized)
+        , initializer_ledger_(workspace.initializer_ledger)
     {
         history_.snapshotRateState(snapshot_, factory);
     }
@@ -557,8 +556,7 @@ public:
     {
         if (!committed_) {
             history_.restoreRateState(snapshot_);
-            workspace_.static_compatible_pressure_initialized =
-                static_pressure_initialized_;
+            workspace_.initializer_ledger = initializer_ledger_;
         }
     }
 
@@ -568,40 +566,35 @@ private:
     TimeHistory& history_;
     TimeHistory::RateStateSnapshot& snapshot_;
     NewtonWorkspace& workspace_;
-    bool static_pressure_initialized_{false};
+    NewtonInitializerLedger initializer_ledger_{};
     bool committed_{false};
 };
 
 /**
  * A reference/embedded solve may produce a useful comparison state without
  * owning the enclosing time-step attempt.  Its algebraic solution is copied
- * out and then discarded, so consuming the one-shot pressure initializer in
- * that solve must be rolled back before the actual candidate solve begins.
+ * out and then discarded, so an initializer consumed in that solve must be
+ * restored in the ledger before the actual candidate solve begins.
  */
-class DiscardedStaticPressureInitializationGuard {
+class DiscardedInitializerGuard {
 public:
-    explicit DiscardedStaticPressureInitializationGuard(
-        NewtonWorkspace& workspace) noexcept
+    explicit DiscardedInitializerGuard(NewtonWorkspace& workspace)
         : workspace_(workspace)
-        , initialized_at_entry_(
-              workspace.static_compatible_pressure_initialized)
+        , ledger_at_entry_(workspace.initializer_ledger)
     {
     }
 
-    DiscardedStaticPressureInitializationGuard(
-        const DiscardedStaticPressureInitializationGuard&) = delete;
-    DiscardedStaticPressureInitializationGuard& operator=(
-        const DiscardedStaticPressureInitializationGuard&) = delete;
+    DiscardedInitializerGuard(const DiscardedInitializerGuard&) = delete;
+    DiscardedInitializerGuard& operator=(const DiscardedInitializerGuard&) = delete;
 
-    ~DiscardedStaticPressureInitializationGuard() noexcept
+    ~DiscardedInitializerGuard() noexcept
     {
-        workspace_.static_compatible_pressure_initialized =
-            initialized_at_entry_;
+        workspace_.initializer_ledger = ledger_at_entry_;
     }
 
 private:
     NewtonWorkspace& workspace_;
-    bool initialized_at_entry_{false};
+    NewtonInitializerLedger ledger_at_entry_{};
 };
 
 systems::SystemStateView makeAcceptedTimeStepStateView(const TimeHistory& history,
@@ -3097,7 +3090,7 @@ TimeLoopReport TimeLoop::run(systems::TransientSystem& transient,
 	                        ((system_temporal_order <= 1 && history.stepIndex() == 0) || system_temporal_order == 2);
 		                    bool have_reference_solution = false;
 		                    if (need_startup_reference) {
-                        DiscardedStaticPressureInitializationGuard
+                        DiscardedInitializerGuard
                             reference_initializer_state(workspace);
 	                        // Bootstrap VSVO error estimation on the very first step. With no "real" history
                         // yet, extrapolation-based predictors reduce to u_pred = u^n and the correction

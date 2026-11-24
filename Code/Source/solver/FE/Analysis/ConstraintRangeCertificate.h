@@ -33,10 +33,20 @@
  * A formulation states the fields and the diagnostic operators of the
  * certificate as a ConstraintRangeDeclaration in the system's diagnostic
  * registry (DiagnosticRegistry::declare); the certificate finds them there.
+ *
+ * ConstraintRangeCertificate is the certificate in a Newton solve, for one
+ * ConstraintRangeMethod: an observer that samples the declared loads and the
+ * range distance at every residual assembly, an acceptance check that vetoes
+ * a converged candidate whose distances exceed the method's thresholds, and
+ * an initializer that adds the least-squares constraint-field correction of
+ * the remaining balance to the current guess once per workspace lifecycle.
+ * Its log lines keep the vocabulary of the qualification records
+ * (free-surface pressure certificate), which scripts parse.
  */
 
 #include "Core/Types.h"
 #include "Systems/DiagnosticRegistry.h"
+#include "TimeStepping/NewtonSolver.h"
 
 #include <array>
 #include <cstdint>
@@ -47,6 +57,8 @@
 #include <set>
 #include <span>
 #include <string>
+#include <string_view>
+#include <vector>
 
 namespace svmp {
 namespace FE {
@@ -221,6 +233,92 @@ struct RetainedFieldSupportResult {
     std::span<const GlobalIndex> constrained_dofs,
     std::span<const GlobalIndex> vector_owned_dofs,
     const std::function<bool(bool)>& all_ranks);
+
+/**
+ * The resolved method of the certificate.  A threshold makes the
+ * corresponding gate mandatory at acceptance; without any, the certificate
+ * only observes.  The initializer requires the range threshold.
+ */
+struct ConstraintRangeMethod {
+    /// Sample at every residual assembly even without a threshold.
+    bool observe{false};
+    /// Maximum relative distance of the load from range(G).
+    std::optional<double> max_range_distance{};
+    /// Maximum relative KKT residual after fitting only a constant field.
+    std::optional<double> max_constant_field_kkt_distance{};
+    /// Add the least-squares constraint-field correction of the remaining
+    /// balance to the current guess, once per workspace lifecycle.
+    bool initialize_constraint_field{false};
+};
+
+/// Whether @p method samples at all.
+[[nodiscard]] bool constraintRangeMethodRequested(const ConstraintRangeMethod& method) noexcept;
+
+/// The method the environment gates below state.
+[[nodiscard]] ConstraintRangeMethod constraintRangeMethodFromEnvironment();
+
+/// The pair matrix and its vectors in a Newton workspace.
+class ConstraintRangeStorage final : public timestepping::NewtonExtensionStorage {
+public:
+    std::unique_ptr<backends::GenericMatrix> pair{};
+    ConstraintRangeVectors vectors{};
+};
+
+/// The certificate's storage in @p workspace, or null.
+[[nodiscard]] ConstraintRangeStorage* findConstraintRangeStorage(timestepping::NewtonWorkspace& workspace);
+
+class ConstraintRangeCertificate final : public timestepping::NewtonObserver,
+                                         public timestepping::NewtonAcceptanceCheck,
+                                         public timestepping::NewtonInitializer {
+public:
+    /// Throws for a negative or nonfinite threshold and for an initializer
+    /// without a range threshold (deferred to the collective policy check
+    /// when MPI runs several tasks).
+    explicit ConstraintRangeCertificate(ConstraintRangeMethod method);
+    ~ConstraintRangeCertificate() override;
+    ConstraintRangeCertificate(const ConstraintRangeCertificate&) = delete;
+    ConstraintRangeCertificate& operator=(const ConstraintRangeCertificate&) = delete;
+
+    [[nodiscard]] const ConstraintRangeMethod& method() const noexcept { return method_; }
+
+    [[nodiscard]] std::string_view id() const override { return "constraint_range"; }
+    [[nodiscard]] std::unique_ptr<timestepping::NewtonExtensionStorage> allocate(
+        const timestepping::NewtonStorageContext& context) const override;
+    void refreshStorage(const timestepping::NewtonStorageContext& context,
+                        timestepping::NewtonExtensionStorage* storage,
+                        bool after_production) const override;
+    void beginSolve() override;
+    void validateCommunicatorPolicy(const systems::FESystem& system) const override;
+
+    void observe(timestepping::NewtonObservation& observation) override;
+
+    [[nodiscard]] std::vector<timestepping::CertificateDecision> assess(
+        timestepping::NewtonAcceptance& acceptance) override;
+    [[nodiscard]] bool requiresAcceptedObservation() const override;
+
+    [[nodiscard]] bool enabled() const override { return method_.initialize_constraint_field; }
+    [[nodiscard]] bool propose(timestepping::NewtonInitialization& initialization) override;
+    void apply(const systems::FESystem& system, backends::GenericVector& current) override;
+    void reportApplied(const systems::FESystem& system, timestepping::NewtonReport& report) override;
+    void reportConsumed(const systems::FESystem& system, timestepping::NewtonReport& report) override;
+
+private:
+    struct State;
+
+    void logInitializer(const systems::FESystem& system, timestepping::NewtonReport& report,
+                        bool applied, bool passed, std::string_view reason) const;
+
+    ConstraintRangeMethod method_;
+    std::unique_ptr<State> state_;
+};
+
+/// Installs @p certificate as observer, acceptance check and initializer of
+/// @p extensions (after the extensions already installed); no-op for null.
+void installConstraintRangeCertificate(timestepping::NewtonExtensions& extensions,
+                                       const std::shared_ptr<ConstraintRangeCertificate>& certificate);
+
+/// The certificate the environment gates request, or null when they request none.
+[[nodiscard]] std::shared_ptr<ConstraintRangeCertificate> environmentConstraintRangeCertificate();
 
 // The environment gates of the static free-surface certificates, each a
 // Navier--Stokes name and its short alias; the first one set decides.

@@ -71,6 +71,7 @@
 #include "FE/TimeStepping/GeneratedState.h"
 #include "FE/TimeStepping/MeshNormalStageParticipant.h"
 #include "FE/TimeStepping/OperatorStageCapture.h"
+#include "FE/Analysis/ConstraintRangeCertificate.h"
 #include "FE/Analysis/RowContributionObserver.h"
 #include "FE/TimeStepping/NewtonSolver.h"
 #include "FE/TimeStepping/StepContext.h"
@@ -4773,15 +4774,19 @@ evaluateStaticCapillaryPressureCertificate(
     options.initial_residual_only_certificate =
         !initialize_compatible_pressure;
     options.external_state_fixed_point.enabled = false;
-    options.read_static_free_surface_environment_options = false;
-    options.initialize_static_compatible_free_surface_pressure =
-        initialize_compatible_pressure;
-    options
-        .accepted_static_pressure_representability_max_relative_distance =
-        static_cast<double>(certificate_options
-                                .pressure_representability_max_relative_distance);
     options.extensions.observers =
         svmp::FE::analysis::environmentResidualObservers();
+    // The probe's own certificate: the deck's range threshold, no
+    // environment gates, the initializer on request.
+    svmp::FE::analysis::installConstraintRangeCertificate(
+        options.extensions,
+        std::make_shared<svmp::FE::analysis::ConstraintRangeCertificate>(
+            svmp::FE::analysis::ConstraintRangeMethod{
+                .max_range_distance = static_cast<double>(
+                    certificate_options
+                        .pressure_representability_max_relative_distance),
+                .initialize_constraint_field =
+                    initialize_compatible_pressure}));
 
     PdeVelocityExtensionCaches probe_pde_extension_caches;
     bool probe_extension_maps_refreshed = false;
@@ -7114,6 +7119,9 @@ void ApplicationDriver::runSteadyState(SimulationComponents& sim, const Paramete
 
   newton_opts.extensions.observers =
       svmp::FE::analysis::environmentResidualObservers();
+  svmp::FE::analysis::installConstraintRangeCertificate(
+      newton_opts.extensions,
+      svmp::FE::analysis::environmentConstraintRangeCertificate());
   svmp::FE::timestepping::NewtonSolver newton(newton_opts);
   svmp::FE::timestepping::NewtonWorkspace workspace;
 
@@ -7294,6 +7302,9 @@ void ApplicationDriver::runTransient(SimulationComponents& sim, const Parameters
   opts.newton.jacobian_op = "equations";
   opts.newton.extensions.observers =
       svmp::FE::analysis::environmentResidualObservers();
+  svmp::FE::analysis::installConstraintRangeCertificate(
+      opts.newton.extensions,
+      svmp::FE::analysis::environmentConstraintRangeCertificate());
 
   const auto transient_cut_topology_preflight_comm =
       activeFESystemCommunicator(*sim.fe_system);

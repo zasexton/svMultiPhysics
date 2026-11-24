@@ -309,6 +309,46 @@ struct FreeSurfaceConservativeBalanceKernelCounts {
     KernelCallCounts pressure_representability_pair{};
 };
 
+// The certificate that a solver built from options installed before the
+// certificate left the solver: the environment gates (the diagnostic switch
+// always; thresholds and initializer when the environment is read), then
+// the test's explicit thresholds and initializer.  Installs nothing when
+// none of them requests the certificate.
+std::shared_ptr<svmp::FE::analysis::ConstraintRangeCertificate> installTestCertificate(
+    svmp::FE::timestepping::NewtonOptions& options,
+    const svmp::FE::analysis::ConstraintRangeMethod& explicit_method = {},
+    bool read_environment = true)
+{
+    auto method = read_environment
+                      ? svmp::FE::analysis::constraintRangeMethodFromEnvironment()
+                      : svmp::FE::analysis::ConstraintRangeMethod{
+                            .observe = svmp::FE::analysis::staticCertificateDiagnosticEnabled()};
+    if (explicit_method.max_range_distance.has_value()) {
+        method.max_range_distance = explicit_method.max_range_distance;
+    }
+    if (explicit_method.max_constant_field_kkt_distance.has_value()) {
+        method.max_constant_field_kkt_distance = explicit_method.max_constant_field_kkt_distance;
+    }
+    method.initialize_constraint_field =
+        method.initialize_constraint_field || explicit_method.initialize_constraint_field;
+    if (!svmp::FE::analysis::constraintRangeMethodRequested(method)) {
+        return nullptr;
+    }
+    auto certificate =
+        std::make_shared<svmp::FE::analysis::ConstraintRangeCertificate>(std::move(method));
+    svmp::FE::analysis::installConstraintRangeCertificate(options.extensions, certificate);
+    return certificate;
+}
+
+// The certificate's storage in a workspace (an empty one when it has none).
+svmp::FE::analysis::ConstraintRangeStorage& testCertificateStorage(
+    svmp::FE::timestepping::NewtonWorkspace& workspace)
+{
+    static svmp::FE::analysis::ConstraintRangeStorage absent;
+    auto* storage = svmp::FE::analysis::findConstraintRangeStorage(workspace);
+    return storage != nullptr ? *storage : absent;
+}
+
 // The synthetic certificate operators the fixtures below install, declared
 // as a formulation declares them (the six sampled vectors, then the pair).
 constexpr std::array<const char*, 6> kSyntheticCertificateVectorOps{
@@ -2560,6 +2600,7 @@ struct CapturedPressureDiagnostic {
     options.abs_tolerance = 1.0e-14;
     options.rel_tolerance = 0.0;
     options.use_line_search = false;
+    installTestCertificate(options);
     svmp::FE::timestepping::NewtonSolver newton(options);
     svmp::FE::timestepping::NewtonWorkspace workspace;
     newton.allocateWorkspace(
@@ -6979,6 +7020,7 @@ TEST(NewtonSolver,
 
     ScopedEnvVar enable_balance(
         "SVMP_NS_FREE_SURFACE_CONSERVATIVE_BALANCE_DIAGNOSTIC", "1");
+    installTestCertificate(nopt);
     svmp::FE::timestepping::NewtonSolver newton(nopt);
     svmp::FE::timestepping::NewtonWorkspace workspace;
     newton.allocateWorkspace(*problem.sys, *problem.factory, workspace);
@@ -7036,6 +7078,7 @@ TEST(NewtonSolver,
     options.line_search_max_iterations = 1;
     options.accepted_state_sync_invalidates_residual = true;
 
+    installTestCertificate(options);
     svmp::FE::timestepping::NewtonSolver newton(options);
     svmp::FE::timestepping::NewtonWorkspace workspace;
     newton.allocateWorkspace(
@@ -7142,6 +7185,7 @@ TEST(NewtonSolver,
     options.line_search_max_iterations = 1;
     options.accepted_state_sync_invalidates_residual = true;
 
+    installTestCertificate(options);
     svmp::FE::timestepping::NewtonSolver newton(options);
     svmp::FE::timestepping::NewtonWorkspace workspace;
     newton.allocateWorkspace(*problem.sys, *problem.factory, workspace);
@@ -7236,6 +7280,7 @@ TEST(NewtonSolver,
     options.line_search_max_iterations = 1;
     options.accepted_state_sync_invalidates_residual = true;
 
+    installTestCertificate(options);
     svmp::FE::timestepping::NewtonSolver newton(options);
     svmp::FE::timestepping::NewtonWorkspace workspace;
     newton.allocateWorkspace(*problem.sys, *problem.factory, workspace);
@@ -7325,6 +7370,7 @@ TEST(NewtonSolver,
     options.line_search_max_iterations = 1;
     options.accepted_state_sync_invalidates_residual = true;
 
+    installTestCertificate(options);
     svmp::FE::timestepping::NewtonSolver newton(options);
     svmp::FE::timestepping::NewtonWorkspace workspace;
     newton.allocateWorkspace(
@@ -7401,6 +7447,7 @@ TEST(NewtonSolver,
     options.rel_tolerance = 0.0;
     options.use_line_search = false;
 
+    installTestCertificate(options);
     svmp::FE::timestepping::NewtonSolver newton(options);
     svmp::FE::timestepping::NewtonWorkspace workspace;
     newton.allocateWorkspace(
@@ -7437,12 +7484,12 @@ TEST(NewtonSolver,
         diagnostic_counts.pressure_representability_pair.matrix_and_vector,
         0);
 
-    ASSERT_NE(workspace.certificate_vectors.solution, nullptr);
-    ASSERT_NE(workspace.certificate_vectors.residual, nullptr);
+    ASSERT_NE(testCertificateStorage(workspace).vectors.solution, nullptr);
+    ASSERT_NE(testCertificateStorage(workspace).vectors.residual, nullptr);
     ASSERT_NE(
-        workspace.certificate_vectors.normal_residual, nullptr);
+        testCertificateStorage(workspace).vectors.normal_residual, nullptr);
     const auto solution =
-        workspace.certificate_vectors.solution->localSpan();
+        testCertificateStorage(workspace).vectors.solution->localSpan();
     const auto velocity_dof =
         problem.sys->fieldDofOffset(problem.velocity_field);
     const auto pressure_dof =
@@ -7454,17 +7501,17 @@ TEST(NewtonSolver,
     EXPECT_NEAR(solution[static_cast<std::size_t>(velocity_dof)], 0.0, 1.0e-14);
     EXPECT_NEAR(solution[static_cast<std::size_t>(pressure_dof)], 2.0, 1.0e-12);
     EXPECT_NEAR(
-        workspace.certificate_vectors.residual->norm(),
+        testCertificateStorage(workspace).vectors.residual->norm(),
         0.0,
         1.0e-13);
     EXPECT_NEAR(
-        workspace.certificate_vectors.normal_residual->norm(),
+        testCertificateStorage(workspace).vectors.normal_residual->norm(),
         0.0,
         1.0e-13);
 
-    ASSERT_NE(workspace.pressure_representability_pair_matrix, nullptr);
+    ASSERT_NE(testCertificateStorage(workspace).pair, nullptr);
     const auto& pair =
-        *workspace.pressure_representability_pair_matrix;
+        *testCertificateStorage(workspace).pair;
     EXPECT_NEAR(pair.getEntry(velocity_dof, velocity_dof), 0.0, 1.0e-14);
     EXPECT_NEAR(pair.getEntry(pressure_dof, pressure_dof), 0.0, 1.0e-14);
     EXPECT_NEAR(pair.getEntry(velocity_dof, pressure_dof),
@@ -7632,6 +7679,7 @@ TEST(NewtonSolver,
     options.abs_tolerance = 1.0e-14;
     options.rel_tolerance = 0.0;
     options.use_line_search = false;
+    installTestCertificate(options);
     svmp::FE::timestepping::NewtonSolver newton(options);
     svmp::FE::timestepping::NewtonWorkspace workspace;
     newton.allocateWorkspace(*problem.sys, *problem.factory, workspace);
@@ -7896,6 +7944,7 @@ TEST(NewtonSolver,
     options.rel_tolerance = 0.0;
     options.use_line_search = false;
 
+    installTestCertificate(options);
     svmp::FE::timestepping::NewtonSolver newton(options);
     svmp::FE::timestepping::NewtonWorkspace workspace;
     newton.allocateWorkspace(
@@ -7917,11 +7966,11 @@ TEST(NewtonSolver,
     EXPECT_FALSE(report.pressure_representability_breakdown);
     EXPECT_NEAR(
         report.pressure_representability_residual_norm, 0.0, 1.0e-13);
-    ASSERT_NE(workspace.certificate_vectors.solution, nullptr);
+    ASSERT_NE(testCertificateStorage(workspace).vectors.solution, nullptr);
     const auto pressure_dof =
         problem.sys->fieldDofOffset(problem.pressure_field);
     const auto solution =
-        workspace.certificate_vectors.solution->localSpan();
+        testCertificateStorage(workspace).vectors.solution->localSpan();
     ASSERT_GE(pressure_dof, 0);
     ASSERT_LT(static_cast<std::size_t>(pressure_dof), solution.size());
     EXPECT_NEAR(
@@ -7977,6 +8026,7 @@ TEST(NewtonSolver,
     options.rel_tolerance = 0.0;
     options.use_line_search = false;
 
+    installTestCertificate(options);
     svmp::FE::timestepping::NewtonSolver newton(options);
     svmp::FE::timestepping::NewtonWorkspace workspace;
     newton.allocateWorkspace(
@@ -7996,11 +8046,11 @@ TEST(NewtonSolver,
     EXPECT_FALSE(report.pressure_representability_breakdown);
     EXPECT_NEAR(
         report.pressure_representability_residual_norm, 0.0, 1.0e-13);
-    ASSERT_NE(workspace.certificate_vectors.solution, nullptr);
+    ASSERT_NE(testCertificateStorage(workspace).vectors.solution, nullptr);
     const auto pressure_dof =
         problem.sys->fieldDofOffset(problem.pressure_field);
     const auto solution =
-        workspace.certificate_vectors.solution->localSpan();
+        testCertificateStorage(workspace).vectors.solution->localSpan();
     ASSERT_GE(pressure_dof, 0);
     ASSERT_LT(static_cast<std::size_t>(pressure_dof), solution.size());
     EXPECT_NEAR(
@@ -8036,6 +8086,7 @@ TEST(NewtonSolver,
     options.rel_tolerance = 0.0;
     options.use_line_search = false;
 
+    installTestCertificate(options);
     svmp::FE::timestepping::NewtonSolver newton(options);
     svmp::FE::timestepping::NewtonWorkspace workspace;
     newton.allocateWorkspace(
@@ -8112,12 +8163,7 @@ TEST(NewtonSolver,
     options.abs_tolerance = 1.0e-14;
     options.rel_tolerance = 0.0;
     options.use_line_search = false;
-    options
-        .accepted_static_pressure_representability_max_relative_distance =
-        1.0e-10;
-    options
-        .accepted_static_constant_pressure_kkt_max_relative_distance =
-        1.0e-10;
+    installTestCertificate(options, {.max_range_distance = 1.0e-10, .max_constant_field_kkt_distance = 1.0e-10});
     svmp::FE::timestepping::NewtonSolver newton(options);
     svmp::FE::timestepping::NewtonWorkspace workspace;
     newton.allocateWorkspace(
@@ -8200,12 +8246,7 @@ TEST(NewtonSolver,
     options.abs_tolerance = 1.0e-14;
     options.rel_tolerance = 0.0;
     options.use_line_search = false;
-    options
-        .accepted_static_pressure_representability_max_relative_distance =
-        1.0e-10;
-    options
-        .accepted_static_constant_pressure_kkt_max_relative_distance =
-        1.0e-10;
+    installTestCertificate(options, {.max_range_distance = 1.0e-10, .max_constant_field_kkt_distance = 1.0e-10});
     svmp::FE::timestepping::NewtonSolver newton(options);
     svmp::FE::timestepping::NewtonWorkspace workspace;
     newton.allocateWorkspace(
@@ -8267,10 +8308,6 @@ TEST(NewtonSolver,
     options.rel_tolerance = 0.0;
     options.use_line_search = false;
     options.initial_residual_only_certificate = true;
-    options.read_static_free_surface_environment_options = false;
-    options
-        .accepted_static_constant_pressure_kkt_max_relative_distance =
-        1.0e-10;
     options.synchronize_state =
         [&](const svmp::FE::systems::SystemStateView&,
             SyncPoint point) {
@@ -8282,6 +8319,7 @@ TEST(NewtonSolver,
                 point == SyncPoint::JacobianAndResidualAssembly ? 1 : 0;
         };
 
+    installTestCertificate(options, {.max_constant_field_kkt_distance = 1.0e-10}, /*read_environment=*/false);
     svmp::FE::timestepping::NewtonSolver newton(options);
     svmp::FE::timestepping::NewtonWorkspace workspace;
     newton.allocateWorkspace(
@@ -8337,9 +8375,7 @@ TEST(NewtonSolver,
     options.abs_tolerance = 1.0e-14;
     options.rel_tolerance = 0.0;
     options.use_line_search = false;
-    options
-        .accepted_static_constant_pressure_kkt_max_relative_distance =
-        0.1;
+    installTestCertificate(options, {.max_constant_field_kkt_distance = 0.1});
     svmp::FE::timestepping::NewtonSolver newton(options);
     svmp::FE::timestepping::NewtonWorkspace workspace;
     newton.allocateWorkspace(
@@ -8414,9 +8450,7 @@ TEST(NewtonSolver,
     options.abs_tolerance = 1.0e-14;
     options.rel_tolerance = 0.0;
     options.use_line_search = false;
-    options
-        .accepted_static_constant_pressure_kkt_max_relative_distance =
-        0.5;
+    installTestCertificate(options, {.max_constant_field_kkt_distance = 0.5});
     svmp::FE::timestepping::NewtonSolver newton(options);
     svmp::FE::timestepping::NewtonWorkspace workspace;
     newton.allocateWorkspace(
@@ -8459,20 +8493,14 @@ TEST(NewtonSolver,
 TEST(NewtonSolver,
      AcceptedStaticConstantPressureKktDistanceGateRejectsInvalidThresholds)
 {
-    svmp::FE::timestepping::NewtonOptions negative_options;
-    negative_options
-        .accepted_static_constant_pressure_kkt_max_relative_distance =
-        -1.0;
     EXPECT_THROW(
-        svmp::FE::timestepping::NewtonSolver(std::move(negative_options)),
+        svmp::FE::analysis::ConstraintRangeCertificate(
+            {.max_constant_field_kkt_distance = -1.0}),
         svmp::FE::InvalidArgumentException);
-
-    svmp::FE::timestepping::NewtonOptions nonfinite_options;
-    nonfinite_options
-        .accepted_static_constant_pressure_kkt_max_relative_distance =
-        std::numeric_limits<double>::quiet_NaN();
     EXPECT_THROW(
-        svmp::FE::timestepping::NewtonSolver(std::move(nonfinite_options)),
+        svmp::FE::analysis::ConstraintRangeCertificate(
+            {.max_constant_field_kkt_distance =
+                 std::numeric_limits<double>::quiet_NaN()}),
         svmp::FE::InvalidArgumentException);
 }
 
@@ -8507,6 +8535,7 @@ TEST(NewtonSolver,
     options.rel_tolerance = 0.0;
     options.use_line_search = false;
 
+    installTestCertificate(options);
     svmp::FE::timestepping::NewtonSolver newton(options);
     svmp::FE::timestepping::NewtonWorkspace workspace;
     newton.allocateWorkspace(
@@ -8526,8 +8555,8 @@ TEST(NewtonSolver,
     const auto telemetry = stdout_text + stderr_text;
     EXPECT_TRUE(report.converged);
 
-    ASSERT_NE(workspace.pressure_representability_pair_matrix, nullptr);
-    ASSERT_NE(workspace.certificate_vectors.load, nullptr);
+    ASSERT_NE(testCertificateStorage(workspace).pair, nullptr);
+    ASSERT_NE(testCertificateStorage(workspace).vectors.load, nullptr);
     const auto velocity_begin =
         problem.sys->fieldDofOffset(problem.velocity_field);
     const auto pressure_begin =
@@ -8538,8 +8567,8 @@ TEST(NewtonSolver,
     ASSERT_EQ(
         problem.sys->fieldDofHandler(problem.pressure_field).getNumDofs(),
         4);
-    const auto load = workspace.certificate_vectors.load->localSpan();
-    const auto& pair = *workspace.pressure_representability_pair_matrix;
+    const auto load = testCertificateStorage(workspace).vectors.load->localSpan();
+    const auto& pair = *testCertificateStorage(workspace).pair;
     for (svmp::FE::GlobalIndex i = 0; i < 4; ++i) {
         ASSERT_LT(static_cast<std::size_t>(velocity_begin + i), load.size());
         ASSERT_LT(static_cast<std::size_t>(pressure_begin + i), load.size());
@@ -8636,6 +8665,7 @@ TEST(NewtonSolver,
     options.rel_tolerance = 0.0;
     options.use_line_search = false;
 
+    installTestCertificate(options);
     svmp::FE::timestepping::NewtonSolver newton(options);
     svmp::FE::timestepping::NewtonWorkspace workspace;
     newton.allocateWorkspace(
@@ -8693,10 +8723,8 @@ TEST(NewtonSolver,
     options.abs_tolerance = 1.0e-14;
     options.rel_tolerance = 0.0;
     options.use_line_search = false;
-    options
-        .accepted_static_pressure_representability_max_relative_distance =
-        1.0e-9;
 
+    installTestCertificate(options, {.max_range_distance = 1.0e-9});
     svmp::FE::timestepping::NewtonSolver newton(options);
     svmp::FE::timestepping::NewtonWorkspace workspace;
     newton.allocateWorkspace(
@@ -8763,6 +8791,7 @@ TEST(NewtonSolver,
     options.abs_tolerance = 1.0e-14;
     options.rel_tolerance = 0.0;
     options.use_line_search = false;
+    installTestCertificate(options);
     svmp::FE::timestepping::NewtonSolver newton(options);
     svmp::FE::timestepping::NewtonWorkspace workspace;
     newton.allocateWorkspace(
@@ -8781,15 +8810,15 @@ TEST(NewtonSolver,
     const auto stdout_text = testing::internal::GetCapturedStdout();
     const auto telemetry = stdout_text + stderr_text;
     EXPECT_TRUE(report.converged);
-    ASSERT_NE(workspace.pressure_representability_pair_matrix, nullptr);
-    ASSERT_NE(workspace.certificate_vectors.load, nullptr);
-    ASSERT_NE(workspace.certificate_vectors.residual, nullptr);
+    ASSERT_NE(testCertificateStorage(workspace).pair, nullptr);
+    ASSERT_NE(testCertificateStorage(workspace).vectors.load, nullptr);
+    ASSERT_NE(testCertificateStorage(workspace).vectors.residual, nullptr);
     const auto velocity_dof =
         problem.sys->fieldDofOffset(problem.velocity_field);
     const auto pressure_dof =
         problem.sys->fieldDofOffset(problem.pressure_field);
     const auto& pair =
-        *workspace.pressure_representability_pair_matrix;
+        *testCertificateStorage(workspace).pair;
 
     // Without explicit zeroRows(..., false), constrained assembly leaves an
     // artificial unit pressure row and LSQR would incorrectly cancel f using
@@ -8798,17 +8827,17 @@ TEST(NewtonSolver,
     EXPECT_NEAR(pair.getEntry(pressure_dof, pressure_dof), 0.0, 1.0e-14);
     EXPECT_NEAR(pair.getEntry(velocity_dof, pressure_dof), 0.0, 1.0e-14);
     EXPECT_NEAR(pair.getEntry(pressure_dof, velocity_dof), 0.0, 1.0e-14);
-    EXPECT_GT(workspace.certificate_vectors.load->norm(), 1.0e-12);
+    EXPECT_GT(testCertificateStorage(workspace).vectors.load->norm(), 1.0e-12);
     EXPECT_NEAR(
-        workspace.certificate_vectors.residual->norm(),
-        workspace.certificate_vectors.load->norm(),
+        testCertificateStorage(workspace).vectors.residual->norm(),
+        testCertificateStorage(workspace).vectors.load->norm(),
         1.0e-13);
     EXPECT_NEAR(
-        workspace.certificate_vectors.normal_residual->norm(),
+        testCertificateStorage(workspace).vectors.normal_residual->norm(),
         0.0,
         1.0e-14);
     EXPECT_NEAR(
-        workspace.certificate_vectors.solution->norm(),
+        testCertificateStorage(workspace).vectors.solution->norm(),
         0.0,
         1.0e-14);
     // A zero reduced operator makes the load range-orthogonal: LSQR reaches
@@ -8866,9 +8895,7 @@ TEST(NewtonSolver,
     options.abs_tolerance = 1.0e-14;
     options.rel_tolerance = 0.0;
     options.use_line_search = false;
-    options
-        .accepted_static_pressure_representability_max_relative_distance =
-        1.0e-10;
+    installTestCertificate(options, {.max_range_distance = 1.0e-10});
     svmp::FE::timestepping::NewtonSolver newton(options);
     svmp::FE::timestepping::NewtonWorkspace workspace;
     newton.allocateWorkspace(
@@ -8940,9 +8967,7 @@ TEST(NewtonSolver,
     options.abs_tolerance = 1.0e-14;
     options.rel_tolerance = 0.0;
     options.use_line_search = false;
-    options
-        .accepted_static_pressure_representability_max_relative_distance =
-        0.5;
+    installTestCertificate(options, {.max_range_distance = 0.5});
     svmp::FE::timestepping::NewtonSolver newton(options);
     svmp::FE::timestepping::NewtonWorkspace workspace;
     newton.allocateWorkspace(
@@ -9015,9 +9040,7 @@ TEST(NewtonSolver,
     options.abs_tolerance = 1.0e-14;
     options.rel_tolerance = 0.0;
     options.use_line_search = false;
-    options
-        .accepted_static_pressure_representability_max_relative_distance =
-        0.5;
+    installTestCertificate(options, {.max_range_distance = 0.5});
     svmp::FE::timestepping::NewtonSolver newton(options);
     svmp::FE::timestepping::NewtonWorkspace workspace;
     newton.allocateWorkspace(
@@ -9060,10 +9083,9 @@ TEST(NewtonSolver,
 TEST(NewtonSolver,
      StaticCompatiblePressureInitializerRequiresRepresentabilityDistanceGate)
 {
-    svmp::FE::timestepping::NewtonOptions options;
-    options.initialize_static_compatible_free_surface_pressure = true;
     EXPECT_THROW(
-        svmp::FE::timestepping::NewtonSolver(std::move(options)),
+        svmp::FE::analysis::ConstraintRangeCertificate(
+            {.initialize_constraint_field = true}),
         svmp::FE::InvalidArgumentException);
     RecordProperty(
         "static_compatible_pressure_initializer_missing_gate_reject_count",
@@ -9100,10 +9122,7 @@ TEST(NewtonSolver,
     options.abs_tolerance = 1.0e-13;
     options.rel_tolerance = 0.0;
     options.use_line_search = false;
-    options.initialize_static_compatible_free_surface_pressure = true;
-    options
-        .accepted_static_pressure_representability_max_relative_distance =
-        1.0e-10;
+    installTestCertificate(options, {.max_range_distance = 1.0e-10, .initialize_constraint_field = true});
     svmp::FE::timestepping::NewtonSolver newton(options);
     svmp::FE::timestepping::NewtonWorkspace workspace;
     newton.allocateWorkspace(
@@ -9159,7 +9178,7 @@ TEST(NewtonSolver,
               "additive_initial_guess_within_threshold");
     EXPECT_EQ(report.pressure_representability_pressure_field,
               problem.pressure_field);
-    EXPECT_TRUE(workspace.static_compatible_pressure_initialized);
+    EXPECT_TRUE(workspace.initializer_ledger.isConsumed(0));
     EXPECT_LE(report.pressure_representability_relative_distance, 1.0e-10);
     EXPECT_NE(
         telemetry.find(
@@ -9332,10 +9351,7 @@ TEST(NewtonSolver,
     options.abs_tolerance = 100.0;
     options.rel_tolerance = 0.0;
     options.use_line_search = false;
-    options.initialize_static_compatible_free_surface_pressure = true;
-    options
-        .accepted_static_pressure_representability_max_relative_distance =
-        1.0e-12;
+    installTestCertificate(options, {.max_range_distance = 1.0e-12, .initialize_constraint_field = true});
     svmp::FE::timestepping::NewtonSolver newton(options);
     svmp::FE::timestepping::NewtonWorkspace workspace;
     newton.allocateWorkspace(
@@ -9363,9 +9379,9 @@ TEST(NewtonSolver,
     EXPECT_LE(report.pressure_representability_relative_distance, 1.0e-12);
     EXPECT_EQ(ts_test::getVectorByDof(problem.history.u()),
               exact_entry_state);
-    ASSERT_NE(workspace.certificate_vectors.correction_load, nullptr);
+    ASSERT_NE(testCertificateStorage(workspace).vectors.correction_load, nullptr);
     EXPECT_DOUBLE_EQ(
-        workspace.certificate_vectors.correction_load->norm(), 0.0);
+        testCertificateStorage(workspace).vectors.correction_load->norm(), 0.0);
     EXPECT_NE(telemetry.find("pressure_correction_load_norm=0"),
               std::string::npos);
     EXPECT_NE(telemetry.find("pressure_correction_iterations=0"),
@@ -9402,10 +9418,7 @@ TEST(NewtonSolver,
     options.abs_tolerance = 1.0e-13;
     options.rel_tolerance = 0.0;
     options.use_line_search = false;
-    options.initialize_static_compatible_free_surface_pressure = true;
-    options
-        .accepted_static_pressure_representability_max_relative_distance =
-        1.0e-10;
+    installTestCertificate(options, {.max_range_distance = 1.0e-10, .initialize_constraint_field = true});
     svmp::FE::timestepping::NewtonSolver one_iteration_newton(options);
     svmp::FE::timestepping::NewtonWorkspace workspace;
     one_iteration_newton.allocateWorkspace(
@@ -9429,7 +9442,7 @@ TEST(NewtonSolver,
     EXPECT_EQ(failed_report.iterations, 1);
     EXPECT_TRUE(
         failed_report.static_compatible_pressure_initializer_applied);
-    EXPECT_FALSE(workspace.static_compatible_pressure_initialized);
+    EXPECT_FALSE(workspace.initializer_ledger.isConsumed(0));
     EXPECT_EQ(ts_test::getVectorByDof(problem.history.u()), entry_current);
     EXPECT_EQ(ts_test::getVectorByDof(problem.history.uPrev()),
               entry_previous);
@@ -9448,7 +9461,7 @@ TEST(NewtonSolver,
     EXPECT_EQ(retry_report.iterations, 1);
     EXPECT_TRUE(
         retry_report.static_compatible_pressure_initializer_applied);
-    EXPECT_TRUE(workspace.static_compatible_pressure_initialized);
+    EXPECT_TRUE(workspace.initializer_ledger.isConsumed(0));
 
     const auto retry_state =
         ts_test::getVectorByDof(problem.history.u());
@@ -9533,10 +9546,6 @@ TEST(NewtonSolver,
     options.abs_tolerance = 1.0e-13;
     options.rel_tolerance = 0.0;
     options.use_line_search = false;
-    options.initialize_static_compatible_free_surface_pressure = true;
-    options
-        .accepted_static_pressure_representability_max_relative_distance =
-        1.0e-10;
     options.synchronize_state =
         [&, pressure_begin](
             const svmp::FE::systems::SystemStateView& state,
@@ -9605,6 +9614,7 @@ TEST(NewtonSolver,
                 "synthetic post-pressure-initial-guess synchronization failure");
         };
 
+    installTestCertificate(options, {.max_range_distance = 1.0e-10, .initialize_constraint_field = true});
     svmp::FE::timestepping::NewtonSolver newton(options);
     svmp::FE::timestepping::NewtonWorkspace workspace;
     newton.allocateWorkspace(
@@ -9626,7 +9636,7 @@ TEST(NewtonSolver,
             workspace),
         std::runtime_error);
     EXPECT_EQ(injected_failures, 1);
-    EXPECT_FALSE(workspace.static_compatible_pressure_initialized);
+    EXPECT_FALSE(workspace.initializer_ledger.isConsumed(0));
     EXPECT_EQ(ts_test::getVectorByDof(problem.history.u()), entry_current);
     EXPECT_EQ(ts_test::getVectorByDof(problem.history.uPrev()),
               entry_previous);
@@ -9653,7 +9663,7 @@ TEST(NewtonSolver,
     EXPECT_TRUE(retry_report.converged);
     EXPECT_TRUE(
         retry_report.static_compatible_pressure_initializer_applied);
-    EXPECT_TRUE(workspace.static_compatible_pressure_initialized);
+    EXPECT_TRUE(workspace.initializer_ledger.isConsumed(0));
     EXPECT_EQ(injected_failures, 1);
     EXPECT_EQ(restored_effect_count, 2);
     EXPECT_NEAR(synchronized_pressure_effect, 4.0, 1.0e-13);
@@ -9703,11 +9713,6 @@ TEST(NewtonSolver,
     loop_options.newton.abs_tolerance = 1.0e-13;
     loop_options.newton.rel_tolerance = 0.0;
     loop_options.newton.use_line_search = false;
-    loop_options.newton
-        .initialize_static_compatible_free_surface_pressure = true;
-    loop_options.newton
-        .accepted_static_pressure_representability_max_relative_distance =
-        1.0e-10;
 
     std::vector<bool> initializer_applied;
     std::vector<std::string> initializer_reasons;
@@ -9729,6 +9734,7 @@ TEST(NewtonSolver,
             return candidate_checks > 1;
         };
 
+    installTestCertificate(loop_options.newton, {.max_range_distance = 1.0e-10, .initialize_constraint_field = true});
     svmp::FE::timestepping::TimeLoop loop(loop_options);
     const auto loop_report = loop.run(
         *problem.transient,
@@ -9807,10 +9813,6 @@ TEST(NewtonSolver,
     options.abs_tolerance = 1.0e-13;
     options.rel_tolerance = 0.0;
     options.use_line_search = false;
-    options.initialize_static_compatible_free_surface_pressure = true;
-    options
-        .accepted_static_pressure_representability_max_relative_distance =
-        1.0e-10;
     options.synchronize_state =
         [&, pressure_begin](
             const svmp::FE::systems::SystemStateView& state,
@@ -9838,6 +9840,7 @@ TEST(NewtonSolver,
             }
         };
 
+    installTestCertificate(options, {.max_range_distance = 1.0e-10, .initialize_constraint_field = true});
     svmp::FE::timestepping::NewtonSolver newton(options);
     svmp::FE::timestepping::NewtonWorkspace workspace;
     newton.allocateWorkspace(
@@ -9855,7 +9858,7 @@ TEST(NewtonSolver,
     EXPECT_EQ(restored_callbacks, 1);
     EXPECT_FALSE(
         problem.sys->meshCoordinateTransactionActive());
-    EXPECT_FALSE(workspace.static_compatible_pressure_initialized);
+    EXPECT_FALSE(workspace.initializer_ledger.isConsumed(0));
 
     const auto retry_report = newton.solveStep(
         *problem.transient,
@@ -9924,11 +9927,6 @@ TEST(NewtonSolver,
     loop_options.newton.abs_tolerance = 1.0e-13;
     loop_options.newton.rel_tolerance = 0.0;
     loop_options.newton.use_line_search = false;
-    loop_options.newton
-        .initialize_static_compatible_free_surface_pressure = true;
-    loop_options.newton
-        .accepted_static_pressure_representability_max_relative_distance =
-        1.0e-10;
 
     std::vector<bool> candidate_initializer_applied;
     std::vector<std::string> candidate_initializer_reasons;
@@ -9950,6 +9948,7 @@ TEST(NewtonSolver,
             return candidate_checks > 1;
         };
 
+    installTestCertificate(loop_options.newton, {.max_range_distance = 1.0e-10, .initialize_constraint_field = true});
     svmp::FE::timestepping::TimeLoop loop(loop_options);
     const auto loop_report = loop.run(
         *problem.transient,
@@ -10019,20 +10018,13 @@ TEST(NewtonSolver,
     options.abs_tolerance = 1.0e-13;
     options.rel_tolerance = 0.0;
     options.use_line_search = false;
-    options.initialize_static_compatible_free_surface_pressure = true;
-    options
-        .accepted_static_pressure_representability_max_relative_distance =
-        1.0e-10;
-    options
-        .accepted_static_constant_pressure_kkt_max_relative_distance =
-        1.0e-10;
     options.external_state_fixed_point.enabled = true;
     options.external_state_fixed_point.max_iterations = 2;
     options.synchronize_state =
         [&](const svmp::FE::systems::SystemStateView&, SyncPoint point) {
             if (point == SyncPoint::OuterFixedPointState) {
                 const bool initialized =
-                    workspace.static_compatible_pressure_initialized;
+                    workspace.initializer_ledger.isConsumed(0);
                 outer_entry_initializer_states.push_back(initialized);
                 if (initialized && inject_outer_failure) {
                     inject_outer_failure = false;
@@ -10043,10 +10035,11 @@ TEST(NewtonSolver,
             }
             if (point == SyncPoint::RestoredOuterFixedPointState) {
                 restored_callback_saw_unconsumed_state =
-                    !workspace.static_compatible_pressure_initialized;
+                    !workspace.initializer_ledger.isConsumed(0);
             }
         };
 
+    installTestCertificate(options, {.max_range_distance = 1.0e-10, .max_constant_field_kkt_distance = 1.0e-10, .initialize_constraint_field = true});
     svmp::FE::timestepping::NewtonSolver newton(options);
     newton.allocateWorkspace(
         *problem.sys, *problem.factory, workspace);
@@ -10061,7 +10054,7 @@ TEST(NewtonSolver,
             workspace),
         std::runtime_error);
     EXPECT_TRUE(restored_callback_saw_unconsumed_state);
-    EXPECT_FALSE(workspace.static_compatible_pressure_initialized);
+    EXPECT_FALSE(workspace.initializer_ledger.isConsumed(0));
 
     const auto retry_report = newton.solveStep(
         *problem.transient,
@@ -10076,7 +10069,7 @@ TEST(NewtonSolver,
         retry_report.pressure_representability_distance_gate_passed);
     EXPECT_TRUE(retry_report.constant_pressure_kkt_distance_gate_applied);
     EXPECT_TRUE(retry_report.constant_pressure_kkt_distance_gate_passed);
-    EXPECT_TRUE(workspace.static_compatible_pressure_initialized);
+    EXPECT_TRUE(workspace.initializer_ledger.isConsumed(0));
     ASSERT_GE(outer_entry_initializer_states.size(), 4u);
     EXPECT_FALSE(outer_entry_initializer_states[0]);
     EXPECT_TRUE(outer_entry_initializer_states[1]);
@@ -10113,10 +10106,7 @@ TEST(NewtonSolver,
     options.abs_tolerance = 1.0e-13;
     options.rel_tolerance = 0.0;
     options.use_line_search = false;
-    options.initialize_static_compatible_free_surface_pressure = true;
-    options
-        .accepted_static_pressure_representability_max_relative_distance =
-        1.0e-10;
+    installTestCertificate(options, {.max_range_distance = 1.0e-10, .initialize_constraint_field = true});
     svmp::FE::timestepping::NewtonSolver newton(options);
     svmp::FE::timestepping::NewtonWorkspace workspace;
     newton.allocateWorkspace(
@@ -10132,11 +10122,11 @@ TEST(NewtonSolver,
     ASSERT_TRUE(initial_report.converged);
     ASSERT_TRUE(
         initial_report.static_compatible_pressure_initializer_applied);
-    ASSERT_TRUE(workspace.static_compatible_pressure_initialized);
+    ASSERT_TRUE(workspace.initializer_ledger.isConsumed(0));
 
     newton.allocateWorkspace(
         *problem.sys, *problem.factory, workspace);
-    EXPECT_TRUE(workspace.static_compatible_pressure_initialized);
+    EXPECT_TRUE(workspace.initializer_ledger.isConsumed(0));
     const auto workspace_reallocated_report = newton.solveStep(
         *problem.transient,
         *problem.linear,
@@ -10178,7 +10168,7 @@ TEST(NewtonSolver,
         jacobian_reallocated_report
             .static_compatible_pressure_initializer_reason,
         "already_initialized");
-    EXPECT_TRUE(workspace.static_compatible_pressure_initialized);
+    EXPECT_TRUE(workspace.initializer_ledger.isConsumed(0));
     EXPECT_EQ(
         workspace.sparsity_revision,
         problem.sys->sparsityPatternRevision());
@@ -10226,10 +10216,7 @@ TEST(NewtonSolver,
     options.abs_tolerance = 1.0e-14;
     options.rel_tolerance = 0.0;
     options.use_line_search = false;
-    options.initialize_static_compatible_free_surface_pressure = true;
-    options
-        .accepted_static_pressure_representability_max_relative_distance =
-        0.5;
+    installTestCertificate(options, {.max_range_distance = 0.5, .initialize_constraint_field = true});
     svmp::FE::timestepping::NewtonSolver newton(options);
     svmp::FE::timestepping::NewtonWorkspace workspace;
     newton.allocateWorkspace(
@@ -10254,7 +10241,7 @@ TEST(NewtonSolver,
     EXPECT_FALSE(report.static_compatible_pressure_initializer_passed);
     EXPECT_EQ(report.static_compatible_pressure_initializer_reason,
               "relative_distance_exceeds_threshold");
-    EXPECT_FALSE(workspace.static_compatible_pressure_initialized);
+    EXPECT_FALSE(workspace.initializer_ledger.isConsumed(0));
     EXPECT_NEAR(
         report.pressure_representability_relative_distance, 1.0, 1.0e-13);
     EXPECT_EQ(ts_test::getVectorByDof(problem.history.u()), entry_current);
@@ -10300,6 +10287,7 @@ TEST(NewtonSolver,
     options.abs_tolerance = 1.0e-14;
     options.rel_tolerance = 0.0;
     options.use_line_search = false;
+    installTestCertificate(options);
     svmp::FE::timestepping::NewtonSolver newton(options);
     svmp::FE::timestepping::NewtonWorkspace workspace;
     newton.allocateWorkspace(
@@ -10359,6 +10347,7 @@ TEST(NewtonSolver,
     options.abs_tolerance = 1.0e-14;
     options.rel_tolerance = 0.0;
     options.use_line_search = false;
+    installTestCertificate(options);
     svmp::FE::timestepping::NewtonSolver newton(options);
     svmp::FE::timestepping::NewtonWorkspace workspace;
     newton.allocateWorkspace(
@@ -10394,13 +10383,13 @@ TEST(NewtonSolver,
     EXPECT_NE(telemetry.find("pressure_representability_claimed=0"),
               std::string::npos);
     EXPECT_NEAR(
-        workspace.certificate_vectors.load->norm(), 0.0, 1.0e-14);
+        testCertificateStorage(workspace).vectors.load->norm(), 0.0, 1.0e-14);
     EXPECT_NEAR(
-        workspace.certificate_vectors.solution->norm(), 0.0, 1.0e-14);
+        testCertificateStorage(workspace).vectors.solution->norm(), 0.0, 1.0e-14);
     EXPECT_NEAR(
-        workspace.certificate_vectors.residual->norm(), 0.0, 1.0e-14);
+        testCertificateStorage(workspace).vectors.residual->norm(), 0.0, 1.0e-14);
     EXPECT_NEAR(
-        workspace.certificate_vectors.normal_residual->norm(),
+        testCertificateStorage(workspace).vectors.normal_residual->norm(),
         0.0,
         1.0e-14);
 }
@@ -10425,6 +10414,7 @@ TEST(NewtonSolver,
     options.rel_tolerance = 0.0;
     options.use_line_search = false;
 
+    installTestCertificate(options);
     svmp::FE::timestepping::NewtonSolver newton(options);
     svmp::FE::timestepping::NewtonWorkspace workspace;
     newton.allocateWorkspace(
@@ -10432,9 +10422,9 @@ TEST(NewtonSolver,
     const auto n_dofs = problem.sys->dofHandler().getNumDofs();
     // Replacing the initializer's second-load vector with an equal-backend,
     // wrong-size allocation must be rejected before either pair multiply.
-    workspace.certificate_vectors.correction_load =
+    testCertificateStorage(workspace).vectors.correction_load =
         problem.factory->createVector(n_dofs + 1);
-    ASSERT_NE(workspace.certificate_vectors.correction_load, nullptr);
+    ASSERT_NE(testCertificateStorage(workspace).vectors.correction_load, nullptr);
     problem.history.repack(*problem.factory);
 
     const auto report = newton.solveStep(
@@ -10485,6 +10475,7 @@ TEST(NewtonSolver,
     options.rel_tolerance = 0.0;
     options.use_line_search = false;
 
+    installTestCertificate(options);
     svmp::FE::timestepping::NewtonSolver newton(options);
     svmp::FE::timestepping::NewtonWorkspace workspace;
     newton.allocateWorkspace(
@@ -10496,15 +10487,15 @@ TEST(NewtonSolver,
     const auto entry_revision =
         problem.sys->sparsityPatternRevision();
     const std::array<const void*, 9> old_vectors{
-        workspace.certificate_vectors.load.get(),
-        workspace.certificate_vectors.correction_load.get(),
-        workspace.certificate_vectors.solution.get(),
-        workspace.certificate_vectors.left_basis.get(),
-        workspace.certificate_vectors.right_basis.get(),
-        workspace.certificate_vectors.direction.get(),
-        workspace.certificate_vectors.work.get(),
-        workspace.certificate_vectors.residual.get(),
-        workspace.certificate_vectors.normal_residual.get(),
+        testCertificateStorage(workspace).vectors.load.get(),
+        testCertificateStorage(workspace).vectors.correction_load.get(),
+        testCertificateStorage(workspace).vectors.solution.get(),
+        testCertificateStorage(workspace).vectors.left_basis.get(),
+        testCertificateStorage(workspace).vectors.right_basis.get(),
+        testCertificateStorage(workspace).vectors.direction.get(),
+        testCertificateStorage(workspace).vectors.work.get(),
+        testCertificateStorage(workspace).vectors.residual.get(),
+        testCertificateStorage(workspace).vectors.normal_residual.get(),
     };
 
     constraint_state->enabled = true;
@@ -10534,15 +10525,15 @@ TEST(NewtonSolver,
     EXPECT_TRUE(report.constant_pressure_kkt_available);
 
     const std::array<const void*, 9> refreshed_vectors{
-        workspace.certificate_vectors.load.get(),
-        workspace.certificate_vectors.correction_load.get(),
-        workspace.certificate_vectors.solution.get(),
-        workspace.certificate_vectors.left_basis.get(),
-        workspace.certificate_vectors.right_basis.get(),
-        workspace.certificate_vectors.direction.get(),
-        workspace.certificate_vectors.work.get(),
-        workspace.certificate_vectors.residual.get(),
-        workspace.certificate_vectors.normal_residual.get(),
+        testCertificateStorage(workspace).vectors.load.get(),
+        testCertificateStorage(workspace).vectors.correction_load.get(),
+        testCertificateStorage(workspace).vectors.solution.get(),
+        testCertificateStorage(workspace).vectors.left_basis.get(),
+        testCertificateStorage(workspace).vectors.right_basis.get(),
+        testCertificateStorage(workspace).vectors.direction.get(),
+        testCertificateStorage(workspace).vectors.work.get(),
+        testCertificateStorage(workspace).vectors.residual.get(),
+        testCertificateStorage(workspace).vectors.normal_residual.get(),
     };
     for (std::size_t i = 0; i < old_vectors.size(); ++i) {
         EXPECT_NE(refreshed_vectors[i], old_vectors[i]);
@@ -10552,7 +10543,7 @@ TEST(NewtonSolver,
         diagnostic_counts.pressure_representability_pair.matrix_only,
         diagnostic_counts.pressure_representability_pair.total);
     EXPECT_NEAR(
-        workspace.certificate_vectors.normal_residual->norm(),
+        testCertificateStorage(workspace).vectors.normal_residual->norm(),
         0.0,
         1.0e-12);
     EXPECT_NE(telemetry.find("pressure_representability_available=1"),

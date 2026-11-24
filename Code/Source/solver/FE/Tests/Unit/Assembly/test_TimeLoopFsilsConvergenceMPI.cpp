@@ -49,6 +49,7 @@
 #include "TimeStepping/TimeHistory.h"
 #include "TimeStepping/TimeLoop.h"
 #include "TimeStepping/NewtonSolver.h"
+#include "Analysis/ConstraintRangeCertificate.h"
 
 #include <mpi.h>
 
@@ -3357,14 +3358,22 @@ TEST(TimeLoopFsilsConvergenceMPI,
     ASSERT_TRUE(permutation);
     backends::FsilsFactory factory(dof_per_node, permutation);
 
+    // Each rank installs a constraint-range certificate with its own method;
+    // the policies must agree before any collective of the certificate.
     const auto require_collective_rejection =
-        [&](timestepping::NewtonOptions options,
+        [&](analysis::ConstraintRangeMethod method,
             bool initialized,
             std::string_view expected_reason) {
+            timestepping::NewtonOptions options;
+            analysis::installConstraintRangeCertificate(
+                options.extensions,
+                std::make_shared<analysis::ConstraintRangeCertificate>(
+                    std::move(method)));
             timestepping::NewtonSolver newton(std::move(options));
             timestepping::NewtonWorkspace workspace;
-            workspace.static_compatible_pressure_initialized =
-                initialized;
+            if (initialized) {
+                workspace.initializer_ledger.markConsumed(0);
+            }
 
             bool caught = false;
             std::string message;
@@ -3406,136 +3415,85 @@ TEST(TimeLoopFsilsConvergenceMPI,
             EXPECT_EQ(reason_min, 1);
         };
 
+    require_collective_rejection(
+        {.max_range_distance = 1.0e-10,
+         .initialize_constraint_field = rank == 0},
+        /*initialized=*/false,
+        "initializer enablement differs");
     {
-        timestepping::NewtonOptions options;
-        options.initialize_static_compatible_free_surface_pressure =
-            rank == 0;
-        options
-            .accepted_static_pressure_representability_max_relative_distance =
-            1.0e-10;
-        require_collective_rejection(
-            std::move(options),
-            /*initialized=*/false,
-            "initializer enablement differs");
-    }
-    {
-        timestepping::NewtonOptions options;
-        options.initialize_static_compatible_free_surface_pressure =
-            true;
+        analysis::ConstraintRangeMethod method{.initialize_constraint_field = true};
         if (rank == 0) {
-            options
-                .accepted_static_pressure_representability_max_relative_distance =
-                1.0e-10;
+            method.max_range_distance = 1.0e-10;
         }
         require_collective_rejection(
-            std::move(options),
+            std::move(method),
             /*initialized=*/false,
             "threshold presence differs");
     }
-    {
-        timestepping::NewtonOptions options;
-        options.initialize_static_compatible_free_surface_pressure =
-            true;
-        options
-            .accepted_static_pressure_representability_max_relative_distance =
-            rank == 0 ? 1.0e-10 : 2.0e-10;
-        require_collective_rejection(
-            std::move(options),
-            /*initialized=*/false,
-            "threshold value differs");
-    }
-    {
-        timestepping::NewtonOptions options;
-        options.initialize_static_compatible_free_surface_pressure =
-            true;
-        options
-            .accepted_static_pressure_representability_max_relative_distance =
-            rank == 0 ? -1.0 : 1.0e-10;
-        require_collective_rejection(
-            std::move(options),
-            /*initialized=*/false,
-            "threshold validity differs");
-    }
+    require_collective_rejection(
+        {.max_range_distance = rank == 0 ? 1.0e-10 : 2.0e-10,
+         .initialize_constraint_field = true},
+        /*initialized=*/false,
+        "threshold value differs");
+    require_collective_rejection(
+        {.max_range_distance = rank == 0 ? -1.0 : 1.0e-10,
+         .initialize_constraint_field = true},
+        /*initialized=*/false,
+        "threshold validity differs");
     {
         constexpr const char* threshold_environment =
             "SVMP_NS_FREE_SURFACE_PRESSURE_REPRESENTABILITY_MAX_RELATIVE_DISTANCE";
         ScopedEnvironmentValue scoped_threshold(
             threshold_environment,
             rank == 0 ? "not-a-number" : nullptr);
-        timestepping::NewtonOptions options;
-        options.initialize_static_compatible_free_surface_pressure =
-            true;
+        auto method = analysis::constraintRangeMethodFromEnvironment();
+        method.initialize_constraint_field = true;
         if (rank != 0) {
-            options
-                .accepted_static_pressure_representability_max_relative_distance =
-                1.0e-10;
+            method.max_range_distance = 1.0e-10;
         }
         require_collective_rejection(
-            std::move(options),
+            std::move(method),
             /*initialized=*/false,
               "threshold validity differs");
     }
     {
-        timestepping::NewtonOptions options;
+        analysis::ConstraintRangeMethod method;
         if (rank == 0) {
-            options
-                .accepted_static_constant_pressure_kkt_max_relative_distance =
-                1.0e-10;
+            method.max_constant_field_kkt_distance = 1.0e-10;
         }
         require_collective_rejection(
-            std::move(options),
+            std::move(method),
             /*initialized=*/false,
             "constant-pressure KKT threshold presence differs");
     }
-    {
-        timestepping::NewtonOptions options;
-        options
-            .accepted_static_constant_pressure_kkt_max_relative_distance =
-            rank == 0 ? 1.0e-10 : 2.0e-10;
-        require_collective_rejection(
-            std::move(options),
-            /*initialized=*/false,
-            "constant-pressure KKT threshold value differs");
-    }
-    {
-        timestepping::NewtonOptions options;
-        options
-            .accepted_static_constant_pressure_kkt_max_relative_distance =
-            rank == 0 ? -1.0 : 1.0e-10;
-        require_collective_rejection(
-            std::move(options),
-            /*initialized=*/false,
-            "constant-pressure KKT threshold validity differs");
-    }
+    require_collective_rejection(
+        {.max_constant_field_kkt_distance = rank == 0 ? 1.0e-10 : 2.0e-10},
+        /*initialized=*/false,
+        "constant-pressure KKT threshold value differs");
+    require_collective_rejection(
+        {.max_constant_field_kkt_distance = rank == 0 ? -1.0 : 1.0e-10},
+        /*initialized=*/false,
+        "constant-pressure KKT threshold validity differs");
     {
         constexpr const char* threshold_environment =
             "SVMP_NS_FREE_SURFACE_CONSTANT_PRESSURE_KKT_MAX_RELATIVE_DISTANCE";
         ScopedEnvironmentValue scoped_threshold(
             threshold_environment,
             rank == 0 ? "not-a-number" : nullptr);
-        timestepping::NewtonOptions options;
+        auto method = analysis::constraintRangeMethodFromEnvironment();
         if (rank != 0) {
-            options
-                .accepted_static_constant_pressure_kkt_max_relative_distance =
-                1.0e-10;
+            method.max_constant_field_kkt_distance = 1.0e-10;
         }
         require_collective_rejection(
-            std::move(options),
+            std::move(method),
             /*initialized=*/false,
             "constant-pressure KKT threshold validity differs");
     }
-    {
-        timestepping::NewtonOptions options;
-        options.initialize_static_compatible_free_surface_pressure =
-            true;
-        options
-            .accepted_static_pressure_representability_max_relative_distance =
-            1.0e-10;
-        require_collective_rejection(
-            std::move(options),
-            /*initialized=*/rank == 0,
-            "one-shot state differs");
-    }
+    require_collective_rejection(
+        {.max_range_distance = 1.0e-10,
+         .initialize_constraint_field = true},
+        /*initialized=*/rank == 0,
+        "initializer ledger differs");
 
     timestepping::NewtonOptions baseline_options;
     baseline_options.residual_op = "op";
@@ -3565,12 +3523,12 @@ TEST(TimeLoopFsilsConvergenceMPI,
     int synchronization_calls = 0;
     timestepping::NewtonOptions divergent_options =
         baseline_options;
-    divergent_options
-        .initialize_static_compatible_free_surface_pressure =
-        rank == 0;
-    divergent_options
-        .accepted_static_pressure_representability_max_relative_distance =
-        1.0e-10;
+    analysis::installConstraintRangeCertificate(
+        divergent_options.extensions,
+        std::make_shared<analysis::ConstraintRangeCertificate>(
+            analysis::ConstraintRangeMethod{
+                .max_range_distance = 1.0e-10,
+                .initialize_constraint_field = rank == 0}));
     divergent_options.synchronize_state =
         [&](const systems::SystemStateView&,
             timestepping::NewtonOptions::StateSynchronizationPoint) {
