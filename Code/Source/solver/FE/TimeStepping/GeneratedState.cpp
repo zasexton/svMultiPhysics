@@ -7,8 +7,10 @@
 
 #include "TimeStepping/GeneratedState.h"
 
+#include "Analysis/FormulationRecord.h"
 #include "Backends/Interfaces/GenericVector.h"
 #include "Dofs/DofHandler.h"
+#include "Forms/FormExpr.h"
 #include "Systems/FESystem.h"
 #include "Systems/FieldBinding.h"
 #include "Systems/SystemCollectives.h"
@@ -289,6 +291,64 @@ void FunctionGeneratedStateParticipant::invalidate()
   }
 }
 
+GeneratedStateDescriptor FunctionGeneratedStateParticipant::describe(
+    GeneratedStatePurpose purpose) const
+{
+  if (callbacks_.describe) {
+    return callbacks_.describe(purpose);
+  }
+  return IGeneratedStateParticipant::describe(purpose);
+}
+
+// ---------------------------------------------------------------------------
+// Declarations
+// ---------------------------------------------------------------------------
+
+const char* generatedStatePurposeName(GeneratedStatePurpose purpose) noexcept
+{
+  switch (purpose) {
+  case GeneratedStatePurpose::SteadySolve:
+    return "steady_solve";
+  case GeneratedStatePurpose::TransientAttempt:
+    return "transient_attempt";
+  case GeneratedStatePurpose::GeneralizedAlphaStage:
+    return "generalized_alpha_stage";
+  case GeneratedStatePurpose::EndpointCandidate:
+    return "endpoint_candidate";
+  case GeneratedStatePurpose::OuterRestore:
+    return "outer_restore";
+  case GeneratedStatePurpose::TimeStepRestore:
+    return "time_step_restore";
+  case GeneratedStatePurpose::CertificateProbe:
+    return "certificate_probe";
+  case GeneratedStatePurpose::Initialization:
+    return "initialization";
+  case GeneratedStatePurpose::AcceptedStep:
+    return "accepted_step";
+  }
+  return "unknown";
+}
+
+bool generatedStatePurposeProjects(GeneratedStatePurpose purpose) noexcept
+{
+  switch (purpose) {
+  case GeneratedStatePurpose::CertificateProbe:
+  case GeneratedStatePurpose::Initialization:
+  case GeneratedStatePurpose::AcceptedStep:
+    return false;
+  default:
+    return true;
+  }
+}
+
+GeneratedStateDescriptor IGeneratedStateParticipant::describe(
+    GeneratedStatePurpose /*purpose*/) const
+{
+  GeneratedStateDescriptor descriptor;
+  descriptor.present = false;
+  return descriptor;
+}
+
 GeneratedStateRegistry::GeneratedStateRegistry(GeneratedStatePolicy policy)
     : policy_(policy)
 {
@@ -517,6 +577,42 @@ public:
   [[nodiscard]] std::string_view name() const noexcept override { return "shadow_fields"; }
   [[nodiscard]] GeneratedStateRole role() const noexcept override { return GeneratedStateRole::Reference; }
 
+  // A lagged copy reads its source as the synchronization left it and a
+  // previous(u, k) copy the accepted value k steps back; both are refreshed
+  // by the selected schedule and never select it.
+  [[nodiscard]] GeneratedStateDescriptor describe(GeneratedStatePurpose purpose) const override
+  {
+    GeneratedStateDescriptor descriptor;
+    descriptor.enablement = OuterEnablement::FollowsSchedule;
+    descriptor.present = !copies_.empty();
+    const bool projects = generatedStatePurposeProjects(purpose);
+    for (const auto& copy : copies_) {
+      GeneratedResource source{.kind = ResourceKind::Field, .field = copy.field.source};
+      if (copy.field.kind == systems::ShadowField::Kind::Previous) {
+        source.steps_back = copy.field.steps_back;
+        descriptor.reads.push_back({.what = source, .version = StateVersion::AcceptedHistory});
+      } else {
+        descriptor.reads.push_back(
+            {.what = source,
+             .version = projects ? StateVersion::ProjectedStage : StateVersion::CurrentTrial});
+      }
+      const GeneratedResource shadow{.kind = ResourceKind::Field, .field = copy.field.shadow};
+      const auto write = [&](WritePhase phase) {
+        descriptor.writes.push_back({.what = shadow,
+                                     .phase = phase,
+                                     .residual_defining = true,
+                                     .requires_fresh_residual = true});
+      };
+      if (projects) {
+        write(WritePhase::ProjectedRefresh);
+      }
+      if (purpose == GeneratedStatePurpose::TransientAttempt) {
+        write(WritePhase::AttemptEntry);
+      }
+    }
+    return descriptor;
+  }
+
   void synchronize(const systems::SystemStateView& state, GeneratedStateSync& /*sync*/) override
   {
     for (const auto& copy : copies_) {
@@ -600,6 +696,318 @@ private:
 std::shared_ptr<IGeneratedStateParticipant> makeShadowFieldParticipant(systems::FESystem& system)
 {
   return std::make_shared<ShadowFieldParticipant>(system);
+}
+
+// ---------------------------------------------------------------------------
+// Declarations without a participant, residual reads and the checks
+// ---------------------------------------------------------------------------
+
+GeneratedStateDescriptor maintenanceGeneratedStateDescriptor(
+    const std::vector<FieldId>& level_set_fields)
+{
+  GeneratedStateDescriptor descriptor;
+  descriptor.enablement = OuterEnablement::RequiredWhenPresent;
+  descriptor.present = !level_set_fields.empty();
+  for (const auto field : level_set_fields) {
+    const GeneratedResource phi{.kind = ResourceKind::Field, .field = field};
+    descriptor.reads.push_back({.what = phi, .version = StateVersion::CurrentTrial});
+    descriptor.reads.push_back({.what = phi, .version = StateVersion::AcceptedEndpoint});
+    descriptor.writes.push_back({.what = phi,
+                                 .phase = WritePhase::AcceptedCommit,
+                                 .residual_defining = false,
+                                 .requires_fresh_residual = false,
+                                 .writes_state_vector = true});
+  }
+  return descriptor;
+}
+
+GeneratedStateDescriptor movingDomainGeneratedStateDescriptor(FieldId mesh_displacement)
+{
+  GeneratedStateDescriptor descriptor;
+  descriptor.enablement = OuterEnablement::Never;
+  descriptor.present = mesh_displacement != INVALID_FIELD_ID;
+  if (descriptor.present) {
+    descriptor.reads.push_back(
+        {.what = {.kind = ResourceKind::Field, .field = mesh_displacement},
+         .version = StateVersion::CurrentTrial});
+    descriptor.writes.push_back({.what = {.kind = ResourceKind::TrialCoordinates},
+                                 .phase = WritePhase::InnerTransaction,
+                                 .residual_defining = true,
+                                 .requires_fresh_residual = false});
+  }
+  return descriptor;
+}
+
+namespace {
+
+void appendRead(std::vector<GeneratedRead>& reads, GeneratedRead read)
+{
+  for (const auto& existing : reads) {
+    if (existing.what == read.what && existing.version == read.version) {
+      return;
+    }
+  }
+  reads.push_back(std::move(read));
+}
+
+GeneratedRead generatedDomainRead(int marker)
+{
+  return {.what = {.kind = ResourceKind::GeneratedDomain, .marker = marker},
+          .version = StateVersion::FrozenPass};
+}
+
+void collectResidualReads(const systems::FESystem& system,
+                          const forms::FormExprNode& node,
+                          std::vector<GeneratedRead>& reads)
+{
+  using FT = forms::FormExprType;
+  switch (node.type()) {
+  case FT::DiscreteField:
+  case FT::StateField: {
+    // A DiscreteField of an unknown is a frozen iterate and a StateField of
+    // an unknown is the block itself: neither is generated state.
+    const auto field = node.fieldId();
+    if (field && *field != INVALID_FIELD_ID &&
+        system.fieldRecord(*field).source_kind == systems::FieldSourceKind::PrescribedData) {
+      appendRead(reads, {.what = {.kind = ResourceKind::Field, .field = *field},
+                         .version = StateVersion::FrozenPass});
+    }
+    break;
+  }
+  case FT::PreviousSolutionRef: {
+    const auto k = node.historyIndex();
+    appendRead(reads, {.what = {.kind = ResourceKind::Field,
+                                .field = node.fieldId().value_or(INVALID_FIELD_ID),
+                                .steps_back = k.value_or(0)},
+                       .version = StateVersion::AcceptedHistory});
+    break;
+  }
+  case FT::CutVolumeIntegral: {
+    const auto marker = node.interfaceMarker();
+    if (marker && *marker >= 0) {
+      appendRead(reads, generatedDomainRead(*marker));
+    }
+    break;
+  }
+  case FT::InterfaceIntegral:
+  case FT::InteriorFaceIntegral: {
+    const auto* exterior = node.exteriorBoundaryMeasure();
+    if (exterior != nullptr && exterior->isGeneratedActiveSubset()) {
+      appendRead(reads, generatedDomainRead(exterior->generatedActiveBoundaryMarker()));
+      break;
+    }
+    const auto marker = node.interfaceMarker();
+    if (marker && *marker >= 0 &&
+        system.isGeneratedEmbeddedInterfaceMarkerRegistered(static_cast<systems::InterfaceId>(*marker))) {
+      appendRead(reads, generatedDomainRead(*marker));
+    }
+    break;
+  }
+  case FT::BoundaryIntegral: {
+    const auto* exterior = node.exteriorBoundaryMeasure();
+    if (exterior != nullptr && exterior->isGeneratedActiveSubset()) {
+      appendRead(reads, generatedDomainRead(exterior->generatedActiveBoundaryMarker()));
+    }
+    break;
+  }
+  default:
+    break;
+  }
+  for (const auto* child : node.children()) {
+    if (child != nullptr) {
+      collectResidualReads(system, *child, reads);
+    }
+  }
+}
+
+} // namespace
+
+std::vector<GeneratedRead> residualGeneratedStateReads(const systems::FESystem& system)
+{
+  std::vector<GeneratedRead> reads;
+  for (const auto& record : system.formulationRecords()) {
+    if (!record.contributes_to_problem_analysis || !record.residual_expr) {
+      continue;
+    }
+    collectResidualReads(system, *record.residual_expr, reads);
+  }
+  return reads;
+}
+
+std::vector<DeclaredGeneratedState> declaredGeneratedState(
+    const GeneratedStateRegistry& registry,
+    GeneratedStatePurpose purpose,
+    std::vector<DeclaredGeneratedState> extra)
+{
+  std::vector<DeclaredGeneratedState> declarations;
+  std::size_t position = 0;
+  for (const auto& participant : registry.participants()) {
+    declarations.push_back({.name = std::string(participant->name()),
+                            .role = participant->role(),
+                            .position = position++,
+                            .registry_participant = true,
+                            .descriptor = participant->describe(purpose)});
+  }
+  for (auto& declaration : extra) {
+    declaration.position = position++;
+    declaration.registry_participant = false;
+    declarations.push_back(std::move(declaration));
+  }
+  return declarations;
+}
+
+const char* generatedStateFindingKindName(GeneratedStateFindingKind kind) noexcept
+{
+  switch (kind) {
+  case GeneratedStateFindingKind::MissingProducer:
+    return "missing_producer";
+  case GeneratedStateFindingKind::ConflictingWriters:
+    return "conflicting_writers";
+  case GeneratedStateFindingKind::IncompatibleStageRequest:
+    return "incompatible_stage_request";
+  case GeneratedStateFindingKind::OrderInconsistency:
+    return "order_inconsistency";
+  }
+  return "unknown";
+}
+
+namespace {
+
+std::string describeResource(const GeneratedResource& resource)
+{
+  switch (resource.kind) {
+  case ResourceKind::Field:
+    return "field " + std::to_string(resource.field) +
+           (resource.steps_back > 0 ? " (" + std::to_string(resource.steps_back) + " steps back)" : "");
+  case ResourceKind::GeneratedDomain:
+    return "generated domain " + std::to_string(resource.marker);
+  case ResourceKind::AffineConstraints:
+    return "affine constraints";
+  case ResourceKind::FrozenRows:
+    return "frozen rows of field " + std::to_string(resource.field) + " in operator '" +
+           resource.operator_tag + "'";
+  case ResourceKind::TrialCoordinates:
+    return "trial coordinates";
+  case ResourceKind::AuxiliaryInput:
+    return "auxiliary input";
+  }
+  return "resource";
+}
+
+bool writtenByAny(const std::vector<DeclaredGeneratedState>& declarations,
+                  const GeneratedResource& resource)
+{
+  for (const auto& declaration : declarations) {
+    for (const auto& write : declaration.descriptor.writes) {
+      if (write.what == resource) {
+        return true;
+      }
+    }
+  }
+  return false;
+}
+
+} // namespace
+
+std::vector<GeneratedStateFinding> checkGeneratedStateDeclarations(
+    GeneratedStatePurpose purpose,
+    const std::vector<DeclaredGeneratedState>& declarations,
+    const std::vector<GeneratedRead>& residual_reads,
+    const std::vector<GeneratedResource>& generated_values)
+{
+  std::vector<GeneratedStateFinding> findings;
+  const std::string purpose_name = generatedStatePurposeName(purpose);
+  // Missing producer.
+  for (const auto& read : residual_reads) {
+    if (read.version != StateVersion::FrozenPass) {
+      continue;
+    }
+    const bool generated =
+        read.what.kind == ResourceKind::GeneratedDomain ||
+        std::find(generated_values.begin(), generated_values.end(), read.what) !=
+            generated_values.end();
+    if (generated && !writtenByAny(declarations, read.what)) {
+      findings.push_back({.kind = GeneratedStateFindingKind::MissingProducer,
+                          .participant = "residual",
+                          .resource = read.what,
+                          .message = "the residual reads " + describeResource(read.what) +
+                                     ", which no participant refreshes in the " + purpose_name});
+    }
+  }
+  // Conflicting writers.
+  for (std::size_t i = 0; i < declarations.size(); ++i) {
+    const auto& writes_i = declarations[i].descriptor.writes;
+    for (std::size_t a = 0; a < writes_i.size(); ++a) {
+      for (std::size_t j = i; j < declarations.size(); ++j) {
+        const auto& writes_j = declarations[j].descriptor.writes;
+        for (std::size_t b = (j == i ? a + 1 : 0); b < writes_j.size(); ++b) {
+          if (writes_i[a].what == writes_j[b].what && writes_i[a].phase == writes_j[b].phase) {
+            findings.push_back({.kind = GeneratedStateFindingKind::ConflictingWriters,
+                                .participant = declarations[j].name,
+                                .resource = writes_j[b].what,
+                                .message = "'" + declarations[i].name + "' and '" +
+                                           declarations[j].name + "' both write " +
+                                           describeResource(writes_j[b].what) +
+                                           " in one phase of the " + purpose_name});
+          }
+        }
+      }
+    }
+  }
+  // Incompatible stage requests.
+  const bool projects = generatedStatePurposeProjects(purpose);
+  for (const auto& declaration : declarations) {
+    for (const auto& read : declaration.descriptor.reads) {
+      if (read.version == StateVersion::ProjectedStage && !projects) {
+        findings.push_back({.kind = GeneratedStateFindingKind::IncompatibleStageRequest,
+                            .participant = declaration.name,
+                            .resource = read.what,
+                            .message = "'" + declaration.name + "' reads the projected " +
+                                       describeResource(read.what) + ", but the " + purpose_name +
+                                       " has no projection step"});
+      } else if (read.version == StateVersion::FrozenPass &&
+                 !writtenByAny(declarations, read.what)) {
+        findings.push_back({.kind = GeneratedStateFindingKind::IncompatibleStageRequest,
+                            .participant = declaration.name,
+                            .resource = read.what,
+                            .message = "'" + declaration.name + "' reads the frozen " +
+                                       describeResource(read.what) + ", which nothing writes in the " +
+                                       purpose_name});
+      }
+    }
+  }
+  // Order consistency: within the raw and the projected pass, a writer runs
+  // before every participant that reads what it writes.
+  for (const auto& reader : declarations) {
+    if (!reader.registry_participant) {
+      continue;
+    }
+    for (const auto& read : reader.descriptor.reads) {
+      WritePhase pass{};
+      if (read.version == StateVersion::CurrentTrial) {
+        pass = WritePhase::ConstraintConstruction;
+      } else if (read.version == StateVersion::ProjectedStage) {
+        pass = WritePhase::ProjectedRefresh;
+      } else {
+        continue;
+      }
+      for (const auto& writer : declarations) {
+        if (!writer.registry_participant || writer.position <= reader.position) {
+          continue;
+        }
+        for (const auto& write : writer.descriptor.writes) {
+          if (write.phase == pass && write.what == read.what) {
+            findings.push_back({.kind = GeneratedStateFindingKind::OrderInconsistency,
+                                .participant = reader.name,
+                                .resource = read.what,
+                                .message = "'" + reader.name + "' reads " + describeResource(read.what) +
+                                           " before '" + writer.name + "' writes it in the same pass"});
+          }
+        }
+      }
+    }
+  }
+  return findings;
 }
 
 } // namespace timestepping

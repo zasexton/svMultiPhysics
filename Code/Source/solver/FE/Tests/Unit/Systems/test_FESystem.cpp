@@ -2580,6 +2580,65 @@ TEST(FESystem, LaggedAndPreviousValuesAreShadowFieldsRefreshedByTheGeneratedStat
     expect_copies(u);
 }
 
+TEST(FESystem, ResidualReadsOfShadowsNeedTheShadowParticipant)
+{
+    // The residual walk finds the prescribed shadow the formulation reads;
+    // without the participant that refreshes it (a steady solve registers
+    // none) the check reports a missing producer, with it there is none.
+    namespace ts = svmp::FE::timestepping;
+    using svmp::FE::forms::inner;
+    using svmp::FE::systems::Refresh;
+    auto mesh = build_single_quad_mesh();
+    auto scalar_space = std::make_shared<H1Space>(ElementType::Quad4, /*order=*/1);
+    auto vector_space = std::make_shared<ProductSpace>(scalar_space, /*components=*/2);
+
+    FESystem sys(mesh);
+    FieldBinding fields(sys, "Owner::registerOn");
+    const auto U = fields.unknownSymbols(FieldSpec{.name = "u", .space = vector_space, .components = 2},
+                                         "velocity", "u", "v");
+    const auto u_ref = fields.lagged(U, Refresh::GeneratedState);
+    svmp::FE::systems::FormulationBuilder F(sys, "equations", {});
+    (void)F.install({U.id}, (inner(U.state, U.test) - inner(u_ref, U.test)).dx());
+    sys.setup();
+    const auto shadows = svmp::FE::systems::shadowFields(sys);
+    ASSERT_EQ(shadows.size(), 1u);
+
+    const auto reads = ts::residualGeneratedStateReads(sys);
+    ASSERT_EQ(reads.size(), 1u);
+    EXPECT_EQ(reads[0].what.kind, ts::ResourceKind::Field);
+    EXPECT_EQ(reads[0].what.field, shadows[0].shadow);
+    EXPECT_EQ(reads[0].version, ts::StateVersion::FrozenPass);
+
+    const std::vector<ts::GeneratedResource> generated{
+        {.kind = ts::ResourceKind::Field, .field = shadows[0].shadow}};
+    auto steady = std::make_shared<ts::GeneratedStateRegistry>(
+        ts::GeneratedStatePolicy{.solve = ts::GeneratedStateSolve::Steady});
+    const auto missing = ts::checkGeneratedStateDeclarations(
+        ts::GeneratedStatePurpose::SteadySolve,
+        ts::declaredGeneratedState(*steady, ts::GeneratedStatePurpose::SteadySolve), reads, generated);
+    ASSERT_EQ(missing.size(), 1u);
+    EXPECT_EQ(missing[0].kind, ts::GeneratedStateFindingKind::MissingProducer);
+
+    auto transient = std::make_shared<ts::GeneratedStateRegistry>(
+        ts::GeneratedStatePolicy{.solve = ts::GeneratedStateSolve::Transient, .outer_fixed_point = true});
+    const auto participant = ts::makeShadowFieldParticipant(sys);
+    transient->add(participant);
+    const auto descriptor = participant->describe(ts::GeneratedStatePurpose::TransientAttempt);
+    EXPECT_TRUE(descriptor.present);
+    EXPECT_EQ(descriptor.enablement, ts::OuterEnablement::FollowsSchedule);
+    ASSERT_EQ(descriptor.reads.size(), 1u);
+    EXPECT_EQ(descriptor.reads[0].what.field, U.id);
+    EXPECT_EQ(descriptor.reads[0].version, ts::StateVersion::ProjectedStage);
+    ASSERT_EQ(descriptor.writes.size(), 2u);
+    EXPECT_EQ(descriptor.writes[0].phase, ts::WritePhase::ProjectedRefresh);
+    EXPECT_EQ(descriptor.writes[1].phase, ts::WritePhase::AttemptEntry);
+    EXPECT_TRUE(ts::checkGeneratedStateDeclarations(
+                    ts::GeneratedStatePurpose::TransientAttempt,
+                    ts::declaredGeneratedState(*transient, ts::GeneratedStatePurpose::TransientAttempt),
+                    reads, generated)
+                    .empty());
+}
+
 TEST(FESystem, MovingDomainSetsTheFrameBindsTheMotionAndDifferentiatesTheInstalls)
 {
     using svmp::FE::forms::FormExpr;

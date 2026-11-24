@@ -670,6 +670,13 @@ public:
                    svmp::FE::timestepping::GeneratedStateSync& sync) override;
   void invalidate() override;
 
+  /// Reads each request's level set (raw and, where the purpose projects,
+  /// projected); writes the generated domains of the request markers and of
+  /// the installed cut context, and the affine constraints, in the raw and
+  /// the projected pass.  Present iff there are requests.
+  [[nodiscard]] svmp::FE::timestepping::GeneratedStateDescriptor describe(
+      svmp::FE::timestepping::GeneratedStatePurpose purpose) const override;
+
   [[nodiscard]] bool providesEpochs() const noexcept override;
   [[nodiscard]] bool epochDiscontinuity(
       svmp::FE::timestepping::NewtonOptions::StateSynchronizationPoint point)

@@ -676,3 +676,176 @@ TEST(GeneratedStateRegistry, FunctionParticipantForwardsItsCallbacks)
   EXPECT_NO_THROW(empty.invalidate());
   EXPECT_STREQ(ts::generatedStateRoleName(Role::DerivedField), "derived_field");
 }
+
+// ---------------------------------------------------------------------------
+// Declarations and their checks
+// ---------------------------------------------------------------------------
+
+namespace {
+
+ts::GeneratedResource fieldResource(svmp::FE::FieldId field)
+{
+  return {.kind = ts::ResourceKind::Field, .field = field};
+}
+
+ts::GeneratedResource domainResource(int marker)
+{
+  return {.kind = ts::ResourceKind::GeneratedDomain, .marker = marker};
+}
+
+ts::DeclaredGeneratedState declaration(std::string name, std::size_t position,
+                                       ts::GeneratedStateDescriptor descriptor)
+{
+  return {.name = std::move(name),
+          .role = ts::GeneratedStateRole::Extension,
+          .position = position,
+          .registry_participant = true,
+          .descriptor = std::move(descriptor)};
+}
+
+std::vector<ts::GeneratedStateFindingKind> kinds(const std::vector<ts::GeneratedStateFinding>& findings)
+{
+  std::vector<ts::GeneratedStateFindingKind> out;
+  for (const auto& finding : findings) {
+    out.push_back(finding.kind);
+  }
+  return out;
+}
+
+} // namespace
+
+TEST(GeneratedStateDeclarations, ParticipantsDeclareNothingUnlessTheyDescribeThemselves)
+{
+  const auto silent = std::make_shared<ts::FunctionGeneratedStateParticipant>(
+      "silent", ts::GeneratedStateRole::Extension, ts::FunctionGeneratedStateParticipant::Callbacks{});
+  const auto described = silent->describe(ts::GeneratedStatePurpose::TransientAttempt);
+  EXPECT_FALSE(described.present);
+  EXPECT_TRUE(described.reads.empty());
+  EXPECT_TRUE(described.writes.empty());
+
+  ts::FunctionGeneratedStateParticipant::Callbacks callbacks;
+  callbacks.describe = [](ts::GeneratedStatePurpose purpose) {
+    ts::GeneratedStateDescriptor d;
+    d.enablement = purpose == ts::GeneratedStatePurpose::CertificateProbe ? ts::OuterEnablement::Never
+                                                                          : ts::OuterEnablement::Inferred;
+    d.writes.push_back({.what = fieldResource(3), .phase = ts::WritePhase::ProjectedRefresh});
+    return d;
+  };
+  const auto probe = std::make_shared<ts::FunctionGeneratedStateParticipant>(
+      "probe", ts::GeneratedStateRole::Extension, callbacks);
+  EXPECT_EQ(probe->describe(ts::GeneratedStatePurpose::CertificateProbe).enablement,
+            ts::OuterEnablement::Never);
+  ASSERT_EQ(probe->describe(ts::GeneratedStatePurpose::SteadySolve).writes.size(), 1u);
+
+  // The registry's participants in run order, then the extra declarations.
+  auto registry = std::make_shared<ts::GeneratedStateRegistry>(ts::GeneratedStatePolicy{});
+  registry->add(probe);
+  registry->add(std::make_shared<ts::FunctionGeneratedStateParticipant>(
+      "geometry", ts::GeneratedStateRole::Geometry, ts::FunctionGeneratedStateParticipant::Callbacks{}));
+  const auto declared = ts::declaredGeneratedState(
+      *registry, ts::GeneratedStatePurpose::SteadySolve,
+      {{.name = "level_set_maintenance", .descriptor = ts::maintenanceGeneratedStateDescriptor({4})}});
+  ASSERT_EQ(declared.size(), 3u);
+  EXPECT_EQ(declared[0].name, "geometry");
+  EXPECT_EQ(declared[1].name, "probe");
+  EXPECT_EQ(declared[2].name, "level_set_maintenance");
+  EXPECT_EQ(declared[2].position, 2u);
+  EXPECT_FALSE(declared[2].registry_participant);
+  EXPECT_TRUE(declared[0].registry_participant);
+}
+
+TEST(GeneratedStateDeclarations, MaintenanceAndMovingDomainAreDeclaredWithoutAParticipant)
+{
+  const auto none = ts::maintenanceGeneratedStateDescriptor({});
+  EXPECT_FALSE(none.present);
+  const auto maintenance = ts::maintenanceGeneratedStateDescriptor({4, 9});
+  EXPECT_TRUE(maintenance.present);
+  EXPECT_EQ(maintenance.enablement, ts::OuterEnablement::RequiredWhenPresent);
+  ASSERT_EQ(maintenance.writes.size(), 2u);
+  EXPECT_EQ(maintenance.writes[1].what, fieldResource(9));
+  EXPECT_EQ(maintenance.writes[1].phase, ts::WritePhase::AcceptedCommit);
+  EXPECT_TRUE(maintenance.writes[1].writes_state_vector);
+
+  EXPECT_FALSE(ts::movingDomainGeneratedStateDescriptor(svmp::FE::INVALID_FIELD_ID).present);
+  const auto moving = ts::movingDomainGeneratedStateDescriptor(2);
+  EXPECT_TRUE(moving.present);
+  EXPECT_EQ(moving.enablement, ts::OuterEnablement::Never);
+  ASSERT_EQ(moving.writes.size(), 1u);
+  EXPECT_EQ(moving.writes[0].what.kind, ts::ResourceKind::TrialCoordinates);
+  EXPECT_EQ(moving.writes[0].phase, ts::WritePhase::InnerTransaction);
+}
+
+TEST(GeneratedStateDeclarations, PurposesThatDoNotProjectAreNamed)
+{
+  using P = ts::GeneratedStatePurpose;
+  for (const auto purpose : {P::SteadySolve, P::TransientAttempt, P::GeneralizedAlphaStage,
+                             P::EndpointCandidate, P::OuterRestore, P::TimeStepRestore}) {
+    EXPECT_TRUE(ts::generatedStatePurposeProjects(purpose)) << ts::generatedStatePurposeName(purpose);
+  }
+  for (const auto purpose : {P::CertificateProbe, P::Initialization, P::AcceptedStep}) {
+    EXPECT_FALSE(ts::generatedStatePurposeProjects(purpose)) << ts::generatedStatePurposeName(purpose);
+  }
+  EXPECT_STREQ(ts::generatedStatePurposeName(P::GeneralizedAlphaStage), "generalized_alpha_stage");
+}
+
+TEST(GeneratedStateDeclarations, ChecksFindMissingProducersConflictsStageRequestsAndOrder)
+{
+  using P = ts::GeneratedStatePurpose;
+  using K = ts::GeneratedStateFindingKind;
+  ts::GeneratedStateDescriptor geometry;
+  geometry.writes.push_back({.what = domainResource(7), .phase = ts::WritePhase::ConstraintConstruction});
+  geometry.writes.push_back({.what = domainResource(7), .phase = ts::WritePhase::ProjectedRefresh});
+  ts::GeneratedStateDescriptor extension;
+  extension.reads.push_back({.what = domainResource(7), .version = ts::StateVersion::ProjectedStage});
+  extension.writes.push_back({.what = fieldResource(5), .phase = ts::WritePhase::ProjectedRefresh});
+  const std::vector<ts::DeclaredGeneratedState> valid{declaration("geometry", 0, geometry),
+                                                     declaration("extension", 1, extension)};
+  const std::vector<ts::GeneratedRead> residual{
+      {.what = domainResource(7), .version = ts::StateVersion::FrozenPass},
+      {.what = fieldResource(5), .version = ts::StateVersion::FrozenPass},
+      // Deck data: a prescribed field nothing refreshes.
+      {.what = fieldResource(6), .version = ts::StateVersion::FrozenPass}};
+  EXPECT_TRUE(ts::checkGeneratedStateDeclarations(P::TransientAttempt, valid, residual, {}).empty());
+
+  // A generated domain or a generated value (a lagged shadow) without a writer.
+  const std::vector<ts::GeneratedRead> shadow_read{
+      {.what = domainResource(8), .version = ts::StateVersion::FrozenPass},
+      {.what = fieldResource(11), .version = ts::StateVersion::FrozenPass}};
+  const auto missing =
+      ts::checkGeneratedStateDeclarations(P::SteadySolve, valid, shadow_read, {fieldResource(11)});
+  EXPECT_EQ(kinds(missing), (std::vector<K>{K::MissingProducer, K::MissingProducer}));
+  EXPECT_EQ(missing[1].resource, fieldResource(11));
+  EXPECT_EQ(missing[1].participant, "residual");
+
+  // Two writers of one value in one phase; different phases do not conflict.
+  ts::GeneratedStateDescriptor second = extension;
+  second.reads.clear();
+  auto conflicting = valid;
+  conflicting.push_back(declaration("second_extension", 2, second));
+  const auto conflict = ts::checkGeneratedStateDeclarations(P::TransientAttempt, conflicting, {}, {});
+  ASSERT_EQ(kinds(conflict), (std::vector<K>{K::ConflictingWriters}));
+  EXPECT_EQ(conflict[0].participant, "second_extension");
+  second.writes[0].phase = ts::WritePhase::AttemptEntry;
+  conflicting.back() = declaration("second_extension", 2, second);
+  EXPECT_TRUE(ts::checkGeneratedStateDeclarations(P::TransientAttempt, conflicting, {}, {}).empty());
+
+  // A projected read where the purpose does not project, and a frozen read
+  // of a resource nothing writes.
+  ts::GeneratedStateDescriptor frozen_reader;
+  frozen_reader.reads.push_back({.what = fieldResource(12), .version = ts::StateVersion::FrozenPass});
+  auto stage = valid;
+  stage.push_back(declaration("frozen_reader", 2, frozen_reader));
+  const auto incompatible = ts::checkGeneratedStateDeclarations(P::AcceptedStep, stage, {}, {});
+  EXPECT_EQ(kinds(incompatible),
+            (std::vector<K>{K::IncompatibleStageRequest, K::IncompatibleStageRequest}));
+  EXPECT_EQ(incompatible[0].participant, "extension");
+  EXPECT_EQ(incompatible[1].participant, "frozen_reader");
+
+  // A reader that runs before the writer of what it reads in the same pass.
+  const std::vector<ts::DeclaredGeneratedState> reversed{declaration("extension", 0, extension),
+                                                        declaration("geometry", 1, geometry)};
+  const auto order = ts::checkGeneratedStateDeclarations(P::TransientAttempt, reversed, {}, {});
+  ASSERT_EQ(kinds(order), (std::vector<K>{K::OrderInconsistency}));
+  EXPECT_EQ(order[0].participant, "extension");
+  EXPECT_STREQ(ts::generatedStateFindingKindName(K::OrderInconsistency), "order_inconsistency");
+}

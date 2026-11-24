@@ -288,6 +288,30 @@ TEST(LevelSetGeometryService, ParticipantEpochsFollowTheAttemptTracker)
   EXPECT_FALSE(options.external_state_epoch_revisited(Point::OuterFixedPointState));
 }
 
+TEST(LevelSetGeometryService, ParticipantIsPresentIffItHasRequests)
+{
+  namespace ts = svmp::FE::timestepping;
+  HostStorage storage;
+  ls::LevelSetGeometryParticipant empty(
+      std::make_shared<ls::LevelSetGeometryService>(
+          storage.host(), std::vector<ls::ActiveCutVolumeRequest>{}),
+      {.solve = ts::GeneratedStateSolve::Transient});
+  const auto none = empty.describe(ts::GeneratedStatePurpose::TransientAttempt);
+  EXPECT_FALSE(none.present);
+  EXPECT_EQ(none.enablement, ts::OuterEnablement::RequiredWhenPresent);
+  EXPECT_TRUE(none.writes.empty());
+
+  // Without an FE system the requests name no field or domain to declare.
+  ls::LevelSetGeometryParticipant requested(
+      std::make_shared<ls::LevelSetGeometryService>(
+          storage.host(), std::vector<ls::ActiveCutVolumeRequest>(1u)),
+      {.solve = ts::GeneratedStateSolve::Transient});
+  const auto present = requested.describe(ts::GeneratedStatePurpose::TransientAttempt);
+  EXPECT_TRUE(present.present);
+  EXPECT_TRUE(present.reads.empty());
+  EXPECT_TRUE(present.writes.empty());
+}
+
 TEST(LevelSetGeometryService, StepParticipantDeclaresTheHooksOfEachPart)
 {
   namespace ts = svmp::FE::timestepping;

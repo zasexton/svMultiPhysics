@@ -1096,6 +1096,72 @@ void LevelSetVelocityExtensionParticipant::synchronize(
       *caches_);
 }
 
+timestepping::GeneratedStateDescriptor
+LevelSetVelocityExtensionParticipant::describe(
+    timestepping::GeneratedStatePurpose purpose) const
+{
+  namespace ts = timestepping;
+  ts::GeneratedStateDescriptor descriptor;
+  descriptor.enablement = ts::OuterEnablement::RequiredWhenPresent;
+  descriptor.present = !requests_.empty();
+  const auto version = ts::generatedStatePurposeProjects(purpose)
+                           ? ts::StateVersion::ProjectedStage
+                           : ts::StateVersion::CurrentTrial;
+  const auto phase = ts::generatedStatePurposeProjects(purpose)
+                         ? ts::WritePhase::ProjectedRefresh
+                         : ts::WritePhase::ConstraintConstruction;
+  for (const auto& request : requests_) {
+    const auto read_field = [&](const std::string& name) {
+      const auto field = system_->findFieldByName(name);
+      if (field != INVALID_FIELD_ID) {
+        descriptor.reads.push_back(
+            {.what = {.kind = ts::ResourceKind::Field, .field = field},
+             .version = version});
+      }
+    };
+    read_field(request.source_velocity_field_name);
+    read_field(request.level_set_field_name);
+    if (request.requested_interface_marker >= 0) {
+      descriptor.reads.push_back(
+          {.what = {.kind = ts::ResourceKind::GeneratedDomain,
+                    .marker = request.requested_interface_marker},
+           .version = version});
+    }
+    const auto target =
+        system_->findFieldByName(request.target_velocity_field_name);
+    if (target == INVALID_FIELD_ID) {
+      continue;
+    }
+    const bool algebraic_extension =
+        system_->fieldRecord(target).source_kind ==
+            systems::FieldSourceKind::Unknown &&
+        static_cast<bool>(findLevelSetVelocityExtensionConstraintKernel(
+            *system_, request.operator_tag, target));
+    if (algebraic_extension) {
+      descriptor.writes.push_back(
+          {.what = {.kind = ts::ResourceKind::FrozenRows,
+                    .field = target,
+                    .operator_tag = request.operator_tag},
+           .phase = phase,
+           .residual_defining = true,
+           .requires_fresh_residual = true});
+      descriptor.writes.push_back(
+          {.what = {.kind = ts::ResourceKind::Field, .field = target},
+           .phase = phase,
+           .residual_defining = false,
+           .requires_fresh_residual = false,
+           .writes_state_vector = true});
+    } else {
+      descriptor.writes.push_back(
+          {.what = {.kind = ts::ResourceKind::Field, .field = target},
+           .phase = phase,
+           .residual_defining = true,
+           .requires_fresh_residual = true});
+    }
+  }
+  return descriptor;
+}
+
 void LevelSetVelocityExtensionParticipant::invalidate()
 {
   for (const auto& request : requests_) {

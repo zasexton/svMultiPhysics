@@ -450,6 +450,27 @@ TEST(LevelSetVelocityExtensionRefresh, PrescribedFieldMatchesTheDirectExtension)
   }
   EXPECT_NO_THROW(participant.invalidate());
 
+  // Its declaration: the source velocity and the level set as the projected
+  // pass left them, and the prescribed target written in that pass.
+  namespace ts = svmp::FE::timestepping;
+  const auto descriptor =
+      participant.describe(ts::GeneratedStatePurpose::TransientAttempt);
+  EXPECT_TRUE(descriptor.present);
+  EXPECT_EQ(descriptor.enablement, ts::OuterEnablement::RequiredWhenPresent);
+  ASSERT_EQ(descriptor.reads.size(), 2u);
+  EXPECT_EQ(descriptor.reads[0].what.field, velocity);
+  EXPECT_EQ(descriptor.reads[1].what.field, phi);
+  EXPECT_EQ(descriptor.reads[1].version, ts::StateVersion::ProjectedStage);
+  ASSERT_EQ(descriptor.writes.size(), 1u);
+  EXPECT_EQ(descriptor.writes[0].what.kind, ts::ResourceKind::Field);
+  EXPECT_EQ(descriptor.writes[0].what.field, extension);
+  EXPECT_EQ(descriptor.writes[0].phase, ts::WritePhase::ProjectedRefresh);
+  EXPECT_TRUE(descriptor.writes[0].requires_fresh_residual);
+  EXPECT_FALSE(descriptor.writes[0].writes_state_vector);
+  const auto probe = participant.describe(ts::GeneratedStatePurpose::CertificateProbe);
+  ASSERT_EQ(probe.reads.size(), 2u);
+  EXPECT_EQ(probe.reads[0].version, ts::StateVersion::CurrentTrial);
+
   // The algebraic wet extension was retired (decisions D47 and D55).
   auto retired = request;
   retired.extension_method = "wall_compatible_normal";

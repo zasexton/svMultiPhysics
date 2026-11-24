@@ -91,6 +91,7 @@
 #include "FE/LevelSet/TwoFluidStageParticipant.h"
 #include "Parameters.h"
 #include "tinyxml2.h"
+#include "FE/Systems/ALEBinding.h"
 #include "FE/Systems/FieldBinding.h"
 #include "FE/Systems/FunctionalRecords.h"
 #include "FE/Systems/TwoFluidStageRecords.h"
@@ -1784,6 +1785,53 @@ void applyJacobianCheckGeometryProvenance(
     options.jacobian_check_geometry_tangent_policy =
         "fixed-topology algebraic wet-extension solve";
   }
+}
+
+// The declarations of the generated state of a solve and their checks:
+// computed for every solve, not yet used, and refusing nothing.  The
+// accepted-step maintenance and a moving domain are declared without a
+// participant; the lagged shadows are the values some participant must
+// refresh.
+void declareGeneratedState(
+    const svmp::FE::systems::FESystem& system,
+    const svmp::FE::timestepping::GeneratedStateRegistry& registry,
+    svmp::FE::timestepping::GeneratedStatePurpose purpose,
+    const std::vector<LevelSetMaintenanceRequest>& maintenance)
+{
+  namespace ts = svmp::FE::timestepping;
+  std::vector<svmp::FE::FieldId> maintained_fields;
+  for (const auto& request : maintenance) {
+    if (!request.configuration) {
+      continue;
+    }
+    const auto field = system.findFieldByName(
+        request.configuration->transport.level_set.field_name);
+    if (field != svmp::FE::INVALID_FIELD_ID &&
+        std::find(maintained_fields.begin(), maintained_fields.end(), field) ==
+            maintained_fields.end()) {
+      maintained_fields.push_back(field);
+    }
+  }
+  const auto* moving_domain = svmp::FE::systems::findMovingDomain(system);
+  std::vector<ts::DeclaredGeneratedState> extra;
+  extra.push_back(
+      {.name = "level_set_maintenance",
+       .descriptor = ts::maintenanceGeneratedStateDescriptor(maintained_fields)});
+  extra.push_back(
+      {.name = "moving_domain",
+       .descriptor = ts::movingDomainGeneratedStateDescriptor(
+           moving_domain ? moving_domain->displacement
+                         : svmp::FE::INVALID_FIELD_ID)});
+  std::vector<ts::GeneratedResource> generated_values;
+  for (const auto& shadow : svmp::FE::systems::shadowFields(system)) {
+    generated_values.push_back(
+        {.kind = ts::ResourceKind::Field, .field = shadow.shadow});
+  }
+  const auto declarations =
+      ts::declaredGeneratedState(registry, purpose, std::move(extra));
+  (void)ts::checkGeneratedStateDeclarations(
+      purpose, declarations, ts::residualGeneratedStateReads(system),
+      generated_values);
 }
 
 using svmp::FE::level_set::logCutTopologyChange;
@@ -6990,6 +7038,10 @@ void ApplicationDriver::runSteadyState(SimulationComponents& sim, const Paramete
   oopCout() << "[svMultiPhysics::Application] Steady: TimeHistory repacked." << std::endl;
 
   (void)cut_geometry->refreshCached(sim.time_history->u(), "steady_initial");
+  declareGeneratedState(*sim.fe_system,
+                        *generated_state,
+                        svmp::FE::timestepping::GeneratedStatePurpose::SteadySolve,
+                        level_set_maintenance);
   if (initializeDiscreteStaticCapillaryEquilibrium(
           sim,
           params,
@@ -7842,6 +7894,11 @@ void ApplicationDriver::runTransient(SimulationComponents& sim, const Parameters
     generated_state->add(shadow_fields);
   }
   generated_state->bind(opts.newton);
+  declareGeneratedState(
+      *sim.fe_system,
+      *generated_state,
+      svmp::FE::timestepping::GeneratedStatePurpose::TransientAttempt,
+      level_set_maintenance);
   // The cut geometry's part of each time step (the cut-topology attempt and
   // the restore retention), composed with the callbacks below.
   svmp::FE::timestepping::StepParticipantList cut_geometry_step_participants;

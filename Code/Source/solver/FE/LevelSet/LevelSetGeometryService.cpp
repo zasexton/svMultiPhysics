@@ -4772,6 +4772,80 @@ void LevelSetGeometryParticipant::invalidate()
   service_->refreshCache().invalidateGeneratedState();
 }
 
+svmp::FE::timestepping::GeneratedStateDescriptor
+LevelSetGeometryParticipant::describe(
+    svmp::FE::timestepping::GeneratedStatePurpose purpose) const
+{
+  namespace ts = svmp::FE::timestepping;
+  ts::GeneratedStateDescriptor descriptor;
+  descriptor.enablement = ts::OuterEnablement::RequiredWhenPresent;
+  const auto& requests = service_->requests();
+  descriptor.present = !requests.empty();
+  const auto* system = service_->host().fe_system;
+  if (!descriptor.present || system == nullptr) {
+    return descriptor;
+  }
+  const bool projects = ts::generatedStatePurposeProjects(purpose);
+  std::vector<int> markers;
+  const auto add_marker = [&markers](int marker) {
+    if (marker >= 0 &&
+        std::find(markers.begin(), markers.end(), marker) == markers.end()) {
+      markers.push_back(marker);
+    }
+  };
+  for (const auto& request : requests) {
+    const auto field = system->findFieldByName(request.level_set_field_name);
+    if (field != svmp::FE::INVALID_FIELD_ID) {
+      const ts::GeneratedResource phi{.kind = ts::ResourceKind::Field,
+                                      .field = field};
+      descriptor.reads.push_back(
+          {.what = phi, .version = ts::StateVersion::CurrentTrial});
+      if (projects) {
+        descriptor.reads.push_back(
+            {.what = phi, .version = ts::StateVersion::ProjectedStage});
+      }
+    }
+    try {
+      if (const auto marker =
+              resolvedActiveCutVolumeInterfaceMarker(*system, request)) {
+        add_marker(*marker);
+      }
+    } catch (...) {
+      // An unresolved marker declares no domain; the refresh reports it.
+    }
+  }
+  // The generated interfaces, contact lines, active boundaries and volumes
+  // of the installed context.
+  if (const auto* context = system->cutIntegrationContext()) {
+    for (const auto marker : context->generatedInterfaceMarkers()) {
+      add_marker(marker);
+    }
+    for (const auto marker : context->generatedVolumeMarkers()) {
+      add_marker(marker);
+    }
+  }
+  std::vector<ts::WritePhase> phases{ts::WritePhase::ConstraintConstruction};
+  if (projects) {
+    phases.push_back(ts::WritePhase::ProjectedRefresh);
+  }
+  for (const auto phase : phases) {
+    for (const auto marker : markers) {
+      descriptor.writes.push_back(
+          {.what = {.kind = ts::ResourceKind::GeneratedDomain,
+                    .marker = marker},
+           .phase = phase,
+           .residual_defining = true,
+           .requires_fresh_residual = true});
+    }
+    descriptor.writes.push_back(
+        {.what = {.kind = ts::ResourceKind::AffineConstraints},
+         .phase = phase,
+         .residual_defining = true,
+         .requires_fresh_residual = true});
+  }
+  return descriptor;
+}
+
 bool LevelSetGeometryParticipant::providesEpochs() const noexcept
 {
   return options_.solve ==

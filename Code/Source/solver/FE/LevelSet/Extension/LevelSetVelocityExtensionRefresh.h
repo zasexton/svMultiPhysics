@@ -213,6 +213,14 @@ public:
                    timestepping::GeneratedStateSync& sync) override;
   void invalidate() override;
 
+  /// Each request reads its source velocity, its level set and its
+  /// generated domain as the projected pass left them, and writes its
+  /// target in the projected pass: the frozen rows of the constraint kernel
+  /// and the state entries of a monolithic (algebraic) extension, or the
+  /// coefficients of a prescribed target.  Present iff there are requests.
+  [[nodiscard]] timestepping::GeneratedStateDescriptor describe(
+      timestepping::GeneratedStatePurpose purpose) const override;
+
 private:
   systems::FESystem* system_{nullptr};
   const svmp::Mesh* mesh_{nullptr};

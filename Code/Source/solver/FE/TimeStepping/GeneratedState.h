@@ -41,6 +41,7 @@
 
 #include "TimeStepping/NewtonSolver.h"
 
+#include <cstddef>
 #include <cstdint>
 #include <functional>
 #include <map>
@@ -211,6 +212,102 @@ inline constexpr int kSteadyOuterFixedPointMaxPasses = 12;
     GeneratedStateSolve solve,
     const OuterFixedPointOverrides& overrides = {});
 
+// ---------------------------------------------------------------------------
+// Declarations of the generated state
+// ---------------------------------------------------------------------------
+//
+// Each participant states, per solve purpose, what it reads (with the version
+// of the state it reads) and what it writes (with the phase of the write).
+// The reads of the residual come from a walk of the installed formulations
+// (residualGeneratedStateReads).  The declarations add information; they do
+// not change what the participants do.
+
+/// The solve purpose a declaration is stated for.
+enum class GeneratedStatePurpose : std::uint8_t {
+    SteadySolve,
+    TransientAttempt,
+    GeneralizedAlphaStage,
+    EndpointCandidate,
+    OuterRestore,
+    TimeStepRestore,
+    CertificateProbe,
+    Initialization,
+    AcceptedStep,
+};
+
+[[nodiscard]] const char* generatedStatePurposeName(GeneratedStatePurpose purpose) noexcept;
+
+/// Whether the synchronizations of @p purpose project the state onto the
+/// regenerated constraints (raw then projected points).  The certificate
+/// probe, the initialization and the accepted step do not.
+[[nodiscard]] bool generatedStatePurposeProjects(GeneratedStatePurpose purpose) noexcept;
+
+/// The version of a resource a read sees.
+enum class StateVersion : std::uint8_t {
+    CurrentTrial,      ///< the state at the synchronization point (raw)
+    ProjectedStage,    ///< after this refresh's constraints were applied
+    FrozenPass,        ///< what the last refresh installed, held through the inner solve
+    AcceptedEndpoint,  ///< u_n, or the restored accepted state
+    AcceptedHistory,   ///< u^{n-k} of one field, k >= 1
+};
+
+enum class ResourceKind : std::uint8_t {
+    Field,              ///< the coefficients of a field
+    GeneratedDomain,    ///< the generated integration domain of an interface marker
+    AffineConstraints,  ///< the affine constraints of the system
+    FrozenRows,         ///< rows a constraint kernel holds fixed through the inner solve
+    TrialCoordinates,   ///< the coordinates of a moving domain
+    AuxiliaryInput,     ///< an auxiliary input of the residual
+};
+
+struct GeneratedResource {
+    ResourceKind kind{ResourceKind::Field};
+    FieldId field{INVALID_FIELD_ID};
+    int marker{-1};
+    std::string operator_tag{};
+    int steps_back{0};
+
+    friend bool operator==(const GeneratedResource&, const GeneratedResource&) = default;
+};
+
+/// When a write happens within a synchronization or a step.
+enum class WritePhase : std::uint8_t {
+    ConstraintConstruction,  ///< the raw pass that builds the constraints
+    ProjectedRefresh,        ///< the projected pass
+    AttemptEntry,            ///< before the physics solve of an attempt
+    AcceptedCommit,          ///< after an accepted step
+    InnerTransaction,        ///< inside the inner solve (a moving mesh)
+};
+
+/// Whether a participant's writes select the outer fixed point.
+enum class OuterEnablement : std::uint8_t {
+    Inferred,             ///< the dependency graph decides
+    RequiredWhenPresent,  ///< selects it when present (today's request kinds)
+    FollowsSchedule,      ///< refreshed by the selected schedule, never selects it
+    Never,                ///< never selects it (for example a certificate probe)
+};
+
+struct GeneratedRead {
+    GeneratedResource what{};
+    StateVersion version{StateVersion::CurrentTrial};
+};
+
+struct GeneratedWrite {
+    GeneratedResource what{};
+    WritePhase phase{WritePhase::ProjectedRefresh};
+    bool residual_defining{false};        ///< changes the residual at a fixed state
+    bool requires_fresh_residual{false};  ///< acceptance needs a residual assembled after it
+    bool writes_state_vector{false};      ///< writes entries of the state vector
+};
+
+struct GeneratedStateDescriptor {
+    std::vector<GeneratedRead> reads{};
+    std::vector<GeneratedWrite> writes{};
+    OuterEnablement enablement{OuterEnablement::Inferred};
+    /// False: registered, but generates nothing (for example no requests).
+    bool present{true};
+};
+
 /// One synchronization: the point and what the Geometry role produced.
 struct GeneratedStateSync {
     NewtonOptions::StateSynchronizationPoint point{};
@@ -245,6 +342,11 @@ public:
                              GeneratedStateSync& sync) = 0;
     virtual void invalidate() {}
 
+    /// What the participant reads and writes for @p purpose.  The default
+    /// declares nothing (present = false).
+    [[nodiscard]] virtual GeneratedStateDescriptor describe(
+        GeneratedStatePurpose purpose) const;
+
     /// True when the participant provides the epoch hooks below.
     [[nodiscard]] virtual bool providesEpochs() const noexcept { return false; }
     [[nodiscard]] virtual bool epochDiscontinuity(
@@ -272,6 +374,8 @@ public:
         std::function<void(const systems::SystemStateView&, GeneratedStateSync&)>
             synchronize{};
         std::function<void()> invalidate{};
+        /// Unset: the participant declares nothing.
+        std::function<GeneratedStateDescriptor(GeneratedStatePurpose)> describe{};
     };
 
     FunctionGeneratedStateParticipant(std::string name,
@@ -284,6 +388,8 @@ public:
     void synchronize(const systems::SystemStateView& state,
                      GeneratedStateSync& sync) override;
     void invalidate() override;
+    [[nodiscard]] GeneratedStateDescriptor describe(
+        GeneratedStatePurpose purpose) const override;
 
 private:
     std::string name_;
@@ -352,6 +458,98 @@ private:
  */
 [[nodiscard]] std::shared_ptr<IGeneratedStateParticipant> makeShadowFieldParticipant(
     systems::FESystem& system);
+
+// ---------------------------------------------------------------------------
+// Declarations without a participant, residual reads and the checks
+// ---------------------------------------------------------------------------
+
+/// The accepted-step level-set maintenance of @p level_set_fields (it runs
+/// in TimeLoop callbacks, not in the registry): it reads the endpoint
+/// candidate and the accepted baseline and writes each field at the
+/// accepted commit.  Present iff @p level_set_fields is not empty.
+[[nodiscard]] GeneratedStateDescriptor maintenanceGeneratedStateDescriptor(
+    const std::vector<FieldId>& level_set_fields);
+
+/// The coupled mesh motion of a moving domain: it reads the mesh
+/// displacement and moves the trial coordinates inside the inner solve.  It
+/// never selects the outer fixed point.  Present iff @p mesh_displacement is
+/// a field.
+[[nodiscard]] GeneratedStateDescriptor movingDomainGeneratedStateDescriptor(
+    FieldId mesh_displacement);
+
+/**
+ * @brief The generated-state reads of the contributing residuals of
+ *        @p system, from a walk of their residual trees.
+ *
+ * A prescribed field read by a tree (DiscreteField or StateField) is a
+ * FrozenPass read of that field.  An integral on a generated domain is a
+ * FrozenPass read of the domain's marker: a cut-volume integral, a boundary
+ * integral on a generated active subset, and an interface or interior-facet
+ * integral whose marker the system registered as a generated embedded
+ * interface.  previousSolution(k) is an AcceptedHistory read.  Unknowns,
+ * frozen iterates and auxiliary inputs make no generated-state read, and
+ * records that do not contribute to the problem analysis (work channels,
+ * diagnostics) are skipped.  The walk changes no tree, record or kernel.
+ * Each read appears once, in order of first occurrence.
+ */
+[[nodiscard]] std::vector<GeneratedRead> residualGeneratedStateReads(
+    const systems::FESystem& system);
+
+/// A participant's or a declaration's descriptor, with its place in the
+/// run order.
+struct DeclaredGeneratedState {
+    std::string name{};
+    GeneratedStateRole role{GeneratedStateRole::Geometry};
+    /// Position in the registry's run order (declarations without a
+    /// participant come after the participants).
+    std::size_t position{0};
+    bool registry_participant{true};
+    GeneratedStateDescriptor descriptor{};
+};
+
+/// The descriptors of @p registry's participants for @p purpose, in run
+/// order, followed by @p extra declarations.
+[[nodiscard]] std::vector<DeclaredGeneratedState> declaredGeneratedState(
+    const GeneratedStateRegistry& registry,
+    GeneratedStatePurpose purpose,
+    std::vector<DeclaredGeneratedState> extra = {});
+
+enum class GeneratedStateFindingKind : std::uint8_t {
+    MissingProducer,
+    ConflictingWriters,
+    IncompatibleStageRequest,
+    OrderInconsistency,
+};
+
+[[nodiscard]] const char* generatedStateFindingKindName(GeneratedStateFindingKind kind) noexcept;
+
+struct GeneratedStateFinding {
+    GeneratedStateFindingKind kind{GeneratedStateFindingKind::MissingProducer};
+    /// The reader, the second writer, or "residual".
+    std::string participant{};
+    GeneratedResource resource{};
+    std::string message{};
+};
+
+/**
+ * @brief The rank-local checks of the declarations of one purpose.
+ *
+ * - Missing producer: a generated domain, or one of @p generated_values (for
+ *   example a lagged shadow), that a contributing residual reads and no
+ *   declaration writes.
+ * - Conflicting writers: two writes of one resource in one phase.
+ * - Incompatible stage request: a ProjectedStage read in a purpose that does
+ *   not project; a FrozenPass read of a resource no declaration writes.
+ * - Order consistency: a participant reads, in the raw or projected pass, a
+ *   resource that a participant later in the run order writes in that pass.
+ *
+ * Returns the findings in that order; it refuses nothing.
+ */
+[[nodiscard]] std::vector<GeneratedStateFinding> checkGeneratedStateDeclarations(
+    GeneratedStatePurpose purpose,
+    const std::vector<DeclaredGeneratedState>& declarations,
+    const std::vector<GeneratedRead>& residual_reads,
+    const std::vector<GeneratedResource>& generated_values);
 
 } // namespace timestepping
 } // namespace FE
