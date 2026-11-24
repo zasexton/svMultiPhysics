@@ -9,6 +9,7 @@
 #include "Auxiliary/AuxiliaryInputRegistry.h"
 #include "Auxiliary/AuxiliaryBindings.h"
 #include "Auxiliary/AuxiliaryModelBuilder.h"
+#include "Auxiliary/AuxiliaryModelDSL.h"
 #include "Auxiliary/AuxiliaryStateManager.h"
 #include "Systems/FESystem.h"
 #include "Systems/FormsInstaller.h"
@@ -2658,6 +2659,65 @@ TEST(BoundaryIntegralInput, QuantityRegistersTheStructSpellingWithEqualValues)
     ASSERT_NE(registry, nullptr);
     EXPECT_EQ(registry->get(Q_measured.registryName()), registry->get(Q_spelled.registryName()));
     EXPECT_NEAR(registry->get(Q_measured.registryName()), 0.5, 1e-14);
+}
+
+TEST(BoundaryIntegralInput, ANamedBoundaryQuantityIsTheInputOfItsName)
+{
+    // u = 1 on the face of area 0.5; a named quantity and an unnamed one.
+    const int marker = 5;
+    auto mesh = std::make_shared<svmp::FE::forms::test::SingleTetraOneBoundaryFaceMeshAccess>(marker);
+    auto space = std::make_shared<svmp::FE::spaces::H1Space>(ElementType::Tetra4, 1);
+
+    FESystem sys(mesh);
+    const auto u_field = sys.addField(FieldSpec{.name = "u", .space = space, .components = 1});
+    sys.addOperator("op");
+    const auto u = FormExpr::stateField(u_field, *space, "u");
+    const auto named = sys.auxiliaryInput(quantity("outlet_flow", FunctionalKind::Integral, u.ds(marker)),
+                                          AuxiliaryInputUpdateSchedule::EachNonlinearIteration);
+    const auto unnamed = sys.auxiliaryInput(quantity("", FunctionalKind::Integral, u.ds(marker)),
+                                            AuxiliaryInputUpdateSchedule::EachNonlinearIteration);
+    EXPECT_EQ(named.registryName(), "outlet_flow");
+    EXPECT_EQ(unnamed.registryName(), "_boundary_integral_b5_0");
+
+    // The named input drives a monolithic model through the output it gives
+    // the boundary, so assembly refreshes it and differentiates through it.
+    auto model = aux::model("named_input_decay", [](ModelFacade& m) {
+        auto q = m.input("Q");
+        auto x = m.state("X");
+        m << ddt(x) == q - x;
+        m << out("P") == x + q;
+    });
+    const auto deployed = sys.deploy(use(model).name("decay").boundary(marker).monolithic().bind("Q", named)
+                                         .initialState({{"X", 0.25}}));
+    const auto v = FormExpr::testFunction(*space, "v");
+    (void)installFormulation(sys, "op", {u_field},
+                             inner(grad(u), grad(v)).dx() + (deployed.output("P") * v).ds(marker));
+    { SetupInputs si; si.topology_override = singleTetraTopology(); sys.setup({}, si); }
+    sys.finalizeAuxiliaryLayout();
+
+    const auto n = sys.dofHandler().getNumDofs();
+    std::vector<Real> sol(static_cast<std::size_t>(n), 1.0);
+    SystemStateView state;
+    state.time = 0.0;
+    state.dt = 0.1;
+    state.u = sol;
+    sys.prepareAuxiliaryForAssembly(state, false);
+    const auto* registry = sys.auxiliaryInputRegistryIfPresent();
+    ASSERT_NE(registry, nullptr);
+    EXPECT_NEAR(registry->get("outlet_flow"), 0.5, 1e-14);
+    EXPECT_EQ(registry->get("outlet_flow"), registry->get(unnamed.registryName()));
+
+    svmp::FE::assembly::DenseMatrixView jacobian(n);
+    svmp::FE::assembly::DenseVectorView residual(n);
+    jacobian.zero();
+    residual.zero();
+    AssemblyRequest request;
+    request.op = "op";
+    request.want_matrix = true;
+    request.want_vector = true;
+    sys.beginTimeStep();
+    const auto result = sys.assemble(request, state, &jacobian, &residual);
+    EXPECT_TRUE(result.success) << result.error_message;
 }
 
 // ===========================================================================

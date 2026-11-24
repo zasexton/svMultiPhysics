@@ -1366,9 +1366,9 @@ public:
      * The quantity's form is one integral, over the exterior boundary
      * (integrand.ds(m), integrand.ds(BoundaryDomain)) or the cells
      * (integrand.dx()); its record (systems::inputFunctional) is registered
-     * as boundaryIntegral(functional, schedule) or domainIntegral does, under
-     * a generated input name (an unnamed dx quantity: "_domain_integral_<k>";
-     * a named one: its name).
+     * as boundaryIntegral or domainIntegral does, under the quantity's name,
+     * or a generated one for an unnamed quantity ("_boundary_integral_b<m>_<k>",
+     * "_domain_integral_<k>").
      *
      * ```cpp
      * const auto Q = quantity("", FunctionalKind::Integral, inner(u, n).ds(outlet));

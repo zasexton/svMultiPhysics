@@ -17000,7 +17000,14 @@ AuxiliaryInputHandle FESystem::auxiliaryInput(
 {
     auto functional = inputFunctional(quantity);
     if (!functional.is_domain_functional) {
-        return boundaryIntegral(std::move(functional), schedule);
+        // A named quantity is the input of its own name, as on the cells: the
+        // functional keeps that name, and the input and the functional must
+        // agree for the reductions that look the functional up.
+        if (functional.name.empty()) {
+            return boundaryIntegral(std::move(functional), schedule);
+        }
+        const auto input_name = functional.name;
+        return boundaryIntegral(input_name, std::move(functional), schedule);
     }
     const auto input_name = functional.name.empty()
         ? generateUniqueAuxiliaryInputName_("_domain_integral")
