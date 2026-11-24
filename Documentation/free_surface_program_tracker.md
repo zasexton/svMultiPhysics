@@ -1125,6 +1125,24 @@ These are proposals. Each lists a recommended option and an alternative. Record 
 - **D67, 2026-11-24 (user): two follow-ups of wave 3.**
   1. **The symmetric Nitsche adjoint of a fitted weak wall with a shear-rate dependent viscosity keeps the viscosity frozen** at the current state, as documented in `VOCABULARY.md`; consistency is unaffected. An exact-derivative adjoint becomes an opt-in under a tolerance gate only if a non-Newtonian weak-wall case is qualified.
   2. **The harmonic mesh-motion `Stiffness` key, an old spelling that overrides `Kappa`, is deleted** (D60). The Robin boundary-condition `Stiffness` parameter of struct, ustruct, Poisson and Navier–Stokes is a different key and stays.
+- **D68, 2026-11-24 (user): the scope of wave 4, "configured problems use the declarations"** (proposal `agent-status/wave4-scope-proposal.md`, checked against `3cb728e8`). Approved as proposed.
+  - **Goal:** every configured problem reaches the solver through one builder lifecycle that consumes declarations; `SimulationBuilder` and `ApplicationDriver` branch on no equation type, boundary type or model.
+  - **Four lanes:**
+    - level set and generated state: level-set transport as a formulation, its transport velocity and cut domains as declarations, schedule step S7, the semi-implicit check out of the driver, and a configured cut-Poisson deck;
+    - maintenance and step participants: accepted-step maintenance, the conservative-phase stage, and the contact, energy, two-fluid and normal-rate participants, each declared by the install that needs it;
+    - builder lifecycle: declare-then-install registration (deleting the pre-registration workarounds), solver and mesh policies as declarations, the driver composed from declarations;
+    - auditability: parsing, logging, DOF work and name lookups out of the formulation directories; per-term side, stage, derivative treatment and signed tags; shape and test-degree checks; an install report and an audit script for D65 criterion 1.
+  - **Bitwise** on the reference sets at 1, 2 and 4 ranks with identical logs, manifests and resolve corpus. The exceptions are the declared install-report file and the new cut-Poisson deck, which has a pre-registered gate.
+  - **Exit:** one lifecycle trace for the five problem types (standalone transport, cut Poisson, prescribed-extension free surface, fitted ALE, two-fluid); full reference parity; the audit counts at their targets; an install report with no unexplained entry.
+  - **Decisions:**
+    1. The level-set formulation goes in `Physics/Formulations/LevelSet`, counted by the audit.
+    2. Static-capillary startup stays a named, counted driver exception until a deck that uses it joins the reference sets.
+    3. The configured cut-Poisson deck reads its level set as prescribed mesh data, with no new key.
+    4. Wave 4 proves parity against the results on the day it starts. Defect fixes found in wave 3 (the fitted-ALE kernel batching) land as separately gated result changes.
+    5. Only the hand-built physics records that convert bitwise are converted; the rest are listed for wave 7.
+    6. The install report is a new file beside `effective_configuration.json`.
+    7. Configured restart, which D65 criterion 2 needs, goes to wave 5.
+  - **Start:** after the wave-3 lanes that edit the same files have landed (environment registry, certificate follow-ups, vocabulary probes and clarity, shape derivatives) and the moving-domains lane has reported. The outlet lane's M4 may continue alongside.
 - **D16, 2026-10-05: production binaries will use LTO + PGO** (`SV_ENABLE_LTO=ON`, `SV_PGO=USE`). The outputs are bitwise identical.
   - Adoption waits until the current speed-up branches settle (post-merge hotspots, dry-cell records, constraint build), because they move the hot paths.
   - The profile is then trained on the tip and stored in group storage (not scratch, which is purged), and refreshed after hot-path changes.
