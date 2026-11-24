@@ -12224,9 +12224,10 @@ void StandardAssembler::assembleMonolithicCellBatch(const MonolithicBatchLoop& l
         cached_geom_h_ = saved_node_coords[slot].entity_h;
         cached_geom_volume_ = saved_node_coords[slot].entity_volume;
         cached_geom_diameter_nodes_ = saved_node_coords[slot].entity_diameter_nodes;
-        if (!cached_mapping_affine_) {
+        if (!cached_mapping_affine_ || !saved_node_coords[slot].mapping_affine) {
             scratch_node_coords_ = saved_node_coords[slot].node_coords;
             cached_mapping_->resetNodes(scratch_node_coords_);
+            cached_mapping_affine_ = saved_node_coords[slot].mapping_affine;
         }
     };
 
@@ -12251,6 +12252,9 @@ void StandardAssembler::assembleMonolithicCellBatch(const MonolithicBatchLoop& l
         zeroCombinedInsertScratch(active, fused_combined_n);
     }
 
+    // Whether every cell of the batch has a constant Jacobian: the batched
+    // basis transforms below use one inverse Jacobian per cell.
+    bool batch_affine = true;
     for (std::size_t slot = 0; slot < active; ++slot) {
         const auto cell_id = cell_ids[begin + slot];
         auto& shared = shared_contexts[slot];
@@ -12266,6 +12270,8 @@ void StandardAssembler::assembleMonolithicCellBatch(const MonolithicBatchLoop& l
         saved_node_coords[slot].entity_h = cached_geom_h_;
         saved_node_coords[slot].entity_volume = cached_geom_volume_;
         saved_node_coords[slot].entity_diameter_nodes = cached_geom_diameter_nodes_;
+        saved_node_coords[slot].mapping_affine = cached_mapping_affine_;
+        batch_affine = batch_affine && cached_mapping_affine_;
 
         setCommonContextState(shared);
         if (any_need_field_solutions) {
@@ -12279,7 +12285,7 @@ void StandardAssembler::assembleMonolithicCellBatch(const MonolithicBatchLoop& l
     }
 
     const bool use_batch_basis =
-        use_coupled_scalar_cache && cached_mapping_affine_;
+        use_coupled_scalar_cache && batch_affine;
     if (!use_batch_basis) {
         // prepareBasis below changes field-recipe state that the
         // serial loop carries from cell to cell; keep it serial.
@@ -12360,7 +12366,7 @@ void StandardAssembler::assembleMonolithicCellBatch(const MonolithicBatchLoop& l
             auto& shared = shared_contexts[slot];
             const bool use_expansion_this_block =
                 use_batch_basis ||
-                (use_coupled_scalar_cache && cached_mapping_affine_ && bi > 0);
+                (use_coupled_scalar_cache && batch_affine && bi > 0);
             const bool preloaded_geometry_ctx =
                 (&ctx == &batch_block_workspaces[slot].ctx);
 
@@ -16119,6 +16125,8 @@ AssemblyResult StandardAssembler::assembleCellsFused(
             }
 
             // === Prepare geometry + context for all cells in batch (ONCE) ===
+            // Whether every cell of the batch has a constant Jacobian.
+            bool batch_affine = true;
             for (std::size_t slot = 0; slot < active; ++slot) {
                 const auto cell_id = gids[begin + slot];
                 auto& ctx = batch_contexts[slot];
@@ -16132,6 +16140,8 @@ AssemblyResult StandardAssembler::assembleCellsFused(
                 saved_node_coords[slot].entity_h = cached_geom_h_;
                 saved_node_coords[slot].entity_volume = cached_geom_volume_;
                 saved_node_coords[slot].entity_diameter_nodes = cached_geom_diameter_nodes_;
+                saved_node_coords[slot].mapping_affine = cached_mapping_affine_;
+                batch_affine = batch_affine && cached_mapping_affine_;
                 tp_fb_save += TP() - tp0;
 
                 tp0 = TP();
@@ -16157,7 +16167,7 @@ AssemblyResult StandardAssembler::assembleCellsFused(
             // for all slots BEFORE the block loop, eliminating per-cell
             // prepareBasis calls entirely.
             const bool use_batch_basis =
-                use_coupled_scalar_cache && cached_mapping_affine_;
+                use_coupled_scalar_cache && batch_affine;
 
             if (use_batch_basis) {
                 // Phase A: field solutions (serial — uses member scratch)
@@ -16253,7 +16263,7 @@ AssemblyResult StandardAssembler::assembleCellsFused(
                     // gradient transform above).  Otherwise, only blocks 1+ use it.
                     const bool use_expansion_this_block =
                         use_batch_basis ||
-                        (use_coupled_scalar_cache && cached_mapping_affine_ && bi > 0);
+                        (use_coupled_scalar_cache && batch_affine && bi > 0);
 
                     // When all conditions are met, the expansion slot loop can be
                     // parallelized: each slot writes only to independent per-slot
@@ -16264,7 +16274,7 @@ AssemblyResult StandardAssembler::assembleCellsFused(
                     //    when !use_batch_basis; when use_batch_basis, field sols
                     //    are already done)
                     const bool omp_slot_parallel =
-                        use_expansion_this_block && cached_mapping_affine_ &&
+                        use_expansion_this_block && batch_affine &&
                         (use_batch_basis || bi > 0);
 
 #ifdef _OPENMP
@@ -16287,9 +16297,10 @@ AssemblyResult StandardAssembler::assembleCellsFused(
                             cached_geom_h_ = slot_h;
                             cached_geom_volume_ = slot_vol;
                             cached_geom_diameter_nodes_ = saved_node_coords[slot].entity_diameter_nodes;
-                            if (!cached_mapping_affine_) {
+                            if (!cached_mapping_affine_ || !saved_node_coords[slot].mapping_affine) {
                                 scratch_node_coords_ = saved_node_coords[slot].node_coords;
                                 cached_mapping_->resetNodes(scratch_node_coords_);
+                                cached_mapping_affine_ = saved_node_coords[slot].mapping_affine;
                             }
                             tp_fb_restore += TP() - tp0;
                         }
@@ -16639,6 +16650,7 @@ AssemblyResult StandardAssembler::assembleCellsFused(
                 saved_node_coords[slot].entity_h = cached_geom_h_;
                 saved_node_coords[slot].entity_volume = cached_geom_volume_;
                 saved_node_coords[slot].entity_diameter_nodes = cached_geom_diameter_nodes_;
+                saved_node_coords[slot].mapping_affine = cached_mapping_affine_;
                 tp_fb_save += TP() - tp0;
 
                 tp0 = TP();
@@ -16741,9 +16753,10 @@ AssemblyResult StandardAssembler::assembleCellsFused(
                         cached_geom_h_ = saved_node_coords[slot].entity_h;
                         cached_geom_volume_ = saved_node_coords[slot].entity_volume;
                         cached_geom_diameter_nodes_ = saved_node_coords[slot].entity_diameter_nodes;
-                        if (!cached_mapping_affine_) {
+                        if (!cached_mapping_affine_ || !saved_node_coords[slot].mapping_affine) {
                             scratch_node_coords_ = saved_node_coords[slot].node_coords;
                             cached_mapping_->resetNodes(scratch_node_coords_);
+                            cached_mapping_affine_ = saved_node_coords[slot].mapping_affine;
                         }
                     }
                     tp_fb_restore += TP() - tp0;
@@ -17281,6 +17294,9 @@ void StandardAssembler::prepareContextFace(
 
     auto mapping = geometry::MappingFactory::create(map_request, scratch_node_coords_);
     const bool face_mapping_affine = mapping->isAffine();
+    // The field and history evaluation of this face reads the assembler's
+    // affinity flag: it is this face's cell's, not the last cell prepared.
+    cached_mapping_affine_ = face_mapping_affine;
 
     const bool need_reference_face =
         hasFlag(required_data, RequiredData::ReferencePhysicalPoints) ||

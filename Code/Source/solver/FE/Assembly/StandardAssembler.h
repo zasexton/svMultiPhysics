@@ -492,6 +492,7 @@ private:
         Real entity_h{0.0};
         Real entity_volume{0.0};
         AssemblyContext::CellDiameterNodes entity_diameter_nodes{};
+        bool mapping_affine{true};  ///< the slot's own mapping has a constant Jacobian
     };
 
     /** Per-slot DOF indices for fused-batched assembly. */

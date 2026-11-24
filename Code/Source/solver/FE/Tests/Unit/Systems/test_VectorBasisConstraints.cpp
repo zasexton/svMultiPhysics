@@ -736,6 +736,164 @@ TEST(OtherFieldRates, RateDerivativesOfAnotherVectorFieldVanishForAConstantField
     }
 }
 
+namespace {
+
+/// Two quadrilaterals sharing an edge: a tapered (not affine) one and a
+/// parallelogram, in the order given.
+[[nodiscard]] std::shared_ptr<svmp::Mesh> taperedAndParallelogramQuads(bool tapered_first)
+{
+    // Vertices: 0 (0,0), 1 (1,0), 2 (2,0), 3 (0.2,1.3), 4 (1,1), 5 (2,1).
+    const std::vector<svmp::real_t> X{0.0, 0.0, 1.0, 0.0, 2.0, 0.0, 0.2, 1.3, 1.0, 1.0, 2.0, 1.0};
+    const std::array<svmp::index_t, 4> tapered{0, 1, 4, 3};
+    const std::array<svmp::index_t, 4> parallelogram{1, 2, 5, 4};
+    std::vector<svmp::index_t> connectivity;
+    for (const auto& cell : tapered_first ? std::array{tapered, parallelogram} : std::array{parallelogram, tapered}) {
+        connectivity.insert(connectivity.end(), cell.begin(), cell.end());
+    }
+    svmp::CellShape shape{};
+    shape.family = svmp::CellFamily::Quad;
+    shape.num_corners = 4;
+    shape.order = 1;
+    auto base = std::make_shared<svmp::MeshBase>();
+    base->build_from_arrays(2, X, {0, 4, 8}, connectivity, {shape, shape});
+    base->finalize();
+    return svmp::create_mesh(std::move(base));
+}
+
+} // namespace
+
+// Two scalar fields installed in one residual (a monolithic kernel whose
+// blocks share the scalar basis) assemble the stiffness of each field as two
+// separate installs do, on a tapered quadrilateral next to a parallelogram,
+// in either cell order: the mapping of each cell decides whether its inverse
+// Jacobian is constant, not the mapping prepared last.
+TEST(MonolithicAffineClassification, TaperedCellNextToAParallelogram)
+{
+    for (const bool tapered_first : {true, false}) {
+        SCOPED_TRACE(tapered_first ? "tapered first" : "parallelogram first");
+        const auto matrix = [&](bool one_install) {
+            FESystem system(taperedAndParallelogramQuads(tapered_first));
+            FieldBinding fields(system, "MonolithicAffineClassification");
+            const auto q1 = std::make_shared<spaces::H1Space>(ElementType::Quad4, 1);
+            const auto A = fields.unknown("a", q1);
+            const auto B = fields.unknown("b", q1);
+            const auto ra = forms::inner(forms::grad(A.state), forms::grad(A.test)).dx() + (A.state * A.test).dx();
+            const auto rb = (2.0 * forms::inner(forms::grad(B.state), forms::grad(B.test))).dx() + (B.state * B.test).dx();
+            if (one_install) {
+                FormulationBuilder F(system, "equations", {});
+                (void)F.residual(ra + rb);
+            } else {
+                {
+                    FormulationBuilder F(system, "equations", {});
+                    (void)F.residual(ra);
+                }
+                FormulationBuilder F(system, "equations", {});
+                (void)F.residual(rb);
+            }
+            system.setup();
+            const auto n = system.dofHandler().getNumDofs();
+            std::vector<Real> U(static_cast<std::size_t>(n), 0.0);
+            SystemStateView state;
+            state.u = U;
+            assembly::DenseMatrixView J(n);
+            J.zero();
+            AssemblyRequest request;
+            request.op = "equations";
+            request.want_matrix = true;
+            EXPECT_TRUE(system.assemble(request, state, &J, nullptr).success);
+            std::vector<Real> out;
+            for (GlobalIndex i = 0; i < n; ++i) {
+                for (GlobalIndex j = 0; j < n; ++j) {
+                    out.push_back(J.getMatrixEntry(i, j));
+                }
+            }
+            return out;
+        };
+        const auto separate = matrix(false);
+        const auto joint = matrix(true);
+        ASSERT_EQ(joint.size(), separate.size());
+        Real scale = 0.0;
+        for (const auto value : separate) {
+            scale = std::max(scale, std::abs(value));
+        }
+        for (std::size_t k = 0; k < joint.size(); ++k) {
+            EXPECT_NEAR(joint[k], separate[k], 1e-13 * scale) << "entry " << k;
+        }
+    }
+}
+
+// The gradient of another field on a boundary face of the tapered
+// quadrilateral, assembled after the cells (the parallelogram last): the face
+// evaluates the field with its own cell's Jacobian at every point, so for
+// w = 1 + 2x + 3y the term grad(w) . (1, 0) is 2 along the whole face.
+TEST(MonolithicAffineClassification, FieldGradientOnAFaceOfATaperedCell)
+{
+    constexpr int marker = 5;
+    const auto build = [&]() {
+        auto mesh = taperedAndParallelogramQuads(/*tapered_first=*/true);
+        auto& local = mesh->local_mesh();
+        for (const auto face : local.boundary_faces()) {
+            auto vertices = local.face_vertices(face);
+            std::sort(vertices.begin(), vertices.end());
+            if (vertices.size() == 2u && vertices[0] == 0 && vertices[1] == 3) {
+                mesh->set_boundary_label(face, marker);
+            }
+        }
+        return mesh;
+    };
+    const auto residual = [&](bool field_gradient) {
+        FESystem system(build());
+        FieldBinding fields(system, "MonolithicAffineClassification");
+        const auto q1 = std::make_shared<spaces::H1Space>(ElementType::Quad4, 1);
+        const auto Uf = fields.unknown("u", q1);
+        const auto W = fields.unknown("w", q1);
+        const auto c = forms::as_vector({forms::FormExpr::constant(1.0), forms::FormExpr::constant(0.0)});
+        const auto source = field_gradient ? forms::inner(forms::grad(W.state), c) : forms::FormExpr::constant(2.0);
+        {
+            FormulationBuilder F(system, "equations", {});
+            (void)F.residual((Uf.state * Uf.test).dx() + (source * Uf.test).ds(marker) +
+                             (W.state * W.test).dx());
+        }
+        system.setup();
+        const auto n = system.dofHandler().getNumDofs();
+        std::vector<Real> U(static_cast<std::size_t>(n), 0.0);
+        const auto& local = system.singleMesh().local_mesh();
+        const auto& X = local.X_ref();
+        const auto w0 = system.fieldDofOffset(W.id);
+        const auto* entities = system.fieldDofHandler(W.id).getEntityDofMap();
+        for (svmp::index_t v = 0; v < static_cast<svmp::index_t>(local.n_vertices()); ++v) {
+            const Real x = X[2 * static_cast<std::size_t>(v)];
+            const Real y = X[2 * static_cast<std::size_t>(v) + 1];
+            U[static_cast<std::size_t>(w0 + entities->getVertexDofs(static_cast<GlobalIndex>(v))[0])] =
+                1.0 + 2.0 * x + 3.0 * y;
+        }
+        SystemStateView state;
+        state.u = U;
+        assembly::DenseVectorView R(n);
+        R.zero();
+        AssemblyRequest request;
+        request.op = "equations";
+        request.want_vector = true;
+        EXPECT_TRUE(system.assemble(request, state, nullptr, &R).success);
+        std::vector<Real> rows;
+        const auto u0 = system.fieldDofOffset(Uf.id);
+        for (GlobalIndex i = u0; i < u0 + system.fieldDofHandler(Uf.id).getNumDofs(); ++i) {
+            rows.push_back(R.getVectorEntry(i));
+        }
+        return rows;
+    };
+    const auto expected = residual(false);
+    const auto actual = residual(true);
+    ASSERT_EQ(actual.size(), expected.size());
+    for (std::size_t i = 0; i < actual.size(); ++i) {
+        EXPECT_NEAR(actual[i], expected[i], 1e-13) << "row " << i;
+    }
+}
+
+
+
+
+
 
 } // namespace test
 } // namespace systems
