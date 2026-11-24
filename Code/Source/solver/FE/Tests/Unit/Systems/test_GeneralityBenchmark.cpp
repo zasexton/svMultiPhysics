@@ -1712,5 +1712,214 @@ TEST(GeneralityBenchmark, P03_UpwindDGTransportPreservesConstantsAndConservesMas
     EXPECT_GT(mass, 0.1);
 }
 
+// ===========================================================================
+// 8. Incompressible finite strain
+// ===========================================================================
+//
+// The stationary point of Pi = (W(F) - p (det F - 1)) dx - external work,
+// W = mu/2 (F : F - dim) (incompressible neo-Hookean), first an exact affine
+// shear d = (gamma y, 0) with constant p (reproduced exactly), then
+// d = (gamma y^2, 0), still with det F = 1, with a prescribed smooth pressure,
+// the body force -div P and the traction P n on x = 1 manufactured from
+// P = mu F - p F^{-T}.
+
+// ---------------------------------------------------------------------------
+// The formulation: everything an author writes for problem 8.
+// ---------------------------------------------------------------------------
+struct SolidInstall {
+    FieldId d{INVALID_FIELD_ID};
+    FieldId p{INVALID_FIELD_ID};
+};
+
+SolidInstall defineIncompressibleSolid(FESystem& system, std::shared_ptr<const spaces::FunctionSpace> Vd,
+                                       std::shared_ptr<const spaces::FunctionSpace> Vp, Real shear_modulus,
+                                       const FormExpr& body_force, int traction_face, const FormExpr& traction,
+                                       const std::vector<FormExpr>& d_wall, const std::vector<int>& walls)
+{
+    using namespace forms;
+    FieldBinding fields(system, "IncompressibleSolid");
+    const auto D = fields.unknown("d", std::move(Vd));
+    const auto P = fields.unknown("p", std::move(Vp));
+    const int dim = system.fieldRecord(D.id).components;
+    const auto mu = FormExpr::constant(shear_modulus);
+    const auto Fdef = finite_deformation::deformationGradient(D.state);
+    const auto W = 0.5 * mu * (inner(Fdef, Fdef) - static_cast<Real>(dim));
+    const auto Pi = (W - P.state * (det(Fdef) - 1.0)).dx();
+    const auto external = inner(body_force, D.test).dx() + inner(traction, D.test).ds(traction_face);
+    auto R = systems::derivative(Pi, {D, P}) - external;
+    BoundaryConditionManager bcs;
+    for (const int wall : walls) {
+        bcs.add(std::make_unique<bc::Dirichlet>(wall, d_wall));
+    }
+    constraints::ConstraintPlan plan(system);
+    plan.essentials(bcs, R, D.state, D.test, D.id);
+    plan.commit();
+    FormulationBuilder F(system, "equations", {});
+    F.symbolicTangent();
+    (void)F.residual(R);
+    return {D.id, P.id};
+}
+// ---------------------------------------------------------------------------
+
+struct SolidCase {
+    Real mu{1.5};
+    Real gamma{0.4};
+    Real p0{0.7};
+    bool affine{true};
+
+    [[nodiscard]] Real displacement(const Point& x, int i) const
+    {
+        return i == 0 ? gamma * (affine ? x[1] : x[1] * x[1]) : 0.0;
+    }
+    [[nodiscard]] Real displacementGradient(const Point& x, int i, int j) const
+    {
+        return (i == 0 && j == 1) ? gamma * (affine ? 1.0 : 2.0 * x[1]) : 0.0;
+    }
+    [[nodiscard]] Real pressure(const Point& x) const
+    {
+        return affine ? p0 : p0 + 0.2 * std::sin(kPi * x[0]) * std::cos(kPi * x[1]);
+    }
+    [[nodiscard]] Point pressureGradient(const Point& x) const
+    {
+        if (affine) {
+            return {0.0, 0.0, 0.0};
+        }
+        return {0.2 * kPi * std::cos(kPi * x[0]) * std::cos(kPi * x[1]),
+                -0.2 * kPi * std::sin(kPi * x[0]) * std::sin(kPi * x[1]), 0.0};
+    }
+    /// The shear F_01 = d d_0 / dy.
+    [[nodiscard]] Real shear(const Point& x) const { return displacementGradient(x, 0, 1); }
+    /// -div P with P = mu F - p F^{-T}, F = I + s e_0 (x) e_1.
+    [[nodiscard]] Real bodyForce(const Point& x, int i) const
+    {
+        const auto gp = pressureGradient(x);
+        if (affine) {
+            return 0.0;
+        }
+        if (i == 0) {
+            return gp[0] - 2.0 * mu * gamma;
+        }
+        if (i == 1) {
+            return gp[1] - shear(x) * gp[0];
+        }
+        return gp[2];
+    }
+    /// P e_0 on x = 1.
+    [[nodiscard]] Real traction(const Point& x, int i) const
+    {
+        if (i == 0) {
+            return mu - pressure(x);
+        }
+        if (i == 1) {
+            return shear(x) * pressure(x);
+        }
+        return 0.0;
+    }
+};
+
+struct SolidRun {
+    Real d_l2{0.0};
+    Real d_h1{0.0};
+    Real p_l2{0.0};
+    Real reaction_defect{0.0};  ///< |integral of P n on x = 0 - exact| (affine case)
+    std::pair<Real, Real> tangent{-1.0, 0.0};
+};
+
+SolidRun runIncompressibleSolid(Cell cell, int n, const SolidCase& sc, bool check_tangent = false)
+{
+    const int dim = cellDimension(cell);
+    FESystem system(boxMesh(cell, n, boxSides()));
+    const auto q2 = std::make_shared<spaces::H1Space>(elementType(cell), 2);
+    const auto Vd = std::make_shared<spaces::ProductSpace>(q2, dim);
+    const auto Vp = std::make_shared<spaces::H1Space>(elementType(cell), 1);
+    const auto body = vectorOf("b", dim, [sc](const Point& x, int i) { return sc.bodyForce(x, i); });
+    const auto traction = vectorOf("t", dim, [sc](const Point& x, int i) { return sc.traction(x, i); });
+    const auto d_wall = componentsOf("d_wall", dim, [sc](const Point& x, int i) { return sc.displacement(x, i); });
+    const auto d_exact = vectorOf("d_exact", dim, [sc](const Point& x, int i) { return sc.displacement(x, i); });
+    std::vector<int> walls{1, 3, 4};
+    if (dim == 3) {
+        walls.insert(walls.end(), {5, 6});
+    }
+    const auto install = defineIncompressibleSolid(system, Vd, Vp, sc.mu, body, 2, traction, d_wall, walls);
+    system.setup();
+    const auto solved = solveSteady(system, "equations", 12);
+    EXPECT_TRUE(solved.converged) << cellName(cell) << " n=" << n;
+    const auto d_h = FormExpr::discreteField(install.d, *Vd, "d");
+    const auto p_h = FormExpr::discreteField(install.p, *Vp, "p");
+    std::vector<std::vector<FormExpr>> rows(static_cast<std::size_t>(dim));
+    for (int i = 0; i < dim; ++i) {
+        for (int j = 0; j < dim; ++j) {
+            rows[static_cast<std::size_t>(i)].push_back(
+                scalarCoefficient("grad_d_" + std::to_string(i) + std::to_string(j),
+                                  [sc, i, j](const Point& x) { return sc.displacementGradient(x, i, j); }));
+        }
+    }
+    const auto ed = d_h - d_exact;
+    const auto egd = forms::grad(d_h) - FormExpr::asTensor(std::move(rows));
+    const auto ep = p_h - scalarCoefficient("p_exact", [sc](const Point& x) { return sc.pressure(x); });
+    SolidRun run;
+    run.d_l2 = norm(system, forms::inner(ed, ed).dx(), solved.u);
+    run.d_h1 = norm(system, forms::inner(egd, egd).dx(), solved.u);
+    run.p_l2 = norm(system, (ep * ep).dx(), solved.u);
+    if (sc.affine) {
+        // The reaction on x = 0: the integral of P n, n = -e_0, against -P e_0.
+        const auto Fh = forms::finite_deformation::deformationGradient(d_h);
+        const auto Ph = FormExpr::constant(sc.mu) * Fh - p_h * forms::det(Fh) * forms::transpose(forms::inv(Fh));
+        const auto t = Ph * FormExpr::normal();
+        for (int i = 0; i < dim; ++i) {
+            const Real reaction = integrate(system, t.component(i).ds(1), solved.u);
+            run.reaction_defect = std::max(run.reaction_defect, std::abs(reaction + sc.traction(Point{0, 0, 0}, i)));
+        }
+    }
+    if (check_tangent) {
+        // Every block of the tangent (d-d, d-p, p-d) at a state away from the solution.
+        auto state = solved.u;
+        for (std::size_t i = 0; i < state.size(); ++i) {
+            if (!system.constraints().isConstrained(static_cast<GlobalIndex>(i))) {
+                state[i] += 0.05 * std::sin(0.7 * static_cast<Real>(i) + 0.3);
+            }
+        }
+        run.tangent = jacobianDefect(system, "equations", state);
+    }
+    return run;
+}
+
+TEST(GeneralityBenchmark, P08_IncompressibleFiniteStrainReproducesAffineShear)
+{
+    for (const auto cell : {Cell::Tri3, Cell::Quad4, Cell::Tet4, Cell::Hex8}) {
+        const auto run = runIncompressibleSolid(cell, 2, SolidCase{}, /*check_tangent=*/cell == Cell::Tri3);
+        EXPECT_LT(run.d_l2, 1e-10) << cellName(cell);
+        EXPECT_LT(run.p_l2, 1e-9) << cellName(cell);
+        EXPECT_LT(run.reaction_defect, 1e-9) << cellName(cell);
+        if (cell == Cell::Tri3) {
+            EXPECT_GT(run.tangent.second, 0.0);
+            EXPECT_LT(run.tangent.first, 1e-7 * run.tangent.second);
+        }
+    }
+}
+
+TEST(GeneralityBenchmark, P08_IncompressibleFiniteStrainManufacturedConverges)
+{
+    SolidCase sc;
+    sc.affine = false;
+    for (const auto& [cell, n0] : std::vector<std::pair<Cell, int>>{{Cell::Tri3, 4}, {Cell::Quad4, 4}, {Cell::Tet4, 2}}) {
+        std::vector<Real> dl2, dh1, pl2;
+        const int levels = cellDimension(cell) == 2 ? 3 : 2;  // 3D: n = 2, 4
+        for (int level = 0; level < levels; ++level) {
+            const auto run = runIncompressibleSolid(cell, n0 << level, sc);
+            dl2.push_back(run.d_l2);
+            dh1.push_back(run.d_h1);
+            pl2.push_back(run.p_l2);
+        }
+        const std::string label = cellName(cell);
+        RecordProperty("p08_" + label + "_d_l2_rates", join(rates(dl2)));
+        RecordProperty("p08_" + label + "_d_h1_rates", join(rates(dh1)));
+        RecordProperty("p08_" + label + "_p_l2_rates", join(rates(pl2)));
+        EXPECT_GT(rates(dl2).back(), 2.6) << label << " " << join(dl2);
+        EXPECT_GT(rates(dh1).back(), 1.8) << label << " " << join(dh1);
+        EXPECT_GT(rates(pl2).back(), 1.7) << label << " " << join(pl2);
+    }
+}
+
 } // namespace
 } // namespace svmp::FE::systems::generality
