@@ -248,7 +248,7 @@ Status: `implemented/public`, unless noted.
 | `previousCoordinate()` | Previous physical coordinate when bound |
 | `referencePosition()` | Position in the reference configuration (x = X + d on a moving domain) |
 | `meshDisplacement()` | Mesh displacement at quadrature points |
-| `meshVelocity()` | Mesh velocity at quadrature points |
+| `meshVelocity()` | Mesh velocity at quadrature points; `grad` and `div` of it read the assembled mesh-velocity Jacobian (interpreted and JIT kernels) |
 | `meshAcceleration()` | Mesh acceleration when bound |
 | `previousMeshVelocity()`, `predictedMeshVelocity()` | Time-level mesh velocity terminals |
 | `t()`, `deltat()`, `deltat_eff()` | Time, time step, and effective time step (`FormExpr::effectiveTimeStep()`, the step implied by the `dt(.)` stencil: 1/\|a0\|, or `deltat()` without a stencil, in kernels, the JIT, derived results and point evaluation alike; 0.5333 `deltat()` under first-order generalized-alpha with rho_inf = 0.5) |
@@ -269,7 +269,7 @@ Status: `implemented/public`, unless noted.
 | `h()`, `vol()`, `area()`, `domainId()` | Cell diameter, cell volume, facet area, cell-domain marker |
 | `hNormal()` | Facet-normal cell size `2 * vol() / area()` |
 | `FormExpr::geometryTrialVectorVariation()`, `meshVelocityVariation()`, `currentMeasureVariation()`, `currentNormalVariation()`, `surfaceJacobianVariation()`, `geometryTrialJacobianVariation()` | `implemented/internal`; produced by symbolic geometry differentiation |
-| `FormExpr::cellDiameterVariation()`, `cellVolumeVariation()`, `facetAreaVariation()` | `implemented/internal`; produced by the complete shape derivative: the derivatives of `h()`, `vol()`, `area()` in the mesh-displacement trial function; interpreted only (no JIT) |
+| `FormExpr::cellDiameterVariation()`, `cellVolumeVariation()`, `facetAreaVariation()` | `implemented/internal`; produced by the complete shape derivative: the derivatives of `h()`, `vol()`, `area()` in the mesh-displacement trial function; interpreted only (a kernel with one of them is interpreted with the JIT on) |
 
 The moving-domain terminals are physics-neutral. They expose assembly-provided
 mesh/domain motion and frame-explicit geometry; they do not encode a specific
@@ -317,7 +317,13 @@ function, G = grad(dd)):
 | coefficient callbacks | grad(f) . dd |
 
 Every row with a spatial integral gets a mesh block; the tangent is symbolic
-(the AD reference path is refused).  Refused by name: moving cut topology (cut
+(the AD reference path is refused).  With the JIT on, the mesh blocks are
+compiled like the other blocks (fused with the cell blocks of the install,
+or each on its own where the fused kernel does not take a term); a mesh
+block the JIT does not lower (the variations of `h()`, `vol()`, `area()`,
+nested spatial derivatives of composite arguments such as
+`div(sym(grad(u)))`) is interpreted, and either way equals the
+interpreter's to round-off.  Refused by name: moving cut topology (cut
 volumes, cut-restricted cells, generated boundary and interface rules,
 cut-adjacent facets), a mesh displacement richer than the geometry (the
 coordinate update moves the geometry nodes only), mesh acceleration and
@@ -325,7 +331,8 @@ predicted mesh velocity,
 curvature, functionals of other integrals (boundary integrals, auxiliary
 inputs and outputs), and spatial derivatives of cellwise-constant geometry.
 `Tests/Unit/Systems/test_ShapeDerivatives.cpp` compares J dd with residual
-differences under the coordinate update on representative cells in CTest; its
+differences under the coordinate update on representative cells in CTest,
+and the JIT's J dd and residual with the interpreter's; its
 suite `CompleteShapeDerivativeSweep`, left out of CTest, covers Tri3, Quad4,
 Tet4, Hex8, Wedge6 and Pyr5 cells, straight and curved P2, with P1 and P2
 fields: `test_fe_systems --gtest_filter='CompleteShapeDerivativeSweep.*'`.

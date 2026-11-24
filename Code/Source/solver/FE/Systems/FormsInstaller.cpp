@@ -2240,9 +2240,6 @@ KernelPtr installResidualForm(
     auto block_options = install_options;
     block_options.compiler_options =
         compilerOptionsForTrial(install_options.compiler_options, trial_field);
-    if (completeShapeDerivative(block_options.compiler_options.geometry_sensitivity)) {
-        block_options.compiler_options.jit.enable = false;
-    }
     const auto lowered = ensureGeometrySensitivityTrialDependency(residual_form,
                                                                   system,
                                                                   test_field,
@@ -2418,9 +2415,6 @@ std::vector<std::vector<KernelPtr>> installResidualBlocks(
                 compilerOptionsForTrial(install_options.compiler_options,
                                         trial_fields[j]);
             refuseUnsupportedCompleteShapeDerivative("installResidualBlocks", system, block_options.compiler_options);
-            if (completeShapeDerivative(block_options.compiler_options.geometry_sensitivity)) {
-                block_options.compiler_options.jit.enable = false;
-            }
             const auto lowered = ensureGeometrySensitivityTrialDependency(
                 blocks.block(i, j),
                 system,
@@ -2651,16 +2645,11 @@ CoupledResidualKernels installCoupledResidual(
             auto block_options = install_options;
             block_options.compiler_options =
                 compilerOptionsForTrial(install_options.compiler_options, trial);
-            if (completeShapeDerivative(block_options.compiler_options.geometry_sensitivity)) {
-                // The mesh blocks of a complete shape derivative are interpreted.
-                block_options.compiler_options.jit.enable = false;
-                if (monolithic_cell_feasible) {
-                    monolithic_cell_feasible = false;
-                    monolithic_disable_reason =
-                        "installCoupledResidual: monolithic cell fusion disabled for the interpreted mesh blocks "
-                        "of a complete shape derivative";
-                }
-            }
+            // A complete shape derivative's mesh block: its tangent is the
+            // kernel's own (the integrand's derivative with its measure
+            // variation), which the monolithic cell kernel reads from it.
+            const bool complete_shape_block =
+                completeShapeDerivative(block_options.compiler_options.geometry_sensitivity);
             const auto lowered_base = lowerStateFields(base_expr, trial, system);
             const auto lowered = ensureGeometrySensitivityTrialDependency(lowered_base,
                                                                           system,
@@ -2706,7 +2695,8 @@ CoupledResidualKernels installCoupledResidual(
                     "installCoupledResidual: mixed-block cell fusion disabled for "
                     "level-set cut-domain shape-tangent interface terms";
             }
-            if (need_symbolic_tangent_kernel || (dispatch.has_cell && monolithic_cell_feasible)) {
+            if (need_symbolic_tangent_kernel ||
+                (dispatch.has_cell && monolithic_cell_feasible && !complete_shape_block)) {
                 try {
                     auto tangent_expr = block_geometry_sensitivity
                         ? forms::differentiateResidual(
@@ -2792,7 +2782,7 @@ CoupledResidualKernels installCoupledResidual(
                 .want_vector = owns_row_vector,
             });
 
-            if (dispatch.has_cell && tangent_ir_for_plan.has_value()) {
+            if (dispatch.has_cell && (tangent_ir_for_plan.has_value() || complete_shape_block)) {
                 monolithic_cell_blocks.push_back(forms::MonolithicCellKernel::BlockSpec{
                     .test_field = test_fields[i],
                     .trial_field = trial,
@@ -3391,16 +3381,11 @@ CoupledResidualKernels installCoupledResidualMixed(
             auto block_options = install_options;
             block_options.compiler_options =
                 compilerOptionsForTrial(install_options.compiler_options, trial);
-            if (completeShapeDerivative(block_options.compiler_options.geometry_sensitivity)) {
-                // The mesh blocks of a complete shape derivative are interpreted.
-                block_options.compiler_options.jit.enable = false;
-                if (monolithic_cell_feasible) {
-                    monolithic_cell_feasible = false;
-                    monolithic_disable_reason =
-                        "installCoupledResidual: monolithic cell fusion disabled for the interpreted mesh blocks "
-                        "of a complete shape derivative";
-                }
-            }
+            // A complete shape derivative's mesh block: its tangent is the
+            // kernel's own (the integrand's derivative with its measure
+            // variation), which the monolithic cell kernel reads from it.
+            const bool complete_shape_block =
+                completeShapeDerivative(block_options.compiler_options.geometry_sensitivity);
             const auto lowered_base = lowerStateFields(base_expr, trial, system);
             const auto lowered = ensureGeometrySensitivityTrialDependency(lowered_base,
                                                                           system,
@@ -3448,7 +3433,8 @@ CoupledResidualKernels installCoupledResidualMixed(
                     "installCoupledResidualMixed: mixed-block cell fusion disabled for "
                     "level-set cut-domain shape-tangent interface terms";
             }
-            if (need_symbolic_tangent_kernel || (dispatch.has_cell && monolithic_cell_feasible)) {
+            if (need_symbolic_tangent_kernel ||
+                (dispatch.has_cell && monolithic_cell_feasible && !complete_shape_block)) {
                 try {
                     auto tangent_expr = block_geometry_sensitivity
                         ? forms::differentiateResidual(
@@ -3548,7 +3534,7 @@ CoupledResidualKernels installCoupledResidualMixed(
                 .want_vector = owns_row_vector,
             });
 
-            if (dispatch.has_cell && tangent_ir_for_plan.has_value()) {
+            if (dispatch.has_cell && (tangent_ir_for_plan.has_value() || complete_shape_block)) {
                 monolithic_cell_blocks.push_back(forms::MonolithicCellKernel::BlockSpec{
                     .test_field = test_fields[i],
                     .trial_field = trial,

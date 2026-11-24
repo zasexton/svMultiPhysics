@@ -22,6 +22,8 @@
 #include "Assembly/GlobalSystemView.h"
 #include "Basis/LagrangeBasis.h"
 #include "Basis/NodeOrderingConventions.h"
+#include "Forms/JIT/JITKernelWrapper.h"
+#include "Forms/MonolithicCellKernel.h"
 #include "Forms/Vocabulary.h"
 #include "Spaces/H1Space.h"
 #include "Spaces/ProductSpace.h"
@@ -320,6 +322,7 @@ struct ProbeSetup {
     bool complete{false};
     bool jit{false};
     bool interface{false};      ///< register the fitted interface kGamma (n even)
+    bool record_residual{false};
 };
 
 struct DirectionalDefect {
@@ -328,6 +331,9 @@ struct DirectionalDefect {
     Real fd_norm{0.0};
     Real jac_norm{0.0};
     std::vector<Real> jdd{};        ///< J dd on the probe rows for the first mesh direction
+    std::vector<Real> residual{};   ///< the probe rows at the base state (ProbeSetup::record_residual)
+    bool jit_mesh_blocks{false};    ///< every mesh block (cell and boundary terms) ran compiled
+    std::string jit_message{};      ///< why it did not
 };
 
 Real norm2(const std::vector<Real>& v)
@@ -371,6 +377,8 @@ DirectionalDefect directionalDefect(const ProbeSetup& setup, const Probe& probe)
     systems::FormInstallOptions install;
     install.compiler_options.use_symbolic_tangent = true;
     install.compiler_options.jit.enable = setup.jit;
+    // The physics modules' JIT policy: specialized kernels with baked bases.
+    install.compiler_options.jit.specialization.enable = setup.jit;
     system.addOperator("probe");
     FieldId row = d_id;
     if (probe.rows == Rows::Mesh) {
@@ -442,6 +450,47 @@ DirectionalDefect directionalDefect(const ProbeSetup& setup, const Probe& probe)
     assemble(values, &J, nullptr);
 
     DirectionalDefect out;
+    if (setup.record_residual) {
+        out.residual = residualRows(values);
+    }
+    // Cell blocks are compiled either as one fused kernel or each on its own
+    // (the fused kernel falls back to its blocks' kernels).
+    {
+        bool all = true;
+        int mesh_blocks = 0;
+        const auto check = [&](FieldId trial, const std::shared_ptr<svmp::FE::assembly::AssemblyKernel>& kernel,
+                               forms::IntegralDomain domain, int marker) {
+            if (trial != d_id) {
+                return;
+            }
+            ++mesh_blocks;
+            const auto* wrapper = dynamic_cast<const forms::jit::JITKernelWrapper*>(kernel.get());
+            if (wrapper == nullptr || !wrapper->hasCompiledTangentDispatch(domain, marker)) {
+                all = false;
+                out.jit_message += "a mesh block is interpreted; ";
+            }
+        };
+        const auto& definition = system.operatorDefinition("probe");
+        for (const auto& term : definition.cells) {
+            if (const auto* fused = dynamic_cast<const forms::MonolithicCellKernel*>(term.kernel.get())) {
+                if (fused->hasCompiledDispatch()) {
+                    mesh_blocks += 1;
+                    continue;
+                }
+                out.jit_message += fused->compileMessage() + "; ";
+                for (std::size_t b = 0; b < fused->numBlocks(); ++b) {
+                    check(fused->blockSpec(b).trial_field, fused->blockSpec(b).fallback_kernel,
+                          forms::IntegralDomain::Cell, -1);
+                }
+            } else {
+                check(term.trial_field, term.kernel, forms::IntegralDomain::Cell, -1);
+            }
+        }
+        for (const auto& term : definition.boundary) {
+            check(term.trial_field, term.kernel, forms::IntegralDomain::Boundary, term.marker);
+        }
+        out.jit_mesh_blocks = all && mesh_blocks > 0;
+    }
     const Real eps = 1e-6;
     for (int k = 0; k < 3; ++k) {
         const bool mesh_direction = k < 2;
@@ -968,29 +1017,70 @@ TEST(CompleteShapeDerivativeSweep, StabilizationOnEveryCellType)
     runProbes(stabilizationProbes(), "stabilization", cases);
 }
 
-// The mesh blocks of a complete shape derivative are interpreted: with the
-// JIT on, their J dd is the interpreter's (to round-off), while the other
-// blocks of the same installs keep their JIT kernels.
 namespace {
 
-void checkMeshBlocksInterpreted(const std::vector<MeshCase>& mesh_cases)
+// With the JIT on (specialized kernels, as the physics modules use it), the
+// mesh blocks of a complete shape derivative are compiled where the JIT
+// lowers every term: fused with the other cell blocks of the install, or each
+// on its own where the fused kernel does not take a term.  They are
+// interpreted per kernel where the JIT does not lower a term (the variations
+// of h(), vol() and area(), and nested spatial derivatives of composite
+// arguments, as in div(sym(grad(u)))).  Either way J dd equals the
+// interpreter's to round-off, and so do the residual rows, second
+// derivatives of the solution included; J dd matches residual differences.
+void checkJITMatchesTheInterpreter(const std::vector<MeshCase>& mesh_cases)
 {
     using namespace svmp::FE::forms;
     const auto n = FormExpr::normal();
-    const std::vector<Probe> probes = {
-        {"q div(u) dx", Rows::Scalar, [](const Symbols& s) { return (s.q * div(s.u) + zeroTimes(s.p * s.q)).dx(); }},
-        {"grad(u):grad(v) dx", Rows::Vector, [](const Symbols& s) { return inner(grad(s.u), grad(s.v)).dx(); }},
-        {"tau_M grad(p).grad(q) dx", Rows::Scalar,
-         [](const Symbols& s) { return inner(grad(s.q), vmsTerms(s).tau_m * grad(s.p)).dx(); }},
-        {"(u.normal()) q ds", Rows::Scalar,
-         [n](const Symbols& s) { return (inner(s.u, n) * s.q + zeroTimes(s.p * s.q)).ds(kTop); }},
-        {"q / hNormal() ds", Rows::Scalar,
-         [](const Symbols& s) { return (s.q / hNormal() + zeroTimes(s.p * s.q)).ds(kTop); }},
-        {"div(2 sym(grad(u))).v dx", Rows::Vector,
-         [](const Symbols& s) { return inner(div(FormExpr::constant(2.0) * sym(grad(s.u))), s.v).dx(); }},
+    const auto half = FormExpr::constant(0.5);
+    struct JITProbe {
+        Probe probe;
+        bool compiled;            ///< the mesh blocks are compiled
+    };
+    const std::vector<JITProbe> probes = {
+        {{"x().v + u.v/2 dx", Rows::Vector,
+          [half](const Symbols& s) { return (inner(x(), s.v) + half * inner(s.u, s.v)).dx(); }},
+         true},
+        {{"w.v + u.v/2 dx", Rows::Vector,
+          [half](const Symbols& s) { return (inner(meshVelocity(), s.v) + half * inner(s.u, s.v)).dx(); }},
+         true},
+        {{"(tr(Jinv()) + p/2) q dx", Rows::Scalar,
+          [half](const Symbols& s) { return ((trace(Jinv()) + half * s.p) * s.q).dx(); }},
+         true},
+        {{"(detJ() + p/2) q dx", Rows::Scalar, [half](const Symbols& s) { return ((detJ() + half * s.p) * s.q).dx(); }},
+         true},
+        {{"(grad(u) (u - w)).v dx", Rows::Vector,
+          [](const Symbols& s) { return inner(grad(s.u) * (s.u - meshVelocity()), s.v).dx(); }},
+         true},
+        {{"div(w) u.v dx", Rows::Vector, [](const Symbols& s) { return (div(meshVelocity()) * inner(s.u, s.v)).dx(); }},
+         true},
+        {{"(div(u) + p/2) q dx", Rows::Scalar, [half](const Symbols& s) { return ((div(s.u) + half * s.p) * s.q).dx(); }},
+         true},
+        {{"grad(u):grad(v) dx", Rows::Vector, [](const Symbols& s) { return inner(grad(s.u), grad(s.v)).dx(); }},
+         true},
+        {{"tau_M grad(p).grad(q) dx", Rows::Scalar,
+          [](const Symbols& s) { return inner(grad(s.q), vmsTerms(s).tau_m * grad(s.p)).dx(); }},
+         false},
+        {{"(u.normal() + p/2) q ds", Rows::Scalar,
+          [n, half](const Symbols& s) { return ((inner(s.u, n) + half * s.p) * s.q).ds(kTop); }},
+         true},
+        {{"(1 / hNormal() + p/2) q ds", Rows::Scalar,
+          [half](const Symbols& s) { return ((FormExpr::constant(1.0) / hNormal() + half * s.p) * s.q).ds(kTop); }},
+         false},
+        {{"div(2 sym(grad(u))).v dx", Rows::Vector,
+          [](const Symbols& s) { return inner(div(FormExpr::constant(2.0) * sym(grad(s.u))), s.v).dx(); }},
+         false},
+    };
+    const auto expectClose = [](const std::vector<Real>& a, const std::vector<Real>& b, const char* what) {
+        ASSERT_EQ(a.size(), b.size()) << what;
+        Real scale = 1.0;
+        for (const auto x : a) scale = std::max(scale, std::abs(x));
+        for (std::size_t i = 0; i < a.size(); ++i) {
+            EXPECT_NEAR(a[i], b[i], 1e-12 * scale) << what << " row " << i;
+        }
     };
     for (const auto& mesh_case : mesh_cases) {
-        for (const auto& probe : probes) {
+        for (const auto& [probe, compiled] : probes) {
             SCOPED_TRACE(caseName(mesh_case) + ": " + probe.name);
             ProbeSetup setup;
             setup.cell = mesh_case.cell;
@@ -999,25 +1089,29 @@ void checkMeshBlocksInterpreted(const std::vector<MeshCase>& mesh_cases)
             setup.u_order = mesh_case.field_order;
             setup.p_order = mesh_case.field_order;
             setup.complete = true;
-            const auto interpreted = directionalDefect(setup, probe).jdd;
+            setup.record_residual = true;
+            const auto interpreted = directionalDefect(setup, probe);
             setup.jit = true;
-            const auto with_jit = directionalDefect(setup, probe).jdd;
-            ASSERT_EQ(interpreted.size(), with_jit.size());
-            for (std::size_t i = 0; i < interpreted.size(); ++i) {
-                EXPECT_NEAR(interpreted[i], with_jit[i], 1e-12 * (1.0 + std::abs(interpreted[i]))) << "row " << i;
+            const auto with_jit = directionalDefect(setup, probe);
+            if (compiled) {
+                EXPECT_TRUE(with_jit.jit_mesh_blocks) << with_jit.jit_message;
             }
+            expectClose(interpreted.jdd, with_jit.jdd, "J dd");
+            expectClose(interpreted.residual, with_jit.residual, "residual");
+            EXPECT_LT(with_jit.mesh, 1e-6) << "|J dd| " << with_jit.jac_norm << ", |FD| " << with_jit.fd_norm;
         }
     }
 }
 
 } // namespace
 
-TEST(CompleteShapeDerivative, MeshBlocksAreInterpretedWithTheJITOn)
+TEST(CompleteShapeDerivative, JITMatchesTheInterpreterOnAMovingDomain)
 {
-    checkMeshBlocksInterpreted({{Cell::Quad, 1, 1, 1}});
+    checkJITMatchesTheInterpreter({{Cell::Quad, 1, 1, 2}, {Cell::Tetra, 1, 1, 1}});
 }
 
-TEST(CompleteShapeDerivativeSweep, MeshBlocksAreInterpretedWithTheJITOnSeveralCells)
+TEST(CompleteShapeDerivativeSweep, JITMatchesTheInterpreterOnSeveralCells)
 {
-    checkMeshBlocksInterpreted({{Cell::Triangle, 1, 1, 2}, {Cell::Quad, 2, 2, 2}, {Cell::Hex, 1, 1, 1}, {Cell::Tetra, 2, 2, 1}});
+    checkJITMatchesTheInterpreter(
+        {{Cell::Triangle, 1, 1, 2}, {Cell::Quad, 2, 2, 2}, {Cell::Hex, 1, 1, 1}, {Cell::Tetra, 2, 2, 1}, {Cell::Wedge, 1, 1, 1}});
 }

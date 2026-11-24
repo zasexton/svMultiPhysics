@@ -7767,6 +7767,11 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
                                 break;
                             }
                         }
+                        if (kid.type == FormExprType::MeshVelocity && shape.kind == Shape::Kind::Matrix) {
+                            // grad(w): the assembly-provided mesh-velocity Jacobian dw_i/dx_j.
+                            values[op_idx] = loadMatDimFromQ(side.mesh_velocity_jacobians, q_index, shape.dims[0]);
+                            break;
+                        }
 	                        throw std::runtime_error("LLVMGen: Gradient operand not supported");
 	                    }
 
@@ -11020,6 +11025,11 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
                                     }
 	                        }
 
+                        if (kid.type == FormExprType::MeshVelocity && shape.kind == Shape::Kind::Matrix) {
+                            // grad(w): the assembly-provided mesh-velocity Jacobian dw_i/dx_j.
+                            values[op_idx] = loadMatDimFromQ(side.mesh_velocity_jacobians, q_index, shape.dims[0]);
+                            break;
+                        }
 	                        throw std::runtime_error("LLVMGen: cached Gradient operand not supported");
 	                    }
 
