@@ -738,7 +738,11 @@ only, also on an interface built from a boundary label (not in `dx` or `ds`,
 and not in the row of a global field); it takes no `.minus()`, `.plus()`,
 `jump()` or `avg()` (it has one value); a volume field in such a term needs
 its side; a product of the two sides, or of the interface-owned unknown with
-another unknown, is refused, as is `dI()` without a marker.  The kernels are
+another unknown, is refused, as is `dI()` without a marker.  Its derivatives
+(`grad`, `div`, `curl`, the Hessian) are refused too: the face basis would be
+differentiated with the parent cell's map, not as a surface gradient (on a
+tetrahedron's face the P1 stiffness of an interface field picked up a normal
+part from the cell's apex; `test_InterfaceMultiplier.cpp`).  The kernels are
 interpreted AD kernels, also with the JIT on and with symbolic tangents.
 
 ### Boundary Conditions, Wave 2 (D63)

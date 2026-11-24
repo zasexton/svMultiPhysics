@@ -710,4 +710,40 @@ TEST(InterfaceFaceAlignment, AHexahedralInterfaceFieldCouplesAsTheFaceMass)
     }
 }
 
+/**
+ * The derivative of an interface-owned field is refused.  The face basis was
+ * differentiated with the parent cell's inverse map, which is not the surface
+ * gradient: on the face z = 0 (vertices 0, 1, 2; area 1/2) of the tetrahedron
+ * with apex (0.2, 0.3, 1), the P1 stiffness inner(grad(lam), grad(mu)).dI came
+ * out [1.125 -0.55 -0.575; -0.55 0.52 0.03; -0.575 0.03 0.545] instead of the
+ * triangle's [1 -1/2 -1/2; -1/2 1/2 0; -1/2 0 1/2] (unchanged by a rigid
+ * rotation of the cells, so a rotated-patch check cannot see it).
+ */
+TEST(InterfaceFaceAlignment, TheDerivativeOfAnInterfaceFieldIsRefused)
+{
+    const std::vector<svmp::real_t> X{0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0, 0.0,
+                                      0.2, 0.3, 1.0, 0.3, 0.2, -1.0};
+    const std::vector<svmp::index_t> conn{0, 1, 2, 3, 0, 2, 1, 4};
+    FESystem sys(buildCellPair(ElementType::Tetra4, X, conn, /*turn=*/0));
+    sys.setInterfaceMeshFromFaceSet(kGamma, "gamma");
+    auto volume = std::make_shared<spaces::H1Space>(ElementType::Tetra4, 1);
+    auto trace = std::make_shared<spaces::H1Space>(ElementType::Triangle3, 1);
+    const auto u_id = sys.addField(FieldSpec{.name = "u", .space = volume});
+    const auto lam_id = sys.addInterfaceField("lambda", trace, kGamma);
+    sys.addOperator("op");
+    const auto u = forms::StateField(u_id, *volume, "u");
+    const auto w = forms::TestField(u_id, *volume, "w");
+    const auto lam = forms::StateField(lam_id, *trace, "lambda");
+    const auto mu = forms::TestField(lam_id, *trace, "mu");
+    try {
+        (void)systems::installFormulation(sys, "op", {u_id, lam_id},
+                                          (u * w).dx() +
+                                              forms::inner(forms::grad(lam), forms::grad(mu)).dI(kGamma));
+        ADD_FAILURE() << "the gradient of an interface-owned field was installed";
+    } catch (const std::exception& e) {
+        EXPECT_NE(std::string(e.what()).find("the derivative of an interface-owned field"), std::string::npos)
+            << e.what();
+    }
+}
+
 } // namespace svmp::FE::test_interface_multiplier

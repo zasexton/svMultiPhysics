@@ -85,12 +85,26 @@ public:
     }
 
     /// jump() and avg() written with restrictions; a check that no
-    /// interface-owned symbol is restricted.
+    /// interface-owned symbol is restricted or differentiated.
     [[nodiscard]] FormExpr withExplicitSides(const FormExpr& integrand) const
     {
         return integrand.transformNodes([this](const FormExprNode& node) -> std::optional<FormExpr> {
             const auto kids = node.childrenShared();
             switch (node.type()) {
+            case FormExprType::Gradient:
+            case FormExprType::Divergence:
+            case FormExprType::Curl:
+            case FormExprType::Hessian:
+                // The face basis would be differentiated with the parent
+                // cell's map, which is not its surface derivative: on a face
+                // of a tetrahedron the gradient of a P1 interface field gets
+                // a normal part from the cell's apex.
+                if (holdsInterfaceOwned(*kids.at(0))) {
+                    fail("the derivative of an interface-owned field on its interface (its surface gradient) is "
+                         "not implemented",
+                         node);
+                }
+                return std::nullopt;
             case FormExprType::Jump:
             case FormExprType::Average:
             case FormExprType::RestrictMinus:
