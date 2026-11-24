@@ -1,5 +1,7 @@
-from .conftest import run_with_reference
+from .conftest import run_with_reference, cpp_exec
 import os
+import re
+import shutil
 import subprocess
 
 # Common folder for all tests in this file
@@ -38,6 +40,20 @@ def test_pipe_RCR_weak_dir_3d(n_proc):
     test_folder = "pipe_RCR_weak_dir_3d"
     t_max = 2
     run_with_reference(base_folder, test_folder, fields, n_proc, t_max)
+
+def test_pipe_RCR_weak_dir_3d_new_solver(n_proc, tmp_path):
+    # The new solver on the weak-wall deck (Penalty_parameter as its Nitsche
+    # gamma) converges at every step. Its results are not compared with the
+    # legacy reference result_002.vtu here.
+    case = tmp_path / "pipe_RCR_weak_dir_3d"
+    shutil.copytree(os.path.join("cases", base_folder, "pipe_RCR_weak_dir_3d"), case,
+                    ignore=shutil.ignore_patterns("*-procs"))
+    cmd = ["mpirun"] + (["--oversubscribe"] if n_proc > 1 else []) + ["-np", str(n_proc), cpp_exec, "solver_new.xml"]
+    run = subprocess.run(cmd, cwd=case, capture_output=True, text=True)
+    assert run.returncode == 0, run.stdout[-4000:] + run.stderr[-4000:]
+    steps = re.findall(r"nonlinear_done step=(\d+) time=\S+ converged=(\d)", run.stdout)
+    assert [int(step) for step, _ in steps] == [0, 1], run.stdout[-4000:]
+    assert all(converged == "1" for _, converged in steps), run.stdout[-4000:]
 
 def test_pipe_RCR_genBC(n_proc):
     test_folder = "pipe_RCR_genBC"
