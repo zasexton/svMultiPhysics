@@ -45,6 +45,7 @@
 #include <functional>
 #include <map>
 #include <memory>
+#include <optional>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -165,6 +166,50 @@ struct GeneratedStateSelection {
     const GeneratedStateRequests& requests,
     GeneratedStateSolve solve,
     bool per_step_only);
+
+// ---------------------------------------------------------------------------
+// Outer fixed-point preset
+// ---------------------------------------------------------------------------
+
+/// Overrides of the transient outer fixed-point preset; the owner reads them
+/// from its input (unset: the preset's value).
+struct OuterFixedPointOverrides {
+    /// Pass limit; at least 1 is used.
+    std::optional<int> max_passes{};
+    /// 1-based pass whose update is the first relaxed one; 0 disables the
+    /// relaxation, 1 relaxes every update.
+    std::optional<int> relaxation_start_pass{};
+    /// 1-based pass from which a two-state constraint cycle ends the
+    /// attempt; 0 disables.
+    std::optional<int> cycle_exit_pass{};
+    /// Cut-topology restarts per step; negative follows the pass limit.
+    std::optional<int> topology_restarts{};
+};
+
+/// The transient preset (decision D28): plain passes before the relaxation
+/// starts, and the pass limit.
+inline constexpr int kTransientOuterFixedPointPlainPasses = 12;
+inline constexpr int kTransientOuterFixedPointMaxPasses = 30;
+/// The steady pass limit.
+inline constexpr int kSteadyOuterFixedPointMaxPasses = 12;
+
+/**
+ * @brief The outer fixed-point options of a steady or transient solve.
+ *
+ * Steady: at most kSteadyOuterFixedPointMaxPasses passes, no relaxation, no
+ * topology restarts, no cycle exit; @p overrides are ignored.  Transient:
+ * at most kTransientOuterFixedPointMaxPasses passes; the updates of the first
+ * kTransientOuterFixedPointPlainPasses passes are plain and later ones use
+ * the safeguarded delta-squared relaxation, so a step that converges within
+ * the plain passes is bitwise identical to the plain loop; the topology
+ * restart budget is the pass limit; a constraint cycle ends the attempt from
+ * the first pass beyond the plain ones.  The overrides apply in that order:
+ * passes, restarts, relaxation, cycle exit.  `enabled` is left false: the
+ * selected schedule decides it.
+ */
+[[nodiscard]] NewtonOptions::ExternalStateFixedPointOptions outerFixedPointPreset(
+    GeneratedStateSolve solve,
+    const OuterFixedPointOverrides& overrides = {});
 
 /// One synchronization: the point and what the Geometry role produced.
 struct GeneratedStateSync {

@@ -9,6 +9,7 @@
 
 #include "TimeStepping/GeneratedState.h"
 
+#include <algorithm>
 #include <cstdint>
 #include <cstdlib>
 #include <memory>
@@ -246,6 +247,125 @@ TEST(GeneratedStateSelection, MatchesTheApplicationSelectionForEveryRequestCombi
       {.maintenance = true}, ts::GeneratedStateSolve::Steady, /*per_step_only=*/true);
   EXPECT_TRUE(steady.policy.outer_fixed_point);
   EXPECT_FALSE(steady.policy.per_step_only);
+}
+
+// ---------------------------------------------------------------------------
+// Outer fixed-point preset
+// ---------------------------------------------------------------------------
+
+namespace {
+
+using FixedPointOptions = ts::NewtonOptions::ExternalStateFixedPointOptions;
+
+void expectSameFixedPointOptions(const FixedPointOptions& a, const FixedPointOptions& b,
+                                 const std::string& where)
+{
+  EXPECT_EQ(a.enabled, b.enabled) << where;
+  EXPECT_EQ(a.max_iterations, b.max_iterations) << where;
+  EXPECT_EQ(a.max_discontinuity_restarts, b.max_discontinuity_restarts) << where;
+  EXPECT_EQ(a.constraint_cycle_exit_start_iteration, b.constraint_cycle_exit_start_iteration)
+      << where;
+  EXPECT_EQ(a.dynamic_relaxation.enabled, b.dynamic_relaxation.enabled) << where;
+  EXPECT_EQ(a.dynamic_relaxation.start_iteration, b.dynamic_relaxation.start_iteration) << where;
+  EXPECT_EQ(a.dynamic_relaxation.initial_factor, b.dynamic_relaxation.initial_factor) << where;
+  EXPECT_EQ(a.dynamic_relaxation.minimum_factor, b.dynamic_relaxation.minimum_factor) << where;
+  EXPECT_EQ(a.dynamic_relaxation.maximum_factor, b.dynamic_relaxation.maximum_factor) << where;
+  EXPECT_EQ(a.dynamic_relaxation.denominator_relative_tolerance,
+            b.dynamic_relaxation.denominator_relative_tolerance)
+      << where;
+  EXPECT_EQ(a.residual_first_on_predicted_certificate, b.residual_first_on_predicted_certificate)
+      << where;
+}
+
+// The outer fixed-point block of the Application's transient solve before
+// it moved to FE, transcribed with an override standing for each deck key
+// (std::nullopt: the key is not stated).
+FixedPointOptions transcribedTransientPreset(std::optional<int> max_passes,
+                                             std::optional<int> restarts,
+                                             std::optional<int> start_pass,
+                                             std::optional<int> exit_pass_key)
+{
+  FixedPointOptions o;
+  constexpr int kOuterFixedPointPlainPasses = 12;
+  constexpr int kOuterFixedPointDefaultMaxPasses = 30;
+  o.max_iterations = kOuterFixedPointDefaultMaxPasses;
+  o.dynamic_relaxation.enabled = true;
+  o.dynamic_relaxation.start_iteration = kOuterFixedPointPlainPasses - 1;
+  if (max_passes) {
+    o.max_iterations = std::max(1, *max_passes);
+  }
+  int cut_topology_restart_limit = o.max_iterations;
+  if (restarts && *restarts >= 0) {
+    cut_topology_restart_limit = *restarts;
+  }
+  o.max_discontinuity_restarts = cut_topology_restart_limit;
+  if (start_pass) {
+    o.dynamic_relaxation.enabled = *start_pass > 0;
+    o.dynamic_relaxation.start_iteration = std::max(0, *start_pass - 1);
+  }
+  int exit_pass = kOuterFixedPointPlainPasses + 1;
+  if (exit_pass_key) {
+    exit_pass = *exit_pass_key;
+  }
+  o.constraint_cycle_exit_start_iteration = exit_pass > 0 ? exit_pass - 1 : -1;
+  return o;
+}
+
+} // namespace
+
+TEST(OuterFixedPointPreset, PinsTheSteadyAndTransientValues)
+{
+  const auto steady = ts::outerFixedPointPreset(ts::GeneratedStateSolve::Steady);
+  EXPECT_FALSE(steady.enabled);
+  EXPECT_EQ(steady.max_iterations, 12);
+  EXPECT_FALSE(steady.dynamic_relaxation.enabled);
+  EXPECT_EQ(steady.dynamic_relaxation.start_iteration, 0);
+  EXPECT_EQ(steady.max_discontinuity_restarts, 0);
+  EXPECT_EQ(steady.constraint_cycle_exit_start_iteration, -1);
+
+  const auto transient = ts::outerFixedPointPreset(ts::GeneratedStateSolve::Transient);
+  EXPECT_FALSE(transient.enabled);
+  EXPECT_EQ(transient.max_iterations, 30);
+  EXPECT_TRUE(transient.dynamic_relaxation.enabled);
+  EXPECT_EQ(transient.dynamic_relaxation.start_iteration, 11);  // pass 12
+  EXPECT_EQ(transient.max_discontinuity_restarts, 30);
+  EXPECT_EQ(transient.constraint_cycle_exit_start_iteration, 12);  // pass 13
+  for (const auto& preset : {steady, transient}) {
+    EXPECT_EQ(preset.dynamic_relaxation.initial_factor, 1.0);
+    EXPECT_EQ(preset.dynamic_relaxation.minimum_factor, 0.05);
+    EXPECT_EQ(preset.dynamic_relaxation.maximum_factor, 25.0);
+    EXPECT_EQ(preset.dynamic_relaxation.denominator_relative_tolerance, 1.0e-12);
+    EXPECT_TRUE(preset.residual_first_on_predicted_certificate);
+  }
+}
+
+TEST(OuterFixedPointPreset, AppliesTheOverridesAsTheApplicationDid)
+{
+  const std::vector<std::optional<int>> values{std::nullopt, -1, 0, 1, 5, 40};
+  for (const auto& max_passes : values) {
+    for (const auto& restarts : values) {
+      for (const auto& start : values) {
+        for (const auto& exit : values) {
+          const ts::OuterFixedPointOverrides overrides{.max_passes = max_passes,
+                                                       .relaxation_start_pass = start,
+                                                       .cycle_exit_pass = exit,
+                                                       .topology_restarts = restarts};
+          const auto name = [](const std::optional<int>& v) {
+            return v ? std::to_string(*v) : std::string("unset");
+          };
+          const std::string where = "passes=" + name(max_passes) + " restarts=" + name(restarts) +
+                                    " start=" + name(start) + " exit=" + name(exit);
+          expectSameFixedPointOptions(
+              ts::outerFixedPointPreset(ts::GeneratedStateSolve::Transient, overrides),
+              transcribedTransientPreset(max_passes, restarts, start, exit), where);
+          // A steady solve ignores the overrides.
+          expectSameFixedPointOptions(
+              ts::outerFixedPointPreset(ts::GeneratedStateSolve::Steady, overrides),
+              ts::outerFixedPointPreset(ts::GeneratedStateSolve::Steady), where);
+        }
+      }
+    }
+  }
 }
 
 // ---------------------------------------------------------------------------

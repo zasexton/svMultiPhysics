@@ -185,6 +185,61 @@ GeneratedStateSelection legacyGeneratedStateSelection(
 }
 
 // ---------------------------------------------------------------------------
+// Outer fixed-point preset
+// ---------------------------------------------------------------------------
+
+// Moved from Application/Core/ApplicationDriver.cpp (runSteady, and the
+// outer fixed-point block of runTransient) with the order of the overrides
+// unchanged.
+
+NewtonOptions::ExternalStateFixedPointOptions outerFixedPointPreset(
+    GeneratedStateSolve solve,
+    const OuterFixedPointOverrides& overrides)
+{
+  NewtonOptions::ExternalStateFixedPointOptions options;
+  if (solve == GeneratedStateSolve::Steady) {
+    options.max_iterations = kSteadyOuterFixedPointMaxPasses;
+    return options;
+  }
+  // At most kTransientOuterFixedPointMaxPasses refreshes; the first
+  // kTransientOuterFixedPointPlainPasses are plain and the updates from then
+  // on use the safeguarded delta-squared (Aitken) relaxation.  A step that
+  // converges within the plain passes is bitwise identical to the plain loop
+  // with that cap; only steps that would have hit it continue, relaxed.
+  options.max_iterations = kTransientOuterFixedPointMaxPasses;
+  options.dynamic_relaxation.enabled = true;
+  options.dynamic_relaxation.start_iteration =
+      kTransientOuterFixedPointPlainPasses - 1;
+  if (overrides.max_passes.has_value()) {
+    options.max_iterations = std::max(1, *overrides.max_passes);
+  }
+  // A cut-topology change during a step is a normal event for a moving
+  // interface: each outer fixed-point refresh may regenerate a new topology,
+  // and the solve continues on it.  The number of such epoch changes is
+  // therefore bounded by the outer iteration limit, which is the default
+  // (0 restores the stop-and-reject behavior).
+  options.max_discontinuity_restarts = options.max_iterations;
+  if (overrides.topology_restarts.has_value() && *overrides.topology_restarts >= 0) {
+    options.max_discontinuity_restarts = *overrides.topology_restarts;
+  }
+  if (overrides.relaxation_start_pass.has_value()) {
+    options.dynamic_relaxation.enabled = *overrides.relaxation_start_pass > 0;
+    options.dynamic_relaxation.start_iteration =
+        std::max(0, *overrides.relaxation_start_pass - 1);
+  }
+  // Exit from a persistent two-state constraint cycle (see NewtonOptions::
+  // ExternalStateFixedPointOptions::constraint_cycle_exit_start_iteration):
+  // from the first refresh beyond the plain passes, so a step that converges
+  // within them is unaffected.
+  int exit_pass = kTransientOuterFixedPointPlainPasses + 1;
+  if (overrides.cycle_exit_pass.has_value()) {
+    exit_pass = *overrides.cycle_exit_pass;
+  }
+  options.constraint_cycle_exit_start_iteration = exit_pass > 0 ? exit_pass - 1 : -1;
+  return options;
+}
+
+// ---------------------------------------------------------------------------
 // Generated-state registry
 // ---------------------------------------------------------------------------
 

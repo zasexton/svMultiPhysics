@@ -6900,9 +6900,12 @@ void ApplicationDriver::runSteadyState(SimulationComponents& sim, const Paramete
           /*per_step_only=*/false);
   const bool use_steady_external_state_fixed_point =
       steady_selection.policy.outer_fixed_point;
+  // The steady preset; a steady solve reads no outer fixed-point input.
+  newton_opts.external_state_fixed_point =
+      svmp::FE::timestepping::outerFixedPointPreset(
+          svmp::FE::timestepping::GeneratedStateSolve::Steady);
   newton_opts.external_state_fixed_point.enabled =
       use_steady_external_state_fixed_point;
-  newton_opts.external_state_fixed_point.max_iterations = 12;
   newton_opts.accepted_state_sync_invalidates_residual =
       steady_selection.accepted_state_sync_invalidates_residual;
   applyJacobianCheckGeometryProvenance(
@@ -7313,78 +7316,41 @@ void ApplicationDriver::runTransient(SimulationComponents& sim, const Parameters
           svmp::FE::timestepping::perStepOnlyGeneratedState());
   const bool use_transient_external_state_fixed_point =
       transient_selection.policy.outer_fixed_point;
-  opts.newton.external_state_fixed_point.enabled =
-      use_transient_external_state_fixed_point;
-  // Outer fixed-point budget and relaxation. Default: at most
-  // kOuterFixedPointDefaultMaxPasses refreshes; the first
-  // kOuterFixedPointPlainPasses are plain and the updates from then on use
-  // the safeguarded delta-squared (Aitken) relaxation. A step that converges
-  // within the plain passes is bitwise identical to the plain loop with that
-  // cap; only steps that would have hit it continue, relaxed. XML keys
-  // Outer_fixed_point_max_passes and Outer_fixed_point_relaxation_start_pass
-  // (1-based pass whose update is the first relaxed one; 0 disables, 1
-  // relaxes every update) override the defaults.
-  constexpr int kOuterFixedPointPlainPasses = 12;
-  constexpr int kOuterFixedPointDefaultMaxPasses = 30;
-  opts.newton.external_state_fixed_point.max_iterations =
-      kOuterFixedPointDefaultMaxPasses;
-  opts.newton.external_state_fixed_point.dynamic_relaxation.enabled = true;
-  opts.newton.external_state_fixed_point.dynamic_relaxation.start_iteration =
-      kOuterFixedPointPlainPasses - 1;
+  // The transient outer fixed-point preset (decision D28) with the overrides
+  // of the input: Outer_fixed_point_max_passes,
+  // Max_cut_topology_restarts_per_step (0 restores the stop-and-reject
+  // behavior), Outer_fixed_point_relaxation_start_pass and
+  // Outer_fixed_point_constraint_cycle_exit_pass.
+  svmp::FE::timestepping::OuterFixedPointOverrides outer_fixed_point_overrides;
   {
     const auto& general = params.general_simulation_parameters;
     if (general.outer_fixed_point_max_passes.defined()) {
-      opts.newton.external_state_fixed_point.max_iterations =
-          std::max(1, general.outer_fixed_point_max_passes.value());
+      outer_fixed_point_overrides.max_passes =
+          general.outer_fixed_point_max_passes.value();
+    }
+    if (general.max_cut_topology_restarts_per_step.defined()) {
+      outer_fixed_point_overrides.topology_restarts =
+          general.max_cut_topology_restarts_per_step.value();
+    }
+    if (general.outer_fixed_point_relaxation_start_pass.defined()) {
+      outer_fixed_point_overrides.relaxation_start_pass =
+          general.outer_fixed_point_relaxation_start_pass.value();
+    }
+    if (general.outer_fixed_point_constraint_cycle_exit_pass.defined()) {
+      outer_fixed_point_overrides.cycle_exit_pass =
+          general.outer_fixed_point_constraint_cycle_exit_pass.value();
     }
   }
-  // A cut-topology change during a step is a normal event for a moving
-  // interface: each outer fixed-point refresh may regenerate a new topology,
-  // and the solve continues on it.  The number of such epoch changes is
-  // therefore bounded by the outer iteration limit, which is the default.
-  // Max_cut_topology_restarts_per_step overrides it (0 restores the
-  // stop-and-reject behavior).
-  const char* cut_topology_restart_limit_source = "outer_iteration_limit";
-  int cut_topology_restart_limit =
-      opts.newton.external_state_fixed_point.max_iterations;
-  {
-    const auto& limit_parameter =
-        params.general_simulation_parameters
-            .max_cut_topology_restarts_per_step;
-    if (limit_parameter.defined() && limit_parameter.value() >= 0) {
-      cut_topology_restart_limit = limit_parameter.value();
-      cut_topology_restart_limit_source = "xml";
-    }
-  }
-  opts.newton.external_state_fixed_point.max_discontinuity_restarts =
-      cut_topology_restart_limit;
-  {
-    const auto& start_parameter = params.general_simulation_parameters
-                                      .outer_fixed_point_relaxation_start_pass;
-    if (start_parameter.defined()) {
-      auto& relaxation =
-          opts.newton.external_state_fixed_point.dynamic_relaxation;
-      relaxation.enabled = start_parameter.value() > 0;
-      relaxation.start_iteration = std::max(0, start_parameter.value() - 1);
-    }
-  }
-  // Exit from a persistent two-state constraint cycle (see NewtonOptions::
-  // ExternalStateFixedPointOptions::constraint_cycle_exit_start_iteration).
-  // Default: from the first refresh beyond the plain passes, so a step that
-  // converges within them is unaffected. XML key
-  // Outer_fixed_point_constraint_cycle_exit_pass (1-based refresh; 0
-  // disables) overrides the default.
-  {
-    int exit_pass = kOuterFixedPointPlainPasses + 1;
-    const auto& exit_parameter = params.general_simulation_parameters
-                                     .outer_fixed_point_constraint_cycle_exit_pass;
-    if (exit_parameter.defined()) {
-      exit_pass = exit_parameter.value();
-    }
-    opts.newton.external_state_fixed_point
-        .constraint_cycle_exit_start_iteration =
-        exit_pass > 0 ? exit_pass - 1 : -1;
-  }
+  opts.newton.external_state_fixed_point =
+      svmp::FE::timestepping::outerFixedPointPreset(
+          svmp::FE::timestepping::GeneratedStateSolve::Transient,
+          outer_fixed_point_overrides);
+  opts.newton.external_state_fixed_point.enabled =
+      use_transient_external_state_fixed_point;
+  const char* cut_topology_restart_limit_source =
+      outer_fixed_point_overrides.topology_restarts.value_or(-1) >= 0
+          ? "xml"
+          : "outer_iteration_limit";
   if (use_transient_external_state_fixed_point) {
     oopCout()
         << "[svMultiPhysics::Application] Level-set nonlinear geometry policy: "

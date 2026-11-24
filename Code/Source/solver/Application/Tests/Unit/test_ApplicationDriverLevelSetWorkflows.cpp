@@ -4623,6 +4623,27 @@ TEST(ApplicationDriverLevelSetWorkflows,
 }
 
 TEST(ApplicationDriverLevelSetWorkflows,
+     OuterFixedPointKeyDefaultsDocumentTheTransientPreset)
+{
+  // The documented defaults of the four outer fixed-point keys are the
+  // transient preset's values; the driver applies a key only when the deck
+  // states it.
+  const GeneralSimulationParameters general;
+  const auto preset = svmp::FE::timestepping::outerFixedPointPreset(
+      svmp::FE::timestepping::GeneratedStateSolve::Transient);
+  EXPECT_EQ(general.outer_fixed_point_max_passes.value(), preset.max_iterations);
+  EXPECT_EQ(general.outer_fixed_point_relaxation_start_pass.value(),
+            preset.dynamic_relaxation.start_iteration + 1);
+  EXPECT_TRUE(preset.dynamic_relaxation.enabled);
+  EXPECT_EQ(general.outer_fixed_point_constraint_cycle_exit_pass.value(),
+            preset.constraint_cycle_exit_start_iteration + 1);
+  // -1: the restart budget follows the pass limit.
+  EXPECT_EQ(general.max_cut_topology_restarts_per_step.value(), -1);
+  EXPECT_EQ(preset.max_discontinuity_restarts, preset.max_iterations);
+  EXPECT_FALSE(general.outer_fixed_point_max_passes.defined());
+}
+
+TEST(ApplicationDriverLevelSetWorkflows,
      RejectedTimeStepRestorationBypassesGeneratedStateCadence)
 {
   using Point =
