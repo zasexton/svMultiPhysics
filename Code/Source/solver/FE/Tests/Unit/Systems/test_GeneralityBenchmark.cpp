@@ -1539,5 +1539,178 @@ TEST(GeneralityBenchmark, P11_ConjugateHeatCurvedProfilesConverge)
     }
 }
 
+// ===========================================================================
+// 3. Conservative upwind DG transport
+// ===========================================================================
+//
+// div(beta c) = f with a constant velocity beta and c = c_in on the inflow
+// boundary, discontinuous P1/P2, the upwind state on every interior facet:
+//
+//   (-c beta . grad v - f v) dx + (beta . n(-) c_up [[v]]) dS
+//     + ((max(beta . n, 0) c + min(beta . n, 0) c_in) v) ds,
+//
+// with c = sin(pi x + 1/2) cos(pi y / 2) (1 + 0.3 z), for beta and -beta.
+
+Real transportExact(const Point& p, int dim)
+{
+    return std::sin(kPi * p[0] + 0.5) * std::cos(0.5 * kPi * p[1]) * (dim == 3 ? 1.0 + 0.3 * p[2] : 1.0);
+}
+
+Point transportGradient(const Point& p, int dim)
+{
+    const Real zf = dim == 3 ? 1.0 + 0.3 * p[2] : 1.0;
+    return {kPi * std::cos(kPi * p[0] + 0.5) * std::cos(0.5 * kPi * p[1]) * zf,
+            -0.5 * kPi * std::sin(kPi * p[0] + 0.5) * std::sin(0.5 * kPi * p[1]) * zf,
+            dim == 3 ? 0.3 * std::sin(kPi * p[0] + 0.5) * std::cos(0.5 * kPi * p[1]) : 0.0};
+}
+
+// ---------------------------------------------------------------------------
+// The formulation: everything an author writes for problem 3.
+// ---------------------------------------------------------------------------
+FieldId defineUpwindTransport(FESystem& system, std::shared_ptr<const spaces::FunctionSpace> V, const FormExpr& beta,
+                              const FormExpr& f, const FormExpr& c_in, bool transient)
+{
+    using namespace forms;
+    FieldBinding fields(system, "Transport");
+    const auto C = fields.unknown("c", std::move(V));
+    const auto& c = C.state;
+    const auto& v = C.test;
+    const auto n = FormExpr::normal();
+    const auto bn = inner(beta, n);
+    const auto cell = transient ? dt(c) * v - c * inner(beta, grad(v)) - f * v : -c * inner(beta, grad(v)) - f * v;
+    // Forward-mode AD: the symbolic tangent of the upwind terms (max, min and
+    // sign of the normal velocity) is wrong or singular for some velocities
+    // and data today.
+    FormulationBuilder F(system, "equations", {});
+    (void)F.residual(cell.dx() + (inner(avg(beta), n.minus()) * upwindValue(c, beta) * jump(v)).dS() +
+                     ((max(bn, 0.0) * c + min(bn, 0.0) * c_in) * v).ds());
+    return C.id;
+}
+// ---------------------------------------------------------------------------
+
+FormExpr transportVelocity(int dim, Real sign)
+{
+    const std::array<Real, 3> b{sign * 1.0, sign * 0.5, sign * 0.25};
+    return forms::constantVector(b, dim);
+}
+
+struct TransportRun {
+    Real l2{0.0};
+    Real flux_cancellation{0.0};  ///< |sum of the residual - boundary terms| at an arbitrary state
+    Real flux_scale{0.0};
+};
+
+TransportRun runUpwindTransport(Cell cell, int order, int n, Real sign)
+{
+    const int dim = cellDimension(cell);
+    FESystem system(boxMesh(cell, n, boxSides()));
+    const auto V = std::make_shared<spaces::L2Space>(elementType(cell), order);
+    const std::array<Real, 3> b{sign * 1.0, sign * 0.5, sign * 0.25};
+    const auto beta = transportVelocity(dim, sign);
+    const auto f = scalarCoefficient("f", [dim, b](const Point& p) {
+        const auto g = transportGradient(p, dim);
+        Real s = 0.0;
+        for (int i = 0; i < dim; ++i) {
+            s += b[static_cast<std::size_t>(i)] * g[static_cast<std::size_t>(i)];
+        }
+        return s;
+    });
+    const auto exact = scalarCoefficient("c_exact", [dim](const Point& p) { return transportExact(p, dim); });
+    const auto c_id = defineUpwindTransport(system, V, beta, f, exact, /*transient=*/false);
+    // The boundary and source terms alone, a measurement with the same test functions.
+    {
+        const auto& record = system.fieldRecord(c_id);
+        const auto c = forms::StateField(c_id, *record.space, "c");
+        const auto v = forms::TestField(c_id, *record.space, "v");
+        const auto bn = forms::inner(beta, FormExpr::normal());
+        FormInstallOptions measurement;
+        measurement.contributes_to_problem_analysis = false;
+        FormulationBuilder B(system, "boundary_terms", measurement);
+        (void)B.residual(((forms::max(bn, 0.0) * c + forms::min(bn, 0.0) * exact) * v).ds() - (f * v).dx());
+    }
+    system.setup();
+    const auto solved = solveSteady(system, "equations");
+    EXPECT_TRUE(solved.converged) << cellName(cell) << " n=" << n;
+    const auto c_h = FormExpr::discreteField(c_id, *V, "c");
+    TransportRun run;
+    run.l2 = norm(system, ((c_h - exact) * (c_h - exact)).dx(), solved.u);
+
+    // The test function 1 (the sum of every row): the cell advection and the
+    // interior facet fluxes cancel, at any state, leaving the boundary fluxes
+    // and the source.
+    std::vector<Real> state(solved.u.size());
+    for (std::size_t i = 0; i < state.size(); ++i) {
+        state[i] = std::sin(1.3 * static_cast<Real>(i) + 0.4);
+    }
+    const auto residual = assembleVector(system, "equations", state);
+    const auto boundary = assembleVector(system, "boundary_terms", state);
+    Real sum = 0.0;
+    for (std::size_t i = 0; i < residual.size(); ++i) {
+        sum += residual[i] - boundary[i];
+        run.flux_scale = std::max(run.flux_scale, std::abs(residual[i]));
+    }
+    run.flux_cancellation = std::abs(sum);
+    return run;
+}
+
+TEST(GeneralityBenchmark, P03_UpwindDGTransportConvergesForBothVelocitySigns)
+{
+    const std::vector<FamilyOrder> cases{{Cell::Tri3, 1, 4}, {Cell::Quad4, 1, 4}, {Cell::Tet4, 1, 2},
+                                         {Cell::Hex8, 1, 2}, {Cell::Tri3, 2, 4}, {Cell::Quad4, 2, 4}};
+    for (const auto& c : cases) {
+        for (const Real sign : {1.0, -1.0}) {
+            std::vector<Real> l2;
+            const int levels = cellDimension(c.cell) == 2 ? 3 : 2;  // 3D: n = 2, 4
+            for (int level = 0; level < levels; ++level) {
+                const auto run = runUpwindTransport(c.cell, c.order, c.n0 << level, sign);
+                l2.push_back(run.l2);
+                EXPECT_LT(run.flux_cancellation, 1e-12 * std::max(Real(1.0), run.flux_scale)) << cellName(c.cell);
+            }
+            const std::string label = std::string(cellName(c.cell)) + "_DG" + std::to_string(c.order) +
+                                      (sign > 0.0 ? "_plus" : "_minus");
+            RecordProperty("p03_" + label + "_l2_rates", join(rates(l2)));
+            EXPECT_GT(rates(l2).back(), c.order + 0.75) << label << " " << join(l2);
+        }
+    }
+}
+
+TEST(GeneralityBenchmark, P03_UpwindDGTransportPreservesConstantsAndConservesMass)
+{
+    // c = 1 in, no source: the discrete solution is 1.
+    for (const auto cell : {Cell::Tri3, Cell::Hex8}) {
+        const int dim = cellDimension(cell);
+        FESystem system(boxMesh(cell, 3, boxSides()));
+        const auto V = std::make_shared<spaces::L2Space>(elementType(cell), 1);
+        (void)defineUpwindTransport(system, V, transportVelocity(dim, -1.0), FormExpr::constant(0.0),
+                                    FormExpr::constant(1.0), false);
+        system.setup();
+        const auto solved = solveSteady(system, "equations");
+        for (const auto value : solved.u) {
+            EXPECT_NEAR(value, 1.0, 1e-12) << cellName(cell);
+        }
+    }
+    // Transient: ones flow into an empty square; under backward Euler the
+    // mass changes by dt times the net boundary inflow at every step.
+    FESystem system(boxMesh(Cell::Tri3, 4, boxSides()));
+    const auto V = std::make_shared<spaces::L2Space>(ElementType::Triangle3, 1);
+    const auto beta = transportVelocity(2, 1.0);
+    const auto c_id = defineUpwindTransport(system, V, beta, FormExpr::constant(0.0), FormExpr::constant(1.0), true);
+    system.setup();
+    const double dt = 0.05;
+    const auto run = runTransient(system, "equations", std::vector<Real>(system.dofHandler().getNumDofs(), 0.0),
+                                  timestepping::SchemeKind::BackwardEuler, dt, 6);
+    ASSERT_EQ(run.states.size(), 6u);
+    const auto c_h = FormExpr::discreteField(c_id, *V, "c");
+    const auto bn = forms::inner(beta, FormExpr::normal());
+    const auto outflow = ((forms::max(bn, 0.0) * c_h + forms::min(bn, 0.0) * 1.0)).ds();
+    Real mass = 0.0;
+    for (const auto& state : run.states) {
+        const Real m = integrate(system, c_h.dx(), state);
+        EXPECT_NEAR(m - mass, -dt * integrate(system, outflow, state), 1e-12);
+        mass = m;
+    }
+    EXPECT_GT(mass, 0.1);
+}
+
 } // namespace
 } // namespace svmp::FE::systems::generality
