@@ -89,25 +89,13 @@ constexpr NewtonCommunicator kSerialNewtonCommunicator = 0;
     return enabled;
 }
 
-[[nodiscard]] bool envBoolEnabled(const char* name) noexcept
-{
-    const char* env = std::getenv(name);
-    if (env == nullptr || env[0] == '\0') {
-        return false;
-    }
-    std::string v(env);
-    std::transform(v.begin(), v.end(), v.begin(),
-                   [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
-    return !(v == "0" || v == "false" || v == "off" || v == "no");
-}
-
 /// Legacy comparison switch: stamp the current-time constraint values into
 /// every TimeHistory state before the nonlinear solve (rewrites the committed
 /// trajectory of time-dependent Dirichlet data and the injected rate slot).
 [[nodiscard]] bool distributeConstraintsIntoHistoryRequested() noexcept
 {
     static const bool enabled =
-        envBoolEnabled("SVMP_DISTRIBUTE_CONSTRAINTS_INTO_HISTORY");
+        environment::enabled("SVMP_DISTRIBUTE_CONSTRAINTS_INTO_HISTORY");
     return enabled;
 }
 
@@ -122,7 +110,7 @@ constexpr NewtonCommunicator kSerialNewtonCommunicator = 0;
 [[nodiscard]] bool mpcStateDistributeDisabled() noexcept
 {
     static const bool disabled =
-        envBoolEnabled("SVMP_NO_MPC_STATE_DISTRIBUTE");
+        environment::enabled("SVMP_NO_MPC_STATE_DISTRIBUTE");
     return disabled;
 }
 
@@ -131,13 +119,13 @@ constexpr NewtonCommunicator kSerialNewtonCommunicator = 0;
 // every use so tests can toggle it.
 [[nodiscard]] bool verifyAcceptedLineSearchRefreshSkipRequested() noexcept
 {
-    return envBoolEnabled("SVMP_NEWTON_VERIFY_ACCEPTED_REFRESH_SKIP");
+    return environment::enabled("SVMP_NEWTON_VERIFY_ACCEPTED_REFRESH_SKIP");
 }
 
 [[nodiscard]] bool newtonMatrixSupportDiagnosticRequested() noexcept
 {
     static const bool enabled =
-        envBoolEnabled("SVMP_NEWTON_MATRIX_SUPPORT_DIAGNOSTIC") ||
+        environment::enabled("SVMP_NEWTON_MATRIX_SUPPORT_DIAGNOSTIC") ||
         environment::isSet("SVMP_NEWTON_MATRIX_SUPPORT_SAMPLE_DOFS");
     return enabled;
 }
@@ -258,7 +246,7 @@ void addMatrixSupportFieldAbs(
 [[nodiscard]] bool linearProbeDumpEnabled() noexcept
 {
     static const bool enabled = [] {
-        const char* env = std::getenv("SVMP_DEBUG_LINEAR_PROBE_DUMP");
+        const char* env = environment::value("SVMP_DEBUG_LINEAR_PROBE_DUMP");
         if (env == nullptr) {
             return false;
         }
@@ -273,7 +261,7 @@ void addMatrixSupportFieldAbs(
 [[nodiscard]] bool linearSolveHistoryEnabled() noexcept
 {
     static const bool enabled = [] {
-        const char* env = std::getenv("SVMP_DEBUG_LINEAR_SOLVE_HISTORY");
+        const char* env = environment::value("SVMP_DEBUG_LINEAR_SOLVE_HISTORY");
         if (env == nullptr) {
             return false;
         }
@@ -288,7 +276,7 @@ void addMatrixSupportFieldAbs(
 [[nodiscard]] int linearSolveHistoryMaxCalls() noexcept
 {
     static const int max_calls = [] {
-        const char* env = std::getenv("SVMP_DEBUG_LINEAR_SOLVE_HISTORY_MAX_CALLS");
+        const char* env = environment::value("SVMP_DEBUG_LINEAR_SOLVE_HISTORY_MAX_CALLS");
         if (env == nullptr) {
             return -1;
         }
@@ -305,7 +293,7 @@ void addMatrixSupportFieldAbs(
 [[nodiscard]] bool linearSolveComponentNormsEnabled() noexcept
 {
     static const bool enabled = [] {
-        const char* env = std::getenv("SVMP_DEBUG_LINEAR_SOLVE_COMPONENT_NORMS");
+        const char* env = environment::value("SVMP_DEBUG_LINEAR_SOLVE_COMPONENT_NORMS");
         if (env == nullptr) {
             return false;
         }
@@ -320,7 +308,7 @@ void addMatrixSupportFieldAbs(
 [[nodiscard]] int linearSolveComponentNormsMaxNewtonIt() noexcept
 {
     static const int max_it = [] {
-        const char* env = std::getenv("SVMP_DEBUG_LINEAR_SOLVE_COMPONENT_NORMS_MAX_NEWTON_IT");
+        const char* env = environment::value("SVMP_DEBUG_LINEAR_SOLVE_COMPONENT_NORMS_MAX_NEWTON_IT");
         if (env == nullptr) {
             return -1;
         }
@@ -337,7 +325,7 @@ void addMatrixSupportFieldAbs(
 [[nodiscard]] bool linearSolveMemoryDiagnosticsEnabled() noexcept
 {
     static const bool enabled = [] {
-        const char* env = std::getenv("SVMP_LINEAR_SOLVE_MEMORY_DIAGNOSTICS");
+        const char* env = environment::value("SVMP_LINEAR_SOLVE_MEMORY_DIAGNOSTICS");
         if (env == nullptr) {
             return false;
         }
@@ -355,7 +343,7 @@ void addMatrixSupportFieldAbs(
     // harnesses in the same process.  Caching the first lookup made a later
     // explicit enable silently ineffective and rendered diagnostic coverage
     // dependent on test/solve order.
-    const char* env = std::getenv("SVMP_NEWTON_ASSEMBLY_DIAGNOSTICS");
+    const char* env = environment::value("SVMP_NEWTON_ASSEMBLY_DIAGNOSTICS");
     if (env == nullptr) {
         return false;
     }
@@ -395,7 +383,7 @@ struct ProcessMemorySnapshot {
 [[nodiscard]] std::optional<std::string> firstLinearVectorDumpPrefix()
 {
     static const std::optional<std::string> prefix = []() -> std::optional<std::string> {
-        const char* env = std::getenv("SVMP_DEBUG_FIRST_LINEAR_VECTOR_DUMP_PREFIX");
+        const char* env = environment::value("SVMP_DEBUG_FIRST_LINEAR_VECTOR_DUMP_PREFIX");
         if (env == nullptr) {
             return std::nullopt;
         }
@@ -420,7 +408,7 @@ void traceLog(const std::string& msg)
 
 [[nodiscard]] bool analysisTraceLogRequested()
 {
-    const char* env = std::getenv("SVMP_FE_ANALYSIS_LOG");
+    const char* env = environment::value("SVMP_FE_ANALYSIS_LOG");
     if (env == nullptr) {
         return false;
     }
@@ -592,7 +580,7 @@ using constraints::constraintSemanticFingerprint;
 
 [[nodiscard]] std::optional<double> explicitRankOneAfterRelativeResidualThreshold() noexcept
 {
-    const char* env = std::getenv("SVMP_FORCE_EXPLICIT_RANK_ONE_AFTER_REL_RES");
+    const char* env = environment::value("SVMP_FORCE_EXPLICIT_RANK_ONE_AFTER_REL_RES");
     if (env == nullptr) {
         return std::nullopt;
     }
@@ -607,7 +595,7 @@ using constraints::constraintSemanticFingerprint;
 
 [[nodiscard]] bool firstDirectOnlyReducedLineSearchEnabled() noexcept
 {
-    const char* env = std::getenv("SVMP_NEWTON_LINE_SEARCH_FIRST_DIRECT_ONLY_REDUCED");
+    const char* env = environment::value("SVMP_NEWTON_LINE_SEARCH_FIRST_DIRECT_ONLY_REDUCED");
     if (env == nullptr) {
         return false;
     }
@@ -619,7 +607,7 @@ using constraints::constraintSemanticFingerprint;
 
 [[nodiscard]] std::optional<double> lateDirectOnlyReducedTighteningThreshold() noexcept
 {
-    const char* env = std::getenv("SVMP_FSILS_TIGHTEN_DIRECT_ONLY_AFTER_REL_RES");
+    const char* env = environment::value("SVMP_FSILS_TIGHTEN_DIRECT_ONLY_AFTER_REL_RES");
     if (env == nullptr) {
         return std::nullopt;
     }
@@ -634,7 +622,7 @@ using constraints::constraintSemanticFingerprint;
 
 [[nodiscard]] Real directOnlyOutletJacobianScale(const std::size_t update_count) noexcept
 {
-    const char* env = std::getenv("SVMP_DIRECT_ONLY_OUTLET_JACOBIAN_SCALE");
+    const char* env = environment::value("SVMP_DIRECT_ONLY_OUTLET_JACOBIAN_SCALE");
     if (env != nullptr) {
         char* end = nullptr;
         const double value = std::strtod(env, &end);
@@ -654,7 +642,7 @@ using constraints::constraintSemanticFingerprint;
 
 [[nodiscard]] int directOnlyOutletJacobianRebuildPeriod(const std::size_t update_count) noexcept
 {
-    const char* env = std::getenv("SVMP_DIRECT_ONLY_OUTLET_JACOBIAN_REBUILD_PERIOD");
+    const char* env = environment::value("SVMP_DIRECT_ONLY_OUTLET_JACOBIAN_REBUILD_PERIOD");
     if (env != nullptr) {
         char* end = nullptr;
         const long value = std::strtol(env, &end, 10);
@@ -674,7 +662,7 @@ using constraints::constraintSemanticFingerprint;
 
 [[nodiscard]] bool preserveGroupedAlgebraicDirectOnlyCouplings() noexcept
 {
-    const char* env = std::getenv("SVMP_PRESERVE_GROUPED_ALGEBRAIC_DIRECT_ONLY");
+    const char* env = environment::value("SVMP_PRESERVE_GROUPED_ALGEBRAIC_DIRECT_ONLY");
     if (env == nullptr) {
         return false;
     }
@@ -686,7 +674,7 @@ using constraints::constraintSemanticFingerprint;
 
 [[nodiscard]] bool pureAlgebraicBorderedRecoveryEnabled() noexcept
 {
-    const char* env = std::getenv("SVMP_PURE_ALGEBRAIC_BORDERED_RECOVERY");
+    const char* env = environment::value("SVMP_PURE_ALGEBRAIC_BORDERED_RECOVERY");
     if (env == nullptr) {
         return false;
     }
@@ -698,7 +686,7 @@ using constraints::constraintSemanticFingerprint;
 
 [[nodiscard]] Real lateDirectOnlyReducedInnerRelTol() noexcept
 {
-    const char* env = std::getenv("SVMP_FSILS_TIGHTEN_DIRECT_ONLY_INNER_REL_TOL");
+    const char* env = environment::value("SVMP_FSILS_TIGHTEN_DIRECT_ONLY_INNER_REL_TOL");
     if (env == nullptr) {
         return static_cast<Real>(1e-6);
     }
@@ -1115,7 +1103,7 @@ void writeScalarFieldVertexDumpRecords(const std::string& path,
 
 [[nodiscard]] bool jacobianCheckEnabled() noexcept
 {
-    const char* env = std::getenv("SVMP_FE_JACOBIAN_CHECK");
+    const char* env = environment::value("SVMP_FE_JACOBIAN_CHECK");
     if (env == nullptr) {
         return false;
     }
@@ -1127,7 +1115,7 @@ void writeScalarFieldVertexDumpRecords(const std::string& path,
 
 [[nodiscard]] int jacobianCheckNewtonIteration() noexcept
 {
-    const char* env = std::getenv("SVMP_FE_JACOBIAN_CHECK_IT");
+    const char* env = environment::value("SVMP_FE_JACOBIAN_CHECK_IT");
     if (env == nullptr) {
         return 0;
     }
@@ -1147,7 +1135,7 @@ void writeScalarFieldVertexDumpRecords(const std::string& path,
 
 [[nodiscard]] double jacobianCheckRelativeStep() noexcept
 {
-    const char* env = std::getenv("SVMP_FE_JACOBIAN_CHECK_STEP");
+    const char* env = environment::value("SVMP_FE_JACOBIAN_CHECK_STEP");
     if (env == nullptr) {
         return 1e-7;
     }
@@ -1169,7 +1157,7 @@ enum class JacobianCheckDifferenceScheme {
 
 [[nodiscard]] JacobianCheckDifferenceScheme jacobianCheckDifferenceScheme() noexcept
 {
-    const char* env = std::getenv("SVMP_FE_JACOBIAN_CHECK_SCHEME");
+    const char* env = environment::value("SVMP_FE_JACOBIAN_CHECK_SCHEME");
     if (env == nullptr) {
         return JacobianCheckDifferenceScheme::Forward;
     }
@@ -1276,7 +1264,7 @@ using ComponentFilter = std::vector<std::string>;
 [[nodiscard]] const ComponentFilter& jacobianCheckComponentFilter()
 {
     static const ComponentFilter tokens = [] {
-        const char* env = std::getenv("SVMP_FE_JACOBIAN_CHECK_COMPONENTS");
+        const char* env = environment::value("SVMP_FE_JACOBIAN_CHECK_COMPONENTS");
         if (env == nullptr) {
             return ComponentFilter{};
         }
@@ -1289,7 +1277,7 @@ using ComponentFilter = std::vector<std::string>;
 {
     static const std::vector<ComponentFilter> filters = [] {
         std::vector<ComponentFilter> parsed;
-        const char* env = std::getenv("SVMP_FE_JACOBIAN_CHECK_COMPONENT_SWEEPS");
+        const char* env = environment::value("SVMP_FE_JACOBIAN_CHECK_COMPONENT_SWEEPS");
         if (env != nullptr) {
             std::string sweep_text = trimCopy(env);
             const char separator = (sweep_text.find(';') != std::string::npos) ? ';' : ',';
@@ -1747,7 +1735,7 @@ enum class FsilsPostSolveSyncMode {
 
 [[nodiscard]] FsilsPostSolveSyncMode fsilsPostSolveSyncMode() noexcept
 {
-    const char* env = std::getenv("SVMP_FSILS_POST_SOLVE_SYNC");
+    const char* env = environment::value("SVMP_FSILS_POST_SOLVE_SYNC");
     if (env == nullptr) {
         return FsilsPostSolveSyncMode::Off;
     }
@@ -1763,7 +1751,7 @@ enum class FsilsPostSolveSyncMode {
 
 [[nodiscard]] bool newtonDirectionCheckEnabled() noexcept
 {
-    const char* env = std::getenv("SVMP_NEWTON_DIRECTION_CHECK");
+    const char* env = environment::value("SVMP_NEWTON_DIRECTION_CHECK");
     if (env == nullptr) {
         return false;
     }
@@ -5732,7 +5720,7 @@ NewtonReport NewtonSolver::solveStep(
     const bool residual_first_on_predicted_certificate =
         options_.external_state_fixed_point
             .residual_first_on_predicted_certificate &&
-        !envBoolEnabled("SVMP_DISABLE_PREDICTED_CERTIFICATE_RESIDUAL_FIRST");
+        !environment::enabled("SVMP_DISABLE_PREDICTED_CERTIFICATE_RESIDUAL_FIRST");
     std::optional<NewtonSolver> residual_first_inner_solver;
     std::optional<NewtonSolver> residual_first_scaled_inner_solver;
     auto residualFirstInnerSolver = [&]() -> const NewtonSolver& {
@@ -7747,7 +7735,7 @@ NewtonReport NewtonSolver::solveStepFrozenExternalState(
     };
 
     bool force_explicit_rank_one_updates =
-        std::getenv("SVMP_FORCE_EXPLICIT_RANK_ONE") != nullptr;
+        environment::isSet("SVMP_FORCE_EXPLICIT_RANK_ONE");
 
     auto bridgeRankOneUpdates = [&]() -> bool {
         const std::span<const backends::RankOneUpdate> rank_one_updates(
@@ -8526,7 +8514,7 @@ NewtonReport NewtonSolver::solveStepFrozenExternalState(
                         ? "post_update_convergence_check"
                         : nullptr);
                 if (initial_residual_first &&
-                    envBoolEnabled("SVMP_RESIDUAL_FIRST_SELF_CHECK")) {
+                    environment::enabled("SVMP_RESIDUAL_FIRST_SELF_CHECK")) {
                     // Diagnostic: the combined assembly must reproduce the
                     // residual bit for bit. Its residual and Jacobian are
                     // kept, so the iterates are those of the combined path.
@@ -9507,7 +9495,7 @@ NewtonReport NewtonSolver::solveStepFrozenExternalState(
             const auto nf = solve_bordered.n_field_dofs;
             const auto na = static_cast<std::size_t>(solve_bordered.n_aux);
             int max_condensed_aux = 64;
-            if (const char* env = std::getenv("SVMP_MAX_CONDENSED_AUX_SIZE")) {
+            if (const char* env = environment::value("SVMP_MAX_CONDENSED_AUX_SIZE")) {
                 const int parsed = std::atoi(env);
                 if (parsed >= 0) {
                     max_condensed_aux = parsed;
@@ -9665,7 +9653,7 @@ NewtonReport NewtonSolver::solveStepFrozenExternalState(
         }
         linear_has_live_bordered = has_solve_bordered && !condensed_bordered_active;
         const bool disable_local_condensed_recovery =
-            std::getenv("SVMP_DISABLE_LOCAL_CONDENSED_RECOVERY") != nullptr;
+            environment::isSet("SVMP_DISABLE_LOCAL_CONDENSED_RECOVERY");
         const bool use_local_condensed_recovery =
             !disable_local_condensed_recovery &&
             transient.system().hasLocalCondensedRecovery() &&

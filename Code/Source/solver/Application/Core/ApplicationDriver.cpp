@@ -3017,7 +3017,7 @@ void reimposeAcceptedMasterBearingState(
   // here as soon as accepted maintenance has refreshed the constraint set so
   // mesh-boundary provenance and all later endpoint artifacts observe the
   // same constraint-consistent values. The repeated operation is idempotent.
-  if (parseBoolEnv("SVMP_NO_MPC_STATE_DISTRIBUTE", false)) {
+  if (parseBoolValue(svmp::FE::environment::value("SVMP_NO_MPC_STATE_DISTRIBUTE"), false)) {
     return;
   }
   const auto& constraints = system.constraints();

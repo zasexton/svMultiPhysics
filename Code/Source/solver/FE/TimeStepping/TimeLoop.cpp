@@ -20,6 +20,7 @@
 #include "TimeStepping/TimeSteppingUtils.h"
 #include "TimeStepping/VSVO_BDF_Controller.h"
 #include "Core/Logger.h"
+#include "Core/EnvironmentNames.h"
 
 #include <algorithm>
 #include <cstdlib>
@@ -278,7 +279,7 @@ std::size_t setLinearDirichletDofs(backends::LinearSolver& linear,
 [[nodiscard]] bool initializationDiagnosticsEnabled() noexcept
 {
     static const bool enabled = [] {
-        const char* env = std::getenv("SVMP_TIMELOOP_INITIALIZATION_DIAGNOSTICS");
+        const char* env = environment::value("SVMP_TIMELOOP_INITIALIZATION_DIAGNOSTICS");
         if (env == nullptr || env[0] == '\0') {
             return false;
         }
@@ -297,7 +298,7 @@ std::size_t setLinearDirichletDofs(backends::LinearSolver& linear,
 [[nodiscard]] bool zeroConstrainedRatesRequested() noexcept
 {
     static const bool enabled = [] {
-        const char* env = std::getenv("SVMP_ZERO_CONSTRAINED_RATES");
+        const char* env = environment::value("SVMP_ZERO_CONSTRAINED_RATES");
         if (env == nullptr || env[0] == '\0') {
             return false;
         }
@@ -318,7 +319,7 @@ std::size_t setLinearDirichletDofs(backends::LinearSolver& linear,
 [[nodiscard]] bool mpcAcceptedStateDistributeDisabled() noexcept
 {
     static const bool disabled = [] {
-        const char* env = std::getenv("SVMP_NO_MPC_STATE_DISTRIBUTE");
+        const char* env = environment::value("SVMP_NO_MPC_STATE_DISTRIBUTE");
         if (env == nullptr || env[0] == '\0') {
             return false;
         }

@@ -14,6 +14,7 @@
 #include "Systems/FESystem.h"
 #include "Systems/FieldBinding.h"
 #include "Systems/SystemCollectives.h"
+#include "Core/EnvironmentNames.h"
 
 #include <algorithm>
 #include <cctype>
@@ -33,7 +34,7 @@ namespace {
 // The driver's environment flag reader, unchanged.
 bool parseBoolEnv(const char* name, bool default_value)
 {
-  const char* env = std::getenv(name);
+  const char* env = environment::value(name);
   if (!env) {
     return default_value;
   }

@@ -52,6 +52,9 @@ std::span<const NameDeclaration> solverCatalogue() noexcept
     constexpr const char* kLevelSetGeometry = "FE/LevelSet/LevelSetGeometryService";
     constexpr const char* kLevelSetMaintenance = "FE/LevelSet/Maintenance";
     constexpr const char* kSystemAssembly = "FE/Systems/SystemAssembly";
+    constexpr const char* kGeneratedState = "FE/TimeStepping/GeneratedState";
+    constexpr const char* kNewton = "FE/TimeStepping/NewtonSolver";
+    constexpr const char* kTimeLoop = "FE/TimeStepping/TimeLoop";
 
     static constexpr NameDeclaration kSolverNames[] = {
         // FE/Analysis: the constraint-range certificate and the row-contribution
@@ -507,6 +510,88 @@ std::span<const NameDeclaration> solverCatalogue() noexcept
          "interface motion, in cut-cell edges, that triggers interface-preserving redistancing"},
         {"SVMP_TRACE_LEVEL_SET_ADVECTION", Diagnostic, kLevelSetExtension, Flag, "off", Reference,
          "logs the velocity-extension updates of level-set advection, with every MUMPS factorization"},
+
+        // FE/TimeStepping: the generated-state schedule, the Newton solver and the
+        // time loop.
+        {"SVMP_CUT_REFRESH_PER_STEP_ONLY", NumericalOverride, kGeneratedState, Flag, "off", NonReference,
+         "refreshes the generated state once per step, without the outer fixed point"},
+        {"SVMP_SYNC_LINE_SEARCH_TRIALS", NumericalOverride, kGeneratedState, Flag,
+         "on when generated state defines the residual", NonReference,
+         "regenerates the generated state at every line-search trial (0 freezes it for comparisons)"},
+        {"SVMP_DEBUG_FIRST_LINEAR_VECTOR_DUMP_PREFIX", Diagnostic, kNewton, Text, "off", Reference,
+         "writes the right-hand side and increment of the first Newton linear solve under this prefix"},
+        {"SVMP_DEBUG_LINEAR_PROBE_DUMP", Diagnostic, kNewton, Flag, "off", Reference,
+         "logs probe products of the first Newton linear system"},
+        {"SVMP_DEBUG_LINEAR_SOLVE_COMPONENT_NORMS", Diagnostic, kNewton, Flag, "off", Reference,
+         "logs the component norms of each Newton increment"},
+        {"SVMP_DEBUG_LINEAR_SOLVE_COMPONENT_NORMS_MAX_NEWTON_IT", Diagnostic, kNewton, Integer, "-1 (all)",
+         Reference, "last Newton iteration of the component-norm log"},
+        {"SVMP_DEBUG_LINEAR_SOLVE_HISTORY", Diagnostic, kNewton, Flag, "off", Reference,
+         "logs one line per Newton linear solve"},
+        {"SVMP_DEBUG_LINEAR_SOLVE_HISTORY_MAX_CALLS", Diagnostic, kNewton, Integer, "-1 (unlimited)", Reference,
+         "linear solves logged per Newton solve"},
+        {"SVMP_DIRECT_ONLY_OUTLET_JACOBIAN_REBUILD_PERIOD", NumericalOverride, kNewton, Integer, "1",
+         NonReference, "Jacobian rebuild period with direct-only coupled-outlet updates"},
+        {"SVMP_DIRECT_ONLY_OUTLET_JACOBIAN_SCALE", NumericalOverride, kNewton, Real, "1", NonReference,
+         "scale of the direct-only coupled-outlet updates"},
+        {"SVMP_DISABLE_LOCAL_CONDENSED_RECOVERY", NumericalOverride, kNewton, Flag, "off", NonReference,
+         "skips the recovery of locally condensed auxiliary unknowns"},
+        {"SVMP_DISABLE_PREDICTED_CERTIFICATE_RESIDUAL_FIRST", Performance, kNewton, Flag, "off", Reference,
+         "assembles residual and Jacobian together on refreshes predicted to pass the zero-update "
+         "certificate"},
+        {"SVMP_DISTRIBUTE_CONSTRAINTS_INTO_HISTORY", NumericalOverride, kNewton, Flag, "off", NonReference,
+         "stamps current constraint values into every history state at state syncs"},
+        {"SVMP_FE_ANALYSIS_LOG", Diagnostic, kNewton, Text, "unset", Reference,
+         "FE system analysis report at setup and after the first tangent (any value, trace, full)"},
+        {"SVMP_FE_JACOBIAN_CHECK", Diagnostic, kNewton, Flag, "off", Reference,
+         "checks the Jacobian against residual differences at one Newton iteration"},
+        {"SVMP_FE_JACOBIAN_CHECK_COMPONENTS", Diagnostic, kNewton, List, "all", Reference,
+         "components of the Jacobian check direction"},
+        {"SVMP_FE_JACOBIAN_CHECK_COMPONENT_SWEEPS", Diagnostic, kNewton, List, "one sweep", Reference,
+         "component groups of the Jacobian check, one sweep each"},
+        {"SVMP_FE_JACOBIAN_CHECK_IT", Diagnostic, kNewton, Integer, "0", Reference,
+         "Newton iteration of the Jacobian check"},
+        {"SVMP_FE_JACOBIAN_CHECK_SCHEME", Diagnostic, kNewton, Text, "forward", Reference,
+         "difference scheme of the Jacobian check (forward, central)"},
+        {"SVMP_FE_JACOBIAN_CHECK_STEP", Diagnostic, kNewton, Real, "1e-7", Reference,
+         "relative step of the Jacobian check"},
+        {"SVMP_FORCE_EXPLICIT_RANK_ONE", NumericalOverride, kNewton, Flag, "off", NonReference,
+         "assembles low-rank auxiliary coupling updates into the Jacobian"},
+        {"SVMP_FORCE_EXPLICIT_RANK_ONE_AFTER_REL_RES", NumericalOverride, kNewton, Real, "never", NonReference,
+         "relative residual below which the direct-only outlet updates are assembled explicitly"},
+        {"SVMP_FSILS_POST_SOLVE_SYNC", NumericalOverride, kNewton, Text, "off", NonReference,
+         "refreshes the ghost entries of the Newton increment after each FSILS solve (update, ghost)"},
+        {"SVMP_FSILS_TIGHTEN_DIRECT_ONLY_AFTER_REL_RES", NumericalOverride, kNewton, Real, "never",
+         NonReference, "relative residual below which the direct-only outlet solve is tightened"},
+        {"SVMP_FSILS_TIGHTEN_DIRECT_ONLY_INNER_REL_TOL", NumericalOverride, kNewton, Real, "1e-6", NonReference,
+         "inner relative tolerance of the tightened direct-only outlet solve"},
+        {"SVMP_LINEAR_SOLVE_MEMORY_DIAGNOSTICS", Diagnostic, kNewton, Flag, "off", Reference,
+         "logs memory use around each Newton linear solve"},
+        {"SVMP_MAX_CONDENSED_AUX_SIZE", NumericalOverride, kNewton, Integer, "64", NonReference,
+         "largest auxiliary block condensed into reduced field updates"},
+        {"SVMP_NEWTON_ASSEMBLY_DIAGNOSTICS", Diagnostic, kNewton, Flag, "off", Reference,
+         "logs per-assembly statistics of Newton assemblies"},
+        {"SVMP_NEWTON_DIRECTION_CHECK", Diagnostic, kNewton, Flag, "off", Reference,
+         "logs the linear residual of each Newton increment"},
+        {"SVMP_NEWTON_LINE_SEARCH_FIRST_DIRECT_ONLY_REDUCED", NumericalOverride, kNewton, Flag, "off",
+         NonReference, "line search on the first Newton iteration with direct-only reduced updates"},
+        {"SVMP_NEWTON_MATRIX_SUPPORT_DIAGNOSTIC", Diagnostic, kNewton, Flag, "off", Reference,
+         "logs the Jacobian support of the sampled DOFs before each linear solve"},
+        {"SVMP_NEWTON_VERIFY_ACCEPTED_REFRESH_SKIP", Diagnostic, kNewton, Flag, "off", Reference,
+         "reassembles a reused line-search residual and throws unless it is identical"},
+        {"SVMP_NO_MPC_STATE_DISTRIBUTE", NumericalOverride, kNewton, Flag, "off", NonReference,
+         "skips distributing master-bearing constraint state into the solution and rate history"},
+        {"SVMP_PRESERVE_GROUPED_ALGEBRAIC_DIRECT_ONLY", NumericalOverride, kNewton, Flag, "off", NonReference,
+         "keeps algebraic direct-only auxiliary couplings grouped"},
+        {"SVMP_PURE_ALGEBRAIC_BORDERED_RECOVERY", NumericalOverride, kNewton, Flag, "off", NonReference,
+         "recovers increments of pure algebraic auxiliary blocks from the explicit bordered system"},
+        {"SVMP_RESIDUAL_FIRST_SELF_CHECK", Diagnostic, kNewton, Flag, "off", Reference,
+         "also assembles residual and Jacobian together on residual-first iterations and logs whether they "
+         "agree"},
+        {"SVMP_TIMELOOP_INITIALIZATION_DIAGNOSTICS", Diagnostic, kTimeLoop, Flag, "off", Reference,
+         "logs the constraints and norms of the initialization solves"},
+        {"SVMP_ZERO_CONSTRAINED_RATES", NumericalOverride, kTimeLoop, Flag, "off", NonReference,
+         "zeros the rates at constrained DOFs after every rate update"},
     };
     return kSolverNames;
 }

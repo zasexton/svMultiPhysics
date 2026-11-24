@@ -1762,7 +1762,7 @@ void SimulationBuilder::createSolvers()
   oopCout() << std::endl;
 
   components_.fe_system->setAnalysisSolverOptions(solver_options);
-  const char* analysis_log = std::getenv("SVMP_FE_ANALYSIS_LOG");
+  const char* analysis_log = svmp::FE::environment::value("SVMP_FE_ANALYSIS_LOG");
   const auto analysis_log_mode = analysis_log ? lower_copy(analysis_log) : std::string{};
   const bool mpi_setup_analysis_requested = !analysis_log_mode.empty();
   const bool parallel_run = svmp::MeshComm::world().is_parallel();
