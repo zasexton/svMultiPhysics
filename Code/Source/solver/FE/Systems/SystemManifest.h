@@ -47,7 +47,13 @@
  *
  * Both functions read definition-time data only and change no state.  They
  * are meant for tests and for diagnostic output at the debug log level.
+ *
+ * Installed row: installedRow() renders one residual row of an operator as
+ * its author can read it, the integrands of its compiled terms and the
+ * fields it depends on, for tests and reports; it writes no log line.
  */
+
+#include "Core/Types.h"
 
 #include <cstdint>
 #include <string>
@@ -71,6 +77,53 @@ class FESystem;
 [[nodiscard]] std::vector<std::string> kernelManifestLines(const FESystem& system);
 
 [[nodiscard]] std::vector<std::string> constraintManifestLines(const FESystem& system);
+
+/// A field of an installed row: its id and registered name.
+struct InstalledRowField {
+    FieldId id{INVALID_FIELD_ID};
+    std::string name{};
+
+    [[nodiscard]] friend bool operator==(const InstalledRowField&, const InstalledRowField&) = default;
+};
+
+/**
+ * @brief One installed residual row of an operator and its field dependencies
+ *
+ * The row of a field is what the operator's kernels with that test field
+ * assemble.  Read from those kernels (the integral terms of their compiled
+ * forms, after installation: the residual of a nonlinear kernel, the
+ * bilinear and linear forms of a linear one, a global row's measured and
+ * dGlobal terms) and from the operator's formulation records (the Jacobian
+ * blocks the installer recorded).
+ */
+struct InstalledRow {
+    std::string operator_tag{};
+    InstalledRowField field{};
+    /// The trial fields of the row's Jacobian blocks (the kernels' blocks and
+    /// the records' block couplings), in field order.
+    std::vector<InstalledRowField> jacobian_fields{};
+    /// The fields the terms read that have no Jacobian block in the row
+    /// (prescribed data, lagged and previous values), in field order.
+    std::vector<InstalledRowField> data_fields{};
+    /// One line per term, in registration order:
+    /// "<slot> trial=<field> <form>: <measure>[ dt^k] : <integrand>", the
+    /// measure as the form IR dump prints it (dx, ds(3), dS, dI(7),
+    /// dCutVolume(7,Negative), ...).
+    std::vector<std::string> terms{};
+
+    /// The row as text: "row <field> of operator <op>", "jacobian: ...",
+    /// "data: ..." and the term lines, one per line.
+    [[nodiscard]] std::string text() const;
+};
+
+/**
+ * @brief The row of @p field in operator @p op
+ *
+ * Reads definition-time data only and changes no state; available before
+ * and after setup.  Throws std::invalid_argument for an unknown operator or a
+ * field with no term in it.
+ */
+[[nodiscard]] InstalledRow installedRow(const FESystem& system, const std::string& op, FieldId field);
 
 } // namespace systems
 } // namespace FE

@@ -21,6 +21,7 @@
 #include <algorithm>
 #include <functional>
 #include <memory>
+#include <stdexcept>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -345,6 +346,53 @@ TEST(SystemManifest, BoundaryDataFactoriesGiveTheManifestsOfTheSpelledOutConditi
     EXPECT_EQ(withoutAddressKeys(typed_callback_kernels), withoutAddressKeys(spelled_callback_kernels));
     EXPECT_EQ(typed_callback_constraints, spelled_callback_constraints);
     EXPECT_FALSE(linesContaining(typed_callback_constraints, "heat_dirichlet_4").empty());
+}
+
+TEST(SystemManifest, AnInstalledRowListsItsTermsAndTheFieldsItDependsOn)
+{
+    // Two unknowns u and w and the data field p: the row of u couples to w
+    // and reads p, the row of w couples to u.
+    const auto mesh = std::make_shared<forms::test::SingleTetraMeshAccess>();
+    const auto space = std::make_shared<spaces::H1Space>(ElementType::Tetra4, /*order=*/1);
+    FESystem system(mesh);
+    const auto u_id = system.addField(FieldSpec{.name = "u", .space = space, .components = 1});
+    const auto w_id = system.addField(FieldSpec{.name = "w", .space = space, .components = 1});
+    const auto p_id = system.addField(FieldSpec{.name = "p", .space = space, .components = 1});
+    system.addOperator("op");
+    const auto u = forms::StateField(u_id, *space, "u");
+    const auto v = forms::TestField(u_id, *space, "v");
+    const auto w = forms::StateField(w_id, *space, "w");
+    const auto q = forms::TestField(w_id, *space, "q");
+    const auto p = FormExpr::discreteField(p_id, *space, "p");
+    const auto row_u = (inner(grad(u), grad(v)) + FormExpr::constant(0.25) * u * u * v + w * v + p * u * v).dx() +
+                       (FormExpr::constant(2.0) * u * v).ds(3);
+    const auto row_w = (w * w * q - u * q).dx();
+    (void)installFormulation(system, "op", {u_id, w_id}, row_u + row_w);
+
+    const auto before = kernelManifestLines(system);
+    const auto U = installedRow(system, "op", u_id);
+    EXPECT_EQ(kernelManifestLines(system), before);
+    EXPECT_EQ(U.operator_tag, "op");
+    EXPECT_EQ(U.field, (InstalledRowField{u_id, "u"}));
+    EXPECT_EQ(U.jacobian_fields, (std::vector<InstalledRowField>{{u_id, "u"}, {w_id, "w"}}));
+    EXPECT_EQ(U.data_fields, (std::vector<InstalledRowField>{{p_id, "p"}}));
+    ASSERT_FALSE(U.terms.empty());
+    EXPECT_FALSE(std::any_of(U.terms.begin(), U.terms.end(),
+                             [](const std::string& t) { return t.find('q') != std::string::npos; }));
+    EXPECT_TRUE(std::any_of(U.terms.begin(), U.terms.end(),
+                            [](const std::string& t) { return t.find(": dx : ") != std::string::npos; }));
+    EXPECT_TRUE(std::any_of(U.terms.begin(), U.terms.end(),
+                            [](const std::string& t) { return t.find(": ds(3) : ") != std::string::npos; }));
+    const auto text = U.text();
+    EXPECT_EQ(text.rfind("row u of operator op\n  jacobian: u, w\n  data: p\n", 0), 0u) << text;
+
+    const auto W = installedRow(system, "op", w_id);
+    EXPECT_EQ(W.jacobian_fields, (std::vector<InstalledRowField>{{u_id, "u"}, {w_id, "w"}}));
+    EXPECT_TRUE(W.data_fields.empty());
+    EXPECT_EQ(W.text().find("  data: -\n"), W.text().find('\n', W.text().find("jacobian")) + 1);
+
+    EXPECT_THROW((void)installedRow(system, "op", p_id), std::invalid_argument);
+    EXPECT_THROW((void)installedRow(system, "other", u_id), std::invalid_argument);
 }
 
 } // namespace

@@ -21,8 +21,10 @@
 #include "Forms/MonolithicCellKernel.h"
 #include "Systems/FESystem.h"
 #include "Systems/GlobalKernel.h"
+#include "Systems/GlobalRowKernel.h"
 #include "Systems/OperatorRegistry.h"
 
+#include <algorithm>
 #include <cstdint>
 #include <cstdlib>
 #include <cstring>
@@ -31,7 +33,9 @@
 #include <iomanip>
 #include <memory>
 #include <optional>
+#include <set>
 #include <sstream>
+#include <stdexcept>
 #include <string>
 #include <string_view>
 #include <typeinfo>
@@ -553,6 +557,247 @@ std::vector<std::string> kernelManifestLines(const FESystem& system)
 std::vector<std::string> constraintManifestLines(const FESystem& system)
 {
     return system.constraintManifestLines();
+}
+
+namespace {
+
+/// The measure of a term as the form IR dump prints it.
+[[nodiscard]] std::string measureText(const forms::IntegralTerm& t)
+{
+    std::ostringstream oss;
+    switch (t.domain) {
+    case forms::IntegralDomain::Cell:
+        oss << "dx";
+        break;
+    case forms::IntegralDomain::Boundary:
+        if (t.exterior_boundary_measure.has_value()) {
+            oss << "dExteriorBoundary(full=" << t.exterior_boundary_measure->physicalBoundaryMarker() << ")";
+        } else {
+            oss << "ds(" << t.boundary_marker << ")";
+        }
+        break;
+    case forms::IntegralDomain::InteriorFace:
+        if (t.interior_facet_side.has_value()) {
+            oss << "dS(" << t.interface_marker << "," << sideName(*t.interior_facet_side) << ")";
+        } else {
+            oss << "dS";
+        }
+        break;
+    case forms::IntegralDomain::InterfaceFace:
+        if (t.exterior_boundary_measure.has_value()) {
+            oss << "dExteriorBoundary(physical=" << t.exterior_boundary_measure->physicalBoundaryMarker()
+                << ",generated=" << t.exterior_boundary_measure->generatedActiveBoundaryMarker() << ")";
+        } else {
+            oss << "dI(" << t.interface_marker << ")";
+        }
+        break;
+    case forms::IntegralDomain::CutVolume:
+        oss << "dCutVolume(" << t.interface_marker << "," << sideName(t.cut_volume_side) << ")";
+        break;
+    }
+    if (t.time_derivative_order > 0) {
+        oss << " dt^" << t.time_derivative_order;
+    }
+    return oss.str();
+}
+
+[[nodiscard]] std::string fieldName(const FESystem& system, FieldId field)
+{
+    try {
+        return system.fieldRecord(field).name;
+    } catch (const std::exception&) {
+        return std::to_string(field);
+    }
+}
+
+/// Collects the row of one test field from the kernels of an operator.
+class RowCollector {
+public:
+    RowCollector(const FESystem& system, FieldId field)
+        : system_(system)
+        , field_(field)
+    {
+    }
+
+    void kernel(const std::string& slot,
+                FieldId test,
+                FieldId trial,
+                const assembly::AssemblyKernel* kernel,
+                int depth = 0)
+    {
+        if (kernel == nullptr || depth > 8) {
+            return;
+        }
+        if (const auto* wrapper = dynamic_cast<const forms::jit::JITKernelWrapper*>(kernel)) {
+            this->kernel(slot, test, trial, &wrapper->fallbackKernel(), depth + 1);
+            return;
+        }
+        if (const auto* k = dynamic_cast<const forms::MixedBlockKernelSet*>(kernel)) {
+            for (std::size_t b = 0; b < k->numBlocks(); ++b) {
+                const auto& spec = k->blockSpec(b);
+                this->kernel(slot, spec.test_field, spec.trial_field, spec.fallback_kernel.get(), depth + 1);
+            }
+            return;
+        }
+        if (const auto* k = dynamic_cast<const forms::MonolithicCellKernel*>(kernel)) {
+            for (std::size_t b = 0; b < k->numBlocks(); ++b) {
+                const auto& spec = k->blockSpec(b);
+                if (spec.residual_ir.has_value() && spec.test_field == field_) {
+                    block(spec.trial_field);
+                    form(slot, spec.trial_field, "residual", *spec.residual_ir);
+                } else {
+                    this->kernel(slot, spec.test_field, spec.trial_field, spec.fallback_kernel.get(), depth + 1);
+                }
+            }
+            return;
+        }
+        if (test != field_) {
+            return;
+        }
+        block(trial);
+        if (const auto* k = dynamic_cast<const forms::FormKernel*>(kernel)) {
+            form(slot, trial, "form", k->ir());
+        } else if (const auto* k = dynamic_cast<const forms::LinearFormKernel*>(kernel)) {
+            form(slot, trial, "bilinear", k->bilinearIR());
+            if (k->linearIR().has_value()) {
+                form(slot, trial, "linear", *k->linearIR());
+            }
+        } else if (const auto* k = dynamic_cast<const forms::NonlinearFormKernel*>(kernel)) {
+            form(slot, trial, "residual", k->residualIR());
+        } else if (const auto* k = dynamic_cast<const forms::SymbolicNonlinearFormKernel*>(kernel)) {
+            form(slot, trial, "residual", k->residualIR());
+        } else {
+            row_.terms.push_back(slot + " trial=" + fieldName(system_, trial) + " " +
+                                 demangledTypeName(typeid(*kernel)) + ": (no form)");
+        }
+    }
+
+    void global(const std::string& slot, const GlobalKernel* kernel)
+    {
+        const auto* row = dynamic_cast<const GlobalRowKernel*>(kernel);
+        if (row == nullptr || row->testField() != field_) {
+            return;
+        }
+        for (const auto f : row->pointTermFields()) {
+            block(f);
+        }
+        if (row->measuredValueForm().isValid()) {
+            row_.terms.push_back(slot + " measured: " + row->measuredValueForm().toString());
+        }
+        if (row->pointValue().isValid()) {
+            row_.terms.push_back(slot + " dGlobal: " + row->pointValue().toString());
+        }
+    }
+
+    void block(FieldId trial)
+    {
+        if (trial != INVALID_FIELD_ID) {
+            jacobian_.insert(trial);
+        }
+    }
+
+    [[nodiscard]] InstalledRow finish(const std::string& op)
+    {
+        row_.operator_tag = op;
+        row_.field = {field_, fieldName(system_, field_)};
+        for (const auto f : jacobian_) {
+            row_.jacobian_fields.push_back({f, fieldName(system_, f)});
+        }
+        for (const auto f : read_) {
+            if (!jacobian_.contains(f)) {
+                row_.data_fields.push_back({f, fieldName(system_, f)});
+            }
+        }
+        return std::move(row_);
+    }
+
+private:
+    void form(const std::string& slot, FieldId trial, const char* label, const forms::FormIR& ir)
+    {
+        for (const auto& requirement : ir.fieldRequirements()) {
+            read_.insert(requirement.field);
+        }
+        for (const auto& t : ir.terms()) {
+            const auto integrand = t.debug_string.empty() ? t.integrand.toString() : t.debug_string;
+            row_.terms.push_back(slot + " trial=" + fieldName(system_, trial) + " " + label + ": " +
+                                 measureText(t) + " : " + integrand);
+        }
+    }
+
+    const FESystem& system_;
+    FieldId field_;
+    InstalledRow row_{};
+    std::set<FieldId> jacobian_{};
+    std::set<FieldId> read_{};
+};
+
+} // namespace
+
+std::string InstalledRow::text() const
+{
+    const auto list = [](const std::vector<InstalledRowField>& fields) {
+        std::string out;
+        for (const auto& f : fields) {
+            out += (out.empty() ? "" : ", ") + f.name;
+        }
+        return out.empty() ? std::string("-") : out;
+    };
+    std::ostringstream oss;
+    oss << "row " << field.name << " of operator " << operator_tag << "\n";
+    oss << "  jacobian: " << list(jacobian_fields) << "\n";
+    oss << "  data: " << list(data_fields) << "\n";
+    for (const auto& term : terms) {
+        oss << "  " << term << "\n";
+    }
+    return oss.str();
+}
+
+InstalledRow installedRow(const FESystem& system, const std::string& op, FieldId field)
+{
+    if (!system.hasOperator(op)) {
+        throw std::invalid_argument("installedRow: no operator '" + op + "'");
+    }
+    const auto& def = system.operatorDefinition(op);
+    RowCollector rows(system, field);
+    for (std::size_t i = 0; i < def.cells.size(); ++i) {
+        const auto& t = def.cells[i];
+        rows.kernel("cell#" + std::to_string(i), t.test_field, t.trial_field, t.kernel.get());
+    }
+    for (std::size_t i = 0; i < def.boundary.size(); ++i) {
+        const auto& t = def.boundary[i];
+        rows.kernel("boundary#" + std::to_string(i), t.test_field, t.trial_field, t.kernel.get());
+    }
+    for (std::size_t i = 0; i < def.interior.size(); ++i) {
+        const auto& t = def.interior[i];
+        rows.kernel("interior#" + std::to_string(i), t.test_field, t.trial_field, t.kernel.get());
+    }
+    for (std::size_t i = 0; i < def.interface_faces.size(); ++i) {
+        const auto& t = def.interface_faces[i];
+        rows.kernel("interface#" + std::to_string(i), t.test_field, t.trial_field, t.kernel.get());
+    }
+    for (std::size_t i = 0; i < def.cut_volumes.size(); ++i) {
+        const auto& t = def.cut_volumes[i];
+        rows.kernel("cut_volume#" + std::to_string(i), t.test_field, t.trial_field, t.kernel.get());
+    }
+    for (std::size_t i = 0; i < def.global.size(); ++i) {
+        rows.global("global#" + std::to_string(i), def.global[i].get());
+    }
+    for (const auto& record : system.formulationRecords()) {
+        if (record.operator_tag != op) {
+            continue;
+        }
+        for (const auto& [test, trial] : record.block_couplings) {
+            if (test == field) {
+                rows.block(trial);
+            }
+        }
+    }
+    auto row = rows.finish(op);
+    if (row.terms.empty()) {
+        throw std::invalid_argument("installedRow: field " + std::to_string(field) + " has no row in operator '" +
+                                    op + "'");
+    }
+    return row;
 }
 
 std::vector<std::string> FESystem::constraintManifestLines() const
