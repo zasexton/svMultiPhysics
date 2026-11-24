@@ -102,6 +102,15 @@ both results as **open/unverified for R0 comparison** and makes no qualification
 claim from them. The review also retains failed static sessile/capillary gates,
 an unresolved full Physics executable, and incomplete D18/D38 horizons.
 
+The wall-advection result was re-recorded on 2026-11-23 (decision D64 item 2)
+with `run_impermeable_wall_advection_qualification.py` and a solver built at
+`2fc97379`, with its fixed gates unchanged: at `n=8` and `n=16` each run accepts
+512/512 fixed steps with no rejected step, no false-liquid wall node, no patch
+sign flip and no representability-slack overflow; the final P1 `phi` RMS errors
+are `1.43e-5` and `3.23e-6`, and the RMS refinement rate is `2.149` (July:
+`1.73e-5`, `4.20e-6` and `2.042`). It remains a prescribed-velocity transport
+isolation: it exercises neither momentum nor the contact law.
+
 The committed WP-4 V3 source adds quadratic 3D planar-interface quadrature,
 collective order admission for total-energy traction, energy-adjoint and
 restoring-response fixtures, and a frozen balanced-force campaign. Its matrix
