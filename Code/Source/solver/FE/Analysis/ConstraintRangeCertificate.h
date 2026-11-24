@@ -36,13 +36,15 @@
  *
  * ConstraintRangeCertificate is the certificate in a Newton solve, for that
  * declaration and one ConstraintRangeMethod: an observer that samples the
- * declared loads and the
- * range distance at every residual assembly, an acceptance check that vetoes
- * a converged candidate whose distances exceed the method's thresholds, and
- * an initializer that adds the least-squares constraint-field correction of
- * the remaining balance to the current guess once per workspace lifecycle.
- * Its log lines keep the vocabulary of the qualification records
- * (free-surface pressure certificate), which scripts parse.
+ * declared loads and the range distance at every residual assembly, an
+ * acceptance check that vetoes a converged candidate whose distances exceed
+ * the method's thresholds, and an initializer that adds the least-squares
+ * constraint-field correction of the remaining balance to the current guess
+ * once per workspace lifecycle.
+ * Its log lines, written by its log adapter (ConstraintRangeCertificateLog.cpp,
+ * declared in the detail namespace below), keep the vocabulary of the
+ * qualification records (free-surface pressure certificate), which scripts
+ * parse.
  *
  * buildNewtonAnalysisExtensions installs the analysis extensions of a Newton
  * solve in one step, from the declarations of the system's formulations and
@@ -497,6 +499,67 @@ struct NewtonAnalysisExtensions {
 [[nodiscard]] bool staticCertificateInitializerRequested() noexcept;
 /// ..._CONSERVATIVE_BALANCE_DIAGNOSTIC_EVERY_ASSEMBLY.
 [[nodiscard]] bool staticCertificateEveryAssembly() noexcept;
+
+namespace detail {
+
+/// What the mixed-pair/LSQR cache decided for one sample, for its log line.
+struct ConstraintRangeCacheTrace {
+    bool revision_key_available{false};
+    bool every_assembly{false};
+    bool pair_matrix_state_independent{false};
+    bool prior_sample{false};
+    bool geometry_match{false};
+    bool candidate{false};
+    bool load_equality_checked{false};
+    bool load_equal{false};
+    bool hit{false};
+    double load_difference_norm{std::numeric_limits<double>::quiet_NaN()};
+    std::string rejection_reason{};
+};
+
+// The log adapter of the certificate (ConstraintRangeCertificateLog.cpp):
+// the text of its log lines, written by the rank the certificate chooses.
+
+/// A sample not taken: the communicator disagrees on whether to sample.
+void logConstraintRangeEnablementDiffers();
+/// A sample not taken: the system declares no certificate.
+void logConstraintRangeNotDeclared(const timestepping::NewtonObservation& observation);
+/// A sample not taken: the declared operator @p op is not installed on every rank.
+void logConstraintRangeOperatorNotInstalled(const timestepping::NewtonObservation& observation,
+                                            std::string_view op);
+/// A sample: the norms of the six sampled loads, the cache, and the range
+/// and constant-field KKT parts of @p record (@p range, the LSQR solve, when
+/// the range is available).
+void logConstraintRangeSample(const timestepping::NewtonObservation& observation,
+                              int rank,
+                              const std::array<double, 6>& norms,
+                              const ConstraintRangeCacheTrace& cache,
+                              const ConstraintRangeReport& record,
+                              const ConstraintRangeLsqrResult& range,
+                              std::uint64_t active_constraint_dofs,
+                              int iteration_cap);
+/// The range-distance gate at an acceptance event.
+void logConstraintRangeDistanceGate(const timestepping::NewtonAcceptance& acceptance,
+                                    const ConstraintRangeReport& candidate,
+                                    double threshold,
+                                    bool passed,
+                                    std::string_view reason);
+/// The constant-field KKT distance gate at an acceptance event.
+void logConstantFieldKktDistanceGate(const timestepping::NewtonAcceptance& acceptance,
+                                     const ConstraintRangeReport& candidate,
+                                     double threshold,
+                                     bool passed,
+                                     std::string_view reason);
+/// The initializer: applied, refused, or consumed earlier.
+void logConstraintRangeInitializer(const ConstraintRangeReport& record,
+                                   double threshold,
+                                   const ConstraintRangeLsqrResult& correction,
+                                   double correction_load_norm,
+                                   bool applied,
+                                   bool passed,
+                                   std::string_view reason);
+
+} // namespace detail
 
 } // namespace analysis
 } // namespace FE

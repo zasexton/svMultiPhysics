@@ -752,6 +752,7 @@ set(FE_ANALYSIS_SOURCES
     Analysis/KernelAnalyzer.cpp
     Analysis/CouplingGraphAnalyzer.cpp
     Analysis/ConstraintRangeCertificate.cpp
+    Analysis/ConstraintRangeCertificateLog.cpp
     Analysis/RowContributionObserver.cpp
     Analysis/ConstraintRankAnalyzer.cpp
     Analysis/MixedOperatorAnalyzer.cpp
