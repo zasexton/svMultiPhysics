@@ -10,10 +10,12 @@
 #include "Forms/BoundaryConditions.h"
 #include "LevelSet/LevelSetConservativePhaseRegions.h"
 #include "Spaces/FunctionSpace.h"
+#include "Systems/TimeSeries.h"
 
 #include <array>
 #include <cmath>
 #include <memory>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -138,6 +140,12 @@ struct LevelSetInflowBoundary {
     // a liquid-only generated-active boundary condition.
     int boundary_marker{-1};
     ScalarValue value{0.0};
+    /// The value given at the mesh vertices in time (a temporal and spatial
+    /// values table), in place of value: the prescribed field
+    /// "<level set>_inflow_<marker>", expanded in each cell's basis
+    /// (systems::meshVertexDataField), so a face point reads its face's
+    /// vertices.
+    std::optional<systems::MeshVertexData> vertex_value{};
     Real penalty_scale{1.0};
 };
 

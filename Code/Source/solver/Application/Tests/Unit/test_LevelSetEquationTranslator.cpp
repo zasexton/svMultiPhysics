@@ -13,6 +13,7 @@
 #include "FE/LevelSet/LevelSetConservativePhaseRegions.h"
 #include "FE/Spaces/SpaceFactory.h"
 #include "FE/Systems/FESystem.h"
+#include "FE/Systems/TimeSeries.h"
 #include "Interfaces/GeneratedActiveBoundaryDomain.h"
 #include "Interfaces/GeneratedInterfaceBoundaryIntersectionDomain.h"
 #include "Mesh/Core/MeshBase.h"
@@ -1386,7 +1387,24 @@ TEST(LevelSetEquationTranslator, TranslatesTemporalSpatialInflowBoundary)
   ASSERT_TRUE(module);
   EXPECT_TRUE(system.hasOperator("level_set"));
   EXPECT_TRUE(formulationRecordsContain(system, FormExprType::BoundaryIntegral));
-  EXPECT_TRUE(formulationRecordsContain(system, FormExprType::Coefficient));
+  // The table is the vertex-data field phi_inflow_4, expanded in each cell's
+  // basis (decision D69 item 2), not a callback of the point.
+  EXPECT_FALSE(formulationRecordsContain(system, FormExprType::Coefficient));
+  const auto inflow_field = system.findFieldByName("phi_inflow_4");
+  ASSERT_NE(inflow_field, svmp::FE::INVALID_FIELD_ID);
+  EXPECT_EQ(system.fieldRecord(inflow_field).source_kind, svmp::FE::systems::FieldSourceKind::PrescribedData);
+  // At t = 0.5 the field holds the table's values at the vertices: node n
+  // (vertex n - 1) is n at t = 0 and n + 0.5 at t = 1.
+  system.setup();
+  svmp::FE::systems::refreshMeshVertexDataFields(system, 0.5);
+  const auto coefficients = system.prescribedFieldCoefficients(inflow_field);
+  const auto dofs = system.fieldDofsAtMeshVertices(inflow_field);
+  ASSERT_EQ(dofs.size(), 4u);
+  for (std::size_t vertex = 0; vertex < 4u; ++vertex) {
+    ASSERT_NE(dofs[vertex], svmp::FE::INVALID_GLOBAL_INDEX);
+    EXPECT_DOUBLE_EQ(coefficients[static_cast<std::size_t>(dofs[vertex])],
+                     static_cast<double>(vertex + 1) + 0.25);
+  }
 #endif
 }
 

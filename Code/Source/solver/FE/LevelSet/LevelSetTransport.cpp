@@ -1,4 +1,5 @@
 #include "LevelSet/LevelSetTransport.h"
+#include "Systems/TimeSeries.h"
 #include "LevelSet/LevelSetVelocityExtensionConstraint.h"
 
 #include "Forms/Vocabulary.h"
@@ -827,9 +828,13 @@ systems::CoupledResidualKernels installLevelSetTransport(
         const auto normal_velocity = dot(velocity, FormExpr::normal());
         const auto inflow_speed =
             FormExpr::constant(0.5) * (abs(normal_velocity) - normal_velocity);
-        const auto target = forms::bc::toScalarExpr(
-            bc.value,
-            forms::bc::markerValueName("level_set_inflow", marker));
+        const auto target = bc.vertex_value
+            ? systems::meshVertexDataField(system,
+                                           options.level_set.field_name + "_inflow_" + std::to_string(marker),
+                                           *bc.vertex_value)
+            : forms::bc::toScalarExpr(
+                  bc.value,
+                  forms::bc::markerValueName("level_set_inflow", marker));
         const auto penalty = FormExpr::constant(bc.penalty_scale) * inflow_speed;
         const auto boundary_measure =
             forms::ExteriorBoundaryMeasure::fullPhysical(marker);

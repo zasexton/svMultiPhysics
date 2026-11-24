@@ -43,57 +43,13 @@ namespace ls = svmp::FE::level_set;
 namespace parsing = application::translators::level_set::configuration;
 
 struct LevelSetTemporalSpatialInflowValues {
-  struct Key {
-    std::int64_t x{0};
-    std::int64_t y{0};
-    std::int64_t z{0};
-
-    friend bool operator==(const Key& a, const Key& b) noexcept
-    {
-      return a.x == b.x && a.y == b.y && a.z == b.z;
-    }
-  };
-
-  struct KeyHash {
-    std::size_t operator()(const Key& key) const noexcept
-    {
-      std::size_t h = 1469598103934665603ull;
-      auto mix = [&](std::int64_t value) {
-        const auto x = std::hash<std::int64_t>{}(value);
-        h ^= x + 0x9e3779b97f4a7c15ull + (h << 6) + (h >> 2);
-      };
-      mix(key.x);
-      mix(key.y);
-      mix(key.z);
-      return h;
-    }
-  };
-
-  int dim{0};
   int num_time_points{0};
   std::string file_path{};
   std::vector<double> t{};
   double period{0.0};
-  std::vector<std::array<svmp::FE::Real, 3>> coords{};
+  /// The local mesh vertex of each stored node.
+  std::vector<svmp::index_t> vertices{};
   std::vector<svmp::FE::Real> values{};
-  std::unordered_map<Key, std::size_t, KeyHash> node_index_by_key{};
-  int line_axis{-1};
-  std::vector<svmp::FE::Real> line_coords{};
-  std::vector<std::size_t> line_nodes{};
-
-  [[nodiscard]] static Key quantize(const std::array<svmp::FE::Real, 3>& p, int dim_in) noexcept
-  {
-    constexpr double scale = 1.0e12;
-    auto q = [](svmp::FE::Real value) {
-      return static_cast<std::int64_t>(
-          std::llround(static_cast<double>(value) * scale));
-    };
-    return Key{
-        .x = q(p[0]),
-        .y = dim_in >= 2 ? q(p[1]) : 0,
-        .z = dim_in >= 3 ? q(p[2]) : 0,
-    };
-  }
 
   [[nodiscard]] svmp::FE::Real sample(std::size_t node, int time_index) const
   {
@@ -104,60 +60,6 @@ struct LevelSetTemporalSpatialInflowValues {
           "[svMultiPhysics::Application] Internal error: level-set temporal/spatial inflow index out of range.");
     }
     return values[idx];
-  }
-
-  void buildInterpolationMetadata()
-  {
-    line_axis = -1;
-    line_coords.clear();
-    line_nodes.clear();
-    if (coords.size() < 2) {
-      return;
-    }
-
-    std::array<double, 3> min_coord{
-        std::numeric_limits<double>::infinity(),
-        std::numeric_limits<double>::infinity(),
-        std::numeric_limits<double>::infinity()};
-    std::array<double, 3> max_coord{
-        -std::numeric_limits<double>::infinity(),
-        -std::numeric_limits<double>::infinity(),
-        -std::numeric_limits<double>::infinity()};
-    for (const auto& p : coords) {
-      for (int d = 0; d < dim; ++d) {
-        const auto value = static_cast<double>(p[static_cast<std::size_t>(d)]);
-        min_coord[static_cast<std::size_t>(d)] =
-            std::min(min_coord[static_cast<std::size_t>(d)], value);
-        max_coord[static_cast<std::size_t>(d)] =
-            std::max(max_coord[static_cast<std::size_t>(d)], value);
-      }
-    }
-
-    double best_range = 0.0;
-    for (int d = 0; d < dim; ++d) {
-      const auto range = max_coord[static_cast<std::size_t>(d)] -
-                         min_coord[static_cast<std::size_t>(d)];
-      if (range > best_range) {
-        best_range = range;
-        line_axis = d;
-      }
-    }
-    if (line_axis < 0 || best_range <= 1.0e-14) {
-      return;
-    }
-
-    line_nodes.resize(coords.size());
-    for (std::size_t i = 0; i < line_nodes.size(); ++i) {
-      line_nodes[i] = i;
-    }
-    std::sort(line_nodes.begin(), line_nodes.end(), [this](std::size_t a, std::size_t b) {
-      return coords[a][static_cast<std::size_t>(line_axis)] <
-             coords[b][static_cast<std::size_t>(line_axis)];
-    });
-    line_coords.reserve(line_nodes.size());
-    for (const auto node : line_nodes) {
-      line_coords.push_back(coords[node][static_cast<std::size_t>(line_axis)]);
-    }
   }
 
   [[nodiscard]] double wrapTime(double time) const noexcept
@@ -198,47 +100,20 @@ struct LevelSetTemporalSpatialInflowValues {
     return static_cast<svmp::FE::Real>((1.0 - alpha) * v0 + alpha * v1);
   }
 
-  [[nodiscard]] svmp::FE::Real interpolateSpatial(const std::array<svmp::FE::Real, 3>& p,
-                                                  svmp::FE::Real time) const
+  /// The values at @p time at the mesh vertices: the table's at its nodes,
+  /// zero at the other vertices (a vertex off the inflow face does not enter
+  /// the face's trace).
+  void fillVertexValues(svmp::FE::Real time, std::span<svmp::FE::Real> out) const
   {
-    if (coords.empty()) {
-      return svmp::FE::Real{0.0};
-    }
-    if (const auto it = node_index_by_key.find(quantize(p, dim)); it != node_index_by_key.end()) {
-      return interpolateTime(it->second, time);
-    }
-    if (line_axis >= 0 && !line_coords.empty()) {
-      const auto x = p[static_cast<std::size_t>(line_axis)];
-      if (x <= line_coords.front()) {
-        return interpolateTime(line_nodes.front(), time);
+    std::fill(out.begin(), out.end(), svmp::FE::Real{0.0});
+    for (std::size_t node = 0; node < vertices.size(); ++node) {
+      const auto vertex = static_cast<std::size_t>(vertices[node]);
+      if (vertices[node] < 0 || vertex >= out.size()) {
+        throw std::runtime_error(
+            "[svMultiPhysics::Application] Internal error: level-set temporal/spatial inflow vertex out of range.");
       }
-      if (x >= line_coords.back()) {
-        return interpolateTime(line_nodes.back(), time);
-      }
-      const auto upper = std::upper_bound(line_coords.begin(), line_coords.end(), x);
-      const auto hi = static_cast<std::size_t>(std::distance(line_coords.begin(), upper));
-      const auto lo = hi - 1u;
-      const auto x0 = static_cast<double>(line_coords[lo]);
-      const auto x1 = static_cast<double>(line_coords[hi]);
-      const auto alpha = (x1 > x0) ? ((static_cast<double>(x) - x0) / (x1 - x0)) : 0.0;
-      const auto v0 = static_cast<double>(interpolateTime(line_nodes[lo], time));
-      const auto v1 = static_cast<double>(interpolateTime(line_nodes[hi], time));
-      return static_cast<svmp::FE::Real>((1.0 - alpha) * v0 + alpha * v1);
+      out[vertex] = interpolateTime(node, time);
     }
-
-    std::size_t best = 0;
-    auto best_d2 = std::numeric_limits<double>::infinity();
-    for (std::size_t i = 0; i < coords.size(); ++i) {
-      const auto dx = static_cast<double>(p[0] - coords[i][0]);
-      const auto dy = static_cast<double>(p[1] - coords[i][1]);
-      const auto dz = static_cast<double>(p[2] - coords[i][2]);
-      const auto d2 = dx * dx + dy * dy + dz * dz;
-      if (d2 < best_d2) {
-        best_d2 = d2;
-        best = i;
-      }
-    }
-    return interpolateTime(best, time);
   }
 };
 
@@ -270,7 +145,6 @@ read_level_set_temporal_spatial_inflow_file(const svmp::MeshBase& mesh,
   }
 
   auto out = std::make_shared<LevelSetTemporalSpatialInflowValues>();
-  out->dim = dim;
   out->num_time_points = num_times;
   out->file_path = file_path;
   out->t.resize(static_cast<std::size_t>(num_times));
@@ -303,22 +177,8 @@ read_level_set_temporal_spatial_inflow_file(const svmp::MeshBase& mesh,
     }
     const auto local = mesh.global_to_local_vertex(static_cast<svmp::gid_t>(node_id_1based - 1));
     const bool keep = local != svmp::INVALID_INDEX;
-    std::array<svmp::FE::Real, 3> p{0.0, 0.0, 0.0};
     if (keep) {
-      const auto& X = mesh.X_ref();
-      const auto base = static_cast<std::size_t>(local) * static_cast<std::size_t>(dim);
-      p[0] = static_cast<svmp::FE::Real>(X.at(base + 0u));
-      if (dim >= 2) {
-        p[1] = static_cast<svmp::FE::Real>(X.at(base + 1u));
-      }
-      if (dim >= 3) {
-        p[2] = static_cast<svmp::FE::Real>(X.at(base + 2u));
-      }
-      const auto stored = out->coords.size();
-      out->coords.push_back(p);
-      out->node_index_by_key.emplace(
-          LevelSetTemporalSpatialInflowValues::quantize(p, dim),
-          stored);
+      out->vertices.push_back(local);
     }
 
     for (int time = 0; time < num_times; ++time) {
@@ -332,12 +192,11 @@ read_level_set_temporal_spatial_inflow_file(const svmp::MeshBase& mesh,
     }
   }
 
-  if (out->coords.empty()) {
+  if (out->vertices.empty()) {
     throw std::runtime_error(
         "[svMultiPhysics::Application] Level-set temporal/spatial inflow file '" +
         file_path + "' did not match any local mesh vertices.");
   }
-  out->buildInterpolationMetadata();
   return out;
 }
 
@@ -973,13 +832,14 @@ void apply_level_set_bcs(const svmp::Physics::EquationModuleInput& input,
         auto data = read_level_set_temporal_spatial_inflow_file(
             *input.mesh,
             trim_copy(temporal_spatial_file->value));
-        inflow.value = svmp::FE::forms::TimeScalarCoefficient(
-            [data](svmp::FE::Real x,
-                   svmp::FE::Real y,
-                   svmp::FE::Real z,
-                   svmp::FE::Real t) -> svmp::FE::Real {
-              return data->interpolateSpatial({x, y, z}, t);
-            });
+        inflow.vertex_value = svmp::FE::systems::MeshVertexData{
+            .space = svmp::FE::spaces::SpaceFactory::create_h1(
+                infer_base_element_type(*input.mesh), infer_polynomial_order(*input.mesh)),
+            .components = 1,
+            .values = [data](svmp::FE::Real t, std::span<svmp::FE::Real> out) {
+              data->fillVertexValues(t, out);
+            },
+        };
       } else if (value.has_value()) {
         inflow.value = *value;
       }
