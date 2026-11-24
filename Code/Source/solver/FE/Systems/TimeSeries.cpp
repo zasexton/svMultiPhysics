@@ -8,12 +8,20 @@
 #include "Systems/TimeSeries.h"
 
 #include "Core/FEException.h"
+#include "Dofs/DofHandler.h"
 #include "Systems/FESystem.h"
+#include "Systems/FieldBinding.h"
 
 #include <algorithm>
 #include <cmath>
 #include <fstream>
+#include <cstdint>
 #include <iterator>
+#include <limits>
+
+#if defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH
+#include "Mesh/Mesh.h"
+#endif
 
 namespace svmp {
 namespace FE {
@@ -145,6 +153,88 @@ const std::function<Real(Real)>* findTimeFunction(const FESystem& system, std::s
         }
     }
     return nullptr;
+}
+
+namespace {
+
+/// The fields of meshVertexDataField on a system (its attachment), with the
+/// time of their last fill.
+struct MeshVertexDataFieldStore {
+    struct Entry {
+        FieldId field{INVALID_FIELD_ID};
+        std::string name{};
+        MeshVertexValuesAtTime values{};
+        bool filled{false};
+        Real filled_time{0.0};
+    };
+    std::vector<Entry> entries{};
+};
+
+} // namespace
+
+forms::FormExpr meshVertexDataField(FESystem& system, std::string name, MeshVertexData data)
+{
+    const std::string where = "FE::systems::meshVertexDataField('" + name + "'): ";
+    FE_THROW_IF(system.isSetup(), InvalidArgumentException, where + "vertex data cannot be declared after setup");
+    FE_THROW_IF(name.empty(), InvalidArgumentException, where + "the name must be nonempty");
+    FE_THROW_IF(!data.space, InvalidArgumentException, where + "the space is empty");
+    FE_THROW_IF(!data.values, InvalidArgumentException, where + "the function is empty");
+    FE_THROW_IF(data.components < 1, InvalidArgumentException, where + "at least one component is required");
+    auto& store = system.attachment<MeshVertexDataFieldStore>();
+    FE_THROW_IF(std::any_of(store.entries.begin(), store.entries.end(),
+                            [&](const MeshVertexDataFieldStore::Entry& entry) { return entry.name == name; }),
+                InvalidArgumentException, where + "vertex data of this name are already declared");
+
+    FieldBinding binding(system, "FE::systems::meshVertexDataField");
+    const auto space = data.space;
+    auto bound = binding.prescribedSymbol(FieldSpec{.name = name,
+                                                    .space = space,
+                                                    .components = data.components,
+                                                    .source_kind = FieldSourceKind::PrescribedData},
+                                          /*auto_register=*/true, "vertex data", name);
+    store.entries.push_back(MeshVertexDataFieldStore::Entry{
+        .field = bound.id, .name = std::move(name), .values = std::move(data.values)});
+    return bound.value;
+}
+
+void refreshMeshVertexDataFields(FESystem& system, Real time)
+{
+    auto* store = system.findAttachment<MeshVertexDataFieldStore>();
+    if (store == nullptr) {
+        return;
+    }
+    for (auto& entry : store->entries) {
+        if (entry.filled && entry.filled_time == time) {
+            continue;
+        }
+        const std::string where = "FE::systems::refreshMeshVertexDataFields('" + entry.name + "'): ";
+#if defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH
+        const auto components = static_cast<std::size_t>(std::max(1, system.fieldRecord(entry.field).components));
+        const auto n_vertices = static_cast<std::size_t>(system.singleMesh(where).n_vertices());
+        std::vector<Real> values(n_vertices * components, std::numeric_limits<Real>::quiet_NaN());
+        entry.values(time, std::span<Real>(values));
+
+        const auto n_dofs = static_cast<std::size_t>(system.fieldDofHandler(entry.field).getNumDofs());
+        std::vector<Real> coefficients(n_dofs, Real{0.0});
+        std::vector<std::uint8_t> assigned(n_dofs, std::uint8_t{0});
+        const auto projection = system.projectMeshVertexValuesToFieldCoefficients(
+            entry.field, std::span<const Real>(values), components, std::span<Real>(coefficients),
+            std::span<std::uint8_t>(assigned), where);
+        FE_THROW_IF(projection.unassigned_dofs != 0u, InvalidArgumentException,
+                    where + std::to_string(projection.unassigned_dofs) +
+                        " DOF(s) of the field have no node at a mesh vertex");
+        for (std::size_t dof = 0; dof < n_dofs; ++dof) {
+            FE_THROW_IF(assigned[dof] != 0u && !std::isfinite(coefficients[dof]), InvalidArgumentException,
+                        where + "the data give DOF " + std::to_string(dof) + " of the field no finite value at time " +
+                            std::to_string(time));
+        }
+        system.setPrescribedFieldCoefficients(entry.field, std::span<const Real>(coefficients));
+        entry.filled = true;
+        entry.filled_time = time;
+#else
+        FE_THROW(InvalidArgumentException, where + "vertex data require FE built with the mesh");
+#endif
+    }
 }
 
 } // namespace systems

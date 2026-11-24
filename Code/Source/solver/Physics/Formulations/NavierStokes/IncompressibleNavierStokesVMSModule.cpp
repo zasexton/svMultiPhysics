@@ -206,13 +206,17 @@ namespace {
     return constitutive(std::move(model), shear_rate).out(0);
 }
 
-/// f = g + f(x, t) + f_h - 2 Omega x u   (constant, space-time, field and Coriolis parts).
-[[nodiscard]] FormExpr bodyForce(const Options& o, const FormExpr& g, int dim,
+/// f = g + f(x, t) + f_table + f_h - 2 Omega x u   (constant, space-time, vertex-table, field and
+/// Coriolis parts).
+[[nodiscard]] FormExpr bodyForce(const Options& o, const FormExpr& g, int dim, const FormExpr& source_table,
                                  const fs::BoundPrescribed& source, const FormExpr& u)
 {
     FormExpr f = g;
     if (o.has_body_force_spacetime) {
         f = f + FormExpr::asVector(bc::toVectorExpr(o.body_force_spacetime, dim, "ns_body_force_spacetime_"));
+    }
+    if (source_table.isValid()) {
+        f = f + source_table;
     }
     if (source.id != FE::INVALID_FIELD_ID) {
         f = f + source.value;
@@ -346,6 +350,9 @@ void IncompressibleNavierStokesVMSModule::registerOn(fs::FESystem& system) const
         ? fields.prescribedSymbol(std::move(*preflight.body_force_spec),
                                   o.auto_register_body_force_field, "momentum source", o.body_force_field_name)
         : fs::BoundPrescribed{};
+    const auto source_table = o.body_force_vertex_data
+        ? FE::systems::meshVertexDataField(system, "Momentum_source_table", *o.body_force_vertex_data)
+        : FormExpr{};
     // u at the last refresh of the generated geometry, for the semi-implicit capillary term.  The term
     // needs the outer fixed point to refresh it and the level sets of the free surfaces to move with u.
     const auto u_ref = preflight.semi_implicit_reference_spec
@@ -353,7 +360,8 @@ void IncompressibleNavierStokesVMSModule::registerOn(fs::FESystem& system) const
                         "Surface_tension_semi_implicit=NormalIncrement")
         : FormExpr{};
     post::declareFreeSurfaceDiscreteFunctionals(free_surfaces, preflight.surface_identities, system, u_id, o.density, o.body_force,
-                                          !o.has_body_force_spacetime && body_force.id == FE::INVALID_FIELD_ID,
+                                          !o.has_body_force_spacetime && !source_table.isValid() &&
+                                              body_force.id == FE::INVALID_FIELD_ID,
                                           o.viscosity, o.viscosity_model == nullptr);
     // Exterior conditions act on the wetted part of a boundary when the liquid is a cut side.
     const auto wetted = FE::level_set::wettedBoundaryResolver(system, preflight.generated_active_boundary_for);
@@ -408,7 +416,7 @@ void IncompressibleNavierStokesVMSModule::registerOn(fs::FESystem& system) const
     const auto rho = FormExpr::constant(o.density);
     const auto g = constantVector(o.body_force, dim);
     const NavierStokesTerms t{u, p, v, q, rho, viscosity(o, u),
-                              bodyForce(o, g, dim, body_force, u), dim};
+                              bodyForce(o, g, dim, source_table, body_force, u), dim};
     const bool mcv = o.enable_ale &&
                      (o.ale_momentum_form == ALEMomentumForm::Conservative ||
                       (o.ale_momentum_form == ALEMomentumForm::Legacy && o.include_moving_control_volume_transient));
@@ -425,7 +433,8 @@ void IncompressibleNavierStokesVMSModule::registerOn(fs::FESystem& system) const
     // Bookkeeping of the opt-in diagnostics and of the free-surface work ledger (exact additive groups of
     // the residual), collected while the terms are stated.
     const auto active_continuity = pspg_grad_p.isValid() ? C + pspg_grad_p : C;
-    const bool nonconservative_force = o.has_body_force_spacetime || body_force.id != FE::INVALID_FIELD_ID ||
+    const bool nonconservative_force = o.has_body_force_spacetime || source_table.isValid() ||
+                                       body_force.id != FE::INVALID_FIELD_ID ||
                                        o.rotating_frame_coriolis_enabled;
     auto work = post::bulkResidualWork(r, M, C, pspg_grad_p, -rho * inner(g, v), nonconservative_force,
                                  preflight.enable_vms, Omega);

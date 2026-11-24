@@ -16,6 +16,7 @@
 #include "Systems/ExactAccumulator.h"
 #include "Systems/GlobalKernel.h"
 #include "Systems/SystemsExceptions.h"
+#include "Systems/TimeSeries.h"
 
 #include "Assembly/Assembler.h"
 #include "Assembly/GlobalSystemView.h"
@@ -2381,6 +2382,8 @@ assembly::AssemblyResult assembleOperator(
         system.prepareAuxiliaryForAssembly(
             state, request.is_nonlinear_iteration);
     }
+    // Vertex data tabulated in time hold their values at the state time.
+    refreshMeshVertexDataFields(system, static_cast<Real>(state.time));
 
     if (request.zero_outputs) {
         if (request.want_matrix) {

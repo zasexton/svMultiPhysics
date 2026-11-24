@@ -26,6 +26,7 @@
 #include "FE/Systems/DiagnosticRegistry.h"
 #include "FE/Systems/FESystem.h"
 #include "FE/Systems/FormsInstaller.h"
+#include "FE/Systems/TimeIntegrator.h"
 #include "FE/Systems/TransientSystem.h"
 #include "FE/TimeStepping/GeneralizedAlpha.h"
 #include "FE/TimeStepping/TimeSteppingUtils.h"
@@ -41,8 +42,11 @@
 #include <filesystem>
 #include <fstream>
 #include <functional>
+#include <iostream>
 #include <limits>
+#include <map>
 #include <memory>
+#include <numeric>
 #include <optional>
 #include <string>
 #include <string_view>
@@ -54,6 +58,7 @@
 #  include <unistd.h>
 #endif
 #include "FE/Constraints/SmallCutAggregationConstraint.h"
+#include "FE/Dofs/EntityDofMap.h"
 #include "FE/Systems/FunctionalRecords.h"
 
 namespace {
@@ -1601,6 +1606,346 @@ TEST(NavierStokesLegacyBCs,
     });
 #endif
 }
+
+#if defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH && defined(FE_HAS_MPI) && FE_HAS_MPI && defined(MESH_HAS_MPI)
+namespace {
+
+// A channel of 8 x 4 squares on [0, 1] x [0, 0.5], each cut into two
+// triangles, for the momentum-source table.
+constexpr int kSourceChannelNx = 8;
+constexpr int kSourceChannelNy = 4;
+
+struct SourceChannelArrays {
+    std::vector<svmp::real_t> coordinates;
+    std::vector<svmp::offset_t> offsets;
+    std::vector<svmp::index_t> connectivity;
+    std::vector<svmp::CellShape> shapes;
+};
+
+[[nodiscard]] SourceChannelArrays makeSourceChannelArrays()
+{
+    SourceChannelArrays arrays;
+    for (int j = 0; j <= kSourceChannelNy; ++j) {
+        for (int i = 0; i <= kSourceChannelNx; ++i) {
+            arrays.coordinates.push_back(static_cast<svmp::real_t>(i) / kSourceChannelNx);
+            arrays.coordinates.push_back(0.5 * static_cast<svmp::real_t>(j) / kSourceChannelNy);
+        }
+    }
+    arrays.offsets.push_back(0);
+    for (int j = 0; j < kSourceChannelNy; ++j) {
+        for (int i = 0; i < kSourceChannelNx; ++i) {
+            const auto v0 = static_cast<svmp::index_t>(j * (kSourceChannelNx + 1) + i);
+            const auto v1 = v0 + 1;
+            const auto v3 = v0 + static_cast<svmp::index_t>(kSourceChannelNx + 1);
+            const auto v2 = v3 + 1;
+            for (const auto& triangle : {std::array<svmp::index_t, 3>{v0, v1, v2},
+                                         std::array<svmp::index_t, 3>{v0, v2, v3}}) {
+                arrays.connectivity.insert(arrays.connectivity.end(), triangle.begin(), triangle.end());
+                arrays.offsets.push_back(static_cast<svmp::offset_t>(arrays.connectivity.size()));
+                arrays.shapes.push_back(svmp::CellShape{svmp::CellFamily::Triangle, 3, 1});
+            }
+        }
+    }
+    return arrays;
+}
+
+/// True under mpiexec: the test main initializes MPI only there.
+[[nodiscard]] bool mpiRunning()
+{
+    int initialized = 0;
+    MPI_Initialized(&initialized);
+    return initialized != 0;
+}
+
+[[nodiscard]] std::shared_ptr<svmp::Mesh> makeSourceChannel(bool partitioned, int ghost_layers)
+{
+    const auto arrays = makeSourceChannelArrays();
+    std::shared_ptr<svmp::Mesh> mesh;
+    if (partitioned) {
+        mesh = std::make_shared<svmp::Mesh>(svmp::MeshComm(MPI_COMM_WORLD));
+        mesh->build_from_arrays_global_and_partition(
+            /*spatial_dim=*/2, arrays.coordinates, arrays.offsets, arrays.connectivity, arrays.shapes,
+            svmp::PartitionHint::Cells, ghost_layers, {{"partition_method", "block"}});
+    } else {
+        auto base = std::make_shared<svmp::MeshBase>();
+        base->build_from_arrays(2, arrays.coordinates, arrays.offsets, arrays.connectivity, arrays.shapes);
+        std::vector<svmp::gid_t> vertex_gids(base->n_vertices());
+        std::iota(vertex_gids.begin(), vertex_gids.end(), svmp::gid_t{0});
+        std::vector<svmp::gid_t> cell_gids(base->n_cells());
+        std::iota(cell_gids.begin(), cell_gids.end(), svmp::gid_t{0});
+        base->set_vertex_gids(std::move(vertex_gids));
+        base->set_cell_gids(std::move(cell_gids));
+        base->finalize();
+        mesh = mpiRunning() ? svmp::create_mesh(std::move(base), svmp::MeshComm(MPI_COMM_SELF))
+                            : svmp::create_mesh(std::move(base));
+    }
+    // The faces on the channel's boundary carry marker 1 on every rank; a
+    // face at the edge of a partition stays unlabeled.
+    auto& local = mesh->local_mesh();
+    const auto& X = local.X_ref();
+    const auto on_boundary = [&](svmp::index_t v) {
+        const auto x = X[2 * static_cast<std::size_t>(v)];
+        const auto y = X[2 * static_cast<std::size_t>(v) + 1];
+        return std::abs(x) < 1e-12 || std::abs(x - 1.0) < 1e-12 || std::abs(y) < 1e-12 || std::abs(y - 0.5) < 1e-12;
+    };
+    const auto same_side = [&](svmp::index_t a, svmp::index_t b) {
+        const auto xa = X[2 * static_cast<std::size_t>(a)];
+        const auto ya = X[2 * static_cast<std::size_t>(a) + 1];
+        const auto xb = X[2 * static_cast<std::size_t>(b)];
+        const auto yb = X[2 * static_cast<std::size_t>(b) + 1];
+        return (std::abs(xa - xb) < 1e-12 && (std::abs(xa) < 1e-12 || std::abs(xa - 1.0) < 1e-12)) ||
+               (std::abs(ya - yb) < 1e-12 && (std::abs(ya) < 1e-12 || std::abs(ya - 0.5) < 1e-12));
+    };
+    for (const auto face : local.boundary_faces()) {
+        const auto vertices = local.face_vertices(face);
+        if (vertices.size() == 2u && on_boundary(vertices[0]) && on_boundary(vertices[1]) &&
+            same_side(vertices[0], vertices[1])) {
+            mesh->set_boundary_label(face, 1);
+        }
+    }
+    return mesh;
+}
+
+/// The momentum source of the table at (x, y) and time t: smooth and not
+/// linear, so a quadrature point's value depends on which vertices it reads.
+[[nodiscard]] std::array<double, 2> channelSource(double x, double y, double t)
+{
+    return {(1.0 + t) * (std::sin(3.0 * x) + y * y), std::cos(2.0 * y) - x * y + t};
+}
+
+/// Writes the source at every vertex of the channel, at times 0 and 1, by
+/// one-based vertex ordinal.
+void writeChannelSourceTable(const std::filesystem::path& path)
+{
+    const auto arrays = makeSourceChannelArrays();
+    const auto n_vertices = arrays.coordinates.size() / 2u;
+    std::ofstream out(path);
+    ASSERT_TRUE(out.is_open());
+    out.precision(17);
+    out << "2 2 " << n_vertices << "\n0\n1\n";
+    for (std::size_t v = 0; v < n_vertices; ++v) {
+        out << v + 1;
+        for (const double t : {0.0, 1.0}) {
+            const auto f = channelSource(arrays.coordinates[2 * v], arrays.coordinates[2 * v + 1], t);
+            out << ' ' << f[0] << ' ' << f[1];
+        }
+        out << '\n';
+    }
+    ASSERT_TRUE(out.good());
+}
+
+/// (vertex global id, field: 0 velocity / 1 pressure, component) -> residual.
+using ChannelResidual = std::map<std::tuple<svmp::gid_t, int, int>, double>;
+
+/// The fluid residual of the channel at zero velocity and pressure, at t =
+/// 0.25 (backward Euler, dt 0.05), summed over the ranks: the momentum source
+/// alone drives it.  The source is the table at @p table, or, with an empty
+/// path, the prescribed field "source" holding the table's vertex values.
+[[nodiscard]] ChannelResidual channelSourceResidual(bool partitioned, int ghost_layers,
+                                                    const std::filesystem::path& table)
+{
+    int rank = 0;
+    int size = 1;
+    if (mpiRunning()) {
+        MPI_Comm_rank(MPI_COMM_WORLD, &rank);
+        MPI_Comm_size(MPI_COMM_WORLD, &size);
+    }
+    const auto mesh = makeSourceChannel(partitioned, ghost_layers);
+
+    svmp::Physics::EquationModuleInput input{};
+    input.equation_type = "fluid";
+    input.mesh_name = "channel";
+    input.mesh = mesh->local_mesh_ptr();
+    input.default_domain.params["Density"] = defined("2.0");
+    input.default_domain.params["Viscosity.model"] = defined("Constant");
+    input.default_domain.params["Viscosity.Value"] = defined("0.01");
+    if (!table.empty()) {
+        input.equation_params["Momentum_source_temporal_and_spatial_values_file_path"] = defined(table.string());
+    } else {
+        input.default_domain.params["Momentum_source_field_name"] = defined("source");
+        input.default_domain.params["Auto_register_momentum_source_field"] = defined("true");
+    }
+
+    svmp::FE::systems::FESystem system(mesh);
+    auto module = svmp::Physics::EquationModuleRegistry::instance().create("fluid", input, system);
+    EXPECT_TRUE(module);
+    if (mpiRunning()) {
+        svmp::FE::systems::SetupOptions setup_options;
+        setup_options.dof_options.my_rank = partitioned ? rank : 0;
+        setup_options.dof_options.world_size = partitioned ? size : 1;
+        setup_options.dof_options.mpi_comm = partitioned ? MPI_COMM_WORLD : MPI_COMM_SELF;
+        system.setup(setup_options);
+    } else {
+        system.setup();
+    }
+
+    constexpr double time = 0.25;
+    const auto& local = mesh->local_mesh();
+    const auto& X = local.X_ref();
+    const auto& gids = local.vertex_gids();
+    if (table.empty()) {
+        const auto source = system.findFieldByName("source");
+        EXPECT_NE(source, svmp::FE::INVALID_FIELD_ID);
+        std::vector<svmp::FE::Real> coefficients(
+            static_cast<std::size_t>(system.fieldDofHandler(source).getNumDofs()), 0.0);
+        const auto* entities = system.fieldDofHandler(source).getEntityDofMap();
+        for (svmp::index_t v = 0; v < static_cast<svmp::index_t>(local.n_vertices()); ++v) {
+            const auto f = channelSource(X[2 * static_cast<std::size_t>(v)], X[2 * static_cast<std::size_t>(v) + 1],
+                                         time);
+            const auto dofs = entities->getVertexDofs(static_cast<svmp::FE::GlobalIndex>(v));
+            for (std::size_t c = 0; c < 2u; ++c) {
+                coefficients[static_cast<std::size_t>(dofs[c])] = f[c];
+            }
+        }
+        system.setPrescribedFieldCoefficients(source, coefficients);
+    }
+
+    const auto n = static_cast<std::size_t>(system.dofHandler().getNumDofs());
+    const std::vector<svmp::FE::Real> zero(n, 0.0);
+    svmp::FE::systems::SystemStateView state;
+    state.time = time;
+    state.dt = 0.05;
+    state.u = std::span<const svmp::FE::Real>(zero);
+    state.u_prev = std::span<const svmp::FE::Real>(zero);
+    const svmp::FE::systems::BackwardDifferenceIntegrator integrator;
+    const auto context = integrator.buildContext(1, state);
+    state.time_integration = &context;
+
+    svmp::FE::systems::AssemblyRequest request;
+    request.op = "equations";
+    request.want_vector = true;
+    svmp::FE::assembly::DenseVectorView R(static_cast<svmp::FE::GlobalIndex>(n));
+    R.zero();
+    EXPECT_TRUE(system.assemble(request, state, nullptr, &R).success);
+    std::vector<double> r(n, 0.0);
+    for (std::size_t i = 0; i < n; ++i) {
+        r[i] = R.getVectorEntry(static_cast<svmp::FE::GlobalIndex>(i));
+    }
+    if (partitioned) {
+        MPI_Allreduce(MPI_IN_PLACE, r.data(), static_cast<int>(n), MPI_DOUBLE, MPI_SUM, MPI_COMM_WORLD);
+    }
+
+    // Name the DOFs by vertex global id, on the ranks that know them.
+    const auto u_id = system.findFieldByName("Velocity");
+    const auto p_id = system.findFieldByName("Pressure");
+    std::vector<long long> named(n, -1);
+    std::vector<int> field_of(n, -1);
+    std::vector<int> component_of(n, -1);
+    for (svmp::index_t v = 0; v < static_cast<svmp::index_t>(local.n_vertices()); ++v) {
+        for (const auto& [field, which, count] :
+             {std::tuple{u_id, 0, 2}, std::tuple{p_id, 1, 1}}) {
+            const auto dofs = system.fieldDofHandler(field).getEntityDofMap()->getVertexDofs(
+                static_cast<svmp::FE::GlobalIndex>(v));
+            for (int c = 0; c < count; ++c) {
+                const auto dof = static_cast<std::size_t>(system.fieldDofOffset(field) + dofs[static_cast<std::size_t>(c)]);
+                named[dof] = static_cast<long long>(gids[static_cast<std::size_t>(v)]);
+                field_of[dof] = which;
+                component_of[dof] = c;
+            }
+        }
+    }
+    if (partitioned) {
+        MPI_Allreduce(MPI_IN_PLACE, named.data(), static_cast<int>(n), MPI_LONG_LONG, MPI_MAX, MPI_COMM_WORLD);
+        MPI_Allreduce(MPI_IN_PLACE, field_of.data(), static_cast<int>(n), MPI_INT, MPI_MAX, MPI_COMM_WORLD);
+        MPI_Allreduce(MPI_IN_PLACE, component_of.data(), static_cast<int>(n), MPI_INT, MPI_MAX, MPI_COMM_WORLD);
+    }
+    ChannelResidual out;
+    for (std::size_t i = 0; i < n; ++i) {
+        EXPECT_GE(named[i], 0) << "DOF " << i << " has no vertex";
+        out[{static_cast<svmp::gid_t>(named[i]), field_of[i], component_of[i]}] = r[i];
+    }
+    return out;
+}
+
+/// Expects two channel residuals to agree entry by entry, to round-off of the
+/// largest entry, and returns the largest difference.
+double expectChannelResidualsMatch(const ChannelResidual& expected, const ChannelResidual& actual)
+{
+    double scale = 0.0;
+    for (const auto& [key, value] : expected) {
+        scale = std::max(scale, std::abs(value));
+    }
+    EXPECT_GT(scale, 0.0);
+    EXPECT_EQ(actual.size(), expected.size());
+    double worst = 0.0;
+    for (const auto& [key, value] : expected) {
+        const auto it = actual.find(key);
+        if (it == actual.end()) {
+            ADD_FAILURE() << "missing vertex " << std::get<0>(key);
+            continue;
+        }
+        worst = std::max(worst, std::abs(it->second - value));
+        EXPECT_LE(std::abs(it->second - value), 1e-13 * scale)
+            << "vertex " << std::get<0>(key) << " field " << std::get<1>(key) << " component " << std::get<2>(key)
+            << ": expected " << value << " got " << it->second;
+    }
+    return worst;
+}
+
+} // namespace
+
+// The momentum source of a temporal and spatial values table is the field of
+// its vertex values expanded in each cell's basis: the residual it drives is
+// that of a prescribed source field holding the same vertex values.
+TEST(NavierStokesLegacyBCs, SpacetimeMomentumTableIsTheFieldOfItsVertexValues)
+{
+    svmp::Physics::formulations::navier_stokes::forceLink_NavierStokesRegister();
+    int rank = 0;
+    if (mpiRunning()) {
+        MPI_Comm_rank(MPI_COMM_WORLD, &rank);
+    }
+    const auto table = std::filesystem::temp_directory_path() /
+                       ("svmp_channel_momentum_source_" + std::to_string(getpid()) + "_rank_" +
+                        std::to_string(rank) + ".dat");
+    const ScopedPathRemoval cleanup(table);
+    writeChannelSourceTable(table);
+    const auto field = channelSourceResidual(/*partitioned=*/false, 0, {});
+    const auto tabulated = channelSourceResidual(/*partitioned=*/false, 0, table);
+    const auto worst = expectChannelResidualsMatch(field, tabulated);
+    std::cout << "momentum-source table vs vertex field: worst " << worst << std::endl;
+}
+
+// The momentum source of a table gives the same residual on two ranks as on
+// one, with one and two ghost layers: a quadrature point reads the vertices of
+// its own cell, which every rank holding the cell holds (the nearest-node
+// interpolation it replaces needed about 12 layers to agree).
+TEST(NavierStokesLegacyBCsMPI, SpacetimeMomentumTableMatchesSerialOnTwoRanks)
+{
+    if (!mpiRunning()) {
+        GTEST_SKIP() << "Run this test under mpiexec.";
+    }
+    int size = 1;
+    MPI_Comm_size(MPI_COMM_WORLD, &size);
+    if (size != 2) {
+        GTEST_SKIP() << "requires two ranks";
+    }
+    svmp::Physics::formulations::navier_stokes::forceLink_NavierStokesRegister();
+    int rank = 0;
+    MPI_Comm_rank(MPI_COMM_WORLD, &rank);
+    long long id = rank == 0 ? static_cast<long long>(getpid()) : 0;
+    MPI_Bcast(&id, 1, MPI_LONG_LONG, 0, MPI_COMM_WORLD);
+    const auto table = std::filesystem::temp_directory_path() /
+                       ("svmp_channel_momentum_source_two_ranks_" + std::to_string(id) + ".dat");
+    if (rank == 0) {
+        writeChannelSourceTable(table);
+    }
+    MPI_Barrier(MPI_COMM_WORLD);
+    const auto serial = channelSourceResidual(/*partitioned=*/false, 0, table);
+    for (const int ghost_layers : {1, 2}) {
+        SCOPED_TRACE(::testing::Message() << "ghost layers " << ghost_layers);
+        const auto worst = expectChannelResidualsMatch(serial, channelSourceResidual(true, ghost_layers, table));
+        if (rank == 0) {
+            std::cout << "momentum-source table, two ranks, ghost layers " << ghost_layers << ": worst " << worst
+                      << std::endl;
+        }
+    }
+    MPI_Barrier(MPI_COMM_WORLD);
+    if (rank == 0) {
+        std::error_code error;
+        std::filesystem::remove(table, error);
+    }
+}
+#endif
 
 TEST(NavierStokesLegacyBCsMPI,
      GeneralVelocityFileMappingIsolatedToActiveCommunicator)

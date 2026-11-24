@@ -16,15 +16,18 @@
 #include "Forms/JIT/JITValidation.h"
 #include "Forms/Vocabulary.h"
 #include "Spaces/H1Space.h"
+#include "Spaces/SpaceFactory.h"
 
 #include "Mesh/Core/MeshBase.h"
 #include "Mesh/Mesh.h"
 #include "Mesh/Topology/CellShape.h"
 
+#include <array>
 #include <cmath>
 #include <filesystem>
 #include <fstream>
 #include <limits>
+#include <string>
 #include <vector>
 
 using svmp::CellFamily;
@@ -348,5 +351,198 @@ TEST(TimeFunction, ResolvedParameterIsJITStrictWhereTheCallbackIsNot)
         "Q", forms::TimeScalarCoefficient([&](Real, Real, Real, Real t) { return flow(t); }));
     EXPECT_FALSE(forms::jit::canCompile(callback * (1.0 + x.component(0)) * v).ok);
 }
+
+namespace {
+
+/// One cell of each shape, its corners moved off an affine map where the shape
+/// allows it (a tapered quadrilateral, a warped hexahedron and wedge).
+struct VertexDataCell {
+    const char* name;
+    ElementType type;
+    CellFamily family;
+    int dim;
+    std::vector<svmp::real_t> coordinates;
+};
+
+[[nodiscard]] std::vector<VertexDataCell> vertexDataCells()
+{
+    return {
+        {"Triangle3", ElementType::Triangle3, CellFamily::Triangle, 2, {0.1, 0.0, 1.3, 0.2, 0.4, 0.9}},
+        {"Quad4", ElementType::Quad4, CellFamily::Quad, 2, {0.0, 0.0, 2.0, 0.0, 1.5, 1.0, 0.2, 1.3}},
+        {"Tetra4", ElementType::Tetra4, CellFamily::Tetra, 3,
+         {0.0, 0.0, 0.0, 1.2, 0.1, 0.0, 0.2, 0.9, 0.1, 0.1, 0.3, 1.1}},
+        {"Hexa8", ElementType::Hex8, CellFamily::Hex, 3,
+         {0.0, 0.0, 0.0, 1.0, 0.0, 0.1, 1.2, 1.1, 0.0, 0.0, 1.0, 0.2,
+          0.1, 0.0, 1.0, 1.1, 0.2, 1.3, 0.9, 1.0, 1.0, 0.0, 1.2, 0.9}},
+        {"Wedge6", ElementType::Wedge6, CellFamily::Wedge, 3,
+         {0.0, 0.0, 0.0, 1.0, 0.1, 0.0, 0.1, 1.0, 0.0, 0.0, 0.1, 1.0, 1.3, 0.0, 1.2, 0.2, 1.1, 0.9}},
+        {"Pyramid5", ElementType::Pyramid5, CellFamily::Pyramid, 3,
+         {0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 1.0, 1.0, 0.0, 0.0, 1.0, 0.0, 0.4, 0.6, 1.0}},
+    };
+}
+
+[[nodiscard]] std::shared_ptr<Mesh> buildOneCellMesh(const VertexDataCell& cell)
+{
+    auto base = std::make_shared<MeshBase>();
+    const auto n_vertices = cell.coordinates.size() / static_cast<std::size_t>(cell.dim);
+    std::vector<svmp::index_t> connectivity(n_vertices);
+    for (std::size_t i = 0; i < n_vertices; ++i) {
+        connectivity[i] = static_cast<svmp::index_t>(i);
+    }
+    CellShape shape{};
+    shape.family = cell.family;
+    shape.num_corners = static_cast<int>(n_vertices);
+    shape.order = 1;
+    base->build_from_arrays(cell.dim, cell.coordinates, {0, static_cast<svmp::offset_t>(n_vertices)}, connectivity,
+                            {shape});
+    base->finalize();
+    return svmp::create_mesh(std::move(base));
+}
+
+} // namespace
+
+// Data linear in space, given at the mesh vertices, are reproduced exactly at
+// every quadrature point of every cell shape: the residual of
+// (u - f_h) . v against the vertex data matches that against the same linear
+// function written with the coordinate, at two times (the second assembly
+// refills the field).  The quadrature points of the default rule are not
+// vertices, and the quadrilateral, hexahedron and wedge are not affine.
+TEST(MeshVertexDataField, ReproducesDataLinearInSpaceAtEveryQuadraturePoint)
+{
+    for (const auto& cell : vertexDataCells()) {
+        SCOPED_TRACE(cell.name);
+        const auto mesh = buildOneCellMesh(cell);
+        const int dim = cell.dim;
+        const auto space = spaces::VectorSpace(spaces::SpaceType::H1, cell.type, 1, dim);
+        // f_c(x, t) = (1 + t) (1 + c + sum_d (0.5 + c - 0.25 d) x_d)
+        const auto exact = [dim](int c, const Real* x, Real t) {
+            Real value = 1.0 + static_cast<Real>(c);
+            for (int d = 0; d < dim; ++d) {
+                value += (0.5 + static_cast<Real>(c) - 0.25 * static_cast<Real>(d)) * x[d];
+            }
+            return (1.0 + t) * value;
+        };
+        const auto assembled = [&](bool vertex_data, Real time) {
+            FESystem sys(mesh);
+            const auto u_id = sys.addField(FieldSpec{.name = "u", .space = space, .components = dim});
+            sys.addOperator("op");
+            const auto u = forms::StateField(u_id, *space, "u");
+            const auto v = forms::TestField(u_id, *space, "v");
+            forms::FormExpr f;
+            if (vertex_data) {
+                const auto& X = mesh->local_mesh().X_ref();
+                f = meshVertexDataField(
+                    sys, "f",
+                    MeshVertexData{.space = space,
+                                   .components = dim,
+                                   .values = [&X, dim, exact](Real t, std::span<Real> out) {
+                                       const auto n = out.size() / static_cast<std::size_t>(dim);
+                                       for (std::size_t vertex = 0; vertex < n; ++vertex) {
+                                           for (int c = 0; c < dim; ++c) {
+                                               out[vertex * static_cast<std::size_t>(dim) + static_cast<std::size_t>(c)] =
+                                                   exact(c, &X[vertex * static_cast<std::size_t>(dim)], t);
+                                           }
+                                       }
+                                   }});
+            } else {
+                const auto x = forms::FormExpr::coordinate();
+                std::vector<forms::FormExpr> components;
+                for (int c = 0; c < dim; ++c) {
+                    auto value = forms::FormExpr::constant(1.0 + static_cast<Real>(c));
+                    for (int d = 0; d < dim; ++d) {
+                        value = value + forms::FormExpr::constant(0.5 + static_cast<Real>(c) - 0.25 * static_cast<Real>(d)) *
+                                            x.component(d);
+                    }
+                    components.push_back((1.0 + forms::FormExpr::time()) * value);
+                }
+                f = forms::FormExpr::asVector(std::move(components));
+            }
+            (void)installFormulation(sys, "op", {u_id}, (forms::inner(u - f, v)).dx());
+            sys.setup();
+            const auto n = sys.dofHandler().getNumDofs();
+            std::vector<Real> U(static_cast<std::size_t>(n), 0.25);
+            std::vector<std::vector<Real>> out;
+            for (const Real t : {time, time + 0.5}) {
+                SystemStateView state;
+                state.u = U;
+                state.time = t;
+                assembly::DenseVectorView R(n);
+                R.zero();
+                AssemblyRequest request;
+                request.op = "op";
+                request.want_vector = true;
+                EXPECT_TRUE(sys.assemble(request, state, nullptr, &R).success);
+                out.emplace_back();
+                for (GlobalIndex i = 0; i < n; ++i) {
+                    out.back().push_back(R.getVectorEntry(i));
+                }
+            }
+            return out;
+        };
+        const auto data = assembled(true, 0.3);
+        const auto expression = assembled(false, 0.3);
+        ASSERT_EQ(data.size(), expression.size());
+        for (std::size_t k = 0; k < data.size(); ++k) {
+            ASSERT_EQ(data[k].size(), expression[k].size());
+            Real scale = 0.0;
+            for (const auto value : expression[k]) {
+                scale = std::max(scale, std::abs(value));
+            }
+            ASSERT_GT(scale, 0.0);
+            for (std::size_t i = 0; i < data[k].size(); ++i) {
+                EXPECT_NEAR(data[k][i], expression[k][i], 1e-14 * scale) << "time " << k << " row " << i;
+            }
+        }
+    }
+}
+
+// The data must give every node of the field a value: a vertex the data leave
+// out, or a space with nodes that are not mesh vertices, fails at the first
+// assembly, naming the field.
+TEST(MeshVertexDataField, RefusesNodesWithoutData)
+{
+    const auto mesh = build_single_quad_mesh();
+    const auto assemble = [&](std::shared_ptr<const spaces::FunctionSpace> data_space, bool skip_vertex) {
+        FESystem sys(mesh);
+        auto space = std::make_shared<spaces::H1Space>(ElementType::Quad4, 1);
+        const auto u_id = sys.addField(FieldSpec{.name = "u", .space = space, .components = 1});
+        sys.addOperator("op");
+        const auto f = meshVertexDataField(
+            sys, "f",
+            MeshVertexData{.space = data_space,
+                           .components = 1,
+                           .values = [skip_vertex](Real, std::span<Real> out) {
+                               for (std::size_t i = skip_vertex ? 1u : 0u; i < out.size(); ++i) {
+                                   out[i] = 1.0;
+                               }
+                           }});
+        EXPECT_THROW((void)meshVertexDataField(sys, "f", MeshVertexData{.space = data_space,
+                                                                         .values = [](Real, std::span<Real>) {}}),
+                     InvalidArgumentException);
+        const auto u = forms::StateField(u_id, *space, "u");
+        const auto v = forms::TestField(u_id, *space, "v");
+        (void)installFormulation(sys, "op", {u_id}, ((u - f) * v).dx());
+        sys.setup();
+        const auto n = sys.dofHandler().getNumDofs();
+        std::vector<Real> U(static_cast<std::size_t>(n), 0.0);
+        SystemStateView state;
+        state.u = U;
+        assembly::DenseVectorView R(n);
+        R.zero();
+        AssemblyRequest request;
+        request.op = "op";
+        request.want_vector = true;
+        try {
+            return sys.assemble(request, state, nullptr, &R).success;
+        } catch (const std::exception& error) {
+            EXPECT_NE(std::string(error.what()).find("'f'"), std::string::npos) << error.what();
+            return false;
+        }
+    };
+    EXPECT_TRUE(assemble(std::make_shared<spaces::H1Space>(ElementType::Quad4, 1), false));
+    EXPECT_FALSE(assemble(std::make_shared<spaces::H1Space>(ElementType::Quad4, 1), true));
+    EXPECT_FALSE(assemble(std::make_shared<spaces::H1Space>(ElementType::Quad4, 2), false));
+}
+
 
 } // namespace svmp::FE::systems::test

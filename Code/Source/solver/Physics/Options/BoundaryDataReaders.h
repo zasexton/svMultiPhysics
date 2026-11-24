@@ -32,6 +32,7 @@
 #include <limits>
 #include <memory>
 #include <optional>
+#include <span>
 #include <sstream>
 #include <string>
 #include <unordered_map>
@@ -101,21 +102,6 @@ struct TemporalSpatialValues {
   std::vector<svmp::FE::Real> d{};
 
   std::unordered_map<Key, std::size_t, KeyHash> node_index_by_key{};
-  bool has_x_only_interpolant{false};
-  std::vector<svmp::FE::Real> x_interpolation_coords{};
-  std::vector<std::size_t> x_interpolation_nodes{};
-
-  // Uniform bucket grid over the stored coordinates.  The nearest-node
-  // interpolant is evaluated at every quadrature point, and a scan over all
-  // stored nodes per evaluation made a 1,573-node 2D table cost about 18 s
-  // per time step; the grid returns the same neighbours (ties broken by node
-  // index, as the scan did) after visiting a few buckets.
-  static constexpr std::size_t kNearestNodes = 8;
-  std::array<double, 3> grid_lo{0.0, 0.0, 0.0};
-  std::array<double, 3> grid_h{1.0, 1.0, 1.0};
-  std::array<long long, 3> grid_n{1, 1, 1};
-  std::vector<std::size_t> grid_offsets{};
-  std::vector<std::size_t> grid_items{};
 
   [[nodiscard]] static Key quantize(const std::array<svmp::FE::Real, 3>& p, int dim_in) noexcept
   {
@@ -137,240 +123,6 @@ struct TemporalSpatialValues {
       throw std::runtime_error("[svMultiPhysics::Physics] Internal error: temporal/spatial BC index out of range.");
     }
     return d[idx];
-  }
-
-  [[nodiscard]] static bool closeValues(svmp::FE::Real a, svmp::FE::Real b) noexcept
-  {
-    const double da = static_cast<double>(a);
-    const double db = static_cast<double>(b);
-    const double scale = std::max({1.0, std::abs(da), std::abs(db)});
-    return std::abs(da - db) <= 1.0e-10 * scale;
-  }
-
-  void buildNearestGrid()
-  {
-    grid_offsets.clear();
-    grid_items.clear();
-    grid_n = {1, 1, 1};
-    if (coords.empty()) {
-      return;
-    }
-    std::array<double, 3> hi{};
-    for (int k = 0; k < 3; ++k) {
-      grid_lo[static_cast<std::size_t>(k)] = std::numeric_limits<double>::infinity();
-      hi[static_cast<std::size_t>(k)] = -std::numeric_limits<double>::infinity();
-    }
-    for (const auto& c : coords) {
-      for (std::size_t k = 0; k < 3; ++k) {
-        grid_lo[k] = std::min(grid_lo[k], static_cast<double>(c[k]));
-        hi[k] = std::max(hi[k], static_cast<double>(c[k]));
-      }
-    }
-    // About two nodes per bucket on the spanned axes; an axis spans the
-    // nodes if its extent exceeds 1e-9 of the longest one, and the bucket
-    // count stays below four per node.
-    double longest = 0.0;
-    for (std::size_t k = 0; k < 3; ++k) {
-      longest = std::max(longest, hi[k] - grid_lo[k]);
-    }
-    std::array<bool, 3> spans{false, false, false};
-    double measure = 1.0;
-    int spanned = 0;
-    for (std::size_t k = 0; k < 3; ++k) {
-      const double extent = hi[k] - grid_lo[k];
-      if (extent > 1.0e-9 * longest && extent > 0.0) {
-        spans[k] = true;
-        measure *= extent;
-        ++spanned;
-      }
-    }
-    double h = longest;
-    if (spanned > 0 && coords.size() > 2) {
-      h = std::pow(2.0 * measure / static_cast<double>(coords.size()), 1.0 / spanned);
-    }
-    if (!(h > 0.0) || !std::isfinite(h)) {
-      h = 1.0;
-    }
-    std::size_t buckets = 1;
-    for (int attempt = 0; attempt < 64; ++attempt) {
-      buckets = 1;
-      for (std::size_t k = 0; k < 3; ++k) {
-        const double extent = hi[k] - grid_lo[k];
-        grid_n[k] = spans[k] ? std::max<long long>(1, static_cast<long long>(std::ceil(extent / h))) : 1;
-        grid_h[k] = spans[k] ? extent / static_cast<double>(grid_n[k]) : std::max(extent, 1.0);
-        buckets *= static_cast<std::size_t>(grid_n[k]);
-      }
-      if (buckets <= 4 * coords.size() + 1) {
-        break;
-      }
-      h *= 2.0;
-    }
-    std::vector<std::size_t> bucket_of(coords.size());
-    grid_offsets.assign(buckets + 1, 0);
-    for (std::size_t i = 0; i < coords.size(); ++i) {
-      std::array<long long, 3> b{};
-      for (std::size_t k = 0; k < 3; ++k) {
-        b[k] = bucketCoordinate(static_cast<double>(coords[i][k]), k);
-      }
-      bucket_of[i] = bucketIndex(b);
-      ++grid_offsets[bucket_of[i] + 1];
-    }
-    for (std::size_t b = 0; b < buckets; ++b) {
-      grid_offsets[b + 1] += grid_offsets[b];
-    }
-    grid_items.resize(coords.size());
-    std::vector<std::size_t> fill(grid_offsets.begin(), grid_offsets.end() - 1);
-    for (std::size_t i = 0; i < coords.size(); ++i) {
-      grid_items[fill[bucket_of[i]]++] = i;
-    }
-  }
-
-  [[nodiscard]] long long bucketCoordinate(double x, std::size_t k) const noexcept
-  {
-    const double s = (x - grid_lo[k]) / grid_h[k];
-    if (!(s > 0.0)) {
-      return 0;
-    }
-    return std::min(grid_n[k] - 1, static_cast<long long>(std::floor(s)));
-  }
-
-  [[nodiscard]] std::size_t bucketIndex(const std::array<long long, 3>& b) const noexcept
-  {
-    return static_cast<std::size_t>((b[2] * grid_n[1] + b[1]) * grid_n[0] + b[0]);
-  }
-
-  // The kNearestNodes stored nodes closest to p, ordered by (squared
-  // distance, node index): the order of the former full partial_sort.
-  [[nodiscard]] std::vector<std::pair<double, std::size_t>> nearestNodes(
-      const std::array<svmp::FE::Real, 3>& p) const
-  {
-    const std::size_t k_wanted = std::min<std::size_t>(kNearestNodes, coords.size());
-    std::vector<std::pair<double, std::size_t>> best;
-    best.reserve(k_wanted + 1);
-    if (k_wanted == 0) {
-      return best;
-    }
-    const auto consider = [&](std::size_t i) {
-      const auto& c = coords[i];
-      const double dx = static_cast<double>(p[0] - c[0]);
-      const double dy = static_cast<double>(p[1] - c[1]);
-      const double dz = static_cast<double>(p[2] - c[2]);
-      const std::pair<double, std::size_t> candidate{dx * dx + dy * dy + dz * dz, i};
-      if (best.size() == k_wanted && !(candidate < best.back())) {
-        return;
-      }
-      best.insert(std::upper_bound(best.begin(), best.end(), candidate), candidate);
-      if (best.size() > k_wanted) {
-        best.pop_back();
-      }
-    };
-    std::array<long long, 3> center{};
-    for (std::size_t k = 0; k < 3; ++k) {
-      center[k] = bucketCoordinate(static_cast<double>(p[k]), k);
-    }
-    const long long max_ring = std::max({grid_n[0], grid_n[1], grid_n[2]});
-    for (long long ring = 0; ring <= max_ring; ++ring) {
-      std::array<long long, 3> lo{};
-      std::array<long long, 3> hi{};
-      for (std::size_t k = 0; k < 3; ++k) {
-        lo[k] = std::max<long long>(0, center[k] - ring);
-        hi[k] = std::min<long long>(grid_n[k] - 1, center[k] + ring);
-      }
-      for (long long bz = lo[2]; bz <= hi[2]; ++bz) {
-        for (long long by = lo[1]; by <= hi[1]; ++by) {
-          for (long long bx = lo[0]; bx <= hi[0]; ++bx) {
-            const bool on_shell = std::llabs(bx - center[0]) == ring ||
-                                  std::llabs(by - center[1]) == ring ||
-                                  std::llabs(bz - center[2]) == ring;
-            if (!on_shell) {
-              continue;       // visited in an earlier ring
-            }
-            const auto b = bucketIndex({bx, by, bz});
-            for (std::size_t j = grid_offsets[b]; j < grid_offsets[b + 1]; ++j) {
-              consider(grid_items[j]);
-            }
-          }
-        }
-      }
-      // Every unvisited node lies outside the visited bucket box; stop once
-      // the k-th candidate is closer than that box's nearest open face.
-      double gap = std::numeric_limits<double>::infinity();
-      for (std::size_t k = 0; k < 3; ++k) {
-        if (lo[k] > 0) {
-          gap = std::min(gap, static_cast<double>(p[k]) - (grid_lo[k] + static_cast<double>(lo[k]) * grid_h[k]));
-        }
-        if (hi[k] < grid_n[k] - 1) {
-          gap = std::min(gap, (grid_lo[k] + static_cast<double>(hi[k] + 1) * grid_h[k]) - static_cast<double>(p[k]));
-        }
-      }
-      if (gap == std::numeric_limits<double>::infinity()) {
-        break;                // every bucket visited
-      }
-      gap -= 1.0e-12 * std::max({grid_h[0], grid_h[1], grid_h[2]});   // bucket rounding
-      if (best.size() == k_wanted && gap > 0.0 && best.back().first < gap * gap) {
-        break;
-      }
-    }
-    return best;
-  }
-
-  void buildInterpolationMetadata()
-  {
-    buildNearestGrid();
-    has_x_only_interpolant = false;
-    x_interpolation_coords.clear();
-    x_interpolation_nodes.clear();
-    if (coords.size() < 2 || num_time_points <= 0 || dof <= 0) {
-      return;
-    }
-
-    std::vector<std::size_t> order(coords.size());
-    for (std::size_t i = 0; i < order.size(); ++i) {
-      order[i] = i;
-    }
-    std::sort(order.begin(), order.end(), [this](std::size_t a, std::size_t b) {
-      return coords[a][0] < coords[b][0];
-    });
-
-    constexpr double coord_tol = 1.0e-12;
-    std::size_t group_begin = 0;
-    bool values_depend_only_on_x = true;
-    while (group_begin < order.size()) {
-      const auto representative = order[group_begin];
-      const double x0 = static_cast<double>(coords[representative][0]);
-      std::size_t group_end = group_begin + 1;
-      while (group_end < order.size() &&
-             std::abs(static_cast<double>(coords[order[group_end]][0]) - x0) <= coord_tol) {
-        ++group_end;
-      }
-
-      for (std::size_t j = group_begin + 1; j < group_end && values_depend_only_on_x; ++j) {
-        const auto node = order[j];
-        for (int it = 0; it < num_time_points && values_depend_only_on_x; ++it) {
-          for (int comp = 0; comp < dof; ++comp) {
-            if (!closeValues(sample(representative, it, comp), sample(node, it, comp))) {
-              values_depend_only_on_x = false;
-              break;
-            }
-          }
-        }
-      }
-      if (!values_depend_only_on_x) {
-        break;
-      }
-
-      x_interpolation_coords.push_back(coords[representative][0]);
-      x_interpolation_nodes.push_back(representative);
-      group_begin = group_end;
-    }
-
-    has_x_only_interpolant =
-        values_depend_only_on_x && x_interpolation_coords.size() >= 2 &&
-        std::abs(static_cast<double>(x_interpolation_coords.back() - x_interpolation_coords.front())) > 1.0e-14;
-    if (!has_x_only_interpolant) {
-      x_interpolation_coords.clear();
-      x_interpolation_nodes.clear();
-    }
   }
 
   [[nodiscard]] std::size_t findNodeIndex(const std::array<svmp::FE::Real, 3>& p) const
@@ -469,69 +221,23 @@ struct TemporalSpatialValues {
     return static_cast<svmp::FE::Real>((1.0 - alpha) * v0 + alpha * v1);
   }
 
-  [[nodiscard]] svmp::FE::Real interpolateAlongX(svmp::FE::Real x, svmp::FE::Real time, int comp) const
+  /// The values at @p time at the mesh vertices of the stored nodes: component
+  /// c of the node at local vertex v goes to out[v * components + c], and the
+  /// components past the table's are zero.
+  void fillVertexValues(svmp::FE::Real time, int components, std::span<svmp::FE::Real> out) const
   {
-    if (!has_x_only_interpolant || x_interpolation_coords.empty()) {
-      throw std::runtime_error("[svMultiPhysics::Physics] Internal error: missing x-axis temporal/spatial interpolant.");
+    const auto n = static_cast<std::size_t>(components);
+    for (std::size_t node = 0; node < node_ids.size(); ++node) {
+      const auto base = static_cast<std::size_t>(node_ids[node]) * n;
+      if (node_ids[node] < 0 || base + n > out.size()) {
+        throw std::runtime_error(
+            "[svMultiPhysics::Physics] Internal error: temporal/spatial values node outside the vertex range.");
+      }
+      for (int c = 0; c < components; ++c) {
+        out[base + static_cast<std::size_t>(c)] =
+            c < dof ? interpolate(node, time, c) : svmp::FE::Real{0.0};
+      }
     }
-
-    if (x <= x_interpolation_coords.front()) {
-      return interpolate(x_interpolation_nodes.front(), time, comp);
-    }
-    if (x >= x_interpolation_coords.back()) {
-      return interpolate(x_interpolation_nodes.back(), time, comp);
-    }
-
-    const auto upper = std::upper_bound(x_interpolation_coords.begin(), x_interpolation_coords.end(), x);
-    const auto hi = static_cast<std::size_t>(std::distance(x_interpolation_coords.begin(), upper));
-    const auto lo = hi - 1;
-    const double x0 = static_cast<double>(x_interpolation_coords[lo]);
-    const double x1 = static_cast<double>(x_interpolation_coords[hi]);
-    const double denom = x1 - x0;
-    const double alpha = (denom > 0.0) ? ((static_cast<double>(x) - x0) / denom) : 0.0;
-    const double v0 = static_cast<double>(interpolate(x_interpolation_nodes[lo], time, comp));
-    const double v1 = static_cast<double>(interpolate(x_interpolation_nodes[hi], time, comp));
-    return static_cast<svmp::FE::Real>((1.0 - alpha) * v0 + alpha * v1);
-  }
-
-  [[nodiscard]] svmp::FE::Real interpolateNearestSpatial(const std::array<svmp::FE::Real, 3>& p,
-                                                         svmp::FE::Real time,
-                                                         int comp) const
-  {
-    if (coords.empty()) {
-      return svmp::FE::Real{0.0};
-    }
-
-    const auto distances = nearestNodes(p);
-    const auto k = distances.size();
-
-    constexpr double exact_tol2 = 1.0e-16;
-    if (distances.front().first <= exact_tol2) {
-      return interpolate(distances.front().second, time, comp);
-    }
-
-    double weighted_sum = 0.0;
-    double weight_total = 0.0;
-    for (std::size_t i = 0; i < k; ++i) {
-      const double w = 1.0 / std::max(distances[i].first, 1.0e-24);
-      weighted_sum += w * static_cast<double>(interpolate(distances[i].second, time, comp));
-      weight_total += w;
-    }
-    return static_cast<svmp::FE::Real>(weight_total > 0.0 ? weighted_sum / weight_total : 0.0);
-  }
-
-  [[nodiscard]] svmp::FE::Real interpolateSpatial(const std::array<svmp::FE::Real, 3>& p,
-                                                  svmp::FE::Real time,
-                                                  int comp) const
-  {
-    const auto key = quantize(p, dim);
-    if (const auto it = node_index_by_key.find(key); it != node_index_by_key.end()) {
-      return interpolate(it->second, time, comp);
-    }
-    if (has_x_only_interpolant) {
-      return interpolateAlongX(p[0], time, comp);
-    }
-    return interpolateNearestSpatial(p, time, comp);
   }
 };
 

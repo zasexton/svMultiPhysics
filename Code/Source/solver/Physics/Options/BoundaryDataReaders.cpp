@@ -399,8 +399,6 @@ std::shared_ptr<TemporalSpatialValues> read_temporal_and_spatial_values_file(con
     navierStokesTraceLog(oss.str());
   }
 
-  out->buildInterpolationMetadata();
-
   return out;
 }
 

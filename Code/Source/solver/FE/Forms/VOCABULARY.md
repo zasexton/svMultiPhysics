@@ -1159,6 +1159,14 @@ Status: `implemented/expert`.
 The runtime kernel model is real-valued. Complex PDEs are represented by
 explicit real/imaginary splitting today.
 
+### Vertex Data (D69 item 2)
+
+Status: `implemented/public`.
+
+| Vocabulary | Header | Notes |
+|------------|--------|-------|
+| `systems::meshVertexDataField(system, name, MeshVertexData{space, components, values})`, `refreshMeshVertexDataFields(system, time)` | `Systems/TimeSeries.h` | Data given at the mesh vertices in time (`values(t, out)` writes component c of vertex v to `out[v * components + c]`, owned and ghost vertices alike) as the prescribed field `name` on a Lagrange space whose nodes are mesh vertices; the value symbol is returned. The assembly of an operator fills the field at the state time when it differs from the last fill. At a quadrature point the field is the cell's basis expansion of its vertex values: data linear on a cell are reproduced exactly on every element shape, and the value depends on the cell's own vertices only, so it is the same at any rank count. A DOF the data leave without a finite value fails the assembly, naming the field. The momentum-source table of the Navier-Stokes module (`Momentum_source_temporal_and_spatial_values_file_path`, field `Momentum_source_table`) uses it |
+
 ## Current Capability Notes
 
 - Forms is a real-valued symbolic DSL with scalar, vector, matrix, and selected

@@ -1060,11 +1060,14 @@ void apply_fluid_rotating_frame_coriolis(
 }
 
 /// The time/space momentum-source file: an equation value replaces a domain
-/// value.
+/// value.  The table holds the source at every mesh vertex; it is expanded in
+/// the Lagrange basis of each cell's geometry (decision D69 item 2), so a
+/// quadrature point reads the values of its cell's vertices only.
 void apply_fluid_momentum_source_spacetime_file(
     const svmp::Physics::EquationModuleInput& input,
     const NavierStokesKeys& keys,
     int dim,
+    svmp::FE::ElementType element_type,
     MarkerCommunicator comm,
     svmp::Physics::formulations::navier_stokes::IncompressibleNavierStokesVMSOptions& options)
 {
@@ -1082,25 +1085,14 @@ void apply_fluid_momentum_source_spacetime_file(
       /*boundary_marker=*/-1,
       source->momentum_source_file,
       comm);
-  options.has_body_force_spacetime = true;
-  for (int d = 0; d < dim; ++d) {
-    if (d < data->dof) {
-      const int comp = d;
-      options.body_force_spacetime[static_cast<std::size_t>(d)] =
-          svmp::FE::forms::TimeScalarCoefficient(
-              [data, comp](svmp::FE::Real x,
-                           svmp::FE::Real y,
-                           svmp::FE::Real z,
-                           svmp::FE::Real t) -> svmp::FE::Real {
-                const std::array<svmp::FE::Real, 3> p{x, y, z};
-                return data->interpolateSpatial(p, t, comp);
-              });
-    } else {
-      options.body_force_spacetime[static_cast<std::size_t>(d)] =
-          svmp::Physics::formulations::navier_stokes::
-              IncompressibleNavierStokesVMSOptions::ScalarValue{0.0};
-    }
-  }
+  options.body_force_vertex_data = svmp::FE::systems::MeshVertexData{
+      .space = svmp::FE::spaces::VectorSpace(
+          svmp::FE::spaces::SpaceType::H1, element_type, infer_polynomial_order(*input.mesh), dim),
+      .components = dim,
+      .values = [data, dim](svmp::FE::Real t, std::span<svmp::FE::Real> out) {
+        data->fillVertexValues(t, dim, out);
+      },
+  };
 }
 
 /// The equation and domain members of the artifact's "resolved" section:
@@ -1926,7 +1918,7 @@ ResolvedOnePhaseNavierStokesInput resolve_one_phase_navier_stokes_input(
   apply_fluid_momentum_source_params(keys, options);
   apply_fluid_properties(domain, keys, options);
   apply_fluid_momentum_source_spacetime_file(
-      input, keys, dim, markerCommunicator(system), options);
+      input, keys, dim, element_type, markerCommunicator(system), options);
   apply_fluid_rotating_frame_coriolis(keys, dim, options);
   apply_node_pressure_constraints(input, options);
   apply_fluid_bcs(input, domain, markerCommunicator(system), options);

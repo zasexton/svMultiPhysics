@@ -10,7 +10,7 @@
 
 /**
  * @file TimeSeries.h
- * @brief Tabulated time data and time-function parameters of a system
+ * @brief Tabulated time data, time-function parameters and vertex data of a system
  *
  * Time-dependent boundary data is a parameter of the forms, not a callback:
  *
@@ -33,6 +33,7 @@
 
 #include <cstdint>
 #include <functional>
+#include <memory>
 #include <span>
 #include <string>
 #include <string_view>
@@ -41,6 +42,10 @@
 
 namespace svmp {
 namespace FE {
+namespace spaces {
+class FunctionSpace;
+} // namespace spaces
+
 namespace systems {
 
 class FESystem;
@@ -117,6 +122,50 @@ struct TimeFunctionStore {
 
 /// The time function @p name of @p system, or null when none is declared.
 [[nodiscard]] const std::function<Real(Real)>* findTimeFunction(const FESystem& system, std::string_view name);
+
+/**
+ * @brief Values at the mesh vertices at a time
+ *
+ * values(t, out) writes the value of component c at mesh vertex v to
+ * out[v * components + c], for every vertex of the system's mesh the data
+ * cover (owned and ghost, in the mesh's local numbering).  out arrives filled
+ * with quiet NaN.
+ */
+using MeshVertexValuesAtTime = std::function<void(Real time, std::span<Real> out)>;
+
+/// Data at the mesh vertices that change in time, and the nodal space they
+/// are expanded in (a Lagrange space whose nodes are mesh vertices).
+struct MeshVertexData {
+    std::shared_ptr<const spaces::FunctionSpace> space{};
+    int components{1};
+    MeshVertexValuesAtTime values{};
+};
+
+/**
+ * @brief Declares the prescribed field @p name holding @p data at the state
+ * time, and returns its value symbol
+ *
+ * Before each assembly at a time other than that of the last fill, the system
+ * evaluates data.values at that time and sets the field's coefficients to the
+ * vertex values (refreshMeshVertexDataFields).  At a quadrature point the
+ * field is the expansion in the cell's own basis of the values at the cell's
+ * nodes: it reproduces data linear on the cell exactly, and it reads no value
+ * but those of the cell's vertices, so it does not depend on the partition or
+ * on where the quadrature points lie.
+ *
+ * Throws InvalidArgumentException after setup, for an empty name, space or
+ * function, or for a field already declared this way.
+ */
+[[nodiscard]] forms::FormExpr meshVertexDataField(FESystem& system, std::string name, MeshVertexData data);
+
+/**
+ * @brief Fills the fields of meshVertexDataField at @p time, each whose last
+ * fill was at another time
+ *
+ * Throws InvalidArgumentException, naming the field, when the data leave a
+ * DOF of a cell of the mesh without a finite value.
+ */
+void refreshMeshVertexDataFields(FESystem& system, Real time);
 
 } // namespace systems
 } // namespace FE

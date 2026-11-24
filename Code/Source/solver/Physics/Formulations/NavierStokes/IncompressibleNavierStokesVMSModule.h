@@ -593,6 +593,10 @@ struct IncompressibleNavierStokesVMSOptions {
     std::array<ScalarValue, 3> body_force_spacetime{
         ScalarValue{0.0}, ScalarValue{0.0}, ScalarValue{0.0}};
     bool has_body_force_spacetime{false};
+    // Momentum source given at the mesh vertices in time (a temporal and
+    // spatial values table): the prescribed field "Momentum_source_table",
+    // expanded in each cell's basis (FE::systems::meshVertexDataField).
+    std::optional<FE::systems::MeshVertexData> body_force_vertex_data{};
     std::string body_force_field_name{};
     bool auto_register_body_force_field{true};
     bool rotating_frame_coriolis_enabled{false};
