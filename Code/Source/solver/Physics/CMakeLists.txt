@@ -204,16 +204,6 @@ file(GLOB_RECURSE PHYSICS_MATERIAL_SOURCES CONFIGURE_DEPENDS
 list(FILTER PHYSICS_MATERIAL_HEADERS EXCLUDE REGEX ".*/(Tests|Examples)/.*")
 list(FILTER PHYSICS_MATERIAL_SOURCES EXCLUDE REGEX ".*/(Tests|Examples)/.*")
 
-file(GLOB_RECURSE PHYSICS_COUPLING_HEADERS CONFIGURE_DEPENDS
-    "${CMAKE_CURRENT_SOURCE_DIR}/Coupling/*.h"
-    "${CMAKE_CURRENT_SOURCE_DIR}/Coupling/*.hpp"
-)
-file(GLOB_RECURSE PHYSICS_COUPLING_SOURCES CONFIGURE_DEPENDS
-    "${CMAKE_CURRENT_SOURCE_DIR}/Coupling/*.cpp"
-)
-list(FILTER PHYSICS_COUPLING_HEADERS EXCLUDE REGEX ".*/(Tests|Examples)/.*")
-list(FILTER PHYSICS_COUPLING_SOURCES EXCLUDE REGEX ".*/(Tests|Examples)/.*")
-
 # Option readers, schemas, rules and registration (decision D52): above
 # Physics/Core, beside the formulations they resolve options for.
 file(GLOB_RECURSE PHYSICS_OPTIONS_HEADERS CONFIGURE_DEPENDS
@@ -227,13 +217,11 @@ list(APPEND PHYSICS_PUBLIC_HEADERS
     ${PHYSICS_OPTIONS_HEADERS}
     ${PHYSICS_FORMULATION_HEADERS}
     ${PHYSICS_MATERIAL_HEADERS}
-    ${PHYSICS_COUPLING_HEADERS}
 )
 list(APPEND PHYSICS_SOURCES
     ${PHYSICS_OPTIONS_SOURCES}
     ${PHYSICS_FORMULATION_SOURCES}
     ${PHYSICS_MATERIAL_SOURCES}
-    ${PHYSICS_COUPLING_SOURCES}
 )
 
 if(PHYSICS_BUILD_SHARED)
@@ -290,42 +278,6 @@ if(PHYSICS_BUILD_TESTS)
     include(${CMAKE_CURRENT_SOURCE_DIR}/cmake/EnableGTest.cmake)
     include(${CMAKE_CURRENT_LIST_DIR}/../../../CMake/SvmpTestEntries.cmake)
 
-    set(PHYSICS_COUPLING_HEADER_TEST_SOURCES)
-    foreach(_physics_coupling_header IN LISTS PHYSICS_COUPLING_HEADERS)
-        file(RELATIVE_PATH
-            _physics_coupling_header_include
-            "${CMAKE_CURRENT_SOURCE_DIR}/.."
-            "${_physics_coupling_header}"
-        )
-        string(MAKE_C_IDENTIFIER
-            "${_physics_coupling_header_include}"
-            _physics_coupling_header_id
-        )
-        set(_physics_coupling_header_source
-            "${CMAKE_CURRENT_BINARY_DIR}/header_checks/${_physics_coupling_header_id}.cpp"
-        )
-        file(WRITE
-            "${_physics_coupling_header_source}"
-            "#include \"${_physics_coupling_header_include}\"\n"
-            "int ${_physics_coupling_header_id}_compile_check() { return 0; }\n"
-        )
-        list(APPEND
-            PHYSICS_COUPLING_HEADER_TEST_SOURCES
-            "${_physics_coupling_header_source}"
-        )
-    endforeach()
-
-    add_library(test_physics_coupling_headers OBJECT
-        ${PHYSICS_COUPLING_HEADER_TEST_SOURCES}
-    )
-    target_link_libraries(test_physics_coupling_headers PRIVATE svphysics)
-    if(_SVMP_PHYSICS_LIBSTDCXX11_OPTIONS)
-        target_compile_options(test_physics_coupling_headers
-            PRIVATE
-                ${_SVMP_PHYSICS_LIBSTDCXX11_OPTIONS}
-        )
-    endif()
-
     set(PHYSICS_TEST_SOURCES
         Tests/Unit/test_main.cpp
         Tests/Unit/test_PoissonModule.cpp
@@ -345,15 +297,13 @@ if(PHYSICS_BUILD_TESTS)
         Tests/Unit/test_FreeSurfaceSemiImplicitSurfaceTension.cpp
         Tests/Unit/test_CoreUtilities.cpp
         Tests/Unit/test_VtpMeshSupport.cpp
-        Tests/Unit/Coupling/test_FSICouplingModule.cpp
-        Tests/Unit/Coupling/test_ThermalInterfaceCouplingModule.cpp
+        Tests/Unit/test_FSIInterfaceForms.cpp
     )
     if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/Tests/Unit/test_UstructModule.cpp")
         list(APPEND PHYSICS_TEST_SOURCES Tests/Unit/test_UstructModule.cpp)
     endif()
 
     add_executable(test_physics ${PHYSICS_TEST_SOURCES})
-    add_dependencies(test_physics test_physics_coupling_headers)
     target_link_libraries(test_physics PRIVATE svphysics ${GTEST_LIBRARIES})
     if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/Materials/Solid/IsochoricNeoHookeanPK1.h" AND
        EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/Materials/Solid/IsochoricNeoHookeanPK1.cpp")

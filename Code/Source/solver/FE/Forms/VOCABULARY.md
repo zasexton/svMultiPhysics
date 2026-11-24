@@ -110,7 +110,6 @@ Adjacent FE services a formulation calls:
 | `Interfaces/ContactLineGeometryCertificate.h` | Planar-wall and contact-rule certificates of a contact line |
 | `PostProcessing/DerivedResultBuilder.h` | Derived output fields defined by a `FormExpr` |
 | `Auxiliary/AuxiliaryModelDSL.h`, `Auxiliary/AuxiliaryBindings.h` | 0D auxiliary models coupled to forms |
-| `Coupling/CouplingFormBuilder.h` | Participant-named forms for multi-module coupling contracts |
 
 ## Canonical Workflow
 
@@ -655,10 +654,6 @@ Bare integer-marker overloads remain legacy routes and fail closed when the
 same physical marker has generated-active provenance. Use
 `ExteriorBoundaryMeasure::fullPhysical(physical_marker)` only for an
 intentional complete-background-face operator.
-The selector overloads of `CouplingFormBuilder::integrate(...)` additionally
-verify that the selector's physical marker matches the coupling boundary
-region.
-
 Advanced `H(div)` trace infrastructure also exposes periodic/MPC pairing
 helpers and marker-scoped mortar/interface field workflows through the Spaces
 and Systems layers. See `Docs/HDIV_ADVANCED_USAGE_GUIDE.md` for those flows.
@@ -750,7 +745,7 @@ Status: `implemented/public` for the Systems install API; compiler/IR APIs are
 | `FormInstallOptions` | `Systems/FormsInstaller.h` | `ad_mode` (`Forward`, the forward-mode dual numbers; `Reverse` and `Taylor` are not implemented and refused), `compiler_options` (`SymbolicOptions`), `extra_trial_fields`, `constitutive_laws`, `source_component_tag`, `contributes_to_problem_analysis`, generated-boundary Nitsche trace requests |
 | Trial fields of an install | `Systems/FormsInstaller.h` | The fields of the list, the extra trial fields, and the fields of the geometry sensitivity (the mesh displacement, the level-set fields of a cut domain). In an install that contributes to the problem analysis, a `StateField` of an unknown that is none of them is refused, naming the term that holds it: its Jacobian columns would be dropped. A value held fixed during the solve is data (`frozen()`, `FormExpr::discreteField`); a `StateField` of a prescribed field is data too. Measurement installs (`contributes_to_problem_analysis = false`: residual-work channels, diagnostic operators) are assembled for their vectors and are not checked |
 | Installer errors | `Systems/FormsInstaller.h` | Name the public entry (`installFormulation: ...`), the term and the fields concerned |
-| `FormInstallOptions::recordConstitutiveLaw(law)` | `Systems/FormsInstaller.h` | `implemented/expert`; records a constitutive law (`analysis::ConstitutiveLawMetadata`, e.g. `analysis::dynamicViscosityMetadata(u, mu)`) for the coupling contracts |
+| `FormInstallOptions::recordConstitutiveLaw(law)` | `Systems/FormsInstaller.h` | `implemented/expert`; records a constitutive law (`analysis::ConstitutiveLawMetadata`, e.g. `analysis::dynamicViscosityMetadata(u, mu)`) in the formulation record of the install, beside the laws the form scan finds |
 | `installStrongDirichlet(system, bcs)` | `Systems/FormsInstaller.h` | Strong constraint installation |
 | `installMixedBilinear(...)` | `Systems/FormsInstaller.h` | Explicit bilinear block installation |
 | `installMixedLinear(...)` | `Systems/FormsInstaller.h` | Explicit linear block installation |
@@ -975,18 +970,6 @@ embedded-boundary formulations, and the facet terms of cut-cell stabilization
 | `cutAdjacentFacetIntegral(e, marker[, side])` | `.dS(marker[, side])`; the marker-less overload is deleted |
 | `ghostPenalty(p, q, k, coefficient, stiffness, facets)` | Burman's ghost penalty `sum_{j<=k} coefficient h^(2j+1)/stiffness [d^j p][d^j q] dS(facets)`, h = `avg(hNormal())`, `[d^1]` the gradient jump, `[d^2]` the second-normal-derivative jump; k = 1 or 2 (the order of the space of p), one facet integral per order; an invalid `stiffness` leaves the terms undivided. Navier–Stokes writes its cut pressure penalty as `ghostPenalty(p, q, k, 0.01 gamma_p, mu + rho h^2/dt + eps, L.cutFacets())` |
 | `cutCellParameterCount(...)`, `cutCellParametersForRule(...)`, `cutSideIndicatorValue(...)` | `implemented/internal`; fill the parameter slots from a cut rule |
-
-### Coupling Forms
-
-Status: `implemented/expert`. Namespace `coupling`.
-
-`Coupling/CouplingFormBuilder.h` builds forms from participant and field names
-of a coupling contract (used by `Physics/Coupling/FSICouplingModule` and the
-thermal interface coupling module): `state(participant, field, symbol)`,
-`test(...)`, `timeDerivative(...)`, `previousSolution(...)`, geometry terminals
-of a participant, `integrate(integrand, region[, boundary_measure])`,
-`sharedInterface(name)` with per-side `state`, `test`, and `normal`, and
-`equationSet(...)` to declare the coupled equations.
 
 ### Solver Structure
 

@@ -1253,52 +1253,6 @@ set(FE_POSTPROCESSING_SOURCES
     PostProcessing/ScalarHistory.cpp
 )
 
-# Coupling sources (physics-agnostic setup and plan infrastructure; depends on
-# FE/Systems and FE/Forms public APIs)
-set(FE_COUPLING_HEADERS
-    Coupling/CouplingTypes.h
-    Coupling/CouplingContext.h
-    Coupling/CouplingDeclaration.h
-    Coupling/CouplingContract.h
-    Coupling/CouplingDefinitionBuilder.h
-    Coupling/DefinitionBackedCouplingContract.h
-    Coupling/CouplingFormBuilder.h
-    Coupling/CouplingGraph.h
-    Coupling/CouplingTemporalRequirements.h
-    Coupling/CouplingGeometryRequirements.h
-    Coupling/MonolithicCouplingBuilder.h
-    Coupling/CouplingPayloadDetangler.h
-    Coupling/PartitionedCouplingBuilder.h
-    Coupling/PartitionedCouplingPlan.h
-    Coupling/PartitionedCouplingPlanGenerator.h
-    Coupling/CouplingRegistry.h
-    Coupling/CouplingDiagnostics.h
-    Coupling/SharedRegionRegistry.h
-    Coupling/TransferPlan.h
-)
-
-set(FE_COUPLING_SOURCES
-    Coupling/CouplingTypes.cpp
-    Coupling/CouplingContext.cpp
-    Coupling/CouplingDeclaration.cpp
-    Coupling/CouplingContract.cpp
-    Coupling/CouplingDefinitionBuilder.cpp
-    Coupling/DefinitionBackedCouplingContract.cpp
-    Coupling/CouplingFormBuilder.cpp
-    Coupling/CouplingGraph.cpp
-    Coupling/CouplingTemporalRequirements.cpp
-    Coupling/CouplingGeometryRequirements.cpp
-    Coupling/MonolithicCouplingBuilder.cpp
-    Coupling/CouplingPayloadDetangler.cpp
-    Coupling/PartitionedCouplingBuilder.cpp
-    Coupling/PartitionedCouplingPlan.cpp
-    Coupling/PartitionedCouplingPlanGenerator.cpp
-    Coupling/CouplingRegistry.cpp
-    Coupling/CouplingDiagnostics.cpp
-    Coupling/SharedRegionRegistry.cpp
-    Coupling/TransferPlan.cpp
-)
-
 # Forms sources (requires FE/Assembly; used by SymbolicAssembler)
 set(FE_FORMS_HEADERS
     Forms/Forms.h
@@ -1693,8 +1647,6 @@ if(FE_ENABLE_ASSEMBLY)
     list(APPEND FE_ALL_SOURCES ${FE_POSTPROCESSING_SOURCES})
     list(APPEND FE_ALL_HEADERS ${FE_FORMS_HEADERS})
     list(APPEND FE_ALL_SOURCES ${FE_FORMS_SOURCES})
-    list(APPEND FE_ALL_HEADERS ${FE_COUPLING_HEADERS})
-    list(APPEND FE_ALL_SOURCES ${FE_COUPLING_SOURCES})
     list(APPEND FE_ALL_HEADERS ${FE_TIMESTEPPING_HEADERS})
     list(APPEND FE_ALL_SOURCES ${FE_TIMESTEPPING_SOURCES})
     list(APPEND FE_ALL_HEADERS ${FE_CONSTITUTIVE_HEADERS})
@@ -3195,42 +3147,6 @@ if(FE_BUILD_TESTS)
                     ${GTEST_LIBRARIES}
             )
             svmp_add_gtest(FE_TraceMultiplier_Tests TARGET test_fe_trace_multipliers)
-        endif()
-
-        # Coupling module tests (physics-agnostic setup and plan metadata)
-        if(EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/Tests/Unit/Coupling/test_main.cpp)
-            set(FE_COUPLING_TEST_SOURCES
-                Tests/Unit/Coupling/test_CouplingContractValidation.cpp
-                Tests/Unit/Coupling/test_CouplingDiagnostics.cpp
-                Tests/Unit/Coupling/test_CouplingFormBuilder.cpp
-                Tests/Unit/Coupling/test_CouplingGeometryRequirements.cpp
-                Tests/Unit/Coupling/test_CouplingGraph.cpp
-                Tests/Unit/Coupling/test_CouplingHeaders.cpp
-                Tests/Unit/Coupling/test_CouplingSourceBoundaries.cpp
-                Tests/Unit/Coupling/test_CouplingTemporalRequirements.cpp
-                Tests/Unit/Coupling/test_DefinitionBackedCouplingContract.cpp
-                Tests/Unit/Coupling/test_CouplingContext.cpp
-                Tests/Unit/Coupling/test_CouplingRegistry.cpp
-                Tests/Unit/Coupling/test_CouplingTypes.cpp
-                Tests/Unit/Coupling/test_MonolithicCouplingBuilder.cpp
-                Tests/Unit/Coupling/test_CouplingPayloadDetangler.cpp
-                Tests/Unit/Coupling/test_PartitionedCouplingBuilder.cpp
-                Tests/Unit/Coupling/test_PartitionedCouplingPlanGenerator.cpp
-                Tests/Unit/Coupling/test_SharedRegionRegistry.cpp
-                Tests/Unit/Coupling/test_main.cpp
-            )
-            add_executable(test_fe_coupling ${FE_COUPLING_TEST_SOURCES})
-            _svmp_fe_target_enable_warnings(test_fe_coupling)
-            target_link_libraries(test_fe_coupling
-                PRIVATE
-                    svfe
-                    ${GTEST_LIBRARIES}
-            )
-            target_compile_definitions(test_fe_coupling
-                PRIVATE
-                    SVMP_FE_SOURCE_DIR="${CMAKE_CURRENT_SOURCE_DIR}"
-            )
-            svmp_add_gtest(FE_Coupling_Tests TARGET test_fe_coupling)
         endif()
 
         # TimeStepping module tests (depends on Systems + Forms + Backends; no Mesh required)

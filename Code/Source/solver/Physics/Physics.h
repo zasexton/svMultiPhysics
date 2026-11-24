@@ -14,8 +14,6 @@
  */
 
 #include "Physics/Core/PhysicsModule.h"
-#include "Physics/Coupling/FSICouplingModule.h"
-#include "Physics/Coupling/ThermalInterfaceCouplingModule.h"
 #include "Physics/Formulations/MeshMotion/HarmonicMeshMotionModule.h"
 #include "Physics/Formulations/MeshMotion/PseudoElasticMeshMotionModule.h"
 

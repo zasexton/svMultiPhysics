@@ -260,9 +260,6 @@ rejected if the current cut context exposes a generated active subset for that
 physical marker. A formulation that genuinely needs the complete background
 face must say so with
 `ExteriorBoundaryMeasure::fullPhysical(physical_marker)`.
-`CouplingFormBuilder::integrate(...)` has corresponding selector overloads;
-they require the selector's physical marker to match the declared coupling
-boundary region before constructing the form.
 Selection alone does not certify a cut-stable numerical penalty. Generated
 Nitsche production routes that claim that property must also use the
 form-bound trace-certificate workflow and its aggregation prerequisite.
