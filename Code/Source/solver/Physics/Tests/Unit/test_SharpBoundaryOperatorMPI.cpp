@@ -5416,21 +5416,20 @@ TEST(MovingDomainPhysicsMPI, FittedALEOperatorMatchesSerialOnTwoRanks)
     expectFittedTankMatchesSerialOnTwoRanks(/*jit=*/true);
 }
 
-// The same with the interpreted kernels. Disabled: the fast path of
-// StandardAssembler::prepareBasis sets basis values and physical gradients
-// but skips the reference gradients and Hessians even when the kernel requires
-// RequiredData::BasisGradients, so in a batch of cells the interpreted
-// mesh-motion sensitivity (the reference-gradient seed of the current
-// Jacobian) reads zeros or another cell's data and the mesh-displacement
-// columns of the Jacobian change with the batch composition.
-TEST(MovingDomainPhysicsMPI, DISABLED_FittedALEInterpretedOperatorMatchesSerialOnTwoRanks)
+// The same with the interpreted kernels, on one partition (they are slow):
+// their batches of cells must see the reference gradients of every cell, which
+// the interpreted mesh-motion sensitivity (the reference-gradient seed of the
+// current Jacobian) reads in the mesh-displacement columns of the Jacobian.
+TEST(MovingDomainPhysicsMPI, FittedALEInterpretedOperatorMatchesSerialOnTwoRanks)
 {
     int rank = 0;
     int size = 1;
     if (!mpiWorld(rank, size) || size != 2) {
         GTEST_SKIP() << "requires an MPI launch with exactly two ranks";
     }
-    expectFittedTankMatchesSerialOnTwoRanks(/*jit=*/false);
+    expectFittedTankOperatorsMatch(
+        fittedTankOperator(/*partitioned=*/false, 0, /*assemble_before_motion=*/false, /*jit=*/false),
+        fittedTankOperator(/*partitioned=*/true, 0, /*assemble_before_motion=*/false, /*jit=*/false));
 }
 #endif
 

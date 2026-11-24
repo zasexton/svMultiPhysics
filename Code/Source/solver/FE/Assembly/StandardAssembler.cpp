@@ -8073,12 +8073,31 @@ void StandardAssembler::prepareBasis(
         }
 
         // Re-set basis values from qpt-major cache (memcpy, no transpose).
-        // Skip ref gradients/hessians — JIT kernels only read physical data.
-        // Physical gradients/hessians were written directly above.
+        // Physical gradients/hessians were written directly above. The
+        // reference gradients and Hessians go into this context too when the
+        // kernel requires them: the cache hit belongs to the assembler, not to
+        // the context, which may be a batch slot that never went through the
+        // slow path.
         if (cached_qpt_major_valid_) {
-            context.setTestBasisValuesOnlyQptMajor(n_test_dofs, cached_qpt_test_values_);
+            const bool need_reference_gradients = hasFlag(required_data, RequiredData::BasisGradients);
+            if (need_reference_gradients) {
+                context.setTestBasisDataQptMajor(n_test_dofs, cached_qpt_test_values_, cached_qpt_test_ref_grads_);
+            } else {
+                context.setTestBasisValuesOnlyQptMajor(n_test_dofs, cached_qpt_test_values_);
+            }
+            if (need_basis_hessians) {
+                context.setTestBasisHessians(n_test_dofs, scratch_ref_hessians_);
+            }
             if (!same_space && !cached_qpt_major_same_space_) {
-                context.setTrialBasisValuesOnlyQptMajor(n_trial_dofs, cached_qpt_trial_values_);
+                if (need_reference_gradients) {
+                    context.setTrialBasisDataQptMajor(n_trial_dofs, cached_qpt_trial_values_,
+                                                      cached_qpt_trial_ref_grads_);
+                } else {
+                    context.setTrialBasisValuesOnlyQptMajor(n_trial_dofs, cached_qpt_trial_values_);
+                }
+                if (need_basis_hessians) {
+                    context.setTrialBasisHessians(n_trial_dofs, scratch_trial_ref_hessians_);
+                }
             }
         } else {
             // Fallback: transpose as before (first call before slow path populates cache)

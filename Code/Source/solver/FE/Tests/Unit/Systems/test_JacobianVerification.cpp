@@ -6,6 +6,7 @@
 #include <gtest/gtest.h>
 
 #include "Assembly/GlobalSystemView.h"
+#include "Dofs/EntityDofMap.h"
 #include "Forms/Vocabulary.h"
 #include "Spaces/H1Space.h"
 #include "Spaces/ProductSpace.h"
@@ -24,9 +25,11 @@
 #include <cmath>
 #include <functional>
 #include <iostream>
+#include <map>
 #include <memory>
 #include <span>
 #include <string>
+#include <tuple>
 #include <vector>
 
 using svmp::FE::ElementType;
@@ -771,33 +774,37 @@ FormExpr zeroTimes(const FormExpr& f)
 } // namespace
 
 // Characterization of the moving-domain Jacobian (decision 4A).  Under the
-// mesh-motion sensitivity of coupled ALE only the boundary probe of the
-// frame-explicit normal is exact.  In the fluid-row, mesh-column cell blocks
-// the measure variation and part of the frame-explicit variations are not
-// assembled; the active-frame operators (x(), J(), detJ(), Jinv(), h(),
-// FormExpr::normal(), hNormal()) and the gradients of the fluid fields carry
-// no shape derivative; an integrand without a frame-explicit terminal gets no
-// mesh block at all; and the mesh operator is geometry-constant.  The AD
-// reference path has the same gaps.  The printed relative defect of the mesh
-// columns is what a complete shape-derivative tangent path must remove; the
-// fluid columns are exact in every case.
-TEST(MovingDomainShapeDerivativeTest, OnlyTheFrameExplicitNormalIsComplete)
+// mesh-motion sensitivity of coupled ALE the frame-explicit probes are exact:
+// the boundary probe of the frame-explicit normal and the cell probes of the
+// current coordinate, the current Jacobian and the mesh velocity (with the
+// variation of the cell measure).  Partly or not assembled: the variations
+// of div(meshVelocity()) and of the fluid-field gradients, so the moving
+// control volume and the ALE convection are partial; the active-frame
+// operators (x(), J(), detJ(), Jinv(), h(), FormExpr::normal(), hNormal())
+// and the gradients of the fluid fields carry no shape derivative; an
+// integrand without a frame-explicit terminal gets no mesh block at all; and
+// the mesh operator is geometry-constant.  The AD reference path has the same
+// gaps.  The printed relative defect of the mesh columns is what a complete
+// shape-derivative tangent path must remove; the fluid columns are exact in
+// every case.
+TEST(MovingDomainShapeDerivativeTest, OnlyTheFrameExplicitTerminalsAreComplete)
 {
     using namespace svmp::FE::forms;
-    const MovingDomainProbe exact{
-        "(u.currentNormal()) q ds", ProbeRows::Pressure,
-        [](const S& s) { return (inner(s.u, currentNormal()) * s.q + zeroTimes(s.p * s.q)).ds(kMovingTop); }};
-    const std::vector<MovingDomainProbe> incomplete = {
-        {"q dx", ProbeRows::Pressure,
-         [](const S& s) { return (s.q + zeroTimes(s.p * s.q)).dx(); }},
-        {"u.v dx", ProbeRows::Velocity,
-         [](const S& s) { return inner(s.u, s.v).dx(); }},
+    const std::vector<MovingDomainProbe> exact = {
+        {"(u.currentNormal()) q ds", ProbeRows::Pressure,
+         [](const S& s) { return (inner(s.u, currentNormal()) * s.q + zeroTimes(s.p * s.q)).ds(kMovingTop); }},
         {"currentCoordinate().v dx", ProbeRows::Velocity,
          [](const S& s) { return (inner(currentCoordinate(), s.v) + zeroTimes(inner(s.u, s.v))).dx(); }},
         {"tr(currentJacobian()) q dx", ProbeRows::Pressure,
          [](const S& s) { return (trace(currentJacobian()) * s.q + zeroTimes(s.p * s.q)).dx(); }},
         {"meshVelocity().v dx", ProbeRows::Velocity,
          [](const S& s) { return (inner(meshVelocity(), s.v) + zeroTimes(inner(s.u, s.v))).dx(); }},
+    };
+    const std::vector<MovingDomainProbe> incomplete = {
+        {"q dx", ProbeRows::Pressure,
+         [](const S& s) { return (s.q + zeroTimes(s.p * s.q)).dx(); }},
+        {"u.v dx", ProbeRows::Velocity,
+         [](const S& s) { return inner(s.u, s.v).dx(); }},
         {"div(meshVelocity()) u.v dx (moving control volume)", ProbeRows::Velocity,
          [](const S& s) { return (div(meshVelocity()) * inner(s.u, s.v)).dx(); }},
         {"x().v dx", ProbeRows::Velocity,
@@ -841,10 +848,10 @@ TEST(MovingDomainShapeDerivativeTest, OnlyTheFrameExplicitNormalIsComplete)
                   << defect.mesh_jacobian_norm << ", |FD| " << defect.mesh_fd_norm << ")\n";
     };
     for (const auto path : {GeometryTangentPath::SymbolicRequired, GeometryTangentPath::ADReference}) {
-        {
-            SCOPED_TRACE(exact.name + " " + tangentPathName(path));
-            const auto defect = movingDomainJacobianDefect(exact, path);
-            report(exact, path, defect);
+        for (const auto& probe : exact) {
+            SCOPED_TRACE(probe.name + " " + tangentPathName(path));
+            const auto defect = movingDomainJacobianDefect(probe, path);
+            report(probe, path, defect);
             EXPECT_LT(defect.mesh_columns, 1e-6);
             EXPECT_LT(defect.other_columns, 1e-6);
         }
@@ -923,4 +930,250 @@ TEST(MovingDomainShapeDerivativeTest, CompleteOptInMakesEveryProbeExact)
     }
     EXPECT_THROW((void)movingDomainJacobianDefect(probes[1], GeometryTangentPath::ADReference, ShapeDerivative::Complete),
                  std::exception);
+}
+
+namespace {
+
+namespace forms = svmp::FE::forms;
+namespace systems = svmp::FE::systems;
+
+/// Two unequal, positively oriented P1 triangles sharing an edge, in the
+/// given order.
+constexpr std::array<std::array<Real, 2>, 4> kTwoTriangleNodes{{{0.0, 0.0}, {1.3, 0.0}, {0.2, 0.9}, {1.1, 1.2}}};
+constexpr std::array<std::array<int, 3>, 2> kTwoTriangleCells{{{0, 1, 2}, {1, 3, 2}}};
+
+std::shared_ptr<svmp::Mesh> makeTwoTriangleMesh(bool reversed)
+{
+    auto base = std::make_shared<svmp::MeshBase>();
+    std::vector<svmp::real_t> x_ref;
+    for (const auto& node : kTwoTriangleNodes) {
+        x_ref.push_back(node[0]);
+        x_ref.push_back(node[1]);
+    }
+    std::vector<svmp::index_t> cells;
+    for (std::size_t c = 0; c < kTwoTriangleCells.size(); ++c) {
+        const auto& cell = kTwoTriangleCells[reversed ? kTwoTriangleCells.size() - 1 - c : c];
+        cells.insert(cells.end(), cell.begin(), cell.end());
+    }
+    svmp::CellShape shape{};
+    shape.family = svmp::CellFamily::Triangle;
+    shape.num_corners = 3;
+    shape.order = 1;
+    base->build_from_arrays(2, x_ref, {0, 3, 6}, cells, std::vector<svmp::CellShape>(2, shape));
+    base->finalize();
+    return svmp::create_mesh(std::move(base));
+}
+
+/// The mesh displacement of a node: smooth in the reference position, so it
+/// does not depend on the cell order.
+std::array<Real, 2> twoTriangleDisplacement(const std::array<Real, 2>& X)
+{
+    return {Real(0.05) * X[1] - Real(0.02) * X[0] + Real(0.01), Real(0.03) * X[0] * X[1] - Real(0.04) * X[0]};
+}
+
+/// d/dd_{a,k} of R_i = int q_i tr(J) dx = sum over the cells at node i of
+/// det(J) tr(J) / 6, J the current Jacobian of a P1 triangle, by node i, node
+/// a and component k.
+std::map<std::tuple<int, int, int>, Real> traceJacobianMeshColumnsExact()
+{
+    std::map<std::tuple<int, int, int>, Real> out;
+    for (const auto& cell : kTwoTriangleCells) {
+        std::array<std::array<Real, 2>, 3> x{};
+        for (int n = 0; n < 3; ++n) {
+            const auto& X = kTwoTriangleNodes[static_cast<std::size_t>(cell[static_cast<std::size_t>(n)])];
+            const auto d = twoTriangleDisplacement(X);
+            x[static_cast<std::size_t>(n)] = {X[0] + d[0], X[1] + d[1]};
+        }
+        Real J[2][2];
+        for (int k = 0; k < 2; ++k) {
+            for (int c = 0; c < 2; ++c) {
+                J[k][c] = x[static_cast<std::size_t>(c + 1)][static_cast<std::size_t>(k)] - x[0][static_cast<std::size_t>(k)];
+            }
+        }
+        const Real det = J[0][0] * J[1][1] - J[0][1] * J[1][0];
+        const Real tr = J[0][0] + J[1][1];
+        for (int a = 0; a < 3; ++a) {
+            for (int k = 0; k < 2; ++k) {
+                Real dJ[2][2] = {{0.0, 0.0}, {0.0, 0.0}};
+                for (int c = 0; c < 2; ++c) {
+                    dJ[k][c] = (a == c + 1 ? 1.0 : 0.0) - (a == 0 ? 1.0 : 0.0);
+                }
+                const Real ddet = dJ[0][0] * J[1][1] + J[0][0] * dJ[1][1] - dJ[0][1] * J[1][0] - J[0][1] * dJ[1][0];
+                const Real dtr = dJ[0][0] + dJ[1][1];
+                const Real df = (ddet * tr + det * dtr) / Real(6.0);
+                for (const int i : cell) {
+                    out[{i, cell[static_cast<std::size_t>(a)], k}] += df;
+                }
+            }
+        }
+    }
+    return out;
+}
+
+struct TraceJacobianColumns {
+    std::vector<std::map<std::tuple<int, int, int>, Real>> assembled;  ///< one map per assembly
+    std::map<std::tuple<int, int, int>, Real> central_difference;
+};
+
+/// The pressure-row, mesh-column Jacobian entries of the interpreted probe
+/// int q tr(currentJacobian()) dx on the two triangles, assembled
+/// @p assemblies times in a row (a cold then warm basis cache), and their
+/// central differences that rebuild the current coordinates, keyed by the
+/// node indices of kTwoTriangleNodes.
+TraceJacobianColumns traceJacobianMeshColumns(bool reversed, bool batched, int assemblies)
+{
+    using namespace svmp::FE::forms;
+    auto mesh = makeTwoTriangleMesh(reversed);
+    auto scalar = std::make_shared<svmp::FE::spaces::H1Space>(ElementType::Triangle3, 1);
+    auto vector = std::make_shared<svmp::FE::spaces::ProductSpace>(scalar, 2);
+
+    systems::FESystem system(mesh, svmp::Configuration::Current);
+    const auto u_id = system.addField(systems::FieldSpec{.name = "u", .space = vector, .components = 2});
+    const auto p_id = system.addField(systems::FieldSpec{.name = "p", .space = scalar, .components = 1});
+    systems::ALEBindingOptions ale_options;
+    ale_options.enabled = true;
+    ale_options.dimension = 2;
+    ale_options.mesh_velocity_space = vector;
+    ale_options.mesh_displacement_space = vector;
+    ale_options.auto_register_mesh_displacement_field = true;
+    const auto ale = systems::resolveALEBinding(system, ale_options);
+    const auto d_id = ale.mesh_displacement_field;
+
+    const auto u = FormExpr::stateField(u_id, *vector, "u");
+    const auto v = FormExpr::testFunction(u_id, *vector, "v");
+    const auto p = FormExpr::stateField(p_id, *scalar, "p");
+    const auto q = FormExpr::testFunction(p_id, *scalar, "q");
+    const auto d = FormExpr::stateField(d_id, *vector, "d");
+    const auto psi = FormExpr::testFunction(d_id, *vector, "psi");
+    systems::FormInstallOptions install;
+    install.compiler_options.use_symbolic_tangent = true;
+    install.compiler_options.jit.enable = false;
+    ale.configureInstallOptions(install);
+    system.addOperator("probe");
+    (void)systems::installFormulation(system, "probe", {u_id, p_id},
+                                      (trace(currentJacobian()) * q + FormExpr::constant(0.0) * p * q).dx() +
+                                          inner(dt(u), v).dx(),
+                                      install);
+    (void)systems::installFormulation(system, "probe", {d_id}, inner(grad(d), grad(psi)).dx(),
+                                      systems::FormInstallOptions{});
+    systems::SetupOptions setup_options;
+    setup_options.use_constraints_in_assembly = false;
+    setup_options.assembly_options.use_batching = batched;
+    system.setup(setup_options);
+
+    // The node of kTwoTriangleNodes at each mesh vertex.
+    const auto& local = mesh->local_mesh();
+    const auto& X_ref = local.X_ref();
+    std::vector<int> node_of(local.n_vertices(), -1);
+    for (std::size_t vtx = 0; vtx < local.n_vertices(); ++vtx) {
+        for (std::size_t n = 0; n < kTwoTriangleNodes.size(); ++n) {
+            if (std::abs(X_ref[2 * vtx] - kTwoTriangleNodes[n][0]) < 1e-14 &&
+                std::abs(X_ref[2 * vtx + 1] - kTwoTriangleNodes[n][1]) < 1e-14) {
+                node_of[vtx] = static_cast<int>(n);
+            }
+        }
+        EXPECT_GE(node_of[vtx], 0);
+    }
+    const auto dof = [&](svmp::FE::FieldId field, std::size_t vtx, int component) {
+        const auto dofs = system.fieldDofHandler(field).getEntityDofMap()->getVertexDofs(static_cast<GlobalIndex>(vtx));
+        return system.fieldDofOffset(field) + dofs[static_cast<std::size_t>(component)];
+    };
+
+    const auto n = system.dofHandler().getNumDofs();
+    std::vector<Real> values(static_cast<std::size_t>(n), 0.0);
+    for (std::size_t vtx = 0; vtx < local.n_vertices(); ++vtx) {
+        const auto displacement = twoTriangleDisplacement(kTwoTriangleNodes[static_cast<std::size_t>(node_of[vtx])]);
+        for (int k = 0; k < 2; ++k) {
+            values[static_cast<std::size_t>(dof(d_id, vtx, k))] = displacement[static_cast<std::size_t>(k)];
+        }
+    }
+    const std::vector<Real> previous(static_cast<std::size_t>(n), 0.0);
+    const auto assemble = [&](const std::vector<Real>& state_values,
+                              svmp::FE::assembly::GlobalSystemView* J,
+                              svmp::FE::assembly::GlobalSystemView* R) {
+        systems::SystemStateView state;
+        state.dt = 0.5;
+        state.u = std::span<const Real>(state_values);
+        state.u_prev = std::span<const Real>(previous);
+        const systems::BackwardDifferenceIntegrator integrator;
+        const auto context = integrator.buildContext(1, state);
+        state.time_integration = &context;
+        (void)system.updateCurrentCoordinatesFromMeshDisplacement(state);
+        systems::AssemblyRequest request;
+        request.op = "probe";
+        request.want_matrix = J != nullptr;
+        request.want_vector = R != nullptr;
+        const auto result = system.assemble(request, state, J, R);
+        EXPECT_TRUE(result.success) << result.error_message;
+    };
+
+    TraceJacobianColumns out;
+    for (int pass = 0; pass < assemblies; ++pass) {
+        svmp::FE::assembly::DenseMatrixView J(n);
+        J.zero();
+        assemble(values, &J, nullptr);
+        auto& entries = out.assembled.emplace_back();
+        for (std::size_t row = 0; row < local.n_vertices(); ++row) {
+            for (std::size_t col = 0; col < local.n_vertices(); ++col) {
+                for (int k = 0; k < 2; ++k) {
+                    entries[{node_of[row], node_of[col], k}] = J.getMatrixEntry(dof(p_id, row, 0), dof(d_id, col, k));
+                }
+            }
+        }
+    }
+    const Real eps = 1e-6;
+    for (std::size_t col = 0; col < local.n_vertices(); ++col) {
+        for (int k = 0; k < 2; ++k) {
+            auto plus = values;
+            auto minus = values;
+            plus[static_cast<std::size_t>(dof(d_id, col, k))] += eps;
+            minus[static_cast<std::size_t>(dof(d_id, col, k))] -= eps;
+            svmp::FE::assembly::DenseVectorView R_plus(n);
+            svmp::FE::assembly::DenseVectorView R_minus(n);
+            R_plus.zero();
+            R_minus.zero();
+            assemble(plus, nullptr, &R_plus);
+            assemble(minus, nullptr, &R_minus);
+            for (std::size_t row = 0; row < local.n_vertices(); ++row) {
+                const auto r = dof(p_id, row, 0);
+                out.central_difference[{node_of[row], node_of[col], k}] =
+                    (R_plus.getVectorEntry(r) - R_minus.getVectorEntry(r)) / (2.0 * eps);
+            }
+        }
+    }
+    return out;
+}
+
+} // namespace
+
+// The interpreted mesh-motion sensitivity of int q tr(J) dx, J the current
+// Jacobian, on two unequal P1 triangles: every pressure-row, mesh-column entry
+// is d(det(J) tr(J) / 6)/dd summed over the cells of the pressure node, equal
+// to central differences that rebuild the current coordinates, whether the
+// cells are assembled one at a time or in a batch, in either cell order, from
+// a cold and from a warm basis cache. A batch slot that does not run the slow
+// path of the basis preparation still needs the reference gradients the
+// current-Jacobian seed reads.
+TEST(MovingDomainShapeDerivativeTest, TraceOfCurrentJacobianIsExactInEveryBatchAndOrder)
+{
+    const auto exact = traceJacobianMeshColumnsExact();
+    Real scale = 0.0;
+    for (const auto& [key, value] : exact) {
+        scale = std::max(scale, std::abs(value));
+    }
+    ASSERT_GT(scale, 0.1);
+    for (const bool reversed : {false, true}) {
+        for (const bool batched : {false, true}) {
+            SCOPED_TRACE(::testing::Message() << "reversed cell order " << reversed << ", batched " << batched);
+            const auto columns = traceJacobianMeshColumns(reversed, batched, /*assemblies=*/2);
+            for (const auto& [key, value] : exact) {
+                const auto& [row, col, k] = key;
+                const auto where = ::testing::Message() << "pressure node " << row << ", displacement node " << col
+                                                        << " component " << k;
+                EXPECT_NEAR(columns.central_difference.at(key), value, 1e-7 * scale) << where;
+                EXPECT_NEAR(columns.assembled[0].at(key), value, 1e-13 * scale) << where << " (cold cache)";
+                EXPECT_NEAR(columns.assembled[1].at(key), value, 1e-13 * scale) << where << " (warm cache)";
+            }
+        }
+    }
 }

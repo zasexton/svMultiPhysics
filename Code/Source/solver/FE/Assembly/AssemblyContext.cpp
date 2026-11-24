@@ -1047,7 +1047,11 @@ AssemblyContext::Vector3D AssemblyContext::referenceGradient(LocalIndex i, Local
     if (i >= n_test_dofs_ || q >= n_qpts_) {
         throw std::out_of_range("AssemblyContext::referenceGradient: index out of range");
     }
-    return test_ref_gradients_[static_cast<std::size_t>(q * n_test_dofs_ + i)];
+    const auto index = static_cast<std::size_t>(q * n_test_dofs_ + i);
+    if (index >= test_ref_gradients_.size()) {
+        throw std::logic_error("AssemblyContext::referenceGradient: reference gradients not set");
+    }
+    return test_ref_gradients_[index];
 }
 
 AssemblyContext::Vector3D AssemblyContext::physicalGradient(LocalIndex i, LocalIndex q) const
@@ -1248,10 +1252,12 @@ AssemblyContext::Vector3D AssemblyContext::trialReferenceGradient(LocalIndex j, 
         throw std::out_of_range("AssemblyContext::trialReferenceGradient: index out of range");
     }
 
-    if (trial_is_test_) {
-        return test_ref_gradients_[static_cast<std::size_t>(q * n_test_dofs_ + j)];
+    const auto& gradients = trial_is_test_ ? test_ref_gradients_ : trial_ref_gradients_;
+    const auto index = static_cast<std::size_t>(q * (trial_is_test_ ? n_test_dofs_ : n_trial_dofs_) + j);
+    if (index >= gradients.size()) {
+        throw std::logic_error("AssemblyContext::trialReferenceGradient: reference gradients not set");
     }
-    return trial_ref_gradients_[static_cast<std::size_t>(q * n_trial_dofs_ + j)];
+    return gradients[index];
 }
 
 AssemblyContext::Matrix3x3 AssemblyContext::trialReferenceHessian(LocalIndex j, LocalIndex q) const

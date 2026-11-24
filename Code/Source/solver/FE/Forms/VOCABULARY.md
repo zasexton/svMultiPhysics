@@ -286,8 +286,9 @@ different vocabulary, and they are partial. Only the frame-explicit terminals
 `surfaceJacobian()`) are differentiated, and only an integrand that contains
 one of them gets mesh columns. `x()`, `J()`, `Jinv()`, `detJ()`, `h()`,
 `vol()`, `area()`, `hNormal()`, `FormExpr::normal()` and the change of `grad`
-and `div` of every field with the mesh are geometry constants, and the cell
-blocks of the other fields' rows do not assemble the measure variation either.
+and `div` of every field with the mesh are geometry constants. An integrand
+with a frame-explicit terminal also gets the variation of the cell measure;
+one without gets none.
 The `MovingDomainShapeDerivativeTest` in
 `Tests/Unit/Systems/test_JacobianVerification.cpp` records the missing part of
 each operator, and `test_FittedFreeSurfaceALE.cpp` that of the production
