@@ -9,6 +9,7 @@
 
 #include "Backends/Interfaces/GenericVector.h"
 #include "Core/FEException.h"
+#include "Systems/ExactAccumulator.h"
 #include "Systems/SystemsExceptions.h"
 
 #include <algorithm>
@@ -46,22 +47,30 @@ std::size_t BorderedGlobalSplitView::borderedIndex(GlobalIndex dof) const
     return static_cast<std::size_t>(index);
 }
 
-void BorderedGlobalSplitView::apply(Real& target, Real value, assembly::AddMode mode)
+void BorderedGlobalSplitView::addBordered(Block block,
+                                          std::size_t index,
+                                          Real& target,
+                                          Real value,
+                                          assembly::AddMode mode)
 {
+    const auto key = contributionKey(block, index);
     switch (mode) {
         case assembly::AddMode::Add:
-            target += value;
+            contributions_.push_back(Contribution{key, value});
             return;
         case assembly::AddMode::Insert:
+            contributions_.erase(std::remove_if(contributions_.begin(), contributions_.end(),
+                                                [key](const Contribution& c) { return c.key == key; }),
+                                 contributions_.end());
             target = value;
             return;
         case assembly::AddMode::Max:
-            target = std::max(target, value);
-            return;
         case assembly::AddMode::Min:
-            target = std::min(target, value);
-            return;
+            break;
     }
+    FE_THROW(NotImplementedException,
+             "BorderedGlobalSplitView: the bordered blocks are summed exactly and take added or inserted "
+             "entries, not Max or Min");
 }
 
 void BorderedGlobalSplitView::addMatrixEntries(std::span<const GlobalIndex> dofs,
@@ -116,7 +125,8 @@ void BorderedGlobalSplitView::addMatrixEntries(std::span<const GlobalIndex> row_
             for (std::size_t j = 0; j < n_cols; ++j) {
                 if (!is_field(col_dofs[j])) {
                     // Field row x global column: B, column-major.
-                    apply(bc.B[static_cast<std::size_t>(row) + nf * borderedIndex(col_dofs[j])], values[j], mode);
+                    const auto index = static_cast<std::size_t>(row) + nf * borderedIndex(col_dofs[j]);
+                    addBordered(Block::B, index, bc.B[index], values[j], mode);
                 }
             }
             continue;
@@ -126,9 +136,11 @@ void BorderedGlobalSplitView::addMatrixEntries(std::span<const GlobalIndex> row_
             const auto col = col_dofs[j];
             if (is_field(col)) {
                 // Global row x field column: Ct, row-major.
-                apply(bc.Ct[bordered_row * nf + static_cast<std::size_t>(col)], values[j], mode);
+                const auto index = bordered_row * nf + static_cast<std::size_t>(col);
+                addBordered(Block::Ct, index, bc.Ct[index], values[j], mode);
             } else {
-                apply(bc.D[bordered_row * na + borderedIndex(col)], values[j], mode);
+                const auto index = bordered_row * na + borderedIndex(col);
+                addBordered(Block::D, index, bc.D[index], values[j], mode);
             }
         }
     }
@@ -200,7 +212,8 @@ void BorderedGlobalSplitView::addVectorEntry(GlobalIndex dof, Real value, assemb
         }
         return;
     }
-    apply(bordered_->g[borderedIndex(dof)], value, mode);
+    const auto index = borderedIndex(dof);
+    addBordered(Block::G, index, bordered_->g[index], value, mode);
 }
 
 void BorderedGlobalSplitView::setVectorEntries(std::span<const GlobalIndex> dofs, std::span<const Real> values)
@@ -221,7 +234,8 @@ void BorderedGlobalSplitView::zeroVectorEntries(std::span<const GlobalIndex> dof
                 vector_->zeroVectorEntries(one);
             }
         } else {
-            bordered_->g[borderedIndex(dof)] = Real(0.0);
+            const auto index = borderedIndex(dof);
+            addBordered(Block::G, index, bordered_->g[index], Real(0.0), assembly::AddMode::Insert);
         }
     }
 }
@@ -231,7 +245,8 @@ Real BorderedGlobalSplitView::getVectorEntry(GlobalIndex dof) const
     if (dof < n_field_) {
         return vector_ != nullptr ? vector_->getVectorEntry(dof) : Real(0.0);
     }
-    return bordered_->g[borderedIndex(dof)];
+    const auto index = borderedIndex(dof);
+    return localValue(contributionKey(Block::G, index), bordered_->g[index]);
 }
 
 void BorderedGlobalSplitView::beginAssemblyPhase()
@@ -296,12 +311,27 @@ Real BorderedGlobalSplitView::getMatrixEntry(GlobalIndex row, GlobalIndex col) c
         return matrix_ != nullptr ? matrix_->getMatrixEntry(row, col) : Real(0.0);
     }
     if (row < n_field_) {
-        return bc.B[static_cast<std::size_t>(row) + nf * borderedIndex(col)];
+        const auto index = static_cast<std::size_t>(row) + nf * borderedIndex(col);
+        return localValue(contributionKey(Block::B, index), bc.B[index]);
     }
     if (col < n_field_) {
-        return bc.Ct[borderedIndex(row) * nf + static_cast<std::size_t>(col)];
+        const auto index = borderedIndex(row) * nf + static_cast<std::size_t>(col);
+        return localValue(contributionKey(Block::Ct, index), bc.Ct[index]);
     }
-    return bc.D[borderedIndex(row) * na + borderedIndex(col)];
+    const auto index = borderedIndex(row) * na + borderedIndex(col);
+    return localValue(contributionKey(Block::D, index), bc.D[index]);
+}
+
+Real BorderedGlobalSplitView::localValue(std::int64_t key, Real stored) const
+{
+    ExactAccumulator sum;
+    sum.add(stored);
+    for (const auto& c : contributions_) {
+        if (c.key == key) {
+            sum.add(c.value);
+        }
+    }
+    return sum.value();
 }
 
 // ---------------------------------------------------------------------------
@@ -382,7 +412,36 @@ void BorderedGlobalReadView::getVectorEntries(std::span<const GlobalIndex> dofs,
 std::unique_ptr<assembly::GlobalSystemView> makeStateReadView(const FESystem& system,
                                                               const backends::GenericVector* vector,
                                                               std::span<const Real> values,
-                                                              bool ghosted)
+                                                              bool ghosted,
+                                                              std::span<const Real> bordered_values)
+{
+    std::unique_ptr<assembly::GlobalSystemView> view;
+    if (vector != nullptr) {
+        auto* mutable_vector = const_cast<backends::GenericVector*>(vector);
+        view = ghosted ? mutable_vector->createGhostedReadView() : mutable_vector->createAssemblyView();
+    }
+    if (!system.hasBorderedGlobalFields()) {
+        return view;
+    }
+    if (bordered_values.empty()) {
+        bordered_values = system.borderedGlobalValues();
+    }
+    FE_THROW_IF(bordered_values.size() != static_cast<std::size_t>(system.numBorderedGlobalDofs()),
+                InvalidArgumentException,
+                "makeStateReadView: the state names " + std::to_string(bordered_values.size()) +
+                    " bordered global values for " + std::to_string(system.numBorderedGlobalDofs()) +
+                    " bordered global DOFs");
+    return std::make_unique<BorderedGlobalReadView>(std::move(view),
+                                                    values,
+                                                    bordered_values,
+                                                    system.dofHandler().getNumDofs());
+}
+
+std::unique_ptr<assembly::GlobalSystemView> makeHistoryReadView(const FESystem& system,
+                                                                const backends::GenericVector* vector,
+                                                                std::span<const Real> values,
+                                                                int k,
+                                                                bool ghosted)
 {
     std::unique_ptr<assembly::GlobalSystemView> view;
     if (vector != nullptr) {
@@ -394,7 +453,7 @@ std::unique_ptr<assembly::GlobalSystemView> makeStateReadView(const FESystem& sy
     }
     return std::make_unique<BorderedGlobalReadView>(std::move(view),
                                                     values,
-                                                    system.borderedGlobalValues(),
+                                                    system.borderedGlobalHistoryValues(k),
                                                     system.dofHandler().getNumDofs());
 }
 

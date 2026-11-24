@@ -21,6 +21,7 @@
 #include "Auxiliary/AuxiliaryStateManager.h"
 #include "Basis/BasisCache.h"
 #include "Spaces/FunctionSpace.h"
+#include "Systems/ExactAccumulator.h"
 #include "Systems/SystemsExceptions.h"
 #include "Core/EnvironmentNames.h"
 
@@ -4485,6 +4486,25 @@ void rebaseGroupedCouplingIds(std::vector<backends::ReducedFieldUpdate>& reduced
     return full_delta;
 }
 
+/// Row @p i of the bordered Ct block.
+[[nodiscard]] std::span<const Real> ctRow(const systems::FESystem::BorderedCouplingData& bordered, std::size_t i)
+{
+    const auto nf = bordered.n_field_dofs;
+    return std::span<const Real>(bordered.Ct.data() + static_cast<std::ptrdiff_t>(i * nf), nf);
+}
+
+/// sum_k a[k] b[k]: each product rounded once, the products summed exactly
+/// (ExactAccumulator), so the value does not depend on the order of k.
+[[nodiscard]] Real exactDotProduct(std::span<const Real> a, std::span<const Real> b)
+{
+    FE_THROW_IF(a.size() != b.size(), InvalidArgumentException, "exactDotProduct: size mismatch");
+    systems::ExactAccumulator sum;
+    for (std::size_t k = 0; k < a.size(); ++k) {
+        sum.add(static_cast<double>(a[k] * b[k]));
+    }
+    return static_cast<Real>(sum.value());
+}
+
 void applyAuxiliaryDelta(systems::FESystem& system,
                          const systems::FESystem::BorderedCouplingData& bc,
                          std::span<const Real> dx,
@@ -6952,6 +6972,17 @@ NewtonReport NewtonSolver::solveStepFrozenExternalState(
     auto applyResidualAdditionAndConstraints = [&]() {
         if (residual_addition != nullptr) {
             axpy(r, static_cast<Real>(1.0), *residual_addition);
+            // The bordered global rows' part of the addition (a stage keeps
+            // it in the system): their residual is the bordered g.
+            const auto bordered_addition = transient.system().borderedGlobalResidualAddition();
+            if (!bordered_addition.empty()) {
+                auto& g = transient.system().borderedCoupling().g;
+                FE_THROW_IF(g.size() != bordered_addition.size(), systems::InvalidStateException,
+                            "NewtonSolver: the bordered residual addition does not match the bordered rows");
+                for (std::size_t i = 0; i < g.size(); ++i) {
+                    g[i] += bordered_addition[i];
+                }
+            }
         }
         zeroConstrainedResidualEntries();
     };
@@ -10646,6 +10677,9 @@ NewtonReport NewtonSolver::solveStepFrozenExternalState(
             view->finalizeAssembly();
         };
 
+        // The Schur products of the bordered global fields (D54) are summed
+        // exactly, so they do not depend on the DOF numbering of the ranks.
+        const bool exact_bordered_products = sys.hasBorderedGlobalFields();
         auto recoverExplicitBorderedCorrection =
             [&](const systems::FESystem::BorderedCouplingData& solve_bordered,
                 std::span<const Real> initial_dense_du) {
@@ -10999,6 +11033,8 @@ NewtonReport NewtonSolver::solveStepFrozenExternalState(
                             Real ctz = Real(0.0);
                             if (direct_ct_z.row_covered[i]) {
                                 ctz = direct_ct_z.values[i];
+                            } else if (exact_bordered_products) {
+                                ctz = exactDotProduct(ctRow(solve_bordered, i), z_col);
                             } else {
                                 for (std::size_t k = 0; k < nf; ++k) {
                                     ctz += solve_bordered.Ct[i * nf + k] * z_columns[j * nf + k];
@@ -11012,6 +11048,8 @@ NewtonReport NewtonSolver::solveStepFrozenExternalState(
                     for (std::size_t i = 0; i < na; ++i) {
                         if (direct_ct_u0.row_covered[i]) {
                             solve_aux_delta[i] -= direct_ct_u0.values[i];
+                        } else if (exact_bordered_products) {
+                            solve_aux_delta[i] -= exactDotProduct(ctRow(solve_bordered, i), u0);
                         } else {
                             for (std::size_t k = 0; k < nf; ++k) {
                                 solve_aux_delta[i] -= solve_bordered.Ct[i * nf + k] * u0[k];

@@ -8258,6 +8258,112 @@ void FESystem::setBorderedGlobalValues(std::span<const Real> values)
     std::copy(values.begin(), values.end(), bordered_global_values_.begin());
 }
 
+std::span<const Real> FESystem::borderedGlobalHistoryValues(int k) const
+{
+    if (k == 1) {
+        return bordered_global_committed_values_;
+    }
+    if (k == 2 && bordered_global_rate_in_second_slot_) {
+        return bordered_global_committed_rates_;
+    }
+    FE_THROW_IF(k < 1 || k > borderedGlobalHistoryDepth(), InvalidArgumentException,
+                "FESystem::borderedGlobalHistoryValues: the bordered global DOFs keep " +
+                    std::to_string(borderedGlobalHistoryDepth()) + " history slots, not slot " +
+                    std::to_string(k));
+    return bordered_global_older_values_[static_cast<std::size_t>(k - 2)];
+}
+
+void FESystem::setBorderedGlobalHistoryDepth(int depth)
+{
+    FE_THROW_IF(depth < 2, InvalidArgumentException,
+                "FESystem::setBorderedGlobalHistoryDepth: the depth must be at least 2");
+    const auto older = static_cast<std::size_t>(depth - 1);
+    const auto oldest = bordered_global_older_values_.empty() ? bordered_global_committed_values_
+                                                              : bordered_global_older_values_.back();
+    bordered_global_older_values_.resize(older, oldest);
+}
+
+void FESystem::initializeBorderedGlobalState(std::span<const Real> values)
+{
+    setBorderedGlobalValues(values);
+    bordered_global_committed_values_.assign(values.begin(), values.end());
+    for (auto& slot : bordered_global_older_values_) {
+        slot.assign(values.begin(), values.end());
+    }
+    bordered_global_committed_rates_.assign(values.size(), Real(0.0));
+    bordered_global_pending_rates_.reset();
+}
+
+void FESystem::setBorderedGlobalRates(std::span<const Real> rates)
+{
+    FE_THROW_IF(rates.size() != bordered_global_committed_rates_.size(), InvalidArgumentException,
+                "FESystem::setBorderedGlobalRates: " + std::to_string(rates.size()) + " rates for " +
+                    std::to_string(bordered_global_committed_rates_.size()) + " bordered global DOFs");
+    std::copy(rates.begin(), rates.end(), bordered_global_committed_rates_.begin());
+}
+
+void FESystem::setPendingBorderedGlobalRates(std::vector<Real> rates)
+{
+    FE_THROW_IF(rates.size() != bordered_global_values_.size(), InvalidArgumentException,
+                "FESystem::setPendingBorderedGlobalRates: " + std::to_string(rates.size()) + " rates for " +
+                    std::to_string(bordered_global_values_.size()) + " bordered global DOFs");
+    bordered_global_pending_rates_ = std::move(rates);
+}
+
+bool FESystem::borderedGlobalDofIsTimeDependent(GlobalIndex index) const
+{
+    const auto n_field = dof_handler_.getNumDofs();
+    for (const auto& rec : field_registry_.records()) {
+        if (rec.scope != FieldScope::Global || rec.source_kind != FieldSourceKind::Unknown) {
+            continue;
+        }
+        const auto idx = static_cast<std::size_t>(rec.id);
+        const auto first = field_dof_offsets_[idx] - n_field;
+        const auto count = field_dof_handlers_[idx].getNumDofs();
+        if (index >= first && index < first + count) {
+            return rec.time_dependent;
+        }
+    }
+    FE_THROW(InvalidArgumentException,
+             "FESystem::borderedGlobalDofIsTimeDependent: bordered DOF " + std::to_string(index) +
+                 " belongs to no global field");
+}
+
+void FESystem::predictBorderedGlobalStage(Real alpha_f, Real dt)
+{
+    // The time loop's predictor of the field DOFs: u += alpha_dt * v.
+    const Real alpha_dt = static_cast<Real>(alpha_f * dt);
+    for (std::size_t i = 0; i < bordered_global_values_.size(); ++i) {
+        if (borderedGlobalDofIsTimeDependent(static_cast<GlobalIndex>(i))) {
+            bordered_global_values_[i] = bordered_global_committed_values_[i];
+            bordered_global_values_[i] += alpha_dt * bordered_global_committed_rates_[i];
+        }
+    }
+}
+
+void FESystem::finalizeBorderedGlobalStage(Real alpha_f, Real gamma, Real dt)
+{
+    FE_THROW_IF(!(alpha_f > 0.0) || !(gamma > 0.0) || !(dt > 0.0), InvalidArgumentException,
+                "FESystem::finalizeBorderedGlobalStage: alpha_f, gamma and dt must be > 0");
+    // The time loop's constants and update of the field DOFs.
+    const double inv_af = 1.0 / static_cast<double>(alpha_f);
+    const double c_prev = (static_cast<double>(alpha_f) - 1.0) * inv_af;
+    const double inv_gamma_dt = 1.0 / (static_cast<double>(gamma) * static_cast<double>(dt));
+    const double c_old = (1.0 - static_cast<double>(gamma)) / static_cast<double>(gamma);
+    std::vector<Real> rates(bordered_global_values_.size(), Real(0.0));
+    for (std::size_t i = 0; i < bordered_global_values_.size(); ++i) {
+        if (!borderedGlobalDofIsTimeDependent(static_cast<GlobalIndex>(i))) {
+            continue;
+        }
+        const Real x_n = bordered_global_committed_values_[i];
+        const Real x = static_cast<Real>(inv_af) * bordered_global_values_[i] + static_cast<Real>(c_prev) * x_n;
+        bordered_global_values_[i] = x;
+        rates[i] = static_cast<Real>(inv_gamma_dt) * (x - x_n) -
+                   static_cast<Real>(c_old) * bordered_global_committed_rates_[i];
+    }
+    bordered_global_pending_rates_ = std::move(rates);
+}
+
 std::vector<Real> FESystem::globalFieldValues(FieldId field, const SystemStateView& state) const
 {
     requireSetup();
@@ -10728,6 +10834,7 @@ void FESystem::rollbackMeshCoordinateTransaction()
         auxiliary_state_manager_->rollbackAll();
     }
     bordered_global_values_ = bordered_global_committed_values_;
+    bordered_global_pending_rates_.reset();
     if (auxiliary_input_registry_) {
         auxiliary_input_registry_->invalidateAll();
     }
@@ -12589,6 +12696,7 @@ void FESystem::notifyMeshReferenceRebased()
         auxiliary_state_manager_->resetAllToCommitted();
     }
     bordered_global_values_ = bordered_global_committed_values_;
+    bordered_global_pending_rates_.reset();
     if (auxiliary_input_registry_) {
         auxiliary_input_registry_->invalidateAll();
     }
@@ -15731,6 +15839,7 @@ void FESystem::beginTimeStep(bool reset_auxiliary_state,
     }
     if (reset_auxiliary_state) {
         bordered_global_values_ = bordered_global_committed_values_;
+        bordered_global_pending_rates_.reset();
     }
     // Invalidate all auxiliary inputs for the new time step.
     if (invalidate_auxiliary_inputs && auxiliary_input_registry_) {
@@ -15755,7 +15864,18 @@ void FESystem::commitTimeStep()
     if (auxiliary_state_manager_) {
         auxiliary_state_manager_->commitAll(last_auxiliary_advance_time_);
     }
+    // The bordered history moves as TimeHistory's does at the accepted step.
+    for (std::size_t k = bordered_global_older_values_.size(); k > 1; --k) {
+        bordered_global_older_values_[k - 1] = bordered_global_older_values_[k - 2];
+    }
+    if (!bordered_global_older_values_.empty()) {
+        bordered_global_older_values_.front() = bordered_global_committed_values_;
+    }
     bordered_global_committed_values_ = bordered_global_values_;
+    if (bordered_global_pending_rates_) {
+        bordered_global_committed_rates_ = std::move(*bordered_global_pending_rates_);
+        bordered_global_pending_rates_.reset();
+    }
 }
 
 void FESystem::finalizeMonolithicAuxiliaryStageState(Real alpha_f, Real final_time)
@@ -23641,6 +23761,7 @@ void FESystem::rollbackAuxiliaryState()
         auxiliary_state_manager_->rollbackAll();
     }
     bordered_global_values_ = bordered_global_committed_values_;
+    bordered_global_pending_rates_.reset();
 }
 
 void FESystem::finalizeAuxiliaryLayout()

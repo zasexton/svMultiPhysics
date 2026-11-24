@@ -548,6 +548,14 @@ public:
         system_->setPrescribedFieldCoefficients(copy.field.shadow, accepted_[index]);
         continue;
       }
+      if (borderedSource(copy)) {
+        auto coefficients = borderedCoefficients(copy, state);
+        system_->setPrescribedFieldCoefficients(copy.field.shadow, coefficients);
+        if (previous && sync.attempt_entry) {
+          accepted_[index] = std::move(coefficients);
+        }
+        continue;
+      }
       std::span<const Real> values = state.u;
       const backends::GenericVector* vector = state.u_vector;
       if (copy.field.kind == systems::ShadowField::Kind::Previous) {
@@ -578,6 +586,37 @@ public:
   }
 
 private:
+  /// A bordered global source (D54) keeps its values and history in the system, not in the state.
+  [[nodiscard]] bool borderedSource(const ShadowCopy& copy) const
+  {
+    const auto& source = system_->fieldRecord(copy.field.source);
+    return system_->hasBorderedGlobalFields() && source.scope == systems::FieldScope::Global &&
+           source.source_kind == systems::FieldSourceKind::Unknown;
+  }
+
+  /// The shadow's coefficients from the system's bordered values or history.
+  [[nodiscard]] std::vector<Real> borderedCoefficients(const ShadowCopy& copy,
+                                                       const systems::SystemStateView& state) const
+  {
+    const std::span<const Real> bordered =
+        copy.field.kind == systems::ShadowField::Kind::Previous
+            ? system_->borderedGlobalHistoryValues(copy.field.steps_back)
+            : (state.bordered_global_values.empty() ? system_->borderedGlobalValues()
+                                                    : state.bordered_global_values);
+    const auto n_field = system_->dofHandler().getNumDofs();
+    std::vector<Real> coefficients(static_cast<std::size_t>(copy.coefficient_count), Real(0.0));
+    for (std::size_t i = 0; i < copy.field_dofs.size(); ++i) {
+      const auto index = static_cast<std::size_t>(copy.state_dofs[i] - n_field);
+      if (copy.state_dofs[i] < n_field || index >= bordered.size()) {
+        throw std::runtime_error("ShadowFieldParticipant: a DOF of '" +
+                                 system_->fieldRecord(copy.field.source).name +
+                                 "' lies outside the bordered global DOFs");
+      }
+      coefficients[static_cast<std::size_t>(copy.field_dofs[i])] = bordered[index];
+    }
+    return coefficients;
+  }
+
   [[nodiscard]] ShadowCopy prepare(const systems::ShadowField& field) const
   {
     // A copy coefficient by coefficient needs the source's DOF map.

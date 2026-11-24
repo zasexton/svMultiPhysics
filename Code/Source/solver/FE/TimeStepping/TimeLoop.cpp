@@ -12,6 +12,8 @@
 #include "Math/FiniteDifference.h"
 #include "Sparsity/DistributedSparsityPattern.h"
 #include "Sparsity/SparsityPattern.h"
+#include "Systems/ExactAccumulator.h"
+#include "Systems/SystemCollectives.h"
 #include "Systems/SystemsExceptions.h"
 #include "TimeStepping/GeneralizedAlpha.h"
 #include "TimeStepping/CollocationMethods.h"
@@ -158,6 +160,170 @@ private:
     static_cast<void>(system);
 #endif
     return local_mask;
+}
+
+// ---------------------------------------------------------------------------
+// The bordered global DOFs (D54) keep their history in the system; the time
+// loop moves it with the field history.
+// ---------------------------------------------------------------------------
+
+// While alive, history slot 2 of the bordered global DOFs is their rate, as
+// the first-order generalized-alpha stage keeps the field rate in slot 2.
+class BorderedRateInSecondSlot {
+public:
+    explicit BorderedRateInSecondSlot(systems::FESystem& system)
+        : system_(system)
+        , saved_(system.borderedGlobalRateInSecondSlot())
+    {
+        system_.setBorderedGlobalRateInSecondSlot(true);
+    }
+    ~BorderedRateInSecondSlot() { system_.setBorderedGlobalRateInSecondSlot(saved_); }
+    BorderedRateInSecondSlot(const BorderedRateInSecondSlot&) = delete;
+    BorderedRateInSecondSlot& operator=(const BorderedRateInSecondSlot&) = delete;
+
+private:
+    systems::FESystem& system_;
+    bool saved_{false};
+};
+
+// The first rates of the bordered global DOFs from their history slots, with
+// the weights of the field rates
+// (utils::initializeSecondOrderStateFromDisplacementHistory); zero without
+// enough history and for the DOFs without a time derivative.
+void initializeBorderedRatesFromHistory(systems::FESystem& system, const TimeHistory& history)
+{
+    if (!system.hasBorderedGlobalFields()) {
+        return;
+    }
+    const auto n = static_cast<std::size_t>(system.numBorderedGlobalDofs());
+    std::vector<Real> rates(n, Real(0.0));
+    const auto w = utils::displacementHistoryDerivativeWeights(history, /*derivative_order=*/1, /*min_points=*/2);
+    if (!w.empty()) {
+        FE_THROW_IF(static_cast<int>(w.size()) > system.borderedGlobalHistoryDepth(), systems::InvalidStateException,
+                    "TimeLoop: the first rates read " + std::to_string(w.size()) +
+                        " history states and the bordered global DOFs keep " +
+                        std::to_string(system.borderedGlobalHistoryDepth()));
+        const bool rate_in_second_slot = system.borderedGlobalRateInSecondSlot();
+        system.setBorderedGlobalRateInSecondSlot(false);
+        for (std::size_t j = 0; j < w.size(); ++j) {
+            const auto slot = system.borderedGlobalHistoryValues(static_cast<int>(j + 1u));
+            const double alpha = w[j];
+            for (std::size_t i = 0; i < n; ++i) {
+                rates[i] += static_cast<Real>(alpha) * slot[i];
+            }
+        }
+        system.setBorderedGlobalRateInSecondSlot(rate_in_second_slot);
+    }
+    for (std::size_t i = 0; i < n; ++i) {
+        if (!system.borderedGlobalDofIsTimeDependent(static_cast<GlobalIndex>(i))) {
+            rates[i] = Real(0.0);
+        }
+    }
+    system.setBorderedGlobalRates(rates);
+}
+
+// The first rates of the bordered global DOFs from the PDE, after the field
+// rates: the rows of the global fields of the dt-only system
+//   Ct uDot_field + D uDot_global = -c g
+// with the bordered blocks of its assembly (D the dt-only Jacobian of the
+// global rows, g their residual without dt terms).  The field rows must not
+// depend on the global rates (B = 0), which holds when no field row holds
+// dt() of a global field; the solve is then the in-matrix solve by blocks.
+// A global field without a time derivative, or a row with no rate term,
+// takes a zero rate, as the in-matrix rows do.
+void initializeBorderedRatesFromPde(systems::FESystem& system,
+                                    const backends::GenericVector& field_rates,
+                                    double c)
+{
+    if (!system.hasBorderedGlobalFields()) {
+        return;
+    }
+    const auto& bc = system.borderedCoupling();
+    const auto nf = bc.n_field_dofs;
+    const auto na = static_cast<std::size_t>(bc.n_aux);
+    FE_THROW_IF(!bc.active || na != static_cast<std::size_t>(system.numBorderedGlobalDofs()) ||
+                    bc.B.size() != nf * na || bc.Ct.size() != na * nf || bc.D.size() != na * na ||
+                    bc.g.size() != na,
+                systems::InvalidStateException,
+                "TimeLoop: the bordered blocks of the first-rate system do not match the bordered global DOFs");
+    FE_THROW_IF(std::any_of(bc.B.begin(), bc.B.end(), [](Real v) { return v != Real(0.0); }),
+                NotImplementedException,
+                "TimeLoop: the first rates from the PDE solve the field rows without the bordered global "
+                "rates, and a field row holds dt() of a global field; initialize the rates from the history "
+                "(initialize_first_order_rate_from_pde = false) or use the InMatrix lowering");
+
+    // Ct uDot_field, row by row: the owned field DOFs of every rank, summed exactly.
+    const auto view = const_cast<backends::GenericVector&>(field_rates).createGhostedReadView();
+    FE_CHECK_NOT_NULL(view.get(), "TimeLoop: first-rate read view");
+    const auto& owned = system.dofHandler().getPartition().locallyOwned();
+    std::vector<systems::ExactAccumulator> ct_rate(na);
+    for (const auto k : owned) {
+        const auto rate = view->getVectorEntry(k);
+        for (std::size_t i = 0; i < na; ++i) {
+            ct_rate[i].add(static_cast<double>(bc.Ct[i * nf + static_cast<std::size_t>(k)] * rate));
+        }
+    }
+    const auto ct_sums = systems::collectiveExactSums(
+        ct_rate, systems::CollectiveCommunicator(system.activeMpiCommunicator()));
+
+    std::vector<std::size_t> rows;
+    for (std::size_t i = 0; i < na; ++i) {
+        if (!system.borderedGlobalDofIsTimeDependent(static_cast<GlobalIndex>(i))) {
+            continue;
+        }
+        bool any_rate_term = false;
+        for (std::size_t j = 0; j < na; ++j) {
+            any_rate_term = any_rate_term || bc.D[i * na + j] != Real(0.0);
+        }
+        if (any_rate_term) {
+            rows.push_back(i);
+        }
+    }
+    const auto m = rows.size();
+    std::vector<double> a(m * m, 0.0);
+    std::vector<double> x(m, 0.0);
+    for (std::size_t r = 0; r < m; ++r) {
+        const auto i = rows[r];
+        for (std::size_t q = 0; q < m; ++q) {
+            a[r * m + q] = static_cast<double>(bc.D[i * na + rows[q]]);
+        }
+        x[r] = static_cast<double>(bc.g[i] * static_cast<Real>(-c)) - ct_sums[i];
+    }
+    // Gaussian elimination with partial pivoting on the replicated block.
+    for (std::size_t col = 0; col < m; ++col) {
+        std::size_t pivot = col;
+        for (std::size_t r = col + 1; r < m; ++r) {
+            if (std::abs(a[r * m + col]) > std::abs(a[pivot * m + col])) {
+                pivot = r;
+            }
+        }
+        FE_THROW_IF(a[pivot * m + col] == 0.0, systems::InvalidStateException,
+                    "TimeLoop: the rate block of the bordered global DOFs is singular");
+        if (pivot != col) {
+            for (std::size_t q = 0; q < m; ++q) {
+                std::swap(a[col * m + q], a[pivot * m + q]);
+            }
+            std::swap(x[col], x[pivot]);
+        }
+        for (std::size_t r = col + 1; r < m; ++r) {
+            const double f = a[r * m + col] / a[col * m + col];
+            for (std::size_t q = col; q < m; ++q) {
+                a[r * m + q] -= f * a[col * m + q];
+            }
+            x[r] -= f * x[col];
+        }
+    }
+    for (std::size_t r = m; r-- > 0;) {
+        for (std::size_t q = r + 1; q < m; ++q) {
+            x[r] -= a[r * m + q] * x[q];
+        }
+        x[r] /= a[r * m + r];
+    }
+    std::vector<Real> rates(na, Real(0.0));
+    for (std::size_t r = 0; r < m; ++r) {
+        rates[rows[r]] = static_cast<Real>(x[r]);
+    }
+    system.setBorderedGlobalRates(rates);
 }
 
 // Communicator-wide AND of a rank-local flag, for the decisions taken after a
@@ -961,6 +1127,21 @@ TimeLoopReport TimeLoop::run(systems::TransientSystem& transient,
             "exactly one");
     }
 
+    if (transient.system().hasBorderedGlobalFields()) {
+        // The bordered global DOFs keep their history in the system, and this
+        // loop moves it with the field history for the one-step and BDF2
+        // schemes below.
+        const auto scheme = options_.scheme;
+        const bool supported =
+            scheme == SchemeKind::BackwardEuler || scheme == SchemeKind::DG0 ||
+            scheme == SchemeKind::BDF2 || scheme == SchemeKind::ThetaMethod || scheme == SchemeKind::CG1 ||
+            (scheme == SchemeKind::GeneralizedAlpha && transient.system().temporalOrder() <= 1);
+        FE_THROW_IF(!supported && !transient.system().timeDerivativeFields().empty(), NotImplementedException,
+                    "TimeLoop: the bordered lowering of global fields supports Backward Euler, BDF2, the theta "
+                    "method and first-order generalized alpha; use the InMatrix lowering for this scheme");
+        transient.system().setBorderedGlobalHistoryDepth(std::max(2, history.historyDepth()));
+    }
+
     const double t0 = options_.t0;
     const double t_end = options_.t_end;
     history.setTime(t0);
@@ -1215,6 +1396,8 @@ TimeLoopReport TimeLoop::run(systems::TransientSystem& transient,
         prev_state.u_prev2 = history.uPrev2Span();
         prev_state.u_history = history.uHistorySpans();
         prev_state.dt_history = history.dtHistory();
+        // The bordered global DOFs of the previous state: their committed values.
+        prev_state.bordered_global_values = transient.system().borderedGlobalCommittedValues();
 
         add.state = prev_state;
         stage.residual_addition = add;
@@ -2632,6 +2815,7 @@ TimeLoopReport TimeLoop::run(systems::TransientSystem& transient,
                                     history.uDDot().localSpan(),
                                     /*overwrite_u_dot=*/true,
                                     /*overwrite_u_ddot=*/false);
+                                initializeBorderedRatesFromHistory(sys, history);
                             } else if (!dt_fields.empty()) {
                                 // Initial consistency is an equation for
                                 // uDot_n at the accepted state u_n. Explicit
@@ -2642,6 +2826,10 @@ TimeLoopReport TimeLoop::run(systems::TransientSystem& transient,
                                 sys.updateConstraints(initialization_time, dt);
                                 ensure_workspace_matches_sparsity();
                                 sys.beginTimeStep();
+                                // Slot 2 holds the rate below, for the bordered
+                                // global DOFs as for the fields.
+                                std::optional<BorderedRateInSecondSlot> bordered_rate_slot;
+                                bordered_rate_slot.emplace(sys);
                                 const auto init_dirichlet_dofs = setLinearDirichletDofs(linear, constraints);
 
                                 systems::SystemStateView init_state{};
@@ -2860,8 +3048,11 @@ TimeLoopReport TimeLoop::run(systems::TransientSystem& transient,
                                             history.uDDot().localSpan(),
                                             /*overwrite_u_dot=*/true,
                                             /*overwrite_u_ddot=*/false);
+                                        bordered_rate_slot.reset();
+                                        initializeBorderedRatesFromHistory(sys, history);
                                     } else {
                                         rep.converged = true;
+                                        initializeBorderedRatesFromPde(sys, history.uDot(), c);
                                     }
                                     logFirstOrderRateInitializationResult(
                                         rep,
@@ -2880,6 +3071,8 @@ TimeLoopReport TimeLoop::run(systems::TransientSystem& transient,
                                         history.uDDot().localSpan(),
                                         /*overwrite_u_dot=*/true,
                                         /*overwrite_u_ddot=*/false);
+                                    bordered_rate_slot.reset();
+                                    initializeBorderedRatesFromHistory(sys, history);
                                 }
                             }
                         }
@@ -2926,6 +3119,8 @@ TimeLoopReport TimeLoop::run(systems::TransientSystem& transient,
                         // Inject uDot^n into the u^{n-1} history slot; the integrator uses it via
                         // history_rate_order==0 to keep generalized-α one-step in (u,uDot).
                         copyVector(history.uPrev2(), history.uDot());
+                        // The bordered global DOFs read their rate in slot 2 as well.
+                        BorderedRateInSecondSlot bordered_rate_slot(sys);
 
                         systems::TransientSystem transient_stage(transient.system(), generalized_alpha_fo);
                         const double stage_time = t + ga1_params->alpha_f * dt;
@@ -2940,6 +3135,10 @@ TimeLoopReport TimeLoop::run(systems::TransientSystem& transient,
                                 cur[i] += alpha_dt * v[i];
                             }
                             constraints.updateGhostsAndDistribute(history.u());
+                            if (sys.hasBorderedGlobalFields()) {
+                                sys.predictBorderedGlobalStage(static_cast<Real>(ga1_params->alpha_f),
+                                                               static_cast<Real>(dt));
+                            }
                         }
 
 	                        nr = newton.solveStep(transient_stage, linear, stage_time, history, workspace);
@@ -2990,6 +3189,12 @@ TimeLoopReport TimeLoop::run(systems::TransientSystem& transient,
 	                            if (!nondt_dofs.empty()) {
 	                                zeroVectorEntries(nondt_dofs, history.uDot());
 	                            }
+                            if (sys.hasBorderedGlobalFields()) {
+                                // The bordered global DOFs: the same endpoint and rate.
+                                sys.finalizeBorderedGlobalStage(static_cast<Real>(ga1_params->alpha_f),
+                                                                static_cast<Real>(gamma),
+                                                                static_cast<Real>(dt));
+                            }
                             // Do NOT distribute the homogeneous constraints into uDot here.
                             // The update above already produces constraint-consistent rates:
                             // constrained VALUES satisfy the (possibly time-dependent) affine

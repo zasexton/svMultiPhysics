@@ -3312,10 +3312,6 @@ void FESystem::setup(const SetupOptions& user_opts, const SetupInputs& inputs)
                             "FESystem::setup: the bordered lowering of global multipliers together with "
                             "monolithic auxiliary unknowns is not supported yet; use InMatrix with a backend "
                             "that has a variable block layout");
-                FE_THROW_IF(!timeDerivativeFields().empty(), NotImplementedException,
-                            "FESystem::setup: the bordered lowering of global multipliers supports steady "
-                            "problems for now (the system has time derivatives); use InMatrix with a backend "
-                            "that has a variable block layout");
             }
         }
         multiplier_lowering_ = lowering;
@@ -3359,6 +3355,11 @@ void FESystem::setup(const SetupOptions& user_opts, const SetupInputs& inputs)
         if (bordered_global_values_.size() != static_cast<std::size_t>(bordered_dofs)) {
             bordered_global_values_.assign(static_cast<std::size_t>(bordered_dofs), Real(0.0));
             bordered_global_committed_values_ = bordered_global_values_;
+            for (auto& slot : bordered_global_older_values_) {
+                slot = bordered_global_values_;
+            }
+            bordered_global_committed_rates_ = bordered_global_values_;
+            bordered_global_pending_rates_.reset();
         }
     }
 

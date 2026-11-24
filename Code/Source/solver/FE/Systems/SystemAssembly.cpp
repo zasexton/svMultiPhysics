@@ -13,6 +13,7 @@
 #include "Auxiliary/AuxiliaryInputRegistry.h"
 #include "Auxiliary/AuxiliaryMultirateScheduler.h"
 #include "Auxiliary/AuxiliaryOperatorRegistry.h"
+#include "Systems/ExactAccumulator.h"
 #include "Systems/GlobalKernel.h"
 #include "Systems/SystemsExceptions.h"
 
@@ -1476,10 +1477,95 @@ filterSparsePairsToOwned(std::span<const std::pair<GlobalIndex, Real>> pairs,
     return owned_pairs;
 }
 
+/**
+ * Adds the exact sums of the bordered contributions of all ranks to the
+ * blocks: every rank gathers every contribution, and each entry is the sum
+ * of its contributions rounded once (ExactAccumulator), whatever the
+ * partition and the order of assembly.
+ */
+void addExactBorderedContributions(FESystem::BorderedCouplingData& bc,
+                                   std::span<const BorderedGlobalSplitView::Contribution> local,
+                                   [[maybe_unused]] MPI_Comm comm)
+{
+    std::vector<std::int64_t> keys;
+    std::vector<Real> values;
+    keys.reserve(local.size());
+    values.reserve(local.size());
+    for (const auto& c : local) {
+        keys.push_back(c.key);
+        values.push_back(c.value);
+    }
+#if FE_HAS_MPI
+    int mpi_initialized = 0;
+    MPI_Initialized(&mpi_initialized);
+    int comm_size = 1;
+    if (mpi_initialized) {
+        MPI_Comm_size(comm, &comm_size);
+    }
+    if (comm_size > 1) {
+        const int local_n = static_cast<int>(keys.size());
+        std::vector<int> counts(static_cast<std::size_t>(comm_size), 0);
+        MPI_Allgather(&local_n, 1, MPI_INT, counts.data(), 1, MPI_INT, comm);
+        std::vector<int> displs(static_cast<std::size_t>(comm_size), 0);
+        int total_n = 0;
+        for (int r = 0; r < comm_size; ++r) {
+            displs[static_cast<std::size_t>(r)] = total_n;
+            total_n += counts[static_cast<std::size_t>(r)];
+        }
+        std::vector<std::int64_t> all_keys(static_cast<std::size_t>(total_n), 0);
+        std::vector<Real> all_values(static_cast<std::size_t>(total_n), Real(0.0));
+        MPI_Allgatherv(keys.data(), local_n, MPI_INT64_T, all_keys.data(), counts.data(), displs.data(),
+                       MPI_INT64_T, comm);
+        MPI_Allgatherv(values.data(), local_n, mpiRealType(), all_values.data(), counts.data(), displs.data(),
+                       mpiRealType(), comm);
+        keys.swap(all_keys);
+        values.swap(all_values);
+    }
+#endif
+    std::vector<std::size_t> order(keys.size());
+    for (std::size_t i = 0; i < order.size(); ++i) {
+        order[i] = i;
+    }
+    std::sort(order.begin(), order.end(), [&keys](std::size_t a, std::size_t b) { return keys[a] < keys[b]; });
+    const auto nf = bc.n_field_dofs;
+    const auto na = static_cast<std::size_t>(bc.n_aux);
+    for (std::size_t first = 0; first < order.size();) {
+        const auto key = keys[order[first]];
+        ExactAccumulator sum;
+        std::size_t last = first;
+        for (; last < order.size() && keys[order[last]] == key; ++last) {
+            sum.add(values[order[last]]);
+        }
+        const auto index = static_cast<std::size_t>(key / 4);
+        Real* target = nullptr;
+        switch (static_cast<BorderedGlobalSplitView::Block>(key % 4)) {
+            case BorderedGlobalSplitView::Block::B:
+                target = index < nf * na ? &bc.B[index] : nullptr;
+                break;
+            case BorderedGlobalSplitView::Block::Ct:
+                target = index < nf * na ? &bc.Ct[index] : nullptr;
+                break;
+            case BorderedGlobalSplitView::Block::D:
+                target = index < na * na ? &bc.D[index] : nullptr;
+                break;
+            case BorderedGlobalSplitView::Block::G:
+                target = index < na ? &bc.g[index] : nullptr;
+                break;
+        }
+        FE_THROW_IF(target == nullptr, InvalidStateException,
+                    "assembleOperator: a bordered contribution lies outside the bordered blocks");
+        *target += sum.value();
+        first = last;
+    }
+}
+
 void synchronizeBorderedCouplingForReplicatedSolve(FESystem::BorderedCouplingData& bc,
                                                    bool sync_matrix_terms,
                                                    bool sync_vector_terms,
-                                                   MPI_Comm comm)
+                                                   MPI_Comm comm,
+                                                   std::span<const BorderedGlobalSplitView::Contribution>
+                                                       exact_contributions = {},
+                                                   bool exact = false)
 {
     if (!bc.active) {
         return;
@@ -1511,6 +1597,9 @@ void synchronizeBorderedCouplingForReplicatedSolve(FESystem::BorderedCouplingDat
         bc.aux_row_global_contributor_counts =
             bc.aux_row_local_contribution_flags;
         allreduceIntEntries(bc.aux_row_global_contributor_counts, comm);
+        if (exact) {
+            addExactBorderedContributions(bc, exact_contributions, comm);
+        }
 
         bc.globally_reduced = true;
         if (!replicatedBorderedCouplingConsistentAcrossRanks(
@@ -1523,6 +1612,9 @@ void synchronizeBorderedCouplingForReplicatedSolve(FESystem::BorderedCouplingDat
     }
 #endif
 
+    if (exact) {
+        addExactBorderedContributions(bc, exact_contributions, comm);
+    }
     bc.globally_reduced = true;
     bc.aux_row_global_contributor_counts =
         bc.aux_row_local_contribution_flags;
@@ -2337,7 +2429,7 @@ assembly::AssemblyResult assembleOperator(
     assembler.setCurrentSolution(state.u);
     // `createAssemblyView()` is non-const for historical reasons; treat this as read-only use.
     std::unique_ptr<assembly::GlobalSystemView> current_solution_view =
-        makeStateReadView(system, state.u_vector, state.u, /*ghosted=*/false);
+        makeStateReadView(system, state.u_vector, state.u, /*ghosted=*/false, state.bordered_global_values);
     assembler.setCurrentSolutionView(current_solution_view.get());
     {
         std::vector<assembly::FieldSolutionAccess> access;
@@ -2402,6 +2494,7 @@ assembly::AssemblyResult assembleOperator(
 
     std::unique_ptr<assembly::GlobalSystemView> prev_solution_view;
     std::unique_ptr<assembly::GlobalSystemView> prev2_solution_view;
+    std::vector<std::unique_ptr<assembly::GlobalSystemView>> bordered_history_views;
 
     if (required_history > 0) {
         if (!state.u_history.empty()) {
@@ -2419,23 +2512,43 @@ assembly::AssemblyResult assembleOperator(
             assembler.setPreviousSolution2(state.u_prev2);
         }
 
-        // Provide global-indexed views for history states when available (needed by some backends).
-        if (required_history >= 1) {
-            if (state.u_prev_vector != nullptr) {
-                auto* vec = const_cast<backends::GenericVector*>(state.u_prev_vector);
-                prev_solution_view = vec->createAssemblyView();
-                assembler.setPreviousSolutionView(prev_solution_view.get());
-            } else {
-                assembler.setPreviousSolutionView(nullptr);
+        if (system.hasBorderedGlobalFields()) {
+            // The bordered global DOFs follow the field DOFs in every history
+            // state, from the system's history slots.
+            FE_THROW_IF(required_history > system.borderedGlobalHistoryDepth(), NotImplementedException,
+                        "assembleOperator: the time integrator reads " + std::to_string(required_history) +
+                            " history states and the bordered global DOFs keep " +
+                            std::to_string(system.borderedGlobalHistoryDepth()));
+            bordered_history_views.clear();
+            for (int k = 1; k <= required_history; ++k) {
+                const backends::GenericVector* vector =
+                    k == 1 ? state.u_prev_vector : (k == 2 ? state.u_prev2_vector : nullptr);
+                const auto values = !state.u_history.empty()
+                                        ? state.u_history[static_cast<std::size_t>(k - 1)]
+                                        : (k == 1 ? state.u_prev : state.u_prev2);
+                bordered_history_views.push_back(
+                    makeHistoryReadView(system, vector, values, k, /*ghosted=*/false));
+                assembler.setPreviousSolutionViewK(k, bordered_history_views.back().get());
             }
-        }
-        if (required_history >= 2) {
-            if (state.u_prev2_vector != nullptr) {
-                auto* vec = const_cast<backends::GenericVector*>(state.u_prev2_vector);
-                prev2_solution_view = vec->createAssemblyView();
-                assembler.setPreviousSolution2View(prev2_solution_view.get());
-            } else {
-                assembler.setPreviousSolution2View(nullptr);
+        } else {
+            // Provide global-indexed views for history states when available (needed by some backends).
+            if (required_history >= 1) {
+                if (state.u_prev_vector != nullptr) {
+                    auto* vec = const_cast<backends::GenericVector*>(state.u_prev_vector);
+                    prev_solution_view = vec->createAssemblyView();
+                    assembler.setPreviousSolutionView(prev_solution_view.get());
+                } else {
+                    assembler.setPreviousSolutionView(nullptr);
+                }
+            }
+            if (required_history >= 2) {
+                if (state.u_prev2_vector != nullptr) {
+                    auto* vec = const_cast<backends::GenericVector*>(state.u_prev2_vector);
+                    prev2_solution_view = vec->createAssemblyView();
+                    assembler.setPreviousSolution2View(prev2_solution_view.get());
+                } else {
+                    assembler.setPreviousSolution2View(nullptr);
+                }
             }
         }
     } else {
@@ -3248,7 +3361,8 @@ assembly::AssemblyResult assembleOperator(
     if (bordered_global_split.has_value()) {
         // Every rank holds its cells' share of the bordered blocks: sum them.
         synchronizeBorderedCouplingForReplicatedSolve(
-            bordered_global_coupling, request.want_matrix, request.want_vector, system.dofHandler().mpiComm());
+            bordered_global_coupling, request.want_matrix, request.want_vector, system.dofHandler().mpiComm(),
+            bordered_global_split->contributions(), /*exact=*/true);
         matrix_out = backend_matrix_out;
         vector_out = backend_vector_out;
         bordered_global_split.reset();

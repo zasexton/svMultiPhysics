@@ -26,6 +26,7 @@
 #include "Assembly/GlobalSystemView.h"
 #include "Systems/FESystem.h"
 
+#include <cstdint>
 #include <memory>
 #include <span>
 #include <string>
@@ -46,6 +47,12 @@ struct SystemStateView;
  * entries of global rows to g.  The view exposes no resolved-entry layout,
  * so assembly inserts through the plain calls.  Not thread-safe for the
  * bordered entries (global fields are assembled without coloring).
+ *
+ * The added bordered entries are not summed here: the view keeps every
+ * contribution (contributions()), and the reduction sums each entry's
+ * contributions over all ranks exactly (ExactAccumulator), so the blocks do
+ * not depend on the partition or the order of assembly.  An inserted entry
+ * drops the contributions before it; Max and Min do not apply to them.
  */
 class BorderedGlobalSplitView final : public assembly::GlobalSystemView {
 public:
@@ -92,9 +99,24 @@ public:
     void zero() override;
     [[nodiscard]] Real getMatrixEntry(GlobalIndex row, GlobalIndex col) const override;
 
+    /// The bordered blocks of a contribution key (key = 4 index + block).
+    enum class Block : std::int64_t { B = 0, Ct = 1, D = 2, G = 3 };
+    /// One added entry of a bordered block, summed exactly by the reduction.
+    struct Contribution {
+        std::int64_t key{0};
+        Real value{0.0};
+    };
+    [[nodiscard]] std::span<const Contribution> contributions() const noexcept { return contributions_; }
+    [[nodiscard]] static std::int64_t contributionKey(Block block, std::size_t index) noexcept
+    {
+        return static_cast<std::int64_t>(index) * 4 + static_cast<std::int64_t>(block);
+    }
+
 private:
     [[nodiscard]] std::size_t borderedIndex(GlobalIndex dof) const;
-    static void apply(Real& target, Real value, assembly::AddMode mode);
+    void addBordered(Block block, std::size_t index, Real& target, Real value, assembly::AddMode mode);
+    /// This rank's value of an entry: the stored value and its pending contributions.
+    [[nodiscard]] Real localValue(std::int64_t key, Real stored) const;
 
     assembly::GlobalSystemView* matrix_{nullptr};
     assembly::GlobalSystemView* vector_{nullptr};
@@ -104,6 +126,7 @@ private:
     std::vector<GlobalIndex> field_rows_{};
     std::vector<GlobalIndex> field_cols_{};
     std::vector<Real> field_values_{};
+    std::vector<Contribution> contributions_{};
 };
 
 /**
@@ -161,13 +184,31 @@ private:
  *
  * Without bordered global fields: @p vector's view (ghosted when @p ghosted),
  * or null when there is no vector (assembly then reads @p values).  With
- * them: a BorderedGlobalReadView over that view or over @p values.
+ * them: a BorderedGlobalReadView over that view or over @p values, with the
+ * bordered global DOFs from @p bordered_values, or from the system's
+ * current values when it is empty (SystemStateView::bordered_global_values).
  */
 [[nodiscard]] std::unique_ptr<assembly::GlobalSystemView>
 makeStateReadView(const FESystem& system,
                   const backends::GenericVector* vector,
                   std::span<const Real> values,
-                  bool ghosted);
+                  bool ghosted,
+                  std::span<const Real> bordered_values = {});
+
+/**
+ * @brief The read view of history state @p k (u^{n-k}) for assembly
+ *
+ * Without bordered global fields: @p vector's view, or null without a
+ * vector, as makeStateReadView.  With them: the field DOFs from that view or
+ * from @p values, the bordered global DOFs from history slot @p k of the
+ * system (FESystem::borderedGlobalHistoryValues).
+ */
+[[nodiscard]] std::unique_ptr<assembly::GlobalSystemView>
+makeHistoryReadView(const FESystem& system,
+                    const backends::GenericVector* vector,
+                    std::span<const Real> values,
+                    int k,
+                    bool ghosted);
 
 /**
  * @brief Clears the bordered blocks of the global rows and columns before an assembly

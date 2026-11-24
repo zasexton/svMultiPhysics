@@ -110,6 +110,61 @@ struct SecondOrderStateInitReport {
 };
 
 /**
+ * @brief The finite-difference weights of initializeSecondOrderStateFromDisplacementHistory
+ *
+ * The Fornberg weights of the @p derivative_order derivative at the newest
+ * displacement history state, on the time grid of `TimeHistory::dtHistory()`,
+ * for the newest min(historyDepth(), max_points) states (weight j for
+ * uHistorySpans()[j]); empty when fewer than @p min_points states exist.
+ * Storage that keeps its history beside TimeHistory (the bordered global
+ * DOFs) takes its rates with the same weights.
+ */
+[[nodiscard]] inline std::vector<double>
+displacementHistoryDerivativeWeights(const TimeHistory& history,
+                                     int derivative_order,
+                                     int min_points,
+                                     int max_points = 6)
+{
+    const double dt_prev = (history.dtPrev() > 0.0 && std::isfinite(history.dtPrev()))
+        ? history.dtPrev()
+        : history.dt();
+    FE_THROW_IF(!(dt_prev > 0.0) || !std::isfinite(dt_prev), InvalidArgumentException,
+                "initializeSecondOrderStateFromDisplacementHistory: dtPrev must be finite and > 0");
+
+    const auto dt_hist = history.dtHistory();
+    auto historyDt = [&](int idx) -> double {
+        if (idx < 0 || idx >= static_cast<int>(dt_hist.size())) {
+            return dt_prev;
+        }
+        const double v = dt_hist[static_cast<std::size_t>(idx)];
+        if (v > 0.0 && std::isfinite(v)) {
+            return v;
+        }
+        return dt_prev;
+    };
+
+    const int available = static_cast<int>(history.uHistorySpans().size());
+    const int n_points = std::min(available, std::max(1, max_points));
+    if (n_points < min_points) {
+        return {};
+    }
+
+    std::vector<double> nodes;
+    nodes.reserve(static_cast<std::size_t>(n_points));
+    nodes.push_back(0.0);
+    double accum = 0.0;
+    for (int j = 1; j < n_points; ++j) {
+        accum += historyDt(j - 1);
+        nodes.push_back(-accum);
+    }
+
+    auto w = math::finiteDifferenceWeights(derivative_order, /*x0=*/0.0, nodes);
+    FE_THROW_IF(static_cast<int>(w.size()) != n_points, InvalidArgumentException,
+                "initializeSecondOrderStateFromDisplacementHistory: internal weight size mismatch");
+    return w;
+}
+
+/**
  * @brief Initialize (u̇,ü) by differentiating displacement history in-place.
  *
  * Uses Fornberg finite-difference weights on the time grid implied by
@@ -143,18 +198,6 @@ initializeSecondOrderStateFromDisplacementHistory(const TimeHistory& history,
     FE_THROW_IF(!(dt_prev > 0.0) || !std::isfinite(dt_prev), InvalidArgumentException,
                 "initializeSecondOrderStateFromDisplacementHistory: dtPrev must be finite and > 0");
 
-    const auto dt_hist = history.dtHistory();
-    auto historyDt = [&](int idx) -> double {
-        if (idx < 0 || idx >= static_cast<int>(dt_hist.size())) {
-            return dt_prev;
-        }
-        const double v = dt_hist[static_cast<std::size_t>(idx)];
-        if (v > 0.0 && std::isfinite(v)) {
-            return v;
-        }
-        return dt_prev;
-    };
-
     auto fillDerivative = [&](int derivative_order,
                               std::span<Real> dst,
                               int min_points,
@@ -165,25 +208,12 @@ initializeSecondOrderStateFromDisplacementHistory(const TimeHistory& history,
             points_used = 0;
             return;
         }
-        const int available = static_cast<int>(u_hist.size());
-        const int n_points = std::min(available, std::max(1, max_points));
-        if (n_points < min_points) {
+        const auto w = displacementHistoryDerivativeWeights(history, derivative_order, min_points, max_points);
+        if (w.empty()) {
             points_used = 0;
             return;
         }
-
-        std::vector<double> nodes;
-        nodes.reserve(static_cast<std::size_t>(n_points));
-        nodes.push_back(0.0);
-        double accum = 0.0;
-        for (int j = 1; j < n_points; ++j) {
-            accum += historyDt(j - 1);
-            nodes.push_back(-accum);
-        }
-
-        const auto w = math::finiteDifferenceWeights(derivative_order, /*x0=*/0.0, nodes);
-        FE_THROW_IF(static_cast<int>(w.size()) != n_points, InvalidArgumentException,
-                    "initializeSecondOrderStateFromDisplacementHistory: internal weight size mismatch");
+        const int n_points = static_cast<int>(w.size());
 
         std::fill(dst.begin(), dst.end(), static_cast<Real>(0.0));
         for (int j = 0; j < n_points; ++j) {

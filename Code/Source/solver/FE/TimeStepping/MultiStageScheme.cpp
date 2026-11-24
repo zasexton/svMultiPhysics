@@ -94,6 +94,16 @@ NewtonReport MultiStageSolver::solveImplicitStage(systems::FESystem& system,
         addition = scratch_residual_addition;
     }
 
+    // The bordered global rows' part of the addition is in the bordered
+    // residual of its assembly; the stage keeps it while Newton solves.
+    struct BorderedAddition {
+        systems::FESystem& system;
+        ~BorderedAddition() { system.setBorderedGlobalResidualAddition({}); }
+    } bordered_addition{system};
+    if (addition != nullptr && system.hasBorderedGlobalFields()) {
+        system.setBorderedGlobalResidualAddition(system.borderedCoupling().g);
+    }
+
     return newton_.solveStep(transient_current, linear, stage.solve_time, history, workspace, addition);
 }
 

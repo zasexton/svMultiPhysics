@@ -60,6 +60,14 @@ struct SystemStateView {
     // Convention: dt_history[k-1] corresponds to dt_{n-k+1} (k=1 is dt_prev).
     std::span<const double> dt_history{};
 
+    // Under the bordered lowering of global fields: the values of the bordered
+    // global DOFs in this state, in index order.  Empty means the system's
+    // current values (FESystem::borderedGlobalValues()); a state at the
+    // previous step (the explicit part of a theta step) names the committed
+    // values.  The history slots of the bordered DOFs are the system's
+    // (FESystem::borderedGlobalHistoryValues()).
+    std::span<const Real> bordered_global_values{};
+
     // Optional transient time-integration context (set by Systems/TimeStepping).
     // If null, assembling forms containing `dt(...)` must fail.
     const assembly::TimeIntegrationContext* time_integration{nullptr};

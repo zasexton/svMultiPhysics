@@ -13,6 +13,7 @@
 #include <gtest/gtest.h>
 
 #include "Assembly/Assembler.h"
+#include "Assembly/GlobalSystemView.h"
 #include "Assembly/TimeIntegrationContext.h"
 
 #include "Auxiliary/AuxiliaryBindings.h"
@@ -39,6 +40,7 @@
 #include "Forms/Forms.h"
 #include "Forms/Vocabulary.h"
 
+#include "Spaces/GlobalSpace.h"
 #include "Spaces/SpaceFactory.h"
 
 #include "Systems/FESystem.h"
@@ -61,9 +63,11 @@
 #include <cstdint>
 #include <cstddef>
 #include <limits>
+#include <map>
 #include <memory>
 #include <optional>
 #include <span>
+#include <sstream>
 #include <string>
 #include <string_view>
 #include <utility>
@@ -3657,6 +3661,395 @@ TEST(TimeLoopFsilsConvergenceMPI, ProcessCountIndependentNumberingSolvesExactly)
         }
     }
 #endif
+}
+
+// ---------------------------------------------------------------------------
+// A transient Stokes pipe with a global outlet under the bordered lowering
+// (D54, design 10 M4)
+// ---------------------------------------------------------------------------
+
+namespace {
+
+constexpr int kPipeCells = 8;
+
+struct GlobalOutletPipe {
+    std::unique_ptr<systems::FESystem> system;
+    FieldId u{INVALID_FIELD_ID};
+    FieldId p{INVALID_FIELD_ID};
+    FieldId P{INVALID_FIELD_ID};
+};
+
+/**
+ * Stokes with a drag term on the strip, rho u_t + beta (1 + |u|^2) u -
+ * nu Lap u + grad p = 0 and div u - tau Lap p = 0 (Brezzi-Pitkaranta), the
+ * traction -p_in(t) n at the inlet (marker 11) and -P n at the outlet
+ * (marker 12), where the global field P is the pressure of an RC outlet:
+ * C P' + P / R = Q, Q the outlet flow.
+ */
+GlobalOutletPipe buildGlobalOutletPipe(MPI_Comm comm, int rank, int size, systems::MultiplierLowering lowering)
+{
+    GlobalOutletPipe out;
+    auto mesh = std::make_shared<StripQuadMeshAccess>(kPipeCells, rank, size);
+    const auto u_space = spaces::VectorSpace(spaces::SpaceType::H1, ElementType::Quad4, 1, 2);
+    const auto p_space = spaces::Space(spaces::SpaceType::H1, ElementType::Quad4, 1, 1);
+    const auto r1 = std::make_shared<spaces::GlobalSpace>(1);
+    out.system = std::make_unique<systems::FESystem>(mesh);
+    auto& sys = *out.system;
+    out.u = sys.addField(systems::FieldSpec{.name = "u", .space = u_space, .components = 2});
+    out.p = sys.addField(systems::FieldSpec{.name = "p", .space = p_space, .components = 1});
+    out.P = sys.addField(systems::FieldSpec{.name = "P", .space = r1, .scope = systems::FieldScope::Global});
+    sys.addOperator("op");
+
+    using forms::FormExpr;
+    const auto u = FormExpr::stateField(out.u, *u_space, "u");
+    const auto p = FormExpr::stateField(out.p, *p_space, "p");
+    const auto P = FormExpr::stateField(out.P, *r1, "P");
+    const auto v = forms::TestField(out.u, *u_space, "v");
+    const auto q = forms::TestField(out.p, *p_space, "q");
+    const auto mu = forms::TestField(out.P, *r1, "mu");
+    const auto n = FormExpr::normal();
+    const auto c = [](Real value) { return FormExpr::constant(value); };
+    const auto p_in = c(1.0) + c(4.0) * FormExpr::time();
+    const auto residual =
+        (c(1.0) * forms::inner(u.dt(1), v) + c(0.2) * (c(1.0) + forms::inner(u, u)) * forms::inner(u, v) +
+         c(0.05) * forms::inner(forms::grad(u), forms::grad(v)) - p * forms::div(v) + q * forms::div(u) +
+         c(0.01) * forms::inner(forms::grad(p), forms::grad(q)))
+            .dx() +
+        (p_in * forms::inner(v, n)).ds(11) + (P * forms::inner(v, n)).ds(12) +
+        (mu * (c(0.5) * P.dt(1) + P / c(2.0))).dGlobal() - (mu * forms::inner(u, n)).ds(12);
+    (void)systems::installFormulation(sys, "op", {out.u, out.p, out.P}, residual);
+
+    systems::SetupOptions options;
+    options.assembler_name = "StandardAssembler";
+    options.assembly_options.ghost_policy = GhostPolicy::ReverseScatter;
+    options.assembly_options.deterministic = true;
+    options.assembly_options.overlap_communication = false;
+    options.dof_options.global_numbering = dofs::GlobalNumberingMode::DenseGlobalIds;
+    options.dof_options.ownership = dofs::OwnershipStrategy::LowestRank;
+    options.dof_options.my_rank = rank;
+    options.dof_options.world_size = size;
+    options.dof_options.mpi_comm = comm;
+    options.multiplier_lowering = lowering;
+    systems::SetupInputs inputs;
+    inputs.topology_override = buildStripTopology(kPipeCells, rank, size);
+    sys.setup(options, inputs);
+    return out;
+}
+
+/// A state of the pipe: P and the field values at the vertices whose DOFs this rank owns.
+struct PipeState {
+    Real P{0.0};
+    std::map<std::pair<GlobalIndex, int>, Real> owned{};
+};
+
+PipeState readPipeState(const GlobalOutletPipe& pipe, const backends::GenericVector& u_vector)
+{
+    PipeState out;
+    const auto& sys = *pipe.system;
+    systems::SystemStateView state;
+    state.u_vector = &u_vector;
+    out.P = sys.globalFieldValues(pipe.P, state).front();
+    auto view = const_cast<backends::GenericVector&>(u_vector).createGhostedReadView();
+    const auto& owned = sys.dofHandler().getPartition().locallyOwned();
+    for (const auto& [field, components] : {std::pair{pipe.u, 2}, std::pair{pipe.p, 1}}) {
+        const auto* map = sys.fieldDofHandler(field).getEntityDofMap();
+        const auto offset = sys.fieldDofOffset(field);
+        for (GlobalIndex vertex = 0; vertex < 2 * (kPipeCells + 1); ++vertex) {
+            const auto dofs = map->getVertexDofs(vertex);
+            for (int component = 0; component < components; ++component) {
+                const auto dof = dofs[static_cast<std::size_t>(component)] + offset;
+                if (owned.contains(dof)) {
+                    out.owned[{vertex, static_cast<int>(field) * 4 + component}] = view->getVectorEntry(dof);
+                }
+            }
+        }
+    }
+    return out;
+}
+
+/// Records the Newton iterate at each residual assembly of a step.
+class IterateRecorder final : public timestepping::NewtonObserver {
+public:
+    IterateRecorder(const GlobalOutletPipe& pipe, const timestepping::TimeHistory& history, const int& step)
+        : pipe_(pipe), history_(history), step_(step)
+    {
+    }
+    [[nodiscard]] std::string_view id() const override { return "test.iterate_recorder"; }
+    void observe(timestepping::NewtonObservation& observation) override
+    {
+        const auto key = std::pair{step_, observation.iteration};
+        if (iterates.count(key) == 0u) {
+            iterates.emplace(key, readPipeState(pipe_, history_.u()));
+        }
+    }
+    std::map<std::pair<int, int>, PipeState> iterates{};
+
+private:
+    const GlobalOutletPipe& pipe_;
+    const timestepping::TimeHistory& history_;
+    const int& step_;
+};
+
+struct PipeRun {
+    bool success{false};
+    std::vector<PipeState> steps{};
+    std::map<std::pair<int, int>, PipeState> iterates{};
+};
+
+PipeRun runGlobalOutletPipe(GlobalOutletPipe& pipe,
+                            const backends::BackendFactory& factory,
+                            backends::LinearSolver& linear,
+                            timestepping::SchemeKind scheme)
+{
+    PipeRun out;
+    auto& sys = *pipe.system;
+    systems::TransientSystem transient(sys, std::make_shared<systems::BackwardDifferenceIntegrator>());
+    auto history = timestepping::TimeHistory::allocate(factory, sys.dofHandler().getNumDofs(), 2);
+    const double dt = 0.05;
+    history.setPrevDt(dt);
+    timestepping::TimeLoopOptions options;
+    options.t0 = 0.0;
+    options.t_end = 6 * dt;
+    options.dt = dt;
+    options.max_steps = 6;
+    options.scheme = scheme;
+    options.generalized_alpha_rho_inf = 0.5;
+    options.newton.residual_op = "op";
+    options.newton.jacobian_op = "op";
+    options.newton.max_iterations = 12;
+    options.newton.abs_tolerance = 1e-11;
+    options.newton.rel_tolerance = 1e-11;
+    options.newton.use_line_search = false;
+    int step = 0;
+    auto recorder = std::make_shared<IterateRecorder>(pipe, history, step);
+    options.newton.extensions.observers.push_back(recorder);
+    timestepping::TimeLoop loop(options);
+    timestepping::TimeLoopCallbacks callbacks;
+    callbacks.on_step_start = [&](const timestepping::TimeHistory&) {};
+    callbacks.on_nonlinear_done = [&](const timestepping::TimeHistory& h, const timestepping::NewtonReport& report) {
+        EXPECT_TRUE(report.converged);
+        out.steps.push_back(readPipeState(pipe, h.u()));
+        ++step;
+    };
+    const auto report = loop.run(transient, factory, linear, history, callbacks);
+    out.success = report.success;
+    out.iterates = std::move(recorder->iterates);
+    return out;
+}
+
+/// Expects @p many within 1e-10 (relative to the largest value) of @p one
+/// and returns the largest relative difference.
+Real expectSamePipeState(const PipeState& many, const PipeState& one, const std::string& where)
+{
+    Real scale = std::abs(one.P);
+    for (const auto& [key, value] : one.owned) {
+        scale = std::max(scale, std::abs(value));
+    }
+    Real largest = std::abs(many.P - one.P) / scale;
+    EXPECT_NEAR(many.P, one.P, 1e-10 * scale) << where << " P";
+    for (const auto& [key, value] : many.owned) {
+        const auto it = one.owned.find(key);
+        EXPECT_NE(it, one.owned.end()) << where << " vertex " << key.first;
+        if (it == one.owned.end()) {
+            continue;
+        }
+        largest = std::max(largest, std::abs(value - it->second) / scale);
+        EXPECT_NEAR(value, it->second, 1e-10 * scale)
+            << where << " vertex " << key.first << " component " << key.second;
+    }
+    return largest;
+}
+
+} // namespace
+
+TEST(TimeLoopFsilsConvergenceMPI, BorderedTransientPipeIsTheInMatrixPipeIterateByIterate)
+{
+#if !defined(FE_HAS_FSILS)
+    GTEST_SKIP() << "FSILS backend is not enabled in this build";
+#else
+    MPI_Comm comm = MPI_COMM_WORLD;
+    const int rank = mpiRank(comm);
+    const int size = mpiSize(comm);
+    if (size > 4) {
+        GTEST_SKIP() << "Run with 1-4 MPI ranks";
+    }
+    for (const auto scheme : {timestepping::SchemeKind::GeneralizedAlpha, timestepping::SchemeKind::BDF2}) {
+        SCOPED_TRACE(scheme == timestepping::SchemeKind::GeneralizedAlpha ? "generalized alpha" : "BDF2");
+        // The reference: one rank, the outlet pressure in the matrix, Eigen's direct solve.
+        auto reference = buildGlobalOutletPipe(MPI_COMM_SELF, 0, 1, systems::MultiplierLowering::InMatrix);
+        auto eigen = backends::BackendFactory::create(backends::BackendKind::Eigen);
+        ASSERT_NE(eigen, nullptr);
+        backends::SolverOptions direct;
+        direct.method = backends::SolverMethod::Direct;
+        direct.preconditioner = backends::PreconditionerType::None;
+        auto direct_solver = eigen->createLinearSolver(direct);
+        const auto one = runGlobalOutletPipe(reference, *eigen, *direct_solver, scheme);
+        ASSERT_TRUE(one.success);
+        ASSERT_EQ(one.steps.size(), 6u);
+        EXPECT_GT(std::abs(one.steps.back().P), 1e-3);
+
+        // The bordered lowering on FSILS at this rank count.
+        auto bordered = buildGlobalOutletPipe(comm, rank, size, systems::MultiplierLowering::Bordered);
+        ASSERT_TRUE(bordered.system->hasBorderedGlobalFields());
+        dofs::DofDistributionOptions dof_options;
+        dof_options.global_numbering = dofs::GlobalNumberingMode::DenseGlobalIds;
+        dof_options.ownership = dofs::OwnershipStrategy::LowestRank;
+        dof_options.my_rank = rank;
+        dof_options.world_size = size;
+        dof_options.mpi_comm = comm;
+        auto permutation = getFsilsDofPermutation(*bordered.system, 3, dof_options);
+        backends::FsilsFactory fsils(3, permutation);
+        backends::SolverOptions gmres = fsilsGmresDiagOptions();
+        gmres.rel_tol = 1e-13;
+        gmres.abs_tol = 1e-15;
+        gmres.max_iter = 20000;
+        auto gmres_solver = fsils.createLinearSolver(gmres);
+        const auto many = runGlobalOutletPipe(bordered, fsils, *gmres_solver, scheme);
+        ASSERT_TRUE(many.success);
+        ASSERT_EQ(many.steps.size(), one.steps.size());
+
+        // Every Newton iterate, and so every full Newton update, of every step.
+        EXPECT_EQ(many.iterates.size(), one.iterates.size());
+        Real largest = 0.0;
+        for (const auto& [key, state] : one.iterates) {
+            const auto it = many.iterates.find(key);
+            ASSERT_NE(it, many.iterates.end()) << "step " << key.first << " iterate " << key.second;
+            largest = std::max(largest,
+                               expectSamePipeState(it->second, state,
+                                                   "ranks " + std::to_string(size) + " step " +
+                                                       std::to_string(key.first) + " iterate " +
+                                                       std::to_string(key.second)));
+        }
+        for (std::size_t s = 0; s < one.steps.size(); ++s) {
+            largest = std::max(largest, expectSamePipeState(many.steps[s], one.steps[s],
+                                                            "ranks " + std::to_string(size) + " step " +
+                                                                std::to_string(s)));
+        }
+        double largest_everywhere = static_cast<double>(largest);
+        MPI_Allreduce(MPI_IN_PLACE, &largest_everywhere, 1, MPI_DOUBLE, MPI_MAX, comm);
+        // Every rank holds the same outlet pressure, bit for bit.
+        std::vector<double> local;
+        for (const auto& s : many.steps) {
+            local.push_back(s.P);
+        }
+        std::vector<double> lowest(local.size());
+        std::vector<double> highest(local.size());
+        MPI_Allreduce(local.data(), lowest.data(), static_cast<int>(local.size()), MPI_DOUBLE, MPI_MIN, comm);
+        MPI_Allreduce(local.data(), highest.data(), static_cast<int>(local.size()), MPI_DOUBLE, MPI_MAX, comm);
+        EXPECT_EQ(lowest, highest);
+        if (rank == 0) {
+            std::ostringstream oss;
+            oss.precision(17);
+            oss << "[bordered-pipe] ranks=" << size << " iterates=" << one.iterates.size()
+                << " largest_relative_difference=" << largest_everywhere << " P=";
+            for (const auto value : local) {
+                oss << value << " ";
+            }
+            std::cout << oss.str() << std::endl;
+        }
+    }
+#endif
+}
+
+
+namespace {
+
+/// The bordered blocks of the pipe at a state given by vertex: B and Ct by
+/// (vertex, field component), D and g.
+struct PipeBlocks {
+    std::map<std::pair<GlobalIndex, int>, Real> B{};
+    std::map<std::pair<GlobalIndex, int>, Real> Ct{};
+    Real D{0.0};
+    Real g{0.0};
+};
+
+PipeBlocks pipeBlocksAt(GlobalOutletPipe& pipe)
+{
+    auto& sys = *pipe.system;
+    const auto n = sys.dofHandler().getNumDofs();
+    // The state and its previous value as functions of the vertex, so that
+    // they are the same at every rank count.
+    std::vector<Real> state(static_cast<std::size_t>(n), 0.0);
+    std::vector<Real> previous(static_cast<std::size_t>(n), 0.0);
+    std::vector<std::pair<std::pair<GlobalIndex, int>, GlobalIndex>> keys;
+    for (const auto& [field, components] : {std::pair{pipe.u, 2}, std::pair{pipe.p, 1}}) {
+        const auto* map = sys.fieldDofHandler(field).getEntityDofMap();
+        const auto offset = sys.fieldDofOffset(field);
+        for (GlobalIndex vertex = 0; vertex < 2 * (kPipeCells + 1); ++vertex) {
+            const auto dofs = map->getVertexDofs(vertex);
+            for (int component = 0; component < components; ++component) {
+                const auto dof = dofs[static_cast<std::size_t>(component)] + offset;
+                const auto key = std::pair{vertex, static_cast<int>(field) * 4 + component};
+                const auto x = static_cast<Real>(vertex) + 0.25 * static_cast<Real>(key.second);
+                state[static_cast<std::size_t>(dof)] = std::sin(0.37 * x + 0.1);
+                previous[static_cast<std::size_t>(dof)] = std::cos(0.29 * x + 0.4);
+                keys.emplace_back(key, dof);
+            }
+        }
+    }
+    const std::array<Real, 1> outlet{0.3};
+    sys.initializeBorderedGlobalState(outlet);
+    systems::SystemStateView view;
+    view.u = state;
+    view.u_prev = previous;
+    view.u_prev2 = previous;
+    view.time = 0.1;
+    view.dt = 0.05;
+    view.dt_prev = 0.05;
+    const systems::BackwardDifferenceIntegrator integrator;
+    const auto context = integrator.buildContext(1, view);
+    view.time_integration = &context;
+    assembly::DenseSystemView out(n);
+    out.zero();
+    systems::AssemblyRequest request;
+    request.op = "op";
+    request.want_matrix = true;
+    request.want_vector = true;
+    request.suppress_constraint_inhomogeneity = true;
+    EXPECT_TRUE(sys.assemble(request, view, &out, &out).success);
+    const auto& bc = sys.borderedCoupling();
+    PipeBlocks blocks;
+    for (const auto& [key, dof] : keys) {
+        blocks.B[key] = bc.B[static_cast<std::size_t>(dof)];
+        blocks.Ct[key] = bc.Ct[static_cast<std::size_t>(dof)];
+    }
+    blocks.D = bc.D.front();
+    blocks.g = bc.g.front();
+    return blocks;
+}
+
+} // namespace
+
+TEST(TimeLoopFsilsConvergenceMPI, BorderedBlocksOfThePipeAreTheOneRankBlocksBitForBit)
+{
+    // The bordered row and column of the outlet pressure are exact sums of
+    // the cells' contributions: at one state they are the one-rank blocks bit
+    // for bit at every rank count, and the same on every rank.
+    MPI_Comm comm = MPI_COMM_WORLD;
+    const int rank = mpiRank(comm);
+    const int size = mpiSize(comm);
+    if (size > 4) {
+        GTEST_SKIP() << "Run with 1-4 MPI ranks";
+    }
+    auto one_pipe = buildGlobalOutletPipe(MPI_COMM_SELF, 0, 1, systems::MultiplierLowering::Bordered);
+    auto many_pipe = buildGlobalOutletPipe(comm, rank, size, systems::MultiplierLowering::Bordered);
+    const auto one = pipeBlocksAt(one_pipe);
+    const auto many = pipeBlocksAt(many_pipe);
+    EXPECT_EQ(many.D, one.D);
+    EXPECT_EQ(many.g, one.g);
+    EXPECT_EQ(many.B, one.B);
+    EXPECT_EQ(many.Ct, one.Ct);
+    std::size_t nonzero = 0;
+    for (const auto& [key, value] : one.Ct) {
+        nonzero += value != 0.0 ? 1u : 0u;
+    }
+    EXPECT_GT(nonzero, 0u) << "the outlet flow couples to the outlet velocities";
+    const std::array<double, 2> local{many.D, many.g};
+    std::array<double, 2> lowest{};
+    std::array<double, 2> highest{};
+    MPI_Allreduce(local.data(), lowest.data(), 2, MPI_DOUBLE, MPI_MIN, comm);
+    MPI_Allreduce(local.data(), highest.data(), 2, MPI_DOUBLE, MPI_MAX, comm);
+    EXPECT_EQ(lowest, highest);
 }
 
 } // namespace svmp::FE::assembly::testing

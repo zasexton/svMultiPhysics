@@ -482,7 +482,10 @@ std::vector<FunctionalFormValue> evaluateOnSystem(
         binding.space = record.space.get();
         binding.dof_map = &dof_handler.getDofMap();
         binding.dof_offset = system.fieldDofOffset(field);
-        binding.field_global_size = dof_handler.getNumDofs();
+        // A bordered global field is not in the cells' DOFs of the system's
+        // map: its own map names its DOFs, read past the field DOFs.
+        binding.field_global_size =
+            system.hasBorderedGlobalFields() && record.scope == FieldScope::Global ? 0 : dof_handler.getNumDofs();
         binding.field_type = record.space->field_type();
         binding.value_dimension = record.components;
         binding.n_components = record.components;
@@ -521,7 +524,7 @@ std::vector<FunctionalFormValue> evaluateOnSystem(
     assembler.setSolution(state.u);
     // Bordered global DOFs are read from the system.
     std::unique_ptr<assembly::GlobalSystemView> solution_view =
-        makeStateReadView(system, state.u_vector, state.u, /*ghosted=*/true);
+        makeStateReadView(system, state.u_vector, state.u, /*ghosted=*/true, state.bordered_global_values);
     if (solution_view != nullptr) {
         assembler.setSolutionView(solution_view.get());
     }
@@ -539,13 +542,34 @@ std::vector<FunctionalFormValue> evaluateOnSystem(
     }
     std::unique_ptr<assembly::GlobalSystemView> previous_view;
     std::unique_ptr<assembly::GlobalSystemView> previous2_view;
-    if (state.u_prev_vector != nullptr) {
-        previous_view = const_cast<backends::GenericVector*>(state.u_prev_vector)->createGhostedReadView();
-        assembler.setPreviousSolutionView(previous_view.get());
-    }
-    if (state.u_prev2_vector != nullptr) {
-        previous2_view = const_cast<backends::GenericVector*>(state.u_prev2_vector)->createGhostedReadView();
-        assembler.setPreviousSolution2View(previous2_view.get());
+    if (system.hasBorderedGlobalFields()) {
+        // The bordered global DOFs of the previous states come from the
+        // system's history slots.
+        const bool have_first = state.u_prev_vector != nullptr || !state.u_prev.empty() ||
+                                !state.u_history.empty();
+        const bool have_second = state.u_prev2_vector != nullptr || !state.u_prev2.empty() ||
+                                 state.u_history.size() >= 2u;
+        if (have_first) {
+            previous_view = makeHistoryReadView(
+                system, state.u_prev_vector,
+                state.u_history.empty() ? state.u_prev : state.u_history[0], 1, /*ghosted=*/true);
+            assembler.setPreviousSolutionView(previous_view.get());
+        }
+        if (have_second && system.borderedGlobalHistoryDepth() >= 2) {
+            previous2_view = makeHistoryReadView(
+                system, state.u_prev2_vector,
+                state.u_history.size() >= 2u ? state.u_history[1] : state.u_prev2, 2, /*ghosted=*/true);
+            assembler.setPreviousSolution2View(previous2_view.get());
+        }
+    } else {
+        if (state.u_prev_vector != nullptr) {
+            previous_view = const_cast<backends::GenericVector*>(state.u_prev_vector)->createGhostedReadView();
+            assembler.setPreviousSolutionView(previous_view.get());
+        }
+        if (state.u_prev2_vector != nullptr) {
+            previous2_view = const_cast<backends::GenericVector*>(state.u_prev2_vector)->createGhostedReadView();
+            assembler.setPreviousSolution2View(previous2_view.get());
+        }
     }
 
     return evaluateFunctionalForms(assembler,

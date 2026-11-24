@@ -111,7 +111,8 @@ void collectGlobalDataFields(const FormExprNode& node, std::vector<FieldId>& out
 /// The value of the monolithic DOF @p dof in @p state (a bordered global DOF from the system).
 [[nodiscard]] Real stateValue(const FESystem& system, const SystemStateView& state, GlobalIndex dof)
 {
-    if (auto view = makeStateReadView(system, state.u_vector, state.u, /*ghosted=*/true)) {
+    if (auto view = makeStateReadView(system, state.u_vector, state.u, /*ghosted=*/true,
+                                      state.bordered_global_values)) {
         return view->getVectorEntry(dof);
     }
     FE_THROW_IF(dof < 0 || static_cast<std::size_t>(dof) >= state.u.size(), InvalidArgumentException,
@@ -152,6 +153,11 @@ void collectGlobalDataFields(const FormExprNode& node, std::vector<FieldId>& out
 /// The value of the monolithic DOF @p dof in the history state @p k of @p state.
 [[nodiscard]] Real historyValue(const FESystem& system, const SystemStateView& state, GlobalIndex dof, int k)
 {
+    if (system.hasBorderedGlobalFields() && dof >= system.dofHandler().getNumDofs()) {
+        // A bordered global DOF: history slot k of the system.
+        const auto slot = system.borderedGlobalHistoryValues(k);
+        return slot[static_cast<std::size_t>(dof - system.dofHandler().getNumDofs())];
+    }
     const backends::GenericVector* vector =
         k == 1 ? state.u_prev_vector : (k == 2 ? state.u_prev2_vector : nullptr);
     std::span<const Real> values = !state.u_history.empty()

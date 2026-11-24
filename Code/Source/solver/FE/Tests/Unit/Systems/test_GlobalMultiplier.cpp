@@ -1332,18 +1332,21 @@ TEST(GlobalBordered, TheBorderedBlocksAreTheInMatrixRowAndColumn)
         ASSERT_EQ(bc.n_field_dofs, n);
         ASSERT_EQ(bc.aux_blocks.size(), 1u);
         EXPECT_EQ(bc.aux_blocks[0].global_field, bordered.lambda);
-        // Bit for bit: the same element matrices reach the same entries in
-        // the same order, only into other storage.
+        // The field block bit for bit: the same element matrices reach the
+        // same entries in the same order.  The bordered row and column are
+        // the exact sums of the same contributions (rounded once), the
+        // matrix holds their sums in assembly order: equal to round-off.
+        // The residual entry of the row is one exact functional, bit for bit.
         const auto m = n + 1;
         for (std::size_t i = 0; i < n; ++i) {
             for (std::size_t j = 0; j < n; ++j) {
                 EXPECT_EQ(split.matrix[i * n + j], full.matrix[i * m + j]) << "order " << order << " K " << i << "," << j;
             }
-            EXPECT_EQ(bc.B[i], full.matrix[i * m + n]) << "order " << order << " B " << i;
-            EXPECT_EQ(bc.Ct[i], full.matrix[n * m + i]) << "order " << order << " Ct " << i;
+            EXPECT_DOUBLE_EQ(bc.B[i], full.matrix[i * m + n]) << "order " << order << " B " << i;
+            EXPECT_DOUBLE_EQ(bc.Ct[i], full.matrix[n * m + i]) << "order " << order << " Ct " << i;
             EXPECT_EQ(split.vector[i], full.vector[i]) << "order " << order << " r " << i;
         }
-        EXPECT_EQ(bc.D[0], full.matrix[n * m + n]) << "order " << order;
+        EXPECT_DOUBLE_EQ(bc.D[0], full.matrix[n * m + n]) << "order " << order;
         EXPECT_EQ(bc.g[0], full.vector[n]) << "order " << order;
     }
 }
@@ -1514,7 +1517,7 @@ TEST(GlobalBordered, AGaugeTypeMultiplierIsRefused)
         << g3;
 }
 
-TEST(GlobalBordered, TimeDerivativesAreRefusedForNow)
+TEST(GlobalBordered, ASchemeWithoutBorderedHistoryIsRefused)
 {
     auto mesh = buildGrid(4, 1, 1.0, 0.5, 1);
     auto h1 = quadSpace(1);
@@ -1532,8 +1535,32 @@ TEST(GlobalBordered, TimeDerivativesAreRefusedForNow)
                                  (mu * u).dx() + (mu * FormExpr::constant(0.5)).dGlobal());
     SetupOptions options;
     options.multiplier_lowering = MultiplierLowering::Bordered;
-    const auto message = feMessage([&] { sys.setup(options); });
-    EXPECT_NE(message.find("supports steady problems for now"), std::string::npos) << message;
+    sys.setup(options);
+    ASSERT_TRUE(sys.hasBorderedGlobalFields());
+
+    // The time loop moves the bordered history for Backward Euler, BDF2, the
+    // theta method and first-order generalized alpha; a collocation scheme
+    // is refused before its first step.
+    auto factory = backends::BackendFactory::create(backends::BackendKind::Eigen);
+    ASSERT_NE(factory, nullptr);
+    backends::SolverOptions direct;
+    direct.method = backends::SolverMethod::Direct;
+    direct.preconditioner = backends::PreconditionerType::None;
+    auto linear = factory->createLinearSolver(direct);
+    TransientSystem transient(sys, std::make_shared<BackwardDifferenceIntegrator>());
+    auto history = timestepping::TimeHistory::allocate(*factory, sys.dofHandler().getNumDofs(), 2);
+    timestepping::TimeLoopOptions loop_options;
+    loop_options.t0 = 0.0;
+    loop_options.t_end = 0.1;
+    loop_options.dt = 0.05;
+    loop_options.scheme = timestepping::SchemeKind::DG1;
+    loop_options.newton.residual_op = "heat";
+    loop_options.newton.jacobian_op = "heat";
+    timestepping::TimeLoop loop(loop_options);
+    const auto message = feMessage([&] { (void)loop.run(transient, *factory, *linear, history); });
+    EXPECT_NE(message.find("the bordered lowering of global fields supports Backward Euler, BDF2"),
+              std::string::npos)
+        << message;
 }
 
 namespace {
@@ -1590,12 +1617,18 @@ ScalarOde buildScalarOde(MultiplierLowering lowering = MultiplierLowering::Auto,
 std::vector<std::array<Real, 2>> runScalarOde(
     timestepping::SchemeKind scheme,
     const std::function<void(ScalarOde&, timestepping::TimeLoopCallbacks&)>& extend = {},
+    MultiplierLowering lowering = MultiplierLowering::Auto,
+    bool rate_from_pde = true,
     bool split_terms = false,
     std::vector<int>* iterations = nullptr)
 {
     std::vector<std::array<Real, 2>> out;
-    auto problem = buildScalarOde(MultiplierLowering::Auto, split_terms);
+    auto problem = buildScalarOde(lowering, split_terms);
     auto& sys = *problem.system;
+    if (sys.hasBorderedGlobalFields()) {
+        const std::array<Real, 1> initial{kInitialValue};
+        sys.initializeBorderedGlobalState(initial);
+    }
     auto factory = backends::BackendFactory::create(backends::BackendKind::Eigen);
     EXPECT_NE(factory, nullptr);
     if (!factory) {
@@ -1630,6 +1663,7 @@ std::vector<std::array<Real, 2>> runScalarOde(
     options.max_steps = 100;
     options.scheme = scheme;
     options.generalized_alpha_rho_inf = 0.5;
+    options.initialize_first_order_rate_from_pde = rate_from_pde;
     options.newton.residual_op = "ode";
     options.newton.jacobian_op = "ode";
     options.newton.max_iterations = 4;
@@ -1637,7 +1671,6 @@ std::vector<std::array<Real, 2>> runScalarOde(
     options.newton.rel_tolerance = 0.0;
     timestepping::TimeLoop loop(options);
     timestepping::TimeLoopCallbacks callbacks;
-    const auto x_dof = sys.fieldDofOffset(problem.x);
     const auto w_dof = sys.fieldDofOffset(problem.w);
     callbacks.on_nonlinear_done = [&](const timestepping::TimeHistory& h, const timestepping::NewtonReport& report) {
         EXPECT_TRUE(report.converged);
@@ -1645,7 +1678,10 @@ std::vector<std::array<Real, 2>> runScalarOde(
             iterations->push_back(report.iterations);
         }
         const auto u = h.uSpan();
-        out.push_back({u[static_cast<std::size_t>(x_dof)], u[static_cast<std::size_t>(w_dof)]});
+        SystemStateView state;
+        state.u = u;
+        const auto x = sys.globalFieldValues(problem.x, state);
+        out.push_back({x.front(), u[static_cast<std::size_t>(w_dof)]});
     };
     if (extend) {
         extend(problem, callbacks);
@@ -1942,7 +1978,8 @@ public:
 /// through the time loop with @p scheme (the shadow fields refreshed by the
 /// generated state); the volume row stays C w' + w/R = f.
 GlobalRowRun runGlobalRow(timestepping::SchemeKind scheme, GlobalRowForm form, int max_iterations = 4,
-                          std::vector<int> rejected_steps = {})
+                          std::vector<int> rejected_steps = {},
+                          MultiplierLowering lowering = MultiplierLowering::Auto)
 {
     GlobalRowRun out;
     auto h1 = quadSpace(1);
@@ -1975,7 +2012,13 @@ GlobalRowRun runGlobalRow(timestepping::SchemeKind scheme, GlobalRowForm form, i
         break;
     }
     (void)installFormulation(sys, "ode", {w_id, x_id}, ((C * w.dt(1) + w / R - f) * v).dx() + (z * row).dGlobal());
-    sys.setup();
+    SetupOptions setup_options;
+    setup_options.multiplier_lowering = lowering;
+    sys.setup(setup_options);
+    if (sys.hasBorderedGlobalFields()) {
+        const std::array<Real, 1> initial{kInitialValue};
+        sys.initializeBorderedGlobalState(initial);
+    }
 
     auto factory = backends::BackendFactory::create(backends::BackendKind::Eigen);
     EXPECT_NE(factory, nullptr);
@@ -2025,19 +2068,22 @@ GlobalRowRun runGlobalRow(timestepping::SchemeKind scheme, GlobalRowForm form, i
     }
     timestepping::TimeLoop loop(options);
     timestepping::TimeLoopCallbacks callbacks;
-    const auto x_dof = static_cast<std::size_t>(sys.fieldDofOffset(x_id));
     const auto shadows = shadowFields(sys);
     callbacks.on_nonlinear_done = [&](const timestepping::TimeHistory& h, const timestepping::NewtonReport& report) {
-        EXPECT_TRUE(report.converged);
+        EXPECT_TRUE(report.converged) << report.failure_message;
         if (form == GlobalRowForm::Previous) {
             std::array<Real, 2> previous{};
             for (const auto& shadow : shadows) {
-                previous[static_cast<std::size_t>(shadow.steps_back - 1)] =
-                    sys.prescribedFieldCoefficients(shadow.shadow).front();
+                const auto values = sys.prescribedFieldCoefficients(shadow.shadow);
+                ASSERT_FALSE(values.empty()) << "the shadow of '" << sys.fieldRecord(shadow.source).name
+                                             << "' was never refreshed";
+                previous[static_cast<std::size_t>(shadow.steps_back - 1)] = values.front();
             }
             out.previous.push_back(previous);
         }
-        out.x.push_back(h.uSpan()[x_dof]);
+        SystemStateView state;
+        state.u = h.uSpan();
+        out.x.push_back(sys.globalFieldValues(x_id, state).front());
         out.iterations.push_back(report.iterations);
     };
     // A rejected first attempt is retried from the accepted state.
@@ -2219,7 +2265,8 @@ TEST(GlobalTimeDerivative, AMeasuredTermOfTheRowTakesTheTermWeightOfTheScheme)
                               timestepping::SchemeKind::BDF2, timestepping::SchemeKind::GeneralizedAlpha}) {
         SCOPED_TRACE(static_cast<int>(scheme));
         std::vector<int> iterations;
-        const auto values = runScalarOde(scheme, {}, /*split_terms=*/true, &iterations);
+        const auto values =
+            runScalarOde(scheme, {}, MultiplierLowering::Auto, true, /*split_terms=*/true, &iterations);
         ASSERT_EQ(values.size(), 10u);
         for (std::size_t step = 0; step < values.size(); ++step) {
             EXPECT_NEAR(values[step][0], values[step][1], 1e-12) << "step " << step;
@@ -2255,7 +2302,7 @@ TEST(GlobalTimeDerivative, TheRowDeclaresItsTimeDerivatives)
         << message;
 }
 
-TEST(GlobalTimeDerivative, OnlyGlobalFieldsTakeTimeDerivativesInDGlobalAndTheBorderedLoweringRefusesThem)
+TEST(GlobalTimeDerivative, OnlyGlobalFieldsTakeTimeDerivativesInDGlobal)
 {
     auto h1 = quadSpace(1);
     auto r1 = std::make_shared<spaces::GlobalSpace>(1);
@@ -2272,22 +2319,99 @@ TEST(GlobalTimeDerivative, OnlyGlobalFieldsTakeTimeDerivativesInDGlobalAndTheBor
     });
     EXPECT_NE(message.find("a time derivative of something other than a global field"), std::string::npos)
         << message;
+}
 
-    // The volume row has no dt(): only the global row makes the system
-    // transient, and the bordered lowering refuses it.
-    FESystem ode(buildGrid(2, 1, 1.0, 0.5, 1));
-    const auto w_id = ode.addField(FieldSpec{.name = "w", .space = h1});
-    const auto y_id = ode.addField(FieldSpec{.name = "Y", .space = r1});
-    const auto w = forms::StateField(w_id, *h1, "w");
-    const auto v = forms::TestField(w_id, *h1, "v");
-    const auto y = forms::StateField(y_id, *r1, "Y");
-    const auto q = forms::TestField(y_id, *r1, "q");
-    (void)installFormulation(ode, "ode", {w_id, y_id},
-                             ((w - y) * v).dx() + (q * (y.dt(1) + y - FormExpr::constant(1.0))).dGlobal());
-    SetupOptions options;
-    options.multiplier_lowering = MultiplierLowering::Bordered;
-    const auto bordered = feMessage([&] { ode.setup(options); });
-    EXPECT_NE(bordered.find("supports steady problems for now"), std::string::npos) << bordered;
+TEST(GlobalBordered, AScalarOdeFollowsTheSchemeOfAVolumeField)
+{
+    // The bordered X keeps its values, rates and history in the system; it
+    // follows the scheme of the volume field w step by step, and the
+    // in-matrix X.
+    struct Case {
+        timestepping::SchemeKind scheme;
+        bool rate_from_pde;
+        const char* name;
+    };
+    for (const auto& c : {Case{timestepping::SchemeKind::BackwardEuler, true, "backward Euler"},
+                          Case{timestepping::SchemeKind::BDF2, true, "BDF2 (theta starter)"},
+                          Case{timestepping::SchemeKind::ThetaMethod, true, "theta"},
+                          Case{timestepping::SchemeKind::GeneralizedAlpha, true, "generalized alpha, PDE rates"},
+                          Case{timestepping::SchemeKind::GeneralizedAlpha, false, "generalized alpha, history rates"}}) {
+        // As one term containing dt(), and term by term with the row's
+        // non-rate terms measured (the term weights of theta and of the
+        // BDF2 starter, and the rate-only startup of generalized alpha).
+        for (const bool split_terms : {false, true}) {
+            SCOPED_TRACE(std::string(c.name) + (split_terms ? ", term by term" : ", one term"));
+            const auto bordered =
+                runScalarOde(c.scheme, {}, MultiplierLowering::Bordered, c.rate_from_pde, split_terms);
+            const auto in_matrix =
+                runScalarOde(c.scheme, {}, MultiplierLowering::InMatrix, c.rate_from_pde, split_terms);
+            ASSERT_EQ(bordered.size(), 10u);
+            ASSERT_EQ(in_matrix.size(), 10u);
+            for (std::size_t step = 0; step < bordered.size(); ++step) {
+                EXPECT_NEAR(bordered[step][0], bordered[step][1], 1e-12) << "step " << step;
+                EXPECT_NEAR(bordered[step][0], in_matrix[step][0], 1e-12) << "step " << step;
+                EXPECT_NEAR(bordered[step][1], in_matrix[step][1], 1e-12) << "step " << step;
+            }
+            EXPECT_GT(std::abs(bordered.back()[0] - kInitialValue), 0.1);
+        }
+    }
+}
+
+TEST(GlobalBordered, PreviousLaggedAndARejectedStepKeepTheBorderedHistory)
+{
+    // previous(X, k) and lagged(X) of a bordered X read the system's history
+    // and iterate: the in-matrix values, step by step.
+    for (const auto form : {GlobalRowForm::TimeDerivative, GlobalRowForm::Previous, GlobalRowForm::Lagged}) {
+        SCOPED_TRACE(form == GlobalRowForm::TimeDerivative ? "dt(X)"
+                     : form == GlobalRowForm::Previous     ? "previous(X)"
+                                                           : "lagged(X)");
+        const int iterations = form == GlobalRowForm::Lagged ? 40 : 4;
+        const auto in_matrix =
+            runGlobalRow(timestepping::SchemeKind::BackwardEuler, form, iterations, {}, MultiplierLowering::InMatrix);
+        const auto bordered =
+            runGlobalRow(timestepping::SchemeKind::BackwardEuler, form, iterations, {}, MultiplierLowering::Bordered);
+        ASSERT_EQ(bordered.x.size(), 10u);
+        ASSERT_EQ(in_matrix.x.size(), 10u);
+        for (std::size_t step = 0; step < bordered.x.size(); ++step) {
+            EXPECT_NEAR(bordered.x[step], in_matrix.x[step], 1e-13) << "step " << step;
+        }
+        ASSERT_EQ(bordered.previous.size(), in_matrix.previous.size());
+        for (std::size_t step = 0; step < bordered.previous.size(); ++step) {
+            EXPECT_NEAR(bordered.previous[step][0], in_matrix.previous[step][0], 1e-13) << "step " << step;
+            EXPECT_NEAR(bordered.previous[step][1], in_matrix.previous[step][1], 1e-13) << "step " << step;
+        }
+    }
+    // Steps 3 and 7 are rejected once and retried with the same dt: the
+    // bordered values, rates and history are those of the accepted steps.
+    // (Generalized alpha with previous(X) is left out: its first-rate
+    // initialization assembles the row before the shadows are refreshed,
+    // under either lowering.)
+    for (const auto scheme : {timestepping::SchemeKind::BackwardEuler, timestepping::SchemeKind::GeneralizedAlpha}) {
+        for (const auto form : {GlobalRowForm::TimeDerivative, GlobalRowForm::Previous}) {
+            if (scheme == timestepping::SchemeKind::GeneralizedAlpha && form == GlobalRowForm::Previous) {
+                continue;
+            }
+            SCOPED_TRACE(std::string(scheme == timestepping::SchemeKind::BackwardEuler ? "backward Euler, "
+                                                                                       : "generalized alpha, ") +
+                         (form == GlobalRowForm::TimeDerivative ? "dt(X)" : "previous(X)"));
+            const auto plain = runGlobalRow(scheme, form, 4, {}, MultiplierLowering::Bordered);
+            const auto retried = runGlobalRow(scheme, form, 4, {3, 7}, MultiplierLowering::Bordered);
+            EXPECT_EQ(retried.rejections, 2);
+            ASSERT_EQ(plain.x.size(), 10u);
+            ASSERT_EQ(retried.x.size(), 12u);
+            std::vector<Real> accepted;
+            for (std::size_t i = 0; i < retried.x.size(); ++i) {
+                if (i == 2 || i == 7) {
+                    continue;
+                }
+                accepted.push_back(retried.x[i]);
+            }
+            ASSERT_EQ(accepted.size(), plain.x.size());
+            for (std::size_t step = 0; step < plain.x.size(); ++step) {
+                EXPECT_EQ(accepted[step], plain.x[step]) << "step " << step;
+            }
+        }
+    }
 }
 
 } // namespace svmp::FE::systems::test_global_multiplier

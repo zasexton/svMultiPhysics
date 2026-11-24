@@ -735,6 +735,82 @@ public:
      */
     void setBorderedGlobalValues(std::span<const Real> values);
     /**
+     * @brief The time state of the bordered global DOFs (transient problems)
+     *
+     * The bordered values are the Newton iterate.  Their accepted history is
+     * kept beside them as TimeHistory keeps the field DOFs': history slot 1
+     * holds the committed values (the last accepted step), slot k the values
+     * k - 1 steps before, and the committed first-order generalized-alpha
+     * rates are kept apart.  commitTimeStep() shifts the slots and commits
+     * the rates of the accepted step; beginTimeStep(reset_auxiliary_state)
+     * and the rollbacks of a rejected step drop the iterate and the rates of
+     * the step.  While a generalized-alpha stage keeps the rate of the field
+     * DOFs in history slot 2 (setBorderedGlobalRateInSecondSlot), slot 2 of
+     * the bordered DOFs is their rate, as the time loop does with the fields.
+     */
+    [[nodiscard]] std::span<const Real> borderedGlobalCommittedValues() const noexcept
+    {
+        return bordered_global_committed_values_;
+    }
+    /// History slot @p k (k >= 1) of the bordered DOFs, as described above.
+    [[nodiscard]] std::span<const Real> borderedGlobalHistoryValues(int k) const;
+    [[nodiscard]] std::span<const Real> borderedGlobalRates() const noexcept
+    {
+        return bordered_global_committed_rates_;
+    }
+    /// The number of history slots of the bordered DOFs (2 unless set; the time loop sets its history depth).
+    [[nodiscard]] int borderedGlobalHistoryDepth() const noexcept
+    {
+        return 1 + static_cast<int>(bordered_global_older_values_.size());
+    }
+    /// Sets the number of history slots; new slots take the oldest values.
+    void setBorderedGlobalHistoryDepth(int depth);
+    /// Sets the values and every history slot to @p values and the rates to zero.
+    void initializeBorderedGlobalState(std::span<const Real> values);
+    /// Sets the committed rates of the bordered DOFs.
+    void setBorderedGlobalRates(std::span<const Real> rates);
+    void setBorderedGlobalRateInSecondSlot(bool rate_in_second_slot) noexcept
+    {
+        bordered_global_rate_in_second_slot_ = rate_in_second_slot;
+    }
+    [[nodiscard]] bool borderedGlobalRateInSecondSlot() const noexcept { return bordered_global_rate_in_second_slot_; }
+    /// Whether bordered DOF @p index belongs to a global field with a time derivative.
+    [[nodiscard]] bool borderedGlobalDofIsTimeDependent(GlobalIndex index) const;
+    /// First-order generalized alpha, before the stage solve: the time-dependent
+    /// bordered DOFs start from committed + alpha_f dt rate, as the field DOFs do.
+    void predictBorderedGlobalStage(Real alpha_f, Real dt);
+    /**
+     * @brief First-order generalized alpha, after the stage solve
+     *
+     * The time-dependent bordered DOFs go from the stage value to the
+     * endpoint, x = x_stage / alpha_f + (alpha_f - 1) / alpha_f x_n, and
+     * take the rate (x - x_n) / (gamma dt) - (1 - gamma) / gamma rate_n,
+     * which commitTimeStep() commits.  The others keep the stage value and a
+     * zero rate, as the field DOFs without a time derivative do.  The
+     * arithmetic is the time loop's for the field DOFs, operation by
+     * operation, so both lowerings give the same numbers.
+     */
+    void finalizeBorderedGlobalStage(Real alpha_f, Real gamma, Real dt);
+    /// Takes @p rates as the rates of the step being solved (committed by commitTimeStep()).
+    void setPendingBorderedGlobalRates(std::vector<Real> rates);
+    /**
+     * @brief The bordered rows' part of a residual addition
+     *
+     * A stage solve with a residual addition (the explicit part of a theta
+     * step, assembled at the old state) adds the field part to the field
+     * residual; the part of the bordered global rows lands in the bordered
+     * residual g of that assembly.  The stage keeps it here while it solves,
+     * and Newton adds it to g after each residual assembly; empty: none.
+     */
+    void setBorderedGlobalResidualAddition(std::vector<Real> addition)
+    {
+        bordered_global_residual_addition_ = std::move(addition);
+    }
+    [[nodiscard]] std::span<const Real> borderedGlobalResidualAddition() const noexcept
+    {
+        return bordered_global_residual_addition_;
+    }
+    /**
      * @brief The values of a global field in @p state, under either lowering
      *
      * InMatrix: the entries of @p state at the field's DOFs.  Bordered: the
@@ -2572,6 +2648,14 @@ private:
     std::vector<Real> bordered_global_values_{};
     /// The bordered global values of the last committed time step (restored when a step is reset or rolled back).
     std::vector<Real> bordered_global_committed_values_{};
+    /// History slots 2, 3, ... of the bordered DOFs (the committed values of the steps before).
+    std::vector<std::vector<Real>> bordered_global_older_values_{std::vector<Real>{}};
+    /// The committed first-order generalized-alpha rates of the bordered DOFs.
+    std::vector<Real> bordered_global_committed_rates_{};
+    /// The rates of the step being finalized, committed by commitTimeStep().
+    std::optional<std::vector<Real>> bordered_global_pending_rates_{};
+    bool bordered_global_rate_in_second_slot_{false};
+    std::vector<Real> bordered_global_residual_addition_{};
     /// Per operator, the field DOFs each bordered global row couples to (setup sparsity).
     std::unordered_map<OperatorTag, std::vector<std::vector<GlobalIndex>>> bordered_global_row_columns_{};
     OperatorRegistry operator_registry_;
