@@ -547,6 +547,15 @@ patterns. Compiling a form that still holds indexed access throws
 `FormCompiler: detected indexed access (Einstein notation). Call
 forms::einsum(expr) to lower it before compilation.`
 
+An index of extent 0 (`Index("i")`, the default `IndexSet`) takes the
+topological dimension of the form's bound spaces, or 3 when no space is bound;
+spaces of two topological dimensions are refused. The topological dimension is
+used for every index, whether it counts the components of a field (its value
+dimension) or the derivatives of a gradient (the ambient dimension): for a
+membrane in three-space, a three-component field on triangles, `u(i) * v(i)`
+sums two of the three components (`test_FormCompiler.cpp`). State the extent
+there, `Index("i", IndexSet(3))`.
+
 ### Matrix, Eigen, Spectral, and History Operators
 
 Status: `implemented/public` for authoring; supported dimensions and

@@ -13,9 +13,11 @@
 #include <gtest/gtest.h>
 
 #include "Forms/BlockForm.h"
+#include "Forms/Einsum.h"
 #include "Forms/FormCompiler.h"
 #include "Forms/FormKernels.h"
 #include "Forms/Index.h"
+#include "Forms/IndexExtent.h"
 #include "Spaces/HCurlSpace.h"
 #include "Spaces/HDivSpace.h"
 #include "Spaces/H1Space.h"
@@ -268,6 +270,34 @@ TEST(FormCompilerTest, RefusesAFormNonlinearInItsTestFunction)
     // The installer's geometry-sensitivity probe: a product with the factor 0.
     EXPECT_NO_THROW((void)compiler.compileResidual(
         (u * v + FormExpr::constant(0.0) * u * inner(grad(v), grad(v))).dx()));
+}
+
+/**
+ * An index of extent 0 takes the topological dimension of the bound spaces
+ * (3 without one).  For a membrane in three-space, a three-component field on
+ * triangles, that is 2: u(i) v(i) sums two of the three components, so it is
+ * not inner(u, v); IndexSet{3} states the extent.  (The ambient dimension of
+ * a gradient index and the value dimension of a component index are not
+ * distinguished from the topological dimension.)
+ */
+TEST(FormCompilerTest, AutoIndexExtentOfAMembraneInThreeSpaceIsTheTopologicalDimension)
+{
+    auto scalar = std::make_shared<spaces::H1Space>(ElementType::Triangle3, 1);
+    spaces::ProductSpace membrane(scalar, 3);
+    const auto u = FormExpr::trialFunction(membrane, "u");
+    const auto v = FormExpr::testFunction(membrane, "v");
+    const Index i("i");
+    EXPECT_EQ(inferAutoIndexExtent(u(i) * v(i)), 2);
+    EXPECT_EQ(inferAutoIndexExtent(FormExpr::constant(1.0)), 3);
+
+    const auto two = einsum(u(i) * v(i));
+    EXPECT_EQ(two.toString(), (u.component(0) * v.component(0) + u.component(1) * v.component(1)).toString());
+
+    const Index k("k", IndexSet(3));
+    const auto three = einsum(u(k) * v(k));
+    EXPECT_EQ(three.toString(), (u.component(0) * v.component(0) + u.component(1) * v.component(1) +
+                                 u.component(2) * v.component(2))
+                                    .toString());
 }
 
 TEST(FormCompilerTest, CompileImplRejectsUnresolvedCoupledAndAuxiliaryPlaceholders)
