@@ -867,7 +867,7 @@ CutTransferInstall defineCutTransfer(FESystem& system, const std::shared_ptr<con
 TEST(GeneralityBenchmarkGaps, P13_StaticCutInterfaceTransferIsExactAndCancels)
 {
     const Real s = 0.43, L = 1.0, q = 0.6, kA = 2.0, kB = 0.5, r = 0.4;
-    for (const auto cell : {Cell::Tri3, Cell::Quad4}) {
+    for (const auto cell : {Cell::Tri3, Cell::Quad4, Cell::Tet4}) {
         auto mesh = boxMesh(cell, 5, boxSides());
         FESystem system(mesh);
         const auto V = std::make_shared<spaces::H1Space>(elementType(cell), 1);
@@ -881,7 +881,7 @@ TEST(GeneralityBenchmarkGaps, P13_StaticCutInterfaceTransferIsExactAndCancels)
         system.setup();
         std::vector<Real> phi_at_vertices(mesh->n_vertices());
         for (std::size_t v = 0; v < phi_at_vertices.size(); ++v) {
-            phi_at_vertices[v] = static_cast<Real>(mesh->X_ref()[2 * v]) - s;
+            phi_at_vertices[v] = static_cast<Real>(mesh->X_ref()[static_cast<std::size_t>(mesh->dim()) * v]) - s;
         }
         std::vector<Real> coefficients(static_cast<std::size_t>(system.fieldDofHandler(phi).getNumDofs()), 0.0);
         (void)system.projectMeshVertexValuesToFieldCoefficients(phi, phi_at_vertices, 1u, coefficients);
