@@ -38,6 +38,7 @@ std::span<const NameDeclaration> solverCatalogue() noexcept
     [[maybe_unused]] constexpr auto NonReference = RunStatus::NonReference;
 
     // Owning services.
+    constexpr const char* kDriver = "Application/Core/ApplicationDriver";
     constexpr const char* kAnalysis = "FE/Analysis";
     constexpr const char* kCertificate = "FE/Analysis/ConstraintRangeCertificate";
     constexpr const char* kRowObserver = "FE/Analysis/RowContributionObserver";
@@ -57,6 +58,55 @@ std::span<const NameDeclaration> solverCatalogue() noexcept
     constexpr const char* kTimeLoop = "FE/TimeStepping/TimeLoop";
 
     static constexpr NameDeclaration kSolverNames[] = {
+        // Application/Core/ApplicationDriver: the solve setup and the step loop.
+        {"SVMP_CUT_RULE_DUMP", Diagnostic, kDriver, Flag, "off", Reference,
+         "dumps every retained generated cut-volume rule per accepted step"},
+        {"SVMP_DISABLE_CUT_CONTEXT_REINSTALL", Performance, kDriver, Flag, "off", Reference,
+         "rebuilds a replaced cut context at the final candidate gate instead of reinstalling it"},
+        {"SVMP_DISABLE_POSTACCEPT_CUT_REUSE", Performance, kDriver, Flag, "off", Reference,
+         "rebuilds the cut geometry of the post-accept maintenance baseline and validator"},
+        {"SVMP_JACOBIAN_REBUILD_PERIOD", NumericalOverride, kDriver, Integer, "1", NonReference,
+         "rebuilds the Newton Jacobian every n iterations"},
+        {"SVMP_NEWTON_ACCEPT_INEXACT_LINEAR", NumericalOverride, kDriver, Flag, "off", NonReference,
+         "accepts Newton updates from linear solves that missed their tolerance"},
+        {"SVMP_NEWTON_LINE_SEARCH", NumericalOverride, kDriver, Flag, "on with active cut or advection requests",
+         NonReference, "Newton backtracking line search"},
+        {"SVMP_NEWTON_LINE_SEARCH_ALPHA_MIN", NumericalOverride, kDriver, Real, "the Newton options", NonReference,
+         "smallest line-search step"},
+        {"SVMP_NEWTON_LINE_SEARCH_C1", NumericalOverride, kDriver, Real, "the Newton options", NonReference,
+         "sufficient-decrease constant of the line search"},
+        {"SVMP_NEWTON_LINE_SEARCH_FAIL_ON_NO_REDUCTION", NumericalOverride, kDriver, Flag, "the Newton options",
+         NonReference, "fails a Newton iteration whose line search reduces nothing (the deck key wins)"},
+        {"SVMP_NEWTON_LINE_SEARCH_MAX_ITERATIONS", NumericalOverride, kDriver, Integer, "the Newton options",
+         NonReference, "line-search trials per Newton iteration (the deck key wins)"},
+        {"SVMP_NEWTON_LINE_SEARCH_SHRINK", NumericalOverride, kDriver, Real, "the Newton options", NonReference,
+         "step reduction per line-search trial"},
+        {"SVMP_NEWTON_PTC", NumericalOverride, kDriver, Flag, "off", NonReference,
+         "pseudo-transient continuation in Newton"},
+        {"SVMP_NEWTON_PTC_ACTIVATE_ON_LINEAR_FAILURE", NumericalOverride, kDriver, Flag, "the Newton options",
+         NonReference, "starts pseudo-transient continuation only after a failed linear solve"},
+        {"SVMP_NEWTON_PTC_GAMMA_DROP_TOLERANCE", NumericalOverride, kDriver, Real, "the Newton options",
+         NonReference, "continuation scaling below which it is dropped"},
+        {"SVMP_NEWTON_PTC_GAMMA_GROWTH", NumericalOverride, kDriver, Real, "the Newton options", NonReference,
+         "growth of the continuation scaling on linear-solve retries"},
+        {"SVMP_NEWTON_PTC_GAMMA_INITIAL", NumericalOverride, kDriver, Real, "the Newton options", NonReference,
+         "initial continuation scaling"},
+        {"SVMP_NEWTON_PTC_GAMMA_MAX", NumericalOverride, kDriver, Real, "the Newton options", NonReference,
+         "largest continuation scaling"},
+        {"SVMP_NEWTON_PTC_MAX_LINEAR_RETRIES", NumericalOverride, kDriver, Integer, "the Newton options",
+         NonReference, "linear-solve retries per Newton iteration under continuation"},
+        {"SVMP_NEWTON_PTC_UPDATE_FROM_RESIDUAL_RATIO", NumericalOverride, kDriver, Flag, "the Newton options",
+         NonReference, "updates the continuation scaling from the residual ratio"},
+        {"SVMP_PDE_EXTENSION_FACTORIZATION", Performance, kDriver, Text, "lu_colamd", NonReference,
+         "direct factorization of the PDE velocity extension (lu_colamd, ldlt_amd, mumps, mumps_serial)"},
+        {"SVMP_TIMELOOP_LAST_STEP_ABSORB_FRACTION", NumericalOverride, kDriver, Real,
+         "1e-2 with a step controller, otherwise 0", NonReference,
+         "remainder, as a fraction of the step, absorbed into the last step"},
+        {"SVMP_VTK_OUTPUT_FINAL_TIME", Diagnostic, kDriver, Flag, "off", Reference,
+         "also writes VTK output at the final time"},
+        {"SVMP_WET_VOLUME_DRIFT_WARNING", Diagnostic, kDriver, Real, "1e-3", Reference,
+         "relative wet-volume drift above which a warning is logged"},
+
         // FE/Analysis: the constraint-range certificate and the row-contribution
         // observers.  The six certificate gates (D61 item 7) mark a run as
         // non-reference.

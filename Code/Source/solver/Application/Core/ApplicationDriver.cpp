@@ -484,7 +484,7 @@ bool parseBoolValue(const char* env, bool default_value)
 
 bool parseBoolEnv(const char* name, bool default_value)
 {
-  return parseBoolValue(std::getenv(name), default_value);
+  return parseBoolValue(svmp::FE::environment::value(name), default_value);
 }
 
 // <Generalized_alpha_initial_rate> chooses the first generalized-alpha rate
@@ -610,7 +610,7 @@ TransientTimeIntegrationSelection resolveTransientTimeIntegrationSelection(
 
 double parseDoubleEnv(const char* name, double default_value)
 {
-  const char* env = std::getenv(name);
+  const char* env = svmp::FE::environment::value(name);
   if (!env) {
     return default_value;
   }
@@ -624,7 +624,7 @@ double parseDoubleEnv(const char* name, double default_value)
 
 int parseIntEnv(const char* name, int default_value)
 {
-  const char* env = std::getenv(name);
+  const char* env = svmp::FE::environment::value(name);
   if (!env) {
     return default_value;
   }
@@ -3552,7 +3552,7 @@ application::core::PdeVelocityExtensionFactorization
 pdeVelocityExtensionFactorizationSetting()
 {
   static const auto setting = [] {
-    const char* text = std::getenv("SVMP_PDE_EXTENSION_FACTORIZATION");
+    const char* text = svmp::FE::environment::value("SVMP_PDE_EXTENSION_FACTORIZATION");
     if (text == nullptr || text[0] == '\0') {
       return application::core::PdeVelocityExtensionFactorization::LuColamd;
     }
@@ -6981,7 +6981,7 @@ void ApplicationDriver::runSteadyState(SimulationComponents& sim, const Paramete
 
   // Modified Newton: reuse Jacobian across multiple iterations.
   // Period 1 = full Newton (default), 2 = rebuild every 2nd iteration, etc.
-  if (const char* jrp = std::getenv("SVMP_JACOBIAN_REBUILD_PERIOD")) {
+  if (const char* jrp = svmp::FE::environment::value("SVMP_JACOBIAN_REBUILD_PERIOD")) {
     newton_opts.jacobian_rebuild_period = std::atoi(jrp);
   }
 
@@ -7333,7 +7333,7 @@ void ApplicationDriver::runTransient(SimulationComponents& sim, const Parameters
       parseBoolEnv("SVMP_NEWTON_ACCEPT_INEXACT_LINEAR", false);
 
   // Modified Newton: reuse Jacobian across multiple iterations.
-  if (const char* jrp = std::getenv("SVMP_JACOBIAN_REBUILD_PERIOD")) {
+  if (const char* jrp = svmp::FE::environment::value("SVMP_JACOBIAN_REBUILD_PERIOD")) {
     opts.newton.jacobian_rebuild_period = std::atoi(jrp);
   }
 
