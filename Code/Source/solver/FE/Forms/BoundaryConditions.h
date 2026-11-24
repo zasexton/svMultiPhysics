@@ -372,11 +372,6 @@ enum class InterfaceTraceReduction : std::uint8_t {
     throw std::invalid_argument("forms::bc::applyScalarTrace: unsupported scalar trace operator");
 }
 
-[[nodiscard]] inline FormExpr normalComponent(const FormExpr& expr)
-{
-    return applyScalarTrace(expr, ScalarTraceOperator::NormalComponent);
-}
-
 [[nodiscard]] inline FormExpr applyInterfaceScalarTrace(const FormExpr& expr,
                                                         ScalarTraceOperator op,
                                                         InterfaceTraceReduction reduction)

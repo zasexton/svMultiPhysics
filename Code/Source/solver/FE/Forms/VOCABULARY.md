@@ -33,7 +33,7 @@ interface terms, and local closure choices visible to a reviewer.
 Practical rules:
 
 - Keep Forms physics-agnostic: prefer `grad`, `jump`, `normalTrace`,
-  `projectTangent`, side restrictions, and local pointwise model hooks over
+  `tangentialProjection`, side restrictions, and local pointwise model hooks over
   names tied to one PDE family.
 - Prefer explicit expression of flux models in Forms terms. For conservation
   laws, authors should write the central, upwind, penalty, or dissipative flux
@@ -300,19 +300,19 @@ Status: `implemented/public`.
 
 | Vocabulary | Notes |
 |------------|-------|
-| `normalTrace(u, n)`, `normalTrace(u)` | Scalar normal component, using explicit `n` or the active facet normal |
-| `normalProjection(u, n)`, `normalProjection(u)` | Normal vector projection |
-| `projectNormal(u, n)`, `projectNormal(u)` | Alias for `normalProjection` |
-| `tangentialProjection(u, n)`, `tangentialProjection(u)` | Tangential vector projection `u - (u.n) n` |
-| `projectTangent(u, n)`, `projectTangent(u)` | Alias for `tangentialProjection` |
-| `tangentialTrace(u, n)`, `tangentialTrace(u)` | Alias for `tangentialProjection` |
+| `normalTrace(u, n)`, `normalTrace(u)` | The scalar `u.n`, `inner(u, n)`, with explicit `n` or the active facet normal |
+| `normalProjection(u, n)`, `normalProjection(u)` | The vector `(u.n) n`, `normalTrace(u, n) * n` |
+| `tangentialProjection(u, n)`, `tangentialProjection(u)` | The vector `u - (u.n) n`, `u - normalProjection(u, n)` |
 | `tangentialProjector(n, dim)` | Projector matrix `identity(dim) - outer(n, n)`, as in the surface-stress term `gamma (I - n x n) : grad(v)` |
 | `conormal(n, wall_normal[, eps])` | Unit conormal of a contact line, `safeNormalize(n - (n.n_w) n_w)` |
 
 The default overloads use `FormExpr::normal()`. Use explicit normals for
 interface-side, level-set, or frame-specific laws where the orientation should
-be visible in the formulation. `bc::normalComponent(u)` is the same tree as
-`normalTrace(u)`.
+be visible in the formulation. These are the only spellings of the three
+quantities (`bc::applyScalarTrace(u, ScalarTraceOperator::NormalComponent)` is
+the tree of `normalTrace(u)`); the oriented tangential trace `n x E` of an
+`H(curl)` field is `cross(n, E)`, and `dot(a, b)` is `inner(a, b)` (the same
+tree), the full real inner product, which the reference writes `inner`.
 
 ### Measures
 
@@ -395,7 +395,7 @@ Status: `implemented/public`.
 |------------|-------|
 | `grad(u)` | Scalar-to-vector, vector-to-matrix, and supported intrinsic vector FE gradients |
 | `symgrad(u)` | Symmetric gradient of a vector field; exactly the expression tree `sym(grad(u))` |
-| `advect(a, u)` | Vector advection `(a . grad) u`; exactly `grad(u) * a`, preserving all state dependencies in both operands. For a scalar field use `inner(grad(u), a)` |
+| `advect(a, u)` | Vector advection `(a . grad) u`, direction first: exactly `grad(u) * a`, the matrix `grad(u)` of a vector field u (rows its components) times the vector a, preserving all state dependencies in both operands. For a scalar field, whose gradient is a vector, the advection is `inner(grad(u), a)` |
 | `div(u)`, `curl(u)` | Vector differential operators |
 | `hessian(u)` | Spatial Hessian support for supported scalar/composite expressions and mappings |
 | `laplacian(u)` | `trace(hessian(u))` helper |
@@ -405,7 +405,7 @@ Status: `implemented/public`.
 | `surfaceLaplacian(f, n)` | Surface Laplacian helper |
 | `meanCurvatureFromNormal(n)`, `curvatureVectorFromNormal(n)` | Curvature helpers from a supplied unit normal |
 | `unitNormalFromLevelSet(phi)`, `meanCurvatureFromLevelSet(phi)` | Level-set geometry helpers |
-| `safeNorm(v)`, `safeNormalize(v)` | Regularized vector norm helpers |
+| `safeNorm(v, eps)`, `safeNormalize(v, eps)` | `sqrt(v.v + eps^2)` and `v / safeNorm(v, eps)`: eps is absolute, in the units of v, default `1e-12` (for a v of order one, such as a normal); pass it where the scale belongs to the model. `unitNormalFromLevelSet`, `meanCurvatureFromLevelSet` and `conormal` take the same eps |
 
 Intrinsic `H(div)` and `H(curl)` vector-basis gradients are matrix-valued with
 layout component-by-physical-coordinate derivative. Affine mappings are
@@ -546,7 +546,6 @@ Status: `implemented/public`.
 | `SidePair{neg, pos}` | One quantity held by two fields, one on each side of an interface (`neg` on `phi < c`, the minus side of `jump()`), e.g. `SidePair{u_neg, u_pos}` of StateFields or `SidePair{v_neg, v_pos}` of their TestFields |
 | `jump(pair)`, `avg(pair, {.neg = w_neg, .pos = w_pos})`, `avg(pair)` | `neg - pos` (the `jump()` convention), `w_neg neg + w_pos pos` (`SidePairWeights`, the weights named by side), and `0.5 neg + 0.5 pos` |
 | `map(f, A)`, `map(f, A, B)` | `{f(A.neg, B.neg), f(A.pos, B.pos)}`; `f` may take the side (`CutVolumeSide`) as its last argument for per-side parameters. `pair * e`, `e * pair`, `pair + pair`, `pair - pair` act side by side |
-| `bc::normalComponent(u)` | Scalar normal trace `inner(u, n)` |
 | `bc::interfaceNormalComponent(u, reduction)` | Interface scalar normal trace helper |
 | `bc::applyScalarTrace(u, op)`, `bc::applyInterfaceScalarTrace(u, op, reduction)` | Scalar trace and side reduction |
 | `bc::ScalarTraceOperator` | `Identity` or `NormalComponent` scalar trace selection |
@@ -1197,7 +1196,7 @@ expected leverage.
 #### Trace and Interface Algebra
 
 Current public pieces include side restrictions, `jump`, `avg`,
-`InterfaceBetween` (`trace`, `normalFrom`, `average`), `normalComponent`, normal/tangential trace-projection
+`InterfaceBetween` (`trace`, `normalFrom`, `average`), the normal/tangential trace-projection
 helpers, scalar trace BC helpers, `.dI`, and the level-set handles with
 `outwardNormal()`. Missing vocabulary:
 

@@ -4639,8 +4639,8 @@ TEST(MovingDomainPhysics,
     const auto n = FE::forms::currentNormal();
     const auto tangential_residual =
         FE::forms::inner(
-            FE::forms::tangentialTrace(d_mesh, n),
-            FE::forms::tangentialTrace(psi, n))
+            FE::forms::tangentialProjection(d_mesh, n),
+            FE::forms::tangentialProjection(psi, n))
             .ds(marker);
     (void)FE::systems::installFormulation(
         system,
@@ -4742,8 +4742,8 @@ TEST(MovingDomainPhysics,
     const auto n = FE::forms::currentNormal();
     const auto tangential_residual =
         FE::forms::inner(
-            FE::forms::tangentialTrace(d_mesh, n),
-            FE::forms::tangentialTrace(psi, n))
+            FE::forms::tangentialProjection(d_mesh, n),
+            FE::forms::tangentialProjection(psi, n))
             .ds(tangential_marker);
     (void)FE::systems::installFormulation(
         system,

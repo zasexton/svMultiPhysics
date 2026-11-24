@@ -351,9 +351,15 @@ inline FormExpr domainId() { return FormExpr::cellDomainId(); }
 inline FormExpr hNormal() { return (2.0 * vol()) / area(); }
 
 // ---------------------------------------------------------------------------
-// Trace/projection helpers
+// Normal and tangential parts of a vector
+//
+// One spelling each, for a vector u and a unit normal n (FormExpr::normal()
+// when omitted): the scalar u . n, the vector (u . n) n and the vector
+// u - (u . n) n.  The oriented tangential trace n x u of an H(curl) field is
+// written cross(n, u).
 // ---------------------------------------------------------------------------
 
+/// The scalar normal component u . n: inner(u, n).
 inline FormExpr normalTrace(const FormExpr& u, const FormExpr& n)
 {
     return inner(u, n);
@@ -364,6 +370,7 @@ inline FormExpr normalTrace(const FormExpr& u)
     return normalTrace(u, FormExpr::normal());
 }
 
+/// The vector normal part (u . n) n: normalTrace(u, n) * n.
 inline FormExpr normalProjection(const FormExpr& u, const FormExpr& n)
 {
     return normalTrace(u, n) * n;
@@ -374,16 +381,7 @@ inline FormExpr normalProjection(const FormExpr& u)
     return normalProjection(u, FormExpr::normal());
 }
 
-inline FormExpr projectNormal(const FormExpr& u, const FormExpr& n)
-{
-    return normalProjection(u, n);
-}
-
-inline FormExpr projectNormal(const FormExpr& u)
-{
-    return normalProjection(u);
-}
-
+/// The vector tangential part u - (u . n) n: u - normalProjection(u, n).
 inline FormExpr tangentialProjection(const FormExpr& u, const FormExpr& n)
 {
     return u - normalProjection(u, n);
@@ -394,26 +392,6 @@ inline FormExpr tangentialProjection(const FormExpr& u)
     return tangentialProjection(u, FormExpr::normal());
 }
 
-inline FormExpr projectTangent(const FormExpr& u, const FormExpr& n)
-{
-    return tangentialProjection(u, n);
-}
-
-inline FormExpr projectTangent(const FormExpr& u)
-{
-    return tangentialProjection(u);
-}
-
-inline FormExpr tangentialTrace(const FormExpr& u, const FormExpr& n)
-{
-    return tangentialProjection(u, n);
-}
-
-inline FormExpr tangentialTrace(const FormExpr& u)
-{
-    return tangentialProjection(u);
-}
-
 // ---------------------------------------------------------------------------
 // Differential operators (UFL-like shorthands)
 // ---------------------------------------------------------------------------
@@ -421,8 +399,10 @@ inline FormExpr tangentialTrace(const FormExpr& u)
 /// Symmetric gradient of a vector field; exactly the tree sym(grad(u)).
 inline FormExpr symgrad(const FormExpr& u) { return sym(grad(u)); }
 
-/// Vector advection (a . grad) u; exactly grad(u) * a with the component-first
-/// gradient convention. For scalar transport use inner(grad(u), a).
+/// Vector advection (a . grad) u of a vector field u along the direction a:
+/// exactly grad(u) * a, the matrix grad(u) (component-first, rows the
+/// components of u) times the vector a, a vector of u's shape.  For a scalar
+/// field grad(u) is a vector; its advection a . grad(u) is inner(grad(u), a).
 inline FormExpr advect(const FormExpr& a, const FormExpr& u) { return grad(u) * a; }
 
 inline FormExpr hessian(const FormExpr& a) { return a.hessian(); }
@@ -433,16 +413,23 @@ inline FormExpr laplacian(const FormExpr& a) { return trace(a.hessian()); }
 // Geometric differential operators (surface/level-set helpers)
 // ---------------------------------------------------------------------------
 
+/// The regularized norm sqrt(v . v + eps^2) of a vector v.  eps is absolute,
+/// in the units of v: the default 1e-12 suits a v of order one (a unit or
+/// level-set normal); pass the scale where it belongs to the model.  The
+/// result is at least eps, so it can divide.
 inline FormExpr safeNorm(const FormExpr& v, Real eps = Real(1e-12))
 {
     return sqrt(inner(v, v) + FormExpr::constant(eps * eps));
 }
 
+/// v / safeNorm(v, eps): the unit vector of v where |v| >> eps, shorter than
+/// one where |v| is of order eps, and about v / eps where |v| << eps.
 inline FormExpr safeNormalize(const FormExpr& v, Real eps = Real(1e-12))
 {
     return v / safeNorm(v, eps);
 }
 
+/// safeNormalize(grad(phi), eps).
 inline FormExpr unitNormalFromLevelSet(const FormExpr& phi, Real eps = Real(1e-12))
 {
     return safeNormalize(grad(phi), eps);

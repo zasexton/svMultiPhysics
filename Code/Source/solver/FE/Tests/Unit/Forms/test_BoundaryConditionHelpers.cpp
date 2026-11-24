@@ -743,13 +743,15 @@ TEST(FormsBoundaryConditions, GeneratedActiveBoundaryMarkerMustBeNonnegative)
     EXPECT_THROW((void)svmp::FE::forms::bc::Boundary(-1), std::invalid_argument);
 }
 
-TEST(FormsBoundaryConditions, NormalComponentHelperBuildsScalarBoundaryTrace) {
+TEST(FormsBoundaryConditions, NormalTraceIsTheNormalComponentScalarTrace) {
     auto space = svmp::FE::spaces::HDivSpace(ElementType::Tetra4, /*order=*/0);
     const auto u = svmp::FE::forms::FormExpr::trialFunction(space, "u");
-    const auto expr = svmp::FE::forms::bc::normalComponent(u);
+    const auto expr = svmp::FE::forms::normalTrace(u);
 
     ASSERT_TRUE(expr.isValid());
-    EXPECT_TRUE(expr.toString().find("n") != std::string::npos);
+    EXPECT_EQ(svmp::FE::systems::formExprTreeHash(expr),
+              svmp::FE::systems::formExprTreeHash(
+                  svmp::FE::forms::bc::applyScalarTrace(u, svmp::FE::forms::bc::ScalarTraceOperator::NormalComponent)));
 }
 
 TEST(FormsBoundaryConditions, TraceLoadBC_AddsBoundaryTermOnNormalTrace) {
@@ -1173,7 +1175,7 @@ TEST(FormsBoundaryConditions, WeakNormalTraceAddsThreeBoundaryTerms)
     auto residual = svmp::FE::forms::dot(u, v).dx();
     bc::Dirichlet condition(
         17, bc::Trace::Normal, svmp::FE::forms::FormExpr::constant(0.0), bc::Nitsche{},
-        bc::NaturalFlux{.parts = {bc::normalFlux([](const svmp::FE::forms::FormExpr& w) { return bc::normalComponent(w); })},
+        bc::NaturalFlux{.parts = {bc::normalFlux([](const svmp::FE::forms::FormExpr& w) { return svmp::FE::forms::normalTrace(w); })},
                         .penalty_weight = svmp::FE::forms::FormExpr::constant(4.0)});
     EXPECT_EQ(condition.label(), "NormalNitscheBC");
     condition.contributeToResidual(residual, u, v);
