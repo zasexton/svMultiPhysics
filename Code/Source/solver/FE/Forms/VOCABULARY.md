@@ -1392,6 +1392,18 @@ can be expressed as domain-neutral mathematical primitives.
 | Complex trial/test handles and conjugation conventions | More ergonomic complex PDE authoring |
 | True complex backend, if justified | Avoid real block lifting where needed |
 
+### Planned: reusable boundary laws
+
+Status: `planned` (decision D76). A boundary law is written once in the notation of its weak form and then bound to
+each boundary it applies to, with that boundary's own parameters and initial states. Every BC added to a problem is
+its own instance: its parameters, states, histories and outputs belong to that application, and sharing between BCs
+is explicit. The design notes are in [BOUNDARY_LAW_DESIGN_NOTES.md](BOUNDARY_LAW_DESIGN_NOTES.md):
+- instance-qualified states and outputs;
+- distinct roles for measured quantities and tested terms;
+- trace relations with a selectable enforcement;
+- normals, traces and measures from one oriented domain;
+- inspectable named contributions.
+
 ## Out of Scope for Now
 
 The following should remain deferred until there is a concrete product/module
