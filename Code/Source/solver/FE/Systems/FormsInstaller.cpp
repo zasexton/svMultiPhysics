@@ -24,6 +24,8 @@
 #include "Forms/BlockForm.h"
 #include "Forms/FormCompiler.h"
 #include "Forms/FormKernels.h"
+#include "Forms/ConstitutiveModel.h"
+#include "Forms/JIT/InlinableConstitutiveModel.h"
 #include "Forms/MixedBlockKernelSet.h"
 #include "Forms/MixedFormIR.h"
 #include "Forms/MonolithicCellKernel.h"
@@ -71,6 +73,66 @@ void requireGeneratedBoundaryNitscheTraceBindings(
             throw std::logic_error(std::string(mismatch_message));
         }
     }
+}
+
+void forEachNodeThroughLawBodies(
+    const forms::FormExpr& expr,
+    const std::function<void(const forms::FormExprNode& node, const forms::FormExprNode* law_call)>& visit)
+{
+    if (!expr.isValid()) {
+        return;
+    }
+    // The dimension a law body is expanded with: the largest topological
+    // dimension of the spaces of the expression, as kernel setup infers it.
+    int dim = 0;
+    const auto measure = [&](const auto& self, const forms::FormExprNode& node) -> void {
+        if (const auto* signature = node.spaceSignature()) {
+            dim = std::max(dim, signature->topological_dimension);
+        }
+        for (const auto& child : node.childrenShared()) {
+            if (child) {
+                self(self, *child);
+            }
+        }
+    };
+    measure(measure, *expr.node());
+
+    // @p arguments: the argument nodes of the innermost body being walked,
+    // visited already as the children of its call.
+    const auto walk = [&](const auto& self, const forms::FormExprNode& node, const forms::FormExprNode* law_call,
+                          std::span<const forms::FormExpr> arguments) -> void {
+        for (const auto& argument : arguments) {
+            if (argument.node() == &node) {
+                return;
+            }
+        }
+        visit(node, law_call);
+        for (const auto& child : node.childrenShared()) {
+            if (child) {
+                self(self, *child, law_call, arguments);
+            }
+        }
+        if (node.type() != forms::FormExprType::Constitutive || node.constitutiveModel() == nullptr) {
+            return;
+        }
+        const auto* inlinable = node.constitutiveModel()->inlinable();
+        if (inlinable == nullptr || inlinable->stateAccess() != forms::MaterialStateAccess::None || dim == 0) {
+            return;
+        }
+        std::vector<forms::FormExpr> inputs;
+        for (const auto& child : node.childrenShared()) {
+            inputs.emplace_back(child);
+        }
+        forms::InlinableConstitutiveContext context;
+        context.dim = dim;
+        const auto expansion = inlinable->inlineExpand(inputs, context);
+        for (const auto& output : expansion.outputs) {
+            if (output.isValid()) {
+                self(self, *output.node(), &node, std::span<const forms::FormExpr>(inputs));
+            }
+        }
+    };
+    walk(walk, *expr.node(), nullptr, std::span<const forms::FormExpr>{});
 }
 
 namespace {
@@ -1709,28 +1771,39 @@ void requireUnknownsAreTrialFields(const FESystem& system,
                                    const forms::FormExpr& residual)
 {
     for (const auto& term : additiveTerms(residual)) {
-        const auto visit = [&](const auto& self, const forms::FormExprNode& n) -> void {
-            if (n.type() == forms::FormExprType::StateField) {
+        forEachNodeThroughLawBodies(
+            forms::FormExpr(term), [&](const forms::FormExprNode& n, const forms::FormExprNode* law_call) {
+                if (n.type() != forms::FormExprType::StateField) {
+                    return;
+                }
                 const auto fid = n.fieldId();
-                if (fid && *fid != CURRENT_SOLUTION_FIELD_ID &&
-                    system.fieldParticipatesInUnknownVector(*fid) &&
-                    std::find(trial_fields.begin(), trial_fields.end(), *fid) == trial_fields.end()) {
+                if (!fid || *fid == CURRENT_SOLUTION_FIELD_ID || !system.fieldParticipatesInUnknownVector(*fid)) {
+                    return;
+                }
+                if (law_call != nullptr) {
+                    // An unknown read in a law body, not taken as an argument:
+                    // installs see the call's arguments only, so the unknown
+                    // would have no Jacobian columns and no value binding.
+                    const auto* inlinable = law_call->constitutiveModel()->inlinable();
                     throw InvalidArgumentException(
-                        "installFormulation: the term '" + term->toString() + "' holds the unknown '" +
-                        system.fieldRecord(*fid).name + "' (StateField '" + n.toString() +
-                        "'), which is not a trial field of the install, so its Jacobian columns would be "
-                        "dropped; add the field to the field list or to "
-                        "FormInstallOptions::extra_trial_fields, or hold its value fixed as data with "
-                        "frozen()");
+                        "installFormulation: the law '" + std::string(inlinable->lawName()) + "' in the term '" +
+                        term->toString() + "' reads the unknown '" + system.fieldRecord(*fid).name +
+                        "' (StateField '" + n.toString() +
+                        "') in its body; pass it to the law as an argument, or hold its value fixed as data "
+                        "with frozen()");
                 }
-            }
-            for (const auto& child : n.childrenShared()) {
-                if (child) {
-                    self(self, *child);
+                if (std::find(trial_fields.begin(), trial_fields.end(), *fid) != trial_fields.end()) {
+                    return;
                 }
-            }
-        };
-        visit(visit, *term);
+                const std::string remedy =
+                    "which is not a trial field of the install, so its Jacobian columns would be "
+                    "dropped; add the field to the field list or to "
+                    "FormInstallOptions::extra_trial_fields, or hold its value fixed as data with "
+                    "frozen()";
+                throw InvalidArgumentException(
+                    "installFormulation: the term '" + term->toString() + "' holds the unknown '" +
+                    system.fieldRecord(*fid).name + "' (StateField '" + n.toString() + "'), " + remedy);
+            });
     }
 }
 

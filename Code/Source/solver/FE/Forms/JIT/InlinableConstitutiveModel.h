@@ -97,6 +97,9 @@ public:
      */
     [[nodiscard]] virtual std::uint64_t kindId() const noexcept = 0;
 
+    /// The name of the law in diagnostics (empty when it has none).
+    [[nodiscard]] virtual std::string_view lawName() const noexcept { return {}; }
+
     /**
      * @brief State access classification (pure vs stateful)
      */

@@ -28,6 +28,7 @@
 #include "Systems/OperatorRegistry.h"
 
 #include <cstddef>
+#include <functional>
 #include <initializer_list>
 #include <memory>
 #include <span>
@@ -143,6 +144,26 @@ struct CoupledResidualMetadata {
     CoupledResidualKernels kernels{};
     analysis::FormContributionAnalysisMetadata analysis{};
 };
+
+/**
+ * @brief Visits every node of @p expr and of the body of every call of a law written as forms
+ *
+ * A stateless inlinable law (constitutive::FormLaw, called through
+ * forms::law) is a constitutive node whose body setup expands into its tree.
+ * The body may read a field it does not take as an argument, a captured
+ * pressure for instance; the walk expands each call (with its arguments and
+ * the largest topological dimension of the expression's spaces; not without
+ * a space to tell the dimension) and visits
+ * that body too, with @p law_call the innermost call around the node (null
+ * outside every body); the argument subtrees a body holds are visited once,
+ * as the call's children, outside the body.  installFormulation walks a
+ * residual this way and refuses an unknown that a body reads without taking
+ * it as an argument, naming the law and the unknown: installs see the
+ * arguments of a call only, so that unknown would have no Jacobian columns.
+ */
+void forEachNodeThroughLawBodies(
+    const forms::FormExpr& expr,
+    const std::function<void(const forms::FormExprNode& node, const forms::FormExprNode* law_call)>& visit);
 
 /**
  * @brief Unified formulation installer — auto-selects single or multi-field path

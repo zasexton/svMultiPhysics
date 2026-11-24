@@ -5,6 +5,7 @@
 
 #include <gtest/gtest.h>
 
+#include "Constitutive/ExpressionLaw.h"
 #include "Systems/ALEBinding.h"
 #include "Systems/FESystem.h"
 #include "Systems/FieldBinding.h"
@@ -1079,6 +1080,111 @@ TEST(FESystem, TaggedTermsFormTheirWorkChannelInTagOrder)
     EXPECT_THROW((void)F.tag("weak", FormExpr{}), std::invalid_argument);
     EXPECT_THROW((void)F.tag("weak", (U * U).dx()), std::invalid_argument);
     EXPECT_THROW((void)F.tag("weak", (U * v + q).dx()), std::invalid_argument);
+}
+
+namespace {
+
+/// The momentum residual inner(law(eps(u)) , grad(v)) of a law proportional
+/// to p eps(u), with p an argument of the law or read by its body, and the
+/// Jacobian of that residual with the pressure row p q installed by
+/// FormulationBuilder::residual.
+struct PressureStrainLaw {
+    std::unique_ptr<FESystem> system;
+    svmp::FE::systems::BoundUnknown u;
+    svmp::FE::systems::BoundUnknown p;
+    svmp::FE::forms::FormExpr momentum;
+};
+
+PressureStrainLaw buildPressureStrainLaw(bool p_is_an_argument)
+{
+    using svmp::FE::forms::FormExpr;
+    using Kind = svmp::FE::forms::ConstitutiveModel::ValueKind;
+    PressureStrainLaw out;
+    out.system = std::make_unique<FESystem>(build_single_quad_mesh());
+    auto scalar = std::make_shared<H1Space>(ElementType::Quad4, 1);
+    auto vector = std::make_shared<ProductSpace>(scalar, 2);
+    FieldBinding fields(*out.system, "Owner");
+    out.u = fields.unknown("u", vector, "displacement");
+    out.p = fields.unknown("p", scalar, "pressure");
+    const auto eps = svmp::FE::forms::sym(svmp::FE::forms::grad(out.u.state));
+    FormExpr stress;
+    if (p_is_an_argument) {
+        const auto law = svmp::FE::forms::law(
+            "test::pressure_strain", {{Kind::Matrix, Kind::Scalar}, Kind::Matrix},
+            [](std::span<const FormExpr> inputs, int) { return inputs[1] * inputs[0]; });
+        stress = law({eps, out.p.state});
+    } else {
+        const auto law = svmp::FE::forms::law("test::pressure_strain_hidden", Kind::Matrix, Kind::Matrix,
+                                              [p = out.p.state](const FormExpr& e, int) { return p * e; });
+        stress = law(eps);
+    }
+    out.momentum = svmp::FE::forms::inner(stress, svmp::FE::forms::grad(out.u.test)).dx();
+    return out;
+}
+
+} // namespace
+
+TEST(FESystem, ALawThatReadsAnUnknownInItsBodyIsRefusedNamingTheLawAndTheUnknown)
+{
+    // A law proportional to p eps(u).  With p an argument the momentum
+    // residual implies the pressure column and assembles it.  Read by the
+    // body (captured, not an argument), p is invisible to the install, whose
+    // kernels would have neither its column nor its value: the install is
+    // refused, naming the law and p, also when p is a trial field.
+    auto with_argument = buildPressureStrainLaw(true);
+    EXPECT_EQ(svmp::FE::systems::inferInstallFields(*with_argument.system, with_argument.momentum).extra_trial_fields,
+              std::vector<svmp::FE::FieldId>{with_argument.p.id});
+    {
+        auto& sys = *with_argument.system;
+        svmp::FE::systems::FormulationBuilder F(sys, "equations", {});
+        (void)F.residual(with_argument.momentum);
+        (void)F.residual((with_argument.p.state * with_argument.p.test).dx());
+        sys.setup();
+        const auto n = sys.dofHandler().getNumDofs();
+        std::vector<svmp::FE::Real> state(static_cast<std::size_t>(n));
+        for (std::size_t i = 0; i < state.size(); ++i) {
+            state[i] = 0.1 + 0.05 * static_cast<svmp::FE::Real>(i);
+        }
+        svmp::FE::systems::SystemStateView view;
+        view.u = state;
+        svmp::FE::assembly::DenseSystemView out(n);
+        out.zero();
+        svmp::FE::systems::AssemblyRequest request;
+        request.op = "equations";
+        request.want_matrix = true;
+        ASSERT_TRUE(sys.assemble(request, view, &out, nullptr).success);
+        const auto p_offset = sys.fieldDofOffset(with_argument.p.id);
+        const auto u_offset = sys.fieldDofOffset(with_argument.u.id);
+        svmp::FE::Real column = 0.0;
+        for (svmp::FE::GlobalIndex i = 0; i < 8; ++i) {
+            column += std::abs(out.getMatrixEntry(u_offset + i, p_offset));
+        }
+        EXPECT_GT(column, 0.0);
+    }
+
+    const auto refusal = [](const std::function<void()>& install) {
+        try {
+            install();
+        } catch (const std::exception& e) {
+            return std::string(e.what());
+        }
+        return std::string();
+    };
+    for (const bool p_is_a_trial_field : {false, true}) {
+        SCOPED_TRACE(p_is_a_trial_field ? "fields u and p" : "field u");
+        auto hidden = buildPressureStrainLaw(false);
+        const auto message = refusal([&] {
+            if (p_is_a_trial_field) {
+                (void)svmp::FE::systems::installFormulation(*hidden.system, "momentum", {hidden.u.id, hidden.p.id},
+                                                            hidden.momentum);
+            } else {
+                svmp::FE::systems::FormulationBuilder F(*hidden.system, "momentum", {});
+                (void)F.residual(hidden.momentum);
+            }
+        });
+        EXPECT_NE(message.find("the law 'test::pressure_strain_hidden'"), std::string::npos) << message;
+        EXPECT_NE(message.find("reads the unknown 'p'"), std::string::npos) << message;
+    }
 }
 
 TEST(FESystem, DerivedMeshVelocityIsExcludedFromUnknownLayout)

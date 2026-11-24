@@ -372,6 +372,7 @@ public:
 
     [[nodiscard]] const forms::InlinableConstitutiveModel* inlinable() const noexcept override { return this; }
     [[nodiscard]] std::uint64_t kindId() const noexcept override { return fnv1a64(kind_name_); }
+    [[nodiscard]] std::string_view lawName() const noexcept override { return kind_name_; }
     [[nodiscard]] forms::MaterialStateAccess stateAccess() const noexcept override
     {
         return forms::MaterialStateAccess::None;
