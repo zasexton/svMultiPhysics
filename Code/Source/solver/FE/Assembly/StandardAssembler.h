@@ -741,7 +741,17 @@ private:
         ContextType type,
         std::span<const LocalIndex> align_facet_to_reference = {},
         bool force_test_face_reference_coords = false,
-        bool force_trial_face_reference_coords = false);
+        bool force_trial_face_reference_coords = false,
+        int face_polynomial_order = -1);
+
+    /// The polynomial order the rule of a face between @p cell_minus and
+    /// @p cell_plus integrates: the highest order of either side's test and
+    /// trial elements, so both sides take one rule.
+    [[nodiscard]] int twoSidedFacePolynomialOrder(const IMeshAccess& mesh,
+                                                  GlobalIndex cell_minus,
+                                                  GlobalIndex cell_plus,
+                                                  const spaces::FunctionSpace& test_space,
+                                                  const spaces::FunctionSpace& trial_space) const;
 
     struct FieldAccessPlan;
     void ensureFieldAccessPlans(const IMeshAccess& mesh);

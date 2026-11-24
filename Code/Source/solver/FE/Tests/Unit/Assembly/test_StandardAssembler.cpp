@@ -3475,6 +3475,83 @@ TEST(StandardAssemblerFaces, InteriorFacePreparesBothSidesConsistently) {
     EXPECT_NEAR(system.getVectorEntry(11), 0.0, 1e-12);
 }
 
+/// Records the quadrature of both sides of each interior face: the point
+/// counts and the largest distance between the physical points of the two
+/// sides.
+class InteriorFaceRuleProbeKernel final : public AssemblyKernel {
+public:
+    [[nodiscard]] RequiredData getRequiredData() const override
+    {
+        return RequiredData::IntegrationWeights | RequiredData::PhysicalPoints;
+    }
+    void computeCell(const AssemblyContext& /*ctx*/, KernelOutput& /*output*/) override {}
+    [[nodiscard]] bool hasInteriorFace() const noexcept override { return true; }
+
+    void computeInteriorFace(const AssemblyContext& ctx_minus,
+                             const AssemblyContext& ctx_plus,
+                             KernelOutput& output_minus,
+                             KernelOutput& output_plus,
+                             KernelOutput& coupling_minus_plus,
+                             KernelOutput& coupling_plus_minus) override
+    {
+        n_minus = ctx_minus.numQuadraturePoints();
+        n_plus = ctx_plus.numQuadraturePoints();
+        max_point_distance = 0.0;
+        for (LocalIndex q = 0; q < std::min(n_minus, n_plus); ++q) {
+            const auto a = ctx_minus.physicalPoint(q);
+            const auto b = ctx_plus.physicalPoint(q);
+            max_point_distance =
+                std::max({max_point_distance, std::abs(a[0] - b[0]), std::abs(a[1] - b[1]), std::abs(a[2] - b[2])});
+        }
+        for (auto* output : {&output_minus, &output_plus, &coupling_minus_plus, &coupling_plus_minus}) {
+            output->local_matrix.clear();
+            output->local_vector.clear();
+            output->has_matrix = false;
+            output->has_vector = false;
+        }
+    }
+
+    LocalIndex n_minus{0};
+    LocalIndex n_plus{0};
+    Real max_point_distance{-1.0};
+};
+
+// The two sides of an interior face between a Q1 and a Q3 hexahedron (a space
+// whose order depends on the cell) integrate with one rule: the same number of
+// points at the same physical points, so a kernel that loops over the minus
+// points may read the plus side at the same index.
+TEST(StandardAssemblerFaces, InteriorFaceSidesShareOneRuleAcrossOrders)
+{
+    TwoHexStackedMeshAccess mesh;
+    spaces::AdaptiveSpace space;
+    space.add_level(1, std::make_shared<spaces::L2Space>(ElementType::Hex8, 1));
+    space.add_level(3, std::make_shared<spaces::L2Space>(ElementType::Hex8, 3));
+    space.resize_element_orders(2);
+    space.set_element_order(0, 1);
+    space.set_element_order(1, 3);
+    const auto n0 = static_cast<GlobalIndex>(space.dofs_per_element(0));
+    const auto n1 = static_cast<GlobalIndex>(space.dofs_per_element(1));
+    dofs::DofMap dof_map(2, n0 + n1, static_cast<LocalIndex>(std::max(n0, n1)));
+    std::vector<GlobalIndex> cell0(static_cast<std::size_t>(n0));
+    std::vector<GlobalIndex> cell1(static_cast<std::size_t>(n1));
+    std::iota(cell0.begin(), cell0.end(), GlobalIndex{0});
+    std::iota(cell1.begin(), cell1.end(), n0);
+    dof_map.setCellDofs(0, cell0);
+    dof_map.setCellDofs(1, cell1);
+    dof_map.setNumDofs(n0 + n1);
+    dof_map.setNumLocalDofs(n0 + n1);
+    dof_map.finalize();
+
+    StandardAssembler assembler;
+    assembler.setDofMap(dof_map);
+    InteriorFaceRuleProbeKernel kernel;
+    DenseSystemView system(n0 + n1);
+    EXPECT_TRUE(assembler.assembleInteriorFaces(mesh, space, space, kernel, system, &system).success);
+    EXPECT_GT(kernel.n_minus, 0);
+    EXPECT_EQ(kernel.n_minus, kernel.n_plus);
+    EXPECT_NEAR(kernel.max_point_distance, 0.0, 1e-12);
+}
+
 TEST(StandardAssemblerFaces,
      InteriorStabilizationRejectsOrphanSnapshotMetadata) {
     TwoHexStackedMeshAccess mesh;

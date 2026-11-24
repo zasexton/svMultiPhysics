@@ -5658,8 +5658,10 @@ void StandardAssembler::assembleInteriorFaceItem(const InteriorFaceLoop& loop,
     face_local_index_time += face_now() - stage_start;
 
     stage_start = face_now();
+    const int face_order =
+        twoSidedFacePolynomialOrder(mesh, cell_minus, cell_plus, test_space, trial_space);
     prepareContextFace(context_, mesh, face_id, cell_minus, local_face_minus, test_space, trial_space,
-                       required_data, ContextType::InteriorFace);
+                       required_data, ContextType::InteriorFace, {}, false, false, face_order);
     face_prepare_minus_time += face_now() - stage_start;
 
     stage_start = face_now();
@@ -5689,7 +5691,7 @@ void StandardAssembler::assembleInteriorFaceItem(const InteriorFaceLoop& loop,
 
     stage_start = face_now();
     prepareContextFace(context_plus, mesh, face_id, cell_plus, local_face_plus, test_space, trial_space,
-                       required_data, ContextType::InteriorFace, align_plus);
+                       required_data, ContextType::InteriorFace, align_plus, false, false, face_order);
     face_prepare_plus_time += face_now() - stage_start;
 
     stage_start = face_now();
@@ -6369,8 +6371,10 @@ AssemblyResult StandardAssembler::assembleInterfaceFaces(
         plus_col_dofs = getCellDofsCached(mesh, cell_plus, col_dof_map_, col_dof_offset_);
 
         // Prepare contexts for both sides
+        const int face_order =
+            twoSidedFacePolynomialOrder(mesh, cell_minus, cell_plus, test_space, trial_space);
         prepareContextFace(context_, mesh, face_id, cell_minus, local_face_minus, test_space, trial_space,
-                           required_data, ContextType::InteriorFace);
+                           required_data, ContextType::InteriorFace, {}, false, false, face_order);
         context_.setMaterialState(nullptr, nullptr, 0u, 0u);
         context_.setTimeIntegrationContext(time_integration_);
         context_.setHistoryWeights(history_weights_);
@@ -6391,7 +6395,7 @@ AssemblyResult StandardAssembler::assembleInterfaceFaces(
                                cell_nodes_minus, cell_nodes_plus, align_plus_storage);
 
         prepareContextFace(context_plus, mesh, face_id, cell_plus, local_face_plus, test_space, trial_space,
-                           required_data, ContextType::InteriorFace, align_plus);
+                           required_data, ContextType::InteriorFace, align_plus, false, false, face_order);
         context_plus.setMaterialState(nullptr, nullptr, 0u, 0u);
         context_plus.setTimeIntegrationContext(time_integration_);
         context_plus.setHistoryWeights(history_weights_);
@@ -17178,6 +17182,22 @@ AssemblyResult StandardAssembler::assembleCellsFused(
     return result;
 }
 
+int StandardAssembler::twoSidedFacePolynomialOrder(const IMeshAccess& mesh,
+                                                    GlobalIndex cell_minus,
+                                                    GlobalIndex cell_plus,
+                                                    const spaces::FunctionSpace& test_space,
+                                                    const spaces::FunctionSpace& trial_space) const
+{
+    int order = 0;
+    for (const GlobalIndex cell : {cell_minus, cell_plus}) {
+        const ElementType cell_type = mesh.getCellType(cell);
+        order = std::max({order,
+                          getElement(test_space, cell, cell_type).polynomial_order(),
+                          getElement(trial_space, cell, cell_type).polynomial_order()});
+    }
+    return order;
+}
+
 void StandardAssembler::prepareContextFace(
     AssemblyContext& context,
     const IMeshAccess& mesh,
@@ -17190,7 +17210,8 @@ void StandardAssembler::prepareContextFace(
     ContextType type,
     std::span<const LocalIndex> align_facet_to_reference,
     bool force_test_face_reference_coords,
-    bool force_trial_face_reference_coords)
+    bool force_trial_face_reference_coords,
+    int face_polynomial_order)
 {
     // Face assembly reuses cell-assembly scratch arrays (scratch_ref_gradients_, etc.).
     // Invalidate the cell-basis fast-path cache so the next prepareBasis call
@@ -17240,9 +17261,13 @@ void StandardAssembler::prepareContextFace(
                      "StandardAssembler::prepareContextFace: face-based trial space element type must match the active face topology");
     }
 
-    // 4. Create a face quadrature rule
+    // 4. Create a face quadrature rule (both sides of a two-sided face pass
+    // one order, so they take one rule)
     const int quad_order = quadrature::QuadratureFactory::recommended_order(
-        std::max(test_element.polynomial_order(), trial_element.polynomial_order()), false);
+        face_polynomial_order >= 0
+            ? face_polynomial_order
+            : std::max(test_element.polynomial_order(), trial_element.polynomial_order()),
+        false);
     auto quad_rule = quadrature::QuadratureFactory::create_pinned(face_type, quad_order);
 
     const auto n_qpts = static_cast<LocalIndex>(quad_rule->num_points());
