@@ -114,6 +114,49 @@ CellData:
 Unsupported scopes fail with a diagnostic naming the derived result, scope, and
 policy.
 
+## Scalar History
+
+Scalars worth a time series (a quantity, a scalar global field, an auxiliary
+input, a state or output of a 0D model) are recorded on the FE system with
+`post::record`, `post::recordAuxiliaryState` and `post::recordAuxiliaryOutput`
+(`FE/PostProcessing/ScalarHistory.h`), or `F.record` in a formulation builder.
+Recording installs nothing. The Navier-Stokes RCR, RCRCR and resistance
+outlets record the flow rate `Q`, their states (`X`; `P1`, `P2`) and `P_out`;
+the Poisson outlets record `Q`, `X` and their flux.
+
+A deck writes the history with one general key (decision D64, item 5):
+
+```xml
+<GeneralSimulationParameters>
+  <Write_scalar_history> true </Write_scalar_history>
+</GeneralSimulationParameters>
+```
+
+Off by default. With the key on, the new solver writes `scalar_history.csv` in
+the results folder (`Save_results_in_folder`, else the working directory): a
+header `step,time,<column>,...` with columns named `<instance>.<value>` (for
+example `rcr_windkessel_b3.P_out`), then one row per accepted time step (one
+row, step 1, for a steady solve). Each number is the shortest decimal that
+reads back to the same double; quantities are summed exactly and the other
+values are those of rank 0, so for the same states the file is the same at
+any rank count. Rank 0 writes it.
+
+Each kind of column samples its own stage of the accepted step:
+
+| Column | Value written for step n+1 |
+|---|---|
+| quantity (`post::record(system, quantity)`) | recomputed from the accepted state u_{n+1} |
+| global field | its value in the accepted state u_{n+1} |
+| auxiliary input (the outlets' `Q`) | the input's cache: its value at the last refresh of the step; for an input refreshed at every nonlinear iteration, the stage state of the last residual evaluation (backward Euler: u_{n+1}; first-order generalized alpha: u_n + alpha_f (u_{n+1} - u_n)) |
+| auxiliary state (`X`, `P1`, `P2`) | the committed state after the step |
+| auxiliary output (`P_out`, the Poisson flux) | the output at the committed state with the cached inputs |
+
+So for an RCR outlet `P_out = X + Rp Q` holds row by row with the written
+`Q`, while under generalized alpha that `Q` is the flow of the stage state,
+not of u_{n+1}; a quantity of the same integrand gives the flow of u_{n+1}
+(`test_GlobalMultiplier.cpp`,
+`AGeneralizedAlphaOutletHistorySamplesEachColumnAtItsStage`).
+
 ## Deferred Scope Design Notes
 
 `Face` fields should attach to `EntityKind::Face` and initially remain mesh

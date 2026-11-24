@@ -15,6 +15,7 @@
 #include "FE/Forms/StandardBCs.h"
 #include "FE/Auxiliary/AuxiliaryBindings.h"
 #include "FE/Auxiliary/AuxiliaryModelDSL.h"
+#include "FE/PostProcessing/ScalarHistory.h"
 #include "FE/Systems/FESystem.h"
 #include "FE/Systems/FunctionalForms.h"
 
@@ -102,6 +103,10 @@ namespace detail {
                 .bind("Q", Q)
                 .initialState({{"P", Pd}})
         );
+        // Q, the 0D states and the flux are columns of the scalar history,
+        // written with <Write_scalar_history>.
+        FE::post::record(system, Q, resistive.instanceName() + ".Q");
+        FE::post::recordAuxiliaryOutput(system, resistive, "flux");
         return std::make_unique<FE::forms::bc::NaturalBC>(marker, resistive.output("flux"));
     }
 
@@ -114,6 +119,9 @@ namespace detail {
             .bind("Q", Q)
             .initialState({{"X", bc.X0}})
     );
+    FE::post::record(system, Q, rcr.instanceName() + ".Q");
+    FE::post::recordAuxiliaryState(system, rcr, "X");
+    FE::post::recordAuxiliaryOutput(system, rcr, "flux");
     return std::make_unique<FE::forms::bc::NaturalBC>(marker, rcr.output("flux"));
 }
 

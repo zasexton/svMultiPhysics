@@ -1527,6 +1527,7 @@ class EquationParameters : public ParameterLists
 ///   <Warning> 0 </Warning>
 ///   <Debug> 0 </Debug>
 ///   <Simulation_requires_remeshing> true </Simulation_requires_remeshing>
+///   <Write_scalar_history> true </Write_scalar_history>
 /// </GeneralSimulationParameters>
 /// \endcode
 class GeneralSimulationParameters : public ParameterLists 
@@ -1547,6 +1548,11 @@ class GeneralSimulationParameters : public ParameterLists
     Parameter<bool> save_averaged_results;
     Parameter<bool> combine_time_series;
     Parameter<bool> save_results_to_vtk_format;
+    // Writes scalar_history.csv in the results folder (new solver): one row
+    // per accepted step with every scalar the formulations record, such as
+    // the flow rate, the states and the pressure of a 0D outlet
+    // (FE/PostProcessing/ScalarHistory.h).  Off by default.
+    Parameter<bool> write_scalar_history;
     Parameter<bool> simulation_requires_remeshing;
     Parameter<bool> start_averaging_from_zero;
     Parameter<bool> verbose;

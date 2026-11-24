@@ -1034,7 +1034,7 @@ TEST(NavierStokesOutletFactory, NewOverload_RCR_EndToEnd)
     EXPECT_NEAR(outputs[out_slot], 55.0, 1e-8);
 }
 
-TEST(NavierStokesOutletFactory, RecordedOutletsWriteTheirFlowStatesAndPressureToTheScalarHistory)
+TEST(NavierStokesOutletFactory, OutletsRecordTheirFlowStatesAndPressureInTheScalarHistory)
 {
     // u = (0, 0, -1) on the outlet face of area 0.5: Q = 0.5.
     const auto run = [](const auto& options,
@@ -1049,9 +1049,7 @@ TEST(NavierStokesOutletFactory, RecordedOutletsWriteTheirFlowStatesAndPressureTo
         const auto p_field = sys.addField(FieldSpec{.name = "p", .space = p_space, .components = 1});
         sys.addOperator("ns");
         const auto u = FormExpr::stateField(u_field, *u_space, "u");
-        auto opts = options(marker);
-        opts.record_history = true;
-        auto bc = Factories::toCoupledOutflowBC(opts, sys, u, FormExpr::constant(1.0), marker);
+        auto bc = Factories::toCoupledOutflowBC(options(marker), sys, u, FormExpr::constant(1.0), marker);
         ASSERT_NE(bc, nullptr);
         EXPECT_EQ(svmp::FE::post::scalarHistoryHeader(sys), expected_header);
 

@@ -21,6 +21,7 @@
 #include "FE/Backends/Utils/BackendOptions.h"
 #include "FE/Constraints/VertexDirichletConstraint.h"
 #include "FE/Dofs/EntityDofMap.h"
+#include "FE/PostProcessing/ScalarHistory.h"
 #include "FE/Spaces/H1Space.h"
 #include "FE/Systems/FESystem.h"
 #include "FE/Systems/TimeIntegrator.h"
@@ -863,6 +864,10 @@ TEST(PoissonModule, CoupledNeumannRCRUsesModernAuxiliaryPath)
 
     const auto out_slot = system.auxiliaryOutputSlotOf("poisson_rcr_7", "flux");
     EXPECT_NE(out_slot, std::string::npos);
+
+    // The input, the state and the flux are columns of the scalar history.
+    EXPECT_EQ(FE::post::scalarHistoryHeader(system),
+              "step,time,poisson_rcr_7.Q,poisson_rcr_7.X,poisson_rcr_7.flux\n");
 }
 
 TEST(PoissonModule, BoundaryScalarValueAcceptsFormExpr)

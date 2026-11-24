@@ -2659,6 +2659,7 @@ GeneralSimulationParameters::GeneralSimulationParameters()
       !required, transient_time_integration_scheme);
   set_parameter("Verbose", false, !required, verbose);
   set_parameter("Warning", false, !required, warning);
+  set_parameter("Write_scalar_history", false, !required, write_scalar_history);
 }
 
 void GeneralSimulationParameters::print_parameters()

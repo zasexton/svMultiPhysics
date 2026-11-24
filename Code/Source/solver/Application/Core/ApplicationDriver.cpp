@@ -260,6 +260,38 @@ void writeEffectiveConfigurationArtifact(
           .rootOnly());
 }
 
+// The writer of scalar_history.csv in the results folder when the deck sets
+// <Write_scalar_history>: one row per accepted step with every scalar the
+// formulations record (FE/PostProcessing/ScalarHistory.h).  Null when the
+// key is off.
+std::shared_ptr<svmp::FE::post::ScalarHistoryWriter> makeScalarHistoryWriter(
+    const application::core::SimulationComponents& sim,
+    const Parameters& params)
+{
+  const auto& general = params.general_simulation_parameters;
+  if (!general.write_scalar_history.value()) {
+    return nullptr;
+  }
+  std::filesystem::path directory = ".";
+  if (general.save_results_in_folder.defined() &&
+      !general.save_results_in_folder.value().empty()) {
+    directory = general.save_results_in_folder.value();
+  }
+  std::filesystem::create_directories(directory);
+  const auto path = directory / "scalar_history.csv";
+  auto writer = std::make_shared<svmp::FE::post::ScalarHistoryWriter>(
+      *sim.fe_system, path.string(),
+      svmp::FE::systems::CollectiveCommunicator(
+          svmp::FE::systems::activeMeshCommunicator(*sim.fe_system)));
+  svmp::FE::logRecord(
+      svmp::FE::LogRecord("ApplicationDriver", "writing scalar history")
+          .diagnostic("scalar_history")
+          .quoted("path", path.string())
+          .integer("columns", svmp::FE::post::scalarHistoryColumns(*sim.fe_system).size())
+          .rootOnly());
+  return writer;
+}
+
 svmp::MeshComm activeFESystemCommunicator(
     const svmp::FE::systems::FESystem& system)
 {
@@ -7055,6 +7087,17 @@ void ApplicationDriver::runSteadyState(SimulationComponents& sim, const Paramete
       /*accepted_step=*/1u,
       solve_time,
       sim.time_history->dt());
+  // The scalar history (<Write_scalar_history>) of a steady solve: one row,
+  // step 1 as in the output.
+  if (auto scalar_history = makeScalarHistoryWriter(sim, params)) {
+    svmp::FE::systems::SystemStateView state;
+    state.time = solve_time;
+    state.dt = sim.time_history->dt();
+    state.effective_dt = state.dt;
+    state.u = sim.time_history->uSpan();
+    state.u_vector = &sim.time_history->u();
+    scalar_history->write(/*step=*/1u, state);
+  }
   outputResults(sim, params, /*step=*/1, solve_time, pvd);
 
   const auto comm = svmp::MeshComm::world();
@@ -9919,23 +9962,12 @@ void ApplicationDriver::runTransient(SimulationComponents& sim, const Parameters
   // The cut geometry's step participants: the entry part before each of its
   // callbacks, the exit part before the discard and after the commit.
   callbacks = cut_geometry_step_participants.callbacks(std::move(callbacks));
-  // The scalar history, scalar_history.csv in the results folder, after every
-  // other participant of an accepted step: written when a formulation records
-  // a scalar (FE/PostProcessing/ScalarHistory.h), which none does by default.
-  if (!svmp::FE::post::scalarHistoryColumns(*sim.fe_system).empty()) {
-    std::filesystem::path history_dir = ".";
-    if (params.general_simulation_parameters.save_results_in_folder.defined() &&
-        !params.general_simulation_parameters.save_results_in_folder.value().empty()) {
-      history_dir = params.general_simulation_parameters.save_results_in_folder.value();
-    }
-    std::filesystem::create_directories(history_dir);
+  // The scalar history (<Write_scalar_history>), after every other
+  // participant of an accepted step.
+  if (auto scalar_history = makeScalarHistoryWriter(sim, params)) {
     svmp::FE::timestepping::StepParticipantList scalar_history_participants;
     scalar_history_participants.add(
-        std::make_shared<svmp::FE::post::ScalarHistoryWriter>(
-            *sim.fe_system, (history_dir / "scalar_history.csv").string(),
-            svmp::FE::systems::CollectiveCommunicator(
-                svmp::FE::systems::activeMeshCommunicator(*sim.fe_system))),
-        svmp::FE::timestepping::StepParticipantOrder::AfterBase);
+        std::move(scalar_history), svmp::FE::timestepping::StepParticipantOrder::AfterBase);
     callbacks = scalar_history_participants.callbacks(std::move(callbacks));
   }
 

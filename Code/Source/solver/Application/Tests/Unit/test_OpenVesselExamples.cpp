@@ -983,6 +983,43 @@ TEST(GeneralSimulationParameters, ParsesOptionalStartTime)
   EXPECT_DOUBLE_EQ(general.start_time.value(), 0.9);
 }
 
+TEST(GeneralSimulationParameters, ReadsWriteScalarHistoryOffByDefault)
+{
+  const auto read = [](const std::string& extra) {
+    tinyxml2::XMLDocument doc;
+    const std::string text = R"xml(
+<svMultiPhysicsFile>
+  <GeneralSimulationParameters>
+    <Continue_previous_simulation>false</Continue_previous_simulation>
+    <Number_of_time_steps>2</Number_of_time_steps>
+    <Save_results_to_VTK_format>true</Save_results_to_VTK_format>
+    <Start_saving_after_time_step>1</Start_saving_after_time_step>
+    <Time_step_size>0.000625</Time_step_size>
+)xml" + extra + R"xml(
+  </GeneralSimulationParameters>
+</svMultiPhysicsFile>
+)xml";
+    EXPECT_EQ(doc.Parse(text.c_str()), tinyxml2::XML_SUCCESS) << doc.ErrorStr();
+    auto general = std::make_unique<GeneralSimulationParameters>();
+    general->set_values(doc.FirstChildElement("svMultiPhysicsFile"));
+    return general;
+  };
+
+  const auto omitted = read("");
+  EXPECT_FALSE(omitted->write_scalar_history.defined());
+  EXPECT_FALSE(omitted->write_scalar_history.value());
+
+  const auto on = read("    <Write_scalar_history> true </Write_scalar_history>\n");
+  EXPECT_TRUE(on->write_scalar_history.defined());
+  EXPECT_TRUE(on->write_scalar_history.value());
+
+  const auto off = read("    <Write_scalar_history>false</Write_scalar_history>\n");
+  EXPECT_TRUE(off->write_scalar_history.defined());
+  EXPECT_FALSE(off->write_scalar_history.value());
+
+  EXPECT_THROW((void)read("    <Write_scalar_history>sometimes</Write_scalar_history>\n"), std::exception);
+}
+
 TEST(GeneralSimulationParameters, ParsesOptionalTransientTimeIntegrationScheme)
 {
   tinyxml2::XMLDocument explicit_doc;

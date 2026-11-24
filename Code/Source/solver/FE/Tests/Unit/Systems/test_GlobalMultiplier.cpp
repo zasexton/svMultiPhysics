@@ -43,6 +43,7 @@
 #include "Spaces/ProductSpace.h"
 #include "Sparsity/SparsityPattern.h"
 #include "Constraints/GaugeRegistry.h"
+#include "Auxiliary/AuxiliaryModelDSL.h"
 #include "Systems/FESystem.h"
 #include "Systems/FieldBinding.h"
 #include "Systems/FormulationBuilder.h"
@@ -1671,6 +1672,148 @@ TEST(GlobalTimeDerivative, TheScalarHistoryRecordsAGlobalFieldAndAQuantityAfterE
         EXPECT_EQ(readReal(row[2]), values[k][0]);
         // w is uniform on the 1 x 0.5 rectangle.
         EXPECT_NEAR(readReal(row[3]), 0.5 * values[k][1], 1e-13);
+    }
+}
+
+TEST(GlobalTimeDerivative, AGeneralizedAlphaOutletHistorySamplesEachColumnAtItsStage)
+{
+    // w obeys C w' + w/R + P_out on the right edge = f(t); its flow through
+    // the right edge, Q, drives an RCR circuit C_o X' = Q - (X - Pd)/Rd whose
+    // pressure P_out = X + Rp Q loads that edge.  f varies, so Q varies.
+    constexpr Real Rp = 0.3;
+    constexpr Real Co = 0.2;
+    constexpr Real Rd = 1.5;
+    constexpr Real Pd = 0.1;
+    constexpr Real X0 = 0.4;
+    constexpr Real kRhoInf = 0.5;
+    auto h1 = quadSpace(1);
+    FESystem sys(buildGrid(2, 1, 1.0, 0.5, 1));
+    const auto w_id = sys.addField(FieldSpec{.name = "w", .space = h1});
+    sys.addOperator("ode");
+    const auto w = forms::StateField(w_id, *h1, "w");
+    const auto v = forms::TestField(w_id, *h1, "v");
+    const auto flow = quantity("flow", FunctionalKind::Integral, w.ds(kRight));
+    const auto Q = sys.auxiliaryInput(quantity("", FunctionalKind::Integral, w.ds(kRight)),
+                                      AuxiliaryInputUpdateSchedule::EachNonlinearIteration);
+    static const auto rcr_model = aux::model("history_rcr", [](ModelFacade& m) {
+        auto q = m.input("Q");
+        auto X = m.state("X");
+        auto [rp, co, rd, pd] = m.params("Rp", "C", "Rd", "Pd");
+        m << ddt(X) == (q - (X - pd) / rd) / co;
+        m << out("P_out") == X + rp * q;
+    });
+    const auto rcr = sys.deploy(use(rcr_model)
+                                    .name("outlet")
+                                    .boundary(kRight)
+                                    .monolithic()
+                                    .params({{"Rp", Rp}, {"C", Co}, {"Rd", Rd}, {"Pd", Pd}})
+                                    .bind("Q", Q)
+                                    .initialState({{"X", X0}}));
+    post::record(sys, flow);
+    post::record(sys, Q, "outlet.Q");
+    post::recordAuxiliaryState(sys, rcr, "X");
+    post::recordAuxiliaryOutput(sys, rcr, "P_out");
+    const auto C = FormExpr::constant(kCapacitance);
+    const auto R = FormExpr::constant(kResistance);
+    const auto f = FormExpr::constant(2.0) + FormExpr::constant(4.0) * FormExpr::time();
+    (void)installFormulation(sys, "ode", {w_id},
+                             ((C * w.dt(1) + w / R - f) * v).dx() + (rcr.output("P_out") * v).ds(kRight));
+    sys.setup();
+    sys.finalizeAuxiliaryLayout();
+
+    auto factory = backends::BackendFactory::create(backends::BackendKind::Eigen);
+    ASSERT_NE(factory, nullptr);
+    backends::SolverOptions direct;
+    direct.method = backends::SolverMethod::Direct;
+    direct.preconditioner = backends::PreconditionerType::None;
+    auto linear = factory->createLinearSolver(direct);
+    TransientSystem transient(sys, std::make_shared<BackwardDifferenceIntegrator>());
+    const auto n = sys.dofHandler().getNumDofs();
+    auto history = timestepping::TimeHistory::allocate(*factory, n, 2);
+    for (int k = 1; k <= history.historyDepth(); ++k) {
+        auto view = history.uPrevK(k).createAssemblyView();
+        view->beginAssemblyPhase();
+        for (GlobalIndex i = 0; i < n; ++i) {
+            view->addVectorEntry(i, kInitialValue, assembly::AddMode::Insert);
+        }
+        view->finalizeAssembly();
+    }
+    history.resetCurrentToPrevious();
+    const double dt = 0.05;
+    history.setPrevDt(dt);
+
+    timestepping::TimeLoopOptions options;
+    options.t0 = 0.0;
+    options.t_end = 0.25;
+    options.dt = dt;
+    options.max_steps = 10;
+    options.scheme = timestepping::SchemeKind::GeneralizedAlpha;
+    options.generalized_alpha_rho_inf = kRhoInf;
+    options.newton.residual_op = "ode";
+    options.newton.jacobian_op = "ode";
+    options.newton.max_iterations = 8;
+    options.newton.abs_tolerance = 1e-12;
+    options.newton.rel_tolerance = 0.0;
+
+    // The flow at the accepted state u_{n+1} and at the stage state
+    // u_n + alpha_f (u_{n+1} - u_n) of first-order generalized alpha.
+    const Real alpha_f = Real{1.0} / (Real{1.0} + kRhoInf);
+    const auto flow_at = [&](std::span<const Real> u, double time) {
+        SystemStateView state;
+        state.time = time;
+        state.dt = dt;
+        state.u = u;
+        const std::vector<forms::FormExpr> forms{flow.form()};
+        return evaluateFunctionalForms(sys, forms, state, CollectiveCommunicator{}).at(0).value;
+    };
+    std::vector<std::array<Real, 2>> expected;  // {Q(u_{n+1}), Q(stage)}
+    const auto path = std::filesystem::temp_directory_path() /
+                      ("svmp_outlet_history_" + std::to_string(::getpid()) + ".csv");
+    timestepping::TimeLoopCallbacks callbacks;
+    callbacks.on_nonlinear_done = [&](const timestepping::TimeHistory& h, const timestepping::NewtonReport& report) {
+        EXPECT_TRUE(report.converged);
+        const auto u = h.uSpan();
+        const auto u_prev = h.uPrevSpan();
+        std::vector<Real> stage(u.size());
+        for (std::size_t i = 0; i < u.size(); ++i) {
+            stage[i] = u_prev[i] + alpha_f * (u[i] - u_prev[i]);
+        }
+        expected.push_back(std::array<Real, 2>{flow_at(u, h.time() + h.dt()),
+                                               flow_at(stage, h.time() + alpha_f * h.dt())});
+    };
+    timestepping::StepParticipantList participants;
+    participants.add(std::make_shared<post::ScalarHistoryWriter>(sys, path.string(), CollectiveCommunicator{}),
+                     timestepping::StepParticipantOrder::AfterBase);
+    callbacks = participants.callbacks(std::move(callbacks));
+    timestepping::TimeLoop loop(options);
+    const auto report = loop.run(transient, *factory, *linear, history, callbacks);
+    EXPECT_TRUE(report.success);
+
+    const auto rows = readCsv(path);
+    std::filesystem::remove(path);
+    ASSERT_EQ(expected.size(), 5u);
+    ASSERT_EQ(rows.size(), 6u);
+    EXPECT_EQ(rows[0], (std::vector<std::string>{"step", "time", "flow", "outlet.Q", "outlet.X", "outlet.P_out"}));
+    Real previous_x = X0;
+    for (std::size_t k = 0; k < expected.size(); ++k) {
+        SCOPED_TRACE("step " + std::to_string(k + 1));
+        const auto& row = rows[k + 1];
+        ASSERT_EQ(row.size(), 6u);
+        const Real measured = readReal(row[2]);
+        const Real input = readReal(row[3]);
+        const Real x = readReal(row[4]);
+        const Real p_out = readReal(row[5]);
+        // The quantity is recomputed from the accepted state.
+        EXPECT_NEAR(measured, expected[k][0], 1e-13);
+        // The input column is the input's cache: the flow at the stage state
+        // of the last residual evaluation, not at the accepted state.
+        EXPECT_NEAR(input, expected[k][1], 1e-13);
+        EXPECT_GT(std::abs(input - measured), 1e-6);
+        // The pressure is the output at the committed state X_{n+1} with the
+        // cached input.
+        EXPECT_NEAR(p_out, x + Rp * input, 1e-13);
+        EXPECT_NE(x, previous_x);
+        previous_x = x;
     }
 }
 

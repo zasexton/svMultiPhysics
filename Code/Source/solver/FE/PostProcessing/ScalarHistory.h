@@ -29,6 +29,14 @@
  * line "<step>,<time>,<value>,...", each number the shortest decimal that
  * reads back to the same double (std::to_chars).
  *
+ * Each column samples its own stage of an accepted step: a quantity is
+ * recomputed from the accepted state, a global field is read from it, an
+ * auxiliary input gives its cache (for an input refreshed at every nonlinear
+ * iteration, its value at the stage state of the last residual evaluation:
+ * u_{n+1} under backward Euler, u_n + alpha_f (u_{n+1} - u_n) under
+ * first-order generalized alpha), and auxiliary states and outputs are read
+ * at the committed state, outputs with the cached inputs.
+ *
  * The values are the same on every rank and at every rank count for the
  * same state: a quantity is evaluated with exact sums
  * (evaluateFunctionalForms), a global field is read on its owner, rank 0,

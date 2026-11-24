@@ -538,10 +538,6 @@ struct IncompressibleNavierStokesVMSOptions {
 
         std::string functional_name{};
         std::string state_name{};
-
-        // Records Q, the state X and P_out in the scalar history
-        // (FE/PostProcessing/ScalarHistory.h); off by default.
-        bool record_history{false};
     };
 
     /**
@@ -574,10 +570,6 @@ struct IncompressibleNavierStokesVMSOptions {
         ScalarValue backflow_beta{0.0};
 
         std::string functional_name{};
-
-        // Records Q, the states P1 and P2 and P_out in the scalar history
-        // (FE/PostProcessing/ScalarHistory.h); off by default.
-        bool record_history{false};
     };
 
     std::string velocity_field_name{"u"};

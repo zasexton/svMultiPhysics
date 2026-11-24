@@ -492,10 +492,10 @@ namespace detail {
                 .bind("Q", Q)
                 .initialState({{"P", Pd}})
         );
-        if (bc.record_history) {
-            FE::post::record(system, Q, resistive.instanceName() + ".Q");
-            FE::post::recordAuxiliaryOutput(system, resistive, "P_out");
-        }
+        // Q, the 0D states and P_out are columns of the scalar history,
+        // written with <Write_scalar_history>.
+        FE::post::record(system, Q, resistive.instanceName() + ".Q");
+        FE::post::recordAuxiliaryOutput(system, resistive, "P_out");
         const auto p_out = resistive.output("P_out");
         const auto flux = -p_out * n - beta * rho * max_backflow * u;
         return std::make_unique<FE::forms::bc::NaturalBC>(target, flux);
@@ -510,11 +510,9 @@ namespace detail {
                 .bind("Q", Q)
                 .initialState({{"X", bc.X0}})
         );
-        if (bc.record_history) {
-            FE::post::record(system, Q, rcr.instanceName() + ".Q");
-            FE::post::recordAuxiliaryState(system, rcr, "X");
-            FE::post::recordAuxiliaryOutput(system, rcr, "P_out");
-        }
+        FE::post::record(system, Q, rcr.instanceName() + ".Q");
+        FE::post::recordAuxiliaryState(system, rcr, "X");
+        FE::post::recordAuxiliaryOutput(system, rcr, "P_out");
         const auto p_out = rcr.output("P_out");
         const auto flux = -p_out * n - beta * rho * max_backflow * u;
         return std::make_unique<FE::forms::bc::NaturalBC>(target, flux);
@@ -568,12 +566,12 @@ namespace detail {
             .bind("Q", Q)
             .initialState({{"P1", bc.P10}, {"P2", bc.P20}})
     );
-    if (bc.record_history) {
-        FE::post::record(system, Q, rcrcr.instanceName() + ".Q");
-        FE::post::recordAuxiliaryState(system, rcrcr, "P1");
-        FE::post::recordAuxiliaryState(system, rcrcr, "P2");
-        FE::post::recordAuxiliaryOutput(system, rcrcr, "P_out");
-    }
+    // Q, the 0D states and P_out are columns of the scalar history, written
+    // with <Write_scalar_history>.
+    FE::post::record(system, Q, rcrcr.instanceName() + ".Q");
+    FE::post::recordAuxiliaryState(system, rcrcr, "P1");
+    FE::post::recordAuxiliaryState(system, rcrcr, "P2");
+    FE::post::recordAuxiliaryOutput(system, rcrcr, "P_out");
 
     const auto p_out = rcrcr.output("P_out");
     const auto flux = -p_out * n - beta * rho * max_backflow * u;
