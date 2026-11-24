@@ -566,7 +566,7 @@ using constraints::constraintSemanticFingerprint;
 
 [[nodiscard]] bool nativeFaceRankOnePromotionEnabled() noexcept
 {
-    const char* env = std::getenv("SVMP_DISABLE_MPI_NATIVE_RANK1_PROMOTION");
+    const char* env = environment::value("SVMP_DISABLE_MPI_NATIVE_RANK1_PROMOTION");
     if (env == nullptr) {
         return true;
     }

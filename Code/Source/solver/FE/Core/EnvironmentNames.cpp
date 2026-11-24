@@ -57,6 +57,7 @@ std::span<const NameDeclaration> solverCatalogue() noexcept
     constexpr const char* kLevelSetMaintenance = "FE/LevelSet/Maintenance";
     constexpr const char* kSystems = "FE/Systems";
     constexpr const char* kBoundaryReduction = "FE/Systems/BoundaryReductionService";
+    constexpr const char* kFESystem = "FE/Systems/FESystem";
     constexpr const char* kFormsInstaller = "FE/Systems/FormsInstaller";
     constexpr const char* kSystemAssembly = "FE/Systems/SystemAssembly";
     constexpr const char* kSystemSetup = "FE/Systems/SystemSetup";
@@ -607,6 +608,17 @@ std::span<const NameDeclaration> solverCatalogue() noexcept
          "logs why the nodal DOF permutation was or was not built"},
         {"SVMP_MONO_AUX_TRACE", Diagnostic, kSystems, Flag, "off", Reference,
          "traces the monolithic auxiliary coupling (vector gathers, boundary functionals, their assembly)"},
+
+        {"SVMP_DISABLE_AUX_DIRECT_COUPLING", NumericalOverride, kFESystem, Flag, "off", NonReference,
+         "drops the direct output-input coupling terms from the monolithic auxiliary Jacobian"},
+        {"SVMP_DISABLE_MPI_NATIVE_RANK1_PROMOTION", NumericalOverride, kFESystem, Flag, "off (promotion on)",
+         NonReference, "turns off the promotion of exact auxiliary coupling updates to native rank-one updates"},
+        {"SVMP_MONO_DIRECT_TRACE", Diagnostic, kFESystem, Flag, "off", Reference,
+         "traces the direct output-input coupling entries of the monolithic auxiliary assembly"},
+        {"SVMP_NEGATE_AUX_DIRECT_COUPLING", NumericalOverride, kFESystem, Flag, "off", NonReference,
+         "flips the sign of the direct auxiliary coupling terms"},
+        {"SVMP_POSITIVE_AUX_DIRECT_COUPLING", NumericalOverride, kFESystem, Flag, "off", NonReference,
+         "forces a positive sign of the direct auxiliary coupling terms (wins over the negation)"},
 
         // FE/TimeStepping: the generated-state schedule, the Newton solver and the
         // time loop.

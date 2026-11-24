@@ -1941,7 +1941,7 @@ void mixConstraintRevisionString(std::uint64_t& h,
 
 [[nodiscard]] bool nativeFaceRankOnePromotionEnabled() noexcept
 {
-    const char* env = std::getenv("SVMP_DISABLE_MPI_NATIVE_RANK1_PROMOTION");
+    const char* env = environment::value("SVMP_DISABLE_MPI_NATIVE_RANK1_PROMOTION");
     if (env == nullptr) {
         return true;
     }
@@ -1956,7 +1956,7 @@ void mixConstraintRevisionString(std::uint64_t& h,
 
 [[nodiscard]] Real auxiliaryDirectCouplingSign(bool direct_only) noexcept
 {
-    const char* force_positive = std::getenv("SVMP_POSITIVE_AUX_DIRECT_COUPLING");
+    const char* force_positive = environment::value("SVMP_POSITIVE_AUX_DIRECT_COUPLING");
     if (force_positive != nullptr) {
         while (*force_positive == ' ' || *force_positive == '\t' || *force_positive == '\n' ||
                *force_positive == '\r') {
@@ -1967,7 +1967,7 @@ void mixConstraintRevisionString(std::uint64_t& h,
         }
     }
 
-    const char* force_negative = std::getenv("SVMP_NEGATE_AUX_DIRECT_COUPLING");
+    const char* force_negative = environment::value("SVMP_NEGATE_AUX_DIRECT_COUPLING");
     if (force_negative != nullptr) {
         while (*force_negative == ' ' || *force_negative == '\t' || *force_negative == '\n' ||
                *force_negative == '\r') {
@@ -5434,7 +5434,7 @@ constexpr Real kDirectCouplingEntryTol = static_cast<Real>(1e-30);
 [[nodiscard]] bool monolithicDirectTraceEnabled() noexcept
 {
     static const bool enabled = [] {
-        const char* env = std::getenv("SVMP_MONO_DIRECT_TRACE");
+        const char* env = environment::value("SVMP_MONO_DIRECT_TRACE");
         if (env == nullptr) {
             return false;
         }
@@ -21227,7 +21227,7 @@ void FESystem::assembleMixedAuxiliaryIntoGlobal(
                                 }
 
                                 const bool disable_direct_coupling =
-                                    std::getenv("SVMP_DISABLE_AUX_DIRECT_COUPLING") != nullptr;
+                                    environment::isSet("SVMP_DISABLE_AUX_DIRECT_COUPLING");
                                 if (!disable_direct_coupling &&
                                     !ed.input_gradients.empty() && !dO_dI_active.empty() &&
                                     ed.n_inputs > 0) {
