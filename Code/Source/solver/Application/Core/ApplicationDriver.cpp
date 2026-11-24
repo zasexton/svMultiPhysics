@@ -51,6 +51,7 @@
 #include "FE/Geometry/CutQuadratureMapping.h"
 #include "FE/Interfaces/GeneratedActiveBoundaryDomain.h"
 #include "FE/Core/DeterministicParallel.h"
+#include "FE/Core/EnvironmentNames.h"
 #include "FE/Core/AggregationGuardDiagnostics.h"
 #include "FE/Core/HaloDiagnostics.h"
 #include "FE/Interfaces/ContactLineStageObservables.h"
@@ -231,6 +232,10 @@ void writeEffectiveConfigurationArtifact(
       output << artifacts[i].json;
     }
     output << "]";
+    if (const auto environment_names = svmp::FE::environment::configurationRecord();
+        !environment_names.empty()) {
+      output << ',' << environment_names;
+    }
     output << "}\n";
     output.flush();
     if (!output.good()) {

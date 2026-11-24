@@ -329,6 +329,7 @@ set(FE_CORE_HEADERS
     Core/AggregationGuardDiagnostics.h
     Core/RankLog.h
     Core/OptionSchema.h
+    Core/EnvironmentNames.h
 )
 
 set(FE_CORE_SOURCES
@@ -336,6 +337,7 @@ set(FE_CORE_SOURCES
     Core/DeterministicParallel.cpp
     Core/HaloDiagnostics.cpp
     Core/AggregationGuardDiagnostics.cpp
+    Core/EnvironmentNames.cpp
 )
 
 # Math module sources
@@ -2407,6 +2409,10 @@ if(FE_BUILD_TESTS)
                 svfe
                 ${GTEST_LIBRARIES}
         )
+        # The environment-name test checks the solver sources against the
+        # registry's catalogue.
+        target_compile_definitions(test_fe_core PRIVATE
+            SVMP_SOLVER_SOURCE_DIR="${CMAKE_CURRENT_SOURCE_DIR}/..")
         svmp_add_gtest(FE_Core_Tests TARGET test_fe_core)
         # FE_LOG_LEVEL is read when the logger is first used, so the
         # environment-driven logger tests run in their own process.
