@@ -532,6 +532,30 @@ TEST(FESystem, MaterialStateSetupRejectsOrphanSnapshotInterfaceRule)
     RecordProperty("system_setup_snapshot_revision_negative_case_count", 1);
 }
 
+// A kernel with material state on a cut volume is refused at setup by name:
+// assembly binds a cut rule's state by its parent cell, so two rules of one
+// kernel on one cell shared one cell's storage (the second rule's points read
+// the first rule's state).
+TEST(FESystem, MaterialStateOnCutVolumesIsRefusedAtSetup)
+{
+    auto mesh = build_single_quad_mesh();
+    auto space = std::make_shared<H1Space>(ElementType::Quad4, 1);
+
+    FESystem system(mesh);
+    const auto field = system.addField(FieldSpec{.name = "u", .space = space, .components = 1});
+    system.addOperator("stateful");
+    system.addCutVolumeKernel("stateful", /*interface_marker=*/5, svmp::FE::geometry::CutIntegrationSide::Negative,
+                              field, std::make_shared<MaterialStateSetupKernel>());
+    try {
+        system.setup();
+        ADD_FAILURE() << "a stateful cut-volume kernel was accepted";
+    } catch (const std::exception& error) {
+        const std::string what = error.what();
+        EXPECT_NE(what.find("cut-volume term of operator 'stateful'"), std::string::npos) << what;
+        EXPECT_NE(what.find("later design decision"), std::string::npos) << what;
+    }
+}
+
 TEST(FESystem, CoordinateConfigurationIsPropagatedToMeshAndSearchAccess)
 {
     auto mesh = build_single_quad_mesh();

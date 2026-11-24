@@ -6094,6 +6094,25 @@ void FESystem::setup(const SetupOptions& user_opts, const SetupInputs& inputs)
         return false;
     };
 
+    // Material state on cut volumes is refused: assembly binds a cut rule's
+    // state by its parent cell, so two rules of one kernel on one cell (the
+    // two sides of a cut, or two markers) would share that cell's storage.
+    for (const auto& tag : operator_registry_.list()) {
+        const auto& def = operator_registry_.get(tag);
+        for (const auto& term : def.cut_volumes) {
+            FE_THROW_IF(term.kernel &&
+                            assembly::hasFlag(term.kernel->getRequiredData(),
+                                              assembly::RequiredData::MaterialState),
+                        InvalidArgumentException,
+                        "FESystem::setup: the cut-volume term of operator '" + tag + "' (marker " +
+                            std::to_string(term.marker) + ", test field '" +
+                            field_registry_.get(term.test_field).name +
+                            "') keeps material state, which cut volumes do not support: the state is "
+                            "stored per parent cell, so two cut rules of one cell would share it. Per-rule "
+                            "storage, and what state means on a moving cut, are a later design decision.");
+        }
+    }
+
     material_state_provider_.reset();
     if (requires_material_state_storage()) {
         std::vector<GlobalIndex> boundary_faces;
