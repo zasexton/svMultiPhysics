@@ -969,5 +969,236 @@ TEST(GeneralityBenchmark, DISABLED_P05_RT1AndBDM1CannotShareOneFieldName)
     }
 }
 
+// ===========================================================================
+// 6. PEC Maxwell and lossy eddy currents
+// ===========================================================================
+//
+// curl curl E + E = f in the unit cube with E x n = 0 on the boundary and
+// E = (0, 0, sin(pi x) sin(pi y)): f = (0, 0, (2 pi^2 + 1) sin(pi x) sin(pi y)).
+// The eddy-current variant curl curl E + (1 + i sigma) E = f with
+// E = (1 + 2i) E_0, split into real and imaginary fields.
+
+Point maxwellField(const Point& p)
+{
+    return {0.0, 0.0, std::sin(kPi * p[0]) * std::sin(kPi * p[1])};
+}
+
+Point maxwellCurl(const Point& p)
+{
+    return {kPi * std::sin(kPi * p[0]) * std::cos(kPi * p[1]), -kPi * std::cos(kPi * p[0]) * std::sin(kPi * p[1]), 0.0};
+}
+
+/// curl curl E_0 + E_0.
+Point maxwellOperator(const Point& p)
+{
+    return {0.0, 0.0, (2.0 * kPi * kPi + 1.0) * std::sin(kPi * p[0]) * std::sin(kPi * p[1])};
+}
+
+FormExpr vector3(const std::string& name, const std::function<Point(const Point&)>& f)
+{
+    return vectorOf(name, 3, [f](const Point& p, int i) { return f(p)[static_cast<std::size_t>(i)]; });
+}
+
+// ---------------------------------------------------------------------------
+// The formulations: everything an author writes for problem 6.
+// ---------------------------------------------------------------------------
+FieldId definePerfectConductor(FESystem& system, std::shared_ptr<const spaces::FunctionSpace> V, const FormExpr& f,
+                               const std::vector<int>& walls)
+{
+    using namespace forms;
+    FieldBinding fields(system, "Maxwell");
+    const auto E = fields.unknown("E", std::move(V));
+    const auto& e = E.state;
+    const auto& v = E.test;
+    constraints::ConstraintPlan plan(system);
+    for (const int wall : walls) {
+        plan.declare(constraints::ConstraintPhase::Essential,
+                     std::make_unique<constraints::HCurlTangentialConstraint>(E.id, wall));  // E x n = 0
+    }
+    plan.commit();
+    FormulationBuilder F(system, "equations", {});
+    F.symbolicTangent();
+    (void)F.residual((inner(curl(e), curl(v)) + inner(e, v) - inner(f, v)).dx());
+    return E.id;
+}
+
+std::pair<FieldId, FieldId> defineEddyCurrent(FESystem& system, const std::shared_ptr<const spaces::FunctionSpace>& V,
+                                              Real conductivity, const FormExpr& f_re, const FormExpr& f_im,
+                                              const std::vector<int>& walls)
+{
+    using namespace forms;
+    FieldBinding fields(system, "EddyCurrent");
+    const auto Er = fields.unknown("E_re", V);
+    const auto Ei = fields.unknown("E_im", V);
+    const auto sigma = FormExpr::constant(conductivity);
+    constraints::ConstraintPlan plan(system);
+    for (const int wall : walls) {
+        plan.declare(constraints::ConstraintPhase::Essential,
+                     std::make_unique<constraints::HCurlTangentialConstraint>(Er.id, wall));
+        plan.declare(constraints::ConstraintPhase::Essential,
+                     std::make_unique<constraints::HCurlTangentialConstraint>(Ei.id, wall));
+    }
+    plan.commit();
+    // curl curl E + (1 + i sigma) E = f, its real and imaginary parts.
+    FormulationBuilder F(system, "equations", {});
+    F.symbolicTangent();
+    (void)F.residual((inner(curl(Er.state), curl(Er.test)) + inner(Er.state, Er.test) -
+                      sigma * inner(Ei.state, Er.test) - inner(f_re, Er.test)).dx() +
+                     (inner(curl(Ei.state), curl(Ei.test)) + inner(Ei.state, Ei.test) +
+                      sigma * inner(Er.state, Ei.test) - inner(f_im, Ei.test)).dx());
+    return {Er.id, Ei.id};
+}
+// ---------------------------------------------------------------------------
+
+struct MaxwellRun {
+    Real l2{0.0};
+    Real curl_l2{0.0};
+    int dofs_per_cell{0};
+};
+
+/**
+ * A DG0 unknown, declared before the H(curl) fields and held at zero by its
+ * own row of "equations": the rows that measure their errors (the
+ * measured-form evaluator does not take H(curl) fields).
+ */
+FieldId errorCells(FESystem& system, Cell cell)
+{
+    FieldBinding fields(system, "ErrorCells");
+    const auto C = fields.unknown("cells", std::make_shared<spaces::L2Space>(elementType(cell), 0));
+    FormulationBuilder F(system, "equations", {});
+    F.symbolicTangent();
+    (void)F.residual((C.state * C.test).dx());
+    return C.id;
+}
+
+MaxwellRun runPerfectConductor(Cell cell, int n, bool rotate = false)
+{
+    BoxOptions options;
+    options.rotate_cells = rotate;
+    FESystem system(boxMesh(cell, n, boxSides(), options));
+    const auto cells = errorCells(system, cell);
+    const auto V = std::make_shared<spaces::HCurlSpace>(elementType(cell), 0);
+    const auto E_id = definePerfectConductor(system, V, vector3("f", maxwellOperator), {1, 2, 3, 4, 5, 6});
+    const auto E_h = forms::StateField(E_id, *V, "E");
+    const auto e = E_h - vector3("E_exact", maxwellField);
+    const auto ec = forms::curl(E_h) - vector3("curl_E_exact", maxwellCurl);
+    declareRowIntegral(system, "l2_error", forms::inner(e, e), cells);
+    declareRowIntegral(system, "curl_error", forms::inner(ec, ec), cells);
+    system.setup();
+    const auto solved = solveSteady(system, "equations");
+    EXPECT_TRUE(solved.converged) << cellName(cell) << " n=" << n;
+    MaxwellRun run;
+    run.l2 = std::sqrt(rowIntegral(system, "l2_error", cells, solved.u));
+    run.curl_l2 = std::sqrt(rowIntegral(system, "curl_error", cells, solved.u));
+    run.dofs_per_cell = static_cast<int>(V->dofs_per_element());
+    return run;
+}
+
+TEST(GeneralityBenchmark, DISABLED_P06_PerfectConductorMaxwellConvergesInHCurl)
+{
+    // Defects found by this benchmark (reported; not vocabulary gaps): on a
+    // Tet4 mesh built from arrays the lowest-order Nedelec field reproduces
+    // E = (-y, x, 0) exactly, but curl(E) of the field evaluates to zero in the
+    // assembled kernels (the measured curl error is |curl E| = 2), so the
+    // curl-curl term vanishes and the solution is the L2 projection of f; the
+    // Hex8 Nedelec mass matrix is singular.
+    for (const auto cell : {Cell::Tet4, Cell::Hex8}) {
+        std::vector<Real> l2, curl_l2;
+        for (const int n : {2, 4, 8}) {
+            const auto run = runPerfectConductor(cell, n);
+            EXPECT_EQ(run.dofs_per_cell, cell == Cell::Tet4 ? 6 : 12) << "lowest-order Nedelec";
+            l2.push_back(run.l2);
+            curl_l2.push_back(run.curl_l2);
+        }
+        std::vector<Real> hcurl;
+        for (std::size_t i = 0; i < l2.size(); ++i) {
+            hcurl.push_back(std::sqrt(l2[i] * l2[i] + curl_l2[i] * curl_l2[i]));
+        }
+        const std::string label = cellName(cell);
+        RecordProperty("p06_" + label + "_hcurl_rates", join(rates(hcurl)));
+        RecordProperty("p06_" + label + "_l2_rates", join(rates(l2)));
+        EXPECT_GT(rates(hcurl).back(), 0.85) << label << " " << join(hcurl);
+        EXPECT_GT(rates(l2).back(), 0.85) << label << " " << join(l2);
+
+        // Other local edge orientations give the same discrete field.
+        const auto turned = runPerfectConductor(cell, 2, /*rotate=*/true);
+        EXPECT_NEAR(turned.l2, l2.front(), 1e-10 * l2.front()) << label;
+        EXPECT_NEAR(turned.curl_l2, curl_l2.front(), 1e-10 * curl_l2.front()) << label;
+    }
+}
+
+TEST(GeneralityBenchmark, DISABLED_P06_LossyEddyCurrentsSolveBothPartsWithAntisymmetricCoupling)
+{
+    // Blocked by the same curl defect as the perfect conductor above.
+    const Real sigma = 3.0;
+    const auto f_re = vector3("f_re", [sigma](const Point& p) {
+        const auto g = maxwellOperator(p);
+        const auto e = maxwellField(p);
+        return Point{g[0] - 2.0 * sigma * e[0], g[1] - 2.0 * sigma * e[1], g[2] - 2.0 * sigma * e[2]};
+    });
+    const auto f_im = vector3("f_im", [sigma](const Point& p) {
+        const auto g = maxwellOperator(p);
+        const auto e = maxwellField(p);
+        return Point{2.0 * g[0] + sigma * e[0], 2.0 * g[1] + sigma * e[1], 2.0 * g[2] + sigma * e[2]};
+    });
+    std::vector<Real> re_err, im_err;
+    for (const int n : {2, 4, 8}) {
+        FESystem system(boxMesh(Cell::Tet4, n, boxSides()));
+        const auto cells = errorCells(system, Cell::Tet4);
+        const auto V = std::make_shared<spaces::HCurlSpace>(ElementType::Tetra4, 0);
+        const auto [er, ei] = defineEddyCurrent(system, V, sigma, f_re, f_im, {1, 2, 3, 4, 5, 6});
+        const auto er_h = forms::StateField(er, *V, "E_re");
+        const auto ei_h = forms::StateField(ei, *V, "E_im");
+        const auto dr = er_h - vector3("E_re_exact", maxwellField);
+        const auto di = ei_h - vector3("E_im_exact", [](const Point& p) {
+                            const auto e = maxwellField(p);
+                            return Point{2.0 * e[0], 2.0 * e[1], 2.0 * e[2]};
+                        });
+        const auto cr = forms::curl(er_h) - vector3("curl_re", maxwellCurl);
+        const auto ci = forms::curl(ei_h) - vector3("curl_im", [](const Point& p) {
+                            const auto c = maxwellCurl(p);
+                            return Point{2.0 * c[0], 2.0 * c[1], 2.0 * c[2]};
+                        });
+        declareRowIntegral(system, "re_error", forms::inner(dr, dr) + forms::inner(cr, cr), cells);
+        declareRowIntegral(system, "im_error", forms::inner(di, di) + forms::inner(ci, ci), cells);
+        system.setup();
+        const auto solved = solveSteady(system, "equations");
+        EXPECT_TRUE(solved.converged);
+        re_err.push_back(std::sqrt(rowIntegral(system, "re_error", cells, solved.u)));
+        im_err.push_back(std::sqrt(rowIntegral(system, "im_error", cells, solved.u)));
+        if (n == 2) {
+            // The coupling blocks: -sigma M in the real rows, +sigma M in the
+            // imaginary rows, opposite transposes of each other.
+            const auto J = assembleDense(system, "equations", solved.u);
+            const auto r0 = system.fieldDofOffset(er);
+            const auto i0 = system.fieldDofOffset(ei);
+            const auto m = system.fieldDofHandler(er).getNumDofs();
+            Real defect = 0.0;
+            Real scale = 0.0;
+            Real sign = 0.0;
+            for (GlobalIndex a = 0; a < m; ++a) {
+                if (system.constraints().isConstrained(r0 + a) || system.constraints().isConstrained(i0 + a)) {
+                    continue;
+                }
+                sign += J(r0 + a, i0 + a);  // -sigma times a mass diagonal entry
+                for (GlobalIndex b = 0; b < m; ++b) {
+                    if (system.constraints().isConstrained(i0 + b) || system.constraints().isConstrained(r0 + b)) {
+                        continue;
+                    }
+                    defect = std::max(defect, std::abs(J(r0 + a, i0 + b) + J(i0 + b, r0 + a)));
+                    scale = std::max(scale, std::abs(J(r0 + a, i0 + b)));
+                }
+            }
+            EXPECT_GT(scale, 0.0);
+            EXPECT_LT(sign, 0.0);
+            EXPECT_LT(defect, 1e-13 * scale);
+        }
+    }
+    RecordProperty("p06_eddy_re_hcurl_rates", join(rates(re_err)));
+    RecordProperty("p06_eddy_im_hcurl_rates", join(rates(im_err)));
+    EXPECT_GT(rates(re_err).back(), 0.85) << join(re_err);
+    EXPECT_GT(rates(im_err).back(), 0.85) << join(im_err);
+}
+
 } // namespace
 } // namespace svmp::FE::systems::generality
