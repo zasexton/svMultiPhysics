@@ -443,5 +443,88 @@ TEST(GeneralityBenchmarkGaps, DISABLED_P09_NamedQuadratureStateWithCondensedTang
     FAIL() << "named quadrature-point state and its condensed tangent are not vocabulary yet";
 }
 
+// ===========================================================================
+// 12. Surface diffusion under rigid rotation
+// ===========================================================================
+//
+// inner(grad_Gamma u, grad_Gamma v) on a surface-owned field.  The first step
+// is a flat patch: the same triangles in the plane z = 0 and rotated rigidly
+// in three-space must give the same stiffness.
+
+std::shared_ptr<svmp::Mesh> flatPatch(int n, const std::array<std::array<Real, 3>, 3>& rotation, int spatial_dim)
+{
+    std::vector<svmp::real_t> x;
+    for (int j = 0; j <= n; ++j) {
+        for (int i = 0; i <= n; ++i) {
+            const Point p{static_cast<Real>(i) / n, static_cast<Real>(j) / n, 0.0};
+            for (int d = 0; d < spatial_dim; ++d) {
+                const auto& r = rotation[static_cast<std::size_t>(d)];
+                x.push_back(static_cast<svmp::real_t>(r[0] * p[0] + r[1] * p[1] + r[2] * p[2]));
+            }
+        }
+    }
+    std::vector<svmp::offset_t> offsets{0};
+    std::vector<svmp::index_t> conn;
+    const auto vid = [n](int i, int j) { return static_cast<svmp::index_t>(j * (n + 1) + i); };
+    for (int j = 0; j < n; ++j) {
+        for (int i = 0; i < n; ++i) {
+            conn.insert(conn.end(), {vid(i, j), vid(i + 1, j), vid(i + 1, j + 1)});
+            offsets.push_back(static_cast<svmp::offset_t>(conn.size()));
+            conn.insert(conn.end(), {vid(i, j), vid(i + 1, j + 1), vid(i, j + 1)});
+            offsets.push_back(static_cast<svmp::offset_t>(conn.size()));
+        }
+    }
+    svmp::CellShape triangle{};
+    triangle.family = svmp::CellFamily::Triangle;
+    triangle.num_corners = 3;
+    triangle.order = 1;
+    auto base = std::make_shared<svmp::MeshBase>();
+    base->build_from_arrays(spatial_dim, x, offsets, conn,
+                            std::vector<svmp::CellShape>(offsets.size() - 1u, triangle));
+    base->finalize();
+    return svmp::create_mesh(std::move(base));
+}
+
+std::vector<Real> patchStiffness(const std::shared_ptr<svmp::Mesh>& mesh)
+{
+    FESystem system(mesh);
+    FieldBinding fields(system, "SurfaceDiffusion");
+    const auto U = fields.unknown("u", std::make_shared<spaces::H1Space>(ElementType::Triangle3, 1));
+    FormulationBuilder F(system, "equations", {});
+    F.symbolicTangent();
+    (void)F.residual(forms::inner(forms::grad(U.state), forms::grad(U.test)).dx());
+    system.setup();
+    return assembleDense(system, "equations", std::vector<Real>(system.dofHandler().getNumDofs(), 0.0)).matrix;
+}
+
+TEST(GeneralityBenchmarkGaps, DISABLED_P12_RotatedFlatPatchHasTheStiffnessOfThePlanarOne)
+{
+    // Missing: a surface-owned scalar field with its intrinsic gradient.  A
+    // triangle mesh embedded in three-space is refused at setup
+    // ("DofLayoutInfo::Lagrange: unsupported cell topology"), and its
+    // geometry would need a 3 x 2 Jacobian and its pseudo-inverse;
+    // interface-owned fields enter forms only linearly, one unknown per
+    // product on one side, so inner(grad_Gamma u, grad_Gamma v) of an
+    // interface field is refused; surfaceGradient(f, n) projects an ambient
+    // gradient of a volume field.  This body states the check.
+    const std::array<std::array<Real, 3>, 3> identity{{{1, 0, 0}, {0, 1, 0}, {0, 0, 1}}};
+    const Real c = std::cos(0.7), s = std::sin(0.7), c2 = std::cos(0.4), s2 = std::sin(0.4);
+    // A rotation about z by 0.7, then about x by 0.4.
+    const std::array<std::array<Real, 3>, 3> rotation{{{c, -s, 0.0}, {c2 * s, c2 * c, -s2}, {s2 * s, s2 * c, c2}}};
+    const auto planar = patchStiffness(flatPatch(3, identity, 2));
+    const auto rotated = patchStiffness(flatPatch(3, rotation, 3));
+    ASSERT_EQ(planar.size(), rotated.size());
+    EXPECT_LT(maxDifference(planar, rotated), 1e-12);
+}
+
+TEST(GeneralityBenchmarkGaps, DISABLED_P12_SurfaceLaplacianOnTheSphere)
+{
+    // Missing, after the flat patch: the surface field on a curved surface
+    // mesh with its metric and measure, so that -lap_Gamma u = 2x on the unit
+    // sphere with mean-zero u = x converges in the lifted L2/H1 norms at
+    // orders two and one for P1 on adequate geometry.
+    FAIL() << "surface-owned fields with an intrinsic gradient are not vocabulary yet";
+}
+
 } // namespace
 } // namespace svmp::FE::systems::generality
