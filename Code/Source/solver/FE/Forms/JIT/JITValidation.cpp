@@ -1180,6 +1180,19 @@ ValidationResult canCompileImpl(const FormExpr& integrand,
             out.cacheable = false;
         }
 
+        // The compiled div(dt(.)) and curl(dt(.)) read the current values
+        // only, not the history of the time stencil (grad(dt(.)) reads it):
+        // such a form is evaluated by the interpreter.
+        if (n.type() == FormExprType::Divergence || n.type() == FormExprType::Curl) {
+            const auto kids = n.childrenShared();
+            if (!kids.empty() && kids[0] && kids[0]->type() == FormExprType::TimeDerivative) {
+                out.ok = false;
+                out.first_issue = issue(n, "JIT: div(dt(.)) and curl(dt(.)) are evaluated by the interpreter "
+                                           "(the compiled operators omit the history of the time stencil)");
+                return;
+            }
+        }
+
         // Spatial derivatives of external-call coefficients require explicit derivatives.
         if (n.type() == FormExprType::Gradient ||
             n.type() == FormExprType::Divergence ||

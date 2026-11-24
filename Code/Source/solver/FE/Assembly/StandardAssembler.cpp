@@ -19754,8 +19754,12 @@ void StandardAssembler::populateFieldSolutionData(
                                                      local_coeffs,
                                                      "StandardAssembler::populateFieldSolutionData", false);
 
-                    // Values only (dt() needs just value history).
+                    // Values, and the Jacobian when the field's gradient is
+                    // requested (grad(dt(u)) and div(dt(u)) read it).
                     vector_values.assign(static_cast<std::size_t>(n_qpts), AssemblyContext::Vector3D{0.0, 0.0, 0.0});
+                    if (need_gradients) {
+                        vector_jacobians.assign(static_cast<std::size_t>(n_qpts), AssemblyContext::Matrix3x3{});
+                    }
                     for (LocalIndex q = 0; q < n_qpts; ++q) {
                         if (field_bcache_ps) {
                             values_at_pt.resize(static_cast<std::size_t>(n_scalar_dofs));
@@ -19769,24 +19773,52 @@ void StandardAssembler::populateFieldSolutionData(
                                                            qpts[static_cast<std::size_t>(q)][1],
                                                            qpts[static_cast<std::size_t>(q)][2]};
                             basis.evaluate_values(xi, values_at_pt);
+                            if (need_gradients) {
+                                basis.evaluate_gradients(xi, gradients_at_pt);
+                            }
                         }
 
                         AssemblyContext::Vector3D u_prev = {0.0, 0.0, 0.0};
                         for (int c = 0; c < vd; ++c) {
                             Real val_c = 0.0;
+                            AssemblyContext::Vector3D gref_c = {0.0, 0.0, 0.0};
                             const LocalIndex base = static_cast<LocalIndex>(c) * dofs_per_component;
                             for (LocalIndex j = 0; j < dofs_per_component; ++j) {
                                 const LocalIndex jj = base + j;
-                                val_c += local_coeffs[static_cast<std::size_t>(jj)] *
-                                         values_at_pt[static_cast<std::size_t>(j)];
+                                const Real coef = local_coeffs[static_cast<std::size_t>(jj)];
+                                val_c += coef * values_at_pt[static_cast<std::size_t>(j)];
+                                if (need_gradients) {
+                                    for (int d = 0; d < dim; ++d) {
+                                        const auto sd = static_cast<std::size_t>(d);
+                                        gref_c[sd] += coef * (field_bcache_ps
+                                                                  ? field_bcache_ps->gradientValue(
+                                                                        static_cast<std::size_t>(j), sd,
+                                                                        static_cast<std::size_t>(q))
+                                                                  : gradients_at_pt[static_cast<std::size_t>(j)][sd]);
+                                    }
+                                }
                             }
                             u_prev[static_cast<std::size_t>(c)] = val_c;
+                            if (need_gradients) {
+                                const auto& J_inv = ctx_inv_jacs_ps[static_cast<std::size_t>(q)];
+                                auto& jac = vector_jacobians[static_cast<std::size_t>(q)];
+                                for (int d1 = 0; d1 < dim; ++d1) {
+                                    Real sum = 0.0;
+                                    for (int d2 = 0; d2 < dim; ++d2) {
+                                        sum += J_inv[static_cast<std::size_t>(d2)][static_cast<std::size_t>(d1)] *
+                                               gref_c[static_cast<std::size_t>(d2)];
+                                    }
+                                    jac[static_cast<std::size_t>(c)][static_cast<std::size_t>(d1)] = sum;
+                                }
+                            }
                         }
                         vector_values[static_cast<std::size_t>(q)] = u_prev;
                     }
 
-                    context.setFieldPreviousSolutionVectorK(req.field, k, vd,
-                                                            std::span<const AssemblyContext::Vector3D>(vector_values));
+                    context.setFieldPreviousSolutionVectorK(
+                        req.field, k, vd, std::span<const AssemblyContext::Vector3D>(vector_values),
+                        need_gradients ? std::span<const AssemblyContext::Matrix3x3>(vector_jacobians)
+                                       : std::span<const AssemblyContext::Matrix3x3>{});
                 }
             }
             continue;
@@ -20636,8 +20668,12 @@ void StandardAssembler::populateFieldSolutionData(
                                                      local_coeffs,
                                                      "StandardAssembler::populateFieldSolutionData", false);
 
-                    // Values only (dt() needs just value history).
+                    // Values, and the Jacobian when the field's gradient is
+                    // requested (grad(dt(u)) and div(dt(u)) read it).
                     vector_values.assign(static_cast<std::size_t>(n_qpts), AssemblyContext::Vector3D{0.0, 0.0, 0.0});
+                    if (need_gradients) {
+                        vector_jacobians.assign(static_cast<std::size_t>(n_qpts), AssemblyContext::Matrix3x3{});
+                    }
                     for (LocalIndex q = 0; q < n_qpts; ++q) {
                         if (field_bcache_ps) {
                             values_at_pt.resize(static_cast<std::size_t>(n_scalar_dofs));
@@ -20651,24 +20687,52 @@ void StandardAssembler::populateFieldSolutionData(
                                                            qpts[static_cast<std::size_t>(q)][1],
                                                            qpts[static_cast<std::size_t>(q)][2]};
                             basis.evaluate_values(xi, values_at_pt);
+                            if (need_gradients) {
+                                basis.evaluate_gradients(xi, gradients_at_pt);
+                            }
                         }
 
                         AssemblyContext::Vector3D u_prev = {0.0, 0.0, 0.0};
                         for (int c = 0; c < vd; ++c) {
                             Real val_c = 0.0;
+                            AssemblyContext::Vector3D gref_c = {0.0, 0.0, 0.0};
                             const LocalIndex base = static_cast<LocalIndex>(c) * dofs_per_component;
                             for (LocalIndex j = 0; j < dofs_per_component; ++j) {
                                 const LocalIndex jj = base + j;
-                                val_c += local_coeffs[static_cast<std::size_t>(jj)] *
-                                         values_at_pt[static_cast<std::size_t>(j)];
+                                const Real coef = local_coeffs[static_cast<std::size_t>(jj)];
+                                val_c += coef * values_at_pt[static_cast<std::size_t>(j)];
+                                if (need_gradients) {
+                                    for (int d = 0; d < dim; ++d) {
+                                        const auto sd = static_cast<std::size_t>(d);
+                                        gref_c[sd] += coef * (field_bcache_ps
+                                                                  ? field_bcache_ps->gradientValue(
+                                                                        static_cast<std::size_t>(j), sd,
+                                                                        static_cast<std::size_t>(q))
+                                                                  : gradients_at_pt[static_cast<std::size_t>(j)][sd]);
+                                    }
+                                }
                             }
                             u_prev[static_cast<std::size_t>(c)] = val_c;
+                            if (need_gradients) {
+                                const auto& J_inv = ctx_inv_jacs_ps[static_cast<std::size_t>(q)];
+                                auto& jac = vector_jacobians[static_cast<std::size_t>(q)];
+                                for (int d1 = 0; d1 < dim; ++d1) {
+                                    Real sum = 0.0;
+                                    for (int d2 = 0; d2 < dim; ++d2) {
+                                        sum += J_inv[static_cast<std::size_t>(d2)][static_cast<std::size_t>(d1)] *
+                                               gref_c[static_cast<std::size_t>(d2)];
+                                    }
+                                    jac[static_cast<std::size_t>(c)][static_cast<std::size_t>(d1)] = sum;
+                                }
+                            }
                         }
                         vector_values[static_cast<std::size_t>(q)] = u_prev;
                     }
 
-                    context.setFieldPreviousSolutionVectorK(req.field, k, vd,
-                                                            std::span<const AssemblyContext::Vector3D>(vector_values));
+                    context.setFieldPreviousSolutionVectorK(
+                        req.field, k, vd, std::span<const AssemblyContext::Vector3D>(vector_values),
+                        need_gradients ? std::span<const AssemblyContext::Matrix3x3>(vector_jacobians)
+                                       : std::span<const AssemblyContext::Matrix3x3>{});
                 }
             }
             continue;

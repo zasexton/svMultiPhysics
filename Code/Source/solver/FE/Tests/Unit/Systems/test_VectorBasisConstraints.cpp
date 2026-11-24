@@ -678,6 +678,64 @@ TEST(VectorBasisMixedInstall, MeasuredFormsWithAVectorBasisFirstUnknown)
     }
 }
 
+// The rate of another field's derivative: with the vector field w the same
+// linear function w = A x (A nonzero) at the current and the previous step,
+// dt(w) vanishes, and so do div(dt(w)) and grad(dt(w)) in the rows of a
+// scalar field (backward Euler).  The scalar rows then hold only u v.
+TEST(OtherFieldRates, RateDerivativesOfAnotherVectorFieldVanishForAConstantField)
+{
+    for (const bool jit : {false, true}) {
+    for (const bool use_grad : {false, true}) {
+        SCOPED_TRACE(::testing::Message() << (use_grad ? "grad(dt(w))" : "div(dt(w))") << (jit ? ", compiled" : ", interpreted"));
+        FormInstallOptions install;
+        install.compiler_options.jit.enable = jit;
+        FESystem system(unitBoxSimplexMesh(2, 2));
+        FieldBinding fields(system, "VectorBasisMixedInstall");
+        const auto p1 = std::make_shared<spaces::H1Space>(ElementType::Triangle3, 1);
+        const auto Uf = fields.unknown("u", p1);
+        const auto W = fields.unknown("w", spaces::VectorSpace(spaces::SpaceType::H1, ElementType::Triangle3, 1, 2));
+        const auto rate = use_grad ? forms::grad(forms::dt(W.state)).component(0, 1) + forms::trace(forms::grad(forms::dt(W.state)))
+                                   : forms::div(forms::dt(W.state));
+        {
+            FormulationBuilder F(system, "equations", install);
+            (void)F.residual(((Uf.state - rate) * Uf.test).dx() + forms::inner(W.state, W.test).dx());
+        }
+        system.setup();
+        const auto n = system.dofHandler().getNumDofs();
+        std::vector<Real> U(static_cast<std::size_t>(n), 0.0);
+        const auto& local = system.singleMesh().local_mesh();
+        const auto& X = local.X_ref();
+        const auto w0 = system.fieldDofOffset(W.id);
+        const auto* entities = system.fieldDofHandler(W.id).getEntityDofMap();
+        for (svmp::index_t v = 0; v < static_cast<svmp::index_t>(local.n_vertices()); ++v) {
+            const Real x = X[2 * static_cast<std::size_t>(v)];
+            const Real y = X[2 * static_cast<std::size_t>(v) + 1];
+            const auto dofs = entities->getVertexDofs(static_cast<GlobalIndex>(v));
+            U[static_cast<std::size_t>(w0 + dofs[0])] = 2.0 * x + 0.5 * y;
+            U[static_cast<std::size_t>(w0 + dofs[1])] = -0.75 * x + 3.0 * y;
+        }
+        SystemStateView state;
+        state.time = 0.1;
+        state.dt = 0.05;
+        state.u = U;
+        state.u_prev = U;
+        const BackwardDifferenceIntegrator integrator;
+        const auto context = integrator.buildContext(1, state);
+        state.time_integration = &context;
+        assembly::DenseVectorView R(n);
+        R.zero();
+        AssemblyRequest request;
+        request.op = "equations";
+        request.want_vector = true;
+        ASSERT_TRUE(system.assemble(request, state, nullptr, &R).success);
+        const auto u0 = system.fieldDofOffset(Uf.id);
+        for (GlobalIndex i = u0; i < u0 + system.fieldDofHandler(Uf.id).getNumDofs(); ++i) {
+            EXPECT_NEAR(R.getVectorEntry(i), 0.0, 1e-12) << "row " << i;
+        }
+    }
+    }
+}
+
 
 } // namespace test
 } // namespace systems
