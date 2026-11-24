@@ -6904,7 +6904,13 @@ void FESystem::setup(const SetupOptions& user_opts, const SetupInputs& inputs)
                         return spec;
                     }
 
-                    spec.geometry_affine = meshAccess().getCellGeometryOrder(cell_id) <= 1;
+                    {
+                        // Only straight-sided simplices have a constant inverse Jacobian.
+                        const auto cell_type = meshAccess().getCellType(cell_id);
+                        spec.geometry_affine = meshAccess().getCellGeometryOrder(cell_id) <= 1 &&
+                            (cell_type == ElementType::Line2 || cell_type == ElementType::Triangle3 ||
+                             cell_type == ElementType::Tetra4);
+                    }
                     spec.test = build_baked_side(test_space, test_element, quad_rule, cell_id, *bake_options);
                     spec.trial = build_baked_side(trial_space, trial_element, quad_rule, cell_id, *bake_options);
                     spec.enabled = spec.test.enabled || spec.trial.enabled;

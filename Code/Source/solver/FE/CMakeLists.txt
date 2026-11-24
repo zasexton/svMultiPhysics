@@ -3148,6 +3148,7 @@ if(FE_BUILD_TESTS)
                 Tests/Unit/Systems/test_VectorBasisConstraints.cpp
                 Tests/Unit/Systems/test_StrongDirichletConstraint.cpp
                 Tests/Unit/Systems/test_FormsInstaller.cpp
+                Tests/Unit/Systems/test_JITBasisBakingGeometry.cpp
                 Tests/Unit/Systems/test_SystemManifest.cpp
                 Tests/Unit/Systems/test_MixedManualParity.cpp
                 Tests/Unit/Systems/test_MixedFormPerformance.cpp
