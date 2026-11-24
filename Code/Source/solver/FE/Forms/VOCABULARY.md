@@ -1,7 +1,6 @@
 # FE/Forms Vocabulary
 
-This is the canonical vocabulary document for `FE/Forms`. It replaces the
-previous split between `VOCABULARY.md` and `FUTURE_FEATURES.md`.
+This is the canonical vocabulary document for `FE/Forms`.
 
 The goal of this file is to keep the public form-authoring surface, expert
 hooks, and planned vocabulary in one current place. It is scoped to the FE form
