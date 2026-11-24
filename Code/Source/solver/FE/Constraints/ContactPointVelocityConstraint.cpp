@@ -14,6 +14,7 @@
 #include "Dofs/EntityDofMap.h"
 #include "Elements/ReferenceElement.h"
 #include "Systems/FESystem.h"
+#include "Core/EnvironmentNames.h"
 
 #if defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH
 #  include "Mesh/Fields/MeshFields.h"
@@ -425,7 +426,7 @@ void ContactPointVelocityConstraint::apply(const systems::FESystem& system,
             "': diagnostic=contact_point_line_not_installable " +
             (install_failure.empty() ? std::string("on another rank") : install_failure));
     }
-    const char* trace = std::getenv("SVMP_CONTACT_POINT_VELOCITY_TRACE");
+    const char* trace = environment::value("SVMP_CONTACT_POINT_VELOCITY_TRACE");
     if (trace != nullptr && trace[0] != '\0' && trace[0] != '0') {
         // One child line per sample point.
         LogRecord line("ContactPointVelocityConstraint", "contact-point velocity");

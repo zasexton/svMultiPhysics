@@ -10,6 +10,7 @@
 #include "Backends/Interfaces/GenericMatrix.h"
 #include "Backends/Interfaces/GenericVector.h"
 #include "Backends/Interfaces/BackendFactory.h"
+#include "Core/EnvironmentNames.h"
 
 #include <cmath>
 #include <cstdio>
@@ -170,7 +171,7 @@ validateNullspaceBasis(const backends::GenericMatrix& matrix,
 
 bool isNullspaceValidationEnabled() noexcept
 {
-    const char* val = std::getenv("SVMP_GAUGE_VALIDATE");
+    const char* val = environment::value("SVMP_GAUGE_VALIDATE");
     if (!val) return false;
 
     // Accept 1, true, yes, on (case-insensitive for first char)

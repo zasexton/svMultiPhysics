@@ -107,7 +107,7 @@ void gatherStrongValueInputs(const forms::FormExprNode& node,
 
 [[nodiscard]] bool strongDirichletTraceEnabled() noexcept
 {
-    const char* env = std::getenv("SVMP_TRACE_STRONG_DIRICHLET");
+    const char* env = environment::value("SVMP_TRACE_STRONG_DIRICHLET");
     if (env != nullptr && env[0] != '\0') {
         return true;
     }

@@ -15,6 +15,7 @@
 #include "Core/LogRecord.h"
 #include "Spaces/FunctionSpace.h"
 #include "Systems/FESystem.h"
+#include "Core/EnvironmentNames.h"
 
 #include <algorithm>
 #include <cmath>
@@ -44,7 +45,7 @@ namespace {
 
 [[nodiscard]] bool activeSideSupportEnvFlag(const char* name)
 {
-    const char* env = std::getenv(name);
+    const char* env = environment::value(name);
     return env != nullptr && env[0] != '\0' && std::string(env) != "0";
 }
 
@@ -183,7 +184,7 @@ void appendSampleDofsFromEnv(const char* raw, std::vector<GlobalIndex>& out)
 {
     std::vector<GlobalIndex> out;
     appendSampleDofsFromEnv(
-        std::getenv("SVMP_LEVEL_SET_ACTIVE_CONSTRAINT_SAMPLE_DOFS"), out);
+        environment::value("SVMP_LEVEL_SET_ACTIVE_CONSTRAINT_SAMPLE_DOFS"), out);
     std::sort(out.begin(), out.end());
     out.erase(std::unique(out.begin(), out.end()), out.end());
     return out;

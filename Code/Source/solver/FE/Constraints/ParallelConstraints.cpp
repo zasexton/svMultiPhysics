@@ -8,6 +8,7 @@
 #include "ParallelConstraints.h"
 
 #include "Core/Logger.h"
+#include "Core/EnvironmentNames.h"
 
 #include <algorithm>
 #include <bit>
@@ -397,7 +398,7 @@ gatherAndResolveConstraints(MPI_Comm comm,
 
 bool envFlagEnabled(const char* name)
 {
-    const char* value = std::getenv(name);
+    const char* value = environment::value(name);
     return value != nullptr && value[0] != '\0' && value[0] != '0';
 }
 

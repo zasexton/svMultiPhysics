@@ -44,6 +44,8 @@ std::span<const NameDeclaration> solverCatalogue() noexcept
     constexpr const char* kAssembly = "FE/Assembly";
     constexpr const char* kEigen = "FE/Backends/Eigen";
     constexpr const char* kFsils = "FE/Backends/FSILS";
+    constexpr const char* kConstraints = "FE/Constraints";
+    constexpr const char* kAggregation = "FE/Constraints/SmallCutAggregationConstraint";
     constexpr const char* kCore = "FE/Core";
     constexpr const char* kJit = "FE/Forms/JIT";
     constexpr const char* kLevelSetExtension = "FE/LevelSet/Extension";
@@ -382,6 +384,39 @@ std::span<const NameDeclaration> solverCatalogue() noexcept
          "checks the block lookup tables of a new matrix"},
         {"SVMP_FSILS_VECTOR_VIEW_TRACE", Diagnostic, kFsils, Flag, "off", Reference,
          "logs vector-view assembly counts and norms"},
+
+        // FE/Constraints: constraint construction, small-cut aggregation and the
+        // parallel constraint exchange.
+        {"SVMP_ACTIVE_SIDE_LOCAL_SUPPORT", NumericalOverride, kConstraints, Flag, "off", NonReference,
+         "marks active-side DOF support rank-locally instead of by owner-routed marks"},
+        {"SVMP_ACTIVE_SIDE_SUPPORT_CHECK", Diagnostic, kConstraints, Flag, "off", Reference,
+         "compares local and owner-routed active-side support marks and throws on a difference"},
+        {"SVMP_AGGREGATION_ALLOW_UNAGGREGATED", NumericalOverride, kAggregation, Flag, "off", NonReference,
+         "leaves small-cut candidates free when their island has no root (0 or 1)"},
+        {"SVMP_AGGREGATION_DUMP", Diagnostic, kAggregation, Flag, "off", Reference,
+         "logs probe vertex coordinates and turns off aggregation reuse"},
+        {"SVMP_AGGREGATION_LINEAR_EXTENSION", NumericalOverride, kAggregation, Flag, "off", NonReference,
+         "restricts the aggregation extension weights to the linear corner basis (0 or 1)"},
+        {"SVMP_AGGREGATION_MAX_LINES", NumericalOverride, kAggregation, Integer, "unlimited", NonReference,
+         "caps the aggregation lines of a refresh"},
+        {"SVMP_AGGREGATION_SLAVE_ALL_CUT", NumericalOverride, kAggregation, Flag, "off", NonReference,
+         "makes every cut-cell DOF an aggregation candidate (0 or 1)"},
+        {"SVMP_AGGREGATION_TRACE_PROPOSALS", Diagnostic, kAggregation, Flag, "off", Reference,
+         "logs every aggregation root proposal and its outcome"},
+        {"SVMP_CONTACT_POINT_VELOCITY_TRACE", Diagnostic, kConstraints, Flag, "off", Reference,
+         "logs the contact-point samples after each constraint update"},
+        {"SVMP_DISABLE_SMALL_CUT_AGGREGATION_REUSE", Performance, kAggregation, Flag, "off", Reference,
+         "recomputes an unchanged aggregation refresh instead of reusing it"},
+        {"SVMP_GAUGE_VALIDATE", Diagnostic, kConstraints, Flag, "off", Reference,
+         "prints the gauge report and checks the inferred null-space vectors"},
+        {"SVMP_LEVEL_SET_ACTIVE_CONSTRAINT_SAMPLE_DOFS", Diagnostic, kConstraints, List, "none", Reference,
+         "field-local DOFs whose active-side support and constraint status are logged"},
+        {"SVMP_PARALLEL_CONSTRAINTS_ALLGATHER", Performance, kConstraints, Flag, "off", Reference,
+         "resolves constraint lines by an all-gather instead of the owner-routed exchange"},
+        {"SVMP_PARALLEL_CONSTRAINTS_CHECK", Diagnostic, kConstraints, Flag, "off", Reference,
+         "repeats the constraint resolution by an all-gather and throws unless the lines agree"},
+        {"SVMP_TRACE_STRONG_DIRICHLET", Diagnostic, kConstraints, Flag, "off", Reference,
+         "traces strong Dirichlet constraint events"},
 
         // FE/Core: the logger and the solver-wide traces and self-checks.
         {"FE_LOG_CONSOLE", Diagnostic, kCore, Flag, "on", Reference,

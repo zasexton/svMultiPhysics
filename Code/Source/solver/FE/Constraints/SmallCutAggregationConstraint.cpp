@@ -26,6 +26,7 @@
 #include "Geometry/CutQuadratureMapping.h"
 #include "Interfaces/FreeSurfaceGeometrySnapshot.h"
 #include "Systems/FESystem.h"
+#include "Core/EnvironmentNames.h"
 
 #include <algorithm>
 #include <array>
@@ -564,7 +565,7 @@ void logGuardRootlessCandidate(const systems::FESystem& system,
 
 [[nodiscard]] bool strictEnvironmentFlag(const char* name, bool& valid)
 {
-    const char* value = std::getenv(name);
+    const char* value = environment::value(name);
     if (value == nullptr || value[0] == '\0' || std::string_view(value) == "0") {
         return false;
     }
@@ -580,7 +581,7 @@ void logGuardRootlessCandidate(const systems::FESystem& system,
 [[nodiscard]] bool aggregationProposalTraceEnabled() noexcept
 {
     static const bool enabled = [] {
-        const char* value = std::getenv("SVMP_AGGREGATION_TRACE_PROPOSALS");
+        const char* value = environment::value("SVMP_AGGREGATION_TRACE_PROPOSALS");
         return value != nullptr && std::string_view(value) == "1";
     }();
     return enabled;
@@ -599,7 +600,7 @@ void logGuardRootlessCandidate(const systems::FESystem& system,
         strictEnvironmentFlag("SVMP_AGGREGATION_ALLOW_UNAGGREGATED",
                               options.flags_valid);
 
-    const char* max_lines = std::getenv("SVMP_AGGREGATION_MAX_LINES");
+    const char* max_lines = environment::value("SVMP_AGGREGATION_MAX_LINES");
     if (max_lines == nullptr || max_lines[0] == '\0') {
         return options;
     }
@@ -4698,8 +4699,8 @@ buildCanonicalTopologyTransitionReport(
 
 [[nodiscard]] bool aggregationReuseDisabled()
 {
-    const char* value = std::getenv("SVMP_DISABLE_SMALL_CUT_AGGREGATION_REUSE");
-    const char* dump = std::getenv("SVMP_AGGREGATION_DUMP");
+    const char* value = environment::value("SVMP_DISABLE_SMALL_CUT_AGGREGATION_REUSE");
+    const char* dump = environment::value("SVMP_AGGREGATION_DUMP");
     const auto set = [](const char* v) {
         return v != nullptr && v[0] != '\0' && v[0] != '0';
     };
@@ -10174,7 +10175,7 @@ void SmallCutAggregationConstraint::apply(const systems::FESystem& system,
     }
     {
         static const bool dump_probe = [] {
-            const char* env = std::getenv("SVMP_AGGREGATION_DUMP");
+            const char* env = environment::value("SVMP_AGGREGATION_DUMP");
             return env != nullptr && env[0] != '\0' && env[0] != '0';
         }();
         if (dump_probe) {
