@@ -11,11 +11,13 @@
 #include "Assembly/StandardAssembler.h"
 #include "Forms/FormCompiler.h"
 #include "Forms/FormKernels.h"
+#include "Forms/Vocabulary.h"
 #include "Forms/JIT/JITEngine.h"
 #include "Forms/JIT/JITCompiler.h"
 #include "Forms/JIT/LLVMGen.h"
 #include "Forms/JIT/JITKernelWrapper.h"
 #include "Spaces/H1Space.h"
+#include "Spaces/L2Space.h"
 #include "Tests/Unit/Forms/FormsTestHelpers.h"
 #include "Tests/Unit/Forms/JITTestHelpers.h"
 #include "Tests/Unit/Forms/PerfTestHelpers.h"
@@ -545,6 +547,61 @@ TEST(JITCoupledKernels, RejectsEmptyAndMissingBlockSpecs)
     EXPECT_FALSE(no_ir.ok);
     EXPECT_EQ(address, 0u);
     EXPECT_NE(no_ir.message.find("has no cell terms"), std::string::npos);
+}
+
+// A linear kernel asked for its residual alone (LinearKernelOutput::VectorOnly)
+// assembles K u + L.  The vectorized compiled batch must evaluate the bilinear
+// part for K u as the scalar path does: its residual matches the interpreted
+// one, with the two-lane batch on and off.
+TEST(JITVectorization, VectorOnlyLinearKernelBatchIncludesTheBilinearPart)
+{
+    requireLLVMJITOrSkip();
+    TwoTetraSharedFaceMeshAccess mesh;
+    auto dof_map = createTwoTetraDG_DofMap();
+    spaces::L2Space space(ElementType::Tetra4, 1);
+
+    FormCompiler compiler;
+    const auto u = FormExpr::trialFunction(space, "u");
+    const auto v = FormExpr::testFunction(space, "v");
+    const auto x = FormExpr::coordinate();
+    const auto bilinear = (u * v + FormExpr::constant(0.3) * inner(grad(u), grad(v))).dx();
+    const auto linear = (-(FormExpr::constant(1.0) + x.component(0)) * v).dx();
+    const auto make_kernel = [&]() {
+        return std::make_shared<LinearFormKernel>(compiler.compileBilinear(bilinear), compiler.compileLinear(linear),
+                                                  LinearKernelOutput::VectorOnly);
+    };
+    const std::vector<Real> U = {0.1, -0.2, 0.3, 0.05, -0.4, 0.25, 0.15, -0.1};
+    const auto residual = [&](assembly::AssemblyKernel& kernel) {
+        assembly::StandardAssembler assembler;
+        assembler.setDofMap(dof_map);
+        assembler.setCurrentSolution(U);
+        assembly::DenseVectorView R(8);
+        R.zero();
+        (void)assembler.assembleVector(mesh, space, kernel, R);
+        std::vector<Real> out;
+        for (GlobalIndex i = 0; i < 8; ++i) {
+            out.push_back(R.getVectorEntry(i));
+        }
+        return out;
+    };
+
+    auto interpreted = make_kernel();
+    const auto expected = residual(*interpreted);
+    for (const bool simd_batch : {false, true}) {
+        SCOPED_TRACE(::testing::Message() << "simd_batch " << simd_batch);
+        JITOptions options;
+        options.enable = true;
+        options.optimization_level = 2;
+        options.vectorize = true;
+        options.simd_batch = simd_batch;
+        options.cache_kernels = false;
+        jit::JITKernelWrapper compiled(make_kernel(), options);
+        const auto actual = residual(compiled);
+        EXPECT_TRUE(compiled.isJITReady());
+        for (std::size_t i = 0; i < expected.size(); ++i) {
+            EXPECT_NEAR(actual[i], expected[i], 1e-13) << "row " << i;
+        }
+    }
 }
 
 TEST(JITColocatedKernels, RejectsNullFormIRSpec)

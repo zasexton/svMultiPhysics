@@ -1182,7 +1182,9 @@ void JITKernelWrapper::computeCellBatch(std::span<const assembly::AssemblyContex
                     batch_args.sides = batch_sides.data();
                     batch_args.outputs = batch_outputs.data();
 
-                    if (want_matrix) {
+                    // A residual alone still needs K: the bilinear part writes it to
+                    // the per-cell scratch the entries point at, for K*u below.
+                    if (want_matrix || want_vector) {
                         callJIT(compiled_bi.cell, &batch_args);
                     }
 
