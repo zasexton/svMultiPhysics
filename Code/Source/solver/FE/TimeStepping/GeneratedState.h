@@ -551,6 +551,76 @@ struct GeneratedStateFinding {
     const std::vector<GeneratedRead>& residual_reads,
     const std::vector<GeneratedResource>& generated_values);
 
+// ---------------------------------------------------------------------------
+// Schedule compiler
+// ---------------------------------------------------------------------------
+
+/// The inputs of compileGeneratedStateSchedule besides the declarations.
+struct GeneratedStateScheduleInputs {
+    GeneratedStateSolve solve{GeneratedStateSolve::Transient};
+    GeneratedStatePurpose purpose{GeneratedStatePurpose::TransientAttempt};
+    /// The unknowns of the Newton block (one node: the block).
+    std::vector<FieldId> block_fields{};
+    /// SVMP_CUT_REFRESH_PER_STEP_ONLY (perStepOnlyGeneratedState); a steady
+    /// solve ignores it.
+    bool per_step_only{false};
+    OuterFixedPointOverrides overrides{};
+};
+
+/// The schedule of a solve, compiled from the declarations.
+struct GeneratedStatePlan {
+    GeneratedStateSelection selection{};
+    NewtonOptions::ExternalStateFixedPointOptions fixed_point{};
+    /// Why the outer fixed point runs: "inferred(<participants>)" for the
+    /// writers of the component that regenerates the block, and
+    /// "envelope(<participants>)" for the participants that select it
+    /// without being in that component (accepted-step maintenance).  Empty
+    /// when it does not run.
+    std::vector<std::string> reasons{};
+    /// The participants of the regenerating component.
+    std::vector<std::string> component{};
+    /// Registry participants per pass, in run order.
+    std::vector<std::string> constraint_construction_order{};
+    std::vector<std::string> projected_refresh_order{};
+    /// FNV-1a fingerprint of the plan (purpose, participants, phases,
+    /// enablement, resources, policy flags, preset values).
+    std::uint64_t fingerprint{0};
+};
+
+/**
+ * @brief The schedule of a solve from the declarations of its generated
+ *        state and the reads of its residual.
+ *
+ * The Newton block is one node.  Edges: a same-pass read (a participant
+ * reads, at the current trial or the projected stage, a block unknown or what
+ * another participant writes in the refresh), and a prior-pass read (the
+ * block reads, frozen through the inner solve, what a participant writes in
+ * the refresh: a field or a generated domain the residual reads, frozen rows
+ * of a kernel in the block, affine constraints).  Prior-step reads (accepted
+ * commit, accepted history) make no edge.  The component of the block in the
+ * same-pass and prior-pass graph regenerates the block when one of its
+ * prior-pass writers needs a fresh residual and selects the loop (Inferred,
+ * or RequiredWhenPresent and present).
+ *
+ * The outer fixed point runs when a present RequiredWhenPresent declaration
+ * exists (today's selection envelope) or the component regenerates the block
+ * through an Inferred writer, and a transient solve is not per-step-only.
+ * The other settings follow legacyGeneratedStateSelection with the monolithic
+ * extension taken from a frozen-rows write; the fixed-point options are
+ * outerFixedPointPreset with `enabled` set.
+ */
+[[nodiscard]] GeneratedStatePlan compileGeneratedStateSchedule(
+    const GeneratedStateScheduleInputs& inputs,
+    const std::vector<DeclaredGeneratedState>& declarations,
+    const std::vector<GeneratedRead>& residual_reads);
+
+/// The fields of the selection and the options that differ between
+/// @p legacy and @p plan, by name (empty: they agree).
+[[nodiscard]] std::vector<std::string> generatedStateScheduleMismatches(
+    const GeneratedStateSelection& legacy_selection,
+    const NewtonOptions::ExternalStateFixedPointOptions& legacy_fixed_point,
+    const GeneratedStatePlan& plan);
+
 } // namespace timestepping
 } // namespace FE
 } // namespace svmp

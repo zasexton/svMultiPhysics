@@ -1787,16 +1787,22 @@ void applyJacobianCheckGeometryProvenance(
   }
 }
 
-// The declarations of the generated state of a solve and their checks:
-// computed for every solve, not yet used, and refusing nothing.  The
+// The declarations of the generated state of a solve, their checks, and the
+// schedule compiled from them, computed beside the selected schedule.  The
 // accepted-step maintenance and a moving domain are declared without a
 // participant; the lagged shadows are the values some participant must
-// refresh.
-void declareGeneratedState(
+// refresh.  The checks refuse nothing yet.  A compiled schedule that differs
+// from the selected one stops the run on every rank; neither drives the
+// solve.
+void dualRunGeneratedStateSchedule(
     const svmp::FE::systems::FESystem& system,
     const svmp::FE::timestepping::GeneratedStateRegistry& registry,
     svmp::FE::timestepping::GeneratedStatePurpose purpose,
-    const std::vector<LevelSetMaintenanceRequest>& maintenance)
+    const std::vector<LevelSetMaintenanceRequest>& maintenance,
+    const svmp::FE::timestepping::GeneratedStateSelection& selection,
+    const svmp::FE::timestepping::NewtonOptions::ExternalStateFixedPointOptions&
+        fixed_point,
+    const svmp::FE::timestepping::OuterFixedPointOverrides& overrides)
 {
   namespace ts = svmp::FE::timestepping;
   std::vector<svmp::FE::FieldId> maintained_fields;
@@ -1829,9 +1835,38 @@ void declareGeneratedState(
   }
   const auto declarations =
       ts::declaredGeneratedState(registry, purpose, std::move(extra));
+  const auto residual_reads = ts::residualGeneratedStateReads(system);
   (void)ts::checkGeneratedStateDeclarations(
-      purpose, declarations, ts::residualGeneratedStateReads(system),
-      generated_values);
+      purpose, declarations, residual_reads, generated_values);
+  std::exception_ptr failure;
+  try {
+    const auto plan = ts::compileGeneratedStateSchedule(
+        {.solve = selection.policy.solve,
+         .purpose = purpose,
+         .block_fields = system.unknownFieldIdsInDofMapOrder(),
+         .per_step_only = selection.policy.per_step_only,
+         .overrides = overrides},
+        declarations,
+        residual_reads);
+    const auto mismatches =
+        ts::generatedStateScheduleMismatches(selection, fixed_point, plan);
+    if (!mismatches.empty()) {
+      std::string fields;
+      for (const auto& field : mismatches) {
+        fields += (fields.empty() ? "" : ", ") + field;
+      }
+      throw std::logic_error(
+          std::string("[svMultiPhysics::Application] The generated-state "
+                      "schedule compiled from the declarations of the ") +
+          ts::generatedStatePurposeName(purpose) +
+          " differs from the selected schedule in: " + fields + ".");
+    }
+  } catch (...) {
+    failure = std::current_exception();
+  }
+  (void)svmp::FE::systems::agreeOnLocalPhase(
+      system, failure, /*local_available=*/true, "generated_state_schedule",
+      "ApplicationDriver");
 }
 
 using svmp::FE::level_set::logCutTopologyChange;
@@ -7038,10 +7073,14 @@ void ApplicationDriver::runSteadyState(SimulationComponents& sim, const Paramete
   oopCout() << "[svMultiPhysics::Application] Steady: TimeHistory repacked." << std::endl;
 
   (void)cut_geometry->refreshCached(sim.time_history->u(), "steady_initial");
-  declareGeneratedState(*sim.fe_system,
-                        *generated_state,
-                        svmp::FE::timestepping::GeneratedStatePurpose::SteadySolve,
-                        level_set_maintenance);
+  dualRunGeneratedStateSchedule(
+      *sim.fe_system,
+      *generated_state,
+      svmp::FE::timestepping::GeneratedStatePurpose::SteadySolve,
+      level_set_maintenance,
+      steady_selection,
+      newton_opts.external_state_fixed_point,
+      /*overrides=*/{});
   if (initializeDiscreteStaticCapillaryEquilibrium(
           sim,
           params,
@@ -7894,11 +7933,14 @@ void ApplicationDriver::runTransient(SimulationComponents& sim, const Parameters
     generated_state->add(shadow_fields);
   }
   generated_state->bind(opts.newton);
-  declareGeneratedState(
+  dualRunGeneratedStateSchedule(
       *sim.fe_system,
       *generated_state,
       svmp::FE::timestepping::GeneratedStatePurpose::TransientAttempt,
-      level_set_maintenance);
+      level_set_maintenance,
+      transient_selection,
+      opts.newton.external_state_fixed_point,
+      outer_fixed_point_overrides);
   // The cut geometry's part of each time step (the cut-topology attempt and
   // the restore retention), composed with the callbacks below.
   svmp::FE::timestepping::StepParticipantList cut_geometry_step_participants;

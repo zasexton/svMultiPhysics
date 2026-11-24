@@ -849,3 +849,227 @@ TEST(GeneratedStateDeclarations, ChecksFindMissingProducersConflictsStageRequest
   EXPECT_EQ(order[0].participant, "extension");
   EXPECT_STREQ(ts::generatedStateFindingKindName(K::OrderInconsistency), "order_inconsistency");
 }
+
+// ---------------------------------------------------------------------------
+// Schedule compiler
+// ---------------------------------------------------------------------------
+
+namespace {
+
+enum class ExtensionCase { None, Prescribed, Monolithic };
+enum class ShadowCase { None, Lagged, Previous };
+
+constexpr svmp::FE::FieldId kVelocity = 0;
+constexpr svmp::FE::FieldId kLevelSet = 1;
+constexpr svmp::FE::FieldId kExtension = 2;
+constexpr svmp::FE::FieldId kShadow = 3;
+constexpr int kInterface = 7;
+
+// The declarations of the Application's participants for one configuration:
+// the cut geometry (registered with or without requests), the extension of
+// the advection velocity, the shadow participant, and the maintenance.
+struct DeclaredCase {
+  std::vector<ts::DeclaredGeneratedState> declarations;
+  std::vector<ts::GeneratedRead> residual_reads;
+  std::vector<svmp::FE::FieldId> block_fields{kVelocity, kLevelSet};
+};
+
+DeclaredCase declaredCase(bool cut, bool maintenance, ExtensionCase extension, ShadowCase shadow,
+                          ts::GeneratedStatePurpose purpose)
+{
+  using ts::GeneratedStateRole;
+  using ts::StateVersion;
+  using ts::WritePhase;
+  DeclaredCase out;
+  std::size_t position = 0;
+  ts::GeneratedStateDescriptor geometry;
+  geometry.enablement = ts::OuterEnablement::RequiredWhenPresent;
+  geometry.present = cut;
+  if (cut) {
+    geometry.reads = {{.what = fieldResource(kLevelSet), .version = StateVersion::CurrentTrial},
+                      {.what = fieldResource(kLevelSet), .version = StateVersion::ProjectedStage}};
+    for (const auto phase : {WritePhase::ConstraintConstruction, WritePhase::ProjectedRefresh}) {
+      geometry.writes.push_back({.what = domainResource(kInterface), .phase = phase,
+                                 .residual_defining = true, .requires_fresh_residual = true});
+      geometry.writes.push_back({.what = {.kind = ts::ResourceKind::AffineConstraints}, .phase = phase,
+                                 .residual_defining = true, .requires_fresh_residual = true});
+    }
+    out.residual_reads.push_back({.what = domainResource(kInterface), .version = StateVersion::FrozenPass});
+  }
+  out.declarations.push_back({.name = "level_set_geometry", .role = GeneratedStateRole::Geometry,
+                              .position = position++, .descriptor = geometry});
+  if (extension != ExtensionCase::None) {
+    ts::GeneratedStateDescriptor d;
+    d.enablement = ts::OuterEnablement::RequiredWhenPresent;
+    d.reads = {{.what = fieldResource(kVelocity), .version = StateVersion::ProjectedStage},
+               {.what = fieldResource(kLevelSet), .version = StateVersion::ProjectedStage},
+               {.what = domainResource(kInterface), .version = StateVersion::ProjectedStage}};
+    if (extension == ExtensionCase::Monolithic) {
+      d.writes.push_back({.what = {.kind = ts::ResourceKind::FrozenRows, .field = kExtension,
+                                   .operator_tag = "level_set"},
+                          .phase = WritePhase::ProjectedRefresh,
+                          .residual_defining = true, .requires_fresh_residual = true});
+      d.writes.push_back({.what = fieldResource(kExtension), .phase = WritePhase::ProjectedRefresh,
+                          .writes_state_vector = true});
+      out.block_fields.push_back(kExtension);
+    } else {
+      d.writes.push_back({.what = fieldResource(kExtension), .phase = WritePhase::ProjectedRefresh,
+                          .residual_defining = true, .requires_fresh_residual = true});
+      out.residual_reads.push_back({.what = fieldResource(kExtension), .version = StateVersion::FrozenPass});
+    }
+    out.declarations.push_back({.name = "level_set_advection_velocity", .role = GeneratedStateRole::Extension,
+                                .position = position++, .descriptor = d});
+  }
+  if (shadow != ShadowCase::None) {
+    ts::GeneratedStateDescriptor d;
+    d.enablement = ts::OuterEnablement::FollowsSchedule;
+    if (shadow == ShadowCase::Lagged) {
+      d.reads.push_back({.what = fieldResource(kVelocity), .version = StateVersion::ProjectedStage});
+    } else {
+      d.reads.push_back({.what = {.kind = ts::ResourceKind::Field, .field = kVelocity, .steps_back = 1},
+                         .version = StateVersion::AcceptedHistory});
+    }
+    d.writes.push_back({.what = fieldResource(kShadow), .phase = WritePhase::ProjectedRefresh,
+                        .residual_defining = true, .requires_fresh_residual = true});
+    if (purpose == ts::GeneratedStatePurpose::TransientAttempt) {
+      d.writes.push_back({.what = fieldResource(kShadow), .phase = WritePhase::AttemptEntry,
+                          .residual_defining = true, .requires_fresh_residual = true});
+    }
+    out.residual_reads.push_back({.what = fieldResource(kShadow), .version = StateVersion::FrozenPass});
+    out.declarations.push_back({.name = "shadow_fields", .role = GeneratedStateRole::Reference,
+                                .position = position++, .descriptor = d});
+  }
+  out.declarations.push_back(
+      {.name = "level_set_maintenance", .position = position++, .registry_participant = false,
+       .descriptor = ts::maintenanceGeneratedStateDescriptor(
+           maintenance ? std::vector<svmp::FE::FieldId>{kLevelSet} : std::vector<svmp::FE::FieldId>{})});
+  out.declarations.push_back({.name = "moving_domain", .position = position++, .registry_participant = false,
+                              .descriptor = ts::movingDomainGeneratedStateDescriptor(svmp::FE::INVALID_FIELD_ID)});
+  return out;
+}
+
+} // namespace
+
+TEST(GeneratedStateSchedule, CompiledScheduleEqualsTheSelectionForEveryConfiguration)
+{
+  const std::vector<ts::OuterFixedPointOverrides> overrides{
+      {},
+      {.max_passes = 0, .relaxation_start_pass = 0, .cycle_exit_pass = 0, .topology_restarts = 0},
+      {.max_passes = 1, .relaxation_start_pass = 1, .cycle_exit_pass = 1, .topology_restarts = 1},
+      {.max_passes = 20, .relaxation_start_pass = 8, .cycle_exit_pass = 9, .topology_restarts = -1}};
+  for (const char* trials : {static_cast<const char*>(nullptr), "0"}) {
+    ScopedEnvironment environment("SVMP_SYNC_LINE_SEARCH_TRIALS", trials);
+    for (const auto solve : {ts::GeneratedStateSolve::Steady, ts::GeneratedStateSolve::Transient}) {
+      const auto purpose = solve == ts::GeneratedStateSolve::Steady ? ts::GeneratedStatePurpose::SteadySolve
+                                                                    : ts::GeneratedStatePurpose::TransientAttempt;
+      for (const bool cut : {false, true}) {
+        for (const bool maintenance : {false, true}) {
+          for (const auto extension :
+               {ExtensionCase::None, ExtensionCase::Prescribed, ExtensionCase::Monolithic}) {
+            for (const auto shadow : {ShadowCase::None, ShadowCase::Lagged, ShadowCase::Previous}) {
+              for (const bool per_step_only : {false, true}) {
+                for (std::size_t o = 0; o < overrides.size(); ++o) {
+                  const std::string where =
+                      std::string("trials=") + (trials ? trials : "unset") + " solve=" +
+                      std::to_string(static_cast<int>(solve)) + " cut=" + std::to_string(cut) +
+                      " maintenance=" + std::to_string(maintenance) + " extension=" +
+                      std::to_string(static_cast<int>(extension)) + " shadow=" +
+                      std::to_string(static_cast<int>(shadow)) + " per_step_only=" +
+                      std::to_string(per_step_only) + " overrides=" + std::to_string(o);
+                  const auto legacy = ts::legacyGeneratedStateSelection(
+                      {.cut_geometry = cut,
+                       .maintenance = maintenance,
+                       .extension = extension != ExtensionCase::None,
+                       .monolithic_extension = extension == ExtensionCase::Monolithic},
+                      solve, per_step_only);
+                  auto legacy_fixed_point = ts::outerFixedPointPreset(solve, overrides[o]);
+                  legacy_fixed_point.enabled = legacy.policy.outer_fixed_point;
+
+                  const auto declared = declaredCase(cut, maintenance, extension, shadow, purpose);
+                  const auto plan = ts::compileGeneratedStateSchedule(
+                      {.solve = solve, .purpose = purpose, .block_fields = declared.block_fields,
+                       .per_step_only = per_step_only, .overrides = overrides[o]},
+                      declared.declarations, declared.residual_reads);
+                  EXPECT_TRUE(ts::generatedStateScheduleMismatches(legacy, legacy_fixed_point, plan).empty())
+                      << where;
+                  // Why the loop runs: the geometry and the extension regenerate
+                  // the block; the maintenance only selects it; a shadow never.
+                  std::vector<std::string> reasons;
+                  if (plan.selection.policy.outer_fixed_point) {
+                    std::string inferred;
+                    if (cut) {
+                      inferred = "level_set_geometry";
+                    }
+                    if (extension != ExtensionCase::None) {
+                      inferred += (inferred.empty() ? "" : ", ") + std::string("level_set_advection_velocity");
+                    }
+                    if (!inferred.empty()) {
+                      reasons.push_back("inferred(" + inferred + ")");
+                    }
+                    if (maintenance) {
+                      reasons.push_back("envelope(level_set_maintenance)");
+                    }
+                  }
+                  EXPECT_EQ(plan.reasons, reasons) << where;
+                  EXPECT_EQ(plan.constraint_construction_order,
+                            std::vector<std::string>{"level_set_geometry"})
+                      << where;
+                  EXPECT_EQ(plan.projected_refresh_order.size(),
+                            1u + (extension != ExtensionCase::None ? 1u : 0u) +
+                                (shadow != ShadowCase::None ? 1u : 0u))
+                      << where;
+                  // The shadow is in the block's component (it reads and feeds
+                  // the block) when it is lagged.
+                  const bool shadow_in_component =
+                      std::find(plan.component.begin(), plan.component.end(), "shadow_fields") !=
+                      plan.component.end();
+                  EXPECT_EQ(shadow_in_component, shadow == ShadowCase::Lagged) << where;
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}
+
+TEST(GeneratedStateSchedule, ProbeAndMovingDomainNeverSelectTheOuterFixedPoint)
+{
+  ts::GeneratedStateDescriptor probe;
+  probe.enablement = ts::OuterEnablement::Never;
+  probe.reads.push_back({.what = fieldResource(kVelocity), .version = ts::StateVersion::CurrentTrial});
+  probe.writes.push_back({.what = {.kind = ts::ResourceKind::FrozenRows, .field = kExtension,
+                                   .operator_tag = "level_set"},
+                          .phase = ts::WritePhase::ConstraintConstruction,
+                          .residual_defining = true, .requires_fresh_residual = true});
+  const std::vector<ts::DeclaredGeneratedState> declarations{
+      {.name = "probe", .role = ts::GeneratedStateRole::Extension, .descriptor = probe},
+      {.name = "moving_domain", .position = 1, .registry_participant = false,
+       .descriptor = ts::movingDomainGeneratedStateDescriptor(5)}};
+  const auto plan = ts::compileGeneratedStateSchedule(
+      {.solve = ts::GeneratedStateSolve::Steady, .purpose = ts::GeneratedStatePurpose::CertificateProbe,
+       .block_fields = {kVelocity, kExtension}},
+      declarations, {});
+  EXPECT_FALSE(plan.selection.policy.outer_fixed_point);
+  EXPECT_FALSE(plan.fixed_point.enabled);
+  EXPECT_TRUE(plan.reasons.empty());
+  EXPECT_EQ(plan.component, std::vector<std::string>{"probe"});
+
+  // An Inferred writer that regenerates the block selects the loop on its
+  // own, with the inference as the reason.
+  auto inferred = declarations;
+  inferred[0].descriptor.enablement = ts::OuterEnablement::Inferred;
+  const auto selected = ts::compileGeneratedStateSchedule(
+      {.solve = ts::GeneratedStateSolve::Transient, .block_fields = {kVelocity, kExtension}},
+      inferred, {});
+  EXPECT_TRUE(selected.selection.policy.outer_fixed_point);
+  EXPECT_EQ(selected.reasons, std::vector<std::string>{"inferred(probe)"});
+  EXPECT_NE(selected.fingerprint, plan.fingerprint);
+  // The fingerprint is a function of the plan.
+  EXPECT_EQ(selected.fingerprint,
+            ts::compileGeneratedStateSchedule(
+                {.solve = ts::GeneratedStateSolve::Transient, .block_fields = {kVelocity, kExtension}},
+                inferred, {})
+                .fingerprint);
+}

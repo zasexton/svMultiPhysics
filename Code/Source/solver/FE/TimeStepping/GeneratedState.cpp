@@ -18,6 +18,7 @@
 #include <algorithm>
 #include <cctype>
 #include <cstdlib>
+#include <cstring>
 #include <stdexcept>
 #include <string>
 #include <utility>
@@ -1008,6 +1009,363 @@ std::vector<GeneratedStateFinding> checkGeneratedStateDeclarations(
     }
   }
   return findings;
+}
+
+// ---------------------------------------------------------------------------
+// Schedule compiler
+// ---------------------------------------------------------------------------
+
+namespace {
+
+constexpr std::size_t kBlockNode = 0;
+
+bool refreshPhase(WritePhase phase) noexcept
+{
+  return phase == WritePhase::ConstraintConstruction || phase == WritePhase::ProjectedRefresh;
+}
+
+bool sameRefreshVersion(StateVersion version) noexcept
+{
+  return version == StateVersion::CurrentTrial || version == StateVersion::ProjectedStage;
+}
+
+// The strongly connected component of every node (Tarjan, iterative).
+std::vector<std::size_t> stronglyConnectedComponents(
+    const std::vector<std::vector<std::size_t>>& adjacency)
+{
+  const std::size_t n = adjacency.size();
+  constexpr std::size_t kUnvisited = static_cast<std::size_t>(-1);
+  std::vector<std::size_t> index(n, kUnvisited), low(n, 0), component(n, kUnvisited);
+  std::vector<bool> on_stack(n, false);
+  std::vector<std::size_t> stack;
+  std::size_t next_index = 0;
+  std::size_t next_component = 0;
+  for (std::size_t root = 0; root < n; ++root) {
+    if (index[root] != kUnvisited) {
+      continue;
+    }
+    // (node, next edge position)
+    std::vector<std::pair<std::size_t, std::size_t>> work{{root, 0}};
+    index[root] = low[root] = next_index++;
+    stack.push_back(root);
+    on_stack[root] = true;
+    while (!work.empty()) {
+      auto& [node, edge] = work.back();
+      if (edge < adjacency[node].size()) {
+        const auto next = adjacency[node][edge++];
+        if (index[next] == kUnvisited) {
+          index[next] = low[next] = next_index++;
+          stack.push_back(next);
+          on_stack[next] = true;
+          work.emplace_back(next, 0);
+        } else if (on_stack[next]) {
+          low[node] = std::min(low[node], index[next]);
+        }
+        continue;
+      }
+      if (low[node] == index[node]) {
+        std::size_t member = 0;
+        do {
+          member = stack.back();
+          stack.pop_back();
+          on_stack[member] = false;
+          component[member] = next_component;
+        } while (member != node);
+        ++next_component;
+      }
+      const auto finished = node;
+      work.pop_back();
+      if (!work.empty()) {
+        auto& parent = work.back().first;
+        low[parent] = std::min(low[parent], low[finished]);
+      }
+    }
+  }
+  return component;
+}
+
+class Fnv1a {
+public:
+  void add(std::string_view text)
+  {
+    for (const unsigned char c : text) {
+      hash_ = (hash_ ^ c) * 1099511628211ull;
+    }
+    add(std::uint64_t{text.size()});
+  }
+  void add(std::uint64_t value)
+  {
+    for (int i = 0; i < 8; ++i) {
+      hash_ = (hash_ ^ ((value >> (8 * i)) & 0xffu)) * 1099511628211ull;
+    }
+  }
+  void add(std::int64_t value) { add(static_cast<std::uint64_t>(value)); }
+  void add(int value) { add(static_cast<std::int64_t>(value)); }
+  void add(bool value) { add(std::uint64_t{value ? 1u : 0u}); }
+  void add(double value)
+  {
+    std::uint64_t bits = 0;
+    std::memcpy(&bits, &value, sizeof(bits));
+    add(bits);
+  }
+  [[nodiscard]] std::uint64_t value() const noexcept { return hash_; }
+
+private:
+  std::uint64_t hash_{1469598103934665603ull};
+};
+
+void addResource(Fnv1a& hash, const GeneratedResource& resource)
+{
+  hash.add(static_cast<int>(resource.kind));
+  hash.add(static_cast<std::int64_t>(resource.field));
+  hash.add(resource.marker);
+  hash.add(std::string_view(resource.operator_tag));
+  hash.add(resource.steps_back);
+}
+
+std::string joined(const std::vector<std::string>& names)
+{
+  std::string out;
+  for (const auto& name : names) {
+    out += (out.empty() ? "" : ", ") + name;
+  }
+  return out;
+}
+
+} // namespace
+
+GeneratedStatePlan compileGeneratedStateSchedule(
+    const GeneratedStateScheduleInputs& inputs,
+    const std::vector<DeclaredGeneratedState>& declarations,
+    const std::vector<GeneratedRead>& residual_reads)
+{
+  GeneratedStatePlan plan;
+  const auto block_field = [&](FieldId field) {
+    return std::find(inputs.block_fields.begin(), inputs.block_fields.end(), field) !=
+           inputs.block_fields.end();
+  };
+  const auto read_by_residual = [&](const GeneratedResource& resource) {
+    return std::any_of(residual_reads.begin(), residual_reads.end(), [&](const GeneratedRead& read) {
+      return read.version == StateVersion::FrozenPass && read.what == resource;
+    });
+  };
+
+  // Nodes: the block, then one per declaration.  A declaration that
+  // generates nothing makes no edge.
+  std::vector<std::vector<std::size_t>> adjacency(declarations.size() + 1);
+  std::vector<bool> fresh_prior_writer(declarations.size(), false);
+  for (std::size_t i = 0; i < declarations.size(); ++i) {
+    const auto& descriptor = declarations[i].descriptor;
+    if (!descriptor.present) {
+      continue;
+    }
+    // Prior pass: the block reads, frozen through the inner solve, what the
+    // refresh writes.
+    for (const auto& write : descriptor.writes) {
+      if (!refreshPhase(write.phase) || !write.residual_defining) {
+        continue;
+      }
+      const bool read_by_block =
+          write.what.kind == ResourceKind::FrozenRows ||
+          write.what.kind == ResourceKind::AffineConstraints ||
+          (write.what.kind == ResourceKind::GeneratedDomain && read_by_residual(write.what)) ||
+          (write.what.kind == ResourceKind::Field && !block_field(write.what.field) &&
+           read_by_residual(write.what));
+      if (read_by_block) {
+        adjacency[i + 1].push_back(kBlockNode);
+        fresh_prior_writer[i] = fresh_prior_writer[i] || write.requires_fresh_residual;
+      }
+    }
+    // Same pass: the participant reads the block or an earlier write of the
+    // refresh.
+    for (const auto& read : descriptor.reads) {
+      if (!sameRefreshVersion(read.version)) {
+        continue;
+      }
+      if (read.what.kind == ResourceKind::Field && block_field(read.what.field)) {
+        adjacency[kBlockNode].push_back(i + 1);
+      }
+      for (std::size_t j = 0; j < declarations.size(); ++j) {
+        if (j == i || !declarations[j].descriptor.present) {
+          continue;
+        }
+        for (const auto& write : declarations[j].descriptor.writes) {
+          if (refreshPhase(write.phase) && write.what == read.what) {
+            adjacency[j + 1].push_back(i + 1);
+          }
+        }
+      }
+    }
+  }
+  const auto component = stronglyConnectedComponents(adjacency);
+
+  bool envelope_selects = false;
+  bool inferred_selects = false;
+  bool monolithic_extension = false;
+  bool geometry_present = false;
+  std::vector<std::string> inferred;
+  std::vector<std::string> envelope;
+  for (std::size_t i = 0; i < declarations.size(); ++i) {
+    const auto& declaration = declarations[i];
+    const auto& descriptor = declaration.descriptor;
+    const bool in_block_component = component[i + 1] == component[kBlockNode];
+    if (in_block_component) {
+      plan.component.push_back(declaration.name);
+    }
+    if (!descriptor.present) {
+      continue;
+    }
+    const bool required = descriptor.enablement == OuterEnablement::RequiredWhenPresent;
+    const bool selecting = required || descriptor.enablement == OuterEnablement::Inferred;
+    envelope_selects = envelope_selects || required;
+    if (in_block_component && fresh_prior_writer[i] && selecting) {
+      inferred.push_back(declaration.name);
+      inferred_selects =
+          inferred_selects || descriptor.enablement == OuterEnablement::Inferred;
+    } else if (required) {
+      envelope.push_back(declaration.name);
+    }
+    for (const auto& write : descriptor.writes) {
+      monolithic_extension = monolithic_extension || write.what.kind == ResourceKind::FrozenRows;
+    }
+    geometry_present = geometry_present || (declaration.registry_participant &&
+                                            declaration.role == GeneratedStateRole::Geometry);
+  }
+
+  // The selection, as legacyGeneratedStateSelection forms it from requests.
+  auto& selection = plan.selection;
+  selection.policy.solve = inputs.solve;
+  selection.generated_state = envelope_selects || inferred_selects;
+  bool outer = envelope_selects || inferred_selects;
+  if (inputs.solve == GeneratedStateSolve::Steady) {
+    selection.policy.outer_fixed_point = outer;
+    selection.accepted_state_sync_invalidates_residual = selection.generated_state && !outer;
+    selection.jacobian_check_refreshes_geometry_within_solve = !outer;
+    selection.jacobian_check_frozen_algebraic_extension = false;
+  } else {
+    outer = outer && !inputs.per_step_only;
+    const bool refresh_within_solve =
+        selection.generated_state && !outer && !monolithic_extension;
+    selection.policy.outer_fixed_point = outer;
+    selection.policy.refresh_within_solve = refresh_within_solve;
+    selection.accepted_state_sync_invalidates_residual =
+        refresh_within_solve && selection.generated_state;
+    selection.policy.synchronize_line_search_trials =
+        synchronizeTransientLineSearchTrials(selection.accepted_state_sync_invalidates_residual);
+    selection.policy.per_step_only = inputs.per_step_only;
+    selection.track_cut_topology = geometry_present;
+    selection.jacobian_check_refreshes_geometry_within_solve = refresh_within_solve;
+    selection.jacobian_check_frozen_algebraic_extension = monolithic_extension;
+  }
+  if (outer) {
+    if (!inferred.empty()) {
+      plan.reasons.push_back("inferred(" + joined(inferred) + ")");
+    }
+    if (!envelope.empty()) {
+      plan.reasons.push_back("envelope(" + joined(envelope) + ")");
+    }
+  }
+  plan.fixed_point = outerFixedPointPreset(inputs.solve, inputs.overrides);
+  plan.fixed_point.enabled = outer;
+
+  for (const auto& declaration : declarations) {
+    if (!declaration.registry_participant) {
+      continue;
+    }
+    if (declaration.role == GeneratedStateRole::Geometry) {
+      plan.constraint_construction_order.push_back(declaration.name);
+    }
+    plan.projected_refresh_order.push_back(declaration.name);
+  }
+
+  Fnv1a hash;
+  hash.add(static_cast<int>(inputs.purpose));
+  hash.add(static_cast<int>(inputs.solve));
+  for (const auto& declaration : declarations) {
+    hash.add(std::string_view(declaration.name));
+    hash.add(static_cast<int>(declaration.role));
+    hash.add(static_cast<std::uint64_t>(declaration.position));
+    hash.add(declaration.registry_participant);
+    hash.add(declaration.descriptor.present);
+    hash.add(static_cast<int>(declaration.descriptor.enablement));
+    for (const auto& read : declaration.descriptor.reads) {
+      addResource(hash, read.what);
+      hash.add(static_cast<int>(read.version));
+    }
+    for (const auto& write : declaration.descriptor.writes) {
+      addResource(hash, write.what);
+      hash.add(static_cast<int>(write.phase));
+      hash.add(write.residual_defining);
+      hash.add(write.requires_fresh_residual);
+      hash.add(write.writes_state_vector);
+    }
+  }
+  hash.add(selection.policy.outer_fixed_point);
+  hash.add(selection.policy.refresh_within_solve);
+  hash.add(selection.policy.synchronize_line_search_trials);
+  hash.add(selection.policy.per_step_only);
+  hash.add(selection.accepted_state_sync_invalidates_residual);
+  hash.add(selection.track_cut_topology);
+  hash.add(plan.fixed_point.max_iterations);
+  hash.add(plan.fixed_point.max_discontinuity_restarts);
+  hash.add(plan.fixed_point.constraint_cycle_exit_start_iteration);
+  hash.add(plan.fixed_point.dynamic_relaxation.enabled);
+  hash.add(plan.fixed_point.dynamic_relaxation.start_iteration);
+  plan.fingerprint = hash.value();
+  return plan;
+}
+
+std::vector<std::string> generatedStateScheduleMismatches(
+    const GeneratedStateSelection& legacy,
+    const NewtonOptions::ExternalStateFixedPointOptions& legacy_fixed_point,
+    const GeneratedStatePlan& plan)
+{
+  std::vector<std::string> mismatches;
+  const auto compare = [&](const char* name, auto a, auto b) {
+    if (!(a == b)) {
+      mismatches.emplace_back(name);
+    }
+  };
+  const auto& s = plan.selection;
+  compare("solve", legacy.policy.solve, s.policy.solve);
+  compare("outer_fixed_point", legacy.policy.outer_fixed_point, s.policy.outer_fixed_point);
+  compare("refresh_within_solve", legacy.policy.refresh_within_solve, s.policy.refresh_within_solve);
+  compare("synchronize_line_search_trials", legacy.policy.synchronize_line_search_trials,
+          s.policy.synchronize_line_search_trials);
+  compare("per_step_only", legacy.policy.per_step_only, s.policy.per_step_only);
+  compare("generated_state", legacy.generated_state, s.generated_state);
+  compare("accepted_state_sync_invalidates_residual", legacy.accepted_state_sync_invalidates_residual,
+          s.accepted_state_sync_invalidates_residual);
+  compare("track_cut_topology", legacy.track_cut_topology, s.track_cut_topology);
+  compare("jacobian_check_refreshes_geometry_within_solve",
+          legacy.jacobian_check_refreshes_geometry_within_solve,
+          s.jacobian_check_refreshes_geometry_within_solve);
+  compare("jacobian_check_frozen_algebraic_extension", legacy.jacobian_check_frozen_algebraic_extension,
+          s.jacobian_check_frozen_algebraic_extension);
+  const auto& a = legacy_fixed_point;
+  const auto& b = plan.fixed_point;
+  compare("fixed_point.enabled", a.enabled, b.enabled);
+  compare("fixed_point.max_iterations", a.max_iterations, b.max_iterations);
+  compare("fixed_point.max_discontinuity_restarts", a.max_discontinuity_restarts,
+          b.max_discontinuity_restarts);
+  compare("fixed_point.constraint_cycle_exit_start_iteration", a.constraint_cycle_exit_start_iteration,
+          b.constraint_cycle_exit_start_iteration);
+  compare("fixed_point.dynamic_relaxation.enabled", a.dynamic_relaxation.enabled,
+          b.dynamic_relaxation.enabled);
+  compare("fixed_point.dynamic_relaxation.start_iteration", a.dynamic_relaxation.start_iteration,
+          b.dynamic_relaxation.start_iteration);
+  compare("fixed_point.dynamic_relaxation.initial_factor", a.dynamic_relaxation.initial_factor,
+          b.dynamic_relaxation.initial_factor);
+  compare("fixed_point.dynamic_relaxation.minimum_factor", a.dynamic_relaxation.minimum_factor,
+          b.dynamic_relaxation.minimum_factor);
+  compare("fixed_point.dynamic_relaxation.maximum_factor", a.dynamic_relaxation.maximum_factor,
+          b.dynamic_relaxation.maximum_factor);
+  compare("fixed_point.dynamic_relaxation.denominator_relative_tolerance",
+          a.dynamic_relaxation.denominator_relative_tolerance,
+          b.dynamic_relaxation.denominator_relative_tolerance);
+  compare("fixed_point.residual_first_on_predicted_certificate",
+          a.residual_first_on_predicted_certificate, b.residual_first_on_predicted_certificate);
+  return mismatches;
 }
 
 } // namespace timestepping
