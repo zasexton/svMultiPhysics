@@ -2079,6 +2079,83 @@ TEST(GlobalTimeDerivative, AScalarOdeFollowsBdf2LikeAVolumeField)
     EXPECT_GT(std::abs(values.back()[0] - euler.back()[0]), 1e-6);
 }
 
+namespace {
+
+/// The residual entry and the diagonal of the global row of x at x = @p at
+/// (x = 1 one step back, backward Euler, dt = 0.1) for the point row
+/// @p row(x) with unit test, beside the volume row w v.
+std::pair<Real, Real> globalPointRowAt(const std::function<FormExpr(const FormExpr&)>& row, bool transient,
+                                       Real at = 3.0)
+{
+    auto h1 = quadSpace(1);
+    auto r1 = std::make_shared<spaces::GlobalSpace>(1);
+    FESystem sys(buildGrid(2, 1, 1.0, 0.5, 1));
+    const auto w_id = sys.addField(FieldSpec{.name = "w", .space = h1});
+    const auto x_id = sys.addField(FieldSpec{.name = "x", .space = r1});
+    sys.addOperator("op");
+    const auto w = forms::StateField(w_id, *h1, "w");
+    const auto v = forms::TestField(w_id, *h1, "v");
+    const auto x = forms::StateField(x_id, *r1, "x");
+    const auto z = forms::TestField(x_id, *r1, "z");
+    (void)installFormulation(sys, "op", {w_id, x_id}, (w * v).dx() + (z * row(x)).dGlobal());
+    sys.setup();
+    const auto n = sys.dofHandler().getNumDofs();
+    const auto xi = static_cast<std::size_t>(sys.fieldDofOffset(x_id));
+    std::vector<Real> state(static_cast<std::size_t>(n), 0.0);
+    std::vector<Real> previous(static_cast<std::size_t>(n), 0.0);
+    state[xi] = at;
+    previous[xi] = 1.0;
+    SystemStateView view;
+    view.u = state;
+    view.u_prev = previous;
+    view.u_prev2 = previous;
+    view.time = 0.1;
+    view.dt = 0.1;
+    view.dt_prev = 0.1;
+    const BackwardDifferenceIntegrator integrator;
+    const auto context = integrator.buildContext(1, view);
+    if (transient) {
+        view.time_integration = &context;
+    }
+    assembly::DenseSystemView out(n);
+    out.zero();
+    AssemblyRequest request;
+    request.op = "op";
+    request.want_matrix = true;
+    request.want_vector = true;
+    request.suppress_constraint_inhomogeneity = true;
+    EXPECT_TRUE(sys.assemble(request, view, &out, &out).success);
+    return {out.vectorData()[xi], out.getMatrixEntry(static_cast<GlobalIndex>(xi), static_cast<GlobalIndex>(xi))};
+}
+
+} // namespace
+
+TEST(GlobalTimeDerivative, AFrozenCopyInAPointRowIsDataInTheTangent)
+{
+    // (2 x - frozen(x)) at x = 3: residual 3, tangent 2.  The finite
+    // difference holds the frozen copy at its value, 3: the central
+    // difference of 2 x - 3.
+    const auto with_frozen = [](const FormExpr& x) { return 2.0 * x - forms::frozen(x); };
+    const auto held = [](const FormExpr& x) { return 2.0 * x - FormExpr::constant(3.0); };
+    constexpr Real h = 1e-3;
+    for (const bool transient : {false, true}) {
+        SCOPED_TRACE(transient ? "with dt(x)" : "without dt(x)");
+        // With dt(x), backward Euler from x = 1 and dt = 0.1 adds 20 to the
+        // residual and 10 to the tangent.
+        const auto frozen_row = [&](const FormExpr& x) {
+            return transient ? x.dt(1) + with_frozen(x) : with_frozen(x);
+        };
+        const auto held_row = [&](const FormExpr& x) { return transient ? x.dt(1) + held(x) : held(x); };
+        const auto [r, J] = globalPointRowAt(frozen_row, transient);
+        EXPECT_NEAR(r, transient ? 23.0 : 3.0, 1e-12);
+        EXPECT_NEAR(J, transient ? 12.0 : 2.0, 1e-12);
+        const auto plus = globalPointRowAt(held_row, transient, 3.0 + h).first;
+        const auto minus = globalPointRowAt(held_row, transient, 3.0 - h).first;
+        EXPECT_NEAR((plus - minus) / (2.0 * h), J, 1e-9);
+        EXPECT_NEAR(globalPointRowAt(held_row, transient).first, r, 1e-12);
+    }
+}
+
 TEST(GlobalTimeDerivative, TheRowDeclaresItsTimeDerivatives)
 {
     auto problem = buildScalarOde();

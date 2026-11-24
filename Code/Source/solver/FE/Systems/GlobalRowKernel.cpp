@@ -307,9 +307,12 @@ GlobalRowKernel::GlobalRowKernel(FieldId test_field,
             std::vector<FieldId> fields;
             collectGlobalStateFields(*point_value_.node(), fields);
             for (const auto field : fields) {
+                // A frozen copy (DiscreteField of the same field) is data
+                // in the tangent, as in the element kernels.
                 point_derivatives_.emplace_back(
                     field,
-                    forms::directionalDerivativeWrtField(point_value_, field, FormExpr::constant(Real(1.0))));
+                    forms::directionalDerivativeWrtField(point_value_, field, FormExpr::constant(Real(1.0)),
+                                                         /*discrete_fields_vary=*/false));
             }
             return;
         }
@@ -353,7 +356,8 @@ GlobalRowKernel::GlobalRowKernel(FieldId test_field,
                     point_fields_.push_back(column);
                 }
                 term.derivatives.emplace_back(
-                    field, forms::directionalDerivativeWrtField(value, field, FormExpr::constant(Real(1.0))));
+                    field, forms::directionalDerivativeWrtField(value, field, FormExpr::constant(Real(1.0)),
+                                                                /*discrete_fields_vary=*/false));
             }
             term.value = std::move(value);
             point_terms_.push_back(std::move(term));
