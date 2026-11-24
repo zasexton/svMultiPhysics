@@ -444,10 +444,24 @@ std::vector<FunctionalFormValue> evaluateOnSystem(
             }
         }
     }
-    // A global field has no cell quadrature of its own; the first other
-    // field gives it.
+    // A global field has no cell quadrature of its own, and a vector basis
+    // (H(div), H(curl)) no scalar tables: the first other field gives the
+    // quadrature (the first volume field when every one has a vector basis).
     FieldId primary_field = fields.front();
+    bool primary_found = false;
     for (const auto field : fields) {
+        const auto& record = system.fieldRecord(field);
+        if (record.scope != FieldScope::Global && record.space &&
+            !record.space->element().basis().is_vector_valued()) {
+            primary_field = field;
+            primary_found = true;
+            break;
+        }
+    }
+    for (const auto field : fields) {
+        if (primary_found) {
+            break;
+        }
         if (system.fieldRecord(field).scope != FieldScope::Global) {
             primary_field = field;
             break;

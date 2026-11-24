@@ -643,6 +643,41 @@ TEST(VectorBasisMixedInstall, PiecewiseConstantAndVectorBasisFieldsInOneInstall)
     }
 }
 
+// Measured forms on a system whose first unknown has a vector basis: the
+// evaluator takes the cells' quadrature from a field with a scalar basis and
+// evaluates a scalar integrand (it crashed taking scalar tables of the
+// H(div) basis).  An integrand of the vector-basis field is refused by name:
+// measured forms do not evaluate such fields.
+TEST(VectorBasisMixedInstall, MeasuredFormsWithAVectorBasisFirstUnknown)
+{
+    FESystem system(unitBoxSimplexMesh(2, 2));
+    FieldBinding fields(system, "VectorBasisMixedInstall");
+    const auto Q = fields.unknown("q", std::make_shared<spaces::HDivSpace>(ElementType::Triangle3, 0));
+    const auto P = fields.unknown("p", std::make_shared<spaces::L2Space>(ElementType::Triangle3, 0));
+    {
+        FormulationBuilder F(system, "equations", {});
+        (void)F.residual(forms::inner(Q.state, Q.test).dx() + (P.state * P.test).dx());
+    }
+    system.setup();
+    const auto n = system.dofHandler().getNumDofs();
+    std::vector<Real> U(static_cast<std::size_t>(n), 0.1);
+    SystemStateView state;
+    state.u = U;
+
+    const std::vector<forms::FormExpr> scalar{(P.state * P.state).dx()};
+    const auto values = evaluateFunctionalForms(system, scalar, state, CollectiveCommunicator{});
+    ASSERT_EQ(values.size(), 1u);
+    EXPECT_NEAR(values[0].value, 0.01, 1e-14);
+
+    const std::vector<forms::FormExpr> vector{forms::inner(Q.state, Q.state).dx()};
+    try {
+        (void)evaluateFunctionalForms(system, vector, state, CollectiveCommunicator{});
+        ADD_FAILURE() << "an integrand of an H(div) field was evaluated";
+    } catch (const std::exception& error) {
+        EXPECT_NE(std::string(error.what()).find("vector basis"), std::string::npos) << error.what();
+    }
+}
+
 
 } // namespace test
 } // namespace systems

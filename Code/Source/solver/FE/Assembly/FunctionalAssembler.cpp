@@ -409,69 +409,75 @@ void prepareCellContext(AssemblyContext& context,
     }
 
     const auto& basis = element.basis();
-    if (scratch.cached_basis_entry == nullptr ||
-        scratch.cached_basis != &basis ||
-        scratch.cached_basis_quad != quad_rule.get() ||
-        scratch.cached_basis_hessians != need_basis_hessians) {
-        scratch.cached_basis_entry = &basis::BasisCache::instance().get_or_compute(
-            basis, *quad_rule, /*gradients=*/true, need_basis_hessians);
-        scratch.cached_basis = &basis;
-        scratch.cached_basis_quad = quad_rule.get();
-        scratch.cached_basis_hessians = need_basis_hessians;
-    }
-    const auto& basis_cache = *scratch.cached_basis_entry;
+    if (basis.is_vector_valued()) {
+        // A functional has no test function: a vector basis (H(div), H(curl))
+        // gives no scalar tables, and its fields enter through their own
+        // solution data.
+    } else {
+        if (scratch.cached_basis_entry == nullptr ||
+            scratch.cached_basis != &basis ||
+            scratch.cached_basis_quad != quad_rule.get() ||
+            scratch.cached_basis_hessians != need_basis_hessians) {
+            scratch.cached_basis_entry = &basis::BasisCache::instance().get_or_compute(
+                basis, *quad_rule, /*gradients=*/true, need_basis_hessians);
+            scratch.cached_basis = &basis;
+            scratch.cached_basis_quad = quad_rule.get();
+            scratch.cached_basis_hessians = need_basis_hessians;
+        }
+        const auto& basis_cache = *scratch.cached_basis_entry;
 
-    for (LocalIndex q = 0; q < n_qpts; ++q) {
-        for (LocalIndex i = 0; i < n_dofs; ++i) {
-            const LocalIndex si = is_product ? static_cast<LocalIndex>(i % n_scalar_dofs) : i;
-            const std::size_t idx = static_cast<std::size_t>(i * n_qpts + q);
-            const std::size_t idx_phys = static_cast<std::size_t>(q * n_dofs + i);
-            const auto sisz = static_cast<std::size_t>(si);
-            const auto qsz = static_cast<std::size_t>(q);
-            scratch.basis_values[idx] = basis_cache.scalarValue(sisz, qsz);
-            scratch.ref_gradients[idx] = {
-                basis_cache.gradientValue(sisz, 0u, qsz),
-                basis_cache.gradientValue(sisz, 1u, qsz),
-                basis_cache.gradientValue(sisz, 2u, qsz)};
+        for (LocalIndex q = 0; q < n_qpts; ++q) {
+            for (LocalIndex i = 0; i < n_dofs; ++i) {
+                const LocalIndex si = is_product ? static_cast<LocalIndex>(i % n_scalar_dofs) : i;
+                const std::size_t idx = static_cast<std::size_t>(i * n_qpts + q);
+                const std::size_t idx_phys = static_cast<std::size_t>(q * n_dofs + i);
+                const auto sisz = static_cast<std::size_t>(si);
+                const auto qsz = static_cast<std::size_t>(q);
+                scratch.basis_values[idx] = basis_cache.scalarValue(sisz, qsz);
+                scratch.ref_gradients[idx] = {
+                    basis_cache.gradientValue(sisz, 0u, qsz),
+                    basis_cache.gradientValue(sisz, 1u, qsz),
+                    basis_cache.gradientValue(sisz, 2u, qsz)};
 
-            const auto& grad_ref = scratch.ref_gradients[idx];
-            const auto& J_inv = scratch.inv_jacobians[q];
-            AssemblyContext::Vector3D grad_phys = {0.0, 0.0, 0.0};
-            for (int d1 = 0; d1 < dim; ++d1) {
-                for (int d2 = 0; d2 < dim; ++d2) {
-                    grad_phys[d1] += J_inv[d2][d1] * grad_ref[d2];
-                }
-            }
-            scratch.phys_gradients[idx_phys] = grad_phys;
-
-            if (need_basis_hessians) {
-                AssemblyContext::Matrix3x3 H_ref{};
-                for (int r = 0; r < 3; ++r) {
-                    for (int c = 0; c < 3; ++c) {
-                        H_ref[static_cast<std::size_t>(r)][static_cast<std::size_t>(c)] =
-                            basis_cache.hessianValue(sisz,
-                                                     static_cast<std::size_t>(r),
-                                                     static_cast<std::size_t>(c),
-                                                     qsz);
+                const auto& grad_ref = scratch.ref_gradients[idx];
+                const auto& J_inv = scratch.inv_jacobians[q];
+                AssemblyContext::Vector3D grad_phys = {0.0, 0.0, 0.0};
+                for (int d1 = 0; d1 < dim; ++d1) {
+                    for (int d2 = 0; d2 < dim; ++d2) {
+                        grad_phys[d1] += J_inv[d2][d1] * grad_ref[d2];
                     }
                 }
-                ref_hessians[idx] = H_ref;
+                scratch.phys_gradients[idx_phys] = grad_phys;
 
-                AssemblyContext::Matrix3x3 H_phys{};
-                for (int r = 0; r < dim; ++r) {
-                    for (int c = 0; c < dim; ++c) {
-                        Real sum = 0.0;
-                        for (int a = 0; a < dim; ++a) {
-                            for (int b = 0; b < dim; ++b) {
-                                sum += J_inv[static_cast<std::size_t>(a)][static_cast<std::size_t>(r)] *
-                                       H_ref[static_cast<std::size_t>(a)][static_cast<std::size_t>(b)] *
-                                       J_inv[static_cast<std::size_t>(b)][static_cast<std::size_t>(c)];
-                            }
+                if (need_basis_hessians) {
+                    AssemblyContext::Matrix3x3 H_ref{};
+                    for (int r = 0; r < 3; ++r) {
+                        for (int c = 0; c < 3; ++c) {
+                            H_ref[static_cast<std::size_t>(r)][static_cast<std::size_t>(c)] =
+                                basis_cache.hessianValue(sisz,
+                                                         static_cast<std::size_t>(r),
+                                                         static_cast<std::size_t>(c),
+                                                         qsz);
                         }
-                        H_phys[static_cast<std::size_t>(r)][static_cast<std::size_t>(c)] = sum;
                     }
+                    ref_hessians[idx] = H_ref;
+
+                    AssemblyContext::Matrix3x3 H_phys{};
+                    for (int r = 0; r < dim; ++r) {
+                        for (int c = 0; c < dim; ++c) {
+                            Real sum = 0.0;
+                            for (int a = 0; a < dim; ++a) {
+                                for (int b = 0; b < dim; ++b) {
+                                    sum += J_inv[static_cast<std::size_t>(a)][static_cast<std::size_t>(r)] *
+                                           H_ref[static_cast<std::size_t>(a)][static_cast<std::size_t>(b)] *
+                                           J_inv[static_cast<std::size_t>(b)][static_cast<std::size_t>(c)];
+                                }
+                            }
+                            H_phys[static_cast<std::size_t>(r)][static_cast<std::size_t>(c)] = sum;
+                        }
+                    }
+                    phys_hessians[idx] = H_phys;
                 }
-                phys_hessians[idx] = H_phys;
             }
         }
     }
@@ -483,12 +489,14 @@ void prepareCellContext(AssemblyContext& context,
     context.setPhysicalPoints(scratch.phys_points);
     context.setJacobianData(scratch.jacobians, scratch.inv_jacobians, scratch.jac_dets);
     context.setIntegrationWeights(scratch.integration_weights);
-    context.setTestBasisData(n_dofs, scratch.basis_values, scratch.ref_gradients);
-    context.setPhysicalGradients(scratch.phys_gradients, scratch.phys_gradients);
+    if (!basis.is_vector_valued()) {
+        context.setTestBasisData(n_dofs, scratch.basis_values, scratch.ref_gradients);
+        context.setPhysicalGradients(scratch.phys_gradients, scratch.phys_gradients);
 
-    if (need_basis_hessians) {
-        context.setTestBasisHessians(n_dofs, ref_hessians);
-        context.setPhysicalHessians(phys_hessians, phys_hessians);
+        if (need_basis_hessians) {
+            context.setTestBasisHessians(n_dofs, ref_hessians);
+            context.setPhysicalHessians(phys_hessians, phys_hessians);
+        }
     }
 
     if (hasFlag(required_data, RequiredData::EntityMeasures)) {
@@ -1607,6 +1615,10 @@ void FunctionalAssembler::bindFieldSolutionData(AssemblyContext& context,
         const auto field_elem_type = field_space.element_type();
         const auto& field_element = field_space.getElement(field_elem_type, cell_id);
         const auto& field_basis = field_element.basis();
+        FE_THROW_IF(field_basis.is_vector_valued(), NotImplementedException,
+                    "FunctionalAssembler: the measured form reads field " + std::to_string(fr.field) +
+                        ", whose basis is a vector basis (H(div) or H(curl)); measured forms do not "
+                        "evaluate such fields");
         const int dim = context.dimension();
         const bool component_blocked = usesComponentBlockedFieldOrdering(*binding);
 
