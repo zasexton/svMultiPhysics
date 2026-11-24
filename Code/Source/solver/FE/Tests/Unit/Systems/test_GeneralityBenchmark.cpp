@@ -524,5 +524,202 @@ TEST(GeneralityBenchmark, P04_TaylorHoodStokesThroughBoundFieldsConverges)
     }
 }
 
+// ===========================================================================
+// 10. Mixed Cahn-Hilliard
+// ===========================================================================
+//
+// dt(c) = div(M grad mu), mu = f'(c) - kappa lap(c) in the unit square with
+// no-flux walls.  With the quadratic potential f'(c) = a c, the mode
+// c = cbar + eps e^{-lambda t} cos(pi x), mu = a cbar + (a + kappa pi^2) eps
+// e^{-lambda t} cos(pi x) is exact for lambda = M pi^2 (a + kappa pi^2).  With
+// the double well f(c) = (c^2 - 1)^2 / 4 split convexly (c^3 implicit, -c at
+// the previous step), backward Euler decreases the discrete free energy at
+// every step.
+
+struct CahnHilliardData {
+    Real M{1.0};
+    Real a{1.0};
+    Real kappa{0.01};
+    bool double_well{false};
+    FormExpr c0;   ///< initial concentration
+    FormExpr mu0;  ///< initial chemical potential
+};
+
+// ---------------------------------------------------------------------------
+// The formulation: everything an author writes for problem 10.
+// ---------------------------------------------------------------------------
+struct CahnHilliardInstall {
+    FieldId c{INVALID_FIELD_ID};
+    FieldId mu{INVALID_FIELD_ID};
+    Quantity mass;
+    Quantity free_energy;
+};
+
+CahnHilliardInstall defineCahnHilliard(FESystem& system,
+                                       const std::shared_ptr<const spaces::FunctionSpace>& V,
+                                       const CahnHilliardData& d)
+{
+    using namespace forms;
+    FieldBinding fields(system, "CahnHilliard");
+    const auto C = fields.unknown("c", V);
+    const auto Mu = fields.unknown("mu", V);
+    const auto& c = C.state;
+    const auto& v = C.test;
+    const auto& mu = Mu.state;
+    const auto& w = Mu.test;
+    const auto M = FormExpr::constant(d.M);
+    const auto a = FormExpr::constant(d.a);
+    const auto kappa = FormExpr::constant(d.kappa);
+
+    // f'(c), time-discretized: a c, or c^3 at the new step and -c at the previous one.
+    const auto potential = d.double_well ? c * c * c - fields.previous(C, 1) : a * c;
+    const auto energy_density = d.double_well ? 0.25 * (c * c - 1.0) * (c * c - 1.0) : 0.5 * a * c * c;
+    FormulationBuilder F(system, "equations", {});
+    F.symbolicTangent();
+    CahnHilliardInstall out{C.id, Mu.id, F.quantity("mass", FunctionalKind::Integral, c.dx()),
+                            F.quantity("free_energy", FunctionalKind::Stored,
+                                       (energy_density + 0.5 * kappa * inner(grad(c), grad(c))).dx())};
+    F.record(out.mass).record(out.free_energy);
+    (void)F.residual((dt(c) * v + M * inner(grad(mu), grad(v))).dx() +
+                     ((mu - potential) * w - kappa * inner(grad(c), grad(w))).dx());
+
+    // The initial state: the L2 projection of (c0, mu0).
+    FormulationBuilder initial(system, "initial", {});
+    (void)initial.residual(((c - d.c0) * v + (mu - d.mu0) * w).dx());
+    return out;
+}
+// ---------------------------------------------------------------------------
+
+struct CahnHilliardModeRun {
+    Real c_l2{0.0};
+    Real mu_l2{0.0};
+    std::vector<Real> final_state;
+    Real mass_drift{0.0};       ///< max |mass(t_n) - mass(0)|
+    bool energy_decreases{true};
+};
+
+constexpr Real kModeAmplitude = 0.1;
+constexpr Real kModeMean = 0.3;
+
+CahnHilliardModeRun runCahnHilliardMode(Cell cell, int order, int n, timestepping::SchemeKind scheme, double dt,
+                                        int steps)
+{
+    CahnHilliardData d;
+    const Real lambda = d.M * kPi * kPi * (d.a + d.kappa * kPi * kPi);
+    const auto mode = [](const Point& p) { return std::cos(kPi * p[0]); };
+    d.c0 = scalarCoefficient("c0", [mode](const Point& p) { return kModeMean + kModeAmplitude * mode(p); });
+    d.mu0 = scalarCoefficient("mu0", [mode, d](const Point& p) {
+        return d.a * kModeMean + (d.a + d.kappa * kPi * kPi) * kModeAmplitude * mode(p);
+    });
+    FESystem system(boxMesh(cell, n, boxSides()));
+    const auto V = std::make_shared<spaces::H1Space>(elementType(cell), order);
+    const auto install = defineCahnHilliard(system, V, d);
+    system.setup();
+    const auto initial = solveSteady(system, "initial");
+    const auto run = runTransient(system, "equations", initial.u, scheme, dt, steps);
+    EXPECT_TRUE(run.success);
+    CahnHilliardModeRun out;
+    if (run.states.empty()) {
+        return out;
+    }
+    const Real mass0 = integrate(system, install.mass.form(), initial.u);
+    Real energy = integrate(system, install.free_energy.form(), initial.u);
+    for (const auto& state : run.states) {
+        out.mass_drift = std::max(out.mass_drift, std::abs(integrate(system, install.mass.form(), state) - mass0));
+        const Real e = integrate(system, install.free_energy.form(), state);
+        out.energy_decreases = out.energy_decreases && e < energy;
+        energy = e;
+    }
+    const Real decay = std::exp(-lambda * dt * steps);
+    const auto c_h = FormExpr::discreteField(install.c, *V, "c");
+    const auto mu_h = FormExpr::discreteField(install.mu, *V, "mu");
+    const auto ec = c_h - scalarCoefficient("c_exact", [mode, decay](const Point& p) {
+                        return kModeMean + kModeAmplitude * decay * mode(p);
+                    });
+    const auto emu = mu_h - scalarCoefficient("mu_exact", [mode, decay, d](const Point& p) {
+                         return d.a * kModeMean + (d.a + d.kappa * kPi * kPi) * kModeAmplitude * decay * mode(p);
+                     });
+    out.final_state = run.states.back();
+    out.c_l2 = norm(system, (ec * ec).dx(), out.final_state);
+    out.mu_l2 = norm(system, (emu * emu).dx(), out.final_state);
+    return out;
+}
+
+TEST(GeneralityBenchmark, P10_CahnHilliardModeConvergesInSpace)
+{
+    // Temporal error suppressed: BDF2 with lambda dt ~ 0.01.
+    for (const auto cell : {Cell::Tri3, Cell::Quad4}) {
+        std::vector<Real> c_err, mu_err;
+        for (const int n : {8, 16, 32}) {
+            const auto run = runCahnHilliardMode(cell, 1, n, timestepping::SchemeKind::BDF2, 1e-3, 20);
+            c_err.push_back(run.c_l2);
+            mu_err.push_back(run.mu_l2);
+            EXPECT_LT(run.mass_drift, 1e-12) << cellName(cell) << " n=" << n;
+            EXPECT_TRUE(run.energy_decreases) << cellName(cell) << " n=" << n;
+        }
+        const std::string label = cellName(cell);
+        RecordProperty("p10_" + label + "_c_l2_rates", join(rates(c_err)));
+        RecordProperty("p10_" + label + "_mu_l2_rates", join(rates(mu_err)));
+        EXPECT_GT(rates(c_err).back(), 1.8) << label << " c " << join(c_err);
+        EXPECT_GT(rates(mu_err).back(), 1.8) << label << " mu " << join(mu_err);
+    }
+}
+
+TEST(GeneralityBenchmark, P10_CahnHilliardModeConvergesInTimeAtTheSchemeOrder)
+{
+    // The same mesh for every step: the differences of successive halvings
+    // of dt carry the temporal error alone.
+    for (const auto& [scheme, order] :
+         std::vector<std::pair<timestepping::SchemeKind, int>>{{timestepping::SchemeKind::BackwardEuler, 1},
+                                                               {timestepping::SchemeKind::BDF2, 2}}) {
+        std::vector<std::vector<Real>> finals;
+        for (const int steps : {4, 8, 16, 32}) {
+            finals.push_back(runCahnHilliardMode(Cell::Quad4, 1, 8, scheme, 0.08 / steps, steps).final_state);
+        }
+        std::vector<Real> differences;
+        for (std::size_t k = 1; k < finals.size(); ++k) {
+            Real m = 0.0;
+            for (std::size_t i = 0; i < finals[k].size(); ++i) {
+                m = std::max(m, std::abs(finals[k][i] - finals[k - 1][i]));
+            }
+            differences.push_back(m);
+        }
+        RecordProperty("p10_time_order" + std::to_string(order) + "_rates", join(rates(differences)));
+        EXPECT_NEAR(rates(differences).back(), order, 0.2) << join(differences);
+    }
+}
+
+TEST(GeneralityBenchmark, P10_DoubleWellConvexSplittingDecreasesItsFreeEnergy)
+{
+    // Spinodal data: a perturbation of the unstable mixed state c = 0.
+    CahnHilliardData d;
+    d.double_well = true;
+    d.kappa = 0.004;
+    d.c0 = scalarCoefficient("c0", [](const Point& p) {
+        return 0.05 * std::cos(2.0 * kPi * p[0]) * std::cos(kPi * p[1]) + 0.03 * std::cos(3.0 * kPi * p[1]);
+    });
+    d.mu0 = FormExpr::constant(0.0);
+    FESystem system(boxMesh(Cell::Quad4, 12, boxSides()));
+    const auto V = std::make_shared<spaces::H1Space>(ElementType::Quad4, 1);
+    const auto install = defineCahnHilliard(system, V, d);
+    system.setup();
+    const auto initial = solveSteady(system, "initial");
+    const auto run = runTransient(system, "equations", initial.u, timestepping::SchemeKind::BackwardEuler, 0.02, 15);
+    ASSERT_TRUE(run.success);
+    ASSERT_EQ(run.states.size(), 15u);
+    const Real mass0 = integrate(system, install.mass.form(), initial.u);
+    std::vector<Real> energies{integrate(system, install.free_energy.form(), initial.u)};
+    for (const auto& state : run.states) {
+        EXPECT_NEAR(integrate(system, install.mass.form(), state), mass0, 1e-12);
+        energies.push_back(integrate(system, install.free_energy.form(), state));
+    }
+    for (std::size_t k = 1; k < energies.size(); ++k) {
+        EXPECT_LE(energies[k], energies[k - 1]) << "step " << k;
+    }
+    RecordProperty("p10_double_well_energy", join(energies));
+    // Phase separation lowers the energy measurably.
+    EXPECT_LT(energies.back(), energies.front() - 1e-3);
+}
+
 } // namespace
 } // namespace svmp::FE::systems::generality
