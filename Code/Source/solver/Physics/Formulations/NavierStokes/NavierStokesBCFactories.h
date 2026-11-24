@@ -1270,6 +1270,41 @@ inline void applyFreeSurfaceContactLineConstraints(
         FE::forms::tangentialProjector(normal, dimension), FE::forms::grad(velocity_test));
 }
 
+/// The traction of the free surface @p b on Gamma, a fitted boundary or the
+/// generated interface, with @p n the outward normal of Gamma's integration
+/// frame: int_Gamma p_ext n.v + gamma (I - n x n) : grad v (SurfaceStress, the
+/// only form, D48), then the semi-implicit capillary increment (D13) when b
+/// uses it (unfitted only, validated; @p u_ref its reference velocity).  The
+/// terms join M and the balance channels in this order, each integrated over
+/// Gamma by its own measure.  Returns false, adding nothing, for
+/// p_ext = gamma = 0.
+inline bool addFreeSurfaceTraction(FE::forms::FormExpr& M, const FE::forms::bc::Boundary& Gamma,
+                                   const FE::forms::FormExpr& n, const FreeSurfaceBoundary& b,
+                                   const NavierStokesTerms& t, const FE::forms::FormExpr& u_ref,
+                                   post::ConservativeBalanceForms* balance, FE::systems::FormulationBuilder& F)
+{
+    namespace bc = FE::forms::bc;
+    if (bc::isZeroConstantScalarValue(b.external_pressure) && bc::isZeroConstantScalarValue(b.surface_tension)) {
+        return false;
+    }
+    const auto gamma = bc::toScalarExpr(b.surface_tension, freeSurfaceValueName("ns_free_surface_surface_tension", b));
+    const auto p_ext = bc::toScalarExpr(b.external_pressure, freeSurfaceValueName("ns_free_surface_external_pressure", b));
+    const auto pressure = exteriorPressureIntegrand(p_ext, n, t.v);
+    post::addExteriorPressure(balance, Gamma.integrate(pressure));
+    if (!surfaceStressActive(b)) {   // gamma = 0
+        M = M + Gamma.integrate(pressure);
+    } else {
+        const auto surface_energy = surfaceEnergyIntegrand(gamma, n, t.v, t.dim);
+        post::addSurfaceEnergy(balance, Gamma.integrate(surface_energy));
+        M = M + Gamma.integrate(pressure + surface_energy);
+    }
+    if (usesSemiImplicitNormalIncrement(b)) {
+        M = M + Gamma.integrate(Factories::semiImplicitNormalIncrementIntegrand(gamma, t.u, u_ref, t.v, n));
+    }
+    F.log(tractionLogs(b));
+    return true;
+}
+
 inline void addUnfittedFreeSurface(FE::forms::FormExpr& M, FE::systems::FESystem& system,
                                    FE::constraints::ConstraintPlan& plan, FE::systems::FormulationBuilder& F,
                                    const IncompressibleNavierStokesVMSOptions& o, const FreeSurfaceBoundary& b,
@@ -1315,26 +1350,10 @@ inline void addUnfittedFreeSurface(FE::forms::FormExpr& M, FE::systems::FESystem
 
     validateFreeSurfaceBoundary(b, o, o.enable_ale, system, dim, identity);
     F.log(unfittedModeLog(b));
-    if (bc::isZeroConstantScalarValue(b.external_pressure) && bc::isZeroConstantScalarValue(b.surface_tension)) {
+    // The traction on the generated interface, with the normal of its rule.
+    if (!addFreeSurfaceTraction(M, bc::Boundary(L.interface()), L.outwardNormal(), b, t, u_ref, balance, F)) {
         F.log(naturalUnfittedSurfaceLog(b));   // sigma n = 0: no interface term
-        return;
     }
-    const auto Gamma = L.interface();
-    const auto n = L.outwardNormal();
-    const auto p_ext = FE::forms::bc::toScalarExpr(b.external_pressure, freeSurfaceValueName("ns_free_surface_external_pressure", b));
-    const auto pressure = exteriorPressureIntegrand(p_ext, n, v);   // SurfaceStress, the only form (D48)
-    post::addExteriorPressure(balance, pressure.dI(Gamma));
-    if (!surfaceStressActive(b)) {   // gamma = 0
-        M = M + pressure.dI(Gamma);
-    } else {
-        const auto surface_energy = surfaceEnergyIntegrand(gamma, n, v, dim);
-        post::addSurfaceEnergy(balance, surface_energy.dI(Gamma));
-        M = M + (pressure + surface_energy).dI(Gamma);
-    }
-    if (usesSemiImplicitNormalIncrement(b)) {
-        M = M + Factories::semiImplicitNormalIncrementIntegrand(gamma, u, u_ref, v, n).dI(Gamma);
-    }
-    F.log(tractionLogs(b));
 }
 
 // ---------------------------------------------------------------------------
@@ -1359,23 +1378,8 @@ inline void addFittedFreeSurface(FE::forms::FormExpr& M, FE::systems::FESystem& 
 
     validateFreeSurfaceBoundary(b, o, o.enable_ale, system, dim, identity);   // the qualified fitted-ALE contract
     const auto Gamma = BoundaryDomain::fullPhysical(b.boundary_marker);
-    const auto n = currentNormal();   // normal of the integration frame
-    const auto gamma = FE::forms::bc::toScalarExpr(b.surface_tension, freeSurfaceValueName("ns_free_surface_surface_tension", b));
-    const auto p_ext = FE::forms::bc::toScalarExpr(b.external_pressure, freeSurfaceValueName("ns_free_surface_external_pressure", b));
-    const bool dynamic_stress =
-        !bc::isZeroConstantScalarValue(b.external_pressure) || !bc::isZeroConstantScalarValue(b.surface_tension);
-    if (dynamic_stress) {   // SurfaceStress, the only fitted form (validated)
-        const auto pressure = exteriorPressureIntegrand(p_ext, n, v);
-        post::addExteriorPressure(balance, pressure.ds(Gamma));
-        if (!surfaceStressActive(b)) {   // gamma = 0
-            M = M + pressure.ds(Gamma);
-        } else {
-            const auto surface_energy = surfaceEnergyIntegrand(gamma, n, v, dim);
-            post::addSurfaceEnergy(balance, surface_energy.ds(Gamma));
-            M = M + (pressure + surface_energy).ds(Gamma);
-        }
-        F.log(tractionLogs(b));
-    }
+    // The traction on the moving marker, with the normal of the integration frame.
+    (void)addFreeSurfaceTraction(M, bc::Boundary(Gamma), currentNormal(), b, t, FormExpr{}, balance, F);
 
     // Coupled ALE, MeshNitsche and MatchFluidNormalVelocity (validated).
     const auto& rec = fittedMeshDisplacementRecord(system, ale);   // throws without a displacement unknown
