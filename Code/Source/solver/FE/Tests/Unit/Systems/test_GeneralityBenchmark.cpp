@@ -950,11 +950,8 @@ TEST(GeneralityBenchmark, DISABLED_P05_MixedDarcyWithStrongNormalMomentsOnEveryF
                           /*strong_normal_flux=*/true);
 }
 
-TEST(GeneralityBenchmark, DISABLED_P05_RT1AndBDM1CannotShareOneFieldName)
+TEST(GeneralityBenchmark, P05_RT1AndBDM1CannotShareOneFieldName)
 {
-    // Defect (reported): FieldBinding::unknown reuses a registered RT1 field
-    // when asked for BDM1 under the same name; spacesCompatible compares the
-    // space type, order and element type but not the basis family.
     FESystem system(boxMesh(Cell::Tri3, 2, boxSides()));
     FieldBinding fields(system, "Probe");
     const auto rt1 = std::make_shared<spaces::HDivSpace>(ElementType::Triangle3, 1);
