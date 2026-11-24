@@ -12050,10 +12050,8 @@ TEST(MovingDomainPhysics, PreparedWeakVelocityNitscheKeepsTreesAndBindsActualFie
             ASSERT_EQ(prepared.size(), 2u);
             EXPECT_EQ(resolved, (std::vector<int>{21, 22}));
             EXPECT_EQ(samples, 0);
-            EXPECT_EQ(prepared[0].physical_marker, 21);
-            EXPECT_FALSE(prepared[0].generated_marker.has_value());
-            EXPECT_EQ(prepared[1].physical_marker, 22);
-            EXPECT_EQ(prepared[1].generated_marker, 122);
+            EXPECT_EQ(prepared[0].target, bc::Boundary(ExteriorBoundaryMeasure::fullPhysical(21)));
+            EXPECT_EQ(prepared[1].target, bc::Boundary(ExteriorBoundaryMeasure::generatedActiveSubset(22, 122)));
             ASSERT_EQ(preflight_bindings.size(), 1u);
             EXPECT_EQ(preflight_bindings[0].velocityField(), 0u);
 
@@ -12237,8 +12235,10 @@ TEST(MovingDomainPhysics, PreparedNitscheContributionsKeepPartialRowsOnLateFailu
     const auto mu = FormExpr::constant(0.04);
     auto options = baseNavierStokesOptions();
     std::vector<ns::PreparedWeakVelocityBoundary> prepared{
-        {.physical_marker = 21, .generated_marker = 121, .prescribed_velocity = constantVector3(1.0, 2.0, 3.0)},
-        {.physical_marker = 22, .generated_marker = 122, .prescribed_velocity = FormExpr::constant(0.0)}};
+        {.target = ExteriorBoundaryMeasure::generatedActiveSubset(21, 121),
+         .prescribed_velocity = constantVector3(1.0, 2.0, 3.0)},
+        {.target = ExteriorBoundaryMeasure::generatedActiveSubset(22, 122),
+         .prescribed_velocity = FormExpr::constant(0.0)}};
     const auto into = [](FormExpr& row, FormExpr& observation) {
         return [&row, &observation](const FormExpr& term) {
             row = sumOf(row, term);
@@ -12365,7 +12365,7 @@ TEST(MovingDomainPhysics, WeakVelocityNitscheSinksKeepSequentialAppendOrder)
             options.nitsche_scale_with_p = scale_with_p;
             options.velocity_dirichlet_weak = {{.boundary_marker = 21, .value = {1.0, 2.0, 3.0}}};
             const std::vector<ns::PreparedWeakVelocityBoundary> stated{{
-                .physical_marker = 21, .generated_marker = std::nullopt, .prescribed_velocity = uD}};
+                .target = ExteriorBoundaryMeasure::fullPhysical(21), .prescribed_velocity = uD}};
             std::vector<bc::GeneratedBoundaryNitscheTraceFormBinding> bindings;
             const auto prepared = ns::Factories::prepareWeakVelocityBoundaries(options, 3, {}, U, P, mu, bindings);
             const auto measure = ExteriorBoundaryMeasure::fullPhysical(21);
@@ -12428,7 +12428,7 @@ TEST(MovingDomainPhysics, BoundaryPreflightPublishesPreparedValuesOnlyAfterSucce
     FE::systems::FESystem system(mesh);
     auto options = baseNavierStokesOptions();
     options.velocity_dirichlet_weak = {{.boundary_marker = 21, .value = {1.0, 2.0, 3.0}}};
-    std::vector<ns::PreparedWeakVelocityBoundary> output{{.physical_marker = 999}};
+    std::vector<ns::PreparedWeakVelocityBoundary> output{{.target = 999}};
     const auto no_active_boundary = FE::level_set::generatedActiveBoundaryResolver(
         {}, "BoundaryPreflightPublishesPreparedValuesOnlyAfterSuccess", "invalid marker");
     options.velocity_dirichlet_weak[0].active_components[0] = false;
@@ -12436,12 +12436,12 @@ TEST(MovingDomainPhysics, BoundaryPreflightPublishesPreparedValuesOnlyAfterSucce
                                                               no_active_boundary, &output),
                  std::invalid_argument);
     ASSERT_EQ(output.size(), 1u);
-    EXPECT_EQ(output[0].physical_marker, 999);
+    EXPECT_EQ(output[0].target.marker(), 999);
     options.velocity_dirichlet_weak[0].active_components[0] = true;
     ASSERT_NO_THROW(ns::validateNavierStokesBoundaryConfiguration(options, {}, system, *vector, *scalar, 3,
                                                                  no_active_boundary, &output));
     ASSERT_EQ(output.size(), 1u);
-    EXPECT_EQ(output[0].physical_marker, 21);
+    EXPECT_EQ(output[0].target.marker(), 21);
     const auto preflight = ns::preflightNavierStokes(system, options, vector, scalar);
     ASSERT_EQ(preflight.prepared_weak_velocity_boundaries.size(), 1u);
     EXPECT_EQ(FE::systems::formExprTreeHash(preflight.prepared_weak_velocity_boundaries[0].prescribed_velocity),

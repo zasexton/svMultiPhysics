@@ -293,27 +293,44 @@ namespace detail {
     return std::make_unique<FE::forms::bc::ReservedBC>(marker);
 }
 
+namespace detail {
+
+/// The marker of the condition @p bc, which @p target, the boundary the
+/// condition acts on (its marker or the generated wetted part of it), names.
+template <class Condition>
+[[nodiscard]] inline int conditionMarker(const Condition& bc, const FE::forms::bc::Boundary& target,
+                                         std::string_view where)
+{
+    const int marker = FE::forms::bc::boundaryMarkerOrThrow(bc, where);
+    if (target.isInterface() || target.marker() != marker) {
+        throw std::invalid_argument(std::string(where) + ": the target is not the boundary of the condition "
+                                    "(boundary_marker " + std::to_string(marker) + ")");
+    }
+    return marker;
+}
+
+} // namespace detail
+
+/// The traction t on @p target: the residual term -(t . v) there.
 [[nodiscard]] inline std::unique_ptr<FE::forms::bc::BoundaryCondition> toTractionBC(
     const IncompressibleNavierStokesVMSOptions::TractionNeumannBC& bc,
     int dim,
-    std::optional<int> generated_active_boundary_marker = std::nullopt)
+    const FE::forms::bc::Boundary& target)
 {
-    const int marker = FE::forms::bc::boundaryMarkerOrThrow(bc, "navier_stokes::Factories::toTractionBC");
+    const int marker = detail::conditionMarker(bc, target, "navier_stokes::Factories::toTractionBC");
 
     auto t_comp = FE::forms::bc::toVectorExpr(
         bc.traction, dim, "ns_traction_neumann", marker, FE::forms::bc::ComponentValueNameStyle::Component);
-    return std::make_unique<FE::forms::bc::NaturalBC>(
-        FE::forms::bc::Boundary::of(marker, generated_active_boundary_marker),
-        FE::forms::FormExpr::asVector(std::move(t_comp)));
+    return std::make_unique<FE::forms::bc::NaturalBC>(target, FE::forms::FormExpr::asVector(std::move(t_comp)));
 }
 
+/// The Robin traction (alpha u - r) on @p target.
 [[nodiscard]] inline std::unique_ptr<FE::forms::bc::BoundaryCondition> toTractionRobinBC(
     const IncompressibleNavierStokesVMSOptions::TractionRobinBC& bc,
     int dim,
-    std::optional<int> generated_active_boundary_marker = std::nullopt)
+    const FE::forms::bc::Boundary& target)
 {
-    const int marker =
-        FE::forms::bc::boundaryMarkerOrThrow(bc, "navier_stokes::Factories::toTractionRobinBC");
+    const int marker = detail::conditionMarker(bc, target, "navier_stokes::Factories::toTractionRobinBC");
 
     const auto alpha = FE::forms::bc::toScalarExpr(
         bc.alpha, FE::forms::bc::markerValueName("ns_traction_robin_alpha", marker));
@@ -321,10 +338,7 @@ namespace detail {
     auto r_comp = FE::forms::bc::toVectorExpr(
         bc.rhs, dim, "ns_traction_robin_rhs", marker, FE::forms::bc::ComponentValueNameStyle::Component);
 
-    return std::make_unique<FE::forms::bc::RobinBC>(
-        FE::forms::bc::Boundary::of(marker, generated_active_boundary_marker),
-        alpha,
-        FE::forms::FormExpr::asVector(std::move(r_comp)));
+    return std::make_unique<FE::forms::bc::RobinBC>(target, alpha, FE::forms::FormExpr::asVector(std::move(r_comp)));
 }
 
 /// Declares the time functions of @p bcs on @p system.  A condition the two
@@ -386,13 +400,14 @@ inline void declareVelocityDirichletTimeFunctions(
                                                       FE::forms::bc::NaturalFlux{}, std::string(symbol));
 }
 
+/// The outflow pressure with backflow stabilization on @p target.
 [[nodiscard]] inline std::unique_ptr<FE::forms::bc::BoundaryCondition> toOutflowBC(
     const IncompressibleNavierStokesVMSOptions::PressureOutflowBC& bc,
     const FE::forms::FormExpr& u,
     const FE::forms::FormExpr& rho,
-    std::optional<int> generated_active_boundary_marker = std::nullopt)
+    const FE::forms::bc::Boundary& target)
 {
-    const int marker = FE::forms::bc::boundaryMarkerOrThrow(bc, "navier_stokes::Factories::toOutflowBC");
+    const int marker = detail::conditionMarker(bc, target, "navier_stokes::Factories::toOutflowBC");
 
     const auto n = FE::forms::FormExpr::normal();
     const auto un = FE::forms::inner(u, n);
@@ -405,20 +420,17 @@ inline void declareVelocityDirichletTimeFunctions(
         FE::forms::bc::toScalarExpr(bc.backflow_beta, FE::forms::bc::markerValueName("ns_backflow_beta", marker));
 
     const auto flux = -p_out * n - beta * rho * max_backflow * u;
-    return std::make_unique<FE::forms::bc::NaturalBC>(
-        FE::forms::bc::Boundary::of(marker, generated_active_boundary_marker), flux);
+    return std::make_unique<FE::forms::bc::NaturalBC>(target, flux);
 }
 
 namespace detail {
 
-/// The outlet, the boundary of @p marker or its generated active part.
-[[nodiscard]] inline FE::forms::ExteriorBoundaryMeasure outletMeasure(
-    int marker,
-    std::optional<int> generated_active_boundary_marker)
+/// The outlet's measure: the generated active part of a generated target,
+/// else the whole physical boundary.
+[[nodiscard]] inline FE::forms::ExteriorBoundaryMeasure outletMeasure(const FE::forms::bc::Boundary& target)
 {
-    return generated_active_boundary_marker.has_value()
-        ? FE::forms::ExteriorBoundaryMeasure::generatedActiveSubset(marker, *generated_active_boundary_marker)
-        : FE::forms::ExteriorBoundaryMeasure::fullPhysical(marker);
+    return target.isGenerated() ? *target.exteriorMeasure()
+                                : FE::forms::ExteriorBoundaryMeasure::fullPhysical(target.marker());
 }
 
 } // namespace detail
@@ -442,13 +454,12 @@ namespace detail {
     FE::systems::FESystem& system,
     const FE::forms::FormExpr& u,
     const FE::forms::FormExpr& rho,
-    std::optional<int> generated_active_boundary_marker = std::nullopt)
+    const FE::forms::bc::Boundary& target)
 {
     using namespace FE::forms;
     using namespace FE::systems;
 
-    const int marker =
-        FE::forms::bc::boundaryMarkerOrThrow(bc, "navier_stokes::Factories::toCoupledOutflowBC");
+    const int marker = detail::conditionMarker(bc, target, "navier_stokes::Factories::toCoupledOutflowBC");
 
     const FE::Real Rp = bc.Rp;
     const FE::Real C  = bc.C;
@@ -469,7 +480,7 @@ namespace detail {
     // The outlet flow rate, the input of the 0D model, refreshed at every
     // Newton iterate.
     const auto flow_rate = quantity(bc.functional_name, FunctionalKind::Integral,
-                                    un.ds(detail::outletMeasure(marker, generated_active_boundary_marker)));
+                                    un.ds(detail::outletMeasure(target)));
     auto Q = system.auxiliaryInput(flow_rate, AuxiliaryInputUpdateSchedule::EachNonlinearIteration);
 
     if (C == 0.0) {
@@ -487,8 +498,7 @@ namespace detail {
         }
         const auto p_out = resistive.output("P_out");
         const auto flux = -p_out * n - beta * rho * max_backflow * u;
-        return std::make_unique<FE::forms::bc::NaturalBC>(
-            FE::forms::bc::Boundary::of(marker, generated_active_boundary_marker), flux);
+        return std::make_unique<FE::forms::bc::NaturalBC>(target, flux);
     } else {
         // Deploy the standard RCR model into the monolithic Newton block so
         // the outlet pressure and flow Jacobian are solved together.
@@ -507,8 +517,7 @@ namespace detail {
         }
         const auto p_out = rcr.output("P_out");
         const auto flux = -p_out * n - beta * rho * max_backflow * u;
-        return std::make_unique<FE::forms::bc::NaturalBC>(
-            FE::forms::bc::Boundary::of(marker, generated_active_boundary_marker), flux);
+        return std::make_unique<FE::forms::bc::NaturalBC>(target, flux);
     }
 }
 
@@ -517,13 +526,12 @@ namespace detail {
     FE::systems::FESystem& system,
     const FE::forms::FormExpr& u,
     const FE::forms::FormExpr& rho,
-    std::optional<int> generated_active_boundary_marker = std::nullopt)
+    const FE::forms::bc::Boundary& target)
 {
     using namespace FE::forms;
     using namespace FE::systems;
 
-    const int marker =
-        FE::forms::bc::boundaryMarkerOrThrow(bc, "navier_stokes::Factories::toCoupledOutflowBC");
+    const int marker = detail::conditionMarker(bc, target, "navier_stokes::Factories::toCoupledOutflowBC");
 
     if (bc.C1 == 0.0 || bc.C2 == 0.0) {
         throw std::invalid_argument("CoupledRCRCROutflowBC: C1 and C2 must be nonzero");
@@ -542,7 +550,7 @@ namespace detail {
     // The outlet flow rate, the input of the 0D model, refreshed at every
     // Newton iterate.
     const auto flow_rate = quantity(bc.functional_name, FunctionalKind::Integral,
-                                    un.ds(detail::outletMeasure(marker, generated_active_boundary_marker)));
+                                    un.ds(detail::outletMeasure(target)));
     auto Q = system.auxiliaryInput(flow_rate, AuxiliaryInputUpdateSchedule::EachNonlinearIteration);
 
     auto rcrcr = system.deploy(
@@ -569,8 +577,7 @@ namespace detail {
 
     const auto p_out = rcrcr.output("P_out");
     const auto flux = -p_out * n - beta * rho * max_backflow * u;
-    return std::make_unique<FE::forms::bc::NaturalBC>(
-        FE::forms::bc::Boundary::of(marker, generated_active_boundary_marker), flux);
+    return std::make_unique<FE::forms::bc::NaturalBC>(target, flux);
 }
 
 namespace detail {
@@ -671,11 +678,8 @@ inline void appendVelocityNitscheBoundaries(
     const auto flux = wallStressFlux(Rows::continuity, p, q, mu);
     for (const auto& boundary : boundaries) {
         const auto& prepared = resolve_boundary(boundary);
-        const auto& [marker, generated_marker, uD] = prepared;
-        const auto measure = generated_marker.has_value()
-                                 ? FE::forms::ExteriorBoundaryMeasure::generatedActiveSubset(marker, *generated_marker)
-                                 : FE::forms::ExteriorBoundaryMeasure::fullPhysical(marker);
-        FE::forms::bc::Dirichlet(measure, uD, nitsche, flux).contributeToRows(rows, u, v, Rows::momentum);
+        FE::forms::bc::Dirichlet(prepared.target, prepared.prescribed_velocity, nitsche, flux)
+            .contributeToRows(rows, u, v, Rows::momentum);
         if (prepared_boundaries != nullptr) {
             prepared_boundaries->push_back(prepared);
         }
@@ -739,8 +743,9 @@ appendVelocityNitscheBCs(
         auto uD_comp = FE::forms::bc::toVectorExpr(
             bc.value, dim, "ns_uD", marker, FE::forms::bc::ComponentValueNameStyle::Component);
         return PreparedWeakVelocityBoundary{
-            .physical_marker = marker,
-            .generated_marker = generated_marker,
+            .target = generated_marker.has_value()
+                          ? FE::forms::ExteriorBoundaryMeasure::generatedActiveSubset(marker, *generated_marker)
+                          : FE::forms::ExteriorBoundaryMeasure::fullPhysical(marker),
             .prescribed_velocity = FE::forms::FormExpr::asVector(std::move(uD_comp))};
     };
     const auto drop = [](const FE::forms::FormExpr&) {};

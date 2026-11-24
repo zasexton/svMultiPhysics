@@ -850,7 +850,7 @@ TEST(NavierStokesOutletFactory,
             system,
             u,
             rho,
-            generated_marker);
+            svmp::FE::forms::bc::Boundary::of(physical_marker, generated_marker));
     });
     verify("rcr_compliant", [=](auto& system,
                                  const auto& u,
@@ -860,7 +860,7 @@ TEST(NavierStokesOutletFactory,
             system,
             u,
             rho,
-            generated_marker);
+            svmp::FE::forms::bc::Boundary::of(physical_marker, generated_marker));
     });
     verify("rcrcr", [=](auto& system,
                         const auto& u,
@@ -870,7 +870,7 @@ TEST(NavierStokesOutletFactory,
             system,
             u,
             rho,
-            generated_marker);
+            svmp::FE::forms::bc::Boundary::of(physical_marker, generated_marker));
     });
 
     EXPECT_EQ(generated_trace_count, expected_variant_count);
@@ -927,13 +927,13 @@ TEST(NavierStokesOutletFactory, FlowRateQuantityRegistersTheHandBuiltRecord)
     };
     for (const std::optional<int> generated : {std::optional<int>{}, std::optional<int>{generated_marker}}) {
         verify("rcr_resistive", generated, [](auto& system, const auto& u, const auto& rho, auto g) {
-            return Factories::toCoupledOutflowBC(makeRCROpts(physical_marker, /*C=*/0.0), system, u, rho, g);
+            return Factories::toCoupledOutflowBC(makeRCROpts(physical_marker, /*C=*/0.0), system, u, rho, svmp::FE::forms::bc::Boundary::of(physical_marker, g));
         });
         verify("rcr_compliant", generated, [](auto& system, const auto& u, const auto& rho, auto g) {
-            return Factories::toCoupledOutflowBC(makeRCROpts(physical_marker, /*C=*/0.001), system, u, rho, g);
+            return Factories::toCoupledOutflowBC(makeRCROpts(physical_marker, /*C=*/0.001), system, u, rho, svmp::FE::forms::bc::Boundary::of(physical_marker, g));
         });
         verify("rcrcr", generated, [](auto& system, const auto& u, const auto& rho, auto g) {
-            return Factories::toCoupledOutflowBC(makeRCRCROpts(physical_marker), system, u, rho, g);
+            return Factories::toCoupledOutflowBC(makeRCRCROpts(physical_marker), system, u, rho, svmp::FE::forms::bc::Boundary::of(physical_marker, g));
         });
     }
 }
@@ -964,7 +964,7 @@ TEST(NavierStokesOutletFactory, NewOverload_RCR_EndToEnd)
     const auto rho = FormExpr::constant(1.0);
 
     // Call the real new factory overload.
-    auto bc = Factories::toCoupledOutflowBC(makeRCROpts(marker), sys, u, rho);
+    auto bc = Factories::toCoupledOutflowBC(makeRCROpts(marker), sys, u, rho, marker);
     ASSERT_NE(bc, nullptr);
     EXPECT_NE(dynamic_cast<svmp::FE::forms::bc::NaturalBC*>(bc.get()), nullptr);
 
@@ -1051,7 +1051,7 @@ TEST(NavierStokesOutletFactory, RecordedOutletsWriteTheirFlowStatesAndPressureTo
         const auto u = FormExpr::stateField(u_field, *u_space, "u");
         auto opts = options(marker);
         opts.record_history = true;
-        auto bc = Factories::toCoupledOutflowBC(opts, sys, u, FormExpr::constant(1.0));
+        auto bc = Factories::toCoupledOutflowBC(opts, sys, u, FormExpr::constant(1.0), marker);
         ASSERT_NE(bc, nullptr);
         EXPECT_EQ(svmp::FE::post::scalarHistoryHeader(sys), expected_header);
 
@@ -1114,7 +1114,7 @@ TEST(NavierStokesOutletFactory, NewOverload_Resistive_EndToEnd)
     const auto u = FormExpr::stateField(u_field, *u_space, "u");
     const auto rho = FormExpr::constant(1.0);
 
-    auto bc = Factories::toCoupledOutflowBC(makeRCROpts(marker, /*C=*/0.0), sys, u, rho);
+    auto bc = Factories::toCoupledOutflowBC(makeRCROpts(marker, /*C=*/0.0), sys, u, rho, marker);
     ASSERT_NE(bc, nullptr);
     EXPECT_NE(dynamic_cast<svmp::FE::forms::bc::NaturalBC*>(bc.get()), nullptr);
 
@@ -1228,7 +1228,7 @@ TEST(NavierStokesOutletFactory, NewOverload_Resistive_FluxInstallation)
     const auto u = FormExpr::stateField(u_field, *u_space, "u");
     const auto rho = FormExpr::constant(1.0);
 
-    auto bc = Factories::toCoupledOutflowBC(makeRCROpts(marker, /*C=*/0.0), sys, u, rho);
+    auto bc = Factories::toCoupledOutflowBC(makeRCROpts(marker, /*C=*/0.0), sys, u, rho, marker);
     ASSERT_NE(bc, nullptr);
     EXPECT_NE(dynamic_cast<svmp::FE::forms::bc::NaturalBC*>(bc.get()), nullptr);
 
@@ -1295,7 +1295,7 @@ TEST(NavierStokesOutletFactory, NewOverload_RCR_FluxInstallation)
     const auto u = FormExpr::stateField(u_field, *u_space, "u");
     const auto rho = FormExpr::constant(1.0);
 
-    auto bc = Factories::toCoupledOutflowBC(makeRCROpts(marker), sys, u, rho);
+    auto bc = Factories::toCoupledOutflowBC(makeRCROpts(marker), sys, u, rho, marker);
     ASSERT_NE(bc, nullptr);
 
     // Install the BC flux into the residual via BoundaryConditionManager.
@@ -1384,7 +1384,7 @@ TEST(NavierStokesOutletFactory, NewOverload_RCRCR_EndToEnd)
     const auto u = FormExpr::stateField(u_field, *u_space, "u");
     const auto rho = FormExpr::constant(1.0);
 
-    auto bc = Factories::toCoupledOutflowBC(makeRCRCROpts(marker), sys, u, rho);
+    auto bc = Factories::toCoupledOutflowBC(makeRCRCROpts(marker), sys, u, rho, marker);
     ASSERT_NE(bc, nullptr);
     EXPECT_NE(dynamic_cast<svmp::FE::forms::bc::NaturalBC*>(bc.get()), nullptr);
 
@@ -1457,7 +1457,7 @@ TEST(NavierStokesOutletFactory, NewOverload_RCRCR_FluxInstallation)
     const auto u = FormExpr::stateField(u_field, *u_space, "u");
     const auto rho = FormExpr::constant(1.0);
 
-    auto bc = Factories::toCoupledOutflowBC(makeRCRCROpts(marker), sys, u, rho);
+    auto bc = Factories::toCoupledOutflowBC(makeRCRCROpts(marker), sys, u, rho, marker);
     ASSERT_NE(bc, nullptr);
 
     BoundaryConditionManager bc_manager;
@@ -1538,7 +1538,7 @@ TEST(NavierStokesOutletFactory, DISABLED_MonolithicRCRCR_MixedFieldJacobianMatch
     const auto p = FormExpr::stateField(p_field, *p_space, "p");
     const auto rho = FormExpr::constant(1.0);
 
-    auto bc = Factories::toCoupledOutflowBC(makeRCRCROpts(marker), sys, u, rho);
+    auto bc = Factories::toCoupledOutflowBC(makeRCRCROpts(marker), sys, u, rho, marker);
     ASSERT_NE(bc, nullptr);
 
     BoundaryConditionManager bc_manager;
@@ -3076,7 +3076,7 @@ TEST(NavierStokesOutletFactory, DISABLED_MonolithicRCRCR_BorderedReductionMatche
     const auto p = FormExpr::stateField(p_field, *p_space, "p");
     const auto rho = FormExpr::constant(1.0);
 
-    auto bc = Factories::toCoupledOutflowBC(makeRCRCROpts(marker), sys, u, rho);
+    auto bc = Factories::toCoupledOutflowBC(makeRCRCROpts(marker), sys, u, rho, marker);
     ASSERT_NE(bc, nullptr);
 
     BoundaryConditionManager bc_manager;
@@ -3306,7 +3306,7 @@ TEST(NavierStokesOutletFactory, TwoResistiveOutletsSystemOverloadIsDeterministic
         BoundaryConditionManager bc_manager;
         auto add_outlet = [&](int marker) {
             auto opts = makeRCROpts(marker, /*C=*/0.0);
-            auto bc = Factories::toCoupledOutflowBC(opts, sys, u, rho);
+            auto bc = Factories::toCoupledOutflowBC(opts, sys, u, rho, marker);
             EXPECT_NE(bc, nullptr);
             bc_manager.add(std::move(bc));
         };
@@ -3428,7 +3428,7 @@ TEST(NavierStokesOutletFactory, MonolithicRCRCR_GeneralizedAlphaAuxResidualRespo
     const auto p = FormExpr::stateField(p_field, *p_space, "p");
     const auto rho = FormExpr::constant(1.0);
 
-    auto bc = Factories::toCoupledOutflowBC(makeRCRCROpts(marker), sys, u, rho);
+    auto bc = Factories::toCoupledOutflowBC(makeRCRCROpts(marker), sys, u, rho, marker);
     ASSERT_NE(bc, nullptr);
 
     BoundaryConditionManager bc_manager;
@@ -3531,7 +3531,7 @@ TEST(NavierStokesOutletFactory, DISABLED_MonolithicRCRCR_GeneralizedAlphaMixedFi
     const auto p = FormExpr::stateField(p_field, *p_space, "p");
     const auto rho = FormExpr::constant(1.0);
 
-    auto bc = Factories::toCoupledOutflowBC(makeRCRCROpts(marker), sys, u, rho);
+    auto bc = Factories::toCoupledOutflowBC(makeRCRCROpts(marker), sys, u, rho, marker);
     ASSERT_NE(bc, nullptr);
 
     BoundaryConditionManager bc_manager;
@@ -3700,7 +3700,24 @@ TEST(NavierStokesOutletFactory, RdZero_Throws)
     auto opts = makeRCROpts(marker);
     opts.Rd = 0.0;
 
-    EXPECT_THROW(Factories::toCoupledOutflowBC(opts, sys, u, rho), std::invalid_argument);
+    EXPECT_THROW(Factories::toCoupledOutflowBC(opts, sys, u, rho, marker), std::invalid_argument);
+}
+
+TEST(NavierStokesOutletFactory, TheTargetIsTheBoundaryOfTheCondition)
+{
+    const int marker = 50;
+    auto mesh = std::make_shared<svmp::FE::forms::test::SingleTetraOneBoundaryFaceMeshAccess>(marker);
+    auto u_space = svmp::FE::spaces::VectorSpace(svmp::FE::spaces::SpaceType::H1, mesh, 1, 3);
+
+    FESystem sys(mesh);
+    const auto u_field = sys.addField(FieldSpec{.name = "u", .space = u_space, .components = 3});
+    const auto u = FormExpr::stateField(u_field, *u_space, "u");
+    const auto rho = FormExpr::constant(1.0);
+
+    EXPECT_THROW(Factories::toCoupledOutflowBC(makeRCROpts(marker), sys, u, rho, marker + 1), std::invalid_argument);
+    EXPECT_THROW(Factories::toCoupledOutflowBC(makeRCRCROpts(marker), sys, u, rho,
+                                               svmp::FE::forms::InterfaceDomain(marker)),
+                 std::invalid_argument);
 }
 
 TEST(NavierStokesPostProcessing, StatesTheFreeSurfaceEnergiesAsMeasured0Forms)

@@ -161,11 +161,12 @@ void validateFreeSurfaceBoundary(const FreeSurfaceBoundary& bc,
                                  int dim,
                                  PreparedSurfaceIdentity& identity);
 
-/// Resolved weak-boundary input for this registration transaction. Certified
-/// route bindings are built separately with the actual registered fields.
+/// Resolved weak-boundary input for this registration transaction: the
+/// boundary (the whole physical boundary, or its generated wetted part) and the
+/// prescribed velocity. Certified route bindings are built separately with the
+/// actual registered fields.
 struct PreparedWeakVelocityBoundary {
-    int physical_marker{-1};
-    std::optional<int> generated_marker{};
+    FE::forms::bc::Boundary target;
     FE::forms::FormExpr prescribed_velocity{};
 };
 

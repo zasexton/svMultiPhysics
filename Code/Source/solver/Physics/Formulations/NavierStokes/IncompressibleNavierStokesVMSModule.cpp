@@ -463,7 +463,9 @@ void IncompressibleNavierStokesVMSModule::registerOn(fs::FESystem& system) const
         }
     }
     work.ghost_penalty = F.tagged(WorkChannel::ghost_penalty, p_id);
-    const auto on = [&](const auto& bc) { return wetted(bc.boundary_marker); };
+    const auto on = [&](const auto& bc) {
+        return FE::forms::bc::Boundary::of(bc.boundary_marker, wetted(bc.boundary_marker));
+    };
     bcs.install(o.traction_neumann, [&](const auto& bc) { return Factories::toTractionBC(bc, dim, on(bc)); });
     bcs.install(o.traction_robin, [&](const auto& bc) { return Factories::toTractionRobinBC(bc, dim, on(bc)); });
     bcs.install(o.pressure_outflow, [&](const auto& bc) { return Factories::toOutflowBC(bc, u, rho, on(bc)); });

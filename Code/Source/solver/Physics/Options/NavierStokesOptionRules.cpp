@@ -1337,7 +1337,10 @@ void validateNavierStokesBoundaryConfiguration(
             validateFiniteConstantScalar(value, "traction value");
         }
         return Factories::toTractionBC(
-            bc, dim, generated_active_boundary_for(bc.boundary_marker));
+            bc, dim,
+            FE::forms::bc::Boundary::of(
+                bc.boundary_marker,
+                generated_active_boundary_for(bc.boundary_marker)));
     });
     velocity_conditions.install(options.traction_robin, [&](const auto& bc) {
         validateFiniteConstantScalar(bc.alpha, "Robin coefficient");
@@ -1345,7 +1348,10 @@ void validateNavierStokesBoundaryConfiguration(
             validateFiniteConstantScalar(value, "Robin right-hand side");
         }
         return Factories::toTractionRobinBC(
-            bc, dim, generated_active_boundary_for(bc.boundary_marker));
+            bc, dim,
+            FE::forms::bc::Boundary::of(
+                bc.boundary_marker,
+                generated_active_boundary_for(bc.boundary_marker)));
     });
 
     const auto u = FE::forms::StateField(
@@ -1366,7 +1372,9 @@ void validateNavierStokesBoundaryConfiguration(
             bc,
             u,
             rho,
-            generated_active_boundary_for(bc.boundary_marker));
+            FE::forms::bc::Boundary::of(
+                bc.boundary_marker,
+                generated_active_boundary_for(bc.boundary_marker)));
     });
 
     for (const auto& bc : options.coupled_outflow_rcr) {
@@ -1477,9 +1485,8 @@ void validateNavierStokesBoundaryConfiguration(
             generated_nitsche_trace_binding_preflight);
     std::vector<FE::forms::BoundaryDomain> routes;
     for (const auto& boundary : prepared_boundaries) {
-        if (boundary.generated_marker.has_value()) {
-            routes.push_back(FE::forms::BoundaryDomain::generatedActiveSubset(
-                boundary.physical_marker, *boundary.generated_marker));
+        if (boundary.target.isGenerated()) {
+            routes.push_back(*boundary.target.exteriorMeasure());
         }
     }
     FE::systems::requireGeneratedBoundaryNitscheTraceBindings(
