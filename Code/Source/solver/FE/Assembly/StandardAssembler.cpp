@@ -13889,11 +13889,13 @@ AssemblyResult StandardAssembler::assembleCellsFused(
                         GlobalIndex dof_offset{0};
                         int comps_per_node{0};
                         int comp_start{0};
+                        bool nodal{true};
                     };
                     std::vector<DofSideInfo> dof_sides;
 
                     auto register_side =
-                        [&](const dofs::DofMap* dof_map, GlobalIndex dof_offset, int value_dim) {
+                        [&](const dofs::DofMap* dof_map, GlobalIndex dof_offset,
+                            const spaces::FunctionSpace& space) {
                             for (const auto& side : dof_sides) {
                                 if (side.dof_map == dof_map && side.dof_offset == dof_offset) {
                                     return;
@@ -13902,17 +13904,16 @@ AssemblyResult StandardAssembler::assembleCellsFused(
                             dof_sides.push_back(DofSideInfo{
                                 .dof_map = dof_map,
                                 .dof_offset = dof_offset,
-                                .comps_per_node = value_dim,
+                                .comps_per_node = space.value_dimension(),
                                 .comp_start = 0,
+                                .nodal = !space.element().basis().is_vector_valued(),
                             });
                         };
 
                     for (std::size_t bi = 0; bi < n_blocks; ++bi) {
                         const auto& bs = monolithic_kernel->blockSpec(bi);
-                        register_side(bs.row_dof_map, bs.row_dof_offset,
-                                      bs.test_space->value_dimension());
-                        register_side(bs.col_dof_map, bs.col_dof_offset,
-                                      bs.trial_space->value_dimension());
+                        register_side(bs.row_dof_map, bs.row_dof_offset, *bs.test_space);
+                        register_side(bs.col_dof_map, bs.col_dof_offset, *bs.trial_space);
                     }
 
                     for (auto& side : dof_sides) {
@@ -13929,6 +13930,20 @@ AssemblyResult StandardAssembler::assembleCellsFused(
                             fused_n_nodes =
                                 static_cast<int>(sample.size()) / dof_sides.front().comps_per_node;
                             fused_combined_n = fused_n_nodes * fused_total_comps;
+                        }
+                    }
+                    // The combined element matrix interleaves the components of each node:
+                    // every side must be nodal (no vector basis), its DOFs whole nodes, and
+                    // no more nodes than the first side.
+                    for (const auto& side : dof_sides) {
+                        if (fused_combined_n == 0) {
+                            break;
+                        }
+                        const auto side_count = static_cast<int>(
+                            getCellDofsCached(mesh, cell_ids.front(), side.dof_map, side.dof_offset).size());
+                        if (!side.nodal || side.comps_per_node <= 0 || side_count % side.comps_per_node != 0 ||
+                            side_count / side.comps_per_node > fused_n_nodes) {
+                            fused_combined_n = 0;
                         }
                     }
 
@@ -15164,22 +15179,23 @@ AssemblyResult StandardAssembler::assembleCellsFused(
                     GlobalIndex dof_offset;
                     int comps_per_node;
                     int comp_start;
+                    bool nodal;
                 };
                 std::vector<DofSideInfo> dof_sides;
 
-                auto register_side = [&](const dofs::DofMap* dm, GlobalIndex off, int dim) {
+                auto register_side = [&](const dofs::DofMap* dm, GlobalIndex off,
+                                         const spaces::FunctionSpace& space) {
                     for (const auto& s : dof_sides) {
                         if (s.dof_map == dm && s.dof_offset == off) return;
                     }
-                    dof_sides.push_back({dm, off, dim, -1});
+                    dof_sides.push_back({dm, off, space.value_dimension(), -1,
+                                         !space.element().basis().is_vector_valued()});
                 };
 
                 for (std::size_t bi = 0; bi < n_blocks; ++bi) {
                     const auto& bs = mixed_block_kernel->blockSpec(bi);
-                    register_side(bs.row_dof_map, bs.row_dof_offset,
-                                  bs.test_space->value_dimension());
-                    register_side(bs.col_dof_map, bs.col_dof_offset,
-                                  bs.trial_space->value_dimension());
+                    register_side(bs.row_dof_map, bs.row_dof_offset, *bs.test_space);
+                    register_side(bs.col_dof_map, bs.col_dof_offset, *bs.trial_space);
                 }
 
                 int total_comps = 0;
@@ -15197,6 +15213,20 @@ AssemblyResult StandardAssembler::assembleCellsFused(
                         static_cast<int>(sample.size()) % dof_sides[0].comps_per_node == 0) {
                         fused_n_nodes = static_cast<int>(sample.size()) / dof_sides[0].comps_per_node;
                         fused_combined_n = fused_n_nodes * fused_total_comps;
+                    }
+                }
+                // The combined element matrix interleaves the components of each node:
+                // every side must be nodal (no vector basis), its DOFs whole nodes, and
+                // no more nodes than the first side.
+                for (const auto& side : dof_sides) {
+                    if (fused_combined_n == 0) {
+                        break;
+                    }
+                    const auto side_count = static_cast<int>(
+                        getCellDofsCached(mesh, gids[0], side.dof_map, side.dof_offset).size());
+                    if (!side.nodal || side.comps_per_node <= 0 || side_count % side.comps_per_node != 0 ||
+                        side_count / side.comps_per_node > fused_n_nodes) {
+                        fused_combined_n = 0;
                     }
                 }
 

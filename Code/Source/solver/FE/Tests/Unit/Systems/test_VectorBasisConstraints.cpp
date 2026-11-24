@@ -14,12 +14,28 @@
 #include "Forms/Vocabulary.h"
 #include "Spaces/HCurlSpace.h"
 #include "Spaces/HDivSpace.h"
+#include "Spaces/H1Space.h"
+#include "Spaces/L2Space.h"
+#include "Spaces/SpaceFactory.h"
 #include "Spaces/TraceSpace.h"
+#include "Assembly/GlobalSystemView.h"
+#include "Mesh/Core/MeshBase.h"
+#include "Mesh/Mesh.h"
+#include "Mesh/Topology/CellShape.h"
 #include "Systems/BoundaryConditionManager.h"
 #include "Systems/FESystem.h"
+#include "Systems/FieldBinding.h"
+#include "Systems/FormulationBuilder.h"
+#include "Systems/FunctionalFormEvaluator.h"
+#include "Systems/SystemCollectives.h"
+#include "Systems/TimeIntegrator.h"
+#include "Dofs/EntityDofMap.h"
 #include "Tests/Unit/Forms/FormsTestHelpers.h"
 
 #include <algorithm>
+#include <array>
+#include <cmath>
+#include <initializer_list>
 #include <memory>
 #include <unordered_set>
 
@@ -494,6 +510,139 @@ TEST(VectorBasisConstraints, MonolithicDofHandlerPreservesCellOrientationsForVec
 
     EXPECT_TRUE(sys.dofHandler().hasCellOrientations());
 }
+
+namespace {
+
+/// The unit square cut into n x n squares of two triangles, or the unit cube
+/// into n^3 cubes of six tetrahedra (Kuhn), with no boundary labels.
+[[nodiscard]] std::shared_ptr<svmp::Mesh> unitBoxSimplexMesh(int dim, int n)
+{
+    std::vector<svmp::real_t> X;
+    const auto vertex = [n, dim](int i, int j, int k) {
+        return static_cast<svmp::index_t>((dim == 3 ? k * (n + 1) * (n + 1) : 0) + j * (n + 1) + i);
+    };
+    for (int k = 0; k <= (dim == 3 ? n : 0); ++k) {
+        for (int j = 0; j <= n; ++j) {
+            for (int i = 0; i <= n; ++i) {
+                X.push_back(static_cast<svmp::real_t>(i) / n);
+                X.push_back(static_cast<svmp::real_t>(j) / n);
+                if (dim == 3) {
+                    X.push_back(static_cast<svmp::real_t>(k) / n);
+                }
+            }
+        }
+    }
+    std::vector<svmp::offset_t> offsets{0};
+    std::vector<svmp::index_t> connectivity;
+    std::vector<svmp::CellShape> shapes;
+    const auto add = [&](std::initializer_list<svmp::index_t> cell, svmp::CellFamily family) {
+        connectivity.insert(connectivity.end(), cell.begin(), cell.end());
+        offsets.push_back(static_cast<svmp::offset_t>(connectivity.size()));
+        svmp::CellShape shape{};
+        shape.family = family;
+        shape.num_corners = static_cast<int>(cell.size());
+        shape.order = 1;
+        shapes.push_back(shape);
+    };
+    for (int k = 0; k < (dim == 3 ? n : 1); ++k) {
+        for (int j = 0; j < n; ++j) {
+            for (int i = 0; i < n; ++i) {
+                if (dim == 2) {
+                    add({vertex(i, j, 0), vertex(i + 1, j, 0), vertex(i + 1, j + 1, 0)}, svmp::CellFamily::Triangle);
+                    add({vertex(i, j, 0), vertex(i + 1, j + 1, 0), vertex(i, j + 1, 0)}, svmp::CellFamily::Triangle);
+                    continue;
+                }
+                const std::array<svmp::index_t, 8> c{vertex(i, j, k),         vertex(i + 1, j, k),
+                                                     vertex(i + 1, j + 1, k), vertex(i, j + 1, k),
+                                                     vertex(i, j, k + 1),     vertex(i + 1, j, k + 1),
+                                                     vertex(i + 1, j + 1, k + 1), vertex(i, j + 1, k + 1)};
+                // Six positively oriented tetrahedra about the diagonal c0-c6.
+                add({c[0], c[1], c[2], c[6]}, svmp::CellFamily::Tetra);
+                add({c[0], c[2], c[3], c[6]}, svmp::CellFamily::Tetra);
+                add({c[0], c[3], c[7], c[6]}, svmp::CellFamily::Tetra);
+                add({c[0], c[7], c[4], c[6]}, svmp::CellFamily::Tetra);
+                add({c[0], c[4], c[5], c[6]}, svmp::CellFamily::Tetra);
+                add({c[0], c[5], c[1], c[6]}, svmp::CellFamily::Tetra);
+            }
+        }
+    }
+    auto base = std::make_shared<svmp::MeshBase>();
+    base->build_from_arrays(dim, X, offsets, connectivity, shapes);
+    base->finalize();
+    return svmp::create_mesh(std::move(base));
+}
+
+} // namespace
+
+// One install of a piecewise-constant field and an H(div) or H(curl) field:
+// the mass matrix of each block is that of its own install, entry by entry
+// (the fused assembly of the two blocks gave zero rows of the vector field on
+// Triangle3 and corrupted the heap on Tetra4).
+TEST(VectorBasisMixedInstall, PiecewiseConstantAndVectorBasisFieldsInOneInstall)
+{
+    for (const int dim : {2, 3}) {
+        for (const bool curl : {false, true}) {
+            if (curl && dim == 2) {
+                continue;
+            }
+            SCOPED_TRACE(::testing::Message() << "dim " << dim << (curl ? " H(curl)" : " H(div)"));
+            const auto type = dim == 2 ? ElementType::Triangle3 : ElementType::Tetra4;
+            const auto vector_space = [&]() -> std::shared_ptr<const spaces::FunctionSpace> {
+                if (curl) {
+                    return std::make_shared<spaces::HCurlSpace>(type, 0);
+                }
+                return std::make_shared<spaces::HDivSpace>(type, 0);
+            };
+            const auto matrix = [&](bool one_install) {
+                FESystem system(unitBoxSimplexMesh(dim, 2));
+                FieldBinding fields(system, "VectorBasisMixedInstall");
+                const auto C = fields.unknown("cells", std::make_shared<spaces::L2Space>(type, 0));
+                const auto E = fields.unknown("E", vector_space());
+                if (one_install) {
+                    FormulationBuilder F(system, "equations", {});
+                    (void)F.residual((C.state * C.test).dx() + forms::inner(E.state, E.test).dx());
+                } else {
+                    {
+                        FormulationBuilder F(system, "equations", {});
+                        (void)F.residual((C.state * C.test).dx());
+                    }
+                    FormulationBuilder F(system, "equations", {});
+                    (void)F.residual(forms::inner(E.state, E.test).dx());
+                }
+                system.setup();
+                const auto n = system.dofHandler().getNumDofs();
+                std::vector<Real> U(static_cast<std::size_t>(n), 0.0);
+                SystemStateView state;
+                state.u = U;
+                assembly::DenseMatrixView J(n);
+                J.zero();
+                AssemblyRequest request;
+                request.op = "equations";
+                request.want_matrix = true;
+                EXPECT_TRUE(system.assemble(request, state, &J, nullptr).success);
+                std::vector<Real> out;
+                for (GlobalIndex i = 0; i < n; ++i) {
+                    for (GlobalIndex j = 0; j < n; ++j) {
+                        out.push_back(J.getMatrixEntry(i, j));
+                    }
+                }
+                return out;
+            };
+            const auto separate = matrix(false);
+            const auto joint = matrix(true);
+            ASSERT_EQ(joint.size(), separate.size());
+            Real scale = 0.0;
+            for (const auto value : separate) {
+                scale = std::max(scale, std::abs(value));
+            }
+            ASSERT_GT(scale, 0.0);
+            for (std::size_t k = 0; k < joint.size(); ++k) {
+                EXPECT_NEAR(joint[k], separate[k], 1e-13 * scale) << "entry " << k;
+            }
+        }
+    }
+}
+
 
 } // namespace test
 } // namespace systems
