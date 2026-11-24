@@ -263,7 +263,7 @@ systems::installFormulation(system, "glue", {u_field, w_field, lambda}, residual
 for fractures, membranes, wells, or any codimension-1 field that must own its
 own DOFs, history, and algebraic blocks. A multiplier restricted to a boundary
 or interface but written as a volume field is the other route (D54 T1:
-`plan.restrictSupport`, `bc::LagrangeDirichletBC`).
+`plan.restrictSupport`, `bc::Dirichlet` with `bc::Multiplier`).
 
 ## 7. One-Sided Trace Laws
 

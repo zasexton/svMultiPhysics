@@ -614,7 +614,7 @@ namespace `forms::bc`.
 | `bc::NitscheVariant`, `bc::Nitsche{gamma, variant, scale_with_p}` | `BoundaryConditions.h` | Nitsche's method: an enforcement of `bc::Dirichlet` and the options of the trace helpers |
 | `TraceInequalitySense`, `TraceInequalityLinearization`, `TraceInequalityOptions` | `BoundaryConditions.h` | One-sided trace-law options |
 | `buildGeneratedBoundaryNitscheTraceTerms(u, v, g, form, ...)`, `symmetricGradientForm(k)`, `GeneratedBoundaryNitscheTraceFormBinding` | `BoundaryConditions.h`, `NitscheTraceBilinearForm.h` | `implemented/expert`; Nitsche terms on a generated boundary consistent with a declared bilinear form (`NitscheTraceBilinearForm::SymmetricGradient`, 2 k eps(u) : eps(v)), with an immutable binding for the installer's trace certificate, which bounds the form's flux by its energy |
-| `bc::Dirichlet(target, g, how = Strong{}, flux = {}, symbol)`, `componentDirichlet(...)` | `StandardBCs.h` | u = g, enforced as declared (see Boundary conditions, wave 2): strong values of a scalar, a dense vector or selected components; Nitsche; penalty |
+| `bc::Dirichlet(target, g, how = Strong{}, flux = {}, symbol)`, `componentDirichlet(...)` | `StandardBCs.h` | u = g, enforced as declared (see Boundary conditions, waves 2 and 3): strong values of a scalar, a dense vector or selected components; Nitsche; penalty; a multiplier restricted to the boundary |
 | `bc::naturalBC(data, prefix)`, `robinBC(data, alpha_prefix, rhs_prefix)`, `dirichlet(data, prefix, how, flux, symbol)`, `dirichlet(data, dim, prefix, symbol, source)` | `StandardBCs.h` | The conditions of typed `BoundaryData`; the same objects, trees, manifests and JIT keys as the spelled-out `NaturalBC(m, toScalarExpr(g, markerValueName(prefix, m)))` and its siblings (Poisson builds its conditions so) |
 | `NaturalBC(boundary, flux)`, `RobinBC(boundary, alpha, rhs)` | `StandardBCs.h` | Weak flux and Robin terms on a `bc::Boundary` |
 | `ReservedBC` | `StandardBCs.h` | Reserves a marker for conflict validation; contributes nothing |
@@ -625,7 +625,6 @@ namespace `forms::bc`.
 | `InterfaceTraceLoadBC`, `InterfaceTraceRobinBC`, `InterfaceTraceJumpPenaltyBC` | `StandardBCs.h` | Interface scalar trace wrappers |
 | `makeNormalTraceEssentialBC`, `makeTraceLoadBC`, `makeTraceRobinBC`, `makeTraceInequalityBC`, `makeInterfaceTrace*BC` | `StandardBCs.h` | Factory helpers for the trace wrappers |
 | `TraceNitscheBC`, `InterfaceTraceNitscheBC` | `NitscheBC.h` | Scalar-trace Nitsche wrapper types with explicit fluxes |
-| `LagrangeDirichletBC`, `makeLagrangeDirichletBC(marker, g, lambda, beta = 0, k = 1)` | `LagrangeDirichletBC.h` | u = g on a physical boundary through a multiplier field restricted to it (D54 T1): `(lambda * v).ds + (mu * (u - g)).ds`, lambda = -k du/dn; with beta > 0 the Barbosa-Hughes term `-(beta h (lambda + k du/dn)(mu + k dv/dn)).ds` (equal-order pairs). Install the residual with lambda in the field list; exclusive on its marker. A multiplier continuous around a corner cannot follow the jump of du/dn there: give each side its own multiplier |
 | `PeriodicBC`, `MultiPointConstraintBC` | `ConstraintBCs.h` | Affine constraints installed through `BoundaryConditionManager` |
 | `bc::BoundaryCondition` | `BoundaryCondition.h` | `implemented/expert`; interface for new BC wrappers. Each wrapper names its kind in `label()` (its class name; a `Dirichlet` its enforcement), which the system manifest prints for the conditions a manager installs as affine constraints |
 | `interface::NitscheVariant`, `NitscheInterfaceOptions` | `InterfaceConditions.h` | Interface Poisson Nitsche options |
@@ -706,6 +705,22 @@ bc::Dirichlet(wall, uD, bc::Nitsche{}, sigma_n).contributeToRows(rows, U.state, 
 | `bc::normalFlux(q)`, `conormalFlux(T[, form])`, `isotropicFlux(field, s, s_test)` | `StandardBCs.h` | Flux parts: `q(u)` of a scalar field, `T(u) n` of a vector field (with the bilinear form a certified generated-boundary route is built from), `-s n` in another unknown s. `q` and `T` are linear functions of their argument, applied to the state and to the test function |
 | `bc::diffusionFlux(k)` | `StandardBCs.h` | `k grad(u).n`, penalty weight `k / h_n` |
 | `bc::RowSink`, `bc::ResidualRows({{field, &form}, ...}[, bindings])` | `StandardBCs.h` | The residual rows a multi-row condition adds to (`Dirichlet::contributeToRows`), one borrowed form per field, summed with `sumOf`; with `bindings`, a Nitsche route on a generated boundary is built from the conormal part's bilinear form and its binding collected for the installer's certificate |
+
+### Boundary Conditions, Wave 3 (D64)
+
+A Lagrange multiplier is one more enforcement of `bc::Dirichlet`.
+
+```cpp
+const FieldId lam = fields.unknown({.name = "lambda", .space = P1}, "Dirichlet multiplier");
+bcs.add(std::make_unique<bc::Dirichlet>(cap, g, bc::Multiplier{.field = lam, .stabilization = 0.1},
+                                        bc::diffusionFlux(k)));
+bcs.applyAll(system, R, u, v, u_id);
+installFormulation(system, "op", {u_id, lam}, R);   // the multiplier is in the field list
+```
+
+| Construct | Header | Meaning |
+|---|---|---|
+| `bc::Multiplier{.field, .stabilization = 0}` | `StandardBCs.h` | u = g through the multiplier lambda, a scalar volume field restricted to the boundary (D54 T1; `setup()` checks it and the condition's scalar field, `installSystemConstraints` adds `SupportRestrictionConstraint(lambda, BoundaryDomain::fullPhysical(b))`): `(lambda v).ds(b)` in u's row and `(mu (u - g)).ds(b)` in the multiplier's, so lambda = -q(u). With beta > 0 Barbosa and Hughes's term `-(beta h (lambda + q(u)) mu).ds(b) - (beta h (lambda + q(u)) q(v)).ds(b)` (h the cell diameter, q the normal flux of the condition's `NaturalFlux`, which a stabilized multiplier requires) makes equal-order pairs stable; without it the multiplier's rows have no diagonal and the Application refuses them under an iterative FSILS solve. Exclusive on its boundary, no analysis descriptor (the multiplier's rows anchor the constant of u), label `MultiplierBC`; refused on a generated active subset, for a vector field and for a component list. A multiplier continuous around a corner cannot follow the jump of du/dn there: give each side its own multiplier |
 
 ### Constraint Plan and Gauge Anchors
 

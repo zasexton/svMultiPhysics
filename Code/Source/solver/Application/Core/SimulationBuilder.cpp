@@ -1702,8 +1702,8 @@ void SimulationBuilder::createSolvers()
           components_.fe_system->fieldRecord(unstabilized.front()).name +
           "' has no stabilization term, so its rows have a zero diagonal, which the iterative FSILS solvers "
           "cannot handle; use the FSILS direct solve, add a stabilization term (for example "
-          "bc::makeLagrangeDirichletBC(..., beta > 0)), or a backend with a direct or saddle-point solve "
-          "(Eigen, PETSc).");
+          "bc::Multiplier{.field = lambda, .stabilization = beta} with beta > 0), or a backend with a direct or "
+          "saddle-point solve (Eigen, PETSc).");
     }
   }
 

@@ -3134,7 +3134,8 @@ if(FE_BUILD_TESTS)
 
             # Trace multipliers written as restricted volume fields (D54 LM3):
             # the support restriction, the multiplier rows at setup, the
-            # Lagrange-multiplier Dirichlet condition and the B1, B2, I3 cases.
+            # multiplier enforcement of the Dirichlet condition and the B1, B2,
+            # I3 cases.
             add_executable(test_fe_trace_multipliers
                 Tests/Unit/Constraints/test_SupportRestrictionConstraint.cpp
                 Tests/Unit/Systems/test_TraceMultiplier.cpp

@@ -4,7 +4,7 @@
  *
  * B1 (weak Dirichlet, MMS): -Delta u = f on the unit square with
  * u = sin(pi x) e^y on the boundary, imposed through one multiplier per side
- * restricted to that side (bc::LagrangeDirichletBC).  P2 u with P1
+ * restricted to that side (bc::Dirichlet with bc::Multiplier).  P2 u with P1
  * lambda (quadrilaterals and triangles): the L2 error of u is O(h^3) and
  * lambda tends to -du/dn on the boundary at second order.  P1 u with P1
  * lambda and the Barbosa-Hughes stabilization: the L2 error of u is O(h^2).
@@ -47,9 +47,9 @@
 #include "Core/FEException.h"
 #include "Dofs/EntityDofMap.h"
 #include "Forms/BoundaryConditions.h"
-#include "Forms/LagrangeDirichletBC.h"
 #include "Forms/StandardBCs.h"
 #include "Forms/Vocabulary.h"
+#include "Spaces/ProductSpace.h"
 #include "Systems/BoundaryConditionManager.h"
 #include "Systems/FESystem.h"
 #include "Systems/FormsInstaller.h"
@@ -314,7 +314,7 @@ FormExpr coefficient(std::string name, std::function<Real(Real, Real)> f)
 }
 
 /// -Delta u = f, u = g on the boundary through one multiplier per boundary
-/// marker (each restricted to its boundary, bc::LagrangeDirichletBC).
+/// marker (each restricted to its boundary, bc::Dirichlet with bc::Multiplier).
 struct WeakDirichletPoisson {
     std::unique_ptr<FESystem> system;
     std::shared_ptr<spaces::H1Space> u_space;
@@ -351,7 +351,9 @@ WeakDirichletPoisson buildWeakDirichletPoisson(std::shared_ptr<svmp::Mesh> mesh,
     auto residual = (forms::inner(forms::grad(u), forms::grad(v)) - f * v).dx();
     systems::BoundaryConditionManager bcs;
     for (std::size_t k = 0; k < out.markers.size(); ++k) {
-        bcs.add(forms::bc::makeLagrangeDirichletBC(out.markers[k], g, out.lambdas[k], beta));
+        bcs.add(std::make_unique<forms::bc::Dirichlet>(
+            out.markers[k], g, forms::bc::Multiplier{.field = out.lambdas[k], .stabilization = beta},
+            forms::bc::diffusionFlux(FormExpr::constant(1.0))));
     }
     bcs.applyAll(sys, residual, u, v, out.u);
     std::vector<FieldId> fields{out.u};
@@ -673,9 +675,74 @@ TEST(TraceMultiplierSetup, TheConditionIsExclusiveOnItsBoundary)
     const auto v = forms::TestField(u_id, *h1, "v");
     auto residual = (forms::inner(forms::grad(u), forms::grad(v))).dx();
     systems::BoundaryConditionManager bcs;
-    bcs.add(forms::bc::makeLagrangeDirichletBC(kLeft, FormExpr::constant(0.0), lam_id));
+    bcs.add(std::make_unique<forms::bc::Dirichlet>(kLeft, FormExpr::constant(0.0),
+                                                   forms::bc::Multiplier{.field = lam_id}));
     bcs.add(std::make_unique<forms::bc::Dirichlet>(kLeft, FormExpr::constant(0.0)));
     EXPECT_THROW(bcs.applyAll(sys, residual, u, v, u_id), std::invalid_argument);
+}
+
+TEST(TraceMultiplierSetup, TheMultiplierIsAnEnforcementOfTheDirichletCondition)
+{
+    namespace bc = forms::bc;
+    auto mesh = buildQuadGrid(2, 2, 1.0, 1.0, 1);
+    auto h1 = std::make_shared<spaces::H1Space>(ElementType::Quad4, 1);
+    FESystem sys(mesh);
+    const auto u_id = sys.addField(FieldSpec{.name = "u", .space = h1});
+    const auto lam_id = sys.addField(FieldSpec{.name = "lambda", .space = h1});
+    const auto u = forms::StateField(u_id, *h1, "u");
+    const auto v = forms::TestField(u_id, *h1, "v");
+    const auto lam = forms::StateField(lam_id, *h1, "lambda");
+    const auto mu = forms::TestField(lam_id, *h1, "test_lambda");
+    const auto g = FormExpr::constant(0.5);
+    const auto k = FormExpr::constant(2.0);
+    const auto n = FormExpr::normal();
+    const auto q = [&](const FormExpr& w) { return k * forms::inner(forms::grad(w), n); };
+
+    // The two rows and the stabilization, in the residual of u (one row) or
+    // in the rows of u and lambda.
+    bc::Dirichlet condition(kLeft, g, bc::Multiplier{.field = lam_id, .stabilization = 0.25}, bc::diffusionFlux(k));
+    EXPECT_EQ(condition.label(), "MultiplierBC");
+    EXPECT_TRUE(condition.hasWeakTerms());
+    EXPECT_FALSE(condition.allowsMarkerSharing());
+    EXPECT_TRUE(condition.getStrongConstraints(u_id).empty());
+    EXPECT_TRUE(condition.analysisMetadata(u_id, &sys).empty());
+    const auto seed = (forms::inner(forms::grad(u), forms::grad(v))).dx();
+    auto residual = seed;
+    EXPECT_THROW(condition.contributeToResidual(residual, u, v), std::logic_error);   // before setup()
+    condition.setup(sys, u_id);
+    residual = seed;
+    condition.contributeToResidual(residual, u, v);
+    const auto weighted = FormExpr::constant(0.25) * FormExpr::cellDiameter() * (lam + q(u));
+    const auto expected = seed + (lam * v).ds(kLeft) + (mu * (u - g)).ds(kLeft) - (weighted * mu).ds(kLeft) -
+                          (weighted * q(v)).ds(kLeft);
+    EXPECT_EQ(residual.toString(), expected.toString());
+    FormExpr R_u = seed;
+    FormExpr R_lam;
+    bc::ResidualRows rows({{u_id, &R_u}, {lam_id, &R_lam}});
+    condition.contributeToRows(rows, u, v, u_id);
+    EXPECT_EQ(R_u.toString(), (seed + (lam * v).ds(kLeft) + (-(weighted * q(v)).ds(kLeft))).toString());
+    EXPECT_EQ(R_lam.toString(), ((mu * (u - g)).ds(kLeft) + (-(weighted * mu).ds(kLeft))).toString());
+
+    // Refusals: the field itself, a vector multiplier or field, a generated
+    // subset, a stabilization without the normal flux or out of range, no
+    // multiplier, a component list.
+    bc::Dirichlet itself(kLeft, g, bc::Multiplier{.field = u_id});
+    EXPECT_THROW(itself.setup(sys, u_id), std::invalid_argument);
+    auto product = std::make_shared<spaces::ProductSpace>(h1, 2);
+    const auto w_id = sys.addField(FieldSpec{.name = "w", .space = product, .components = 2});
+    bc::Dirichlet vector_multiplier(kLeft, g, bc::Multiplier{.field = w_id});
+    EXPECT_THROW(vector_multiplier.setup(sys, u_id), std::invalid_argument);
+    bc::Dirichlet vector_field(kLeft, g, bc::Multiplier{.field = lam_id});
+    EXPECT_THROW(vector_field.setup(sys, w_id), std::invalid_argument);
+    EXPECT_THROW(bc::Dirichlet(forms::ExteriorBoundaryMeasure::generatedActiveSubset(kLeft, 77), g,
+                               bc::Multiplier{.field = lam_id}),
+                 std::invalid_argument);
+    EXPECT_THROW(bc::Dirichlet(kLeft, g, bc::Multiplier{.field = lam_id, .stabilization = 0.1}), std::invalid_argument);
+    EXPECT_THROW(bc::Dirichlet(kLeft, g, bc::Multiplier{.field = lam_id, .stabilization = -1.0}),
+                 std::invalid_argument);
+    EXPECT_THROW(bc::Dirichlet(kLeft, g, bc::Multiplier{}), std::invalid_argument);
+    EXPECT_THROW(bc::Dirichlet(kLeft, std::vector<FormExpr>{g, g}, bc::Multiplier{.field = lam_id}),
+                 std::invalid_argument);
 }
 
 TEST(TraceMultiplierSetup, AnUnstabilizedMultiplierIsReportedForTheIterativeSolvers)

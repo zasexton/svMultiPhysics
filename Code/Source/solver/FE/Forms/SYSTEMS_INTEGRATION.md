@@ -23,7 +23,7 @@ How `FE/Forms` weak-form expressions become assembled operators in `FE/Systems`.
 | Mixed-dimensional interface fields | `FESystem::addInterfaceField()`, coupled by `.dI(marker)` forms | `FESystem.h` |
 | Mortar/hybrid facet fields | `MortarSpace`, coupled by `.dI(marker)` forms (`FESystem::addInterfaceFaceKernel()` for hand-written kernels) | `MortarSpace.h` / `FormsInstaller.h` |
 | Global multipliers | A `GlobalSpace` field in the form (`(mu * p).dx()`, `.dGlobal()`) | `GlobalSpace.h` / `Vocabulary.h` |
-| Trace multipliers | `plan.restrictSupport()` + `bc::LagrangeDirichletBC` | `ConstraintPlan.h` / `LagrangeDirichletBC.h` |
+| Trace multipliers | `plan.restrictSupport()` + `bc::Dirichlet(b, g, bc::Multiplier{...})` | `ConstraintPlan.h` / `StandardBCs.h` |
 | Auto-detecting compilation | `FormCompiler::compile()` | `FormCompiler.h` |
 | Explicit mixed compilation | `FormCompiler::compileMixed()` | `FormCompiler.h` |
 | Pre-compiled IR installation | `installMixedFormIR()` | `FormsInstaller.h` |

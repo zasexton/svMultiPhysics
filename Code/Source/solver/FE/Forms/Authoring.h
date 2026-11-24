@@ -28,7 +28,6 @@
 #include "Forms/BoundaryConditions.h"
 #include "Forms/StandardBCs.h"
 #include "Forms/NitscheBC.h"
-#include "Forms/LagrangeDirichletBC.h"
 #include "Forms/BoundaryFunctional.h"
 
 // The FE services a formulation calls.

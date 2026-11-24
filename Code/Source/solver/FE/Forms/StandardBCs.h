@@ -8,6 +8,7 @@
 
 #include "Constraints/HDivNormalConstraint.h"
 #include "Constraints/NormalComponentConstraint.h"
+#include "Constraints/SupportRestrictionConstraint.h"
 #include "Forms/BoundaryCondition.h"
 #include "Forms/Vocabulary.h"
 #include "Systems/FESystem.h"
@@ -228,9 +229,23 @@ struct Penalty {
     FormExpr beta{};
 };
 
+/// Enforcement by a Lagrange multiplier lambda, a scalar volume field of its
+/// own restricted to the boundary (D54 T1): the residual terms
+/// (lambda v) + (mu (u - g)) on the boundary, mu the test function of lambda,
+/// so lambda is minus the operator's flux q(u) there.  With a positive
+/// stabilization beta, Barbosa and Hughes's term
+/// -(beta h (lambda + q(u)) (mu + q(v))), h the cell diameter, makes
+/// equal-order pairs stable; q is the normal flux of the condition's
+/// NaturalFlux.  Install the residual with the multiplier in the field list.
+struct Multiplier {
+    FieldId field{INVALID_FIELD_ID};
+    Real stabilization{0.0};
+};
+
 /// How a condition u = g is enforced: strongly, by Nitsche's method
-/// (BoundaryConditions.h, with the operator's NaturalFlux) or by a penalty.
-using Enforcement = std::variant<Strong, Nitsche, Penalty>;
+/// (BoundaryConditions.h, with the operator's NaturalFlux), by a penalty or
+/// by a Lagrange multiplier.
+using Enforcement = std::variant<Strong, Nitsche, Penalty, Multiplier>;
 
 /// A part of a flux as a linear function of its unknown: applied to the
 /// unknown's state it is the part of the flux; applied to the unknown's test
@@ -387,15 +402,20 @@ private:
  *   gamma p^2 w (u - g) . v.  A flux with parts in other
  *   unknowns makes the condition multi-row (contributeToRows).
  * - Penalty{beta}: weak, beta (u - g) . v.
+ * - Multiplier{lambda, beta}: weak, through the multiplier lambda restricted
+ *   to the boundary, (lambda v) + (mu (u - g)), with Barbosa and Hughes's
+ *   stabilization when beta > 0.  The condition is exclusive on its boundary;
+ *   the multiplier's rows anchor the constant of u (setup reads them).
  *
  * The target is a Boundary: a marker or an exterior measure (the generated
- * wet part of a cut boundary: weak enforcement only).  The value is the whole field (a
+ * wet part of a cut boundary: Nitsche or penalty only).  The value is the whole field (a
  * scalar, or a vector expression), every component of a vector field, or, for
  * strong enforcement, some components; strong component conditions of one
  * boundary merge (mergeComponents, BoundaryConditionManager::add).  The
  * manifest names the condition by
  * its enforcement: EssentialBC (strong, the whole field or every component),
- * ComponentEssentialBC (strong, some components), NitscheBC, PenaltyBC.
+ * ComponentEssentialBC (strong, some components), NitscheBC, PenaltyBC,
+ * MultiplierBC.
  */
 class Dirichlet final : public BoundaryCondition {
 public:
@@ -464,10 +484,49 @@ public:
         if (std::holds_alternative<Penalty>(how_)) {
             return "PenaltyBC";
         }
+        if (isMultiplier()) {
+            return "MultiplierBC";
+        }
         return "NitscheBC";
     }
 
     [[nodiscard]] bool hasWeakTerms() const override { return !isStrong(); }
+
+    /// A multiplier condition fixes u on its boundary: exclusive there.
+    [[nodiscard]] bool allowsMarkerSharing() const override { return hasWeakTerms() && !isMultiplier(); }
+
+    /// Binds the multiplier's symbols: a scalar volume field other than the
+    /// field of the condition, which is scalar too.
+    void setup(systems::FESystem& system, FieldId field_id) override
+    {
+        const auto* multiplier = std::get_if<Multiplier>(&how_);
+        if (multiplier == nullptr) {
+            return;
+        }
+        const std::string context = "bc::Dirichlet on boundary_marker " + std::to_string(boundary_marker_);
+        if (multiplier->field == field_id) {
+            throw std::invalid_argument(context + ": the multiplier must be a field of its own");
+        }
+        if (system.fieldRecord(field_id).components != 1) {
+            throw std::invalid_argument(context + ": a multiplier enforces the value of a scalar field");
+        }
+        const auto& rec = system.fieldRecord(multiplier->field);
+        if (!rec.space || rec.scope != systems::FieldScope::VolumeCell || rec.components != 1) {
+            throw std::invalid_argument(context + ": the multiplier '" + rec.name +
+                                        "' must be a scalar volume field (restricted to the boundary)");
+        }
+        multiplier_space_ = rec.space;
+        multiplier_name_ = rec.name;
+    }
+
+    /// Registers the multiplier's support restriction to the boundary.
+    void installSystemConstraints(systems::FESystem& system, FieldId /*field_id*/) const override
+    {
+        if (const auto* multiplier = std::get_if<Multiplier>(&how_)) {
+            system.addSystemConstraint(std::make_unique<constraints::SupportRestrictionConstraint>(
+                multiplier->field, ExteriorBoundaryMeasure::fullPhysical(boundary_marker_)));
+        }
+    }
 
     [[nodiscard]] const Enforcement& enforcement() const noexcept { return how_; }
 
@@ -576,9 +635,14 @@ public:
         return out;
     }
 
+    /// The descriptors of the condition; a multiplier condition has none (its
+    /// rows anchor the constant of u, which setup reads from them).
     [[nodiscard]] std::vector<analysis::BoundaryConditionDescriptor>
     analysisMetadata(FieldId field_id, const systems::FESystem* /*system*/) const override
     {
+        if (isMultiplier()) {
+            return {};
+        }
         const std::string name = source_name_.empty() ? std::string(label()) : source_name_;
         const std::string on_marker = " on marker " + std::to_string(boundary_marker_);
         auto descriptor = [&](int component) {
@@ -628,6 +692,7 @@ public:
 
 private:
     [[nodiscard]] bool isStrong() const noexcept { return std::holds_alternative<Strong>(how_); }
+    [[nodiscard]] bool isMultiplier() const noexcept { return std::holds_alternative<Multiplier>(how_); }
     [[nodiscard]] int precedence() const noexcept
     {
         const auto* strong = std::get_if<Strong>(&how_);
@@ -670,6 +735,32 @@ private:
         if (const auto* penalty = std::get_if<Penalty>(&how_)) {
             if (!penalty->beta.isValid()) {
                 throw std::invalid_argument("bc::Dirichlet: invalid penalty coefficient");
+            }
+            return;
+        }
+        if (const auto* multiplier = std::get_if<Multiplier>(&how_)) {
+            if (multiplier->field == INVALID_FIELD_ID) {
+                throw std::invalid_argument("bc::Dirichlet: invalid multiplier field");
+            }
+            if (!(multiplier->stabilization >= Real(0.0)) || !std::isfinite(multiplier->stabilization)) {
+                throw std::invalid_argument("bc::Dirichlet: the multiplier stabilization must be finite and >= 0");
+            }
+            if (measure_.has_value() && !measure_->isFullPhysical()) {
+                throw std::invalid_argument(
+                    "bc::Dirichlet: a multiplier is restricted to the mesh faces of a marker; a generated active "
+                    "subset needs Nitsche{} or Penalty{}");
+            }
+            if (components_.size() != 1u) {
+                throw std::invalid_argument("bc::Dirichlet: a multiplier enforces the value of a scalar field");
+            }
+            if (multiplier->stabilization > Real(0.0)) {
+                const bool normal_flux = !flux_.parts.empty() && std::all_of(
+                    flux_.parts.begin(), flux_.parts.end(),
+                    [](const FluxPart& part) { return part.kind == FluxPart::Kind::Normal && part.of; });
+                if (!normal_flux) {
+                    throw std::invalid_argument(
+                        "bc::Dirichlet: a stabilized multiplier needs the operator's normal flux");
+                }
             }
             return;
         }
@@ -722,6 +813,10 @@ private:
         const auto diff = u - value;
         if (const auto* penalty = std::get_if<Penalty>(&how_)) {
             rows.add(field, integrate(vector ? penalty->beta * inner(diff, v) : penalty->beta * diff * v));
+            return;
+        }
+        if (const auto* multiplier = std::get_if<Multiplier>(&how_)) {
+            emitMultiplier(rows, u, v, field, diff, *multiplier, vector);
             return;
         }
 
@@ -791,6 +886,43 @@ private:
         rows.add(field, integrate(vector ? penalty * inner(diff, v) : penalty * diff * v));
     }
 
+    /// The multiplier's two rows, one integral per test function (the
+    /// installer splits a residual by its integrals): (lambda v) in u's row,
+    /// (mu (u - g)) in the multiplier's; then Barbosa and Hughes's
+    /// stabilization, -(beta h (lambda + q(u)) mu) and -(beta h (lambda + q(u)) q(v)).
+    void emitMultiplier(RowSink& rows,
+                        const FormExpr& u,
+                        const FormExpr& v,
+                        FieldId field,
+                        const FormExpr& diff,
+                        const Multiplier& multiplier,
+                        bool vector) const
+    {
+        if (!multiplier_space_) {
+            throw std::logic_error("bc::Dirichlet: setup() binds the multiplier before its terms are stated");
+        }
+        if (vector) {
+            throw std::invalid_argument("bc::Dirichlet: a multiplier enforces the value of a scalar field");
+        }
+        const auto lam = StateField(multiplier.field, *multiplier_space_, multiplier_name_);
+        const auto mu = TestField(multiplier.field, *multiplier_space_, "test_" + multiplier_name_);
+        rows.add(field, integrate(lam * v));
+        rows.add(multiplier.field, integrate(mu * diff));
+        if (multiplier.stabilization > Real(0.0)) {
+            const auto q = [&](const FormExpr& w) {
+                FormExpr sum = flux_.parts.front().of(w);
+                for (std::size_t p = 1; p < flux_.parts.size(); ++p) {
+                    sum = sum + flux_.parts[p].of(w);
+                }
+                return sum;
+            };
+            const auto weighted =
+                FormExpr::constant(multiplier.stabilization) * FormExpr::cellDiameter() * (lam + q(u));
+            rows.subtract(multiplier.field, integrate(weighted * mu));
+            rows.subtract(field, integrate(weighted * q(v)));
+        }
+    }
+
     [[nodiscard]] std::vector<FormExpr> values() const
     {
         std::vector<FormExpr> out;
@@ -809,6 +941,8 @@ private:
     std::string symbol_{"u"};
     std::string source_name_{};
     bool some_components_{false};
+    std::shared_ptr<const spaces::FunctionSpace> multiplier_space_{};   ///< bound by setup()
+    std::string multiplier_name_{};
 };
 
 /// The strong Dirichlet condition of the active components of @p values on
