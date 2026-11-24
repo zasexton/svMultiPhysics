@@ -5166,12 +5166,14 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
                                            q_index);
         };
 
+        // Physical Hessian tables are quadrature-point major, [q * n_dofs + j],
+        // as AssemblyContext stores them (and as the value and gradient tables).
         auto loadMat3FromTable = [&](llvm::Value* base_ptr,
-                                     llvm::Value* n_qpts,
+                                     llvm::Value* n_dofs,
                                      llvm::Value* dof_index,
                                      llvm::Value* q_index) -> CodeValue {
             CodeValue out = makeMatrix(3u, 3u);
-            auto* offset = builder.CreateAdd(builder.CreateMul(dof_index, n_qpts), q_index);
+            auto* offset = builder.CreateAdd(builder.CreateMul(q_index, n_dofs), dof_index);
             auto* base9 = builder.CreateMul(offset, builder.getInt32(9));
             auto* base9_64 = builder.CreateZExt(base9, i64);
             for (std::size_t i = 0; i < 9; ++i) {
@@ -5181,12 +5183,12 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
         };
 
         auto loadMatDimFromTable = [&](llvm::Value* base_ptr,
-                                       llvm::Value* n_qpts,
+                                       llvm::Value* n_dofs,
                                        llvm::Value* dof_index,
                                        llvm::Value* q_index,
                                        std::uint32_t dim) -> CodeValue {
             CodeValue out = makeMatrix(dim, dim);
-            auto* offset = builder.CreateAdd(builder.CreateMul(dof_index, n_qpts), q_index);
+            auto* offset = builder.CreateAdd(builder.CreateMul(q_index, n_dofs), dof_index);
             auto* base9 = builder.CreateMul(offset, builder.getInt32(9));
             auto* base9_64 = builder.CreateZExt(base9, i64);
             for (std::uint32_t r = 0; r < dim; ++r) {
@@ -5226,7 +5228,7 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
                 }
             }
             return loadMatDimFromTable(test_side ? side.test_phys_hessians : side.trial_phys_hessians,
-                                       side.n_qpts,
+                                       test_side ? side.n_test_dofs : side.n_trial_dofs,
                                        dof_index,
                                        q_index,
                                        dim);
@@ -7851,7 +7853,7 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
 		                                        auto* j64 = builder.CreateZExt(j, i64);
 		                                        auto* cj = loadRealPtrAt(coeffs_ptr, j64);
 		                                        const auto H =
-		                                            loadMat3FromTable(side.trial_phys_hessians, side.n_qpts, j, q_index);
+		                                            loadMat3FromTable(side.trial_phys_hessians, side.n_trial_dofs, j, q_index);
 		                                        auto* tr = traceHessBasis(H, dim);
 		                                        return builder.CreateFMul(cj, tr);
 		                                    });
@@ -7867,7 +7869,7 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
 		                                            auto* j64 = builder.CreateZExt(j, i64);
 		                                            auto* cj = loadRealPtrAt(coeffs_ptr, j64);
 		                                            const auto H =
-		                                                loadMat3FromTable(side.trial_phys_hessians, side.n_qpts, j, q_index);
+		                                                loadMat3FromTable(side.trial_phys_hessians, side.n_trial_dofs, j, q_index);
 		                                            const auto idxH = static_cast<std::size_t>(r * 3u + d);
 		                                            return builder.CreateFMul(cj, H.elems[idxH]);
 		                                        });
@@ -7885,7 +7887,7 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
 	                                auto* dofs_per_comp =
 	                                    builder.CreateUDiv(side.n_trial_dofs, builder.getInt32(static_cast<std::uint32_t>(rows)));
 	                                auto* comp = builder.CreateUDiv(j_index, dofs_per_comp);
-	                                const auto H = loadMat3FromTable(side.trial_phys_hessians, side.n_qpts, j_index, q_index);
+	                                const auto H = loadMat3FromTable(side.trial_phys_hessians, side.n_trial_dofs, j_index, q_index);
 	                                auto* tr = traceHessBasis(H, dim);
 
 	                                for (std::size_t r = 0; r < rows; ++r) {
@@ -11100,7 +11102,7 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
 	                                        auto* j = builder.CreateAdd(base, jj);
 	                                        auto* j64 = builder.CreateZExt(j, i64);
 	                                        auto* cj = loadRealPtrAt(coeffs_ptr, j64);
-	                                        const auto H = loadMat3FromTable(side.trial_phys_hessians, side.n_qpts, j, q_index);
+	                                        const auto H = loadMat3FromTable(side.trial_phys_hessians, side.n_trial_dofs, j, q_index);
 	                                        auto* tr = traceHessBasis(H, dim);
 	                                        return builder.CreateFMul(cj, tr);
 	                                    });
@@ -11113,7 +11115,7 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
 	                                            auto* j = builder.CreateAdd(base, jj);
 	                                            auto* j64 = builder.CreateZExt(j, i64);
 	                                            auto* cj = loadRealPtrAt(coeffs_ptr, j64);
-	                                            const auto H = loadMat3FromTable(side.trial_phys_hessians, side.n_qpts, j, q_index);
+	                                            const auto H = loadMat3FromTable(side.trial_phys_hessians, side.n_trial_dofs, j, q_index);
 	                                            const auto idxH = static_cast<std::size_t>(r * 3u + d);
 	                                            return builder.CreateFMul(cj, H.elems[idxH]);
 	                                        });
@@ -13495,7 +13497,7 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
 	                                                auto* j = builder.CreateAdd(base, jj);
 	                                                auto* j64 = builder.CreateZExt(j, i64);
 	                                                auto* cj = loadRealPtrAt(coeffs_ptr, j64);
-	                                                const auto H = loadMat3FromTable(side.trial_phys_hessians, side.n_qpts, j, q_index);
+	                                                const auto H = loadMat3FromTable(side.trial_phys_hessians, side.n_trial_dofs, j, q_index);
 	                                                return builder.CreateFMul(cj, traceHessBasis(H, dim));
 	                                            });
 
@@ -13510,7 +13512,7 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
 	                                                    auto* j = builder.CreateAdd(base, jj);
 	                                                    auto* j64 = builder.CreateZExt(j, i64);
 	                                                    auto* cj = loadRealPtrAt(coeffs_ptr, j64);
-	                                                    const auto H = loadMat3FromTable(side.trial_phys_hessians, side.n_qpts, j, q_index);
+	                                                    const auto H = loadMat3FromTable(side.trial_phys_hessians, side.n_trial_dofs, j, q_index);
 	                                                    return builder.CreateFMul(cj, H.elems[r * 3u + d]);
 	                                                });
 	                                            gd = builder.CreateFAdd(gd, acc);
@@ -18203,7 +18205,7 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
 	                                        auto* j = builder.CreateAdd(base, jj);
 	                                        auto* j64 = builder.CreateZExt(j, i64);
 	                                        auto* cj = loadRealPtrAt(coeffs_ptr, j64);
-	                                        const auto H = loadMat3FromTable(side.trial_phys_hessians, side.n_qpts, j, q_index);
+	                                        const auto H = loadMat3FromTable(side.trial_phys_hessians, side.n_trial_dofs, j, q_index);
 	                                        return builder.CreateFMul(cj, traceHessBasis(H, dim));
 	                                    });
 
@@ -18218,7 +18220,7 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
 	                                            auto* j = builder.CreateAdd(base, jj);
 	                                            auto* j64 = builder.CreateZExt(j, i64);
 	                                            auto* cj = loadRealPtrAt(coeffs_ptr, j64);
-	                                            const auto H = loadMat3FromTable(side.trial_phys_hessians, side.n_qpts, j, q_index);
+	                                            const auto H = loadMat3FromTable(side.trial_phys_hessians, side.n_trial_dofs, j, q_index);
 	                                            return builder.CreateFMul(cj, H.elems[r * 3u + d]);
 	                                        });
 	                                    gd = builder.CreateFAdd(gd, acc);
@@ -18239,7 +18241,7 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
 	                                builder.CreateUDiv(side.n_trial_dofs,
 	                                                   builder.getInt32(static_cast<std::uint32_t>(rows)));
 	                            auto* comp = builder.CreateUDiv(j_index, dofs_per_comp);
-	                            const auto H = loadMat3FromTable(side.trial_phys_hessians, side.n_qpts, j_index, q_index);
+	                            const auto H = loadMat3FromTable(side.trial_phys_hessians, side.n_trial_dofs, j_index, q_index);
 	                            auto* tr = traceHessBasis(H, dim);
 
 	                            for (std::size_t r = 0; r < rows; ++r) {

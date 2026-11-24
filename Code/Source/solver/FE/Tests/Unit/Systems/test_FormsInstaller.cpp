@@ -56,6 +56,7 @@
 #include "Spaces/HCurlSpace.h"
 #include "Spaces/L2Space.h"
 #include "Spaces/ProductSpace.h"
+#include "Spaces/SpaceFactory.h"
 
 #include "Systems/AuxiliaryQuadratureLayout.h"
 #include "Tests/Unit/Forms/FormsTestHelpers.h"
@@ -66,6 +67,8 @@
 #include <array>
 #include <cmath>
 #include <cstdint>
+#include <functional>
+#include <initializer_list>
 #include <memory>
 #include <optional>
 #include <span>
@@ -7780,5 +7783,125 @@ TEST(MovingFrameColocatedBlocks, CompiledResidualRowsMatchTheInterpretedOnes)
     for (const bool vectorize : {true, false}) {
         SCOPED_TRACE(::testing::Message() << (vectorize ? "batched" : "unbatched"));
         expectSameRows(movingFramePressureRows(true, vectorize, true), interpreted);
+    }
+}
+
+namespace {
+
+/// The unit square cut into 2 x 2 quadrilaterals, or into 8 triangles.
+std::shared_ptr<svmp::Mesh> unitSquareForHessians(bool triangles)
+{
+    std::vector<svmp::real_t> X;
+    for (int j = 0; j <= 2; ++j) {
+        for (int i = 0; i <= 2; ++i) {
+            X.push_back(0.5 * i);
+            X.push_back(0.5 * j);
+        }
+    }
+    const auto v = [](int i, int j) { return static_cast<svmp::index_t>(j * 3 + i); };
+    std::vector<svmp::offset_t> offsets{0};
+    std::vector<svmp::index_t> connectivity;
+    std::vector<svmp::CellShape> shapes;
+    const auto add = [&](std::initializer_list<svmp::index_t> cell) {
+        connectivity.insert(connectivity.end(), cell.begin(), cell.end());
+        offsets.push_back(static_cast<svmp::offset_t>(connectivity.size()));
+        svmp::CellShape shape{};
+        shape.family = triangles ? svmp::CellFamily::Triangle : svmp::CellFamily::Quad;
+        shape.num_corners = static_cast<int>(cell.size());
+        shape.order = 1;
+        shapes.push_back(shape);
+    };
+    for (int j = 0; j < 2; ++j) {
+        for (int i = 0; i < 2; ++i) {
+            if (triangles) {
+                add({v(i, j), v(i + 1, j), v(i + 1, j + 1)});
+                add({v(i, j), v(i + 1, j + 1), v(i, j + 1)});
+            } else {
+                add({v(i, j), v(i + 1, j), v(i + 1, j + 1), v(i, j + 1)});
+            }
+        }
+    }
+    auto base = std::make_shared<svmp::MeshBase>();
+    base->build_from_arrays(2, X, offsets, connectivity, shapes);
+    base->finalize();
+    return svmp::create_mesh(std::move(base));
+}
+
+/// The residual rows of @p residual (in the unknowns @p fields of @p system,
+/// built by @p install) at a non-trivial state.
+std::vector<Real> residualRowsForHessians(bool triangles,
+                                          bool compiled,
+                                          bool vectorize,
+                                          bool symbolic,
+                                          const std::function<svmp::FE::forms::FormExpr(svmp::FE::systems::FieldBinding&)>& install)
+{
+    svmp::FE::systems::FESystem system(unitSquareForHessians(triangles));
+    svmp::FE::systems::FieldBinding fields(system, "Hessians");
+    const auto residual = install(fields);
+    svmp::FE::systems::FormInstallOptions options;
+    options.compiler_options.jit = svmp::FE::forms::test::makeUnitTestJITOptions();
+    options.compiler_options.jit.enable = compiled;
+    options.compiler_options.jit.vectorize = vectorize;
+    options.compiler_options.use_symbolic_tangent = symbolic;
+    {
+        svmp::FE::systems::FormulationBuilder F(system, "equations", options);
+        (void)F.residual(residual);
+    }
+    system.setup();
+    const auto n = system.dofHandler().getNumDofs();
+    std::vector<Real> U(static_cast<std::size_t>(n));
+    for (GlobalIndex i = 0; i < n; ++i) {
+        U[static_cast<std::size_t>(i)] = std::sin(0.3 + 1.7 * static_cast<Real>(i));
+    }
+    svmp::FE::systems::SystemStateView state;
+    state.u = U;
+    svmp::FE::assembly::DenseVectorView R(n);
+    R.zero();
+    svmp::FE::systems::AssemblyRequest request;
+    request.op = "equations";
+    request.want_vector = true;
+    EXPECT_TRUE(system.assemble(request, state, nullptr, &R).success);
+    std::vector<Real> out(static_cast<std::size_t>(n));
+    for (GlobalIndex i = 0; i < n; ++i) {
+        out[static_cast<std::size_t>(i)] = R.getVectorEntry(i);
+    }
+    return out;
+}
+
+void expectSameHessianRows(const std::vector<Real>& actual, const std::vector<Real>& expected)
+{
+    ASSERT_EQ(actual.size(), expected.size());
+    Real scale = 0.0;
+    for (const auto value : expected) {
+        scale = std::max(scale, std::abs(value));
+    }
+    ASSERT_GT(scale, 0.1);
+    for (std::size_t i = 0; i < actual.size(); ++i) {
+        EXPECT_NEAR(actual[i], expected[i], 1e-13 * scale) << "row " << i;
+    }
+}
+
+} // namespace
+
+// The compiled residual of div(2 sym(grad u)), with the second derivatives of
+// the components of a bilinear velocity (nonzero mixed derivatives on Quad4),
+// equals the interpreted one.  The compiled kernels read the physical Hessian
+// tables dof-major while the context stores them quadrature-point major, so
+// they read other functions' Hessians at other points.
+TEST(CompiledResidualHessians, ComponentHessiansOfABilinearVelocity)
+{
+    if (!svmp::FE::forms::jit::llvmJITEnabled()) {
+        GTEST_SKIP();
+    }
+    const auto install = [](svmp::FE::systems::FieldBinding& fields) {
+        using namespace svmp::FE::forms;
+        const auto U = fields.unknown(
+            "u", svmp::FE::spaces::VectorSpace(svmp::FE::spaces::SpaceType::H1, ElementType::Quad4, 1, 2));
+        return inner(div(2.0 * sym(grad(U.state))), U.test).dx() + inner(U.state, U.test).dx();
+    };
+    const auto interpreted = residualRowsForHessians(false, false, true, false, install);
+    for (const bool vectorize : {true, false}) {
+        SCOPED_TRACE(::testing::Message() << (vectorize ? "batched" : "unbatched"));
+        expectSameHessianRows(residualRowsForHessians(false, true, vectorize, false, install), interpreted);
     }
 }
