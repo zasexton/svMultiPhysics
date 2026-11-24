@@ -106,18 +106,26 @@ private:
 };
 
 /**
- * @brief Natural (Neumann/traction) BC: adds -∫ flux · v ds(marker)
+ * @brief Natural (Neumann/traction) BC: the prescribed conormal flux g, adding -∫ g · v ds(marker)
+ *
+ * g is the value of the operator's conormal flux, the boundary term of the
+ * residual's integration by parts: for -div(k grad u) = f, written
+ * k grad(u).grad(v) - f v, it is g = k grad(u).n (n the outward normal); for
+ * a vector law -div(sigma(u)) = f it is the traction sigma(u) n.  So g is the
+ * flux entering the body.  A physical outward flux has the opposite sign: the
+ * heat leaving through the boundary is q_out = -k grad(T).n = -g, so an
+ * outward heat flux q_out is prescribed as NaturalBC(b, -q_out).
  */
 class NaturalBC : public BoundaryCondition {
 public:
-    NaturalBC(Boundary target, FormExpr flux)
+    NaturalBC(Boundary target, FormExpr conormal_flux)
         : target_(std::move(target))
-        , flux_(std::move(flux))
+        , conormal_flux_(std::move(conormal_flux))
     {
         if (target_.isInterface()) {
             throw std::invalid_argument("NaturalBC: an interface flux is an InterfaceTraceLoadBC");
         }
-        if (!flux_.isValid()) {
+        if (!conormal_flux_.isValid()) {
             throw std::invalid_argument("NaturalBC: invalid flux expression");
         }
     }
@@ -129,7 +137,7 @@ public:
                               const FormExpr& /*u*/,
                               const FormExpr& v) const override
     {
-        residual = residual - target_.integrate(inner(flux_, v));
+        residual = residual - target_.integrate(inner(conormal_flux_, v));
     }
 
     [[nodiscard]] std::vector<StrongDirichlet> getStrongConstraints(FieldId /*field_id*/) const override
@@ -154,11 +162,15 @@ public:
 
 private:
     Boundary target_;
-    FormExpr flux_{};
+    FormExpr conormal_flux_{};
 };
 
 /**
  * @brief Robin BC: adds ∫ alpha * (u · v) ds(marker) - ∫ rhs · v ds(marker)
+ *
+ * The conormal flux of NaturalBC set to rhs - alpha u: for the heat equation
+ * k grad(T).n = rhs - alpha T, a heat transfer coefficient alpha to an
+ * ambient temperature T_inf with rhs = alpha T_inf.
  */
 class RobinBC : public BoundaryCondition {
 public:
@@ -1266,14 +1278,14 @@ derivedRateConditions(const std::vector<std::unique_ptr<Dirichlet>>& values,
 
 // ---- Conditions from typed boundary data (BoundaryConditions.h BoundaryData) ----
 
-/// NaturalBC(marker, g): the residual term -(g v).ds(marker).
+/// NaturalBC(marker, g), g the prescribed conormal flux: the residual term -(g v).ds(marker).
 [[nodiscard]] inline std::unique_ptr<BoundaryCondition>
 naturalBC(const BoundaryData<ScalarValue>& data, std::string_view prefix)
 {
     return std::make_unique<NaturalBC>(data.boundary_marker, value(data, prefix));
 }
 
-/// NaturalBC(marker, asVector(g)) of a vector flux; every component must be active.
+/// NaturalBC(marker, asVector(g)) of a vector conormal flux (a traction); every component must be active.
 [[nodiscard]] inline std::unique_ptr<BoundaryCondition>
 naturalBC(const BoundaryData<ComponentValues>& data,
           int dim,

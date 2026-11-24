@@ -648,7 +648,7 @@ namespace `forms::bc`.
 | `buildGeneratedBoundaryNitscheTraceTerms(u, v, g, form, ...)`, `symmetricGradientForm(k)`, `GeneratedBoundaryNitscheTraceFormBinding` | `BoundaryConditions.h`, `NitscheTraceBilinearForm.h` | `implemented/expert`; Nitsche terms on a generated boundary consistent with a declared bilinear form (`NitscheTraceBilinearForm::SymmetricGradient`, 2 k eps(u) : eps(v)), with an immutable binding for the installer's trace certificate, which bounds the form's flux by its energy |
 | `bc::Dirichlet(target, g, how = Strong{}, flux = {}, symbol)`, `componentDirichlet(...)` | `StandardBCs.h` | u = g, enforced as declared (see Boundary conditions, waves 2 and 3): strong values of a scalar, a dense vector or selected components; Nitsche; penalty; a multiplier restricted to the boundary |
 | `bc::naturalBC(data, prefix)`, `robinBC(data, alpha_prefix, rhs_prefix)`, `dirichlet(data, prefix, how, flux, symbol)`, `dirichlet(data, dim, prefix, symbol, source)` | `StandardBCs.h` | The conditions of typed `BoundaryData`; the same objects, trees, manifests and JIT keys as the spelled-out `NaturalBC(m, toScalarExpr(g, markerValueName(prefix, m)))` and its siblings (Poisson builds its conditions so) |
-| `NaturalBC(boundary, flux)`, `RobinBC(boundary, alpha, rhs)` | `StandardBCs.h` | Weak flux and Robin terms on a `bc::Boundary` |
+| `NaturalBC(boundary, g)`, `RobinBC(boundary, alpha, rhs)` | `StandardBCs.h` | Weak flux and Robin terms on a `bc::Boundary`: `g` is the prescribed conormal flux (`k grad(u).n`, the flux entering; see Signed Fluxes), Robin sets it to `rhs - alpha u` |
 | `ReservedBC` | `StandardBCs.h` | Reserves a marker for conflict validation; contributes nothing |
 | `constraints::NormalComponentConstraint(field, markers, g, {feature_angle_degrees})` | `Constraints/NormalComponentConstraint.h` | `implemented/expert`; the affine lines of u.n = g after deal.II's normal-flux constraints: facet normals averaged (by facet measure) within the feature angle, one slaved component per direction (the largest determinant), every component at a corner; the same lines at any rank count (contributions summed at the DOF owner in global facet order). Points an earlier constraint holds are left to it; walls that meet at an edge belong in one constraint. `constraints::boundaryPointNormals(system, field, markers)` gives the averaged normal of each owned point where the facets have one direction. No deck uses it yet |
 | `TraceLoadBC`, `TraceRobinBC`, `TraceInequalityBC` | `StandardBCs.h` | Boundary scalar trace wrappers |
@@ -762,6 +762,30 @@ bcs.add(std::make_unique<bc::Dirichlet>(inlet, std::vector<std::pair<int, FormEx
 | `bc::Trace::Value`, `bc::Trace::Normal`, `bc::Trace::Tangential`; `bc::Dirichlet(target, trace, g, how = Strong{}, flux = {}, symbol)` | `StandardBCs.h` | tau(u) = g for the trace tau named before the value: u . n = g (g a scalar) or (I - n n) u = (I - n n) g (g a vector). Strong: a normal trace installs the constraint of the field's space, `HDivNormalConstraint` for H(div) and `NormalComponentConstraint` for a vector Lagrange field (any other field is refused at install); a tangential trace has none. Nitsche: each flux part paired with the trace, a vector flux by its normal component (F . n)(v . n) for the normal trace and by F . (I - n n) v for the tangential part, a scalar normal flux q (an H(div) field's) by q(u)(v . n) on the normal trace; the isotropic part -s n gives s (v . n) and q (u . n - g) on the normal trace and nothing on the tangential part; the penalty pairs tau(u) - g with tau(v). The adjoint terms apply each part to the test function: the adjoint of a linear flux; for a coefficient that depends on the state (a viscosity of the shear rate) it is the adjoint with the coefficient frozen, not the derivative of the flux. Penalty: beta (tau(u) - g) . tau(v). Labels `NormalEssentialBC`, `NormalNitscheBC`, `TangentialNitscheBC`, `NormalPenaltyBC`, `TangentialPenaltyBC`; descriptors `TraceKind::NormalComponent`, `TangentialComponent`. No certified generated-boundary route and no multiplier for a trace |
 | `bc::Dirichlet(target, {{i, g_i}, ...}, how = Strong{}, flux = {}, symbol = "u", source = {})` | `StandardBCs.h` | Some components, the third trace, stated by indexed values. Strong as before (`ComponentEssentialBC`, merged by target). Nitsche and penalty (new): the trace is the projection P w = (w_i for the listed i, 0 otherwise), paired as above with a conormal flux (a normal flux is refused); one descriptor per component; labels `ComponentNitscheBC`, `ComponentPenaltyBC` |
 | `bc::Multiplier{.field, .stabilization = 0}` | `StandardBCs.h` | u = g through the multiplier lambda, a scalar volume field restricted to the boundary (D54 T1; `setup()` checks it and the condition's scalar field, `installSystemConstraints` adds `SupportRestrictionConstraint(lambda, BoundaryDomain::fullPhysical(b))`): `(lambda v).ds(b)` in u's row and `(mu (u - g)).ds(b)` in the multiplier's, so lambda = -q(u). With beta > 0 Barbosa and Hughes's term `-(beta h (lambda + q(u)) mu).ds(b) - (beta h (lambda + q(u)) q(v)).ds(b)` (h the cell diameter, q the normal flux of the condition's `NaturalFlux`, which a stabilized multiplier requires) makes equal-order pairs stable; without it the multiplier's rows have no diagonal and the Application refuses them under an iterative FSILS solve. Exclusive on its boundary, no analysis descriptor (the multiplier's rows anchor the constant of u), label `MultiplierBC`; refused on a generated active subset, for a vector field and for a component list. A multiplier continuous around a corner cannot follow the jump of du/dn there: give each side its own multiplier |
+
+### Signed Fluxes of Natural Conditions
+
+`bc::NaturalBC(b, g)` subtracts `(g v).ds(b)` from the residual, so `g` is the
+operator's conormal flux, the boundary term of the integration by parts: for
+`-div(k grad T) = f`, written `(k inner(grad(T), grad(v)) - f v).dx()`, the
+condition is `k grad(T).n = g` with `n` the outward normal (for a vector law,
+the traction `sigma(u) n = g`).  `g` is the flux entering the body.  The
+physical heat flux is `-k grad(T)`, and the heat leaving through the boundary,
+`q_out = -k grad(T).n`, is `-g`:
+
+```cpp
+// A prescribed outward heat flux q_out: the conormal flux is g = -q_out.
+bcs.add(std::make_unique<bc::NaturalBC>(wall, -q_out));
+// The heat leaving through the wall, recorded as the physical flux: equal to q_out.
+const auto heat_flux = -k * grad(T);
+F.record(F.quantity("heat_leaving", systems::FunctionalKind::Integral, inner(heat_flux, FormExpr::normal()).ds(wall)));
+```
+
+`test_Authoring.cpp` (`TheNaturalConditionPrescribesTheConormalFluxNotTheOutwardHeatFlux`)
+solves the canonical skeleton on a slab with an outward heat flux `q_out`
+through one side (`inflow = -q_out`) and checks the temperature
+`T_w - q_out x / k`, the heat flux `(q_out, 0)`, and the heat leaving through
+that side (`q_out`) and through the Dirichlet wall (`-q_out`, its reaction).
 
 ### Constraint Plan and Gauge Anchors
 
