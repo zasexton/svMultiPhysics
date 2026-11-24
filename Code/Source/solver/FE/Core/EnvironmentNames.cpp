@@ -38,10 +38,56 @@ std::span<const NameDeclaration> solverCatalogue() noexcept
     [[maybe_unused]] constexpr auto NonReference = RunStatus::NonReference;
 
     // Owning services.
+    constexpr const char* kAssembly = "FE/Assembly";
     constexpr const char* kEigen = "FE/Backends/Eigen";
     constexpr const char* kFsils = "FE/Backends/FSILS";
+    constexpr const char* kSystemAssembly = "FE/Systems/SystemAssembly";
 
     static constexpr NameDeclaration kSolverNames[] = {
+        // FE/Assembly and FE/Systems/SystemAssembly: assembly and cut-cell numerics.
+        {"SVMP_ASSEMBLY_SPIN_US", Performance, kAssembly, Integer, "0", Reference,
+         "busy-wait of a threaded-assembly worker before it blocks, in microseconds"},
+        {"SVMP_ASSEMBLY_THREAD_TIMING", Diagnostic, kAssembly, Flag, "off", Reference,
+         "prints the wall time of each assembly loop and of the threaded pipeline"},
+        {"SVMP_ASSEMBLY_TIMING", Diagnostic, kAssembly, Flag, "off", Reference,
+         "assembly phase timers; also the cut-volume and interior-face timers"},
+        {"SVMP_CUT_VOLUME_BASIS_CACHE_MAX_ENTRIES", Performance, kAssembly, Integer, "0 (off)", Reference,
+         "entries of the cut-volume basis tabulation cache"},
+        {"SVMP_CUT_VOLUME_EPOCH_CACHE_MAX_MB", Performance, kAssembly, Integer, "1024", Reference,
+         "memory budget of the cut-volume cache kept across assemblies, in MB"},
+        {"SVMP_CUT_VOLUME_TIMING", Diagnostic, kAssembly, Flag, "off", Reference,
+         "prints the cut-volume assembly timing"},
+        {"SVMP_DISABLE_CUT_VOLUME_FUSION", Performance, kSystemAssembly, Flag, "off", NonReference,
+         "assembles each cut-volume term in its own pass (changes the summation order)"},
+        {"SVMP_FE_COMPARE_MONOLITHIC_COMPILED", Diagnostic, kAssembly, Flag, "off", Reference,
+         "compares compiled monolithic cell kernels with the interpreted ones and throws on a mismatch"},
+        {"SVMP_FE_COMPARE_MONOLITHIC_MAX_CELLS", Diagnostic, kAssembly, Integer, "1", Reference,
+         "cells compared by SVMP_FE_COMPARE_MONOLITHIC_COMPILED"},
+        {"SVMP_FE_COMPARE_MONOLITHIC_TOL", Diagnostic, kAssembly, Real, "1e-11", Reference,
+         "tolerance of SVMP_FE_COMPARE_MONOLITHIC_COMPILED"},
+        {"SVMP_FE_CUT_VOLUME_ROW_PROVENANCE_DIAGNOSTIC", Diagnostic, kSystemAssembly, Flag, "off", Reference,
+         "logs which cut-volume rules contribute to each row"},
+        {"SVMP_FE_CUT_VOLUME_ROW_PROVENANCE_MAX_RULES", Diagnostic, kSystemAssembly, Integer, "0 (unlimited)",
+         Reference, "caps the rules of the row provenance log"},
+        {"SVMP_FE_CUT_VOLUME_ROW_PROVENANCE_OPERATOR", Diagnostic, kSystemAssembly, List, "all operators",
+         Reference, "operator tags of the row provenance log, separated by | or ,"},
+        {"SVMP_FE_DISABLE_DIRICHLET_FAST_PATH", Performance, kAssembly, Flag, "off", NonReference,
+         "sends cells whose DOFs are all Dirichlet through the general constraint distributor"},
+        {"SVMP_FE_DISABLE_MONOLITHIC_COMPILED_DISPATCH", Performance, kAssembly, Flag, "off", Reference,
+         "vetoes SVMP_FE_ENABLE_MONOLITHIC_COMPILED_DISPATCH"},
+        {"SVMP_FE_ENABLE_MONOLITHIC_COMPILED_DISPATCH", Performance, kAssembly, Flag, "off", NonReference,
+         "JIT-compiled monolithic coupled cell kernels (changes round-off)"},
+        {"SVMP_GHOST_TRACE_ROW_DOF", Diagnostic, kAssembly, Integer, "off", Reference,
+         "traces the ghost contributions sent to this global row DOF"},
+        {"SVMP_INTERIOR_FACE_TIMING", Diagnostic, kAssembly, Flag, "off", Reference,
+         "prints the interior-face assembly timing"},
+        {"SVMP_MIN_GENERATED_CUT_VOLUME_FRACTION", NumericalOverride, kAssembly, Real, "1e-8", NonReference,
+         "volume fraction below which a generated cut sub-volume rule is pruned"},
+        {"SVMP_MONO_AUX_TRACE_DOF_GATHER", Diagnostic, kAssembly, Flag, "off", Reference,
+         "prints the norms of functional-assembler coefficient gathers"},
+        {"SVMP_PARALLEL_ASSEMBLER_TRACE", Diagnostic, kAssembly, Flag, "off", Reference,
+         "prints per-rank ghost exchange statistics"},
+
         // FE/Backends/Eigen: the Eigen matrix backend.
         {"SVMP_EIGEN_COUNT_DROPPED", Diagnostic, kEigen, Flag, "off", Reference,
          "logs samples of matrix writes outside the sparsity pattern"},

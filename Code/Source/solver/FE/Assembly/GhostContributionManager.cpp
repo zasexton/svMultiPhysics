@@ -8,6 +8,7 @@
 #include "GhostContributionManager.h"
 #include "Dofs/DofMap.h"
 #include "Dofs/GhostDofManager.h"
+#include "Core/EnvironmentNames.h"
 
 #include <algorithm>
 #include <array>
@@ -130,7 +131,7 @@ void sortGhostVectorEntries(std::vector<GhostVectorContribution>& entries,
 [[nodiscard]] GlobalIndex traced_ghost_row_dof() noexcept
 {
     static const GlobalIndex traced = []() noexcept {
-        const char* env = std::getenv("SVMP_GHOST_TRACE_ROW_DOF");
+        const char* env = environment::value("SVMP_GHOST_TRACE_ROW_DOF");
         if (env == nullptr || *env == '\0') {
             return INVALID_GLOBAL_INDEX;
         }

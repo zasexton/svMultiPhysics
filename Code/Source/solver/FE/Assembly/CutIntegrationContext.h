@@ -19,6 +19,7 @@
 #include "Interfaces/GeneratedActiveBoundaryDomain.h"
 #include "Interfaces/GeneratedInterfaceBoundaryIntersectionDomain.h"
 #include "Interfaces/LevelSetInterfaceDomain.h"
+#include "Core/EnvironmentNames.h"
 
 #if defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH
 #include "Mesh/Search/CutCell.h"
@@ -392,7 +393,7 @@ public:
 
     [[nodiscard]] static Real minGeneratedCutVolumeFraction() noexcept {
         static const Real value = []() noexcept {
-            const char* env = std::getenv("SVMP_MIN_GENERATED_CUT_VOLUME_FRACTION");
+            const char* env = environment::value("SVMP_MIN_GENERATED_CUT_VOLUME_FRACTION");
             if (env != nullptr && env[0] != '\0') {
                 char* end = nullptr;
                 const double parsed = std::strtod(env, &end);

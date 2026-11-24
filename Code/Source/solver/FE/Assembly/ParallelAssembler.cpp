@@ -13,6 +13,7 @@
 #include "Sparsity/SparsityPattern.h"
 #include "Spaces/FunctionSpace.h"
 #include "Elements/Element.h"
+#include "Core/EnvironmentNames.h"
 
 #include <chrono>
 #include <algorithm>
@@ -48,7 +49,7 @@ namespace {
 [[nodiscard]] GlobalIndex traced_ghost_row_dof() noexcept
 {
     static const GlobalIndex traced = []() noexcept {
-        const char* env = std::getenv("SVMP_GHOST_TRACE_ROW_DOF");
+        const char* env = environment::value("SVMP_GHOST_TRACE_ROW_DOF");
         if (env == nullptr || *env == '\0') {
             return INVALID_GLOBAL_INDEX;
         }
@@ -923,7 +924,7 @@ void ParallelAssembler::finalize(GlobalSystemView* matrix_view, GlobalSystemView
     // Exchange ghost contributions
     if (ghost_policy_ == GhostPolicy::ReverseScatter) {
         exchangeGhostContributions();
-        if (std::getenv("SVMP_PARALLEL_ASSEMBLER_TRACE") != nullptr) {
+        if (environment::isSet("SVMP_PARALLEL_ASSEMBLER_TRACE")) {
             const auto& stats = ghost_manager_.getLastExchangeStats();
             std::fprintf(stderr,
                          "[R%d] ParallelAssembler exchange neighbors=%d "

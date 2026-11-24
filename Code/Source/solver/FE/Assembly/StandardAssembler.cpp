@@ -41,6 +41,7 @@
 #include "Forms/JIT/JITKernelWrapper.h"
 #include "Math/Vector.h"
 #include "Math/Matrix.h"
+#include "Core/EnvironmentNames.h"
 
 #if defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH
 #include "Mesh/Core/InterfaceMesh.h"
@@ -89,7 +90,7 @@ namespace {
 /// When disabled (default), TP() returns 0.0 with a well-predicted branch.
 [[nodiscard]] inline bool assemblyTimingEnabled() noexcept {
     static const bool enabled = [] {
-        const char* env = std::getenv("SVMP_ASSEMBLY_TIMING");
+        const char* env = environment::value("SVMP_ASSEMBLY_TIMING");
         return env && std::string_view(env) != "0";
     }();
     return enabled;
@@ -97,38 +98,23 @@ namespace {
 
 [[nodiscard]] inline bool cutVolumeTimingEnabled() noexcept {
     static const bool enabled = [] {
-        const char* cut_env = std::getenv("SVMP_CUT_VOLUME_TIMING");
+        const char* cut_env = environment::value("SVMP_CUT_VOLUME_TIMING");
         if (cut_env && std::string_view(cut_env) != "0") {
             return true;
         }
-        const char* assembly_env = std::getenv("SVMP_ASSEMBLY_TIMING");
+        const char* assembly_env = environment::value("SVMP_ASSEMBLY_TIMING");
         return assembly_env && std::string_view(assembly_env) != "0";
     }();
     return enabled;
 }
 
-[[nodiscard]] bool envFlagEnabled(const char* name) noexcept
-{
-    const char* raw = std::getenv(name);
-    if (raw == nullptr || raw[0] == '\0') {
-        return false;
-    }
-    std::string value(raw);
-    std::transform(value.begin(), value.end(), value.begin(),
-                   [](unsigned char ch) {
-                       return static_cast<char>(std::tolower(ch));
-                   });
-    return value != "0" && value != "false" && value != "off" &&
-           value != "no";
-}
-
 [[nodiscard]] inline bool interiorFaceTimingEnabled() noexcept {
     static const bool enabled = [] {
-        const char* face_env = std::getenv("SVMP_INTERIOR_FACE_TIMING");
+        const char* face_env = environment::value("SVMP_INTERIOR_FACE_TIMING");
         if (face_env && std::string_view(face_env) != "0") {
             return true;
         }
-        const char* assembly_env = std::getenv("SVMP_ASSEMBLY_TIMING");
+        const char* assembly_env = environment::value("SVMP_ASSEMBLY_TIMING");
         return assembly_env && std::string_view(assembly_env) != "0";
     }();
     return enabled;
@@ -390,7 +376,7 @@ private:
         constexpr std::size_t default_megabytes = 1024u;
         constexpr std::size_t max_megabytes = std::size_t{1} << 30u;
         std::size_t megabytes = default_megabytes;
-        const char* env = std::getenv("SVMP_CUT_VOLUME_EPOCH_CACHE_MAX_MB");
+        const char* env = environment::value("SVMP_CUT_VOLUME_EPOCH_CACHE_MAX_MB");
         if (env != nullptr && env[0] != '\0') {
             char* end = nullptr;
             const auto value = std::strtoull(env, &end, 10);
@@ -474,7 +460,7 @@ void mixCutVolumeBasisCacheHash(std::uint64_t& h, Real value) noexcept
 [[nodiscard]] std::size_t cutVolumeBasisCacheMaxEntriesFromEnv() noexcept
 {
     static const std::size_t max_entries = [] {
-        const char* env = std::getenv("SVMP_CUT_VOLUME_BASIS_CACHE_MAX_ENTRIES");
+        const char* env = environment::value("SVMP_CUT_VOLUME_BASIS_CACHE_MAX_ENTRIES");
         if (env == nullptr) {
             return std::size_t{0};
         }
@@ -842,13 +828,13 @@ void bindCutStabilizationScaleConstants(AssemblyContext& context,
 
 [[nodiscard]] inline bool monolithicCompiledDispatchEnabled() noexcept
 {
-    return core::envEnabled("SVMP_FE_ENABLE_MONOLITHIC_COMPILED_DISPATCH") &&
-           !core::envEnabled("SVMP_FE_DISABLE_MONOLITHIC_COMPILED_DISPATCH");
+    return environment::enabled("SVMP_FE_ENABLE_MONOLITHIC_COMPILED_DISPATCH") &&
+           !environment::enabled("SVMP_FE_DISABLE_MONOLITHIC_COMPILED_DISPATCH");
 }
 
 [[nodiscard]] inline bool monolithicCompiledCompareEnabled() noexcept
 {
-    return core::envEnabled("SVMP_FE_COMPARE_MONOLITHIC_COMPILED");
+    return environment::enabled("SVMP_FE_COMPARE_MONOLITHIC_COMPILED");
 }
 
 [[nodiscard]] inline bool hasSelectiveTimeIntegrationTermWeights(
@@ -861,13 +847,13 @@ void bindCutStabilizationScaleConstants(AssemblyContext& context,
 
 [[nodiscard]] inline bool dirichletFastPathEnabled() noexcept
 {
-    return !core::envEnabled("SVMP_FE_DISABLE_DIRICHLET_FAST_PATH");
+    return !environment::enabled("SVMP_FE_DISABLE_DIRICHLET_FAST_PATH");
 }
 
 [[nodiscard]] inline Real monolithicCompiledCompareTolerance() noexcept
 {
     static const Real tol = [] {
-        const char* env = std::getenv("SVMP_FE_COMPARE_MONOLITHIC_TOL");
+        const char* env = environment::value("SVMP_FE_COMPARE_MONOLITHIC_TOL");
         if (env == nullptr || env[0] == '\0') {
             return Real(1e-11);
         }
@@ -884,7 +870,7 @@ void bindCutStabilizationScaleConstants(AssemblyContext& context,
 [[nodiscard]] inline int monolithicCompiledCompareMaxCells() noexcept
 {
     static const int max_cells = [] {
-        const char* env = std::getenv("SVMP_FE_COMPARE_MONOLITHIC_MAX_CELLS");
+        const char* env = environment::value("SVMP_FE_COMPARE_MONOLITHIC_MAX_CELLS");
         if (env == nullptr || env[0] == '\0') {
             return 1;
         }
@@ -2162,7 +2148,7 @@ namespace {
 
 [[nodiscard]] bool assemblyThreadTimingEnabled() noexcept
 {
-    static const bool enabled = envFlagEnabled("SVMP_ASSEMBLY_THREAD_TIMING");
+    static const bool enabled = environment::enabled("SVMP_ASSEMBLY_THREAD_TIMING");
     return enabled;
 }
 

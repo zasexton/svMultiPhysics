@@ -35,6 +35,7 @@
 #include "Core/AlignedAllocator.h"
 #include "Core/FEConfig.h"
 #include "Core/MpiCollectiveTrace.h"
+#include "Core/EnvironmentNames.h"
 
 #include <algorithm>
 #include <array>
@@ -844,25 +845,10 @@ private:
     return "Unknown";
 }
 
-[[nodiscard]] bool envFlagEnabled(const char* name) noexcept
-{
-    const char* raw = std::getenv(name);
-    if (raw == nullptr || raw[0] == '\0') {
-        return false;
-    }
-    std::string value(raw);
-    std::transform(value.begin(), value.end(), value.begin(),
-                   [](unsigned char ch) {
-                       return static_cast<char>(std::tolower(ch));
-                   });
-    return value != "0" && value != "false" && value != "off" &&
-           value != "no";
-}
-
 [[nodiscard]] bool cutVolumeRowProvenanceDiagnosticEnabled() noexcept
 {
     static const bool enabled =
-        envFlagEnabled("SVMP_FE_CUT_VOLUME_ROW_PROVENANCE_DIAGNOSTIC");
+        environment::enabled("SVMP_FE_CUT_VOLUME_ROW_PROVENANCE_DIAGNOSTIC");
     return enabled;
 }
 
@@ -870,7 +856,7 @@ private:
 {
     static const std::string value = []() {
         const char* raw =
-            std::getenv("SVMP_FE_CUT_VOLUME_ROW_PROVENANCE_OPERATOR");
+            environment::value("SVMP_FE_CUT_VOLUME_ROW_PROVENANCE_OPERATOR");
         return raw == nullptr ? std::string{} : std::string(raw);
     }();
     return value;
@@ -904,7 +890,7 @@ private:
 {
     static const std::size_t value = []() noexcept {
         const char* raw =
-            std::getenv("SVMP_FE_CUT_VOLUME_ROW_PROVENANCE_MAX_RULES");
+            environment::value("SVMP_FE_CUT_VOLUME_ROW_PROVENANCE_MAX_RULES");
         if (raw == nullptr || raw[0] == '\0') {
             return std::size_t{0};
         }
@@ -1317,7 +1303,7 @@ std::string summarizeSparsePairsForTrace(std::span<const std::pair<GlobalIndex, 
 [[nodiscard]] bool cutVolumeFusionDisabled() noexcept
 {
     static const bool disabled = [] {
-        const char* env = std::getenv("SVMP_DISABLE_CUT_VOLUME_FUSION");
+        const char* env = environment::value("SVMP_DISABLE_CUT_VOLUME_FUSION");
         return env && std::string_view(env) != "0";
     }();
     return disabled;

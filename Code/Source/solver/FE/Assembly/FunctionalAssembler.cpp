@@ -22,6 +22,7 @@
 #include "Math/Vector.h"
 #include "Basis/BasisCache.h"
 #include "Basis/BasisFunction.h"
+#include "Core/EnvironmentNames.h"
 
 #include <algorithm>
 #include <chrono>
@@ -126,7 +127,7 @@ void gatherVectorCoefficients(std::span<const GlobalIndex> dofs,
         out[i] = raw_values[static_cast<std::size_t>(dof)];
     }
 
-    if (std::getenv("SVMP_MONO_AUX_TRACE_DOF_GATHER") != nullptr) {
+    if (environment::isSet("SVMP_MONO_AUX_TRACE_DOF_GATHER")) {
         static thread_local int trace_budget = 64;
         if (trace_budget > 0) {
             Real l2 = 0.0;
