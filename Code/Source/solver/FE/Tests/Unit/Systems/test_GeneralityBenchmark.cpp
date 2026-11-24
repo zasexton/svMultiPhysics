@@ -721,5 +721,253 @@ TEST(GeneralityBenchmark, P10_DoubleWellConvexSplittingDecreasesItsFreeEnergy)
     EXPECT_LT(energies.back(), energies.front() - 1e-3);
 }
 
+// ===========================================================================
+// 5. Mixed Darcy
+// ===========================================================================
+//
+// K^{-1} q + grad p = 0, div q = f in the unit square or cube with K = I and
+//
+//   p = prod sin(pi x_i) - (2/pi)^dim,  q = -grad p,  f = div q,
+//
+// either with the pressure prescribed on the boundary (natural for the mixed
+// form: + (p_D r . n) ds), or with the normal moments q . n = g prescribed
+// strongly and p of mean zero through a global multiplier.  The flux of each
+// cell through its faces equals its source: the balance operator below sums
+// q . n over every cell's faces (the interior ones once from each side) less
+// the source, a measurement apart from the equations.
+
+Real darcyPressure(const Point& p, int dim)
+{
+    Real v = 1.0;
+    for (int i = 0; i < dim; ++i) {
+        v *= std::sin(kPi * p[static_cast<std::size_t>(i)]);
+    }
+    return v - std::pow(2.0 / kPi, dim);
+}
+
+Real darcyFlux(const Point& p, int dim, int a)
+{
+    Real v = -kPi;
+    for (int i = 0; i < dim; ++i) {
+        const Real t = kPi * p[static_cast<std::size_t>(i)];
+        v *= i == a ? std::cos(t) : std::sin(t);
+    }
+    return v;
+}
+
+Real darcySource(const Point& p, int dim)
+{
+    Real v = dim * kPi * kPi;
+    for (int i = 0; i < dim; ++i) {
+        v *= std::sin(kPi * p[static_cast<std::size_t>(i)]);
+    }
+    return v;
+}
+
+// ---------------------------------------------------------------------------
+// The formulation: everything an author writes for problem 5.
+// ---------------------------------------------------------------------------
+struct DarcyData {
+    FormExpr Kinv;
+    FormExpr f;
+    FormExpr boundary_pressure;                          ///< p on the boundary, natural; or
+    std::vector<std::pair<int, FormExpr>> normal_flux;   ///< q . n = g, strong, with p of mean zero
+};
+
+struct DarcyInstall {
+    FieldId q{INVALID_FIELD_ID};
+    FieldId p{INVALID_FIELD_ID};
+    FieldId lambda{INVALID_FIELD_ID};
+};
+
+DarcyInstall defineMixedDarcy(FESystem& system,
+                              std::shared_ptr<const spaces::FunctionSpace> flux_space,
+                              std::shared_ptr<const spaces::FunctionSpace> pressure_space,
+                              const DarcyData& d)
+{
+    using namespace forms;
+    FieldBinding fields(system, "MixedDarcy");
+    // The pressure is declared before the flux: the measured-form evaluator,
+    // and the global row built on it, take their cell rules from the first
+    // unknown, which may not be an H(div) field today.
+    const auto P = fields.unknown("p", std::move(pressure_space));
+    const auto Q = fields.unknown("q", std::move(flux_space));
+    const auto& q = Q.state;
+    const auto& r = Q.test;
+    const auto& p = P.state;
+    const auto& s = P.test;
+    const auto n = FormExpr::normal();
+
+    auto R = (inner(d.Kinv * q, r) - p * div(r) + (div(q) - d.f) * s).dx();
+    DarcyInstall out{Q.id, P.id, INVALID_FIELD_ID};
+    BoundaryConditionManager bcs;
+    if (d.normal_flux.empty()) {
+        R = R + (d.boundary_pressure * inner(r, n)).ds();
+    } else {
+        for (const auto& [face, g] : d.normal_flux) {
+            bcs.add(std::make_unique<bc::Dirichlet>(face, bc::Trace::Normal, g));  // q . n = g
+        }
+        out.lambda = fields.global("lambda", "pressure mean multiplier");
+        const auto& R1 = *system.fieldRecord(out.lambda).space;
+        R = R + (StateField(out.lambda, R1, "lambda") * s + TestField(out.lambda, R1, "m") * p).dx();
+    }
+    constraints::ConstraintPlan plan(system);
+    plan.essentials(bcs, R, q, r, Q.id);
+    plan.commit();
+    FormulationBuilder F(system, "equations", {});
+    F.symbolicTangent();
+    (void)F.residual(R);
+
+    // The balance of every cell: the flux leaving through its faces less its source.
+    FormInstallOptions measurement;
+    measurement.contributes_to_problem_analysis = false;
+    FormulationBuilder balance(system, "balance", measurement);
+    (void)balance.residual((inner(avg(q), n.minus()) * jump(s)).dS() + (inner(q, n) * s).ds() - (d.f * s).dx());
+    return out;
+}
+// ---------------------------------------------------------------------------
+
+struct DarcyRun {
+    Real flux_l2{0.0};
+    Real div_l2{0.0};
+    Real pressure_l2{0.0};
+    Real multiplier{0.0};
+    Real cell_imbalance{0.0};  ///< max over cells |flux out - source + lambda |K||
+    Real cell_source{0.0};     ///< max over cells |source|, the scale
+};
+
+DarcyRun runMixedDarcy(Cell cell, int order, int n, bool strong_normal_flux)
+{
+    const int dim = cellDimension(cell);
+    FESystem system(boxMesh(cell, n, boxSides()));
+    const auto flux_space = std::make_shared<spaces::HDivSpace>(elementType(cell), order);
+    const auto pressure_space = std::make_shared<spaces::L2Space>(elementType(cell), order);
+    DarcyData d;
+    d.Kinv = FormExpr::identity(dim);
+    d.f = scalarCoefficient("f", [dim](const Point& p) { return darcySource(p, dim); });
+    d.boundary_pressure = scalarCoefficient("p_wall", [dim](const Point& p) { return darcyPressure(p, dim); });
+    if (strong_normal_flux) {
+        for (int axis = 0; axis < dim; ++axis) {
+            for (const Real sign : {-1.0, 1.0}) {
+                d.normal_flux.emplace_back(sign < 0.0 ? 2 * axis + 1 : 2 * axis + 2,
+                                           scalarCoefficient("g_" + std::to_string(axis) + (sign < 0.0 ? "lo" : "hi"),
+                                                             [dim, axis, sign](const Point& p) {
+                                                                 return sign * darcyFlux(p, dim, axis);
+                                                             }));
+            }
+        }
+    }
+    const auto install = defineMixedDarcy(system, flux_space, pressure_space, d);
+    // The flux errors through the rows of the discontinuous pressure.
+    const auto q_h = forms::StateField(install.q, *flux_space, "q");
+    const auto eq = q_h - vectorOf("q_exact", dim, [dim](const Point& p, int i) { return darcyFlux(p, dim, i); });
+    const auto ediv = forms::div(q_h) - d.f;
+    declareRowIntegral(system, "flux_error", forms::inner(eq, eq), install.p);
+    declareRowIntegral(system, "div_error", ediv * ediv, install.p);
+    system.setup();
+    const auto solved = solveSteady(system, "equations");
+    EXPECT_TRUE(solved.converged) << cellName(cell) << " RT" << order << " n=" << n;
+
+    DarcyRun run;
+    const auto p_h = FormExpr::discreteField(install.p, *pressure_space, "p");
+    const auto ep = p_h - scalarCoefficient("p_exact", [dim](const Point& p) { return darcyPressure(p, dim); });
+    run.flux_l2 = std::sqrt(rowIntegral(system, "flux_error", install.p, solved.u));
+    run.div_l2 = std::sqrt(rowIntegral(system, "div_error", install.p, solved.u));
+    run.pressure_l2 = norm(system, (ep * ep).dx(), solved.u);
+    if (install.lambda != INVALID_FIELD_ID) {
+        run.multiplier = solved.u[static_cast<std::size_t>(system.fieldDofOffset(install.lambda))];
+    }
+
+    // The per-cell balance: the pressure test functions of a cell sum to its indicator.
+    const auto balance = assembleVector(system, "balance", solved.u);
+    const auto source = assembleVector(system, "balance", std::vector<Real>(solved.u.size(), 0.0));
+    const auto& map = system.fieldDofHandler(install.p).getDofMap();
+    const auto offset = system.fieldDofOffset(install.p);
+    const auto n_cells = static_cast<GlobalIndex>(system.mesh()->local_mesh().n_cells());
+    const Real cell_volume = 1.0 / static_cast<Real>(n_cells);
+    for (GlobalIndex c = 0; c < n_cells; ++c) {
+        Real imbalance = 0.0;
+        Real cell_source = 0.0;
+        for (const auto dof : map.getCellDofs(c)) {
+            imbalance += balance[static_cast<std::size_t>(offset + dof)];
+            cell_source += source[static_cast<std::size_t>(offset + dof)];
+        }
+        run.cell_imbalance = std::max(run.cell_imbalance, std::abs(imbalance + run.multiplier * cell_volume));
+        run.cell_source = std::max(run.cell_source, std::abs(cell_source));
+    }
+    return run;
+}
+
+void expectMixedDarcyRates(const std::vector<FamilyOrder>& cases, bool strong_normal_flux)
+{
+    for (const auto& c : cases) {
+        std::vector<Real> eq, ediv, ep;
+        for (int level = 0; level < 3; ++level) {
+            const auto run = runMixedDarcy(c.cell, c.order, c.n0 << level, strong_normal_flux);
+            eq.push_back(run.flux_l2);
+            ediv.push_back(run.div_l2);
+            ep.push_back(run.pressure_l2);
+            EXPECT_LT(run.cell_imbalance, 1e-11 * run.cell_source) << cellName(c.cell) << " level " << level;
+            EXPECT_LT(std::abs(run.multiplier), 1e-2) << cellName(c.cell);
+        }
+        const std::string label = std::string(cellName(c.cell)) + "_RT" + std::to_string(c.order) +
+                                  (strong_normal_flux ? "_normal_flux" : "_pressure");
+        ::testing::Test::RecordProperty("p05_" + label + "_flux_rates", join(rates(eq)));
+        ::testing::Test::RecordProperty("p05_" + label + "_div_rates", join(rates(ediv)));
+        ::testing::Test::RecordProperty("p05_" + label + "_pressure_rates", join(rates(ep)));
+        const Real expected = c.order + 1;
+        EXPECT_GT(rates(eq).back(), expected - 0.2) << label << " flux " << join(eq);
+        EXPECT_GT(rates(ediv).back(), expected - 0.2) << label << " div " << join(ediv);
+        EXPECT_GT(rates(ep).back(), expected - 0.2) << label << " pressure " << join(ep);
+    }
+}
+
+TEST(GeneralityBenchmark, DISABLED_P05_MixedDarcyRT1DG1WithBoundaryPressure)
+{
+    // Defect found by this benchmark (reported; not a vocabulary gap): the
+    // RT1/DG1 mixed form, installed as one residual on a Tri3 mesh built from
+    // arrays, corrupts the heap during its first Newton step (glibc aborts in
+    // a later allocation, inside the problem analysis after assembly).
+    expectMixedDarcyRates({{Cell::Tri3, 1, 4}, {Cell::Tet4, 1, 1}}, /*strong_normal_flux=*/false);
+}
+
+TEST(GeneralityBenchmark, DISABLED_P05_MixedDarcyWithStrongNormalMomentsOnEveryFamily)
+{
+    // Defects found by this benchmark (reported; not vocabulary gaps):
+    // - strong normal moments, bc::Dirichlet(face, bc::Trace::Normal, g) on an
+    //   H(div) field of a mesh built from arrays: the constrained values ignore
+    //   the global orientation of the face DOFs in 2D (the boundary fluxes of
+    //   q . n = 1 on the unit square sum to 0, not 4) and in 3D carry the wrong
+    //   sign and the reference face measure (they sum to -24, not 6, on the
+    //   2 x 2 x 2 Kuhn cube);
+    // - one install holding a DG0 field and an H(div) or H(curl) field (the
+    //   RT0/DG0 pair) is assembled wrongly: zero diagonal rows of the vector
+    //   field on Tri3, heap corruption in the fused cell assembly on Tet4;
+    // - the RT and Nedelec mass matrices of Quad4, Hex8 and Wedge6 cells are
+    //   singular, and an RT0 field on Wedge6 does not reproduce a linear flux.
+    expectMixedDarcyRates({{Cell::Tri3, 0, 4}, {Cell::Quad4, 0, 4}, {Cell::Tet4, 0, 2}, {Cell::Hex8, 0, 2},
+                           {Cell::Tri3, 1, 4}, {Cell::Tet4, 1, 1}},
+                          /*strong_normal_flux=*/true);
+}
+
+TEST(GeneralityBenchmark, DISABLED_P05_RT1AndBDM1CannotShareOneFieldName)
+{
+    // Defect (reported): FieldBinding::unknown reuses a registered RT1 field
+    // when asked for BDM1 under the same name; spacesCompatible compares the
+    // space type, order and element type but not the basis family.
+    FESystem system(boxMesh(Cell::Tri3, 2, boxSides()));
+    FieldBinding fields(system, "Probe");
+    const auto rt1 = std::make_shared<spaces::HDivSpace>(ElementType::Triangle3, 1);
+    const auto bdm1 = std::make_shared<spaces::HDivSpace>(ElementType::Triangle3, 1, BasisType::BDM);
+    EXPECT_NE(rt1->dofs_per_element(), bdm1->dofs_per_element());
+    (void)fields.unknown("q", rt1);
+    try {
+        (void)fields.unknown("q", bdm1);
+        ADD_FAILURE() << "an RT1 field was reused as BDM1";
+    } catch (const std::invalid_argument& e) {
+        EXPECT_NE(std::string(e.what()).find("incompatible function space"), std::string::npos) << e.what();
+    }
+}
+
 } // namespace
 } // namespace svmp::FE::systems::generality
