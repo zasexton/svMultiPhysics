@@ -29,6 +29,7 @@
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
+#include <functional>
 #include <limits>
 #include <memory>
 #include <optional>
@@ -317,10 +318,19 @@ ParabolicProfileData build_parabolic_profile_data(const svmp::MeshBase& mesh,
                                                   int boundary_marker,
                                                   MarkerCommunicator comm);
 double parabolic_weight(const ParabolicProfileData& data, const Vec3d& x);
+/// The integral of the parabolic weight itself over the faces of the marker:
+/// the flux of a profile that a condition imposes at quadrature points.
 double integrate_parabolic_weight_over_marker(const svmp::MeshBase& mesh,
                                               int boundary_marker,
                                               const ParabolicProfileData& data,
                                               MarkerCommunicator comm);
+/// The integral over the faces of the marker of the interpolant, in each
+/// face's Lagrange basis, of @p value at the face's nodes: the flux of a
+/// profile that a strong condition imposes at the nodes.
+double integrate_nodal_interpolant_over_marker(const svmp::MeshBase& mesh,
+                                               int boundary_marker,
+                                               const std::function<double(const Vec3d&)>& value,
+                                               MarkerCommunicator comm);
 
 enum class InletProfileType { Flat, Parabolic };
 

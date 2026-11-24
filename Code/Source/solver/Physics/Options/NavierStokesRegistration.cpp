@@ -1402,11 +1402,19 @@ void apply_fluid_bcs(const svmp::Physics::EquationModuleInput& input,
 
       double normalization = 1.0;
       if (impose_flux) {
+        // The flux of the profile as imposed: a strong condition imposes it
+        // at the nodes, so its flux is that of the nodal interpolant; a weak
+        // one imposes the weight itself at the quadrature points.
         if (profile == InletProfileType::Flat) {
           normalization = g.area;
-        } else {
+        } else if (weak) {
           normalization = integrate_parabolic_weight_over_marker(
               *input.mesh, bc.boundary_marker, *ctx->parabolic, comm);
+        } else {
+          const auto& parabolic = *ctx->parabolic;
+          normalization = integrate_nodal_interpolant_over_marker(
+              *input.mesh, bc.boundary_marker,
+              [&parabolic](const Vec3d& x) { return parabolic_weight(parabolic, x); }, comm);
         }
         if (!(normalization > 0.0)) {
           if (is_unsteady) {

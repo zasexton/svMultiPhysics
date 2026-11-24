@@ -7,7 +7,9 @@
 
 #include "Physics/Options/BoundaryDataReaders.h"
 
+#include "FE/Basis/BasisFactory.h"
 #include "FE/Core/Logger.h"
+#include "FE/Quadrature/QuadratureFactory.h"
 #include "FE/Systems/FESystem.h"
 #include "Mesh/Core/MeshBase.h"
 #include "Mesh/Topology/CellTopology.h"
@@ -1073,6 +1075,109 @@ double integrate_parabolic_weight_over_marker(const svmp::MeshBase& mesh,
       mesh, boundary_marker, comm,
       [&](svmp::index_t f, std::array<double, 1>& values) {
         values[0] = face_integral(mesh.face_vertices(f));
+      });
+  for (const auto& payload : payloads) {
+    sum += payload.values[0];
+  }
+  return sum;
+}
+
+namespace {
+
+/// The element of a face of the mesh with @p node_count nodes, when the face
+/// is a Lagrange triangle or quadrilateral.
+std::optional<svmp::FE::ElementType> lagrange_face_type(const svmp::CellShape& shape, std::size_t node_count)
+{
+  using svmp::FE::ElementType;
+  switch (shape.family) {
+    case svmp::CellFamily::Triangle:
+      if (node_count == 3u) return ElementType::Triangle3;
+      if (node_count == 6u) return ElementType::Triangle6;
+      break;
+    case svmp::CellFamily::Quad:
+      if (node_count == 4u) return ElementType::Quad4;
+      if (node_count == 8u) return ElementType::Quad8;
+      if (node_count == 9u) return ElementType::Quad9;
+      break;
+    default:
+      break;
+  }
+  return std::nullopt;
+}
+
+/// The integral over face @p f of the interpolant, in the face's own Lagrange
+/// basis, of @p value at the face's nodes.  A face of another shape is
+/// fan-triangulated, with the linear interpolant on each triangle.
+double face_nodal_interpolant_integral(const svmp::MeshBase& mesh,
+                                       svmp::index_t f,
+                                       const std::function<double(const Vec3d&)>& value)
+{
+  const auto verts = mesh.face_vertices(f);
+  std::vector<Vec3d> pts;
+  pts.reserve(verts.size());
+  for (const auto v : verts) {
+    if (v != svmp::INVALID_INDEX) {
+      pts.push_back(to_vec3(mesh.get_vertex_coords(v)));
+    }
+  }
+  if (pts.size() < 3u) {
+    return 0.0;
+  }
+  std::vector<double> nodal(pts.size());
+  for (std::size_t i = 0; i < pts.size(); ++i) {
+    nodal[i] = value(pts[i]);
+  }
+  const auto type = (pts.size() == verts.size())
+                        ? lagrange_face_type(mesh.face_shapes().at(static_cast<std::size_t>(f)), pts.size())
+                        : std::nullopt;
+  if (!type.has_value()) {
+    double sum = 0.0;
+    for (std::size_t i = 1; i + 1 < pts.size(); ++i) {
+      const double area = 0.5 * norm(cross(pts[i] - pts[0], pts[i + 1] - pts[0]));
+      sum += area * (nodal[0] + nodal[i] + nodal[i + 1]) / 3.0;
+    }
+    return sum;
+  }
+  using namespace svmp::FE;
+  const int order = (pts.size() <= 4u) ? 1 : 2;
+  const auto basis = basis::basis_factory::create(
+      basis::BasisRequest{.element_type = *type, .basis_type = BasisType::Lagrange, .order = order});
+  if (!basis || basis->size() != pts.size()) {
+    throw std::runtime_error("[svMultiPhysics::Physics] Unsupported boundary face for a nodal interpolant integral.");
+  }
+  // Exact for the interpolant on affine faces and to order 2p+2 on curved ones.
+  const auto rule = quadrature::QuadratureFactory::create(*type, 2 * order + 2);
+  std::vector<Real> phi;
+  std::vector<basis::Gradient> dphi;
+  double sum = 0.0;
+  for (std::size_t q = 0; q < rule->num_points(); ++q) {
+    const auto xi = rule->point(q);
+    basis->evaluate_values(xi, phi);
+    basis->evaluate_gradients(xi, dphi);
+    Vec3d t0{}, t1{};
+    double interpolant = 0.0;
+    for (std::size_t j = 0; j < pts.size(); ++j) {
+      t0 = t0 + static_cast<double>(dphi[j][0]) * pts[j];
+      t1 = t1 + static_cast<double>(dphi[j][1]) * pts[j];
+      interpolant += static_cast<double>(phi[j]) * nodal[j];
+    }
+    sum += static_cast<double>(rule->weight(q)) * norm(cross(t0, t1)) * interpolant;
+  }
+  return sum;
+}
+
+} // namespace
+
+double integrate_nodal_interpolant_over_marker(const svmp::MeshBase& mesh,
+                                               int boundary_marker,
+                                               const std::function<double(const Vec3d&)>& value,
+                                               MarkerCommunicator comm)
+{
+  double sum = 0.0;
+  const auto payloads = gather_unique_marker_face_payloads<1>(
+      mesh, boundary_marker, comm,
+      [&](svmp::index_t f, std::array<double, 1>& values) {
+        values[0] = face_nodal_interpolant_integral(mesh, f, value);
       });
   for (const auto& payload : payloads) {
     sum += payload.values[0];

@@ -10,6 +10,7 @@
 #include "Physics/Core/EquationModuleInput.h"
 #include "Physics/Core/EquationModuleRegistry.h"
 #include "Physics/Formulations/NavierStokes/IncompressibleNavierStokesVMSModule.h"
+#include "Physics/Options/BoundaryDataReaders.h"
 #include "Physics/Options/FreeSurfaceProfiles.h"
 #include "Physics/Options/NavierStokesRegistration.h"
 #include "Physics/Options/NavierStokesOptionRules.h"
@@ -1317,15 +1318,19 @@ TEST(NavierStokesLegacyBCs, VelocityInletParabolicScalingAndPeriodicTimeOrigin)
 #if !(defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH)
     GTEST_SKIP() << "Requires FE built with Mesh integration (FE_WITH_MESH=ON).";
 #else
-    // At the three degree-2 triangle points the radial weight is 3/4,
-    // giving normalization (1/2)*(3/4)=3/8.  The centre has weight one.
+    // A weak inflow imposes the weight itself at the quadrature points, so
+    // its flux is the integral of the weight: at the three degree-2 triangle
+    // points the radial weight is 3/4, giving normalization
+    // (1/2)*(3/4)=3/8.  The centre has weight one.  (Every node of this face
+    // is on its perimeter, so a strong parabolic inflow has no flux here.)
     auto mesh = buildSingleTetraTwoWallMesh(76, 77, 78);
     auto boundary = velocityInlet(77);
     boundary.params["Profile"] = defined("Parabolic");
+    boundary.params["Weakly_applied"] = defined("true");
     const auto steady = resolveVelocityInlet(mesh, boundary);
-    ASSERT_EQ(steady.velocity_dirichlet.size(), 1u);
+    ASSERT_EQ(steady.velocity_dirichlet_weak.size(), 1u);
     const auto& steady_value = std::get<svmp::FE::forms::TimeScalarCoefficient>(
-        steady.velocity_dirichlet.front().value[0]);
+        steady.velocity_dirichlet_weak.front().value[0]);
     // Preserve division in the steady path: 3.1/(3/8).
     EXPECT_EQ(steady_value(0.0, 1.0 / 3.0, 1.0 / 3.0, 0.0), -0x1.0888888888889p+3);
     EXPECT_EQ(steady_value(0.0, 0.0, 0.0, 0.0), 0.0);
@@ -1340,11 +1345,9 @@ TEST(NavierStokesLegacyBCs, VelocityInletParabolicScalingAndPeriodicTimeOrigin)
     boundary.params["Time_dependence"] = defined("Unsteady");
     boundary.params["Temporal_values_file_path"] = defined(path.string());
     const auto unsteady = resolveVelocityInlet(mesh, boundary);
-    ASSERT_EQ(unsteady.velocity_dirichlet.size(), 1u);
-    // The flow rate is a time function of the system, the profile a
-    // coefficient of space: their product is the callback's, bit for bit.
+    ASSERT_EQ(unsteady.velocity_dirichlet_weak.size(), 1u);
     const auto unsteady_value = [&](double x, double y, double z, double t) {
-        return velocityValueAt(unsteady.velocity_dirichlet.front(), 0u, {x, y, z}, t);
+        return velocityValueAt(unsteady.velocity_dirichlet_weak.front(), 0u, {x, y, z}, t);
     };
     // The temporal amplitude multiplies the already normalized profile;
     // for 3.1 this differs by one bit from the steady division above.
@@ -1365,8 +1368,9 @@ TEST(NavierStokesLegacyBCs, VelocityInletParabolicScalingAndPeriodicTimeOrigin)
 // A strong unsteady inflow reads the flow rate of its file as a time function
 // of the system.  Its constraints are those of the callback the weak inflow
 // keeps (the callback the strong inflow used), installed as a strong
-// condition: the same DOFs and inhomogeneities, bit for bit, at setup and
-// over two periods of the RCR pipe's inflow file.
+// condition: the same DOFs and inhomogeneities, bit for bit for a flat
+// profile and up to the normalization ratio for a parabolic one, at setup
+// and over two periods of the RCR pipe's inflow file.
 TEST(NavierStokesLegacyBCs, StrongUnsteadyInflowTimeFunctionGivesTheCallbackConstraints)
 {
 #if !(defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH)
@@ -1424,15 +1428,27 @@ TEST(NavierStokesLegacyBCs, StrongUnsteadyInflowTimeFunctionGivesTheCallbackCons
         EXPECT_EQ(svmp::FE::systems::timeFunctions(with_time_function).size(), 1u);
         EXPECT_TRUE(svmp::FE::systems::timeFunctions(with_callback).empty());
 
+        // The weak resolution normalizes a parabolic profile by the integral
+        // of its weight, the strong one by that of its nodal interpolant: the
+        // parabolic constraints differ by that one ratio, the flat ones not at all.
+        const bool parabolic = std::string_view(profile) == "Parabolic";
+        std::optional<double> ratio;
         std::size_t nonzero = 0;
         const auto expect_same_constraints = [&](double time) {
             const auto dofs = with_time_function.constraints().getConstrainedDofs();
             ASSERT_EQ(dofs, with_callback.constraints().getConstrainedDofs()) << "t=" << time;
             for (const auto dof : dofs) {
                 const double value = with_time_function.constraints().getInhomogeneity(dof);
-                EXPECT_EQ(std::bit_cast<std::uint64_t>(value),
-                          std::bit_cast<std::uint64_t>(with_callback.constraints().getInhomogeneity(dof)))
-                    << "t=" << time << " dof=" << dof;
+                const double callback_value = with_callback.constraints().getInhomogeneity(dof);
+                if (parabolic && value != 0.0) {
+                    if (!ratio.has_value()) {
+                        ratio = value / callback_value;
+                    }
+                    EXPECT_NEAR(value / callback_value, *ratio, 1e-14 * *ratio) << "t=" << time << " dof=" << dof;
+                } else {
+                    EXPECT_EQ(std::bit_cast<std::uint64_t>(value), std::bit_cast<std::uint64_t>(callback_value))
+                        << "t=" << time << " dof=" << dof;
+                }
                 nonzero += value != 0.0 ? 1u : 0u;
             }
         };
@@ -1446,7 +1462,134 @@ TEST(NavierStokesLegacyBCs, StrongUnsteadyInflowTimeFunctionGivesTheCallbackCons
         }
         // The flow rate is zero at whole periods only.
         EXPECT_GT(nonzero, 0u);
+        if (parabolic) {
+            ASSERT_TRUE(ratio.has_value());
+            EXPECT_GT(*ratio, 1.0);
+        }
     }
+#endif
+}
+
+// A strong inflow with <Impose_flux> imposes the profile at the nodes: the
+// flux of the constrained velocity, the interpolant of the nodal values over
+// the inlet faces, is the requested flow rate.  (Normalizing by the integral
+// of the continuous weight delivered 0.985 of the rate on the RCR pipe.)
+TEST(NavierStokesLegacyBCs, StrongImposedFluxInflowCarriesTheRequestedFlowRate)
+{
+#if !(defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH)
+    GTEST_SKIP() << "Requires FE built with Mesh integration (FE_WITH_MESH=ON).";
+#else
+    using Module = svmp::Physics::formulations::navier_stokes::IncompressibleNavierStokesVMSModule;
+    auto mesh = loadBeamMesh();
+    ASSERT_TRUE(mesh);
+    const auto markers = labelBeamInletOutlet(*mesh);
+    const auto& base = mesh->local_mesh();
+    for (const char* profile : {"Flat", "Parabolic"}) {
+        SCOPED_TRACE(profile);
+        svmp::Physics::EquationModuleInput input{};
+        input.equation_type = "fluid";
+        input.mesh_name = "beam";
+        input.mesh = mesh->local_mesh_ptr();
+        input.default_domain.params["Density"] = defined("1.06");
+        input.default_domain.params["Viscosity.model"] = defined("Constant");
+        input.default_domain.params["Viscosity.Value"] = defined("0.04");
+        svmp::Physics::BoundaryConditionInput bc{};
+        bc.name = "inflow";
+        bc.boundary_marker = static_cast<int>(markers.inlet);
+        bc.params["Type"] = defined("Dir");
+        bc.params["Time_dependence"] = defined("Steady");
+        bc.params["Value"] = defined("-3.1");
+        bc.params["Profile"] = defined(profile);
+        bc.params["Impose_flux"] = defined("true");
+        input.boundary_conditions.push_back(std::move(bc));
+        svmp::FE::systems::FESystem system(mesh);
+        auto resolved = svmp::Physics::options::resolveNavierStokesInput(input, system);
+        auto& one_phase = *resolved.one_phase;
+        auto module = std::make_unique<Module>(one_phase.velocity_space, one_phase.pressure_space, one_phase.options);
+        module->registerOn(system);
+        system.setup();
+
+        const svmp::FE::FieldId velocity = 0;
+        const auto* entity = system.fieldDofHandler(velocity).getEntityDofMap();
+        ASSERT_NE(entity, nullptr);
+        const auto offset = system.fieldDofOffset(velocity);
+        // The inlet is the face of minimal axis coordinate, outward normal -e_axis.
+        double flux = 0.0;
+        for (const auto f : base.faces_with_label(markers.inlet)) {
+            const auto verts = base.face_vertices(f);
+            ASSERT_EQ(verts.size(), 3u);
+            std::array<std::array<double, 3>, 3> x{};
+            double normal_velocity = 0.0;
+            for (std::size_t a = 0; a < 3u; ++a) {
+                const auto c = base.get_vertex_coords(verts[a]);
+                x[a] = {static_cast<double>(c[0]), static_cast<double>(c[1]), static_cast<double>(c[2])};
+                const auto dofs = entity->getVertexDofs(static_cast<svmp::FE::GlobalIndex>(verts[a]));
+                ASSERT_EQ(dofs.size(), 3u);
+                const auto dof = dofs[static_cast<std::size_t>(markers.axis)] + offset;
+                ASSERT_TRUE(system.constraints().isConstrained(dof));
+                normal_velocity -= system.constraints().getInhomogeneity(dof) / 3.0;
+            }
+            const std::array<double, 3> e1{x[1][0] - x[0][0], x[1][1] - x[0][1], x[1][2] - x[0][2]};
+            const std::array<double, 3> e2{x[2][0] - x[0][0], x[2][1] - x[0][1], x[2][2] - x[0][2]};
+            const std::array<double, 3> n{e1[1] * e2[2] - e1[2] * e2[1], e1[2] * e2[0] - e1[0] * e2[2],
+                                          e1[0] * e2[1] - e1[1] * e2[0]};
+            flux += 0.5 * std::sqrt(n[0] * n[0] + n[1] * n[1] + n[2] * n[2]) * normal_velocity;
+        }
+        // The magnitude: the direction is the marker's averaged normal.
+        EXPECT_NEAR(std::abs(flux), 3.1, 3.1e-12);
+    }
+#endif
+}
+
+// The interpolant integral is that of each face's own Lagrange basis: exact
+// for a bilinear function on a quadrilateral face, which a fan of linear
+// triangles is not (1/3 instead of 1/4 for xy on the unit square).
+TEST(NavierStokesLegacyBCs, NodalInterpolantIntegralUsesTheFaceBasis)
+{
+#if !(defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH)
+    GTEST_SKIP() << "Requires FE built with Mesh integration (FE_WITH_MESH=ON).";
+#else
+    auto base = std::make_shared<svmp::MeshBase>();
+    // A unit cube with its z = 0 face tapered: x in [0, 1] at y = 0 and [0, 0.5] at y = 1.
+    const std::vector<svmp::real_t> x_ref = {
+        0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.5, 1.0, 0.0, 0.0, 1.0, 0.0,
+        0.0, 0.0, 1.0, 1.0, 0.0, 1.0, 1.0, 1.0, 1.0, 0.0, 1.0, 1.0,
+    };
+    svmp::CellShape shape{};
+    shape.family = svmp::CellFamily::Hex;
+    shape.num_corners = 8;
+    shape.order = 1;
+    base->build_from_arrays(3, x_ref, {0, 8}, {0, 1, 2, 3, 4, 5, 6, 7}, {shape});
+    base->finalize();
+    int labelled = 0;
+    for (svmp::index_t f = 0; f < static_cast<svmp::index_t>(base->n_faces()); ++f) {
+        bool bottom = true;
+        for (const auto v : base->face_vertices(f)) {
+            bottom = bottom && x_ref[3u * static_cast<std::size_t>(v) + 2u] == 0.0;
+        }
+        if (bottom) {
+            base->set_boundary_label(f, static_cast<svmp::label_t>(5));
+            ++labelled;
+        }
+    }
+    ASSERT_EQ(labelled, 1);
+    auto mesh = svmp::create_mesh(std::move(base));
+#if FE_HAS_MPI
+    const svmp::Physics::options::MarkerCommunicator comm = MPI_COMM_SELF;
+#else
+    const svmp::Physics::options::MarkerCommunicator comm = 0;
+#endif
+    using svmp::Physics::options::Vec3d;
+    // A linear function is its own interpolant: area 3/4, centroid x = 7/18.
+    const double linear = svmp::Physics::options::integrate_nodal_interpolant_over_marker(
+        mesh->local_mesh(), 5, [](const Vec3d& x) { return 1.0 + 2.0 * x.x; }, comm);
+    EXPECT_NEAR(linear, 0.75 * (1.0 + 2.0 * 7.0 / 18.0), 1e-14);
+    // Of x*y only the corner (0.5, 1) is nonzero, with value 0.5.
+    const double corner = svmp::Physics::options::integrate_nodal_interpolant_over_marker(
+        mesh->local_mesh(), 5, [](const Vec3d& x) { return x.x * x.y; }, comm);
+    // phi = xi*eta on the map x = xi (1 - eta/2), y = eta: |J| = 1 - eta/2,
+    // so the integral of 0.5 phi is 0.5 * (1/2) * (1/2 - 1/6) = 1/12.
+    EXPECT_NEAR(corner, 1.0 / 12.0, 1e-14);
 #endif
 }
 
