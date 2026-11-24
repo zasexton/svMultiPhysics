@@ -120,9 +120,11 @@ public:
     FormulationBuilder& recordConstitutiveLaw(analysis::ConstitutiveLawMetadata law);
     FormulationBuilder& configure(const ALEBinding& ale);
 
-    /// Keeps the geometry of later installs constant on a moving domain
-    /// (FormInstallOptions::moving_domain_geometry = false).
-    FormulationBuilder& geometryConstant();
+    /// Freezes the geometry in the tangent of later installs on a moving
+    /// domain (FormInstallOptions::moving_domain_geometry = false): their
+    /// Jacobian gets no mesh-displacement columns, while their integrals are
+    /// still taken in the system's assembly frame, which moves with the mesh.
+    FormulationBuilder& freezeGeometryInTangent();
 
     /// Moves @p bindings into trace-certificate requests on @p volume_interface_marker.
     FormulationBuilder& certifyGeneratedBoundaryNitscheTraces(

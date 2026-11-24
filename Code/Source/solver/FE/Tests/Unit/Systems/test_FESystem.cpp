@@ -2913,7 +2913,7 @@ TEST(FESystem, MovingDomainSetsTheFrameBindsTheMotionAndDifferentiatesTheInstall
 
     // An install that keeps its geometry constant opts out.
     svmp::FE::systems::FormulationBuilder fixed(sys, "fixed", {});
-    fixed.geometryConstant();
+    fixed.freezeGeometryInTangent();
     (void)fixed.install({temperature},
                         (svmp::FE::forms::inner(svmp::FE::forms::grad(T), svmp::FE::forms::grad(w))).dx());
     const auto& constant = sys.formulationRecords().back();

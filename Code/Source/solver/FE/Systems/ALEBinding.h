@@ -85,7 +85,7 @@ struct MovingDomainOptions {
  * trial fields, as ALEBinding::configureInstallOptions does for one install.
  * An install that keeps its geometry constant, such as a mesh-motion equation
  * on the reference mesh, sets FormInstallOptions::moving_domain_geometry to
- * false (FormulationBuilder::geometryConstant()).  Throws after setup, for a
+ * false (FormulationBuilder::freezeGeometryInTangent()).  Throws after setup, for a
  * second declaration, and for a displacement that is not a vector unknown.
  */
 [[nodiscard]] MovingDomain movingDomain(FESystem& system, FieldId displacement, MovingDomainOptions options = {});

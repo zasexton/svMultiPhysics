@@ -109,7 +109,7 @@ FormulationBuilder& FormulationBuilder::configure(const ALEBinding& ale)
     return *this;
 }
 
-FormulationBuilder& FormulationBuilder::geometryConstant()
+FormulationBuilder& FormulationBuilder::freezeGeometryInTangent()
 {
     options_.moving_domain_geometry = false;
     return *this;
