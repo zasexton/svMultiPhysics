@@ -7905,3 +7905,27 @@ TEST(CompiledResidualHessians, ComponentHessiansOfABilinearVelocity)
         expectSameHessianRows(residualRowsForHessians(false, true, vectorize, false, install), interpreted);
     }
 }
+
+// The compiled residual of a symbolic-tangent kernel with laplacian(p) of a
+// quadratic pressure equals the interpreted one.  Its residual reads the
+// current solution as a state field, whose Hessian the hoisted lowering looked
+// up as another field's (there is none), so the Laplacian evaluated to 0.
+TEST(CompiledResidualHessians, LaplacianOfTheCurrentSolutionInASymbolicKernel)
+{
+    if (!svmp::FE::forms::jit::llvmJITEnabled()) {
+        GTEST_SKIP();
+    }
+    const auto install = [](svmp::FE::systems::FieldBinding& fields) {
+        using namespace svmp::FE::forms;
+        const auto P = fields.unknown("p", std::make_shared<svmp::FE::spaces::H1Space>(ElementType::Triangle3, 2));
+        const auto H = hessian(P.state);
+        return (laplacian(P.state) * P.test + P.state * P.state * P.test).dx() +
+               ((H.component(0, 1) + 0.5 * H.component(1, 1)) * P.test).dx();
+    };
+    const auto interpreted = residualRowsForHessians(true, false, true, true, install);
+    expectSameHessianRows(residualRowsForHessians(true, false, true, false, install), interpreted);
+    for (const bool vectorize : {true, false}) {
+        SCOPED_TRACE(::testing::Message() << (vectorize ? "batched" : "unbatched"));
+        expectSameHessianRows(residualRowsForHessians(true, true, vectorize, true, install), interpreted);
+    }
+}
