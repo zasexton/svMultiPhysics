@@ -1096,6 +1096,18 @@ Status: `implemented/internal` (decision D64 item 11, D66): the compiled schedul
 | `levelSetGeometryDescriptor(system, requests, purpose)`, `levelSetVelocityExtensionDescriptor(system, requests, purpose)`, `shadowFieldDescriptor(system, purpose)` | `LevelSet/LevelSetGeometryService.h`, `LevelSet/Extension/LevelSetVelocityExtensionRefresh.h`, `TimeStepping/GeneratedState.h` | What the cut geometry, the velocity extension and the shadow participant declare, before the participants exist; their `describe()` returns the same |
 | `FESystem::declareFieldConvergenceCriterion(FieldConvergenceCriterion{field, abs, rel})`, `fieldConvergenceCriteria()` | `Systems/FESystem.h`, `Systems/FieldRegistry.h` | The nonlinear convergence criterion an install declares for one of its unknowns (the level-set transport: `Tolerance` and its linear `Absolute_tolerance`, 1e-10 when unstated, through `LevelSetTransportOptions::residual_criterion`); declarations of one field merge to the strictest positive tolerances, in order of first declaration |
 
+### Environment Names (D47 P5)
+
+Status: `implemented/internal`.
+
+| Vocabulary | Header | Notes |
+|------------|--------|-------|
+| `environment::EnvironmentNameRegistry`, `EnvironmentNameRegistry::solver()` | `Core/EnvironmentNames.h` | The one service through which the solver reads environment variables. Its catalogue declares each name once, grouped by owning service; reading a name that is not declared throws `std::logic_error`. A registry over other declarations (a test's) reads the same way |
+| `environment::NameDeclaration{name, kind, owner, type, default_value, run_status, controls}`, `NameKind` (`Diagnostic`, `Performance`, `TestHook`, `NumericalOverride`), `ValueType` (`Flag`, `Integer`, `Real`, `Text`, `List`), `RunStatus` (`Reference`, `NonReference`) | `Core/EnvironmentNames.h` | One declared name: what setting it changes, its owner, how it is read, what its reader does when it is unset, and whether a run that sets it can still be a reference run |
+| `environment::value(name)`, `isSet(name)`, `enabled(name)` | `Core/EnvironmentNames.h` | Stateless reads through the solver registry: the raw value (`nullptr` when unset), presence, and the shared flag rule (set, nonempty, and not 0, false, off or no in any case). A reader keeps its own caching and any other parse |
+| `environment::configurationRecord()`, `EnvironmentNameRegistry::setNames()` | `Core/EnvironmentNames.h` | The `environment_names` member of `effective_configuration.json`: every set name that is not a diagnostic, with its value, kind, value type and owner, and whether the run is still a reference run; empty, and the artifact unchanged, when none is set |
+| `DiagnosticRegistry::enabled(set, names)` | `Systems/DiagnosticRegistry.h` | Reads a diagnostic set's switches through a given registry; `enabled(set)` reads them through the solver registry, which declares them |
+
 ### Manual Block and Complex Workflows
 
 Status: `implemented/expert`.
