@@ -107,7 +107,7 @@ TEST(JITValidation, ScalarValueShapeQueryIsStructuralAndFailClosed)
         2,
         two_component_3d_signature,
         "scalar_shape_two_component_velocity_3d");
-    const auto reference_coordinate = FormExpr::referenceCoordinate();
+    const auto reference_coordinate = FormExpr::referenceCellCoordinate();
     const auto vector_2d = FormExpr::asVector({
         FormExpr::constant(Real(1.0)),
         FormExpr::constant(Real(2.0)),

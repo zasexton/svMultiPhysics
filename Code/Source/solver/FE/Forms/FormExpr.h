@@ -736,13 +736,13 @@ public:
     static FormExpr materialStateWorkRef(std::uint32_t offset_bytes);
     static FormExpr previousSolution(int steps_back = 1);
 	    static FormExpr coordinate();
-	    static FormExpr referenceCoordinate();
+	    static FormExpr referenceCellCoordinate();
         static FormExpr meshDisplacement();
         static FormExpr meshVelocity();
         static FormExpr meshAcceleration();
         static FormExpr currentCoordinate();
         static FormExpr previousCoordinate();
-        static FormExpr referenceCoordinatePhysical();
+        static FormExpr referencePosition();
         static FormExpr previousMeshVelocity();
         static FormExpr predictedMeshVelocity();
         static FormExpr currentJacobian();

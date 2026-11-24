@@ -295,7 +295,7 @@ TEST(LLVMGenFunctionalKernels, CoordinatesLoadPhysicalAndReference)
     const auto dof_map = createSingleTetraDofMap();
     spaces::H1Space space(ElementType::Tetra4, 1);
 
-    const auto integrand = FormExpr::coordinate().component(0) + FormExpr::referenceCoordinate().component(1);
+    const auto integrand = FormExpr::coordinate().component(0) + FormExpr::referenceCellCoordinate().component(1);
     auto interp = makeFunctionalFormKernel(integrand, FunctionalFormKernel::Domain::Cell);
 
     auto throw_fallback = makeThrowingTotalKernelFor(integrand, /*has_cell=*/true, /*has_boundary=*/false);

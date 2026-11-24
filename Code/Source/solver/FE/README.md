@@ -1464,7 +1464,8 @@ public:
 
     // Geometry terminals
     static FormExpr x();           // Physical coordinate
-    static FormExpr X();           // Reference coordinate
+    static FormExpr referenceCellCoordinate();  // Reference-cell (quadrature) coordinate
+    static FormExpr referencePosition();        // Reference-configuration position
     static FormExpr n();           // Normal
     static FormExpr J();           // Jacobian
     static FormExpr detJ();        // Jacobian determinant

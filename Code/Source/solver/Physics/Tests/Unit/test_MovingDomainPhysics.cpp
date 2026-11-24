@@ -13076,7 +13076,7 @@ TEST(MovingDomainPhysics,
             .boundary_marker = marker,
             .quantity = mm::NormalConstraintQuantity::Displacement,
             .target = FE::forms::component(
-                FE::forms::FormExpr::referenceCoordinate(), 2),
+                FE::forms::FormExpr::referenceCellCoordinate(), 2),
             .penalty = FE::Real{1.0},
             .velocity_time_scale = FE::Real{1.0},
         });

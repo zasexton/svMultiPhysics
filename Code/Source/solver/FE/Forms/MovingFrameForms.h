@@ -125,7 +125,7 @@ struct MovingFrameFormTerminals {
 {
     MovingFrameFormTerminals terminals;
     terminals.current_coordinate = FormExpr::currentCoordinate();
-    terminals.reference_coordinate = FormExpr::referenceCoordinatePhysical();
+    terminals.reference_coordinate = FormExpr::referencePosition();
     terminals.mesh_velocity = FormExpr::meshVelocity();
     terminals.mesh_acceleration = FormExpr::meshAcceleration();
     terminals.frame_origin = frameOrigin(frame);

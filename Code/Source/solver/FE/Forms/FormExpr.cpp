@@ -2385,7 +2385,7 @@ FormExpr FormExpr::coordinate()
     return FormExpr(std::make_shared<CoordinateNode>());
 }
 
-FormExpr FormExpr::referenceCoordinate()
+FormExpr FormExpr::referenceCellCoordinate()
 {
     return FormExpr(std::make_shared<ReferenceCoordinateNode>());
 }
@@ -2415,7 +2415,7 @@ FormExpr FormExpr::previousCoordinate()
     return FormExpr(std::make_shared<SimpleTerminalNode>(FormExprType::PreviousCoordinate, "x_previous"));
 }
 
-FormExpr FormExpr::referenceCoordinatePhysical()
+FormExpr FormExpr::referencePosition()
 {
     return FormExpr(std::make_shared<SimpleTerminalNode>(FormExprType::ReferencePhysicalCoordinate, "X_physical"));
 }
