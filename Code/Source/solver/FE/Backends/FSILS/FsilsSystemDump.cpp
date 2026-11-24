@@ -14,6 +14,7 @@
 #include "Core/Logger.h"
 
 #include "Backends/FSILS/liner_solver/fils_struct.hpp"
+#include "Core/EnvironmentNames.h"
 
 #include <algorithm>
 #include <atomic>
@@ -37,7 +38,7 @@ constexpr std::int32_t kVersion = 1;
 
 [[nodiscard]] const char* dumpPrefix() noexcept
 {
-    const char* env = std::getenv("SVMP_FSILS_DUMP_SYSTEM_PREFIX");
+    const char* env = environment::value("SVMP_FSILS_DUMP_SYSTEM_PREFIX");
     if (env == nullptr || env[0] == '\0') {
         return nullptr;
     }
@@ -46,7 +47,7 @@ constexpr std::int32_t kVersion = 1;
 
 [[nodiscard]] long long envInteger(const char* name, long long fallback) noexcept
 {
-    const char* env = std::getenv(name);
+    const char* env = environment::value(name);
     if (env == nullptr || env[0] == '\0') {
         return fallback;
     }

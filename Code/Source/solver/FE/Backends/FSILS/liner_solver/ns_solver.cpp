@@ -52,6 +52,7 @@
 
 #include "Array3.h"
 #include "Math/DenseLinearAlgebra.h"
+#include "Core/EnvironmentNames.h"
 
 #include <cmath>
 #include <cstdlib>
@@ -78,7 +79,7 @@ constexpr int kNativeFaceDuplicateCouplingId = -2;
 
 [[nodiscard]] bool envFlagEnabled(const char* env_name) noexcept
 {
-  const char* env = std::getenv(env_name);
+  const char* env = svmp::FE::environment::value(env_name);
   if (env == nullptr) {
     return false;
   }
@@ -93,7 +94,7 @@ constexpr int kNativeFaceDuplicateCouplingId = -2;
 
 [[nodiscard]] int envIntValue(const char* env_name, int default_value) noexcept
 {
-  const char* env = std::getenv(env_name);
+  const char* env = svmp::FE::environment::value(env_name);
   if (env == nullptr || *env == '\0') {
     return default_value;
   }
@@ -127,7 +128,7 @@ constexpr int kNativeFaceDuplicateCouplingId = -2;
 
 [[nodiscard]] const char* fsilsOracleBlockCompareFile() noexcept
 {
-  const char* path = std::getenv("SVMP_FSILS_NS_ORACLE_BLOCK_COMPARE_FILE");
+  const char* path = svmp::FE::environment::value("SVMP_FSILS_NS_ORACLE_BLOCK_COMPARE_FILE");
   if (path == nullptr || *path == '\0') {
     return nullptr;
   }
@@ -141,7 +142,7 @@ constexpr int kNativeFaceDuplicateCouplingId = -2;
 
 [[nodiscard]] const char* fsilsNsDumpPrefix() noexcept
 {
-  const char* env = std::getenv("SVMP_FSILS_NS_DUMP_PREFIX");
+  const char* env = svmp::FE::environment::value("SVMP_FSILS_NS_DUMP_PREFIX");
   if (env == nullptr) {
     return nullptr;
   }
@@ -153,7 +154,7 @@ constexpr int kNativeFaceDuplicateCouplingId = -2;
 
 [[nodiscard]] int fsilsNsDumpMaxSolves() noexcept
 {
-  const char* env = std::getenv("SVMP_FSILS_NS_DUMP_MAX_SOLVES");
+  const char* env = svmp::FE::environment::value("SVMP_FSILS_NS_DUMP_MAX_SOLVES");
   if (env == nullptr || *env == '\0') {
     return 1;
   }
@@ -275,7 +276,7 @@ bool loadOracleScalarMode(const fe_fsi_linear_solver::FSILS_lhsType& lhs,
 
 [[nodiscard]] bool syncOrderTraceEnabled() noexcept
 {
-  const char* env = std::getenv("SVMP_FSILS_TRACE_SYNC_ORDER");
+  const char* env = svmp::FE::environment::value("SVMP_FSILS_TRACE_SYNC_ORDER");
   if (env == nullptr) {
     return false;
   }

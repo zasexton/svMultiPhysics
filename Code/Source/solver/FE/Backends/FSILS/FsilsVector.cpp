@@ -10,6 +10,7 @@
 #include "Backends/FSILS/liner_solver/fsils_api.hpp"
 #include "Backends/FSILS/liner_solver/fils_struct.hpp"
 #include "Core/FEException.h"
+#include "Core/EnvironmentNames.h"
 
 #include <algorithm>
 #include <cmath>
@@ -581,7 +582,7 @@ public:
     void endAssemblyPhase() override { phase_ = assembly::AssemblyPhase::Flushing; }
     void finalizeAssembly() override {
         phase_ = assembly::AssemblyPhase::Finalized;
-        if (std::getenv("SVMP_FSILS_VECTOR_VIEW_TRACE") != nullptr && vector_requested_ > 0) {
+        if (environment::isSet("SVMP_FSILS_VECTOR_VIEW_TRACE") && vector_requested_ > 0) {
             int rank = 0;
             if (vec_ != nullptr) {
                 if (const auto* shared = vec_->shared()) {

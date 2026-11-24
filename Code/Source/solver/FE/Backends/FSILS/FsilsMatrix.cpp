@@ -19,6 +19,7 @@
 
 #include "Array.h"
 #include "Vector.h"
+#include "Core/EnvironmentNames.h"
 
 #include <algorithm>
 #include <cmath>
@@ -107,7 +108,7 @@ namespace {
 
 [[nodiscard]] bool env_flag_enabled(const char* name) noexcept
 {
-    const char* value = std::getenv(name);
+    const char* value = environment::value(name);
     return value != nullptr && value[0] != '\0' && value[0] != '0';
 }
 
@@ -120,7 +121,7 @@ namespace {
 [[nodiscard]] GlobalIndex fsils_trace_add_row_dof() noexcept
 {
     static const GlobalIndex traced = []() noexcept {
-        const char* env = std::getenv("SVMP_FSILS_TRACE_ADD_ROW_DOF");
+        const char* env = environment::value("SVMP_FSILS_TRACE_ADD_ROW_DOF");
         if (env == nullptr || *env == '\0') {
             return INVALID_GLOBAL_INDEX;
         }
@@ -712,7 +713,7 @@ void build_owned_row_halo_plan(FsilsShared& shared)
                       MPI_MIN,
                       lhs.commu.comm);
         if (global_plan_ok == 0) {
-            if (std::getenv("SVMP_FSILS_HALO_TRACE") != nullptr) {
+            if (environment::isSet("SVMP_FSILS_HALO_TRACE")) {
                 std::fprintf(stderr,
                              "[FSILS_HALO] rank=%d explicit halo plan disabled during owner validation local_ok=%d owned=%lld local=%lld\n",
                              rank,
@@ -840,7 +841,7 @@ void build_owned_row_halo_plan(FsilsShared& shared)
                   MPI_MIN,
                   lhs.commu.comm);
     if (global_plan_ok == 0) {
-        if (std::getenv("SVMP_FSILS_HALO_TRACE") != nullptr) {
+        if (environment::isSet("SVMP_FSILS_HALO_TRACE")) {
             std::fprintf(stderr,
                          "[FSILS_HALO] rank=%d explicit halo plan disabled during node mapping local_ok=%d owned=%lld local=%lld\n",
                          rank,
@@ -853,7 +854,7 @@ void build_owned_row_halo_plan(FsilsShared& shared)
                  "FsilsMatrix: failed to map explicit owned-row halo plan to local FSILS nodes");
     }
 
-    if (std::getenv("SVMP_FSILS_HALO_TRACE") != nullptr) {
+    if (environment::isSet("SVMP_FSILS_HALO_TRACE")) {
         std::size_t send_nodes_total = 0;
         std::size_t recv_nodes_total = 0;
         for (const auto& nodes : lhs.owned_halo_send_nodes) {
@@ -1348,7 +1349,7 @@ public:
                 }
             }
         }
-        if (std::getenv("SVMP_FSILS_MATRIX_VIEW_TRACE") != nullptr && matrix_requested_ > 0) {
+        if (environment::isSet("SVMP_FSILS_MATRIX_VIEW_TRACE") && matrix_requested_ > 0) {
             int rank = 0;
             if (matrix_ != nullptr) {
                 if (const auto shared = matrix_->operatorShared()) {

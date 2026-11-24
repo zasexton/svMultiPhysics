@@ -21,6 +21,7 @@
 #include "Backends/FSILS/liner_solver/bicgs.h"
 #include "Backends/FSILS/liner_solver/fsils_api.hpp"
 #include "Backends/FSILS/liner_solver/fils_struct.hpp"
+#include "Core/EnvironmentNames.h"
 #include <algorithm>
 #include <atomic>
 #include <cctype>
@@ -107,7 +108,7 @@ struct FsilsLocalConstraintMeanStats {
 
 [[nodiscard]] int fsilsDumpPreparedRowGlobalNode() noexcept
 {
-    const char* env = std::getenv("SVMP_FSILS_DUMP_PREPARED_ROW_GLOBAL_NODE");
+    const char* env = environment::value("SVMP_FSILS_DUMP_PREPARED_ROW_GLOBAL_NODE");
     if (env == nullptr || *env == '\0') {
         return -1;
     }
@@ -120,7 +121,7 @@ struct FsilsLocalConstraintMeanStats {
 
 [[nodiscard]] int fsilsDumpPreparedRowComponent() noexcept
 {
-    const char* env = std::getenv("SVMP_FSILS_DUMP_PREPARED_ROW_COMPONENT");
+    const char* env = environment::value("SVMP_FSILS_DUMP_PREPARED_ROW_COMPONENT");
     if (env == nullptr || *env == '\0') {
         return -1;
     }
@@ -133,7 +134,7 @@ struct FsilsLocalConstraintMeanStats {
 
 [[nodiscard]] int fsilsDumpPreparedColComponent() noexcept
 {
-    const char* env = std::getenv("SVMP_FSILS_DUMP_PREPARED_COL_COMPONENT");
+    const char* env = environment::value("SVMP_FSILS_DUMP_PREPARED_COL_COMPONENT");
     if (env == nullptr || *env == '\0') {
         return -1;
     }
@@ -146,7 +147,7 @@ struct FsilsLocalConstraintMeanStats {
 
 [[nodiscard]] const char* fsilsDumpPreparedRowPrefix() noexcept
 {
-    const char* path = std::getenv("SVMP_FSILS_DUMP_PREPARED_ROW_PREFIX");
+    const char* path = environment::value("SVMP_FSILS_DUMP_PREPARED_ROW_PREFIX");
     if (path == nullptr || *path == '\0') {
         return nullptr;
     }
@@ -155,7 +156,7 @@ struct FsilsLocalConstraintMeanStats {
 
 [[nodiscard]] bool fsilsLowRankResidualPolishEnabled() noexcept
 {
-    const char* env = std::getenv("SVMP_FSILS_DISABLE_LOW_RANK_RESIDUAL_POLISH");
+    const char* env = environment::value("SVMP_FSILS_DISABLE_LOW_RANK_RESIDUAL_POLISH");
     if (env == nullptr) {
         return true;
     }
@@ -172,7 +173,7 @@ struct FsilsLocalConstraintMeanStats {
 
 [[nodiscard]] bool fsilsEnableMpiNativeFaceRankOne() noexcept
 {
-    if (const char* env = std::getenv("SVMP_FSILS_ENABLE_MPI_NATIVE_FACE_RANK_ONE")) {
+    if (const char* env = environment::value("SVMP_FSILS_ENABLE_MPI_NATIVE_FACE_RANK_ONE")) {
         std::string value = env;
         std::transform(value.begin(), value.end(), value.begin(), [](unsigned char ch) {
             return static_cast<char>(std::tolower(ch));
@@ -839,7 +840,7 @@ namespace {
 [[nodiscard]] bool fsilsTraceEnabled() noexcept
 {
     static const bool enabled = [] {
-        const char* env = std::getenv("SVMP_FSILS_TRACE");
+        const char* env = environment::value("SVMP_FSILS_TRACE");
         if (env == nullptr) {
             return false;
         }
@@ -853,7 +854,7 @@ namespace {
 
 [[nodiscard]] bool fsilsMatrixDiagnosticsEnabled() noexcept
 {
-    const char* env = std::getenv("SVMP_FSILS_MATRIX_DIAGNOSTICS");
+    const char* env = environment::value("SVMP_FSILS_MATRIX_DIAGNOSTICS");
     if (env == nullptr) {
         return false;
     }
@@ -871,7 +872,7 @@ namespace {
 [[nodiscard]] unsigned long long parseUnsignedEnv(const char* name,
                                                   unsigned long long fallback) noexcept
 {
-    const char* env = std::getenv(name);
+    const char* env = environment::value(name);
     if (env == nullptr || *env == '\0') {
         return fallback;
     }
@@ -909,11 +910,11 @@ namespace {
 
 [[nodiscard]] bool reducedInternalizationTraceEnabled() noexcept
 {
-    const char* env = std::getenv("SVMP_FSILS_TRACE_SCHUR_SETUP_TIMING");
+    const char* env = environment::value("SVMP_FSILS_TRACE_SCHUR_SETUP_TIMING");
     if (env != nullptr && *env != '\0' && *env != '0') {
         return true;
     }
-    env = std::getenv("SVMP_FSILS_TRACE_SCHUR_SETUP_TIMING_ALL_RANKS");
+    env = environment::value("SVMP_FSILS_TRACE_SCHUR_SETUP_TIMING_ALL_RANKS");
     return env != nullptr && *env != '\0' && *env != '0';
 }
 
@@ -1035,7 +1036,7 @@ struct GmresLaunchConfig {
     if (sD_override > 0) {
         sD = sD_override;
     } else {
-        const char* sd_env = std::getenv("SVMP_FSILS_GMRES_SD");
+        const char* sd_env = environment::value("SVMP_FSILS_GMRES_SD");
         if (sd_env) {
             try {
                 sD = std::stoi(sd_env);
@@ -1066,7 +1067,7 @@ struct GmresLaunchConfig {
 [[nodiscard]] Real fsilsBlockSchurConstraintMeanDominanceLimit() noexcept
 {
     Real limit = static_cast<Real>(1.0);
-    if (const char* env = std::getenv("SVMP_FSILS_BLOCKSCHUR_CONSTRAINT_MEAN_DOMINANCE")) {
+    if (const char* env = environment::value("SVMP_FSILS_BLOCKSCHUR_CONSTRAINT_MEAN_DOMINANCE")) {
         try {
             limit = static_cast<Real>(std::stod(env));
         } catch (...) {
@@ -1082,7 +1083,7 @@ struct GmresLaunchConfig {
 [[nodiscard]] int fsilsBlockSchurOuterIterationCap(bool has_coupled_updates,
                                                    bool configured_coupled_outer) noexcept
 {
-    if (const char* env = std::getenv("SVMP_FSILS_BLOCKSCHUR_OUTER_CAP")) {
+    if (const char* env = environment::value("SVMP_FSILS_BLOCKSCHUR_OUTER_CAP")) {
         std::string value(env);
         std::transform(value.begin(), value.end(), value.begin(), [](unsigned char ch) {
             return static_cast<char>(std::tolower(ch));
@@ -1132,18 +1133,18 @@ struct GmresLaunchConfig {
         return !value.empty() && value != "0" && value != "false" &&
                value != "off" && value != "no";
     };
-    if (const char* env = std::getenv("SVMP_FSILS_DISABLE_BLOCKSCHUR_TRUE_RESIDUAL_RETRY")) {
+    if (const char* env = environment::value("SVMP_FSILS_DISABLE_BLOCKSCHUR_TRUE_RESIDUAL_RETRY")) {
         if (enabled_value(env)) {
             return false;
         }
     }
-    return enabled_value(std::getenv("SVMP_FSILS_ENABLE_BLOCKSCHUR_TRUE_RESIDUAL_RETRY"));
+    return enabled_value(environment::value("SVMP_FSILS_ENABLE_BLOCKSCHUR_TRUE_RESIDUAL_RETRY"));
 }
 
 [[nodiscard]] Real fsilsBlockSchurTrueResidualRetryRelScale() noexcept
 {
     Real scale = static_cast<Real>(1.0e-3);
-    if (const char* env = std::getenv("SVMP_FSILS_BLOCKSCHUR_TRUE_RESIDUAL_RETRY_REL_SCALE")) {
+    if (const char* env = environment::value("SVMP_FSILS_BLOCKSCHUR_TRUE_RESIDUAL_RETRY_REL_SCALE")) {
         try {
             scale = static_cast<Real>(std::stod(env));
         } catch (...) {
@@ -1161,7 +1162,7 @@ struct GmresLaunchConfig {
 [[nodiscard]] int fsilsBlockSchurTrueResidualRetryMaxIterCap() noexcept
 {
     int cap = 2000;
-    if (const char* env = std::getenv("SVMP_FSILS_BLOCKSCHUR_TRUE_RESIDUAL_RETRY_MAX_ITER")) {
+    if (const char* env = environment::value("SVMP_FSILS_BLOCKSCHUR_TRUE_RESIDUAL_RETRY_MAX_ITER")) {
         try {
             cap = std::stoi(env);
         } catch (...) {
@@ -1491,8 +1492,8 @@ SolverReport FsilsLinearSolver::solveOnOperatorLayout(const GenericMatrix& A_in,
     // transform available only as an explicit diagnostic opt-in.
     double stage_scale = 1.0;
     if (use_blockschur && has_saddle_point) {
-        if (std::getenv("SVMP_FSILS_ENABLE_BLOCKSCHUR_STAGE_SCALING") != nullptr &&
-            std::getenv("SVMP_FSILS_DISABLE_BLOCKSCHUR_STAGE_SCALING") == nullptr &&
+        if (environment::isSet("SVMP_FSILS_ENABLE_BLOCKSCHUR_STAGE_SCALING") &&
+            !environment::isSet("SVMP_FSILS_DISABLE_BLOCKSCHUR_STAGE_SCALING") &&
             std::isfinite(dt_eff_) && dt_eff_ > 0.0) {
             stage_scale = dt_eff_;
         }
@@ -1531,8 +1532,8 @@ SolverReport FsilsLinearSolver::solveOnOperatorLayout(const GenericMatrix& A_in,
 
     const bool enforce_transpose_saddle_blocks =
         use_blockschur && has_saddle_point &&
-        (std::getenv("SVMP_FSILS_ASSUME_TRANSPOSE_SADDLE") != nullptr) &&
-        (std::getenv("SVMP_FSILS_DISABLE_TRANSPOSE_SADDLE") == nullptr);
+        environment::isSet("SVMP_FSILS_ASSUME_TRANSPOSE_SADDLE") &&
+        !environment::isSet("SVMP_FSILS_DISABLE_TRANSPOSE_SADDLE");
 
     auto applySaddlePointEnforcement = [&]() {
         if (!enforce_transpose_saddle_blocks) {
@@ -3224,7 +3225,7 @@ SolverReport FsilsLinearSolver::solveOnOperatorLayout(const GenericMatrix& A_in,
         }
 
         lhs.use_reduced_face_cache_in_add_bc_mul =
-            (std::getenv("SVMP_DISABLE_REDUCED_FACE_CACHE_ADD_BC_MUL") == nullptr) &&
+            !environment::isSet("SVMP_DISABLE_REDUCED_FACE_CACHE_ADD_BC_MUL") &&
             std::any_of(lhs.reduced_updates.begin(),
                         lhs.reduced_updates.end(),
                         [](const auto& update) { return update.active && update.has_face_cache; });
@@ -4121,7 +4122,7 @@ SolverReport FsilsLinearSolver::solveOnOperatorLayout(const GenericMatrix& A_in,
             }
         }
 
-        if (const char* rows_env = std::getenv("SVMP_FSILS_MEAN_MODE_ROWS");
+        if (const char* rows_env = environment::value("SVMP_FSILS_MEAN_MODE_ROWS");
             rows_env != nullptr && rows_env[0] != '\0' && rows_env[0] != '0') {
             struct RowRec {
                 long double magnitude{0.0L};

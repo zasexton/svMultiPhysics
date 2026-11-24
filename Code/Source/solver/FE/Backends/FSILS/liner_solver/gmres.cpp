@@ -48,6 +48,7 @@
 #include "two_lane.h"
 
 #include "Array3.h"
+#include "Core/EnvironmentNames.h"
 
 #include <Eigen/Dense>
 #include <Eigen/Eigenvalues>
@@ -189,7 +190,7 @@ bool backsolve_hessenberg(const Array<double>& h,
 
 [[nodiscard]] bool parse_bool_env(const char* name, bool default_value) noexcept
 {
-  const char* env = std::getenv(name);
+  const char* env = svmp::FE::environment::value(name);
   if (!env) {
     return default_value;
   }
@@ -220,7 +221,7 @@ bool backsolve_hessenberg(const Array<double>& h,
 
 [[nodiscard]] int parse_int_env(const char* name, int default_value) noexcept
 {
-  const char* env = std::getenv(name);
+  const char* env = svmp::FE::environment::value(name);
   if (!env) {
     return default_value;
   }
@@ -233,7 +234,7 @@ bool backsolve_hessenberg(const Array<double>& h,
 
 [[nodiscard]] double parse_double_env(const char* name, double default_value) noexcept
 {
-  const char* env = std::getenv(name);
+  const char* env = svmp::FE::environment::value(name);
   if (!env) {
     return default_value;
   }
@@ -383,11 +384,11 @@ struct GmresEnhancements {
     c.experimental_adaptive_controls =
         parse_bool_env("SVMP_FSILS_GMRES_EXPERIMENTAL_ADAPTIVE", false) ||
         parse_bool_env("SVMP_FSILS_GMRES_ADAPTIVE", false);
-    if (std::getenv("SVMP_FSILS_GMRES_NO_ADAPTIVE") != nullptr) {
+    if (svmp::FE::environment::isSet("SVMP_FSILS_GMRES_NO_ADAPTIVE")) {
       c.experimental_adaptive_controls = false;
     }
 
-    const char* update = std::getenv("SVMP_FSILS_GMRES_RECYCLE_UPDATE");
+    const char* update = svmp::FE::environment::value("SVMP_FSILS_GMRES_RECYCLE_UPDATE");
     if (update) {
       std::string v = to_lower(std::string(update));
       if (v == "off" || v == "no" || v == "false" || v == "0") {
@@ -419,7 +420,7 @@ struct GmresEnhancements {
       c.recycle_replace_n = -1;
     }
 
-    const char* orth = std::getenv("SVMP_FSILS_GMRES_ORTH");
+    const char* orth = svmp::FE::environment::value("SVMP_FSILS_GMRES_ORTH");
     if (orth) {
       std::string v = to_lower(std::string(orth));
       if (v == "mgs" || v == "modified" || v == "modified-gram-schmidt") {
@@ -432,7 +433,7 @@ struct GmresEnhancements {
       c.mgs_dgks_ratio = 0.5;
     }
 
-    const char* reorth_env = std::getenv("SVMP_FSILS_GMRES_REORTH");
+    const char* reorth_env = svmp::FE::environment::value("SVMP_FSILS_GMRES_REORTH");
     if (reorth_env) {
       c.reorth_mode_explicit = true;
       std::string v = to_lower(std::string(reorth_env));

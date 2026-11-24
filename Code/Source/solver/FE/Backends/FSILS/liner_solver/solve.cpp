@@ -37,6 +37,7 @@
 #include "norm.h"
 #include "ns_solver.h"
 #include "precond.h"
+#include "Core/EnvironmentNames.h"
 
 #include <algorithm>
 #include <cmath>
@@ -53,7 +54,7 @@ namespace {
 
 [[nodiscard]] bool fsilsSolveVectorTraceEnabled() noexcept
 {
-  const char* env = std::getenv("SVMP_FSILS_SOLVE_VECTOR_TRACE");
+  const char* env = svmp::FE::environment::value("SVMP_FSILS_SOLVE_VECTOR_TRACE");
   if (env == nullptr) {
     return false;
   }

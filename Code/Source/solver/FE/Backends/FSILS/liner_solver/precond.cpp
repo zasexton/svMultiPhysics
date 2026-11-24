@@ -34,6 +34,7 @@
 #include "precond.h"
 
 #include "fsils_api.hpp"
+#include "Core/EnvironmentNames.h"
 
 #include <algorithm>
 #include <cstdint>
@@ -55,11 +56,11 @@ namespace {
 [[nodiscard]] bool trace_precond_reduced_support() noexcept
 {
   static const bool enabled = [] {
-    const char* env = std::getenv("SVMP_FSILS_TRACE_SCHUR_SETUP_TIMING");
+    const char* env = svmp::FE::environment::value("SVMP_FSILS_TRACE_SCHUR_SETUP_TIMING");
     if (env == nullptr || *env == '\0' || *env == '0') {
       return false;
     }
-    env = std::getenv("SVMP_FSILS_TRACE_SCHUR_SETUP_TIMING_ALL_RANKS");
+    env = svmp::FE::environment::value("SVMP_FSILS_TRACE_SCHUR_SETUP_TIMING_ALL_RANKS");
     return env != nullptr && *env != '\0' && *env != '0';
   }();
   return enabled;
@@ -67,7 +68,7 @@ namespace {
 
 [[nodiscard]] const char* precond_reduced_dump_prefix() noexcept
 {
-  const char* env = std::getenv("SVMP_FSILS_PRECOND_REDUCED_DUMP_PREFIX");
+  const char* env = svmp::FE::environment::value("SVMP_FSILS_PRECOND_REDUCED_DUMP_PREFIX");
   if (env == nullptr) {
     return nullptr;
   }
@@ -79,7 +80,7 @@ namespace {
 
 [[nodiscard]] int precond_reduced_dump_max_calls() noexcept
 {
-  const char* env = std::getenv("SVMP_FSILS_PRECOND_REDUCED_DUMP_MAX_CALLS");
+  const char* env = svmp::FE::environment::value("SVMP_FSILS_PRECOND_REDUCED_DUMP_MAX_CALLS");
   if (env == nullptr || *env == '\0') {
     return 4;
   }

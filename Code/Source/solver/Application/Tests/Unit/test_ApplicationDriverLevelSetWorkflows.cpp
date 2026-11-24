@@ -1759,6 +1759,22 @@ private:
   std::optional<std::string> original_{};
 };
 
+// Unsets every declared environment name for the lifetime of the guard.
+class WorkflowUnsetEnvironmentNames {
+public:
+  WorkflowUnsetEnvironmentNames()
+  {
+    for (const auto& use :
+         svmp::FE::environment::EnvironmentNameRegistry::solver().setNames()) {
+      unset_.push_back(std::make_unique<WorkflowScopedEnvVar>(
+          use.declaration->name, std::nullopt));
+    }
+  }
+
+private:
+  std::vector<std::unique_ptr<WorkflowScopedEnvVar>> unset_{};
+};
+
 #if defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH
 
 struct CutOptionRefreshCase {
@@ -2644,6 +2660,7 @@ private:
 TEST(ApplicationDriverLevelSetWorkflows,
      WritesOneDeterministicallyOrderedEffectiveConfigurationArtifact)
 {
+  const WorkflowUnsetEnvironmentNames unset_environment_names;
   const auto unique = std::chrono::steady_clock::now()
                           .time_since_epoch()
                           .count();
@@ -2682,6 +2699,51 @@ TEST(ApplicationDriverLevelSetWorkflows,
       "{\"artifact_schema_version\":1,\"component\":\"z_component\"}]}\n");
   EXPECT_FALSE(std::filesystem::exists(
       output_directory / "effective_configuration.json.tmp"));
+
+  std::error_code cleanup_error;
+  std::filesystem::remove_all(output_directory, cleanup_error);
+  EXPECT_FALSE(cleanup_error);
+}
+
+TEST(ApplicationDriverLevelSetWorkflows,
+     EffectiveConfigurationRecordsSetEnvironmentNamesOtherThanDiagnostics)
+{
+  const WorkflowUnsetEnvironmentNames unset_environment_names;
+  const WorkflowScopedEnvVar restart("SVMP_FSILS_GMRES_SD", std::string("40"));
+  const WorkflowScopedEnvVar trace("SVMP_FSILS_TRACE", std::string("1"));
+  const auto unique = std::chrono::steady_clock::now()
+                          .time_since_epoch()
+                          .count();
+  const auto output_directory =
+      std::filesystem::temp_directory_path() /
+      ("svmp-effective-configuration-environment-" + std::to_string(unique));
+  std::filesystem::create_directories(output_directory);
+
+  Parameters params;
+  params.general_simulation_parameters.save_results_in_folder.set(
+      output_directory.string());
+  application::core::SimulationComponents sim;
+  sim.physics_modules.push_back(
+      std::make_unique<WorkflowEffectiveConfigurationModule>(
+          "a_component",
+          R"({"artifact_schema_version":1,"component":"a_component"})"));
+
+  writeEffectiveConfigurationArtifact(
+      sim, params, svmp::MeshComm::world());
+
+  std::ifstream input(output_directory / "effective_configuration.json");
+  ASSERT_TRUE(input.is_open());
+  const std::string contents{
+      std::istreambuf_iterator<char>{input},
+      std::istreambuf_iterator<char>{}};
+  EXPECT_EQ(
+      contents,
+      "{\"artifact_schema_version\":1,\"modules\":["
+      "{\"artifact_schema_version\":1,\"component\":\"a_component\"}],"
+      "\"environment_names\":{\"reference_run\":false,\"set\":["
+      "{\"name\":\"SVMP_FSILS_GMRES_SD\",\"value\":\"40\","
+      "\"kind\":\"numerical_override\",\"value_type\":\"integer\","
+      "\"owner\":\"FE/Backends/FSILS\",\"marks_non_reference\":true}]}}\n");
 
   std::error_code cleanup_error;
   std::filesystem::remove_all(output_directory, cleanup_error);

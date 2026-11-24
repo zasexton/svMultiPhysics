@@ -40,6 +40,7 @@
 #include "distributed_sparse_operator.h"
 #include "fsils_api.hpp"
 #include "two_lane.h"
+#include "Core/EnvironmentNames.h"
 
 #include <algorithm>
 #include <atomic>
@@ -80,7 +81,7 @@ std::atomic<bool> g_vv_dynamic_kernel_forced{false};
 [[nodiscard]] bool prefetch_enabled() noexcept
 {
   static const bool enabled = []() {
-    const char* env = std::getenv("SVMP_FSILS_SPMV_PREFETCH");
+    const char* env = svmp::FE::environment::value("SVMP_FSILS_SPMV_PREFETCH");
     if (env == nullptr || env[0] == '\0') {
       return true;
     }

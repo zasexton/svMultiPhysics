@@ -10,6 +10,7 @@
 #include "Backends/Eigen/EigenVector.h"
 #include "Core/FEException.h"
 #include "Sparsity/SparsityPattern.h"
+#include "Core/EnvironmentNames.h"
 
 #include <algorithm>
 #include <atomic>
@@ -276,11 +277,11 @@ void EigenMatrix::addValue(GlobalIndex row_g, GlobalIndex col_g, Real value, ass
         // default, log samples with SVMP_EIGEN_COUNT_DROPPED=1, and throw
         // with SVMP_EIGEN_STRICT_PATTERN=1.
         static const bool strict_pattern = [] {
-            const char* env = std::getenv("SVMP_EIGEN_STRICT_PATTERN");
+            const char* env = environment::value("SVMP_EIGEN_STRICT_PATTERN");
             return env != nullptr && env[0] != '\0' && env[0] != '0';
         }();
         static const bool count_dropped = [] {
-            const char* env = std::getenv("SVMP_EIGEN_COUNT_DROPPED");
+            const char* env = environment::value("SVMP_EIGEN_COUNT_DROPPED");
             return env != nullptr && env[0] != '\0' && env[0] != '0';
         }();
         static std::atomic<long> dropped{0};

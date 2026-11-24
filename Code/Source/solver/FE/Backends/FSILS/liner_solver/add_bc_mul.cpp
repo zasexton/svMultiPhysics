@@ -29,6 +29,7 @@
  */
 
 #include "add_bc_mul.h"
+#include "Core/EnvironmentNames.h"
 
 #include <algorithm>
 #include <cmath>
@@ -51,7 +52,7 @@ constexpr int kNativeFaceDuplicateCouplingId = -2;
 
 [[nodiscard]] bool native_face_exact_pre_enabled() noexcept
 {
-  const char* env = std::getenv("SVMP_FSILS_NATIVE_FACE_EXACT_PRE");
+  const char* env = svmp::FE::environment::value("SVMP_FSILS_NATIVE_FACE_EXACT_PRE");
   if (env == nullptr) {
     return false;
   }
@@ -63,7 +64,7 @@ constexpr int kNativeFaceDuplicateCouplingId = -2;
 
 [[nodiscard]] bool trace_native_face_exact_pre_enabled() noexcept
 {
-  const char* env = std::getenv("SVMP_FSILS_TRACE_NATIVE_FACE_EXACT_PRE");
+  const char* env = svmp::FE::environment::value("SVMP_FSILS_TRACE_NATIVE_FACE_EXACT_PRE");
   if (env == nullptr) {
     return false;
   }
@@ -75,7 +76,7 @@ constexpr int kNativeFaceDuplicateCouplingId = -2;
 
 [[nodiscard]] const char* addBcMulDumpPrefix() noexcept
 {
-  const char* env = std::getenv("SVMP_FSILS_ADD_BC_MUL_DUMP_PREFIX");
+  const char* env = svmp::FE::environment::value("SVMP_FSILS_ADD_BC_MUL_DUMP_PREFIX");
   if (env == nullptr) {
     return nullptr;
   }
@@ -87,7 +88,7 @@ constexpr int kNativeFaceDuplicateCouplingId = -2;
 
 [[nodiscard]] int addBcMulDumpMaxCalls() noexcept
 {
-  const char* env = std::getenv("SVMP_FSILS_ADD_BC_MUL_DUMP_MAX_CALLS");
+  const char* env = svmp::FE::environment::value("SVMP_FSILS_ADD_BC_MUL_DUMP_MAX_CALLS");
   if (env == nullptr || *env == '\0') {
     return 80;
   }

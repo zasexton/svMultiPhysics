@@ -1,6 +1,7 @@
 #include "distributed_low_rank_correction.h"
 
 #include "Math/DenseLinearAlgebra.h"
+#include "Core/EnvironmentNames.h"
 
 #include <algorithm>
 #include <cmath>
@@ -16,7 +17,7 @@ constexpr int kNativeFaceDuplicateCouplingId = -2;
 
 [[nodiscard]] bool correctionTraceEnabled() noexcept
 {
-  const char* env = std::getenv("SVMP_FSILS_TRACE_EXPLICIT_BLOCK_CORRECTIONS");
+  const char* env = svmp::FE::environment::value("SVMP_FSILS_TRACE_EXPLICIT_BLOCK_CORRECTIONS");
   if (env == nullptr) {
     return false;
   }
@@ -31,7 +32,7 @@ constexpr int kNativeFaceDuplicateCouplingId = -2;
 
 [[nodiscard]] int correctionTraceLimit() noexcept
 {
-  const char* env = std::getenv("SVMP_FSILS_TRACE_EXPLICIT_BLOCK_CORRECTIONS_LIMIT");
+  const char* env = svmp::FE::environment::value("SVMP_FSILS_TRACE_EXPLICIT_BLOCK_CORRECTIONS_LIMIT");
   if (env == nullptr) {
     return 6;
   }

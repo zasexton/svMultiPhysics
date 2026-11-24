@@ -42,6 +42,7 @@
 #include "gmres.h"
 #include "norm.h"
 #include "omp_la.h"
+#include "Core/EnvironmentNames.h"
 
 #include <unordered_map>
 
@@ -410,7 +411,7 @@ using fe_fsi_linear_solver::fsils_int;
 
 [[nodiscard]] int parse_int_env(const char* name, int default_value) noexcept
 {
-  const char* env = std::getenv(name);
+  const char* env = svmp::FE::environment::value(name);
   if (!env) {
     return default_value;
   }
@@ -423,7 +424,7 @@ using fe_fsi_linear_solver::fsils_int;
 
 [[nodiscard]] double parse_double_env(const char* name, double default_value) noexcept
 {
-  const char* env = std::getenv(name);
+  const char* env = svmp::FE::environment::value(name);
   if (!env) {
     return default_value;
   }
@@ -436,7 +437,7 @@ using fe_fsi_linear_solver::fsils_int;
 
 [[nodiscard]] bool env_enabled(const char* name) noexcept
 {
-  const char* env = std::getenv(name);
+  const char* env = svmp::FE::environment::value(name);
   if (env == nullptr) {
     return false;
   }
@@ -469,7 +470,7 @@ using fe_fsi_linear_solver::fsils_int;
 [[nodiscard]] int forced_schur_preconditioner_code() noexcept
 {
   static const int forced = []() noexcept {
-    const char* env = std::getenv("SVMP_FSILS_BLOCKSCHUR_FORCE_SCHUR_PC");
+    const char* env = svmp::FE::environment::value("SVMP_FSILS_BLOCKSCHUR_FORCE_SCHUR_PC");
     if (env == nullptr) {
       return -1;
     }
@@ -514,7 +515,7 @@ using fe_fsi_linear_solver::fsils_int;
 
 [[nodiscard]] const char* schur_dump_prefix() noexcept
 {
-  const char* env = std::getenv("SVMP_FSILS_SCHUR_DUMP_PREFIX");
+  const char* env = svmp::FE::environment::value("SVMP_FSILS_SCHUR_DUMP_PREFIX");
   if (env == nullptr) {
     return nullptr;
   }
@@ -793,7 +794,7 @@ void dump_schur_vector_owned(const fe_fsi_linear_solver::FSILS_lhsType& lhs,
 
 [[nodiscard]] bool skip_post_solve_halo_sync() noexcept
 {
-  const char* env = std::getenv("SVMP_FSILS_SKIP_POST_SOLVE_COMM");
+  const char* env = svmp::FE::environment::value("SVMP_FSILS_SKIP_POST_SOLVE_COMM");
   if (!env) {
     return false;
   }
@@ -4339,7 +4340,7 @@ void schur_face_only_legacy(const dsb::ScalarBlockSchurSystem& system,
   }
   const bool use_multi_face_gmres =
       active_coupled_faces > 1 &&
-      (std::getenv("SVMP_FSILS_DISABLE_MULTI_FACE_LEGACY_GMRES") == nullptr);
+      !svmp::FE::environment::isSet("SVMP_FSILS_DISABLE_MULTI_FACE_LEGACY_GMRES");
 
   static bool emitted_schur_operator_probe = false;
   if (!emitted_schur_operator_probe && env_enabled("SVMP_FSILS_TRACE_SCHUR_OPERATOR_PROBE")) {

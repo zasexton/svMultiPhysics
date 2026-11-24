@@ -1,4 +1,5 @@
 #include "block_schur_strategy_selector.h"
+#include "Core/EnvironmentNames.h"
 
 #include <cstdlib>
 
@@ -8,7 +9,7 @@ namespace {
 
 [[nodiscard]] bool env_enabled(const char* name) noexcept
 {
-  const char* env = std::getenv(name);
+  const char* env = svmp::FE::environment::value(name);
   if (env == nullptr) {
     return false;
   }
