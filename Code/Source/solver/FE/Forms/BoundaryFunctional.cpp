@@ -10,13 +10,109 @@
 #include "Core/FEException.h"
 #include "Forms/FormKernels.h"
 #include "Forms/FormIR.h"
+#include "Forms/ConstitutiveModel.h"
+#include "Forms/JIT/InlinableConstitutiveModel.h"
 #include "Forms/JIT/JITFunctionalKernelWrapper.h"
 
+#include <algorithm>
+#include <optional>
 #include <utility>
+#include <vector>
 
 namespace svmp {
 namespace FE {
 namespace forms {
+
+namespace {
+
+/// The largest topological dimension of the spaces in @p node (0 without one).
+[[nodiscard]] int largestTopologicalDimension(const FormExprNode& node)
+{
+    int dim = 0;
+    if (const auto* signature = node.spaceSignature()) {
+        dim = signature->topological_dimension;
+    }
+    for (const auto& child : node.childrenShared()) {
+        if (child) {
+            dim = std::max(dim, largestTopologicalDimension(*child));
+        }
+    }
+    return dim;
+}
+
+/// The stateless inlinable law of a constitutive call node, or null.
+[[nodiscard]] const InlinableConstitutiveModel* statelessInlinableLaw(const FormExprNode& node)
+{
+    if (node.type() != FormExprType::Constitutive || node.constitutiveModel() == nullptr) {
+        return nullptr;
+    }
+    const auto* inlinable = node.constitutiveModel()->inlinable();
+    if (inlinable == nullptr || inlinable->stateAccess() != MaterialStateAccess::None) {
+        return nullptr;
+    }
+    return inlinable;
+}
+
+/**
+ * @p integrand with every call of a law written as forms (a stateless
+ * inlinable model, such as constitutive::FormLaw) replaced by its body, as
+ * kernel setup expands the calls of a residual.  A functional kernel
+ * evaluates the integrand point by point, and such a law has no pointwise
+ * evaluation.  Returns @p integrand itself when it holds no such call, or
+ * when no space tells the dimension.
+ */
+[[nodiscard]] FormExpr expandStatelessLaws(const FormExpr& integrand, int dim)
+{
+    bool expanded = false;
+    const auto expandCall = [&](const auto& self, const FormExprNode& call) -> std::vector<FormExpr> {
+        const auto* law = statelessInlinableLaw(call);
+        std::vector<FormExpr> inputs;
+        for (const auto& child : call.childrenShared()) {
+            inputs.push_back(self(self, FormExpr(child)));
+        }
+        InlinableConstitutiveContext context;
+        context.dim = dim;
+        auto expansion = law->inlineExpand(inputs, context);
+        expanded = true;
+        std::vector<FormExpr> outputs;
+        for (auto& output : expansion.outputs) {
+            outputs.push_back(self(self, output));
+        }
+        return outputs;
+    };
+    const auto expand = [&](const auto& self, const FormExpr& expr) -> FormExpr {
+        if (!expr.isValid()) {
+            return expr;
+        }
+        return expr.transformNodes([&](const FormExprNode& node) -> std::optional<FormExpr> {
+            if (statelessInlinableLaw(node) != nullptr) {
+                const auto outputs = expandCall(self, node);
+                FE_THROW_IF(outputs.empty(), InvalidArgumentException,
+                            "compileBoundaryFunctionalKernel: a law call expanded to no output");
+                return outputs.front();
+            }
+            if (node.type() == FormExprType::ConstitutiveOutput) {
+                const auto kids = node.childrenShared();
+                const auto index = node.constitutiveOutputIndex();
+                if (kids.size() == 1u && kids.front() && index.has_value() && *index >= 0 &&
+                    statelessInlinableLaw(*kids.front()) != nullptr) {
+                    const auto outputs = expandCall(self, *kids.front());
+                    FE_THROW_IF(static_cast<std::size_t>(*index) >= outputs.size(), InvalidArgumentException,
+                                "compileBoundaryFunctionalKernel: a law output index past its outputs");
+                    return outputs[static_cast<std::size_t>(*index)];
+                }
+            }
+            return std::nullopt;
+        });
+    };
+    if (dim == 0) {
+        return integrand;
+    }
+    auto out = expand(expand, integrand);
+    return expanded ? out : integrand;
+}
+
+} // namespace
 
 namespace detail {
 
@@ -63,12 +159,14 @@ compileBoundaryFunctionalKernel(const FormExpr& integrand, int boundary_marker)
 }
 
 std::shared_ptr<assembly::FunctionalKernel>
-compileBoundaryFunctionalKernel(const FormExpr& integrand,
+compileBoundaryFunctionalKernel(const FormExpr& original_integrand,
                                 int boundary_marker,
                                 const SymbolicOptions& options)
 {
-    FE_THROW_IF(!integrand.isValid(), InvalidArgumentException,
+    FE_THROW_IF(!original_integrand.isValid(), InvalidArgumentException,
                 "compileBoundaryFunctionalKernel: invalid integrand");
+    const auto integrand =
+        expandStatelessLaws(original_integrand, largestTopologicalDimension(*original_integrand.node()));
 
     (void)boundary_marker;
 
@@ -132,17 +230,19 @@ compileBoundaryFunctionalKernel(const BoundaryFunctional& functional,
                     "compileBoundaryFunctionalKernel: invalid domain integrand");
         FE_CHECK_NOT_NULL(functional.integrand.node(),
                           "compileBoundaryFunctionalKernel: domain integrand node");
+        const auto integrand =
+            expandStatelessLaws(functional.integrand, largestTopologicalDimension(*functional.integrand.node()));
 
         const auto field_requirements =
-            detail::analyzeFieldRequirements(*functional.integrand.node());
+            detail::analyzeFieldRequirements(*integrand.node());
         auto required = detail::analyzeRequiredData(
-            *functional.integrand.node(), FormKind::Linear);
+            *integrand.node(), FormKind::Linear);
         for (const auto& fr : field_requirements) {
             required |= fr.required;
         }
 
         auto base = std::make_shared<FunctionalFormKernel>(
-            functional.integrand,
+            integrand,
             FunctionalFormKernel::Domain::Cell,
             required,
             field_requirements);
@@ -153,7 +253,7 @@ compileBoundaryFunctionalKernel(const BoundaryFunctional& functional,
 
         return std::make_shared<jit::JITFunctionalKernelWrapper>(
             std::move(base),
-            functional.integrand,
+            integrand,
             jit::JITFunctionalKernelWrapper::Domain::Cell,
             options.jit);
     }

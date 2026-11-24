@@ -11,6 +11,8 @@
 #include "Systems/FieldBinding.h"
 #include "Systems/FormsInstaller.h"
 #include "Systems/FormulationBuilder.h"
+#include "Systems/FunctionalFormEvaluator.h"
+#include "Systems/SystemCollectives.h"
 #include "Forms/Vocabulary.h"
 #include "Systems/MeshDisplacementBinding.h"
 #include "Systems/OperatorBackends.h"
@@ -1185,6 +1187,38 @@ TEST(FESystem, ALawThatReadsAnUnknownInItsBodyIsRefusedNamingTheLawAndTheUnknown
         EXPECT_NE(message.find("the law 'test::pressure_strain_hidden'"), std::string::npos) << message;
         EXPECT_NE(message.find("reads the unknown 'p'"), std::string::npos) << message;
     }
+}
+
+TEST(FESystem, AFunctionalOfALawWrittenAsFormsIsTheFunctionalOfItsBody)
+{
+    // A law written as forms has no pointwise evaluation; a functional of it
+    // (a quantity, a derived result such as a stress output) expands its
+    // calls as residual kernels do, so it is the functional of the body, bit
+    // for bit.
+    using svmp::FE::forms::FormExpr;
+    using Kind = svmp::FE::forms::ConstitutiveModel::ValueKind;
+    FESystem sys(build_single_quad_mesh());
+    auto scalar = std::make_shared<H1Space>(ElementType::Quad4, 1);
+    FieldBinding fields(sys, "Owner");
+    const auto u = fields.unknown("u", scalar, "solution");
+    svmp::FE::systems::FormulationBuilder F(sys, "equations", {});
+    (void)F.residual((u.state * u.test).dx());
+    sys.setup();
+    const auto law = svmp::FE::forms::law("test::cubic", Kind::Scalar, Kind::Scalar,
+                                          [](const FormExpr& x, int) { return x * x * x + FormExpr::constant(2.0) * x; });
+    std::vector<svmp::FE::Real> state(static_cast<std::size_t>(sys.dofHandler().getNumDofs()));
+    for (std::size_t i = 0; i < state.size(); ++i) {
+        state[i] = 0.3 + 0.1 * static_cast<svmp::FE::Real>(i);
+    }
+    svmp::FE::systems::SystemStateView view;
+    view.u = state;
+    const std::array<FormExpr, 2> forms{law(u.state).dx(),
+                                        (u.state * u.state * u.state + FormExpr::constant(2.0) * u.state).dx()};
+    const auto values = svmp::FE::systems::evaluateFunctionalForms(sys, forms, view,
+                                                                    svmp::FE::systems::CollectiveCommunicator{});
+    ASSERT_EQ(values.size(), 2u);
+    EXPECT_EQ(values[0].value, values[1].value);
+    EXPECT_GT(values[1].value, 0.0);
 }
 
 TEST(FESystem, DerivedMeshVelocityIsExcludedFromUnknownLayout)
