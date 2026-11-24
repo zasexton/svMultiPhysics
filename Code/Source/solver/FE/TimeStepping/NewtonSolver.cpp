@@ -10607,6 +10607,19 @@ NewtonReport NewtonSolver::solveStepFrozenExternalState(
                     << ", retry=" << (ptc_retries + 1) << "/" << options_.pseudo_transient.max_linear_retries << ")";
                 traceLog(oss.str());
             }
+            // Every activation is reported in the run log, with or without
+            // the trace, once (rank 0): the step, the Newton iteration, the
+            // shift and the failed linear solve that triggered it.
+            if (communicatorRank(system_communicator) == 0) {
+                std::ostringstream oss;
+                oss << "NewtonSolver: PTC activation diagnostic=ptc_activation step=" << history.stepIndex()
+                    << " newton_iteration=" << it << " gamma=" << ptc_gamma << " retry=" << (ptc_retries + 1)
+                    << "/" << options_.pseudo_transient.max_linear_retries
+                    << " trigger='linear solve did not converge' linear_relative_residual="
+                    << report.linear.relative_residual << " linear_iterations=" << report.linear.iterations
+                    << " linear_message='" << report.linear.message << "'";
+                FE_LOG_INFO(oss.str());
+            }
 
             applyPtcDiagonalShift(ptc_gamma);
 
