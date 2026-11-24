@@ -491,7 +491,9 @@ private:
 
 class TwoTetraSharedFaceMeshAccess final : public assembly::IMeshAccess {
 public:
-    explicit TwoTetraSharedFaceMeshAccess(Real scale = 1.0)
+    /// @p domain_ids are the domain ids (region labels) of cells 0 and 1.
+    explicit TwoTetraSharedFaceMeshAccess(Real scale = 1.0, std::array<int, 2> domain_ids = {0, 0})
+        : domain_ids_(domain_ids)
     {
         nodes_ = {
             {0.0, 0.0, 0.0},  // 0
@@ -516,6 +518,11 @@ public:
 
     [[nodiscard]] ElementType getCellType(GlobalIndex /*cell_id*/) const override {
         return ElementType::Tetra4;
+    }
+
+    [[nodiscard]] int getCellDomainId(GlobalIndex cell_id) const override
+    {
+        return domain_ids_.at(static_cast<std::size_t>(cell_id));
     }
 
     void getCellNodes(GlobalIndex cell_id, std::vector<GlobalIndex>& nodes) const override {
@@ -591,6 +598,7 @@ public:
 private:
     std::vector<std::array<Real, 3>> nodes_;
     std::vector<std::array<GlobalIndex, 4>> cells_;
+    std::array<int, 2> domain_ids_{};
 };
 
 class TwoTetraSharedFacePermutedPlusMeshAccess final : public assembly::IMeshAccess {

@@ -376,7 +376,7 @@ lowers to the tree of the untyped call (tested in
 |------------|-----------|
 | `.dx(VolumeDomain::full())`, `integrate(expr, VolumeDomain::full())` | `.dx()` |
 | `.dx(VolumeDomain::cut(m, side))` | `.dCutVolume(m, side)` |
-| `.dx(VolumeDomain::cells(k))` | `(eq(domainId(), k) * expr).dx()`: the cells of domain id (mesh region label) `k`; other cells integrate zero |
+| `.dx(VolumeDomain::cells(k))` | `(eq(domainId(), k) * expr).dx()`: the cells of domain id (mesh region label) `k`; other cells integrate zero. A multiplicative mask, not a selection of cells: `expr` is evaluated at every quadrature point of every cell and multiplied by 0 off domain `k`, so a coefficient that throws there throws, and one that is infinite or NaN there gives NaN (`0 * Inf`) in those rows (`test_IntegrationDomainLowering.cpp`). Write `expr` finite on every cell |
 | `I.trace(expr, VolumeDomain::cells(k))` with `I = systems::interfaceBetween(system, a, b, marker)` | `expr.minus()` or `expr.plus()`, the side of subdomain `k` on the fitted interface `marker` (`InterfaceBetween`; the interface mesh's orientation must put one subdomain on the minus side of every face, on every rank); see Interface Orientation |
 | `.dI(InterfaceDomain(m))` | `.dI(m)` |
 | `.dL(ContactLineDomain(m, wall))`, `dInterfaceBoundary(expr, ContactLineDomain)` | `.dI(m)` with the codimension-two generated rule |

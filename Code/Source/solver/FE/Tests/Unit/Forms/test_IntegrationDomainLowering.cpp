@@ -11,14 +11,23 @@
 
 #include <gtest/gtest.h>
 
+#include "Assembly/GlobalSystemView.h"
+#include "Assembly/StandardAssembler.h"
 #include "Forms/CutCellForms.h"
+#include "Forms/FormCompiler.h"
 #include "Forms/FormExpr.h"
+#include "Forms/FormKernels.h"
 #include "Forms/IntegrationDomain.h"
 #include "Forms/Vocabulary.h"
 #include "Spaces/H1Space.h"
+#include "Spaces/L2Space.h"
 #include "Spaces/ProductSpace.h"
 #include "Systems/SystemManifest.h"
+#include "Tests/Unit/Forms/FormsTestHelpers.h"
 
+#include <array>
+#include <cmath>
+#include <limits>
 #include <memory>
 #include <stdexcept>
 
@@ -58,6 +67,59 @@ TEST(IntegrationDomainLowering, VolumeDomainsLowerToDxAndDCutVolume)
     EXPECT_NE(systems::formExprTreeHash(integrand.dx(VolumeDomain::cut(7, CutVolumeSide::Negative))),
               systems::formExprTreeHash(integrand.dx(VolumeDomain::cut(7, CutVolumeSide::Positive))));
     EXPECT_THROW((void)VolumeDomain::cut(-1, CutVolumeSide::Negative), std::invalid_argument);
+}
+
+/**
+ * expr.dx(VolumeDomain::cells(k)) is the mask (eq(domainId(), k) * expr).dx():
+ * the integrand is evaluated at every quadrature point of every cell and
+ * multiplied by 0 off the domain.  On two tetrahedra of domain ids 1 and 2, a
+ * coefficient that is finite everywhere integrates on domain 1 only; one that
+ * throws on domain 2 throws, and one that is infinite there gives 0 * Inf =
+ * NaN in the row of domain 2.
+ */
+TEST(IntegrationDomainLowering, CellsDomainIsAMaskEvaluatedOnEveryCell)
+{
+    TwoTetraSharedFaceMeshAccess mesh(1.0, {1, 2});
+    spaces::L2Space space(ElementType::Tetra4, 0);
+    dofs::DofMap dof_map(2, 2, 1);
+    dof_map.setCellDofs(0, std::vector<GlobalIndex>{0});
+    dof_map.setCellDofs(1, std::vector<GlobalIndex>{1});
+    dof_map.setNumDofs(2);
+    dof_map.setNumLocalDofs(2);
+    dof_map.finalize();
+
+    const auto v = FormExpr::testFunction(space, "v");
+    const auto rows = [&](const ScalarCoefficient& k) {
+        FormCompiler compiler;
+        FormKernel kernel(compiler.compileLinear(
+            (FormExpr::coefficient("k", k) * v).dx(VolumeDomain::cells(1))));
+        assembly::StandardAssembler assembler;
+        assembler.setDofMap(dof_map);
+        assembly::DenseVectorView R(2);
+        R.zero();
+        (void)assembler.assembleVector(mesh, space, kernel, R);
+        return std::array<Real, 2>{R.getVectorEntry(0), R.getVectorEntry(1)};
+    };
+    // Cell 0 lies in x + y + z < 1, cell 1 in x + y + z > 1.
+    const auto on_domain_1 = [](Real x, Real y, Real z) { return x + y + z < 1.0; };
+
+    const auto finite = rows([](Real, Real, Real) { return 2.0; });
+    EXPECT_NEAR(finite[0], 2.0 / 6.0, 1e-14);
+    EXPECT_EQ(finite[1], 0.0);
+
+    EXPECT_THROW((void)rows([&](Real x, Real y, Real z) -> Real {
+                     if (!on_domain_1(x, y, z)) {
+                         throw std::domain_error("k is defined on domain 1 only");
+                     }
+                     return 2.0;
+                 }),
+                 std::exception);
+
+    const auto singular = rows([&](Real x, Real y, Real z) {
+        return on_domain_1(x, y, z) ? 2.0 : std::numeric_limits<Real>::infinity();
+    });
+    EXPECT_NEAR(singular[0], 2.0 / 6.0, 1e-14);
+    EXPECT_TRUE(std::isnan(singular[1]));
 }
 
 TEST(IntegrationDomainLowering, InterfaceAndContactLineDomainsLowerToDI)
