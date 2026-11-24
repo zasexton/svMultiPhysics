@@ -435,6 +435,7 @@ void AssemblyContext::configureFace(
     cell_domain_id_ = 0;
     face_id_ = face_id;
     local_face_id_ = local_face_id;
+    boundary_marker_ = -1;
     interior_face_marker_ = -1;
     required_data_ = required_data;
 
@@ -496,6 +497,7 @@ void AssemblyContext::configureFace(
     cell_domain_id_ = 0;
     face_id_ = face_id;
     local_face_id_ = local_face_id;
+    boundary_marker_ = -1;
     interior_face_marker_ = -1;
     required_data_ = required_data;
 

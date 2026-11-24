@@ -1559,6 +1559,26 @@ TEST(AssemblyContextErrors, NormalForCellContext) {
     EXPECT_THROW(ctx.normal(0), std::logic_error);
 }
 
+// A context reused from an exterior face for an interior face must not keep
+// the exterior boundary marker: an interior face has none.
+TEST(AssemblyContextFaces, InteriorFaceDoesNotKeepThePrecedingBoundaryMarker)
+{
+    spaces::H1Space space(ElementType::Tetra4, 1);
+    AssemblyContext ctx;
+    ctx.reserve(4, 4, 3);
+    ctx.configureFace(/*face_id=*/3, /*cell_id=*/0, /*local_face_id=*/1, space, space, RequiredData::None,
+                      ContextType::BoundaryFace);
+    ctx.setBoundaryMarker(41);
+    ASSERT_EQ(ctx.boundaryMarker(), 41);
+    ctx.configureFace(/*face_id=*/7, /*cell_id=*/0, /*local_face_id=*/2, space, space, RequiredData::None,
+                      ContextType::InteriorFace);
+    EXPECT_EQ(ctx.boundaryMarker(), -1);
+    ctx.setBoundaryMarker(41);
+    ctx.configureFace(/*face_id=*/7, /*cell_id=*/0, /*local_face_id=*/2, space.element(), RequiredData::None,
+                      ContextType::InteriorFace);
+    EXPECT_EQ(ctx.boundaryMarker(), -1);
+}
+
 } // namespace test
 } // namespace assembly
 } // namespace FE
