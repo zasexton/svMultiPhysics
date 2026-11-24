@@ -7,6 +7,8 @@
 
 #include "Analysis/ConstraintRangeCertificate.h"
 
+#include "Analysis/RowContributionObserver.h"
+
 #include "Assembly/CutIntegrationContext.h"
 #include "Assembly/GlobalSystemView.h"
 #include "Backends/Interfaces/BackendFactory.h"
@@ -1393,8 +1395,11 @@ ConstraintRangeStorage* findConstraintRangeStorage(timestepping::NewtonWorkspace
     return nullptr;
 }
 
-ConstraintRangeCertificate::ConstraintRangeCertificate(ConstraintRangeMethod method)
-    : method_(std::move(method))
+ConstraintRangeCertificate::ConstraintRangeCertificate(
+    std::optional<ConstraintRangeDeclaration> declaration,
+    ConstraintRangeMethod method)
+    : declaration_(std::move(declaration))
+    , method_(std::move(method))
     , state_(std::make_unique<State>())
 {
     const bool defer_threshold_validation = mpiMultiTaskActive();
@@ -1433,11 +1438,9 @@ std::unique_ptr<timestepping::NewtonExtensionStorage> ConstraintRangeCertificate
     const timestepping::NewtonStorageContext& context) const
 {
     const auto& system = context.system;
-    const auto* declaration =
-        systems::findDiagnosticDeclaration<ConstraintRangeDeclaration>(system);
     bool allocate_pair =
         constraintRangeMethodRequested(method_) &&
-        declaration != nullptr && declaration->pair.installedOn(system);
+        declaration_.has_value() && declaration_->pair.installedOn(system);
 #if FE_HAS_MPI
     {
         int initialized = 0;
@@ -1459,7 +1462,7 @@ std::unique_ptr<timestepping::NewtonExtensionStorage> ConstraintRangeCertificate
     // The pair matrix first and its vectors immediately after it, so they
     // take the pair layout; the solver builds the production Jacobian last.
     auto storage = std::make_unique<ConstraintRangeStorage>();
-    storage->pair = createPairMatrix(context, declaration->pair.tag);
+    storage->pair = createPairMatrix(context, declaration_->pair.tag);
     storage->vectors.recreate(context.factory, system.dofHandler().getNumDofs());
     FE_CHECK_NOT_NULL(storage->pair.get(),
                       "NewtonSolver workspace.pressure_representability_pair_matrix");
@@ -1482,13 +1485,11 @@ void ConstraintRangeCertificate::refreshStorage(const timestepping::NewtonStorag
     // vectors.
     const auto& system = context.system;
     const auto& factory = context.factory;
-    const auto* declaration =
-        systems::findDiagnosticDeclaration<ConstraintRangeDeclaration>(system);
     FE_THROW_IF(
-        declaration == nullptr || !declaration->pair.installedOn(system),
+        !declaration_.has_value() || !declaration_->pair.installedOn(system),
         systems::InvalidStateException,
         "NewtonSolver: pressure-representability pair operator disappeared during a sparsity refresh");
-    const std::string& pair_op = declaration->pair.tag;
+    const std::string& pair_op = declaration_->pair.tag;
     const auto* pair_dist = system.distributedSparsityIfAvailable(pair_op);
     const bool use_pair_distributed =
         pair_dist != nullptr && factory.backendKind() != backends::BackendKind::Eigen;
@@ -1732,8 +1733,8 @@ void ConstraintRangeCertificate::observe(timestepping::NewtonObservation& observ
     // The formulation declares the fields and the six sampled
     // operators plus the symmetric pair of the certificate in the
     // system's diagnostic registry; it installs them only on request.
-    const auto* declaration = systems::findDiagnosticDeclaration<
-        analysis::ConstraintRangeDeclaration>(transient.system());
+    const auto* declaration =
+        declaration_.has_value() ? &*declaration_ : nullptr;
     if (!allRanks(declaration != nullptr)) {
         report.range.reason =
             "conservative_balance_operator_unavailable";
@@ -2966,17 +2967,6 @@ void ConstraintRangeCertificate::reportApplied(const systems::FESystem& system,
                    "additive_initial_guess_within_threshold");
 }
 
-void installConstraintRangeCertificate(timestepping::NewtonExtensions& extensions,
-                                       const std::shared_ptr<ConstraintRangeCertificate>& certificate)
-{
-    if (!certificate) {
-        return;
-    }
-    extensions.observers.push_back(certificate);
-    extensions.acceptance_checks.push_back(certificate);
-    extensions.initializers.push_back(certificate);
-}
-
 ConstraintRangeProbeEvidence ConstraintRangeCertificate::probeEvidence(
     const timestepping::NewtonReport& report,
     const systems::FESystem& system,
@@ -3094,11 +3084,57 @@ ConstraintRangeProbeEvidence ConstraintRangeCertificate::probeEvidence(
     return evidence;
 }
 
+NewtonAnalysisMethod newtonAnalysisMethodFromEnvironment()
+{
+    NewtonAnalysisMethod method;
+    method.observe_field_residual = fieldResidualObserverSwitchedOn();
+    method.observe_row_contributions = rowContributionObserverSwitchedOn();
+    method.constraint_range = constraintRangeMethodFromEnvironment();
+    return method;
+}
+
+namespace {
+
+/// The first declaration of type Declaration of the formulations of
+/// @p system, or none.
+template <class Declaration>
+[[nodiscard]] std::optional<Declaration> declarationOf(const systems::FESystem& system)
+{
+    const auto* declaration = systems::findDiagnosticDeclaration<Declaration>(system);
+    return declaration != nullptr ? std::optional<Declaration>(*declaration) : std::nullopt;
+}
+
+} // namespace
+
+NewtonAnalysisExtensions buildNewtonAnalysisExtensions(
+    const systems::FESystem& system,
+    const NewtonAnalysisMethod& method)
+{
+    NewtonAnalysisExtensions analysis;
+    auto& extensions = analysis.extensions;
+    if (method.observe_field_residual) {
+        extensions.observers.push_back(std::make_shared<FieldResidualObserver>());
+    }
+    if (method.observe_row_contributions) {
+        extensions.observers.push_back(std::make_shared<RowContributionObserver>(
+            declarationOf<RowContributionDeclaration>(system)));
+    }
+    if (constraintRangeMethodRequested(method.constraint_range)) {
+        auto certificate = std::make_shared<ConstraintRangeCertificate>(
+            declarationOf<ConstraintRangeDeclaration>(system), method.constraint_range);
+        extensions.observers.push_back(certificate);
+        extensions.acceptance_checks.push_back(certificate);
+        extensions.initializers.push_back(certificate);
+        analysis.constraint_range = std::move(certificate);
+    }
+    return analysis;
+}
+
 timestepping::NewtonOptions constraintRangeProbeOptions(
     const systems::OperatorTag& op,
-    const std::shared_ptr<ConstraintRangeCertificate>& certificate,
-    std::vector<std::shared_ptr<timestepping::NewtonObserver>> observers)
+    const NewtonAnalysisExtensions& analysis)
 {
+    const auto& certificate = analysis.constraint_range;
     FE_CHECK_NOT_NULL(certificate.get(), "constraintRangeProbeOptions: certificate");
     timestepping::NewtonOptions options;
     options.residual_op = op;
@@ -3112,18 +3148,8 @@ timestepping::NewtonOptions constraintRangeProbeOptions(
     options.assemble_both_when_possible = false;
     options.initial_residual_only_certificate = !certificate->enabled();
     options.external_state_fixed_point.enabled = false;
-    options.extensions.observers = std::move(observers);
-    installConstraintRangeCertificate(options.extensions, certificate);
+    options.extensions = analysis.extensions;
     return options;
-}
-
-std::shared_ptr<ConstraintRangeCertificate> environmentConstraintRangeCertificate()
-{
-    auto method = constraintRangeMethodFromEnvironment();
-    if (!constraintRangeMethodRequested(method)) {
-        return nullptr;
-    }
-    return std::make_shared<ConstraintRangeCertificate>(std::move(method));
 }
 
 } // namespace analysis

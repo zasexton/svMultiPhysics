@@ -3362,17 +3362,20 @@ TEST(TimeLoopFsilsConvergenceMPI,
     ASSERT_TRUE(permutation);
     backends::FsilsFactory factory(dof_per_node, permutation);
 
-    // Each rank installs a constraint-range certificate with its own method;
-    // the policies must agree before any collective of the certificate.
+    // Each rank installs a constraint-range certificate with its own method,
+    // also one that requests nothing (the system declares none); the
+    // policies must agree before any collective of the certificate.
     const auto require_collective_rejection =
         [&](analysis::ConstraintRangeMethod method,
             bool initialized,
             std::string_view expected_reason) {
-            timestepping::NewtonOptions options;
-            analysis::installConstraintRangeCertificate(
-                options.extensions,
+            const auto certificate =
                 std::make_shared<analysis::ConstraintRangeCertificate>(
-                    std::move(method)));
+                    std::nullopt, std::move(method));
+            timestepping::NewtonOptions options;
+            options.extensions.observers = {certificate};
+            options.extensions.acceptance_checks = {certificate};
+            options.extensions.initializers = {certificate};
             timestepping::NewtonSolver newton(std::move(options));
             timestepping::NewtonWorkspace workspace;
             if (initialized) {
@@ -3527,12 +3530,12 @@ TEST(TimeLoopFsilsConvergenceMPI,
     int synchronization_calls = 0;
     timestepping::NewtonOptions divergent_options =
         baseline_options;
-    analysis::installConstraintRangeCertificate(
-        divergent_options.extensions,
-        std::make_shared<analysis::ConstraintRangeCertificate>(
-            analysis::ConstraintRangeMethod{
-                .max_range_distance = 1.0e-10,
-                .initialize_constraint_field = rank == 0}));
+    divergent_options.extensions =
+        analysis::buildNewtonAnalysisExtensions(
+            *sys,
+            {.constraint_range = {.max_range_distance = 1.0e-10,
+                                  .initialize_constraint_field = rank == 0}})
+            .extensions;
     divergent_options.synchronize_state =
         [&](const systems::SystemStateView&,
             timestepping::NewtonOptions::StateSynchronizationPoint) {

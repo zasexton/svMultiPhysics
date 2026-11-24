@@ -18,14 +18,17 @@
  * that field and of the field its rows couple to.  RowContributionObserver
  * samples them at every residual assembly of a Newton solve; the
  * FieldResidualObserver samples the constrained residual itself.  Both are
- * switched on by the environment (environmentResidualObservers), and their
- * log lines are those the Newton solver printed before they left it.
+ * switched on by the environment (fieldResidualObserverSwitchedOn,
+ * rowContributionObserverSwitchedOn) and installed with the other analysis
+ * extensions of a solve (buildNewtonAnalysisExtensions), and their log
+ * lines are those the Newton solver printed before they left it.
  */
 
 #include "Systems/DiagnosticRegistry.h"
 #include "TimeStepping/NewtonSolver.h"
 
 #include <memory>
+#include <optional>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -60,8 +63,15 @@ public:
 /// matrix switch, a scratch matrix of the Jacobian pattern) and logs its
 /// contribution to the rows of the declared field before and after the
 /// constrained rows are zeroed, with matrix support and summary samples.
+/// Without a declaration it observes nothing.
 class RowContributionObserver final : public timestepping::NewtonObserver {
 public:
+    /// The observer of the rows @p declaration states (none when empty).
+    explicit RowContributionObserver(std::optional<RowContributionDeclaration> declaration)
+        : declaration_(std::move(declaration))
+    {
+    }
+
     [[nodiscard]] std::string_view id() const override { return "row_contribution"; }
     [[nodiscard]] int storageOrder() const noexcept override { return 1; }
     [[nodiscard]] std::unique_ptr<timestepping::NewtonExtensionStorage> allocate(
@@ -70,14 +80,19 @@ public:
                         timestepping::NewtonExtensionStorage* storage,
                         bool after_production) const override;
     void observe(timestepping::NewtonObservation& observation) override;
+
+private:
+    std::optional<RowContributionDeclaration> declaration_;
 };
 
-/// The observers the environment switches on, in observation order: the
-/// field-residual observer (SVMP_NEWTON_FIELD_RESIDUAL_DIAGNOSTIC or a
-/// row-contribution switch), then the row-contribution observer
+/// Whether the environment switches on the field-residual observer
+/// (SVMP_NEWTON_FIELD_RESIDUAL_DIAGNOSTIC or a row-contribution switch).
+[[nodiscard]] bool fieldResidualObserverSwitchedOn() noexcept;
+
+/// Whether the environment switches on the row-contribution observer
 /// (SVMP_NS_PRESSURE_ROW_CONTRIBUTION_DIAGNOSTIC or
 /// SVMP_PRESSURE_ROW_CONTRIBUTION_DIAGNOSTIC).
-[[nodiscard]] std::vector<std::shared_ptr<timestepping::NewtonObserver>> environmentResidualObservers();
+[[nodiscard]] bool rowContributionObserverSwitchedOn() noexcept;
 
 } // namespace analysis
 } // namespace FE

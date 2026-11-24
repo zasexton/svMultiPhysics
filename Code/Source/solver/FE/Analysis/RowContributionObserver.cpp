@@ -1189,11 +1189,10 @@ void RowContributionObserver::observe(timestepping::NewtonObservation& observati
         return;
     }
     auto& transient = observation.transient;
-    const auto* rows = systems::findDiagnosticDeclaration<
-        RowContributionDeclaration>(transient.system());
-    if (rows == nullptr) {
+    if (!declaration_.has_value()) {
         return;
     }
+    const auto* rows = &*declaration_;
     const char* phase = observation.phase;
     const auto sync_point = observation.sync_point;
     auto& residual_scratch = observation.scratch;
@@ -1308,16 +1307,14 @@ void RowContributionObserver::observe(timestepping::NewtonObservation& observati
     }
 }
 
-std::vector<std::shared_ptr<timestepping::NewtonObserver>> environmentResidualObservers()
+bool fieldResidualObserverSwitchedOn() noexcept
 {
-    std::vector<std::shared_ptr<timestepping::NewtonObserver>> observers;
-    if (newtonFieldResidualDiagnosticEnabled()) {
-        observers.push_back(std::make_shared<FieldResidualObserver>());
-    }
-    if (pressureRowContributionDiagnosticEnabled()) {
-        observers.push_back(std::make_shared<RowContributionObserver>());
-    }
-    return observers;
+    return newtonFieldResidualDiagnosticEnabled();
+}
+
+bool rowContributionObserverSwitchedOn() noexcept
+{
+    return pressureRowContributionDiagnosticEnabled();
 }
 
 } // namespace analysis

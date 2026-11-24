@@ -313,10 +313,11 @@ struct FreeSurfaceConservativeBalanceKernelCounts {
 // The certificate that a solver built from options installed before the
 // certificate left the solver: the environment gates (the diagnostic switch
 // always; thresholds and initializer when the environment is read), then
-// the test's explicit thresholds and initializer.  Installs nothing when
-// none of them requests the certificate.
+// the test's explicit thresholds and initializer, for the declaration of
+// @p system.  Installs nothing when none of them requests the certificate.
 std::shared_ptr<svmp::FE::analysis::ConstraintRangeCertificate> installTestCertificate(
     svmp::FE::timestepping::NewtonOptions& options,
+    const svmp::FE::systems::FESystem& system,
     const svmp::FE::analysis::ConstraintRangeMethod& explicit_method = {},
     bool read_environment = true)
 {
@@ -332,13 +333,15 @@ std::shared_ptr<svmp::FE::analysis::ConstraintRangeCertificate> installTestCerti
     }
     method.initialize_constraint_field =
         method.initialize_constraint_field || explicit_method.initialize_constraint_field;
-    if (!svmp::FE::analysis::constraintRangeMethodRequested(method)) {
-        return nullptr;
-    }
-    auto certificate =
-        std::make_shared<svmp::FE::analysis::ConstraintRangeCertificate>(std::move(method));
-    svmp::FE::analysis::installConstraintRangeCertificate(options.extensions, certificate);
-    return certificate;
+    auto analysis = svmp::FE::analysis::buildNewtonAnalysisExtensions(
+        system, {.constraint_range = std::move(method)});
+    const auto append = [](auto& installed, const auto& built) {
+        installed.insert(installed.end(), built.begin(), built.end());
+    };
+    append(options.extensions.observers, analysis.extensions.observers);
+    append(options.extensions.acceptance_checks, analysis.extensions.acceptance_checks);
+    append(options.extensions.initializers, analysis.extensions.initializers);
+    return analysis.constraint_range;
 }
 
 // The certificate's storage in a workspace (an empty one when it has none).
@@ -2601,7 +2604,7 @@ struct CapturedPressureDiagnostic {
     options.abs_tolerance = 1.0e-14;
     options.rel_tolerance = 0.0;
     options.use_line_search = false;
-    installTestCertificate(options);
+    installTestCertificate(options, *problem.sys);
     svmp::FE::timestepping::NewtonSolver newton(options);
     svmp::FE::timestepping::NewtonWorkspace workspace;
     newton.allocateWorkspace(
@@ -7291,7 +7294,7 @@ TEST(NewtonSolver,
 
     ScopedEnvVar enable_balance(
         "SVMP_NS_FREE_SURFACE_CONSERVATIVE_BALANCE_DIAGNOSTIC", "1");
-    installTestCertificate(nopt);
+    installTestCertificate(nopt, *problem.sys);
     svmp::FE::timestepping::NewtonSolver newton(nopt);
     svmp::FE::timestepping::NewtonWorkspace workspace;
     newton.allocateWorkspace(*problem.sys, *problem.factory, workspace);
@@ -7349,7 +7352,7 @@ TEST(NewtonSolver,
     options.line_search_max_iterations = 1;
     options.accepted_state_sync_invalidates_residual = true;
 
-    installTestCertificate(options);
+    installTestCertificate(options, *problem.sys);
     svmp::FE::timestepping::NewtonSolver newton(options);
     svmp::FE::timestepping::NewtonWorkspace workspace;
     newton.allocateWorkspace(
@@ -7456,7 +7459,7 @@ TEST(NewtonSolver,
     options.line_search_max_iterations = 1;
     options.accepted_state_sync_invalidates_residual = true;
 
-    installTestCertificate(options);
+    installTestCertificate(options, *problem.sys);
     svmp::FE::timestepping::NewtonSolver newton(options);
     svmp::FE::timestepping::NewtonWorkspace workspace;
     newton.allocateWorkspace(*problem.sys, *problem.factory, workspace);
@@ -7551,7 +7554,7 @@ TEST(NewtonSolver,
     options.line_search_max_iterations = 1;
     options.accepted_state_sync_invalidates_residual = true;
 
-    installTestCertificate(options);
+    installTestCertificate(options, *problem.sys);
     svmp::FE::timestepping::NewtonSolver newton(options);
     svmp::FE::timestepping::NewtonWorkspace workspace;
     newton.allocateWorkspace(*problem.sys, *problem.factory, workspace);
@@ -7641,7 +7644,7 @@ TEST(NewtonSolver,
     options.line_search_max_iterations = 1;
     options.accepted_state_sync_invalidates_residual = true;
 
-    installTestCertificate(options);
+    installTestCertificate(options, *problem.sys);
     svmp::FE::timestepping::NewtonSolver newton(options);
     svmp::FE::timestepping::NewtonWorkspace workspace;
     newton.allocateWorkspace(
@@ -7718,7 +7721,7 @@ TEST(NewtonSolver,
     options.rel_tolerance = 0.0;
     options.use_line_search = false;
 
-    installTestCertificate(options);
+    installTestCertificate(options, *problem.sys);
     svmp::FE::timestepping::NewtonSolver newton(options);
     svmp::FE::timestepping::NewtonWorkspace workspace;
     newton.allocateWorkspace(
@@ -7950,7 +7953,7 @@ TEST(NewtonSolver,
     options.abs_tolerance = 1.0e-14;
     options.rel_tolerance = 0.0;
     options.use_line_search = false;
-    installTestCertificate(options);
+    installTestCertificate(options, *problem.sys);
     svmp::FE::timestepping::NewtonSolver newton(options);
     svmp::FE::timestepping::NewtonWorkspace workspace;
     newton.allocateWorkspace(*problem.sys, *problem.factory, workspace);
@@ -8213,7 +8216,7 @@ TEST(NewtonSolver,
     options.rel_tolerance = 0.0;
     options.use_line_search = false;
 
-    installTestCertificate(options);
+    installTestCertificate(options, *problem.sys);
     svmp::FE::timestepping::NewtonSolver newton(options);
     svmp::FE::timestepping::NewtonWorkspace workspace;
     newton.allocateWorkspace(
@@ -8295,7 +8298,7 @@ TEST(NewtonSolver,
     options.rel_tolerance = 0.0;
     options.use_line_search = false;
 
-    installTestCertificate(options);
+    installTestCertificate(options, *problem.sys);
     svmp::FE::timestepping::NewtonSolver newton(options);
     svmp::FE::timestepping::NewtonWorkspace workspace;
     newton.allocateWorkspace(
@@ -8355,7 +8358,7 @@ TEST(NewtonSolver,
     options.rel_tolerance = 0.0;
     options.use_line_search = false;
 
-    installTestCertificate(options);
+    installTestCertificate(options, *problem.sys);
     svmp::FE::timestepping::NewtonSolver newton(options);
     svmp::FE::timestepping::NewtonWorkspace workspace;
     newton.allocateWorkspace(
@@ -8432,7 +8435,7 @@ TEST(NewtonSolver,
     options.abs_tolerance = 1.0e-14;
     options.rel_tolerance = 0.0;
     options.use_line_search = false;
-    installTestCertificate(options, {.max_range_distance = 1.0e-10, .max_constant_field_kkt_distance = 1.0e-10});
+    installTestCertificate(options, *problem.sys, {.max_range_distance = 1.0e-10, .max_constant_field_kkt_distance = 1.0e-10});
     svmp::FE::timestepping::NewtonSolver newton(options);
     svmp::FE::timestepping::NewtonWorkspace workspace;
     newton.allocateWorkspace(
@@ -8515,7 +8518,7 @@ TEST(NewtonSolver,
     options.abs_tolerance = 1.0e-14;
     options.rel_tolerance = 0.0;
     options.use_line_search = false;
-    installTestCertificate(options, {.max_range_distance = 1.0e-10, .max_constant_field_kkt_distance = 1.0e-10});
+    installTestCertificate(options, *problem.sys, {.max_range_distance = 1.0e-10, .max_constant_field_kkt_distance = 1.0e-10});
     svmp::FE::timestepping::NewtonSolver newton(options);
     svmp::FE::timestepping::NewtonWorkspace workspace;
     newton.allocateWorkspace(
@@ -8588,7 +8591,7 @@ TEST(NewtonSolver,
                 point == SyncPoint::JacobianAndResidualAssembly ? 1 : 0;
         };
 
-    installTestCertificate(options, {.max_constant_field_kkt_distance = 1.0e-10}, /*read_environment=*/false);
+    installTestCertificate(options, *problem.sys, {.max_constant_field_kkt_distance = 1.0e-10}, /*read_environment=*/false);
     svmp::FE::timestepping::NewtonSolver newton(options);
     svmp::FE::timestepping::NewtonWorkspace workspace;
     newton.allocateWorkspace(
@@ -8644,7 +8647,7 @@ TEST(NewtonSolver,
     options.abs_tolerance = 1.0e-14;
     options.rel_tolerance = 0.0;
     options.use_line_search = false;
-    installTestCertificate(options, {.max_constant_field_kkt_distance = 0.1});
+    installTestCertificate(options, *problem.sys, {.max_constant_field_kkt_distance = 0.1});
     svmp::FE::timestepping::NewtonSolver newton(options);
     svmp::FE::timestepping::NewtonWorkspace workspace;
     newton.allocateWorkspace(
@@ -8719,7 +8722,7 @@ TEST(NewtonSolver,
     options.abs_tolerance = 1.0e-14;
     options.rel_tolerance = 0.0;
     options.use_line_search = false;
-    installTestCertificate(options, {.max_constant_field_kkt_distance = 0.5});
+    installTestCertificate(options, *problem.sys, {.max_constant_field_kkt_distance = 0.5});
     svmp::FE::timestepping::NewtonSolver newton(options);
     svmp::FE::timestepping::NewtonWorkspace workspace;
     newton.allocateWorkspace(
@@ -8764,10 +8767,11 @@ TEST(NewtonSolver,
 {
     EXPECT_THROW(
         svmp::FE::analysis::ConstraintRangeCertificate(
-            {.max_constant_field_kkt_distance = -1.0}),
+            std::nullopt, {.max_constant_field_kkt_distance = -1.0}),
         svmp::FE::InvalidArgumentException);
     EXPECT_THROW(
         svmp::FE::analysis::ConstraintRangeCertificate(
+            std::nullopt,
             {.max_constant_field_kkt_distance =
                  std::numeric_limits<double>::quiet_NaN()}),
         svmp::FE::InvalidArgumentException);
@@ -8804,7 +8808,7 @@ TEST(NewtonSolver,
     options.rel_tolerance = 0.0;
     options.use_line_search = false;
 
-    installTestCertificate(options);
+    installTestCertificate(options, *problem.sys);
     svmp::FE::timestepping::NewtonSolver newton(options);
     svmp::FE::timestepping::NewtonWorkspace workspace;
     newton.allocateWorkspace(
@@ -8934,7 +8938,7 @@ TEST(NewtonSolver,
     options.rel_tolerance = 0.0;
     options.use_line_search = false;
 
-    installTestCertificate(options);
+    installTestCertificate(options, *problem.sys);
     svmp::FE::timestepping::NewtonSolver newton(options);
     svmp::FE::timestepping::NewtonWorkspace workspace;
     newton.allocateWorkspace(
@@ -8993,7 +8997,7 @@ TEST(NewtonSolver,
     options.rel_tolerance = 0.0;
     options.use_line_search = false;
 
-    installTestCertificate(options, {.max_range_distance = 1.0e-9});
+    installTestCertificate(options, *problem.sys, {.max_range_distance = 1.0e-9});
     svmp::FE::timestepping::NewtonSolver newton(options);
     svmp::FE::timestepping::NewtonWorkspace workspace;
     newton.allocateWorkspace(
@@ -9060,7 +9064,7 @@ TEST(NewtonSolver,
     options.abs_tolerance = 1.0e-14;
     options.rel_tolerance = 0.0;
     options.use_line_search = false;
-    installTestCertificate(options);
+    installTestCertificate(options, *problem.sys);
     svmp::FE::timestepping::NewtonSolver newton(options);
     svmp::FE::timestepping::NewtonWorkspace workspace;
     newton.allocateWorkspace(
@@ -9164,7 +9168,7 @@ TEST(NewtonSolver,
     options.abs_tolerance = 1.0e-14;
     options.rel_tolerance = 0.0;
     options.use_line_search = false;
-    installTestCertificate(options, {.max_range_distance = 1.0e-10});
+    installTestCertificate(options, *problem.sys, {.max_range_distance = 1.0e-10});
     svmp::FE::timestepping::NewtonSolver newton(options);
     svmp::FE::timestepping::NewtonWorkspace workspace;
     newton.allocateWorkspace(
@@ -9236,7 +9240,7 @@ TEST(NewtonSolver,
     options.abs_tolerance = 1.0e-14;
     options.rel_tolerance = 0.0;
     options.use_line_search = false;
-    installTestCertificate(options, {.max_range_distance = 0.5});
+    installTestCertificate(options, *problem.sys, {.max_range_distance = 0.5});
     svmp::FE::timestepping::NewtonSolver newton(options);
     svmp::FE::timestepping::NewtonWorkspace workspace;
     newton.allocateWorkspace(
@@ -9309,7 +9313,7 @@ TEST(NewtonSolver,
     options.abs_tolerance = 1.0e-14;
     options.rel_tolerance = 0.0;
     options.use_line_search = false;
-    installTestCertificate(options, {.max_range_distance = 0.5});
+    installTestCertificate(options, *problem.sys, {.max_range_distance = 0.5});
     svmp::FE::timestepping::NewtonSolver newton(options);
     svmp::FE::timestepping::NewtonWorkspace workspace;
     newton.allocateWorkspace(
@@ -9365,11 +9369,12 @@ TEST(NewtonSolver, ConstraintRangeProbeReportsFiniteRankUniformEvidence)
     auto problem = makePressureRepresentabilityProblem(diagnostic_counts);
     const auto entry_state = ts_test::getVectorByDof(problem.history.u());
 
-    auto certificate =
-        std::make_shared<svmp::FE::analysis::ConstraintRangeCertificate>(
-            svmp::FE::analysis::ConstraintRangeMethod{.max_range_distance = 0.5});
+    const auto analysis = svmp::FE::analysis::buildNewtonAnalysisExtensions(
+        *problem.sys, {.constraint_range = {.max_range_distance = 0.5}});
+    const auto& certificate = analysis.constraint_range;
+    ASSERT_NE(certificate, nullptr);
     // The probe observes the supplied state and changes nothing.
-    auto options = svmp::FE::analysis::constraintRangeProbeOptions("op", certificate, {});
+    auto options = svmp::FE::analysis::constraintRangeProbeOptions("op", analysis);
     EXPECT_TRUE(options.initial_residual_only_certificate);
     EXPECT_EQ(options.max_iterations, 1);
     EXPECT_FALSE(options.use_line_search);
@@ -9427,7 +9432,7 @@ TEST(NewtonSolver,
 {
     EXPECT_THROW(
         svmp::FE::analysis::ConstraintRangeCertificate(
-            {.initialize_constraint_field = true}),
+            std::nullopt, {.initialize_constraint_field = true}),
         svmp::FE::InvalidArgumentException);
     RecordProperty(
         "static_compatible_pressure_initializer_missing_gate_reject_count",
@@ -9464,7 +9469,7 @@ TEST(NewtonSolver,
     options.abs_tolerance = 1.0e-13;
     options.rel_tolerance = 0.0;
     options.use_line_search = false;
-    installTestCertificate(options, {.max_range_distance = 1.0e-10, .initialize_constraint_field = true});
+    installTestCertificate(options, *problem.sys, {.max_range_distance = 1.0e-10, .initialize_constraint_field = true});
     svmp::FE::timestepping::NewtonSolver newton(options);
     svmp::FE::timestepping::NewtonWorkspace workspace;
     newton.allocateWorkspace(
@@ -9693,7 +9698,7 @@ TEST(NewtonSolver,
     options.abs_tolerance = 100.0;
     options.rel_tolerance = 0.0;
     options.use_line_search = false;
-    installTestCertificate(options, {.max_range_distance = 1.0e-12, .initialize_constraint_field = true});
+    installTestCertificate(options, *problem.sys, {.max_range_distance = 1.0e-12, .initialize_constraint_field = true});
     svmp::FE::timestepping::NewtonSolver newton(options);
     svmp::FE::timestepping::NewtonWorkspace workspace;
     newton.allocateWorkspace(
@@ -9760,7 +9765,7 @@ TEST(NewtonSolver,
     options.abs_tolerance = 1.0e-13;
     options.rel_tolerance = 0.0;
     options.use_line_search = false;
-    installTestCertificate(options, {.max_range_distance = 1.0e-10, .initialize_constraint_field = true});
+    installTestCertificate(options, *problem.sys, {.max_range_distance = 1.0e-10, .initialize_constraint_field = true});
     svmp::FE::timestepping::NewtonSolver one_iteration_newton(options);
     svmp::FE::timestepping::NewtonWorkspace workspace;
     one_iteration_newton.allocateWorkspace(
@@ -9956,7 +9961,7 @@ TEST(NewtonSolver,
                 "synthetic post-pressure-initial-guess synchronization failure");
         };
 
-    installTestCertificate(options, {.max_range_distance = 1.0e-10, .initialize_constraint_field = true});
+    installTestCertificate(options, *problem.sys, {.max_range_distance = 1.0e-10, .initialize_constraint_field = true});
     svmp::FE::timestepping::NewtonSolver newton(options);
     svmp::FE::timestepping::NewtonWorkspace workspace;
     newton.allocateWorkspace(
@@ -10076,7 +10081,7 @@ TEST(NewtonSolver,
             return candidate_checks > 1;
         };
 
-    installTestCertificate(loop_options.newton, {.max_range_distance = 1.0e-10, .initialize_constraint_field = true});
+    installTestCertificate(loop_options.newton, *problem.sys, {.max_range_distance = 1.0e-10, .initialize_constraint_field = true});
     svmp::FE::timestepping::TimeLoop loop(loop_options);
     const auto loop_report = loop.run(
         *problem.transient,
@@ -10182,7 +10187,7 @@ TEST(NewtonSolver,
             }
         };
 
-    installTestCertificate(options, {.max_range_distance = 1.0e-10, .initialize_constraint_field = true});
+    installTestCertificate(options, *problem.sys, {.max_range_distance = 1.0e-10, .initialize_constraint_field = true});
     svmp::FE::timestepping::NewtonSolver newton(options);
     svmp::FE::timestepping::NewtonWorkspace workspace;
     newton.allocateWorkspace(
@@ -10290,7 +10295,7 @@ TEST(NewtonSolver,
             return candidate_checks > 1;
         };
 
-    installTestCertificate(loop_options.newton, {.max_range_distance = 1.0e-10, .initialize_constraint_field = true});
+    installTestCertificate(loop_options.newton, *problem.sys, {.max_range_distance = 1.0e-10, .initialize_constraint_field = true});
     svmp::FE::timestepping::TimeLoop loop(loop_options);
     const auto loop_report = loop.run(
         *problem.transient,
@@ -10381,7 +10386,7 @@ TEST(NewtonSolver,
             }
         };
 
-    installTestCertificate(options, {.max_range_distance = 1.0e-10, .max_constant_field_kkt_distance = 1.0e-10, .initialize_constraint_field = true});
+    installTestCertificate(options, *problem.sys, {.max_range_distance = 1.0e-10, .max_constant_field_kkt_distance = 1.0e-10, .initialize_constraint_field = true});
     svmp::FE::timestepping::NewtonSolver newton(options);
     newton.allocateWorkspace(
         *problem.sys, *problem.factory, workspace);
@@ -10457,7 +10462,7 @@ TEST(NewtonSolver,
     options.abs_tolerance = 1.0e-13;
     options.rel_tolerance = 0.0;
     options.use_line_search = false;
-    installTestCertificate(options, {.max_range_distance = 1.0e-10, .initialize_constraint_field = true});
+    installTestCertificate(options, *problem.sys, {.max_range_distance = 1.0e-10, .initialize_constraint_field = true});
     svmp::FE::timestepping::NewtonSolver newton(options);
     svmp::FE::timestepping::NewtonWorkspace workspace;
     newton.allocateWorkspace(
@@ -10563,7 +10568,7 @@ TEST(NewtonSolver,
     options.abs_tolerance = 1.0e-14;
     options.rel_tolerance = 0.0;
     options.use_line_search = false;
-    installTestCertificate(options, {.max_range_distance = 0.5, .initialize_constraint_field = true});
+    installTestCertificate(options, *problem.sys, {.max_range_distance = 0.5, .initialize_constraint_field = true});
     svmp::FE::timestepping::NewtonSolver newton(options);
     svmp::FE::timestepping::NewtonWorkspace workspace;
     newton.allocateWorkspace(
@@ -10634,7 +10639,7 @@ TEST(NewtonSolver,
     options.abs_tolerance = 1.0e-14;
     options.rel_tolerance = 0.0;
     options.use_line_search = false;
-    installTestCertificate(options);
+    installTestCertificate(options, *problem.sys);
     svmp::FE::timestepping::NewtonSolver newton(options);
     svmp::FE::timestepping::NewtonWorkspace workspace;
     newton.allocateWorkspace(
@@ -10694,7 +10699,7 @@ TEST(NewtonSolver,
     options.abs_tolerance = 1.0e-14;
     options.rel_tolerance = 0.0;
     options.use_line_search = false;
-    installTestCertificate(options);
+    installTestCertificate(options, *problem.sys);
     svmp::FE::timestepping::NewtonSolver newton(options);
     svmp::FE::timestepping::NewtonWorkspace workspace;
     newton.allocateWorkspace(
@@ -10761,7 +10766,7 @@ TEST(NewtonSolver,
     options.rel_tolerance = 0.0;
     options.use_line_search = false;
 
-    installTestCertificate(options);
+    installTestCertificate(options, *problem.sys);
     svmp::FE::timestepping::NewtonSolver newton(options);
     svmp::FE::timestepping::NewtonWorkspace workspace;
     newton.allocateWorkspace(
@@ -10822,7 +10827,7 @@ TEST(NewtonSolver,
     options.rel_tolerance = 0.0;
     options.use_line_search = false;
 
-    installTestCertificate(options);
+    installTestCertificate(options, *problem.sys);
     svmp::FE::timestepping::NewtonSolver newton(options);
     svmp::FE::timestepping::NewtonWorkspace workspace;
     newton.allocateWorkspace(

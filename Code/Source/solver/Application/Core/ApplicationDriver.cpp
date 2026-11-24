@@ -73,7 +73,6 @@
 #include "FE/TimeStepping/MeshNormalStageParticipant.h"
 #include "FE/TimeStepping/OperatorStageCapture.h"
 #include "FE/Analysis/ConstraintRangeCertificate.h"
-#include "FE/Analysis/RowContributionObserver.h"
 #include "FE/TimeStepping/NewtonSolver.h"
 #include "FE/TimeStepping/StepContext.h"
 #include "FE/TimeStepping/StepParticipants.h"
@@ -4848,20 +4847,22 @@ evaluateStaticCapillaryPressureCertificate(
   };
 
   try {
-    // The probe's own certificate: the deck's range threshold, no
-    // environment gates, the initializer on request.
-    auto certificate =
-        std::make_shared<svmp::FE::analysis::ConstraintRangeCertificate>(
-            svmp::FE::analysis::ConstraintRangeMethod{
-                .max_range_distance = static_cast<double>(
-                    certificate_options
-                        .pressure_representability_max_relative_distance),
-                .initialize_constraint_field =
-                    initialize_compatible_pressure});
+    // The residual observers the environment switches on, and the probe's
+    // own certificate: the deck's range threshold, no environment gates,
+    // the initializer on request.
+    auto analysis_method =
+        svmp::FE::analysis::newtonAnalysisMethodFromEnvironment();
+    analysis_method.constraint_range =
+        svmp::FE::analysis::ConstraintRangeMethod{
+            .max_range_distance = static_cast<double>(
+                certificate_options
+                    .pressure_representability_max_relative_distance),
+            .initialize_constraint_field = initialize_compatible_pressure};
+    const auto analysis =
+        svmp::FE::analysis::buildNewtonAnalysisExtensions(
+            system, analysis_method);
     auto options = svmp::FE::analysis::constraintRangeProbeOptions(
-        "equations",
-        certificate,
-        svmp::FE::analysis::environmentResidualObservers());
+        "equations", analysis);
 
     PdeVelocityExtensionCaches probe_pde_extension_caches;
     bool probe_extension_maps_refreshed = false;
@@ -4981,7 +4982,7 @@ evaluateStaticCapillaryPressureCertificate(
     return StaticCapillaryPressureCertificate{
         .report = std::move(report),
         .certified_solution = std::move(certified_solution),
-        .certificate = std::move(certificate),
+        .certificate = analysis.constraint_range,
     };
   } catch (...) {
     const auto failure = std::current_exception();
@@ -7071,11 +7072,11 @@ void ApplicationDriver::runSteadyState(SimulationComponents& sim, const Paramete
   const auto integrator = std::make_shared<const ZeroTimeDerivativeIntegrator>();
   svmp::FE::systems::TransientSystem transient(*sim.fe_system, integrator);
 
-  newton_opts.extensions.observers =
-      svmp::FE::analysis::environmentResidualObservers();
-  svmp::FE::analysis::installConstraintRangeCertificate(
-      newton_opts.extensions,
-      svmp::FE::analysis::environmentConstraintRangeCertificate());
+  newton_opts.extensions =
+      svmp::FE::analysis::buildNewtonAnalysisExtensions(
+          *sim.fe_system,
+          svmp::FE::analysis::newtonAnalysisMethodFromEnvironment())
+          .extensions;
   svmp::FE::timestepping::NewtonSolver newton(newton_opts);
   svmp::FE::timestepping::NewtonWorkspace workspace;
 
@@ -7268,11 +7269,11 @@ void ApplicationDriver::runTransient(SimulationComponents& sim, const Parameters
   // number of mesh traversals per Newton iteration.
   opts.newton.residual_op = "equations";
   opts.newton.jacobian_op = "equations";
-  opts.newton.extensions.observers =
-      svmp::FE::analysis::environmentResidualObservers();
-  svmp::FE::analysis::installConstraintRangeCertificate(
-      opts.newton.extensions,
-      svmp::FE::analysis::environmentConstraintRangeCertificate());
+  opts.newton.extensions =
+      svmp::FE::analysis::buildNewtonAnalysisExtensions(
+          *sim.fe_system,
+          svmp::FE::analysis::newtonAnalysisMethodFromEnvironment())
+          .extensions;
 
   const auto transient_cut_topology_preflight_comm =
       activeFESystemCommunicator(*sim.fe_system);

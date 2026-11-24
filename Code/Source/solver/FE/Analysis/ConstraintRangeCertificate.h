@@ -32,16 +32,22 @@
  *
  * A formulation states the fields and the diagnostic operators of the
  * certificate as a ConstraintRangeDeclaration in the system's diagnostic
- * registry (DiagnosticRegistry::declare); the certificate finds them there.
+ * registry (DiagnosticRegistry::declare).
  *
- * ConstraintRangeCertificate is the certificate in a Newton solve, for one
- * ConstraintRangeMethod: an observer that samples the declared loads and the
+ * ConstraintRangeCertificate is the certificate in a Newton solve, for that
+ * declaration and one ConstraintRangeMethod: an observer that samples the
+ * declared loads and the
  * range distance at every residual assembly, an acceptance check that vetoes
  * a converged candidate whose distances exceed the method's thresholds, and
  * an initializer that adds the least-squares constraint-field correction of
  * the remaining balance to the current guess once per workspace lifecycle.
  * Its log lines keep the vocabulary of the qualification records
  * (free-surface pressure certificate), which scripts parse.
+ *
+ * buildNewtonAnalysisExtensions installs the analysis extensions of a Newton
+ * solve in one step, from the declarations of the system's formulations and
+ * a resolved NewtonAnalysisMethod: the residual observers and the
+ * certificate.
  */
 
 #include "Core/Types.h"
@@ -375,10 +381,13 @@ class ConstraintRangeCertificate final : public timestepping::NewtonObserver,
                                          public timestepping::NewtonAcceptanceCheck,
                                          public timestepping::NewtonInitializer {
 public:
-    /// Throws for a negative or nonfinite threshold and for an initializer
-    /// without a range threshold (deferred to the collective policy check
-    /// when MPI runs several tasks).
-    explicit ConstraintRangeCertificate(ConstraintRangeMethod method);
+    /// The certificate of @p declaration (when empty, a system that declares
+    /// none: it samples nothing and says so) for @p method.  Throws for a
+    /// negative or nonfinite threshold and for an initializer without a
+    /// range threshold (deferred to the collective policy check when MPI
+    /// runs several tasks).
+    ConstraintRangeCertificate(std::optional<ConstraintRangeDeclaration> declaration,
+                               ConstraintRangeMethod method);
     ~ConstraintRangeCertificate() override;
     ConstraintRangeCertificate(const ConstraintRangeCertificate&) = delete;
     ConstraintRangeCertificate& operator=(const ConstraintRangeCertificate&) = delete;
@@ -430,28 +439,55 @@ private:
     void logInitializer(const systems::FESystem& system, timestepping::NewtonReport& report,
                         bool applied, bool passed, std::string_view reason) const;
 
+    std::optional<ConstraintRangeDeclaration> declaration_;
     ConstraintRangeMethod method_;
     std::unique_ptr<State> state_;
 };
 
-/// Installs @p certificate as observer, acceptance check and initializer of
-/// @p extensions (after the extensions already installed); no-op for null.
-void installConstraintRangeCertificate(timestepping::NewtonExtensions& extensions,
-                                       const std::shared_ptr<ConstraintRangeCertificate>& certificate);
+/**
+ * The resolved method of the analysis extensions of a Newton solve: the
+ * residual observers it switches on and the method of the constraint-range
+ * certificate, which is installed when it requests a sample.
+ */
+struct NewtonAnalysisMethod {
+    /// FieldResidualObserver.
+    bool observe_field_residual{false};
+    /// RowContributionObserver.
+    bool observe_row_contributions{false};
+    ConstraintRangeMethod constraint_range{};
+};
+
+/// The method the environment states: the switches of the two residual
+/// observers, then the six certificate gates (constraintRangeMethodFromEnvironment).
+[[nodiscard]] NewtonAnalysisMethod newtonAnalysisMethodFromEnvironment();
+
+/// The analysis extensions of a Newton solve, and the certificate among
+/// them, through which its results are read (null when none is installed).
+struct NewtonAnalysisExtensions {
+    timestepping::NewtonExtensions extensions{};
+    std::shared_ptr<ConstraintRangeCertificate> constraint_range{};
+};
 
 /**
- * The options of a probe of @p certificate at a supplied state: one Newton
- * iteration of @p op, the entry residual alone (or, when the certificate
- * initializes, its correction and nothing more), no line search, no outer
- * fixed point, and only the given observers and the certificate.
+ * The extensions @p method requests on @p system, each with the declaration
+ * of the system's formulations it reads (none when the system declares
+ * none), in installation order: the field-residual observer, the
+ * row-contribution observer, then the certificate as observer, acceptance
+ * check and initializer.
+ */
+[[nodiscard]] NewtonAnalysisExtensions buildNewtonAnalysisExtensions(
+    const systems::FESystem& system,
+    const NewtonAnalysisMethod& method);
+
+/**
+ * The options of a probe of the certificate of @p analysis at a supplied
+ * state: one Newton iteration of @p op, the entry residual alone (or, when
+ * the certificate initializes, its correction and nothing more), no line
+ * search, no outer fixed point, and only the extensions of @p analysis.
  */
 [[nodiscard]] timestepping::NewtonOptions constraintRangeProbeOptions(
     const systems::OperatorTag& op,
-    const std::shared_ptr<ConstraintRangeCertificate>& certificate,
-    std::vector<std::shared_ptr<timestepping::NewtonObserver>> observers);
-
-/// The certificate the environment gates request, or null when they request none.
-[[nodiscard]] std::shared_ptr<ConstraintRangeCertificate> environmentConstraintRangeCertificate();
+    const NewtonAnalysisExtensions& analysis);
 
 // The environment gates of the static free-surface certificates, each a
 // Navier--Stokes name and its short alias; the first one set decides.
