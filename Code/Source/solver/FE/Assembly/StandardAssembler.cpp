@@ -7848,20 +7848,24 @@ void StandardAssembler::prepareBasis(
             FE_THROW_IF(continuity != Continuity::H_curl && continuity != Continuity::H_div, FEException,
                         std::string("StandardAssembler::prepareBasis: ") + which +
                             " space uses a vector-valued basis but is not H(curl)/H(div)");
-
-            if (continuity == Continuity::H_curl) {
-                FE_THROW_IF(need_basis_divergences, FEException,
-                            std::string("StandardAssembler::prepareBasis: BasisDivergences requested for ") + which +
-                                " H(curl) space");
-            } else if (continuity == Continuity::H_div) {
-                FE_THROW_IF(need_basis_curls, FEException,
-                            std::string("StandardAssembler::prepareBasis: BasisCurls requested for ") + which +
-                                " H(div) space");
-            }
         };
 
     validate_vector_basis_requirements(test_space, test_is_vector_basis, "test");
     validate_vector_basis_requirements(trial_space, trial_is_vector_basis, "trial");
+
+    // A form asks for the curls of its H(curl) arguments and the divergences
+    // of its H(div) arguments (FormCompiler's required data); the other
+    // argument of a mixed pair, such as the H(div) test of inner(curl(E), G)
+    // with E in H(curl), gets neither, and a read of one there is refused by
+    // the assembly context.
+    const bool need_test_basis_curls =
+        need_basis_curls && test_is_vector_basis && test_space.continuity() == Continuity::H_curl;
+    const bool need_test_basis_divergences =
+        need_basis_divergences && test_is_vector_basis && test_space.continuity() == Continuity::H_div;
+    const bool need_trial_basis_curls =
+        need_basis_curls && trial_is_vector_basis && trial_space.continuity() == Continuity::H_curl;
+    const bool need_trial_basis_divergences =
+        need_basis_divergences && trial_is_vector_basis && trial_space.continuity() == Continuity::H_div;
 
     // ---- Fast path: skip BasisCache reads when topology matches previous cell ----
     const bool same_space = (&test_space == &trial_space);
@@ -8150,9 +8154,9 @@ void StandardAssembler::prepareBasis(
          hasFlag(required_data, RequiredData::SolutionGradients) ||
          required_data == RequiredData::None);
     const bool need_test_vector_derivatives =
-        need_test_vector_jacobians || need_basis_curls || need_basis_divergences;
+        need_test_vector_jacobians || need_test_basis_curls || need_test_basis_divergences;
     const bool need_trial_vector_derivatives =
-        need_trial_vector_jacobians || need_basis_curls || need_basis_divergences;
+        need_trial_vector_jacobians || need_trial_basis_curls || need_trial_basis_divergences;
 
     if (test_is_vector_basis) {
         scratch_basis_values_.clear();
@@ -8171,12 +8175,12 @@ void StandardAssembler::prepareBasis(
         } else {
             scratch_basis_vector_jacobians_.clear();
         }
-        if (need_basis_curls) {
+        if (need_test_basis_curls) {
             scratch_basis_curls_.resize(test_basis_size);
         } else {
             scratch_basis_curls_.clear();
         }
-        if (need_basis_divergences) {
+        if (need_test_basis_divergences) {
             scratch_basis_divergences_.resize(test_basis_size);
         } else {
             scratch_basis_divergences_.clear();
@@ -8225,10 +8229,10 @@ void StandardAssembler::prepareBasis(
             if (need_trial_vector_jacobians) {
                 trial_basis_vector_jacobians.resize(trial_basis_size);
             }
-            if (need_basis_curls) {
+            if (need_trial_basis_curls) {
                 trial_basis_curls.resize(trial_basis_size);
             }
-            if (need_basis_divergences) {
+            if (need_trial_basis_divergences) {
                 trial_basis_divergences.resize(trial_basis_size);
             }
         } else {
@@ -8407,8 +8411,8 @@ void StandardAssembler::prepareBasis(
                                                     n_test_dofs,
                                                     need_test_vector_derivatives,
                                                     need_test_vector_jacobians,
-                                                    need_basis_curls,
-                                                    need_basis_divergences,
+                                                    need_test_basis_curls,
+                                                    need_test_basis_divergences,
                                                     local_test_bcache);
     }
     const basis::BasisCacheEntry* trial_vector_bcache = nullptr;
@@ -8420,8 +8424,8 @@ void StandardAssembler::prepareBasis(
                                                      n_trial_dofs,
                                                      need_trial_vector_derivatives,
                                                      need_trial_vector_jacobians,
-                                                     need_basis_curls,
-                                                     need_basis_divergences,
+                                                     need_trial_basis_curls,
+                                                     need_trial_basis_divergences,
                                                      local_trial_bcache);
     }
 
@@ -8496,7 +8500,7 @@ void StandardAssembler::prepareBasis(
                     test_vec_jacobians = &vec_jacobians_at_pt;
                 }
             }
-            if (!test_vector_bcache && need_basis_curls) {
+            if (!test_vector_bcache && need_test_basis_curls) {
                 if (test_vector_cut_cache != nullptr &&
                     qsz < test_vector_cut_cache->curls.size()) {
                     test_vec_curls = &test_vector_cut_cache->curls[qsz];
@@ -8505,7 +8509,7 @@ void StandardAssembler::prepareBasis(
                     test_vec_curls = &vec_curls_at_pt;
                 }
             }
-            if (!test_vector_bcache && need_basis_divergences) {
+            if (!test_vector_bcache && need_test_basis_divergences) {
                 if (test_vector_cut_cache != nullptr &&
                     qsz < test_vector_cut_cache->divergences.size()) {
                     test_vec_divergences = &test_vector_cut_cache->divergences[qsz];
@@ -8568,7 +8572,7 @@ void StandardAssembler::prepareBasis(
                                                      "StandardAssembler::prepareBasis");
                 }
 
-                if (need_basis_curls) {
+                if (need_test_basis_curls) {
                     const auto cref = test_vector_bcache
                         ? test_vector_bcache->vectorCurl(static_cast<std::size_t>(i), qsz)
                         : (*test_vec_curls)[static_cast<std::size_t>(i)];
@@ -8585,7 +8589,7 @@ void StandardAssembler::prepareBasis(
                     scratch_basis_curls_[idx] = cphys;
                 }
 
-                if (need_basis_divergences) {
+                if (need_test_basis_divergences) {
                     const Real div_ref = test_vector_bcache
                         ? test_vector_bcache->vectorDivergenceValue(static_cast<std::size_t>(i), qsz)
                         : (*test_vec_divergences)[static_cast<std::size_t>(i)];
@@ -8670,7 +8674,7 @@ void StandardAssembler::prepareBasis(
                         trial_vec_jacobians = &vec_jacobians_at_pt;
                     }
                 }
-                if (!trial_vector_bcache && need_basis_curls) {
+                if (!trial_vector_bcache && need_trial_basis_curls) {
                     if (trial_vector_cut_cache != nullptr &&
                         qsz < trial_vector_cut_cache->curls.size()) {
                         trial_vec_curls = &trial_vector_cut_cache->curls[qsz];
@@ -8679,7 +8683,7 @@ void StandardAssembler::prepareBasis(
                         trial_vec_curls = &vec_curls_at_pt;
                     }
                 }
-                if (!trial_vector_bcache && need_basis_divergences) {
+                if (!trial_vector_bcache && need_trial_basis_divergences) {
                     if (trial_vector_cut_cache != nullptr &&
                         qsz < trial_vector_cut_cache->divergences.size()) {
                         trial_vec_divergences = &trial_vector_cut_cache->divergences[qsz];
@@ -8742,7 +8746,7 @@ void StandardAssembler::prepareBasis(
                                                          "StandardAssembler::prepareBasis");
                     }
 
-                    if (need_basis_curls) {
+                    if (need_trial_basis_curls) {
                         const auto cref = trial_vector_bcache
                             ? trial_vector_bcache->vectorCurl(static_cast<std::size_t>(j), qsz)
                             : (*trial_vec_curls)[static_cast<std::size_t>(j)];
@@ -8759,7 +8763,7 @@ void StandardAssembler::prepareBasis(
                         trial_basis_curls[idx] = cphys;
                     }
 
-                    if (need_basis_divergences) {
+                    if (need_trial_basis_divergences) {
                         const Real div_ref = trial_vector_bcache
                             ? trial_vector_bcache->vectorDivergenceValue(static_cast<std::size_t>(j), qsz)
                             : (*trial_vec_divergences)[static_cast<std::size_t>(j)];
@@ -8836,10 +8840,10 @@ void StandardAssembler::prepareBasis(
                                             need_test_vector_jacobians
                                                 ? std::span<const AssemblyContext::Matrix3x3>(scratch_basis_vector_jacobians_)
                                                 : std::span<const AssemblyContext::Matrix3x3>{});
-        if (need_basis_curls) {
+        if (need_test_basis_curls) {
             context.setTestBasisCurls(n_test_dofs, std::span<const AssemblyContext::Vector3D>(scratch_basis_curls_));
         }
-        if (need_basis_divergences) {
+        if (need_test_basis_divergences) {
             context.setTestBasisDivergences(n_test_dofs, std::span<const Real>(scratch_basis_divergences_));
         }
     } else {
@@ -8859,10 +8863,10 @@ void StandardAssembler::prepareBasis(
                                                  need_trial_vector_jacobians
                                                      ? std::span<const AssemblyContext::Matrix3x3>(trial_basis_vector_jacobians)
                                                      : std::span<const AssemblyContext::Matrix3x3>{});
-            if (need_basis_curls) {
+            if (need_trial_basis_curls) {
                 context.setTrialBasisCurls(n_trial_dofs, std::span<const AssemblyContext::Vector3D>(trial_basis_curls));
             }
-            if (need_basis_divergences) {
+            if (need_trial_basis_divergences) {
                 context.setTrialBasisDivergences(n_trial_dofs, std::span<const Real>(trial_basis_divergences));
             }
         } else {

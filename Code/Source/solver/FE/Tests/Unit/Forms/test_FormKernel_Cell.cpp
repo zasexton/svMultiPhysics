@@ -895,6 +895,56 @@ TEST(FormKernelCellTest, HCurlVectorBasisSymGradInnerProductUsesAnalyticJacobian
     }
 }
 
+/**
+ * inner(curl(E), G) with E in H(curl) (lowest-order Nedelec, the trial) and G
+ * in H(div) (lowest-order Raviart-Thomas, the test) on the reference
+ * tetrahedron: the curl is needed from the H(curl) basis only.  The matrix is
+ * int curl(N_j) . RT_i over the cell (both maps are the identity there).
+ */
+TEST(FormKernelCellTest, CurlOfAnHCurlTrialTestedWithAnHDivBasis)
+{
+    SingleTetraMeshAccess mesh;
+    spaces::HCurlSpace hcurl(ElementType::Tetra4, 0, BasisType::Nedelec);
+    spaces::HDivSpace hdiv(ElementType::Tetra4, 0, BasisType::RaviartThomas);
+    const auto E = FormExpr::trialFunction(hcurl, "E");
+    const auto G = FormExpr::testFunction(hdiv, "G");
+
+    const auto n_rows = static_cast<LocalIndex>(hdiv.dofs_per_element());
+    const auto n_cols = static_cast<LocalIndex>(hcurl.dofs_per_element());
+    auto row_map = createSingleTetraDofMap(n_rows);
+    auto col_map = createSingleTetraDofMap(n_cols);
+
+    FormCompiler compiler;
+    FormKernel kernel(compiler.compileBilinear(inner(curl(E), G).dx()));
+    assembly::StandardAssembler assembler;
+    assembler.setRowDofMap(row_map, 0);
+    assembler.setColDofMap(col_map, 0);
+    assembly::DenseMatrixView mat(static_cast<GlobalIndex>(n_rows), static_cast<GlobalIndex>(n_cols));
+    mat.zero();
+    ASSERT_NO_THROW((void)assembler.assembleMatrix(mesh, hdiv, hcurl, kernel, mat));
+
+    const auto& rt = hdiv.element().basis();
+    const auto& ned = hcurl.element().basis();
+    const auto quad = hdiv.element().quadrature();
+    ASSERT_NE(quad.get(), nullptr);
+    std::vector<math::Vector<Real, 3>> rt_values;
+    std::vector<math::Vector<Real, 3>> ned_curls;
+    for (LocalIndex i = 0; i < n_rows; ++i) {
+        for (LocalIndex j = 0; j < n_cols; ++j) {
+            Real expected = 0.0;
+            for (std::size_t q = 0; q < quad->num_points(); ++q) {
+                rt.evaluate_vector_values(quad->point(q), rt_values);
+                ned.evaluate_curl(quad->point(q), ned_curls);
+                for (int c = 0; c < 3; ++c) {
+                    expected += quad->weight(q) * ned_curls[static_cast<std::size_t>(j)][c] *
+                                rt_values[static_cast<std::size_t>(i)][c];
+                }
+            }
+            EXPECT_NEAR(mat.getMatrixEntry(i, j), expected, 1e-12) << "i=" << i << ", j=" << j;
+        }
+    }
+}
+
 TEST(FormKernelCellTest, CurvedHCurlVectorBasisGradInnerProductUsesCurvedPiolaDerivatives)
 {
     CurvedTetra10MeshAccess mesh;
