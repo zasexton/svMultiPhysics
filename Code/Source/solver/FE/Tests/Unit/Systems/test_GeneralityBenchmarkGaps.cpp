@@ -304,5 +304,144 @@ TEST(GeneralityBenchmarkGaps, P02_SpeciesWithGlobalReservoirCouplingBlocks)
     EXPECT_LT(defect, 1e-7 * scale);
 }
 
+// ===========================================================================
+// 9. Viscoelastic material point in an elastic body
+// ===========================================================================
+//
+// The internal variable a with dt(a) + a / tau - (strain rate) = 0, here a
+// cellwise (DG0) unknown of the system, one value per cell standing for its
+// material point, and E a in the stress work.  The displacement is
+// prescribed with unit volumetric strain rate, so a(t) = tau (1 - e^{-t/tau}).
+//
+// What is missing for problem 9 as stated: a named quadrature-point state
+// (an unknown or history value per quadrature point, not a cell DOF of a
+// field: Forms has only byte-offset material-state terminals,
+// materialStateOldRef/WorkRef, and no named spelling), the local row G(a,
+// previous(a), strain, dt) = 0 solved per point and condensed out of the
+// global tangent with its chain rule, the comparison of the condensed and
+// uncondensed updates, and accepted history of such state on restart.
+
+// ---------------------------------------------------------------------------
+// The formulation: everything an author writes for the cellwise proxy of problem 9.
+// ---------------------------------------------------------------------------
+struct ViscoelasticInstall {
+    FieldId u{INVALID_FIELD_ID};
+    FieldId a{INVALID_FIELD_ID};
+    Quantity internal_variable;
+};
+
+ViscoelasticInstall defineViscoelasticBody(FESystem& system, const std::shared_ptr<const spaces::FunctionSpace>& Vu,
+                                           const std::shared_ptr<const spaces::FunctionSpace>& Va, Real modulus,
+                                           Real relaxation_time, const std::vector<FormExpr>& u_wall,
+                                           const std::vector<int>& walls)
+{
+    using namespace forms;
+    FieldBinding fields(system, "Viscoelastic");
+    const auto U = fields.unknown("u", Vu);
+    const auto A = fields.unknown("a", Va);
+    const auto E = FormExpr::constant(modulus);
+    const auto tau = FormExpr::constant(relaxation_time);
+    const auto& u = U.state;
+    const auto& a = A.state;
+    const auto strain_rate = trace(grad(dt(u)));  // div(dt(u)) drops the history today
+    auto R = (2.0 * inner(symgrad(u), symgrad(U.test)) + E * a * div(U.test)).dx() +
+             ((dt(a) + a / tau - strain_rate) * A.test).dx();
+    BoundaryConditionManager bcs;
+    for (const int wall : walls) {
+        bcs.add(std::make_unique<bc::Dirichlet>(wall, u_wall));
+    }
+    constraints::ConstraintPlan plan(system);
+    plan.essentials(bcs, R, u, U.test, U.id);
+    plan.commit();
+    FormulationBuilder F(system, "equations", {});
+    F.symbolicTangent();
+    ViscoelasticInstall out{U.id, A.id, F.quantity("a_mean", FunctionalKind::Integral, a.dx())};
+    (void)F.residual(R);
+    return out;
+}
+// ---------------------------------------------------------------------------
+
+TEST(GeneralityBenchmarkGaps, P09_CellwiseViscoelasticVariableFollowsItsRelaxation)
+{
+    const Real tau = 0.5;
+    const double T = 0.4;
+    for (const auto& [scheme, order] :
+         std::vector<std::pair<timestepping::SchemeKind, Real>>{{timestepping::SchemeKind::BackwardEuler, 1.0},
+                                                                {timestepping::SchemeKind::BDF2, 2.0}}) {
+        std::vector<Real> errors;
+        for (const int steps : {4, 8, 16}) {
+            FESystem system(boxMesh(Cell::Tri3, 2, boxSides()));
+            const auto p1 = std::make_shared<spaces::H1Space>(ElementType::Triangle3, 1);
+            const auto Vu = std::make_shared<spaces::ProductSpace>(p1, 2);
+            const auto Va = std::make_shared<spaces::L2Space>(ElementType::Triangle3, 0);
+            // u = (t x, 0): div(dt u) = 1.
+            const auto t = FormExpr::time();
+            const std::vector<FormExpr> u_wall{t * FormExpr::coordinate().component(0), FormExpr::constant(0.0)};
+            const auto install = defineViscoelasticBody(system, Vu, Va, 3.0, tau, u_wall, {1, 2, 3, 4});
+            system.setup();
+            const auto run = runTransient(system, "equations", std::vector<Real>(system.dofHandler().getNumDofs(), 0.0),
+                                          scheme, T / steps, steps);
+            ASSERT_TRUE(run.success);
+            ASSERT_FALSE(run.states.empty());
+            const Real a = integrate(system, install.internal_variable.form(), run.states.back());
+            errors.push_back(std::abs(a - tau * (1.0 - std::exp(-T / tau))));
+            RecordProperty("p09_a_" + std::to_string(steps) + "_" + std::to_string(static_cast<int>(order)), std::to_string(a));
+        }
+        RecordProperty("p09_order" + std::to_string(static_cast<int>(order)) + "_rates", join(rates(errors)));
+        EXPECT_NEAR(rates(errors).back(), order, 0.2) << join(errors);
+    }
+}
+
+TEST(GeneralityBenchmarkGaps, DISABLED_P09_TheDivergenceOfARateIsTheTraceOfItsGradient)
+{
+    // Defect found by this benchmark (reported): div(dt(u)) of a vector field
+    // evaluates as if the stencil had only its leading term: with u = (t x, 0)
+    // prescribed, the cellwise b = div(dt(u)) is 1, 2, 3, 4 at the first four
+    // backward Euler steps of dt = 0.1 (1, 3, 4.5, 6 under BDF2) instead of 1;
+    // trace(grad(dt(u))), grad(dt(u))(0, 0) and the scalar grad(dt(T)) are
+    // right.
+    for (const bool divergence : {true, false}) {
+        FESystem system(boxMesh(Cell::Tri3, 2, boxSides()));
+        FieldBinding fields(system, "Rate");
+        const auto p1 = std::make_shared<spaces::H1Space>(ElementType::Triangle3, 1);
+        const auto U = fields.unknown("u", std::make_shared<spaces::ProductSpace>(p1, 2));
+        const auto B = fields.unknown("b", std::make_shared<spaces::L2Space>(ElementType::Triangle3, 0));
+        const auto t = FormExpr::time();
+        const auto x = FormExpr::coordinate().component(0);
+        const auto rate = divergence ? forms::div(forms::dt(U.state)) : forms::trace(forms::grad(forms::dt(U.state)));
+        auto R = forms::inner(U.state - forms::as_vector({t * x, FormExpr::constant(0.0)}), U.test).dx() +
+                 ((B.state - rate) * B.test).dx();
+        BoundaryConditionManager bcs;
+        for (int wall = 1; wall <= 4; ++wall) {
+            bcs.add(std::make_unique<forms::bc::Dirichlet>(wall, std::vector<FormExpr>{t * x, FormExpr::constant(0.0)}));
+        }
+        constraints::ConstraintPlan plan(system);
+        plan.essentials(bcs, R, U.state, U.test, U.id);
+        plan.commit();
+        FormulationBuilder F(system, "equations", {});
+        (void)F.residual(R);
+        system.setup();
+        const auto run = runTransient(system, "equations", std::vector<Real>(system.dofHandler().getNumDofs(), 0.0),
+                                      timestepping::SchemeKind::BackwardEuler, 0.1, 4);
+        for (const auto& state : run.states) {
+            EXPECT_NEAR(integrate(system, B.state.dx(), state), 1.0, 1e-12) << (divergence ? "div" : "trace grad");
+        }
+    }
+}
+
+TEST(GeneralityBenchmarkGaps, DISABLED_P09_NamedQuadratureStateWithCondensedTangent)
+{
+    // Missing: a named quadrature-point state of the formulation and its
+    // local evolution row G(a, previous(a), strain, dt) = 0 on that state
+    // (Forms has only the internal byte-offset terminals
+    // materialStateOldRef/materialStateWorkRef and expert constitutive
+    // callbacks); the condensed tangent of the global rows through the local
+    // solve (the chain rule dG/da^{-1} dG/d strain); the uncondensed update to
+    // compare it with; and the restart of accepted quadrature history.  A J2
+    // loading/unloading cycle needs, in addition, the complementarity of the
+    // yield condition on that state.
+    FAIL() << "named quadrature-point state and its condensed tangent are not vocabulary yet";
+}
+
 } // namespace
 } // namespace svmp::FE::systems::generality
