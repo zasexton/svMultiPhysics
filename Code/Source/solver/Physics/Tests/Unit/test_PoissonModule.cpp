@@ -998,9 +998,10 @@ TEST(PoissonModule, CoupledNeumannRCRUsesModernAuxiliaryPath)
     const auto out_slot = system.auxiliaryOutputSlotOf("poisson_rcr_7", "flux");
     EXPECT_NE(out_slot, std::string::npos);
 
-    // The input, the state and the flux are columns of the scalar history.
+    // The input, the stage time, the state and the flux are columns of the
+    // scalar history.
     EXPECT_EQ(FE::post::scalarHistoryHeader(system),
-              "step,time,poisson_rcr_7.Q,poisson_rcr_7.X,poisson_rcr_7.flux\n");
+              "step,time,poisson_rcr_7.Q,poisson_rcr_7@stage_time,poisson_rcr_7.X,poisson_rcr_7.flux\n");
 }
 
 TEST(PoissonModule, BoundaryScalarValueAcceptsFormExpr)

@@ -14,6 +14,8 @@
 #include "Systems/FESystem.h"
 #include "Auxiliary/AuxiliaryStateManager.h"
 #include "Auxiliary/AuxiliaryInputRegistry.h"
+#include "PostProcessing/ScalarHistory.h"
+#include "Systems/SystemCollectives.h"
 
 #include <cmath>
 #include <array>
@@ -2545,6 +2547,98 @@ TEST(AuxiliaryModelBuilder, PrepareAuxiliaryForAssembly_UsesStageXDotForOutputs)
 
     ASSERT_EQ(outputs.size(), 1u);
     EXPECT_NEAR(outputs[0], 1.375, 1e-12);
+}
+
+// The scalar history records what a monolithic block applied: the
+// accepted-stage record keeps the outputs of the last residual evaluation
+// (xdot at the stage, 1.375), not a re-evaluation (which would read xdot = 0),
+// together with the stage state and time; it is published by the commit,
+// kept through an uncommitted attempt and cleared by a step committed
+// without a stage (an endpoint scheme continuing the run).
+TEST(AuxiliaryModelBuilder, AcceptedStageRecordKeepsTheAppliedOutputsAtTheCommit)
+{
+    using namespace svmp::FE;
+
+    auto model = std::make_shared<aux_test::OutputUsesXDotModel>();
+    systems::FESystem system(std::shared_ptr<const assembly::IMeshAccess>{});
+    const auto handle = system.deploy(
+        use(model)
+            .name("xdot_out")
+            .scope(AuxiliaryStateScope::Global)
+            .solveMode(AuxiliarySolveMode::Monolithic)
+            .initialize({0.8}));
+    post::recordAuxiliaryOutput(system, handle, "xdot");
+    system.finalizeAuxiliaryLayout();
+
+    auto& blk = system.auxiliaryStateManagerIfPresent()->getBlock("xdot_out");
+    blk.work()[0] = 1.0;
+    system.commitTimeStep();
+    EXPECT_EQ(system.auxiliaryAcceptedStageRecord("xdot_out"), nullptr);
+
+    const double dt = 0.1;
+    const double alpha_f = 2.0 / 3.0;  // rho_inf = 1/2
+    std::array<double, 1> dt_hist{{dt}};
+    auto ti = aux_test::buildGeneralizedAlphaFirstOrderContext(dt);
+    systems::SystemStateView state;
+    state.time = alpha_f * dt;
+    state.dt = dt;
+    state.effective_dt = alpha_f * dt;
+    state.dt_prev = dt;
+    state.dt_history = dt_hist;
+    state.time_integration = &ti;
+    const auto stage_step = [&](double work) {
+        system.beginTimeStep();
+        blk.work()[0] = work;
+        system.prepareAuxiliaryForAssembly(state, false);
+        system.finalizeMonolithicAuxiliaryStageState(alpha_f, alpha_f, dt, dt);
+    };
+
+    stage_step(1.1);
+    EXPECT_EQ(system.auxiliaryAcceptedStageRecord("xdot_out"), nullptr);  // not committed yet
+    system.commitTimeStep();
+    const auto* record = system.auxiliaryAcceptedStageRecord("xdot_out");
+    ASSERT_NE(record, nullptr);
+    EXPECT_NEAR(record->time, alpha_f * dt, 1e-15);
+    ASSERT_EQ(record->states.size(), 1u);
+    EXPECT_NEAR(record->states[0], 1.1, 1e-15);
+    ASSERT_EQ(record->outputs.size(), 1u);
+    EXPECT_NEAR(record->outputs[0], 1.375, 1e-12);
+
+    systems::SystemStateView endpoint;
+    endpoint.time = dt;
+    endpoint.dt = dt;
+    const auto values = post::scalarHistoryValues(system, endpoint, systems::CollectiveCommunicator{});
+    ASSERT_EQ(values.size(), 2u);  // xdot_out@stage_time, xdot_out.xdot
+    EXPECT_NEAR(values[0], alpha_f * dt, 1e-15);
+    EXPECT_NEAR(values[1], 1.375, 1e-12);
+
+    // An attempt whose candidate is discarded publishes nothing.
+    stage_step(1.2);
+    record = system.auxiliaryAcceptedStageRecord("xdot_out");
+    ASSERT_NE(record, nullptr);
+    EXPECT_NEAR(record->states[0], 1.1, 1e-15);
+    // The retry is an endpoint step: its commit clears the record, and the
+    // history reads the committed state at the step time.
+    system.beginTimeStep();
+    system.commitTimeStep();
+    EXPECT_EQ(system.auxiliaryAcceptedStageRecord("xdot_out"), nullptr);
+}
+
+// The stage-time column cannot collide with a state of the model: a state
+// named stage_time keeps its own column.
+TEST(AuxiliaryModelBuilder, AStateNamedStageTimeKeepsItsOwnHistoryColumn)
+{
+    using namespace svmp::FE;
+    auto model = AuxiliaryModelBuilder("named_stage")
+        .state("stage_time")
+        .ode("stage_time", forms::FormExpr::constant(0.0))
+        .build();
+    systems::FESystem system(std::shared_ptr<const assembly::IMeshAccess>{});
+    const auto handle = system.deploy(
+        use(model).name("m").scope(AuxiliaryStateScope::Global).solveMode(AuxiliarySolveMode::Monolithic)
+            .initialize({3.0}));
+    post::recordAuxiliaryState(system, handle, "stage_time");
+    EXPECT_EQ(post::scalarHistoryHeader(system), "step,time,m@stage_time,m.stage_time\n");
 }
 
 TEST(AuxiliaryModelBuilder, FinalizeMonolithicAuxiliaryStageState_OnlyTransformsDifferentialRows)

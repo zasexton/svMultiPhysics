@@ -1081,17 +1081,22 @@ TEST(NavierStokesOutletFactory, OutletsRecordTheirFlowStatesAndPressureInTheScal
             EXPECT_NEAR(values[i], expected_values[i], 1e-10) << i;
         }
     };
+    // Before the first accepted step the states are read at the committed
+    // (initial) state and the stage time is the state's time, 0.
     // RCR: X0 = 50, P_out = X + Rp Q = 55.
     run([](int marker) { return makeRCROpts(marker); },
-        "step,time,rcr_windkessel_b42.Q,rcr_windkessel_b42.X,rcr_windkessel_b42.P_out\n", {0.5, 50.0, 55.0});
+        "step,time,rcr_windkessel_b42.Q,rcr_windkessel_b42@stage_time,rcr_windkessel_b42.X,"
+        "rcr_windkessel_b42.P_out\n",
+        {0.5, 0.0, 50.0, 55.0});
     // RCRCR: P_out = P1 + Rp Q = 65.
     run([](int marker) { return makeRCRCROpts(marker); },
-        "step,time,rcrcr_windkessel_b42.Q,rcrcr_windkessel_b42.P1,rcrcr_windkessel_b42.P2,"
-        "rcrcr_windkessel_b42.P_out\n",
-        {0.5, 60.0, 45.0, 65.0});
-    // Resistance: the committed state P is its initial value Pd = 50.
+        "step,time,rcrcr_windkessel_b42.Q,rcrcr_windkessel_b42@stage_time,rcrcr_windkessel_b42.P1,"
+        "rcrcr_windkessel_b42.P2,rcrcr_windkessel_b42.P_out\n",
+        {0.5, 0.0, 60.0, 45.0, 65.0});
+    // Resistance: the state P is its initial value Pd = 50.
     run([](int marker) { return makeRCROpts(marker, /*C=*/0.0); },
-        "step,time,resistive_outflow_b42.Q,resistive_outflow_b42.P_out\n", {0.5, 50.0});
+        "step,time,resistive_outflow_b42.Q,resistive_outflow_b42@stage_time,resistive_outflow_b42.P_out\n",
+        {0.5, 0.0, 50.0});
 }
 
 TEST(NavierStokesOutletFactory, NewOverload_Resistive_EndToEnd)

@@ -1210,6 +1210,15 @@ Status: `implemented/public`.
 |------------|--------|-------|
 | `systems::meshVertexDataField(system, name, MeshVertexData{space, components, values})`, `refreshMeshVertexDataFields(system, time)` | `Systems/TimeSeries.h` | Data given at the mesh vertices in time (`values(t, out)` writes component c of vertex v to `out[v * components + c]`, owned and ghost vertices alike) as the prescribed field `name` on a Lagrange space whose nodes are mesh vertices; the value symbol is returned. The assembly of an operator fills the field at the state time when it differs from the last fill. At a quadrature point the field is the cell's basis expansion of its vertex values: data linear on a cell are reproduced exactly on every element shape, and the value depends on the cell's own vertices only, so it is the same at any rank count. A DOF the data leave without a finite value fails the assembly, naming the field. The momentum-source table of the Navier-Stokes module (`Momentum_source_temporal_and_spatial_values_file_path`, field `Momentum_source_table`) and the level-set inflow table (`<level set>_inflow_<marker>`, zero off the table's nodes) use it |
 
+### Coupled-Model Stage Values (W3-M)
+
+Status: `implemented/public`.
+
+| Vocabulary | Header | Notes |
+|------------|--------|-------|
+| `FESystem::recordAuxiliaryAcceptedStage(instance)`, `auxiliaryAcceptedStageRecord(instance)`, `auxiliaryAcceptedStageValue(instance, source, name)`, `AuxiliaryAcceptedStageRecord{time, states, outputs, inputs}` | `Systems/FESystem.h` | A monolithic auxiliary block solves its states at the stage of the time integrator (t_n + alpha_f dt under generalized-alpha), where the coupled fields apply its outputs. For a recorded single-entity instance the stage finalization keeps, before the conversion to the step end, the stage time, the stage state, the outputs as the last residual evaluation applied them and the inputs they read; `commitTimeStep()` publishes them, `beginTimeStep()` drops an uncommitted attempt's, and a step committed without a stage (an endpoint scheme) clears them. Live constraint bindings, whatever view they name, never read the record |
+| `ScalarHistorySource::AuxiliaryStageTime`, column `<instance>@stage_time` | `PostProcessing/ScalarHistory.h` | The scalar history reads auxiliary states and outputs from the accepted-stage record, else at the committed state with the step time; the first recorded state or output of an instance requests its record and adds its stage-time column |
+
 ## Current Capability Notes
 
 - Forms is a real-valued symbolic DSL with scalar, vector, matrix, and selected

@@ -1904,6 +1904,40 @@ public:
                                                 Real dt) const;
 
     /**
+     * @brief The values a monolithic block applied at the stage of the last accepted step
+     *
+     * A monolithic block solves its states at the stage of the time
+     * integrator (t_n + alpha_f dt for generalized-alpha), where the fields
+     * it is coupled to apply its outputs, and is then converted to the step
+     * end.  For an instance whose accepted stage is recorded
+     * (recordAuxiliaryAcceptedStage), finalizeMonolithicAuxiliaryStageState()
+     * keeps, before that conversion, the stage time, the stage state, the
+     * outputs as the last residual evaluation applied them and the inputs
+     * they read; commitTimeStep() publishes them, and a step committed
+     * without that finalization (an endpoint scheme) clears them.  Live
+     * constraint bindings never read this record.
+     */
+    struct AuxiliaryAcceptedStageRecord {
+        Real time{0.0};
+        std::vector<Real> states{};
+        std::vector<Real> outputs{};
+        std::vector<Real> inputs{};
+    };
+
+    /// Keep the accepted-stage record of the single-entity monolithic instance @p instance_name.
+    void recordAuxiliaryAcceptedStage(std::string_view instance_name);
+
+    /// The published accepted-stage record of @p instance_name; null before the first, after a
+    /// step committed without a stage, and for an instance whose stage is not recorded.
+    [[nodiscard]] const AuxiliaryAcceptedStageRecord* auxiliaryAcceptedStageRecord(
+        std::string_view instance_name) const;
+
+    /// State or output @p name of the accepted-stage record of @p instance_name, when published.
+    [[nodiscard]] std::optional<Real> auxiliaryAcceptedStageValue(std::string_view instance_name,
+                                                                  AuxiliaryConstraintValueSource source,
+                                                                  std::string_view name) const;
+
+    /**
      * @brief Return true when formulation metadata should keep AuxiliaryOutputRef.
      *
      * Live monolithic blocks preserve the output reference in metadata so the
@@ -2861,6 +2895,11 @@ private:
         /// Empty = all entities (WholeDomain / no restriction).
         std::vector<std::size_t> entity_map{};
         std::vector<std::size_t> qp_offsets{};
+        /// The accepted-stage record (auxiliaryAcceptedStageRecord): kept only
+        /// when requested; pending from the stage finalization to the commit.
+        bool record_accepted_stage{false};
+        std::optional<AuxiliaryAcceptedStageRecord> pending_stage_record{};
+        std::optional<AuxiliaryAcceptedStageRecord> accepted_stage_record{};
     };
     struct AuxiliaryScopeResolution {
         std::size_t entity_count{0};

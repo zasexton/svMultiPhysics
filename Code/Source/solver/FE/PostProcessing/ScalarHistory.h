@@ -34,8 +34,14 @@
  * auxiliary input gives its cache (for an input refreshed at every nonlinear
  * iteration, its value at the stage state of the last residual evaluation:
  * u_{n+1} under backward Euler, u_n + alpha_f (u_{n+1} - u_n) under
- * first-order generalized alpha), and auxiliary states and outputs are read
- * at the committed state, outputs with the cached inputs.
+ * first-order generalized alpha).  The states and outputs of an auxiliary
+ * instance are those the coupled fields applied: for a single-entity
+ * monolithic block the accepted-stage record of the step
+ * (FESystem::auxiliaryAcceptedStageRecord: the stage state and the outputs
+ * as its last residual evaluation applied them, kept at the commit), and
+ * the committed state for another block, after an endpoint step and before
+ * the first step.  The first recorded state or output of an instance adds
+ * the column "<instance>@stage_time", the time those columns hold at.
  *
  * The values are the same on every rank and at every rank count for the
  * same state: a quantity is evaluated with exact sums
@@ -73,8 +79,9 @@ enum class ScalarHistorySource : std::uint8_t {
     Quantity,        ///< a quantity's measured 0-form, summed exactly
     GlobalField,     ///< the value of a scalar global field
     AuxiliaryInput,  ///< the current value of a registered auxiliary input
-    AuxiliaryState,  ///< a committed state of a single-entity auxiliary instance
-    AuxiliaryOutput  ///< an output of a single-entity auxiliary instance at its committed state
+    AuxiliaryState,  ///< a state of a single-entity auxiliary instance at its accepted stage
+    AuxiliaryOutput, ///< an output of a single-entity auxiliary instance at its accepted stage
+    AuxiliaryStageTime ///< the time of an instance's accepted stage (the step time before any)
 };
 
 /// One column of a scalar history.
@@ -105,12 +112,14 @@ void record(systems::FESystem& system, FieldId field);
 /// Records the auxiliary input @p input under @p name.
 void record(systems::FESystem& system, const systems::AuxiliaryInputHandle& input, std::string name);
 
-/// Records state @p state of the single-entity instance @p instance as "<instance>.<state>".
+/// Records state @p state of the single-entity instance @p instance as
+/// "<instance>.<state>", after "<instance>@stage_time" for its first column.
 void recordAuxiliaryState(systems::FESystem& system,
                           const systems::AuxiliaryInstanceHandle& instance,
                           const std::string& state);
 
-/// Records output @p output of the single-entity instance @p instance as "<instance>.<output>".
+/// Records output @p output of the single-entity instance @p instance as
+/// "<instance>.<output>", after "<instance>@stage_time" for its first column.
 void recordAuxiliaryOutput(systems::FESystem& system,
                            const systems::AuxiliaryInstanceHandle& instance,
                            const std::string& output);

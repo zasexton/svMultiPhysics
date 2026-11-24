@@ -1077,9 +1077,11 @@ TEST(BoundaryIntegralInput, ScalarHistoryRecordsAnInputAndTheCommittedStateAndOu
     svmp::FE::post::record(sys, Q, "Q");
     svmp::FE::post::recordAuxiliaryState(sys, decay, "X");
     svmp::FE::post::recordAuxiliaryOutput(sys, decay, "Y");
-    EXPECT_EQ(svmp::FE::post::scalarHistoryHeader(sys), "step,time,Q,decay.X,decay.Y\n");
+    // A partitioned block has no accepted stage: its states are read at the
+    // committed state, and its stage time is the state's time.
+    EXPECT_EQ(svmp::FE::post::scalarHistoryHeader(sys), "step,time,Q,decay@stage_time,decay.X,decay.Y\n");
     // Recording installs nothing and registers no input.
-    EXPECT_EQ(svmp::FE::post::scalarHistoryColumns(sys).size(), 3u);
+    EXPECT_EQ(svmp::FE::post::scalarHistoryColumns(sys).size(), 4u);
 
     const auto u = FormExpr::stateField(u_field, *space, "u");
     const auto v = FormExpr::testFunction(*space, "v");
@@ -1091,19 +1093,20 @@ TEST(BoundaryIntegralInput, ScalarHistoryRecordsAnInputAndTheCommittedStateAndOu
     SystemStateView state; state.time = 0.0; state.dt = 0.1; state.u = sol;
     sys.prepareAuxiliaryForAssembly(state, false);
     auto values = svmp::FE::post::scalarHistoryValues(sys, state, CollectiveCommunicator{});
-    ASSERT_EQ(values.size(), 3u);
+    ASSERT_EQ(values.size(), 4u);
     EXPECT_NEAR(values[0], 0.5, 1e-14);
-    EXPECT_EQ(values[1], 10.0);
+    EXPECT_EQ(values[1], 0.0);
     EXPECT_EQ(values[2], 10.0);
+    EXPECT_EQ(values[3], 10.0);
 
     // The work state moves; the committed state, and so the history, only at commit.
     sys.advanceAuxiliaryState(state);
     values = svmp::FE::post::scalarHistoryValues(sys, state, CollectiveCommunicator{});
-    EXPECT_EQ(values[1], 10.0);
+    EXPECT_EQ(values[2], 10.0);
     sys.commitTimeStep();
     values = svmp::FE::post::scalarHistoryValues(sys, state, CollectiveCommunicator{});
-    EXPECT_NEAR(values[1], 9.95, 1e-12);
     EXPECT_NEAR(values[2], 9.95, 1e-12);
+    EXPECT_NEAR(values[3], 9.95, 1e-12);
 }
 
 TEST(BoundaryIntegralInput, FESystem_ConsistentInitializesGlobalPartitionedDAE)

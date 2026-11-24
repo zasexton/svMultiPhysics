@@ -50,6 +50,7 @@ using svmp::FE::forms::deltat;
 using svmp::FE::forms::t;
 using svmp::FE::forms::bc::strongDirichlet;
 using svmp::FE::systems::AuxiliaryConstraintValueSource;
+using svmp::FE::systems::AuxiliaryOutputStateView;
 using svmp::FE::systems::AuxiliaryModelBuilder;
 using svmp::FE::systems::use;
 
@@ -518,6 +519,43 @@ TEST(StrongDirichletConstraint, AuxiliaryStateBindingDrivesStrongDirichlet)
     ASSERT_EQ(work.size(), 1u);
     work[0] = 2.5;
 
+    sys.updateConstraints(/*time=*/0.0, /*dt=*/0.0);
+    for (const auto dof : constrained) {
+        EXPECT_NEAR(sys.constraints().getInhomogeneity(dof), 2.5, 1e-12);
+    }
+}
+
+// A live binding follows the work state whatever view it names: the stage
+// view of a constraint is the stage being solved, not the accepted-stage
+// record the scalar history reads.
+TEST(StrongDirichletConstraint, AuxiliaryStateBindingWithTheStageViewFollowsTheWorkState)
+{
+    const int marker = 7;
+    auto mesh = build_single_quad_mesh_with_left_edge_marker(marker);
+    auto space = std::make_shared<H1Space>(ElementType::Quad4, /*order=*/1);
+
+    FESystem sys(mesh);
+    auto u = sys.addField(FieldSpec{.name = "u", .space = space, .components = 1});
+
+    auto model = AuxiliaryModelBuilder("state_bc")
+        .state("x")
+        .ode("x", FormExpr::constant(0.0))
+        .build();
+
+    sys.deployAuxiliaryModel(
+        use(model).name("state_bc_inst").global().partitioned("ForwardEuler")
+            .initialize({1.25})
+            .drivesStrongDirichlet(u, marker, "x", -1, AuxiliaryConstraintValueSource::State,
+                                   AuxiliaryOutputStateView::Stage));
+    sys.finalizeAuxiliaryLayout();
+    sys.setup();
+
+    const auto constrained = svmp::FE::constraints::boundaryDofsByMarker(*mesh, sys.dofHandler(), marker);
+    ASSERT_EQ(constrained.size(), 2u);
+    for (const auto dof : constrained) {
+        EXPECT_NEAR(sys.constraints().getInhomogeneity(dof), 1.25, 1e-12);
+    }
+    sys.auxiliaryStateManager().getBlock("state_bc_inst").work()[0] = 2.5;
     sys.updateConstraints(/*time=*/0.0, /*dt=*/0.0);
     for (const auto dof : constrained) {
         EXPECT_NEAR(sys.constraints().getInhomogeneity(dof), 2.5, 1e-12);

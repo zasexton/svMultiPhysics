@@ -15844,6 +15844,10 @@ assembly::AssemblyResult FESystem::assembleMass(
 void FESystem::beginTimeStep(bool reset_auxiliary_state,
                              bool invalidate_auxiliary_inputs)
 {
+    // A stage kept by an attempt that was not committed is not this step's.
+    for (auto& entry : deployed_aux_entries_) {
+        entry.pending_stage_record.reset();
+    }
     // requireSetup() is skipped for auxiliary-only use (no mesh/fields).
     // Material/global-kernel providers are null when not set up.
     if (material_state_provider_) {
@@ -15883,6 +15887,14 @@ void FESystem::commitTimeStep()
     if (auxiliary_state_manager_) {
         auxiliary_state_manager_->commitAll(last_auxiliary_advance_time_);
     }
+    // The accepted-stage records of this step, or none for a step without a
+    // stage finalization.
+    for (auto& entry : deployed_aux_entries_) {
+        if (entry.record_accepted_stage) {
+            entry.accepted_stage_record = std::move(entry.pending_stage_record);
+            entry.pending_stage_record.reset();
+        }
+    }
     // The bordered history moves as TimeHistory's does at the accepted step.
     for (std::size_t k = bordered_global_older_values_.size(); k > 1; --k) {
         bordered_global_older_values_[k - 1] = bordered_global_older_values_[k - 2];
@@ -15916,6 +15928,36 @@ void FESystem::finalizeMonolithicAuxiliaryStageState(
 
     if (!auxiliary_state_manager_) {
         return;
+    }
+
+    // The values a recorded monolithic block applied at the stage, before the
+    // conversion to the step end; published by commitTimeStep().
+    {
+        Real step_dt = dt;
+        if (!(step_dt > Real(0.0)) || !std::isfinite(static_cast<double>(step_dt))) {
+            step_dt = final_time - previous_auxiliary_time;
+        }
+        const bool step_known = step_dt > Real(0.0) && std::isfinite(static_cast<double>(step_dt));
+        for (auto& entry : deployed_aux_entries_) {
+            if (!entry.record_accepted_stage || !entry.materialized ||
+                entry.spec.solve_mode != AuxiliarySolveMode::Monolithic ||
+                !auxiliary_state_manager_->hasBlock(entry.instance_name)) {
+                continue;
+            }
+            const auto& blk = auxiliary_state_manager_->getBlock(entry.instance_name);
+            if (blk.entityCount() != 1u) {
+                continue;
+            }
+            AuxiliaryAcceptedStageRecord record;
+            record.time = step_known ? final_time - (Real(1.0) - alpha_f) * step_dt : final_time;
+            record.states = blk.gatherEntityWork(/*entity_index=*/0);
+            const auto n_outputs = static_cast<std::size_t>(std::max(0, entry.model->outputCount()));
+            record.outputs.assign(entry.output_buffer.begin(),
+                                  entry.output_buffer.begin() +
+                                      static_cast<std::ptrdiff_t>(std::min(n_outputs, entry.output_buffer.size())));
+            record.inputs = buildInputVector(entry);
+            entry.pending_stage_record = std::move(record);
+        }
     }
 
     const bool transform_stage =
@@ -23780,6 +23822,9 @@ void FESystem::rollbackAuxiliaryState()
     if (auxiliary_state_manager_) {
         auxiliary_state_manager_->rollbackAll();
     }
+    for (auto& entry : deployed_aux_entries_) {
+        entry.pending_stage_record.reset();
+    }
     bordered_global_values_ = bordered_global_committed_values_;
     bordered_global_pending_rates_.reset();
 }
@@ -24918,6 +24963,57 @@ Real FESystem::auxiliaryConstraintValue(std::string_view instance_name,
                 "FESystem::auxiliaryConstraintValue: output index out of range for '" +
                     binding.value_name + "'");
     return outputs[out_idx];
+}
+
+void FESystem::recordAuxiliaryAcceptedStage(std::string_view instance_name)
+{
+    auto it = std::find_if(deployed_aux_entries_.begin(), deployed_aux_entries_.end(),
+                           [&](const DeployedAuxEntry& entry) { return entry.instance_name == instance_name; });
+    FE_THROW_IF(it == deployed_aux_entries_.end(), InvalidArgumentException,
+                "FESystem::recordAuxiliaryAcceptedStage: no deployed instance '" + std::string(instance_name) + "'");
+    it->record_accepted_stage = true;
+}
+
+const FESystem::AuxiliaryAcceptedStageRecord* FESystem::auxiliaryAcceptedStageRecord(
+    std::string_view instance_name) const
+{
+    const auto& entry = findDeployedAuxEntry_(instance_name);
+    return entry.accepted_stage_record.has_value() ? &*entry.accepted_stage_record : nullptr;
+}
+
+std::optional<Real> FESystem::auxiliaryAcceptedStageValue(std::string_view instance_name,
+                                                          AuxiliaryConstraintValueSource source,
+                                                          std::string_view name) const
+{
+    const auto& entry = findDeployedAuxEntry_(instance_name);
+    if (!entry.accepted_stage_record.has_value()) {
+        return std::nullopt;
+    }
+    const auto& record = *entry.accepted_stage_record;
+    if (source == AuxiliaryConstraintValueSource::State) {
+        const auto* built = dynamic_cast<const BuiltAuxiliaryModel*>(entry.model.get());
+        FE_THROW_IF(built == nullptr, InvalidArgumentException,
+                    "FESystem::auxiliaryAcceptedStageValue: instance '" + entry.instance_name +
+                        "' does not name its states");
+        const auto& names = built->stateNames();
+        const auto it = std::find(names.begin(), names.end(), name);
+        FE_THROW_IF(it == names.end(), InvalidArgumentException,
+                    "FESystem::auxiliaryAcceptedStageValue: unknown state '" + std::string(name) +
+                        "' on instance '" + entry.instance_name + "'");
+        const auto index = static_cast<std::size_t>(std::distance(names.begin(), it));
+        FE_THROW_IF(index >= record.states.size(), InvalidStateException,
+                    "FESystem::auxiliaryAcceptedStageValue: state index out of range");
+        return record.states[index];
+    }
+    const auto names = entry.model->outputNames();
+    const auto it = std::find(names.begin(), names.end(), name);
+    FE_THROW_IF(it == names.end(), InvalidArgumentException,
+                "FESystem::auxiliaryAcceptedStageValue: unknown output '" + std::string(name) +
+                    "' on instance '" + entry.instance_name + "'");
+    const auto index = static_cast<std::size_t>(std::distance(names.begin(), it));
+    FE_THROW_IF(index >= record.outputs.size(), InvalidStateException,
+                "FESystem::auxiliaryAcceptedStageValue: output index out of range");
+    return record.outputs[index];
 }
 
 std::size_t FESystem::auxiliaryOutputSlotOf(std::string_view output_name) const

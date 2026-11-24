@@ -1970,7 +1970,7 @@ TEST(GlobalTimeDerivative, TheScalarHistoryRecordsAGlobalFieldAndAQuantityAfterE
     }
 }
 
-TEST(GlobalTimeDerivative, AGeneralizedAlphaOutletHistorySamplesEachColumnAtItsStage)
+TEST(GlobalTimeDerivative, AGeneralizedAlphaOutletHistorySamplesTheModelAtTheAppliedStage)
 {
     // w obeys C w' + w/R + P_out on the right edge = f(t); its flow through
     // the right edge, Q, drives an RCR circuit C_o X' = Q - (X - Pd)/Rd whose
@@ -2088,24 +2088,28 @@ TEST(GlobalTimeDerivative, AGeneralizedAlphaOutletHistorySamplesEachColumnAtItsS
     std::filesystem::remove(path);
     ASSERT_EQ(expected.size(), 5u);
     ASSERT_EQ(rows.size(), 6u);
-    EXPECT_EQ(rows[0], (std::vector<std::string>{"step", "time", "flow", "outlet.Q", "outlet.X", "outlet.P_out"}));
+    EXPECT_EQ(rows[0], (std::vector<std::string>{"step", "time", "flow", "outlet.Q", "outlet@stage_time", "outlet.X",
+                                                 "outlet.P_out"}));
     Real previous_x = X0;
     for (std::size_t k = 0; k < expected.size(); ++k) {
         SCOPED_TRACE("step " + std::to_string(k + 1));
         const auto& row = rows[k + 1];
-        ASSERT_EQ(row.size(), 6u);
+        ASSERT_EQ(row.size(), 7u);
         const Real measured = readReal(row[2]);
         const Real input = readReal(row[3]);
-        const Real x = readReal(row[4]);
-        const Real p_out = readReal(row[5]);
+        const Real stage_time = readReal(row[4]);
+        const Real x = readReal(row[5]);
+        const Real p_out = readReal(row[6]);
+        // The model's columns hold at the stage the field applied them.
+        EXPECT_NEAR(stage_time, dt * static_cast<Real>(k) + alpha_f * dt, 1e-14);
         // The quantity is recomputed from the accepted state.
         EXPECT_NEAR(measured, expected[k][0], 1e-13);
         // The input column is the input's cache: the flow at the stage state
         // of the last residual evaluation, not at the accepted state.
         EXPECT_NEAR(input, expected[k][1], 1e-13);
         EXPECT_GT(std::abs(input - measured), 1e-6);
-        // The pressure is the output at the committed state X_{n+1} with the
-        // cached input.
+        // The state is the one solved at the stage, and the pressure the
+        // output there with the cached input: X_s + Rp Q_s, the applied load.
         EXPECT_NEAR(p_out, x + Rp * input, 1e-13);
         EXPECT_NE(x, previous_x);
         previous_x = x;

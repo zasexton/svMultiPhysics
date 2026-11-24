@@ -66,6 +66,24 @@ void appendNumber(std::string& out, double value)
     return binding;
 }
 
+/// Keeps the accepted stage of @p instance and adds the column
+/// "<instance>@stage_time" before its first state or output.
+void recordStageOfInstanceOnce(systems::FESystem& system, const std::string& instance)
+{
+    const auto& columns = system.attachment<ScalarHistoryDeclarations>().columns;
+    const bool present = std::any_of(columns.begin(), columns.end(), [&](const ScalarHistoryColumn& column) {
+        return column.source == ScalarHistorySource::AuxiliaryStageTime && column.target == instance;
+    });
+    if (!present) {
+        system.recordAuxiliaryAcceptedStage(instance);
+        addColumn(system, ScalarHistoryColumn{
+                              .name = instance + "@stage_time",
+                              .source = ScalarHistorySource::AuxiliaryStageTime,
+                              .target = instance,
+                          });
+    }
+}
+
 } // namespace
 
 void record(systems::FESystem& system, const systems::Quantity& quantity)
@@ -107,6 +125,7 @@ void recordAuxiliaryState(systems::FESystem& system,
                           const systems::AuxiliaryInstanceHandle& instance,
                           const std::string& state)
 {
+    recordStageOfInstanceOnce(system, instance.instanceName());
     addColumn(system, ScalarHistoryColumn{
                           .name = instance.instanceName() + "." + state,
                           .source = ScalarHistorySource::AuxiliaryState,
@@ -119,6 +138,7 @@ void recordAuxiliaryOutput(systems::FESystem& system,
                            const systems::AuxiliaryInstanceHandle& instance,
                            const std::string& output)
 {
+    recordStageOfInstanceOnce(system, instance.instanceName());
     addColumn(system, ScalarHistoryColumn{
                           .name = instance.instanceName() + "." + output,
                           .source = ScalarHistorySource::AuxiliaryOutput,
@@ -198,17 +218,24 @@ std::vector<Real> scalarHistoryValues(const systems::FESystem& system,
                 break;
             }
             case ScalarHistorySource::AuxiliaryState:
-                value = system.auxiliaryConstraintValue(
-                    column.target,
-                    committedValue(systems::AuxiliaryConstraintValueSource::State, column.value),
-                    state.time, state.dt);
+            case ScalarHistorySource::AuxiliaryOutput: {
+                // The values the block applied at the accepted stage, else the
+                // committed state (an endpoint step, or before the first step).
+                const auto source = column.source == ScalarHistorySource::AuxiliaryState
+                                        ? systems::AuxiliaryConstraintValueSource::State
+                                        : systems::AuxiliaryConstraintValueSource::Output;
+                const auto accepted = system.auxiliaryAcceptedStageValue(column.target, source, column.value);
+                value = accepted.has_value()
+                            ? *accepted
+                            : system.auxiliaryConstraintValue(column.target, committedValue(source, column.value),
+                                                              state.time, state.dt);
                 break;
-            case ScalarHistorySource::AuxiliaryOutput:
-                value = system.auxiliaryConstraintValue(
-                    column.target,
-                    committedValue(systems::AuxiliaryConstraintValueSource::Output, column.value),
-                    state.time, state.dt);
+            }
+            case ScalarHistorySource::AuxiliaryStageTime: {
+                const auto* record = system.auxiliaryAcceptedStageRecord(column.target);
+                value = record != nullptr ? record->time : state.time;
                 break;
+            }
             }
             if (comm.rank() == 0) {
                 rank_zero[i].add(value);
