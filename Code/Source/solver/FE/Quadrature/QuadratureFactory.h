@@ -204,6 +204,18 @@ public:
      * @throws FEException if element type doesn't support position-based quadrature
      */
     static Real default_legacy_modifier(ElementType element_type);
+
+    /**
+     * @brief Whether cells of @p element_type take the legacy 4-point
+     * tetrahedron rule (degree 2) for an element of @p polynomial_order
+     *
+     * Tetra4 cells of elements whose functions have degree at most 1:
+     * Lagrange orders 0 and 1, and the lowest-order Raviart-Thomas and
+     * Nedelec elements (order 0, functions of degree 1).
+     */
+    static bool uses_legacy_tetrahedron_rule(ElementType element_type,
+                                             int polynomial_order,
+                                             bool vector_basis) noexcept;
 };
 
 } // namespace quadrature

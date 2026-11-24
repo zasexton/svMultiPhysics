@@ -362,6 +362,12 @@ bool QuadratureFactory::supports_position_based(ElementType element_type) noexce
     }
 }
 
+bool QuadratureFactory::uses_legacy_tetrahedron_rule(ElementType element_type,
+                                                     int polynomial_order,
+                                                     bool vector_basis) noexcept {
+    return element_type == ElementType::Tetra4 && polynomial_order <= (vector_basis ? 0 : 1);
+}
+
 Real QuadratureFactory::default_legacy_modifier(ElementType element_type) {
     switch (canonical(element_type)) {
         case ElementType::Triangle3:

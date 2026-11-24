@@ -18,7 +18,8 @@ resolveAuxiliaryCellQuadratureRule(
     const auto& element = space.getElement(cell_type, cell_id);
 
     const int basis_order = element.polynomial_order();
-    if (basis_order <= 1 && cell_type == ElementType::Tetra4) {
+    if (quadrature::QuadratureFactory::uses_legacy_tetrahedron_rule(
+            cell_type, basis_order, element.basis().is_vector_valued())) {
         const auto legacy_modifier =
             quadrature::QuadratureFactory::default_legacy_modifier(cell_type);
         return quadrature::QuadratureFactory::create_legacy_compatible(

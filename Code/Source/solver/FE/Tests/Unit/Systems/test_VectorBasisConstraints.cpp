@@ -36,6 +36,7 @@
 #include <array>
 #include <cmath>
 #include <initializer_list>
+#include <limits>
 #include <memory>
 #include <unordered_set>
 
@@ -895,6 +896,7 @@ TEST(MonolithicAffineClassification, FieldGradientOnAFaceOfATaperedCell)
 
 
 
+
 // div and curl of another field with a vector basis, in the rows of a
 // piecewise-constant field: they equal the trace and the antisymmetric part of
 // the field's gradient, interpreted and compiled (the interpreter gave 0 for
@@ -1053,6 +1055,196 @@ TEST(QuadratureRuleSwitch, FirstCellAfterAnotherRuleMapsItsOwnPoints)
     EXPECT_NEAR(total, 0.25, 1e-14);  // the DG2 rows sum to the integral of x y
 }
 
+
+namespace {
+
+/// The unit square cut into n x n quadrilaterals, or the unit cube into n^3
+/// hexahedra or 2 n^3 wedges, with no boundary labels.
+[[nodiscard]] std::shared_ptr<svmp::Mesh> unitBoxTensorMesh(svmp::CellFamily family, int n)
+{
+    const int dim = family == svmp::CellFamily::Quad ? 2 : 3;
+    std::vector<svmp::real_t> X;
+    const auto vertex = [n, dim](int i, int j, int k) {
+        return static_cast<svmp::index_t>((dim == 3 ? k * (n + 1) * (n + 1) : 0) + j * (n + 1) + i);
+    };
+    for (int k = 0; k <= (dim == 3 ? n : 0); ++k) {
+        for (int j = 0; j <= n; ++j) {
+            for (int i = 0; i <= n; ++i) {
+                X.push_back(static_cast<svmp::real_t>(i) / n);
+                X.push_back(static_cast<svmp::real_t>(j) / n);
+                if (dim == 3) {
+                    X.push_back(static_cast<svmp::real_t>(k) / n);
+                }
+            }
+        }
+    }
+    std::vector<svmp::offset_t> offsets{0};
+    std::vector<svmp::index_t> connectivity;
+    std::vector<svmp::CellShape> shapes;
+    const auto add = [&](std::initializer_list<svmp::index_t> cell) {
+        connectivity.insert(connectivity.end(), cell.begin(), cell.end());
+        offsets.push_back(static_cast<svmp::offset_t>(connectivity.size()));
+        svmp::CellShape shape{};
+        shape.family = family;
+        shape.num_corners = static_cast<int>(cell.size());
+        shape.order = 1;
+        shapes.push_back(shape);
+    };
+    for (int k = 0; k < (dim == 3 ? n : 1); ++k) {
+        for (int j = 0; j < n; ++j) {
+            for (int i = 0; i < n; ++i) {
+                if (dim == 2) {
+                    add({vertex(i, j, 0), vertex(i + 1, j, 0), vertex(i + 1, j + 1, 0), vertex(i, j + 1, 0)});
+                    continue;
+                }
+                const std::array<svmp::index_t, 8> c{vertex(i, j, k),         vertex(i + 1, j, k),
+                                                     vertex(i + 1, j + 1, k), vertex(i, j + 1, k),
+                                                     vertex(i, j, k + 1),     vertex(i + 1, j, k + 1),
+                                                     vertex(i + 1, j + 1, k + 1), vertex(i, j + 1, k + 1)};
+                if (family == svmp::CellFamily::Hex) {
+                    add({c[0], c[1], c[2], c[3], c[4], c[5], c[6], c[7]});
+                } else {
+                    add({c[0], c[1], c[2], c[4], c[5], c[6]});
+                    add({c[0], c[2], c[3], c[4], c[6], c[7]});
+                }
+            }
+        }
+    }
+    auto base = std::make_shared<svmp::MeshBase>();
+    base->build_from_arrays(dim, X, offsets, connectivity, shapes);
+    base->finalize();
+    return svmp::create_mesh(std::move(base));
+}
+
+/// Solves A x = b (A dense, row-major, n x n) by Gaussian elimination with
+/// partial pivoting; returns the smallest pivot relative to the largest entry
+/// of A (0 when A is singular).
+Real solveDense(std::vector<Real> A, std::vector<Real>& b)
+{
+    const auto n = b.size();
+    Real scale = 0.0;
+    for (const auto a : A) {
+        scale = std::max(scale, std::abs(a));
+    }
+    Real smallest = std::numeric_limits<Real>::max();
+    for (std::size_t k = 0; k < n; ++k) {
+        std::size_t p = k;
+        for (std::size_t i = k + 1; i < n; ++i) {
+            if (std::abs(A[i * n + k]) > std::abs(A[p * n + k])) {
+                p = i;
+            }
+        }
+        smallest = std::min(smallest, std::abs(A[p * n + k]) / scale);
+        if (A[p * n + k] == 0.0) {
+            return 0.0;
+        }
+        if (p != k) {
+            for (std::size_t j = 0; j < n; ++j) {
+                std::swap(A[k * n + j], A[p * n + j]);
+            }
+            std::swap(b[k], b[p]);
+        }
+        for (std::size_t i = k + 1; i < n; ++i) {
+            const Real f = A[i * n + k] / A[k * n + k];
+            for (std::size_t j = k; j < n; ++j) {
+                A[i * n + j] -= f * A[k * n + j];
+            }
+            b[i] -= f * b[k];
+        }
+    }
+    for (std::size_t k = n; k-- > 0;) {
+        for (std::size_t j = k + 1; j < n; ++j) {
+            b[k] -= A[k * n + j] * b[j];
+        }
+        b[k] /= A[k * n + k];
+    }
+    return smallest;
+}
+
+} // namespace
+
+// The mass matrix of a Raviart-Thomas or Nedelec field is regular on every
+// cell family and the L2 projection of a linear field of the space reproduces
+// it: x for H(div), (-y, x, 0) for H(curl).  The rules of these elements were
+// chosen for functions of degree k, not k + 1: the lowest-order masses of
+// Quad4, Hex8 and Wedge6 were singular, and RT1 and Nedelec1 on Tetra4 took
+// the legacy 4-point rule (singular too).
+TEST(VectorBasisQuadrature, MassIsRegularAndALinearFieldIsReproduced)
+{
+    struct Case {
+        svmp::CellFamily family;
+        bool curl;
+        int order;
+        int n;
+    };
+    for (const auto& c : {Case{svmp::CellFamily::Quad, false, 0, 2}, Case{svmp::CellFamily::Hex, false, 0, 2},
+                          Case{svmp::CellFamily::Hex, true, 0, 2}, Case{svmp::CellFamily::Wedge, false, 0, 2},
+                          Case{svmp::CellFamily::Wedge, true, 0, 2}, Case{svmp::CellFamily::Tetra, false, 1, 1},
+                          Case{svmp::CellFamily::Tetra, true, 1, 1}}) {
+        const int dim = c.family == svmp::CellFamily::Quad ? 2 : 3;
+        const auto type = c.family == svmp::CellFamily::Quad    ? ElementType::Quad4
+                          : c.family == svmp::CellFamily::Hex   ? ElementType::Hex8
+                          : c.family == svmp::CellFamily::Wedge ? ElementType::Wedge6
+                                                          : ElementType::Tetra4;
+        SCOPED_TRACE(::testing::Message() << "cell family " << static_cast<int>(c.family)
+                                          << (c.curl ? " H(curl)" : " H(div)") << " order " << c.order);
+        FESystem system(c.family == svmp::CellFamily::Tetra ? unitBoxSimplexMesh(3, c.n) : unitBoxTensorMesh(c.family, c.n));
+        FieldBinding fields(system, "VectorBasisQuadrature");
+        std::shared_ptr<const spaces::FunctionSpace> V;
+        if (c.curl) {
+            V = std::make_shared<spaces::HCurlSpace>(type, c.order);
+        } else {
+            V = std::make_shared<spaces::HDivSpace>(type, c.order);
+        }
+        const auto E = fields.unknown("E", V);
+        std::vector<forms::FormExpr> components;
+        for (int d = 0; d < dim; ++d) {
+            if (c.curl) {
+                components.push_back(d == 0 ? -forms::x().component(1)
+                                            : (d == 1 ? forms::x().component(0) : forms::FormExpr::constant(0.0)));
+            } else {
+                components.push_back(forms::x().component(d));
+            }
+        }
+        const auto field = forms::FormExpr::asVector(components);
+        {
+            FormulationBuilder F(system, "equations", {});
+            (void)F.residual((forms::inner(E.state, E.test) - forms::inner(field, E.test)).dx());
+        }
+        system.setup();
+        const auto n = system.dofHandler().getNumDofs();
+        const std::vector<Real> U(static_cast<std::size_t>(n), 0.0);
+        SystemStateView state;
+        state.u = U;
+        assembly::DenseMatrixView M(n);
+        assembly::DenseVectorView R(n);
+        M.zero();
+        R.zero();
+        AssemblyRequest request;
+        request.op = "equations";
+        request.want_matrix = true;
+        request.want_vector = true;
+        ASSERT_TRUE(system.assemble(request, state, &M, &R).success);
+        std::vector<Real> A(static_cast<std::size_t>(n * n));
+        std::vector<Real> b(static_cast<std::size_t>(n));
+        for (GlobalIndex i = 0; i < n; ++i) {
+            b[static_cast<std::size_t>(i)] = -R.getVectorEntry(i);
+            for (GlobalIndex j = 0; j < n; ++j) {
+                A[static_cast<std::size_t>(i * n + j)] = M.getMatrixEntry(i, j);
+            }
+        }
+        const auto rhs = b;
+        const Real pivot = solveDense(A, b);
+        EXPECT_GT(pivot, 1e-8);
+        // |E_h - field|^2 = |field|^2 - c.b for the projection c.
+        Real projected = 0.0;
+        for (std::size_t i = 0; i < b.size(); ++i) {
+            projected += b[i] * rhs[i];
+        }
+        const Real norm2 = c.curl ? Real(2) / Real(3) : Real(dim) / Real(3);
+        EXPECT_NEAR(projected, norm2, 1e-12);
+    }
+}
 
 } // namespace test
 } // namespace systems

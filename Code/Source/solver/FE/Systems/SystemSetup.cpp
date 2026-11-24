@@ -6726,7 +6726,8 @@ void FESystem::setup(const SetupOptions& user_opts, const SetupInputs& inputs)
                 // (4 QPs) matching StandardAssembler::resolveQuadratureRule.
                 // Tri3 keeps the Duffy rule (4 QPs) for better NS-VMS stability.
                 const int basis_order = test_element.polynomial_order();
-                if (basis_order <= 1 && cell_type == ElementType::Tetra4) {
+                if (quadrature::QuadratureFactory::uses_legacy_tetrahedron_rule(
+                        cell_type, basis_order, test_element.basis().is_vector_valued())) {
                     const auto default_mod = quadrature::QuadratureFactory::default_legacy_modifier(cell_type);
                     return quadrature::QuadratureFactory::create_legacy_compatible(
                         cell_type, default_mod);

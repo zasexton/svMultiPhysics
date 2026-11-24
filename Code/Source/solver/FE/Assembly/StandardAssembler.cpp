@@ -7125,7 +7125,8 @@ std::shared_ptr<const quadrature::QuadratureRule> StandardAssembler::resolveQuad
     // NS-VMS stabilization terms (nonlinear τ) need the extra point for
     // accurate integration compared to the 3-point position-based rule.
     const int basis_order = test_element.polynomial_order();
-    if (basis_order <= 1 && cell_type == ElementType::Tetra4) {
+    if (quadrature::QuadratureFactory::uses_legacy_tetrahedron_rule(
+            cell_type, basis_order, test_element.basis().is_vector_valued())) {
         const auto default_mod = quadrature::QuadratureFactory::default_legacy_modifier(cell_type);
         return quadrature::QuadratureFactory::create_legacy_compatible_pinned(
             cell_type, default_mod);

@@ -64,7 +64,11 @@ VectorElement::VectorElement(ElementType element_type,
 
     num_dofs_ = basis_->size();
 
-    const int quad_order = QuadratureFactory::recommended_order(info_.order, /*is_mass_matrix=*/false);
+    // Raviart-Thomas and Nedelec functions of order k are polynomials of
+    // degree k + 1 (BDM of degree k): the rule integrates the product of two
+    // of them exactly on an affine cell.
+    const int basis_degree = (basis_type_ == BasisType::BDM) ? info_.order : info_.order + 1;
+    const int quad_order = QuadratureFactory::recommended_order(basis_degree, /*is_mass_matrix=*/false);
     quad_ = QuadratureFactory::create(element_type, quad_order);
     if (!quad_) {
         throw FEException("VectorElement: QuadratureFactory returned null rule",
