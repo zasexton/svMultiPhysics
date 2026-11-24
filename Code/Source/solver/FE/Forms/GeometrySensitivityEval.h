@@ -65,6 +65,24 @@ namespace geometry_sensitivity {
     LocalIndex q,
     LocalIndex j);
 
+// Complete shape derivatives of the entity measures in the mesh-displacement
+// trial function j.  They need the mesh displacement to be the Lagrange space
+// of the geometry (its scalar DOF a is geometry node a of the cell): h from
+// the node pair that realizes it, vol from the cell quadrature (cells) or the
+// assembler's node gradients (faces), area from the face quadrature.
+
+[[nodiscard]] Real cellDiameterDerivative(
+    const assembly::AssemblyContext& ctx,
+    LocalIndex j);
+
+[[nodiscard]] Real cellVolumeDerivative(
+    const assembly::AssemblyContext& ctx,
+    LocalIndex j);
+
+[[nodiscard]] Real facetAreaDerivative(
+    const assembly::AssemblyContext& ctx,
+    LocalIndex j);
+
 } // namespace geometry_sensitivity
 } // namespace forms
 } // namespace FE

@@ -92,6 +92,22 @@ enum class GeometrySensitivityMode : std::uint8_t {
     LevelSetCutDomainUnknowns
 };
 
+/**
+ * @brief How much of the geometry a mesh-motion tangent differentiates.
+ *
+ * FrameExplicit (the default) differentiates only the frame-explicit
+ * terminals (currentCoordinate(), meshVelocity(), currentNormal(), ...) and
+ * gives mesh columns only to an integrand that contains one.  Complete, an
+ * opt-in, differentiates every geometric quantity of x = X + d: the physical
+ * gradients, divergences and Hessians of every field, the measure of every
+ * integral, J(), Jinv(), detJ(), x(), normal(), h(), vol() and area(), so
+ * every integral of a moving-domain residual gets mesh columns.
+ */
+enum class ShapeDerivative : std::uint8_t {
+    FrameExplicit,
+    Complete
+};
+
 enum class GeometryTangentPath : std::uint8_t {
     Auto,
     ADReference,
@@ -221,6 +237,17 @@ struct GeometrySensitivityOptions {
     GeometrySensitivityMode mode{GeometrySensitivityMode::GeometryConstant};
     FieldId mesh_motion_field{INVALID_FIELD_ID};
     std::vector<LevelSetCutDomainSensitivity> level_set_cut_domains{};
+    /// MeshMotionUnknowns only: which geometric quantities vary with the mesh displacement.
+    ShapeDerivative shape_derivative{ShapeDerivative::FrameExplicit};
+    /// Complete only: the space and trial symbol of the mesh displacement in
+    /// the residual being differentiated (filled by the installer and the
+    /// symbolic tangent kernel; found in the residual when empty).
+    std::optional<SpaceSignature> mesh_motion_space{};
+    std::optional<std::string> mesh_motion_symbol{};
+    /// Complete only: the field whose Hessians the residual evaluates with the
+    /// mapping curvature (the row's active trial, read from the trial basis);
+    /// kernels evaluate the Hessians of every other field without it.
+    FieldId exact_hessian_field{INVALID_FIELD_ID};
 };
 
 struct TensorJITOptions {
@@ -561,6 +588,12 @@ struct SymbolicOptions {
 
         // Global measure.  Appended for the same reason.
         GlobalIntegral, ///< Unit point mass: a term with no spatial integral, added once (dGlobal)
+
+        // Complete shape derivatives of the entity measures.  Appended for the same reason.
+        CellDiameterVariation, ///< Derivative of h() in the active mesh-displacement trial function
+        CellVolumeVariation,   ///< Derivative of vol() in the active mesh-displacement trial function
+        FacetAreaVariation,    ///< Derivative of area() in the active mesh-displacement trial function
+        GeometryTrialGradientVariation, ///< grad of the mesh-displacement trial function, constant in space within a cell
 		};
 
 class FormExpr;
@@ -728,6 +761,10 @@ public:
         static FormExpr currentMeasureVariation();
         static FormExpr currentNormalVariation();
         static FormExpr surfaceJacobianVariation();
+        static FormExpr cellDiameterVariation();
+        static FormExpr cellVolumeVariation();
+        static FormExpr facetAreaVariation();
+        static FormExpr geometryTrialGradientVariation();
 	    static FormExpr time();
 	    static FormExpr timeStep();
 	    static FormExpr effectiveTimeStep();

@@ -209,6 +209,10 @@ struct DualValue {
         case FormExprType::CurrentMeasureVariation:
         case FormExprType::CurrentNormalVariation:
         case FormExprType::SurfaceJacobianVariation:
+        case FormExprType::CellDiameterVariation:
+        case FormExprType::CellVolumeVariation:
+        case FormExprType::FacetAreaVariation:
+        case FormExprType::GeometryTrialGradientVariation:
             throw std::invalid_argument(
                 "PointEvaluator: symbolic geometry-variation terminals require an assembly trial column");
         case FormExprType::ParameterRef: {

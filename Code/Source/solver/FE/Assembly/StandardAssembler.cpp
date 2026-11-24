@@ -1945,6 +1945,78 @@ void setPerCellCacheStorageReuseForTesting(bool enabled) noexcept
 
 } // namespace detail
 
+namespace {
+
+/// The node pair realizing the cell diameter h (the first maximum of the
+/// node distances, as the diameter loops find it) and the unit vector from
+/// the second node to the first.
+template <class Nodes>
+AssemblyContext::CellDiameterNodes cellDiameterNodePair(const Nodes& nodes, std::size_t first,
+                                                        std::size_t second, Real h)
+{
+    AssemblyContext::CellDiameterNodes out;
+    out.num_nodes = static_cast<int>(nodes.size());
+    if (!(h > Real(0)) || first >= nodes.size() || second >= nodes.size()) {
+        return out;
+    }
+    out.first = static_cast<int>(first);
+    out.second = static_cast<int>(second);
+    for (int k = 0; k < 3; ++k) {
+        out.direction[static_cast<std::size_t>(k)] = (nodes[first][k] - nodes[second][k]) / h;
+    }
+    return out;
+}
+
+using MappingCurvature = std::array<AssemblyContext::Matrix3x3, 3>;
+
+/// d2 xi / dx2 at the context's quadrature points of @p cell_id: the mapping
+/// curvature that exact physical Hessians add to J^-T (reference Hessian) J^-1,
+/// as the basis Hessians carry it (RequiredData::ExactFieldHessians).
+std::vector<MappingCurvature> fieldHessianMappingCurvature(const IMeshAccess& mesh,
+                                                           GlobalIndex cell_id,
+                                                           const AssemblyContext& context)
+{
+    std::vector<std::array<Real, 3>> coordinates;
+    mesh.getCellCoordinates(cell_id, coordinates);
+    std::vector<math::Vector<Real, 3>> nodes(coordinates.size());
+    for (std::size_t i = 0; i < coordinates.size(); ++i) {
+        nodes[i] = math::Vector<Real, 3>{coordinates[i][0], coordinates[i][1], coordinates[i][2]};
+    }
+    geometry::MappingRequest request;
+    request.element_type = mesh.getCellType(cell_id);
+    request.geometry_order = mesh.getCellGeometryOrder(cell_id);
+    request.use_affine = request.geometry_order <= 1;
+    const auto mapping = geometry::MappingFactory::create(request, nodes);
+    const int dim = context.dimension();
+    const auto points = context.quadraturePoints();
+    const auto inverse_jacobians = context.inverseJacobians();
+    std::vector<MappingCurvature> out(points.size());
+    for (std::size_t q = 0; q < points.size(); ++q) {
+        const math::Vector<Real, 3> xi{points[q][0], points[q][1], points[q][2]};
+        (void)detail::inverseMappingSecondDerivatives(inverse_jacobians[q], mapping->mapping_hessian(xi), dim, out[q]);
+    }
+    return out;
+}
+
+void addMappingCurvature(AssemblyContext::Matrix3x3& H,
+                         const AssemblyContext::Vector3D& reference_gradient,
+                         const MappingCurvature& curvature,
+                         int dim)
+{
+    for (int r = 0; r < dim; ++r) {
+        for (int c = 0; c < dim; ++c) {
+            Real sum = 0.0;
+            for (int a = 0; a < dim; ++a) {
+                sum += reference_gradient[static_cast<std::size_t>(a)] *
+                       curvature[static_cast<std::size_t>(a)][static_cast<std::size_t>(r)][static_cast<std::size_t>(c)];
+            }
+            H[static_cast<std::size_t>(r)][static_cast<std::size_t>(c)] += sum;
+        }
+    }
+}
+
+} // namespace
+
 bool StandardAssembler::perCellCacheStorageReuseEnabled() noexcept
 {
     return g_per_cell_cache_storage_reuse_enabled.load(std::memory_order_relaxed);
@@ -3488,6 +3560,7 @@ void StandardAssembler::reset()
     cached_mapping_affine_ = false;
     cached_geom_h_ = 0.0;
     cached_geom_volume_ = 0.0;
+    cached_geom_diameter_nodes_ = AssemblyContext::CellDiameterNodes{};
     cached_cell_dof_mesh_ = nullptr;
     cached_cell_dof_count_ = 0;
     cached_cell_dof_mesh_revisions_valid_ = false;
@@ -3530,6 +3603,7 @@ void StandardAssembler::invalidateGeometryCaches()
     cached_mapping_affine_ = false;
     cached_geom_h_ = 0.0;
     cached_geom_volume_ = 0.0;
+    cached_geom_diameter_nodes_ = AssemblyContext::CellDiameterNodes{};
     clearCutVolumeBasisCache();
     clearCutVolumeGeometryCache();
     cut_volume_epoch_cache_.clear();
@@ -7442,17 +7516,23 @@ void StandardAssembler::prepareGeometry(
             cell_volume += ctx_int_wts[q];
         }
         Real h = 0.0;
+        std::size_t h_first = 0, h_second = 0;
         for (std::size_t a = 0; a < n_nodes; ++a) {
             for (std::size_t b = a + 1; b < n_nodes; ++b) {
                 const Real dx = scratch_node_coords_[a][0] - scratch_node_coords_[b][0];
                 const Real dy = scratch_node_coords_[a][1] - scratch_node_coords_[b][1];
                 const Real dz = scratch_node_coords_[a][2] - scratch_node_coords_[b][2];
                 const Real dist = std::sqrt(dx * dx + dy * dy + dz * dz);
-                if (dist > h) h = dist;
+                if (dist > h) {
+                    h = dist;
+                    h_first = a;
+                    h_second = b;
+                }
             }
         }
         cached_geom_h_ = h;
         cached_geom_volume_ = cell_volume;
+        cached_geom_diameter_nodes_ = cellDiameterNodePair(scratch_node_coords_, h_first, h_second, h);
     }
 
     context.markGeometryDirty();
@@ -7647,16 +7727,22 @@ void StandardAssembler::prepareGeometry(
         for (LocalIndex q = 0; q < n_qpts; ++q)
             cell_volume += ctx_int_wts[q];
         Real h = 0.0;
+        std::size_t h_first = 0, h_second = 0;
         for (std::size_t a = 0; a < n_nodes; ++a)
             for (std::size_t b = a + 1; b < n_nodes; ++b) {
                 const Real dx = ws.node_coords[a][0] - ws.node_coords[b][0];
                 const Real dy = ws.node_coords[a][1] - ws.node_coords[b][1];
                 const Real dz = ws.node_coords[a][2] - ws.node_coords[b][2];
                 const Real dist = std::sqrt(dx * dx + dy * dy + dz * dz);
-                if (dist > h) h = dist;
+                if (dist > h) {
+                    h = dist;
+                    h_first = a;
+                    h_second = b;
+                }
             }
         ws.geom_h = h;
         ws.geom_volume = cell_volume;
+        ws.geom_diameter_nodes = cellDiameterNodePair(ws.node_coords, h_first, h_second, h);
     }
 
     context.markGeometryDirty();
@@ -7998,6 +8084,9 @@ void StandardAssembler::prepareBasis(
 
         if (hasFlag(required_data, RequiredData::EntityMeasures)) {
             context.setEntityMeasures(cached_geom_h_, cached_geom_volume_, 0.0);
+            if (hasFlag(required_data, RequiredData::EntityMeasureDerivatives)) {
+                context.setCellDiameterNodes(cached_geom_diameter_nodes_);
+            }
         }
 
         return;
@@ -8783,6 +8872,9 @@ void StandardAssembler::prepareBasis(
     if (hasFlag(required_data, RequiredData::EntityMeasures)) {
         // Use entity measures precomputed in prepareGeometry.
         context.setEntityMeasures(cached_geom_h_, cached_geom_volume_, /*facet_area=*/0.0);
+        if (hasFlag(required_data, RequiredData::EntityMeasureDerivatives)) {
+            context.setCellDiameterNodes(cached_geom_diameter_nodes_);
+        }
     }
 
     // Update basis topology cache for fast-path reuse on next cell
@@ -9191,6 +9283,7 @@ void StandardAssembler::restoreCutVolumeGeometryCacheEntry(
     context.setIntegrationWeights(entry.integration_weights);
     cached_geom_h_ = entry.geom_h;
     cached_geom_volume_ = entry.geom_volume;
+    cached_geom_diameter_nodes_ = AssemblyContext::CellDiameterNodes{};
     context.markGeometryDirty();
 
     cached_geom_bcache_handle_ = basis::BasisCacheHandle{};
@@ -9430,6 +9523,9 @@ void StandardAssembler::prepareCutVolumeBasisFromEpochCache(
         }
         if (hasFlag(required_data, RequiredData::EntityMeasures)) {
             context.setEntityMeasures(cached_geom_h_, cached_geom_volume_, /*facet_area=*/0.0);
+            if (hasFlag(required_data, RequiredData::EntityMeasureDerivatives)) {
+                context.setCellDiameterNodes(cached_geom_diameter_nodes_);
+            }
         }
         return;
     }
@@ -12117,6 +12213,7 @@ void StandardAssembler::assembleMonolithicCellBatch(const MonolithicBatchLoop& l
     const auto restorePreparedGeometry = [&](std::size_t slot) {
         cached_geom_h_ = saved_node_coords[slot].entity_h;
         cached_geom_volume_ = saved_node_coords[slot].entity_volume;
+        cached_geom_diameter_nodes_ = saved_node_coords[slot].entity_diameter_nodes;
         if (!cached_mapping_affine_) {
             scratch_node_coords_ = saved_node_coords[slot].node_coords;
             cached_mapping_->resetNodes(scratch_node_coords_);
@@ -12152,11 +12249,13 @@ void StandardAssembler::assembleMonolithicCellBatch(const MonolithicBatchLoop& l
         prepareGeometry(shared, mesh, cell_id, *fused_quad_rule);
         shared.setEntityMeasures(
             cached_geom_h_, cached_geom_volume_, 0.0);
+        shared.setCellDiameterNodes(cached_geom_diameter_nodes_);
         tp_m_geom += TP() - tp0;
 
         saved_node_coords[slot].node_coords = scratch_node_coords_;
         saved_node_coords[slot].entity_h = cached_geom_h_;
         saved_node_coords[slot].entity_volume = cached_geom_volume_;
+        saved_node_coords[slot].entity_diameter_nodes = cached_geom_diameter_nodes_;
 
         setCommonContextState(shared);
         if (any_need_field_solutions) {
@@ -12334,6 +12433,9 @@ void StandardAssembler::assembleMonolithicCellBatch(const MonolithicBatchLoop& l
                         saved_node_coords[slot].entity_h,
                         saved_node_coords[slot].entity_volume,
                         0.0);
+                    if (hasFlag(meta.required_data, RequiredData::EntityMeasureDerivatives)) {
+                        ctx.setCellDiameterNodes(saved_node_coords[slot].entity_diameter_nodes);
+                    }
                 }
             } else {
                 restorePreparedGeometry(slot);
@@ -14215,6 +14317,7 @@ AssemblyResult StandardAssembler::assembleCellsFused(
             prepareGeometry(shared_ctx, mesh, cell_id, *fused_quad_rule);
             shared_ctx.setEntityMeasures(
                 cached_geom_h_, cached_geom_volume_, 0.0);
+            shared_ctx.setCellDiameterNodes(cached_geom_diameter_nodes_);
             tp_m_geom += TP() - tp0;
             setCommonContextState(shared_ctx);
             if (any_need_field_solutions) {
@@ -14305,6 +14408,9 @@ AssemblyResult StandardAssembler::assembleCellsFused(
 
                     if (hasFlag(meta.required_data, RequiredData::EntityMeasures)) {
                         workspace.ctx.setEntityMeasures(cached_geom_h_, cached_geom_volume_, 0.0);
+                        if (hasFlag(meta.required_data, RequiredData::EntityMeasureDerivatives)) {
+                            workspace.ctx.setCellDiameterNodes(cached_geom_diameter_nodes_);
+                        }
                     }
                 } else {
                     const auto* saved_coupled_meta = active_coupled_block_meta_;
@@ -15725,9 +15831,14 @@ AssemblyResult StandardAssembler::assembleCellsFused(
                             }
 
                             if (hasFlag(meta.required_data,
-                                        RequiredData::EntityMeasures))
+                                        RequiredData::EntityMeasures)) {
                                 thread_ctx.setEntityMeasures(
                                     geom_ws.geom_h, geom_ws.geom_volume, 0.0);
+                                if (hasFlag(meta.required_data,
+                                            RequiredData::EntityMeasureDerivatives)) {
+                                    thread_ctx.setCellDiameterNodes(geom_ws.geom_diameter_nodes);
+                                }
+                            }
 
                             // Row DOFs
                             auto row_dofs = getCellDofsCached(
@@ -15977,6 +16088,7 @@ AssemblyResult StandardAssembler::assembleCellsFused(
                 saved_node_coords[slot].node_coords = scratch_node_coords_;
                 saved_node_coords[slot].entity_h = cached_geom_h_;
                 saved_node_coords[slot].entity_volume = cached_geom_volume_;
+                saved_node_coords[slot].entity_diameter_nodes = cached_geom_diameter_nodes_;
                 tp_fb_save += TP() - tp0;
 
                 tp0 = TP();
@@ -16130,6 +16242,7 @@ AssemblyResult StandardAssembler::assembleCellsFused(
                             // Restore cached entity measures (serial only — member vars not thread-safe)
                             cached_geom_h_ = slot_h;
                             cached_geom_volume_ = slot_vol;
+                            cached_geom_diameter_nodes_ = saved_node_coords[slot].entity_diameter_nodes;
                             if (!cached_mapping_affine_) {
                                 scratch_node_coords_ = saved_node_coords[slot].node_coords;
                                 cached_mapping_->resetNodes(scratch_node_coords_);
@@ -16215,8 +16328,12 @@ AssemblyResult StandardAssembler::assembleCellsFused(
                                 }
                             }
 
-                            if (hasFlag(meta.required_data, RequiredData::EntityMeasures))
+                            if (hasFlag(meta.required_data, RequiredData::EntityMeasures)) {
                                 ctx.setEntityMeasures(slot_h, slot_vol, 0.0);
+                                if (hasFlag(meta.required_data, RequiredData::EntityMeasureDerivatives)) {
+                                    ctx.setCellDiameterNodes(saved_node_coords[slot].entity_diameter_nodes);
+                                }
+                            }
 
                         } else {
                             prepareBasis(ctx, mesh, cell_id, *bs.test_space, *bs.trial_space,
@@ -16477,6 +16594,7 @@ AssemblyResult StandardAssembler::assembleCellsFused(
                 saved_node_coords[slot].node_coords = scratch_node_coords_;
                 saved_node_coords[slot].entity_h = cached_geom_h_;
                 saved_node_coords[slot].entity_volume = cached_geom_volume_;
+                saved_node_coords[slot].entity_diameter_nodes = cached_geom_diameter_nodes_;
                 tp_fb_save += TP() - tp0;
 
                 tp0 = TP();
@@ -16576,6 +16694,7 @@ AssemblyResult StandardAssembler::assembleCellsFused(
                         // and never accesses mapping nodes.
                         cached_geom_h_ = saved_node_coords[slot].entity_h;
                         cached_geom_volume_ = saved_node_coords[slot].entity_volume;
+                        cached_geom_diameter_nodes_ = saved_node_coords[slot].entity_diameter_nodes;
                         if (!cached_mapping_affine_) {
                             scratch_node_coords_ = saved_node_coords[slot].node_coords;
                             cached_mapping_->resetNodes(scratch_node_coords_);
@@ -17908,17 +18027,49 @@ void StandardAssembler::prepareContextFace(
         }
 
         Real h = 0.0;
+        std::size_t h_first = 0, h_second = 0;
         for (std::size_t a = 0; a < n_nodes; ++a) {
             for (std::size_t b = a + 1; b < n_nodes; ++b) {
                 const Real dx = scratch_node_coords_[a][0] - scratch_node_coords_[b][0];
                 const Real dy = scratch_node_coords_[a][1] - scratch_node_coords_[b][1];
                 const Real dz = scratch_node_coords_[a][2] - scratch_node_coords_[b][2];
                 const Real dist = std::sqrt(dx * dx + dy * dy + dz * dz);
-                if (dist > h) h = dist;
+                if (dist > h) {
+                    h = dist;
+                    h_first = a;
+                    h_second = b;
+                }
             }
         }
 
         context.setEntityMeasures(h, cell_volume, facet_area);
+
+        if (hasFlag(required_data, RequiredData::EntityMeasureDerivatives)) {
+            // d h / d x_a from the realizing node pair; d vol / d x_a =
+            // sum_q w_q |det J| grad_x N_a, with the cell rule of vol.
+            context.setCellDiameterNodes(cellDiameterNodePair(scratch_node_coords_, h_first, h_second, h));
+            std::vector<AssemblyContext::Vector3D> volume_gradients(n_nodes, AssemblyContext::Vector3D{0.0, 0.0, 0.0});
+            std::vector<basis::Gradient> reference_gradients;
+            const auto& geometry_basis = mapping->geometryBasis();
+            for (std::size_t q = 0; q < cell_quad_points.size(); ++q) {
+                const math::Vector<Real, 3> xi{
+                    cell_quad_points[q][0],
+                    cell_quad_points[q][1],
+                    cell_quad_points[q][2]};
+                geometry_basis.evaluate_gradients(xi, reference_gradients);
+                FE_THROW_IF(reference_gradients.size() != n_nodes, FEException,
+                            "StandardAssembler::prepareContextFace: the geometry basis does not match the cell nodes");
+                const auto inverse_jacobian = mapping->jacobian_inverse(xi);
+                const Real weight = cell_quad_weights[q] * std::abs(mapping->jacobian_determinant(xi));
+                for (std::size_t a = 0; a < n_nodes; ++a) {
+                    const auto g = mapping->transform_gradient(reference_gradients[a], inverse_jacobian);
+                    for (int k = 0; k < 3; ++k) {
+                        volume_gradients[a][static_cast<std::size_t>(k)] += weight * g[k];
+                    }
+                }
+            }
+            context.setCellVolumeNodeGradients(volume_gradients);
+        }
     }
 
     // Do not expose the face rule to the field-solution basis caches.  Its
@@ -18737,8 +18888,13 @@ void StandardAssembler::populateFieldSolutionData(
         const bool want_gradients = hasFlag(req.required, RequiredData::SolutionGradients);
         const bool want_hessians = hasFlag(req.required, RequiredData::SolutionHessians);
         const bool want_laplacians = hasFlag(req.required, RequiredData::SolutionLaplacians);
-        const bool need_gradients = want_gradients;
         const bool need_hessians = want_hessians || want_laplacians;
+        // Complete shape derivatives: Hessians with the mapping curvature, as
+        // the active trial's (only for the field that requests them).
+        const bool exact_hessians = need_hessians && hasFlag(req.required, RequiredData::ExactFieldHessians);
+        const bool need_gradients = want_gradients || exact_hessians;
+        const auto mapping_curvature = exact_hessians ? fieldHessianMappingCurvature(mesh, cell_id, context)
+                                                      : std::vector<MappingCurvature>{};
 
 	        const auto cell_dofs = getCellDofsFromTable(*access->dof_table, cell_id);
 	        FE_THROW_IF(cell_dofs.size() != static_cast<std::size_t>(n_dofs), FEException,
@@ -18977,6 +19133,9 @@ void StandardAssembler::populateFieldSolutionData(
                                 }
                                 H[static_cast<std::size_t>(r)][static_cast<std::size_t>(c)] = sum;
                             }
+                        }
+                        if (exact_hessians) {
+                            addMappingCurvature(H, gref_sum, mapping_curvature[static_cast<std::size_t>(q)], dim);
                         }
                         scalar_hessians[static_cast<std::size_t>(q)] = H;
                         if (want_laplacians) {
@@ -19500,6 +19659,9 @@ void StandardAssembler::populateFieldSolutionData(
                                 H[static_cast<std::size_t>(r)][static_cast<std::size_t>(c)] = sum;
                             }
                         }
+                        if (exact_hessians) {
+                            addMappingCurvature(H, gref_sum_c, mapping_curvature[static_cast<std::size_t>(q)], dim);
+                        }
                         const auto idx = q_base + static_cast<std::size_t>(comp);
                         vector_component_hessians[idx] = H;
                         if (want_laplacians) {
@@ -19774,8 +19936,13 @@ void StandardAssembler::populateFieldSolutionData(
         const bool want_gradients = hasFlag(req.required, RequiredData::SolutionGradients);
         const bool want_hessians = hasFlag(req.required, RequiredData::SolutionHessians);
         const bool want_laplacians = hasFlag(req.required, RequiredData::SolutionLaplacians);
-        const bool need_gradients = want_gradients;
         const bool need_hessians = want_hessians || want_laplacians;
+        // Complete shape derivatives: Hessians with the mapping curvature, as
+        // the active trial's (only for the field that requests them).
+        const bool exact_hessians = need_hessians && hasFlag(req.required, RequiredData::ExactFieldHessians);
+        const bool need_gradients = want_gradients || exact_hessians;
+        const auto mapping_curvature = exact_hessians ? fieldHessianMappingCurvature(mesh, cell_id, context)
+                                                      : std::vector<MappingCurvature>{};
 
 	        const auto cell_dofs = getCellDofsFromTable(*access->dof_table, cell_id);
 	        FE_THROW_IF(cell_dofs.size() != static_cast<std::size_t>(n_dofs), FEException,
@@ -19936,6 +20103,9 @@ void StandardAssembler::populateFieldSolutionData(
                             }
                             H[static_cast<std::size_t>(r)][static_cast<std::size_t>(c)] = sum;
                         }
+                    }
+                    if (exact_hessians) {
+                        addMappingCurvature(H, gref_sum, mapping_curvature[static_cast<std::size_t>(q)], dim);
                     }
                     scalar_hessians[static_cast<std::size_t>(q)] = H;
                     if (want_laplacians) {
@@ -20376,6 +20546,9 @@ void StandardAssembler::populateFieldSolutionData(
                                 }
                                 H[static_cast<std::size_t>(r)][static_cast<std::size_t>(c)] = sum;
                             }
+                        }
+                        if (exact_hessians) {
+                            addMappingCurvature(H, gref_sum_c, mapping_curvature[static_cast<std::size_t>(q)], dim);
                         }
                         const auto idx = q_base + static_cast<std::size_t>(comp);
                         vector_component_hessians[idx] = H;
@@ -21000,8 +21173,12 @@ void StandardAssembler::populateFieldSolutionDataFast(
     CellFieldEvaluationCache* field_eval_cache)
 {
     // Use cached recipes to skip per-field lookups.
-    // Falls back to the original path if recipes aren't valid.
-    if (!cached_field_recipes_valid_) {
+    // Falls back to the original path if recipes aren't valid, and for the
+    // exact (curvature) Hessians of complete shape derivatives.
+    if (!cached_field_recipes_valid_ ||
+        std::any_of(requirements.begin(), requirements.end(), [](const FieldRequirement& req) {
+            return hasFlag(req.required, RequiredData::ExactFieldHessians);
+        })) {
         populateFieldSolutionData(context, mesh, cell_id, requirements);
         return;
     }

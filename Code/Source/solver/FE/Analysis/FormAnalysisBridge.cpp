@@ -205,6 +205,14 @@ struct TerminalWalkContext {
         case FT::Pullback:
         case FT::Pushforward:
             return FormTerminalKind::FrameTransform;
+        case FT::CellDiameterVariation:
+            return FormTerminalKind::CellDiameterVariation;
+        case FT::CellVolumeVariation:
+            return FormTerminalKind::CellVolumeVariation;
+        case FT::FacetAreaVariation:
+            return FormTerminalKind::FacetAreaVariation;
+        case FT::GeometryTrialGradientVariation:
+            return FormTerminalKind::GeometryTrialGradientVariation;
         default:
             return std::nullopt;
     }
@@ -406,11 +414,17 @@ void appendFeatureGates(FormContributionAnalysisMetadata& metadata)
     add(FormBridgeFeature::GeometryTerminals,
         FormBridgeFeatureStatus::Partial,
         "Geometry terminal kind and integration domain are reported; geometry revision and provider metadata require Systems/Assembly extensions.");
+    const bool complete_shape_derivative =
+        metadata.geometry_sensitivity.mode == forms::GeometrySensitivityMode::MeshMotionUnknowns &&
+        metadata.geometry_sensitivity.shape_derivative == forms::ShapeDerivative::Complete;
     add(FormBridgeFeature::GeometrySensitivity,
-        metadata.geometry_sensitivity.mode == forms::GeometrySensitivityMode::MeshMotionUnknowns
+        metadata.geometry_sensitivity.mode == forms::GeometrySensitivityMode::MeshMotionUnknowns &&
+                !complete_shape_derivative
             ? FormBridgeFeatureStatus::Partial
             : FormBridgeFeatureStatus::Available,
-        metadata.geometry_sensitivity.mode == forms::GeometrySensitivityMode::MeshMotionUnknowns
+        complete_shape_derivative
+            ? "Complete shape derivative: every geometric quantity and every measure varies with the mesh-motion field."
+            : metadata.geometry_sensitivity.mode == forms::GeometrySensitivityMode::MeshMotionUnknowns
             ? "Mesh-motion field option is reported; structured sensitivity provenance requires Systems/Assembly extensions."
             : "No geometry-sensitivity field was requested.");
     add(FormBridgeFeature::InstalledDependencies,
@@ -559,6 +573,10 @@ void appendFeatureGates(FormContributionAnalysisMetadata& metadata)
         case FormTerminalKind::CurrentNormalVariation:
         case FormTerminalKind::SurfaceJacobianVariation:
         case FormTerminalKind::FrameTransform:
+        case FormTerminalKind::CellDiameterVariation:
+        case FormTerminalKind::CellVolumeVariation:
+        case FormTerminalKind::FacetAreaVariation:
+        case FormTerminalKind::GeometryTrialGradientVariation:
             return DependencyKind::GeometryMap;
         default:
             return DependencyKind::FieldUnknown;
@@ -806,6 +824,14 @@ const char* toString(FormTerminalKind kind) noexcept
             return "CellDomainId";
         case FormTerminalKind::FrameTransform:
             return "FrameTransform";
+        case FormTerminalKind::CellDiameterVariation:
+            return "CellDiameterVariation";
+        case FormTerminalKind::CellVolumeVariation:
+            return "CellVolumeVariation";
+        case FormTerminalKind::FacetAreaVariation:
+            return "FacetAreaVariation";
+        case FormTerminalKind::GeometryTrialGradientVariation:
+            return "GeometryTrialGradientVariation";
     }
     return "Unknown";
 }

@@ -1308,7 +1308,10 @@ std::array<Real, 3> fdCurlVector(const VectorCoefficient& f, const std::array<Re
 // Spatial jets (value + spatial derivatives via chain rule)
 // ============================================================================
 
+using geometry_sensitivity::cellDiameterDerivative;
+using geometry_sensitivity::cellVolumeDerivative;
 using geometry_sensitivity::currentFaceNormalDerivative;
+using geometry_sensitivity::facetAreaDerivative;
 using geometry_sensitivity::currentMeasureDerivative;
 using geometry_sensitivity::currentTimeDerivativeCoefficient;
 using geometry_sensitivity::integrationWeightDerivative;
@@ -2331,6 +2334,53 @@ SpatialJet<Scalar> evalSpatialJet(const FormExprNode& node,
             if (out.has_grad || out.has_hess) {
                 throw FEException("Forms: spatial derivatives of current-measure variations are not available",
                                   __FILE__, __LINE__, __func__, FEStatus::NotImplemented);
+            }
+            return out;
+        }
+        case FormExprType::GeometryTrialGradientVariation: {
+            // grad of the mesh trial function, constant in space within a
+            // cell: kernels evaluate the spatial derivatives of fields as
+            // J^-T (reference derivatives) J^-1, whose variation at a fixed
+            // reference point has no second derivative of the trial function.
+            out.value.kind = EvalValue<Scalar>::Kind::Matrix;
+            out.value.resizeMatrix(static_cast<std::size_t>(dim), static_cast<std::size_t>(dim));
+            if (env.trial_active == side) {
+                const auto g = trialMeshVelocityJacobianSeed(ctx, geometryVariationTrialIndex(env), q);
+                for (int r = 0; r < dim; ++r) {
+                    for (int c = 0; c < dim; ++c) {
+                        out.value.matrixAt(static_cast<std::size_t>(r), static_cast<std::size_t>(c)) =
+                            makeScalarConstant<Scalar>(g[static_cast<std::size_t>(r)][static_cast<std::size_t>(c)], env);
+                    }
+                }
+            }
+            if (out.has_grad) {
+                out.grad = zeroTensor3<Scalar>(static_cast<std::size_t>(dim), static_cast<std::size_t>(dim),
+                                               static_cast<std::size_t>(dim), env);
+            }
+            if (out.has_hess) {
+                throw FEException("Forms: second spatial derivatives of the mesh-trial gradient are not available",
+                                  __FILE__, __LINE__, __func__, FEStatus::NotImplemented);
+            }
+            return out;
+        }
+        case FormExprType::CellDiameterVariation:
+        case FormExprType::CellVolumeVariation:
+        case FormExprType::FacetAreaVariation: {
+            // Cellwise constants, like h(), vol() and area().
+            Real value = 0.0;
+            if (env.trial_active == side) {
+                const auto j = geometryVariationTrialIndex(env);
+                value = node.type() == FormExprType::CellDiameterVariation ? cellDiameterDerivative(ctx, j)
+                        : node.type() == FormExprType::CellVolumeVariation ? cellVolumeDerivative(ctx, j)
+                                                                           : facetAreaDerivative(ctx, j);
+            }
+            out.value.kind = EvalValue<Scalar>::Kind::Scalar;
+            out.value.s = makeScalarConstant<Scalar>(value, env);
+            if (out.has_grad) {
+                out.grad = zeroVector<Scalar>(static_cast<std::size_t>(dim), env);
+            }
+            if (out.has_hess) {
+                out.hess = zeroMatrix<Scalar>(static_cast<std::size_t>(dim), static_cast<std::size_t>(dim), env);
             }
             return out;
         }
@@ -5284,7 +5334,7 @@ EvalValue<Real> evalConstitutiveOutputReal(const FormExprNode& call_node,
 
 using EvalRealDispatchFn = EvalValue<Real> (*)(const FormExprNode&, const EvalEnvReal&, Side, LocalIndex);
 constexpr std::size_t kFormExprDispatchSize =
-    static_cast<std::size_t>(FormExprType::BoundaryNormal) + 1u;
+    static_cast<std::size_t>(FormExprType::GeometryTrialGradientVariation) + 1u;
 
 EvalValue<Real> evalRealSwitchImpl(const FormExprNode& node,
                                    const EvalEnvReal& env,
@@ -5574,6 +5624,37 @@ EvalValue<Real> evalRealDispatchCurrentMeasureVariation(const FormExprNode&, con
     return EvalValue<Real>{EvalValue<Real>::Kind::Scalar, value};
 }
 
+EvalValue<Real> evalRealDispatchGeometryTrialGradientVariation(const FormExprNode&, const EvalEnvReal& env, Side side, LocalIndex q)
+{
+    const auto& ctx = ctxForSide(env.minus, env.plus, side);
+    const int dim = ctx.dimension();
+    EvalValue<Real> out;
+    out.kind = EvalValue<Real>::Kind::Matrix;
+    out.resizeMatrix(static_cast<std::size_t>(dim), static_cast<std::size_t>(dim));
+    if (env.trial_active == side) {
+        const auto g = trialMeshVelocityJacobianSeed(ctx, env.j, q);
+        for (int r = 0; r < dim; ++r) {
+            for (int c = 0; c < dim; ++c) {
+                out.matrixAt(static_cast<std::size_t>(r), static_cast<std::size_t>(c)) =
+                    g[static_cast<std::size_t>(r)][static_cast<std::size_t>(c)];
+            }
+        }
+    }
+    return out;
+}
+
+EvalValue<Real> evalRealDispatchEntityMeasureVariation(const FormExprNode& node, const EvalEnvReal& env, Side side, LocalIndex)
+{
+    const auto& ctx = ctxForSide(env.minus, env.plus, side);
+    Real value = 0.0;
+    if (env.trial_active == side) {
+        value = node.type() == FormExprType::CellDiameterVariation ? cellDiameterDerivative(ctx, env.j)
+                : node.type() == FormExprType::CellVolumeVariation ? cellVolumeDerivative(ctx, env.j)
+                                                                   : facetAreaDerivative(ctx, env.j);
+    }
+    return EvalValue<Real>{EvalValue<Real>::Kind::Scalar, value};
+}
+
 EvalValue<Real> evalRealDispatchCurrentNormalVariation(const FormExprNode&, const EvalEnvReal& env, Side side, LocalIndex q)
 {
     const auto& ctx = ctxForSide(env.minus, env.plus, side);
@@ -5694,6 +5775,11 @@ const std::array<EvalRealDispatchFn, kFormExprDispatchSize>& evalRealDispatchTab
         table[static_cast<std::size_t>(FormExprType::CurrentMeasureVariation)] = &evalRealDispatchCurrentMeasureVariation;
         table[static_cast<std::size_t>(FormExprType::CurrentNormalVariation)] = &evalRealDispatchCurrentNormalVariation;
         table[static_cast<std::size_t>(FormExprType::SurfaceJacobianVariation)] = &evalRealDispatchSurfaceJacobianVariation;
+        table[static_cast<std::size_t>(FormExprType::CellDiameterVariation)] = &evalRealDispatchEntityMeasureVariation;
+        table[static_cast<std::size_t>(FormExprType::CellVolumeVariation)] = &evalRealDispatchEntityMeasureVariation;
+        table[static_cast<std::size_t>(FormExprType::FacetAreaVariation)] = &evalRealDispatchEntityMeasureVariation;
+        table[static_cast<std::size_t>(FormExprType::GeometryTrialGradientVariation)] =
+            &evalRealDispatchGeometryTrialGradientVariation;
         table[static_cast<std::size_t>(FormExprType::Jacobian)] = &evalRealDispatchJacobian;
         table[static_cast<std::size_t>(FormExprType::JacobianInverse)] = &evalRealDispatchJacobianInverse;
         table[static_cast<std::size_t>(FormExprType::JacobianDeterminant)] = &evalRealDispatchJacobianDeterminant;
@@ -5789,6 +5875,12 @@ EvalValue<Real> evalRealSwitchImpl(const FormExprNode& node,
             return evalRealDispatchCurrentNormalVariation(node, env, side, q);
         case FormExprType::SurfaceJacobianVariation:
             return evalRealDispatchSurfaceJacobianVariation(node, env, side, q);
+        case FormExprType::CellDiameterVariation:
+        case FormExprType::CellVolumeVariation:
+        case FormExprType::FacetAreaVariation:
+            return evalRealDispatchEntityMeasureVariation(node, env, side, q);
+        case FormExprType::GeometryTrialGradientVariation:
+            return evalRealDispatchGeometryTrialGradientVariation(node, env, side, q);
         case FormExprType::Identity: {
             const int idim = node.identityDim().value_or(dim);
             EvalValue<Real> out;
@@ -16035,6 +16127,10 @@ using NodeHashMemo = std::unordered_map<const FormExprNode*, std::uint64_t>;
     hashTag64(h, 0x46ULL);
     hashPod64(h, static_cast<std::uint8_t>(geom.mode));
     hashPod64(h, static_cast<std::uint16_t>(geom.mesh_motion_field));
+    if (geom.shape_derivative == ShapeDerivative::Complete) {
+        hashTag64(h, 0x47ULL);
+        hashPod64(h, static_cast<std::int32_t>(geom.exact_hessian_field));
+    }
     hashPod64(h, static_cast<std::uint32_t>(geom.level_set_cut_domains.size()));
     for (const auto& domain : geom.level_set_cut_domains) {
         hashPod64(h, static_cast<std::uint16_t>(domain.level_set_field));
@@ -16382,6 +16478,18 @@ void SymbolicNonlinearFormKernel::rebuildTangentIR()
         !geometry_sensitivity.level_set_cut_domains.empty();
     const FieldId mesh_sensitivity_field = geometry_sensitivity.mesh_motion_field;
     const auto residual_function_names = firstFunctionSymbolNames(residual_ir_);
+    // Complete shape derivative: the mesh-displacement trial function is this
+    // kernel's trial symbol in its trial space.
+    const bool complete_shape_sensitivity =
+        mesh_geometry_sensitivity &&
+        geometry_sensitivity.shape_derivative == ShapeDerivative::Complete;
+    auto complete_geometry = geometry_sensitivity;
+    if (complete_shape_sensitivity) {
+        complete_geometry.mesh_motion_space = residual_ir_.trialSpace();
+        if (residual_function_names.trial.has_value()) {
+            complete_geometry.mesh_motion_symbol = residual_function_names.trial;
+        }
+    }
     const auto geometry_trial_symbol = [&]() -> std::string {
         if (!residual_function_names.trial.has_value()) {
             return "dlevel_set";
@@ -16589,16 +16697,22 @@ void SymbolicNonlinearFormKernel::rebuildTangentIR()
             continue;
         }
 
-        FormExpr dI = geometry_sensitivity_active
-            ? (level_set_cut_geometry_sensitivity
-                   ? FormExpr{}
-                   : differentiateResidual(term.integrand,
-                                           mesh_sensitivity_field,
-                                           trial_state_field,
-                                           geometry_sensitivity))
-            : differentiateResidual(term.integrand);
+        FormExpr dI{};
+        if (complete_shape_sensitivity) {
+            // The integrand's derivative and its measure variation together.
+            dI = differentiateIntegrandShape(term.integrand, term.domain, trial_state_field, complete_geometry);
+        } else {
+            dI = geometry_sensitivity_active
+                ? (level_set_cut_geometry_sensitivity
+                       ? FormExpr{}
+                       : differentiateResidual(term.integrand,
+                                               mesh_sensitivity_field,
+                                               trial_state_field,
+                                               geometry_sensitivity))
+                : differentiateResidual(term.integrand);
+        }
 
-        if (mesh_geometry_sensitivity) {
+        if (mesh_geometry_sensitivity && !complete_shape_sensitivity) {
             const auto primal_integrand = rewriteTrialFunctionsToState(term.integrand, trial_state_field);
             dI = dI + primal_integrand *
                 (FormExpr::currentMeasureVariation() / FormExpr::currentMeasure());

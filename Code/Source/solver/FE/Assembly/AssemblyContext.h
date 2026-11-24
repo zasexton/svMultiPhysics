@@ -701,6 +701,33 @@ public:
      */
     [[nodiscard]] Real facetArea() const;
 
+    /**
+     * @brief The node pair that realizes the cell diameter h (max vertex
+     *        distance) and the unit vector from the second to the first.
+     *
+     * Prepared with RequiredData::EntityMeasureDerivatives: dh/dx_first =
+     * direction, dh/dx_second = -direction, every other node zero.  Indices
+     * are cell-local geometry nodes; num_nodes = 0 when not prepared.
+     */
+    struct CellDiameterNodes {
+        int first{-1};
+        int second{-1};
+        Vector3D direction{0.0, 0.0, 0.0};
+        int num_nodes{0};
+    };
+
+    [[nodiscard]] const CellDiameterNodes& cellDiameterNodes() const noexcept { return cell_diameter_nodes_; }
+
+    /**
+     * @brief d vol / d x_a for every cell-local geometry node a of a face
+     *        context (RequiredData::EntityMeasureDerivatives); empty when not
+     *        prepared.  Cell contexts derive it from their own quadrature.
+     */
+    [[nodiscard]] std::span<const Vector3D> cellVolumeNodeGradients() const noexcept
+    {
+        return {cell_volume_node_gradients_.data(), cell_volume_node_gradients_.size()};
+    }
+
     // =========================================================================
     // Basis Function Data (Test Space)
     // =========================================================================
@@ -1996,6 +2023,12 @@ public:
      * available.
      */
     void setEntityMeasures(Real cell_diameter, Real cell_volume, Real facet_area);
+    /// Set after setEntityMeasures, which clears both.
+    void setCellDiameterNodes(const CellDiameterNodes& nodes) noexcept { cell_diameter_nodes_ = nodes; }
+    void setCellVolumeNodeGradients(std::span<const Vector3D> gradients)
+    {
+        cell_volume_node_gradients_.assign(gradients.begin(), gradients.end());
+    }
 
     /**
      * @brief Set solution values at quadrature points
@@ -2187,6 +2220,8 @@ private:
     Real cell_diameter_{0.0};
     Real cell_volume_{0.0};
     Real facet_area_{0.0};
+    CellDiameterNodes cell_diameter_nodes_{};
+    std::vector<Vector3D> cell_volume_node_gradients_{};
 
     // Test basis data — all qpt-major: [q * n_test_dofs + i]
     ArenaArray<Real> test_basis_values_;

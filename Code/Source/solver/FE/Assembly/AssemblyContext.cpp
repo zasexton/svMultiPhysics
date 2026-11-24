@@ -330,6 +330,8 @@ void AssemblyContext::configure(
     cell_diameter_ = 0.0;
     cell_volume_ = 0.0;
     facet_area_ = 0.0;
+    cell_diameter_nodes_ = CellDiameterNodes{};
+    cell_volume_node_gradients_.clear();
 
     material_state_old_base_ = nullptr;
     material_state_work_base_ = nullptr;
@@ -392,6 +394,8 @@ void AssemblyContext::configure(
     cell_diameter_ = 0.0;
     cell_volume_ = 0.0;
     facet_area_ = 0.0;
+    cell_diameter_nodes_ = CellDiameterNodes{};
+    cell_volume_node_gradients_.clear();
 
     material_state_old_base_ = nullptr;
     material_state_work_base_ = nullptr;
@@ -450,6 +454,8 @@ void AssemblyContext::configureFace(
     cell_diameter_ = 0.0;
     cell_volume_ = 0.0;
     facet_area_ = 0.0;
+    cell_diameter_nodes_ = CellDiameterNodes{};
+    cell_volume_node_gradients_.clear();
 
     material_state_old_base_ = nullptr;
     material_state_work_base_ = nullptr;
@@ -509,6 +515,8 @@ void AssemblyContext::configureFace(
     cell_diameter_ = 0.0;
     cell_volume_ = 0.0;
     facet_area_ = 0.0;
+    cell_diameter_nodes_ = CellDiameterNodes{};
+    cell_volume_node_gradients_.clear();
 
     material_state_old_base_ = nullptr;
     material_state_work_base_ = nullptr;
@@ -576,6 +584,8 @@ void AssemblyContext::clear()
     cell_diameter_ = 0.0;
     cell_volume_ = 0.0;
     facet_area_ = 0.0;
+    cell_diameter_nodes_ = CellDiameterNodes{};
+    cell_volume_node_gradients_.clear();
 
     quad_points_.clear();
     quad_weights_.clear();
@@ -996,6 +1006,8 @@ void AssemblyContext::setEntityMeasures(Real cell_diameter, Real cell_volume, Re
     cell_diameter_ = cell_diameter;
     cell_volume_ = cell_volume;
     facet_area_ = facet_area;
+    cell_diameter_nodes_ = CellDiameterNodes{};
+    cell_volume_node_gradients_.clear();
 }
 
 // ============================================================================
@@ -3166,6 +3178,8 @@ void AssemblyContext::copyGeometryDataFrom(const AssemblyContext& other)
     cell_diameter_ = other.cell_diameter_;
     cell_volume_ = other.cell_volume_;
     facet_area_ = other.facet_area_;
+    cell_diameter_nodes_ = other.cell_diameter_nodes_;
+    cell_volume_node_gradients_ = other.cell_volume_node_gradients_;
     reference_physical_points_ = other.reference_physical_points_;
     current_physical_points_ = other.current_physical_points_;
     reference_jacobians_ = other.reference_jacobians_;
@@ -3646,6 +3660,8 @@ void AssemblyContext::configureForCoupledBlock(
     cell_diameter_ = 0.0;
     cell_volume_ = 0.0;
     facet_area_ = 0.0;
+    cell_diameter_nodes_ = CellDiameterNodes{};
+    cell_volume_node_gradients_.clear();
 
     material_state_old_base_ = nullptr;
     material_state_work_base_ = nullptr;

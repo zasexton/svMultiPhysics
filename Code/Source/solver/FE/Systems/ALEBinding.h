@@ -32,6 +32,8 @@ struct ALEBindingOptions {
     bool enabled{false};
     int dimension{0};
     forms::GeometryTangentPath geometry_tangent_path{forms::GeometryTangentPath::SymbolicRequired};
+    /// Complete (opt-in, C++ only): the tangent differentiates every geometric quantity in d.
+    forms::ShapeDerivative shape_derivative{forms::ShapeDerivative::FrameExplicit};
     std::string mesh_velocity_field_name{"mesh_velocity"};
     std::string mesh_displacement_field_name{"mesh_displacement"};
     std::shared_ptr<const spaces::FunctionSpace> mesh_velocity_space{};
@@ -42,6 +44,7 @@ struct ALEBindingOptions {
 struct ALEBinding {
     bool enabled{false};
     forms::GeometryTangentPath geometry_tangent_path{forms::GeometryTangentPath::SymbolicRequired};
+    forms::ShapeDerivative shape_derivative{forms::ShapeDerivative::FrameExplicit};
     FieldId mesh_velocity_field{INVALID_FIELD_ID};
     FieldId mesh_displacement_field{INVALID_FIELD_ID};
 
@@ -60,6 +63,7 @@ struct MovingDomain {
     FieldId displacement{INVALID_FIELD_ID};
     FieldId velocity{INVALID_FIELD_ID}; ///< the derived mesh velocity, dd/dt
     forms::GeometryTangentPath geometry_tangent_path{forms::GeometryTangentPath::SymbolicRequired};
+    forms::ShapeDerivative shape_derivative{forms::ShapeDerivative::FrameExplicit};
 
     /// The coupled ALE binding of the displacement and its velocity.
     [[nodiscard]] ALEBinding binding() const noexcept;
@@ -68,6 +72,10 @@ struct MovingDomain {
 struct MovingDomainOptions {
     forms::GeometryTangentPath geometry_tangent_path{forms::GeometryTangentPath::SymbolicRequired};
     std::string mesh_velocity_field_name{"mesh_velocity"};
+    /// Complete (opt-in, C++ only): every install on the domain, including the
+    /// geometry-constant ones, differentiates every geometric quantity in the
+    /// displacement (forms::ShapeDerivative); FrameExplicit keeps today's tangent.
+    forms::ShapeDerivative shape_derivative{forms::ShapeDerivative::FrameExplicit};
 };
 
 /**
@@ -85,7 +93,10 @@ struct MovingDomainOptions {
  * trial fields, as ALEBinding::configureInstallOptions does for one install.
  * An install that keeps its geometry constant, such as a mesh-motion equation
  * on the reference mesh, sets FormInstallOptions::moving_domain_geometry to
- * false (FormulationBuilder::freezeGeometryInTangent()).  Throws after setup, for a
+ * false (FormulationBuilder::freezeGeometryInTangent()); with a complete shape
+ * derivative (MovingDomainOptions::shape_derivative) every install on the
+ * domain differentiates its geometry, since every install assembles on
+ * x = X + d.  Throws after setup, for a
  * second declaration, and for a displacement that is not a vector unknown.
  */
 [[nodiscard]] MovingDomain movingDomain(FESystem& system, FieldId displacement, MovingDomainOptions options = {});

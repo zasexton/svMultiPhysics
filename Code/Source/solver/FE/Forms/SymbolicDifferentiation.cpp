@@ -11,6 +11,8 @@
 #include "Forms/IndexExtent.h"
 #include "Forms/Tensor/TensorDifferentiation.h"
 
+#include <algorithm>
+#include <array>
 #include <cmath>
 #include <limits>
 #include <stdexcept>
@@ -253,6 +255,238 @@ struct DiffPair {
     FormExpr deriv{};
 };
 
+// ---------------------------------------------------------------------------
+// Complete shape derivatives (ShapeDerivative::Complete)
+//
+// With x = X + d and dd the mesh-displacement trial function, every quantity
+// that a moving-domain kernel evaluates at a fixed reference point varies as
+// follows (G = grad(dd), the physical gradient of dd):
+//   fields (nodal values fixed)        0
+//   x(), currentCoordinate(), d        dd
+//   meshVelocity()                     meshVelocityVariation()   (a0 dd)
+//   grad f                             grad(df) - grad(f) G      (vector f; G^T grad f for scalar f)
+//   div f                              div(df) - tr(grad(f) G)   (vector f)
+//   div T                              div(dT) - sum_j grad(T e_j) (G e_j)   (matrix T)
+//   H f                                grad(d grad f) - H(f) G   (scalar f)
+//   J(), currentJacobian()             G J
+//   Jinv()                             -Jinv G
+//   detJ(), currentJacobianDeterminant() detJ div(dd)
+//   normal(), currentNormal()          -(I - n n) G^T n
+//   cell measure                       div(dd)
+//   facet measure, currentMeasure()    div(dd) - n.(G n)         (surface divergence)
+//   h(), vol(), area()                 cellDiameterVariation(), cellVolumeVariation(), facetAreaVariation()
+// ---------------------------------------------------------------------------
+
+/// Rank of the value of @p node (0 scalar, 1 vector, 2 matrix, 3 rank-3), -1
+/// when it cannot be told without evaluation.
+[[nodiscard]] int valueRank(const FormExprNode& node)
+{
+    const auto kids = node.childrenShared();
+    const auto kid = [&](std::size_t k) -> int {
+        return (k < kids.size() && kids[k]) ? valueRank(*kids[k]) : -1;
+    };
+    if (isDefinitelyScalarNode(node)) {
+        return 0;
+    }
+    switch (node.type()) {
+        case FormExprType::CellDiameterVariation:
+        case FormExprType::CellVolumeVariation:
+        case FormExprType::FacetAreaVariation:
+        case FormExprType::CurrentMeasureVariation:
+            return 0;
+        case FormExprType::TestFunction:
+        case FormExprType::TrialFunction:
+        case FormExprType::DiscreteField:
+        case FormExprType::StateField: {
+            const auto* sig = node.spaceSignature();
+            if (sig == nullptr) return -1;
+            switch (sig->field_type) {
+                case FieldType::Scalar: return 0;
+                case FieldType::Vector: return 1;
+                case FieldType::Tensor: return 2;
+                default: return -1;
+            }
+        }
+        case FormExprType::Coefficient:
+            if (node.vectorCoefficient() != nullptr) return 1;
+            if (node.matrixCoefficient() != nullptr) return 2;
+            if (node.tensor3Coefficient() != nullptr) return 3;
+            return -1;
+        case FormExprType::Coordinate:
+        case FormExprType::ReferenceCoordinate:
+        case FormExprType::MeshDisplacement:
+        case FormExprType::MeshVelocity:
+        case FormExprType::MeshAcceleration:
+        case FormExprType::CurrentCoordinate:
+        case FormExprType::PreviousCoordinate:
+        case FormExprType::ReferencePhysicalCoordinate:
+        case FormExprType::PreviousMeshVelocity:
+        case FormExprType::PredictedMeshVelocity:
+        case FormExprType::CurrentNormal:
+        case FormExprType::ReferenceNormal:
+        case FormExprType::Normal:
+        case FormExprType::BoundaryNormal:
+        case FormExprType::GeometryTrialVectorVariation:
+        case FormExprType::MeshVelocityVariation:
+        case FormExprType::CurrentNormalVariation:
+        case FormExprType::AsVector:
+        case FormExprType::CrossProduct:
+        case FormExprType::SymmetricEigenvector:
+            return 1;
+        case FormExprType::Identity:
+        case FormExprType::Jacobian:
+        case FormExprType::JacobianInverse:
+        case FormExprType::CurrentJacobian:
+        case FormExprType::ReferenceJacobian:
+        case FormExprType::SurfaceJacobian:
+        case FormExprType::GeometryTrialJacobianVariation:
+        case FormExprType::SurfaceJacobianVariation:
+        case FormExprType::GeometryTrialGradientVariation:
+        case FormExprType::AsTensor:
+        case FormExprType::Transpose:
+        case FormExprType::Inverse:
+        case FormExprType::Cofactor:
+        case FormExprType::Deviator:
+        case FormExprType::SymmetricPart:
+        case FormExprType::SkewPart:
+        case FormExprType::MatrixExponential:
+        case FormExprType::MatrixLogarithm:
+        case FormExprType::MatrixSqrt:
+        case FormExprType::MatrixPower:
+        case FormExprType::SpectralDecomposition:
+            return 2;
+        case FormExprType::Gradient: {
+            const int r = kid(0);
+            return r < 0 ? -1 : r + 1;
+        }
+        case FormExprType::Hessian: {
+            const int r = kid(0);
+            return r < 0 ? -1 : r + 2;
+        }
+        case FormExprType::Divergence: {
+            const int r = kid(0);
+            return r < 1 ? -1 : r - 1;
+        }
+        case FormExprType::Curl:
+        case FormExprType::Negate:
+        case FormExprType::TimeDerivative:
+        case FormExprType::RestrictMinus:
+        case FormExprType::RestrictPlus:
+        case FormExprType::Jump:
+        case FormExprType::Average:
+        case FormExprType::Pullback:
+        case FormExprType::Pushforward:
+        case FormExprType::Normalize:
+            return kid(0);
+        case FormExprType::Add:
+        case FormExprType::Subtract: {
+            const int a = kid(0), b = kid(1);
+            return (a >= 0 && b >= 0 && a != b) ? -1 : std::max(a, b);
+        }
+        case FormExprType::Divide:
+            return kid(1) == 0 ? kid(0) : -1;
+        case FormExprType::Multiply: {
+            const int a = kid(0), b = kid(1);
+            if (a < 0 || b < 0) return -1;
+            if (a == 0) return b;
+            if (b == 0) return a;
+            if (a == 2 && b == 1) return 1;
+            if (a == 2 && b == 2) return 2;
+            return -1;
+        }
+        case FormExprType::OuterProduct: {
+            const int a = kid(0), b = kid(1);
+            return (a < 0 || b < 0) ? -1 : a + b;
+        }
+        case FormExprType::Conditional:
+            return kid(1);
+        case FormExprType::Component: {
+            const int r = kid(0);
+            const int j = node.componentIndex1().value_or(-1);
+            if (r == 1 && j < 0) return 0;
+            if (r == 2 && j >= 0) return 0;
+            return -1;
+        }
+        default:
+            return -1;
+    }
+}
+
+/// A geometric terminal that kernels evaluate as constant in space within a
+/// cell (its spatial derivatives are zero), so a spatial derivative of an
+/// expression that contains it has no consistent shape derivative.
+[[nodiscard]] bool containsCellwiseConstantGeometry(const FormExprNode& node)
+{
+    switch (node.type()) {
+        case FormExprType::Normal:
+        case FormExprType::CurrentNormal:
+        case FormExprType::ReferenceNormal:
+        case FormExprType::BoundaryNormal:
+        case FormExprType::Jacobian:
+        case FormExprType::JacobianInverse:
+        case FormExprType::JacobianDeterminant:
+        case FormExprType::CurrentJacobian:
+        case FormExprType::CurrentJacobianDeterminant:
+        case FormExprType::CurrentMeasure:
+        case FormExprType::SurfaceJacobian:
+        case FormExprType::CurrentMeanCurvature:
+        case FormExprType::CellDiameter:
+        case FormExprType::CellVolume:
+        case FormExprType::FacetArea:
+            return true;
+        default:
+            break;
+    }
+    for (const auto& child : node.childrenShared()) {
+        if (child && containsCellwiseConstantGeometry(*child)) {
+            return true;
+        }
+    }
+    return false;
+}
+
+/// How kernels evaluate the spatial second derivatives of the fields in a
+/// subtree: Exact with the mapping curvature (basis functions, and the row's
+/// active field, whose Hessians the residual reads from the trial basis),
+/// Approximate without it (every other field: J^-T (reference Hessian) J^-1).
+enum class HessianSemantics : std::uint8_t { None, Exact, Approximate, Mixed };
+
+[[nodiscard]] HessianSemantics combine(HessianSemantics a, HessianSemantics b) noexcept
+{
+    if (a == HessianSemantics::None) return b;
+    if (b == HessianSemantics::None || a == b) return a;
+    return HessianSemantics::Mixed;
+}
+
+[[nodiscard]] HessianSemantics hessianSemantics(const FormExprNode& node, FieldId exact_field)
+{
+    switch (node.type()) {
+        case FormExprType::TestFunction:
+        case FormExprType::TrialFunction:
+            return HessianSemantics::Exact;
+        case FormExprType::StateField:
+        case FormExprType::DiscreteField:
+            return node.fieldId().has_value() && *node.fieldId() == exact_field ? HessianSemantics::Exact
+                                                                                : HessianSemantics::Approximate;
+        case FormExprType::PreviousSolutionRef:
+            return HessianSemantics::Approximate;
+        default:
+            break;
+    }
+    HessianSemantics out = HessianSemantics::None;
+    for (const auto& child : node.childrenShared()) {
+        if (child) out = combine(out, hessianSemantics(*child, exact_field));
+    }
+    return out;
+}
+
+[[noreturn]] void refuseCompleteShapeDerivative(const FormExprNode& node, const std::string& why)
+{
+    throw std::invalid_argument(
+        "differentiateResidual: the complete shape derivative (ShapeDerivative::Complete) " + why +
+        "; offending subexpression: " + node.toString());
+}
+
 enum class DiffWrtKind : std::uint8_t {
     ActiveTrialFunction,
     SpecificTrialFunction,
@@ -290,6 +524,10 @@ struct DiffTargetConfig {
     FormExpr spatial_direction{};
 
     GeometrySensitivityOptions geometry_sensitivity{};
+
+    // Complete shape derivative of a bare integrand: the integral domain whose
+    // measure variation is added to the derivative.
+    std::optional<IntegralDomain> integrand_domain{};
 };
 
 [[nodiscard]] bool differentiatesMeshGeometry(const DiffTargetConfig& cfg) noexcept
@@ -299,6 +537,50 @@ struct DiffTargetConfig {
            cfg.geometry_sensitivity.mode == GeometrySensitivityMode::MeshMotionUnknowns &&
            cfg.geometry_sensitivity.mesh_motion_field != INVALID_FIELD_ID &&
            *cfg.field_id == cfg.geometry_sensitivity.mesh_motion_field;
+}
+
+[[nodiscard]] bool differentiatesCompleteShape(const DiffTargetConfig& cfg) noexcept
+{
+    return differentiatesMeshGeometry(cfg) &&
+           cfg.geometry_sensitivity.shape_derivative == ShapeDerivative::Complete;
+}
+
+/// The mesh-displacement trial function dd of a complete shape derivative:
+/// the options' space and symbol, else the first trial function (or mesh
+/// field) of @p residual.
+[[nodiscard]] FormExpr completeShapeTrialFunction(const FormExpr& residual, const DiffTargetConfig& cfg)
+{
+    const auto& geometry = cfg.geometry_sensitivity;
+    if (geometry.mesh_motion_space.has_value() && geometry.mesh_motion_symbol.has_value()) {
+        return FormExpr::trialFunction(*geometry.mesh_motion_space, makeDeltaName(*geometry.mesh_motion_symbol));
+    }
+    const FormExprNode* found = nullptr;
+    const auto visit = [&](const auto& self, const FormExprNode& n) -> void {
+        if (found != nullptr) return;
+        const bool trial = n.type() == FormExprType::TrialFunction;
+        const bool mesh_field = (n.type() == FormExprType::StateField || n.type() == FormExprType::DiscreteField) &&
+                                n.fieldId().has_value() && *n.fieldId() == geometry.mesh_motion_field;
+        if ((trial || mesh_field) && n.spaceSignature() != nullptr) {
+            found = &n;
+            return;
+        }
+        for (const auto& child : n.childrenShared()) {
+            if (child) self(self, *child);
+        }
+    };
+    if (residual.node() != nullptr) {
+        visit(visit, *residual.node());
+    }
+    if (found != nullptr) {
+        return FormExpr::trialFunction(*found->spaceSignature(), makeDeltaName(found->toString()));
+    }
+    if (geometry.mesh_motion_space.has_value()) {
+        return FormExpr::trialFunction(*geometry.mesh_motion_space,
+                                       makeDeltaName(geometry.mesh_motion_symbol.value_or("mesh_displacement")));
+    }
+    throw std::invalid_argument(
+        "differentiateResidual: the complete shape derivative needs the mesh-displacement space "
+        "(GeometrySensitivityOptions::mesh_motion_space) for a residual without a mesh-displacement trial function");
 }
 
 [[nodiscard]] bool spaceSignatureEqual(const FormExprNode::SpaceSignature& a,
@@ -895,11 +1177,48 @@ FormExpr differentiateResidualImpl(const FormExpr& residual_form,
 
     const int auto_extent = inferAutoIndexExtent(residual_form);
 
+    // Complete shape derivative: the mesh-displacement trial function dd, the
+    // integral domain being differentiated (it decides the measure and
+    // currentMeasure() rules) and one memo per domain.
+    const bool complete_shape = differentiatesCompleteShape(cfg);
+    const FormExpr shape_dd = complete_shape ? completeShapeTrialFunction(residual_form, cfg) : FormExpr{};
+    IntegralDomain shape_domain = cfg.integrand_domain.value_or(IntegralDomain::Cell);
+    // Inside the argument of a spatial derivative the chain factor G is the
+    // cellwise mesh-trial gradient: kernels evaluate field derivatives as
+    // J^-T (reference derivatives) J^-1, whose variation at a fixed
+    // reference point has no second derivative of the trial function.
+    int shape_depth = 0;
+    std::array<std::unordered_map<const FormExprNode*, DiffPair>, 10> shape_memo;
+    const auto shapeMeasureVariation = [&](IntegralDomain domain, const FormExprNode& at) -> FormExpr {
+        switch (domain) {
+            case IntegralDomain::Cell:
+                return shape_dd.div();
+            case IntegralDomain::Boundary: {
+                const auto n = FormExpr::normal();
+                return shape_dd.div() - inner(shape_dd.grad() * n, n);
+            }
+            case IntegralDomain::InteriorFace:
+            case IntegralDomain::InterfaceFace: {
+                // The facet moves with the trial function of either side; the
+                // minus side's restricted to the facet is the shared one.
+                const auto n = FormExpr::normal();
+                return (shape_dd.div() - inner(shape_dd.grad() * n, n)).minus();
+            }
+            case IntegralDomain::CutVolume:
+                break;
+        }
+        refuseCompleteShapeDerivative(at, "does not differentiate across a moving cut topology (a cut-volume "
+                                          "or generated-interface integral is a separate capability)");
+    };
+
     const auto diff = [&](const auto& self, const std::shared_ptr<FormExprNode>& node) -> DiffPair {
         if (!node) {
             throw std::invalid_argument("differentiateResidual: encountered null node");
         }
-        if (auto it = memo.find(node.get()); it != memo.end()) {
+        auto& active_memo = complete_shape
+            ? shape_memo[2u * static_cast<std::size_t>(shape_domain) + (shape_depth > 0 ? 1u : 0u)]
+            : memo;
+        if (auto it = active_memo.find(node.get()); it != active_memo.end()) {
             return it->second;
         }
 
@@ -917,6 +1236,250 @@ FormExpr differentiateResidualImpl(const FormExpr& residual_form,
         auto zeroOf = [&](const FormExpr& ref) -> FormExpr {
             return FormExpr::constant(0.0) * ref;
         };
+
+        if (complete_shape) {
+            const auto G = shape_depth > 0 ? FormExpr::geometryTrialGradientVariation() : shape_dd.grad();
+            const int dim = shape_dd.node()->spaceSignature()->value_dimension;
+            const auto unit = [dim](int j) {
+                std::vector<FormExpr> e;
+                for (int k = 0; k < dim; ++k) e.push_back(FormExpr::constant(k == j ? 1.0 : 0.0));
+                return FormExpr::asVector(std::move(e));
+            };
+            const auto inDomain = [&](IntegralDomain domain, std::size_t k) {
+                const auto saved = shape_domain;
+                shape_domain = domain;
+                const auto r = diff1(k);
+                shape_domain = saved;
+                return r;
+            };
+            // The chain factor of a spatial derivative that is itself inside a
+            // spatial derivative: the trial gradient for exactly evaluated
+            // second derivatives, the cellwise one for the others.
+            const auto chainFactor = [&](const FormExprNode& argument) -> FormExpr {
+                if (shape_depth == 0) {
+                    return shape_dd.grad();
+                }
+                switch (hessianSemantics(argument, cfg.geometry_sensitivity.exact_hessian_field)) {
+                    case HessianSemantics::Approximate:
+                        return FormExpr::geometryTrialGradientVariation();
+                    case HessianSemantics::Mixed:
+                        refuseCompleteShapeDerivative(
+                            *node, "cannot differentiate second derivatives of fields that kernels evaluate "
+                                   "differently (the row's active field with the mapping curvature, others without)");
+                    default:
+                        return shape_dd.grad();
+                }
+            };
+            const auto spatialChild = [&](const char* op) -> DiffPair {
+                if (kids.empty() || !kids[0]) {
+                    throw std::invalid_argument("differentiateResidual: missing child");
+                }
+                if (containsCellwiseConstantGeometry(*kids[0])) {
+                    refuseCompleteShapeDerivative(
+                        *node, std::string("cannot differentiate ") + op +
+                                   " of a geometric quantity that kernels treat as constant in a cell");
+                }
+                ++shape_depth;
+                const auto r = diff1(0);
+                --shape_depth;
+                return r;
+            };
+            bool handled = true;
+            switch (node->type()) {
+                case FormExprType::Coordinate:
+                case FormExprType::CurrentCoordinate:
+                case FormExprType::MeshDisplacement:
+                    out.primal = FormExpr(node);
+                    out.deriv = shape_dd;
+                    break;
+                case FormExprType::MeshVelocity:
+                    out.primal = FormExpr(node);
+                    out.deriv = FormExpr::meshVelocityVariation();
+                    break;
+                case FormExprType::Jacobian:
+                case FormExprType::CurrentJacobian:
+                    out.primal = FormExpr(node);
+                    out.deriv = G * out.primal;
+                    break;
+                case FormExprType::JacobianInverse:
+                    out.primal = FormExpr(node);
+                    out.deriv = -(out.primal * G);
+                    break;
+                case FormExprType::JacobianDeterminant:
+                case FormExprType::CurrentJacobianDeterminant:
+                    out.primal = FormExpr(node);
+                    out.deriv = out.primal * shape_dd.div();
+                    break;
+                case FormExprType::CurrentMeasure:
+                    out.primal = FormExpr(node);
+                    out.deriv = out.primal * shapeMeasureVariation(shape_domain, *node);
+                    break;
+                case FormExprType::Normal:
+                case FormExprType::CurrentNormal: {
+                    out.primal = FormExpr(node);
+                    const auto Gtn = G.transpose() * out.primal;
+                    out.deriv = inner(Gtn, out.primal) * out.primal - Gtn;
+                    break;
+                }
+                case FormExprType::SurfaceJacobian:
+                    out.primal = FormExpr(node);
+                    out.deriv = FormExpr::surfaceJacobianVariation();
+                    break;
+                case FormExprType::CellDiameter:
+                    out.primal = FormExpr(node);
+                    out.deriv = FormExpr::cellDiameterVariation();
+                    break;
+                case FormExprType::CellVolume:
+                    out.primal = FormExpr(node);
+                    out.deriv = FormExpr::cellVolumeVariation();
+                    break;
+                case FormExprType::FacetArea:
+                    out.primal = FormExpr(node);
+                    out.deriv = FormExpr::facetAreaVariation();
+                    break;
+                case FormExprType::Coefficient:
+                    // f(x) evaluated at the moving point: grad(f) . dd (the
+                    // kernels' gradient of a coefficient callback).
+                    out.primal = FormExpr(node);
+                    if (node->scalarCoefficient() != nullptr || node->timeScalarCoefficient() != nullptr) {
+                        out.deriv = inner(out.primal.grad(), shape_dd);
+                    } else if (node->vectorCoefficient() != nullptr) {
+                        out.deriv = out.primal.grad() * shape_dd;
+                    } else {
+                        refuseCompleteShapeDerivative(*node, "supports scalar and vector coefficient callbacks only");
+                    }
+                    break;
+                case FormExprType::MeshAcceleration:
+                case FormExprType::PredictedMeshVelocity:
+                    refuseCompleteShapeDerivative(*node, "relates only the mesh displacement and its first time "
+                                                         "derivative to the moving domain");
+                case FormExprType::CurrentMeanCurvature:
+                    refuseCompleteShapeDerivative(*node, "does not differentiate the curvature of a moving boundary");
+                case FormExprType::BoundaryNormal:
+                case FormExprType::CutVolumeIntegral:
+                    refuseCompleteShapeDerivative(*node, "does not differentiate across a moving cut topology "
+                                                         "(generated rules are a separate capability)");
+                case FormExprType::BoundaryFunctionalSymbol:
+                case FormExprType::BoundaryIntegralSymbol:
+                case FormExprType::BoundaryIntegralRef:
+                case FormExprType::AuxiliaryInputSymbol:
+                case FormExprType::AuxiliaryInputRef:
+                case FormExprType::AuxiliaryOutputSymbol:
+                case FormExprType::AuxiliaryOutputRef:
+                    refuseCompleteShapeDerivative(*node, "does not differentiate the geometry inside a functional "
+                                                         "evaluated on another integral (a nonlocal dependence)");
+                case FormExprType::Gradient: {
+                    const auto a = spatialChild("grad");
+                    const int rank = valueRank(*a.primal.node());
+                    const auto Gc = chainFactor(*kids[0]);
+                    out.primal = a.primal.grad();
+                    if (rank == 0) {
+                        out.deriv = a.deriv.grad() - Gc.transpose() * out.primal;
+                    } else if (rank == 1) {
+                        out.deriv = a.deriv.grad() - out.primal * Gc;
+                    } else {
+                        refuseCompleteShapeDerivative(*node, "differentiates grad of scalars and vectors only");
+                    }
+                    break;
+                }
+                case FormExprType::Divergence: {
+                    const auto a = spatialChild("div");
+                    const int rank = valueRank(*a.primal.node());
+                    const auto Gc = chainFactor(*kids[0]);
+                    out.primal = a.primal.div();
+                    if (rank == 1) {
+                        out.deriv = a.deriv.div() - (a.primal.grad() * Gc).trace();
+                    } else if (rank == 2) {
+                        FormExpr chain{};
+                        for (int j = 0; j < dim; ++j) {
+                            const auto term = (a.primal * unit(j)).grad() * (Gc * unit(j));
+                            chain = chain.isValid() ? chain + term : term;
+                        }
+                        out.deriv = a.deriv.div() - chain;
+                    } else {
+                        refuseCompleteShapeDerivative(*node, "differentiates div of vectors and matrices only");
+                    }
+                    break;
+                }
+                case FormExprType::Hessian: {
+                    const auto a = spatialChild("hessian");
+                    if (valueRank(*a.primal.node()) != 0) {
+                        refuseCompleteShapeDerivative(*node, "differentiates the Hessian of scalars only");
+                    }
+                    out.primal = a.primal.hessian();
+                    const auto semantics = hessianSemantics(*kids[0], cfg.geometry_sensitivity.exact_hessian_field);
+                    if (semantics == HessianSemantics::Mixed) {
+                        refuseCompleteShapeDerivative(
+                            *node, "cannot differentiate the Hessian of fields that kernels evaluate differently");
+                    }
+                    if (semantics == HessianSemantics::Approximate) {
+                        // J^-T (reference Hessian) J^-1: dH = H(df) - G^T H - H G.
+                        out.deriv = a.deriv.hessian() - G.transpose() * out.primal - out.primal * G;
+                    } else {
+                        // With the mapping curvature: dH = grad(d grad f) - H G, which also
+                        // carries the second derivatives of dd.
+                        const auto grad_dd = shape_dd.grad();
+                        out.deriv = (a.deriv.grad() - grad_dd.transpose() * a.primal.grad()).grad() - out.primal * G;
+                    }
+                    break;
+                }
+                case FormExprType::Curl: {
+                    const auto a = spatialChild("curl");
+                    if (valueRank(*a.primal.node()) != 1) {
+                        refuseCompleteShapeDerivative(*node, "differentiates the curl of vectors only");
+                    }
+                    out.primal = a.primal.curl();
+                    // (curl f)_i = e_ijk d_j f_k; the chain part of d_j f_k is (grad(f) G)_kj.
+                    const auto A = a.primal.grad() * chainFactor(*kids[0]);
+                    const auto zero = FormExpr::constant(0.0);
+                    const auto chain = dim == 3
+                        ? FormExpr::asVector({A.component(2, 1) - A.component(1, 2),
+                                              A.component(0, 2) - A.component(2, 0),
+                                              A.component(1, 0) - A.component(0, 1)})
+                        : FormExpr::asVector({zero, zero, A.component(1, 0) - A.component(0, 1)});
+                    out.deriv = a.deriv.curl() - chain;
+                    break;
+                }
+                case FormExprType::CellIntegral: {
+                    const auto a = inDomain(IntegralDomain::Cell, 0);
+                    out.primal = a.primal.dx();
+                    out.deriv = (a.deriv + a.primal * shapeMeasureVariation(IntegralDomain::Cell, *node)).dx();
+                    break;
+                }
+                case FormExprType::BoundaryIntegral:
+                case FormExprType::InterfaceIntegral: {
+                    const auto* exterior = node->exteriorBoundaryMeasure();
+                    if (exterior != nullptr && exterior->isGeneratedActiveSubset()) {
+                        refuseCompleteShapeDerivative(*node, "does not differentiate across a moving cut topology "
+                                                             "(a generated boundary rule is a separate capability)");
+                    }
+                    const auto domain = node->type() == FormExprType::BoundaryIntegral ? IntegralDomain::Boundary
+                                                                                       : IntegralDomain::InterfaceFace;
+                    const auto a = inDomain(domain, 0);
+                    out.primal = wrapExteriorIntegral(a.primal, *node);
+                    out.deriv = wrapExteriorIntegral(a.deriv + a.primal * shapeMeasureVariation(domain, *node), *node);
+                    break;
+                }
+                case FormExprType::InteriorFaceIntegral: {
+                    if (node->cutVolumeSide().has_value()) {
+                        refuseCompleteShapeDerivative(*node, "does not differentiate across a moving cut topology "
+                                                             "(cut-adjacent facets are a separate capability)");
+                    }
+                    const auto a = inDomain(IntegralDomain::InteriorFace, 0);
+                    out.primal = wrapInteriorFaceIntegral(a.primal, *node);
+                    out.deriv = wrapInteriorFaceIntegral(
+                        a.deriv + a.primal * shapeMeasureVariation(IntegralDomain::InteriorFace, *node), *node);
+                    break;
+                }
+                default:
+                    handled = false;
+                    break;
+            }
+            if (handled) {
+                active_memo.emplace(node.get(), out);
+                return out;
+            }
+        }
 
         const auto isWrtTrial = [&](const FormExprNode::SpaceSignature& sig, const std::string& name) -> bool {
             switch (cfg.kind) {
@@ -986,6 +1549,10 @@ FormExpr differentiateResidualImpl(const FormExpr& residual_form,
             case FormExprType::CurrentMeasureVariation:
             case FormExprType::CurrentNormalVariation:
             case FormExprType::SurfaceJacobianVariation:
+            case FormExprType::CellDiameterVariation:
+            case FormExprType::CellVolumeVariation:
+            case FormExprType::FacetAreaVariation:
+            case FormExprType::GeometryTrialGradientVariation:
             case FormExprType::Time:
             case FormExprType::TimeStep:
             case FormExprType::EffectiveTimeStep:
@@ -1839,12 +2406,15 @@ FormExpr differentiateResidualImpl(const FormExpr& residual_form,
                                             std::to_string(static_cast<std::uint16_t>(node->type())));
         }
 
-        memo.emplace(node.get(), out);
+        active_memo.emplace(node.get(), out);
         return out;
     };
 
     const auto pair = diff(diff, residual_form.nodeShared());
-    auto deriv = simplify(pair.deriv);
+    auto deriv = simplify(complete_shape && cfg.integrand_domain.has_value()
+                              ? pair.deriv + pair.primal * shapeMeasureVariation(*cfg.integrand_domain,
+                                                                                 *residual_form.node())
+                              : pair.deriv);
     if (tensor::containsTensorCalculusNodes(deriv)) {
         deriv = tensor::postprocessTensorDerivative(deriv);
     }
@@ -1949,6 +2519,29 @@ FormExpr differentiateResidual(const FormExpr& residual_form,
         cfg.active_trial_field = field;
     }
     return differentiateResidualImpl(residual_form, cfg);
+}
+
+FormExpr differentiateIntegrandShape(const FormExpr& integrand,
+                                     IntegralDomain domain,
+                                     FieldId trial_state_field,
+                                     GeometrySensitivityOptions geometry_sensitivity)
+{
+    if (geometry_sensitivity.mode != GeometrySensitivityMode::MeshMotionUnknowns ||
+        geometry_sensitivity.mesh_motion_field == INVALID_FIELD_ID ||
+        geometry_sensitivity.shape_derivative != ShapeDerivative::Complete) {
+        throw std::invalid_argument(
+            "differentiateIntegrandShape: requires MeshMotionUnknowns with ShapeDerivative::Complete and a mesh-motion field");
+    }
+    DiffTargetConfig cfg;
+    cfg.kind = DiffWrtKind::FieldId;
+    cfg.field_id = geometry_sensitivity.mesh_motion_field;
+    cfg.trial_state_field = trial_state_field;
+    if (trial_state_field == CURRENT_SOLUTION_FIELD_ID) {
+        cfg.active_trial_field = geometry_sensitivity.mesh_motion_field;
+    }
+    cfg.geometry_sensitivity = std::move(geometry_sensitivity);
+    cfg.integrand_domain = domain;
+    return differentiateResidualImpl(integrand, cfg);
 }
 
 FormExpr directionalDerivativeWrtField(const FormExpr& expr,

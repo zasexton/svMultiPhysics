@@ -269,6 +269,7 @@ Status: `implemented/public`, unless noted.
 | `h()`, `vol()`, `area()`, `domainId()` | Cell diameter, cell volume, facet area, cell-domain marker |
 | `hNormal()` | Facet-normal cell size `2 * vol() / area()` |
 | `FormExpr::geometryTrialVectorVariation()`, `meshVelocityVariation()`, `currentMeasureVariation()`, `currentNormalVariation()`, `surfaceJacobianVariation()`, `geometryTrialJacobianVariation()` | `implemented/internal`; produced by symbolic geometry differentiation |
+| `FormExpr::cellDiameterVariation()`, `cellVolumeVariation()`, `facetAreaVariation()`, `geometryTrialGradientVariation()` | `implemented/internal`; produced by the complete shape derivative: the derivatives of `h()`, `vol()`, `area()` in the mesh-displacement trial function, and its gradient held constant in a cell (inside a spatial derivative); interpreted only (no JIT) |
 
 The moving-domain terminals are physics-neutral. They expose assembly-provided
 mesh/domain motion and frame-explicit geometry; they do not encode a specific
@@ -291,6 +292,39 @@ The `MovingDomainShapeDerivativeTest` in
 `Tests/Unit/Systems/test_JacobianVerification.cpp` records the missing part of
 each operator, and `test_FittedFreeSurfaceALE.cpp` that of the production
 coupled-ALE Jacobian.
+
+Complete shape derivatives (`implemented/public`, opt-in, C++ only; D61 item 4,
+D65): `MovingDomainOptions::shape_derivative = forms::ShapeDerivative::Complete`
+(or `ALEBindingOptions::shape_derivative`) makes every install on the moving domain,
+the geometry-constant ones included, differentiate every geometric quantity
+of x = X + d (`SymbolicDifferentiation.cpp`; dd the mesh-displacement trial
+function, G = grad(dd)):
+
+| Quantity | Variation |
+|----------|-----------|
+| fields (fixed nodal values), earlier time levels | 0 |
+| `x()`, `currentCoordinate()`, `meshDisplacement()` | dd |
+| `meshVelocity()` | `meshVelocityVariation()` (a0 dd) |
+| `grad(f)` | grad(df) - grad(f) G (vector f; G^T grad(f) for scalar f) |
+| `div(f)`, `div(T)` | div(df) - tr(grad(f) G); div(dT) - sum_j grad(T e_j) (G e_j) |
+| `hessian(f)`, `curl(f)` | H(df) - G^T H - H G (kernels' field Hessians omit the mapping curvature); curl through grad |
+| `J()`, `Jinv()`, `detJ()` and the current-frame Jacobians | G J; -Jinv G; detJ div(dd) |
+| `normal()`, `currentNormal()` | -(I - n n) G^T n |
+| cell measure; facet measure, `currentMeasure()` | div(dd); div(dd) - n.(G n) (minus side on interior facets and fitted interfaces) |
+| `h()`, `vol()`, `area()` | `cellDiameterVariation()` (the realizing node pair), `cellVolumeVariation()`, `facetAreaVariation()`; the mesh displacement must be the geometry's Lagrange space |
+| coefficient callbacks | grad(f) . dd |
+
+Every row with a spatial integral gets a mesh block; the tangent is symbolic
+(the AD reference path is refused).  Refused by name: moving cut topology (cut
+volumes, cut-restricted cells, generated boundary and interface rules,
+cut-adjacent facets), a mesh displacement richer than the geometry (the
+coordinate update moves the geometry nodes only), mesh acceleration and
+predicted mesh velocity,
+curvature, functionals of other integrals (boundary integrals, auxiliary
+inputs and outputs), and spatial derivatives of cellwise-constant geometry.
+`Tests/Unit/Systems/test_ShapeDerivatives.cpp` compares J dd with residual
+differences under the coordinate update on Tri3, Quad4, Tet4, Hex8, Wedge6
+and Pyr5 cells, straight and curved P2, P1 and P2 fields.
 
 ### Trace and Projection Helpers
 

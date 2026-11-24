@@ -491,6 +491,7 @@ private:
         std::vector<math::Vector<Real, 3>> node_coords;
         Real entity_h{0.0};
         Real entity_volume{0.0};
+        AssemblyContext::CellDiameterNodes entity_diameter_nodes{};
     };
 
     /** Per-slot DOF indices for fused-batched assembly. */
@@ -528,6 +529,7 @@ private:
         bool mapping_affine{false};
         Real geom_h{0.0};
         Real geom_volume{0.0};
+        AssemblyContext::CellDiameterNodes geom_diameter_nodes{};
         basis::BasisCacheHandle geom_bcache_handle{};
         const basis::BasisCacheEntry* geom_bcache{nullptr};
     };
@@ -1222,6 +1224,7 @@ private:
     // elements in the coupled batch path).
     Real cached_geom_h_{0.0};
     Real cached_geom_volume_{0.0};
+    AssemblyContext::CellDiameterNodes cached_geom_diameter_nodes_{};
 
     // Cached quad rule from prepareContext (used for BasisCache lookups in populateFieldSolutionData)
     std::shared_ptr<const quadrature::QuadratureRule> cached_quad_rule_;

@@ -47,7 +47,9 @@ bool FormIR::hasGeometrySensitivityTerminals() const noexcept { return impl_->ha
 bool FormIR::geometrySensitivityActive() const noexcept
 {
     if (impl_->geometry_sensitivity.mode == GeometrySensitivityMode::MeshMotionUnknowns) {
-        return impl_->has_geometry_sensitivity_terminals;
+        // A complete shape derivative varies every integral with the mesh.
+        return impl_->has_geometry_sensitivity_terminals ||
+               impl_->geometry_sensitivity.shape_derivative == ShapeDerivative::Complete;
     }
     if (impl_->geometry_sensitivity.mode ==
         GeometrySensitivityMode::LevelSetCutDomainUnknowns) {

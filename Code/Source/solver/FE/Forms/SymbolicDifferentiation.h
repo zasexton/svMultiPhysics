@@ -10,6 +10,7 @@
  */
 
 #include "Forms/FormExpr.h"
+#include "Forms/FormIR.h"
 
 #include <optional>
 #include <string>
@@ -99,6 +100,21 @@ struct SymbolicDiffResult {
                                             FieldId field,
                                             FieldId trial_state_field,
                                             GeometrySensitivityOptions geometry_sensitivity);
+
+/**
+ * @brief Complete shape derivative of the bare integrand of an integral over
+ *        @p domain in the mesh displacement of @p geometry_sensitivity.
+ *
+ * Requires MeshMotionUnknowns with ShapeDerivative::Complete.  The result is
+ * the derivative of the integrand plus the integrand times the variation of
+ * the measure of @p domain (div(dd) on cells, the surface divergence of dd on
+ * facets), as differentiateResidual gives for the integral.  Used by kernels
+ * that hold their residual as integrand terms.
+ */
+[[nodiscard]] FormExpr differentiateIntegrandShape(const FormExpr& integrand,
+                                                  IntegralDomain domain,
+                                                  FieldId trial_state_field,
+                                                  GeometrySensitivityOptions geometry_sensitivity);
 
 /**
  * @brief Directional derivative of an expression w.r.t. a FieldId

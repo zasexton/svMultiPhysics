@@ -112,6 +112,10 @@ enum class FormTerminalKind : std::uint8_t {
     FacetArea,
     CellDomainId,
     FrameTransform,
+    CellDiameterVariation,
+    CellVolumeVariation,
+    FacetAreaVariation,
+    GeometryTrialGradientVariation,
 };
 
 struct FormTerminalMetadata {

@@ -183,6 +183,8 @@ void ALEBinding::configureInstallOptions(FormInstallOptions& install) const
         mesh_displacement_field;
     install.compiler_options.geometry_tangent_path =
         geometry_tangent_path;
+    install.compiler_options.geometry_sensitivity.shape_derivative =
+        shape_derivative;
 
     if (std::find(install.extra_trial_fields.begin(),
                   install.extra_trial_fields.end(),
@@ -205,6 +207,7 @@ ALEBinding MovingDomain::binding() const noexcept
     ALEBinding out;
     out.enabled = true;
     out.geometry_tangent_path = geometry_tangent_path;
+    out.shape_derivative = shape_derivative;
     out.mesh_velocity_field = velocity;
     out.mesh_displacement_field = displacement;
     return out;
@@ -236,6 +239,7 @@ MovingDomain movingDomain(FESystem& system, FieldId displacement, MovingDomainOp
             .enabled = true,
             .dimension = rec.space->value_dimension(),
             .geometry_tangent_path = options.geometry_tangent_path,
+            .shape_derivative = options.shape_derivative,
             .mesh_velocity_field_name = std::move(options.mesh_velocity_field_name),
             .mesh_displacement_field_name = rec.name,
             .mesh_velocity_space = rec.space,
@@ -246,6 +250,7 @@ MovingDomain movingDomain(FESystem& system, FieldId displacement, MovingDomainOp
         .displacement = ale.mesh_displacement_field,
         .velocity = ale.mesh_velocity_field,
         .geometry_tangent_path = ale.geometry_tangent_path,
+        .shape_derivative = ale.shape_derivative,
     };
     return *declaration.domain;
 }
@@ -274,6 +279,7 @@ MovingDomain movingDomain(FESystem& system, ALEBindingOptions options)
                         MovingDomainOptions{
                             .geometry_tangent_path = options.geometry_tangent_path,
                             .mesh_velocity_field_name = std::move(options.mesh_velocity_field_name),
+                            .shape_derivative = options.shape_derivative,
                         });
 }
 
@@ -290,6 +296,7 @@ ALEBinding resolveALEBinding(FESystem& system, ALEBindingOptions options)
     ALEBinding binding;
     binding.enabled = options.enabled;
     binding.geometry_tangent_path = options.geometry_tangent_path;
+    binding.shape_derivative = options.shape_derivative;
 
     if (!options.enabled) {
         return binding;

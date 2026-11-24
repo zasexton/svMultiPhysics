@@ -3111,6 +3111,7 @@ if(FE_BUILD_TESTS)
 		                Tests/Unit/Systems/test_MultiFieldRectangularAssembly.cpp
                 Tests/Unit/Systems/test_NavierStokesCoupled.cpp
                 Tests/Unit/Systems/test_JacobianVerification.cpp
+                Tests/Unit/Systems/test_ShapeDerivatives.cpp
                 Tests/Unit/Systems/test_SystemConstraints.cpp
                 Tests/Unit/Systems/test_SetupStoragePlan.cpp
                 Tests/Unit/Systems/test_VectorBasisConstraints.cpp

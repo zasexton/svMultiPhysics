@@ -1232,6 +1232,43 @@ std::unordered_set<FieldId> gatherStateFields(const forms::FormExprNode& node)
     return out;
 }
 
+[[nodiscard]] bool completeShapeDerivative(const forms::GeometrySensitivityOptions& options) noexcept
+{
+    return options.mode == forms::GeometrySensitivityMode::MeshMotionUnknowns &&
+           options.shape_derivative == forms::ShapeDerivative::Complete;
+}
+
+/// Whether @p node holds an integral with a spatial measure (every integral
+/// but the point mass dGlobal), whose integrand moves with a complete shape
+/// derivative.
+[[nodiscard]] bool containsSpatialIntegral(const forms::FormExprNode& node)
+{
+    switch (node.type()) {
+        case forms::FormExprType::CellIntegral:
+        case forms::FormExprType::BoundaryIntegral:
+        case forms::FormExprType::InteriorFaceIntegral:
+        case forms::FormExprType::InterfaceIntegral:
+        case forms::FormExprType::CutVolumeIntegral:
+            return true;
+        case forms::FormExprType::GlobalIntegral:
+            return false;
+        default:
+            break;
+    }
+    for (const auto& child : node.childrenShared()) {
+        if (child && containsSpatialIntegral(*child)) {
+            return true;
+        }
+    }
+    return false;
+}
+
+/// Whether the geometry of @p node varies with the mesh displacement under
+/// @p options: a frame-explicit terminal, or with a complete shape derivative
+/// any spatial integral.
+[[nodiscard]] bool variesWithMeshGeometry(const forms::FormExprNode& node,
+                                          const forms::GeometrySensitivityOptions& options);
+
 bool containsGeometrySensitivityTerminal(const forms::FormExprNode& node)
 {
     switch (node.type()) {
@@ -1248,6 +1285,10 @@ bool containsGeometrySensitivityTerminal(const forms::FormExprNode& node)
         case forms::FormExprType::CurrentMeasureVariation:
         case forms::FormExprType::CurrentNormalVariation:
         case forms::FormExprType::SurfaceJacobianVariation:
+        case forms::FormExprType::CellDiameterVariation:
+        case forms::FormExprType::CellVolumeVariation:
+        case forms::FormExprType::FacetAreaVariation:
+        case forms::FormExprType::GeometryTrialGradientVariation:
             return true;
         default:
             break;
@@ -1258,6 +1299,50 @@ bool containsGeometrySensitivityTerminal(const forms::FormExprNode& node)
         }
     }
     return false;
+}
+
+bool variesWithMeshGeometry(const forms::FormExprNode& node,
+                            const forms::GeometrySensitivityOptions& options)
+{
+    return completeShapeDerivative(options) ? containsSpatialIntegral(node)
+                                            : containsGeometrySensitivityTerminal(node);
+}
+
+/// A complete shape derivative is a symbolic tangent; the AD reference path
+/// seeds only the frame-explicit terminals.  Its rules take x = X + d at
+/// every point, which holds when the mesh displacement is no richer than the
+/// geometry: the coordinate update moves the geometry nodes only.
+void refuseUnsupportedCompleteShapeDerivative(std::string_view installer,
+                                           const FESystem& system,
+                                           const forms::SymbolicOptions& options)
+{
+    if (!completeShapeDerivative(options.geometry_sensitivity)) {
+        return;
+    }
+    if (options.geometry_tangent_path == forms::GeometryTangentPath::ADReference ||
+        options.geometry_tangent_path == forms::GeometryTangentPath::SymbolicWithADCheck) {
+        throw InvalidArgumentException(
+            std::string(installer) +
+            ": the complete shape derivative is a symbolic tangent; the AD reference path (ADReference, "
+            "SymbolicWithADCheck) differentiates the frame-explicit terminals only");
+    }
+    const auto mesh_field = options.geometry_sensitivity.mesh_motion_field;
+    if (mesh_field == INVALID_FIELD_ID || !system.hasMeshAccess()) {
+        return;
+    }
+    const auto& space = system.fieldRecord(mesh_field).space;
+    const auto& mesh = system.meshAccess();
+    int geometry_order = 1;
+    for (GlobalIndex cell = 0; cell < mesh.numCells(); ++cell) {
+        geometry_order = std::max(geometry_order, mesh.getCellGeometryOrder(cell));
+    }
+    if (space != nullptr && space->polynomial_order() > geometry_order) {
+        throw InvalidArgumentException(
+            std::string(installer) +
+            ": the complete shape derivative needs a mesh displacement no richer than the geometry (order " +
+            std::to_string(space->polynomial_order()) + " on a geometry of order " + std::to_string(geometry_order) +
+            "); the coordinate update moves the geometry nodes only");
+    }
 }
 
 void validateGeometrySensitivityField(const FESystem& system,
@@ -1350,7 +1435,7 @@ void validateMovingGeometryTangentPath(std::string_view installer,
     const auto& geometry_sensitivity = options.geometry_sensitivity;
     if (geometry_sensitivity.mode != forms::GeometrySensitivityMode::MeshMotionUnknowns ||
         root == nullptr ||
-        !containsGeometrySensitivityTerminal(*root)) {
+        !variesWithMeshGeometry(*root, geometry_sensitivity)) {
         return;
     }
 
@@ -1379,7 +1464,7 @@ void validateMovingGeometryTangentPath(std::string_view installer,
 {
     auto out = gatherStateFields(node);
     if (geometry_sensitivity.mode == forms::GeometrySensitivityMode::MeshMotionUnknowns &&
-        containsGeometrySensitivityTerminal(node)) {
+        variesWithMeshGeometry(node, geometry_sensitivity)) {
         FE_THROW_IF(geometry_sensitivity.mesh_motion_field == INVALID_FIELD_ID,
                     InvalidArgumentException,
                     "installCoupledResidual: monolithic geometry sensitivity requested "
@@ -1414,6 +1499,11 @@ void validateMovingGeometryTangentPath(std::string_view installer,
         mesh_field != INVALID_FIELD_ID &&
         trial_field != mesh_field) {
         options.geometry_sensitivity.mode = forms::GeometrySensitivityMode::GeometryConstant;
+        options.geometry_sensitivity.shape_derivative = forms::ShapeDerivative::FrameExplicit;
+    }
+    if (completeShapeDerivative(options.geometry_sensitivity)) {
+        // The complete shape derivative is a symbolic tangent.
+        options.use_symbolic_tangent = true;
     }
     if (options.geometry_sensitivity.mode ==
         forms::GeometrySensitivityMode::LevelSetCutDomainUnknowns) {
@@ -1511,7 +1601,7 @@ void validateMovingGeometryTangentPath(std::string_view installer,
     const bool needs_mesh_probe =
         compiler_options.geometry_sensitivity.mode ==
             forms::GeometrySensitivityMode::MeshMotionUnknowns &&
-        containsGeometrySensitivityTerminal(*expr.node());
+        variesWithMeshGeometry(*expr.node(), compiler_options.geometry_sensitivity);
     const bool needs_level_set_probe =
         compiler_options.geometry_sensitivity.mode ==
             forms::GeometrySensitivityMode::LevelSetCutDomainUnknowns &&
@@ -2024,9 +2114,14 @@ KernelPtr installResidualForm(
                                       std::span<const FieldId>(single_trial_field, 1u),
                                       residual_form.node(),
                                       install_options.compiler_options);
+    refuseUnsupportedCompleteShapeDerivative("installResidualForm", system, install_options.compiler_options);
     auto block_options = install_options;
     block_options.compiler_options =
         compilerOptionsForTrial(install_options.compiler_options, trial_field);
+    if (completeShapeDerivative(block_options.compiler_options.geometry_sensitivity)) {
+        block_options.compiler_options.geometry_sensitivity.exact_hessian_field = trial_field;
+        block_options.compiler_options.jit.enable = false;
+    }
     const auto lowered = ensureGeometrySensitivityTrialDependency(residual_form,
                                                                   system,
                                                                   test_field,
@@ -2201,6 +2296,11 @@ std::vector<std::vector<KernelPtr>> installResidualBlocks(
             block_options.compiler_options =
                 compilerOptionsForTrial(install_options.compiler_options,
                                         trial_fields[j]);
+            refuseUnsupportedCompleteShapeDerivative("installResidualBlocks", system, block_options.compiler_options);
+            if (completeShapeDerivative(block_options.compiler_options.geometry_sensitivity)) {
+                block_options.compiler_options.geometry_sensitivity.exact_hessian_field = trial_fields[j];
+                block_options.compiler_options.jit.enable = false;
+            }
             const auto lowered = ensureGeometrySensitivityTrialDependency(
                 blocks.block(i, j),
                 system,
@@ -2346,6 +2446,7 @@ CoupledResidualKernels installCoupledResidual(
                                           trial_fields,
                                           root,
                                           install_options.compiler_options);
+        refuseUnsupportedCompleteShapeDerivative("installCoupledResidual", system, install_options.compiler_options);
         const auto state_fields =
             gatherResidualDependencies(*root, install_options.compiler_options.geometry_sensitivity);
 
@@ -2428,6 +2529,18 @@ CoupledResidualKernels installCoupledResidual(
             auto block_options = install_options;
             block_options.compiler_options =
                 compilerOptionsForTrial(install_options.compiler_options, trial);
+            if (completeShapeDerivative(block_options.compiler_options.geometry_sensitivity)) {
+                // The row's residual reads the active field's Hessians from its trial basis.
+                block_options.compiler_options.geometry_sensitivity.exact_hessian_field = active_trial;
+                // The mesh blocks of a complete shape derivative are interpreted.
+                block_options.compiler_options.jit.enable = false;
+                if (monolithic_cell_feasible) {
+                    monolithic_cell_feasible = false;
+                    monolithic_disable_reason =
+                        "installCoupledResidual: monolithic cell fusion disabled for the interpreted mesh blocks "
+                        "of a complete shape derivative";
+                }
+            }
             const auto lowered_base = lowerStateFields(base_expr, trial, system);
             const auto lowered = ensureGeometrySensitivityTrialDependency(lowered_base,
                                                                           system,
@@ -3062,6 +3175,7 @@ CoupledResidualKernels installCoupledResidualMixed(
                                           trial_fields,
                                           root,
                                           install_options.compiler_options);
+        refuseUnsupportedCompleteShapeDerivative("installCoupledResidualMixed", system, install_options.compiler_options);
         const auto state_fields =
             gatherResidualDependencies(*root, install_options.compiler_options.geometry_sensitivity);
         for (const auto field : state_fields) {
@@ -3151,6 +3265,18 @@ CoupledResidualKernels installCoupledResidualMixed(
             auto block_options = install_options;
             block_options.compiler_options =
                 compilerOptionsForTrial(install_options.compiler_options, trial);
+            if (completeShapeDerivative(block_options.compiler_options.geometry_sensitivity)) {
+                // The row's residual reads the active field's Hessians from its trial basis.
+                block_options.compiler_options.geometry_sensitivity.exact_hessian_field = active_trial;
+                // The mesh blocks of a complete shape derivative are interpreted.
+                block_options.compiler_options.jit.enable = false;
+                if (monolithic_cell_feasible) {
+                    monolithic_cell_feasible = false;
+                    monolithic_disable_reason =
+                        "installCoupledResidual: monolithic cell fusion disabled for the interpreted mesh blocks "
+                        "of a complete shape derivative";
+                }
+            }
             const auto lowered_base = lowerStateFields(base_expr, trial, system);
             const auto lowered = ensureGeometrySensitivityTrialDependency(lowered_base,
                                                                           system,
@@ -3393,6 +3519,11 @@ CoupledResidualKernels installCoupledResidualMixed(
             }
             const bool owns_row_vector = trial == owner;
             const auto expr = owns_row_vector ? all : part.integral(trial);
+            FE_THROW_IF(completeShapeDerivative(compilerOptionsForTrial(side_options.compiler_options, trial)
+                                                    .geometry_sensitivity),
+                        InvalidArgumentException,
+                        "installCoupledResidualMixed: the complete shape derivative of single-sided interface "
+                        "terms (an AD kernel) is a separate capability");
             forms::FormCompiler compiler(compilerOptionsForTrial(side_options.compiler_options, trial));
             auto residual_ir = compiler.compileResidual(lowerStateFields(expr, trial, system));
             auto kernel = std::make_shared<SingleSidedInterfaceKernel>(
@@ -4394,7 +4525,8 @@ CoupledResidualKernels installFormulation(
     // A declared moving domain: the geometry of the install varies with the
     // mesh displacement, which is a trial field (movingDomain()).
     if (const auto* domain = findMovingDomain(system);
-        domain != nullptr && options.moving_domain_geometry &&
+        domain != nullptr &&
+        (options.moving_domain_geometry || domain->shape_derivative == forms::ShapeDerivative::Complete) &&
         options.compiler_options.geometry_sensitivity.mode == forms::GeometrySensitivityMode::GeometryConstant) {
         auto moving = options;
         domain->binding().configureInstallOptions(moving);
@@ -4449,6 +4581,7 @@ CoupledResidualKernels installFormulation(
                                       std::span<const FieldId>(trial_fields),
                                       residual.node(),
                                       install_options.compiler_options);
+    refuseUnsupportedCompleteShapeDerivative("installFormulation", system, install_options.compiler_options);
 
     // Early validation: reject duplicate test function names across different
     // spaces before creating any side effects (FormulationRecord, contributions).
@@ -4777,7 +4910,7 @@ CoupledResidualKernels installFormulation(
             install_options.compiler_options.geometry_sensitivity.mesh_motion_field !=
                 INVALID_FIELD_ID &&
             resolved.node() != nullptr &&
-            containsGeometrySensitivityTerminal(*resolved.node())) {
+            variesWithMeshGeometry(*resolved.node(), install_options.compiler_options.geometry_sensitivity)) {
             const FieldId mesh_trial =
                 install_options.compiler_options.geometry_sensitivity.mesh_motion_field;
             if (std::find(trial_fields.begin(), trial_fields.end(), mesh_trial) !=

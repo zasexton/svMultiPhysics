@@ -187,6 +187,8 @@ enum class RequiredData : std::uint64_t {
     MeshAccelerationGradient    = 1ull << 48, ///< Spatial Jacobian of mesh acceleration at quadrature points
     PreviousMeshVelocityGradient= 1ull << 49, ///< Spatial Jacobian of previous mesh velocity at quadrature points
     PredictedMeshVelocityGradient=1ull << 50, ///< Spatial Jacobian of predicted mesh velocity at quadrature points
+    EntityMeasureDerivatives    = 1ull << 51, ///< Derivatives of h, vol (and area) in the cell's geometry nodes (complete shape derivatives)
+    ExactFieldHessians          = 1ull << 52, ///< Per-field: Hessians with the mapping curvature, as the active trial's (complete shape derivatives)
 
     // Common combinations
     BasicGeometry       = PhysicalPoints | JacobianDets | InverseJacobians,

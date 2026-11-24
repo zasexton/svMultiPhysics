@@ -10,7 +10,9 @@
 #include "Core/FEException.h"
 #include "Systems/SystemsExceptions.h"
 
+#include <algorithm>
 #include <cstddef>
+#include <string>
 
 namespace svmp {
 namespace FE {
@@ -328,6 +330,88 @@ Real integrationWeightDerivative(
         return 0.0;
     }
     return ctx.integrationWeight(q) * currentMeasureDerivative(ctx, q, j) / measure;
+}
+
+namespace {
+
+struct NodalTrialDof {
+    int component{0};
+    LocalIndex node{0};
+    LocalIndex nodes_per_component{0};
+};
+
+[[nodiscard]] NodalTrialDof nodalTrialDof(const assembly::AssemblyContext& ctx,
+                                          LocalIndex j,
+                                          const char* label)
+{
+    FE_THROW_IF(ctx.trialUsesVectorBasis(), InvalidArgumentException,
+                std::string("Forms: ") + label +
+                    " requires a scalar-component H1/Product mesh-displacement trial");
+    const auto per_component = dofsPerComponentOrThrow(ctx, label);
+    return {scalarComponentForTrialDofOrThrow(ctx, j, label),
+            static_cast<LocalIndex>(j % per_component), per_component};
+}
+
+void requireGeometryNodes(LocalIndex nodes_per_component, std::size_t geometry_nodes, const char* label)
+{
+    FE_THROW_IF(geometry_nodes == 0u, InvalidArgumentException,
+                std::string("Forms: ") + label +
+                    " needs entity-measure derivative data, which this assembly path did not prepare");
+    FE_THROW_IF(static_cast<std::size_t>(nodes_per_component) != geometry_nodes, InvalidArgumentException,
+                std::string("Forms: ") + label +
+                    " requires the mesh displacement to be the Lagrange space of the geometry "
+                    "(one scalar DOF per geometry node of the cell)");
+}
+
+} // namespace
+
+Real cellDiameterDerivative(const assembly::AssemblyContext& ctx, LocalIndex j)
+{
+    const auto dof = nodalTrialDof(ctx, j, "the shape derivative of h()");
+    const auto& nodes = ctx.cellDiameterNodes();
+    requireGeometryNodes(dof.nodes_per_component, static_cast<std::size_t>(std::max(nodes.num_nodes, 0)),
+                         "the shape derivative of h()");
+    if (nodes.first < 0) {
+        return 0.0;
+    }
+    const Real e = nodes.direction[static_cast<std::size_t>(dof.component)];
+    Real value = 0.0;
+    if (static_cast<int>(dof.node) == nodes.first) value += e;
+    if (static_cast<int>(dof.node) == nodes.second) value -= e;
+    return value;
+}
+
+Real cellVolumeDerivative(const assembly::AssemblyContext& ctx, LocalIndex j)
+{
+    const auto dof = nodalTrialDof(ctx, j, "the shape derivative of vol()");
+    if (ctx.contextType() == assembly::ContextType::Cell) {
+        // vol = sum_q w_q: d vol = sum_q w_q div(dd).
+        Real value = 0.0;
+        for (LocalIndex q = 0; q < ctx.numQuadraturePoints(); ++q) {
+            value += ctx.integrationWeight(q) *
+                     ctx.trialPhysicalGradient(j, q)[static_cast<std::size_t>(dof.component)];
+        }
+        return value;
+    }
+    const auto gradients = ctx.cellVolumeNodeGradients();
+    requireGeometryNodes(dof.nodes_per_component, gradients.size(), "the shape derivative of vol()");
+    return gradients[static_cast<std::size_t>(dof.node)][static_cast<std::size_t>(dof.component)];
+}
+
+Real facetAreaDerivative(const assembly::AssemblyContext& ctx, LocalIndex j)
+{
+    const auto dof = nodalTrialDof(ctx, j, "the shape derivative of area()");
+    FE_THROW_IF(ctx.contextType() == assembly::ContextType::Cell, InvalidArgumentException,
+                "Forms: area() and its shape derivative are defined on faces only");
+    // area = sum_q w_q: d area = sum_q w_q div_G(dd), div_G v = div v - n.(grad v) n.
+    const auto c = static_cast<std::size_t>(dof.component);
+    Real value = 0.0;
+    for (LocalIndex q = 0; q < ctx.numQuadraturePoints(); ++q) {
+        const auto g = ctx.trialPhysicalGradient(j, q);
+        const auto n = ctx.normal(q);
+        value += ctx.integrationWeight(q) * (g[c] - n[c] * dot3(g, n));
+    }
+    return value;
 }
 
 } // namespace geometry_sensitivity

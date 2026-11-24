@@ -2510,6 +2510,26 @@ FormExpr FormExpr::surfaceJacobianVariation()
     return FormExpr(std::make_shared<SimpleTerminalNode>(FormExprType::SurfaceJacobianVariation, "dJ_surface"));
 }
 
+FormExpr FormExpr::cellDiameterVariation()
+{
+    return FormExpr(std::make_shared<SimpleTerminalNode>(FormExprType::CellDiameterVariation, "dh"));
+}
+
+FormExpr FormExpr::cellVolumeVariation()
+{
+    return FormExpr(std::make_shared<SimpleTerminalNode>(FormExprType::CellVolumeVariation, "dvol"));
+}
+
+FormExpr FormExpr::facetAreaVariation()
+{
+    return FormExpr(std::make_shared<SimpleTerminalNode>(FormExprType::FacetAreaVariation, "darea"));
+}
+
+FormExpr FormExpr::geometryTrialGradientVariation()
+{
+    return FormExpr(std::make_shared<SimpleTerminalNode>(FormExprType::GeometryTrialGradientVariation, "gradX_mesh"));
+}
+
 FormExpr FormExpr::time()
 {
     return FormExpr(std::make_shared<TimeNode>());
