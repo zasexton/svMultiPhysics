@@ -36,6 +36,7 @@
 #include "Forms/FormCompiler.h"
 #include "Forms/FormKernels.h"
 #include "Forms/IntegrationDomain.h"
+#include "Forms/InterfaceConditions.h"
 #include "Forms/JIT/JITKernelWrapper.h"
 #include "Forms/JIT/LLVMJITBuildInfo.h"
 #include "Forms/StandardBCs.h"
@@ -61,6 +62,7 @@
 #include "Tests/Unit/Forms/JITTestHelpers.h"
 
 #include <algorithm>
+#include <functional>
 #include <array>
 #include <cmath>
 #include <cstdint>
@@ -163,6 +165,60 @@ makeFormsInstallerReferencePlaneInterfaceDomain(int marker)
     domain.addVolumeRegion(std::move(positive_region));
 
     return domain;
+}
+
+/// The matrix of the bilinear form @p form_of(u, v, marker), u and v P1 on the
+/// single tetrahedron, installed as one kernel and assembled on the generated
+/// reference plane x + y + z = 1/2 of makeFormsInstallerReferencePlaneInterfaceDomain.
+template <class FormOf>
+std::array<std::array<Real, 4>, 4> generatedReferencePlaneMatrix(int marker, const FormOf& form_of)
+{
+    auto mesh = std::make_shared<svmp::FE::forms::test::SingleTetraMeshAccess>();
+    auto space = std::make_shared<svmp::FE::spaces::H1Space>(ElementType::Tetra4, /*order=*/1);
+    svmp::FE::systems::FESystem sys(mesh);
+    const auto u_field = sys.addField(
+        svmp::FE::systems::FieldSpec{.name = "u", .space = space, .components = 1});
+    sys.addOperator("op");
+    const auto u = svmp::FE::forms::TrialFunction(*space, "u");
+    const auto v = svmp::FE::forms::TestFunction(*space, "v");
+    const std::array<FieldId, 1> fields = {u_field};
+    const auto kernels =
+        svmp::FE::systems::installMixedBilinear(sys, "op", fields, fields, form_of(u, v, marker));
+    EXPECT_EQ(kernels.size(), 1u);
+    auto cut_context = std::make_shared<svmp::FE::assembly::CutIntegrationContext>();
+    cut_context->addGeneratedInterfaceDomain(makeFormsInstallerReferencePlaneInterfaceDomain(marker));
+    sys.setCutIntegrationContext(cut_context);
+    svmp::FE::systems::SetupInputs inputs;
+    inputs.topology_override = singleTetraTopology();
+    sys.setup({}, inputs);
+    std::vector<Real> U(static_cast<std::size_t>(sys.dofHandler().getNumDofs()), Real{0.0});
+    svmp::FE::systems::SystemStateView state;
+    state.u = U;
+    svmp::FE::systems::AssemblyRequest req;
+    req.op = "op";
+    req.want_matrix = true;
+    svmp::FE::assembly::DenseMatrixView out(sys.dofHandler().getNumDofs());
+    out.zero();
+    const auto result = sys.assemble(req, state, &out, nullptr);
+    EXPECT_TRUE(result.success) << result.error_message;
+    std::array<std::array<Real, 4>, 4> A{};
+    for (GlobalIndex i = 0; i < 4; ++i) {
+        for (GlobalIndex j = 0; j < 4; ++j) {
+            A[static_cast<std::size_t>(i)][static_cast<std::size_t>(j)] = out.getMatrixEntry(i, j);
+        }
+    }
+    return A;
+}
+
+Real entrySum(const std::array<std::array<Real, 4>, 4>& A)
+{
+    Real total = 0.0;
+    for (const auto& row : A) {
+        for (const auto entry : row) {
+            total += entry;
+        }
+    }
+    return total;
 }
 
 std::shared_ptr<const svmp::FE::interfaces::FreeSurfaceGeometrySnapshot>
@@ -3610,6 +3666,118 @@ TEST(FormsInstaller,
             EXPECT_NEAR(out.getMatrixEntry(i, j), 0.0, 1.0e-12)
                 << "entry (" << i << ", " << j << ")";
         }
+    }
+}
+
+/**
+ * The orientation of the upwind spelling on a two-sided generated rule.  The
+ * reference plane x + y + z = 1/2 of the single tetrahedron has the normal
+ * n = (1, 1, 1)/sqrt(3) from the negative (minus) side to the positive
+ * (plus) side.  A velocity beta = n carries the negative side's state into
+ * the positive side, so the upstream state is the minus side's.
+ *
+ * - normal().minus() is -n on the generated rule (it points into the minus
+ *   side), so inner(avg(beta), normal().minus()) = -1 where the fitted
+ *   convention (the outward normal of the minus cell) gives +1: the fitted
+ *   upwind selection, written for two side states 1 (minus) and 100 (plus),
+ *   takes the downstream state 100 and the flux changes sign.  The matrix of
+ *   (bn * c_up * u(-) v(-)) sums to |Gamma| bn c_up.
+ * - A field has one trace on both sides of a generated rule (the parent
+ *   cell's), so jump(u) = 0 and upwindValue(u, beta) = u(-): the helper
+ *   selects no wrong state for one field, and applyNitscheInterfacePoisson,
+ *   whose every term holds jump(u) or jump(v), installs zero there.
+ */
+TEST(FormsInstaller,
+     FormsInstaller_GeneratedTwoSidedMinusNormalReversesTheFittedUpwindSelection)
+{
+    using svmp::FE::forms::FormExpr;
+    const Real interface_measure = std::sqrt(Real{3.0}) / Real{8.0};
+    const Real s = Real{1.0} / std::sqrt(Real{3.0});
+    const auto beta = svmp::FE::forms::as_vector(
+        {FormExpr::constant(s), FormExpr::constant(s), FormExpr::constant(s)});
+    const auto bn = svmp::FE::forms::inner(svmp::FE::forms::avg(beta), FormExpr::normal().minus());
+
+    const auto fitted_upwind_flux =
+        generatedReferencePlaneMatrix(788, [&](const FormExpr& u, const FormExpr& v, int marker) {
+            const auto c_up = svmp::FE::forms::conditional(svmp::FE::forms::ge(bn, FormExpr::constant(0.0)),
+                                                           FormExpr::constant(1.0), FormExpr::constant(100.0));
+            return (bn * c_up * u.minus() * v.minus()).dI(marker);
+        });
+    EXPECT_NEAR(entrySum(fitted_upwind_flux), -100.0 * interface_measure, 1e-12)
+        << "the fitted spelling selects the downstream state on a generated rule";
+
+    const auto upwind = generatedReferencePlaneMatrix(789, [&](const FormExpr& u, const FormExpr& v, int marker) {
+        return (svmp::FE::forms::upwindValue(u, beta) * v.minus()).dI(marker);
+    });
+    const auto minus_trace = generatedReferencePlaneMatrix(
+        790, [&](const FormExpr& u, const FormExpr& v, int marker) { return (u.minus() * v.minus()).dI(marker); });
+    for (std::size_t i = 0; i < 4; ++i) {
+        for (std::size_t j = 0; j < 4; ++j) {
+            EXPECT_NEAR(upwind[i][j], minus_trace[i][j], 1e-14) << "entry (" << i << ", " << j << ")";
+        }
+    }
+    EXPECT_NEAR(entrySum(minus_trace), interface_measure, 1e-12);
+
+    const auto nitsche = generatedReferencePlaneMatrix(791, [&](const FormExpr& u, const FormExpr& v, int marker) {
+        return svmp::FE::forms::interface::applyNitscheInterfacePoisson(
+            (FormExpr::constant(0.0) * u.minus() * v.minus()).dI(marker), FormExpr::constant(1.0), u, v, marker);
+    });
+    for (const auto& row : nitsche) {
+        for (const auto entry : row) {
+            EXPECT_NEAR(entry, 0.0, 1e-14);
+        }
+    }
+}
+
+/**
+ * On a generated rule a kernel is assembled two-sided when any of its dI terms
+ * holds .plus(), jump() or avg(), and only then is the minus context's normal
+ * negated and every term evaluated on both sides.  So a term's value depends
+ * on the other terms of its kernel.  With n = (1, 1, 1)/sqrt(3) the rule
+ * normal (from the negative to the positive side) and e = n, each matrix
+ * below sums to |Gamma| times:
+ *
+ *   term                          alone   with 0 * jump(u) v(-) in the kernel
+ *   inner(e, n(-)) u(-) v(-)       +1         -1   (n(-) negated)
+ *   inner(e, n) u v                +1          0   (both sides, n(-) = -n(+))
+ *   u v                            +1         +2   (both sides, counted twice)
+ *
+ * The test pins today's values; a term's meaning should not depend on the
+ * other terms of its kernel.
+ */
+TEST(FormsInstaller, FormsInstaller_GeneratedInterfaceTermDependsOnTheOtherTermsOfItsKernel)
+{
+    using svmp::FE::forms::FormExpr;
+    const Real gamma = std::sqrt(Real{3.0}) / Real{8.0};
+    const Real s = Real{1.0} / std::sqrt(Real{3.0});
+    const auto e = svmp::FE::forms::as_vector({FormExpr::constant(s), FormExpr::constant(s), FormExpr::constant(s)});
+    const auto n = FormExpr::normal();
+    const auto with_jump = [](const FormExpr& term, const FormExpr& u, const FormExpr& v, int marker) {
+        return term.dI(marker) + (FormExpr::constant(0.0) * svmp::FE::forms::jump(u) * v.minus()).dI(marker);
+    };
+    struct Case {
+        const char* name;
+        std::function<FormExpr(const FormExpr&, const FormExpr&)> term;
+        Real alone;
+        Real with_two_sided_term;
+    };
+    const std::vector<Case> cases{
+        {"inner(e, n(-)) u(-) v(-)",
+         [&](const FormExpr& u, const FormExpr& v) { return svmp::FE::forms::inner(e, n.minus()) * u.minus() * v.minus(); },
+         1.0, -1.0},
+        {"inner(e, n) u v", [&](const FormExpr& u, const FormExpr& v) { return svmp::FE::forms::inner(e, n) * u * v; },
+         1.0, 0.0},
+        {"u v", [](const FormExpr& u, const FormExpr& v) { return u * v; }, 1.0, 2.0},
+    };
+    int marker = 800;
+    for (const auto& c : cases) {
+        SCOPED_TRACE(c.name);
+        const auto alone = generatedReferencePlaneMatrix(
+            marker++, [&](const FormExpr& u, const FormExpr& v, int m) { return c.term(u, v).dI(m); });
+        const auto mixed = generatedReferencePlaneMatrix(
+            marker++, [&](const FormExpr& u, const FormExpr& v, int m) { return with_jump(c.term(u, v), u, v, m); });
+        EXPECT_NEAR(entrySum(alone), c.alone * gamma, 1e-12);
+        EXPECT_NEAR(entrySum(mixed), c.with_two_sided_term * gamma, 1e-12);
     }
 }
 

@@ -113,7 +113,7 @@ struct CellSums {
  */
 CellSums assembleCellSums(
     const std::function<forms::FormExpr(const forms::FormExpr&, const forms::FormExpr&)>& interface_terms,
-    const std::function<Real(Real)>& u_exact)
+    const std::function<Real(GlobalIndex, Real)>& u_exact)
 {
     using forms::FormExpr;
     auto space = std::make_shared<spaces::L2Space>(ElementType::Quad4, 1);
@@ -141,7 +141,7 @@ CellSums assembleCellSums(
         std::vector<Real> local;
         space->interpolate_scalar(
             [&](const spaces::FunctionSpace::Value& xi) {
-                return u_exact(static_cast<Real>(cell) + Real(0.5) * (xi[0] + Real(1.0)));
+                return u_exact(cell, static_cast<Real>(cell) + Real(0.5) * (xi[0] + Real(1.0)));
             },
             local);
         const auto dofs = sys.fieldDofHandler(u_id).getCellDofs(cell);
@@ -172,7 +172,18 @@ CellSums assembleCellSums(
     return sums;
 }
 
+/// assembleCellSums for a state @p u_exact(x) that is one function of x on both cells.
+CellSums assembleCellSums(
+    const std::function<forms::FormExpr(const forms::FormExpr&, const forms::FormExpr&)>& interface_terms,
+    const std::function<Real(Real)>& u_exact)
+{
+    return assembleCellSums(interface_terms, [&](GlobalIndex /*cell*/, Real x) { return u_exact(x); });
+}
+
 Real linearX(Real x) { return x; }
+
+/// The state 1 on the left cell and 100 on the right, a 1:100 contrast across the interface.
+Real leftOneRightHundred(GlobalIndex cell, Real /*x*/) { return cell == 0 ? Real(1.0) : Real(100.0); }
 
 } // namespace
 
@@ -245,6 +256,27 @@ TEST(InterfaceTraceConventions, NormalComponentJumpIsTheCoreJumpAlongTheMinusNor
     EXPECT_NEAR(with_helper.left, with_core.left, 1e-12);
     EXPECT_NEAR(with_helper.right, with_core.right, 1e-12);
     EXPECT_GT(std::abs(with_core.left), 0.5);
+}
+
+TEST(InterfaceTraceConventions, UpwindValueOnAFittedInterfaceCarriesTheUpstreamState)
+{
+    // The upwind flux {beta}.n(-) upwindValue(u, beta) jump(v) for u = 1 on the
+    // left cell and 100 on the right: with beta = (1, 0) the flux leaving the
+    // left cell carries 1, with beta = (-1, 0) the flux leaving the right cell
+    // carries 100, whichever cell is the minus side.
+    const auto upwind_flux = [](Real beta_x) {
+        return [beta_x](const forms::FormExpr& u, const forms::FormExpr& v) {
+            const auto beta = forms::as_vector({forms::FormExpr::constant(beta_x), forms::FormExpr::constant(0.0)});
+            const auto bn = forms::inner(forms::avg(beta), forms::FormExpr::normal().minus());
+            return (bn * forms::upwindValue(u, beta) * forms::jump(v)).dI(kInterfaceMarker);
+        };
+    };
+    const auto rightward = assembleCellSums(upwind_flux(1.0), leftOneRightHundred);
+    EXPECT_NEAR(rightward.left, 1.0, 1e-12);
+    EXPECT_NEAR(rightward.right, -1.0, 1e-12);
+    const auto leftward = assembleCellSums(upwind_flux(-1.0), leftOneRightHundred);
+    EXPECT_NEAR(leftward.left, -100.0, 1e-10);
+    EXPECT_NEAR(leftward.right, 100.0, 1e-10);
 }
 
 TEST(InterfaceTraceConventions, IdentityJumpReductionIsTheCoreJump)
