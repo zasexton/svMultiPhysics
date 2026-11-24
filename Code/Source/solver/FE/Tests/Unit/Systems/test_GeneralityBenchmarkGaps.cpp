@@ -335,7 +335,7 @@ ViscoelasticInstall defineViscoelasticBody(FESystem& system, const std::shared_p
     const auto tau = FormExpr::constant(relaxation_time);
     const auto& u = U.state;
     const auto& a = A.state;
-    const auto strain_rate = trace(grad(dt(u)));  // div(dt(u)) drops the history today
+    const auto strain_rate = div(dt(u));
     auto R = (2.0 * inner(symgrad(u), symgrad(U.test)) + E * a * div(U.test)).dx() +
              ((dt(a) + a / tau - strain_rate) * A.test).dx();
     BoundaryConditionManager bcs;
@@ -384,14 +384,12 @@ TEST(GeneralityBenchmarkGaps, P09_CellwiseViscoelasticVariableFollowsItsRelaxati
     }
 }
 
-TEST(GeneralityBenchmarkGaps, DISABLED_P09_TheDivergenceOfARateIsTheTraceOfItsGradient)
+TEST(GeneralityBenchmarkGaps, P09_TheDivergenceOfARateIsTheTraceOfItsGradient)
 {
-    // Defect found by this benchmark (reported): div(dt(u)) of a vector field
-    // evaluates as if the stencil had only its leading term: with u = (t x, 0)
-    // prescribed, the cellwise b = div(dt(u)) is 1, 2, 3, 4 at the first four
-    // backward Euler steps of dt = 0.1 (1, 3, 4.5, 6 under BDF2) instead of 1;
-    // trace(grad(dt(u))), grad(dt(u))(0, 0) and the scalar grad(dt(T)) are
-    // right.
+    // div(dt(u)) of a vector field takes the whole stencil, as
+    // trace(grad(dt(u))) does: with u = (t x, 0) prescribed, the cellwise
+    // b = div(dt(u)) is 1 at every backward Euler step (it read 1, 2, 3, 4
+    // when the divergence of a rate kept only the stencil's leading term).
     for (const bool divergence : {true, false}) {
         FESystem system(boxMesh(Cell::Tri3, 2, boxSides()));
         FieldBinding fields(system, "Rate");
