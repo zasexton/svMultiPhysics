@@ -22,6 +22,7 @@
 #include "Spaces/H1Space.h"
 #include "Spaces/L2Space.h"
 
+#include "Analysis/ConstraintRangeCertificate.h"
 #include "Auxiliary/AuxiliaryModelBuilder.h"
 #include "Auxiliary/AuxiliaryModelDSL.h"
 #include "Auxiliary/AuxiliaryStateManager.h"
@@ -32,6 +33,7 @@
 #include "Dofs/EntityDofMap.h"
 #include "Interfaces/FreeSurfaceGeometrySnapshot.h"
 #include "Interfaces/LevelSetInterfaceBuilder.h"
+#include "Systems/DiagnosticRegistry.h"
 #include "Systems/FESystem.h"
 #include "Systems/FormsInstaller.h"
 #include "Systems/TimeIntegrator.h"
@@ -306,6 +308,40 @@ struct FreeSurfaceConservativeBalanceKernelCounts {
     std::array<KernelCallCounts, 6> operators{};
     KernelCallCounts pressure_representability_pair{};
 };
+
+// The synthetic certificate operators the fixtures below install, declared
+// as a formulation declares them (the six sampled vectors, then the pair).
+constexpr std::array<const char*, 6> kSyntheticCertificateVectorOps{
+    "equations_diagnostic_ns_free_surface_pressure_virtual_work",
+    "equations_diagnostic_ns_free_surface_surface_energy_virtual_work",
+    "equations_diagnostic_ns_free_surface_gravitational_potential_virtual_work",
+    "equations_diagnostic_ns_free_surface_physical_potential_virtual_work",
+    "equations_diagnostic_ns_free_surface_pressure_representability_load_virtual_work",
+    "equations_diagnostic_ns_free_surface_conservative_balance",
+};
+constexpr const char* kSyntheticCertificatePairOp =
+    "equations_diagnostic_ns_free_surface_pressure_representability_pair";
+
+void declareSyntheticConstraintRangeCertificate(
+    svmp::FE::systems::FESystem& sys,
+    svmp::FE::FieldId primary_field,
+    svmp::FE::FieldId constraint_field)
+{
+    constexpr const char* set = "synthetic_constraint_range";
+    auto& registry = svmp::FE::systems::diagnosticRegistry(sys);
+    registry.declareSet(set, {});
+    const auto handle = [&](const char* tag) { return registry.handle(set, tag); };
+    const auto& ops = kSyntheticCertificateVectorOps;
+    registry.declare(set, svmp::FE::analysis::ConstraintRangeDeclaration{
+                              .primary_field = primary_field,
+                              .constraint_field = constraint_field,
+                              .constraint_work = handle(ops[0]),
+                              .potential_work_parts = {handle(ops[1]), handle(ops[2])},
+                              .potential_work = handle(ops[3]),
+                              .load = handle(ops[4]),
+                              .balance = handle(ops[5]),
+                              .pair = handle(kSyntheticCertificatePairOp)});
+}
 
 class CountingKernel final : public svmp::FE::assembly::AssemblyKernel {
 public:
@@ -2025,14 +2061,9 @@ template <typename BuildForm>
     p.sys->addCellKernel("op", p.u_field, p.u_field, kernel);
 
     if (balance_counts != nullptr) {
-        constexpr std::array<const char*, 6> diagnostic_ops{
-            "equations_diagnostic_ns_free_surface_pressure_virtual_work",
-            "equations_diagnostic_ns_free_surface_surface_energy_virtual_work",
-            "equations_diagnostic_ns_free_surface_gravitational_potential_virtual_work",
-            "equations_diagnostic_ns_free_surface_physical_potential_virtual_work",
-            "equations_diagnostic_ns_free_surface_pressure_representability_load_virtual_work",
-            "equations_diagnostic_ns_free_surface_conservative_balance",
-        };
+        const auto& diagnostic_ops = kSyntheticCertificateVectorOps;
+        declareSyntheticConstraintRangeCertificate(
+            *p.sys, p.u_field, svmp::FE::INVALID_FIELD_ID);
         const std::array<svmp::FE::forms::FormExpr, 6> diagnostic_forms{
             (svmp::FE::forms::FormExpr::constant(2.0) * u * v).dx(),
             (svmp::FE::forms::FormExpr::constant(-0.5) * u * v).dx(),
@@ -2262,14 +2293,9 @@ makePressureRepresentabilityProblem(
             ((pressure - FormExpr::constant(production_pressure_target)) * q)
                 .dx()));
 
-    constexpr std::array<const char*, 6> vector_ops{
-        "equations_diagnostic_ns_free_surface_pressure_virtual_work",
-        "equations_diagnostic_ns_free_surface_surface_energy_virtual_work",
-        "equations_diagnostic_ns_free_surface_gravitational_potential_virtual_work",
-        "equations_diagnostic_ns_free_surface_physical_potential_virtual_work",
-        "equations_diagnostic_ns_free_surface_pressure_representability_load_virtual_work",
-        "equations_diagnostic_ns_free_surface_conservative_balance",
-    };
+    const auto& vector_ops = kSyntheticCertificateVectorOps;
+    declareSyntheticConstraintRangeCertificate(
+        *p.sys, p.velocity_field, p.pressure_field);
     // On the unit tetra, a constant P1 field satisfies int(v_i)=1/24.
     // The finite-precision LSQR regression therefore uses factors 12 and 24
     // so its physical-potential load has controlled unit-scale coefficients.
@@ -2336,8 +2362,7 @@ makePressureRepresentabilityProblem(
         }
     }
 
-    constexpr const char* pair_op =
-        "equations_diagnostic_ns_free_surface_pressure_representability_pair";
+    constexpr const char* pair_op = kSyntheticCertificatePairOp;
     p.sys->addOperator(pair_op);
     if (install_symbolic_cut_volume_pair) {
         // Use the real mixed symbolic installer and cut-volume dispatch used

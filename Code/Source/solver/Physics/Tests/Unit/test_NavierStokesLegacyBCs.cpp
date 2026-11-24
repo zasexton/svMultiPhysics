@@ -15,6 +15,7 @@
 #include "Physics/Options/NavierStokesOptionRules.h"
 
 #include "Assembly/GlobalSystemView.h"
+#include "FE/Analysis/ConstraintRangeCertificate.h"
 #include "FE/Forms/FormExpr.h"
 #include "FE/Forms/JIT/LLVMJITBuildInfo.h"
 #include "FE/Forms/PointEvaluator.h"
@@ -22,6 +23,7 @@
 #include "Interfaces/GeneratedActiveBoundaryDomain.h"
 #include "Interfaces/GeneratedInterfaceBoundaryIntersectionDomain.h"
 #include "FE/Spaces/SpaceFactory.h"
+#include "FE/Systems/DiagnosticRegistry.h"
 #include "FE/Systems/FESystem.h"
 #include "FE/Systems/FormsInstaller.h"
 #include "FE/Systems/TransientSystem.h"
@@ -2901,6 +2903,20 @@ TEST(NavierStokesLegacyBCs,
             if (system.hasOperator(std::string(tag))) {
                 ++installed;
             }
+        }
+        // The certificate's declaration names these operators whether or
+        // not they are installed, with the velocity and pressure fields.
+        const auto* declaration = svmp::FE::systems::findDiagnosticDeclaration<
+            svmp::FE::analysis::ConstraintRangeDeclaration>(system);
+        EXPECT_NE(declaration, nullptr);
+        if (declaration != nullptr) {
+            EXPECT_EQ(declaration->constraint_work.tag, Operators::pressure_virtual_work);
+            EXPECT_EQ(declaration->load.tag, Operators::pressure_representability_load_virtual_work);
+            EXPECT_EQ(declaration->pair.tag, Operators::pressure_representability_pair);
+            EXPECT_EQ(declaration->pair.installedOn(system), requested);
+            EXPECT_NE(declaration->primary_field, svmp::FE::INVALID_FIELD_ID);
+            EXPECT_NE(declaration->constraint_field, svmp::FE::INVALID_FIELD_ID);
+            EXPECT_NE(declaration->primary_field, declaration->constraint_field);
         }
         return installed;
     };

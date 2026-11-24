@@ -23,15 +23,23 @@
  * operators of a set up by name.  A system's registry is one of its
  * attachments (diagnosticRegistry); FormulationBuilder::diagnostic installs
  * through it.
+ *
+ * A consumer of diagnostic operators (a solver extension such as a
+ * certificate or an observer) holds DiagnosticOperatorHandles instead of
+ * operator names: the formulation records a typed declaration of the
+ * operators of a set (declare), and the consumer finds it by its type
+ * (findDeclaration), so the names stay with the formulation.
  */
 
 #include "Core/Types.h"
 #include "Systems/FormsInstaller.h"
 #include "Systems/OperatorRegistry.h"
 
+#include <any>
 #include <initializer_list>
 #include <string>
 #include <string_view>
+#include <utility>
 #include <vector>
 
 namespace svmp {
@@ -43,6 +51,19 @@ class FormExpr;
 namespace systems {
 
 class FESystem;
+
+/// A diagnostic operator of a set, held by a consumer instead of its name.
+/// The formulation may declare a handle whose operator it installs only on
+/// request; installedOn tells whether it is installed on a system.
+struct DiagnosticOperatorHandle {
+    std::string set{};
+    OperatorTag tag{};
+
+    /// Whether the operator is installed on @p system (false for an empty handle).
+    [[nodiscard]] bool installedOn(const FESystem& system) const;
+
+    friend bool operator==(const DiagnosticOperatorHandle&, const DiagnosticOperatorHandle&) = default;
+};
 
 /// How a diagnostic operator's install options differ from the formulation's.
 struct DiagnosticOperatorOptions {
@@ -83,11 +104,50 @@ public:
     /// The operators installed for @p set, in order of first installation.
     [[nodiscard]] std::vector<OperatorTag> operators(std::string_view set) const;
 
+    /// The handle of the operator @p operator_tag of the declared @p set,
+    /// whether or not it is installed; throws std::invalid_argument for an
+    /// undeclared set.
+    [[nodiscard]] DiagnosticOperatorHandle handle(std::string_view set, OperatorTag operator_tag) const;
+
+    /// Records @p declaration, a typed view of operators of the declared
+    /// @p set for the consumers that read them.  A declaration equal to one
+    /// already recorded in the set is kept once (the formulations that share
+    /// a system may declare it each); an unequal one of the same type is
+    /// recorded after it.
+    template <class Declaration>
+    void declare(std::string_view set, Declaration declaration)
+    {
+        auto& entry = find(set);
+        for (const auto& recorded : entry.declarations) {
+            const auto* same_type = std::any_cast<Declaration>(&recorded);
+            if (same_type != nullptr && *same_type == declaration) {
+                return;
+            }
+        }
+        entry.declarations.emplace_back(std::move(declaration));
+    }
+
+    /// The first declaration of type Declaration, in the order of the sets
+    /// and of recording, or null when none is recorded.
+    template <class Declaration>
+    [[nodiscard]] const Declaration* findDeclaration() const
+    {
+        for (const auto& entry : sets_) {
+            for (const auto& recorded : entry.declarations) {
+                if (const auto* declaration = std::any_cast<Declaration>(&recorded)) {
+                    return declaration;
+                }
+            }
+        }
+        return nullptr;
+    }
+
 private:
     struct Set {
         std::string name{};
         std::vector<std::string> environment_switches{};
         std::vector<OperatorTag> operators{};
+        std::vector<std::any> declarations{};
     };
 
     [[nodiscard]] const Set& find(std::string_view set) const;
@@ -101,6 +161,15 @@ private:
 
 /// The diagnostic registry of @p system, or null when none was created.
 [[nodiscard]] const DiagnosticRegistry* findDiagnosticRegistry(const FESystem& system) noexcept;
+
+/// The first declaration of type Declaration in the diagnostic registry of
+/// @p system (DiagnosticRegistry::findDeclaration), or null.
+template <class Declaration>
+[[nodiscard]] const Declaration* findDiagnosticDeclaration(const FESystem& system) noexcept
+{
+    const auto* registry = findDiagnosticRegistry(system);
+    return registry != nullptr ? registry->findDeclaration<Declaration>() : nullptr;
+}
 
 } // namespace systems
 } // namespace FE

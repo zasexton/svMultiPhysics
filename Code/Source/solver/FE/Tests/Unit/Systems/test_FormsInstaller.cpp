@@ -2019,6 +2019,52 @@ TEST(FormulationBuilder, PhaseFormulationsShareTheSystemDiagnosticRegistry)
     EXPECT_EQ(shared, separate);
 }
 
+namespace {
+struct UnitDiagnosticDeclaration {
+    svmp::FE::systems::DiagnosticOperatorHandle row{};
+    int order{0};
+    friend bool operator==(const UnitDiagnosticDeclaration&, const UnitDiagnosticDeclaration&) = default;
+};
+} // namespace
+
+TEST(DiagnosticRegistry, HandlesAndTypedDeclarationsKeepOperatorNamesWithTheFormulation)
+{
+    namespace systems = svmp::FE::systems;
+    namespace forms = svmp::FE::forms;
+    auto mesh = std::make_shared<forms::test::SingleTetraMeshAccess>();
+    auto space = std::make_shared<svmp::FE::spaces::H1Space>(ElementType::Tetra4, /*order=*/1);
+    systems::FESystem sys(mesh);
+    const auto u_field = sys.addField(systems::FieldSpec{.name = "u", .space = space, .components = 1});
+    EXPECT_EQ(systems::findDiagnosticDeclaration<UnitDiagnosticDeclaration>(sys), nullptr);
+
+    auto& registry = systems::diagnosticRegistry(sys);
+    registry.declareSet("unit_rows", {"SVMP_UNIT_DIAGNOSTIC_SWITCH_THAT_IS_NEVER_SET"});
+    EXPECT_THROW((void)registry.handle("undeclared", "op_row"), std::invalid_argument);
+    const auto row = registry.handle("unit_rows", "op_row");
+    EXPECT_EQ(row.set, "unit_rows");
+    EXPECT_EQ(row.tag, "op_row");
+    EXPECT_FALSE(row.installedOn(sys));
+    EXPECT_FALSE(systems::DiagnosticOperatorHandle{}.installedOn(sys));
+
+    // A declaration recorded again (by another formulation of the system) is
+    // kept once; an unequal one is recorded after it, and the first is found.
+    EXPECT_EQ(registry.findDeclaration<UnitDiagnosticDeclaration>(), nullptr);
+    registry.declare("unit_rows", UnitDiagnosticDeclaration{.row = row, .order = 1});
+    registry.declare("unit_rows", UnitDiagnosticDeclaration{.row = row, .order = 1});
+    registry.declare("unit_rows", UnitDiagnosticDeclaration{.row = row, .order = 2});
+    const auto* found = systems::findDiagnosticDeclaration<UnitDiagnosticDeclaration>(sys);
+    ASSERT_NE(found, nullptr);
+    EXPECT_EQ(found->order, 1);
+    EXPECT_EQ(found->row, row);
+    EXPECT_EQ(registry.findDeclaration<int>(), nullptr);
+    EXPECT_THROW(registry.declare("undeclared", 3), std::invalid_argument);
+
+    const auto u = forms::FormExpr::stateField(u_field, *space, "u");
+    const auto v = forms::FormExpr::testFunction(*space, "v");
+    (void)registry.install(sys, "unit_rows", row.tag, {u_field}, (u * v).dx(), systems::FormInstallOptions{});
+    EXPECT_TRUE(found->row.installedOn(sys));
+}
+
 TEST(ContactLineGeometryCertificate, PlanarWallEvidenceChecksTheConfiguredNormal)
 {
     namespace interfaces = svmp::FE::interfaces;

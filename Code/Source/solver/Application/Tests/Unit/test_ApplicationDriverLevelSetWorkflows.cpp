@@ -2584,6 +2584,23 @@ void installWorkflowExactConstantPressureCertificate(
   constexpr const char* pair_operator =
       "equations_diagnostic_ns_free_surface_pressure_representability_pair";
   system.addOperator(pair_operator);
+  // Declared as a formulation declares the certificate's operators.
+  constexpr const char* set = "workflow_constraint_range";
+  auto& registry = svmp::FE::systems::diagnosticRegistry(system);
+  registry.declareSet(set, {});
+  const auto handle = [&](const char* tag) { return registry.handle(set, tag); };
+  registry.declare(
+      set,
+      svmp::FE::analysis::ConstraintRangeDeclaration{
+          .primary_field = velocity,
+          .constraint_field = pressure,
+          .constraint_work = handle(diagnostic_operators[0]),
+          .potential_work_parts = {handle(diagnostic_operators[1]),
+                                   handle(diagnostic_operators[2])},
+          .potential_work = handle(diagnostic_operators[3]),
+          .load = handle(diagnostic_operators[4]),
+          .balance = handle(diagnostic_operators[5]),
+          .pair = handle(pair_operator)});
   system.addCellKernel(
       pair_operator,
       velocity,

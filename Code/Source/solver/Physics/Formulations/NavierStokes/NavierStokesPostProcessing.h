@@ -22,6 +22,8 @@
 #include "Physics/Formulations/NavierStokes/IncompressibleNavierStokesVMSModule.h"
 #include "Physics/Options/NavierStokesOptionRules.h"
 
+#include "FE/Analysis/ConstraintRangeCertificate.h"
+#include "FE/Analysis/RowContributionObserver.h"
 #include "FE/Core/FEException.h"
 #include "FE/Core/LogRecord.h"
 #include "FE/Core/Types.h"
@@ -507,8 +509,23 @@ inline constexpr std::string_view kPressureRowContributionDiagnostics =
 inline constexpr std::string_view kConservativeBalanceDiagnostics =
     "navier_stokes_free_surface_conservative_balance";
 
-/// Declares both sets with their environment switches.
-inline void declareDiagnosticSets(FE::systems::DiagnosticRegistry& registry)
+/// The continuity-row operators of the pressure-row set, in sampling order.
+struct PressureRowContributionDiagnosticOperators {
+    inline static constexpr std::string_view galerkin_continuity{"equations_diagnostic_ns_galerkin_continuity"};
+    inline static constexpr std::string_view active_continuity{"equations_diagnostic_ns_active_continuity"};
+    inline static constexpr std::string_view vms_pspg{"equations_diagnostic_ns_vms_pspg"};
+    inline static constexpr std::string_view vms_pspg_pressure_gradient{
+        "equations_diagnostic_ns_vms_pspg_pressure_gradient"};
+    inline static constexpr std::string_view vms_pspg_nonpressure{"equations_diagnostic_ns_vms_pspg_nonpressure"};
+    inline static constexpr std::string_view pressure_ghost_penalty{
+        "equations_diagnostic_ns_pressure_ghost_penalty"};
+};
+
+/// Declares both sets with their environment switches, and what the
+/// consumers of their operators read: the constraint-range certificate of
+/// the velocity/pressure pair and the pressure-row contributions (whether
+/// or not the operators are installed).
+inline void declareDiagnosticSets(FE::systems::DiagnosticRegistry& registry, FE::FieldId u_id, FE::FieldId p_id)
 {
     registry.declareSet(
         std::string(kPressureRowContributionDiagnostics),
@@ -522,6 +539,30 @@ inline void declareDiagnosticSets(FE::systems::DiagnosticRegistry& registry)
          "SVMP_FREE_SURFACE_CONSERVATIVE_BALANCE_DIAGNOSTIC",
          "SVMP_NS_FREE_SURFACE_EQUILIBRIUM_DIAGNOSTIC",
          "SVMP_FREE_SURFACE_EQUILIBRIUM_DIAGNOSTIC"});
+
+    using Balance = FreeSurfaceConservativeBalanceDiagnosticOperators;
+    const auto balance = [&](std::string_view tag) {
+        return registry.handle(kConservativeBalanceDiagnostics, std::string(tag));
+    };
+    registry.declare(kConservativeBalanceDiagnostics,
+                     FE::analysis::ConstraintRangeDeclaration{
+                         .primary_field = u_id,
+                         .constraint_field = p_id,
+                         .constraint_work = balance(Balance::pressure_virtual_work),
+                         .potential_work_parts = {balance(Balance::surface_energy_virtual_work),
+                                                  balance(Balance::gravitational_potential_virtual_work)},
+                         .potential_work = balance(Balance::physical_potential_virtual_work),
+                         .load = balance(Balance::pressure_representability_load_virtual_work),
+                         .balance = balance(Balance::conservative_balance),
+                         .pair = balance(Balance::pressure_representability_pair)});
+
+    using Rows = PressureRowContributionDiagnosticOperators;
+    FE::analysis::RowContributionDeclaration rows{.row_field_name = "Pressure", .coupling_field_name = "Velocity"};
+    for (const auto tag : {Rows::galerkin_continuity, Rows::active_continuity, Rows::vms_pspg,
+                           Rows::vms_pspg_pressure_gradient, Rows::vms_pspg_nonpressure, Rows::pressure_ghost_penalty}) {
+        rows.operators.push_back(registry.handle(kPressureRowContributionDiagnostics, std::string(tag)));
+    }
+    registry.declare(kPressureRowContributionDiagnostics, std::move(rows));
 }
 
 /// The conservative-balance diagnostic is requested (by the options or the
@@ -708,30 +749,30 @@ inline void installPressureRowContributionDiagnosticOperators(
     const FE::forms::FormExpr& pressure_ghost_penalty_form,
     const FE::forms::VolumeDomain& liquid)
 {
-    const auto install_row = [&](const char* operator_tag, const FE::forms::FormExpr& form) {
-        (void)F.diagnostic(kPressureRowContributionDiagnostics, operator_tag, {p_id}, form,
+    const auto install_row = [&](std::string_view operator_tag, const FE::forms::FormExpr& form) {
+        (void)F.diagnostic(kPressureRowContributionDiagnostics, std::string(operator_tag), {p_id}, form,
                            {.extra_trial_fields = {u_id}});
     };
+    using Rows = PressureRowContributionDiagnosticOperators;
     F.log(navierStokesLog("pressure-row contribution operators")
               .diagnostic("navier_stokes_pressure_row_contribution_operators")
               .text("installing", "1")
               .text("ops", "equations_diagnostic_ns_galerkin_continuity|equations_diagnostic_ns_active_continuity|"
                            "equations_diagnostic_ns_vms_pspg|equations_diagnostic_ns_vms_pspg_pressure_gradient|"
                            "equations_diagnostic_ns_vms_pspg_nonpressure|equations_diagnostic_ns_pressure_ghost_penalty"));
-    install_row("equations_diagnostic_ns_galerkin_continuity", galerkin_continuity_integrand.dx(liquid));
-    install_row("equations_diagnostic_ns_active_continuity", active_continuity_diagnostic_form);
+    install_row(Rows::galerkin_continuity, galerkin_continuity_integrand.dx(liquid));
+    install_row(Rows::active_continuity, active_continuity_diagnostic_form);
     if (vms_pspg_continuity_integrand.isValid()) {
-        install_row("equations_diagnostic_ns_vms_pspg", vms_pspg_continuity_integrand.dx(liquid));
+        install_row(Rows::vms_pspg, vms_pspg_continuity_integrand.dx(liquid));
     }
     if (vms_pspg_pressure_gradient_integrand.isValid()) {
-        install_row("equations_diagnostic_ns_vms_pspg_pressure_gradient",
-                    vms_pspg_pressure_gradient_integrand.dx(liquid));
+        install_row(Rows::vms_pspg_pressure_gradient, vms_pspg_pressure_gradient_integrand.dx(liquid));
     }
     if (vms_pspg_nonpressure_integrand.isValid()) {
-        install_row("equations_diagnostic_ns_vms_pspg_nonpressure", vms_pspg_nonpressure_integrand.dx(liquid));
+        install_row(Rows::vms_pspg_nonpressure, vms_pspg_nonpressure_integrand.dx(liquid));
     }
     if (pressure_ghost_penalty_form.isValid()) {
-        install_row("equations_diagnostic_ns_pressure_ghost_penalty", pressure_ghost_penalty_form);
+        install_row(Rows::pressure_ghost_penalty, pressure_ghost_penalty_form);
     }
 }
 

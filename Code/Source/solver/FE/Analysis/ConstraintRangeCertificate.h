@@ -29,10 +29,16 @@
  *
  * The environment gates of the static free-surface certificates (decision
  * D61 item 7) are read here until the diagnostics registry replaces them.
+ *
+ * A formulation states the fields and the diagnostic operators of the
+ * certificate as a ConstraintRangeDeclaration in the system's diagnostic
+ * registry (DiagnosticRegistry::declare); the certificate finds them there.
  */
 
 #include "Core/Types.h"
+#include "Systems/DiagnosticRegistry.h"
 
+#include <array>
 #include <cstdint>
 #include <functional>
 #include <limits>
@@ -61,6 +67,35 @@ struct OperatorDefinition;
 } // namespace systems
 
 namespace analysis {
+
+/**
+ * What a formulation declares for the constraint-range certificate of its
+ * saddle-point pair: the primary field (the test field of every sampled
+ * load), the scalar constraint field, and the diagnostic operators, which it
+ * may install only on request.  The six sampled operators are the constraint
+ * work, the two parts of the potential work, their sum, the load that is
+ * certified to lie in the range of G, and the balance (constraint work plus
+ * potential work); `pair` is the symmetric mixed operator [0, G; G^T, 0].
+ */
+struct ConstraintRangeDeclaration {
+    FieldId primary_field{INVALID_FIELD_ID};
+    FieldId constraint_field{INVALID_FIELD_ID};
+    systems::DiagnosticOperatorHandle constraint_work{};
+    std::array<systems::DiagnosticOperatorHandle, 2> potential_work_parts{};
+    systems::DiagnosticOperatorHandle potential_work{};
+    systems::DiagnosticOperatorHandle load{};
+    systems::DiagnosticOperatorHandle balance{};
+    systems::DiagnosticOperatorHandle pair{};
+
+    /// The six sampled operators, in the order of the certificate record.
+    [[nodiscard]] std::array<const systems::DiagnosticOperatorHandle*, 6> sampledOperators() const noexcept
+    {
+        return {&constraint_work, &potential_work_parts[0], &potential_work_parts[1],
+                &potential_work, &load, &balance};
+    }
+
+    friend bool operator==(const ConstraintRangeDeclaration&, const ConstraintRangeDeclaration&) = default;
+};
 
 /// Reductions over the communicator of the system, called on every rank.
 struct CertificateCollectives {

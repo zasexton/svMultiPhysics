@@ -1005,6 +1005,17 @@ Status: `implemented/public`.
 | `FormulationBuilder::tag(label, term)`, `tagged(label, test_field)` | `Systems/FormulationBuilder.h` | A term recorded under a work-channel label and returned unchanged, so a residual summed through `tag()` is the residual without it; `tagged` is the `sumOf` left fold of a label's terms in one test field's row, in tag order. A tagged term holds the test function of one field |
 | `systems::deriveBlockLayout(system, BlockLayoutRequest{split_by_role, name_saddle_pair})` | `Systems/SystemSetup.h` | The solver block layout of a set-up system: one block per unknown field of `fieldMap()`, or, with `split_by_role`, the primary run merged into a `PrimaryField` block and the constraint run into a `ConstraintField` block (momentum 0, constraint 1) when the constraint fields follow all primary fields and one run has several fields; a merged block takes the first `solver_block` its fields state, else their names joined by `+`. `name_saddle_pair` names the first primary and the first constraint field of an unmerged layout. The Application asks for the split under FSILS BlockSchur |
 
+### Solver Extensions (D64 item 12)
+
+Status: `implemented/public`.
+
+| Vocabulary | Header | Notes |
+|------------|--------|-------|
+| `systems::DiagnosticOperatorHandle{set, tag}`, `DiagnosticRegistry::handle(set, tag)`, `installedOn(system)` | `Systems/DiagnosticRegistry.h` | A diagnostic operator held by a consumer instead of its name; a formulation may declare a handle whose operator it installs only on request |
+| `DiagnosticRegistry::declare(set, declaration)`, `findDeclaration<D>()`, `systems::findDiagnosticDeclaration<D>(system)` | `Systems/DiagnosticRegistry.h` | A typed view of the operators of a set, recorded by the formulation and found by its type; an equal declaration recorded again (by another formulation of the system) is kept once |
+| `analysis::ConstraintRangeDeclaration` | `Analysis/ConstraintRangeCertificate.h` | The fields (primary, scalar constraint) and diagnostic operators of the constraint-range certificate of a saddle-point pair: constraint work, two potential-work parts and their sum, the certified load, the balance, and the pair `[0, G; G^T, 0]` |
+| `analysis::RowContributionDeclaration` | `Analysis/RowContributionObserver.h` | The diagnostic operators whose contributions to the rows of one field are sampled, with the names of that field and of the field it couples to |
+
 ### Manual Block and Complex Workflows
 
 Status: `implemented/expert`.

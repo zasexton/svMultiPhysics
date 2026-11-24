@@ -428,7 +428,7 @@ void IncompressibleNavierStokesVMSModule::registerOn(fs::FESystem& system) const
     auto work = post::bulkResidualWork(r, M, C, pspg_grad_p, -rho * inner(g, v), nonconservative_force,
                                  preflight.enable_vms, Omega);
     auto& diagnostics = fs::diagnosticRegistry(system);   // shared with the other formulations of the system
-    post::declareDiagnosticSets(diagnostics);
+    post::declareDiagnosticSets(diagnostics, u_id, p_id);
     std::optional<post::ConservativeBalanceForms> balance;
     if (post::conservativeBalanceDiagnosticSupported(diagnostics, free_surfaces, preflight.has_exterior_free_surface,
                                                o.conservative_balance_diagnostics)) {

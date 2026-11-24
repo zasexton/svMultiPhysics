@@ -631,6 +631,15 @@ TEST(IncompressibleTwoFluidModule,
   for (const auto& tag : operators) {
     EXPECT_EQ(std::count(operators.begin(), operators.end(), tag), 1) << tag;
   }
+  // Both phases declare the same pressure-row operators once.
+  const auto* rows =
+      registry->findDeclaration<FE::analysis::RowContributionDeclaration>();
+  ASSERT_NE(rows, nullptr);
+  ASSERT_EQ(rows->operators.size(), 6u);
+  EXPECT_EQ(rows->operators.front().tag, operators.front());
+  EXPECT_TRUE(rows->operators.front().installedOn(fixture.system));
+  EXPECT_EQ(rows->row_field_name, "Pressure");
+  EXPECT_EQ(rows->coupling_field_name, "Velocity");
   bool negative_rows = false;
   bool positive_rows = false;
   for (const auto& line : FE::systems::kernelManifestLines(fixture.system)) {

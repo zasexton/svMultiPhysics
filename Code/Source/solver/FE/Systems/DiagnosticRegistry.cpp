@@ -20,6 +20,11 @@ namespace svmp {
 namespace FE {
 namespace systems {
 
+bool DiagnosticOperatorHandle::installedOn(const FESystem& system) const
+{
+    return !tag.empty() && system.hasOperator(tag);
+}
+
 void DiagnosticRegistry::declareSet(std::string set, std::vector<std::string> environment_switches)
 {
     for (const auto& existing : sets_) {
@@ -94,6 +99,11 @@ CoupledResidualKernels DiagnosticRegistry::install(FESystem& system,
 std::vector<OperatorTag> DiagnosticRegistry::operators(std::string_view set) const
 {
     return find(set).operators;
+}
+
+DiagnosticOperatorHandle DiagnosticRegistry::handle(std::string_view set, OperatorTag operator_tag) const
+{
+    return DiagnosticOperatorHandle{.set = find(set).name, .tag = std::move(operator_tag)};
 }
 
 const DiagnosticRegistry::Set& DiagnosticRegistry::find(std::string_view set) const

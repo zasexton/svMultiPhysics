@@ -18,10 +18,12 @@
 #include "Dofs/DofIndexSet.h"
 #include "Dofs/EntityDofMap.h"
 #include "Analysis/ConstraintRangeCertificate.h"
+#include "Analysis/RowContributionObserver.h"
 #include "Auxiliary/AuxiliaryOperatorRegistry.h"
 #include "Auxiliary/AuxiliaryStateManager.h"
 #include "Basis/BasisCache.h"
 #include "Spaces/FunctionSpace.h"
+#include "Systems/DiagnosticRegistry.h"
 #include "Systems/SystemsExceptions.h"
 
 #if defined(FE_HAS_FSILS)
@@ -161,10 +163,6 @@ constexpr NewtonCommunicator kSerialNewtonCommunicator = 0;
            options.accepted_static_constant_pressure_kkt_max_relative_distance
                .has_value();
 }
-
-inline constexpr std::string_view
-    kFreeSurfacePressureRepresentabilityPairOperator{
-        "equations_diagnostic_ns_free_surface_pressure_representability_pair"};
 
 [[nodiscard]] bool newtonMatrixSupportDiagnosticRequested() noexcept
 {
@@ -6040,10 +6038,12 @@ void NewtonSolver::allocateWorkspace(const systems::FESystem& system,
     workspace.certificate_vectors.residual.reset();
     workspace.certificate_vectors.normal_residual.reset();
 
+    const auto* constraint_range_declaration =
+        systems::findDiagnosticDeclaration<analysis::ConstraintRangeDeclaration>(system);
     bool allocate_pressure_representability =
         freeSurfaceConservativeBalanceDiagnosticRequested(options_) &&
-        system.hasOperator(std::string(
-            kFreeSurfacePressureRepresentabilityPairOperator));
+        constraint_range_declaration != nullptr &&
+        constraint_range_declaration->pair.installedOn(system);
 #if FE_HAS_MPI
     {
         int initialized = 0;
@@ -6064,8 +6064,7 @@ void NewtonSolver::allocateWorkspace(const systems::FESystem& system,
     }
 #endif
     if (allocate_pressure_representability) {
-        const std::string pair_op(
-            kFreeSurfacePressureRepresentabilityPairOperator);
+        const std::string& pair_op = constraint_range_declaration->pair.tag;
         const auto* pair_dist =
             system.distributedSparsityIfAvailable(pair_op);
         if (pair_dist != nullptr &&
@@ -6247,12 +6246,14 @@ void NewtonSolver::maybeReallocateJacobianForSparsity(const systems::FESystem& s
     // the pair matrix remains compatible with its already allocated LSQR
     // vectors.
     if (workspace.pressure_representability_pair_matrix) {
-        const std::string pair_op(
-            kFreeSurfacePressureRepresentabilityPairOperator);
+        const auto* constraint_range_declaration =
+            systems::findDiagnosticDeclaration<analysis::ConstraintRangeDeclaration>(system);
         FE_THROW_IF(
-            !system.hasOperator(pair_op),
+            constraint_range_declaration == nullptr ||
+                !constraint_range_declaration->pair.installedOn(system),
             systems::InvalidStateException,
             "NewtonSolver: pressure-representability pair operator disappeared during a sparsity refresh");
+        const std::string& pair_op = constraint_range_declaration->pair.tag;
         const auto* pair_dist =
             system.distributedSparsityIfAvailable(pair_op);
         const bool use_pair_distributed =
@@ -8682,15 +8683,13 @@ NewtonReport NewtonSolver::solveStepFrozenExternalState(
             if (!pressureRowContributionDiagnosticEnabled()) {
                 return;
             }
-            const char* ops[] = {
-                "equations_diagnostic_ns_galerkin_continuity",
-                "equations_diagnostic_ns_active_continuity",
-                "equations_diagnostic_ns_vms_pspg",
-                "equations_diagnostic_ns_vms_pspg_pressure_gradient",
-                "equations_diagnostic_ns_vms_pspg_nonpressure",
-                "equations_diagnostic_ns_pressure_ghost_penalty",
-            };
-            for (const char* op : ops) {
+            const auto* rows = systems::findDiagnosticDeclaration<
+                analysis::RowContributionDeclaration>(transient.system());
+            if (rows == nullptr) {
+                return;
+            }
+            for (const auto& handle : rows->operators) {
+                const std::string& op = handle.tag;
                 if (!transient.system().hasOperator(op)) {
                     if (mpiRank() == 0) {
                         std::ostringstream skipped;
@@ -8948,20 +8947,47 @@ NewtonReport NewtonSolver::solveStepFrozenExternalState(
             const auto geometry_key =
                 freeSurfaceDiagnosticGeometryKey();
 
-            // These tags are installed by the Navier--Stokes formulation only
-            // when every effective free surface uses the variational
-            // SurfaceStress form.  Keeping the strings here avoids an FE ->
-            // Physics dependency while preserving a strict six-vector plus
-            // one symmetric-matrix contract for qualification tooling.
-            constexpr std::array<const char*, 6> ops{
-                "equations_diagnostic_ns_free_surface_pressure_virtual_work",
-                "equations_diagnostic_ns_free_surface_surface_energy_virtual_work",
-                "equations_diagnostic_ns_free_surface_gravitational_potential_virtual_work",
-                "equations_diagnostic_ns_free_surface_physical_potential_virtual_work",
-                "equations_diagnostic_ns_free_surface_pressure_representability_load_virtual_work",
-                "equations_diagnostic_ns_free_surface_conservative_balance",
-            };
-            for (const char* op : ops) {
+            // The formulation declares the fields and the six sampled
+            // operators plus the symmetric pair of the certificate in the
+            // system's diagnostic registry; it installs them only on request.
+            const auto* declaration = systems::findDiagnosticDeclaration<
+                analysis::ConstraintRangeDeclaration>(transient.system());
+            if (!allRanks(declaration != nullptr)) {
+                report.pressure_representability_reason =
+                    "conservative_balance_operator_unavailable";
+                report.constant_pressure_kkt_reason =
+                    "conservative_balance_operator_unavailable";
+                if (!free_surface_conservative_balance_unavailable_logged &&
+                    communicatorRank(system_communicator) == 0) {
+                    std::ostringstream skipped;
+                    skipped
+                        << "NewtonSolver: free-surface conservative balance"
+                        << " diagnostic=free_surface_conservative_balance"
+                        << " available=0"
+                        << " reason=certificate_not_declared"
+                        << " pressure_representability_available=0"
+                        << " pressure_representability_method=lsqr"
+                        << " pressure_representability_convergence=normal_equation_stationarity"
+                        << " pressure_representability_distance_gate_applied=0"
+                        << " pressure_representability_claimed=0"
+                        << " pressure_representability_reason=conservative_balance_operator_unavailable"
+                        << " constant_pressure_kkt_available=0"
+                        << " constant_pressure_kkt_reason=conservative_balance_operator_unavailable"
+                        << " iteration=" << current_newton_iteration
+                        << " phase='"
+                        << (phase != nullptr ? phase : "unknown") << "'"
+                        << " sync_point=" << stateSyncPointName(sync_point);
+                    FE_LOG_INFO(skipped.str());
+                }
+                free_surface_conservative_balance_unavailable_logged = true;
+                return;
+            }
+            std::array<std::string, 6> ops;
+            const auto sampled_operators = declaration->sampledOperators();
+            for (std::size_t i = 0; i < ops.size(); ++i) {
+                ops[i] = sampled_operators[i]->tag;
+            }
+            for (const auto& op : ops) {
                 const bool local_operator_installed =
                     transient.system().hasOperator(op);
                 if (!allRanks(local_operator_installed)) {
@@ -9001,8 +9027,7 @@ NewtonReport NewtonSolver::solveStepFrozenExternalState(
                 }
             }
 
-            const std::string pair_op(
-                kFreeSurfacePressureRepresentabilityPairOperator);
+            const std::string& pair_op = declaration->pair.tag;
             const bool pair_operator_available = allRanks(
                 transient.system().hasOperator(pair_op));
             const bool local_representability_workspace_available =
@@ -9261,6 +9286,15 @@ NewtonReport NewtonSolver::solveStepFrozenExternalState(
                 }
                 if (pair_fields.size() == 1u) {
                     pressure_field = *pair_fields.begin();
+                }
+                // The operator terms must confirm the declared fields.
+                if (velocity_field.has_value() &&
+                    *velocity_field != declaration->primary_field) {
+                    velocity_field.reset();
+                }
+                if (pressure_field.has_value() &&
+                    *pressure_field != declaration->constraint_field) {
+                    pressure_field.reset();
                 }
 
                 const bool fields_identified_on_all_ranks = allRanks(
