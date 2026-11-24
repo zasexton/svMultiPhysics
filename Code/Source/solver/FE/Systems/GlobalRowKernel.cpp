@@ -407,8 +407,9 @@ bool GlobalRowKernel::anchorsConstantModeOf(FieldId field) const
     if (!measured_value_form_.isValid() || !occursUndifferentiated(*measured_value_form_.node(), field)) {
         return false;
     }
-    const auto derivative = forms::simplify(
-        forms::directionalDerivativeWrtField(measured_value_form_, field, FormExpr::constant(Real(1.0))));
+    // The column of the row's Jacobian: a frozen copy is data there.
+    const auto derivative = forms::simplify(forms::directionalDerivativeWrtField(
+        measured_value_form_, field, FormExpr::constant(Real(1.0)), /*discrete_fields_vary=*/false));
     return !isZeroConstant(derivative);
 }
 

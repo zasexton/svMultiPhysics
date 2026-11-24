@@ -91,8 +91,9 @@ public:
      *
      * True when the field enters the row's measured terms without a
      * derivative and a constant shift of it changes the row (the derivative
-     * of the measured 0-form in the direction 1 is not identically zero), as
-     * for the mean-value constraint (mu * p).dx().  The gauge registry takes
+     * of the measured 0-form in the direction 1, with frozen copies held
+     * fixed as in the tangent, is not identically zero), as for the
+     * mean-value constraint (mu * p).dx().  The gauge registry takes
      * this as the field's anchoring evidence.
      */
     [[nodiscard]] bool anchorsConstantModeOf(FieldId field) const;

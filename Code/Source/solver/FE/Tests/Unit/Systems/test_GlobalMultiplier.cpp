@@ -972,6 +972,41 @@ TEST(GlobalMultiplierG1, TheRateOfAQuadraticPotentialIsTwiceItsValue)
     EXPECT_NEAR(values[1].value, 2.0 * values[0].value, 1e-13 * std::abs(values[0].value));
 }
 
+TEST(GlobalMultiplierG2, TheRowOfUMinusItsFrozenCopyFixesTheConstantOfU)
+{
+    // The row (mu (u - frozen(u))).dx() is zero, and its Jacobian is that of
+    // (mu u).dx(): the frozen copy is data.  It fixes the constant of u as
+    // (mu u).dx() does, and no gauge is added for u.
+    const auto f = FormExpr::constant(1.0);
+    for (const bool frozen_copy : {false, true}) {
+        SCOPED_TRACE(frozen_copy ? "(mu (u - frozen(u))).dx()" : "(mu u).dx()");
+        auto h1 = std::make_shared<spaces::H1Space>(ElementType::Triangle3, 1);
+        auto r1 = std::make_shared<spaces::GlobalSpace>(1);
+        FESystem sys(buildTriangleGrid(4));
+        const auto u_id = sys.addField(FieldSpec{.name = "u", .space = h1});
+        const auto lam_id = sys.addField(FieldSpec{.name = "lambda", .space = r1});
+        sys.addOperator("poisson");
+        const auto u = forms::StateField(u_id, *h1, "u");
+        const auto v = forms::TestField(u_id, *h1, "v");
+        const auto lam = forms::StateField(lam_id, *r1, "lambda");
+        const auto mu = forms::TestField(lam_id, *r1, "mu");
+        const auto mean = frozen_copy ? u - forms::frozen(u) : u;
+        (void)installFormulation(sys, "poisson", {u_id, lam_id},
+                                 (forms::inner(forms::grad(u), forms::grad(v)) - f * v - lam * v).dx() -
+                                     (mu * mean).dx());
+        sys.setup();
+        bool anchored_by_row = false;
+        for (const auto& evidence : sys.gaugeRegistry().anchoring()) {
+            anchored_by_row = anchored_by_row ||
+                              (evidence.field == u_id &&
+                               evidence.source.find("multiplier 'lambda': its row fixes the constant") !=
+                                   std::string::npos);
+        }
+        EXPECT_TRUE(anchored_by_row);
+        EXPECT_EQ(sys.constraints().numConstraints(), 0) << "no gauge for u";
+    }
+}
+
 TEST(GlobalMultiplierG2, MeanZeroMultiplierMatchesTheAutomaticGauge)
 {
     // u = cos(pi x) cos(pi y) on the unit square: -Delta u = 2 pi^2 u with

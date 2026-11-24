@@ -157,6 +157,43 @@ TEST(TraceMultiplierSetup, TheMultiplierAnchorsTheConstantOfU)
     }
 }
 
+TEST(TraceMultiplierSetup, RowsOfUMinusItsFrozenCopyAnchorTheConstantOfU)
+{
+    // As TheMultiplierAnchorsTheConstantOfU with the multiplier's rows
+    // (mu (u - frozen(u))).ds: zero, with the Jacobian of (mu u).ds, since
+    // the frozen copy is data.  They fix the constant of u as those rows do.
+    auto mesh = buildQuadGrid(3, 3, 1.0, 1.0, 1, kWholeBoundary);
+    auto h1 = std::make_shared<spaces::H1Space>(ElementType::Quad4, 1);
+    FESystem sys(mesh);
+    const auto u_id = sys.addField(FieldSpec{.name = "u", .space = h1});
+    const auto lam_id = sys.addField(FieldSpec{.name = "lambda", .space = h1});
+    sys.addOperator("op");
+    const auto u = forms::StateField(u_id, *h1, "u");
+    const auto v = forms::TestField(u_id, *h1, "v");
+    const auto lam = forms::StateField(lam_id, *h1, "lambda");
+    const auto mu = forms::TestField(lam_id, *h1, "mu");
+    (void)systems::installFormulation(
+        sys, "op", {u_id, lam_id},
+        (forms::inner(forms::grad(u), forms::grad(v)) - FormExpr::constant(1.0) * v).dx() +
+            (lam * v).ds(kWholeBoundary) + (mu * (u - forms::frozen(u))).ds(kWholeBoundary));
+    constraints::ConstraintPlan plan(sys);
+    plan.restrictSupport({lam_id}, forms::BoundaryDomain::fullPhysical(kWholeBoundary));
+    plan.commit();
+    sys.setup();
+    bool anchored_by_rows = false;
+    for (const auto& evidence : sys.gaugeRegistry().anchoring()) {
+        anchored_by_rows = anchored_by_rows ||
+                           (evidence.field == u_id &&
+                            evidence.source.find("trace multiplier 'lambda': its rows fix the constant") !=
+                                std::string::npos);
+    }
+    EXPECT_TRUE(anchored_by_rows);
+    const auto offset_u = sys.fieldDofOffset(u_id);
+    for (GlobalIndex d = 0; d < sys.fieldDofHandler(u_id).getNumDofs(); ++d) {
+        EXPECT_FALSE(sys.constraints().isConstrained(offset_u + d)) << "u dof " << d;
+    }
+}
+
 TEST(TraceMultiplierSetup, AnInterfaceFieldMultiplierAnchorsTheConstantOfU)
 {
     // The same problem with the multiplier an interface field on the boundary

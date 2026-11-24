@@ -2618,7 +2618,8 @@ LocalIndex maxInteriorFaceQuadraturePoints(const assembly::IMeshAccess& mesh,
 /**
  * Whether the rows of a test field fix the constant of @p field: @p row is the
  * residual of one test field (its rows); with the test function set to 1 it
- * is the sum of those rows, and a constant shift of @p field changes it.
+ * is the sum of those rows, and a constant shift of @p field changes it
+ * through the Jacobian (a frozen copy of @p field is data, as in the tangent).
  * (GlobalRowKernel::anchorsConstantModeOf asks the same of a global row.)
  */
 [[nodiscard]] bool rowsFixTheConstantOf(const forms::FormExpr& row, FieldId field)
@@ -2635,8 +2636,9 @@ LocalIndex maxInteriorFaceQuadraturePoints(const assembly::IMeshAccess& mesh,
     if (!unit_row.isValid() || !occursUndifferentiatedIn(*unit_row.node(), field)) {
         return false;
     }
-    const auto derivative = forms::simplify(
-        forms::directionalDerivativeWrtField(unit_row, field, forms::FormExpr::constant(Real(1.0))));
+    // The columns of the rows' Jacobian: a frozen copy is data there.
+    const auto derivative = forms::simplify(forms::directionalDerivativeWrtField(
+        unit_row, field, forms::FormExpr::constant(Real(1.0)), /*discrete_fields_vary=*/false));
     if (!derivative.isValid()) {
         return false;
     }
