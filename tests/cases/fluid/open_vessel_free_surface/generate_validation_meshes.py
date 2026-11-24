@@ -1147,7 +1147,6 @@ def write_solver_xml(
   <Backflow_stabilization_coefficient>0.0</Backflow_stabilization_coefficient>
 
   <Enable_ALE>true</Enable_ALE>
-  <Mesh_velocity_source>coupled_displacement</Mesh_velocity_source>
   <Mesh_velocity_field>mesh_velocity</Mesh_velocity_field>
   <Mesh_displacement_field>mesh_displacement</Mesh_displacement_field>
   <Auto_register_mesh_displacement_field>true</Auto_register_mesh_displacement_field>

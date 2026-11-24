@@ -733,7 +733,7 @@ namespace opt = svmp::FE::options;
 const std::vector<std::string>& moving_domain_and_momentum_source_spellings()
 {
   static const auto spellings = ns::navierStokesDomainSchema().spellings(
-      {"Enable_ALE", "Mesh_velocity_field", "Mesh_velocity_source",
+      {"Enable_ALE", "Mesh_velocity_field",
        "Mesh_displacement_field", "Auto_register_mesh_displacement_field",
        "Momentum_source_field_name", "Auto_register_momentum_source_field"});
   return spellings;
@@ -862,9 +862,6 @@ void apply_fluid_moving_domain_options(
   if (const auto* view = keys.domainFirst("Mesh_velocity_field")) {
     options.mesh_velocity_field_name = view->mesh_velocity_field;
   }
-  if (const auto* view = keys.domainFirst("Mesh_velocity_source")) {
-    options.mesh_velocity_source = view->mesh_velocity_source;
-  }
   if (const auto* view = keys.domainFirst("Mesh_displacement_field")) {
     options.mesh_displacement_field_name = view->mesh_displacement_field;
   }
@@ -876,9 +873,7 @@ void apply_fluid_moving_domain_options(
     throw std::runtime_error(
         "[svMultiPhysics::Physics] Mesh_velocity_field must be non-empty when configuring Navier-Stokes ALE.");
   }
-  if (options.mesh_velocity_source ==
-          svmp::Physics::formulations::navier_stokes::ALEMeshVelocitySource::CoupledDisplacement &&
-      trim_copy(options.mesh_displacement_field_name).empty()) {
+  if (options.enable_ale && trim_copy(options.mesh_displacement_field_name).empty()) {
     throw std::runtime_error(
         "[svMultiPhysics::Physics] Mesh_displacement_field must be non-empty when configuring coupled ALE.");
   }
@@ -1122,7 +1117,6 @@ std::string resolved_navier_stokes_input_json(
   used.use_taylor_hood_type_basis = equation.use_taylor_hood_type_basis;
   used.enable_ale = options.enable_ale;
   used.mesh_velocity_field = options.mesh_velocity_field_name;
-  used.mesh_velocity_source = options.mesh_velocity_source;
   used.mesh_displacement_field = options.mesh_displacement_field_name;
   used.auto_register_mesh_displacement_field = options.auto_register_mesh_displacement_field;
   used.momentum_source_field_name = options.body_force_field_name;

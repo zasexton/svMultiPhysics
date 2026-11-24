@@ -139,7 +139,6 @@ struct NavierStokesInputView {
     // Equation and domain elements.
     bool enable_ale{false};
     std::string mesh_velocity_field{"mesh_velocity"};
-    ALEMeshVelocitySource mesh_velocity_source{ALEMeshVelocitySource::PrescribedData};
     std::string mesh_displacement_field{"mesh_displacement"};
     bool auto_register_mesh_displacement_field{false};
     std::string momentum_source_field_name{};

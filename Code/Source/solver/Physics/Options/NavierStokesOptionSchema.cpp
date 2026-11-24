@@ -288,13 +288,6 @@ void addSharedNavierStokesKeys(opt::OptionSchema<NavierStokesInputView>& schema)
     schema
         .key("Enable_ALE", &V::enable_ale, relaxedBool())
         .key("Mesh_velocity_field", &V::mesh_velocity_field, opt::StringCodec{})
-        .key("Mesh_velocity_source", &V::mesh_velocity_source,
-             opt::EnumCodec<ALEMeshVelocitySource>{{
-                 token(ALEMeshVelocitySource::PrescribedData, "prescribed_data",
-                       {"prescribed", "data", "mesh_motion_data"}),
-                 token(ALEMeshVelocitySource::CoupledDisplacement, "coupled_displacement",
-                       {"coupled", "derived", "derived_from_displacement", "monolithic"}),
-             }})
         .key("Mesh_displacement_field", &V::mesh_displacement_field, opt::StringCodec{})
         .key("Auto_register_mesh_displacement_field", &V::auto_register_mesh_displacement_field,
              relaxedBool())
@@ -1087,11 +1080,6 @@ tangentialPolicyProvenance(
         << ",\"operator\":" << json::quote(options.operator_tag)
         << ",\"dimension\":" << dimension << '}'
         << ",\"ale\":{\"enabled\":" << json::boolean(options.enable_ale)
-        << ",\"mesh_velocity_source\":"
-        << json::quote(options.mesh_velocity_source ==
-                              ALEMeshVelocitySource::CoupledDisplacement
-                          ? "CoupledDisplacement"
-                          : "PrescribedData")
         << ",\"mesh_velocity_field\":"
         << json::quote(options.mesh_velocity_field_name)
         << ",\"mesh_displacement_field\":"

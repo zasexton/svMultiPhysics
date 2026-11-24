@@ -1508,16 +1508,6 @@ NavierStokesPreflight preflightNavierStokes(
     const std::shared_ptr<const FE::spaces::FunctionSpace>& velocity_space,
     const std::shared_ptr<const FE::spaces::FunctionSpace>& pressure_space)
 {
-    // The mesh velocity of a moving domain is the time derivative of the
-    // coupled mesh displacement unknown, the only mesh motion.
-    if (options.enable_ale &&
-        options.mesh_velocity_source !=
-            ALEMeshVelocitySource::CoupledDisplacement) {
-        throw std::invalid_argument(
-            "IncompressibleNavierStokesVMSModule::registerOn: ALE requires "
-            "the mesh velocity derived from a coupled mesh-displacement "
-            "unknown (Mesh_velocity_source = coupled_displacement)");
-    }
     if (freeSurfacePhysicalModelName(options.free_surface_physical_model) ==
         nullptr) {
         throw std::invalid_argument(

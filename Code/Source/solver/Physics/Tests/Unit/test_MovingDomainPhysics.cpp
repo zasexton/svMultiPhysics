@@ -3266,7 +3266,6 @@ TEST(MovingDomainPhysics, NavierStokesFittedFreeSurfaceALEUsesCurrentBoundaryGeo
     auto opts = baseNavierStokesOptions();
     opts.enable_ale = true;
     opts.enable_convection = false;
-    opts.mesh_velocity_source = ns::ALEMeshVelocitySource::CoupledDisplacement;
     opts.auto_register_mesh_displacement_field = true;
 
     // The qualified fitted-ALE contract (coupled mesh displacement,
@@ -3389,8 +3388,6 @@ TEST(MovingDomainPhysics,
     const auto valid_options = [&]() {
         auto opts = baseNavierStokesOptions();
         opts.enable_ale = true;
-        opts.mesh_velocity_source =
-            ns::ALEMeshVelocitySource::CoupledDisplacement;
         opts.auto_register_mesh_displacement_field = true;
         opts.free_surface.push_back(
             ns::IncompressibleNavierStokesVMSOptions::FreeSurfaceBoundary{
@@ -3437,10 +3434,6 @@ TEST(MovingDomainPhysics,
 
     expect_rejected_before_mutation(
         [](auto& opts) { opts.enable_ale = false; });
-    expect_rejected_before_mutation([](auto& opts) {
-        opts.mesh_velocity_source =
-            ns::ALEMeshVelocitySource::PrescribedData;
-    });
     expect_rejected_before_mutation([](auto& opts) {
         opts.free_surface.front().normal_kinematic_policy =
             ns::FreeSurfaceNormalKinematicPolicy::None;
@@ -3531,8 +3524,6 @@ TEST(MovingDomainPhysics,
         auto opts = baseNavierStokesOptions();
         opts.enable_ale = true;
         opts.enable_convection = false;
-        opts.mesh_velocity_source =
-            ns::ALEMeshVelocitySource::CoupledDisplacement;
         opts.auto_register_mesh_displacement_field = true;
         auto boundary =
             ns::IncompressibleNavierStokesVMSOptions::FreeSurfaceBoundary{
@@ -3762,34 +3753,6 @@ TEST(MovingDomainPhysics,
 }
 
 TEST(MovingDomainPhysics,
-     FittedFreeSurfacePrescribedTangentialVelocityRequiresCoupledDisplacement)
-{
-    constexpr int marker = 40;
-    auto mesh = std::make_shared<SingleTetraBoundaryMeshAccess>(marker);
-    auto u_space = makeVelocitySpace(mesh);
-    auto p_space = makePressureSpace(mesh);
-    auto opts = baseNavierStokesOptions();
-    opts.enable_ale = true;
-    opts.mesh_velocity_source = ns::ALEMeshVelocitySource::PrescribedData;
-    opts.free_surface.push_back(
-        ns::IncompressibleNavierStokesVMSOptions::FreeSurfaceBoundary{
-            .implementation = ns::FreeSurfaceImplementation::FittedALE,
-            .boundary_marker = marker,
-            .tangential_mesh_policy =
-                ns::FreeSurfaceTangentialMeshPolicy::Prescribed,
-            .prescribed_tangential_mesh_velocity = {
-                FE::Real{0.2}, FE::Real{0.0}, FE::Real{0.0}},
-        });
-
-    FE::systems::FESystem system(mesh);
-    ns::IncompressibleNavierStokesVMSModule module(
-        u_space, p_space, std::move(opts));
-    EXPECT_THROW(module.registerOn(system), std::invalid_argument);
-    EXPECT_TRUE(system.formulationRecords().empty());
-    EXPECT_TRUE(system.meshTangentialBoundaryPolicies().empty());
-}
-
-TEST(MovingDomainPhysics,
      FittedFreeSurfaceRejectsMeshMotionTangentialOwnerInEitherOrder)
 {
     constexpr int marker = 41;
@@ -3800,8 +3763,6 @@ TEST(MovingDomainPhysics,
     const auto make_fluid_options = [&]() {
         auto opts = baseNavierStokesOptions();
         opts.enable_ale = true;
-        opts.mesh_velocity_source =
-            ns::ALEMeshVelocitySource::CoupledDisplacement;
         opts.auto_register_mesh_displacement_field = true;
         opts.free_surface.push_back(
             ns::IncompressibleNavierStokesVMSOptions::FreeSurfaceBoundary{
@@ -3926,8 +3887,6 @@ TEST(MovingDomainPhysics,
     const auto make_fluid_options = [&]() {
         auto opts = baseNavierStokesOptions();
         opts.enable_ale = true;
-        opts.mesh_velocity_source =
-            ns::ALEMeshVelocitySource::CoupledDisplacement;
         opts.auto_register_mesh_displacement_field = true;
         opts.free_surface.push_back(
             ns::IncompressibleNavierStokesVMSOptions::FreeSurfaceBoundary{
@@ -4909,8 +4868,6 @@ TEST(MovingDomainPhysics,
         auto opts = baseNavierStokesOptions();
         opts.enable_ale = true;
         opts.enable_convection = false;
-        opts.mesh_velocity_source =
-            ns::ALEMeshVelocitySource::CoupledDisplacement;
         opts.auto_register_mesh_displacement_field = true;
         opts.free_surface.push_back(
             ns::IncompressibleNavierStokesVMSOptions::FreeSurfaceBoundary{
@@ -4985,8 +4942,6 @@ TEST(MovingDomainPhysics,
             auto opts = baseNavierStokesOptions();
             opts.enable_ale = true;
             opts.enable_convection = false;
-            opts.mesh_velocity_source =
-                ns::ALEMeshVelocitySource::CoupledDisplacement;
             opts.auto_register_mesh_displacement_field = true;
             opts.free_surface.push_back(
                 ns::IncompressibleNavierStokesVMSOptions::
@@ -5069,8 +5024,6 @@ TEST(MovingDomainPhysics,
     auto opts = baseNavierStokesOptions();
     opts.enable_ale = true;
     opts.enable_convection = false;
-    opts.mesh_velocity_source =
-        ns::ALEMeshVelocitySource::CoupledDisplacement;
     opts.auto_register_mesh_displacement_field = true;
     opts.free_surface.push_back(
         ns::IncompressibleNavierStokesVMSOptions::FreeSurfaceBoundary{
@@ -6015,7 +5968,6 @@ TEST(MovingDomainPhysics, FittedPinnedContactLineConstrainsMeshDisplacement)
     auto opts = baseNavierStokesOptions();
     opts.enable_ale = true;
     opts.enable_convection = false;
-    opts.mesh_velocity_source = ns::ALEMeshVelocitySource::CoupledDisplacement;
     opts.mesh_displacement_field_name = "mesh_displacement";
     opts.mesh_velocity_field_name = "mesh_velocity";
 
@@ -6076,41 +6028,6 @@ TEST(MovingDomainPhysics, FittedPinnedContactLineRequiresALE)
     EXPECT_THROW(module.registerOn(system), std::invalid_argument);
 }
 
-TEST(MovingDomainPhysics,
-     FittedPinnedContactLineRejectsPrescribedALEBeforeSystemMutation)
-{
-    constexpr int marker = 141;
-    auto mesh = std::make_shared<SingleTetraBoundaryMeshAccess>(marker);
-    auto u_space = makeVelocitySpace(mesh);
-    auto p_space = makePressureSpace(mesh);
-
-    auto opts = baseNavierStokesOptions();
-    opts.enable_ale = true;
-    opts.mesh_velocity_source = ns::ALEMeshVelocitySource::PrescribedData;
-    opts.free_surface.push_back(
-        ns::IncompressibleNavierStokesVMSOptions::FreeSurfaceBoundary{
-            .implementation = ns::FreeSurfaceImplementation::FittedALE,
-            .boundary_marker = marker,
-            .contact_lines = {
-                pinnedContactLine(/*wall_marker=*/-1, marker),
-            },
-        });
-
-    const auto velocity_name = opts.velocity_field_name;
-    const auto pressure_name = opts.pressure_field_name;
-    const auto mesh_velocity_name = opts.mesh_velocity_field_name;
-    FE::systems::FESystem system(mesh);
-    ns::IncompressibleNavierStokesVMSModule module(
-        u_space, p_space, std::move(opts));
-
-    EXPECT_THROW(module.registerOn(system), std::invalid_argument);
-    EXPECT_EQ(system.findFieldByName(velocity_name), FE::INVALID_FIELD_ID);
-    EXPECT_EQ(system.findFieldByName(pressure_name), FE::INVALID_FIELD_ID);
-    EXPECT_EQ(system.findFieldByName(mesh_velocity_name), FE::INVALID_FIELD_ID);
-    EXPECT_FALSE(system.hasOperator("equations"));
-    EXPECT_TRUE(system.formulationRecords().empty());
-}
-
 TEST(MovingDomainPhysics, FittedPrescribedContactAngleFailsClosedWithoutContactLineIntegration)
 {
     constexpr int marker = 42;
@@ -6128,7 +6045,6 @@ TEST(MovingDomainPhysics, FittedPrescribedContactAngleFailsClosedWithoutContactL
     auto opts = baseNavierStokesOptions();
     opts.enable_ale = true;
     opts.enable_convection = false;
-    opts.mesh_velocity_source = ns::ALEMeshVelocitySource::CoupledDisplacement;
     opts.mesh_displacement_field_name = "mesh_displacement";
     opts.mesh_velocity_field_name = "mesh_velocity";
 
@@ -6208,8 +6124,6 @@ TEST(MovingDomainPhysics, NavierStokesFittedFreeSurfaceReservesBoundaryMarker)
     auto p_space = makePressureSpace(mesh);
     auto opts = baseNavierStokesOptions();
     opts.enable_ale = true;
-    opts.mesh_velocity_source =
-        ns::ALEMeshVelocitySource::CoupledDisplacement;
     opts.auto_register_mesh_displacement_field = true;
 
     opts.velocity_dirichlet.push_back(ns::IncompressibleNavierStokesVMSOptions::VelocityDirichletBC{
@@ -6335,8 +6249,6 @@ TEST(MovingDomainPhysics, NavierStokesFittedSurfaceStressFailsClosed)
     auto p_space = makePressureSpace(mesh);
     auto opts = baseNavierStokesOptions();
     opts.enable_ale = true;
-    opts.mesh_velocity_source =
-        ns::ALEMeshVelocitySource::CoupledDisplacement;
     opts.auto_register_mesh_displacement_field = true;
     // Fitted SurfaceStress needs no opt-in (decision D47 Q2(b)), but its
     // conormal line force has no fitted contact-line entity: with a contact
@@ -8339,7 +8251,6 @@ TEST(MovingDomainPhysics, NavierStokesUnfittedFreeSurfaceRejectsALEUntilTranspor
     auto p_space = makePressureSpace(mesh);
     auto opts = baseNavierStokesOptions();
     opts.enable_ale = true;
-    opts.mesh_velocity_source = ns::ALEMeshVelocitySource::CoupledDisplacement;
     opts.auto_register_mesh_displacement_field = true;
     opts.free_surface.push_back(
         ns::IncompressibleNavierStokesVMSOptions::FreeSurfaceBoundary{
@@ -9020,8 +8931,6 @@ TEST(MovingDomainPhysics,
     auto p_space = makePressureSpace(mesh);
     auto opts = baseNavierStokesOptions();
     opts.enable_ale = true;
-    opts.mesh_velocity_source =
-        ns::ALEMeshVelocitySource::CoupledDisplacement;
     opts.auto_register_mesh_displacement_field = true;
     opts.nitsche_gamma = 23.0;
     opts.nitsche_symmetric = false;
@@ -9051,7 +8960,7 @@ TEST(MovingDomainPhysics,
     const auto artifact = module.effectiveConfigurationArtifact();
     ASSERT_TRUE(artifact.has_value());
     constexpr std::string_view expected =
-        R"json({"artifact_schema_version":1,"component":"incompressible_navier_stokes_free_surface","configuration_schema":{"input_version":2,"effective_version":2,"migration_mode":"current"},"capability_label":"one_phase_liquid_sharp_interface","units":{"system":"consistent_solver_units","angle":"radian","length":"solver_length","pressure":"solver_pressure","surface_tension":"force_per_length"},"fields":{"velocity":"u","pressure":"p","operator":"equations","dimension":3},"ale":{"enabled":true,"mesh_velocity_source":"CoupledDisplacement","mesh_velocity_field":"mesh_velocity","mesh_displacement_field":"mesh_displacement","geometry_tangent_path":"SymbolicRequired"},"generic_velocity_nitsche":{"gamma":23,"symmetric":false,"scale_with_polynomial_order":false,"generated_active_boundary_minimum_energy_ratio":0.25},"stabilization":{"vms_enabled":false,"ct_m":1,"ct_c":36,"epsilon":9.9999999999999998e-13},"maintenance_policy":{"owner_component":"level_set_transport","coupling":"one_way_velocity_to_extension_to_level_set"},"extension_guards":{"physical_momentum_dry_extension_allowed":false,"auxiliary_extension_owner":"level_set_transport","external_owner_required":true},"free_surfaces":[{"implementation":"FittedALE","boundary_marker":172,"interface_marker":-1,"level_set_field":"level_set","generated_interface_domain":"free_surface","generated_interface_geometry":"LinearCorner","geometry_tangent_policy":"RefreshedFrozenQuadrature","level_set_isovalue":0,"active_domain":"None","active_phase_sign":"full_domain","external_pressure":2.25,"surface_tension":0.5,"surface_tension_form_effective":"SurfaceStress","curvature_policy":"variational_surface_stress_generated_geometry","curvature_tangent_policy":"fitted_geometry_surface_variation","kinematic":{"normal_policy":"MatchFluidNormalVelocity","tangential_mesh_policy":"Prescribed","prescribed_tangential_mesh_velocity":[0,0,0],"enforcement":"MeshNitsche","nitsche":{"gamma":17}},"stabilization":{"enabled":false,"small_cut_aggregation":true,"pressure_gradient_penalty":1},"pruning":{"decision_owner":"authoritative_geometry_snapshot","fallback_to_whole_face":false},"contact_lines":[{"model":"None"}]}]})json";
+        R"json({"artifact_schema_version":1,"component":"incompressible_navier_stokes_free_surface","configuration_schema":{"input_version":2,"effective_version":2,"migration_mode":"current"},"capability_label":"one_phase_liquid_sharp_interface","units":{"system":"consistent_solver_units","angle":"radian","length":"solver_length","pressure":"solver_pressure","surface_tension":"force_per_length"},"fields":{"velocity":"u","pressure":"p","operator":"equations","dimension":3},"ale":{"enabled":true,"mesh_velocity_field":"mesh_velocity","mesh_displacement_field":"mesh_displacement","geometry_tangent_path":"SymbolicRequired"},"generic_velocity_nitsche":{"gamma":23,"symmetric":false,"scale_with_polynomial_order":false,"generated_active_boundary_minimum_energy_ratio":0.25},"stabilization":{"vms_enabled":false,"ct_m":1,"ct_c":36,"epsilon":9.9999999999999998e-13},"maintenance_policy":{"owner_component":"level_set_transport","coupling":"one_way_velocity_to_extension_to_level_set"},"extension_guards":{"physical_momentum_dry_extension_allowed":false,"auxiliary_extension_owner":"level_set_transport","external_owner_required":true},"free_surfaces":[{"implementation":"FittedALE","boundary_marker":172,"interface_marker":-1,"level_set_field":"level_set","generated_interface_domain":"free_surface","generated_interface_geometry":"LinearCorner","geometry_tangent_policy":"RefreshedFrozenQuadrature","level_set_isovalue":0,"active_domain":"None","active_phase_sign":"full_domain","external_pressure":2.25,"surface_tension":0.5,"surface_tension_form_effective":"SurfaceStress","curvature_policy":"variational_surface_stress_generated_geometry","curvature_tangent_policy":"fitted_geometry_surface_variation","kinematic":{"normal_policy":"MatchFluidNormalVelocity","tangential_mesh_policy":"Prescribed","prescribed_tangential_mesh_velocity":[0,0,0],"enforcement":"MeshNitsche","nitsche":{"gamma":17}},"stabilization":{"enabled":false,"small_cut_aggregation":true,"pressure_gradient_penalty":1},"pruning":{"decision_owner":"authoritative_geometry_snapshot","fallback_to_whole_face":false},"contact_lines":[{"model":"None"}]}]})json";
     std::string expected_with_aggregation_guards(expected);
     constexpr std::string_view artifact_schema_fragment =
         "\"artifact_schema_version\":1";
@@ -10576,8 +10485,6 @@ TEST(MovingDomainPhysics, NavierStokesFreeSurfaceRejectsInvalidScalarParameters)
         if (enable_kinematics) {
             // MeshNitsche needs a coupled mesh displacement; the rejection
             // then comes from the boundary-local gamma.
-            opts.mesh_velocity_source =
-                ns::ALEMeshVelocitySource::CoupledDisplacement;
             opts.auto_register_mesh_displacement_field = true;
         }
         opts.free_surface.push_back(
@@ -11861,7 +11768,6 @@ TEST(MovingDomainPhysics, NavierStokesCoupledALEDerivesMeshVelocityFromDisplacem
     auto p_space = makePressureSpace(mesh);
     auto opts = baseNavierStokesOptions();
     opts.enable_ale = true;
-    opts.mesh_velocity_source = ns::ALEMeshVelocitySource::CoupledDisplacement;
     opts.mesh_displacement_field_name = "mesh_displacement";
     opts.mesh_velocity_field_name = "mesh_velocity";
 
@@ -11917,7 +11823,6 @@ TEST(MovingDomainPhysics, NavierStokesCoupledALEAcceptsADReferenceTangentPathOve
     auto p_space = makePressureSpace(mesh);
     auto opts = baseNavierStokesOptions();
     opts.enable_ale = true;
-    opts.mesh_velocity_source = ns::ALEMeshVelocitySource::CoupledDisplacement;
     opts.mesh_displacement_field_name = "mesh_displacement";
     opts.mesh_velocity_field_name = "mesh_velocity";
     opts.moving_mesh_tangent_path = FE::forms::GeometryTangentPath::ADReference;
@@ -13708,7 +13613,6 @@ TEST(MovingDomainPhysics, CoupledALEAndHarmonicMeshMotionShareDisplacementUnknow
 
     auto ns_opts = baseNavierStokesOptions();
     ns_opts.enable_ale = true;
-    ns_opts.mesh_velocity_source = ns::ALEMeshVelocitySource::CoupledDisplacement;
     ns_opts.mesh_displacement_field_name = "mesh_displacement";
     ns_opts.mesh_velocity_field_name = "mesh_velocity";
 
@@ -13764,7 +13668,6 @@ TEST(MovingDomainPhysics, CoupledFittedFreeSurfaceALEAndHarmonicMeshMotionSetup)
     auto ns_opts = baseNavierStokesOptions();
     ns_opts.enable_ale = true;
     ns_opts.enable_convection = false;
-    ns_opts.mesh_velocity_source = ns::ALEMeshVelocitySource::CoupledDisplacement;
     ns_opts.mesh_displacement_field_name = "mesh_displacement";
     ns_opts.mesh_velocity_field_name = "mesh_velocity";
     ns_opts.auto_register_mesh_displacement_field = true;

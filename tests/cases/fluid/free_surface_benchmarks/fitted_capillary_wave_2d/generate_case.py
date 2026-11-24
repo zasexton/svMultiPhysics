@@ -230,7 +230,6 @@ def solver_xml(schedule: dict, steps: int, cadence: int) -> str:
     <Module_options>jit=true; jit_specialization=true</Module_options>
     <Backflow_stabilization_coefficient>0.0</Backflow_stabilization_coefficient>
     <Enable_ALE>true</Enable_ALE>
-    <Mesh_velocity_source>coupled_displacement</Mesh_velocity_source>
     <Mesh_velocity_field>mesh_velocity</Mesh_velocity_field>
     <Mesh_displacement_field>mesh_displacement</Mesh_displacement_field>
     <Auto_register_mesh_displacement_field>true</Auto_register_mesh_displacement_field>

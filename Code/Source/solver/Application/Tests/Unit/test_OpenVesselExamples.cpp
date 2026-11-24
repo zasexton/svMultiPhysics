@@ -2860,7 +2860,6 @@ TEST(OpenVesselExamples, FittedAleMeshNitscheDecksDeclareSlidingWallsAndDisjoint
 
     const auto& fluid = childWithAttribute(*root, "Add_equation", "type", "fluid");
     expectText(fluid, "Enable_ALE", "true");
-    expectText(fluid, "Mesh_velocity_source", "coupled_displacement");
     expectText(fluid, "Mesh_displacement_field", "mesh_displacement");
     expectText(fluid, "Hydrostatic_pressure_initialization", "false");
     EXPECT_EQ(fluid.FirstChildElement("Node_pressure_constraints"), nullptr)

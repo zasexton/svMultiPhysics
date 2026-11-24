@@ -405,7 +405,6 @@ TEST(EquationTranslatorFreeSurface, BuildInputKeepsOopFreeSurfaceParameters)
   auto params = parseEquationXml(R"xml(
 <Add_equation type="fluid">
   <Enable_ALE>true</Enable_ALE>
-  <Mesh_velocity_source>coupled_displacement</Mesh_velocity_source>
   <Constant_velocity>0.0 0.0 0.0</Constant_velocity>
   <Add_BC name="free_surface">
     <Type>Free_surface</Type>
@@ -430,7 +429,6 @@ TEST(EquationTranslatorFreeSurface, BuildInputKeepsOopFreeSurfaceParameters)
   const auto input = application::translators::EquationTranslator::buildInput(*params, singleMeshMap(mesh));
 
   EXPECT_EQ(input.equation_params.at("Enable_ALE").value, "true");
-  EXPECT_EQ(input.equation_params.at("Mesh_velocity_source").value, "coupled_displacement");
   EXPECT_EQ(input.equation_params.at("Constant_velocity").value, "0.0 0.0 0.0");
   ASSERT_EQ(input.boundary_conditions.size(), 1u);
   const auto& bc = input.boundary_conditions.front();
@@ -550,7 +548,6 @@ TEST(EquationTranslatorFreeSurface,
         std::string(R"xml(
 <Add_equation type="fluid">
   <Enable_ALE>true</Enable_ALE>
-  <Mesh_velocity_source>coupled_displacement</Mesh_velocity_source>
   <Auto_register_mesh_displacement_field>true</Auto_register_mesh_displacement_field>
   <Density>1.0</Density>
   <Viscosity model="Constant">
@@ -612,7 +609,6 @@ TEST(EquationTranslatorFreeSurface,
   auto smoothing_params = parseEquationXml(R"xml(
 <Add_equation type="fluid">
   <Enable_ALE>true</Enable_ALE>
-  <Mesh_velocity_source>coupled_displacement</Mesh_velocity_source>
   <Auto_register_mesh_displacement_field>true</Auto_register_mesh_displacement_field>
   <Density>1.0</Density>
   <Viscosity model="Constant">
@@ -648,7 +644,6 @@ TEST(EquationTranslatorFreeSurface,
   auto free_with_weight_params = parseEquationXml(R"xml(
 <Add_equation type="fluid">
   <Enable_ALE>true</Enable_ALE>
-  <Mesh_velocity_source>coupled_displacement</Mesh_velocity_source>
   <Auto_register_mesh_displacement_field>true</Auto_register_mesh_displacement_field>
   <Density>1.0</Density>
   <Viscosity model="Constant">
@@ -684,7 +679,6 @@ TEST(EquationTranslatorFreeSurface,
   auto params = parseEquationXml(R"xml(
 <Add_equation type="fluid">
   <Enable_ALE>true</Enable_ALE>
-  <Mesh_velocity_source>coupled_displacement</Mesh_velocity_source>
   <Auto_register_mesh_displacement_field>true</Auto_register_mesh_displacement_field>
   <Density>1.0</Density>
   <Viscosity model="Constant">

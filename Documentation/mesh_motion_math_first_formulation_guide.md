@@ -158,8 +158,8 @@ nonlinearity policy updates current coordinates from the trial
 `mesh_displacement` state before assembly, so the same primitives assemble on
 the trial current geometry. This requires the FE system's assembly frame to
 be the current configuration (`FESystem(mesh, svmp::Configuration::Current)`);
-the application selects it whenever an equation requests
-`Mesh_velocity_source=coupled_displacement`. With a reference-frame FE
+the application selects it whenever an equation enables ALE
+(`Enable_ALE=true`). With a reference-frame FE
 system only the frame-explicit terminals (`currentNormal()`,
 `currentMeasure()`, ...) see the motion.
 
@@ -181,8 +181,6 @@ velocity from it:
 
 ```cpp
 ns_options.enable_ale = true;
-ns_options.mesh_velocity_source =
-    navier_stokes::ALEMeshVelocitySource::CoupledDisplacement;
 ns_options.mesh_displacement_field_name = "mesh_displacement";
 ns_options.mesh_velocity_field_name = "mesh_velocity";
 ```

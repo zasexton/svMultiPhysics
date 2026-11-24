@@ -26,9 +26,9 @@ The prescribed mesh-velocity branch went the same way (decision D61 item 3):
 `ALEBinding` binds only a coupled mesh displacement and its derived velocity,
 `FE::systems::ALEMeshVelocitySource`, `FESystem::addMeshMotionDataField`,
 `bindStandardMeshMotionFieldsByName` and
-`syncBoundMeshMotionFieldsToPrescribedBuffers` are deleted, and Navier-Stokes
-refuses ALE without `Mesh_velocity_source = coupled_displacement`. The
-prescribed-ALE items below are history.
+`syncBoundMeshMotionFieldsToPrescribedBuffers` are deleted, and so is the
+`Mesh_velocity_source` key (decision D64 item 6): enabling ALE in Navier-Stokes
+means a coupled mesh displacement. The prescribed-ALE items below are history.
 
 ## Implementation Status
 

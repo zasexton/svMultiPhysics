@@ -1647,8 +1647,6 @@ TEST(NavierStokesLegacyBCs, FittedFreeSurfaceBCTranslation_SetupSucceeds)
     input.mesh_name = "single_tetra";
     input.mesh = mesh->local_mesh_ptr();
     input.equation_params["Enable_ALE"] = defined("true");
-    input.equation_params["Mesh_velocity_source"] =
-        defined("coupled_displacement");
     input.equation_params["Auto_register_mesh_displacement_field"] =
         defined("true");
     input.default_domain.params["Density"] = defined("1.0");
@@ -1692,8 +1690,6 @@ TEST(NavierStokesLegacyBCs, FittedFreeSurfaceKinematicBCTranslation_UsesCurrentG
     input.mesh = mesh->local_mesh_ptr();
 
     input.equation_params["Enable_ALE"] = defined("true");
-    input.equation_params["Mesh_velocity_source"] =
-        defined("coupled_displacement");
     input.equation_params["Auto_register_mesh_displacement_field"] =
         defined("true");
     input.default_domain.params["Density"] = defined("1.0");
@@ -1753,8 +1749,6 @@ TEST(NavierStokesLegacyBCs, FittedFreeSurfaceKinematicEnforcementDefaultsToMeshN
             input.mesh_name = "single_tetra";
             input.mesh = mesh->local_mesh_ptr();
             input.equation_params["Enable_ALE"] = defined("true");
-            input.equation_params["Mesh_velocity_source"] =
-                defined("coupled_displacement");
             input.equation_params["Auto_register_mesh_displacement_field"] =
                 defined("true");
             input.default_domain.params["Density"] = defined("1.0");
@@ -1836,8 +1830,6 @@ TEST(NavierStokesLegacyBCs, FreeSurfaceBoundaryKeysResolveThroughTheSchema)
             input.mesh_name = "single_tetra";
             input.mesh = mesh->local_mesh_ptr();
             input.equation_params["Enable_ALE"] = defined("true");
-            input.equation_params["Mesh_velocity_source"] =
-                defined("coupled_displacement");
             input.equation_params["Auto_register_mesh_displacement_field"] =
                 defined("true");
             input.default_domain.params["Density"] = defined("1.0");
@@ -1957,8 +1949,6 @@ TEST(NavierStokesLegacyBCs,
     input.mesh_name = "single_tetra";
     input.mesh = mesh->local_mesh_ptr();
     input.equation_params["Enable_ALE"] = defined("true");
-    input.equation_params["Mesh_velocity_source"] =
-        defined("coupled_displacement");
     input.equation_params["Auto_register_mesh_displacement_field"] =
         defined("true");
     input.default_domain.params["Density"] = defined("1.0");
@@ -2040,7 +2030,6 @@ TEST(NavierStokesLegacyBCs, FittedFreeSurfacePrescribedAngleTranslationFailsClos
     input.mesh = mesh->local_mesh_ptr();
 
     input.equation_params["Enable_ALE"] = defined("true");
-    input.equation_params["Mesh_velocity_source"] = defined("coupled_displacement");
     input.equation_params["Auto_register_mesh_displacement_field"] = defined("true");
     input.default_domain.params["Density"] = defined("1.0");
     input.default_domain.params["Viscosity.model"] = defined("Constant");
@@ -2418,8 +2407,6 @@ TEST(NavierStokesLegacyBCs, FreeSurfaceContactNoneIsExplicitAndComplete)
     input.mesh = mesh->local_mesh_ptr();
     // The qualified fitted contract.
     input.equation_params["Enable_ALE"] = defined("true");
-    input.equation_params["Mesh_velocity_source"] =
-        defined("coupled_displacement");
     input.equation_params["Auto_register_mesh_displacement_field"] =
         defined("true");
     input.default_domain.params["Density"] = defined("1.0");
@@ -2464,8 +2451,6 @@ TEST(NavierStokesLegacyBCs, FreeSurfacePinnedIsExplicitAndComplete)
     input.mesh = mesh->local_mesh_ptr();
     // The qualified fitted contract.
     input.equation_params["Enable_ALE"] = defined("true");
-    input.equation_params["Mesh_velocity_source"] =
-        defined("coupled_displacement");
     input.equation_params["Auto_register_mesh_displacement_field"] =
         defined("true");
     input.default_domain.params["Density"] = defined("1.0");
@@ -3107,9 +3092,9 @@ TEST(NavierStokesLegacyBCs, NavierStokesEquationAndDomainKeysResolveThroughTheSc
     const std::vector<FailureCase> failures = {
         {{}, {{"Density", "abc"}},
          "[Navier-Stokes domain] Density: expected a number, got 'abc'"},
-        {{{"Mesh_velocity_source", "sideways"}}, {},
-         "[Navier-Stokes equation] Mesh_velocity_source: expected one of "
-         "prescribed_data | coupled_displacement, got 'sideways'"},
+        {{{"Rotating_frame_angular_velocity", "sideways"}}, {},
+         "[Navier-Stokes equation] Rotating_frame_angular_velocity: expected "
+         "three numbers, got 'sideways'"},
         {{}, {{"Viscosity.Value", "0"}},
          "[svMultiPhysics::Physics] Constant viscosity must be > 0 for the new "
          "solver Navier-Stokes module. Set <Use_new_OOP_solver>false"

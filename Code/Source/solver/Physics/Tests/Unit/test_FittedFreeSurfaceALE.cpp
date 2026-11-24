@@ -228,7 +228,6 @@ ns::IncompressibleNavierStokesVMSOptions coupledALEOptions()
     opts.enable_convection = false;
     opts.enable_vms = false;
     opts.enable_ale = true;
-    opts.mesh_velocity_source = ns::ALEMeshVelocitySource::CoupledDisplacement;
     opts.mesh_displacement_field_name = "mesh_displacement";
     opts.mesh_velocity_field_name = "mesh_velocity";
     opts.auto_register_mesh_displacement_field = true;
@@ -508,31 +507,6 @@ TEST(FittedFreeSurfaceALE, SurfaceStressIsTheFittedDefaultWithoutAnOptIn)
             << artifact->json;
         EXPECT_EQ(artifact->json.find("fitted_surface_stress_current_frame_gradient_unqualified"),
                   std::string::npos);
-    }
-    {
-        // ALE moves the domain with a coupled mesh displacement only: a
-        // prescribed mesh-velocity source is refused before the surface
-        // energy or the pressure load is checked.
-        const auto register_prescribed = [&](FE::Real surface_tension) -> std::string {
-            FE::systems::FESystem system(mesh);
-            auto opts = coupledALEOptions();
-            opts.mesh_velocity_source = ns::ALEMeshVelocitySource::PrescribedData;
-            opts.auto_register_mesh_displacement_field = false;
-            opts.free_surface.push_back(fittedSurface(0.25, surface_tension));
-            ns::IncompressibleNavierStokesVMSModule fluid(spaces.vector, spaces.scalar, opts);
-            try {
-                fluid.registerOn(system);
-            } catch (const std::invalid_argument& error) {
-                return error.what();
-            }
-            return {};
-        };
-        for (const FE::Real surface_tension : {gamma, FE::Real{0.0}}) {
-            EXPECT_NE(register_prescribed(surface_tension).find(
-                          "ALE requires the mesh velocity derived from a coupled "
-                          "mesh-displacement unknown"),
-                      std::string::npos);
-        }
     }
 }
 

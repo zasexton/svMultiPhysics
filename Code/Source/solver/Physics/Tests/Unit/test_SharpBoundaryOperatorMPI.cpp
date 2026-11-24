@@ -3599,8 +3599,6 @@ public:
                 : "u";
         fluid_options.velocity_field_name = velocity_field_name;
         fluid_options.enable_ale = true;
-        fluid_options.mesh_velocity_source =
-            ns::ALEMeshVelocitySource::CoupledDisplacement;
         fluid_options.mesh_displacement_field_name =
             "mesh_displacement";
         fluid_options.mesh_velocity_field_name = "mesh_velocity";

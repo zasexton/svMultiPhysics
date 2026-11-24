@@ -163,7 +163,7 @@ fails at the first step on the finer meshes. Its time error is second order.
 
 A fitted free surface (`Implementation=FittedALE`) is a boundary of the
 liquid mesh. The mesh moves with a coupled displacement unknown
-(`Enable_ALE=true`, `Mesh_velocity_source=coupled_displacement`) solved by a
+(`Enable_ALE=true`) solved by a
 `mesh_motion` equation. Decision D5 of the program tracker selects this path
 as the independent reference for the unfitted results.
 
@@ -171,9 +171,8 @@ as the independent reference for the unfitted results.
 motion and the fitted boundary terms on the trial current configuration:
 the FE geometric-nonlinearity transaction moves the current coordinates at
 every trial state, and the application builds the FE system with the current
-configuration as its assembly frame whenever an equation requests coupled
-displacement (`Enable_ALE=true` with `Mesh_velocity_source=coupled_displacement`;
-`SimulationBuilder::createFESystem`, which logs
+configuration as its assembly frame whenever an equation enables ALE
+(`Enable_ALE=true`; `SimulationBuilder::createFESystem`, which logs
 `assembly_frame=current (coupled mesh-displacement ALE)`). This holds for
 every kinematic enforcement below. Fitted boundary integrals therefore use
 the ordinary boundary measure of that frame; the current normal is the

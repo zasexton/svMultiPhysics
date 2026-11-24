@@ -1041,28 +1041,14 @@ bool inputRequestsCoupledDisplacementALE(const Parameters& params)
     if (equation == nullptr) {
       continue;
     }
-    // The same keys and tokens as the Navier-Stokes translator; the last
-    // defined key wins there as well.
-    std::optional<std::string> enable;
-    for (const auto* key : {"Enable_ALE"}) {
-      if (auto value = definedParameterValue(*equation, key)) {
-        enable = std::move(value);
-      }
-    }
-    std::optional<std::string> source;
-    for (const auto* key : {"Mesh_velocity_source"}) {
-      if (auto value = definedParameterValue(*equation, key)) {
-        source = std::move(value);
-      }
-    }
-    if (!enable || !source) {
+    // The same key and tokens as the Navier-Stokes translator: ALE moves
+    // the domain with the coupled mesh displacement.
+    const auto enable = definedParameterValue(*equation, "Enable_ALE");
+    if (!enable) {
       continue;
     }
     const auto enabled = normalizedParameterToken(*enable);
-    const auto kind = normalizedParameterToken(*source);
-    if ((enabled == "true" || enabled == "1" || enabled == "yes" || enabled == "on") &&
-        (kind == "coupled" || kind == "coupleddisplacement" || kind == "derived" ||
-         kind == "derivedfromdisplacement" || kind == "monolithic")) {
+    if (enabled == "true" || enabled == "1" || enabled == "yes" || enabled == "on") {
       return true;
     }
   }

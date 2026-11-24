@@ -356,11 +356,6 @@ struct FreeSurfaceBoundary {
     FE::options::OptionInput input{};
 };
 
-enum class ALEMeshVelocitySource {
-    PrescribedData,
-    CoupledDisplacement
-};
-
 /**
  * @brief The momentum transport of a moving domain (ALE), set in code only
  *
@@ -644,13 +639,11 @@ struct IncompressibleNavierStokesVMSOptions {
     // ALE/moving-domain options. Disabled by default to preserve static-mesh behavior.
     //
     // When enabled, the domain moves with a coupled mesh displacement unknown
-    // and the mesh velocity is its time derivative (mesh_velocity_source must
-    // be CoupledDisplacement).  Physics remains responsible for the
-    // ALE-specific residual choices.
+    // and the mesh velocity is its time derivative.  Physics remains
+    // responsible for the ALE-specific residual choices.
     bool enable_ale{false};
     bool include_moving_control_volume_transient{true};   // Legacy only
     ALEMomentumForm ale_momentum_form{ALEMomentumForm::Legacy};
-    ALEMeshVelocitySource mesh_velocity_source{ALEMeshVelocitySource::PrescribedData};
     std::string mesh_velocity_field_name{"mesh_velocity"};
     std::string mesh_displacement_field_name{"mesh_displacement"};
     bool auto_register_mesh_displacement_field{false};

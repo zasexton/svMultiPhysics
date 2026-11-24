@@ -167,7 +167,6 @@ bool is_oop_equation_extension_parameter(const std::string& name)
   static const std::set<std::string> names = {
     "Enable_ALE",
     "Mesh_velocity_field",
-    "Mesh_velocity_source",
     "Mesh_displacement_field",
     "Auto_register_mesh_displacement_field",
     "Free_surface_physical_model",
