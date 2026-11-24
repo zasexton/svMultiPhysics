@@ -1308,6 +1308,63 @@ bool variesWithMeshGeometry(const forms::FormExprNode& node,
                                             : containsGeometrySensitivityTerminal(node);
 }
 
+/// A complete shape derivative differentiates a smooth mesh deformation; a cut
+/// classification that changes with the mesh (cut volumes, generated
+/// interfaces and boundaries, cut-restricted cells) is a separate capability.
+void refuseCompleteShapeDerivativeOnMovingCutTopology(std::string_view installer,
+                                                      const FESystem& system,
+                                                      const forms::FormExprNode& residual,
+                                                      const forms::GeometrySensitivityOptions& options)
+{
+    if (!completeShapeDerivative(options)) {
+        return;
+    }
+    const auto refuse = [&](const std::string& what) {
+        throw InvalidArgumentException(
+            std::string(installer) +
+            ": complete shape derivatives across a moving cut topology are a separate capability; " + what +
+            " (ShapeDerivative::Complete differentiates fitted moving domains only)");
+    };
+    if (!system.formInstallCellDomainRestrictions().empty()) {
+        refuse("the install's cells are restricted to a side of a cut");
+    }
+    const auto visit = [&](const auto& self, const forms::FormExprNode& n) -> void {
+        switch (n.type()) {
+            case forms::FormExprType::CutVolumeIntegral:
+                refuse("the residual integrates over a cut volume");
+                break;
+            case forms::FormExprType::BoundaryNormal:
+                refuse("the residual reads the normal of a generated boundary rule");
+                break;
+            case forms::FormExprType::InteriorFaceIntegral:
+                if (n.cutVolumeSide().has_value()) {
+                    refuse("the residual integrates over cut-adjacent facets");
+                }
+                break;
+            case forms::FormExprType::BoundaryIntegral:
+            case forms::FormExprType::InterfaceIntegral: {
+                const auto* exterior = n.exteriorBoundaryMeasure();
+                if (exterior != nullptr && exterior->isGeneratedActiveSubset()) {
+                    refuse("the residual integrates over a generated boundary subset");
+                }
+                if (n.type() == forms::FormExprType::InterfaceIntegral) {
+                    const int marker = n.interfaceMarker().value_or(-1);
+                    if (marker >= 0 && system.isGeneratedEmbeddedInterfaceMarkerRegistered(marker)) {
+                        refuse("the residual integrates over the generated interface " + std::to_string(marker));
+                    }
+                }
+                break;
+            }
+            default:
+                break;
+        }
+        for (const auto& child : n.childrenShared()) {
+            if (child) self(self, *child);
+        }
+    };
+    visit(visit, residual);
+}
+
 /// A complete shape derivative is a symbolic tangent; the AD reference path
 /// seeds only the frame-explicit terminals.  Its rules take x = X + d at
 /// every point, which holds when the mesh displacement is no richer than the
@@ -2115,6 +2172,10 @@ KernelPtr installResidualForm(
                                       residual_form.node(),
                                       install_options.compiler_options);
     refuseUnsupportedCompleteShapeDerivative("installResidualForm", system, install_options.compiler_options);
+    if (residual_form.node() != nullptr) {
+        refuseCompleteShapeDerivativeOnMovingCutTopology("installResidualForm", system, *residual_form.node(),
+                                                         install_options.compiler_options.geometry_sensitivity);
+    }
     auto block_options = install_options;
     block_options.compiler_options =
         compilerOptionsForTrial(install_options.compiler_options, trial_field);
@@ -2447,6 +2508,8 @@ CoupledResidualKernels installCoupledResidual(
                                           root,
                                           install_options.compiler_options);
         refuseUnsupportedCompleteShapeDerivative("installCoupledResidual", system, install_options.compiler_options);
+        refuseCompleteShapeDerivativeOnMovingCutTopology("installCoupledResidual", system, *root,
+                                                         install_options.compiler_options.geometry_sensitivity);
         const auto state_fields =
             gatherResidualDependencies(*root, install_options.compiler_options.geometry_sensitivity);
 
@@ -3176,6 +3239,8 @@ CoupledResidualKernels installCoupledResidualMixed(
                                           root,
                                           install_options.compiler_options);
         refuseUnsupportedCompleteShapeDerivative("installCoupledResidualMixed", system, install_options.compiler_options);
+        refuseCompleteShapeDerivativeOnMovingCutTopology("installCoupledResidualMixed", system, *root,
+                                                         install_options.compiler_options.geometry_sensitivity);
         const auto state_fields =
             gatherResidualDependencies(*root, install_options.compiler_options.geometry_sensitivity);
         for (const auto field : state_fields) {
@@ -4582,6 +4647,8 @@ CoupledResidualKernels installFormulation(
                                       residual.node(),
                                       install_options.compiler_options);
     refuseUnsupportedCompleteShapeDerivative("installFormulation", system, install_options.compiler_options);
+    refuseCompleteShapeDerivativeOnMovingCutTopology("installFormulation", system, *residual.node(),
+                                                     install_options.compiler_options.geometry_sensitivity);
 
     // Early validation: reject duplicate test function names across different
     // spaces before creating any side effects (FormulationRecord, contributions).

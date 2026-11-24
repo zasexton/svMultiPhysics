@@ -710,6 +710,117 @@ TEST(CompleteShapeDerivative, FacetTermsMatchDirectionalDifferences)
 
 namespace {
 
+// The installs of a complete moving domain on a triangle mesh, for the refusals.
+struct RefusalSystem {
+    std::shared_ptr<svmp::Mesh> mesh = makeBoxMesh(Cell::Triangle, 2, 2, 1, 0.02).mesh;
+    std::shared_ptr<svmp::FE::spaces::H1Space> scalar = std::make_shared<svmp::FE::spaces::H1Space>(ElementType::Triangle3, 1);
+    std::shared_ptr<svmp::FE::spaces::ProductSpace> vector = std::make_shared<svmp::FE::spaces::ProductSpace>(scalar, 2);
+    systems::FESystem system{mesh, svmp::Configuration::Current};
+    FieldId p{svmp::FE::INVALID_FIELD_ID};
+    FieldId d{svmp::FE::INVALID_FIELD_ID};
+
+    explicit RefusalSystem(forms::GeometryTangentPath path = forms::GeometryTangentPath::SymbolicRequired)
+    {
+        p = system.addField(systems::FieldSpec{.name = "p", .space = scalar, .components = 1});
+        d = system.addMeshDisplacementUnknown("d", vector, 2);
+        systems::MovingDomainOptions moving;
+        moving.shape_derivative = forms::ShapeDerivative::Complete;
+        moving.geometry_tangent_path = path;
+        (void)systems::movingDomain(system, d, moving);
+        system.addOperator("probe");
+    }
+
+    void install(const FormExpr& residual)
+    {
+        systems::FormInstallOptions options;
+        options.compiler_options.jit.enable = false;
+        (void)systems::installFormulation(system, "probe", {p}, residual, options);
+    }
+
+    [[nodiscard]] FormExpr pState() const { return FormExpr::stateField(p, *scalar, "p"); }
+    [[nodiscard]] FormExpr q() const { return FormExpr::testFunction(p, *scalar, "q"); }
+};
+
+std::string installError(const std::function<void()>& install)
+{
+    try {
+        install();
+    } catch (const std::exception& e) {
+        return e.what();
+    }
+    return {};
+}
+
+} // namespace
+
+// A complete shape derivative differentiates a smooth deformation of a fitted
+// domain.  A cut classification that changes with the mesh (cut volumes,
+// cut-restricted cells, generated boundary rules) is a separate capability
+// and is refused by name, as are the AD reference path, which seeds only the
+// frame-explicit terminals, and a mesh displacement richer than the geometry.
+TEST(CompleteShapeDerivative, MovingCutTopologyAndTheADPathAreRefusedByName)
+{
+    {
+        RefusalSystem s;
+        const auto message = installError([&] {
+            s.install((s.pState() * s.q()).dCutVolume(9, forms::CutVolumeSide::Negative));
+        });
+        EXPECT_NE(message.find("moving cut topology"), std::string::npos) << message;
+    }
+    {
+        RefusalSystem s;
+        systems::FESystem::FormCellDomainRestriction restriction;
+        restriction.interface_marker = 9;
+        restriction.level_set_field = s.p;
+        auto scope = s.system.scopedFormInstallCellDomainRestrictions({restriction});
+        const auto message = installError([&] { s.install((s.pState() * s.q()).dx()); });
+        EXPECT_NE(message.find("moving cut topology"), std::string::npos) << message;
+    }
+    {
+        RefusalSystem s;
+        const auto message = installError([&] {
+            s.install((s.pState() * s.q()).dS(9, forms::CutVolumeSide::Negative));
+        });
+        EXPECT_NE(message.find("moving cut topology"), std::string::npos) << message;
+    }
+    {
+        RefusalSystem s(forms::GeometryTangentPath::ADReference);
+        const auto message = installError([&] { s.install((s.pState() * s.q()).dx()); });
+        EXPECT_NE(message.find("AD reference path"), std::string::npos) << message;
+    }
+    {
+        // A mesh displacement richer than the geometry: the coordinate update
+        // moves the geometry nodes only, so x = X + d does not hold in between.
+        auto mesh = makeBoxMesh(Cell::Triangle, 2, 2, 1, 0.02).mesh;
+        auto scalar = std::make_shared<svmp::FE::spaces::H1Space>(ElementType::Triangle3, 1);
+        auto quadratic = std::make_shared<svmp::FE::spaces::H1Space>(ElementType::Triangle3, 2);
+        auto vector = std::make_shared<svmp::FE::spaces::ProductSpace>(quadratic, 2);
+        systems::FESystem system(mesh, svmp::Configuration::Current);
+        const auto p = system.addField(systems::FieldSpec{.name = "p", .space = scalar, .components = 1});
+        const auto d = system.addMeshDisplacementUnknown("d", vector, 2);
+        systems::MovingDomainOptions moving;
+        moving.shape_derivative = forms::ShapeDerivative::Complete;
+        (void)systems::movingDomain(system, d, moving);
+        system.addOperator("probe");
+        const auto message = installError([&] {
+            systems::FormInstallOptions options;
+            options.compiler_options.jit.enable = false;
+            (void)systems::installFormulation(system, "probe", {p},
+                                              (FormExpr::stateField(p, *scalar, "p") *
+                                               FormExpr::testFunction(p, *scalar, "q")).dx(),
+                                              options);
+        });
+        EXPECT_NE(message.find("no richer than the geometry"), std::string::npos) << message;
+    }
+    {
+        // A fitted install of the same system is accepted.
+        RefusalSystem s;
+        EXPECT_EQ(installError([&] { s.install((s.pState() * s.q()).dx() + (s.pState() * s.q()).ds(kTop)); }), "");
+    }
+}
+
+namespace {
+
 // The residual-based VMS stabilization of the Navier-Stokes module, written
 // out: the element metric K = Jinv^T Jinv, tau_M and tau_C, PSPG, SUPG,
 // grad-div and cross-stress terms with the ALE transport velocity u - w.
