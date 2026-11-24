@@ -21,6 +21,7 @@
 #include "Forms/FormCompiler.h"
 #include "Forms/FormKernels.h"
 #include "Forms/JIT/InlinableConstitutiveModel.h"
+#include "Forms/JIT/JITKernelWrapper.h"
 #include "Forms/JIT/JITValidation.h"
 #include "Forms/Vocabulary.h"
 #include "Quadrature/QuadratureFactory.h"
@@ -29,7 +30,9 @@
 #include "Spaces/L2Space.h"
 #include "Systems/MaterialStateProvider.h"
 #include "Tests/Unit/Forms/FormsTestHelpers.h"
+#include "Tests/Unit/Forms/JITTestHelpers.h"
 
+#include <cstring>
 #include <memory>
 #include <stdexcept>
 #include <string_view>
@@ -370,6 +373,62 @@ public:
         out.kind = Value<Dual>::Kind::Scalar;
         out.s = mul(input.s, factor, makeDualConstant(0.0, ws.alloc()));
         return out;
+    }
+};
+
+/// Not inlinable, so a compiled kernel reaches it through the external-call
+/// trampoline: K(x) = (old state + user value) * x, and it writes 7 to the
+/// work state.
+class OldStatePlusUserDataModel final : public ConstitutiveModel {
+public:
+    [[nodiscard]] StateSpec stateSpec() const noexcept override { return StateSpec{sizeof(Real), alignof(Real)}; }
+
+    [[nodiscard]] OutputSpec outputSpec(std::size_t output_index) const override
+    {
+        if (output_index != 0u) {
+            throw std::invalid_argument("OldStatePlusUserDataModel::outputSpec: output_index out of range");
+        }
+        return OutputSpec{ValueKind::Scalar};
+    }
+
+    [[nodiscard]] Value<Real> evaluate(const Value<Real>& /*input*/, int /*dim*/) const override
+    {
+        throw std::logic_error("OldStatePlusUserDataModel: unary evaluate() should not be called");
+    }
+
+    [[nodiscard]] Value<Dual> evaluate(const Value<Dual>& /*input*/, int /*dim*/, DualWorkspace& /*ws*/) const override
+    {
+        throw std::logic_error("OldStatePlusUserDataModel: unary evaluate() should not be called (dual)");
+    }
+
+    [[nodiscard]] Value<Real> evaluate(const Value<Real>& input, const ConstitutiveEvalContext& ctx) const override
+    {
+        return Value<Real>{Value<Real>::Kind::Scalar, factor(ctx) * input.s};
+    }
+
+    [[nodiscard]] Value<Dual> evaluate(const Value<Dual>& input,
+                                       const ConstitutiveEvalContext& ctx,
+                                       DualWorkspace& ws) const override
+    {
+        Value<Dual> out;
+        out.kind = Value<Dual>::Kind::Scalar;
+        out.s = mul(input.s, factor(ctx), makeDualConstant(0.0, ws.alloc()));
+        return out;
+    }
+
+private:
+    [[nodiscard]] static Real factor(const ConstitutiveEvalContext& ctx)
+    {
+        Real old_value = 0.0;
+        if (ctx.state_old.size() == sizeof(Real)) {
+            std::memcpy(&old_value, ctx.state_old.data(), sizeof(Real));
+        }
+        if (ctx.state_work.size() == sizeof(Real)) {
+            const Real written = 7.0;
+            std::memcpy(ctx.state_work.data(), &written, sizeof(Real));
+        }
+        const auto* user = static_cast<const UserContext*>(ctx.user_data);
+        return old_value + (user != nullptr ? user->value : 0.0);
     }
 };
 
@@ -1427,6 +1486,63 @@ TEST(ConstitutiveModelTest, InlinableStatefulConstitutiveWritesStateAndUsesSlotP
 
     // input=2, k=3 => state=6. For a unit tetra: V=1/6 => entry=6*V=1.
     EXPECT_NEAR(mat.getMatrixEntry(0, 0), 1.0, 1e-12);
+}
+
+// A compiled kernel calls a model that is not inlinable through the external
+// trampoline, which reads the user data and the material state from the side
+// arguments the kernel passes.  It must read them where the kernel's argument
+// layout (V6) holds them: the compiled matrix equals the interpreted one,
+// before and after the material state is committed (old state 0, then 7).
+TEST(ConstitutiveModelTest, CompiledExternalConstitutiveCallReadsUserDataAndMaterialState)
+{
+    requireLLVMJITOrSkip();
+    SingleTetraMeshAccess mesh;
+    auto dof_map = createSingleTetraP0DofMap();
+    spaces::L2Space space(ElementType::Tetra4, 0);
+    auto model = std::make_shared<OldStatePlusUserDataModel>();
+
+    FormCompiler compiler;
+    const auto u = FormExpr::trialFunction(space, "u");
+    const auto v = FormExpr::testFunction(space, "v");
+    const auto form = (FormExpr::constitutive(model, FormExpr::constant(1.0)) * u * v).dx();
+
+    UserContext user;
+    user.value = 4.0;
+    const auto entries = [&](assembly::AssemblyKernel& kernel) {
+        systems::MaterialStateProvider provider(/*num_cells=*/mesh.numCells());
+        provider.addKernel(kernel, kernel.materialStateSpec(), /*max_qpts=*/64);
+        assembly::StandardAssembler assembler;
+        assembler.setDofMap(dof_map);
+        assembler.setMaterialStateProvider(&provider);
+        assembler.setUserData(&user);
+        std::vector<Real> out;
+        for (int step = 0; step < 2; ++step) {
+            provider.beginTimeStep();
+            assembly::DenseMatrixView mat(1);
+            mat.zero();
+            (void)assembler.assembleMatrix(mesh, space, space, kernel, mat);
+            out.push_back(mat.getMatrixEntry(0, 0));
+            provider.commitTimeStep();
+        }
+        return out;
+    };
+
+    FormKernel interpreted(compiler.compileBilinear(form));
+    const auto expected = entries(interpreted);
+    ASSERT_EQ(expected.size(), 2u);
+    EXPECT_NEAR(expected[0], 4.0 / 6.0, 1e-12);
+    EXPECT_NEAR(expected[1], 11.0 / 6.0, 1e-12);
+
+    JITOptions options;
+    options.enable = true;
+    options.optimization_level = 2;
+    options.cache_kernels = false;
+    jit::JITKernelWrapper compiled(std::make_shared<FormKernel>(compiler.compileBilinear(form)), options);
+    const auto actual = entries(compiled);
+    EXPECT_TRUE(compiled.isJITReady());
+    ASSERT_EQ(actual.size(), 2u);
+    EXPECT_NEAR(actual[0], expected[0], 1e-12);
+    EXPECT_NEAR(actual[1], expected[1], 1e-12);
 }
 
 } // namespace test

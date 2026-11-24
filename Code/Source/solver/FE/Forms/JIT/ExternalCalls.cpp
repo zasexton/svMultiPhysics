@@ -29,7 +29,9 @@ namespace jit {
 
 namespace {
 
-using SideArgs = assembly::jit::KernelSideArgsV4;
+// The side arguments every compiled kernel passes (CellKernelArgsV6 and its
+// face and batch forms).
+using SideArgs = assembly::jit::KernelSideArgsV6;
 
 [[nodiscard]] const external::ExternalCallTableV1* tryGetExternalCallTable(const SideArgs* side) noexcept
 {
