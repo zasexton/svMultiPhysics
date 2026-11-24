@@ -4957,7 +4957,18 @@ SolverReport FsilsLinearSolver::solveOnOperatorLayout(const GenericMatrix& A_in,
         [&](const FsilsResidualCheckResult& internal_check,
             FsilsResidualCheckResult check,
             std::string_view phase) -> FsilsResidualCheckResult {
-        if (check.ok || !internal_check.ok || !use_blockschur) {
+        // The internal solve met its target in its own norm: its final
+        // residual against its own initial residual.  validateInternalResidual
+        // measures the same final norm against the original RHS norm, and the
+        // two norms differ by the BlockSchur scaling, so a solve that met its
+        // target internally can fail that check (and the replay acceptance
+        // below with it).
+        const bool internal_met_own_target =
+            ls.RI.suc && std::isfinite(static_cast<double>(ls.RI.iNorm)) &&
+            std::isfinite(static_cast<double>(ls.RI.fNorm)) && ls.RI.iNorm > 0.0 &&
+            static_cast<Real>(ls.RI.fNorm) <=
+                std::max<Real>(options_.abs_tol, options_.rel_tol * static_cast<Real>(ls.RI.iNorm));
+        if (check.ok || !(internal_check.ok || internal_met_own_target) || !use_blockschur) {
             return check;
         }
 
