@@ -3886,7 +3886,7 @@ TEST(StandardAssemblerHessianTest, PhysicalBasisHessiansMatchFiniteDifferenceGra
 }
 
 // ============================================================================
-// StandardAssembler Edge Case Tests (UNIT_TEST_CHECKLIST.md)
+// StandardAssembler Edge Case Tests
 // ============================================================================
 
 namespace {

@@ -510,7 +510,7 @@ Goal: allow physics authors to express moving-domain weak forms through generic 
   - [x] Keep ALE transport terms math-first: write `dt(field) + inner(a, grad(field))`, `u - meshVelocity()`, and `div(meshVelocity()) * ...` explicitly instead of exposing public `materialDerivative`, `transportDerivative`, or moving-volume wrapper helpers.
 - [x] Preserve existing `Coordinate` behavior for backward compatibility.
 - [x] Clarify whether existing `ReferenceCoordinate` means quadrature coordinate or physical reference coordinate; add a new terminal if needed to avoid ambiguity. Existing `ReferenceCoordinate` remains the quadrature reference coordinate; `referenceCoordinatePhysical()` provides the physical reference-coordinate terminal.
-- [x] Update `VOCABULARY.md` and `VOCABULARY_ROADMAP.md`.
+- [x] Update `VOCABULARY.md`.
 
 ### FE/Forms Compiler, Interpreter, AD, and JIT
 
