@@ -1333,5 +1333,211 @@ TEST(GeneralityBenchmark, DISABLED_P07_ClampedInteriorPenaltyPlateConvergesInBro
     }
 }
 
+// ===========================================================================
+// 11. Conjugate heat transfer across a matching interface
+// ===========================================================================
+//
+// Two slabs A (x < 1/2, conductivity k_A) and B (x > 1/2, k_B) exchange heat
+// through a finite resistance r on Gamma = {x = 1/2}:
+//
+//   (k_A grad T_A . grad v_A) dx(A) + (k_B grad T_B . grad v_B) dx(B)
+//     + ((T_A - T_B) (v_A - v_B) / r) dI(Gamma),
+//
+// with T given at x = 0 and x = 1 and insulated elsewhere.  The exact patch
+// T_A = L - q (x - s) / k_A, T_B = L - r q - q (x - s) / k_B has unequal
+// conductivities, a temperature jump r q and the same heat q on both sides;
+// the curved variant adds y-dependence and curvature with sources.
+
+constexpr int kSlabA = 1;
+constexpr int kSlabB = 2;
+constexpr int kGamma = 31;
+
+struct SlabData {
+    Real L{1.0}, q0{0.6}, kA{2.0}, kB{0.5}, r{0.4}, s{0.5};
+    bool curved{false};
+    Real beta{0.3}, gamma{-0.7};
+
+    [[nodiscard]] Real q(Real y) const { return curved ? q0 * (1.0 + 0.5 * std::cos(kPi * y)) : q0; }
+    [[nodiscard]] Real w(Real y) const { return curved ? 0.2 * std::cos(kPi * y) : 0.0; }
+    [[nodiscard]] Real TA(const Point& p) const
+    {
+        const Real d = p[0] - s;
+        return L + w(p[1]) - q(p[1]) * d / kA + (curved ? beta * d * d : 0.0);
+    }
+    [[nodiscard]] Real TB(const Point& p) const
+    {
+        const Real d = p[0] - s;
+        return L + w(p[1]) - r * q(p[1]) - q(p[1]) * d / kB + (curved ? gamma * d * d : 0.0);
+    }
+    /// -k lap(T) on each side.
+    [[nodiscard]] Real fA(const Point& p) const
+    {
+        if (!curved) {
+            return 0.0;
+        }
+        const Real d = p[0] - s;
+        const Real w2 = -0.2 * kPi * kPi * std::cos(kPi * p[1]);
+        const Real q2 = -0.5 * q0 * kPi * kPi * std::cos(kPi * p[1]);
+        return -kA * (2.0 * beta + w2 - q2 * d / kA);
+    }
+    [[nodiscard]] Real fB(const Point& p) const
+    {
+        if (!curved) {
+            return 0.0;
+        }
+        const Real d = p[0] - s;
+        const Real w2 = -0.2 * kPi * kPi * std::cos(kPi * p[1]);
+        const Real q2 = -0.5 * q0 * kPi * kPi * std::cos(kPi * p[1]);
+        return -kB * (2.0 * gamma + w2 - r * q2 - q2 * d / kB);
+    }
+};
+
+// ---------------------------------------------------------------------------
+// The formulation: everything an author writes for problem 11.
+// ---------------------------------------------------------------------------
+struct ConjugateHeatInstall {
+    FieldId TA{INVALID_FIELD_ID};
+    FieldId TB{INVALID_FIELD_ID};
+    Quantity heat_A_to_B;
+};
+
+ConjugateHeatInstall defineConjugateHeat(FESystem& system, const std::shared_ptr<const spaces::FunctionSpace>& V,
+                                         const SlabData& d, const FormExpr& fA, const FormExpr& fB,
+                                         const FormExpr& TA_wall, const FormExpr& TB_wall)
+{
+    using namespace forms;
+    FieldBinding fields(system, "ConjugateHeat");
+    const auto A = fields.unknown("T_A", V);
+    const auto B = fields.unknown("T_B", V);
+    const auto OA = VolumeDomain::cells(kSlabA);
+    const auto OB = VolumeDomain::cells(kSlabB);
+    const auto G = interfaceBetween(system, OA, OB, kGamma);
+    const auto kA = FormExpr::constant(d.kA);
+    const auto kB = FormExpr::constant(d.kB);
+    const auto r = FormExpr::constant(d.r);
+    const auto jumpT = G.trace(A.state, OA) - G.trace(B.state, OB);
+    const auto jumpV = G.trace(A.test, OA) - G.trace(B.test, OB);
+
+    auto R = (kA * inner(grad(A.state), grad(A.test)) - fA * A.test).dx(OA) +
+             (kB * inner(grad(B.state), grad(B.test)) - fB * B.test).dx(OB) + (jumpT * jumpV / r).dI(G.domain());
+    BoundaryConditionManager wallA;
+    wallA.add(std::make_unique<bc::Dirichlet>(1, TA_wall));
+    BoundaryConditionManager wallB;
+    wallB.add(std::make_unique<bc::Dirichlet>(2, TB_wall));
+    constraints::ConstraintPlan plan(system);
+    plan.essentials(wallA, R, A.state, A.test, A.id);
+    plan.essentials(wallB, R, B.state, B.test, B.id);
+    plan.activeOn({A.id}, OA).activeOn({B.id}, OB);
+    plan.commit();
+    FormulationBuilder F(system, "equations", {});
+    F.symbolicTangent();
+    ConjugateHeatInstall out{A.id, B.id, F.quantity("heat_A_to_B", FunctionalKind::Integral, (jumpT / r).dI(G.domain()))};
+    F.record(out.heat_A_to_B);
+    (void)F.residual(R);
+    // The heat crossing Gamma through the rows of T_A (a measurement): the
+    // measured-form evaluator takes dI on generated interfaces only.
+    FormInstallOptions measurement;
+    measurement.contributes_to_problem_analysis = false;
+    FormulationBuilder exchange(system, "exchange", measurement);
+    (void)exchange.residual((jumpT * G.trace(A.test, OA) / r).dI(G.domain()));
+    return out;
+}
+// ---------------------------------------------------------------------------
+
+struct ConjugateHeatRun {
+    Real errA{0.0};
+    Real errB{0.0};
+    Real heat{0.0};
+    Real scale{0.0};
+};
+
+ConjugateHeatRun runConjugateHeat(Cell cell, int n, bool curved)
+{
+    SlabData d;
+    d.curved = curved;
+    BoxOptions options;
+    options.region = [d](const Point& c) { return c[0] < d.s ? kSlabA : kSlabB; };
+    options.interface_faces = [d](const Point& c) { return std::abs(c[0] - d.s) < 1e-9; };
+    FESystem system(boxMesh(cell, n, boxSides(), options));
+    system.setInterfaceMeshFromFaceSet(kGamma, "gamma");
+    const auto V = std::make_shared<spaces::H1Space>(elementType(cell), 1);
+    const auto exactA = scalarCoefficient("T_A_exact", [d](const Point& p) { return d.TA(p); });
+    const auto exactB = scalarCoefficient("T_B_exact", [d](const Point& p) { return d.TB(p); });
+    const auto install = defineConjugateHeat(system, V, d, scalarCoefficient("f_A", [d](const Point& p) { return d.fA(p); }),
+                                             scalarCoefficient("f_B", [d](const Point& p) { return d.fB(p); }), exactA,
+                                             exactB);
+    system.setup();
+    const auto solved = solveSteady(system, "equations");
+    EXPECT_TRUE(solved.converged) << cellName(cell) << " n=" << n;
+    const auto TA_h = FormExpr::discreteField(install.TA, *V, "T_A");
+    const auto TB_h = FormExpr::discreteField(install.TB, *V, "T_B");
+    ConjugateHeatRun run;
+    run.errA = norm(system, ((TA_h - exactA) * (TA_h - exactA)).dx(forms::VolumeDomain::cells(kSlabA)), solved.u);
+    run.errB = norm(system, ((TB_h - exactB) * (TB_h - exactB)).dx(forms::VolumeDomain::cells(kSlabB)), solved.u);
+    const auto rows = assembleVector(system, "exchange", solved.u);
+    const auto offset = system.fieldDofOffset(install.TA);
+    for (GlobalIndex i = offset; i < offset + system.fieldDofHandler(install.TA).getNumDofs(); ++i) {
+        if (!system.constraints().isConstrained(i)) {
+            run.heat += rows[static_cast<std::size_t>(i)];
+        }
+    }
+    run.scale = d.L;
+    return run;
+}
+
+TEST(GeneralityBenchmark, P11_ConjugateHeatExactPatchOnEveryFamily)
+{
+    const SlabData d;
+    for (const auto cell : {Cell::Tri3, Cell::Quad4, Cell::Tet4, Cell::Hex8, Cell::Wedge6, Cell::Pyr5}) {
+        const auto run = runConjugateHeat(cell, 2, /*curved=*/false);
+        EXPECT_LT(run.errA, 1e-12) << cellName(cell);
+        EXPECT_LT(run.errB, 1e-12) << cellName(cell);
+        // The same heat q crosses the unit interface.
+        EXPECT_NEAR(run.heat, d.q0, 1e-12) << cellName(cell);
+    }
+}
+
+TEST(GeneralityBenchmark, DISABLED_P11_TheDeclaredExchangeQuantityIsMeasured)
+{
+    // Missing: the measured-form evaluator takes dI only on a generated
+    // (cut) interface and one side at a time; the quantity
+    // F.quantity("heat_A_to_B", ..., dI(Gamma)) of a fitted interface (an
+    // InterfaceMesh from a face set) is refused ("a cut measure ... needs a
+    // cut integration context"), and the same two-sided integrand on a
+    // generated interface throws ("requested plus-side context in non-DG
+    // evaluation"), so an exchange cannot be recorded through its own
+    // quantity (problem 13 measures it through the rows instead).
+    const SlabData d;
+    BoxOptions options;
+    options.region = [d](const Point& c) { return c[0] < d.s ? kSlabA : kSlabB; };
+    options.interface_faces = [d](const Point& c) { return std::abs(c[0] - d.s) < 1e-9; };
+    FESystem system(boxMesh(Cell::Quad4, 2, boxSides(), options));
+    system.setInterfaceMeshFromFaceSet(kGamma, "gamma");
+    const auto V = std::make_shared<spaces::H1Space>(ElementType::Quad4, 1);
+    const auto exactA = scalarCoefficient("T_A_exact", [d](const Point& p) { return d.TA(p); });
+    const auto exactB = scalarCoefficient("T_B_exact", [d](const Point& p) { return d.TB(p); });
+    const auto install = defineConjugateHeat(system, V, d, FormExpr::constant(0.0), FormExpr::constant(0.0), exactA, exactB);
+    system.setup();
+    const auto solved = solveSteady(system, "equations");
+    EXPECT_NEAR(integrate(system, install.heat_A_to_B.form(), solved.u), d.q0, 1e-12);
+}
+
+TEST(GeneralityBenchmark, P11_ConjugateHeatCurvedProfilesConverge)
+{
+    for (const auto& [cell, n0] : std::vector<std::pair<Cell, int>>{{Cell::Tri3, 4}, {Cell::Quad4, 4}, {Cell::Tet4, 2}, {Cell::Hex8, 2}}) {
+        std::vector<Real> ea, eb;
+        for (int level = 0; level < 3; ++level) {
+            const auto run = runConjugateHeat(cell, n0 << level, /*curved=*/true);
+            ea.push_back(run.errA);
+            eb.push_back(run.errB);
+        }
+        const std::string label = cellName(cell);
+        RecordProperty("p11_" + label + "_A_rates", join(rates(ea)));
+        RecordProperty("p11_" + label + "_B_rates", join(rates(eb)));
+        EXPECT_GT(rates(ea).back(), 1.75) << label << " " << join(ea);
+        EXPECT_GT(rates(eb).back(), 1.75) << label << " " << join(eb);
+    }
+}
+
 } // namespace
 } // namespace svmp::FE::systems::generality
