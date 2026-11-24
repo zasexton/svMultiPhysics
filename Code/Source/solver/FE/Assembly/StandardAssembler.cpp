@@ -1975,12 +1975,18 @@ AssemblyContext::CellDiameterNodes cellDiameterNodePair(const Nodes& nodes, std:
 using MappingCurvature = std::array<AssemblyContext::Matrix3x3, 3>;
 
 /// d2 xi / dx2 at the context's quadrature points of @p cell_id: the mapping
-/// curvature that exact physical Hessians add to J^-T (reference Hessian) J^-1,
-/// as the basis Hessians carry it (RequiredData::ExactFieldHessians).
+/// curvature that physical Hessians add to J^-T (reference Hessian) J^-1, as
+/// the basis Hessians carry it.  Empty on an affine cell, where it vanishes.
 std::vector<MappingCurvature> fieldHessianMappingCurvature(const IMeshAccess& mesh,
                                                            GlobalIndex cell_id,
                                                            const AssemblyContext& context)
 {
+    const auto cell_type = mesh.getCellType(cell_id);
+    if (mesh.getCellGeometryOrder(cell_id) <= 1 &&
+        (cell_type == ElementType::Line2 || cell_type == ElementType::Triangle3 ||
+         cell_type == ElementType::Tetra4)) {
+        return {};
+    }
     std::vector<std::array<Real, 3>> coordinates;
     mesh.getCellCoordinates(cell_id, coordinates);
     std::vector<math::Vector<Real, 3>> nodes(coordinates.size());
@@ -1992,6 +1998,9 @@ std::vector<MappingCurvature> fieldHessianMappingCurvature(const IMeshAccess& me
     request.geometry_order = mesh.getCellGeometryOrder(cell_id);
     request.use_affine = request.geometry_order <= 1;
     const auto mapping = geometry::MappingFactory::create(request, nodes);
+    if (mapping->isAffine()) {
+        return {};
+    }
     const int dim = context.dimension();
     const auto points = context.quadraturePoints();
     const auto inverse_jacobians = context.inverseJacobians();
@@ -18969,6 +18978,15 @@ void StandardAssembler::populateFieldSolutionData(
 
     const ElementType cell_type = mesh.getCellType(cell_id);
     const int dim = mesh.dimension();
+    // The mapping curvature of this cell, computed once for the fields that read Hessians.
+    std::optional<std::vector<MappingCurvature>> cell_mapping_curvature;
+    const std::vector<MappingCurvature> no_mapping_curvature;
+    const auto cellMappingCurvature = [&]() -> const std::vector<MappingCurvature>& {
+        if (!cell_mapping_curvature) {
+            cell_mapping_curvature = fieldHessianMappingCurvature(mesh, cell_id, context);
+        }
+        return *cell_mapping_curvature;
+    };
     const auto qpts = context.quadraturePoints();
 
     auto& values_at_pt = scratch_scalar_values_at_pt_;
@@ -19064,12 +19082,11 @@ void StandardAssembler::populateFieldSolutionData(
         const bool want_hessians = hasFlag(req.required, RequiredData::SolutionHessians);
         const bool want_laplacians = hasFlag(req.required, RequiredData::SolutionLaplacians);
         const bool need_hessians = want_hessians || want_laplacians;
-        // Complete shape derivatives: Hessians with the mapping curvature, as
-        // the active trial's (only for the field that requests them).
-        const bool exact_hessians = need_hessians && hasFlag(req.required, RequiredData::ExactFieldHessians);
+        // Every field's Hessian carries the mapping curvature, as the basis
+        // Hessians (and so the active field's) do; it vanishes on affine cells.
+        const auto& mapping_curvature = need_hessians ? cellMappingCurvature() : no_mapping_curvature;
+        const bool exact_hessians = !mapping_curvature.empty();
         const bool need_gradients = want_gradients || exact_hessians;
-        const auto mapping_curvature = exact_hessians ? fieldHessianMappingCurvature(mesh, cell_id, context)
-                                                      : std::vector<MappingCurvature>{};
 
 	        const auto cell_dofs = getCellDofsFromTable(*access->dof_table, cell_id);
 	        FE_THROW_IF(cell_dofs.size() != static_cast<std::size_t>(n_dofs), FEException,
@@ -20013,6 +20030,15 @@ void StandardAssembler::populateFieldSolutionData(
 
     const ElementType cell_type = mesh.getCellType(cell_id);
     const int dim = mesh.dimension();
+    // The mapping curvature of this cell, computed once for the fields that read Hessians.
+    std::optional<std::vector<MappingCurvature>> cell_mapping_curvature;
+    const std::vector<MappingCurvature> no_mapping_curvature;
+    const auto cellMappingCurvature = [&]() -> const std::vector<MappingCurvature>& {
+        if (!cell_mapping_curvature) {
+            cell_mapping_curvature = fieldHessianMappingCurvature(mesh, cell_id, context);
+        }
+        return *cell_mapping_curvature;
+    };
     const auto qpts = context.quadraturePoints();
 
     auto& values_at_pt = ws.scalar_values_at_pt;
@@ -20148,12 +20174,11 @@ void StandardAssembler::populateFieldSolutionData(
         const bool want_hessians = hasFlag(req.required, RequiredData::SolutionHessians);
         const bool want_laplacians = hasFlag(req.required, RequiredData::SolutionLaplacians);
         const bool need_hessians = want_hessians || want_laplacians;
-        // Complete shape derivatives: Hessians with the mapping curvature, as
-        // the active trial's (only for the field that requests them).
-        const bool exact_hessians = need_hessians && hasFlag(req.required, RequiredData::ExactFieldHessians);
+        // Every field's Hessian carries the mapping curvature, as the basis
+        // Hessians (and so the active field's) do; it vanishes on affine cells.
+        const auto& mapping_curvature = need_hessians ? cellMappingCurvature() : no_mapping_curvature;
+        const bool exact_hessians = !mapping_curvature.empty();
         const bool need_gradients = want_gradients || exact_hessians;
-        const auto mapping_curvature = exact_hessians ? fieldHessianMappingCurvature(mesh, cell_id, context)
-                                                      : std::vector<MappingCurvature>{};
 
 	        const auto cell_dofs = getCellDofsFromTable(*access->dof_table, cell_id);
 	        FE_THROW_IF(cell_dofs.size() != static_cast<std::size_t>(n_dofs), FEException,
@@ -21420,12 +21445,8 @@ void StandardAssembler::populateFieldSolutionDataFast(
     CellFieldEvaluationCache* field_eval_cache)
 {
     // Use cached recipes to skip per-field lookups.
-    // Falls back to the original path if recipes aren't valid, and for the
-    // exact (curvature) Hessians of complete shape derivatives.
-    if (!cached_field_recipes_valid_ ||
-        std::any_of(requirements.begin(), requirements.end(), [](const FieldRequirement& req) {
-            return hasFlag(req.required, RequiredData::ExactFieldHessians);
-        })) {
+    // Falls back to the original path if recipes aren't valid.
+    if (!cached_field_recipes_valid_) {
         populateFieldSolutionData(context, mesh, cell_id, requirements);
         return;
     }

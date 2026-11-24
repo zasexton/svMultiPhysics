@@ -2454,32 +2454,6 @@ SpatialJet<Scalar> evalSpatialJet(const FormExprNode& node,
             }
             return out;
         }
-        case FormExprType::GeometryTrialGradientVariation: {
-            // grad of the mesh trial function, constant in space within a
-            // cell: kernels evaluate the spatial derivatives of fields as
-            // J^-T (reference derivatives) J^-1, whose variation at a fixed
-            // reference point has no second derivative of the trial function.
-            out.value.kind = EvalValue<Scalar>::Kind::Matrix;
-            out.value.resizeMatrix(static_cast<std::size_t>(dim), static_cast<std::size_t>(dim));
-            if (env.trial_active == side) {
-                const auto g = trialMeshVelocityJacobianSeed(ctx, geometryVariationTrialIndex(env), q);
-                for (int r = 0; r < dim; ++r) {
-                    for (int c = 0; c < dim; ++c) {
-                        out.value.matrixAt(static_cast<std::size_t>(r), static_cast<std::size_t>(c)) =
-                            makeScalarConstant<Scalar>(g[static_cast<std::size_t>(r)][static_cast<std::size_t>(c)], env);
-                    }
-                }
-            }
-            if (out.has_grad) {
-                out.grad = zeroTensor3<Scalar>(static_cast<std::size_t>(dim), static_cast<std::size_t>(dim),
-                                               static_cast<std::size_t>(dim), env);
-            }
-            if (out.has_hess) {
-                throw FEException("Forms: second spatial derivatives of the mesh-trial gradient are not available",
-                                  __FILE__, __LINE__, __func__, FEStatus::NotImplemented);
-            }
-            return out;
-        }
         case FormExprType::CellDiameterVariation:
         case FormExprType::CellVolumeVariation:
         case FormExprType::FacetAreaVariation: {
@@ -5451,7 +5425,7 @@ EvalValue<Real> evalConstitutiveOutputReal(const FormExprNode& call_node,
 
 using EvalRealDispatchFn = EvalValue<Real> (*)(const FormExprNode&, const EvalEnvReal&, Side, LocalIndex);
 constexpr std::size_t kFormExprDispatchSize =
-    static_cast<std::size_t>(FormExprType::GeometryTrialGradientVariation) + 1u;
+    static_cast<std::size_t>(FormExprType::FacetAreaVariation) + 1u;
 
 EvalValue<Real> evalRealSwitchImpl(const FormExprNode& node,
                                    const EvalEnvReal& env,
@@ -5741,25 +5715,6 @@ EvalValue<Real> evalRealDispatchCurrentMeasureVariation(const FormExprNode&, con
     return EvalValue<Real>{EvalValue<Real>::Kind::Scalar, value};
 }
 
-EvalValue<Real> evalRealDispatchGeometryTrialGradientVariation(const FormExprNode&, const EvalEnvReal& env, Side side, LocalIndex q)
-{
-    const auto& ctx = ctxForSide(env.minus, env.plus, side);
-    const int dim = ctx.dimension();
-    EvalValue<Real> out;
-    out.kind = EvalValue<Real>::Kind::Matrix;
-    out.resizeMatrix(static_cast<std::size_t>(dim), static_cast<std::size_t>(dim));
-    if (env.trial_active == side) {
-        const auto g = trialMeshVelocityJacobianSeed(ctx, env.j, q);
-        for (int r = 0; r < dim; ++r) {
-            for (int c = 0; c < dim; ++c) {
-                out.matrixAt(static_cast<std::size_t>(r), static_cast<std::size_t>(c)) =
-                    g[static_cast<std::size_t>(r)][static_cast<std::size_t>(c)];
-            }
-        }
-    }
-    return out;
-}
-
 EvalValue<Real> evalRealDispatchEntityMeasureVariation(const FormExprNode& node, const EvalEnvReal& env, Side side, LocalIndex)
 {
     const auto& ctx = ctxForSide(env.minus, env.plus, side);
@@ -5895,8 +5850,6 @@ const std::array<EvalRealDispatchFn, kFormExprDispatchSize>& evalRealDispatchTab
         table[static_cast<std::size_t>(FormExprType::CellDiameterVariation)] = &evalRealDispatchEntityMeasureVariation;
         table[static_cast<std::size_t>(FormExprType::CellVolumeVariation)] = &evalRealDispatchEntityMeasureVariation;
         table[static_cast<std::size_t>(FormExprType::FacetAreaVariation)] = &evalRealDispatchEntityMeasureVariation;
-        table[static_cast<std::size_t>(FormExprType::GeometryTrialGradientVariation)] =
-            &evalRealDispatchGeometryTrialGradientVariation;
         table[static_cast<std::size_t>(FormExprType::Jacobian)] = &evalRealDispatchJacobian;
         table[static_cast<std::size_t>(FormExprType::JacobianInverse)] = &evalRealDispatchJacobianInverse;
         table[static_cast<std::size_t>(FormExprType::JacobianDeterminant)] = &evalRealDispatchJacobianDeterminant;
@@ -5996,8 +5949,6 @@ EvalValue<Real> evalRealSwitchImpl(const FormExprNode& node,
         case FormExprType::CellVolumeVariation:
         case FormExprType::FacetAreaVariation:
             return evalRealDispatchEntityMeasureVariation(node, env, side, q);
-        case FormExprType::GeometryTrialGradientVariation:
-            return evalRealDispatchGeometryTrialGradientVariation(node, env, side, q);
         case FormExprType::Identity: {
             const int idim = node.identityDim().value_or(dim);
             EvalValue<Real> out;
@@ -16275,7 +16226,6 @@ using NodeHashMemo = std::unordered_map<const FormExprNode*, std::uint64_t>;
     hashPod64(h, static_cast<std::uint16_t>(geom.mesh_motion_field));
     if (geom.shape_derivative == ShapeDerivative::Complete) {
         hashTag64(h, 0x47ULL);
-        hashPod64(h, static_cast<std::int32_t>(geom.exact_hessian_field));
     }
     hashPod64(h, static_cast<std::uint32_t>(geom.level_set_cut_domains.size()));
     for (const auto& domain : geom.level_set_cut_domains) {

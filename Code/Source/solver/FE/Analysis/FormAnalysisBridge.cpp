@@ -211,8 +211,6 @@ struct TerminalWalkContext {
             return FormTerminalKind::CellVolumeVariation;
         case FT::FacetAreaVariation:
             return FormTerminalKind::FacetAreaVariation;
-        case FT::GeometryTrialGradientVariation:
-            return FormTerminalKind::GeometryTrialGradientVariation;
         default:
             return std::nullopt;
     }
@@ -576,7 +574,6 @@ void appendFeatureGates(FormContributionAnalysisMetadata& metadata)
         case FormTerminalKind::CellDiameterVariation:
         case FormTerminalKind::CellVolumeVariation:
         case FormTerminalKind::FacetAreaVariation:
-        case FormTerminalKind::GeometryTrialGradientVariation:
             return DependencyKind::GeometryMap;
         default:
             return DependencyKind::FieldUnknown;
@@ -830,8 +827,6 @@ const char* toString(FormTerminalKind kind) noexcept
             return "CellVolumeVariation";
         case FormTerminalKind::FacetAreaVariation:
             return "FacetAreaVariation";
-        case FormTerminalKind::GeometryTrialGradientVariation:
-            return "GeometryTrialGradientVariation";
     }
     return "Unknown";
 }

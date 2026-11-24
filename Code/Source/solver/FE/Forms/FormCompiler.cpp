@@ -282,7 +282,6 @@ bool isGeometrySensitivityTerminal(FormExprType type) noexcept
         case FormExprType::CellDiameterVariation:
         case FormExprType::CellVolumeVariation:
         case FormExprType::FacetAreaVariation:
-        case FormExprType::GeometryTrialGradientVariation:
         case FormExprType::Pullback:
         case FormExprType::Pushforward:
             return true;
@@ -701,10 +700,6 @@ assembly::RequiredData analyzeRequiredData(const FormExprNode& node, FormKind ki
             case FormExprType::CellVolume:
             case FormExprType::FacetArea:
                 required |= RequiredData::EntityMeasures;
-                break;
-            case FormExprType::GeometryTrialGradientVariation:
-                required |= RequiredData::BasisValues;
-                required |= RequiredData::PhysicalGradients;
                 break;
             case FormExprType::CellDiameterVariation:
             case FormExprType::CellVolumeVariation:
@@ -1461,19 +1456,6 @@ FormIR FormCompiler::compileImpl(const FormExpr& form, FormKind kind)
             t.required_data |= assembly::RequiredData::FaceOrientations;
         }
         required |= t.required_data;
-    }
-
-    // Complete shape derivatives: the row's active field has its Hessians with
-    // the mapping curvature, as the residual reads them from the trial basis.
-    if (impl_->options.geometry_sensitivity.mode == GeometrySensitivityMode::MeshMotionUnknowns &&
-        impl_->options.geometry_sensitivity.shape_derivative == ShapeDerivative::Complete &&
-        impl_->options.geometry_sensitivity.exact_hessian_field != INVALID_FIELD_ID) {
-        const auto it = field_required.find(impl_->options.geometry_sensitivity.exact_hessian_field);
-        if (it != field_required.end() &&
-            (assembly::hasFlag(it->second, assembly::RequiredData::SolutionHessians) ||
-             assembly::hasFlag(it->second, assembly::RequiredData::SolutionLaplacians))) {
-            it->second |= assembly::RequiredData::ExactFieldHessians;
-        }
     }
 
     std::vector<assembly::FieldRequirement> field_requirements;

@@ -1350,7 +1350,6 @@ bool containsGeometrySensitivityTerminal(const forms::FormExprNode& node)
         case forms::FormExprType::CellDiameterVariation:
         case forms::FormExprType::CellVolumeVariation:
         case forms::FormExprType::FacetAreaVariation:
-        case forms::FormExprType::GeometryTrialGradientVariation:
             return true;
         default:
             break;
@@ -2242,7 +2241,6 @@ KernelPtr installResidualForm(
     block_options.compiler_options =
         compilerOptionsForTrial(install_options.compiler_options, trial_field);
     if (completeShapeDerivative(block_options.compiler_options.geometry_sensitivity)) {
-        block_options.compiler_options.geometry_sensitivity.exact_hessian_field = trial_field;
         block_options.compiler_options.jit.enable = false;
     }
     const auto lowered = ensureGeometrySensitivityTrialDependency(residual_form,
@@ -2421,7 +2419,6 @@ std::vector<std::vector<KernelPtr>> installResidualBlocks(
                                         trial_fields[j]);
             refuseUnsupportedCompleteShapeDerivative("installResidualBlocks", system, block_options.compiler_options);
             if (completeShapeDerivative(block_options.compiler_options.geometry_sensitivity)) {
-                block_options.compiler_options.geometry_sensitivity.exact_hessian_field = trial_fields[j];
                 block_options.compiler_options.jit.enable = false;
             }
             const auto lowered = ensureGeometrySensitivityTrialDependency(
@@ -2655,8 +2652,6 @@ CoupledResidualKernels installCoupledResidual(
             block_options.compiler_options =
                 compilerOptionsForTrial(install_options.compiler_options, trial);
             if (completeShapeDerivative(block_options.compiler_options.geometry_sensitivity)) {
-                // The row's residual reads the active field's Hessians from its trial basis.
-                block_options.compiler_options.geometry_sensitivity.exact_hessian_field = active_trial;
                 // The mesh blocks of a complete shape derivative are interpreted.
                 block_options.compiler_options.jit.enable = false;
                 if (monolithic_cell_feasible) {
@@ -3397,8 +3392,6 @@ CoupledResidualKernels installCoupledResidualMixed(
             block_options.compiler_options =
                 compilerOptionsForTrial(install_options.compiler_options, trial);
             if (completeShapeDerivative(block_options.compiler_options.geometry_sensitivity)) {
-                // The row's residual reads the active field's Hessians from its trial basis.
-                block_options.compiler_options.geometry_sensitivity.exact_hessian_field = active_trial;
                 // The mesh blocks of a complete shape derivative are interpreted.
                 block_options.compiler_options.jit.enable = false;
                 if (monolithic_cell_feasible) {

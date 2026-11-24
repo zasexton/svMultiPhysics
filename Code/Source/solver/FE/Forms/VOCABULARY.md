@@ -269,7 +269,7 @@ Status: `implemented/public`, unless noted.
 | `h()`, `vol()`, `area()`, `domainId()` | Cell diameter, cell volume, facet area, cell-domain marker |
 | `hNormal()` | Facet-normal cell size `2 * vol() / area()` |
 | `FormExpr::geometryTrialVectorVariation()`, `meshVelocityVariation()`, `currentMeasureVariation()`, `currentNormalVariation()`, `surfaceJacobianVariation()`, `geometryTrialJacobianVariation()` | `implemented/internal`; produced by symbolic geometry differentiation |
-| `FormExpr::cellDiameterVariation()`, `cellVolumeVariation()`, `facetAreaVariation()`, `geometryTrialGradientVariation()` | `implemented/internal`; produced by the complete shape derivative: the derivatives of `h()`, `vol()`, `area()` in the mesh-displacement trial function, and its gradient held constant in a cell (inside a spatial derivative); interpreted only (no JIT) |
+| `FormExpr::cellDiameterVariation()`, `cellVolumeVariation()`, `facetAreaVariation()` | `implemented/internal`; produced by the complete shape derivative: the derivatives of `h()`, `vol()`, `area()` in the mesh-displacement trial function; interpreted only (no JIT) |
 
 The moving-domain terminals are physics-neutral. They expose assembly-provided
 mesh/domain motion and frame-explicit geometry; they do not encode a specific
@@ -309,7 +309,7 @@ function, G = grad(dd)):
 | `meshVelocity()` | `meshVelocityVariation()` (a0 dd) |
 | `grad(f)` | grad(df) - grad(f) G (vector f; G^T grad(f) for scalar f) |
 | `div(f)`, `div(T)` | div(df) - tr(grad(f) G); div(dT) - sum_j grad(T e_j) (G e_j) |
-| `hessian(f)`, `curl(f)` | H(df) - G^T H - H G (kernels' field Hessians omit the mapping curvature); curl through grad |
+| `hessian(f)`, `curl(f)` | grad(grad(df) - G^T grad(f)) - H G (field Hessians carry the mapping curvature, so a derivative of G is the Hessian of dd); curl through grad |
 | `J()`, `Jinv()`, `detJ()` and the current-frame Jacobians | G J; -Jinv G; detJ div(dd) |
 | `normal()`, `currentNormal()` | -(I - n n) G^T n |
 | cell measure; facet measure, `currentMeasure()` | div(dd); div(dd) - n.(G n) (minus side on interior facets and fitted interfaces) |
@@ -434,7 +434,7 @@ Status: `implemented/public`.
 | `symgrad(u)` | Symmetric gradient of a vector field; exactly the expression tree `sym(grad(u))` |
 | `advect(a, u)` | Vector advection `(a . grad) u`, direction first: exactly `grad(u) * a`, the matrix `grad(u)` of a vector field u (rows its components) times the vector a, preserving all state dependencies in both operands. For a scalar field, whose gradient is a vector, the advection is `inner(grad(u), a)` |
 | `div(u)`, `curl(u)` | Vector differential operators |
-| `hessian(u)` | Spatial Hessian support for supported scalar/composite expressions and mappings |
+| `hessian(u)` | Spatial Hessian support for supported scalar/composite expressions and mappings; the Hessian of every field (the active unknown, other fields, earlier time levels) is the physical one, with the mapping curvature on non-affine and curved cells, in interpreted and compiled kernels |
 | `laplacian(u)` | `trace(hessian(u))` helper |
 | `dt(u, order)` | Symbolic time derivative; the stencil comes from the time integrator of the transient system. Its operand is a field (`StateField`, `TrialFunction` or `DiscreteField`); `dt()` of anything else is refused where it is built. The schemes that weight terms (the theta method and the Crank-Nicolson starter of BDF2: theta for the terms without a time derivative, 1 - theta at the old state) and the consistent startup of first-order generalized alpha (the rate solve with the rate terms only) act on the integral terms as written: the compiler splits an integrand at its top-level sums only, and a term that holds `dt()` anywhere is a rate term as a whole. `((dt(y) - g) * v).dx()` is one rate term, so `g` takes the rate weight and leaves the startup's rate-free residual, while `(dt(y) * v).dx() - (g * v).dx()` (or `(dt(y) * v - g * v).dx()`) is a rate term and a rate-free term, as meant. Write rate terms as separate integrals (decision D71). `grad(dt(u))` and `div(dt(u))` of a vector field read the gradient history of the stencil, also for a field of another row, with the inverse Jacobian of the current derivatives, so a field equal at both steps has a rate of exactly zero; compiled, `div(dt(u))` of an H1 vector field is `trace(grad(dt(u)))`, and `curl(dt(u))` and `div(dt(u))` of other fields run interpreted (`test_JacobianVerification.cpp`, `test_VectorBasisConstraints.cpp`) |
 | `surfaceGradient(f, n)` | Projected surface gradient helper |

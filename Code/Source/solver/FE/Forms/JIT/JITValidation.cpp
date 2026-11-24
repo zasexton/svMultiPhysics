@@ -1137,12 +1137,6 @@ ValidationResult canCompileImpl(const FormExpr& integrand,
                     n,
                     "JIT: shape derivatives of h(), vol() and area() read per-node entity-measure data; use interpreter fallback");
                 return;
-            case FormExprType::GeometryTrialGradientVariation:
-                out.ok = false;
-                out.first_issue = issue(
-                    n,
-                    "JIT: the cellwise mesh-trial gradient of a nested shape derivative is interpreted; use interpreter fallback");
-                return;
 
             // Measure wrappers are handled by FormCompiler -> FormIR decomposition, not by kernel lowering.
             case FormExprType::CellIntegral:

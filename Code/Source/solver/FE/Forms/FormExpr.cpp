@@ -2529,11 +2529,6 @@ FormExpr FormExpr::facetAreaVariation()
     return FormExpr(std::make_shared<SimpleTerminalNode>(FormExprType::FacetAreaVariation, "darea"));
 }
 
-FormExpr FormExpr::geometryTrialGradientVariation()
-{
-    return FormExpr(std::make_shared<SimpleTerminalNode>(FormExprType::GeometryTrialGradientVariation, "gradX_mesh"));
-}
-
 FormExpr FormExpr::time()
 {
     return FormExpr(std::make_shared<TimeNode>());

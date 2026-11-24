@@ -461,7 +461,6 @@ struct DiffPair {
         case FormExprType::SurfaceJacobian:
         case FormExprType::GeometryTrialJacobianVariation:
         case FormExprType::SurfaceJacobianVariation:
-        case FormExprType::GeometryTrialGradientVariation:
         case FormExprType::AsTensor:
         case FormExprType::Transpose:
         case FormExprType::Inverse:
@@ -569,37 +568,6 @@ struct DiffPair {
 /// subtree: Exact with the mapping curvature (basis functions, and the row's
 /// active field, whose Hessians the residual reads from the trial basis),
 /// Approximate without it (every other field: J^-T (reference Hessian) J^-1).
-enum class HessianSemantics : std::uint8_t { None, Exact, Approximate, Mixed };
-
-[[nodiscard]] HessianSemantics combine(HessianSemantics a, HessianSemantics b) noexcept
-{
-    if (a == HessianSemantics::None) return b;
-    if (b == HessianSemantics::None || a == b) return a;
-    return HessianSemantics::Mixed;
-}
-
-[[nodiscard]] HessianSemantics hessianSemantics(const FormExprNode& node, FieldId exact_field)
-{
-    switch (node.type()) {
-        case FormExprType::TestFunction:
-        case FormExprType::TrialFunction:
-            return HessianSemantics::Exact;
-        case FormExprType::StateField:
-        case FormExprType::DiscreteField:
-            return node.fieldId().has_value() && *node.fieldId() == exact_field ? HessianSemantics::Exact
-                                                                                : HessianSemantics::Approximate;
-        case FormExprType::PreviousSolutionRef:
-            return HessianSemantics::Approximate;
-        default:
-            break;
-    }
-    HessianSemantics out = HessianSemantics::None;
-    for (const auto& child : node.childrenShared()) {
-        if (child) out = combine(out, hessianSemantics(*child, exact_field));
-    }
-    return out;
-}
-
 [[noreturn]] void refuseCompleteShapeDerivative(const FormExprNode& node, const std::string& why)
 {
     throw std::invalid_argument(
@@ -1303,12 +1271,10 @@ FormExpr differentiateResidualImpl(const FormExpr& residual_form,
     const bool complete_shape = differentiatesCompleteShape(cfg);
     const FormExpr shape_dd = complete_shape ? completeShapeTrialFunction(residual_form, cfg) : FormExpr{};
     IntegralDomain shape_domain = cfg.integrand_domain.value_or(IntegralDomain::Cell);
-    // Inside the argument of a spatial derivative the chain factor G is the
-    // cellwise mesh-trial gradient: kernels evaluate field derivatives as
-    // J^-T (reference derivatives) J^-1, whose variation at a fixed
-    // reference point has no second derivative of the trial function.
-    int shape_depth = 0;
-    std::array<std::unordered_map<const FormExprNode*, DiffPair>, 10> shape_memo;
+    // The chain factor is G = grad(dd) at every depth: kernels evaluate the
+    // second derivatives of every field with the mapping curvature, so a
+    // spatial derivative of G carries the second derivatives of dd.
+    std::array<std::unordered_map<const FormExprNode*, DiffPair>, 5> shape_memo;
     const auto shapeMeasureVariation = [&](IntegralDomain domain, const FormExprNode& at) -> FormExpr {
         switch (domain) {
             case IntegralDomain::Cell:
@@ -1335,9 +1301,7 @@ FormExpr differentiateResidualImpl(const FormExpr& residual_form,
         if (!node) {
             throw std::invalid_argument("differentiateResidual: encountered null node");
         }
-        auto& active_memo = complete_shape
-            ? shape_memo[2u * static_cast<std::size_t>(shape_domain) + (shape_depth > 0 ? 1u : 0u)]
-            : memo;
+        auto& active_memo = complete_shape ? shape_memo[static_cast<std::size_t>(shape_domain)] : memo;
         if (auto it = active_memo.find(node.get()); it != active_memo.end()) {
             return it->second;
         }
@@ -1358,7 +1322,7 @@ FormExpr differentiateResidualImpl(const FormExpr& residual_form,
         };
 
         if (complete_shape) {
-            const auto G = shape_depth > 0 ? FormExpr::geometryTrialGradientVariation() : shape_dd.grad();
+            const auto G = shape_dd.grad();
             const int dim = shape_dd.node()->spaceSignature()->value_dimension;
             const auto unit = [dim](int j) {
                 std::vector<FormExpr> e;
@@ -1372,24 +1336,6 @@ FormExpr differentiateResidualImpl(const FormExpr& residual_form,
                 shape_domain = saved;
                 return r;
             };
-            // The chain factor of a spatial derivative that is itself inside a
-            // spatial derivative: the trial gradient for exactly evaluated
-            // second derivatives, the cellwise one for the others.
-            const auto chainFactor = [&](const FormExprNode& argument) -> FormExpr {
-                if (shape_depth == 0) {
-                    return shape_dd.grad();
-                }
-                switch (hessianSemantics(argument, cfg.geometry_sensitivity.exact_hessian_field)) {
-                    case HessianSemantics::Approximate:
-                        return FormExpr::geometryTrialGradientVariation();
-                    case HessianSemantics::Mixed:
-                        refuseCompleteShapeDerivative(
-                            *node, "cannot differentiate second derivatives of fields that kernels evaluate "
-                                   "differently (the row's active field with the mapping curvature, others without)");
-                    default:
-                        return shape_dd.grad();
-                }
-            };
             const auto spatialChild = [&](const char* op) -> DiffPair {
                 if (kids.empty() || !kids[0]) {
                     throw std::invalid_argument("differentiateResidual: missing child");
@@ -1399,10 +1345,7 @@ FormExpr differentiateResidualImpl(const FormExpr& residual_form,
                         *node, std::string("cannot differentiate ") + op +
                                    " of a geometric quantity that kernels treat as constant in a cell");
                 }
-                ++shape_depth;
-                const auto r = diff1(0);
-                --shape_depth;
-                return r;
+                return diff1(0);
             };
             bool handled = true;
             switch (node->type()) {
@@ -1491,7 +1434,7 @@ FormExpr differentiateResidualImpl(const FormExpr& residual_form,
                 case FormExprType::Gradient: {
                     const auto a = spatialChild("grad");
                     const int rank = valueRank(*a.primal.node());
-                    const auto Gc = chainFactor(*kids[0]);
+                    const auto& Gc = G;
                     out.primal = a.primal.grad();
                     if (rank == 0) {
                         out.deriv = a.deriv.grad() - Gc.transpose() * out.primal;
@@ -1505,7 +1448,7 @@ FormExpr differentiateResidualImpl(const FormExpr& residual_form,
                 case FormExprType::Divergence: {
                     const auto a = spatialChild("div");
                     const int rank = valueRank(*a.primal.node());
-                    const auto Gc = chainFactor(*kids[0]);
+                    const auto& Gc = G;
                     out.primal = a.primal.div();
                     if (rank == 1) {
                         out.deriv = a.deriv.div() - (a.primal.grad() * Gc).trace();
@@ -1527,20 +1470,9 @@ FormExpr differentiateResidualImpl(const FormExpr& residual_form,
                         refuseCompleteShapeDerivative(*node, "differentiates the Hessian of scalars only");
                     }
                     out.primal = a.primal.hessian();
-                    const auto semantics = hessianSemantics(*kids[0], cfg.geometry_sensitivity.exact_hessian_field);
-                    if (semantics == HessianSemantics::Mixed) {
-                        refuseCompleteShapeDerivative(
-                            *node, "cannot differentiate the Hessian of fields that kernels evaluate differently");
-                    }
-                    if (semantics == HessianSemantics::Approximate) {
-                        // J^-T (reference Hessian) J^-1: dH = H(df) - G^T H - H G.
-                        out.deriv = a.deriv.hessian() - G.transpose() * out.primal - out.primal * G;
-                    } else {
-                        // With the mapping curvature: dH = grad(d grad f) - H G, which also
-                        // carries the second derivatives of dd.
-                        const auto grad_dd = shape_dd.grad();
-                        out.deriv = (a.deriv.grad() - grad_dd.transpose() * a.primal.grad()).grad() - out.primal * G;
-                    }
+                    // Hessians carry the mapping curvature: dH = grad(d grad f) - H G,
+                    // which also carries the second derivatives of dd.
+                    out.deriv = (a.deriv.grad() - G.transpose() * a.primal.grad()).grad() - out.primal * G;
                     break;
                 }
                 case FormExprType::Curl: {
@@ -1550,7 +1482,7 @@ FormExpr differentiateResidualImpl(const FormExpr& residual_form,
                     }
                     out.primal = a.primal.curl();
                     // (curl f)_i = e_ijk d_j f_k; the chain part of d_j f_k is (grad(f) G)_kj.
-                    const auto A = a.primal.grad() * chainFactor(*kids[0]);
+                    const auto A = a.primal.grad() * G;
                     const auto zero = FormExpr::constant(0.0);
                     const auto chain = dim == 3
                         ? FormExpr::asVector({A.component(2, 1) - A.component(1, 2),
@@ -1684,8 +1616,7 @@ FormExpr differentiateResidualImpl(const FormExpr& residual_form,
             case FormExprType::CellDiameterVariation:
             case FormExprType::CellVolumeVariation:
             case FormExprType::FacetAreaVariation:
-            case FormExprType::GeometryTrialGradientVariation:
-            case FormExprType::Time:
+                case FormExprType::Time:
             case FormExprType::TimeStep:
             case FormExprType::EffectiveTimeStep:
             case FormExprType::Identity:

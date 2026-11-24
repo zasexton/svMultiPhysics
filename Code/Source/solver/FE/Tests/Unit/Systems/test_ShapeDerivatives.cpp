@@ -602,19 +602,9 @@ void runProbes(const std::vector<Probe>& probes, const char* label,
             setup.complete = true;
             const auto defect = directionalDefect(setup, probe);
             EXPECT_LT(defect.mesh, 1e-6) << "|J dd| " << defect.jac_norm << ", |FD| " << defect.fd_norm;
+            EXPECT_LT(defect.other, 1e-6);
             const bool simplex = mesh_case.cell == Cell::Triangle || mesh_case.cell == Cell::Tetra;
             const bool affine = simplex && mesh_case.geometry_order == 1;
-            // The u and p columns are today's tangent.  With second derivatives
-            // on a non-affine cell its blocks between two fields are not exact:
-            // the residual reads the Hessian of a field that is not the row's
-            // active one without the mapping curvature, the block of that field
-            // reads its trial basis Hessian with it (and the reverse).
-            if (!probe.second_derivatives || affine) {
-                EXPECT_LT(defect.other, 1e-6);
-            } else if (defect.other > 1e-6) {
-                std::cout << "[ shape derivative ] " << caseName(mesh_case) << ": " << probe.name
-                          << ": today's u, p columns differ from directional differences by " << defect.other << "\n";
-            }
             if (!(probe.second_derivatives && affine && mesh_case.field_order == 1)) {
                 EXPECT_GT(defect.fd_norm, 1e-8);
             }
@@ -928,6 +918,41 @@ TEST(CompleteShapeDerivative, StabilizationMetricAndParametersMatchDirectionalDi
     // Every term on non-affine cells, where the metric varies in the cell and
     // P1 fields have second derivatives.
     runProbes(stabilizationProbes(), "stabilization", {{Cell::Quad, 1, 1, 2}});
+}
+
+// One definition of field Hessians: every field's Hessian, the row's active
+// unknown, the other fields and earlier time levels, carries the mapping
+// curvature, as the basis Hessians do.  On a non-affine or curved cell the
+// blocks between two fields of a term with second derivatives are then exact:
+// the residual reads the other field's Hessian as the block reads its trial
+// basis Hessian.  With the default tangent (no complete shape derivative),
+// the u and p columns of PSPG, SUPG and cross-stress rows match residual
+// differences on a non-simplex P1 cell, a curved Quad9 and a curved Tri6.
+TEST(FieldHessianCurvature, BlocksBetweenFieldsOfSecondDerivativeTermsMatchResidualDifferences)
+{
+    std::vector<Probe> probes;
+    for (const auto& probe : stabilizationProbes()) {
+        if (probe.second_derivatives) {
+            probes.push_back(probe);
+        }
+    }
+    ASSERT_FALSE(probes.empty());
+    for (const auto& mesh_case : std::vector<MeshCase>{{Cell::Quad, 1, 1, 2}, {Cell::Quad, 2, 2, 1},
+                                                       {Cell::Triangle, 2, 2, 1}}) {
+        for (const auto& probe : probes) {
+            SCOPED_TRACE(caseName(mesh_case) + ": " + probe.name);
+            ProbeSetup setup;
+            setup.cell = mesh_case.cell;
+            setup.n = mesh_case.n;
+            setup.geometry_order = mesh_case.geometry_order;
+            setup.u_order = mesh_case.field_order;
+            setup.p_order = mesh_case.field_order;
+            const auto defect = directionalDefect(setup, probe);
+            EXPECT_LT(defect.other, 1e-6);
+            std::cout << "[ field Hessians ] " << caseName(mesh_case) << ": " << probe.name
+                      << ": u, p columns against residual differences " << defect.other << "\n";
+        }
+    }
 }
 
 TEST(CompleteShapeDerivativeSweep, StabilizationOnEveryCellType)

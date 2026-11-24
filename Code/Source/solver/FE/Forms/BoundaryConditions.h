@@ -177,7 +177,6 @@ template <class BC>
     case FormExprType::CellDiameterVariation:
     case FormExprType::CellVolumeVariation:
     case FormExprType::FacetAreaVariation:
-    case FormExprType::GeometryTrialGradientVariation:
     case FormExprType::Constitutive:
     case FormExprType::ConstitutiveOutput:
     case FormExprType::CellIntegral:

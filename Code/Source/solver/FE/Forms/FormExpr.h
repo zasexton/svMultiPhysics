@@ -244,10 +244,6 @@ struct GeometrySensitivityOptions {
     /// symbolic tangent kernel; found in the residual when empty).
     std::optional<SpaceSignature> mesh_motion_space{};
     std::optional<std::string> mesh_motion_symbol{};
-    /// Complete only: the field whose Hessians the residual evaluates with the
-    /// mapping curvature (the row's active trial, read from the trial basis);
-    /// kernels evaluate the Hessians of every other field without it.
-    FieldId exact_hessian_field{INVALID_FIELD_ID};
 };
 
 struct TensorJITOptions {
@@ -593,7 +589,6 @@ struct SymbolicOptions {
         CellDiameterVariation, ///< Derivative of h() in the active mesh-displacement trial function
         CellVolumeVariation,   ///< Derivative of vol() in the active mesh-displacement trial function
         FacetAreaVariation,    ///< Derivative of area() in the active mesh-displacement trial function
-        GeometryTrialGradientVariation, ///< grad of the mesh-displacement trial function, constant in space within a cell
 		};
 
 class FormExpr;
@@ -768,7 +763,6 @@ public:
         static FormExpr cellDiameterVariation();
         static FormExpr cellVolumeVariation();
         static FormExpr facetAreaVariation();
-        static FormExpr geometryTrialGradientVariation();
 	    static FormExpr time();
 	    static FormExpr timeStep();
 	    static FormExpr effectiveTimeStep();
