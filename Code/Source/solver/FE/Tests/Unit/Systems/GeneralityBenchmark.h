@@ -342,13 +342,16 @@ struct Solution {
     }
 };
 
-/// The Eigen direct solver, every Newton step a sparse LU solve.
+/// The Eigen direct solver, every Newton step a sparse LU solve.  It accepts
+/// a solve whose relative residual is below 1e-8 (the C0 interior-penalty
+/// plate on fine Tri3 meshes is ill-conditioned); Newton's own tolerance
+/// decides convergence, refining the step when the residual is not met.
 inline backends::SolverOptions directSolverOptions()
 {
     backends::SolverOptions direct;
     direct.method = backends::SolverMethod::Direct;
     direct.preconditioner = backends::PreconditionerType::None;
-    direct.rel_tol = 1e-14;
+    direct.rel_tol = 1e-8;
     direct.abs_tol = 1e-14;
     direct.max_iter = 1;
     return direct;

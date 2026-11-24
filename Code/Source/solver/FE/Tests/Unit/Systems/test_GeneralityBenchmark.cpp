@@ -1329,21 +1329,15 @@ PlateRun runClampedPlate(Cell cell, int n, bool reverse = false, bool check_symm
     return run;
 }
 
-TEST(GeneralityBenchmark, DISABLED_P07_ClampedInteriorPenaltyPlateConvergesInBrokenH2)
+TEST(GeneralityBenchmark, P07_ClampedInteriorPenaltyPlateConvergesInBrokenH2)
 {
-    // Defect found by this benchmark (reported; not a vocabulary gap): on
-    // interior facets the residual of avg(laplacian(u)) * jv evaluates to
-    // zero for a P2 or Q2 state, while its (symbolic) tangent does not; the
-    // consistency terms are missing from the residual, Newton does not
-    // converge and the error does not decrease.  The cell Hessian, the slope
-    // jumps and the boundary slope terms assemble.
     for (const auto cell : {Cell::Tri3, Cell::Quad4}) {
         std::vector<Real> h2, l2;
-        for (const int n : {4, 8, 16}) {
-            const auto run = runClampedPlate(cell, n, false, n == 4);
+        for (const int n : {8, 16, 32}) {
+            const auto run = runClampedPlate(cell, n, false, n == 8);
             h2.push_back(run.h2);
             l2.push_back(run.l2);
-            if (n == 4) {
+            if (n == 8) {
                 EXPECT_GT(run.scale, 0.0);
                 EXPECT_LT(run.asymmetry, 1e-12 * run.scale) << cellName(cell);
                 // Facet reversal: the cells in reverse order swap the sides of
