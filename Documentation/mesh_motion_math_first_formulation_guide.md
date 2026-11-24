@@ -157,9 +157,9 @@ configured current/reference geometry. For coupled ALE, the FE geometric
 nonlinearity policy updates current coordinates from the trial
 `mesh_displacement` state before assembly, so the same primitives assemble on
 the trial current geometry. This requires the FE system's assembly frame to
-be the current configuration (`FESystem(mesh, svmp::Configuration::Current)`);
-the application selects it whenever an equation enables ALE
-(`Enable_ALE=true`). With a reference-frame FE
+be the current configuration; `movingDomain()` selects it
+(`FESystem::setAssemblyConfiguration`) when Navier-Stokes registers with
+`Enable_ALE=true`. With a reference-frame FE
 system only the frame-explicit terminals (`currentNormal()`,
 `currentMeasure()`, ...) see the motion.
 

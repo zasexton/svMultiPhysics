@@ -170,10 +170,11 @@ as the independent reference for the unfitted results.
 **Assembly frame.** Coupled-displacement ALE assembles the fluid, the mesh
 motion and the fitted boundary terms on the trial current configuration:
 the FE geometric-nonlinearity transaction moves the current coordinates at
-every trial state, and the application builds the FE system with the current
-configuration as its assembly frame whenever an equation enables ALE
-(`Enable_ALE=true`; `SimulationBuilder::createFESystem`, which logs
-`assembly_frame=current (coupled mesh-displacement ALE)`). This holds for
+every trial state, and the formulation makes the current configuration the
+assembly frame of the FE system: Navier-Stokes with `Enable_ALE=true` declares
+its moving domain (`movingDomain()`) while it registers, and
+`SimulationBuilder::createPhysicsModules` then logs
+`assembly_frame=current (coupled mesh-displacement ALE)`. This holds for
 every kinematic enforcement below. Fitted boundary integrals therefore use
 the ordinary boundary measure of that frame; the current normal is the
 normal of the same frame, and no fitted term multiplies by the current
