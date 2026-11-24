@@ -28,6 +28,7 @@
 #include "Systems/FESystem.h"
 #include "Systems/SystemState.h"
 #include "TimeStepping/TimeHistory.h"
+#include "Core/EnvironmentNames.h"
 
 #include <algorithm>
 #include <array>
@@ -68,7 +69,7 @@ double secondsSince(Clock::time_point start)
 
 bool parseBoolEnv(const char* name, bool default_value)
 {
-  const char* env = std::getenv(name);
+  const char* env = environment::value(name);
   if (!env) {
     return default_value;
   }
@@ -338,7 +339,7 @@ long readProcessPeakRssKb()
 bool cutGeometryMemoryReportEnabled()
 {
   static const bool enabled = [] {
-    const char* value = std::getenv("SVMP_CUT_MEMORY_REPORT");
+    const char* value = environment::value("SVMP_CUT_MEMORY_REPORT");
     return value != nullptr && value[0] != '\0' && value[0] != '0';
   }();
   return enabled;
@@ -1207,7 +1208,7 @@ bool snapshotMayStoreFullCellsClassificationOnly(
     const LevelSetGeometryHost& sim)
 {
   static const bool keep_points = [] {
-    const char* value = std::getenv("SVMP_KEEP_DRY_CELL_POINTS");
+    const char* value = environment::value("SVMP_KEEP_DRY_CELL_POINTS");
     return value != nullptr && value[0] != '\0' && value[0] != '0';
   }();
   return !keep_points &&
@@ -1399,7 +1400,7 @@ void auditGhostLayers(
 {
   const bool print = parseBoolEnv("SVMP_AUDIT_GHOST_LAYERS", false);
   const char* withhold_text =
-      std::getenv("SVMP_AUDIT_WITHHOLD_GHOST_CUT_LAYERS");
+      environment::value("SVMP_AUDIT_WITHHOLD_GHOST_CUT_LAYERS");
   const bool withhold =
       withhold_text != nullptr && withhold_text[0] != '\0';
   if (!print && !withhold) {

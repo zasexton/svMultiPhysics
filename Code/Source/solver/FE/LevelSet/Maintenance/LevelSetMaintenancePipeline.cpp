@@ -22,6 +22,7 @@
 #include "Systems/SystemState.h"
 #include "TimeStepping/FieldRepairPublication.h"
 #include "TimeStepping/TimeHistory.h"
+#include "Core/EnvironmentNames.h"
 
 #include <algorithm>
 #include <cmath>
@@ -222,7 +223,7 @@ LevelSetKinematicBaseline makeLevelSetKinematicBaseline(
 
 LevelSetRedistancingTrigger resolveLevelSetRedistancingTrigger()
 {
-  const char* text = std::getenv("SVMP_REDISTANCING_TRIGGER_CELLS");
+  const char* text = environment::value("SVMP_REDISTANCING_TRIGGER_CELLS");
   if (text == nullptr || text[0] == '\0') {
     return LevelSetRedistancingTrigger{.interface_motion_cells = 1.0};
   }
@@ -499,8 +500,8 @@ void redistanceMaintainedLevelSet(
   // distortion that the redistancing removes builds up with interface
   // motion, so the call count does not depend on the time step, and an
   // interface at rest is left alone.  The one-cell threshold is fixed
-  // for every case; SVMP_REDISTANCING_TRIGGER_CELLS (diagnostic only)
-  // changes it to test the sensitivity.
+  // for every case; SVMP_REDISTANCING_TRIGGER_CELLS changes it to test the
+  // sensitivity (a run that sets it is not a reference run).
   const auto transport_velocity = levelSetTransportVelocityCoefficients(
       *host.fe_system, velocity_field, fe_solution);
   // Tetra4 meshes use the zero-surface variants (exact distance to the

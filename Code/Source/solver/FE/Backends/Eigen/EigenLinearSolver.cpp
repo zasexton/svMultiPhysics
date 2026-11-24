@@ -11,6 +11,7 @@
 #include "Backends/Eigen/EigenVector.h"
 #include "Core/FEException.h"
 #include "Core/Logger.h"
+#include "Core/EnvironmentNames.h"
 
 #if defined(FE_HAS_EIGEN)
 #include <iostream>
@@ -445,7 +446,7 @@ void emit_direct_factorization_diagnostics(const EigenMatrix& A,
 
 [[nodiscard]] bool diagnostics_requested()
 {
-    const char* env = std::getenv("SVMP_FE_EIGEN_FACTOR_DIAGNOSTICS");
+    const char* env = environment::value("SVMP_FE_EIGEN_FACTOR_DIAGNOSTICS");
     return env != nullptr && env[0] != '\0' && std::string(env) != "0";
 }
 

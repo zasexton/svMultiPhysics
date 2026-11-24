@@ -23,6 +23,7 @@
 #include "Mesh/Topology/DistributedTopology.h"
 
 #include "Backends/MUMPS/MumpsDistributedSolver.h"
+#include "Core/EnvironmentNames.h"
 
 #if defined(FE_HAS_EIGEN)
 #include "Backends/Eigen/EigenMatrix.h"
@@ -743,7 +744,7 @@ struct ReuseVote {
 
 [[nodiscard]] bool environmentFlag(const char* name) noexcept
 {
-  const char* text = std::getenv(name);
+  const char* text = environment::value(name);
   return text != nullptr && text[0] != '\0' && std::string(text) != "0";
 }
 
@@ -792,7 +793,7 @@ struct ReuseVote {
 // component c throw (exercises the failure reporting of distributed solves).
 [[nodiscard]] bool injectedComponentFailure(std::size_t component)
 {
-  const char* text = std::getenv("SVMP_PDE_EXTENSION_FAIL_COMPONENT");
+  const char* text = environment::value("SVMP_PDE_EXTENSION_FAIL_COMPONENT");
   return text != nullptr && text[0] != '\0' &&
          std::string(text) == std::to_string(component);
 }
@@ -803,14 +804,14 @@ void dumpCanonicalSolution(const std::vector<VertexRecord>& vertices,
                            const std::vector<double>& solution,
                            const svmp::MeshComm& comm)
 {
-  const char* prefix = std::getenv("SVMP_PDE_EXTENSION_DUMP");
+  const char* prefix = environment::value("SVMP_PDE_EXTENSION_DUMP");
   if (prefix == nullptr || prefix[0] == '\0') {
     return;
   }
   static std::atomic<std::uint64_t> calls{0u};
   const auto call = calls.fetch_add(1u);
   std::uint64_t limit = 2u;
-  if (const char* text = std::getenv("SVMP_PDE_EXTENSION_DUMP_CALLS");
+  if (const char* text = environment::value("SVMP_PDE_EXTENSION_DUMP_CALLS");
       text != nullptr && text[0] != '\0') {
     limit = std::strtoull(text, nullptr, 10);
   }
@@ -844,7 +845,7 @@ struct ComponentSolveHeader {
 // its diagnostics are requested every solve goes through the backend.
 [[nodiscard]] bool backendFactorDiagnosticsRequested()
 {
-  const char* env = std::getenv("SVMP_FE_EIGEN_FACTOR_DIAGNOSTICS");
+  const char* env = environment::value("SVMP_FE_EIGEN_FACTOR_DIAGNOSTICS");
   return env != nullptr && env[0] != '\0' && std::string(env) != "0";
 }
 
@@ -1280,7 +1281,7 @@ namespace {
 
 [[nodiscard]] std::size_t cacheCapacityFromEnvironment() noexcept
 {
-  const char* text = std::getenv("SVMP_PDE_EXTENSION_CACHE_ENTRIES");
+  const char* text = environment::value("SVMP_PDE_EXTENSION_CACHE_ENTRIES");
   if (text == nullptr || text[0] == '\0') {
     return 0u;
   }

@@ -465,9 +465,8 @@ std::string trim_copy(std::string s)
   return s;
 }
 
-bool parseBoolEnv(const char* name, bool default_value)
+bool parseBoolValue(const char* env, bool default_value)
 {
-  const char* env = std::getenv(name);
   if (!env) {
     return default_value;
   }
@@ -481,6 +480,11 @@ bool parseBoolEnv(const char* name, bool default_value)
     return false;
   }
   return default_value;
+}
+
+bool parseBoolEnv(const char* name, bool default_value)
+{
+  return parseBoolValue(std::getenv(name), default_value);
 }
 
 // <Generalized_alpha_initial_rate> chooses the first generalized-alpha rate
@@ -3588,7 +3592,7 @@ PdeVelocityExtensionCaches& solvePdeExtensionCaches()
 
 bool levelSetAdvectionTraceEnabled()
 {
-  return parseBoolEnv("SVMP_TRACE_LEVEL_SET_ADVECTION", false) ||
+  return parseBoolValue(svmp::FE::environment::value("SVMP_TRACE_LEVEL_SET_ADVECTION"), false) ||
          application::core::oopTraceEnabled();
 }
 

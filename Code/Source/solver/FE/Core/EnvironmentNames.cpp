@@ -41,6 +41,9 @@ std::span<const NameDeclaration> solverCatalogue() noexcept
     constexpr const char* kAssembly = "FE/Assembly";
     constexpr const char* kEigen = "FE/Backends/Eigen";
     constexpr const char* kFsils = "FE/Backends/FSILS";
+    constexpr const char* kLevelSetExtension = "FE/LevelSet/Extension";
+    constexpr const char* kLevelSetGeometry = "FE/LevelSet/LevelSetGeometryService";
+    constexpr const char* kLevelSetMaintenance = "FE/LevelSet/Maintenance";
     constexpr const char* kSystemAssembly = "FE/Systems/SystemAssembly";
 
     static constexpr NameDeclaration kSolverNames[] = {
@@ -93,6 +96,9 @@ std::span<const NameDeclaration> solverCatalogue() noexcept
          "logs samples of matrix writes outside the sparsity pattern"},
         {"SVMP_EIGEN_STRICT_PATTERN", Diagnostic, kEigen, Flag, "off", Reference,
          "throws on a matrix write outside the sparsity pattern instead of dropping it"},
+        {"SVMP_FE_EIGEN_FACTOR_DIAGNOSTICS", Diagnostic, kEigen, Flag, "off", Reference,
+         "prints the direct-solver factorization diagnostics; the PDE velocity extension then "
+         "factorizes on every call"},
 
         // FE/Backends/FSILS: the FSILS linear-solver backend and its solvers.
         {"SVMP_DISABLE_REDUCED_FACE_CACHE_ADD_BC_MUL", Performance, kFsils, Flag, "off", NonReference,
@@ -305,6 +311,48 @@ std::span<const NameDeclaration> solverCatalogue() noexcept
          "checks the block lookup tables of a new matrix"},
         {"SVMP_FSILS_VECTOR_VIEW_TRACE", Diagnostic, kFsils, Flag, "off", Reference,
          "logs vector-view assembly counts and norms"},
+
+        // FE/LevelSet: the generated cut geometry, the PDE velocity extension and
+        // level-set maintenance.
+        {"SVMP_AUDIT_GHOST_LAYERS", Diagnostic, kLevelSetGeometry, Flag, "off", Reference,
+         "prints per-rank histograms of cut cells and fragments by ghost layer"},
+        {"SVMP_AUDIT_WITHHOLD_GHOST_CUT_LAYERS", TestHook, kLevelSetGeometry, Integer, "off", NonReference,
+         "removes the generated cut data of ghost cells beyond this layer"},
+        {"SVMP_CUT_MEMORY_REPORT", Diagnostic, kLevelSetGeometry, Flag, "off", Reference,
+         "logs the memory of the generated cut geometry at each rebuild phase"},
+        {"SVMP_DISABLE_ACTIVE_CUT_REFRESH_CACHE", Performance, kLevelSetGeometry, Flag, "off", Reference,
+         "rebuilds the installed cut context instead of keeping, resyncing or reinstalling it"},
+        {"SVMP_DISABLE_CUT_CONTEXT_RESYNC", Performance, kLevelSetGeometry, Flag, "off", Reference,
+         "rebuilds the cut context when only the field layout changed"},
+        {"SVMP_DISABLE_INCREMENTAL_REBUILD", Performance, kLevelSetGeometry, Flag, "off", Reference,
+         "rebuilds the cut geometry of every cell instead of reusing unchanged cells"},
+        {"SVMP_DISABLE_VERTEX_FIELD_FAST_PATH", Performance, kLevelSetGeometry, Flag, "off", NonReference,
+         "evaluates vertex fields by point location instead of nodal reads (changes round-off)"},
+        {"SVMP_INCREMENTAL_REBUILD_SELF_CHECK", Diagnostic, kLevelSetGeometry, Flag, "off", Reference,
+         "rebuilds each cut snapshot from scratch too and throws unless the two agree"},
+        {"SVMP_KEEP_DRY_CELL_POINTS", Performance, kLevelSetGeometry, Flag, "off", Reference,
+         "keeps every quadrature point of full cells in the cut snapshot"},
+        {"SVMP_RETAIN_RESTORED_CUT_CONTEXT", Performance, kLevelSetGeometry, Flag, "off", Reference,
+         "keeps the attempt-entry cut context for a rollback to reinstall"},
+        {"SVMP_PDE_EXTENSION_CACHE_ENTRIES", Performance, kLevelSetExtension, Integer,
+         "1, or 3 for distributed component solves and multi-rank MUMPS", Reference,
+         "cached dry-region factorizations of the PDE velocity extension (1 to 8)"},
+        {"SVMP_PDE_EXTENSION_DUMP", Diagnostic, kLevelSetExtension, Text, "off", Reference,
+         "writes the extension solution of the first calls under this prefix"},
+        {"SVMP_PDE_EXTENSION_DUMP_CALLS", Diagnostic, kLevelSetExtension, Integer, "2", Reference,
+         "calls written by SVMP_PDE_EXTENSION_DUMP"},
+        {"SVMP_PDE_EXTENSION_FAIL_COMPONENT", TestHook, kLevelSetExtension, Integer, "off", NonReference,
+         "makes the solve of this velocity component throw"},
+        {"SVMP_PDE_EXTENSION_MUMPS_DIAGNOSTICS", Diagnostic, kLevelSetExtension, Flag, "off", Reference,
+         "logs every MUMPS factorization of the extension"},
+        {"SVMP_PDE_EXTENSION_REPLICATED_SOLVES", Performance, kLevelSetExtension, Flag, "off", Reference,
+         "solves every velocity component on every rank"},
+        {"SVMP_PDE_EXTENSION_SELF_CHECK", Diagnostic, kLevelSetExtension, Flag, "off", Reference,
+         "repeats each cached or distributed extension solve uncached and throws unless they agree"},
+        {"SVMP_REDISTANCING_TRIGGER_CELLS", NumericalOverride, kLevelSetMaintenance, Real, "1", NonReference,
+         "interface motion, in cut-cell edges, that triggers interface-preserving redistancing"},
+        {"SVMP_TRACE_LEVEL_SET_ADVECTION", Diagnostic, kLevelSetExtension, Flag, "off", Reference,
+         "logs the velocity-extension updates of level-set advection, with every MUMPS factorization"},
     };
     return kSolverNames;
 }
