@@ -15,6 +15,10 @@
 #include "Mesh/Fields/MeshFields.h"
 #include "Mesh/Mesh.h"
 
+#ifdef MESH_HAS_MPI
+#include <mpi.h>
+#endif
+
 #include <algorithm>
 #include <array>
 #include <cctype>
@@ -117,6 +121,29 @@ struct LevelSetTemporalSpatialInflowValues {
   }
 };
 
+/// Whether @p local holds on some rank of the run (MPI_COMM_WORLD, as the
+/// mesh translator's collectives use), or on this process when MPI does not
+/// run.  Every rank reads the same input, so every rank reaches the call.
+bool holdsOnSomeRank(bool local)
+{
+#ifdef MESH_HAS_MPI
+  int initialized = 0;
+  int finalized = 0;
+  MPI_Initialized(&initialized);
+  MPI_Finalized(&finalized);
+  if (initialized != 0 && finalized == 0) {
+    int size = 1;
+    MPI_Comm_size(MPI_COMM_WORLD, &size);
+    if (size > 1) {
+      int value = local ? 1 : 0;
+      MPI_Allreduce(MPI_IN_PLACE, &value, 1, MPI_INT, MPI_MAX, MPI_COMM_WORLD);
+      return value != 0;
+    }
+  }
+#endif
+  return local;
+}
+
 std::shared_ptr<LevelSetTemporalSpatialInflowValues>
 read_level_set_temporal_spatial_inflow_file(const svmp::MeshBase& mesh,
                                             const std::string& file_path)
@@ -192,10 +219,12 @@ read_level_set_temporal_spatial_inflow_file(const svmp::MeshBase& mesh,
     }
   }
 
-  if (out->vertices.empty()) {
+  // A rank whose part of the mesh does not touch the inflow face holds none
+  // of the table's nodes; the table must match a vertex on some rank.
+  if (!holdsOnSomeRank(!out->vertices.empty())) {
     throw std::runtime_error(
         "[svMultiPhysics::Application] Level-set temporal/spatial inflow file '" +
-        file_path + "' did not match any local mesh vertices.");
+        file_path + "' did not match any mesh vertex.");
   }
   return out;
 }

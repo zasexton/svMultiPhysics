@@ -71,6 +71,7 @@ svmp_add_gtest(Application_Tests TARGET test_application COST 240)
 if(FE_ENABLE_MPI AND MPIEXEC_EXECUTABLE)
   add_executable(test_application_mpi
     Unit/test_ApplicationDriverLevelSetWorkflowsMPI.cpp
+    Unit/test_LevelSetInflowTableMPI.cpp
     Unit/test_LevelSetMaintenanceTransactionConsensusMPI.cpp
     Unit/test_MeshPartitionWeightingMPI.cpp
     Unit/test_LegacyParameterStubs.cpp
