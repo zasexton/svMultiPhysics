@@ -9,12 +9,14 @@
 
 #include "Physics/Core/EquationModuleInput.h"
 #include "Physics/Core/EquationModuleRegistry.h"
+#include "Physics/Formulations/Poisson/PoissonBCFactories.h"
 #include "Physics/Formulations/Poisson/PoissonModule.h"
 #include "Physics/Tests/Unit/PhysicsTestHelpers.h"
 
 #include "FE/Forms/JIT/LLVMJITBuildInfo.h"
 #include "FE/Assembly/CutIntegrationContext.h"
 #include "FE/Assembly/GlobalSystemView.h"
+#include "FE/Auxiliary/AuxiliaryStateManager.h"
 #include "FE/Backends/Interfaces/BackendFactory.h"
 #include "FE/Backends/Interfaces/BackendKind.h"
 #include "FE/Backends/Interfaces/LinearSolver.h"
@@ -24,6 +26,8 @@
 #include "FE/PostProcessing/ScalarHistory.h"
 #include "FE/Spaces/H1Space.h"
 #include "FE/Systems/FESystem.h"
+#include "FE/Systems/FormsInstaller.h"
+#include "FE/Systems/BoundaryConditionManager.h"
 #include "FE/Systems/TimeIntegrator.h"
 #include "FE/Systems/TransientSystem.h"
 #include "FE/Tests/Unit/Forms/FormsTestHelpers.h"
@@ -39,6 +43,7 @@
 #include <filesystem>
 #include <fstream>
 #include <limits>
+#include <map>
 #include <memory>
 #include <stdexcept>
 #include <string>
@@ -434,6 +439,134 @@ TEST(PoissonModule, ExplicitUnavailableJITPreservesBoundaryWorkAtItsOriginalPhas
         EXPECT_EQ(system.boundaryConditionDescriptors().size(), coupled ? 0u : 1u);
         EXPECT_TRUE(system.formulationRecords().empty());
         EXPECT_TRUE(system.operatorDefinition("equations").cells.empty());
+    }
+}
+
+namespace {
+
+struct WindkesselPairAssembly {
+    std::vector<FE::Real> residual;
+    std::map<std::string, std::vector<FE::Real>> state_columns; ///< instance -> dR/dX
+};
+
+// Two compliant Windkessel Neumann conditions on the two faces of one
+// tetrahedron, applied in the given order, assembled at fixed u; @p shift
+// is added to the work value of instance @p shifted before assembly.
+WindkesselPairAssembly assembleWindkesselPair(bool reversed,
+                                              const std::string& shifted = {},
+                                              FE::Real shift = 0.0)
+{
+    using namespace FE::systems;
+    using FE::forms::FormExpr;
+    constexpr int face_a = 61;
+    constexpr int face_b = 62;
+    auto mesh = std::make_shared<FE::forms::test::SingleTetraTwoBoundaryFaceMeshAccess>(face_a, face_b);
+    auto space = std::make_shared<FE::spaces::H1Space>(FE::ElementType::Tetra4, 1);
+    FESystem sys(mesh);
+    const auto u_field = sys.addField(FieldSpec{.name = "u", .space = space, .components = 1});
+    sys.addOperator("op");
+    const auto u = FormExpr::stateField(u_field, *space, "u");
+    const auto v = FormExpr::testFunction(*space, "v");
+
+    auto options = [](int marker, FE::Real Rp, FE::Real C, FE::Real Rd, FE::Real X0, const char* name) {
+        formulations::poisson::PoissonOptions::CoupledRCRNeumannBC bc;
+        bc.boundary_marker = marker;
+        bc.Rp = Rp;
+        bc.C = C;
+        bc.Rd = Rd;
+        bc.Pd = 0.0;
+        bc.X0 = X0;
+        bc.functional_name = std::string(name) + "_flow";
+        bc.state_name = name;
+        return bc;
+    };
+    std::vector<formulations::poisson::PoissonOptions::CoupledRCRNeumannBC> bcs = {
+        options(face_a, 12.0, 0.01, 90.0, 5.0, "windkessel_a"),
+        options(face_b, 25.0, 0.02, 110.0, 2.0, "windkessel_b"),
+    };
+    if (reversed) {
+        std::reverse(bcs.begin(), bcs.end());
+    }
+    BoundaryConditionManager bc_manager;
+    for (const auto& bc : bcs) {
+        bc_manager.add(formulations::poisson::Factories::toWindkesselBC(bc, sys, u));
+    }
+    auto residual = inner(grad(u), grad(v)).dx() + (u * v).dx();
+    bc_manager.applyAll(sys, residual, u, v, u_field);
+    (void)installFormulation(sys, "op", {u_field}, residual);
+    SetupInputs si;
+    si.topology_override = makeSingleTetraTopology();
+    sys.setup({}, si);
+    sys.finalizeAuxiliaryLayout();
+
+    const auto n = static_cast<std::size_t>(sys.dofHandler().getNumDofs());
+    std::vector<FE::Real> sol(n);
+    for (std::size_t i = 0; i < n; ++i) {
+        sol[i] = 0.4 - 0.3 * static_cast<FE::Real>(i);
+    }
+    SystemStateView state;
+    state.time = 0.0;
+    state.dt = 0.1;
+    state.u = sol;
+    sys.beginTimeStep();
+    if (!shifted.empty()) {
+        sys.auxiliaryStateManager().getBlock(shifted).work()[0] += shift;
+    }
+    FE::assembly::DenseMatrixView K(static_cast<FE::GlobalIndex>(n));
+    FE::assembly::DenseVectorView R(static_cast<FE::GlobalIndex>(n));
+    K.zero();
+    R.zero();
+    AssemblyRequest request;
+    request.op = "op";
+    request.want_matrix = true;
+    request.want_vector = true;
+    request.is_nonlinear_iteration = true;
+    const auto result = sys.assemble(request, state, &K, &R);
+    EXPECT_TRUE(result.success) << result.error_message;
+
+    WindkesselPairAssembly out;
+    out.residual.resize(n);
+    for (std::size_t i = 0; i < n; ++i) {
+        out.residual[i] = R.getVectorEntry(static_cast<FE::GlobalIndex>(i));
+    }
+    const auto& bordered = sys.borderedCoupling();
+    std::size_t column = 0;
+    for (const auto& block : bordered.aux_blocks) {
+        out.state_columns[block.name].assign(
+            bordered.B.begin() + static_cast<std::ptrdiff_t>(column * n),
+            bordered.B.begin() + static_cast<std::ptrdiff_t>((column + 1) * n));
+        column += static_cast<std::size_t>(block.dim);
+    }
+    return out;
+}
+
+} // namespace
+
+// Two compliant Windkessel conditions each read their own capacitor pressure:
+// the declaration order does not change the residual, and moving one
+// capacitor pressure moves only its own face's flux, by its own column.
+TEST(PoissonModule, WindkesselConditionsReadTheirOwnCapacitorPressures)
+{
+    const auto forward = assembleWindkesselPair(/*reversed=*/false);
+    const auto reverse = assembleWindkesselPair(/*reversed=*/true);
+    ASSERT_EQ(forward.residual.size(), reverse.residual.size());
+    for (std::size_t i = 0; i < forward.residual.size(); ++i) {
+        EXPECT_NEAR(forward.residual[i], reverse.residual[i], 1e-12 * (1.0 + std::abs(forward.residual[i])))
+            << "residual row " << i;
+    }
+    ASSERT_EQ(forward.state_columns.size(), 2u);
+    for (const bool reversed : {false, true}) {
+        const auto base = assembleWindkesselPair(reversed);
+        for (const auto& [instance, column] : base.state_columns) {
+            const auto moved = assembleWindkesselPair(reversed, instance, 3.0);
+            FE::Real largest = 0.0;
+            for (std::size_t i = 0; i < column.size(); ++i) {
+                EXPECT_NEAR((moved.residual[i] - base.residual[i]) / 3.0, column[i], 1e-12)
+                    << instance << (reversed ? " reversed" : "") << " row " << i;
+                largest = std::max(largest, std::abs(column[i]));
+            }
+            EXPECT_GT(largest, 0.01) << instance;
+        }
     }
 }
 

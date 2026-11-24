@@ -24753,19 +24753,66 @@ std::span<const Real> FESystem::auxiliaryOutputValues() const noexcept
     return aux_output_flat_;
 }
 
-std::span<const Real> FESystem::auxiliaryStateValues() const noexcept
+std::span<const Real> FESystem::auxiliaryStateValues() const
 {
     aux_state_flat_.clear();
-    if (!auxiliary_state_manager_) {
+    if (!auxiliary_state_manager_ || auxiliary_state_references_.empty()) {
         return aux_state_flat_;
     }
 
-    const auto& state = auxiliary_state_manager_->state();
-    for (std::size_t i = 0; i < state.blockCount(); ++i) {
-        const auto work = state.block(i).work();
-        aux_state_flat_.insert(aux_state_flat_.end(), work.begin(), work.end());
+    aux_state_flat_.reserve(auxiliary_state_references_.size());
+    for (const auto& reference : auxiliary_state_references_) {
+        FE_THROW_IF(!auxiliary_state_manager_->hasBlock(reference.instance_name),
+                    InvalidStateException,
+                    "FESystem::auxiliaryStateValues: auxiliary state '" +
+                        reference.instance_name + "/" + reference.state_name +
+                        "' is read by an installed form but its instance has no state block");
+        // A slot is one scalar: for an instance with several entities (cell,
+        // node or quadrature-point scope) it holds the first entity's value.
+        const auto& block = auxiliary_state_manager_->getBlock(reference.instance_name);
+        const auto values = block.gatherEntityWork(/*entity_idx=*/0);
+        FE_THROW_IF(reference.state_index >= values.size(), InvalidStateException,
+                    "FESystem::auxiliaryStateValues: auxiliary state '" +
+                        reference.instance_name + "/" + reference.state_name +
+                        "' lies outside its instance's block");
+        aux_state_flat_.push_back(values[reference.state_index]);
     }
     return aux_state_flat_;
+}
+
+std::uint32_t FESystem::bindAuxiliaryStateReference(std::string_view qualified_state_name)
+{
+    const std::string qualified(qualified_state_name);
+    if (const auto it = auxiliary_state_reference_slot_by_name_.find(qualified);
+        it != auxiliary_state_reference_slot_by_name_.end()) {
+        return it->second;
+    }
+
+    const auto slash = qualified.find('/');
+    FE_THROW_IF(slash == std::string::npos, InvalidArgumentException,
+                "FESystem::bindAuxiliaryStateReference: '" + qualified +
+                    "' does not name an instance; use instance/state");
+    AuxiliaryStateReference reference;
+    reference.instance_name = qualified.substr(0, slash);
+    reference.state_name = qualified.substr(slash + 1);
+
+    const auto& entry = findDeployedAuxEntry_(reference.instance_name);
+    const auto* built = dynamic_cast<const BuiltAuxiliaryModel*>(entry.model.get());
+    FE_THROW_IF(built == nullptr, InvalidArgumentException,
+                "FESystem::bindAuxiliaryStateReference: instance '" + reference.instance_name +
+                    "' does not name its states");
+    const auto& state_names = built->stateNames();
+    const auto state_it =
+        std::find(state_names.begin(), state_names.end(), reference.state_name);
+    FE_THROW_IF(state_it == state_names.end(), InvalidArgumentException,
+                "FESystem::bindAuxiliaryStateReference: instance '" + reference.instance_name +
+                    "' has no state '" + reference.state_name + "'");
+    reference.state_index = static_cast<std::size_t>(std::distance(state_names.begin(), state_it));
+
+    const auto slot = static_cast<std::uint32_t>(auxiliary_state_references_.size());
+    auxiliary_state_references_.push_back(std::move(reference));
+    auxiliary_state_reference_slot_by_name_.emplace(qualified, slot);
+    return slot;
 }
 
 Real FESystem::auxiliaryConstraintValue(std::string_view instance_name,
@@ -25105,7 +25152,17 @@ FESystem::synthesizeLoweredAuxiliaryOutputExpr_(const DeployedAuxEntry& entry,
                 switch (node.type()) {
                     case forms::FormExprType::AuxiliaryStateRef: {
                         if (!can_inline_state_assignments) {
-                            return std::nullopt;
+                            // A state the output keeps belongs to this
+                            // instance: name it with the instance so the
+                            // inlined output does not read another
+                            // instance's state at the same model-local slot.
+                            const auto slot = node.slotIndex();
+                            if (!slot || *slot >= state_names.size()) {
+                                trace_block("bad_state_slot");
+                                return std::nullopt;
+                            }
+                            return AuxiliaryInstanceHandle(entry.instance_name)
+                                .state(state_names[*slot]);
                         }
                         const auto slot = node.slotIndex();
                         if (!slot || *slot >= explicit_state_exprs.size() ||
@@ -25199,7 +25256,8 @@ FESystem::synthesizeLoweredAuxiliaryOutputExpr_(const DeployedAuxEntry& entry,
             return std::nullopt;
         }
         if (entry.lower_to_direct_only &&
-            exprContainsType(*lowered.node(), forms::FormExprType::AuxiliaryStateRef)) {
+            (exprContainsType(*lowered.node(), forms::FormExprType::AuxiliaryStateRef) ||
+             exprContainsType(*lowered.node(), forms::FormExprType::AuxiliaryStateSymbol))) {
             trace_block("state_refs_remaining");
             return std::nullopt;
         }

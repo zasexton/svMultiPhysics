@@ -14,6 +14,7 @@
 
 #include <cmath>
 #include <functional>
+#include <map>
 #include <numeric>
 #include <unordered_set>
 
@@ -3407,6 +3408,152 @@ TEST(NavierStokesOutletFactory, TwoResistiveOutletsSystemOverloadIsDeterministic
                 << "two-outlet resistive Jacobian mismatch at row=" << i
                 << " col=" << j;
         }
+    }
+}
+
+namespace {
+
+// The residual and the dR/d(state) columns of an RCR outlet on @p rcr_marker
+// and an RCRCR outlet on @p rcrcr_marker at fixed fields, the outlets applied
+// in the given order.
+struct CompliantOutletAssembly {
+    std::vector<Real> residual;
+    std::map<std::string, std::vector<Real>> state_columns; ///< bordered block/index -> dR/dx
+};
+
+CompliantOutletAssembly assembleCompliantOutletPair(bool rcrcr_first, Real rcrcr_p10)
+{
+    constexpr int rcr_marker = 831;
+    constexpr int rcrcr_marker = 832;
+    constexpr int inlet_marker = 833;
+    constexpr int wall_marker = 834;
+
+    auto mesh = std::make_shared<SingleTetraTwoOutletBoundaryFaceMeshAccess>(
+        rcr_marker, rcrcr_marker, inlet_marker, wall_marker);
+    auto u_space = svmp::FE::spaces::VectorSpace(svmp::FE::spaces::SpaceType::H1, mesh, 1, 3);
+    auto p_space = svmp::FE::spaces::Space(svmp::FE::spaces::SpaceType::H1, mesh, 1);
+
+    FESystem sys(mesh);
+    const auto u_field = sys.addField(FieldSpec{.name = "u", .space = u_space, .components = 3});
+    const auto p_field = sys.addField(FieldSpec{.name = "p", .space = p_space, .components = 1});
+    sys.addOperator("ns");
+    const auto u = FormExpr::stateField(u_field, *u_space, "u");
+    const auto p = FormExpr::stateField(p_field, *p_space, "p");
+    const auto rho = FormExpr::constant(1.0);
+
+    BoundaryConditionManager bc_manager;
+    auto add_rcr = [&]() {
+        auto opts = makeRCROpts(rcr_marker);
+        opts.X0 = 5.0;
+        bc_manager.add(Factories::toCoupledOutflowBC(opts, sys, u, rho, rcr_marker));
+    };
+    auto add_rcrcr = [&]() {
+        auto opts = makeRCRCROpts(rcrcr_marker);
+        opts.P10 = rcrcr_p10;
+        bc_manager.add(Factories::toCoupledOutflowBC(opts, sys, u, rho, rcrcr_marker));
+    };
+    if (rcrcr_first) {
+        add_rcrcr();
+        add_rcr();
+    } else {
+        add_rcr();
+        add_rcrcr();
+    }
+
+    const auto v = FormExpr::testFunction(*u_space, "v");
+    const auto q = FormExpr::testFunction(*p_space, "q");
+    auto momentum = inner(grad(u), grad(v)).dx() - inner(p, div(v)).dx();
+    auto continuity = (q * div(u)).dx() + (p * q).dx();
+    bc_manager.applyAll(sys, momentum, u, v, u_field);
+    (void)installFormulation(sys, "ns", {u_field, p_field}, momentum + continuity, FormInstallOptions{});
+
+    SetupInputs si;
+    si.topology_override = singleTetraTopology();
+    sys.setup({}, si);
+    sys.finalizeAuxiliaryLayout();
+
+    const auto n = static_cast<std::size_t>(sys.dofHandler().getNumDofs());
+    std::vector<Real> sol(n, 0.0);
+    assignComponentPattern(sol, sys, "u", 0, Real(0.04), Real(0.006));
+    assignComponentPattern(sol, sys, "u", 1, Real(-0.03), Real(0.004));
+    assignComponentPattern(sol, sys, "u", 2, Real(-0.80), Real(-0.02));
+    assignComponentPattern(sol, sys, "p", 0, Real(0.12), Real(0.01));
+
+    SystemStateView state;
+    state.time = 0.0;
+    state.dt = 0.1;
+    state.u = sol;
+    svmp::FE::assembly::DenseMatrixView lhs(static_cast<svmp::FE::GlobalIndex>(n));
+    svmp::FE::assembly::DenseVectorView rhs(static_cast<svmp::FE::GlobalIndex>(n));
+    lhs.zero();
+    rhs.zero();
+    AssemblyRequest req;
+    req.op = "ns";
+    req.want_matrix = true;
+    req.want_vector = true;
+    req.is_nonlinear_iteration = true;
+    sys.beginTimeStep();
+    const auto ar = sys.assemble(req, state, &lhs, &rhs);
+    EXPECT_TRUE(ar.success) << ar.error_message;
+
+    CompliantOutletAssembly out;
+    out.residual.resize(n);
+    for (std::size_t i = 0; i < n; ++i) {
+        out.residual[i] = rhs.getVectorEntry(static_cast<svmp::FE::GlobalIndex>(i));
+    }
+    const auto& bordered = sys.borderedCoupling();
+    EXPECT_TRUE(bordered.active);
+    std::size_t column = 0;
+    for (const auto& block : bordered.aux_blocks) {
+        for (int k = 0; k < block.dim; ++k, ++column) {
+            out.state_columns[block.name + "/" + std::to_string(k)].assign(
+                bordered.B.begin() + static_cast<std::ptrdiff_t>(column * n),
+                bordered.B.begin() + static_cast<std::ptrdiff_t>((column + 1) * n));
+        }
+    }
+    return out;
+}
+
+} // namespace
+
+// An RCR and an RCRCR outlet each read their own capacitor pressure: the
+// declaration order does not change the fluid residual, and the RCRCR's
+// initial P1 reaches the fluid through its own pressure column.
+TEST(NavierStokesOutletFactory, CompliantOutletPairReadsItsOwnCapacitorStates)
+{
+    const auto forward = assembleCompliantOutletPair(/*rcrcr_first=*/false, /*rcrcr_p10=*/2.0);
+    const auto reverse = assembleCompliantOutletPair(/*rcrcr_first=*/true, /*rcrcr_p10=*/2.0);
+    ASSERT_EQ(forward.residual.size(), reverse.residual.size());
+    for (std::size_t i = 0; i < forward.residual.size(); ++i) {
+        EXPECT_NEAR(forward.residual[i], reverse.residual[i], 1e-12 * (1.0 + std::abs(forward.residual[i])))
+            << "residual row " << i;
+    }
+    ASSERT_EQ(forward.state_columns.size(), 3u);
+    for (const auto& [label, column] : forward.state_columns) {
+        ASSERT_EQ(reverse.state_columns.count(label), 1u) << label;
+        for (std::size_t i = 0; i < column.size(); ++i) {
+            EXPECT_NEAR(column[i], reverse.state_columns.at(label)[i], 1e-12) << label << " row " << i;
+        }
+    }
+
+    for (const bool rcrcr_first : {false, true}) {
+        const auto low = assembleCompliantOutletPair(rcrcr_first, /*rcrcr_p10=*/2.0);
+        const auto high = assembleCompliantOutletPair(rcrcr_first, /*rcrcr_p10=*/8.0);
+        const std::vector<Real>* p1_column = nullptr;
+        for (const auto& [label, column] : low.state_columns) {
+            if (label.find("rcrcr") != std::string::npos && label.ends_with("/0")) {
+                p1_column = &column;
+            }
+        }
+        ASSERT_NE(p1_column, nullptr);
+        Real moved = 0.0;
+        for (std::size_t i = 0; i < low.residual.size(); ++i) {
+            const Real fd = (high.residual[i] - low.residual[i]) / 6.0;
+            EXPECT_NEAR(fd, (*p1_column)[i], 1e-11) << (rcrcr_first ? "RCRCR first" : "RCR first")
+                                                    << " row " << i;
+            moved = std::max(moved, std::abs(high.residual[i] - low.residual[i]));
+        }
+        EXPECT_GT(moved, 0.1) << "the RCRCR's initial P1 must reach the fluid residual";
     }
 }
 

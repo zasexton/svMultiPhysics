@@ -1794,12 +1794,38 @@ public:
     [[nodiscard]] std::span<const Real> auxiliaryOutputValues() const noexcept;
 
     /**
-     * @brief Get the flattened current auxiliary work-state values.
+     * @brief Current work values of the bound auxiliary states, in slot order.
      *
-     * Updated on demand from the auxiliary state manager and returned in block
-     * registration order. Empty if no auxiliary blocks are deployed.
+     * Entry k is the value of the k-th reference returned by
+     * `auxiliaryStateReferences()`, read from its own instance's block, so an
+     * installed `AuxiliaryStateRef(k)` reads the state of the instance it was
+     * bound to.  Empty when no installed form reads an auxiliary state.
      */
-    [[nodiscard]] std::span<const Real> auxiliaryStateValues() const noexcept;
+    [[nodiscard]] std::span<const Real> auxiliaryStateValues() const;
+
+    /// One auxiliary state that installed forms read: a state of one deployed instance.
+    struct AuxiliaryStateReference {
+        std::string instance_name{};
+        std::string state_name{};
+        std::size_t state_index{0}; ///< Model-local index of the state.
+    };
+
+    /**
+     * @brief Bind the instance-qualified state "instance/state" to an assembly slot.
+     *
+     * Installed forms read auxiliary states through these slots.  Every
+     * deployed instance owns its states: two instances of one model get two
+     * slots even when their values agree, and binding the same qualified name
+     * again (one handle used in several terms) returns the same slot.  The slot
+     * resolves to the instance's block storage when values are gathered.
+     */
+    [[nodiscard]] std::uint32_t bindAuxiliaryStateReference(std::string_view qualified_state_name);
+
+    /// The bound auxiliary states, indexed by assembly slot.
+    [[nodiscard]] const std::vector<AuxiliaryStateReference>& auxiliaryStateReferences() const noexcept
+    {
+        return auxiliary_state_references_;
+    }
 
     /**
      * @brief Get the stable logical id of a named auxiliary output.
@@ -1849,8 +1875,9 @@ public:
      * @brief Lowered algebraic output expression lookup by symbolic output name.
      *
      * When a deployed AuxiliaryState output can be expressed directly in terms
-     * of runtime-available terminals (for example AuxiliaryStateRef,
-     * AuxiliaryInputRef, and constants), setup may lower that output to a
+     * of runtime-available terminals (for example the instance-qualified
+     * state `instance/state` of a differential model, AuxiliaryInputRef, and
+     * constants), setup may lower that output to a
      * direct expression for assembly-time substitution in a plain NaturalBC.
      *
      * For live monolithic blocks, formulation metadata may still preserve the
@@ -2851,6 +2878,8 @@ private:
     std::unordered_map<std::string, forms::FormExpr> lowered_aux_output_exprs_by_name_{};
     std::unordered_map<std::size_t, forms::FormExpr> lowered_aux_output_exprs_by_id_{};
     std::vector<AuxiliaryOutputDescriptor> auxiliary_output_descriptors_{};
+    std::vector<AuxiliaryStateReference> auxiliary_state_references_{};
+    std::unordered_map<std::string, std::uint32_t> auxiliary_state_reference_slot_by_name_{};
     std::unordered_map<std::string, std::uint32_t> auxiliary_output_id_by_qualified_name_{};
     std::unordered_map<std::string, std::string> auxiliary_variant_selection_{};
     std::vector<analysis::AuxiliaryOutputConsumerRecord> auxiliary_output_consumers_{};

@@ -4909,6 +4909,22 @@ CoupledResidualKernels installFormulation(
                 }
             }
 
+            // An inlined output names the states it keeps with their
+            // instance; bind each to the system slot that reads that
+            // instance's storage.
+            auto bind_output_states = [&](const forms::FormExpr& lowered_output) {
+                return lowered_output.transformNodes(
+                    [&](const forms::FormExprNode& n) -> std::optional<forms::FormExpr> {
+                        if (n.type() != forms::FormExprType::AuxiliaryStateSymbol) {
+                            return std::nullopt;
+                        }
+                        const auto state_name = n.symbolName();
+                        FE_THROW_IF(!state_name, InvalidStateException,
+                                    "installFormulation: unnamed auxiliary state in an inlined output");
+                        return forms::FormExpr::auxiliaryStateRef(
+                            system.bindAuxiliaryStateReference(*state_name));
+                    });
+            };
             auto resolve_aux_metadata = [&](const forms::FormExprNode& node)
                 -> std::optional<forms::FormExpr> {
                 auto sym = node.symbolName();
@@ -4927,7 +4943,7 @@ CoupledResidualKernels installFormulation(
                             static_cast<std::uint32_t>(it->second));
                     }
                     if (auto lowered_output = system.loweredAuxiliaryOutputExpr(nm)) {
-                        return *lowered_output;
+                        return bind_output_states(*lowered_output);
                     }
                 }
                 return std::nullopt;
@@ -4945,7 +4961,7 @@ CoupledResidualKernels installFormulation(
                 }
                 if (node.type() == forms::FormExprType::AuxiliaryOutputSymbol) {
                     if (auto lowered_output = system.loweredAuxiliaryOutputExpr(nm)) {
-                        return *lowered_output;
+                        return bind_output_states(*lowered_output);
                     }
                     auto it = output_ids.find(nm);
                     if (it != output_ids.end())

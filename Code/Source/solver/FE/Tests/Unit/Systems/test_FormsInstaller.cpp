@@ -19,6 +19,7 @@
 #include "Systems/FormsInstallerDetail.h"
 #include "Systems/TimeIntegrator.h"
 #include "Auxiliary/AuxiliaryModelBuilder.h"
+#include "Auxiliary/AuxiliaryModelDSL.h"
 #include "Auxiliary/AuxiliaryBindings.h"
 #include "Auxiliary/AuxiliaryInputRegistry.h"
 #include "Auxiliary/AuxiliaryOperatorBuilder.h"
@@ -64,6 +65,7 @@
 
 #include <algorithm>
 #include <functional>
+#include <map>
 #include <array>
 #include <cmath>
 #include <cstdint>
@@ -6172,10 +6174,17 @@ TEST(FormsInstaller, DynamicAuxiliaryOutputLoweringPreservesMetadataOutputRef)
     ASSERT_TRUE(lowered.has_value());
     ASSERT_TRUE(lowered->isValid());
     ASSERT_NE(lowered->node(), nullptr);
-    EXPECT_TRUE(exprContainsType(*lowered->node(), forms::FormExprType::AuxiliaryStateRef));
+    // The kept differential state is named with its instance, not by its
+    // model-local slot.
+    EXPECT_TRUE(exprContainsType(*lowered->node(), forms::FormExprType::AuxiliaryStateSymbol));
+    EXPECT_FALSE(exprContainsType(*lowered->node(), forms::FormExprType::AuxiliaryStateRef));
+    EXPECT_NE(lowered->toString().find("aux(rcr_inst/X)"), std::string::npos) << lowered->toString();
     EXPECT_TRUE(exprContainsType(*lowered->node(), forms::FormExprType::AuxiliaryInputRef));
     EXPECT_FALSE(exprContainsType(*lowered->node(), forms::FormExprType::AuxiliaryOutputRef));
     EXPECT_FALSE(exprContainsType(*lowered->node(), forms::FormExprType::ParameterRef));
+    ASSERT_EQ(sys.auxiliaryStateReferences().size(), 1u);
+    EXPECT_EQ(sys.auxiliaryStateReferences()[0].instance_name, "rcr_inst");
+    EXPECT_EQ(sys.auxiliaryStateReferences()[0].state_name, "X");
 
     const auto& recs = sys.formulationRecords();
     ASSERT_EQ(recs.size(), 1u);
@@ -6196,6 +6205,316 @@ TEST(FormsInstaller, DynamicAuxiliaryOutputLoweringPreservesMetadataOutputRef)
     ASSERT_EQ(consumers.size(), 1u);
     EXPECT_EQ(consumers[0].qualified_output_name, "rcr_inst/P_out");
     EXPECT_EQ(consumers[0].operator_tag, "op");
+}
+
+namespace boundary_law_instances {
+
+using namespace svmp::FE::systems;
+using svmp::FE::forms::FormExpr;
+
+constexpr int kFaceA = 41;
+constexpr int kFaceB = 42;
+
+// y = z + r Q, dz/dt = Q - z: a differential law whose first state has
+// model-local slot zero.
+std::shared_ptr<BuiltAuxiliaryModel> oneStateLaw()
+{
+    static const auto model = aux::model("one_state_law", [](ModelFacade& m) {
+        auto Q = m.input("Q");
+        auto z = m.state("z");
+        auto r = m.param("r");
+        m << ddt(z) == Q - z;
+        m << out("y") == z + r * Q;
+    });
+    return model;
+}
+
+// A different differential law whose first state, w, also has slot zero.
+std::shared_ptr<BuiltAuxiliaryModel> twoStateLaw()
+{
+    static const auto model = aux::model("two_state_law", [](ModelFacade& m) {
+        auto Q = m.input("Q");
+        auto w = m.state("w");
+        auto s = m.state("s");
+        auto r = m.param("r");
+        m << ddt(w) == Q - s;
+        m << ddt(s) == w - s;
+        m << out("y") == w + r * Q;
+    });
+    return model;
+}
+
+// An algebraic law the system eliminates: y = P with P = r Q.
+std::shared_ptr<BuiltAuxiliaryModel> algebraicLaw()
+{
+    static const auto model = aux::model("algebraic_law", [](ModelFacade& m) {
+        auto Q = m.input("Q");
+        auto P = m.state("P", AuxiliaryVariableKind::Algebraic);
+        auto r = m.param("r");
+        m.initialGuess("P", 0.0);
+        m << alg(P) == P - r * Q;
+        m << out("y") == P;
+    });
+    return model;
+}
+
+struct LawApplication {
+    std::string name;
+    std::shared_ptr<BuiltAuxiliaryModel> model;
+    int marker;
+    Real r;
+    std::vector<Real> initial; ///< In the model's state order.
+};
+
+// Applications with distinct parameters and initial states: A and B on
+// disjoint faces, C (eliminated) on A's face.
+std::vector<LawApplication> lawApplications()
+{
+    return {
+        {"law_a", oneStateLaw(), kFaceA, 3.0, {5.0}},
+        {"law_b", twoStateLaw(), kFaceB, 7.0, {2.0, -1.0}},
+        {"law_c", algebraicLaw(), kFaceA, 11.0, {0.0}},
+    };
+}
+
+const std::vector<std::string>& stateNamesOf(const std::string& instance)
+{
+    static const auto applications = lawApplications();
+    for (const auto& app : applications) {
+        if (app.name == instance) {
+            return app.model->stateNames();
+        }
+    }
+    throw std::runtime_error("unknown law application " + instance);
+}
+
+struct LawSystem {
+    std::shared_ptr<svmp::FE::forms::test::SingleTetraTwoBoundaryFaceMeshAccess> mesh;
+    std::shared_ptr<svmp::FE::spaces::H1Space> space;
+    std::unique_ptr<FESystem> sys;
+    FieldId u_field{INVALID_FIELD_ID};
+};
+
+LawSystem buildLawSystem(const std::vector<LawApplication>& applications)
+{
+    LawSystem ls;
+    ls.mesh = std::make_shared<svmp::FE::forms::test::SingleTetraTwoBoundaryFaceMeshAccess>(kFaceA, kFaceB);
+    ls.space = std::make_shared<svmp::FE::spaces::H1Space>(ElementType::Tetra4, 1);
+    ls.sys = std::make_unique<FESystem>(ls.mesh);
+    auto& sys = *ls.sys;
+    ls.u_field = sys.addField(FieldSpec{.name = "u", .space = ls.space, .components = 1});
+    sys.addOperator("op");
+    const auto u = FormExpr::stateField(ls.u_field, *ls.space, "u");
+    const auto v = FormExpr::testFunction(*ls.space, "v");
+
+    auto residual = (u * v).dx();
+    for (const auto& app : applications) {
+        auto Q = sys.auxiliaryInput(
+            quantity(app.name + "_flow", FunctionalKind::Integral, u.ds(app.marker)),
+            AuxiliaryInputUpdateSchedule::EachNonlinearIteration);
+        auto handle = sys.deploy(use(app.model)
+                                     .name(app.name)
+                                     .boundary(app.marker)
+                                     .monolithic()
+                                     .params({{"r", app.r}})
+                                     .bind("Q", Q)
+                                     .initialize(app.initial));
+        residual = residual + (handle.output("y") * v).ds(app.marker);
+    }
+    (void)installFormulation(sys, "op", {ls.u_field}, residual);
+    SetupInputs si;
+    si.topology_override = singleTetraTopology();
+    sys.setup({}, si);
+    sys.finalizeAuxiliaryLayout();
+    return ls;
+}
+
+struct LawAssembly {
+    std::vector<Real> residual;
+    std::vector<Real> jacobian;
+    std::map<std::string, std::vector<Real>> state_columns; ///< "instance/state" -> dR/dstate
+    std::map<std::string, Real> outputs;                   ///< instance -> y
+};
+
+std::vector<Real> fixedField(const FESystem& sys)
+{
+    const auto n = static_cast<std::size_t>(sys.dofHandler().getNumDofs());
+    std::vector<Real> u(n);
+    for (std::size_t i = 0; i < n; ++i) {
+        u[i] = 0.3 + 0.17 * static_cast<Real>(i) - 0.05 * static_cast<Real>(i * i);
+    }
+    return u;
+}
+
+LawAssembly assembleLaws(FESystem& sys, const std::vector<Real>& u)
+{
+    const auto n = sys.dofHandler().getNumDofs();
+    const auto nn = static_cast<std::size_t>(n);
+    SystemStateView state;
+    state.time = 0.0;
+    state.dt = 0.1;
+    state.u = u;
+    svmp::FE::assembly::DenseMatrixView K(n);
+    svmp::FE::assembly::DenseVectorView R(n);
+    K.zero();
+    R.zero();
+    AssemblyRequest request;
+    request.op = "op";
+    request.want_matrix = true;
+    request.want_vector = true;
+    request.is_nonlinear_iteration = true;
+    const auto result = sys.assemble(request, state, &K, &R);
+    EXPECT_TRUE(result.success) << result.error_message;
+
+    LawAssembly out;
+    out.residual.resize(nn);
+    out.jacobian.resize(nn * nn);
+    for (std::size_t i = 0; i < nn; ++i) {
+        out.residual[i] = R.getVectorEntry(static_cast<GlobalIndex>(i));
+        for (std::size_t j = 0; j < nn; ++j) {
+            out.jacobian[i * nn + j] =
+                K.getMatrixEntry(static_cast<GlobalIndex>(i), static_cast<GlobalIndex>(j));
+        }
+    }
+    const auto& bordered = sys.borderedCoupling();
+    std::size_t column = 0;
+    for (const auto& block : bordered.aux_blocks) {
+        const auto& names = stateNamesOf(block.name);
+        for (int k = 0; k < block.dim; ++k, ++column) {
+            const auto label = block.name + "/" + names.at(static_cast<std::size_t>(k));
+            auto& col = out.state_columns[label];
+            col.assign(bordered.B.begin() + static_cast<std::ptrdiff_t>(column * nn),
+                       bordered.B.begin() + static_cast<std::ptrdiff_t>((column + 1) * nn));
+        }
+    }
+    const auto values = sys.auxiliaryOutputValues();
+    for (const auto& app : lawApplications()) {
+        const auto slot = sys.auxiliaryOutputSlotOf(app.name, "y");
+        if (slot < values.size()) {
+            out.outputs[app.name] = values[slot];
+        }
+    }
+    return out;
+}
+
+} // namespace boundary_law_instances
+
+// Two applications of boundary laws own their states: reversing their
+// declarations leaves the residual, the field Jacobian, the state columns
+// and the outputs of each application unchanged.
+TEST(FormsInstaller, BoundaryLawApplicationsKeepTheirStatesInEitherDeclarationOrder)
+{
+    using namespace boundary_law_instances;
+    auto forward_apps = lawApplications();
+    auto reverse_apps = forward_apps;
+    std::reverse(reverse_apps.begin(), reverse_apps.end());
+
+    auto forward = buildLawSystem(forward_apps);
+    auto reverse = buildLawSystem(reverse_apps);
+    const auto u = fixedField(*forward.sys);
+    ASSERT_EQ(u.size(), static_cast<std::size_t>(reverse.sys->dofHandler().getNumDofs()));
+    forward.sys->beginTimeStep();
+    reverse.sys->beginTimeStep();
+    const auto a = assembleLaws(*forward.sys, u);
+    const auto b = assembleLaws(*reverse.sys, u);
+
+    ASSERT_EQ(a.residual.size(), b.residual.size());
+    for (std::size_t i = 0; i < a.residual.size(); ++i) {
+        EXPECT_NEAR(a.residual[i], b.residual[i], 1e-13 * (1.0 + std::abs(a.residual[i])))
+            << "residual row " << i;
+    }
+    for (std::size_t i = 0; i < a.jacobian.size(); ++i) {
+        EXPECT_NEAR(a.jacobian[i], b.jacobian[i], 1e-13 * (1.0 + std::abs(a.jacobian[i])))
+            << "Jacobian entry " << i;
+    }
+    ASSERT_EQ(a.state_columns.size(), 3u);
+    ASSERT_EQ(b.state_columns.size(), 3u);
+    for (const auto& [label, column] : a.state_columns) {
+        const auto it = b.state_columns.find(label);
+        ASSERT_NE(it, b.state_columns.end()) << label;
+        for (std::size_t i = 0; i < column.size(); ++i) {
+            EXPECT_NEAR(column[i], it->second[i], 1e-13) << label << " row " << i;
+        }
+    }
+    for (const auto& [name, value] : a.outputs) {
+        ASSERT_EQ(b.outputs.count(name), 1u) << name;
+        EXPECT_NEAR(value, b.outputs.at(name), 1e-13) << name;
+    }
+}
+
+// At fixed FE fields, perturbing one state moves only its own application's
+// load, by the direct derivative dy_i/dz_j = delta_ij, and the finite
+// difference matches the assembled state column.
+TEST(FormsInstaller, BoundaryLawLoadFollowsOnlyItsOwnStateAtFixedFields)
+{
+    using namespace boundary_law_instances;
+    for (const bool reversed : {false, true}) {
+        auto apps = lawApplications();
+        if (reversed) {
+            std::reverse(apps.begin(), apps.end());
+        }
+        auto ls = buildLawSystem(apps);
+        auto& sys = *ls.sys;
+        const auto u = fixedField(sys);
+        sys.beginTimeStep();
+        const auto base = assembleLaws(sys, u);
+
+        Real largest_column = 0.0;
+        for (const auto& [label, column] : base.state_columns) {
+            const auto slash = label.find('/');
+            const auto instance = label.substr(0, slash);
+            const auto state = label.substr(slash + 1);
+            const auto& names = stateNamesOf(instance);
+            const auto index = static_cast<std::size_t>(
+                std::distance(names.begin(), std::find(names.begin(), names.end(), state)));
+            auto work = sys.auxiliaryStateManager().getBlock(instance).work();
+            ASSERT_LT(index, work.size());
+            constexpr Real h = 0.25;
+            const Real saved = work[index];
+            work[index] = saved + h;
+            const auto moved = assembleLaws(sys, u);
+            sys.auxiliaryStateManager().getBlock(instance).work()[index] = saved;
+            for (std::size_t i = 0; i < column.size(); ++i) {
+                const Real fd = (moved.residual[i] - base.residual[i]) / h;
+                EXPECT_NEAR(fd, column[i], 1e-12) << (reversed ? "reversed " : "") << label << " row " << i;
+                largest_column = std::max(largest_column, std::abs(column[i]));
+            }
+        }
+        EXPECT_GT(largest_column, 0.1);
+    }
+}
+
+// The inlined output names the state of its own instance, and the installed
+// form reads it through a slot bound to that instance.
+TEST(FormsInstaller, InlinedBoundaryLawOutputNamesItsInstanceState)
+{
+    using namespace boundary_law_instances;
+    auto ls = buildLawSystem(lawApplications());
+    auto& sys = *ls.sys;
+
+    const auto b_output = sys.loweredAuxiliaryOutputExpr("law_b/y");
+    ASSERT_TRUE(b_output.has_value());
+    const auto text = b_output->toString();
+    EXPECT_NE(text.find("aux(law_b/w)"), std::string::npos) << text;
+    EXPECT_EQ(text.find("law_a"), std::string::npos) << text;
+
+    // The eliminated algebraic law keeps no state; the differential ones
+    // each bind their own first state.
+    const auto& references = sys.auxiliaryStateReferences();
+    ASSERT_EQ(references.size(), 2u);
+    EXPECT_EQ(references[0].instance_name, "law_a");
+    EXPECT_EQ(references[0].state_name, "z");
+    EXPECT_EQ(references[0].state_index, 0u);
+    EXPECT_EQ(references[1].instance_name, "law_b");
+    EXPECT_EQ(references[1].state_name, "w");
+    EXPECT_EQ(references[1].state_index, 0u);
+    EXPECT_EQ(sys.bindAuxiliaryStateReference("law_b/w"), 1u);
+
+    sys.beginTimeStep();
+    const auto values = sys.auxiliaryStateValues();
+    ASSERT_EQ(values.size(), 2u);
+    EXPECT_EQ(values[0], 5.0);
+    EXPECT_EQ(values[1], 2.0);
 }
 
 TEST(FormsInstaller, BoundaryConditionManagerPreservesAuxiliaryOutputMetadataUntilInstall)
