@@ -1032,7 +1032,7 @@ Status: `implemented/public`.
 
 ### Generated-State Schedule
 
-Status: `implemented/internal` (decision D64 item 11, D66): the compiled schedule drives the Application's steady and transient solves; the static-capillary certificate probe keeps its own options until its declaration lands.
+Status: `implemented/internal` (decision D64 item 11, D66): the compiled schedule drives the Application's steady and transient solves and the policy of the static-capillary certificate probe (which declares its one frozen-rows refresh and never selects the outer fixed point; its Newton options are the certificate's).
 
 | Vocabulary | Header | Notes |
 |------------|--------|-------|

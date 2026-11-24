@@ -4857,13 +4857,50 @@ evaluateStaticCapillaryPressureCertificate(
     PdeVelocityExtensionCaches probe_pde_extension_caches;
     bool probe_extension_maps_refreshed = false;
     if (!algebraic_extension_requests.empty()) {
+      namespace ts = svmp::FE::timestepping;
       using svmp::FE::timestepping::FunctionGeneratedStateParticipant;
       using svmp::FE::timestepping::GeneratedStateRole;
       using svmp::FE::timestepping::GeneratedStateSync;
+      // The probe refreshes the frozen rows of the algebraic extensions once,
+      // at its first accepted nonlinear state, from the velocity it solved
+      // for; it never selects the outer fixed point.
+      const auto probe_declaration = [&](ts::GeneratedStatePurpose) {
+        ts::GeneratedStateDescriptor descriptor;
+        descriptor.enablement = ts::OuterEnablement::Never;
+        for (const auto& request : algebraic_extension_requests) {
+          const auto source =
+              system.findFieldByName(request.source_velocity_field_name);
+          if (source != svmp::FE::INVALID_FIELD_ID) {
+            descriptor.reads.push_back(
+                {.what = {.kind = ts::ResourceKind::Field, .field = source},
+                 .version = ts::StateVersion::CurrentTrial});
+          }
+          descriptor.writes.push_back(
+              {.what = {.kind = ts::ResourceKind::FrozenRows,
+                        .field = system.findFieldByName(
+                            request.target_velocity_field_name),
+                        .operator_tag = request.operator_tag},
+               .phase = ts::WritePhase::InnerTransaction,
+               .residual_defining = true,
+               .requires_fresh_residual = true});
+        }
+        return descriptor;
+      };
+      const auto probe_plan = ts::compileGeneratedStateSchedule(
+          generatedStateScheduleInputs(
+              system,
+              ts::GeneratedStateSolve::Steady,
+              ts::GeneratedStatePurpose::CertificateProbe,
+              /*per_step_only=*/false,
+              /*overrides=*/{}),
+          {{.name = "level_set_advection_velocity",
+            .role = GeneratedStateRole::Extension,
+            .descriptor =
+                probe_declaration(ts::GeneratedStatePurpose::CertificateProbe)}},
+          ts::residualGeneratedStateReads(system));
       const auto generated_state =
           std::make_shared<svmp::FE::timestepping::GeneratedStateRegistry>(
-              svmp::FE::timestepping::GeneratedStatePolicy{
-                  .solve = svmp::FE::timestepping::GeneratedStateSolve::Steady});
+              probe_plan.selection.policy);
       generated_state->add(std::make_shared<FunctionGeneratedStateParticipant>(
           "level_set_advection_velocity",
           GeneratedStateRole::Extension,
@@ -4885,7 +4922,8 @@ evaluateStaticCapillaryPressureCertificate(
                         /*refresh_frozen_algebraic_map=*/true,
                         &probe_pde_extension_caches);
                     probe_extension_maps_refreshed = true;
-                  }}));
+                  },
+              .describe = probe_declaration}));
       generated_state->bind(options);
     }
 
