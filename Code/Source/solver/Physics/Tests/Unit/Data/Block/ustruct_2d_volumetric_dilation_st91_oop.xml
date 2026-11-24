@@ -78,7 +78,7 @@
       <Pressure>true</Pressure>
     </Output>
 
-    <LS type="BICGS">
+    <LS type="GMRES">
       <Linear_algebra type="fsils">
         <Preconditioner>row-column-scaling</Preconditioner>
       </Linear_algebra>

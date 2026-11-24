@@ -91,7 +91,7 @@
         <Preconditioner>row-column-scaling</Preconditioner>
       </Linear_algebra>
       <Tolerance>1e-12</Tolerance>
-      <Absolute_tolerance>1e-10</Absolute_tolerance>
+      <Absolute_tolerance>1e-9</Absolute_tolerance>
       <Max_iterations>500</Max_iterations>
       <Krylov_space_dimension>250</Krylov_space_dimension>
     </LS>

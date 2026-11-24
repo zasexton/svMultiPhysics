@@ -523,7 +523,6 @@ def two_dimensional_volumetric_case() -> dict[str, object]:
         mesh_file_path="../Square/mesh/mesh-complete.mesh.vtu",
         face_entries=TWO_D_FACES,
         newton_max_iterations=14,
-        linear_solver_type="BICGS",
         linear_tolerance=1.0e-8,
         linear_max_iterations=1000,
     )
