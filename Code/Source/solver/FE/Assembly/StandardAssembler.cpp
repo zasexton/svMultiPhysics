@@ -4943,6 +4943,7 @@ AssemblyResult StandardAssembler::assembleBoundaryFaces(
                                    required_data, ContextType::BoundaryFace);
                 context_.setMaterialState(nullptr, nullptr, 0u, 0u);
                 context_.setTimeIntegrationContext(time_integration_);
+                context_.setHistoryWeights(history_weights_);
                 context_.setTime(time_);
                 context_.setTimeStep(dt_);
                 context_.setRealParameterGetter(get_real_param_);
@@ -5664,6 +5665,7 @@ void StandardAssembler::assembleInteriorFaceItem(const InteriorFaceLoop& loop,
     stage_start = face_now();
     context_.setMaterialState(nullptr, nullptr, 0u, 0u);
     context_.setTimeIntegrationContext(time_integration_);
+    context_.setHistoryWeights(history_weights_);
     context_.setTime(time_);
     context_.setTimeStep(dt_);
     context_.setRealParameterGetter(get_real_param_);
@@ -5693,6 +5695,7 @@ void StandardAssembler::assembleInteriorFaceItem(const InteriorFaceLoop& loop,
     stage_start = face_now();
     context_plus.setMaterialState(nullptr, nullptr, 0u, 0u);
     context_plus.setTimeIntegrationContext(time_integration_);
+    context_plus.setHistoryWeights(history_weights_);
     context_plus.setTime(time_);
     context_plus.setTimeStep(dt_);
     context_plus.setRealParameterGetter(get_real_param_);
@@ -6172,6 +6175,7 @@ AssemblyResult StandardAssembler::assembleInterfaceFaces(
                                    trial_force_face_reference);
                 context_.setMaterialState(nullptr, nullptr, 0u, 0u);
                 context_.setTimeIntegrationContext(time_integration_);
+                context_.setHistoryWeights(history_weights_);
                 context_.setTime(time_);
                 context_.setTimeStep(dt_);
                 context_.setRealParameterGetter(get_real_param_);
@@ -6369,6 +6373,7 @@ AssemblyResult StandardAssembler::assembleInterfaceFaces(
                            required_data, ContextType::InteriorFace);
         context_.setMaterialState(nullptr, nullptr, 0u, 0u);
         context_.setTimeIntegrationContext(time_integration_);
+        context_.setHistoryWeights(history_weights_);
         context_.setTime(time_);
         context_.setTimeStep(dt_);
         context_.setRealParameterGetter(get_real_param_);
@@ -6389,6 +6394,7 @@ AssemblyResult StandardAssembler::assembleInterfaceFaces(
                            required_data, ContextType::InteriorFace, align_plus);
         context_plus.setMaterialState(nullptr, nullptr, 0u, 0u);
         context_plus.setTimeIntegrationContext(time_integration_);
+        context_plus.setHistoryWeights(history_weights_);
         context_plus.setTime(time_);
         context_plus.setTimeStep(dt_);
         context_plus.setRealParameterGetter(get_real_param_);
@@ -6757,6 +6763,7 @@ AssemblyResult StandardAssembler::assembleCellsCore(
         tp_s0 = TP_SUB();
         ctx.setMaterialState(nullptr, nullptr, 0u, 0u);
         ctx.setTimeIntegrationContext(time_integration_);
+        ctx.setHistoryWeights(history_weights_);
         ctx.setTime(time_);
         ctx.setTimeStep(dt_);
         ctx.setRealParameterGetter(get_real_param_);
@@ -10111,6 +10118,7 @@ AssemblyResult StandardAssembler::assembleCutVolumes(
         context_.setCutVolumeDomain(interface_marker, rule.side);
         context_.setMaterialState(nullptr, nullptr, 0u, 0u);
         context_.setTimeIntegrationContext(time_integration_);
+        context_.setHistoryWeights(history_weights_);
         context_.setTime(time_);
         context_.setTimeStep(dt_);
         context_.setRealParameterGetter(get_real_param_);
@@ -11066,6 +11074,7 @@ void StandardAssembler::assembleCutVolumeFusedRule(const CutVolumeFusedLoop& loo
         context_.setCutVolumeDomain(interface_marker, rule.side);
         context_.setMaterialState(nullptr, nullptr, 0u, 0u);
         context_.setTimeIntegrationContext(time_integration_);
+        context_.setHistoryWeights(history_weights_);
         context_.setTime(time_);
         context_.setTimeStep(dt_);
         context_.setRealParameterGetter(get_real_param_);
@@ -12142,6 +12151,7 @@ void StandardAssembler::assembleMonolithicCellBatch(const MonolithicBatchLoop& l
     const auto setCommonContextState = [&](AssemblyContext& ctx) {
         ctx.setMaterialState(nullptr, nullptr, 0u, 0u);
         ctx.setTimeIntegrationContext(time_integration_);
+        ctx.setHistoryWeights(history_weights_);
         ctx.setTime(time_);
         ctx.setTimeStep(dt_);
         ctx.setRealParameterGetter(get_real_param_);
@@ -12936,6 +12946,7 @@ void StandardAssembler::assembleMonolithicVectorCell(const MonolithicVectorLoop&
     const auto setCommonContextState = [&](AssemblyContext& ctx) {
         ctx.setMaterialState(nullptr, nullptr, 0u, 0u);
         ctx.setTimeIntegrationContext(time_integration_);
+        ctx.setHistoryWeights(history_weights_);
         ctx.setTime(time_);
         ctx.setTimeStep(dt_);
         ctx.setRealParameterGetter(get_real_param_);
@@ -13654,6 +13665,7 @@ AssemblyResult StandardAssembler::assembleCellsFused(
         const auto setCommonContextState = [&](AssemblyContext& ctx) {
             ctx.setMaterialState(nullptr, nullptr, 0u, 0u);
             ctx.setTimeIntegrationContext(time_integration_);
+            ctx.setHistoryWeights(history_weights_);
             ctx.setTime(time_);
             ctx.setTimeStep(dt_);
             ctx.setRealParameterGetter(get_real_param_);
@@ -15674,6 +15686,7 @@ AssemblyResult StandardAssembler::assembleCellsFused(
                         // --- 2. Set context properties ---
                         thread_ctx.setMaterialState(nullptr, nullptr, 0u, 0u);
                         thread_ctx.setTimeIntegrationContext(time_integration_);
+                        thread_ctx.setHistoryWeights(history_weights_);
                         thread_ctx.setTime(time_);
                         thread_ctx.setTimeStep(dt_);
                         thread_ctx.setRealParameterGetter(get_real_param_);
@@ -16094,6 +16107,7 @@ AssemblyResult StandardAssembler::assembleCellsFused(
                 tp0 = TP();
                 ctx.setMaterialState(nullptr, nullptr, 0u, 0u);
                 ctx.setTimeIntegrationContext(time_integration_);
+                ctx.setHistoryWeights(history_weights_);
                 ctx.setTime(time_);
                 ctx.setTimeStep(dt_);
                 ctx.setRealParameterGetter(get_real_param_);
@@ -16605,6 +16619,7 @@ AssemblyResult StandardAssembler::assembleCellsFused(
                 tp0 = TP();
                 ctx.setMaterialState(nullptr, nullptr, 0u, 0u);
                 ctx.setTimeIntegrationContext(time_integration_);
+                ctx.setHistoryWeights(history_weights_);
                 ctx.setTime(time_);
                 ctx.setTimeStep(dt_);
                 ctx.setRealParameterGetter(get_real_param_);
@@ -16886,6 +16901,7 @@ AssemblyResult StandardAssembler::assembleCellsFused(
         // 2. Set context global state ONCE
         context_.setMaterialState(nullptr, nullptr, 0u, 0u);
         context_.setTimeIntegrationContext(time_integration_);
+        context_.setHistoryWeights(history_weights_);
         context_.setTime(time_);
         context_.setTimeStep(dt_);
         context_.setRealParameterGetter(get_real_param_);

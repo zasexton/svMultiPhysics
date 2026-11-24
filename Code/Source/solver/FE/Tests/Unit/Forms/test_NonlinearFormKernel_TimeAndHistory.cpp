@@ -349,6 +349,61 @@ TEST(HistoryOpsTest, HistoryConvolutionMatchesExplicitSumAndHasNoJacobianContrib
     }
 }
 
+// A history convolution without explicit weights reads the weights the
+// assembler was given (StandardAssembler::setHistoryWeights): it equals the
+// convolution with those weights written out, and follows a change of them.
+TEST(HistoryOpsTest, HistoryConvolutionWithoutWeightsReadsTheAssemblerHistoryWeights)
+{
+    SingleTetraMeshAccess mesh;
+    auto dof_map = createSingleTetraDofMap();
+    spaces::H1Space space(ElementType::Tetra4, /*order=*/1);
+
+    FormCompiler compiler;
+    const auto u = TrialFunction(space, "u");
+    const auto v = TestFunction(space, "v");
+    SymbolicNonlinearFormKernel implicit(compiler.compileResidual(((u + FormExpr::historyConvolution({})) * v).dx()),
+                                         NonlinearKernelOutput::Both);
+    implicit.resolveInlinableConstitutives();
+
+    assembly::StandardAssembler assembler;
+    assembler.setDofMap(dof_map);
+    assembly::TimeIntegrationContext ti;
+    ti.integrator_name = "unit_history";
+    assembly::TimeDerivativeStencil dt1;
+    dt1.order = 1;
+    dt1.a = {Real(1.0), Real(-1.0), Real(1.0)};
+    ti.dt1 = dt1;
+    assembler.setTimeIntegrationContext(&ti);
+    std::vector<Real> U = {0.1, -0.2, 0.3, -0.1};
+    std::vector<Real> U_prev = {0.07, -0.01, 0.02, 0.05};
+    std::vector<Real> U_prev2 = {0.09, 0.03, -0.04, 0.01};
+    assembler.setCurrentSolution(U);
+    assembler.setPreviousSolution(U_prev);
+    assembler.setPreviousSolution2(U_prev2);
+
+    for (const auto& weights : {std::vector<Real>{0.25, -1.75}, std::vector<Real>{2.0, 0.5}}) {
+        SCOPED_TRACE(::testing::Message() << "weights " << weights[0] << ", " << weights[1]);
+        SymbolicNonlinearFormKernel explicit_kernel(
+            compiler.compileResidual(((u + FormExpr::historyConvolution({FormExpr::constant(weights[0]),
+                                                                         FormExpr::constant(weights[1])})) *
+                                      v)
+                                         .dx()),
+            NonlinearKernelOutput::Both);
+        explicit_kernel.resolveInlinableConstitutives();
+        assembler.setHistoryWeights(weights);
+
+        assembly::DenseVectorView R(4);
+        assembly::DenseVectorView R_explicit(4);
+        R.zero();
+        R_explicit.zero();
+        (void)assembler.assembleVector(mesh, space, implicit, R);
+        (void)assembler.assembleVector(mesh, space, explicit_kernel, R_explicit);
+        for (GlobalIndex i = 0; i < 4; ++i) {
+            EXPECT_NEAR(R.getVectorEntry(i), R_explicit.getVectorEntry(i), 1e-14);
+        }
+    }
+}
+
 TEST(HistoryOpsTest, HistoryWeightedSumMatchesExplicitSumAndHasNoJacobianContribution)
 {
     SingleTetraMeshAccess mesh;
