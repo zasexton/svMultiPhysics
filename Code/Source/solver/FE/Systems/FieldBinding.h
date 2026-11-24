@@ -87,6 +87,11 @@ struct ShadowField {
     Kind kind{Kind::Lagged};
     Refresh refresh{Refresh::GeneratedState}; ///< of a lagged copy
     int steps_back{0};                        ///< k of previous(u, k)
+    /// Of a lagged copy whose owner requires the generated-state outer fixed
+    /// point to refresh it, and the source to advect every level set a
+    /// functional declaration pairs with it: the owner's name for the
+    /// requirement, which starts each refusal.  Empty: no requirement.
+    std::string schedule_requirement{};
 };
 
 /// The shadow fields of @p system, in registration order.
@@ -173,9 +178,12 @@ public:
      * so a term in u - lagged(U) has the residual of u - u_ref and the
      * Jacobian of u.  timestepping::makeShadowFieldParticipant refreshes it.
      * The shadow of a global unknown is a global field of prescribed data.
+     * A non-empty @p schedule_requirement records the owner's requirement on
+     * the schedule that refreshes it (ShadowField::schedule_requirement).
      */
     [[nodiscard]] forms::FormExpr lagged(const BoundUnknown& unknown, Refresh refresh,
-                                         std::string shadow_name = {});
+                                         std::string shadow_name = {},
+                                         std::string schedule_requirement = {});
 
     /**
      * @brief u^{n-k}, the unknown's accepted value @p k >= 1 steps back

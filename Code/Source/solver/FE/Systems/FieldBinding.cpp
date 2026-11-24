@@ -257,13 +257,17 @@ std::vector<ShadowField> shadowFields(const FESystem& system)
     return records != nullptr ? records->fields : std::vector<ShadowField>{};
 }
 
-forms::FormExpr FieldBinding::lagged(const BoundUnknown& unknown, Refresh refresh, std::string shadow_name)
+forms::FormExpr FieldBinding::lagged(const BoundUnknown& unknown, Refresh refresh, std::string shadow_name,
+                                     std::string schedule_requirement)
 {
     if (shadow_name.empty() && unknown.id != INVALID_FIELD_ID) {
         shadow_name = system_->fieldRecord(unknown.id).name + "_lagged";
     }
-    return shadow(unknown, ShadowField{.kind = ShadowField::Kind::Lagged, .refresh = refresh}, std::move(shadow_name),
-                  "lagged copy");
+    return shadow(unknown,
+                  ShadowField{.kind = ShadowField::Kind::Lagged,
+                              .refresh = refresh,
+                              .schedule_requirement = std::move(schedule_requirement)},
+                  std::move(shadow_name), "lagged copy");
 }
 
 forms::FormExpr FieldBinding::previous(const BoundUnknown& unknown, int k, std::string shadow_name)
@@ -304,8 +308,12 @@ forms::FormExpr FieldBinding::shadow(const BoundUnknown& unknown, ShadowField re
     if (existing == records.end()) {
         records.push_back(record);
     } else if (existing->source != record.source || existing->kind != record.kind ||
-               existing->refresh != record.refresh || existing->steps_back != record.steps_back) {
+               existing->refresh != record.refresh || existing->steps_back != record.steps_back ||
+               (!existing->schedule_requirement.empty() && !record.schedule_requirement.empty() &&
+                existing->schedule_requirement != record.schedule_requirement)) {
         throw std::invalid_argument(context + ": field '" + shadow_name + "' is already another shadow field");
+    } else if (existing->schedule_requirement.empty()) {
+        existing->schedule_requirement = record.schedule_requirement;
     }
     return forms::FormExpr::discreteField(id, *space, std::move(shadow_name));
 }

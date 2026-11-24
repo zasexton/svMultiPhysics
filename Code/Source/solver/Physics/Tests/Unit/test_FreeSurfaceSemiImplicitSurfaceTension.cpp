@@ -14,6 +14,8 @@
 
 #include <gtest/gtest.h>
 
+#include "FE/Systems/FieldBinding.h"
+
 #include "Physics/Formulations/NavierStokes/IncompressibleNavierStokesVMSModule.h"
 #include "Physics/Tests/Unit/PhysicsTestHelpers.h"
 
@@ -498,6 +500,15 @@ BlockMeasurement measureBlock(const PlanarCut& cut,
     auto on = makeProbe(ns::FreeSurfaceSurfaceTensionSemiImplicit::NormalIncrement, cut);
     auto off = makeProbe(ns::FreeSurfaceSurfaceTensionSemiImplicit::None, cut);
     EXPECT_NE(on->reference, FE::INVALID_FIELD_ID);
+    // The lagged velocity carries the term's requirement on the schedule
+    // that refreshes it (the outer fixed point, and level sets advected by u).
+    const auto shadows = FE::systems::shadowFields(*on->system);
+    EXPECT_EQ(shadows.size(), 1u);
+    if (!shadows.empty()) {
+        EXPECT_EQ(shadows.front().shadow, on->reference);
+        EXPECT_EQ(shadows.front().schedule_requirement,
+                  "Surface_tension_semi_implicit=NormalIncrement");
+    }
     on->system->setPrescribedFieldCoefficients(
         on->reference, fieldCoefficients(*on, on->reference, reference));
     const auto state_on = makeState(*on, velocity, integrator);

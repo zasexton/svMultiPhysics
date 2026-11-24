@@ -4530,6 +4530,49 @@ TEST(ApplicationDriverLevelSetWorkflows,
 }
 
 TEST(ApplicationDriverLevelSetWorkflows,
+     ShadowScheduleRequirementRefusalsKeepTheSemiImplicitTexts)
+{
+  // A lagged copy with a schedule requirement needs a transient solve with
+  // the outer fixed point and level sets advected by its source; the owner's
+  // requirement starts each refusal, so the semi-implicit capillary texts
+  // stay as they were.
+  auto mesh = makeWorkflowTriangleMesh();
+  auto scalar = std::make_shared<svmp::FE::spaces::H1Space>(
+      svmp::FE::ElementType::Triangle3, 1);
+  auto vector = std::make_shared<svmp::FE::spaces::ProductSpace>(scalar, 2);
+  svmp::FE::systems::FESystem system(mesh);
+  svmp::FE::systems::FieldBinding fields(system, "test");
+  const auto U = fields.unknownSymbols(
+      svmp::FE::systems::FieldSpec{.name = "Velocity", .space = vector, .components = 2},
+      "velocity", "u", "v");
+  EXPECT_EQ(scheduleRequiredShadow(system, svmp::FE::systems::shadowFields(system), {},
+                                   /*transient_solve=*/false, /*outer_fixed_point=*/false),
+            nullptr);
+  (void)fields.lagged(U, svmp::FE::systems::Refresh::GeneratedState, "u_ref",
+                      "Surface_tension_semi_implicit=NormalIncrement");
+  const auto shadows = svmp::FE::systems::shadowFields(system);
+  const auto refusal = [&](bool transient, bool outer) {
+    try {
+      (void)scheduleRequiredShadow(system, shadows, {}, transient, outer);
+    } catch (const std::runtime_error& error) {
+      return std::string(error.what());
+    }
+    return std::string("accepted");
+  };
+  EXPECT_EQ(refusal(false, false),
+            "[svMultiPhysics::Application] Surface_tension_semi_implicit=NormalIncrement "
+            "requires a transient solve; the term is defined by the effective time step of "
+            "the time integrator");
+  EXPECT_EQ(refusal(true, false),
+            "[svMultiPhysics::Application] Surface_tension_semi_implicit=NormalIncrement "
+            "requires the generated-state outer fixed point, which refreshes the reference "
+            "velocity with the interface geometry");
+  EXPECT_EQ(refusal(true, true),
+            "[svMultiPhysics::Application] Surface_tension_semi_implicit=NormalIncrement "
+            "found no declared unfitted free-surface velocity and level set");
+}
+
+TEST(ApplicationDriverLevelSetWorkflows,
      TransientLineSearchTrialSynchronizationFollowsResidualContract)
 {
   {

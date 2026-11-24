@@ -2525,6 +2525,15 @@ TEST(FESystem, LaggedAndPreviousValuesAreShadowFieldsRefreshedByTheGeneratedStat
     EXPECT_THROW((void)fields.previous(W, 0), std::invalid_argument);
     const svmp::FE::systems::BoundUnknown data{shadows[0].shadow, u_ref, u_ref};
     EXPECT_THROW((void)fields.lagged(data, Refresh::GeneratedState), std::invalid_argument);
+    // A schedule requirement is recorded with the copy: a later request
+    // without one keeps it, a different one is refused.
+    EXPECT_TRUE(shadows[0].schedule_requirement.empty());
+    (void)fields.lagged(U, Refresh::GeneratedState, "u_lagged", "Owner=Requirement");
+    EXPECT_EQ(svmp::FE::systems::shadowFields(sys)[0].schedule_requirement, "Owner=Requirement");
+    (void)fields.lagged(U, Refresh::GeneratedState);
+    EXPECT_EQ(svmp::FE::systems::shadowFields(sys)[0].schedule_requirement, "Owner=Requirement");
+    EXPECT_THROW((void)fields.lagged(U, Refresh::GeneratedState, "u_lagged", "Other=Requirement"),
+                 std::invalid_argument);
 
     sys.addOperator("mass");
     sys.addCellKernel("mass", U.id, std::make_shared<MassKernel>(1.0));

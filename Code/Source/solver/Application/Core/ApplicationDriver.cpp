@@ -6484,7 +6484,9 @@ bool initializeDiscreteStaticCapillaryEquilibrium(
 }
 
 // How one level_set equation advects its level set.
-struct SemiImplicitLevelSetTransport {
+// How a level_set equation transports its field, for the schedule
+// requirements of lagged copies (ShadowField::schedule_requirement).
+struct LevelSetTransportFacts {
   std::string level_set_field_name{};
   svmp::FE::level_set::LevelSetVelocitySource velocity_source{
       svmp::FE::level_set::LevelSetVelocitySource::CoupledField};
@@ -6497,18 +6499,19 @@ struct SemiImplicitLevelSetTransport {
   std::string extension_source_velocity_field_name{};
 };
 
-[[noreturn]] void rejectSemiImplicit(const std::string& reason)
+// A refusal of a lagged copy's schedule requirement, which the owner names.
+[[noreturn]] void rejectShadowSchedule(const std::string& requirement,
+                                       const std::string& reason)
 {
-  throw std::runtime_error(
-      "[svMultiPhysics::Application] Surface_tension_semi_implicit="
-      "NormalIncrement " +
-      reason);
+  throw std::runtime_error("[svMultiPhysics::Application] " + requirement +
+                           " " + reason);
 }
 
-// The level set must move with the velocity whose increment the term
-// linearizes.  Returns an empty string when it does, else the reason.
-std::string semiImplicitTransportMismatch(
-    const SemiImplicitLevelSetTransport& transport,
+// The level set must move with the velocity of the lagged copy (the velocity
+// whose increment the owner's term linearizes).  Returns an empty string when
+// it does, else the reason.
+std::string levelSetTransportMismatch(
+    const LevelSetTransportFacts& transport,
     const std::string& velocity_name)
 {
   namespace ls = svmp::FE::level_set;
@@ -6555,39 +6558,40 @@ std::string semiImplicitTransportMismatch(
   return "uses an unsupported level-set velocity source";
 }
 
-// The lagged velocity of the semi-implicit capillary term
-// (Surface_tension_semi_implicit=NormalIncrement), a shadow field
-// (FieldBinding::lagged) refreshed by the generated-state outer fixed point,
-// or nullptr when no free surface uses the term.  Requires a transient solve
-// with the outer fixed point, and every declared free-surface level set to be
-// transported by the free-surface velocity or by a PDE extension of it.
-const svmp::FE::systems::ShadowField* semiImplicitLaggedVelocity(
+// The lagged copy with a schedule requirement (ShadowField::
+// schedule_requirement; the semi-implicit capillary term,
+// Surface_tension_semi_implicit=NormalIncrement), or nullptr when no shadow
+// has one.  Requires a transient solve with the outer fixed point, and every
+// level set that a functional declaration pairs with the copy's source to be
+// transported by that velocity or by a PDE extension of it.  The owner's
+// requirement starts each refusal.
+const svmp::FE::systems::ShadowField* scheduleRequiredShadow(
     const svmp::FE::systems::FESystem& system,
     const std::vector<svmp::FE::systems::ShadowField>& shadows,
-    std::span<const SemiImplicitLevelSetTransport> transports,
+    std::span<const LevelSetTransportFacts> transports,
     bool transient_solve,
     bool outer_fixed_point)
 {
   using svmp::FE::FieldId;
   using svmp::FE::INVALID_FIELD_ID;
-  const std::string reference_name(
-      svmp::Physics::formulations::navier_stokes::
-          kFreeSurfaceSemiImplicitReferenceVelocityFieldName);
   const auto reference = std::find_if(
       shadows.begin(), shadows.end(),
-      [&](const svmp::FE::systems::ShadowField& shadow) {
-        return system.fieldRecord(shadow.shadow).name == reference_name;
+      [](const svmp::FE::systems::ShadowField& shadow) {
+        return !shadow.schedule_requirement.empty();
       });
   if (reference == shadows.end()) {
     return nullptr;
   }
+  const auto& requirement = reference->schedule_requirement;
   if (!transient_solve) {
-    rejectSemiImplicit(
+    rejectShadowSchedule(
+        requirement,
         "requires a transient solve; the term is defined by the effective "
         "time step of the time integrator");
   }
   if (!outer_fixed_point) {
-    rejectSemiImplicit(
+    rejectShadowSchedule(
+        requirement,
         "requires the generated-state outer fixed point, which refreshes "
         "the reference velocity with the interface geometry");
   }
@@ -6601,7 +6605,8 @@ const svmp::FE::systems::ShadowField* semiImplicitLaggedVelocity(
       continue;
     }
     if (declaration.velocity_field != reference->source) {
-      rejectSemiImplicit(
+      rejectShadowSchedule(
+          requirement,
           "requires all unfitted free surfaces to share one velocity field");
     }
     if (declaration.level_set_field != INVALID_FIELD_ID) {
@@ -6609,7 +6614,8 @@ const svmp::FE::systems::ShadowField* semiImplicitLaggedVelocity(
     }
   }
   if (level_set_fields.empty()) {
-    rejectSemiImplicit(
+    rejectShadowSchedule(
+        requirement,
         "found no declared unfitted free-surface velocity and level set");
   }
   const auto& velocity_name = system.fieldRecord(reference->source).name;
@@ -6621,15 +6627,17 @@ const svmp::FE::systems::ShadowField* semiImplicitLaggedVelocity(
         continue;
       }
       transported = true;
-      const auto mismatch = semiImplicitTransportMismatch(transport, velocity_name);
+      const auto mismatch = levelSetTransportMismatch(transport, velocity_name);
       if (!mismatch.empty()) {
-        rejectSemiImplicit("cannot use level set '" + level_set_name +
-                           "': its level_set equation " + mismatch);
+        rejectShadowSchedule(requirement,
+                             "cannot use level set '" + level_set_name +
+                                 "': its level_set equation " + mismatch);
       }
     }
     if (!transported) {
-      rejectSemiImplicit("requires level set '" + level_set_name +
-                         "' to be transported by a level_set equation");
+      rejectShadowSchedule(requirement,
+                           "requires level set '" + level_set_name +
+                               "' to be transported by a level_set equation");
     }
   }
   return &*reference;
@@ -6950,9 +6958,10 @@ void ApplicationDriver::runSteadyState(SimulationComponents& sim, const Paramete
       LevelSetMaintenanceScheduleStage::SteadyInitialization,
       sim.time_history->stepIndex(),
       activeFESystemCommunicator(*sim.fe_system));
-  // The semi-implicit capillary term is defined by the transient outer
-  // fixed point; a steady solve fails closed here.
-  (void)semiImplicitLaggedVelocity(
+  // A lagged copy with a schedule requirement (the semi-implicit capillary
+  // term) needs the transient outer fixed point; a steady solve fails closed
+  // here.
+  (void)scheduleRequiredShadow(
       *sim.fe_system,
       svmp::FE::systems::shadowFields(*sim.fe_system),
       {},
@@ -7454,12 +7463,12 @@ void ApplicationDriver::runTransient(SimulationComponents& sim, const Parameters
            "legacy fixed_topology comparison mode."
         << std::endl;
   }
-  std::vector<SemiImplicitLevelSetTransport> semi_implicit_transports;
+  std::vector<LevelSetTransportFacts> semi_implicit_transports;
   for (const auto& equation : sim.resolved_level_set_equations_by_input_index) {
     if (!equation) {
       continue;
     }
-    SemiImplicitLevelSetTransport transport;
+    LevelSetTransportFacts transport;
     transport.level_set_field_name = equation->options.level_set.field_name;
     transport.velocity_source = equation->options.velocity.source;
     transport.advection_velocity_field_name =
@@ -7484,7 +7493,7 @@ void ApplicationDriver::runTransient(SimulationComponents& sim, const Parameters
       shadows.empty()
           ? std::shared_ptr<svmp::FE::timestepping::IGeneratedStateParticipant>{}
           : svmp::FE::timestepping::makeShadowFieldParticipant(*sim.fe_system);
-  const auto* semi_implicit_velocity = semiImplicitLaggedVelocity(
+  const auto* semi_implicit_velocity = scheduleRequiredShadow(
       *sim.fe_system,
       shadows,
       semi_implicit_transports,

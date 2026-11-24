@@ -346,9 +346,11 @@ void IncompressibleNavierStokesVMSModule::registerOn(fs::FESystem& system) const
         ? fields.prescribedSymbol(std::move(*preflight.body_force_spec),
                                   o.auto_register_body_force_field, "momentum source", o.body_force_field_name)
         : fs::BoundPrescribed{};
-    // u at the last refresh of the generated geometry, for the semi-implicit capillary term.
+    // u at the last refresh of the generated geometry, for the semi-implicit capillary term.  The term
+    // needs the outer fixed point to refresh it and the level sets of the free surfaces to move with u.
     const auto u_ref = preflight.semi_implicit_reference_spec
-        ? fields.lagged(U, fs::Refresh::GeneratedState, preflight.semi_implicit_reference_spec->name)
+        ? fields.lagged(U, fs::Refresh::GeneratedState, preflight.semi_implicit_reference_spec->name,
+                        "Surface_tension_semi_implicit=NormalIncrement")
         : FormExpr{};
     post::declareFreeSurfaceDiscreteFunctionals(free_surfaces, preflight.surface_identities, system, u_id, o.density, o.body_force,
                                           !o.has_body_force_spacetime && body_force.id == FE::INVALID_FIELD_ID,
