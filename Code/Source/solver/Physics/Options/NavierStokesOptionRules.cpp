@@ -1978,7 +1978,7 @@ NavierStokesPreflight preflightNavierStokes(
                 .mesh_row_source =
                     "Fitted free-surface mesh normal kinematic row on marker " +
                     std::to_string(boundary.boundary_marker),
-                .fluid_row_source = fittedFluidNormalDescriptorSource(boundary)}});
+                .related_row_source = fittedFluidNormalDescriptorSource(boundary)}});
     }
     auto bulk_volume = FE::forms::VolumeDomain::full();
     std::optional<FE::LogRecord> active_domain_log;

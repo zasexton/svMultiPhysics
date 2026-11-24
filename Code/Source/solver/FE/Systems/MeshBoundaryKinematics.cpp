@@ -34,7 +34,7 @@ void declareMeshNormalKinematicItem(
     system.declareMeshNormalBoundaryConstraint(std::move(declaration));
     system.bindMeshNormalBoundaryConstraintConsumer(
         displacement_field, marker, operator_tag,
-        std::move(binding.mesh_row_source), std::move(binding.fluid_row_source));
+        std::move(binding.mesh_row_source), std::move(binding.related_row_source));
     meshNormalConstraintStageMeasurements(system)
         .registerFittedALENormalOperatorStageMeasurement(
             displacement_field, marker, binding.prescribed_tangential_mesh_velocity);
@@ -109,14 +109,14 @@ void declareMeshBoundaryRowDescriptors(
         return;
     }
     if (rows.normal_relation) {
-        if (rows.velocity_field == INVALID_FIELD_ID) {
-            throw std::invalid_argument(rows.missing_velocity_message);
+        if (rows.related_velocity_field == INVALID_FIELD_ID) {
+            throw std::invalid_argument(rows.missing_related_field_message);
         }
         analysis::BoundaryConditionDescriptor mesh_descriptor;
         mesh_descriptor.primary_variable =
             analysis::VariableKey::field(rows.mesh_displacement_field);
         mesh_descriptor.related_variables.push_back(
-            analysis::VariableKey::field(rows.velocity_field));
+            analysis::VariableKey::field(rows.related_velocity_field));
         mesh_descriptor.boundary_marker = rows.boundary_marker;
         mesh_descriptor.trace_kind = analysis::TraceKind::NormalComponent;
         mesh_descriptor.enforcement_kind =
@@ -124,19 +124,19 @@ void declareMeshBoundaryRowDescriptors(
         mesh_descriptor.source = rows.mesh_normal_source;
         system.addBoundaryConditionDescriptor(
             std::move(mesh_descriptor), operator_tag);
-        analysis::BoundaryConditionDescriptor fluid_descriptor;
-        fluid_descriptor.primary_variable =
-            analysis::VariableKey::field(rows.velocity_field);
-        fluid_descriptor.related_variables.push_back(
+        analysis::BoundaryConditionDescriptor related_descriptor;
+        related_descriptor.primary_variable =
+            analysis::VariableKey::field(rows.related_velocity_field);
+        related_descriptor.related_variables.push_back(
             analysis::VariableKey::field(rows.mesh_displacement_field));
-        fluid_descriptor.boundary_marker = rows.boundary_marker;
-        fluid_descriptor.trace_kind = analysis::TraceKind::NormalComponent;
-        // The fluid keeps its natural dynamic condition.
-        fluid_descriptor.enforcement_kind =
+        related_descriptor.boundary_marker = rows.boundary_marker;
+        related_descriptor.trace_kind = analysis::TraceKind::NormalComponent;
+        // The related field keeps its natural condition.
+        related_descriptor.enforcement_kind =
             analysis::EnforcementKind::WeakConsistent;
-        fluid_descriptor.source = rows.fluid_normal_source;
+        related_descriptor.source = rows.related_normal_source;
         system.addBoundaryConditionDescriptor(
-            std::move(fluid_descriptor), operator_tag);
+            std::move(related_descriptor), operator_tag);
     }
     analysis::BoundaryConditionDescriptor descriptor;
     descriptor.primary_variable =
@@ -169,7 +169,7 @@ MeshNormalBoundaryConstraintDeclaration normalRateRelation(FieldId d_field,
         .mesh_displacement_field = d_field,
         .boundary_marker = boundary_marker,
         .quantity = MeshNormalBoundaryQuantity::MeshVelocityTrace,
-        .target_kind = MeshNormalBoundaryTargetKind::FluidNormalVelocity,
+        .target_kind = MeshNormalBoundaryTargetKind::RelatedFieldNormal,
         .target_expression = forms::normalTrace(related, forms::currentNormal()),
         .enforcement_kind = analysis::EnforcementKind::WeakPenalty,
         .related_velocity_field = related_field,

@@ -40,8 +40,8 @@ namespace systems {
 struct MeshNormalKinematicBinding {
     /// Descriptor source of the mesh row that consumes the constraint.
     std::string mesh_row_source{};
-    /// Descriptor source of the related fluid-normal row.
-    std::string fluid_row_source{};
+    /// Descriptor source of the normal row of the related field.
+    std::string related_row_source{};
     /// Prescribed tangential mesh velocity measured with the constraint.
     std::optional<std::array<Real, 3>> prescribed_tangential_mesh_velocity{};
 };
@@ -92,8 +92,8 @@ void declareMeshNormalKinematics(
 struct MeshBoundaryRows {
     int boundary_marker{-1};
     FieldId mesh_displacement_field{INVALID_FIELD_ID};
-    /// The fluid velocity related to the normal row (normal relation only).
-    FieldId velocity_field{INVALID_FIELD_ID};
+    /// The field r of the normal relation (dt d - r).n = 0 (normal relation only).
+    FieldId related_velocity_field{INVALID_FIELD_ID};
     /// The mesh-normal kinematic relation is installed.
     bool normal_relation{false};
     /// The tangential mesh velocity is prescribed (penalized).
@@ -101,11 +101,11 @@ struct MeshBoundaryRows {
     MeshTangentialBoundaryPolicy tangential_policy{
         MeshTangentialBoundaryPolicy::Free};
     std::string mesh_normal_source{};
-    std::string fluid_normal_source{};
+    std::string related_normal_source{};
     std::string tangential_source{};
     /// Message of the std::invalid_argument thrown when the normal relation
-    /// has no velocity field.
-    std::string missing_velocity_message{};
+    /// has no related field.
+    std::string missing_related_field_message{};
 };
 
 /**
@@ -113,9 +113,9 @@ struct MeshBoundaryRows {
  *        @p operator_tag and bind its tangential-policy consumer.
  *
  * Without installed rows only the tangential descriptor (weak consistent)
- * and the consumer are declared.  With rows: the normal mesh and fluid
- * descriptors when the normal relation is installed, then the tangential
- * descriptor (weak penalty when prescribed) and the consumer.
+ * and the consumer are declared.  With rows: the normal descriptors of the
+ * mesh and of the related field when the normal relation is installed, then
+ * the tangential descriptor (weak penalty when prescribed) and the consumer.
  */
 void declareMeshBoundaryRowDescriptors(
     FESystem& system,

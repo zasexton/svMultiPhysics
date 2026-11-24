@@ -140,7 +140,7 @@ inline void declareFittedMeshRowDescriptors(
         FE::systems::MeshBoundaryRows{
             .boundary_marker = bc.boundary_marker,
             .mesh_displacement_field = ale_binding.mesh_displacement_field,
-            .velocity_field = velocity_field,
+            .related_velocity_field = velocity_field,
             .normal_relation =
                 bc.kinematic_enforcement != FreeSurfaceKinematicEnforcement::None &&
                 bc.normal_kinematic_policy ==
@@ -153,10 +153,10 @@ inline void declareFittedMeshRowDescriptors(
             .mesh_normal_source =
                 "Fitted free-surface mesh normal kinematic row on marker " +
                 std::to_string(bc.boundary_marker),
-            .fluid_normal_source = fittedFluidNormalDescriptorSource(bc),
+            .related_normal_source = fittedFluidNormalDescriptorSource(bc),
             .tangential_source = fittedTangentialOperatorSource(
                 bc.boundary_marker, bc.tangential_mesh_policy),
-            .missing_velocity_message =
+            .missing_related_field_message =
                 "IncompressibleNavierStokesVMSModule: fitted normal "
                 "kinematics require a related fluid velocity field",
         },

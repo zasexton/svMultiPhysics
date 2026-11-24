@@ -89,7 +89,7 @@ void appendFittedALENormalMeasurementDeclaration(
     appendMeshBoundaryString(
         tokens, declaration.mesh_normal_integral_functional);
     appendMeshBoundaryString(
-        tokens, declaration.fluid_normal_integral_functional);
+        tokens, declaration.related_normal_integral_functional);
     appendMeshBoundaryString(
         tokens, declaration.normal_gap_squared_integral_functional);
     appendMeshBoundaryString(
@@ -286,7 +286,7 @@ void MeshNormalConstraintStageMeasurements::registerFittedALENormalOperatorStage
             prescribed_tangential_mesh_velocity,
         .mesh_normal_integral_functional =
             name_base + "_integral_mesh_normal",
-        .fluid_normal_integral_functional =
+        .related_normal_integral_functional =
             name_base + "_integral_fluid_normal",
         .normal_gap_squared_integral_functional =
             name_base + "_integral_normal_gap_squared",
@@ -321,8 +321,8 @@ void MeshNormalConstraintStageMeasurements::registerFittedALENormalOperatorStage
                     measurement.prescribed_tangential_mesh_velocity ||
                 existing->mesh_normal_integral_functional !=
                     measurement.mesh_normal_integral_functional ||
-                existing->fluid_normal_integral_functional !=
-                    measurement.fluid_normal_integral_functional ||
+                existing->related_normal_integral_functional !=
+                    measurement.related_normal_integral_functional ||
                 existing->normal_gap_squared_integral_functional !=
                     measurement.normal_gap_squared_integral_functional ||
                 existing->mesh_velocity_squared_integral_functional !=
@@ -422,9 +422,9 @@ void MeshNormalConstraintStageMeasurements::registerFittedALENormalOperatorStage
             tangential_projector * (mesh_velocity - target));
     }
     // Preserve the exact consumer-bound expression rather than rebuilding an
-    // equivalent fluid trace from field metadata.
-    const auto fluid_normal = constraint.target_expression;
-    const auto normal_gap = mesh_normal - fluid_normal;
+    // equivalent related-field trace from field metadata.
+    const auto related_normal = constraint.target_expression;
+    const auto normal_gap = mesh_normal - related_normal;
 
     forms::BoundaryFunctional mesh_functional{
         .integrand = mesh_normal,
@@ -432,10 +432,10 @@ void MeshNormalConstraintStageMeasurements::registerFittedALENormalOperatorStage
         .name = measurement.mesh_normal_integral_functional,
         .reduction = forms::BoundaryFunctional::Reduction::Sum,
     };
-    forms::BoundaryFunctional fluid_functional{
-        .integrand = fluid_normal,
+    forms::BoundaryFunctional related_functional{
+        .integrand = related_normal,
         .boundary_marker = boundary_marker,
-        .name = measurement.fluid_normal_integral_functional,
+        .name = measurement.related_normal_integral_functional,
         .reduction = forms::BoundaryFunctional::Reduction::Sum,
     };
     forms::BoundaryFunctional gap_functional{
@@ -483,7 +483,7 @@ void MeshNormalConstraintStageMeasurements::registerFittedALENormalOperatorStage
     // exact history alias.  The velocity is a current-only secondary field.
     auto& service = boundaryReductionService(mesh_displacement_field);
     service.addBoundaryFunctional(std::move(mesh_functional));
-    service.addBoundaryFunctional(std::move(fluid_functional));
+    service.addBoundaryFunctional(std::move(related_functional));
     service.addBoundaryFunctional(std::move(gap_functional));
     service.addBoundaryFunctional(
         std::move(mesh_velocity_squared_functional));
@@ -648,7 +648,7 @@ void MeshNormalConstraintStageMeasurements::stageFittedALENormalOperatorStageMea
                 [](const auto& declaration) {
                     return declaration.target_kind ==
                                MeshNormalBoundaryTargetKind::
-                                   FluidNormalVelocity &&
+                                   RelatedFieldNormal &&
                            declaration.consumer_binding.has_value();
                 }));
         FE_THROW_IF(
@@ -726,7 +726,7 @@ void MeshNormalConstraintStageMeasurements::stageFittedALENormalOperatorStageMea
                     !service->hasFunctional(
                         declaration.mesh_normal_integral_functional) ||
                     !service->hasFunctional(
-                        declaration.fluid_normal_integral_functional) ||
+                        declaration.related_normal_integral_functional) ||
                     !service->hasFunctional(
                         declaration.normal_gap_squared_integral_functional) ||
                     !service->hasFunctional(
@@ -856,7 +856,7 @@ void MeshNormalConstraintStageMeasurements::stageFittedALENormalOperatorStageMea
         BoundaryReductionService* service{nullptr};
         const forms::BoundaryFunctional* measure_functional{nullptr};
         std::string_view mesh_normal_name{};
-        std::string_view fluid_normal_name{};
+        std::string_view related_normal_name{};
         std::string_view gap_squared_name{};
         std::string_view mesh_velocity_squared_name{};
         std::string_view mesh_normal_squared_name{};
@@ -909,8 +909,8 @@ void MeshNormalConstraintStageMeasurements::stageFittedALENormalOperatorStageMea
                     .measure_functional = &measure_functional,
                     .mesh_normal_name =
                         declaration.mesh_normal_integral_functional,
-                    .fluid_normal_name =
-                        declaration.fluid_normal_integral_functional,
+                    .related_normal_name =
+                        declaration.related_normal_integral_functional,
                     .gap_squared_name =
                         declaration.normal_gap_squared_integral_functional,
                     .mesh_velocity_squared_name =
@@ -972,7 +972,7 @@ void MeshNormalConstraintStageMeasurements::stageFittedALENormalOperatorStageMea
             raw.Wn = route.service->evaluateFunctional(
                 route.mesh_normal_name, *measurement_state);
             raw.Un = route.service->evaluateFunctional(
-                route.fluid_normal_name, *measurement_state);
+                route.related_normal_name, *measurement_state);
             raw.gap_sq = route.service->evaluateFunctional(
                 route.gap_squared_name, *measurement_state);
             raw.mesh_velocity_sq = route.service->evaluateFunctional(
@@ -1216,8 +1216,8 @@ void MeshNormalConstraintStageMeasurements::commitPendingFittedALENormalOperator
                                 .mesh_normal_integral_functional !=
                             declaration.mesh_normal_integral_functional ||
                         pending.declaration
-                                .fluid_normal_integral_functional !=
-                            declaration.fluid_normal_integral_functional ||
+                                .related_normal_integral_functional !=
+                            declaration.related_normal_integral_functional ||
                         pending.declaration
                                 .normal_gap_squared_integral_functional !=
                             declaration

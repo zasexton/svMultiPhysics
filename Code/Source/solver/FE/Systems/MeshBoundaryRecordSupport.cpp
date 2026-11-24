@@ -226,12 +226,12 @@ void appendMeshNormalDeclaration(
     appendMeshBoundaryString(tokens, binding.operator_tag);
     appendMeshBoundaryString(tokens, binding.mesh_descriptor_source);
     appendMeshBoundaryToken(
-        tokens, binding.related_fluid.has_value() ? 1u : 0u);
-    if (binding.related_fluid.has_value()) {
+        tokens, binding.related_field.has_value() ? 1u : 0u);
+    if (binding.related_field.has_value()) {
         appendMeshBoundaryIntegral(
-            tokens, binding.related_fluid->enforcement_kind);
+            tokens, binding.related_field->enforcement_kind);
         appendMeshBoundaryString(
-            tokens, binding.related_fluid->descriptor_source);
+            tokens, binding.related_field->descriptor_source);
     }
 }
 

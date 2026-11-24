@@ -234,24 +234,24 @@ enum class MeshNormalBoundaryQuantity : std::uint8_t {
 enum class MeshNormalBoundaryTargetKind : std::uint8_t {
     PrescribedDisplacement,
     TimeScaledPrescribedVelocity,
-    FluidNormalVelocity
+    RelatedFieldNormal
 };
 
-struct MeshNormalBoundaryRelatedFluidConsumerBinding {
+struct MeshNormalBoundaryRelatedFieldConsumerBinding {
     analysis::EnforcementKind enforcement_kind{
         analysis::EnforcementKind::WeakPenalty};
     std::string descriptor_source{};
 
     [[nodiscard]] friend bool operator==(
-        const MeshNormalBoundaryRelatedFluidConsumerBinding&,
-        const MeshNormalBoundaryRelatedFluidConsumerBinding&) = default;
+        const MeshNormalBoundaryRelatedFieldConsumerBinding&,
+        const MeshNormalBoundaryRelatedFieldConsumerBinding&) = default;
 };
 
 struct MeshNormalBoundaryConstraintConsumerBinding {
     std::string operator_tag{};
     std::string mesh_descriptor_source{};
-    std::optional<MeshNormalBoundaryRelatedFluidConsumerBinding>
-        related_fluid{};
+    std::optional<MeshNormalBoundaryRelatedFieldConsumerBinding>
+        related_field{};
 
     [[nodiscard]] friend bool operator==(
         const MeshNormalBoundaryConstraintConsumerBinding&,
@@ -332,7 +332,7 @@ struct FittedALENormalMeasurementDeclaration {
     std::optional<std::array<Real, 3>>
         prescribed_tangential_mesh_velocity{};
     std::string mesh_normal_integral_functional{};
-    std::string fluid_normal_integral_functional{};
+    std::string related_normal_integral_functional{};
     std::string normal_gap_squared_integral_functional{};
     std::string mesh_velocity_squared_integral_functional{};
     std::string mesh_normal_squared_integral_functional{};
@@ -345,8 +345,8 @@ struct FittedALENormalMeasurementDeclaration {
  * @brief Raw fitted-ALE normal moments sampled at one operator stage.
  *
  * A is boundary measure, Wn is the integral of mesh normal velocity, Un is
- * the integral of fluid normal velocity, and gap_sq is the integral of their
- * squared difference.  The remaining squared integrals retain the complete
+ * the integral of the related field's normal component, and gap_sq is the
+ * integral of their squared difference.  The remaining squared integrals retain the complete
  * mesh velocity and its orthogonal normal/tangential projections.  These are
  * raw operator-stage moments: they are not endpoint values and must not be
  * reported as work or dissipation.  `tangential_target_gap_sq` is present
@@ -780,7 +780,7 @@ public:
         int boundary_marker,
         std::string operator_tag,
         std::string mesh_descriptor_source,
-        std::optional<std::string> related_fluid_descriptor_source =
+        std::optional<std::string> related_descriptor_source =
             std::nullopt);
     /** Declare one phase-pair source for sharp material-interface transport. */
     void declareMaterialInterfaceTransportVelocity(
@@ -800,11 +800,11 @@ public:
      * @brief The mesh-normal constraint on (@p mesh_displacement_field,
      * @p boundary_marker) that a fitted-ALE normal measurement observes.
      *
-     * Throws unless it is an exact fluid-normal velocity constraint between
+     * Throws unless it is an exact normal-rate relation between
      * distinct mesh-dimensional volume unknowns (target: the related
      * velocity trace on the current normal) with the reciprocal consumer
      * binding of an installed boundary operator, which has exactly one
-     * matching mesh descriptor and one reciprocal fluid descriptor.
+     * matching mesh descriptor and one reciprocal related-field descriptor.
      */
     [[nodiscard]] const MeshNormalBoundaryConstraintDeclaration&
     validatedFittedALENormalConstraint(

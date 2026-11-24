@@ -100,7 +100,7 @@ TEST(MeshNormalConstraintStageMeasurements, RecordsAreOneAttachmentOfTheSystem)
     EXPECT_FALSE(store->transaction_active);
 }
 
-TEST(MeshNormalConstraintStageMeasurements, RegistrationRequiresAFluidNormalConstraint)
+TEST(MeshNormalConstraintStageMeasurements, RegistrationRequiresANormalRateRelation)
 {
     TwoVectorFields f;
     const auto message = invalidArgumentMessage([&] {

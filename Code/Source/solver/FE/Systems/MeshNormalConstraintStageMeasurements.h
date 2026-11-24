@@ -15,9 +15,10 @@
  *        candidate and the accepted history.
  *
  * A measurement takes the raw boundary moments of one mesh-normal constraint
- * that ties the mesh velocity trace to a fluid normal velocity (the fitted-ALE
- * kinematic condition (dt d - u) . n = 0) at the converged operator stage of
- * a candidate step: the boundary area, the mesh and fluid normal velocity
+ * that ties the mesh velocity trace to the normal component of a related
+ * field r (the normal-rate relation (dt d - r) . n = 0, e.g. the fitted-ALE
+ * kinematic condition with r the fluid velocity) at the converged operator
+ * stage of a candidate step: the boundary area, the mesh and related normal
  * integrals and the squared gap, mesh-velocity, normal, tangential and
  * tangential-target integrals.  Measurements are staged with a candidate,
  * dropped with a rejected one and published, collectively, after acceptance.
@@ -67,8 +68,8 @@ public:
   explicit MeshNormalConstraintStageMeasurements(svmp::FE::systems::FESystem& system);
 
   /**
-   * @brief Register raw operator-stage moments for one bound fitted-ALE
-   * fluid-normal constraint.
+   * @brief Register raw operator-stage moments for one bound normal-rate
+   * relation.
    *
    * Registration is deterministic and an exact duplicate is a no-op.  It
    * must occur after the constraint's reciprocal consumer binding is

@@ -8,6 +8,8 @@
 #include <gtest/gtest.h>
 
 #include "Analysis/GeneratedBoundaryAggregateTraceCertificate.h"
+#include "Assembly/GlobalSystemView.h"
+#include "Dofs/EntityDofMap.h"
 #include "Interfaces/ContactLineGeometryCertificate.h"
 #include "Spaces/H1Space.h"
 #include "Spaces/ProductSpace.h"
@@ -15,10 +17,12 @@
 #include "Systems/MeshBoundaryKinematics.h"
 #include "Systems/MeshNormalConstraintStageMeasurements.h"
 #include "Systems/FormsInstaller.h"
+#include "Systems/TimeIntegrator.h"
 #include "Forms/Vocabulary.h"
 
 #include "Tests/Unit/Forms/FormsTestHelpers.h"
 
+#include <array>
 #include <functional>
 #include <memory>
 #include <stdexcept>
@@ -73,22 +77,22 @@ struct MovingBoundaryDeclarations {
                 .policy = policy, .owner_component = "moving boundary"});
             systems::declareMeshBoundaryRowDescriptors(system, "moving", {
                 .boundary_marker = marker, .mesh_displacement_field = displacement,
-                .velocity_field = velocity, .normal_relation = true,
+                .related_velocity_field = velocity, .normal_relation = true,
                 .tangential_prescribed = marker == 7, .tangential_policy = policy,
                 .mesh_normal_source = "mesh " + suffix,
-                .fluid_normal_source = "fluid " + suffix,
+                .related_normal_source = "fluid " + suffix,
                 .tangential_source = "tangent " + suffix}, true);
             declarations.push_back({
                 .constraint = {
                     .mesh_displacement_field = displacement, .boundary_marker = marker,
                     .quantity = systems::MeshNormalBoundaryQuantity::MeshVelocityTrace,
-                    .target_kind = systems::MeshNormalBoundaryTargetKind::FluidNormalVelocity,
+                    .target_kind = systems::MeshNormalBoundaryTargetKind::RelatedFieldNormal,
                     .target_expression = target, .related_velocity_field = velocity,
                     .owner_component = "moving boundary",
                     .requires_mesh_flux_consistency = marker == 7,
                     .mesh_flux_consistency_nitsche_gamma = marker == 7 ? 8.0 : 0.0},
                 .binding = {.mesh_row_source = "mesh " + suffix,
-                            .fluid_row_source = "fluid " + suffix,
+                            .related_row_source = "fluid " + suffix,
                             .prescribed_tangential_mesh_velocity = marker == 7
                                 ? std::optional<std::array<svmp::FE::Real, 3>>{{1, 2, 3}}
                                 : std::nullopt}});
@@ -187,7 +191,7 @@ TEST(MeshBoundaryKinematics, PreparedAndCallbackDeclarationsKeepRelationsConsume
             EXPECT_EQ(constraint.mesh_displacement_field, fixture.displacement);
             EXPECT_EQ(constraint.related_velocity_field, fixture.velocity);
             EXPECT_EQ(constraint.quantity, systems::MeshNormalBoundaryQuantity::MeshVelocityTrace);
-            EXPECT_EQ(constraint.target_kind, systems::MeshNormalBoundaryTargetKind::FluidNormalVelocity);
+            EXPECT_EQ(constraint.target_kind, systems::MeshNormalBoundaryTargetKind::RelatedFieldNormal);
             EXPECT_EQ(constraint.target_expression.node(), fixture.target.node());
             EXPECT_EQ(constraint.owner_component, "moving boundary");
             EXPECT_EQ(constraint.requires_mesh_flux_consistency, i == 1);
@@ -195,9 +199,9 @@ TEST(MeshBoundaryKinematics, PreparedAndCallbackDeclarationsKeepRelationsConsume
             ASSERT_TRUE(constraint.consumer_binding);
             EXPECT_EQ(constraint.consumer_binding->operator_tag, "moving");
             EXPECT_EQ(constraint.consumer_binding->mesh_descriptor_source, mesh_sources[i]);
-            ASSERT_TRUE(constraint.consumer_binding->related_fluid);
-            EXPECT_EQ(constraint.consumer_binding->related_fluid->descriptor_source, fluid_sources[i]);
-            EXPECT_EQ(constraint.consumer_binding->related_fluid->enforcement_kind,
+            ASSERT_TRUE(constraint.consumer_binding->related_field);
+            EXPECT_EQ(constraint.consumer_binding->related_field->descriptor_source, fluid_sources[i]);
+            EXPECT_EQ(constraint.consumer_binding->related_field->enforcement_kind,
                       analysis::EnforcementKind::WeakConsistent);
             const auto& measurement = measurements[i];
             EXPECT_EQ(measurement.key.boundary_marker, markers[i]);
@@ -238,7 +242,7 @@ TEST(MeshBoundaryKinematics, NormalRowWithoutVelocityThrowsTheGivenMessage)
     systems::MeshBoundaryRows rows{};
     rows.boundary_marker = 3;
     rows.normal_relation = true;
-    rows.missing_velocity_message = "Owner: rows need a velocity";
+    rows.missing_related_field_message = "Owner: rows need a velocity";
     EXPECT_EQ(invalidArgumentMessage([&] {
                   systems::declareMeshBoundaryRowDescriptors(
                       sys, "op", rows, /*rows_installed=*/true);
@@ -301,7 +305,7 @@ TEST(MeshBoundaryKinematics, NormalRateRelationStatesTheRowTheDeclarationAndTheC
     EXPECT_EQ(relation.mesh_displacement_field, fixture.displacement);
     EXPECT_EQ(relation.boundary_marker, 7);
     EXPECT_EQ(relation.quantity, systems::MeshNormalBoundaryQuantity::MeshVelocityTrace);
-    EXPECT_EQ(relation.target_kind, systems::MeshNormalBoundaryTargetKind::FluidNormalVelocity);
+    EXPECT_EQ(relation.target_kind, systems::MeshNormalBoundaryTargetKind::RelatedFieldNormal);
     EXPECT_EQ(relation.target_expression.toString(), normalTrace(u, currentNormal()).toString());
     EXPECT_EQ(relation.related_velocity_field, fixture.velocity);
     EXPECT_EQ(relation.owner_component, "owner");
@@ -356,4 +360,146 @@ TEST(MeshBoundaryKinematics, NormalRateRelationStatesTheRowTheDeclarationAndTheC
     auto other_field = displacement_flux;
     other_field.field = fixture.velocity;
     EXPECT_NO_THROW(systems::requireNormalRateRelationsConsumable(fixture.system, other_field));
+}
+
+// A consumer of the normal-rate relation that is not a fluid: the mesh rate
+// follows the normal component of a wall velocity w, a vector unknown with an
+// equation of its own (here w = g).  On the face z = 0 of the unit tetrahedron
+// (n = -e_z, |F| = 1/2, h_n = 2|T|/|F| = 2/3) the row
+// int (gamma_N / h_n) ((dt d - w).n)(psi.n) gives each face node's z row
+// (gamma_N / h_n)(|F| / 3)(dt d - w).e_z for a uniform mesh rate and nothing
+// to the tangential rows or to the fourth node; the rate operator of d with
+// its consistency term vanishes for a uniform rate.  The tangent couples the
+// z rows to the z columns of w alone, with the face mass -gamma_N / h_n.
+TEST(MeshBoundaryKinematics, NormalRateRelationTiesTheMeshRateToAWallVelocity)
+{
+    using namespace svmp::FE;
+    using namespace svmp::FE::forms;
+    constexpr int marker = 5;
+    constexpr Real gamma_N = 8.0;
+    constexpr Real kappa = 1.5;
+    constexpr Real step = 0.5;
+    const std::array<Real, 3> g{0.3, -0.2, 0.7};
+    const auto space = std::make_shared<ProductSpace>(std::make_shared<H1Space>(ElementType::Tetra4, 1), 3);
+    systems::FESystem system(std::make_shared<forms::test::SingleTetraOneBoundaryFaceMeshAccess>(marker));
+    const auto d_id = system.addMeshDisplacementUnknown("d", space);
+    const auto w_id = system.addField({.name = "wall_velocity", .space = space, .components = 3});
+    system.addOperator("moving");
+    const auto d = StateField(d_id, *space, "d");
+    const auto w = StateField(w_id, *space, "w");
+    const auto psi = TestField(d_id, *space, "psi");
+    const auto t = TestField(w_id, *space, "t");
+    const auto g_value = FormExpr::asVector({FormExpr::constant(g[0]), FormExpr::constant(g[1]),
+                                             FormExpr::constant(g[2])});
+
+    // The owner of the relation: the wall's own equation and the relation row.
+    (void)systems::installFormulation(
+        system, "moving", {d_id, w_id},
+        systems::normalRateRelationRow(d, w, psi, gamma_N, currentNormal(), BoundaryDomain::fullPhysical(marker)) +
+            inner(w - g_value, t).dx());
+    system.declareMeshTangentialBoundaryPolicy({.mesh_displacement_field = d_id, .boundary_marker = marker,
+                                                .policy = systems::MeshTangentialBoundaryPolicy::Free,
+                                                .owner_component = "moving wall"});
+    systems::declareMeshBoundaryRowDescriptors(system, "moving", {
+        .boundary_marker = marker, .mesh_displacement_field = d_id,
+        .related_velocity_field = w_id, .normal_relation = true,
+        .tangential_policy = systems::MeshTangentialBoundaryPolicy::Free,
+        .mesh_normal_source = "mesh normal row", .related_normal_source = "wall normal row",
+        .tangential_source = "mesh tangential row"}, true);
+    systems::declareMeshNormalKinematics(system, "moving", {{
+        .constraint = systems::normalRateRelation(d_id, marker, w_id, w, gamma_N, "moving wall"),
+        .binding = {.mesh_row_source = "mesh normal row", .related_row_source = "wall normal row"}}});
+    ASSERT_EQ(system.meshNormalBoundaryConstraints().size(), 1u);
+    EXPECT_EQ(system.meshNormalBoundaryConstraints().front().target_kind,
+              systems::MeshNormalBoundaryTargetKind::RelatedFieldNormal);
+    EXPECT_EQ(system.meshNormalBoundaryConstraints().front().related_velocity_field, w_id);
+
+    // The operator of d takes the relation.
+    systems::requireNormalRateRelationsConsumable(system, {.field = d_id, .flux_of_rate = true,
+                                                           .literal_kappa = kappa, .context = "Wall test"});
+    (void)systems::installFormulation(
+        system, "moving", {d_id},
+        systems::addNormalRateRelationConsistency(system, d_id,
+                                                  (FormExpr::constant(kappa) * inner(grad(dt(d)), grad(psi))).dx(),
+                                                  FormExpr::constant(kappa), grad(dt(d)), psi));
+
+    systems::SetupInputs inputs;
+    dofs::MeshTopologyInfo topology;
+    topology.n_cells = 1;
+    topology.n_vertices = 4;
+    topology.dim = 3;
+    topology.cell2vertex_offsets = {0, 4};
+    topology.cell2vertex_data = {0, 1, 2, 3};
+    topology.vertex_gids = {0, 1, 2, 3};
+    topology.cell_gids = {0};
+    topology.cell_owner_ranks = {0};
+    inputs.topology_override = topology;
+    systems::SetupOptions options;
+    options.use_constraints_in_assembly = false;
+    system.setup(options, inputs);
+
+    const auto n = system.dofHandler().getNumDofs();
+    const auto dof = [&](FieldId field, GlobalIndex vertex, int component) {
+        const auto dofs = system.fieldDofHandler(field).getEntityDofMap()->getVertexDofs(vertex);
+        return system.fieldDofOffset(field) + dofs[static_cast<std::size_t>(component)];
+    };
+    // w = g; d_prev = 0 and d = step * rate, so that dt(d) = rate under backward Euler.
+    const auto assemble = [&](const std::array<Real, 3>& rate, assembly::DenseMatrixView* J,
+                              assembly::DenseVectorView* R) {
+        std::vector<Real> values(static_cast<std::size_t>(n), 0.0);
+        const std::vector<Real> previous(static_cast<std::size_t>(n), 0.0);
+        for (GlobalIndex vertex = 0; vertex < 4; ++vertex) {
+            for (int c = 0; c < 3; ++c) {
+                values[static_cast<std::size_t>(dof(w_id, vertex, c))] = g[static_cast<std::size_t>(c)];
+                values[static_cast<std::size_t>(dof(d_id, vertex, c))] = step * rate[static_cast<std::size_t>(c)];
+            }
+        }
+        systems::SystemStateView state;
+        state.dt = step;
+        state.u = std::span<const Real>(values);
+        state.u_prev = std::span<const Real>(previous);
+        const systems::BackwardDifferenceIntegrator integrator;
+        const auto context = integrator.buildContext(1, state);
+        state.time_integration = &context;
+        systems::AssemblyRequest request;
+        request.op = "moving";
+        request.want_matrix = J != nullptr;
+        request.want_vector = R != nullptr;
+        const auto result = system.assemble(request, state, J, R);
+        EXPECT_TRUE(result.success) << result.error_message;
+    };
+
+    const Real weight = gamma_N / (2.0 / 3.0);   // gamma_N / h_n
+    for (const Real mismatch : {0.0, 0.1}) {
+        SCOPED_TRACE(::testing::Message() << "normal rate mismatch " << mismatch);
+        assembly::DenseVectorView R(n);
+        R.zero();
+        // Tangential rates differ from those of w; only the normal rate is related.
+        assemble({1.1, 2.2, g[2] + mismatch}, nullptr, &R);
+        for (GlobalIndex vertex = 0; vertex < 4; ++vertex) {
+            for (int c = 0; c < 3; ++c) {
+                const Real expected = (vertex < 3 && c == 2) ? weight * (0.5 / 3.0) * mismatch : 0.0;
+                EXPECT_NEAR(R.getVectorEntry(dof(d_id, vertex, c)), expected, 1e-12)
+                    << "vertex " << vertex << " component " << c;
+                EXPECT_NEAR(R.getVectorEntry(dof(w_id, vertex, c)), 0.0, 1e-12);
+            }
+        }
+    }
+
+    assembly::DenseMatrixView J(n);
+    J.zero();
+    assemble({1.1, 2.2, g[2]}, &J, nullptr);
+    for (int row_component = 0; row_component < 3; ++row_component) {
+        for (int column_component = 0; column_component < 3; ++column_component) {
+            Real block_sum = 0.0;
+            for (GlobalIndex i = 0; i < 4; ++i) {
+                for (GlobalIndex j = 0; j < 4; ++j) {
+                    block_sum += J.getMatrixEntry(dof(d_id, i, row_component), dof(w_id, j, column_component));
+                }
+            }
+            const Real expected = (row_component == 2 && column_component == 2) ? -weight * 0.5 : 0.0;
+            EXPECT_NEAR(block_sum, expected, 1e-12)
+                << "rows " << row_component << " columns " << column_component;
+        }
+    }
 }

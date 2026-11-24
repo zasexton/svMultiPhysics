@@ -581,10 +581,10 @@ TEST(FittedFreeSurfaceALE, MeshNitscheKeepsTheFluidDynamicConditionAndDeclaresMe
     ASSERT_EQ(declarations.size(), 1u);
     EXPECT_TRUE(declarations.front().requires_mesh_flux_consistency);
     ASSERT_TRUE(declarations.front().consumer_binding.has_value());
-    ASSERT_TRUE(declarations.front().consumer_binding->related_fluid.has_value());
-    EXPECT_EQ(declarations.front().consumer_binding->related_fluid->enforcement_kind,
+    ASSERT_TRUE(declarations.front().consumer_binding->related_field.has_value());
+    EXPECT_EQ(declarations.front().consumer_binding->related_field->enforcement_kind,
               FE::analysis::EnforcementKind::WeakConsistent);
-    EXPECT_EQ(declarations.front().consumer_binding->related_fluid->descriptor_source,
+    EXPECT_EQ(declarations.front().consumer_binding->related_field->descriptor_source,
               "Fitted free-surface fluid natural dynamic condition on marker " +
                   std::to_string(kSurface));
 

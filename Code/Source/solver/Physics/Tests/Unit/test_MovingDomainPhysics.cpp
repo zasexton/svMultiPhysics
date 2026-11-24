@@ -3568,7 +3568,7 @@ TEST(MovingDomainPhysics,
         EXPECT_EQ(
             normal_declarations.front().target_kind,
             FE::systems::MeshNormalBoundaryTargetKind::
-                FluidNormalVelocity);
+                RelatedFieldNormal);
         EXPECT_EQ(
             normal_declarations.front().enforcement_kind,
             FE::analysis::EnforcementKind::WeakPenalty);
@@ -3600,7 +3600,7 @@ TEST(MovingDomainPhysics,
         EXPECT_FALSE(
             measurements.front().mesh_normal_integral_functional.empty());
         EXPECT_FALSE(
-            measurements.front().fluid_normal_integral_functional.empty());
+            measurements.front().related_normal_integral_functional.empty());
         EXPECT_FALSE(
             measurements.front()
                 .normal_gap_squared_integral_functional.empty());
@@ -4187,7 +4187,7 @@ TEST(MovingDomainPhysics,
     mislabeled_fluid_target.quantity =
         FE::systems::MeshNormalBoundaryQuantity::MeshVelocityTrace;
     mislabeled_fluid_target.target_kind =
-        FE::systems::MeshNormalBoundaryTargetKind::FluidNormalVelocity;
+        FE::systems::MeshNormalBoundaryTargetKind::RelatedFieldNormal;
     mislabeled_fluid_target.related_velocity_field = velocity;
     EXPECT_THROW(
         system.declareMeshNormalBoundaryConstraint(
@@ -4205,7 +4205,7 @@ TEST(MovingDomainPhysics,
     wrong_space_fluid_target.quantity =
         FE::systems::MeshNormalBoundaryQuantity::MeshVelocityTrace;
     wrong_space_fluid_target.target_kind =
-        FE::systems::MeshNormalBoundaryTargetKind::FluidNormalVelocity;
+        FE::systems::MeshNormalBoundaryTargetKind::RelatedFieldNormal;
     wrong_space_fluid_target.related_velocity_field = velocity;
     wrong_space_fluid_target.target_expression = FE::forms::normalTrace(
         FE::forms::StateField(
@@ -4309,7 +4309,7 @@ TEST(MovingDomainPhysics,
             .quantity = FE::systems::MeshNormalBoundaryQuantity::
                 MeshVelocityTrace,
             .target_kind = FE::systems::MeshNormalBoundaryTargetKind::
-                FluidNormalVelocity,
+                RelatedFieldNormal,
             .target_expression = FE::forms::normalTrace(
                 FE::forms::StateField(
                     velocity, *vector_space, "normal_consumer_velocity"),
@@ -4446,12 +4446,12 @@ TEST(MovingDomainPhysics,
         declaration.consumer_binding->mesh_descriptor_source,
         mesh_source);
     ASSERT_TRUE(
-        declaration.consumer_binding->related_fluid.has_value());
+        declaration.consumer_binding->related_field.has_value());
     EXPECT_EQ(
-        declaration.consumer_binding->related_fluid->enforcement_kind,
+        declaration.consumer_binding->related_field->enforcement_kind,
         FE::analysis::EnforcementKind::WeakNitsche);
     EXPECT_EQ(
-        declaration.consumer_binding->related_fluid->descriptor_source,
+        declaration.consumer_binding->related_field->descriptor_source,
         fluid_source);
     ASSERT_NO_THROW(
         system.bindMeshNormalBoundaryConstraintConsumer(
@@ -5068,7 +5068,7 @@ TEST(MovingDomainPhysics,
         EXPECT_EQ(
             declaration.target_kind,
             FE::systems::MeshNormalBoundaryTargetKind::
-                FluidNormalVelocity);
+                RelatedFieldNormal);
         EXPECT_EQ(
             declaration.owner_component,
             "IncompressibleNavierStokesVMSModule.FreeSurfaceBoundary");
@@ -12777,7 +12777,7 @@ TEST(MovingDomainPhysics,
         declarations.front().consumer_binding->mesh_descriptor_source,
         "TraceRobinBC on marker 11");
     EXPECT_FALSE(
-        declarations.front().consumer_binding->related_fluid.has_value());
+        declarations.front().consumer_binding->related_field.has_value());
     EXPECT_THROW(
         system.bindMeshNormalBoundaryConstraintConsumer(
             displacement,
@@ -13718,7 +13718,7 @@ TEST(MovingDomainPhysics, CoupledFittedFreeSurfaceALEAndHarmonicMeshMotionSetup)
     EXPECT_EQ(normal_declarations[0].boundary_marker, marker);
     EXPECT_EQ(
         normal_declarations[0].target_kind,
-        FE::systems::MeshNormalBoundaryTargetKind::FluidNormalVelocity);
+        FE::systems::MeshNormalBoundaryTargetKind::RelatedFieldNormal);
     EXPECT_EQ(
         normal_declarations[0].quantity,
         FE::systems::MeshNormalBoundaryQuantity::MeshVelocityTrace);
@@ -13731,14 +13731,14 @@ TEST(MovingDomainPhysics, CoupledFittedFreeSurfaceALEAndHarmonicMeshMotionSetup)
         normal_declarations[0].consumer_binding->mesh_descriptor_source,
         "Fitted free-surface mesh normal kinematic row on marker 39");
     ASSERT_TRUE(
-        normal_declarations[0].consumer_binding->related_fluid.has_value());
+        normal_declarations[0].consumer_binding->related_field.has_value());
     EXPECT_EQ(
         normal_declarations[0]
-            .consumer_binding->related_fluid->descriptor_source,
+            .consumer_binding->related_field->descriptor_source,
         "Fitted free-surface fluid natural dynamic condition on marker 39");
     EXPECT_EQ(
         normal_declarations[0]
-            .consumer_binding->related_fluid->enforcement_kind,
+            .consumer_binding->related_field->enforcement_kind,
         FE::analysis::EnforcementKind::WeakConsistent);
     const auto* fitted_target =
         normal_declarations[0].target_expression.node();
@@ -13770,7 +13770,7 @@ TEST(MovingDomainPhysics, CoupledFittedFreeSurfaceALEAndHarmonicMeshMotionSetup)
         normal_declarations[1].consumer_binding->mesh_descriptor_source,
         "TraceRobinBC on marker 40");
     EXPECT_FALSE(
-        normal_declarations[1].consumer_binding->related_fluid.has_value());
+        normal_declarations[1].consumer_binding->related_field.has_value());
 
     const auto mesh_velocity = system.findFieldByName("mesh_velocity");
     ASSERT_NE(mesh_velocity, FE::INVALID_FIELD_ID);

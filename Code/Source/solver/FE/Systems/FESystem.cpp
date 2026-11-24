@@ -1508,7 +1508,7 @@ using record_support::appendMeshNormalDeclaration;
 {
     std::vector<analysis::VariableKey> expected_related;
     if (declaration.target_kind ==
-        MeshNormalBoundaryTargetKind::FluidNormalVelocity) {
+        MeshNormalBoundaryTargetKind::RelatedFieldNormal) {
         expected_related.push_back(
             analysis::VariableKey::field(
                 declaration.related_velocity_field));
@@ -1528,11 +1528,11 @@ using record_support::appendMeshNormalDeclaration;
            descriptor.source == source;
 }
 
-// Enforcement of the fluid side of a fitted-ALE fluid-normal relation:
-// a weak penalty or Nitsche row on the fluid, or WeakConsistent when the
-// fluid keeps its natural (dynamic) traction condition and the kinematic
-// relation is enforced on the mesh displacement only.
-[[nodiscard]] bool isFittedRelatedFluidEnforcement(
+// Enforcement of the related-field side of a normal-rate relation: a weak
+// penalty or Nitsche row on the related field, or WeakConsistent when it
+// keeps its natural condition (a fluid its dynamic traction condition) and
+// the relation is enforced on the mesh displacement only.
+[[nodiscard]] bool isFittedRelatedFieldEnforcement(
     analysis::EnforcementKind kind) noexcept
 {
     return kind == analysis::EnforcementKind::WeakPenalty ||
@@ -1540,7 +1540,7 @@ using record_support::appendMeshNormalDeclaration;
            kind == analysis::EnforcementKind::WeakConsistent;
 }
 
-[[nodiscard]] bool meshNormalRelatedFluidDescriptorMatches(
+[[nodiscard]] bool meshNormalRelatedFieldDescriptorMatches(
     const analysis::BoundaryConditionDescriptor& descriptor,
     const MeshNormalBoundaryConstraintDeclaration& declaration,
     std::string_view source)
@@ -1557,7 +1557,7 @@ using record_support::appendMeshNormalDeclaration;
            descriptor.interface_marker == -1 &&
            descriptor.trace_kind ==
                analysis::TraceKind::NormalComponent &&
-           isFittedRelatedFluidEnforcement(descriptor.enforcement_kind) &&
+           isFittedRelatedFieldEnforcement(descriptor.enforcement_kind) &&
            descriptor.related_variables == expected_related &&
            descriptor.source == source;
 }
@@ -8545,7 +8545,7 @@ void FESystem::declareMeshNormalBoundaryConstraint(
         declaration.target_kind ==
             MeshNormalBoundaryTargetKind::TimeScaledPrescribedVelocity ||
         declaration.target_kind ==
-            MeshNormalBoundaryTargetKind::FluidNormalVelocity;
+            MeshNormalBoundaryTargetKind::RelatedFieldNormal;
     FE_THROW_IF(
         !known_target,
         InvalidArgumentException,
@@ -8589,7 +8589,7 @@ void FESystem::declareMeshNormalBoundaryConstraint(
         "FESystem::declareMeshNormalBoundaryConstraint: target expression "
         "must be a valid scalar and may not contain a test function");
     if (declaration.target_kind !=
-        MeshNormalBoundaryTargetKind::FluidNormalVelocity) {
+        MeshNormalBoundaryTargetKind::RelatedFieldNormal) {
         const auto* target_node = declaration.target_expression.node();
         FE_THROW_IF(
             target_node == nullptr ||
@@ -8623,7 +8623,7 @@ void FESystem::declareMeshNormalBoundaryConstraint(
         "not target the bound mesh displacement field");
 
     if (declaration.target_kind ==
-        MeshNormalBoundaryTargetKind::FluidNormalVelocity) {
+        MeshNormalBoundaryTargetKind::RelatedFieldNormal) {
         FE_THROW_IF(
             declaration.quantity !=
                 MeshNormalBoundaryQuantity::MeshVelocityTrace ||
@@ -8652,7 +8652,7 @@ void FESystem::declareMeshNormalBoundaryConstraint(
             target_node == nullptr
                 ? std::vector<std::shared_ptr<forms::FormExprNode>>{}
                 : target_node->childrenShared();
-        const bool exact_fluid_normal_target =
+        const bool exact_related_normal_target =
             target_node != nullptr &&
             target_node->type() == forms::FormExprType::InnerProduct &&
             target_children.size() == 2u &&
@@ -8670,7 +8670,7 @@ void FESystem::declareMeshNormalBoundaryConstraint(
             target_children[1]->type() ==
                 forms::FormExprType::CurrentNormal;
         FE_THROW_IF(
-            !exact_fluid_normal_target,
+            !exact_related_normal_target,
             InvalidArgumentException,
             "FESystem::declareMeshNormalBoundaryConstraint: fluid-normal "
             "velocity target must be exactly the related state-field "
@@ -8736,7 +8736,7 @@ void FESystem::bindMeshNormalBoundaryConstraintConsumer(
     int boundary_marker,
     std::string operator_tag,
     std::string mesh_descriptor_source,
-    std::optional<std::string> related_fluid_descriptor_source)
+    std::optional<std::string> related_descriptor_source)
 {
     FE_THROW_IF(
         mesh_boundary_history_transaction_active_ ||
@@ -8791,15 +8791,15 @@ void FESystem::bindMeshNormalBoundaryConstraintConsumer(
         "FESystem::bindMeshNormalBoundaryConstraintConsumer: no matching "
         "normal constraint declaration");
 
-    const bool needs_related_fluid =
+    const bool needs_related_field =
         declaration->target_kind ==
-        MeshNormalBoundaryTargetKind::FluidNormalVelocity;
+        MeshNormalBoundaryTargetKind::RelatedFieldNormal;
     FE_THROW_IF(
-        needs_related_fluid
-            ? !related_fluid_descriptor_source.has_value() ||
-                  related_fluid_descriptor_source->find_first_not_of(
+        needs_related_field
+            ? !related_descriptor_source.has_value() ||
+                  related_descriptor_source->find_first_not_of(
                       " \t\r\n") == std::string::npos
-            : related_fluid_descriptor_source.has_value(),
+            : related_descriptor_source.has_value(),
         InvalidArgumentException,
         "FESystem::bindMeshNormalBoundaryConstraintConsumer: fitted "
         "fluid-normal targets require one nonblank reciprocal fluid "
@@ -8822,9 +8822,9 @@ void FESystem::bindMeshNormalBoundaryConstraintConsumer(
         "FESystem::bindMeshNormalBoundaryConstraintConsumer: expected "
         "exactly one matching mesh normal boundary descriptor");
 
-    std::optional<MeshNormalBoundaryRelatedFluidConsumerBinding>
-        related_fluid;
-    if (needs_related_fluid) {
+    std::optional<MeshNormalBoundaryRelatedFieldConsumerBinding>
+        related_field;
+    if (needs_related_field) {
         const analysis::BoundaryConditionDescriptor*
             related_descriptor = nullptr;
         const auto related_descriptor_count =
@@ -8834,10 +8834,10 @@ void FESystem::bindMeshNormalBoundaryConstraintConsumer(
             operator_tag,
             [&](const auto& descriptor) {
                 const bool matches =
-                    meshNormalRelatedFluidDescriptorMatches(
+                    meshNormalRelatedFieldDescriptorMatches(
                     descriptor,
                     *declaration,
-                    *related_fluid_descriptor_source);
+                    *related_descriptor_source);
                 if (matches) {
                     related_descriptor = &descriptor;
                 }
@@ -8849,12 +8849,12 @@ void FESystem::bindMeshNormalBoundaryConstraintConsumer(
             "FESystem::bindMeshNormalBoundaryConstraintConsumer: expected "
             "exactly one matching reciprocal fluid normal boundary "
             "descriptor");
-        related_fluid =
-            MeshNormalBoundaryRelatedFluidConsumerBinding{
+        related_field =
+            MeshNormalBoundaryRelatedFieldConsumerBinding{
                 .enforcement_kind =
                     related_descriptor->enforcement_kind,
                 .descriptor_source =
-                    *related_fluid_descriptor_source,
+                    *related_descriptor_source,
             };
     }
 
@@ -8862,7 +8862,7 @@ void FESystem::bindMeshNormalBoundaryConstraintConsumer(
         .operator_tag = std::move(operator_tag),
         .mesh_descriptor_source =
             std::move(mesh_descriptor_source),
-        .related_fluid = std::move(related_fluid),
+        .related_field = std::move(related_field),
     };
     if (declaration->consumer_binding.has_value()) {
         FE_THROW_IF(
@@ -8897,7 +8897,7 @@ FESystem::validatedFittedALENormalConstraint(
         "the fitted-ALE operator-stage measurement");
     FE_THROW_IF(
         declaration->target_kind !=
-                MeshNormalBoundaryTargetKind::FluidNormalVelocity ||
+                MeshNormalBoundaryTargetKind::RelatedFieldNormal ||
             declaration->quantity !=
                 MeshNormalBoundaryQuantity::MeshVelocityTrace ||
             declaration->related_velocity_field == INVALID_FIELD_ID ||
@@ -8954,7 +8954,7 @@ FESystem::validatedFittedALENormalConstraint(
         target_node == nullptr
             ? std::vector<std::shared_ptr<forms::FormExprNode>>{}
             : target_node->childrenShared();
-    const bool exact_fluid_normal_target =
+    const bool exact_related_normal_target =
         target_node != nullptr &&
         target_node->type() == forms::FormExprType::InnerProduct &&
         target_children.size() == 2u &&
@@ -8970,19 +8970,19 @@ FESystem::validatedFittedALENormalConstraint(
         target_children[1]->type() ==
             forms::FormExprType::CurrentNormal;
     FE_THROW_IF(
-        !exact_fluid_normal_target,
+        !exact_related_normal_target,
         InvalidArgumentException,
         "FESystem: fitted-ALE measurement target must remain exactly the "
         "related velocity state-field trace on the current normal");
 
     FE_THROW_IF(
         !declaration->consumer_binding.has_value() ||
-            !declaration->consumer_binding->related_fluid.has_value(),
+            !declaration->consumer_binding->related_field.has_value(),
         InvalidArgumentException,
         "FESystem: fitted-ALE measurement requires the exact reciprocal "
         "mesh/fluid consumer binding before registration");
     const auto& binding = *declaration->consumer_binding;
-    const auto& related = *binding.related_fluid;
+    const auto& related = *binding.related_field;
     const auto has_boundary_formulation = std::any_of(
         formulation_records_.begin(),
         formulation_records_.end(),
@@ -9003,7 +9003,7 @@ FESystem::validatedFittedALENormalConstraint(
                 std::string::npos ||
             !hasOperator(binding.operator_tag) ||
             !has_boundary_formulation ||
-            !isFittedRelatedFluidEnforcement(related.enforcement_kind),
+            !isFittedRelatedFieldEnforcement(related.enforcement_kind),
         InvalidArgumentException,
         "FESystem: fitted-ALE measurement consumer provenance is not an "
         "installed boundary operator binding");
@@ -9018,13 +9018,13 @@ FESystem::validatedFittedALENormalConstraint(
                     *declaration,
                     binding.mesh_descriptor_source);
             });
-    const auto fluid_descriptor_count =
+    const auto related_row_descriptor_count =
         countOperatorBoundBoundaryDescriptors(
             bc_descriptors_,
             bc_descriptor_operator_tags_,
             binding.operator_tag,
             [&](const auto& descriptor) {
-                return meshNormalRelatedFluidDescriptorMatches(
+                return meshNormalRelatedFieldDescriptorMatches(
                            descriptor,
                            *declaration,
                            related.descriptor_source) &&
@@ -9032,7 +9032,7 @@ FESystem::validatedFittedALENormalConstraint(
                            related.enforcement_kind;
             });
     FE_THROW_IF(
-        mesh_descriptor_count != 1u || fluid_descriptor_count != 1u,
+        mesh_descriptor_count != 1u || related_row_descriptor_count != 1u,
         InvalidArgumentException,
         "FESystem: fitted-ALE measurement requires exactly one matching "
         "mesh descriptor and reciprocal fluid descriptor");
@@ -9218,20 +9218,20 @@ void FESystem::recordAcceptedMeshNormalBoundaryConstraints(
             "consumer requires exactly one matching mesh normal boundary "
             "descriptor");
 
-        const bool needs_related_fluid =
+        const bool needs_related_field =
             declaration.target_kind ==
-            MeshNormalBoundaryTargetKind::FluidNormalVelocity;
+            MeshNormalBoundaryTargetKind::RelatedFieldNormal;
         FE_THROW_IF(
-            needs_related_fluid != binding.related_fluid.has_value(),
+            needs_related_field != binding.related_field.has_value(),
             InvalidArgumentException,
             "FESystem::recordAcceptedMeshNormalBoundaryConstraints: "
             "reciprocal fluid consumer provenance is incomplete");
-        if (needs_related_fluid) {
-            const auto& related = *binding.related_fluid;
+        if (needs_related_field) {
+            const auto& related = *binding.related_field;
             FE_THROW_IF(
                 related.descriptor_source.find_first_not_of(" \t\r\n") ==
                         std::string::npos ||
-                    !isFittedRelatedFluidEnforcement(related.enforcement_kind),
+                    !isFittedRelatedFieldEnforcement(related.enforcement_kind),
                 InvalidArgumentException,
                 "FESystem::recordAcceptedMeshNormalBoundaryConstraints: "
                 "reciprocal fluid descriptor provenance is invalid");
@@ -9241,7 +9241,7 @@ void FESystem::recordAcceptedMeshNormalBoundaryConstraints(
                 bc_descriptor_operator_tags_,
                 binding.operator_tag,
                 [&](const auto& descriptor) {
-                    return meshNormalRelatedFluidDescriptorMatches(
+                    return meshNormalRelatedFieldDescriptorMatches(
                                descriptor,
                                declaration,
                                related.descriptor_source) &&
@@ -9381,7 +9381,7 @@ void FESystem::emitAcceptedMeshNormalBoundaryConstraintHistory(
                 MeshNormalBoundaryTargetKind::TimeScaledPrescribedVelocity) {
                 target_name = "TimeScaledPrescribedVelocity";
             } else if (declaration.target_kind ==
-                       MeshNormalBoundaryTargetKind::FluidNormalVelocity) {
+                       MeshNormalBoundaryTargetKind::RelatedFieldNormal) {
                 target_name = "FluidNormalVelocity";
             }
             LogRecord line("MeshBoundaryKinematics", "accepted normal mesh constraint history");
@@ -9398,15 +9398,15 @@ void FESystem::emitAcceptedMeshNormalBoundaryConstraintHistory(
                 .quoted("owner", declaration.owner_component)
                 .quoted("consumer_operator_tag", binding.operator_tag)
                 .quoted("mesh_descriptor_source", binding.mesh_descriptor_source)
-                .value("related_fluid_bound", (binding.related_fluid.has_value() ? "true" : "false"));
-            if (binding.related_fluid.has_value()) {
+                .value("related_fluid_bound", (binding.related_field.has_value() ? "true" : "false"));
+            if (binding.related_field.has_value()) {
                 line.quoted("related_fluid_descriptor_source",
-                            binding.related_fluid->descriptor_source)
+                            binding.related_field->descriptor_source)
                     .text("related_fluid_enforcement",
-                          binding.related_fluid->enforcement_kind ==
+                          binding.related_field->enforcement_kind ==
                                   analysis::EnforcementKind::WeakNitsche
                               ? "WeakNitsche"
-                              : binding.related_fluid->enforcement_kind ==
+                              : binding.related_field->enforcement_kind ==
                                         analysis::EnforcementKind::
                                             WeakConsistent
                                     ? "WeakConsistent"
