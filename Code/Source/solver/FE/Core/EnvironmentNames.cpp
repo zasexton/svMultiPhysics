@@ -39,6 +39,8 @@ std::span<const NameDeclaration> solverCatalogue() noexcept
 
     // Owning services.
     constexpr const char* kDriver = "Application/Core/ApplicationDriver";
+    constexpr const char* kCutConfiguration = "Application/Core/LevelSetCutConfiguration";
+    constexpr const char* kSimulationBuilder = "Application/Core/SimulationBuilder";
     constexpr const char* kAnalysis = "FE/Analysis";
     constexpr const char* kCertificate = "FE/Analysis/ConstraintRangeCertificate";
     constexpr const char* kRowObserver = "FE/Analysis/RowContributionObserver";
@@ -112,6 +114,23 @@ std::span<const NameDeclaration> solverCatalogue() noexcept
          "also writes VTK output at the final time"},
         {"SVMP_WET_VOLUME_DRIFT_WARNING", Diagnostic, kDriver, Real, "1e-3", Reference,
          "relative wet-volume drift above which a warning is logged"},
+
+        // Application: the simulation builder and the cut configuration.
+        {"SVMP_CUT_RETENTION_FORCE", TestHook, kCutConfiguration, Text, "the request's retention", NonReference,
+         "forces the retained generated cut-volume sides (active_and_inactive, active_only)"},
+        {"SVMP_DOF_NUMBERING", NumericalOverride, kSimulationBuilder, Text,
+         "Morton with FSILS, otherwise sequential", NonReference,
+         "DOF numbering (rcm, cuthill-mckee, morton, hilbert, sequential, interleaved, block)"},
+        {"SVMP_FSILS_BLOCKSCHUR_MOMENTUM_HAT", NumericalOverride, kSimulationBuilder, Text,
+         "ilu-k", NonReference,
+         "replaces the BlockSchur momentum approximation (diag-k, blockdiag-k, ilu-k, asm-k)"},
+        {"SVMP_FSILS_BLOCKSCHUR_SCHUR_PC", NumericalOverride, kSimulationBuilder, Text,
+         "algebraic-shat", NonReference,
+         "replaces the BlockSchur Schur preconditioner (diag-l, blockdiag-l, ilu-l, algebraic-shat)"},
+        {"SVMP_FSILS_LOCALITY_ORDERING", NumericalOverride, kSimulationBuilder, Text, "morton", NonReference,
+         "FSILS node-locality numbering (off, none, interleaved, auto, morton, hilbert, rcm)"},
+        {"SVMP_FSILS_REJECT_FILL_BEYOND_HALO", NumericalOverride, kSimulationBuilder, Flag, "off", NonReference,
+         "rejects constraint fill columns beyond the ghost layers"},
 
         // FE/Analysis: the constraint-range certificate and the row-contribution
         // observers.  The six certificate gates (D61 item 7) mark a run as

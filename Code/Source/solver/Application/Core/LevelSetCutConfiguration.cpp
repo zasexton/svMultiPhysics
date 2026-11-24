@@ -4,6 +4,7 @@
 #include "FE/Core/LogRecord.h"
 #include "Parameters.h"
 #include "Physics/Options/NavierStokesOptionSchema.h"
+#include "FE/Core/EnvironmentNames.h"
 
 #include <algorithm>
 #include <cctype>
@@ -423,7 +424,7 @@ std::optional<ActiveCutVolumeRequest> activeCutVolumeRequestFromParameters(
   // diagnostics). The free-surface post-processing below rejects the
   // active-only request when small-cut aggregation is enabled, because that
   // consumer requires a complete two-sided cell classification.
-  if (const char* force = std::getenv("SVMP_CUT_RETENTION_FORCE")) {
+  if (const char* force = svmp::FE::environment::value("SVMP_CUT_RETENTION_FORCE")) {
     const std::string_view mode(force);
     if (mode == "active_and_inactive") {
       request.volume_retention = ActiveCutVolumeRetention::ActiveAndInactive;
@@ -630,7 +631,7 @@ activeCutVolumeRequests(const EquationParameters& equation)
           "[svMultiPhysics::Application] Incompressible two-fluid generated "
           "cut construction did not produce a cut-volume request.");
     }
-    if (const char* force = std::getenv("SVMP_CUT_RETENTION_FORCE");
+    if (const char* force = svmp::FE::environment::value("SVMP_CUT_RETENTION_FORCE");
         force != nullptr && std::string_view(force) == "active_only") {
       throw std::runtime_error(
           "[svMultiPhysics::Application] active-only cut retention is "
@@ -702,7 +703,7 @@ activeCutVolumeRequests(const EquationParameters& equation)
       // full-active root.  Retaining only the active cut-volume side makes
       // that proof impossible and can hide roots across an inactive/cut band.
       if (cut_keys.small_cut_aggregation) {
-        if (const char* force = std::getenv("SVMP_CUT_RETENTION_FORCE");
+        if (const char* force = svmp::FE::environment::value("SVMP_CUT_RETENTION_FORCE");
             force != nullptr &&
             std::string_view(force) == "active_only") {
           throw std::runtime_error(

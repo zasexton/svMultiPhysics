@@ -589,7 +589,7 @@ svmp::FE::backends::BackendKind selectBackend(const Parameters& params)
 
 bool applyFsilsLocalityOrderingEnv(svmp::FE::dofs::DofDistributionOptions& options)
 {
-  const char* env = std::getenv("SVMP_FSILS_LOCALITY_ORDERING");
+  const char* env = svmp::FE::environment::value("SVMP_FSILS_LOCALITY_ORDERING");
   if (env == nullptr || env[0] == '\0') {
     return false;
   }
@@ -881,11 +881,11 @@ svmp::FE::backends::SolverOptions translateSolverOptions(const Parameters& param
     opts.fsils_blockschur_momentum_approximation =
         svmp::FE::backends::FsilsBlockSchurMomentumApproximation::ILUK;
 
-    const char* schur_pc_env = std::getenv("SVMP_FSILS_BLOCKSCHUR_SCHUR_PC");
+    const char* schur_pc_env = svmp::FE::environment::value("SVMP_FSILS_BLOCKSCHUR_SCHUR_PC");
     if (schur_pc_env && schur_pc_env[0]) {
       opts.fsils_blockschur_schur_preconditioner = toFsilsBlockSchurPreconditioner(schur_pc_env);
     }
-    const char* momentum_hat_env = std::getenv("SVMP_FSILS_BLOCKSCHUR_MOMENTUM_HAT");
+    const char* momentum_hat_env = svmp::FE::environment::value("SVMP_FSILS_BLOCKSCHUR_MOMENTUM_HAT");
     if (momentum_hat_env && momentum_hat_env[0]) {
       opts.fsils_blockschur_momentum_approximation =
           toFsilsBlockSchurMomentumApproximation(momentum_hat_env);
@@ -1474,9 +1474,9 @@ void SimulationBuilder::setupSystem()
   if (fsils_backend) {
     if (applyFsilsLocalityOrderingEnv(setup_opts.dof_options)) {
       oopCout() << "[svMultiPhysics::Application] SVMP_FSILS_LOCALITY_ORDERING="
-                << std::getenv("SVMP_FSILS_LOCALITY_ORDERING")
+                << svmp::FE::environment::value("SVMP_FSILS_LOCALITY_ORDERING")
                 << " -> FSILS locality numbering override applied" << std::endl;
-    } else if (std::getenv("SVMP_DOF_NUMBERING") == nullptr) {
+    } else if (!svmp::FE::environment::isSet("SVMP_DOF_NUMBERING")) {
       setup_opts.dof_options.numbering = svmp::FE::dofs::DofNumberingStrategy::Morton;
       oopCout() << "[svMultiPhysics::Application] FSILS backend: defaulting locality numbering to Morton"
                 << std::endl;
@@ -1496,7 +1496,7 @@ void SimulationBuilder::setupSystem()
     // operator-only ghost nodes.  SVMP_FSILS_REJECT_FILL_BEYOND_HALO=1 restores
     // the rejection (off_rank_constraint_fill_outside_halo) for comparison.
     {
-      const char* env = std::getenv("SVMP_FSILS_REJECT_FILL_BEYOND_HALO");
+      const char* env = svmp::FE::environment::value("SVMP_FSILS_REJECT_FILL_BEYOND_HALO");
       const bool reject = env != nullptr && env[0] != '\0' && std::string(env) != "0";
       setup_opts.backend_accepts_columns_beyond_ghost_rows = !reject;
     }
@@ -1508,7 +1508,7 @@ void SimulationBuilder::setupSystem()
   }
 
   // Allow env var override for DOF numbering strategy
-  if (const char* env = std::getenv("SVMP_DOF_NUMBERING"); env != nullptr) {
+  if (const char* env = svmp::FE::environment::value("SVMP_DOF_NUMBERING"); env != nullptr) {
     const std::string val = lower_copy(std::string(env));
     using S = svmp::FE::dofs::DofNumberingStrategy;
     if (val == "rcm" || val == "cuthill-mckee") {
