@@ -613,14 +613,19 @@ void remapCutInterfaceGeometry(AssemblyContext& context,
     context.markGeometryDirty();
 }
 
+/// The positive side's context of a two-sided generated rule takes the
+/// negated rule normal, so normal().minus() is the rule normal grad(phi) /
+/// |grad(phi)| (pointing out of the negative side) and normal().plus() its
+/// negation, each the outward normal of its side as on interior facets and
+/// fitted interfaces, and normal() of a one-sided term the rule normal (D70).
 void orientGeneratedInterfaceContextForSide(
     AssemblyContext& context,
     interfaces::CutInterfaceSideTag side)
 {
-    if (side == interfaces::CutInterfaceSideTag::Positive) {
+    if (side == interfaces::CutInterfaceSideTag::Negative) {
         return;
     }
-    FE_THROW_IF(side != interfaces::CutInterfaceSideTag::Negative,
+    FE_THROW_IF(side != interfaces::CutInterfaceSideTag::Positive,
                 FEException,
                 "generated cut-interface two-sided assembly requires explicit negative/positive side tags");
 
@@ -11550,7 +11555,7 @@ void StandardAssembler::assembleCutInterfaceItem(const CutInterfaceLoop& loop,
     const bool assemble_matrix = loop.assemble_matrix;
     const bool assemble_vector = loop.assemble_vector;
     const bool use_interface_kernel = loop.use_interface_kernel;
-    const bool use_two_sided_kernel = loop.use_two_sided_kernel;
+    const bool kernel_two_sided_on_some_marker = loop.use_two_sided_kernel;
     const RequiredData required_data = loop.required_data;
     const auto& field_requirements = loop.field_requirements;
     const auto& minus_field_requirements = loop.minus_field_requirements;
@@ -11579,6 +11584,10 @@ void StandardAssembler::assembleCutInterfaceItem(const CutInterfaceLoop& loop,
     if (interface_marker >= 0 && active_marker != interface_marker) {
         return;
     }
+    // Two-sided on this rule's marker only when a term there (or on every
+    // marker) reads the plus side, decided before a binding is required (D70).
+    const bool use_two_sided_kernel =
+        kernel_two_sided_on_some_marker && kernel.requiresTwoSidedInterfaceFaceOnMarker(active_marker);
     FE_THROW_IF(rule.frame != geometry::CutGeometryFrame::Reference, FEException,
                 "StandardAssembler::assembleCutInterfaces: only reference-frame cut-interface rules are supported");
     FE_THROW_IF(rule.points.empty(), FEException,
@@ -11837,6 +11846,26 @@ void StandardAssembler::assembleCutInterfaceItem(const CutInterfaceLoop& loop,
                                use_two_sided_kernel && assemble_matrix && insert_matrix_view != nullptr,
                                false);
     if (use_interface_kernel) {
+        // The contexts state, for the kernel's term policy, that they are the
+        // two sides of a generated interface; reset however the call ends.
+        struct GeneratedSidesScope {
+            AssemblyContext& minus;
+            AssemblyContext& plus;
+            GeneratedSidesScope(AssemblyContext& m, AssemblyContext& p, bool two_sided) : minus(m), plus(p)
+            {
+                minus.setGeneratedInterfaceTwoSided(two_sided);
+                plus.setGeneratedInterfaceTwoSided(two_sided);
+            }
+            ~GeneratedSidesScope()
+            {
+                minus.setGeneratedInterfaceTwoSided(false);
+                plus.setGeneratedInterfaceTwoSided(false);
+            }
+            GeneratedSidesScope(const GeneratedSidesScope&) = delete;
+            GeneratedSidesScope& operator=(const GeneratedSidesScope&) = delete;
+        };
+        const GeneratedSidesScope generated_sides(
+            context_, use_two_sided_kernel ? context_plus : context_, use_two_sided_kernel);
         loop.kernel.computeInterfaceFace(
             context_, use_two_sided_kernel ? context_plus : context_, active_marker,
             kernel_output_, output_plus, coupling_mp, coupling_pm);

@@ -624,6 +624,10 @@ public:
 	    [[nodiscard]] virtual std::optional<int> identityDim() const { return std::nullopt; }
 	    [[nodiscard]] virtual std::optional<int> boundaryMarker() const { return std::nullopt; }
 	    [[nodiscard]] virtual std::optional<int> interfaceMarker() const { return std::nullopt; }
+	    /// Whether an interface integral states every term of its integrand
+	    /// two-sided (the derivative of a two-sided term, D70); otherwise each
+	    /// term is two-sided when it holds .plus(), jump() or avg().
+	    [[nodiscard]] virtual bool interfaceStatesTwoSided() const { return false; }
         [[nodiscard]] virtual std::optional<CutVolumeSide> cutVolumeSide() const { return std::nullopt; }
 	    [[nodiscard]] virtual std::optional<int> componentIndex0() const { return std::nullopt; }
     [[nodiscard]] virtual std::optional<int> componentIndex1() const { return std::nullopt; }
@@ -944,6 +948,10 @@ public:
 	    [[nodiscard]] FormExpr dS(int interior_facet_marker,
                                  CutVolumeSide side) const;
 	    [[nodiscard]] FormExpr dI(int interface_marker = -1) const;
+	    /// This interface integral with every term of its integrand two-sided,
+	    /// whatever operators it holds: the measure of the derivative of a
+	    /// two-sided term, which keeps its source term's rows and blocks (D70).
+	    [[nodiscard]] FormExpr withTwoSidedTerms() const;
         [[nodiscard]] FormExpr dExteriorBoundary(
             const ExteriorBoundaryMeasure& measure) const;
         [[nodiscard]] FormExpr dCutVolume(int interface_marker,

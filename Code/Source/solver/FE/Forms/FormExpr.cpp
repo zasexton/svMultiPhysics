@@ -2040,11 +2040,13 @@ public:
         std::shared_ptr<FormExprNode> child,
         int interface_marker,
         std::optional<ExteriorBoundaryMeasure>
-            exterior_boundary_measure = std::nullopt)
+            exterior_boundary_measure = std::nullopt,
+        bool states_two_sided = false)
         : UnaryNode(std::move(child))
         , interface_marker_(interface_marker)
         , exterior_boundary_measure_(
               std::move(exterior_boundary_measure))
+        , states_two_sided_(states_two_sided)
     {
         if (exterior_boundary_measure_.has_value() &&
             (!exterior_boundary_measure_
@@ -2072,6 +2074,7 @@ public:
     }
 
     [[nodiscard]] std::optional<int> interfaceMarker() const override { return interface_marker_; }
+    [[nodiscard]] bool interfaceStatesTwoSided() const override { return states_two_sided_; }
     [[nodiscard]] const ExteriorBoundaryMeasure*
     exteriorBoundaryMeasure() const override
     {
@@ -2084,6 +2087,7 @@ private:
     int interface_marker_{-1};
     std::optional<ExteriorBoundaryMeasure>
         exterior_boundary_measure_{};
+    bool states_two_sided_{false};
 };
 
 class GlobalIntegralNode final : public UnaryNode {
@@ -3481,6 +3485,20 @@ FormExpr FormExpr::dx(const VolumeIntegrationDomain& domain) const
     return dCutVolume(*domain.interfaceMarker(), *domain.side());
 }
 
+FormExpr FormExpr::withTwoSidedTerms() const
+{
+    if (!node_ || node_->type() != FormExprType::InterfaceIntegral) {
+        throw std::invalid_argument("FormExpr::withTwoSidedTerms: not an interface integral");
+    }
+    const auto* exterior = node_->exteriorBoundaryMeasure();
+    return FormExpr(std::make_shared<InterfaceIntegralNode>(
+        node_->childrenShared().at(0),
+        node_->interfaceMarker().value_or(-1),
+        exterior == nullptr ? std::optional<ExteriorBoundaryMeasure>{}
+                            : std::optional<ExteriorBoundaryMeasure>{*exterior},
+        /*states_two_sided=*/true));
+}
+
 FormExpr FormExpr::dI(const InterfaceDomain& domain) const
 {
     return dI(domain.marker());
@@ -3698,7 +3716,8 @@ std::shared_ptr<FormExprNode> transformNodeShared(
                 exterior == nullptr
                     ? std::optional<ExteriorBoundaryMeasure>{}
                     : std::optional<ExteriorBoundaryMeasure>{
-                          *exterior});
+                          *exterior},
+                node->interfaceStatesTwoSided());
         }
         case FormExprType::CutVolumeIntegral: {
             const int marker = node->interfaceMarker().value_or(-1);

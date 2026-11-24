@@ -403,7 +403,20 @@ Two-sided traces use the following definitions:
 | `u-` | Trace of `u` from the negative retained side. |
 | `jump(u)` | `u- - u+`, the `jump()` of the form language, for scalar and component-wise vector/tensor fields unless a formulation explicitly asks for a normal jump. The minus side of a two-sided generated rule is the negative retained side and the plus side the positive one (`GeneratedInterfaceTwoSidedBinding::minus_side = Negative`, `plus_side = Positive`). |
 | `avg(u)` | Arithmetic average `0.5 * (u+ + u-)`. Weighted averages are a formulation-specific extension and must declare their weights. |
-| `n+`, `n-` | `n+ = n` and `n- = -n`, where `n` is the generated-interface normal above. In a two-sided term `normal().plus()` evaluates to `n+` and `normal().minus()` to `n-` (the assembler negates the rule normal on the negative side), so each points into its own side; on interior facets and fitted interfaces `normal().minus()` is instead the outward normal of the minus cell. A one-sided term sees the rule normal `n`. |
+| `n-`, `n+` | `n- = n` and `n+ = -n`, where `n` is the generated-interface normal above: each is the outward normal of its side, as on interior facets and fitted interfaces. In a two-sided evaluation `normal().minus()` evaluates to `n-` and `normal().plus()` to `n+` (the assembler negates the rule normal on the positive side); a one-sided term sees the rule normal `n` (D70, which replaces the D53 normals). |
+
+A kernel is evaluated two-sided on a generated marker when one of its `dI`
+terms on that marker, or on every marker, holds `.plus()`, `jump()` or
+`avg()`; the assembler decides it per rule from the rule's marker before it
+requires the two-sided binding. In a two-sided evaluation such a term fills
+the negative and positive rows and the four side blocks, and a term without
+them fills the negative row and the negative-negative block only, the values
+it has in a one-sided evaluation; so no term changes with the other terms of
+its kernel. The form compiler classifies each summand of the integrand as
+written, and a symbolic derivative keeps its source summand's sidedness
+(`dI(...).withTwoSidedTerms()`). A compiled kernel whose interface terms mix
+the two compiles them apart and sends the one-sided part's positive row and
+coupling blocks to scratch.
 
 Side ownership is a parent-cell binding, not a persistent surface mesh
 ownership. The generated rule owns a parent cell, a stable generated-domain id,

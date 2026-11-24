@@ -90,6 +90,67 @@ bool FormIR::hasInterfaceFaceTerms() const noexcept
     return false;
 }
 
+namespace {
+
+[[nodiscard]] bool holdsTwoSidedInterfaceOperator(const FormExprNode* node) noexcept
+{
+    if (node == nullptr) {
+        return false;
+    }
+    switch (node->type()) {
+        case FormExprType::RestrictPlus:
+        case FormExprType::Jump:
+        case FormExprType::Average:
+            return true;
+        default:
+            break;
+    }
+    for (const auto* child : node->children()) {
+        if (holdsTwoSidedInterfaceOperator(child)) {
+            return true;
+        }
+    }
+    return false;
+}
+
+} // namespace
+
+bool interfaceTermIsTwoSided(const IntegralTerm& term) noexcept
+{
+    return term.interface_two_sided || holdsTwoSidedInterfaceOperator(term.integrand.node());
+}
+
+bool interfaceTermsMixSidesOnMarker(const FormIR& ir, int interface_marker) noexcept
+{
+    bool one_sided = false;
+    bool two_sided = false;
+    for (const auto& term : ir.terms()) {
+        if (term.domain != IntegralDomain::InterfaceFace) {
+            continue;
+        }
+        if (term.interface_marker >= 0 && term.interface_marker != interface_marker) {
+            continue;
+        }
+        (interfaceTermIsTwoSided(term) ? two_sided : one_sided) = true;
+    }
+    return one_sided && two_sided;
+}
+
+bool interfaceTermsMixSides(const FormIR& ir) noexcept
+{
+    // Every stated marker, and one no term states (the terms on every marker).
+    constexpr int unstated = -2;
+    for (const auto& term : ir.terms()) {
+        if (term.domain != IntegralDomain::InterfaceFace || term.interface_marker < 0) {
+            continue;
+        }
+        if (interfaceTermsMixSidesOnMarker(ir, term.interface_marker)) {
+            return true;
+        }
+    }
+    return interfaceTermsMixSidesOnMarker(ir, unstated);
+}
+
 bool FormIR::hasCutVolumeTerms() const noexcept
 {
     for (const auto& t : impl_->terms) {

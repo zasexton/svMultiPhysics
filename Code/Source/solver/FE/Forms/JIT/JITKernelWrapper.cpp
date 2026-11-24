@@ -591,6 +591,10 @@ bool JITKernelWrapper::requiresTwoSidedInterfaceFace() const noexcept
 {
     return fallback_->requiresTwoSidedInterfaceFace();
 }
+bool JITKernelWrapper::requiresTwoSidedInterfaceFaceOnMarker(int interface_marker) const noexcept
+{
+    return fallback_->requiresTwoSidedInterfaceFaceOnMarker(interface_marker);
+}
 
 void JITKernelWrapper::computeCell(const assembly::AssemblyContext& ctx,
                                    assembly::KernelOutput& output)
@@ -2132,10 +2136,44 @@ void JITKernelWrapper::computeInterfaceFace(const assembly::AssemblyContext& ctx
     try {
         const auto checks = assembly::jit::PackingChecks{.validate_alignment = false};
         const bool one_sided_embedded = &ctx_plus == &ctx_minus;
+        const bool generated_two_sided = !one_sided_embedded && ctx_minus.isGeneratedInterfaceTwoSided();
+        const auto callOnMarker = [&](const CompiledDispatch& compiled, const void* args) {
+            callJIT(compiled.interface_all, args);
+            if (const auto it = compiled.interface_by_marker.find(interface_marker);
+                it != compiled.interface_by_marker.end()) {
+                callJIT(it->second, args);
+            }
+        };
+        // A two-sided generated call of an IR mixing interface term sides
+        // (D70): the two-sided terms fill every block; the one-sided terms
+        // run with their plus row and coupling blocks sent to scratch, so
+        // they fill the minus row and the minus-minus block only.
+        const auto callSides = [&](const InterfaceSidesDispatch& sides, const void* args) {
+            callOnMarker(sides.two_sided, args);
+            thread_local assembly::KernelOutput scratch_plus;
+            thread_local assembly::KernelOutput scratch_mp;
+            thread_local assembly::KernelOutput scratch_pm;
+            scratch_plus.reserve(ctx_plus.numTestDofs(), ctx_plus.numTrialDofs(),
+                                 output_plus.has_matrix, output_plus.has_vector);
+            scratch_mp.reserve(ctx_minus.numTestDofs(), ctx_plus.numTrialDofs(),
+                               coupling_minus_plus.has_matrix, false);
+            scratch_pm.reserve(ctx_plus.numTestDofs(), ctx_minus.numTrialDofs(),
+                               coupling_plus_minus.has_matrix, false);
+            const auto minus_only_args =
+                assembly::jit::packInterfaceFaceKernelArgsV6(ctx_minus, ctx_plus, interface_marker,
+                                                             output_minus, scratch_plus,
+                                                             scratch_mp, scratch_pm,
+                                                             checks);
+            callOnMarker(sides.one_sided, &minus_only_args);
+        };
+        const auto mixesSides = [&](const FormIR& ir) {
+            return generated_two_sided && interfaceTermsMixSidesOnMarker(ir, interface_marker);
+        };
 
     if (kind_ == WrappedKind::FormKernel) {
         const auto* k = dynamic_cast<const FormKernel*>(fallback_.get());
-        if (!k || k->ir().kind() != FormKind::Bilinear) {
+        if (!k || k->ir().kind() != FormKind::Bilinear ||
+            (mixesSides(k->ir()) && !interfaceSidesOnce(sides_form_, k->ir()).ok)) {
             fallback_->computeInterfaceFace(ctx_minus, ctx_plus, interface_marker,
                                             output_minus, output_plus,
                                             coupling_minus_plus, coupling_plus_minus);
@@ -2181,15 +2219,15 @@ void JITKernelWrapper::computeInterfaceFace(const assembly::AssemblyContext& ctx
 	                                                         output_minus, output_plus,
 	                                                         coupling_minus_plus, coupling_plus_minus,
 	                                                         checks);
-	        const auto disp =
-	            getSpecializedDispatch(KernelRole::Form, k->ir(), IntegralDomain::InterfaceFace, ctx_minus, &ctx_plus);
-	        const auto& compiled = disp ? *disp : compiled_form_;
+	        if (mixesSides(k->ir())) {
+	            callSides(sides_form_, &args);
+	        } else {
+	            const auto disp =
+	                getSpecializedDispatch(KernelRole::Form, k->ir(), IntegralDomain::InterfaceFace, ctx_minus, &ctx_plus);
+	            const auto& compiled = disp ? *disp : compiled_form_;
 
-            callJIT(compiled.interface_all, &args);
-            if (const auto it = compiled.interface_by_marker.find(interface_marker);
-                it != compiled.interface_by_marker.end()) {
-                callJIT(it->second, &args);
-            }
+	            callOnMarker(compiled, &args);
+	        }
 
         output_minus.has_matrix = true;
         output_minus.has_vector = false;
@@ -2204,7 +2242,11 @@ void JITKernelWrapper::computeInterfaceFace(const assembly::AssemblyContext& ctx
 
     if (kind_ == WrappedKind::SymbolicNonlinearFormKernel) {
         const auto* k = dynamic_cast<const SymbolicNonlinearFormKernel*>(fallback_.get());
-        if (!k) {
+        if (!k ||
+            (!k->isMatrixOnly() && mixesSides(k->residualIR()) &&
+             !interfaceSidesOnce(sides_residual_, k->residualIR()).ok) ||
+            (!k->isVectorOnly() && mixesSides(k->tangentIR()) &&
+             !interfaceSidesOnce(sides_tangent_, k->tangentIR()).ok)) {
             fallback_->computeInterfaceFace(ctx_minus, ctx_plus, interface_marker,
                                             output_minus, output_plus,
                                             coupling_minus_plus, coupling_plus_minus);
@@ -2272,26 +2314,26 @@ void JITKernelWrapper::computeInterfaceFace(const assembly::AssemblyContext& ctx
                                                          checks);
 
 	        if (want_matrix) {
-	            const auto disp =
-	                getSpecializedDispatch(KernelRole::Tangent, k->tangentIR(), IntegralDomain::InterfaceFace, ctx_minus, &ctx_plus);
-	            const auto& compiled = disp ? *disp : compiled_tangent_;
+	            if (mixesSides(k->tangentIR())) {
+	                callSides(sides_tangent_, &args);
+	            } else {
+	                const auto disp =
+	                    getSpecializedDispatch(KernelRole::Tangent, k->tangentIR(), IntegralDomain::InterfaceFace, ctx_minus, &ctx_plus);
+	                const auto& compiled = disp ? *disp : compiled_tangent_;
 
-	            callJIT(compiled.interface_all, &args);
-	            if (const auto it = compiled.interface_by_marker.find(interface_marker);
-	                it != compiled.interface_by_marker.end()) {
-	                callJIT(it->second, &args);
+	                callOnMarker(compiled, &args);
 	            }
 	        }
 
 	        if (want_vector) {
-	            const auto disp =
-	                getSpecializedDispatch(KernelRole::Residual, k->residualIR(), IntegralDomain::InterfaceFace, ctx_minus, &ctx_plus);
-	            const auto& compiled = disp ? *disp : compiled_residual_;
+	            if (mixesSides(k->residualIR())) {
+	                callSides(sides_residual_, &args);
+	            } else {
+	                const auto disp =
+	                    getSpecializedDispatch(KernelRole::Residual, k->residualIR(), IntegralDomain::InterfaceFace, ctx_minus, &ctx_plus);
+	                const auto& compiled = disp ? *disp : compiled_residual_;
 
-	            callJIT(compiled.interface_all, &args);
-	            if (const auto it = compiled.interface_by_marker.find(interface_marker);
-	                it != compiled.interface_by_marker.end()) {
-	                callJIT(it->second, &args);
+	                callOnMarker(compiled, &args);
 	            }
 	        }
 
@@ -2791,6 +2833,9 @@ void JITKernelWrapper::markDirty(std::string_view reason) noexcept
     compiled_residual_ = CompiledDispatch{};
     compiled_tangent_ = CompiledDispatch{};
     has_compiled_linear_ = false;
+    sides_form_ = InterfaceSidesDispatch{};
+    sides_residual_ = InterfaceSidesDispatch{};
+    sides_tangent_ = InterfaceSidesDispatch{};
 
     specialized_dispatch_.clear();
     attempted_specializations_.clear();
@@ -3559,6 +3604,101 @@ void JITKernelWrapper::markRuntimeFailureOnce(std::string_view where, std::strin
     FE_LOG_WARNING(full);
 }
 
+void JITKernelWrapper::fillCompiledDispatch(CompiledDispatch& out, const JITCompileResult& r)
+{
+    out = CompiledDispatch{};
+    out.ok = r.ok;
+    out.cacheable = r.cacheable;
+    out.message = r.message;
+    out.boundary_by_marker.reserve(r.kernels.size());
+    out.interior_by_marker.reserve(r.kernels.size());
+    out.interior_by_region.reserve(r.kernels.size());
+    out.interface_by_marker.reserve(r.kernels.size());
+    out.cut_volume_by_region.reserve(r.kernels.size());
+
+    for (const auto& k : r.kernels) {
+        switch (k.domain) {
+            case IntegralDomain::Cell:
+                out.cell = k.address;
+                break;
+            case IntegralDomain::Boundary:
+                if (k.boundary_marker < 0) {
+                    out.boundary_all = k.address;
+                } else {
+                    out.boundary_by_marker[k.boundary_marker] = k.address;
+                }
+                break;
+            case IntegralDomain::InteriorFace:
+                if (k.interface_marker < 0) {
+                    out.interior_face = k.address;
+                } else if (k.interior_facet_side.has_value()) {
+                    out.interior_by_region[interiorFaceDispatchKey(
+                        k.interface_marker,
+                        *k.interior_facet_side)] = k.address;
+                } else {
+                    out.interior_by_marker[k.interface_marker] = k.address;
+                }
+                break;
+            case IntegralDomain::InterfaceFace:
+                if (k.interface_marker < 0) {
+                    out.interface_all = k.address;
+                } else {
+                    out.interface_by_marker[k.interface_marker] = k.address;
+                }
+                break;
+            case IntegralDomain::CutVolume:
+                out.cut_volume_by_region[cutVolumeDispatchKey(
+                    k.interface_marker, k.cut_volume_side)] = k.address;
+                break;
+        }
+    }
+}
+
+const JITKernelWrapper::InterfaceSidesDispatch& JITKernelWrapper::interfaceSidesOnce(InterfaceSidesDispatch& sides,
+                                                                                     const FormIR& ir)
+{
+    {
+        std::lock_guard<std::mutex> lock(jit_mutex_);
+        if (sides.attempted) {
+            return sides;
+        }
+    }
+    // The first two-sided generated call of an IR mixing interface term
+    // sides compiles them apart (D70); nothing else ever compiles them.
+    assembly::requireSerial("JIT interface term sides compile");
+    std::lock_guard<std::mutex> lock(jit_mutex_);
+    if (sides.attempted) {
+        return sides;
+    }
+    sides.attempted = true;
+    if (!compiler_) {
+        return sides;
+    }
+    ValidationOptions vopt;
+    vopt.strictness = Strictness::AllowExternalCalls;
+    const auto part = [&](bool two_sided) {
+        auto sub = ir.clone();
+        std::vector<IntegralTerm> terms;
+        for (const auto& term : ir.terms()) {
+            if (term.domain == IntegralDomain::InterfaceFace && interfaceTermIsTwoSided(term) == two_sided) {
+                terms.push_back(term);
+            }
+        }
+        sub.setTerms(std::move(terms));
+        return compiler_->compile(sub, vopt);
+    };
+    const auto r_two = part(true);
+    const auto r_one = part(false);
+    if (!r_two.ok || !r_one.ok) {
+        return sides;
+    }
+    fillCompiledDispatch(sides.two_sided, r_two);
+    fillCompiledDispatch(sides.one_sided, r_one);
+    sides.ok = true;
+    bumpDispatchEpoch();
+    return sides;
+}
+
 void JITKernelWrapper::maybeCompile()
 {
     if (!options_.enable) {
@@ -3610,53 +3750,8 @@ void JITKernelWrapper::maybeCompile()
     ValidationOptions vopt;
     vopt.strictness = Strictness::AllowExternalCalls;
 
-    const auto fillDispatch = [&](CompiledDispatch& out, const JITCompileResult& r) {
-        out = CompiledDispatch{};
-        out.ok = r.ok;
-        out.cacheable = r.cacheable;
-        out.message = r.message;
-        out.boundary_by_marker.reserve(r.kernels.size());
-        out.interior_by_marker.reserve(r.kernels.size());
-        out.interior_by_region.reserve(r.kernels.size());
-        out.interface_by_marker.reserve(r.kernels.size());
-        out.cut_volume_by_region.reserve(r.kernels.size());
-
-        for (const auto& k : r.kernels) {
-            switch (k.domain) {
-                case IntegralDomain::Cell:
-                    out.cell = k.address;
-                    break;
-                case IntegralDomain::Boundary:
-                    if (k.boundary_marker < 0) {
-                        out.boundary_all = k.address;
-                    } else {
-                        out.boundary_by_marker[k.boundary_marker] = k.address;
-                    }
-                    break;
-                case IntegralDomain::InteriorFace:
-                    if (k.interface_marker < 0) {
-                        out.interior_face = k.address;
-                    } else if (k.interior_facet_side.has_value()) {
-                        out.interior_by_region[interiorFaceDispatchKey(
-                            k.interface_marker,
-                            *k.interior_facet_side)] = k.address;
-                    } else {
-                        out.interior_by_marker[k.interface_marker] = k.address;
-                    }
-                    break;
-                case IntegralDomain::InterfaceFace:
-                    if (k.interface_marker < 0) {
-                        out.interface_all = k.address;
-                    } else {
-                        out.interface_by_marker[k.interface_marker] = k.address;
-                    }
-                    break;
-                case IntegralDomain::CutVolume:
-                    out.cut_volume_by_region[cutVolumeDispatchKey(
-                        k.interface_marker, k.cut_volume_side)] = k.address;
-                    break;
-            }
-        }
+    const auto fillDispatch = [](CompiledDispatch& out, const JITCompileResult& r) {
+        fillCompiledDispatch(out, r);
     };
 
     auto warnCompileFailureOnce = [&](std::string_view what, std::string_view msg) {

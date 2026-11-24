@@ -1308,6 +1308,7 @@ void collectIntegralTerms(
             const int marker = n.interfaceMarker().value_or(-1);
             const auto* exterior =
                 n.exteriorBoundaryMeasure();
+            const auto first_new_term = out_terms.size();
             collect_integrand_terms(collect_integrand_terms,
                                     makeExprFromNode(children[0]),
                                     sign,
@@ -1322,6 +1323,16 @@ void collectIntegralTerms(
                                               ExteriorBoundaryMeasure>{
                                               *exterior},
                                     CutVolumeSide::Negative);
+            // Each term of the integrand is two-sided when it reads the plus
+            // side, classified here before any optimization, or as the
+            // integral states for a derived term (D70).
+            const bool stated = n.interfaceStatesTwoSided();
+            for (auto k = first_new_term; k < out_terms.size(); ++k) {
+                auto& term = out_terms[k];
+                term.interface_two_sided =
+                    stated || (term.integrand.isValid() && term.integrand.node() != nullptr &&
+                               containsTwoSidedInterfaceOperator(*term.integrand.node()));
+            }
             return;
         }
         case FormExprType::CutVolumeIntegral: {
@@ -1397,8 +1408,9 @@ FormIR FormCompiler::compileImpl(const FormExpr& form, FormKind kind)
     for (auto& t : terms) {
         if (t.exterior_boundary_measure.has_value() &&
             t.exterior_boundary_measure->isGeneratedActiveSubset() &&
-            detail::containsTwoSidedInterfaceOperator(
-                *t.integrand.node())) {
+            (t.interface_two_sided ||
+             detail::containsTwoSidedInterfaceOperator(
+                 *t.integrand.node()))) {
             throw std::invalid_argument(
                 "FormCompiler: generated active exterior boundaries are one-sided and cannot use plus restriction, jump, or average");
         }

@@ -798,6 +798,14 @@ public:
     [[nodiscard]] bool hasBoundaryFace() const noexcept override { return primary_->hasBoundaryFace(); }
     [[nodiscard]] bool hasInteriorFace() const noexcept override { return primary_->hasInteriorFace(); }
     [[nodiscard]] bool hasInterfaceFace() const noexcept override { return primary_->hasInterfaceFace(); }
+    [[nodiscard]] bool requiresTwoSidedInterfaceFace() const noexcept override
+    {
+        return primary_->requiresTwoSidedInterfaceFace();
+    }
+    [[nodiscard]] bool requiresTwoSidedInterfaceFaceOnMarker(int interface_marker) const noexcept override
+    {
+        return primary_->requiresTwoSidedInterfaceFaceOnMarker(interface_marker);
+    }
     [[nodiscard]] bool hasSingleSidedInterfaceFace() const noexcept override
     {
         return primary_->hasSingleSidedInterfaceFace();

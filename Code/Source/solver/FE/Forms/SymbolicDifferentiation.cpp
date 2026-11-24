@@ -10,6 +10,7 @@
 #include "Core/Types.h"
 #include "Forms/IndexExtent.h"
 #include "Forms/Tensor/TensorDifferentiation.h"
+#include <algorithm>
 
 #include <algorithm>
 #include <array>
@@ -50,6 +51,125 @@ namespace {
     }
     throw std::invalid_argument(
         "wrapExteriorIntegral: node is not an exterior-boundary integral");
+}
+
+[[nodiscard]] bool holdsTwoSidedInterfaceOperator(const FormExprNode& node)
+{
+    switch (node.type()) {
+        case FormExprType::RestrictPlus:
+        case FormExprType::Jump:
+        case FormExprType::Average:
+            return true;
+        default:
+            break;
+    }
+    for (const auto* child : node.children()) {
+        if (child != nullptr && holdsTwoSidedInterfaceOperator(*child)) {
+            return true;
+        }
+    }
+    return false;
+}
+
+/// The signed summands of an integrand, split as FormCompiler splits it into
+/// terms (Add, Subtract, Negate).
+void collectSignedSummands(const std::shared_ptr<FormExprNode>& node,
+                           bool negated,
+                           std::vector<std::pair<std::shared_ptr<FormExprNode>, bool>>& out)
+{
+    const auto kids = node->childrenShared();
+    switch (node->type()) {
+        case FormExprType::Add:
+            if (kids.size() == 2u && kids[0] && kids[1]) {
+                collectSignedSummands(kids[0], negated, out);
+                collectSignedSummands(kids[1], negated, out);
+                return;
+            }
+            break;
+        case FormExprType::Subtract:
+            if (kids.size() == 2u && kids[0] && kids[1]) {
+                collectSignedSummands(kids[0], negated, out);
+                collectSignedSummands(kids[1], !negated, out);
+                return;
+            }
+            break;
+        case FormExprType::Negate:
+            if (kids.size() == 1u && kids[0]) {
+                collectSignedSummands(kids[0], !negated, out);
+                return;
+            }
+            break;
+        default:
+            break;
+    }
+    out.emplace_back(node, negated);
+}
+
+[[nodiscard]] bool isZeroLike(const FormExprNode& node);
+
+/// The derivative of an interface integral.  A term of a generated interface
+/// is one-sided unless it holds .plus(), jump() or avg() (D70), and a
+/// derivative can lose the plus operand of its source term; then the
+/// derivative of each two-sided summand is integrated by its own measure
+/// stating it two-sided.  Otherwise (no derivative summand of a two-sided
+/// summand without a two-sided operator, or a measure that states it
+/// already) the derivative is the one it was.
+template<class DerivativeOf>
+[[nodiscard]] FormExpr interfaceIntegralDerivative(const std::shared_ptr<FormExprNode>& integrand,
+                                                   const FormExprNode& integral_node,
+                                                   const FormExpr& whole_derivative,
+                                                   const DerivativeOf& derivative_of)
+{
+    const auto wrap = [&](const FormExpr& d) {
+        auto out = wrapExteriorIntegral(d, integral_node);
+        if (integral_node.interfaceStatesTwoSided() && out.node() != nullptr &&
+            out.node()->type() == FormExprType::InterfaceIntegral) {
+            out = out.withTwoSidedTerms();
+        }
+        return out;
+    };
+    if (integral_node.interfaceStatesTwoSided() || integral_node.exteriorBoundaryMeasure() != nullptr ||
+        !holdsTwoSidedInterfaceOperator(*integrand)) {
+        return wrap(whole_derivative);
+    }
+    std::vector<std::pair<std::shared_ptr<FormExprNode>, bool>> summands;
+    collectSignedSummands(integrand, /*negated=*/false, summands);
+    const auto loses_plus_operand = [&](const std::shared_ptr<FormExprNode>& summand) {
+        if (!holdsTwoSidedInterfaceOperator(*summand)) {
+            return false;
+        }
+        const auto d = derivative_of(summand);
+        if (!d.isValid() || d.node() == nullptr) {
+            return false;
+        }
+        std::vector<std::pair<std::shared_ptr<FormExprNode>, bool>> d_summands;
+        collectSignedSummands(d.nodeShared(), /*negated=*/false, d_summands);
+        return std::any_of(d_summands.begin(), d_summands.end(), [](const auto& d_summand) {
+            return !isZeroLike(*d_summand.first) && !holdsTwoSidedInterfaceOperator(*d_summand.first);
+        });
+    };
+    if (std::none_of(summands.begin(), summands.end(),
+                     [&](const auto& summand) { return loses_plus_operand(summand.first); })) {
+        return wrap(whole_derivative);
+    }
+    FormExpr one_sided;
+    FormExpr out;
+    const auto add = [](FormExpr& sum, const FormExpr& e) { sum = sum.isValid() ? sum + e : e; };
+    for (const auto& [summand, negated] : summands) {
+        auto d = derivative_of(summand);
+        if (negated) {
+            d = -d;
+        }
+        if (holdsTwoSidedInterfaceOperator(*summand)) {
+            add(out, wrap(d).withTwoSidedTerms());
+        } else {
+            add(one_sided, d);
+        }
+    }
+    if (one_sided.isValid()) {
+        add(out, wrap(one_sided));
+    }
+    return out;
 }
 
 [[nodiscard]] FormExpr wrapInteriorFaceIntegral(const FormExpr& integrand,
@@ -1457,7 +1577,19 @@ FormExpr differentiateResidualImpl(const FormExpr& residual_form,
                                                                                        : IntegralDomain::InterfaceFace;
                     const auto a = inDomain(domain, 0);
                     out.primal = wrapExteriorIntegral(a.primal, *node);
-                    out.deriv = wrapExteriorIntegral(a.deriv + a.primal * shapeMeasureVariation(domain, *node), *node);
+                    const auto whole = a.deriv + a.primal * shapeMeasureVariation(domain, *node);
+                    if (node->type() != FormExprType::InterfaceIntegral) {
+                        out.deriv = wrapExteriorIntegral(whole, *node);
+                        break;
+                    }
+                    out.deriv = interfaceIntegralDerivative(
+                        kids[0], *node, whole, [&](const std::shared_ptr<FormExprNode>& summand) {
+                            const auto saved = shape_domain;
+                            shape_domain = domain;
+                            const auto p = self(self, summand);
+                            shape_domain = saved;
+                            return p.deriv + p.primal * shapeMeasureVariation(domain, *node);
+                        });
                     break;
                 }
                 case FormExprType::InteriorFaceIntegral: {
@@ -2377,12 +2509,18 @@ FormExpr differentiateResidualImpl(const FormExpr& residual_form,
             case FormExprType::InterfaceIntegral: {
                 const auto a = diff1(0);
                 out.primal = wrapExteriorIntegral(a.primal, *node);
-                auto deriv_integrand = a.deriv;
-                if (differentiatesMeshGeometry(cfg)) {
-                    deriv_integrand = deriv_integrand +
-                        a.primal * (FormExpr::currentMeasureVariation() / FormExpr::currentMeasure());
-                }
-                out.deriv = wrapExteriorIntegral(deriv_integrand, *node);
+                const auto with_measure_variation = [&](const DiffPair& p) {
+                    if (!differentiatesMeshGeometry(cfg)) {
+                        return p.deriv;
+                    }
+                    return p.deriv +
+                        p.primal * (FormExpr::currentMeasureVariation() / FormExpr::currentMeasure());
+                };
+                out.deriv = interfaceIntegralDerivative(
+                    kids[0], *node, with_measure_variation(a),
+                    [&](const std::shared_ptr<FormExprNode>& summand) {
+                        return with_measure_variation(self(self, summand));
+                    });
                 break;
             }
             case FormExprType::CutVolumeIntegral: {
@@ -3289,7 +3427,9 @@ FormExpr directionalDerivativeWrtField(const FormExpr& expr,
             case FormExprType::InterfaceIntegral: {
                 const auto a = diff1(0);
                 out.primal = wrapExteriorIntegral(a.primal, *node);
-                out.deriv = wrapExteriorIntegral(a.deriv, *node);
+                out.deriv = interfaceIntegralDerivative(
+                    kids[0], *node, a.deriv,
+                    [&](const std::shared_ptr<FormExprNode>& summand) { return self(self, summand).deriv; });
                 break;
             }
             case FormExprType::CutVolumeIntegral: {

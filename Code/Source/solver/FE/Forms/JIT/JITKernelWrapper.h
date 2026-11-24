@@ -39,6 +39,7 @@ class FormIR;
 namespace jit {
 
 class JITCompiler;
+struct JITCompileResult;
 
 class JITKernelWrapper final : public assembly::AssemblyKernel {
 public:
@@ -79,6 +80,7 @@ public:
     [[nodiscard]] bool hasInteriorFace() const noexcept override;
     [[nodiscard]] bool hasInterfaceFace() const noexcept override;
     [[nodiscard]] bool requiresTwoSidedInterfaceFace() const noexcept override;
+    [[nodiscard]] bool requiresTwoSidedInterfaceFaceOnMarker(int interface_marker) const noexcept override;
     [[nodiscard]] bool supportsCellBatch() const noexcept override { return true; }
 
     void computeCell(const assembly::AssemblyContext& ctx,
@@ -342,6 +344,23 @@ private:
 	    CompiledDispatch compiled_residual_{};
 	    CompiledDispatch compiled_tangent_{};
 	    bool has_compiled_linear_{false};
+
+    // For two-sided generated interface calls of an IR whose interface terms
+    // mix one-sided and two-sided terms (D70): its two-sided and its
+    // one-sided interface terms compiled apart at the first such call, the
+    // one-sided ones filling the minus row and the minus-minus block only.
+    // Not ok: such calls use the interpreter.
+    struct InterfaceSidesDispatch {
+        bool attempted{false};
+        bool ok{false};
+        CompiledDispatch two_sided{};
+        CompiledDispatch one_sided{};
+    };
+    [[nodiscard]] const InterfaceSidesDispatch& interfaceSidesOnce(InterfaceSidesDispatch& sides, const FormIR& ir);
+    static void fillCompiledDispatch(CompiledDispatch& out, const JITCompileResult& r);
+    InterfaceSidesDispatch sides_form_{};
+    InterfaceSidesDispatch sides_residual_{};
+    InterfaceSidesDispatch sides_tangent_{};
 
 	    std::unordered_map<SpecializationKey, std::shared_ptr<CompiledDispatch>, SpecializationKeyHash>
 	        specialized_dispatch_{};

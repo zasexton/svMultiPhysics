@@ -59,6 +59,14 @@ struct IntegralTerm {
     // the k-th time derivative contribution (time discretization handled elsewhere).
     int time_derivative_order{0};
 
+    // For interface integrals: whether the term reads the plus side (it
+    // holds .plus(), jump() or avg()), classified from the source integrand
+    // before any optimization; a derived (tangent) term keeps the
+    // classification of its source term.  On a two-sided generated interface
+    // a term without it belongs to the minus row and the minus-minus block
+    // only (D70).
+    bool interface_two_sided{false};
+
     // Integrand expression (no measure wrapper)
     FormExpr integrand{};
 
@@ -173,6 +181,18 @@ private:
     struct Impl;
     std::unique_ptr<Impl> impl_;
 };
+
+/// Whether an interface term reads the plus side: classified two-sided when
+/// compiled, or holding .plus(), jump() or avg() (D70).
+[[nodiscard]] bool interfaceTermIsTwoSided(const IntegralTerm& term) noexcept;
+
+/// Whether the interface terms of @p ir on @p interface_marker (and on every
+/// marker) mix one-sided and two-sided terms, whose rows and blocks differ
+/// on a two-sided generated interface (D70).
+[[nodiscard]] bool interfaceTermsMixSidesOnMarker(const FormIR& ir, int interface_marker) noexcept;
+
+/// interfaceTermsMixSidesOnMarker() for some marker.
+[[nodiscard]] bool interfaceTermsMixSides(const FormIR& ir) noexcept;
 
 } // namespace forms
 } // namespace FE

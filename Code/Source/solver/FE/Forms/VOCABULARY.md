@@ -363,6 +363,7 @@ Untyped measures (`FormExpr.h`):
 | `.dS()`, `.dS(marker)` | Interior facet integral; with a marker, over a marker-backed facet set |
 | `.dS(marker, side)` | Interior facets of a set adjacent to one side of a cut |
 | `.dI(marker)` | Registered or generated interface integral; `marker = -1` means all interfaces |
+| `.dI(marker).withTwoSidedTerms()` | The interface integral with every term of its integrand two-sided on a generated rule, whatever operators it holds: the measure of a derivative of a two-sided term (D70) |
 | `.dCutVolume(interface_marker, side)` | Generated cut-volume integral over the selected interface side |
 | `.dExteriorBoundary(measure)` | Explicit `ExteriorBoundaryMeasure`: `fullPhysical(m)` or `generatedActiveSubset(m, g)` |
 | `dInterfaceBoundary(expr, marker)` | Generated interface-boundary intersection; shares `.dI(marker)` dispatch, but the generated rule carries geometric dimension d-2 (a point in 2D, a line in 3D) and the codimension-two Jacobian |
@@ -606,10 +607,28 @@ but a cell integral (dx) uses it: [[u]] in the integrand '...'`. The normal
 of the minus side is `FormExpr::normal().minus()`; the DG helpers above write
 fluxes against it. On a generated (level-set) interface the minus side is the
 negative side `phi < c` and the plus side the positive one, so `jump(u)` is
-`u(negative) - u(positive)`; in a two-sided term there `normal().minus()` is
-`-n` and `normal().plus()` is `+n` with `n = grad(phi) / |grad(phi)|`, each
-pointing into its own side, the opposite of interior facets
-(`FE/Docs/LevelSet.md`, Two-Sided Generated Interfaces).
+`u(negative) - u(positive)`, `normal().minus()` is `n = grad(phi) /
+|grad(phi)|` and `normal().plus()` is `-n`, each the outward normal of its
+side as on interior facets and fitted interfaces, and `normal()` in a term
+without `.plus()`, `jump()` or `avg()` is `n` (`FE/Docs/LevelSet.md`,
+Two-Sided Generated Interfaces; D70). The DG helpers are therefore the same
+on both: `upwindValue(u, beta)` and `downwindValue` select by
+`sign(inner(avg(beta), normal().minus()))`, and an upwind flux of two side
+states takes the upstream one (`test_FormsInstaller.cpp`). On a generated
+rule a field has one trace, the parent cell's, so `jump(u)` is zero there,
+`upwindValue(u, beta)` is `u`, and `interface::applyNitscheInterfacePoisson`
+installs nothing; a coupling of two fields (`SidePair`) is written with each
+field's trace, `a.minus()` and `b.plus()`. A generated rule is assembled
+two-sided on a marker where a `dI` term of the kernel (on that marker or on
+every marker) holds `.plus()`, `jump()` or `avg()`; there each such term
+fills both rows and all four blocks, and every other term the minus row and
+the minus-minus block only, as it would one-sided. A term thus means the same
+whatever the other terms of its kernel (`test_FormsInstaller.cpp`). The
+sidedness of a term is classified from the integrand as written, each summand
+apart, and a derivative keeps its source term's even when it drops the plus
+operand (`k (a - b(+)) v` differentiates to `k da v`, still two-sided);
+`dI(...).withTwoSidedTerms()` states it. A fitted interface keeps every term
+in every block.
 
 The BC trace helpers follow the core convention:
 `bc::InterfaceTraceReduction::Jump` is `jump(u) = u(-) - u(+)` for

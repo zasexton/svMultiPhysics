@@ -743,6 +743,20 @@ public:
      */
     [[nodiscard]] virtual bool requiresTwoSidedInterfaceFace() const noexcept { return false; }
 
+    /**
+     * @brief requiresTwoSidedInterfaceFace() for one interface marker
+     *
+     * True when a `dI` term on @p interface_marker, or on every marker, needs
+     * the plus side.  A generated interface is evaluated two-sided on that
+     * marker only, so a jump on one marker binds no pair of contexts on
+     * another (D70).
+     */
+    [[nodiscard]] virtual bool requiresTwoSidedInterfaceFaceOnMarker(int interface_marker) const noexcept
+    {
+        (void)interface_marker;
+        return requiresTwoSidedInterfaceFace();
+    }
+
     // =========================================================================
     // Query
     // =========================================================================

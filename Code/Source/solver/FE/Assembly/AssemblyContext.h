@@ -1655,6 +1655,16 @@ public:
     [[nodiscard]] int interiorFaceMarker() const noexcept { return interior_face_marker_; }
 
     /**
+     * @brief Whether this context is one side of a two-sided evaluation on a
+     * generated interface (set by the assembler around the kernel call)
+     *
+     * There a `dI` term without `.plus()`, `jump()` or `avg()` belongs to the
+     * minus row and the minus-minus block only (D70).
+     */
+    [[nodiscard]] bool isGeneratedInterfaceTwoSided() const noexcept { return generated_interface_two_sided_; }
+    void setGeneratedInterfaceTwoSided(bool two_sided) noexcept { generated_interface_two_sided_ = two_sided; }
+
+    /**
      * @brief Get active level-set side for a marked interior facet set
      */
     [[nodiscard]] geometry::CutIntegrationSide interiorFaceSide() const noexcept {
@@ -2148,6 +2158,7 @@ private:
     LocalIndex local_face_id_{0};
     int boundary_marker_{-1};
     int interior_face_marker_{-1};
+    bool generated_interface_two_sided_{false};
     geometry::CutIntegrationSide interior_face_side_{
         geometry::CutIntegrationSide::Interface};
     int cut_volume_marker_{-1};

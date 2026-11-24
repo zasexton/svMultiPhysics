@@ -236,11 +236,51 @@ void runHomogeneousCellBatches(std::span<const assembly::AssemblyContext* const>
         if (term.domain != IntegralDomain::InterfaceFace) {
             continue;
         }
-        if (formExprRequiresTwoSidedInterfaceFace(term.integrand.node())) {
+        if (interfaceTermIsTwoSided(term)) {
             return true;
         }
     }
     return false;
+}
+
+/// formIRRequiresTwoSidedInterfaceFace() for the terms on @p marker and on
+/// every marker.
+[[nodiscard]] bool formIRRequiresTwoSidedInterfaceFaceOnMarker(const FormIR& ir, int marker) noexcept
+{
+    for (const auto& term : ir.terms()) {
+        if (term.domain != IntegralDomain::InterfaceFace) {
+            continue;
+        }
+        if (term.interface_marker >= 0 && term.interface_marker != marker) {
+            continue;
+        }
+        if (interfaceTermIsTwoSided(term)) {
+            return true;
+        }
+    }
+    return false;
+}
+
+/// Whether the call evaluates the two sides of a generated interface (D70).
+[[nodiscard]] bool generatedTwoSidedCall(const assembly::AssemblyContext& ctx_minus,
+                                         const assembly::AssemblyContext& ctx_plus) noexcept
+{
+    return &ctx_minus != &ctx_plus && ctx_minus.isGeneratedInterfaceTwoSided();
+}
+
+/// Whether @p term enters the block of test side @p test_active and trial
+/// side @p trial_active (a vector: trial Minus): on a two-sided generated
+/// call a term without .plus(), jump() or avg() belongs to the minus row and
+/// the minus-minus block only (D70); otherwise every block.
+[[nodiscard]] bool interfaceTermEntersBlock(bool generated_two_sided,
+                                            const IntegralTerm& term,
+                                            Side test_active,
+                                            Side trial_active) noexcept
+{
+    if (!generated_two_sided || (test_active == Side::Minus && trial_active == Side::Minus)) {
+        return true;
+    }
+    return interfaceTermIsTwoSided(term);
 }
 
 [[nodiscard]] bool interiorFaceTermMatchesContext(
@@ -13395,6 +13435,11 @@ bool FormKernel::requiresTwoSidedInterfaceFace() const noexcept
     return formIRRequiresTwoSidedInterfaceFace(ir_);
 }
 
+bool FormKernel::requiresTwoSidedInterfaceFaceOnMarker(int interface_marker) const noexcept
+{
+    return formIRRequiresTwoSidedInterfaceFaceOnMarker(ir_, interface_marker);
+}
+
 void FormKernel::ensureInterpreterLoweredIndexedAccess()
 {
     if (!indexed_lowering_done_) {
@@ -14000,6 +14045,7 @@ void FormKernel::computeInterfaceFace(
             }
         }
 
+        const bool generated_two_sided = generatedTwoSidedCall(ctx_minus, ctx_plus);
         auto assembleVector = [&](Side eval_side,
                                   Side test_active,
                                   assembly::KernelOutput& out,
@@ -14019,6 +14065,7 @@ void FormKernel::computeInterfaceFace(
                         const auto& term = terms[term_index];
                         if (term.domain != IntegralDomain::InterfaceFace) continue;
                         if (term.interface_marker >= 0 && term.interface_marker != interface_marker) continue;
+                        if (!interfaceTermEntersBlock(generated_two_sided, term, test_active, Side::Minus)) continue;
                         const Real term_weight = termWeightFor(side_time_ctx, term.time_derivative_order);
                         if (term_weight == 0.0) continue;
                         const Real s = evalScalarIntegrandTensorAware(term_index,
@@ -14090,6 +14137,7 @@ void FormKernel::computeInterfaceFace(
         }
     }
 
+    const bool generated_two_sided = generatedTwoSidedCall(ctx_minus, ctx_plus);
     auto assembleBlock = [&](Side eval_side,
                              Side test_active,
                              Side trial_active,
@@ -14105,6 +14153,7 @@ void FormKernel::computeInterfaceFace(
             const auto& term = terms[term_index];
             if (term.domain != IntegralDomain::InterfaceFace) continue;
             if (term.interface_marker >= 0 && term.interface_marker != interface_marker) continue;
+            if (!interfaceTermEntersBlock(generated_two_sided, term, test_active, trial_active)) continue;
 
             const auto& ctx_eval = ctxForSide(ctx_minus, &ctx_plus, eval_side);
             const auto* time_ctx = ctx_eval.timeIntegrationContext();
@@ -14681,6 +14730,12 @@ bool LinearFormKernel::requiresTwoSidedInterfaceFace() const noexcept
 {
     return formIRRequiresTwoSidedInterfaceFace(bilinear_ir_) ||
            (linear_ir_.has_value() && formIRRequiresTwoSidedInterfaceFace(*linear_ir_));
+}
+
+bool LinearFormKernel::requiresTwoSidedInterfaceFaceOnMarker(int interface_marker) const noexcept
+{
+    return formIRRequiresTwoSidedInterfaceFaceOnMarker(bilinear_ir_, interface_marker) ||
+           (linear_ir_.has_value() && formIRRequiresTwoSidedInterfaceFaceOnMarker(*linear_ir_, interface_marker));
 }
 
 void LinearFormKernel::ensureInterpreterLoweredIndexedAccess()
@@ -15326,6 +15381,11 @@ bool NonlinearFormKernel::requiresTwoSidedInterfaceFace() const noexcept
     return formIRRequiresTwoSidedInterfaceFace(residual_ir_);
 }
 
+bool NonlinearFormKernel::requiresTwoSidedInterfaceFaceOnMarker(int interface_marker) const noexcept
+{
+    return formIRRequiresTwoSidedInterfaceFaceOnMarker(residual_ir_, interface_marker);
+}
+
 void NonlinearFormKernel::ensureInterpreterLoweredIndexedAccess()
 {
     if (!indexed_lowering_done_) {
@@ -15864,6 +15924,7 @@ void NonlinearFormKernel::computeInterfaceFace(
     }
 
     thread_local DualWorkspace ws;
+    const bool generated_two_sided = generatedTwoSidedCall(ctx_minus, ctx_plus);
 
     auto assembleResidualJacBlock = [&](Side eval_side,
                                         Side test_active,
@@ -15902,6 +15963,7 @@ void NonlinearFormKernel::computeInterfaceFace(
                 for (const auto& term : residual_ir_.terms()) {
                     if (term.domain != IntegralDomain::InterfaceFace) continue;
                     if (term.interface_marker >= 0 && term.interface_marker != interface_marker) continue;
+                    if (!interfaceTermEntersBlock(generated_two_sided, term, test_active, trial_active)) continue;
                     const Real term_weight = termWeightFor(time_ctx, term.time_derivative_order);
                     if (term_weight == 0.0) continue;
                     const auto val = evalDual(*term.integrand.node(), env, eval_side, q);
@@ -16275,6 +16337,11 @@ using NodeHashMemo = std::unordered_map<const FormExprNode*, std::uint64_t>;
         }
         const auto ih = stableHash64(*root, memo);
         hashPod64(h, ih);
+        if (term.interface_two_sided && !formExprRequiresTwoSidedInterfaceFace(root)) {
+            // Stated two-sided (D70); a classification from the integrand
+            // is in its hash already.
+            hashTag64(h, 0x52ULL);
+        }
     }
 
     return h;
@@ -16351,6 +16418,17 @@ private:
     return cache;
 }
 
+/// A derivative of a two-sided interface term keeps its rows and blocks on a
+/// generated interface even when it lost the plus operand (D70).
+[[nodiscard]] FormExpr keepInterfaceTermSides(FormExpr measure, const IntegralTerm& term)
+{
+    if (term.domain == IntegralDomain::InterfaceFace && term.interface_two_sided && measure.node() != nullptr &&
+        measure.node()->type() == FormExprType::InterfaceIntegral) {
+        return measure.withTwoSidedTerms();
+    }
+    return measure;
+}
+
 [[nodiscard]] FormExpr wrapInterfaceTermMeasure(
     const FormExpr& integrand,
     const IntegralTerm& term,
@@ -16365,7 +16443,7 @@ private:
         }
         return integrand.dExteriorBoundary(measure);
     }
-    return integrand.dI(interface_marker);
+    return keepInterfaceTermSides(integrand.dI(interface_marker), term);
 }
 
 [[nodiscard]] FormExpr wrapIntegralTermMeasure(
@@ -16386,7 +16464,7 @@ private:
                                       *term.interior_facet_side)
                        : integrand.dS(term.interface_marker);
         case IntegralDomain::InterfaceFace:
-            return integrand.dI(term.interface_marker);
+            return keepInterfaceTermSides(integrand.dI(term.interface_marker), term);
         case IntegralDomain::CutVolume:
             return integrand.dCutVolume(
                 term.interface_marker, term.cut_volume_side);
@@ -17164,6 +17242,12 @@ bool SymbolicNonlinearFormKernel::requiresTwoSidedInterfaceFace() const noexcept
            formIRRequiresTwoSidedInterfaceFace(tangent_ir_);
 }
 
+bool SymbolicNonlinearFormKernel::requiresTwoSidedInterfaceFaceOnMarker(int interface_marker) const noexcept
+{
+    return formIRRequiresTwoSidedInterfaceFaceOnMarker(residual_ir_, interface_marker) ||
+           formIRRequiresTwoSidedInterfaceFaceOnMarker(tangent_ir_, interface_marker);
+}
+
 void SymbolicNonlinearFormKernel::ensureInterpreterLoweredIndexedAccess()
 {
     if (!indexed_lowering_done_) {
@@ -17753,6 +17837,7 @@ void SymbolicNonlinearFormKernel::computeInterfaceFace(const assembly::AssemblyC
         }
     }
 
+    const bool generated_two_sided = generatedTwoSidedCall(ctx_minus, ctx_plus);
     if (want_vector) {
         auto assembleResidualVec = [&](Side eval_side,
                                        Side test_active,
@@ -17773,6 +17858,7 @@ void SymbolicNonlinearFormKernel::computeInterfaceFace(const assembly::AssemblyC
                     for (const auto& term : residual_ir_.terms()) {
                         if (term.domain != IntegralDomain::InterfaceFace) continue;
                         if (term.interface_marker >= 0 && term.interface_marker != interface_marker) continue;
+                        if (!interfaceTermEntersBlock(generated_two_sided, term, test_active, Side::Minus)) continue;
                         const Real term_weight = termWeightFor(time_ctx, term.time_derivative_order);
                         if (term_weight == 0.0) continue;
 
@@ -17808,6 +17894,7 @@ void SymbolicNonlinearFormKernel::computeInterfaceFace(const assembly::AssemblyC
             for (const auto& term : tangent_ir_.terms()) {
                 if (term.domain != IntegralDomain::InterfaceFace) continue;
                 if (term.interface_marker >= 0 && term.interface_marker != interface_marker) continue;
+                if (!interfaceTermEntersBlock(generated_two_sided, term, test_active, trial_active)) continue;
 
                 const auto& ctx_eval = ctxForSide(ctx_minus, &ctx_plus, eval_side);
                 const auto* time_ctx = ctx_eval.timeIntegrationContext();
@@ -18608,6 +18695,7 @@ void CoupledResidualSensitivityKernel::computeInterfaceFace(const assembly::Asse
     }
 
     thread_local DualWorkspace ws;
+    const bool generated_two_sided = generatedTwoSidedCall(ctx_minus, ctx_plus);
 
     const auto& terms = residualIR().terms();
     const bool have_mask = (term_has_coupled_dependency_.size() == terms.size());
@@ -18638,6 +18726,7 @@ void CoupledResidualSensitivityKernel::computeInterfaceFace(const assembly::Asse
                     const auto& term = terms[t];
                     if (term.domain != IntegralDomain::InterfaceFace) continue;
                     if (term.interface_marker >= 0 && term.interface_marker != interface_marker) continue;
+                    if (!interfaceTermEntersBlock(generated_two_sided, term, test_active, Side::Minus)) continue;
                     const Real term_weight = termWeightFor(time_ctx, term.time_derivative_order);
                     if (term_weight == 0.0) continue;
                     const auto val = evalDual(*term.integrand.node(), env, eval_side, q);
