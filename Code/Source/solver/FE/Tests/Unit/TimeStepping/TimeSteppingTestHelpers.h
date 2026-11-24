@@ -11,6 +11,7 @@
 
 #include "Core/Types.h"
 #include "Dofs/DofHandler.h"
+#include "TimeStepping/GeneratedState.h"
 
 #include <cmath>
 #include <memory>
@@ -18,6 +19,61 @@
 #include <vector>
 
 namespace svmp::FE::timestepping::test {
+
+/// The requests the Application's solves selected the generated-state
+/// schedule from, before the schedule was compiled from declarations.
+struct TranscribedGeneratedStateRequests {
+    bool cut_geometry{false};
+    bool maintenance{false};
+    bool extension{false};
+    bool monolithic_extension{false};
+};
+
+/// That selection (the driver lines of the steady and transient solves),
+/// transcribed with its variable names: the reference the compiled schedule
+/// is checked against.
+[[nodiscard]] inline GeneratedStateSelection transcribedGeneratedStateSelection(
+    const TranscribedGeneratedStateRequests& r,
+    GeneratedStateSolve solve,
+    bool per_step_only_generated_state)
+{
+    GeneratedStateSelection s;
+    if (solve == GeneratedStateSolve::Steady) {
+        const bool steady_has_generated_state = r.cut_geometry || r.maintenance || r.extension;
+        const bool use_steady_external_state_fixed_point = steady_has_generated_state;
+        s.generated_state = steady_has_generated_state;
+        s.accepted_state_sync_invalidates_residual =
+            steady_has_generated_state && !use_steady_external_state_fixed_point;
+        s.jacobian_check_refreshes_geometry_within_solve = !use_steady_external_state_fixed_point;
+        s.jacobian_check_frozen_algebraic_extension = false;
+        s.policy = GeneratedStatePolicy{.solve = GeneratedStateSolve::Steady,
+                                        .outer_fixed_point = use_steady_external_state_fixed_point};
+        s.track_cut_topology = false;
+        return s;
+    }
+    const bool has_frozen_algebraic_level_set_extension = r.monolithic_extension;
+    const bool has_transient_generated_state = r.cut_geometry || r.maintenance || r.extension;
+    const bool use_transient_external_state_fixed_point =
+        has_transient_generated_state && !per_step_only_generated_state;
+    const bool refresh_generated_geometry_within_solve =
+        has_transient_generated_state && !use_transient_external_state_fixed_point &&
+        !has_frozen_algebraic_level_set_extension;
+    const bool accepted_state_sync_invalidates_residual =
+        refresh_generated_geometry_within_solve && has_transient_generated_state;
+    const bool synchronize_line_search_trials =
+        synchronizeTransientLineSearchTrials(accepted_state_sync_invalidates_residual);
+    s.generated_state = has_transient_generated_state;
+    s.accepted_state_sync_invalidates_residual = accepted_state_sync_invalidates_residual;
+    s.policy = GeneratedStatePolicy{.solve = GeneratedStateSolve::Transient,
+                                    .outer_fixed_point = use_transient_external_state_fixed_point,
+                                    .refresh_within_solve = refresh_generated_geometry_within_solve,
+                                    .synchronize_line_search_trials = synchronize_line_search_trials,
+                                    .per_step_only = per_step_only_generated_state};
+    s.track_cut_topology = r.cut_geometry;
+    s.jacobian_check_refreshes_geometry_within_solve = refresh_generated_geometry_within_solve;
+    s.jacobian_check_frozen_algebraic_extension = has_frozen_algebraic_level_set_extension;
+    return s;
+}
 
 [[nodiscard]] inline svmp::FE::dofs::MeshTopologyInfo singleTetraTopology()
 {

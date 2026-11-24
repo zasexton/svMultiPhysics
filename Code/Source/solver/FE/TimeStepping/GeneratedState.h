@@ -14,9 +14,9 @@
  *        residual depends on (cut geometry, projected fields, extensions,
  *        lagged references), and the policy predicates of those points.
  *
- * The predicates and the selection of the schedule were moved from
- * Application/Core/ApplicationDriver.cpp with bodies and environment names
- * unchanged.
+ * The predicates were moved from Application/Core/ApplicationDriver.cpp with
+ * bodies and environment names unchanged; the schedule of a solve is compiled
+ * from the declarations of its participants (compileGeneratedStateSchedule).
  *
  * GeneratedStateRegistry composes the owners of generated state
  * (participants) into NewtonSolver's synchronization hook.  At a
@@ -39,6 +39,7 @@
  * steady and transient solves.
  */
 
+#include "Systems/FieldRegistry.h"
 #include "TimeStepping/NewtonSolver.h"
 
 #include <cstddef>
@@ -120,18 +121,8 @@ struct GeneratedStatePolicy {
 // Selection of the generated-state schedule
 // ---------------------------------------------------------------------------
 
-/// The generated-state requests of a solve, as its owner finds them.
-struct GeneratedStateRequests {
-    bool cut_geometry{false};  ///< generated cut geometry (active cut volumes)
-    bool maintenance{false};   ///< accepted-step level-set maintenance
-    bool extension{false};     ///< extended level-set advection velocities
-    /// Some extension target is an unknown of the Newton block whose rows a
-    /// registered constraint kernel generates (the monolithic extension).
-    bool monolithic_extension{false};
-};
-
 /// The generated-state schedule of a solve and the Newton settings that
-/// follow from it.
+/// follow from it (GeneratedStatePlan::selection).
 struct GeneratedStateSelection {
     GeneratedStatePolicy policy{};
     /// Some generated state is requested.
@@ -152,21 +143,6 @@ struct GeneratedStateSelection {
 /// override: SVMP_CUT_REFRESH_PER_STEP_ONLY).  It switches the transient
 /// outer fixed point off and changes Newton's fixed point.
 [[nodiscard]] bool perStepOnlyGeneratedState();
-
-/**
- * @brief The schedule the Application's steady and transient solves select
- *        today, from the existence of each kind of request.
- *
- * Steady: the outer fixed point runs iff any request exists.  Transient: the
- * same unless @p per_step_only; without the outer fixed point the state is
- * refreshed within the solve unless the extension is monolithic, and
- * line-search trials synchronize as synchronizeTransientLineSearchTrials
- * decides.  @p per_step_only is ignored by a steady solve.
- */
-[[nodiscard]] GeneratedStateSelection legacyGeneratedStateSelection(
-    const GeneratedStateRequests& requests,
-    GeneratedStateSolve solve,
-    bool per_step_only);
 
 // ---------------------------------------------------------------------------
 // Outer fixed-point preset
@@ -459,6 +435,14 @@ private:
 [[nodiscard]] std::shared_ptr<IGeneratedStateParticipant> makeShadowFieldParticipant(
     systems::FESystem& system);
 
+/// The declaration of the shadow participant of @p system for @p purpose
+/// (what its describe() returns): each lagged shadow reads its source as the
+/// synchronization leaves it and each previous(u, k) shadow the accepted
+/// value k steps back; both are written at each projected refresh and, in a
+/// transient attempt, at its entry; they follow the schedule.
+[[nodiscard]] GeneratedStateDescriptor shadowFieldDescriptor(
+    const systems::FESystem& system, GeneratedStatePurpose purpose);
+
 // ---------------------------------------------------------------------------
 // Declarations without a participant, residual reads and the checks
 // ---------------------------------------------------------------------------
@@ -565,12 +549,18 @@ struct GeneratedStateScheduleInputs {
     /// solve ignores it.
     bool per_step_only{false};
     OuterFixedPointOverrides overrides{};
+    /// The field convergence criteria the installs declared
+    /// (FESystem::fieldConvergenceCriteria).
+    std::vector<systems::FieldConvergenceCriterion> field_criteria{};
 };
 
 /// The schedule of a solve, compiled from the declarations.
 struct GeneratedStatePlan {
     GeneratedStateSelection selection{};
     NewtonOptions::ExternalStateFixedPointOptions fixed_point{};
+    /// NewtonOptions::field_residual_criteria: the declared criteria, in
+    /// their order.
+    std::vector<NewtonOptions::FieldResidualCriterion> field_criteria{};
     /// Why the outer fixed point runs: "inferred(<participants>)" for the
     /// writers of the component that regenerates the block, and
     /// "envelope(<participants>)" for the participants that select it
@@ -605,20 +595,40 @@ struct GeneratedStatePlan {
  * The outer fixed point runs when a present RequiredWhenPresent declaration
  * exists (today's selection envelope) or the component regenerates the block
  * through an Inferred writer, and a transient solve is not per-step-only.
- * The other settings follow legacyGeneratedStateSelection with the monolithic
- * extension taken from a frozen-rows write; the fixed-point options are
- * outerFixedPointPreset with `enabled` set.
+ * Without the outer fixed point a transient solve refreshes within the solve
+ * unless an extension writes frozen rows (a monolithic extension), and then
+ * reassembles the residual after an accepted-state refresh; line-search
+ * trials synchronize as synchronizeTransientLineSearchTrials decides.  The
+ * fixed-point options are outerFixedPointPreset with `enabled` set, and the
+ * field criteria are the declared ones.
  */
 [[nodiscard]] GeneratedStatePlan compileGeneratedStateSchedule(
     const GeneratedStateScheduleInputs& inputs,
     const std::vector<DeclaredGeneratedState>& declarations,
     const std::vector<GeneratedRead>& residual_reads);
 
-/// The fields of the selection and the options that differ between
-/// @p legacy and @p plan, by name (empty: they agree).
-[[nodiscard]] std::vector<std::string> generatedStateScheduleMismatches(
-    const GeneratedStateSelection& legacy_selection,
-    const NewtonOptions::ExternalStateFixedPointOptions& legacy_fixed_point,
+/// Whether two plans select the same schedule: the selection, the
+/// fixed-point options and the field criteria.
+[[nodiscard]] bool sameGeneratedStateSchedule(const GeneratedStatePlan& a,
+                                              const GeneratedStatePlan& b);
+
+/**
+ * @brief The checks before the first collective of a solve, on the
+ *        declarations of its registered participants.
+ *
+ * Recompiles the schedule from @p declarations, which may name generated
+ * domains the plan compiled before the cut geometry was installed did not
+ * know, and requires it to select the schedule of @p plan.  Refuses every
+ * finding of checkGeneratedStateDeclarations (decision D66 item 1).  A local
+ * failure is agreed on, so the ranks stop together.  Then requires every
+ * rank of the system's communicator to hold the same plan fingerprint.
+ */
+void requireGeneratedStateSchedule(
+    const systems::FESystem& system,
+    const GeneratedStateScheduleInputs& inputs,
+    const std::vector<DeclaredGeneratedState>& declarations,
+    const std::vector<GeneratedRead>& residual_reads,
+    const std::vector<GeneratedResource>& generated_values,
     const GeneratedStatePlan& plan);
 
 } // namespace timestepping

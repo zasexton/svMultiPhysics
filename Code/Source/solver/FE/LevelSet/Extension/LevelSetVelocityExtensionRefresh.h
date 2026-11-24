@@ -179,6 +179,22 @@ bool refreshLevelSetVelocityExtensions(
  * those frozen rows (a rejected cut-topology change).  The FE system, the
  * mesh and the caches must outlive the participant.
  */
+/**
+ * @brief The declaration of the extensions of @p requests for @p purpose
+ *        (what LevelSetVelocityExtensionParticipant::describe returns).
+ *
+ * Each request reads its source velocity, its level set and its generated
+ * domain as the projected pass leaves them, and writes its target in the
+ * projected pass: the frozen rows of the constraint kernel and the state
+ * entries of a monolithic (algebraic) extension, or the coefficients of a
+ * prescribed target.  Present iff there are requests.
+ */
+[[nodiscard]] timestepping::GeneratedStateDescriptor
+levelSetVelocityExtensionDescriptor(
+    const systems::FESystem& system,
+    std::span<const LevelSetVelocityExtensionRequest> requests,
+    timestepping::GeneratedStatePurpose purpose);
+
 class LevelSetVelocityExtensionParticipant final
     : public timestepping::IGeneratedStateParticipant {
 public:
@@ -213,11 +229,7 @@ public:
                    timestepping::GeneratedStateSync& sync) override;
   void invalidate() override;
 
-  /// Each request reads its source velocity, its level set and its
-  /// generated domain as the projected pass left them, and writes its
-  /// target in the projected pass: the frozen rows of the constraint kernel
-  /// and the state entries of a monolithic (algebraic) extension, or the
-  /// coefficients of a prescribed target.  Present iff there are requests.
+  /// levelSetVelocityExtensionDescriptor of the participant's requests.
   [[nodiscard]] timestepping::GeneratedStateDescriptor describe(
       timestepping::GeneratedStatePurpose purpose) const override;
 

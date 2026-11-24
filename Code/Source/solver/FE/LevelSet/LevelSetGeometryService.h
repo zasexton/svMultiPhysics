@@ -637,6 +637,21 @@ private:
  * participant that tracks the cut topology provides the outer fixed point's
  * epoch hooks from the attempt tracker.
  */
+/**
+ * @brief The declaration of the cut geometry of @p requests for @p purpose
+ *        (what LevelSetGeometryParticipant::describe returns).
+ *
+ * Reads each request's level set (raw and, where the purpose projects,
+ * projected); writes the generated domains of the request markers and, once
+ * it is installed, of the system's cut context, and the affine constraints,
+ * in the raw and the projected pass.  Present iff there are requests.
+ */
+[[nodiscard]] svmp::FE::timestepping::GeneratedStateDescriptor
+levelSetGeometryDescriptor(
+    const svmp::FE::systems::FESystem* system,
+    const std::vector<ActiveCutVolumeRequest>& requests,
+    svmp::FE::timestepping::GeneratedStatePurpose purpose);
+
 class LevelSetGeometryParticipant final
     : public svmp::FE::timestepping::IGeneratedStateParticipant {
 public:
@@ -670,10 +685,7 @@ public:
                    svmp::FE::timestepping::GeneratedStateSync& sync) override;
   void invalidate() override;
 
-  /// Reads each request's level set (raw and, where the purpose projects,
-  /// projected); writes the generated domains of the request markers and of
-  /// the installed cut context, and the affine constraints, in the raw and
-  /// the projected pass.  Present iff there are requests.
+  /// levelSetGeometryDescriptor of the service's requests.
   [[nodiscard]] svmp::FE::timestepping::GeneratedStateDescriptor describe(
       svmp::FE::timestepping::GeneratedStatePurpose purpose) const override;
 

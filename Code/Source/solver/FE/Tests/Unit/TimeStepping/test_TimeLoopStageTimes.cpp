@@ -22,6 +22,8 @@
 #include "Tests/Unit/Forms/FormsTestHelpers.h"
 #include "Tests/Unit/TimeStepping/TimeSteppingTestHelpers.h"
 #include "TimeStepping/GeneralizedAlpha.h"
+#include "TimeStepping/GeneratedState.h"
+#include "TimeStepping/StepController.h"
 #include "TimeStepping/NewmarkBeta.h"
 #include "TimeStepping/TimeHistory.h"
 #include "TimeStepping/TimeLoop.h"
@@ -452,4 +454,172 @@ TEST(TimeLoopStageTimes, PreviousSolutionOfAnInjectedHistorySlotIsRefused)
         ts::GeneralizedAlphaSecondOrderIntegratorOptions{.alpha_m = 0.5, .alpha_f = 0.5, .beta = 0.25, .gamma = 0.5});
     const auto refused_alpha_2 = assembleWith(2, 2, generalized_alpha_2);
     EXPECT_NE(refused_alpha_2.find("GeneralizedAlpha(2ndOrder)"), std::string::npos) << refused_alpha_2;
+}
+
+// ---------------------------------------------------------------------------
+// The generated-state schedule compiled from declarations drives TimeLoop as
+// the transcribed selection does (design note 12, level 3): backward Euler
+// and generalized-alpha (whose endpoint candidate is regenerated after the
+// stage solve), accepted steps, and attempts the outer fixed point does not
+// converge, which the step controller rejects and retries from the restored
+// time step.  The traces of the synchronization points, the reports and the
+// final states are compared.
+// ---------------------------------------------------------------------------
+
+namespace {
+
+namespace gs = svmp::FE::timestepping;
+
+struct ScheduledLoopRun {
+    std::vector<std::string> trace{};
+    bool success{false};
+    int steps{0};
+    std::vector<Real> u{};
+};
+
+ScheduledLoopRun runScheduledLoop(bool from_plan,
+                                  gs::SchemeKind scheme,
+                                  const gs::OuterFixedPointOverrides& overrides)
+{
+    ScheduledLoopRun run;
+    auto mesh = std::make_shared<svmp::FE::forms::test::SingleTetraMeshAccess>();
+    auto space = std::make_shared<svmp::FE::spaces::H1Space>(ElementType::Tetra4, 1);
+    svmp::FE::systems::FESystem sys(mesh);
+    const auto u_field = sys.addField(svmp::FE::systems::FieldSpec{.name = "u", .space = space, .components = 1});
+    sys.addOperator("op");
+    // A generated coefficient m = 1 + 0.9 * u(vertex 0), regenerated at each
+    // synchronization of the geometry role.
+    auto generated = std::make_shared<double>(1.0);
+    const auto m = svmp::FE::forms::FormExpr::coefficient(
+        "generated_m", [generated](Real, Real, Real) { return static_cast<Real>(*generated); });
+    const auto u = svmp::FE::forms::FormExpr::trialFunction(*space, "u");
+    const auto v = svmp::FE::forms::FormExpr::testFunction(*space, "v");
+    const auto form = (svmp::FE::forms::dt(u) * v + m * u * v - v).dx();
+    svmp::FE::forms::FormCompiler compiler;
+    sys.addCellKernel("op", u_field, u_field,
+                      std::make_shared<svmp::FE::forms::NonlinearFormKernel>(compiler.compileResidual(form),
+                                                                            svmp::FE::forms::ADMode::Forward));
+    svmp::FE::systems::SetupInputs inputs;
+    inputs.topology_override = ts_test::singleTetraTopology();
+    sys.setup({}, inputs);
+    auto integrator = std::make_shared<svmp::FE::systems::BackwardDifferenceIntegrator>();
+    svmp::FE::systems::TransientSystem transient(sys, integrator);
+    auto factory = ts_test::createTestFactory();
+    if (!factory) {
+        ADD_FAILURE() << "Eigen backend not available";
+        return run;
+    }
+    auto linear = factory->createLinearSolver(ts_test::directSolve());
+    const auto n_dofs = sys.dofHandler().getNumDofs();
+    auto history = gs::TimeHistory::allocate(*factory, n_dofs, /*history_depth=*/3);
+    const std::vector<Real> u0 = {1.0, -0.5, 0.25, 2.0};
+    for (int k = 1; k <= history.historyDepth(); ++k) {
+        ts_test::setVectorByDof(history.uPrevK(k), u0);
+    }
+    history.resetCurrentToPrevious();
+    const double dt = 0.1;
+    history.setPrevDt(dt);
+
+    gs::GeneratedStatePolicy policy;
+    gs::NewtonOptions::ExternalStateFixedPointOptions fixed_point;
+    if (from_plan) {
+        gs::GeneratedStateDescriptor geometry;
+        geometry.enablement = gs::OuterEnablement::RequiredWhenPresent;
+        geometry.reads = {{.what = {.kind = gs::ResourceKind::Field, .field = u_field},
+                           .version = gs::StateVersion::CurrentTrial}};
+        for (const auto phase : {gs::WritePhase::ConstraintConstruction, gs::WritePhase::ProjectedRefresh}) {
+            geometry.writes.push_back({.what = {.kind = gs::ResourceKind::AffineConstraints},
+                                       .phase = phase,
+                                       .residual_defining = true,
+                                       .requires_fresh_residual = true});
+        }
+        const auto plan = gs::compileGeneratedStateSchedule(
+            {.solve = gs::GeneratedStateSolve::Transient,
+             .purpose = gs::GeneratedStatePurpose::TransientAttempt,
+             .block_fields = {u_field},
+             .overrides = overrides},
+            {{.name = "geometry", .role = gs::GeneratedStateRole::Geometry, .descriptor = geometry}}, {});
+        policy = plan.selection.policy;
+        fixed_point = plan.fixed_point;
+    } else {
+        const auto selection = ts_test::transcribedGeneratedStateSelection(
+            {.cut_geometry = true}, gs::GeneratedStateSolve::Transient, /*per_step_only=*/false);
+        policy = selection.policy;
+        fixed_point = gs::outerFixedPointPreset(gs::GeneratedStateSolve::Transient, overrides);
+        fixed_point.enabled = selection.policy.outer_fixed_point;
+    }
+
+    gs::TimeLoopOptions opts;
+    opts.t0 = 0.0;
+    opts.t_end = 3.0 * dt;
+    opts.dt = dt;
+    opts.max_steps = 20;
+    opts.scheme = scheme;
+    opts.generalized_alpha_rho_inf = 0.5;
+    opts.newton.residual_op = "op";
+    opts.newton.jacobian_op = "op";
+    opts.newton.max_iterations = 8;
+    opts.newton.abs_tolerance = 1e-12;
+    opts.newton.rel_tolerance = 0.0;
+    opts.newton.external_state_fixed_point = fixed_point;
+    opts.step_controller = std::make_shared<gs::SimpleStepController>(
+        gs::SimpleStepControllerOptions{.max_retries = 2});
+    auto registry = std::make_shared<gs::GeneratedStateRegistry>(policy);
+    registry->add(std::make_shared<gs::FunctionGeneratedStateParticipant>(
+        "geometry", gs::GeneratedStateRole::Geometry,
+        gs::FunctionGeneratedStateParticipant::Callbacks{
+            .synchronize =
+                [&run, generated](const svmp::FE::systems::SystemStateView& state, gs::GeneratedStateSync& sync) {
+                    const double u_vertex = state.u.empty() ? 0.0 : static_cast<double>(state.u.front());
+                    *generated = 1.0 + 0.9 * u_vertex;
+                    run.trace.push_back(std::string(gs::generatedStateSyncPointName(sync.point)) + "@" +
+                                        std::to_string(state.time) + ":" + std::to_string(u_vertex));
+                }}));
+    registry->bind(opts.newton);
+
+    gs::TimeLoop loop(opts);
+    const auto report = loop.run(transient, *factory, *linear, history);
+    run.success = report.success;
+    run.steps = report.steps_taken;
+    run.u = ts_test::getVectorByDof(history.uPrev());
+    return run;
+}
+
+} // namespace
+
+TEST(GeneratedStateScheduleTimeLoop, BackwardEulerAndGeneralizedAlphaRunAlikeUnderBothSchedules)
+{
+#if !defined(FE_HAS_EIGEN) || !FE_HAS_EIGEN
+    GTEST_SKIP() << "TimeStepping tests require the Eigen backend (enable FE_ENABLE_EIGEN)";
+#endif
+    for (const auto scheme : {gs::SchemeKind::BackwardEuler, gs::SchemeKind::GeneralizedAlpha}) {
+        for (const auto& overrides : {gs::OuterFixedPointOverrides{},
+                                      // Two passes cannot converge the outer
+                                      // fixed point: every attempt is rejected
+                                      // and retried from the restored step.
+                                      gs::OuterFixedPointOverrides{.max_passes = 2}}) {
+            const std::string where = std::string(scheme == gs::SchemeKind::BackwardEuler ? "BE" : "GA") +
+                                      " max_passes=" + std::to_string(overrides.max_passes.value_or(30));
+            const auto legacy = runScheduledLoop(false, scheme, overrides);
+            const auto plan = runScheduledLoop(true, scheme, overrides);
+            EXPECT_FALSE(legacy.trace.empty()) << where;
+            EXPECT_EQ(legacy.trace, plan.trace) << where;
+            EXPECT_EQ(legacy.success, plan.success) << where;
+            EXPECT_EQ(legacy.steps, plan.steps) << where;
+            EXPECT_EQ(legacy.u, plan.u) << where;
+            EXPECT_EQ(legacy.success, !overrides.max_passes.has_value()) << where;
+            const auto seen = [&](const std::string& token) {
+                return std::any_of(legacy.trace.begin(), legacy.trace.end(), [&](const std::string& entry) {
+                    return entry.rfind(token + "@", 0) == 0;
+                });
+            };
+            // The generalized-alpha endpoint is regenerated after a stage solve
+            // that converged; backward Euler has no endpoint points.
+            EXPECT_EQ(seen("endpoint_candidate"),
+                      scheme == gs::SchemeKind::GeneralizedAlpha && legacy.success)
+                << where;
+            // A rejected attempt restores the accepted time step.
+            EXPECT_EQ(seen("restored_time_step"), overrides.max_passes.has_value()) << where;
+        }
+    }
 }

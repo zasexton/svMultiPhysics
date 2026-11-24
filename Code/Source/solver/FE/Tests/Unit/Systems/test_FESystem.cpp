@@ -2637,6 +2637,39 @@ TEST(FESystem, ResidualReadsOfShadowsNeedTheShadowParticipant)
                     ts::declaredGeneratedState(*transient, ts::GeneratedStatePurpose::TransientAttempt),
                     reads, generated)
                     .empty());
+
+    // Before the first collective of a solve the findings are refused
+    // (decision D66 item 1), and the registered participants must select
+    // the schedule the solve was set up with.
+    const ts::GeneratedStateScheduleInputs steady_inputs{
+        .solve = ts::GeneratedStateSolve::Steady,
+        .purpose = ts::GeneratedStatePurpose::SteadySolve,
+        .block_fields = sys.unknownFieldIdsInDofMapOrder()};
+    const auto steady_declarations =
+        ts::declaredGeneratedState(*steady, ts::GeneratedStatePurpose::SteadySolve);
+    const auto steady_plan = ts::compileGeneratedStateSchedule(steady_inputs, steady_declarations, reads);
+    try {
+        ts::requireGeneratedStateSchedule(sys, steady_inputs, steady_declarations, reads, generated, steady_plan);
+        ADD_FAILURE() << "a shadow nothing refreshes was accepted";
+    } catch (const std::runtime_error& error) {
+        EXPECT_NE(std::string(error.what()).find("missing_producer"), std::string::npos) << error.what();
+    }
+    const ts::GeneratedStateScheduleInputs transient_inputs{
+        .solve = ts::GeneratedStateSolve::Transient,
+        .purpose = ts::GeneratedStatePurpose::TransientAttempt,
+        .block_fields = sys.unknownFieldIdsInDofMapOrder()};
+    const auto transient_declarations =
+        ts::declaredGeneratedState(*transient, ts::GeneratedStatePurpose::TransientAttempt);
+    const auto transient_plan =
+        ts::compileGeneratedStateSchedule(transient_inputs, transient_declarations, reads);
+    EXPECT_NO_THROW(ts::requireGeneratedStateSchedule(sys, transient_inputs, transient_declarations, reads,
+                                                      generated, transient_plan));
+    auto per_step_inputs = transient_inputs;
+    per_step_inputs.per_step_only = true;
+    EXPECT_THROW(ts::requireGeneratedStateSchedule(
+                     sys, transient_inputs, transient_declarations, reads, generated,
+                     ts::compileGeneratedStateSchedule(per_step_inputs, transient_declarations, reads)),
+                 std::logic_error);
 }
 
 TEST(FESystem, FieldConvergenceCriteriaMergeToTheStrictestInDeclarationOrder)

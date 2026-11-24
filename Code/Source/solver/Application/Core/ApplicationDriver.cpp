@@ -1787,22 +1787,12 @@ void applyJacobianCheckGeometryProvenance(
   }
 }
 
-// The declarations of the generated state of a solve, their checks, and the
-// schedule compiled from them, computed beside the selected schedule.  The
-// accepted-step maintenance and a moving domain are declared without a
-// participant; the lagged shadows are the values some participant must
-// refresh.  The checks refuse nothing yet.  A compiled schedule that differs
-// from the selected one stops the run on every rank; neither drives the
-// solve.
-void dualRunGeneratedStateSchedule(
+// The generated state of a solve declared without a participant: the
+// accepted-step maintenance and a moving domain.
+std::vector<svmp::FE::timestepping::DeclaredGeneratedState>
+generatedStateWithoutParticipant(
     const svmp::FE::systems::FESystem& system,
-    const svmp::FE::timestepping::GeneratedStateRegistry& registry,
-    svmp::FE::timestepping::GeneratedStatePurpose purpose,
-    const std::vector<LevelSetMaintenanceRequest>& maintenance,
-    const svmp::FE::timestepping::GeneratedStateSelection& selection,
-    const svmp::FE::timestepping::NewtonOptions::ExternalStateFixedPointOptions&
-        fixed_point,
-    const svmp::FE::timestepping::OuterFixedPointOverrides& overrides)
+    const std::vector<LevelSetMaintenanceRequest>& maintenance)
 {
   namespace ts = svmp::FE::timestepping;
   std::vector<svmp::FE::FieldId> maintained_fields;
@@ -1819,54 +1809,109 @@ void dualRunGeneratedStateSchedule(
     }
   }
   const auto* moving_domain = svmp::FE::systems::findMovingDomain(system);
-  std::vector<ts::DeclaredGeneratedState> extra;
-  extra.push_back(
+  std::vector<ts::DeclaredGeneratedState> declarations;
+  declarations.push_back(
       {.name = "level_set_maintenance",
        .descriptor = ts::maintenanceGeneratedStateDescriptor(maintained_fields)});
-  extra.push_back(
+  declarations.push_back(
       {.name = "moving_domain",
        .descriptor = ts::movingDomainGeneratedStateDescriptor(
            moving_domain ? moving_domain->displacement
                          : svmp::FE::INVALID_FIELD_ID)});
+  return declarations;
+}
+
+// The schedule inputs of a solve: its unknowns, the overrides and the field
+// convergence criteria its installs declared.
+svmp::FE::timestepping::GeneratedStateScheduleInputs generatedStateScheduleInputs(
+    const svmp::FE::systems::FESystem& system,
+    svmp::FE::timestepping::GeneratedStateSolve solve,
+    svmp::FE::timestepping::GeneratedStatePurpose purpose,
+    bool per_step_only,
+    const svmp::FE::timestepping::OuterFixedPointOverrides& overrides)
+{
+  return {.solve = solve,
+          .purpose = purpose,
+          .block_fields = system.unknownFieldIdsInDofMapOrder(),
+          .per_step_only = per_step_only,
+          .overrides = overrides,
+          .field_criteria = system.fieldConvergenceCriteria()};
+}
+
+// The schedule of a solve, compiled before its participants are registered
+// from what they will declare: the cut geometry (always registered), the
+// extension of the advection velocities (registered when there are requests,
+// an FE system and a mesh), the shadows (registered by a transient solve
+// that has any), then the state generated without a participant.
+// requireDeclaredGeneratedState checks it against the registered
+// participants.
+svmp::FE::timestepping::GeneratedStatePlan planGeneratedState(
+    const application::core::SimulationComponents& sim,
+    const svmp::FE::timestepping::GeneratedStateScheduleInputs& inputs,
+    const std::vector<ActiveCutVolumeRequest>& cut_requests,
+    const std::vector<LevelSetAdvectionVelocityRequest>& extension_requests,
+    const std::vector<LevelSetMaintenanceRequest>& maintenance)
+{
+  namespace ts = svmp::FE::timestepping;
+  const auto& system = *sim.fe_system;
+  std::vector<ts::DeclaredGeneratedState> declarations;
+  std::size_t position = 0;
+  declarations.push_back(
+      {.name = "level_set_geometry",
+       .role = ts::GeneratedStateRole::Geometry,
+       .position = position++,
+       .descriptor = svmp::FE::level_set::levelSetGeometryDescriptor(
+           &system, cut_requests, inputs.purpose)});
+  if (!extension_requests.empty() && sim.primary_mesh) {
+    declarations.push_back(
+        {.name = "level_set_advection_velocity",
+         .role = ts::GeneratedStateRole::Extension,
+         .position = position++,
+         .descriptor = svmp::FE::level_set::levelSetVelocityExtensionDescriptor(
+             system, extension_requests, inputs.purpose)});
+  }
+  if (inputs.solve == ts::GeneratedStateSolve::Transient &&
+      !svmp::FE::systems::shadowFields(system).empty()) {
+    declarations.push_back(
+        {.name = "shadow_fields",
+         .role = ts::GeneratedStateRole::Reference,
+         .position = position++,
+         .descriptor = ts::shadowFieldDescriptor(system, inputs.purpose)});
+  }
+  for (auto& declaration : generatedStateWithoutParticipant(system, maintenance)) {
+    declaration.position = position++;
+    declaration.registry_participant = false;
+    declarations.push_back(std::move(declaration));
+  }
+  return ts::compileGeneratedStateSchedule(
+      inputs, declarations, ts::residualGeneratedStateReads(system));
+}
+
+// Before the first collective of the solve: the registered participants
+// declare the schedule @p plan was compiled for, their declarations pass the
+// checks (decision D66 item 1), and every rank holds the same plan.  The
+// lagged shadows are the generated values some participant must refresh.
+void requireDeclaredGeneratedState(
+    const svmp::FE::systems::FESystem& system,
+    const svmp::FE::timestepping::GeneratedStateRegistry& registry,
+    const svmp::FE::timestepping::GeneratedStateScheduleInputs& inputs,
+    const std::vector<LevelSetMaintenanceRequest>& maintenance,
+    const svmp::FE::timestepping::GeneratedStatePlan& plan)
+{
+  namespace ts = svmp::FE::timestepping;
   std::vector<ts::GeneratedResource> generated_values;
   for (const auto& shadow : svmp::FE::systems::shadowFields(system)) {
     generated_values.push_back(
         {.kind = ts::ResourceKind::Field, .field = shadow.shadow});
   }
-  const auto declarations =
-      ts::declaredGeneratedState(registry, purpose, std::move(extra));
-  const auto residual_reads = ts::residualGeneratedStateReads(system);
-  (void)ts::checkGeneratedStateDeclarations(
-      purpose, declarations, residual_reads, generated_values);
-  std::exception_ptr failure;
-  try {
-    const auto plan = ts::compileGeneratedStateSchedule(
-        {.solve = selection.policy.solve,
-         .purpose = purpose,
-         .block_fields = system.unknownFieldIdsInDofMapOrder(),
-         .per_step_only = selection.policy.per_step_only,
-         .overrides = overrides},
-        declarations,
-        residual_reads);
-    const auto mismatches =
-        ts::generatedStateScheduleMismatches(selection, fixed_point, plan);
-    if (!mismatches.empty()) {
-      std::string fields;
-      for (const auto& field : mismatches) {
-        fields += (fields.empty() ? "" : ", ") + field;
-      }
-      throw std::logic_error(
-          std::string("[svMultiPhysics::Application] The generated-state "
-                      "schedule compiled from the declarations of the ") +
-          ts::generatedStatePurposeName(purpose) +
-          " differs from the selected schedule in: " + fields + ".");
-    }
-  } catch (...) {
-    failure = std::current_exception();
-  }
-  (void)svmp::FE::systems::agreeOnLocalPhase(
-      system, failure, /*local_available=*/true, "generated_state_schedule",
-      "ApplicationDriver");
+  ts::requireGeneratedStateSchedule(
+      system,
+      inputs,
+      ts::declaredGeneratedState(registry, inputs.purpose,
+                                 generatedStateWithoutParticipant(system, maintenance)),
+      ts::residualGeneratedStateReads(system),
+      generated_values,
+      plan);
 }
 
 using svmp::FE::level_set::logCutTopologyChange;
@@ -2374,132 +2419,6 @@ ActiveFluidReport writeActiveFluidVisualizationOutput(
   }
 
   return report;
-}
-
-void applyCoupledLevelSetFieldResidualCriteria(
-    const svmp::FE::systems::FESystem& system,
-    const Parameters& params,
-    svmp::FE::timestepping::NewtonOptions& options)
-{
-  for (auto* equation : params.equation_parameters) {
-    if (equation == nullptr || !equation->type.defined() ||
-        !equation->coupled.defined() || !equation->coupled.value() ||
-        !equation->tolerance.defined() ||
-        !(equation->tolerance.value() > 0.0)) {
-      continue;
-    }
-    const auto type = normalized_token(equation->type.value());
-    if (type != "levelset" && type != "levelsettransport") {
-      continue;
-    }
-
-    std::string field_name{"level_set"};
-    const auto equation_parameters = equation->get_parameter_list();
-    if (const auto configured_name = first_defined_parameter(
-            equation_parameters,
-            {"Level_set_field_name"})) {
-      field_name = trim_copy(*configured_name);
-    }
-
-    const auto field = system.findFieldByName(field_name);
-    if (field == svmp::FE::INVALID_FIELD_ID) {
-      throw std::runtime_error(
-          "[svMultiPhysics::Application] Coupled level-set nonlinear "
-          "convergence could not find field '" +
-          field_name + "'.");
-    }
-    if (!system.fieldParticipatesInUnknownVector(field)) {
-      throw std::runtime_error(
-          "[svMultiPhysics::Application] Coupled level-set nonlinear "
-          "convergence requires unknown field '" +
-          field_name + "'.");
-    }
-
-    const double tolerance = equation->tolerance.value();
-    // Preserve the equation-local residual floor.  The monolithic linear
-    // solve separately uses the strictest requested coupled tolerance, but a
-    // stricter tolerance on an unrelated equation must not silently tighten
-    // this named nonlinear block.  SimulationBuilder uses the same 1e-10
-    // legacy default when Absolute_tolerance is omitted.
-    const double absolute_tolerance =
-        equation->linear_solver.absolute_tolerance.defined()
-            ? equation->linear_solver.absolute_tolerance.value()
-            : 1.0e-10;
-    const double equation_absolute_tolerance =
-        absolute_tolerance > 0.0 && std::isfinite(absolute_tolerance)
-            ? absolute_tolerance
-            : 0.0;
-    const double effective_absolute_tolerance =
-        equation_absolute_tolerance;
-    const auto existing = std::find_if(
-        options.field_residual_criteria.begin(),
-        options.field_residual_criteria.end(),
-        [field](const auto& criterion) { return criterion.field == field; });
-    if (existing == options.field_residual_criteria.end()) {
-      options.field_residual_criteria.push_back(
-          svmp::FE::timestepping::NewtonOptions::FieldResidualCriterion{
-              .field = field,
-              .abs_tolerance = effective_absolute_tolerance,
-              .rel_tolerance = tolerance});
-    } else {
-      // Multiple equation declarations for the same transported field share
-      // one residual block.  Retain the strictest enabled absolute and
-      // relative targets instead of creating duplicate criteria that Newton
-      // rejects.
-      if (effective_absolute_tolerance > 0.0 &&
-          (!(existing->abs_tolerance > 0.0) ||
-           effective_absolute_tolerance < existing->abs_tolerance)) {
-        existing->abs_tolerance = effective_absolute_tolerance;
-      }
-      if (!(existing->rel_tolerance > 0.0) ||
-          tolerance < existing->rel_tolerance) {
-        existing->rel_tolerance = tolerance;
-      }
-    }
-  }
-}
-
-// The field convergence criteria the installs declared
-// (FESystem::fieldConvergenceCriteria), beside those the deck-type lookup
-// above derived: fields, tolerances and order must agree, or the run stops on
-// every rank.  The lookup still provides the criteria.
-void dualRunFieldResidualCriteria(
-    const svmp::FE::systems::FESystem& system,
-    const svmp::FE::timestepping::NewtonOptions& options)
-{
-  std::exception_ptr failure;
-  try {
-    const auto& declared = system.fieldConvergenceCriteria();
-    const auto& selected = options.field_residual_criteria;
-    bool same = declared.size() == selected.size();
-    for (std::size_t i = 0; same && i < declared.size(); ++i) {
-      same = declared[i].field == selected[i].field &&
-             declared[i].abs_tolerance == selected[i].abs_tolerance &&
-             declared[i].rel_tolerance == selected[i].rel_tolerance;
-    }
-    if (!same) {
-      const auto list = [&](const auto& criteria) {
-        std::ostringstream out;
-        out << std::setprecision(17);
-        for (const auto& criterion : criteria) {
-          out << " '" << system.fieldRecord(criterion.field).name
-              << "' abs=" << criterion.abs_tolerance
-              << " rel=" << criterion.rel_tolerance;
-        }
-        return out.str();
-      };
-      throw std::logic_error(
-          "[svMultiPhysics::Application] The field convergence criteria the "
-          "installs declared (" + list(declared) +
-          " ) differ from those of the coupled level-set equations (" +
-          list(selected) + " ).");
-    }
-  } catch (...) {
-    failure = std::current_exception();
-  }
-  (void)svmp::FE::systems::agreeOnLocalPhase(
-      system, failure, /*local_available=*/true, "field_residual_criteria",
-      "ApplicationDriver");
 }
 
 void logLevelSetMaintenanceCoverageDiagnostics(
@@ -7046,25 +6965,22 @@ void ApplicationDriver::runSteadyState(SimulationComponents& sim, const Paramete
       activeFESystemCommunicator(*sim.fe_system));
   const auto steady_level_set_advection_velocity =
       levelSetAdvectionVelocityRequests(params);
-  applyCoupledLevelSetFieldResidualCriteria(
-      *sim.fe_system, params, newton_opts);
-  dualRunFieldResidualCriteria(*sim.fe_system, newton_opts);
-  const auto steady_selection =
-      svmp::FE::timestepping::legacyGeneratedStateSelection(
-          svmp::FE::timestepping::GeneratedStateRequests{
-              .cut_geometry = !steady_active_cut_requests.empty(),
-              .maintenance = !level_set_maintenance.empty(),
-              .extension = !steady_level_set_advection_velocity.empty()},
-          svmp::FE::timestepping::GeneratedStateSolve::Steady,
-          /*per_step_only=*/false);
+  // The schedule compiled from the declarations of the generated state; a
+  // steady solve reads no outer fixed-point input.
+  const auto steady_schedule_inputs = generatedStateScheduleInputs(
+      *sim.fe_system,
+      svmp::FE::timestepping::GeneratedStateSolve::Steady,
+      svmp::FE::timestepping::GeneratedStatePurpose::SteadySolve,
+      /*per_step_only=*/false,
+      /*overrides=*/{});
+  const auto steady_plan = planGeneratedState(
+      sim, steady_schedule_inputs, steady_active_cut_requests,
+      steady_level_set_advection_velocity, level_set_maintenance);
+  const auto& steady_selection = steady_plan.selection;
+  newton_opts.field_residual_criteria = steady_plan.field_criteria;
   const bool use_steady_external_state_fixed_point =
       steady_selection.policy.outer_fixed_point;
-  // The steady preset; a steady solve reads no outer fixed-point input.
-  newton_opts.external_state_fixed_point =
-      svmp::FE::timestepping::outerFixedPointPreset(
-          svmp::FE::timestepping::GeneratedStateSolve::Steady);
-  newton_opts.external_state_fixed_point.enabled =
-      use_steady_external_state_fixed_point;
+  newton_opts.external_state_fixed_point = steady_plan.fixed_point;
   newton_opts.accepted_state_sync_invalidates_residual =
       steady_selection.accepted_state_sync_invalidates_residual;
   applyJacobianCheckGeometryProvenance(
@@ -7117,14 +7033,9 @@ void ApplicationDriver::runSteadyState(SimulationComponents& sim, const Paramete
   oopCout() << "[svMultiPhysics::Application] Steady: TimeHistory repacked." << std::endl;
 
   (void)cut_geometry->refreshCached(sim.time_history->u(), "steady_initial");
-  dualRunGeneratedStateSchedule(
-      *sim.fe_system,
-      *generated_state,
-      svmp::FE::timestepping::GeneratedStatePurpose::SteadySolve,
-      level_set_maintenance,
-      steady_selection,
-      newton_opts.external_state_fixed_point,
-      /*overrides=*/{});
+  requireDeclaredGeneratedState(*sim.fe_system, *generated_state,
+                                steady_schedule_inputs, level_set_maintenance,
+                                steady_plan);
   if (initializeDiscreteStaticCapillaryEquilibrium(
           sim,
           params,
@@ -7467,34 +7378,6 @@ void ApplicationDriver::runTransient(SimulationComponents& sim, const Parameters
       LevelSetMaintenanceScheduleStage::TransientInitialization,
       sim.time_history->stepIndex(),
       activeFESystemCommunicator(*sim.fe_system));
-  applyCoupledLevelSetFieldResidualCriteria(
-      *sim.fe_system, params, opts.newton);
-  dualRunFieldResidualCriteria(*sim.fe_system, opts.newton);
-  const bool has_frozen_algebraic_level_set_extension =
-      std::any_of(
-          level_set_advection_velocity.begin(),
-          level_set_advection_velocity.end(),
-          [&](const LevelSetAdvectionVelocityRequest& request) {
-            const auto target = sim.fe_system->findFieldByName(
-                request.target_velocity_field_name);
-            return target != svmp::FE::INVALID_FIELD_ID &&
-                   sim.fe_system->fieldRecord(target).source_kind ==
-                       svmp::FE::systems::FieldSourceKind::Unknown &&
-                   static_cast<bool>(svmp::FE::level_set::
-                       findLevelSetVelocityExtensionConstraintKernel(
-                           *sim.fe_system, request.operator_tag, target));
-          });
-  const auto transient_selection =
-      svmp::FE::timestepping::legacyGeneratedStateSelection(
-          svmp::FE::timestepping::GeneratedStateRequests{
-              .cut_geometry = !transient_active_cut_requests.empty(),
-              .maintenance = !level_set_maintenance.empty(),
-              .extension = !level_set_advection_velocity.empty(),
-              .monolithic_extension = has_frozen_algebraic_level_set_extension},
-          svmp::FE::timestepping::GeneratedStateSolve::Transient,
-          svmp::FE::timestepping::perStepOnlyGeneratedState());
-  const bool use_transient_external_state_fixed_point =
-      transient_selection.policy.outer_fixed_point;
   // The transient outer fixed-point preset (decision D28) with the overrides
   // of the input: Outer_fixed_point_max_passes,
   // Max_cut_topology_restarts_per_step (0 restores the stop-and-reject
@@ -7520,12 +7403,21 @@ void ApplicationDriver::runTransient(SimulationComponents& sim, const Parameters
           general.outer_fixed_point_constraint_cycle_exit_pass.value();
     }
   }
-  opts.newton.external_state_fixed_point =
-      svmp::FE::timestepping::outerFixedPointPreset(
-          svmp::FE::timestepping::GeneratedStateSolve::Transient,
-          outer_fixed_point_overrides);
-  opts.newton.external_state_fixed_point.enabled =
-      use_transient_external_state_fixed_point;
+  // The schedule compiled from the declarations of the generated state.
+  const auto transient_schedule_inputs = generatedStateScheduleInputs(
+      *sim.fe_system,
+      svmp::FE::timestepping::GeneratedStateSolve::Transient,
+      svmp::FE::timestepping::GeneratedStatePurpose::TransientAttempt,
+      svmp::FE::timestepping::perStepOnlyGeneratedState(),
+      outer_fixed_point_overrides);
+  const auto transient_plan = planGeneratedState(
+      sim, transient_schedule_inputs, transient_active_cut_requests,
+      level_set_advection_velocity, level_set_maintenance);
+  const auto& transient_selection = transient_plan.selection;
+  opts.newton.field_residual_criteria = transient_plan.field_criteria;
+  const bool use_transient_external_state_fixed_point =
+      transient_selection.policy.outer_fixed_point;
+  opts.newton.external_state_fixed_point = transient_plan.fixed_point;
   const char* cut_topology_restart_limit_source =
       outer_fixed_point_overrides.topology_restarts.value_or(-1) >= 0
           ? "xml"
@@ -7556,7 +7448,7 @@ void ApplicationDriver::runTransient(SimulationComponents& sim, const Parameters
                    .constraint_cycle_exit_start_iteration +
                1
         << std::endl;
-  } else if (has_frozen_algebraic_level_set_extension) {
+  } else if (transient_selection.jacobian_check_frozen_algebraic_extension) {
     oopCout()
         << "[svMultiPhysics::Application] Level-set nonlinear geometry policy: "
            "legacy fixed_topology comparison mode."
@@ -7978,14 +7870,9 @@ void ApplicationDriver::runTransient(SimulationComponents& sim, const Parameters
     generated_state->add(shadow_fields);
   }
   generated_state->bind(opts.newton);
-  dualRunGeneratedStateSchedule(
-      *sim.fe_system,
-      *generated_state,
-      svmp::FE::timestepping::GeneratedStatePurpose::TransientAttempt,
-      level_set_maintenance,
-      transient_selection,
-      opts.newton.external_state_fixed_point,
-      outer_fixed_point_overrides);
+  requireDeclaredGeneratedState(*sim.fe_system, *generated_state,
+                                transient_schedule_inputs,
+                                level_set_maintenance, transient_plan);
   // The cut geometry's part of each time step (the cut-topology attempt and
   // the restore retention), composed with the callbacks below.
   svmp::FE::timestepping::StepParticipantList cut_geometry_step_participants;

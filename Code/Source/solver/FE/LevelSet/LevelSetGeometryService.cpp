@@ -4772,16 +4772,15 @@ void LevelSetGeometryParticipant::invalidate()
   service_->refreshCache().invalidateGeneratedState();
 }
 
-svmp::FE::timestepping::GeneratedStateDescriptor
-LevelSetGeometryParticipant::describe(
-    svmp::FE::timestepping::GeneratedStatePurpose purpose) const
+svmp::FE::timestepping::GeneratedStateDescriptor levelSetGeometryDescriptor(
+    const svmp::FE::systems::FESystem* system,
+    const std::vector<ActiveCutVolumeRequest>& requests,
+    svmp::FE::timestepping::GeneratedStatePurpose purpose)
 {
   namespace ts = svmp::FE::timestepping;
   ts::GeneratedStateDescriptor descriptor;
   descriptor.enablement = ts::OuterEnablement::RequiredWhenPresent;
-  const auto& requests = service_->requests();
   descriptor.present = !requests.empty();
-  const auto* system = service_->host().fe_system;
   if (!descriptor.present || system == nullptr) {
     return descriptor;
   }
@@ -4844,6 +4843,14 @@ LevelSetGeometryParticipant::describe(
          .requires_fresh_residual = true});
   }
   return descriptor;
+}
+
+svmp::FE::timestepping::GeneratedStateDescriptor
+LevelSetGeometryParticipant::describe(
+    svmp::FE::timestepping::GeneratedStatePurpose purpose) const
+{
+  return levelSetGeometryDescriptor(service_->host().fe_system,
+                                    service_->requests(), purpose);
 }
 
 bool LevelSetGeometryParticipant::providesEpochs() const noexcept

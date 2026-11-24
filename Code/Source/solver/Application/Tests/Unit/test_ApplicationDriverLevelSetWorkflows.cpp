@@ -4444,84 +4444,13 @@ TEST(ApplicationDriverLevelSetWorkflows,
 }
 
 TEST(ApplicationDriverLevelSetWorkflows,
-     CoupledLevelSetAddsNamedFieldAbsoluteAndRelativeResidualCriterion)
+     CoupledLevelSetEquationsDeclareTheirFieldCriteria)
 {
-  auto params = parseWorkflowParametersXml(R"xml(
-<svMultiPhysicsFile>
-  <Add_equation type="level_set">
-    <Coupled>true</Coupled>
-    <Tolerance>1.0e-4</Tolerance>
-    <Level_set_field_name>phi</Level_set_field_name>
-    <LS type="GMRES">
-      <Absolute_tolerance>2.0e-12</Absolute_tolerance>
-    </LS>
-  </Add_equation>
-  <Add_equation type="fluid">
-    <Coupled>true</Coupled>
-    <Tolerance>2.0e-2</Tolerance>
-  </Add_equation>
-</svMultiPhysicsFile>
-)xml");
-
-  auto mesh = makeWorkflowTriangleMesh();
-  auto space = std::make_shared<svmp::FE::spaces::H1Space>(
-      svmp::FE::ElementType::Triangle3, 1);
-  svmp::FE::systems::FESystem system(mesh);
-  const auto phi = system.addField(svmp::FE::systems::FieldSpec{
-      .name = "phi", .space = space, .components = 1});
-  ASSERT_NO_THROW(system.setup({}));
-
-  svmp::FE::timestepping::NewtonOptions options{};
-  ASSERT_NO_THROW(applyCoupledLevelSetFieldResidualCriteria(
-      system, *params, options));
-
-  ASSERT_EQ(options.field_residual_criteria.size(), 1u);
-  EXPECT_EQ(options.field_residual_criteria.front().field, phi);
-  EXPECT_DOUBLE_EQ(options.field_residual_criteria.front().abs_tolerance,
-                   2.0e-12);
-  EXPECT_DOUBLE_EQ(options.field_residual_criteria.front().rel_tolerance,
-                   1.0e-4);
-}
-
-TEST(ApplicationDriverLevelSetWorkflows,
-     CoupledLevelSetFieldResidualUsesLinearAbsoluteToleranceDefault)
-{
-  auto params = parseWorkflowParametersXml(R"xml(
-<svMultiPhysicsFile>
-  <Add_equation type="level_set">
-    <Coupled>true</Coupled>
-    <Tolerance>1.0e-4</Tolerance>
-    <Level_set_field_name>phi</Level_set_field_name>
-  </Add_equation>
-  <Add_equation type="fluid">
-    <Coupled>true</Coupled>
-    <Tolerance>2.0e-2</Tolerance>
-  </Add_equation>
-</svMultiPhysicsFile>
-)xml");
-
-  auto mesh = makeWorkflowTriangleMesh();
-  auto space = std::make_shared<svmp::FE::spaces::H1Space>(
-      svmp::FE::ElementType::Triangle3, 1);
-  svmp::FE::systems::FESystem system(mesh);
-  (void)system.addField(svmp::FE::systems::FieldSpec{
-      .name = "phi", .space = space, .components = 1});
-  ASSERT_NO_THROW(system.setup({}));
-
-  svmp::FE::timestepping::NewtonOptions options{};
-  ASSERT_NO_THROW(applyCoupledLevelSetFieldResidualCriteria(
-      system, *params, options));
-
-  ASSERT_EQ(options.field_residual_criteria.size(), 1u);
-  EXPECT_DOUBLE_EQ(options.field_residual_criteria.front().abs_tolerance,
-                   1.0e-10);
-  EXPECT_DOUBLE_EQ(options.field_residual_criteria.front().rel_tolerance,
-                   1.0e-4);
-}
-
-TEST(ApplicationDriverLevelSetWorkflows,
-     CoupledLevelSetFieldResidualMergesStrictestEffectiveTolerances)
-{
+  // A Coupled level-set equation with a positive Tolerance declares the
+  // criterion of its field through its input snapshot: rel = Tolerance, abs =
+  // its linear solver's Absolute_tolerance (1e-10 when unstated).  Declared
+  // in deck order, equations of one field merge to the strictest tolerances;
+  // an uncoupled equation and the fluid declare nothing.
   auto params = parseWorkflowParametersXml(R"xml(
 <svMultiPhysicsFile>
   <Add_equation type="level_set">
@@ -4529,89 +4458,7 @@ TEST(ApplicationDriverLevelSetWorkflows,
     <Tolerance>1.0e-3</Tolerance>
     <Level_set_field_name>phi</Level_set_field_name>
     <LS type="GMRES">
-      <Absolute_tolerance>1.0e-8</Absolute_tolerance>
-    </LS>
-  </Add_equation>
-  <Add_equation type="level_set_transport">
-    <Coupled>true</Coupled>
-    <Tolerance>1.0e-5</Tolerance>
-    <Level_set_field_name>phi</Level_set_field_name>
-    <LS type="GMRES">
-      <Absolute_tolerance>1.0e-9</Absolute_tolerance>
-    </LS>
-  </Add_equation>
-  <Add_equation type="fluid">
-    <Coupled>true</Coupled>
-    <Tolerance>2.0e-2</Tolerance>
-    <LS type="GMRES">
       <Absolute_tolerance>2.0e-12</Absolute_tolerance>
-    </LS>
-  </Add_equation>
-</svMultiPhysicsFile>
-)xml");
-
-  auto mesh = makeWorkflowTriangleMesh();
-  auto space = std::make_shared<svmp::FE::spaces::H1Space>(
-      svmp::FE::ElementType::Triangle3, 1);
-  svmp::FE::systems::FESystem system(mesh);
-  (void)system.addField(svmp::FE::systems::FieldSpec{
-      .name = "phi", .space = space, .components = 1});
-  ASSERT_NO_THROW(system.setup({}));
-
-  svmp::FE::timestepping::NewtonOptions options{};
-  ASSERT_NO_THROW(applyCoupledLevelSetFieldResidualCriteria(
-      system, *params, options));
-
-  ASSERT_EQ(options.field_residual_criteria.size(), 1u);
-  EXPECT_DOUBLE_EQ(options.field_residual_criteria.front().abs_tolerance,
-                   1.0e-9);
-  EXPECT_DOUBLE_EQ(options.field_residual_criteria.front().rel_tolerance,
-                   1.0e-5);
-}
-
-TEST(ApplicationDriverLevelSetWorkflows,
-     UncoupledLevelSetDoesNotAddFieldResidualCriterion)
-{
-  auto params = parseWorkflowParametersXml(R"xml(
-<svMultiPhysicsFile>
-  <Add_equation type="level_set">
-    <Tolerance>1.0e-4</Tolerance>
-    <Level_set_field_name>phi</Level_set_field_name>
-  </Add_equation>
-  <Add_equation type="fluid">
-    <Tolerance>2.0e-2</Tolerance>
-  </Add_equation>
-</svMultiPhysicsFile>
-)xml");
-
-  auto mesh = makeWorkflowTriangleMesh();
-  auto space = std::make_shared<svmp::FE::spaces::H1Space>(
-      svmp::FE::ElementType::Triangle3, 1);
-  svmp::FE::systems::FESystem system(mesh);
-  (void)system.addField(svmp::FE::systems::FieldSpec{
-      .name = "phi", .space = space, .components = 1});
-  ASSERT_NO_THROW(system.setup({}));
-
-  svmp::FE::timestepping::NewtonOptions options{};
-  ASSERT_NO_THROW(applyCoupledLevelSetFieldResidualCriteria(
-      system, *params, options));
-  EXPECT_TRUE(options.field_residual_criteria.empty());
-}
-
-TEST(ApplicationDriverLevelSetWorkflows,
-     DeclaredLevelSetCriteriaEqualTheCoupledEquationLookup)
-{
-  // Each coupled level-set equation's snapshot carries the criterion its
-  // install declares; declared in deck order they merge to the criteria of
-  // the deck-type lookup, and an uncoupled equation declares none.
-  auto params = parseWorkflowParametersXml(R"xml(
-<svMultiPhysicsFile>
-  <Add_equation type="level_set">
-    <Coupled>true</Coupled>
-    <Tolerance>1.0e-3</Tolerance>
-    <Level_set_field_name>phi</Level_set_field_name>
-    <LS type="GMRES">
-      <Absolute_tolerance>1.0e-8</Absolute_tolerance>
     </LS>
   </Add_equation>
   <Add_equation type="level_set_transport">
@@ -4646,6 +4493,11 @@ TEST(ApplicationDriverLevelSetWorkflows,
   ASSERT_NO_THROW(system.setup({}));
 
   const std::vector<svmp::FE::FieldId> fields{phi, phi, psi, psi};
+  const std::vector<svmp::FE::level_set::LevelSetResidualCriterionOptions> expected{
+      {.declared = true, .abs_tolerance = 2.0e-12, .rel_tolerance = 1.0e-3},
+      {.declared = true, .abs_tolerance = 1.0e-10, .rel_tolerance = 1.0e-5},
+      {.declared = true, .abs_tolerance = 1.0e-10, .rel_tolerance = 1.0e-4},
+      {.declared = false}};
   std::size_t level_set_index = 0;
   for (auto* equation : params->equation_parameters) {
     if (equation->type.value() == "fluid") {
@@ -4655,7 +4507,10 @@ TEST(ApplicationDriverLevelSetWorkflows,
         application::translators::EquationTranslator::snapshotLevelSetEquationInput(
             *equation, {}, /*sole_equation=*/false);
     const auto& criterion = snapshot->residual_criterion;
-    EXPECT_EQ(criterion.declared, level_set_index != 3u) << level_set_index;
+    ASSERT_LT(level_set_index, expected.size());
+    EXPECT_EQ(criterion.declared, expected[level_set_index].declared) << level_set_index;
+    EXPECT_EQ(criterion.abs_tolerance, expected[level_set_index].abs_tolerance) << level_set_index;
+    EXPECT_EQ(criterion.rel_tolerance, expected[level_set_index].rel_tolerance) << level_set_index;
     if (criterion.declared) {
       system.declareFieldConvergenceCriterion(
           {.field = fields[level_set_index],
@@ -4664,28 +4519,14 @@ TEST(ApplicationDriverLevelSetWorkflows,
     }
     ++level_set_index;
   }
-  svmp::FE::timestepping::NewtonOptions options{};
-  ASSERT_NO_THROW(applyCoupledLevelSetFieldResidualCriteria(
-      system, *params, options));
   const auto& declared = system.fieldConvergenceCriteria();
-  ASSERT_EQ(declared.size(), options.field_residual_criteria.size());
   ASSERT_EQ(declared.size(), 2u);
-  for (std::size_t i = 0; i < declared.size(); ++i) {
-    EXPECT_EQ(declared[i].field, options.field_residual_criteria[i].field);
-    EXPECT_EQ(declared[i].abs_tolerance,
-              options.field_residual_criteria[i].abs_tolerance);
-    EXPECT_EQ(declared[i].rel_tolerance,
-              options.field_residual_criteria[i].rel_tolerance);
-  }
-  // phi: the stricter tolerances, the absolute one the 1e-10 default of the
-  // second equation.
-  EXPECT_EQ(declared[0].abs_tolerance, 1.0e-10);
+  EXPECT_EQ(declared[0].field, phi);
+  EXPECT_EQ(declared[0].abs_tolerance, 2.0e-12);
   EXPECT_EQ(declared[0].rel_tolerance, 1.0e-5);
-  // psi: the 1e-10 default absolute tolerance.
+  EXPECT_EQ(declared[1].field, psi);
   EXPECT_EQ(declared[1].abs_tolerance, 1.0e-10);
-  EXPECT_NO_THROW(dualRunFieldResidualCriteria(system, options));
-  options.field_residual_criteria.pop_back();
-  EXPECT_THROW(dualRunFieldResidualCriteria(system, options), std::logic_error);
+  EXPECT_EQ(declared[1].rel_tolerance, 1.0e-4);
 }
 
 TEST(ApplicationDriverLevelSetWorkflows,

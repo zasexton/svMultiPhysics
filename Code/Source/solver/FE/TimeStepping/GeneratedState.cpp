@@ -21,6 +21,7 @@
 #include <cstring>
 #include <stdexcept>
 #include <string>
+#include <tuple>
 #include <utility>
 
 namespace svmp {
@@ -130,61 +131,12 @@ bool synchronizeTransientLineSearchTrials(
 // Selection of the generated-state schedule
 // ---------------------------------------------------------------------------
 
-// Moved from Application/Core/ApplicationDriver.cpp (runSteady and
-// runTransient) with the predicates unchanged.
+// Moved from Application/Core/ApplicationDriver.cpp with the reader
+// unchanged.
 
 bool perStepOnlyGeneratedState()
 {
   return parseBoolEnv("SVMP_CUT_REFRESH_PER_STEP_ONLY", false);
-}
-
-GeneratedStateSelection legacyGeneratedStateSelection(
-    const GeneratedStateRequests& requests,
-    GeneratedStateSolve solve,
-    bool per_step_only)
-{
-  GeneratedStateSelection selection;
-  selection.policy.solve = solve;
-  selection.generated_state =
-      requests.cut_geometry || requests.maintenance || requests.extension;
-  if (solve == GeneratedStateSolve::Steady) {
-    // Generated geometry uses an outer Picard loop so each inner Newton
-    // residual and Jacobian share exactly one frozen G.
-    const bool use_steady_external_state_fixed_point = selection.generated_state;
-    selection.policy.outer_fixed_point = use_steady_external_state_fixed_point;
-    selection.accepted_state_sync_invalidates_residual =
-        selection.generated_state && !use_steady_external_state_fixed_point;
-    selection.jacobian_check_refreshes_geometry_within_solve =
-        !use_steady_external_state_fixed_point;
-    selection.jacobian_check_frozen_algebraic_extension = false;
-    return selection;
-  }
-  // Generated cut rules, active-set constraints, and the wet-extension map
-  // form one residual-defining package G(u).  The assembled tangent
-  // differentiates R(u,G) at fixed G; it does not contain every shape,
-  // projection, or active-set derivative.  Solve the consistent nested
-  // problem with outer regeneration and inner frozen-geometry Newton solves.
-  const bool use_transient_external_state_fixed_point =
-      selection.generated_state && !per_step_only;
-  const bool refresh_generated_geometry_within_solve =
-      selection.generated_state && !use_transient_external_state_fixed_point &&
-      !requests.monolithic_extension;
-  // When generated data is refreshed at accepted iterates, reassemble the
-  // residual after that refresh before deciding that Newton has converged.
-  selection.accepted_state_sync_invalidates_residual =
-      refresh_generated_geometry_within_solve && selection.generated_state;
-  selection.policy.outer_fixed_point = use_transient_external_state_fixed_point;
-  selection.policy.refresh_within_solve = refresh_generated_geometry_within_solve;
-  selection.policy.synchronize_line_search_trials =
-      synchronizeTransientLineSearchTrials(
-          selection.accepted_state_sync_invalidates_residual);
-  selection.policy.per_step_only = per_step_only;
-  selection.track_cut_topology = requests.cut_geometry;
-  selection.jacobian_check_refreshes_geometry_within_solve =
-      refresh_generated_geometry_within_solve;
-  selection.jacobian_check_frozen_algebraic_extension =
-      requests.monolithic_extension;
-  return selection;
 }
 
 // ---------------------------------------------------------------------------
@@ -578,40 +530,9 @@ public:
   [[nodiscard]] std::string_view name() const noexcept override { return "shadow_fields"; }
   [[nodiscard]] GeneratedStateRole role() const noexcept override { return GeneratedStateRole::Reference; }
 
-  // A lagged copy reads its source as the synchronization left it and a
-  // previous(u, k) copy the accepted value k steps back; both are refreshed
-  // by the selected schedule and never select it.
   [[nodiscard]] GeneratedStateDescriptor describe(GeneratedStatePurpose purpose) const override
   {
-    GeneratedStateDescriptor descriptor;
-    descriptor.enablement = OuterEnablement::FollowsSchedule;
-    descriptor.present = !copies_.empty();
-    const bool projects = generatedStatePurposeProjects(purpose);
-    for (const auto& copy : copies_) {
-      GeneratedResource source{.kind = ResourceKind::Field, .field = copy.field.source};
-      if (copy.field.kind == systems::ShadowField::Kind::Previous) {
-        source.steps_back = copy.field.steps_back;
-        descriptor.reads.push_back({.what = source, .version = StateVersion::AcceptedHistory});
-      } else {
-        descriptor.reads.push_back(
-            {.what = source,
-             .version = projects ? StateVersion::ProjectedStage : StateVersion::CurrentTrial});
-      }
-      const GeneratedResource shadow{.kind = ResourceKind::Field, .field = copy.field.shadow};
-      const auto write = [&](WritePhase phase) {
-        descriptor.writes.push_back({.what = shadow,
-                                     .phase = phase,
-                                     .residual_defining = true,
-                                     .requires_fresh_residual = true});
-      };
-      if (projects) {
-        write(WritePhase::ProjectedRefresh);
-      }
-      if (purpose == GeneratedStatePurpose::TransientAttempt) {
-        write(WritePhase::AttemptEntry);
-      }
-    }
-    return descriptor;
+    return shadowFieldDescriptor(*system_, purpose);
   }
 
   void synchronize(const systems::SystemStateView& state, GeneratedStateSync& /*sync*/) override
@@ -697,6 +618,39 @@ private:
 std::shared_ptr<IGeneratedStateParticipant> makeShadowFieldParticipant(systems::FESystem& system)
 {
   return std::make_shared<ShadowFieldParticipant>(system);
+}
+
+GeneratedStateDescriptor shadowFieldDescriptor(const systems::FESystem& system,
+                                               GeneratedStatePurpose purpose)
+{
+  GeneratedStateDescriptor descriptor;
+  descriptor.enablement = OuterEnablement::FollowsSchedule;
+  const auto shadows = systems::shadowFields(system);
+  descriptor.present = !shadows.empty();
+  const bool projects = generatedStatePurposeProjects(purpose);
+  for (const auto& field : shadows) {
+    GeneratedResource source{.kind = ResourceKind::Field, .field = field.source};
+    if (field.kind == systems::ShadowField::Kind::Previous) {
+      source.steps_back = field.steps_back;
+      descriptor.reads.push_back({.what = source, .version = StateVersion::AcceptedHistory});
+    } else {
+      descriptor.reads.push_back(
+          {.what = source,
+           .version = projects ? StateVersion::ProjectedStage : StateVersion::CurrentTrial});
+    }
+    const GeneratedResource shadow{.kind = ResourceKind::Field, .field = field.shadow};
+    const auto write = [&](WritePhase phase) {
+      descriptor.writes.push_back(
+          {.what = shadow, .phase = phase, .residual_defining = true, .requires_fresh_residual = true});
+    };
+    if (projects) {
+      write(WritePhase::ProjectedRefresh);
+    }
+    if (purpose == GeneratedStatePurpose::TransientAttempt) {
+      write(WritePhase::AttemptEntry);
+    }
+  }
+  return descriptor;
 }
 
 // ---------------------------------------------------------------------------
@@ -1232,7 +1186,7 @@ GeneratedStatePlan compileGeneratedStateSchedule(
                                             declaration.role == GeneratedStateRole::Geometry);
   }
 
-  // The selection, as legacyGeneratedStateSelection forms it from requests.
+  // The selection: the outer fixed point, or a refresh within the solve.
   auto& selection = plan.selection;
   selection.policy.solve = inputs.solve;
   selection.generated_state = envelope_selects || inferred_selects;
@@ -1267,6 +1221,11 @@ GeneratedStatePlan compileGeneratedStateSchedule(
   }
   plan.fixed_point = outerFixedPointPreset(inputs.solve, inputs.overrides);
   plan.fixed_point.enabled = outer;
+  for (const auto& criterion : inputs.field_criteria) {
+    plan.field_criteria.push_back({.field = criterion.field,
+                                   .abs_tolerance = criterion.abs_tolerance,
+                                   .rel_tolerance = criterion.rel_tolerance});
+  }
 
   for (const auto& declaration : declarations) {
     if (!declaration.registry_participant) {
@@ -1311,61 +1270,107 @@ GeneratedStatePlan compileGeneratedStateSchedule(
   hash.add(plan.fixed_point.constraint_cycle_exit_start_iteration);
   hash.add(plan.fixed_point.dynamic_relaxation.enabled);
   hash.add(plan.fixed_point.dynamic_relaxation.start_iteration);
+  for (const auto& criterion : plan.field_criteria) {
+    hash.add(static_cast<std::int64_t>(criterion.field));
+    hash.add(criterion.abs_tolerance);
+    hash.add(criterion.rel_tolerance);
+  }
   plan.fingerprint = hash.value();
   return plan;
 }
 
-std::vector<std::string> generatedStateScheduleMismatches(
-    const GeneratedStateSelection& legacy,
-    const NewtonOptions::ExternalStateFixedPointOptions& legacy_fixed_point,
+bool sameGeneratedStateSchedule(const GeneratedStatePlan& a, const GeneratedStatePlan& b)
+{
+  const auto& s = a.selection;
+  const auto& r = b.selection;
+  const auto& x = a.fixed_point;
+  const auto& y = b.fixed_point;
+  bool same = s.policy.solve == r.policy.solve &&
+              s.policy.outer_fixed_point == r.policy.outer_fixed_point &&
+              s.policy.refresh_within_solve == r.policy.refresh_within_solve &&
+              s.policy.synchronize_line_search_trials == r.policy.synchronize_line_search_trials &&
+              s.policy.per_step_only == r.policy.per_step_only &&
+              s.generated_state == r.generated_state &&
+              s.accepted_state_sync_invalidates_residual == r.accepted_state_sync_invalidates_residual &&
+              s.track_cut_topology == r.track_cut_topology &&
+              s.jacobian_check_refreshes_geometry_within_solve ==
+                  r.jacobian_check_refreshes_geometry_within_solve &&
+              s.jacobian_check_frozen_algebraic_extension == r.jacobian_check_frozen_algebraic_extension &&
+              x.enabled == y.enabled && x.max_iterations == y.max_iterations &&
+              x.max_discontinuity_restarts == y.max_discontinuity_restarts &&
+              x.constraint_cycle_exit_start_iteration == y.constraint_cycle_exit_start_iteration &&
+              x.dynamic_relaxation.enabled == y.dynamic_relaxation.enabled &&
+              x.dynamic_relaxation.start_iteration == y.dynamic_relaxation.start_iteration &&
+              x.dynamic_relaxation.initial_factor == y.dynamic_relaxation.initial_factor &&
+              x.dynamic_relaxation.minimum_factor == y.dynamic_relaxation.minimum_factor &&
+              x.dynamic_relaxation.maximum_factor == y.dynamic_relaxation.maximum_factor &&
+              x.dynamic_relaxation.denominator_relative_tolerance ==
+                  y.dynamic_relaxation.denominator_relative_tolerance &&
+              x.residual_first_on_predicted_certificate == y.residual_first_on_predicted_certificate &&
+              a.field_criteria.size() == b.field_criteria.size();
+  for (std::size_t i = 0; same && i < a.field_criteria.size(); ++i) {
+    same = a.field_criteria[i].field == b.field_criteria[i].field &&
+           a.field_criteria[i].abs_tolerance == b.field_criteria[i].abs_tolerance &&
+           a.field_criteria[i].rel_tolerance == b.field_criteria[i].rel_tolerance;
+  }
+  return same;
+}
+
+void requireGeneratedStateSchedule(
+    const systems::FESystem& system,
+    const GeneratedStateScheduleInputs& inputs,
+    const std::vector<DeclaredGeneratedState>& declarations,
+    const std::vector<GeneratedRead>& residual_reads,
+    const std::vector<GeneratedResource>& generated_values,
     const GeneratedStatePlan& plan)
 {
-  std::vector<std::string> mismatches;
-  const auto compare = [&](const char* name, auto a, auto b) {
-    if (!(a == b)) {
-      mismatches.emplace_back(name);
+  std::exception_ptr failure;
+  std::uint64_t fingerprint = 0;
+  try {
+    const auto registered = compileGeneratedStateSchedule(inputs, declarations, residual_reads);
+    if (!sameGeneratedStateSchedule(registered, plan)) {
+      throw std::logic_error(
+          std::string("GeneratedState: the registered participants of the ") +
+          generatedStatePurposeName(inputs.purpose) +
+          " select another generated-state schedule than the one the solve was set up with");
     }
-  };
-  const auto& s = plan.selection;
-  compare("solve", legacy.policy.solve, s.policy.solve);
-  compare("outer_fixed_point", legacy.policy.outer_fixed_point, s.policy.outer_fixed_point);
-  compare("refresh_within_solve", legacy.policy.refresh_within_solve, s.policy.refresh_within_solve);
-  compare("synchronize_line_search_trials", legacy.policy.synchronize_line_search_trials,
-          s.policy.synchronize_line_search_trials);
-  compare("per_step_only", legacy.policy.per_step_only, s.policy.per_step_only);
-  compare("generated_state", legacy.generated_state, s.generated_state);
-  compare("accepted_state_sync_invalidates_residual", legacy.accepted_state_sync_invalidates_residual,
-          s.accepted_state_sync_invalidates_residual);
-  compare("track_cut_topology", legacy.track_cut_topology, s.track_cut_topology);
-  compare("jacobian_check_refreshes_geometry_within_solve",
-          legacy.jacobian_check_refreshes_geometry_within_solve,
-          s.jacobian_check_refreshes_geometry_within_solve);
-  compare("jacobian_check_frozen_algebraic_extension", legacy.jacobian_check_frozen_algebraic_extension,
-          s.jacobian_check_frozen_algebraic_extension);
-  const auto& a = legacy_fixed_point;
-  const auto& b = plan.fixed_point;
-  compare("fixed_point.enabled", a.enabled, b.enabled);
-  compare("fixed_point.max_iterations", a.max_iterations, b.max_iterations);
-  compare("fixed_point.max_discontinuity_restarts", a.max_discontinuity_restarts,
-          b.max_discontinuity_restarts);
-  compare("fixed_point.constraint_cycle_exit_start_iteration", a.constraint_cycle_exit_start_iteration,
-          b.constraint_cycle_exit_start_iteration);
-  compare("fixed_point.dynamic_relaxation.enabled", a.dynamic_relaxation.enabled,
-          b.dynamic_relaxation.enabled);
-  compare("fixed_point.dynamic_relaxation.start_iteration", a.dynamic_relaxation.start_iteration,
-          b.dynamic_relaxation.start_iteration);
-  compare("fixed_point.dynamic_relaxation.initial_factor", a.dynamic_relaxation.initial_factor,
-          b.dynamic_relaxation.initial_factor);
-  compare("fixed_point.dynamic_relaxation.minimum_factor", a.dynamic_relaxation.minimum_factor,
-          b.dynamic_relaxation.minimum_factor);
-  compare("fixed_point.dynamic_relaxation.maximum_factor", a.dynamic_relaxation.maximum_factor,
-          b.dynamic_relaxation.maximum_factor);
-  compare("fixed_point.dynamic_relaxation.denominator_relative_tolerance",
-          a.dynamic_relaxation.denominator_relative_tolerance,
-          b.dynamic_relaxation.denominator_relative_tolerance);
-  compare("fixed_point.residual_first_on_predicted_certificate",
-          a.residual_first_on_predicted_certificate, b.residual_first_on_predicted_certificate);
-  return mismatches;
+    fingerprint = registered.fingerprint;
+    const auto findings =
+        checkGeneratedStateDeclarations(inputs.purpose, declarations, residual_reads, generated_values);
+    if (!findings.empty()) {
+      std::string reasons;
+      for (const auto& finding : findings) {
+        reasons += (reasons.empty() ? "" : "; ") + std::string(generatedStateFindingKindName(finding.kind)) +
+                   ": " + finding.message;
+      }
+      throw std::runtime_error(std::string("GeneratedState: the generated state of the ") +
+                               generatedStatePurposeName(inputs.purpose) + " is not well declared (" +
+                               reasons + ")");
+    }
+  } catch (...) {
+    failure = std::current_exception();
+  }
+  (void)systems::agreeOnLocalPhase(system, failure, /*local_available=*/true,
+                                   "generated_state_declarations", "GeneratedState");
+  std::uint64_t minimum = fingerprint;
+  std::uint64_t maximum = fingerprint;
+#if FE_HAS_MPI
+  int mpi_initialized = 0;
+  int mpi_finalized = 0;
+  MPI_Initialized(&mpi_initialized);
+  if (mpi_initialized != 0) {
+    MPI_Finalized(&mpi_finalized);
+  }
+  if (mpi_initialized != 0 && mpi_finalized == 0 && system.activeMpiCommunicator() != MPI_COMM_NULL) {
+    std::tie(minimum, maximum) = systems::collectiveMinMaxUint64(
+        fingerprint, systems::CollectiveCommunicator(system.activeMpiCommunicator()));
+  }
+#endif
+  if (minimum != maximum) {
+    throw std::runtime_error(std::string("GeneratedState: the generated-state schedule of the ") +
+                             generatedStatePurposeName(inputs.purpose) +
+                             " differs between the ranks of the FE communicator");
+  }
 }
 
 } // namespace timestepping

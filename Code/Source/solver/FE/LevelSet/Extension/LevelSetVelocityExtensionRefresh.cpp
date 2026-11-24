@@ -1096,23 +1096,24 @@ void LevelSetVelocityExtensionParticipant::synchronize(
       *caches_);
 }
 
-timestepping::GeneratedStateDescriptor
-LevelSetVelocityExtensionParticipant::describe(
-    timestepping::GeneratedStatePurpose purpose) const
+timestepping::GeneratedStateDescriptor levelSetVelocityExtensionDescriptor(
+    const systems::FESystem& system,
+    std::span<const LevelSetVelocityExtensionRequest> requests,
+    timestepping::GeneratedStatePurpose purpose)
 {
   namespace ts = timestepping;
   ts::GeneratedStateDescriptor descriptor;
   descriptor.enablement = ts::OuterEnablement::RequiredWhenPresent;
-  descriptor.present = !requests_.empty();
+  descriptor.present = !requests.empty();
   const auto version = ts::generatedStatePurposeProjects(purpose)
                            ? ts::StateVersion::ProjectedStage
                            : ts::StateVersion::CurrentTrial;
   const auto phase = ts::generatedStatePurposeProjects(purpose)
                          ? ts::WritePhase::ProjectedRefresh
                          : ts::WritePhase::ConstraintConstruction;
-  for (const auto& request : requests_) {
+  for (const auto& request : requests) {
     const auto read_field = [&](const std::string& name) {
-      const auto field = system_->findFieldByName(name);
+      const auto field = system.findFieldByName(name);
       if (field != INVALID_FIELD_ID) {
         descriptor.reads.push_back(
             {.what = {.kind = ts::ResourceKind::Field, .field = field},
@@ -1128,15 +1129,15 @@ LevelSetVelocityExtensionParticipant::describe(
            .version = version});
     }
     const auto target =
-        system_->findFieldByName(request.target_velocity_field_name);
+        system.findFieldByName(request.target_velocity_field_name);
     if (target == INVALID_FIELD_ID) {
       continue;
     }
     const bool algebraic_extension =
-        system_->fieldRecord(target).source_kind ==
+        system.fieldRecord(target).source_kind ==
             systems::FieldSourceKind::Unknown &&
         static_cast<bool>(findLevelSetVelocityExtensionConstraintKernel(
-            *system_, request.operator_tag, target));
+            system, request.operator_tag, target));
     if (algebraic_extension) {
       descriptor.writes.push_back(
           {.what = {.kind = ts::ResourceKind::FrozenRows,
@@ -1160,6 +1161,13 @@ LevelSetVelocityExtensionParticipant::describe(
     }
   }
   return descriptor;
+}
+
+timestepping::GeneratedStateDescriptor
+LevelSetVelocityExtensionParticipant::describe(
+    timestepping::GeneratedStatePurpose purpose) const
+{
+  return levelSetVelocityExtensionDescriptor(*system_, requests_, purpose);
 }
 
 void LevelSetVelocityExtensionParticipant::invalidate()

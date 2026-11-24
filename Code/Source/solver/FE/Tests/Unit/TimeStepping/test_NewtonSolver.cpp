@@ -5084,8 +5084,8 @@ const std::vector<gs::GeneratedRead> kGeometryResidualReads{
     {.what = {.kind = gs::ResourceKind::GeneratedDomain, .marker = 3},
      .version = gs::StateVersion::FrozenPass}};
 
-// The options of one run: the legacy selection, or the plan compiled from
-// the declarations.
+// The options of one run: the transcribed selection of the Application
+// before the cutover, or the plan compiled from the declarations.
 void scheduleOptions(bool from_plan,
                      gs::GeneratedStateSolve solve,
                      bool per_step_only,
@@ -5095,7 +5095,7 @@ void scheduleOptions(bool from_plan,
                      gs::NewtonOptions::ExternalStateFixedPointOptions& fixed_point)
 {
     if (!from_plan) {
-        const auto selection = gs::legacyGeneratedStateSelection(
+        const auto selection = ts_test::transcribedGeneratedStateSelection(
             {.cut_geometry = true}, solve, per_step_only);
         policy = selection.policy;
         fixed_point = gs::outerFixedPointPreset(solve, overrides);

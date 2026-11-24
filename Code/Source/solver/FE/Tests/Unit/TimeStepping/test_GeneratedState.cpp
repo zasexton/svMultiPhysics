@@ -8,6 +8,7 @@
 #include <gtest/gtest.h>
 
 #include "TimeStepping/GeneratedState.h"
+#include "Tests/Unit/TimeStepping/TimeSteppingTestHelpers.h"
 
 #include <algorithm>
 #include <cstdint>
@@ -149,50 +150,6 @@ TEST(GeneratedStateSelection, PerStepOnlyIsOffUnlessTheEnvironmentSetsIt)
 
 namespace {
 
-// The selection lines of the Application's steady and transient solves
-// before they moved to FE, transcribed with their variable names.
-ts::GeneratedStateSelection transcribedSelection(const ts::GeneratedStateRequests& r,
-                                                 ts::GeneratedStateSolve solve,
-                                                 bool per_step_only_generated_state)
-{
-  ts::GeneratedStateSelection s;
-  if (solve == ts::GeneratedStateSolve::Steady) {
-    const bool steady_has_generated_state = r.cut_geometry || r.maintenance || r.extension;
-    const bool use_steady_external_state_fixed_point = steady_has_generated_state;
-    s.generated_state = steady_has_generated_state;
-    s.accepted_state_sync_invalidates_residual =
-        steady_has_generated_state && !use_steady_external_state_fixed_point;
-    s.jacobian_check_refreshes_geometry_within_solve = !use_steady_external_state_fixed_point;
-    s.jacobian_check_frozen_algebraic_extension = false;
-    s.policy = ts::GeneratedStatePolicy{.solve = ts::GeneratedStateSolve::Steady,
-                                        .outer_fixed_point = use_steady_external_state_fixed_point};
-    s.track_cut_topology = false;
-    return s;
-  }
-  const bool has_frozen_algebraic_level_set_extension = r.monolithic_extension;
-  const bool has_transient_generated_state = r.cut_geometry || r.maintenance || r.extension;
-  const bool use_transient_external_state_fixed_point =
-      has_transient_generated_state && !per_step_only_generated_state;
-  const bool refresh_generated_geometry_within_solve =
-      has_transient_generated_state && !use_transient_external_state_fixed_point &&
-      !has_frozen_algebraic_level_set_extension;
-  const bool accepted_state_sync_invalidates_residual =
-      refresh_generated_geometry_within_solve && has_transient_generated_state;
-  const bool synchronize_line_search_trials =
-      ts::synchronizeTransientLineSearchTrials(accepted_state_sync_invalidates_residual);
-  s.generated_state = has_transient_generated_state;
-  s.accepted_state_sync_invalidates_residual = accepted_state_sync_invalidates_residual;
-  s.policy = ts::GeneratedStatePolicy{.solve = ts::GeneratedStateSolve::Transient,
-                                      .outer_fixed_point = use_transient_external_state_fixed_point,
-                                      .refresh_within_solve = refresh_generated_geometry_within_solve,
-                                      .synchronize_line_search_trials = synchronize_line_search_trials,
-                                      .per_step_only = per_step_only_generated_state};
-  s.track_cut_topology = r.cut_geometry;
-  s.jacobian_check_refreshes_geometry_within_solve = refresh_generated_geometry_within_solve;
-  s.jacobian_check_frozen_algebraic_extension = has_frozen_algebraic_level_set_extension;
-  return s;
-}
-
 void expectSameSelection(const ts::GeneratedStateSelection& a,
                          const ts::GeneratedStateSelection& b,
                          const std::string& where)
@@ -215,39 +172,6 @@ void expectSameSelection(const ts::GeneratedStateSelection& a,
 }
 
 } // namespace
-
-TEST(GeneratedStateSelection, MatchesTheApplicationSelectionForEveryRequestCombination)
-{
-  for (const char* trials : {static_cast<const char*>(nullptr), "0", "1"}) {
-    ScopedEnvironment environment("SVMP_SYNC_LINE_SEARCH_TRIALS", trials);
-    for (const auto solve : {ts::GeneratedStateSolve::Steady, ts::GeneratedStateSolve::Transient}) {
-      for (int mask = 0; mask < 32; ++mask) {
-        const ts::GeneratedStateRequests requests{.cut_geometry = (mask & 1) != 0,
-                                                  .maintenance = (mask & 2) != 0,
-                                                  .extension = (mask & 4) != 0,
-                                                  .monolithic_extension = (mask & 8) != 0};
-        const bool per_step_only = (mask & 16) != 0;
-        const std::string where = std::string("trials=") + (trials ? trials : "unset") +
-                                  " solve=" + std::to_string(static_cast<int>(solve)) +
-                                  " mask=" + std::to_string(mask);
-        expectSameSelection(ts::legacyGeneratedStateSelection(requests, solve, per_step_only),
-                            transcribedSelection(requests, solve, per_step_only), where);
-      }
-    }
-  }
-  // Cases no reference deck reaches: a monolithic extension refreshed once
-  // per step, and a steady solve, which ignores per-step-only.
-  const auto lone_monolithic = ts::legacyGeneratedStateSelection(
-      {.extension = true, .monolithic_extension = true}, ts::GeneratedStateSolve::Transient,
-      /*per_step_only=*/true);
-  EXPECT_FALSE(lone_monolithic.policy.outer_fixed_point);
-  EXPECT_FALSE(lone_monolithic.policy.refresh_within_solve);
-  EXPECT_TRUE(lone_monolithic.jacobian_check_frozen_algebraic_extension);
-  const auto steady = ts::legacyGeneratedStateSelection(
-      {.maintenance = true}, ts::GeneratedStateSolve::Steady, /*per_step_only=*/true);
-  EXPECT_TRUE(steady.policy.outer_fixed_point);
-  EXPECT_FALSE(steady.policy.per_step_only);
-}
 
 // ---------------------------------------------------------------------------
 // Outer fixed-point preset
@@ -950,7 +874,7 @@ DeclaredCase declaredCase(bool cut, bool maintenance, ExtensionCase extension, S
 
 } // namespace
 
-TEST(GeneratedStateSchedule, CompiledScheduleEqualsTheSelectionForEveryConfiguration)
+TEST(GeneratedStateSchedule, CompiledScheduleEqualsTheTranscribedSelectionForEveryConfiguration)
 {
   const std::vector<ts::OuterFixedPointOverrides> overrides{
       {},
@@ -976,7 +900,7 @@ TEST(GeneratedStateSchedule, CompiledScheduleEqualsTheSelectionForEveryConfigura
                       std::to_string(static_cast<int>(extension)) + " shadow=" +
                       std::to_string(static_cast<int>(shadow)) + " per_step_only=" +
                       std::to_string(per_step_only) + " overrides=" + std::to_string(o);
-                  const auto legacy = ts::legacyGeneratedStateSelection(
+                  const auto legacy = svmp::FE::timestepping::test::transcribedGeneratedStateSelection(
                       {.cut_geometry = cut,
                        .maintenance = maintenance,
                        .extension = extension != ExtensionCase::None,
@@ -990,8 +914,8 @@ TEST(GeneratedStateSchedule, CompiledScheduleEqualsTheSelectionForEveryConfigura
                       {.solve = solve, .purpose = purpose, .block_fields = declared.block_fields,
                        .per_step_only = per_step_only, .overrides = overrides[o]},
                       declared.declarations, declared.residual_reads);
-                  EXPECT_TRUE(ts::generatedStateScheduleMismatches(legacy, legacy_fixed_point, plan).empty())
-                      << where;
+                  expectSameSelection(legacy, plan.selection, where);
+                  expectSameFixedPointOptions(legacy_fixed_point, plan.fixed_point, where);
                   // Why the loop runs: the geometry and the extension regenerate
                   // the block; the maintenance only selects it; a shadow never.
                   std::vector<std::string> reasons;
@@ -1072,4 +996,39 @@ TEST(GeneratedStateSchedule, ProbeAndMovingDomainNeverSelectTheOuterFixedPoint)
                 {.solve = ts::GeneratedStateSolve::Transient, .block_fields = {kVelocity, kExtension}},
                 inferred, {})
                 .fingerprint);
+}
+
+TEST(GeneratedStateSchedule, PlanCarriesTheDeclaredFieldCriteriaInOrder)
+{
+  const std::vector<svmp::FE::systems::FieldConvergenceCriterion> criteria{
+      {.field = kLevelSet, .abs_tolerance = 1e-10, .rel_tolerance = 1e-4},
+      {.field = kVelocity, .abs_tolerance = 0.0, .rel_tolerance = 1e-3}};
+  const auto declared = declaredCase(true, false, ExtensionCase::Monolithic, ShadowCase::None,
+                                     ts::GeneratedStatePurpose::TransientAttempt);
+  const ts::GeneratedStateScheduleInputs inputs{.solve = ts::GeneratedStateSolve::Transient,
+                                                .block_fields = declared.block_fields,
+                                                .field_criteria = criteria};
+  const auto plan = ts::compileGeneratedStateSchedule(inputs, declared.declarations, declared.residual_reads);
+  ASSERT_EQ(plan.field_criteria.size(), 2u);
+  EXPECT_EQ(plan.field_criteria[0].field, kLevelSet);
+  EXPECT_EQ(plan.field_criteria[0].abs_tolerance, 1e-10);
+  EXPECT_EQ(plan.field_criteria[0].rel_tolerance, 1e-4);
+  EXPECT_EQ(plan.field_criteria[1].field, kVelocity);
+  EXPECT_TRUE(ts::sameGeneratedStateSchedule(plan, plan));
+
+  // A plan that differs in a criterion, in the selection or in the options
+  // selects another schedule; the fingerprint follows the criteria too.
+  auto other_inputs = inputs;
+  other_inputs.field_criteria.pop_back();
+  const auto fewer = ts::compileGeneratedStateSchedule(other_inputs, declared.declarations, declared.residual_reads);
+  EXPECT_FALSE(ts::sameGeneratedStateSchedule(plan, fewer));
+  EXPECT_NE(plan.fingerprint, fewer.fingerprint);
+  other_inputs = inputs;
+  other_inputs.per_step_only = true;
+  EXPECT_FALSE(ts::sameGeneratedStateSchedule(
+      plan, ts::compileGeneratedStateSchedule(other_inputs, declared.declarations, declared.residual_reads)));
+  other_inputs = inputs;
+  other_inputs.overrides.max_passes = 3;
+  EXPECT_FALSE(ts::sameGeneratedStateSchedule(
+      plan, ts::compileGeneratedStateSchedule(other_inputs, declared.declarations, declared.residual_reads)));
 }
