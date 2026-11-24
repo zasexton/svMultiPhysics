@@ -822,11 +822,8 @@ DarcyInstall defineMixedDarcy(FESystem& system,
 {
     using namespace forms;
     FieldBinding fields(system, "MixedDarcy");
-    // The pressure is declared before the flux: the measured-form evaluator,
-    // and the global row built on it, take their cell rules from the first
-    // unknown, which may not be an H(div) field today.
-    const auto P = fields.unknown("p", std::move(pressure_space));
     const auto Q = fields.unknown("q", std::move(flux_space));
+    const auto P = fields.unknown("p", std::move(pressure_space));
     const auto& q = Q.state;
     const auto& r = Q.test;
     const auto& p = P.state;
@@ -936,20 +933,27 @@ DarcyRun runMixedDarcy(Cell cell, int order, int n, bool strong_normal_flux)
 void expectMixedDarcyRates(const std::vector<FamilyOrder>& cases, bool strong_normal_flux)
 {
     for (const auto& c : cases) {
-        std::vector<Real> eq, ediv, ep;
+        std::vector<Real> eq, ediv, ep, multiplier;
         for (int level = 0; level < 3; ++level) {
             const auto run = runMixedDarcy(c.cell, c.order, c.n0 << level, strong_normal_flux);
             eq.push_back(run.flux_l2);
             ediv.push_back(run.div_l2);
             ep.push_back(run.pressure_l2);
+            multiplier.push_back(std::abs(run.multiplier));
             EXPECT_LT(run.cell_imbalance, 1e-11 * run.cell_source) << cellName(c.cell) << " level " << level;
-            EXPECT_LT(std::abs(run.multiplier), 1e-2) << cellName(c.cell);
         }
         const std::string label = std::string(cellName(c.cell)) + "_RT" + std::to_string(c.order) +
                                   (strong_normal_flux ? "_normal_flux" : "_pressure");
         ::testing::Test::RecordProperty("p05_" + label + "_flux_rates", join(rates(eq)));
         ::testing::Test::RecordProperty("p05_" + label + "_div_rates", join(rates(ediv)));
         ::testing::Test::RecordProperty("p05_" + label + "_pressure_rates", join(rates(ep)));
+        if (strong_normal_flux) {
+            // The multiplier is the mean defect of the prescribed normal moments
+            // against the source (zero for the continuous data); it vanishes
+            // with the quadrature error of the moments.
+            ::testing::Test::RecordProperty("p05_" + label + "_multiplier", join(multiplier));
+            EXPECT_LT(multiplier.back(), 0.3 * multiplier.front()) << label << " multiplier " << join(multiplier);
+        }
         const Real expected = c.order + 1;
         EXPECT_GT(rates(eq).back(), expected - 0.2) << label << " flux " << join(eq);
         EXPECT_GT(rates(ediv).back(), expected - 0.2) << label << " div " << join(ediv);
@@ -957,32 +961,24 @@ void expectMixedDarcyRates(const std::vector<FamilyOrder>& cases, bool strong_no
     }
 }
 
-TEST(GeneralityBenchmark, DISABLED_P05_MixedDarcyRT1DG1WithBoundaryPressure)
+TEST(GeneralityBenchmark, P05_MixedDarcyWithStrongNormalMomentsOnEveryFamily)
 {
-    // Defect found by this benchmark (reported; not a vocabulary gap): the
-    // RT1/DG1 mixed form, installed as one residual on a Tri3 mesh built from
-    // arrays, corrupts the heap during its first Newton step (glibc aborts in
-    // a later allocation, inside the problem analysis after assembly).
-    expectMixedDarcyRates({{Cell::Tri3, 1, 4}, {Cell::Tet4, 1, 1}}, /*strong_normal_flux=*/false);
+    expectMixedDarcyRates({{Cell::Tri3, 0, 4}, {Cell::Quad4, 0, 4}, {Cell::Tet4, 0, 2}, {Cell::Hex8, 0, 2},
+                           {Cell::Wedge6, 0, 2}, {Cell::Pyr5, 0, 2}},
+                          /*strong_normal_flux=*/true);
 }
 
-TEST(GeneralityBenchmark, DISABLED_P05_MixedDarcyWithStrongNormalMomentsOnEveryFamily)
+TEST(GeneralityBenchmark, DISABLED_P05_MixedDarcyRT1DG1)
 {
-    // Defects found by this benchmark (reported; not vocabulary gaps):
-    // - strong normal moments, bc::Dirichlet(face, bc::Trace::Normal, g) on an
-    //   H(div) field of a mesh built from arrays: the constrained values ignore
-    //   the global orientation of the face DOFs in 2D (the boundary fluxes of
-    //   q . n = 1 on the unit square sum to 0, not 4) and in 3D carry the wrong
-    //   sign and the reference face measure (they sum to -24, not 6, on the
-    //   2 x 2 x 2 Kuhn cube);
-    // - one install holding a DG0 field and an H(div) or H(curl) field (the
-    //   RT0/DG0 pair) is assembled wrongly: zero diagonal rows of the vector
-    //   field on Tri3, heap corruption in the fused cell assembly on Tet4;
-    // - the RT and Nedelec mass matrices of Quad4, Hex8 and Wedge6 cells are
-    //   singular, and an RT0 field on Wedge6 does not reproduce a linear flux.
-    expectMixedDarcyRates({{Cell::Tri3, 0, 4}, {Cell::Quad4, 0, 4}, {Cell::Tet4, 0, 2}, {Cell::Hex8, 0, 2},
-                           {Cell::Tri3, 1, 4}, {Cell::Tet4, 1, 1}},
-                          /*strong_normal_flux=*/true);
+    // Found by this benchmark (reported; not a vocabulary gap): an RT1 field
+    // (two DOFs on each edge) of a Tri3 mesh built from arrays does not
+    // reproduce a linear flux: the L2 projection of (x + 2y, -x) has error
+    // 0.21 and divergence error 10 (div = 1 exactly), so the RT1/DG1 flux and
+    // pressure do not converge (rates 0.00), while RT0 converges on every
+    // family.  The DOFs of an edge seem not to be permuted between the two
+    // cells that see the edge in opposite directions.
+    expectMixedDarcyRates({{Cell::Tri3, 1, 4}, {Cell::Tet4, 1, 1}}, /*strong_normal_flux=*/false);
+    expectMixedDarcyRates({{Cell::Tri3, 1, 4}, {Cell::Tet4, 1, 1}}, /*strong_normal_flux=*/true);
 }
 
 TEST(GeneralityBenchmark, P05_RT1AndBDM1CannotShareOneFieldName)
