@@ -918,6 +918,20 @@ struct ScalarFieldVertexDumpRecord {
     Real value{0.0};
 };
 
+/// The first unknown field, in DOF map order, that states the constraint
+/// solver role, or INVALID_FIELD_ID.
+[[nodiscard]] FieldId firstConstraintRoleField(const systems::FESystem& sys)
+{
+    for (const auto field : sys.unknownFieldIdsInDofMapOrder()) {
+        if (sys.fieldRecord(field).solver_role == systems::SolverRole::Constraint) {
+            return field;
+        }
+    }
+    return INVALID_FIELD_ID;
+}
+
+/// The first scalar field of the field map that states the constraint solver
+/// role, else the first scalar field.
 [[nodiscard]] std::optional<std::size_t> selectPreferredScalarVertexDumpFieldIndex(
     const systems::FESystem& sys)
 {
@@ -931,11 +945,9 @@ struct ScalarFieldVertexDumpRecord {
         if (!first_scalar.has_value()) {
             first_scalar = field_idx;
         }
-        std::string lower_name = field.name;
-        std::transform(lower_name.begin(), lower_name.end(), lower_name.begin(),
-                       [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
-        if (lower_name.find("pressure") != std::string::npos ||
-            lower_name == "p") {
+        const auto id = sys.findFieldByName(field.name);
+        if (id != INVALID_FIELD_ID &&
+            sys.fieldRecord(id).solver_role == systems::SolverRole::Constraint) {
             return field_idx;
         }
     }
@@ -2385,12 +2397,13 @@ void logNewtonMatrixSupportDiagnostic(const systems::FESystem& sys,
     std::vector<GlobalIndex> sample_dofs =
         newtonMatrixSupportGlobalSampleDofs();
 
-    const auto pressure_field = sys.findFieldByName("Pressure");
-    GlobalIndex pressure_offset = INVALID_GLOBAL_INDEX;
-    GlobalIndex pressure_dofs = 0;
-    if (pressure_field != INVALID_FIELD_ID) {
-        pressure_offset = sys.fieldDofOffset(pressure_field);
-        pressure_dofs = sys.fieldDofHandler(pressure_field).getNumDofs();
+    // Samples in the constraint field are annotated with their local index.
+    const auto constraint_field = firstConstraintRoleField(sys);
+    GlobalIndex constraint_offset = INVALID_GLOBAL_INDEX;
+    GlobalIndex constraint_dofs = 0;
+    if (constraint_field != INVALID_FIELD_ID) {
+        constraint_offset = sys.fieldDofOffset(constraint_field);
+        constraint_dofs = sys.fieldDofHandler(constraint_field).getNumDofs();
     }
 
     std::sort(sample_dofs.begin(), sample_dofs.end());
@@ -2542,11 +2555,11 @@ void logNewtonMatrixSupportDiagnostic(const systems::FESystem& sys,
             << " col_first_nonzero="
             << firstNonzeroMatrixIndices(matrix, dof, /*scan_row=*/false, tiny);
 
-        if (pressure_offset >= 0 &&
-            dof >= pressure_offset &&
-            dof < pressure_offset + pressure_dofs) {
-            oss << " field='Pressure'"
-                << " field_local_dof=" << (dof - pressure_offset);
+        if (constraint_offset >= 0 &&
+            dof >= constraint_offset &&
+            dof < constraint_offset + constraint_dofs) {
+            oss << " field='" << sys.fieldRecord(constraint_field).name << "'"
+                << " field_local_dof=" << (dof - constraint_offset);
         }
         FE_LOG_INFO(oss.str());
     }
