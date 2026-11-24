@@ -56,6 +56,21 @@ SPHERIC_FREE_SLIP_WALLS = True
 # ghost layers move no value (12, 15 and 18 layers are bitwise equal at 4 ranks);
 # 0 writes no key (the solver's default).
 SPHERIC_3D_GHOST_LAYERS = 18
+# Fluid linear solver of the SPHERIC decks (decision D64 item 1): FSILS GMRES,
+# which runs on any number of ranks, with the settings of the other FSILS
+# free-surface decks (fsils_gmres_block of the free_surface_benchmarks
+# generators, the reference sets).  "--fluid-solver eigen_direct" writes the
+# serial Eigen direct solver of the earlier decks, which the solver refuses on
+# more than one rank.  The Newton controls are the same for both.
+SPHERIC_FLUID_SOLVER = "fsils_gmres"
+SPHERIC_FLUID_SOLVERS = ("fsils_gmres", "eigen_direct")
+FREE_SURFACE_FSILS_GMRES = {
+    "preconditioner": "rcs",
+    "max_iterations": "100",
+    "krylov_space_dimension": "50",
+    "tolerance": "1.0e-8",
+    "absolute_tolerance": "1.0e-10",
+}
 # The coordinate axis of each face file's normal (free-slip component masks).
 FACE_NORMAL_AXIS = {
     "wall_left": 0, "wall_right": 0,
@@ -917,7 +932,7 @@ def write_solver_xml(
     active_domain: str | None = None,
     enable_cut_cell_stabilization: bool = True,
     use_blockschur_solver: bool = False,
-    use_direct_fluid_solver: bool = False,
+    spheric_fluid_solver: str | None = None,
     include_pressure_constraints: bool = True,
     momentum_source_file_path: str | None = None,
     rotating_frame_angular_velocity_file_path: str | None = None,
@@ -934,6 +949,13 @@ def write_solver_xml(
     newton_line_search_max_iterations: str = "10",
     allow_overlapping_face_files: bool = False,
 ) -> None:
+    """Write solver.xml.  spheric_fluid_solver (one of SPHERIC_FLUID_SOLVERS)
+    selects the Newton controls of the SPHERIC decks with that fluid linear
+    solver; None writes the generic controls with FSILS GMRES."""
+    if spheric_fluid_solver is not None and spheric_fluid_solver not in SPHERIC_FLUID_SOLVERS:
+        raise ValueError(f"spheric_fluid_solver must be one of {SPHERIC_FLUID_SOLVERS}")
+    if spheric_fluid_solver is not None and use_blockschur_solver:
+        raise ValueError("the BlockSchur solver and a SPHERIC fluid solver exclude each other")
     if ghost_layers < 0:
         raise ValueError("ghost_layers must be nonnegative")
     face_overlap_opt_out = (
@@ -1014,17 +1036,22 @@ def write_solver_xml(
         else ""
     )
     cut_cell_stabilization_text = "true" if enable_cut_cell_stabilization else "false"
-    use_relaxed_unfitted_controls = use_blockschur_solver or use_direct_fluid_solver
+    use_direct_fluid_solver = spheric_fluid_solver == "eigen_direct"
+    use_free_surface_fsils_gmres = spheric_fluid_solver == "fsils_gmres"
+    use_relaxed_unfitted_controls = use_blockschur_solver or spheric_fluid_solver is not None
     unfitted_fluid_solver_type = (
         "Direct" if use_direct_fluid_solver else ("NS" if use_blockschur_solver else "GMRES")
+    )
+    unfitted_fluid_preconditioner = (
+        FREE_SURFACE_FSILS_GMRES["preconditioner"] if use_free_surface_fsils_gmres else "fsils"
     )
     unfitted_fluid_linear_algebra_block = (
         """    <Linear_algebra type="eigen">
       <Preconditioner>none</Preconditioner>
     </Linear_algebra>"""
         if use_direct_fluid_solver
-        else """    <Linear_algebra type="fsils">
-      <Preconditioner>fsils</Preconditioner>
+        else f"""    <Linear_algebra type="fsils">
+      <Preconditioner>{unfitted_fluid_preconditioner}</Preconditioner>
     </Linear_algebra>"""
     )
     unfitted_level_set_nonlinear_tolerance = (
@@ -1055,6 +1082,16 @@ def write_solver_xml(
         TEST05_BLOCKSCHUR_LINEAR_ABSOLUTE_TOLERANCE
         if use_relaxed_unfitted_controls
         else LINEAR_SOLVER_ABSOLUTE_TOLERANCE
+    )
+    fluid_linear_controls = (
+        FREE_SURFACE_FSILS_GMRES
+        if use_free_surface_fsils_gmres
+        else {
+            "max_iterations": unfitted_linear_max_iterations,
+            "krylov_space_dimension": unfitted_krylov_space_dimension,
+            "tolerance": unfitted_linear_tolerance,
+            "absolute_tolerance": unfitted_linear_absolute_tolerance,
+        }
     )
     unfitted_blockschur_controls = ""
     if use_blockschur_solver:
@@ -1236,10 +1273,10 @@ def write_solver_xml(
 
   <LS type="{unfitted_fluid_solver_type}">
 {unfitted_fluid_linear_algebra_block}
-    <Max_iterations>{unfitted_linear_max_iterations}</Max_iterations>
-    <Krylov_space_dimension>{unfitted_krylov_space_dimension}</Krylov_space_dimension>
-    <Tolerance>{unfitted_linear_tolerance}</Tolerance>
-    <Absolute_tolerance>{unfitted_linear_absolute_tolerance}</Absolute_tolerance>{unfitted_blockschur_controls}
+    <Max_iterations>{fluid_linear_controls["max_iterations"]}</Max_iterations>
+    <Krylov_space_dimension>{fluid_linear_controls["krylov_space_dimension"]}</Krylov_space_dimension>
+    <Tolerance>{fluid_linear_controls["tolerance"]}</Tolerance>
+    <Absolute_tolerance>{fluid_linear_controls["absolute_tolerance"]}</Absolute_tolerance>{unfitted_blockschur_controls}
   </LS>
 
 {wall_bc_blocks}
@@ -1371,7 +1408,7 @@ def write_case(
     active_domain: str | None = None,
     enable_cut_cell_stabilization: bool = True,
     use_blockschur_solver: bool = False,
-    use_direct_fluid_solver: bool = False,
+    spheric_fluid_solver: str | None = None,
     include_pressure_constraints: bool = True,
     momentum_source_file_path: str | None = None,
     rotating_frame_angular_velocity_file_path: str | None = None,
@@ -1486,7 +1523,7 @@ def write_case(
         active_domain=active_domain,
         enable_cut_cell_stabilization=enable_cut_cell_stabilization,
         use_blockschur_solver=use_blockschur_solver,
-        use_direct_fluid_solver=use_direct_fluid_solver,
+        spheric_fluid_solver=spheric_fluid_solver,
         include_pressure_constraints=include_pressure_constraints,
         momentum_source_file_path=momentum_source_file_path,
         rotating_frame_angular_velocity_file_path=rotating_frame_angular_velocity_file_path,
@@ -1619,6 +1656,7 @@ def generate_spheric_test10(
     redistancing: bool = INTERFACE_PRESERVING_REDISTANCING,
     free_slip_walls: bool = SPHERIC_FREE_SLIP_WALLS,
     ghost_layers: int = SPHERIC_3D_GHOST_LAYERS,
+    fluid_solver: str = SPHERIC_FLUID_SOLVER,
 ) -> None:
     """The unfitted Test 10 deck."""
     tank = Box(0.0, 0.900, 0.0, 0.508, 0.0, 0.062)
@@ -1699,7 +1737,7 @@ def generate_spheric_test10(
         ghost_layers=ghost_layers,
         include_top_wall_bc=True,
         active_domain="LevelSetNegative",
-        use_direct_fluid_solver=True,
+        spheric_fluid_solver=fluid_solver,
         include_pressure_constraints=False,
         advection_velocity_extension_method="pde_harmonic",
         momentum_source_file_path="bc/test10_lateral_water_1x_roll_body_force.dat",
@@ -1820,7 +1858,8 @@ The 2D section has no spanwise direction and its face files are disjoint.
 
 def generate_spheric_test05(*, allow_overlapping_face_files: bool = False,
                             redistancing: bool = INTERFACE_PRESERVING_REDISTANCING,
-                            free_slip_walls: bool = SPHERIC_FREE_SLIP_WALLS) -> None:
+                            free_slip_walls: bool = SPHERIC_FREE_SLIP_WALLS,
+                            fluid_solver: str = SPHERIC_FLUID_SOLVER) -> None:
     if allow_overlapping_face_files:
         raise ValueError(
             "the SPHERIC 05 decks are two-dimensional sections with disjoint face files "
@@ -1952,7 +1991,7 @@ def generate_spheric_test05(*, allow_overlapping_face_files: bool = False,
             level_set_outflow_faces=["wall_top"],
             active_domain="LevelSetNegative",
             enable_cut_cell_stabilization=True,
-            use_direct_fluid_solver=True,
+            spheric_fluid_solver=fluid_solver,
             include_pressure_constraints=False,
             advection_velocity_extension_method="pde_harmonic",
             enable_adaptive_time_loop=True,
@@ -2003,7 +2042,8 @@ TEST02_CRITERIA = {
 def generate_spheric_test02(*, allow_overlapping_face_files: bool = False,
                             redistancing: bool = INTERFACE_PRESERVING_REDISTANCING,
                             free_slip_walls: bool = SPHERIC_FREE_SLIP_WALLS,
-                            ghost_layers: int = SPHERIC_3D_GHOST_LAYERS) -> None:
+                            ghost_layers: int = SPHERIC_3D_GHOST_LAYERS,
+                            fluid_solver: str = SPHERIC_FLUID_SOLVER) -> None:
     tank = Box(0.0, TEST02_TANK_LENGTH, 0.0, TEST02_TANK_HEIGHT, 0.0, TEST02_TANK_WIDTH)
     obstacle = Box(
         TEST02_OBSTACLE_X_MIN,
@@ -2115,7 +2155,7 @@ def generate_spheric_test02(*, allow_overlapping_face_files: bool = False,
         obstacles=[obstacle],
         active_domain="LevelSetNegative",
         enable_cut_cell_stabilization=True,
-        use_direct_fluid_solver=True,
+        spheric_fluid_solver=fluid_solver,
         include_pressure_constraints=False,
         advection_velocity_extension_method="pde_harmonic",
         enable_adaptive_time_loop=True,
@@ -2180,10 +2220,21 @@ def main() -> None:
             "solver's default)"
         ),
     )
+    parser.add_argument(
+        "--fluid-solver",
+        choices=SPHERIC_FLUID_SOLVERS,
+        default=SPHERIC_FLUID_SOLVER,
+        help=(
+            "fluid linear solver of the unfitted SPHERIC decks: fsils_gmres (decision D64 item 1, "
+            "FSILS GMRES with the settings of the FSILS free-surface decks, any number of ranks) "
+            "or eigen_direct, the serial Eigen direct solver of the earlier decks (one rank only)"
+        ),
+    )
     args = parser.parse_args()
     legacy = {"allow_overlapping_face_files": args.allow_overlapping_face_files}
     protocol = {"redistancing": args.interface_preserving_redistancing == "on",
-                "free_slip_walls": args.wall_condition == "free-slip"}
+                "free_slip_walls": args.wall_condition == "free-slip",
+                "fluid_solver": args.fluid_solver}
 
     if args.case in {"all", "spheric_test10"}:
         generate_spheric_test10(**legacy, **protocol, ghost_layers=args.ghost_layers_3d)

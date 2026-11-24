@@ -109,6 +109,41 @@ def test_decks_use_mesh_nitsche_sliding_walls_and_rest(dim):
     assert np.allclose(grid.point_data["Pressure"], gen.WATER_DENSITY * gen.GRAVITY * (gen.FILL_HEIGHT - y))
 
 
+def fluid_linear_solver(root):
+    """The fluid LS element as (type, backend, preconditioner, {other keys})."""
+    solver = list(root.iter("Add_equation"))[0].find("LS")
+    algebra = solver.find("Linear_algebra")
+    return (solver.get("type"), algebra.get("type"), algebra.findtext("Preconditioner").strip(),
+            {child.tag: child.text.strip() for child in solver if child.tag != "Linear_algebra"})
+
+
+@pytest.mark.parametrize("dim", [2, 3])
+def test_decks_use_the_fsils_gmres_fluid_solver(dim):
+    # Decision D64 item 1: FSILS GMRES with the settings of the other FSILS
+    # free-surface decks, on any number of ranks.
+    gvm = load("generate_validation_meshes")
+    settings = gvm.FREE_SURFACE_FSILS_GMRES
+    assert gen.FLUID_SOLVER == "fsils_gmres"
+    assert fluid_linear_solver(ET.parse(DECKS[dim] / "solver.xml").getroot()) == (
+        "GMRES", "fsils", settings["preconditioner"], {
+            "Max_iterations": settings["max_iterations"],
+            "Krylov_space_dimension": settings["krylov_space_dimension"],
+            "Tolerance": settings["tolerance"],
+            "Absolute_tolerance": settings["absolute_tolerance"]})
+
+
+def test_eigen_direct_option_changes_only_the_fluid_solver():
+    # The serial Eigen sparse LU of the earlier decks stays a generator option.
+    kwargs = dict(steps=gen.STEPS_AT_REST, dt=gen.DT, cadence=1)
+    faces = [*gen.WALLS_2D, gen.FREE_SURFACE]
+    gmres = gen.solver_xml(2, faces, **kwargs)
+    direct = gen.solver_xml(2, faces, fluid_solver="eigen_direct", **kwargs)
+    assert fluid_linear_solver(ET.fromstring(direct))[:3] == ("Direct", "eigen", "none")
+    assert gmres.replace('<LS type="GMRES">', '<LS type="Direct">').replace(
+        '<Linear_algebra type="fsils">', '<Linear_algebra type="eigen">').replace(
+        "<Preconditioner>rcs</Preconditioner>", "<Preconditioner>none</Preconditioner>") == direct
+
+
 def test_boundary_classification_rejects_an_unclassified_facet():
     points, cells = gen.tank_triangles(4, 2)
     with pytest.raises(RuntimeError, match="lies on 0 tank planes"):

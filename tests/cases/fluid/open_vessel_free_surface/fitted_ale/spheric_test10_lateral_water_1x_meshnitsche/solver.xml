@@ -78,9 +78,9 @@
     <Mesh_velocity>true</Mesh_velocity>
   </Output>
 
-  <LS type="Direct">
-    <Linear_algebra type="eigen">
-      <Preconditioner>none</Preconditioner>
+  <LS type="GMRES">
+    <Linear_algebra type="fsils">
+      <Preconditioner>rcs</Preconditioner>
     </Linear_algebra>
     <Max_iterations>100</Max_iterations>
     <Krylov_space_dimension>50</Krylov_space_dimension>

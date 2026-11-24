@@ -111,14 +111,14 @@
     <Volume>true</Volume>
   </Output>
 
-  <LS type="Direct">
-    <Linear_algebra type="eigen">
-      <Preconditioner>none</Preconditioner>
+  <LS type="GMRES">
+    <Linear_algebra type="fsils">
+      <Preconditioner>rcs</Preconditioner>
     </Linear_algebra>
     <Max_iterations>100</Max_iterations>
-    <Krylov_space_dimension>80</Krylov_space_dimension>
-    <Tolerance>1.0e-4</Tolerance>
-    <Absolute_tolerance>1.0e-4</Absolute_tolerance>
+    <Krylov_space_dimension>50</Krylov_space_dimension>
+    <Tolerance>1.0e-8</Tolerance>
+    <Absolute_tolerance>1.0e-10</Absolute_tolerance>
   </LS>
 
   <Add_BC name="wall_left">

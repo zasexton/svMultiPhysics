@@ -864,14 +864,19 @@ void expectGmresSolver(const tinyxml2::XMLElement& equation)
   EXPECT_FALSE(text(solver, "Tolerance").empty());
 }
 
-void expectEigenDirectSolver(const tinyxml2::XMLElement& equation)
+// The fluid solver of the SPHERIC decks (decision D64 item 1): FSILS GMRES,
+// which runs on any number of ranks, with the settings of the other FSILS
+// free-surface decks.
+void expectFreeSurfaceFsilsGmresSolver(const tinyxml2::XMLElement& equation)
 {
-  const auto& solver = childWithAttribute(equation, "LS", "type", "Direct");
+  const auto& solver = childWithAttribute(equation, "LS", "type", "GMRES");
   const auto& linear_algebra =
-      childWithAttribute(solver, "Linear_algebra", "type", "eigen");
-  expectText(linear_algebra, "Preconditioner", "none");
-  EXPECT_FALSE(text(solver, "Max_iterations").empty());
-  EXPECT_FALSE(text(solver, "Tolerance").empty());
+      childWithAttribute(solver, "Linear_algebra", "type", "fsils");
+  expectText(linear_algebra, "Preconditioner", "rcs");
+  expectText(solver, "Max_iterations", "100");
+  expectText(solver, "Krylov_space_dimension", "50");
+  expectText(solver, "Tolerance", "1.0e-8");
+  expectText(solver, "Absolute_tolerance", "1.0e-10");
 }
 
 bool fileContains(const fs::path& path, std::string_view needle)
@@ -2863,7 +2868,7 @@ TEST(OpenVesselExamples, FittedAleMeshNitscheDecksDeclareSlidingWallsAndDisjoint
     EXPECT_EQ(fluid.FirstChildElement("Momentum_source_temporal_and_spatial_values_file_path"),
               nullptr)
         << "the committed deck holds the tank at rest";
-    expectEigenDirectSolver(fluid);
+    expectFreeSurfaceFsilsGmresSolver(fluid);
     const auto& free_surface = expectBoundaryCondition(fluid, "free_surface", "Free_surface");
     expectText(free_surface, "Implementation", "FittedALE");
     // A fitted free surface always uses the MeshNitsche normal enforcement;
@@ -2935,8 +2940,9 @@ TEST(OpenVesselExamples, LiteratureValidationCasesDeclareGeneratedMeshes)
   // 05 (a 2D section, decision D51) and 10 with disjoint face files, the current level-set protocol (D55
   // extension, D14 reconciliation, D21 patch bounds, D39 redistancing), no
   // retired keys, free-slip walls (D58: only the normal velocity is fixed;
-  // the Test 02 obstacle is one face file per plane) and, in 3D, the halo of
-  // the small-cut aggregation stencil (18 ghost layers).
+  // the Test 02 obstacle is one face file per plane), the FSILS GMRES fluid
+  // solver (D64 item 1) and, in 3D, the halo of the small-cut aggregation
+  // stencil (18 ghost layers).
   struct CaseExpectation {
     std::string representation_dir;
     std::string case_name;
@@ -3037,6 +3043,7 @@ TEST(OpenVesselExamples, LiteratureValidationCasesDeclareGeneratedMeshes)
 
     const auto& fluid = childWithAttribute(*root, "Add_equation", "type", "fluid");
     EXPECT_EQ(fluid.FirstChildElement("Node_pressure_constraints"), nullptr);
+    expectFreeSurfaceFsilsGmresSolver(fluid);
     for (const auto& face : expected.faces) {
       const bool wall = startsWith(face, "wall_") || startsWith(face, "obstacle_");
       if (!wall || (!expected.top_wall_bc && face == "wall_top")) {
@@ -3104,7 +3111,6 @@ TEST(OpenVesselExamples, LiteratureValidationCasesDeclareGeneratedMeshes)
     }
     if (startsWith(expected.case_name, "spheric_test05_wet_bed_")) {
       expectBoundaryCondition(level_set, "wall_top", "LevelSetOutflow");
-      expectEigenDirectSolver(fluid);
       EXPECT_TRUE(fileContains(case_dir / "pressure_gauge.csv",
                                "node_id,pressure"));
       EXPECT_TRUE(fileContains(case_dir / "benchmark.json",

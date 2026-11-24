@@ -35,8 +35,11 @@ Written by `../generate_spheric_test10_fitted_decks.py`:
   contact line can move; the wall boundary layers (about 1 mm) are far below
   the mesh size in any case.
 - Hydrostatic initial pressure in the mesh file, no pressure gauge (the
-  natural free-surface traction fixes the pressure level), Eigen sparse LU,
-  `dt = 1 ms`, 100 steps, fluid equation before `mesh_motion`.
+  natural free-surface traction fixes the pressure level), FSILS GMRES with
+  the settings of the other FSILS free-surface decks (decision D64 item 1;
+  `--fluid-solver eigen_direct` writes the serial Eigen sparse LU of the
+  earlier decks, one rank only), `dt = 1 ms`, 100 steps, fluid equation
+  before `mesh_motion`.
 - Face sets: a boundary facet belongs to the tank plane on which all its
   vertices lie; the sets are checked to be disjoint and to cover the
   boundary, and each facet records its parent cell as `GlobalElementID`.

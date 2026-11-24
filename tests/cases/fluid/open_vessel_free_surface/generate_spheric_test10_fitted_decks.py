@@ -84,6 +84,13 @@ WALLS_3D = {**WALLS_2D, "wall_front": (2, 0.0), "wall_back": (2, TANK_BREADTH)}
 EFFECTIVE_DIRECTION = {"wall_left": 0, "wall_right": 0, "wall_bottom": 1,
                        "wall_front": 2, "wall_back": 2}
 FREE_SURFACE = "free_surface"
+# Fluid linear solver (decision D64 item 1): FSILS GMRES with the settings of the
+# other FSILS free-surface decks (generate_validation_meshes.FREE_SURFACE_FSILS_GMRES),
+# on any number of ranks; "--fluid-solver eigen_direct" writes the serial Eigen
+# sparse LU of the earlier decks (one rank only).
+FLUID_SOLVER = "fsils_gmres"
+FLUID_LINEAR_ALGEBRA = {"fsils_gmres": ("GMRES", "fsils", "rcs"),
+                        "eigen_direct": ("Direct", "eigen", "none")}
 
 
 def _load(name: str):
@@ -250,7 +257,9 @@ def _profile_decks():
 
 
 def solver_xml(dim: int, faces: list[str], *, steps: int, dt: float, cadence: int,
-               body_force_file: str | None = None, angular_velocity_file: str | None = None) -> str:
+               body_force_file: str | None = None, angular_velocity_file: str | None = None,
+               fluid_solver: str = FLUID_SOLVER) -> str:
+    ls_type, linear_algebra, preconditioner = FLUID_LINEAR_ALGEBRA[fluid_solver]
     add_faces = "\n".join(
         f'  <Add_face name="{f}">\n    <Face_file_path>mesh/water/mesh-surfaces/{f}.vtp</Face_file_path>\n  </Add_face>'
         for f in faces)
@@ -330,9 +339,9 @@ def solver_xml(dim: int, faces: list[str], *, steps: int, dt: float, cadence: in
     <Mesh_velocity>true</Mesh_velocity>
   </Output>
 
-  <LS type="Direct">
-    <Linear_algebra type="eigen">
-      <Preconditioner>none</Preconditioner>
+  <LS type="{ls_type}">
+    <Linear_algebra type="{linear_algebra}">
+      <Preconditioner>{preconditioner}</Preconditioner>
     </Linear_algebra>
     <Max_iterations>100</Max_iterations>
     <Krylov_space_dimension>50</Krylov_space_dimension>
@@ -491,7 +500,7 @@ def write_forcing(case_dir: Path, dim: int, points: np.ndarray, reference_file: 
 
 def write_deck(dim: int, case_dir: Path, *, reference_file: Path | None = None,
                end_time: float | None = None, x_only: bool = False,
-               force: bool = False) -> dict:
+               force: bool = False, fluid_solver: str = FLUID_SOLVER) -> dict:
     if case_dir.exists():
         if not force and any(case_dir.iterdir()):
             raise FileExistsError(f"{case_dir} is not empty (use --force)")
@@ -518,7 +527,8 @@ def write_deck(dim: int, case_dir: Path, *, reference_file: Path | None = None,
     (case_dir / "solver.xml").write_text(
         solver_xml(dim, faces, steps=steps, dt=DT, cadence=cadence,
                    body_force_file=forcing["body_force_file"] if forcing else None,
-                   angular_velocity_file=forcing.get("angular_velocity_file") if forcing else None),
+                   angular_velocity_file=forcing.get("angular_velocity_file") if forcing else None,
+                   fluid_solver=fluid_solver),
         encoding="utf-8")
     meta = metadata(dim, points, cells, sets, steps=steps, forcing=forcing)
     (case_dir / "benchmark.json").write_text(json.dumps(meta, indent=2) + "\n", encoding="utf-8")
@@ -540,6 +550,9 @@ def main(argv=None) -> int:
     parser.add_argument("--forcing-x-only", action="store_true",
                         help="diagnostic: evaluate the Euler and centrifugal terms at mid-depth "
                              "(x-only table)")
+    parser.add_argument("--fluid-solver", choices=sorted(FLUID_LINEAR_ALGEBRA), default=FLUID_SOLVER,
+                        help="fsils_gmres (decision D64 item 1, any number of ranks) or eigen_direct, "
+                             "the serial Eigen sparse LU of the earlier decks (one rank only)")
     parser.add_argument("--force", action="store_true", help="replace a non-empty output dir")
     args = parser.parse_args(argv)
     dims = args.dim or [2, 3]
@@ -551,7 +564,8 @@ def main(argv=None) -> int:
         case_dir = args.output_dir or (ROOT / (DECK_2D if dim == 2 else DECK_3D))
         meta = write_deck(dim, case_dir, reference_file=args.roll_forcing,
                           end_time=args.end_time, x_only=args.forcing_x_only,
-                          force=args.force or args.output_dir is None)
+                          force=args.force or args.output_dir is None,
+                          fluid_solver=args.fluid_solver)
         print(f"wrote {case_dir}: {meta['mesh']['points']} points, {meta['mesh']['cells']} cells, "
               f"faces {meta['mesh']['face_sets']}, steps {meta['time']['steps']}")
     return 0

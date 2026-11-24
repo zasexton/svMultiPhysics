@@ -431,6 +431,75 @@ def test_spheric_unfitted_decks_state_the_current_level_set_protocol(case_name):
     assert not [child.tag for child in level_set if child.tag.startswith(retired)]
 
 
+def _linear_solver(element):
+    """An LS element as (type, backend, preconditioner, {other keys})."""
+    algebra = element.find("Linear_algebra")
+    return (element.get("type"), algebra.get("type"), algebra.findtext("Preconditioner").strip(),
+            {child.tag: child.text.strip() for child in element if child.tag != "Linear_algebra"})
+
+
+def _fluid_linear_solver(root):
+    fluid = next(equation for equation in root.findall("Add_equation")
+                 if equation.get("type") == "fluid")
+    return _linear_solver(fluid.find("LS"))
+
+
+FREE_SURFACE_FSILS_GMRES_SOLVER = ("GMRES", "fsils", "rcs", {
+    "Max_iterations": "100", "Krylov_space_dimension": "50",
+    "Tolerance": "1.0e-8", "Absolute_tolerance": "1.0e-10"})
+
+
+@pytest.mark.parametrize("case_name", sorted(SPHERIC_UNFITTED_DECKS))
+def test_spheric_unfitted_decks_use_the_fsils_gmres_fluid_solver(case_name):
+    # Decision D64 item 1: FSILS GMRES runs on any number of ranks; the serial
+    # Eigen direct solver is refused above one rank.
+    repo = Path(__file__).resolve().parents[1]
+    solver_xml = (repo / "tests/cases/fluid/open_vessel_free_surface/unfitted_level_set"
+                  / case_name / "solver.xml")
+    assert _fluid_linear_solver(ET.parse(solver_xml).getroot()) == FREE_SURFACE_FSILS_GMRES_SOLVER
+
+
+def test_validation_generator_writes_the_fsils_gmres_fluid_solver_by_default(tmp_path):
+    # Decision D64 item 1: the SPHERIC decks take the fluid solver settings of
+    # the other FSILS free-surface decks (the benchmark generators' block);
+    # "--fluid-solver eigen_direct" writes the serial Eigen direct solver of
+    # the earlier decks, with the same Newton controls.
+    generator = _load_validation_mesh_generator()
+    assert generator.SPHERIC_FLUID_SOLVER == "fsils_gmres"
+    benchmark = Path(__file__).resolve().parent / "cases/fluid/free_surface_benchmarks/static_drop_2d"
+    spec = importlib.util.spec_from_file_location("static_drop_2d_generate_case_for_spheric",
+                                                  benchmark / "generate_case.py")
+    static_drop = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(static_drop)
+    assert _linear_solver(ET.fromstring(static_drop.fsils_gmres_block())) == \
+        FREE_SURFACE_FSILS_GMRES_SOLVER
+
+    common = dict(mesh_path="mesh/background/mesh-complete.mesh.vtu", faces=["wall_top"],
+                  fitted=False, fill_height=0.1, time_step=0.001, time_steps=1,
+                  level_set_outflow_faces=["wall_top"])
+    texts = {}
+    for solver in generator.SPHERIC_FLUID_SOLVERS:
+        case_dir = tmp_path / solver
+        case_dir.mkdir()
+        generator.write_solver_xml(case_dir, spheric_fluid_solver=solver, **common)
+        texts[solver] = (case_dir / "solver.xml").read_text()
+    roots = {solver: ET.fromstring(text) for solver, text in texts.items()}
+    assert _fluid_linear_solver(roots["fsils_gmres"]) == FREE_SURFACE_FSILS_GMRES_SOLVER
+    assert _fluid_linear_solver(roots["eigen_direct"]) == ("Direct", "eigen", "none", {
+        "Max_iterations": "100", "Krylov_space_dimension": "80",
+        "Tolerance": "1.0e-4", "Absolute_tolerance": "1.0e-4"})
+
+    # Only the fluid LS element differs.
+    def without_fluid_solver(text):
+        start = text.index('<Add_equation type="fluid">')
+        begin = text.index("<LS ", start)
+        return text[:begin] + text[text.index("</LS>", begin):]
+
+    assert without_fluid_solver(texts["fsils_gmres"]) == without_fluid_solver(texts["eigen_direct"])
+    with pytest.raises(ValueError, match="spheric_fluid_solver must be one of"):
+        generator.write_solver_xml(tmp_path, spheric_fluid_solver="fsils_direct", **common)
+
+
 def _profile_args():
     defaults = {
         "high_order_3d_benchmark_profile_qualification": True,
