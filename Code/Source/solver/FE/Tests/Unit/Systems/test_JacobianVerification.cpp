@@ -7,6 +7,8 @@
 
 #include "Assembly/GlobalSystemView.h"
 #include "Dofs/EntityDofMap.h"
+#include "Forms/JIT/JITKernelWrapper.h"
+#include "Forms/MonolithicCellKernel.h"
 #include "Forms/JIT/LLVMJITBuildInfo.h"
 #include "Forms/Vocabulary.h"
 #include "Spaces/H1Space.h"
@@ -932,6 +934,93 @@ TEST(MovingDomainShapeDerivativeTest, CompleteOptInMakesEveryProbeExact)
     }
     EXPECT_THROW((void)movingDomainJacobianDefect(probes[1], GeometryTangentPath::ADReference, ShapeDerivative::Complete),
                  std::exception);
+}
+
+/**
+ * The rate of a vector field in another field's row: with u = (t x, 0, 0) at
+ * t = 0.2 and 0.1 on the single tetrahedron (volume 1/6) and backward Euler
+ * with dt = 0.1, dt(u) = (x, 0, 0), so div(dt(u)) = trace(grad(dt(u))) = 1
+ * and the P0 row of b = 0 in (b - rate) w is -1/6 for both spellings (a
+ * rate without the history term would give -2/6), interpreted and compiled.
+ */
+TEST(TimeDerivativeInAnotherRow, TheDivergenceOfARateIsTheTraceOfItsGradient)
+{
+    using svmp::FE::forms::FormExpr;
+    namespace forms = svmp::FE::forms;
+    namespace systems = svmp::FE::systems;
+    const Real dt = 0.1;
+    for (const bool jit : {false, true}) {
+    for (const bool divergence : {true, false}) {
+        SCOPED_TRACE(std::string(divergence ? "div(dt(u))" : "trace(grad(dt(u)))") +
+                     (jit ? ", compiled" : ", interpreted"));
+        auto mesh = std::make_shared<svmp::FE::forms::test::SingleTetraMeshAccess>();
+        auto p1 = std::make_shared<svmp::FE::spaces::H1Space>(ElementType::Tetra4, 1);
+        auto vector = std::make_shared<svmp::FE::spaces::ProductSpace>(p1, 3);
+        auto p0 = std::make_shared<svmp::FE::spaces::L2Space>(ElementType::Tetra4, 0);
+        systems::FESystem sys(mesh);
+        const auto u_id = sys.addField(systems::FieldSpec{.name = "u", .space = vector, .components = 3});
+        const auto b_id = sys.addField(systems::FieldSpec{.name = "b", .space = p0, .components = 1});
+        sys.addOperator("op");
+        const auto u = forms::StateField(u_id, *vector, "u");
+        const auto z = forms::TestField(u_id, *vector, "z");
+        const auto b = forms::StateField(b_id, *p0, "b");
+        const auto w = forms::TestField(b_id, *p0, "w");
+        const auto rate = divergence ? forms::div(forms::dt(u)) : forms::trace(forms::grad(forms::dt(u)));
+        systems::FormInstallOptions options;
+        options.compiler_options.jit.enable = jit;
+        (void)systems::installFormulation(sys, "op", {u_id, b_id},
+                                          forms::inner(u, z).dx() + ((b - rate) * w).dx(), options);
+        systems::SetupInputs inputs;
+        inputs.topology_override = singleTetraTopology();
+        sys.setup({}, inputs);
+
+        const auto n = sys.dofHandler().getNumDofs();
+        const std::array<Real, 4> x{0.0, 1.0, 0.0, 0.0};  // the vertices' x
+        const auto state_at = [&](Real t) {
+            std::vector<Real> values(static_cast<std::size_t>(n), 0.0);
+            const auto dofs = sys.fieldDofHandler(u_id).getCellDofs(0);
+            const auto offset = sys.fieldDofOffset(u_id);
+            for (std::size_t a = 0; a < 4; ++a) {  // component 0 of vertex a
+                values[static_cast<std::size_t>(offset + dofs[a])] = t * x[a];
+            }
+            return values;
+        };
+        const auto current = state_at(0.2);
+        const auto previous = state_at(0.1);
+        systems::SystemStateView state;
+        state.dt = dt;
+        state.u = std::span<const Real>(current);
+        state.u_prev = std::span<const Real>(previous);
+        const systems::BackwardDifferenceIntegrator integrator;
+        const auto context = integrator.buildContext(1, state);
+        state.time_integration = &context;
+        systems::AssemblyRequest request;
+        request.op = "op";
+        request.want_vector = true;
+        svmp::FE::assembly::DenseVectorView R(n);
+        R.zero();
+        ASSERT_TRUE(sys.assemble(request, state, nullptr, &R).success);
+        const auto b_row = sys.fieldDofOffset(b_id) + sys.fieldDofHandler(b_id).getCellDofs(0)[0];
+        EXPECT_NEAR(R.getVectorEntry(b_row), -1.0 / 6.0, 1e-12);
+        if (jit) {
+            // Compiled, not evaluated by the interpreter: the fused cell
+            // kernel, or each block it falls back to.
+            int jit_blocks = 0;
+            for (const auto& term : sys.operatorDefinition("op").cells) {
+                const auto* fused = dynamic_cast<const svmp::FE::forms::MonolithicCellKernel*>(term.kernel.get());
+                ASSERT_NE(fused, nullptr) << term.kernel->name();
+                for (std::size_t i = 0; i < fused->numBlocks(); ++i) {
+                    if (const auto* block = dynamic_cast<const svmp::FE::forms::jit::JITKernelWrapper*>(
+                            fused->blockSpec(i).fallback_kernel.get())) {
+                        ++jit_blocks;
+                        EXPECT_TRUE(fused->hasCompiledDispatch() || block->isJITReady()) << block->name();
+                    }
+                }
+            }
+            EXPECT_GT(jit_blocks, 0);
+        }
+    }
+    }
 }
 
 namespace {

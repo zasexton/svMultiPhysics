@@ -453,6 +453,14 @@ struct Builder {
 
     [[nodiscard]] std::uint32_t lower(const FormExprNode& node)
     {
+        // div(dt(u)) of an H1 vector field or unknown is lowered as
+        // trace(grad(dt(u))), whose code carries the history of the dt()
+        // stencil (the div(dt(.)) code applied the current coefficient alone).
+        if (const auto rate = rateOfDivergenceLoweredAsGradientTrace(node)) {
+            const auto rate_gradient_trace = FormExpr(rate).grad().trace();
+            return lower(*rate_gradient_trace.node());
+        }
+
         std::vector<std::uint32_t> kid_indices;
         const auto kids = node.childrenShared();
         kid_indices.reserve(kids.size());
@@ -1690,6 +1698,31 @@ KernelIRBuildResult lowerToKernelIR(const FormExprNode& root,
     b.result.ir.children = std::move(b.children);
     b.result.ir.root = root_idx;
     return b.result;
+}
+
+std::shared_ptr<FormExprNode> rateOfDivergenceLoweredAsGradientTrace(const FormExprNode& node)
+{
+    if (node.type() != FormExprType::Divergence) {
+        return nullptr;
+    }
+    const auto kids = node.childrenShared();
+    if (kids.size() != 1u || !kids[0] || kids[0]->type() != FormExprType::TimeDerivative) {
+        return nullptr;
+    }
+    const auto operands = kids[0]->childrenShared();
+    if (operands.size() != 1u || !operands[0]) {
+        return nullptr;
+    }
+    const auto operand_type = operands[0]->type();
+    const bool field_operand = operand_type == FormExprType::TrialFunction ||
+                               operand_type == FormExprType::DiscreteField ||
+                               operand_type == FormExprType::StateField;
+    const auto* sig = operands[0]->spaceSignature();
+    if (!field_operand || sig == nullptr || sig->field_type != FieldType::Vector ||
+        sig->continuity == Continuity::H_div || sig->continuity == Continuity::H_curl) {
+        return nullptr;
+    }
+    return kids[0];
 }
 
 KernelIRBuildResult lowerToKernelIR(const FormExpr& integrand,

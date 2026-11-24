@@ -1335,6 +1335,109 @@ TEST(VectorBasisConstraints, StrongNormalTraceHoldsOnEveryBoundaryFaceOfAMesh)
     }
 }
 
+
+namespace {
+
+/// n x n parallelograms: the unit square mapped by x' = 0.7 x + 0.3 y + 0.1,
+/// y' = 0.2 x + 1.1 y - 0.05, so every cell is affine.
+[[nodiscard]] std::shared_ptr<svmp::Mesh> skewedQuadMesh(int n)
+{
+    std::vector<svmp::real_t> X;
+    for (int j = 0; j <= n; ++j) {
+        for (int i = 0; i <= n; ++i) {
+            const Real x = static_cast<Real>(i) / n;
+            const Real y = static_cast<Real>(j) / n;
+            X.push_back(static_cast<svmp::real_t>(0.7 * x + 0.3 * y + 0.1));
+            X.push_back(static_cast<svmp::real_t>(0.2 * x + 1.1 * y - 0.05));
+        }
+    }
+    std::vector<svmp::offset_t> offsets{0};
+    std::vector<svmp::index_t> connectivity;
+    std::vector<svmp::CellShape> shapes;
+    const auto vertex = [n](int i, int j) { return static_cast<svmp::index_t>(j * (n + 1) + i); };
+    for (int j = 0; j < n; ++j) {
+        for (int i = 0; i < n; ++i) {
+            for (const auto v : {vertex(i, j), vertex(i + 1, j), vertex(i + 1, j + 1), vertex(i, j + 1)}) {
+                connectivity.push_back(v);
+            }
+            offsets.push_back(static_cast<svmp::offset_t>(connectivity.size()));
+            svmp::CellShape shape{};
+            shape.family = svmp::CellFamily::Quad;
+            shape.num_corners = 4;
+            shape.order = 1;
+            shapes.push_back(shape);
+        }
+    }
+    auto base = std::make_shared<svmp::MeshBase>();
+    base->build_from_arrays(2, X, offsets, connectivity, shapes);
+    base->finalize();
+    return svmp::create_mesh(std::move(base));
+}
+
+} // namespace
+
+// The previous derivatives of a rate use the inverse Jacobian the current
+// ones use.  On a face of an affine cell the assembler evaluates a field's
+// current derivatives with the first point's inverse Jacobian, and the face
+// geometry is evaluated point by point, so the inverse Jacobians of the face
+// points agree only to round-off; the previous derivatives must use the same
+// one, or a field equal at both steps has a rate of round-off size.  With
+// w = A x at both steps on parallelograms, div(dt(w)) and grad(dt(w)) on the
+// interior facets are exactly zero, interpreted and compiled (backward Euler).
+TEST(OtherFieldRates, RateDerivativesOnTheFacetsOfAffineCellsVanishExactlyForAConstantField)
+{
+    for (const bool jit : {false, true}) {
+    for (const bool use_grad : {false, true}) {
+        SCOPED_TRACE(::testing::Message() << (use_grad ? "grad(dt(w))" : "div(dt(w))") << (jit ? ", compiled" : ", interpreted"));
+        FormInstallOptions install;
+        install.compiler_options.jit.enable = jit;
+        FESystem system(skewedQuadMesh(3));
+        FieldBinding fields(system, "OtherFieldRates");
+        const auto q1 = std::make_shared<spaces::H1Space>(ElementType::Quad4, 1);
+        const auto Uf = fields.unknown("u", q1);
+        const auto W = fields.unknown("w", spaces::VectorSpace(spaces::SpaceType::H1, ElementType::Quad4, 1, 2));
+        const auto rate = use_grad ? forms::trace(forms::grad(forms::dt(W.state))) : forms::div(forms::dt(W.state));
+        {
+            FormulationBuilder F(system, "equations", install);
+            (void)F.residual((Uf.state * Uf.test).dx() + forms::inner(W.state, W.test).dx() +
+                             (forms::avg(rate) * forms::avg(Uf.test)).dS());
+        }
+        system.setup();
+        const auto n = system.dofHandler().getNumDofs();
+        std::vector<Real> U(static_cast<std::size_t>(n), 0.0);
+        const auto& local = system.singleMesh().local_mesh();
+        const auto& X = local.X_ref();
+        const auto w0 = system.fieldDofOffset(W.id);
+        const auto* entities = system.fieldDofHandler(W.id).getEntityDofMap();
+        for (svmp::index_t v = 0; v < static_cast<svmp::index_t>(local.n_vertices()); ++v) {
+            const Real x = X[2 * static_cast<std::size_t>(v)];
+            const Real y = X[2 * static_cast<std::size_t>(v) + 1];
+            const auto dofs = entities->getVertexDofs(static_cast<GlobalIndex>(v));
+            U[static_cast<std::size_t>(w0 + dofs[0])] = 2.0 * x + 0.5 * y;
+            U[static_cast<std::size_t>(w0 + dofs[1])] = -0.75 * x + 3.0 * y;
+        }
+        SystemStateView state;
+        state.time = 0.1;
+        state.dt = 0.05;
+        state.u = U;
+        state.u_prev = U;
+        const BackwardDifferenceIntegrator integrator;
+        const auto context = integrator.buildContext(1, state);
+        state.time_integration = &context;
+        assembly::DenseVectorView R(n);
+        R.zero();
+        AssemblyRequest request;
+        request.op = "equations";
+        request.want_vector = true;
+        ASSERT_TRUE(system.assemble(request, state, nullptr, &R).success);
+        const auto u0 = system.fieldDofOffset(Uf.id);
+        for (GlobalIndex i = u0; i < u0 + system.fieldDofHandler(Uf.id).getNumDofs(); ++i) {
+            EXPECT_EQ(R.getVectorEntry(i), 0.0) << "row " << i;
+        }
+    }
+    }
+}
+
 } // namespace test
 } // namespace systems
 } // namespace FE

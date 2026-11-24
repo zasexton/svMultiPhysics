@@ -16,6 +16,7 @@
 #include "Forms/FormExpr.h"
 
 #include <cstdint>
+#include <memory>
 #include <optional>
 #include <string>
 #include <string_view>
@@ -153,6 +154,16 @@ KernelIRBuildResult lowerToKernelIR(const FormExpr& integrand,
 
 KernelIRBuildResult lowerToKernelIR(const FormExprNode& root,
                                     const KernelIRBuildOptions& options = {});
+
+/**
+ * @brief The rate dt(u) of a div(dt(u)) node whose operand u is an H1 vector
+ * field or unknown, or null
+ *
+ * The compiled kernel lowers such a divergence as trace(grad(dt(u))), whose
+ * code applies the whole time stencil; any other div(dt(.)) or curl(dt(.))
+ * is evaluated by the interpreter (JITValidation).
+ */
+[[nodiscard]] std::shared_ptr<FormExprNode> rateOfDivergenceLoweredAsGradientTrace(const FormExprNode& node);
 
 // ============================================================================
 // Term-group planning for micro-kernel splitting

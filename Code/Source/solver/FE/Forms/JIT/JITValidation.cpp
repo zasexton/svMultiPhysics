@@ -6,6 +6,7 @@
  */
 
 #include "Forms/JIT/JITValidation.h"
+#include "Forms/JIT/KernelIR.h"
 
 #include "Assembly/JIT/KernelArgs.h"
 #include "Core/FEException.h"
@@ -1181,14 +1182,17 @@ ValidationResult canCompileImpl(const FormExpr& integrand,
         }
 
         // The compiled div(dt(.)) and curl(dt(.)) read the current values
-        // only, not the history of the time stencil (grad(dt(.)) reads it):
-        // such a form is evaluated by the interpreter.
+        // only, not the history of the time stencil (grad(dt(.)) reads it).
+        // div(dt(u)) of an H1 vector field is lowered as trace(grad(dt(u)))
+        // and compiled; any other such form is evaluated by the interpreter.
         if (n.type() == FormExprType::Divergence || n.type() == FormExprType::Curl) {
             const auto kids = n.childrenShared();
-            if (!kids.empty() && kids[0] && kids[0]->type() == FormExprType::TimeDerivative) {
+            if (!kids.empty() && kids[0] && kids[0]->type() == FormExprType::TimeDerivative &&
+                !rateOfDivergenceLoweredAsGradientTrace(n)) {
                 out.ok = false;
-                out.first_issue = issue(n, "JIT: div(dt(.)) and curl(dt(.)) are evaluated by the interpreter "
-                                           "(the compiled operators omit the history of the time stencil)");
+                out.first_issue = issue(n, "JIT: curl(dt(.)), and div(dt(.)) of other than an H1 vector field, "
+                                           "are evaluated by the interpreter (the compiled operators omit the "
+                                           "history of the time stencil)");
                 return;
             }
         }

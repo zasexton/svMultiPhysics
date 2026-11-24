@@ -19891,7 +19891,11 @@ void StandardAssembler::populateFieldSolutionData(
                             }
                             u_prev[static_cast<std::size_t>(c)] = val_c;
                             if (need_gradients) {
-                                const auto& J_inv = ctx_inv_jacs_ps[static_cast<std::size_t>(q)];
+                                // The inverse Jacobian of the current derivatives
+                                // (above), so a field equal at both steps has a
+                                // rate of exactly zero.
+                                const auto& J_inv =
+                                    ctx_inv_jacs_ps[cached_mapping_affine_ ? 0 : static_cast<std::size_t>(q)];
                                 auto& jac = vector_jacobians[static_cast<std::size_t>(q)];
                                 for (int d1 = 0; d1 < dim; ++d1) {
                                     Real sum = 0.0;
@@ -20805,7 +20809,11 @@ void StandardAssembler::populateFieldSolutionData(
                             }
                             u_prev[static_cast<std::size_t>(c)] = val_c;
                             if (need_gradients) {
-                                const auto& J_inv = ctx_inv_jacs_ps[static_cast<std::size_t>(q)];
+                                // The inverse Jacobian of the current derivatives
+                                // (above), so a field equal at both steps has a
+                                // rate of exactly zero.
+                                const auto& J_inv =
+                                    ctx_inv_jacs_ps[cached_mapping_affine_ ? 0 : static_cast<std::size_t>(q)];
                                 auto& jac = vector_jacobians[static_cast<std::size_t>(q)];
                                 for (int d1 = 0; d1 < dim; ++d1) {
                                     Real sum = 0.0;
