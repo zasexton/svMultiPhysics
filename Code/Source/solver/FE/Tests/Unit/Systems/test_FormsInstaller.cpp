@@ -17,6 +17,7 @@
 #include "Systems/SystemManifest.h"
 #include "Systems/BoundaryConditionManager.h"
 #include "Systems/FormsInstallerDetail.h"
+#include "Systems/TimeIntegrator.h"
 #include "Auxiliary/AuxiliaryModelBuilder.h"
 #include "Auxiliary/AuxiliaryBindings.h"
 #include "Auxiliary/AuxiliaryInputRegistry.h"
@@ -27,6 +28,7 @@
 #include "Assembly/StandardAssembler.h"
 #include "Assembly/CutIntegrationContext.h"
 
+#include "Dofs/EntityDofMap.h"
 #include "Elements/Element.h"
 
 #include "Geometry/CutQuadrature.h"
@@ -35,6 +37,7 @@
 #include "Forms/FormKernels.h"
 #include "Forms/IntegrationDomain.h"
 #include "Forms/JIT/JITKernelWrapper.h"
+#include "Forms/JIT/LLVMJITBuildInfo.h"
 #include "Forms/StandardBCs.h"
 #include "Forms/Vocabulary.h"
 
@@ -44,6 +47,8 @@
 #include "Interfaces/LevelSetInterfaceBuilder.h"
 #include "Interfaces/LevelSetInterfaceDomain.h"
 
+#include "Mesh/Mesh.h"
+#include "Mesh/Topology/CellShape.h"
 #include "Quadrature/QuadratureFactory.h"
 
 #include "Spaces/H1Space.h"
@@ -7163,5 +7168,126 @@ TEST(FormsInstaller, VolumeIntegrationDomainPreservesScalarReactionDiffusion)
                   direct.selected_rule_is_full_cell);
         EXPECT_EQ(selector.elements_assembled,
                   direct.elements_assembled);
+    }
+}
+
+namespace {
+
+/// The pressure rows of int grad(q).(currentCoordinate() + meshVelocity()) dx
+/// (+ 0 p q) on one moving P1 triangle of an FESystem in the current
+/// configuration, with the mesh displacement d of an ALE binding, optionally
+/// installed with the binding's mesh-motion sensitivity.
+std::vector<Real> movingFramePressureRows(bool compiled, bool vectorize, bool sensitivity)
+{
+    using namespace svmp::FE::forms;
+    auto base = std::make_shared<svmp::MeshBase>();
+    const std::vector<svmp::real_t> coordinates = {0.0, 0.0, 1.3, 0.0, 0.2, 0.9};
+    svmp::CellShape shape{};
+    shape.family = svmp::CellFamily::Triangle;
+    shape.num_corners = 3;
+    shape.order = 1;
+    base->build_from_arrays(2, coordinates, {0, 3}, {0, 1, 2}, std::vector<svmp::CellShape>(1, shape));
+    base->finalize();
+    auto mesh = svmp::create_mesh(std::move(base));
+
+    auto scalar = std::make_shared<svmp::FE::spaces::H1Space>(ElementType::Triangle3, 1);
+    auto vector = std::make_shared<svmp::FE::spaces::ProductSpace>(scalar, 2);
+    svmp::FE::systems::FESystem system(mesh, svmp::Configuration::Current);
+    const auto p_id = system.addField(svmp::FE::systems::FieldSpec{.name = "p", .space = scalar, .components = 1});
+    svmp::FE::systems::ALEBindingOptions ale_options;
+    ale_options.enabled = true;
+    ale_options.dimension = 2;
+    ale_options.mesh_velocity_space = vector;
+    ale_options.mesh_displacement_space = vector;
+    ale_options.auto_register_mesh_displacement_field = true;
+    const auto ale = svmp::FE::systems::resolveALEBinding(system, ale_options);
+    const auto d_id = ale.mesh_displacement_field;
+    const auto p = FormExpr::stateField(p_id, *scalar, "p");
+    const auto q = FormExpr::testFunction(p_id, *scalar, "q");
+    const auto d = FormExpr::stateField(d_id, *vector, "d");
+    const auto psi = FormExpr::testFunction(d_id, *vector, "psi");
+    svmp::FE::systems::FormInstallOptions install;
+    install.compiler_options.jit = svmp::FE::forms::test::makeUnitTestJITOptions();
+    install.compiler_options.jit.enable = compiled;
+    install.compiler_options.jit.vectorize = vectorize;
+    if (sensitivity) {
+        ale.configureInstallOptions(install);
+    }
+    system.addOperator("rows");
+    (void)svmp::FE::systems::installFormulation(
+        system, "rows", {p_id},
+        (inner(grad(q), currentCoordinate() + meshVelocity()) + FormExpr::constant(0.0) * p * q).dx(), install);
+    (void)svmp::FE::systems::installFormulation(system, "rows", {d_id}, inner(grad(d), grad(psi)).dx(),
+                                                svmp::FE::systems::FormInstallOptions{});
+    svmp::FE::systems::SetupOptions setup_options;
+    setup_options.use_constraints_in_assembly = false;
+    system.setup(setup_options);
+
+    const auto n = system.dofHandler().getNumDofs();
+    std::vector<Real> values(static_cast<std::size_t>(n), 0.0);
+    const auto& X = mesh->local_mesh().X_ref();
+    const auto d0 = system.fieldDofOffset(d_id);
+    for (std::size_t v = 0; v < mesh->local_mesh().n_vertices(); ++v) {
+        const auto dofs = system.fieldDofHandler(d_id).getEntityDofMap()->getVertexDofs(static_cast<GlobalIndex>(v));
+        const Real x = X[2 * v];
+        const Real y = X[2 * v + 1];
+        values[static_cast<std::size_t>(d0 + dofs[0])] = 0.05 * y - 0.02 * x + 0.01;
+        values[static_cast<std::size_t>(d0 + dofs[1])] = 0.03 * x * y - 0.04 * x;
+    }
+    const std::vector<Real> previous(static_cast<std::size_t>(n), 0.0);
+    svmp::FE::systems::SystemStateView state;
+    state.dt = 0.5;
+    state.u = values;
+    state.u_prev = previous;
+    const svmp::FE::systems::BackwardDifferenceIntegrator integrator;
+    const auto context = integrator.buildContext(1, state);
+    state.time_integration = &context;
+    (void)system.updateCurrentCoordinatesFromMeshDisplacement(state);
+    svmp::FE::systems::AssemblyRequest request;
+    request.op = "rows";
+    request.want_vector = true;
+    svmp::FE::assembly::DenseVectorView R(n);
+    R.zero();
+    EXPECT_TRUE(system.assemble(request, state, nullptr, &R).success);
+    std::vector<Real> out;
+    for (std::size_t v = 0; v < mesh->local_mesh().n_vertices(); ++v) {
+        const auto dofs = system.fieldDofHandler(p_id).getEntityDofMap()->getVertexDofs(static_cast<GlobalIndex>(v));
+        out.push_back(R.getVectorEntry(system.fieldDofOffset(p_id) + dofs[0]));
+    }
+    return out;
+}
+
+void expectSameRows(const std::vector<Real>& actual, const std::vector<Real>& expected)
+{
+    ASSERT_EQ(actual.size(), expected.size());
+    for (std::size_t i = 0; i < actual.size(); ++i) {
+        EXPECT_NEAR(actual[i], expected[i], 1e-13) << "pressure row " << i;
+    }
+}
+
+} // namespace
+
+// Installed with the mesh-motion sensitivity, the pressure rows have a (p, p)
+// and a (p, d) block, whose compiled kernels are colocated in one module.  The
+// colocated kernel of a block is its tangent; it replaced the block's compiled
+// residual as well, so the compiled residual rows were 0 (and a residual-only
+// call could write through the absent element matrix).  The compiled rows equal
+// the interpreted ones, batched and unbatched.
+TEST(MovingFrameColocatedBlocks, CompiledResidualRowsMatchTheInterpretedOnes)
+{
+    if (!svmp::FE::forms::jit::llvmJITEnabled()) {
+        GTEST_SKIP();
+    }
+    const auto interpreted = movingFramePressureRows(/*compiled=*/false, /*vectorize=*/true, /*sensitivity=*/true);
+    Real scale = 0.0;
+    for (const auto value : interpreted) {
+        scale = std::max(scale, std::abs(value));
+    }
+    ASSERT_GT(scale, 0.1);
+    expectSameRows(movingFramePressureRows(false, true, false), interpreted);
+    expectSameRows(movingFramePressureRows(true, true, false), interpreted);
+    for (const bool vectorize : {true, false}) {
+        SCOPED_TRACE(::testing::Message() << (vectorize ? "batched" : "unbatched"));
+        expectSameRows(movingFramePressureRows(true, vectorize, true), interpreted);
     }
 }

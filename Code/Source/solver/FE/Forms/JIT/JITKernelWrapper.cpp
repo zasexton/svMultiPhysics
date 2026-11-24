@@ -2940,10 +2940,14 @@ void JITKernelWrapper::setExternalCellAddress(std::uintptr_t addr)
     std::lock_guard<std::mutex> lock(jit_mutex_);
     const DispatchEpochBump bump_epoch{dispatch_epoch_};
 
-    // Replace an existing dispatch when one was already compiled, otherwise
-    // publish a minimal role-appropriate dispatch. This path must not call
-    // maybeCompile(): colocated kernels use it specifically as a compilation
-    // bypass after the address has already been resolved elsewhere.
+    // The address is the cell kernel of the wrapper's matrix form: a
+    // FormKernel's form, a LinearFormKernel's bilinear part, a
+    // SymbolicNonlinearFormKernel's tangent.  It replaces that dispatch only:
+    // the vector dispatches (the linear part, the residual) keep their own
+    // kernels.  Replace an existing dispatch when one was already compiled,
+    // otherwise publish a minimal role-appropriate dispatch. This path must not
+    // call maybeCompile(): colocated kernels use it specifically as a
+    // compilation bypass after the address has already been resolved elsewhere.
     bool replaced_existing = false;
     if (compiled_tangent_.ok && compiled_tangent_.cell != 0) {
         compiled_tangent_.cell = addr;
@@ -2951,14 +2955,6 @@ void JITKernelWrapper::setExternalCellAddress(std::uintptr_t addr)
     }
     if (compiled_bilinear_.ok && compiled_bilinear_.cell != 0) {
         compiled_bilinear_.cell = addr;
-        replaced_existing = true;
-    }
-    if (compiled_linear_.ok && compiled_linear_.cell != 0) {
-        compiled_linear_.cell = addr;
-        replaced_existing = true;
-    }
-    if (compiled_residual_.ok && compiled_residual_.cell != 0) {
-        compiled_residual_.cell = addr;
         replaced_existing = true;
     }
     if (compiled_form_.ok && compiled_form_.cell != 0) {
@@ -2979,8 +2975,6 @@ void JITKernelWrapper::setExternalCellAddress(std::uintptr_t addr)
             case WrappedKind::SymbolicNonlinearFormKernel:
                 compiled_tangent_.ok = true;
                 compiled_tangent_.cell = addr;
-                compiled_residual_.ok = true;
-                compiled_residual_.cell = addr;
                 break;
             case WrappedKind::NonlinearFormKernel:
                 compiled_residual_.ok = true;

@@ -148,6 +148,9 @@ public:
         CutVolumeSide side) const noexcept;
 
     /** @brief Inject a pre-compiled cell kernel address from colocated compilation.
+     *  The address is the cell kernel of the wrapper's matrix form (a
+     *  FormKernel's form, a LinearFormKernel's bilinear part, a
+     *  SymbolicNonlinearFormKernel's tangent) and replaces that dispatch only.
      *  Bypasses the normal maybeCompile() path. */
     void setExternalCellAddress(std::uintptr_t addr);
 
