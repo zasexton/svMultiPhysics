@@ -863,6 +863,57 @@ TEST(TraceMultiplierB4, WeakTracesByNitscheReproduceALinearSolution)
     }
 }
 
+TEST(TraceMultiplierB4, AStrongWholeFieldVectorValueEqualsItsComponentList)
+{
+    // u = u* on every side, strongly, written as one vector value
+    // bc::Dirichlet(side, as_vector({ux, uy})) and as the component list
+    // {ux, uy}: the same strong declarations, so u_h = u* (linear, in the P1
+    // space) either way.
+    namespace bc = forms::bc;
+    const auto ux = coefficient("u_exact_x", [](Real x, Real y) { return 1.0 + 2.0 * x + 3.0 * y; });
+    const auto uy = coefficient("u_exact_y", [](Real x, Real y) { return -1.0 + 0.5 * x - y; });
+    const auto u_exact = FormExpr::asVector({ux, uy});
+
+    const bc::Dirichlet whole(kLeft, u_exact);
+    const auto records = whole.getStrongConstraints(FieldId{0});
+    ASSERT_EQ(records.size(), 2u);
+    for (std::size_t c = 0; c < records.size(); ++c) {
+        EXPECT_EQ(records[c].component, static_cast<int>(c));
+        EXPECT_EQ(records[c].value.toString(), (c == 0 ? ux : uy).toString());
+    }
+
+    for (const bool as_vector : {true, false}) {
+        SCOPED_TRACE(as_vector ? "vector value" : "component list");
+        auto h1 = std::make_shared<spaces::H1Space>(ElementType::Quad4, 1);
+        auto vector = std::make_shared<spaces::ProductSpace>(h1, 2);
+        FESystem sys(buildQuadGrid(4, 4, 1.0, 1.0, 1));
+        const auto u_id = sys.addField(FieldSpec{.name = "u", .space = vector, .components = 2});
+        sys.addOperator("op");
+        const auto u = forms::StateField(u_id, *vector, "u");
+        const auto v = forms::TestField(u_id, *vector, "v");
+        auto residual = forms::inner(forms::grad(u), forms::grad(v)).dx();
+        systems::BoundaryConditionManager bcs;
+        for (const int side : {kLeft, kRight, kBottom, kTop}) {
+            if (as_vector) {
+                bcs.add(std::make_unique<bc::Dirichlet>(side, u_exact));
+            } else {
+                bcs.add(std::make_unique<bc::Dirichlet>(side, std::vector<FormExpr>{ux, uy}));
+            }
+        }
+        bcs.applyAll(sys, residual, u, v, u_id);
+        (void)systems::installFormulation(sys, "op", {u_id}, residual);
+        ASSERT_NO_THROW(sys.setup());
+        const auto state = solveLinear(sys);
+        systems::SystemStateView view;
+        view.u = state;
+        const auto e = u - u_exact;
+        const auto values = systems::evaluateFunctionalForms(sys, std::vector<FormExpr>{forms::inner(e, e).dx()}, view,
+                                                             systems::CollectiveCommunicator{});
+        ASSERT_EQ(values.size(), 1u);
+        EXPECT_LT(std::sqrt(values[0].value), 1e-10);
+    }
+}
+
 // ---------------------------------------------------------------------------
 // I3: a cut interface glued by a stabilized multiplier, against Nitsche
 // ---------------------------------------------------------------------------

@@ -743,6 +743,18 @@ public:
         std::vector<StrongDirichlet> out;
         out.reserve(components_.size());
         for (const auto& [component, value] : components_) {
+            // A whole-field vector value as_vector({g0, g1, ...}) states
+            // u_i = g_i, the declarations of its component list (the strong
+            // constraint evaluates a scalar at each node).
+            if (component < 0 && value.isValid() && value.node()->type() == FormExprType::AsVector) {
+                const auto entries = value.node()->childrenShared();
+                for (std::size_t c = 0; c < entries.size(); ++c) {
+                    out.push_back(strongDirichlet(field_id, boundary_marker_, FormExpr(entries[c]), symbol_,
+                                                  static_cast<int>(c)));
+                    out.back().precedence = std::get<Strong>(how_).precedence;
+                }
+                continue;
+            }
             out.push_back(strongDirichlet(field_id, boundary_marker_, value, symbol_, component));
             out.back().precedence = std::get<Strong>(how_).precedence;
         }
