@@ -37,6 +37,21 @@ TEST(FieldRegistry, AddsFindsAndRejectsDuplicates)
     EXPECT_THROW(reg.add(FieldSpec{.name = "u", .space = space, .components = 1}), svmp::FE::FEException);
 }
 
+TEST(FieldRegistry, ARefusedFieldTakesNoId)
+{
+    FieldRegistry reg;
+    auto space = std::make_shared<H1Space>(ElementType::Quad4, /*order=*/1);
+    const FieldId u = reg.add(FieldSpec{.name = "u", .space = space, .components = 1});
+    // Refused after its checks began (a volume field with an interface marker).
+    EXPECT_THROW(reg.add(FieldSpec{.name = "m", .space = space, .components = 1, .interface_marker = 3}),
+                 svmp::FE::FEException);
+    const FieldId w = reg.add(FieldSpec{.name = "w", .space = space, .components = 1});
+    EXPECT_EQ(w, u + 1);
+    EXPECT_EQ(reg.get(w).name, "w");
+    EXPECT_EQ(reg.findByName("w"), w);
+    EXPECT_FALSE(reg.has(w + 1));
+}
+
 TEST(FieldRegistry, AddsAndQueriesStateGroups)
 {
     FieldRegistry reg;

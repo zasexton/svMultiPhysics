@@ -29,7 +29,9 @@ FieldId FieldRegistry::add(FieldSpec spec)
                 "FieldRegistry::add: out of FieldId values");
 
     FieldRecord rec;
-    rec.id = next_id_++;
+    // The id is taken only when the field is added: a refused field leaves
+    // the ids, and so fields_[id], as they were.
+    rec.id = next_id_;
     rec.name = std::move(spec.name);
     rec.space = std::move(spec.space);
     rec.components = spec.components > 0 ? spec.components : rec.space->value_dimension();
@@ -117,6 +119,7 @@ FieldId FieldRegistry::add(FieldSpec spec)
     }
 
     fields_.push_back(rec);
+    ++next_id_;
     name_to_id_[fields_.back().name] = fields_.back().id;
     return fields_.back().id;
 }
