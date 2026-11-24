@@ -13316,19 +13316,6 @@ TEST(MovingDomainPhysics, HarmonicMeshMotionRejectsInvalidLiteralParameters)
     negative_kappa.kappa = -1.0;
     expect_invalid(negative_kappa, "kappa must be positive");
 
-    mm::HarmonicMeshMotionOptions zero_stiffness;
-    zero_stiffness.stiffness = 0.0;
-    expect_invalid(zero_stiffness, "stiffness must be positive");
-
-    mm::HarmonicMeshMotionOptions negative_stiffness;
-    negative_stiffness.stiffness = -1.0;
-    expect_invalid(negative_stiffness, "stiffness must be positive");
-
-    mm::HarmonicMeshMotionOptions conflicting_literals;
-    conflicting_literals.kappa = 2.0;
-    conflicting_literals.stiffness = 3.0;
-    expect_invalid(conflicting_literals,
-                   "both kappa and deprecated stiffness were set");
 }
 
 TEST(MovingDomainPhysics, PseudoElasticMeshMotionMatchesFiniteDifference)

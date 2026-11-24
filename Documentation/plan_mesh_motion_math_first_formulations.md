@@ -74,7 +74,7 @@ auto residual = (kappa * inner(grad(d_mesh), grad(psi))).dx();
 - [x] Spatial and time scalar coefficients are supported through the existing
   Forms coefficient/callback machinery.
 - [x] The residual spelling is preserved regardless of how `kappa` is supplied.
-- [x] `stiffness` remains as a deprecated transition alias.
+- [x] `stiffness` remained as a deprecated transition alias until it was deleted (D67).
 - [x] Inconsistent `stiffness` and `kappa` literals produce a diagnostic.
 
 ## 4. Boundary Terms

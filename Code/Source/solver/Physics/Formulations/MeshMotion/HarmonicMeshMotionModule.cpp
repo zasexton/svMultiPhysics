@@ -77,29 +77,6 @@ void HarmonicMeshMotionModule::registerOn(FE::systems::FESystem& system) const
         };
 
     validate_positive_literal(options_.kappa, "kappa");
-    HarmonicMeshMotionOptions::ScalarValue effective_kappa = options_.kappa;
-    if (options_.stiffness) {
-        validate_positive_literal(*options_.stiffness, "stiffness");
-
-        const auto kappa_literal = literal_real(options_.kappa);
-        const auto stiffness_literal = literal_real(*options_.stiffness);
-        if (kappa_literal && stiffness_literal) {
-            constexpr FE::Real default_kappa = 1.0;
-            if (std::abs(*kappa_literal - default_kappa) <= 0.0) {
-                effective_kappa = *options_.stiffness;
-            } else if (std::abs(*kappa_literal - *stiffness_literal) <= 0.0) {
-                effective_kappa = options_.kappa;
-            } else {
-                throw std::invalid_argument(
-                    "HarmonicMeshMotionModule::registerOn: both kappa and deprecated "
-                    "stiffness were set; use kappa only or set matching literal values");
-            }
-        } else {
-            throw std::invalid_argument(
-                "HarmonicMeshMotionModule::registerOn: both kappa and deprecated "
-                "stiffness were set; use kappa only or set matching literal values");
-        }
-    }
 
     auto normal_preparation = BoundaryPreparation::prepareNormalConstraints(
         system,
@@ -121,7 +98,7 @@ void HarmonicMeshMotionModule::registerOn(FE::systems::FESystem& system) const
             .field = normal_preparation.candidate_displacement,
             .own_normal_markers = normal_preparation.markers,
             .flux_of_rate = options_.quantity == HarmonicQuantity::Velocity,
-            .literal_kappa = literal_real(effective_kappa),
+            .literal_kappa = literal_real(options_.kappa),
             .context = "HarmonicMeshMotionModule::registerOn",
             .rate_flux_hint = "set the harmonic quantity to velocity (Harmonic_quantity=velocity)",
         });
@@ -156,7 +133,7 @@ void HarmonicMeshMotionModule::registerOn(FE::systems::FESystem& system) const
     const auto& V = *binding.space;
     const auto d_mesh = StateField(d_id, V, "d_mesh");
     const auto psi = TestField(d_id, V, "psi");
-    const auto kappa = FE::forms::bc::toScalarExpr(effective_kappa, "mesh_motion_kappa");
+    const auto kappa = FE::forms::bc::toScalarExpr(options_.kappa, "mesh_motion_kappa");
     // The harmonic operator acts on the displacement or on the mesh velocity.
     const auto q_mesh =
         options_.quantity == HarmonicQuantity::Velocity ? dt(d_mesh) : d_mesh;

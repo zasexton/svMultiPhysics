@@ -47,7 +47,6 @@ struct MeshMotionKeys {
   bool auto_register_field{true};
   bool bind_as_mesh_displacement{true};
   Real kappa{1.0};
-  std::optional<Real> stiffness{};
   mm::HarmonicQuantity harmonic_quantity{mm::HarmonicQuantity::Displacement};
   Real lambda_mesh{1.0};
   Real mu_mesh{1.0};
@@ -104,8 +103,6 @@ const opt::OptionSchema<MeshMotionKeys>& harmonic_mesh_motion_schema()
     opt::OptionSchema<MeshMotionKeys> out("Harmonic mesh motion");
     add_common_mesh_motion_keys(out);
     out.key("Kappa", &MeshMotionKeys::kappa, opt::RealCodec{}, {.empty = opt::EmptyPolicy::Absent, .doc = "kappa"})
-        .key("Stiffness", &MeshMotionKeys::stiffness, opt::OptionalCodec<opt::RealCodec>{},
-             {.doc = "the older name of Kappa (none: unset)"})
         .key("Harmonic_quantity", &MeshMotionKeys::harmonic_quantity,
              opt::EnumCodec<mm::HarmonicQuantity>{
                  {{mm::HarmonicQuantity::Displacement, "displacement", {"mesh_displacement"}},
@@ -401,9 +398,6 @@ create_mesh_motion_from_input(const svmp::Physics::EquationModuleInput& input,
     options.auto_register_field = keys.auto_register_field;
     options.bind_as_mesh_displacement = keys.bind_as_mesh_displacement;
     options.kappa = keys.kappa;
-    if (keys.stiffness) {
-      options.stiffness = mm::HarmonicMeshMotionOptions::ScalarValue{*keys.stiffness};
-    }
     options.quantity = keys.harmonic_quantity;
     apply_mesh_motion_bcs(input, options, dim);
 

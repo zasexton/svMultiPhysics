@@ -154,13 +154,13 @@ Poisson boundary condition 'right': Time_dependence=Steady; Type=Dirichlet; Valu
 Poisson boundary condition 'left': Time_dependence=Steady; Type=Dirichlet; Value=0; Weakly_applied=false; Stiffness=1;
 == tests/cases/fluid/open_vessel_free_surface/fitted_ale/spheric_test10_lateral_water_1x_2d_meshnitsche/solver.xml mesh_motion
 Mesh motion equation: Model=harmonic;
-Harmonic mesh motion: Field_name=mesh_displacement; Auto_register_field=true; Bind_as_mesh_displacement=true; Kappa=1; Stiffness=none; Harmonic_quantity=velocity;
+Harmonic mesh motion: Field_name=mesh_displacement; Auto_register_field=true; Bind_as_mesh_displacement=true; Kappa=1; Harmonic_quantity=velocity;
 Mesh-motion boundary condition 'wall_left': Type=Dirichlet; Value=0; Target=; Effective_direction=1 0; Quantity=displacement; Alpha=none; Penalty=none; Velocity_time_scale=1; Tangential_policy=smoothing_only;
 Mesh-motion boundary condition 'wall_right': Type=Dirichlet; Value=0; Target=; Effective_direction=1 0; Quantity=displacement; Alpha=none; Penalty=none; Velocity_time_scale=1; Tangential_policy=smoothing_only;
 Mesh-motion boundary condition 'wall_bottom': Type=Dirichlet; Value=0; Target=; Effective_direction=0 1; Quantity=displacement; Alpha=none; Penalty=none; Velocity_time_scale=1; Tangential_policy=smoothing_only;
 == tests/cases/fluid/open_vessel_free_surface/fitted_ale/spheric_test10_lateral_water_1x_meshnitsche/solver.xml mesh_motion
 Mesh motion equation: Model=harmonic;
-Harmonic mesh motion: Field_name=mesh_displacement; Auto_register_field=true; Bind_as_mesh_displacement=true; Kappa=1; Stiffness=none; Harmonic_quantity=velocity;
+Harmonic mesh motion: Field_name=mesh_displacement; Auto_register_field=true; Bind_as_mesh_displacement=true; Kappa=1; Harmonic_quantity=velocity;
 Mesh-motion boundary condition 'wall_left': Type=Dirichlet; Value=0; Target=; Effective_direction=1 0 0; Quantity=displacement; Alpha=none; Penalty=none; Velocity_time_scale=1; Tangential_policy=smoothing_only;
 Mesh-motion boundary condition 'wall_right': Type=Dirichlet; Value=0; Target=; Effective_direction=1 0 0; Quantity=displacement; Alpha=none; Penalty=none; Velocity_time_scale=1; Tangential_policy=smoothing_only;
 Mesh-motion boundary condition 'wall_bottom': Type=Dirichlet; Value=0; Target=; Effective_direction=0 1 0; Quantity=displacement; Alpha=none; Penalty=none; Velocity_time_scale=1; Tangential_policy=smoothing_only;

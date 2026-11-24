@@ -247,7 +247,6 @@ bool is_oop_equation_extension_parameter(const std::string& name)
     "Bind_as_mesh_displacement",
     "Kappa",
     "Harmonic_quantity",
-    "Stiffness",
     "Lambda_mesh",
     "Mu_mesh",
     "Element_order",

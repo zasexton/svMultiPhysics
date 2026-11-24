@@ -17,7 +17,6 @@
 #include <array>
 #include <cstdint>
 #include <memory>
-#include <optional>
 #include <string>
 #include <vector>
 
@@ -64,7 +63,6 @@ struct HarmonicMeshMotionOptions {
     std::string field_name{"mesh_displacement"};
     std::string operator_tag{"equations"};
     ScalarValue kappa{ScalarValue{1.0}};
-    std::optional<ScalarValue> stiffness{};
     HarmonicQuantity quantity{HarmonicQuantity::Displacement};
 
     bool auto_register_field{true};
