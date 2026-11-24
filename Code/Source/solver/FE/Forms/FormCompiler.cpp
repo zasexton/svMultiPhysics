@@ -381,6 +381,146 @@ void requireTwoSidedOperatorsOnFacets(const std::vector<IntegralTerm>& terms)
     }
 }
 
+/**
+ * A form is linear in its test function.  Returns the first subexpression of
+ * @p node that is not: a product or contraction whose two factors both hold
+ * the test function (u v v), a quotient with it in the denominator, a power,
+ * comparison, minimum or maximum of it, a condition that reads it, or a
+ * nonlinear scalar or matrix function of it.  Sums, scalings, restrictions,
+ * jump, avg, derivatives, components, selections between test-linear
+ * branches, products with a literal factor 0 and opaque calls (constitutive
+ * laws, directional derivatives) are taken as linear.  @p holds_test memoizes
+ * which subtrees hold a test function.
+ */
+const FormExprNode* findTestNonlinearity(const FormExprNode& node,
+                                         std::unordered_map<const FormExprNode*, bool>& holds_test)
+{
+    const auto holds = [&](const auto& self, const FormExprNode& n) -> bool {
+        if (const auto it = holds_test.find(&n); it != holds_test.end()) {
+            return it->second;
+        }
+        bool found = n.type() == FormExprType::TestFunction;
+        for (const auto* child : n.children()) {
+            if (!found && child != nullptr) {
+                found = self(self, *child);
+            }
+        }
+        holds_test.emplace(&n, found);
+        return found;
+    };
+    if (!holds(holds, node)) {
+        return nullptr;
+    }
+    const auto kids = node.children();
+    const auto kid_holds = [&](std::size_t i) {
+        return i < kids.size() && kids[i] != nullptr && holds(holds, *kids[i]);
+    };
+    // A product with the literal factor 0, such as the installer's
+    // geometry-sensitivity probe 0 * trial * inner(test, test), is zero.
+    const auto literal_zero = [](const auto& self, const FormExprNode* n) -> bool {
+        if (n == nullptr) {
+            return false;
+        }
+        if (n->type() == FormExprType::Constant) {
+            const auto value = n->constantValue();
+            return value.has_value() && *value == Real(0.0);
+        }
+        if (n->type() == FormExprType::Multiply) {
+            const auto factors = n->children();
+            return std::any_of(factors.begin(), factors.end(),
+                               [&](const FormExprNode* f) { return self(self, f); });
+        }
+        return false;
+    };
+    switch (node.type()) {
+        case FormExprType::Multiply:
+        case FormExprType::InnerProduct:
+        case FormExprType::DoubleContraction:
+        case FormExprType::OuterProduct:
+        case FormExprType::CrossProduct:
+            if (node.type() == FormExprType::Multiply && literal_zero(literal_zero, &node)) {
+                return nullptr;
+            }
+            if (kid_holds(0) && kid_holds(1)) {
+                return &node;
+            }
+            break;
+        case FormExprType::Divide:
+            if (kid_holds(1)) {
+                return &node;
+            }
+            break;
+        case FormExprType::Conditional:
+            if (kid_holds(0)) {
+                return &node;
+            }
+            break;
+        case FormExprType::Power:
+        case FormExprType::Minimum:
+        case FormExprType::Maximum:
+        case FormExprType::Less:
+        case FormExprType::LessEqual:
+        case FormExprType::Greater:
+        case FormExprType::GreaterEqual:
+        case FormExprType::Equal:
+        case FormExprType::NotEqual:
+        case FormExprType::AbsoluteValue:
+        case FormExprType::Sign:
+        case FormExprType::Sqrt:
+        case FormExprType::Exp:
+        case FormExprType::Log:
+        case FormExprType::Norm:
+        case FormExprType::Normalize:
+        case FormExprType::Determinant:
+        case FormExprType::Inverse:
+        case FormExprType::Cofactor:
+        case FormExprType::MatrixExponential:
+        case FormExprType::MatrixLogarithm:
+        case FormExprType::MatrixSqrt:
+        case FormExprType::MatrixPower:
+        case FormExprType::SymmetricEigenvalue:
+        case FormExprType::Eigenvalue:
+        case FormExprType::SymmetricEigenvector:
+        case FormExprType::SpectralDecomposition:
+        case FormExprType::SmoothHeaviside:
+        case FormExprType::SmoothAbsoluteValue:
+        case FormExprType::SmoothMin:
+        case FormExprType::SmoothMax:
+        case FormExprType::SmoothSign:
+            return &node;
+        default:
+            break;
+    }
+    for (const auto* child : kids) {
+        if (child != nullptr) {
+            if (const auto* found = findTestNonlinearity(*child, holds_test)) {
+                return found;
+            }
+        }
+    }
+    return nullptr;
+}
+
+/// Refuses an integrand that is not linear in its test function, naming the
+/// term and the offending subexpression.
+void requireLinearInTestFunction(const std::vector<IntegralTerm>& terms)
+{
+    std::unordered_map<const FormExprNode*, bool> holds_test;
+    for (const auto& term : terms) {
+        if (!term.integrand.isValid() || term.integrand.node() == nullptr) {
+            continue;
+        }
+        const auto* found = findTestNonlinearity(*term.integrand.node(), holds_test);
+        if (found == nullptr) {
+            continue;
+        }
+        throw std::invalid_argument(
+            "FormCompiler: the integrand '" + abbreviatedTerm(term.integrand) +
+            "' is not linear in the test function: " + found->toString() +
+            " (a form is linear in its test function; a product holds it in one factor only)");
+    }
+}
+
 void requireSupportedGeometrySensitivityMode(const FormExprNode& node,
                                              const GeometrySensitivityOptions& options)
 {
@@ -1238,6 +1378,7 @@ FormIR FormCompiler::compileImpl(const FormExpr& form, FormKind kind)
     std::vector<IntegralTerm> terms;
     detail::collectIntegralTerms(form, /*sign=*/+1, terms);
     detail::requireTwoSidedOperatorsOnFacets(terms);
+    detail::requireLinearInTestFunction(terms);
 
     const bool form_has_geometry_sensitivity_terminals =
         detail::containsGeometrySensitivityTerminal(*form.node());

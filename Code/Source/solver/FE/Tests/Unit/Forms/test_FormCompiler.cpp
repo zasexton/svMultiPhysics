@@ -227,6 +227,49 @@ TEST(FormCompilerTest, CompileResidualRequiresTrialAndTest)
     EXPECT_THROW((void)compiler.compileResidual(v.dx()), std::invalid_argument);
 }
 
+/**
+ * A form is linear in its test function.  (u v v).dx() is nonlinear in the
+ * single test function v and is refused with an error that names the term and
+ * the subexpression; so are a test function in a denominator and a nonlinear
+ * function of it.  Nonlinear dependence on the unknown, a selection between
+ * test-linear branches and linear operators of v stay valid.
+ */
+TEST(FormCompilerTest, RefusesAFormNonlinearInItsTestFunction)
+{
+    FormCompiler compiler;
+    spaces::H1Space space(ElementType::Tetra4, 1);
+    const auto u = FormExpr::trialFunction(space, "u");
+    const auto v = FormExpr::testFunction(space, "v");
+
+    const auto refusal = [&](const FormExpr& form) -> std::string {
+        try {
+            (void)compiler.compileResidual(form);
+        } catch (const std::invalid_argument& e) {
+            return e.what();
+        }
+        return {};
+    };
+
+    const auto quadratic = refusal((u * v * v).dx());
+    EXPECT_NE(quadratic.find("not linear in the test function"), std::string::npos) << quadratic;
+    EXPECT_NE(quadratic.find("(u * v) * v"), std::string::npos) << quadratic;
+    EXPECT_NE(refusal((inner(grad(v), grad(v)) * u).dx()).find("not linear in the test function"),
+              std::string::npos);
+    EXPECT_NE(refusal((u / v).dx()).find("not linear in the test function"), std::string::npos);
+    EXPECT_NE(refusal((sqrt(v * v) * u).dx()).find("not linear in the test function"), std::string::npos);
+    EXPECT_NE(refusal((conditional(gt(v, FormExpr::constant(0.0)), u, u * u) * u).ds(1))
+                  .find("not linear in the test function"),
+              std::string::npos);
+
+    EXPECT_NO_THROW((void)compiler.compileResidual((u * u * v + inner(grad(u), grad(v))).dx()));
+    EXPECT_NO_THROW((void)compiler.compileResidual(
+        (conditional(gt(u, FormExpr::constant(0.0)), v, FormExpr::constant(2.0) * v) * u).dx()));
+    EXPECT_NO_THROW((void)compiler.compileResidual((u * v / (FormExpr::constant(1.0) + u * u)).dx()));
+    // The installer's geometry-sensitivity probe: a product with the factor 0.
+    EXPECT_NO_THROW((void)compiler.compileResidual(
+        (u * v + FormExpr::constant(0.0) * u * inner(grad(v), grad(v))).dx()));
+}
+
 TEST(FormCompilerTest, CompileImplRejectsUnresolvedCoupledAndAuxiliaryPlaceholders)
 {
     FormCompiler compiler;
