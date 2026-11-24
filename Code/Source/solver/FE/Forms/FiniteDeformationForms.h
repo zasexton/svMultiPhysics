@@ -88,11 +88,6 @@ struct FiniteDeformationLinearizationExpressions {
     return grad(variation);
 }
 
-[[nodiscard]] inline FormExpr jacobian(const FormExpr& F)
-{
-    return det(F);
-}
-
 [[nodiscard]] inline FormExpr inverseDeformationGradient(const FormExpr& F)
 {
     return inv(F);
@@ -129,7 +124,7 @@ struct FiniteDeformationLinearizationExpressions {
     FiniteDeformationExpressions out;
     const int d = finiteDeformationDimension(displacement, dim);
     out.F = deformationGradient(displacement, d);
-    out.J = jacobian(out.F);
+    out.J = det(out.F);
     out.Finv = inverseDeformationGradient(out.F);
     out.FinvT = transpose(out.Finv);
     out.C = rightCauchyGreen(out.F);

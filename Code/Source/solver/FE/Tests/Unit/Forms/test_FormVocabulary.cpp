@@ -884,7 +884,7 @@ TEST(FormVocabularyTest, RequiredDataInferenceIncludesGeometryAndMeasures)
     const auto ir_x = compiler.compileLinear((component(x(), 0) * v).dx());
     EXPECT_TRUE(assembly::hasFlag(ir_x.requiredData(), assembly::RequiredData::PhysicalPoints));
 
-    const auto ir_X = compiler.compileLinear((component(X(), 0) * v).dx());
+    const auto ir_X = compiler.compileLinear((component(referenceCellCoordinate(), 0) * v).dx());
     EXPECT_TRUE(assembly::hasFlag(ir_X.requiredData(), assembly::RequiredData::QuadraturePoints));
 
     const auto ir_J = compiler.compileLinear((trace(J()) * v).dx());
@@ -936,7 +936,7 @@ TEST(FormVocabularyTest, RequiredDataInferenceIncludesGeometryAndMeasures)
                          assembly::RequiredData::PredictedMeshVelocity,
                          assembly::RequiredData::PredictedMeshVelocityGradient);
     require_linear_flag(component(currentCoordinate(), 0), assembly::RequiredData::CurrentPhysicalPoints);
-    require_linear_flag(component(referenceCoordinatePhysical(), 0), assembly::RequiredData::ReferencePhysicalPoints);
+    require_linear_flag(component(referencePosition(), 0), assembly::RequiredData::ReferencePhysicalPoints);
     require_linear_flag(component(currentJacobian(), 0, 0), assembly::RequiredData::CurrentJacobians);
     require_linear_flag(component(referenceJacobian(), 0, 0), assembly::RequiredData::ReferenceJacobians);
     require_linear_flag(currentJacobianDeterminant(), assembly::RequiredData::CurrentJacobians);
@@ -1051,7 +1051,7 @@ TEST(FormVocabularyTest, MovingDomainCoordinateTerminalsUseExplicitFrames)
     auto dof_map = createSingleTetraDofMap();
     spaces::H1Space space(ElementType::Tetra4, 1);
 
-    const auto dx0 = component(currentCoordinate() - referenceCoordinatePhysical(), 0);
+    const auto dx0 = component(currentCoordinate() - referencePosition(), 0);
     auto vec = assembleCellLinear(dx0, dof_map, mesh, space);
 
     const Real expected_entry = mesh.translation()[0] * singleTetraP1BasisIntegral();
@@ -1076,7 +1076,7 @@ TEST(FormVocabularyTest, MovingDomainCoordinateTerminalsMatchInterpreterAndJIT)
 
     FormCompiler compiler;
     const auto v = FormExpr::testFunction(space, "v");
-    const auto scalar = component(currentCoordinate() - referenceCoordinatePhysical(), 0);
+    const auto scalar = component(currentCoordinate() - referencePosition(), 0);
     const auto form = (scalar * v).dx();
 
     auto interp_kernel = std::make_shared<FormKernel>(compiler.compileLinear(form));
@@ -1123,7 +1123,7 @@ TEST(FormVocabularyTest, MovingDomainVolumeTerminalsMatchInterpreterAndJIT)
         component(meshVelocity(), 1) +
         component(meshAcceleration(), 2) +
         div(meshVelocity()) +
-        component(currentCoordinate() - referenceCoordinatePhysical(), 0) +
+        component(currentCoordinate() - referencePosition(), 0) +
         trace(currentJacobian() - referenceJacobian()) +
         currentJacobianDeterminant() +
         referenceJacobianDeterminant() +
@@ -1290,7 +1290,7 @@ TEST(FormVocabularyTest, MovingDomainGeometryTerminalsAreADConstants)
     FormCompiler compiler;
     const auto u = FormExpr::trialFunction(space, "u");
     const auto v = FormExpr::testFunction(space, "v");
-    const auto scalar = component(currentCoordinate() - referenceCoordinatePhysical(), 0);
+    const auto scalar = component(currentCoordinate() - referencePosition(), 0);
     auto ir = compiler.compileResidual((scalar * u * v).dx());
     NonlinearFormKernel kernel(std::move(ir), ADMode::Forward);
 

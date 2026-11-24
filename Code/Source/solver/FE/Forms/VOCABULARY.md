@@ -245,10 +245,10 @@ Status: `implemented/public`, unless noted.
 | Vocabulary | Notes |
 |------------|-------|
 | `x()` | Active physical coordinate; preserves legacy active-coordinate behavior |
-| `X()` | Reference-cell quadrature coordinate, not a physical material coordinate |
+| `referenceCellCoordinate()` | Reference-cell quadrature coordinate, not a physical material coordinate |
 | `currentCoordinate()` | Current physical coordinate |
 | `previousCoordinate()` | Previous physical coordinate when bound |
-| `referenceCoordinatePhysical()` | Physical reference-configuration coordinate |
+| `referencePosition()` | Position in the reference configuration (x = X + d on a moving domain) |
 | `meshDisplacement()` | Mesh displacement at quadrature points |
 | `meshVelocity()` | Mesh velocity at quadrature points |
 | `meshAcceleration()` | Mesh acceleration when bound |
@@ -981,7 +981,6 @@ Status: `implemented/public` helper header, namespace
 | `deformationGradient(u[, dim])` | `F = I + grad(u)` |
 | `deformationGradientVariation(du)` | Variation of `F` |
 | `finiteDeformationDimension(u[, dim])` | `dim` when given (1, 2 or 3), otherwise the topological dimension of `u`'s space; throws for another `dim` and, without one, when `u` is not a field symbol |
-| `jacobian(F)` | `det(F)` helper in finite-deformation namespace |
 | `inverseDeformationGradient(F)` | `F^{-1}` |
 | `inverseTransposeDeformationGradient(F)` | `F^{-T}` |
 | `rightCauchyGreen(F)`, `leftCauchyGreen(F)` | `C` and `b` |

@@ -1852,7 +1852,8 @@ std::vector<FormExpr> TestFunctions(const MixedSpace& W);
 
 // === Geometry Shortcuts ===
 FormExpr x();           // Physical coordinate
-FormExpr X();           // Reference coordinate
+FormExpr referenceCellCoordinate();  // Reference-cell (quadrature) coordinate
+FormExpr referencePosition();        // Reference-configuration position
 FormExpr t();           // Time
 FormExpr deltat();      // Time step
 FormExpr deltat_eff();  // Effective time step (for multi-stage methods)

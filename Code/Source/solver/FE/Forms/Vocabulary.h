@@ -292,10 +292,12 @@ inline std::vector<FormExpr> TestFunctions(const spaces::MixedSpace& W,
 // ---------------------------------------------------------------------------
 
 inline FormExpr x() { return FormExpr::coordinate(); }
-inline FormExpr X() { return FormExpr::referenceCoordinate(); }
+/// The reference-cell coordinate of the quadrature point (xi), not a material position.
+inline FormExpr referenceCellCoordinate() { return FormExpr::referenceCoordinate(); }
 inline FormExpr currentCoordinate() { return FormExpr::currentCoordinate(); }
 inline FormExpr previousCoordinate() { return FormExpr::previousCoordinate(); }
-inline FormExpr referenceCoordinatePhysical() { return FormExpr::referenceCoordinatePhysical(); }
+/// The position X of the point in the reference configuration (x = X + d on a moving domain).
+inline FormExpr referencePosition() { return FormExpr::referenceCoordinatePhysical(); }
 inline FormExpr meshDisplacement() { return FormExpr::meshDisplacement(); }
 inline FormExpr meshVelocity() { return FormExpr::meshVelocity(); }
 inline FormExpr meshAcceleration() { return FormExpr::meshAcceleration(); }
