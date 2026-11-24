@@ -4684,6 +4684,8 @@ std::uint64_t collectiveConstraintSemanticsKey(
 struct StaticCapillaryPressureCertificate {
   svmp::FE::timestepping::NewtonReport report{};
   std::vector<svmp::FE::Real> certified_solution{};
+  // The probed certificate; its results are reached through it.
+  std::shared_ptr<svmp::FE::analysis::ConstraintRangeCertificate> certificate{};
 };
 
 // The probe is one Newton step on a copy of the candidate.  A monolithic
@@ -4760,33 +4762,20 @@ evaluateStaticCapillaryPressureCertificate(
   };
 
   try {
-    svmp::FE::timestepping::NewtonOptions options;
-    options.residual_op = "equations";
-    options.jacobian_op = "equations";
-    options.max_iterations = 1;
-    options.min_iterations = 0;
-    options.abs_tolerance =
-        std::numeric_limits<double>::max();
-    options.rel_tolerance = 0.0;
-    options.step_tolerance = 0.0;
-    options.use_line_search = false;
-    options.assemble_both_when_possible = false;
-    options.initial_residual_only_certificate =
-        !initialize_compatible_pressure;
-    options.external_state_fixed_point.enabled = false;
-    options.extensions.observers =
-        svmp::FE::analysis::environmentResidualObservers();
     // The probe's own certificate: the deck's range threshold, no
     // environment gates, the initializer on request.
-    svmp::FE::analysis::installConstraintRangeCertificate(
-        options.extensions,
+    auto certificate =
         std::make_shared<svmp::FE::analysis::ConstraintRangeCertificate>(
             svmp::FE::analysis::ConstraintRangeMethod{
                 .max_range_distance = static_cast<double>(
                     certificate_options
                         .pressure_representability_max_relative_distance),
                 .initialize_constraint_field =
-                    initialize_compatible_pressure}));
+                    initialize_compatible_pressure});
+    auto options = svmp::FE::analysis::constraintRangeProbeOptions(
+        "equations",
+        certificate,
+        svmp::FE::analysis::environmentResidualObservers());
 
     PdeVelocityExtensionCaches probe_pde_extension_caches;
     bool probe_extension_maps_refreshed = false;
@@ -4868,6 +4857,7 @@ evaluateStaticCapillaryPressureCertificate(
     return StaticCapillaryPressureCertificate{
         .report = std::move(report),
         .certified_solution = std::move(certified_solution),
+        .certificate = std::move(certificate),
     };
   } catch (...) {
     const auto failure = std::current_exception();
@@ -5874,259 +5864,91 @@ bool initializeDiscreteStaticCapillaryEquilibrium(
                 "pressure_certificate_solution_is_invalid";
             return evaluation;
           }
-          if (globalAnyBool(
-                  !std::isfinite(report.residual_norm),
-                  comm)) {
+          // The certificate checks that its evidence is finite and the
+          // same on every rank; a constant pressure is a physical mode of
+          // the static cap at zero gravity.
+          const auto evidence = certificate.certificate->probeEvidence(
+              report,
+              system,
+              /*constant_field_is_physical=*/gravitational_acceleration_is_zero,
+              /*distinct_field=*/level_set_field);
+          using Defect =
+              svmp::FE::analysis::ConstraintRangeProbeEvidence::Defect;
+          switch (evidence.defect) {
+          case Defect::None:
+            break;
+          case Defect::ProductionResidualNonfinite:
             evaluation.success = false;
             evaluation.diagnostic =
                 "pressure_certificate_production_residual_is_nonfinite";
             return evaluation;
-          }
-          if (globalMinDouble(report.residual_norm, comm) !=
-              globalMaxDouble(report.residual_norm, comm)) {
+          case Defect::ProductionResidualDiffersAcrossRanks:
             evaluation.success = false;
             evaluation.diagnostic =
                 "pressure_certificate_production_residual_differs_across_communicator";
             return evaluation;
-          }
-          const bool local_kkt_scalar_invalid =
-              report.constant_pressure_kkt_available &&
-              (!std::isfinite(
-                   report
-                       .constant_pressure_kkt_residual_norm) ||
-               !std::isfinite(
-                   report
-                       .constant_pressure_kkt_relative_distance) ||
-               !std::isfinite(
-                   report.constant_pressure_kkt_pressure_jump) ||
-               !std::isfinite(
-                   report
-                       .constant_pressure_kkt_volume_multiplier));
-          if (globalAnyBool(
-                  local_kkt_scalar_invalid, comm)) {
+          case Defect::ConstantFieldKktNonfinite:
             evaluation.success = false;
             evaluation.diagnostic =
                 "pressure_certificate_constant_kkt_scalar_is_nonfinite";
             return evaluation;
-          }
-          const bool local_diagnostic_sampled =
-              report
-                  .pressure_representability_diagnostic_sampled;
-          const bool local_pressure_available =
-              local_diagnostic_sampled &&
-              report.pressure_representability_available;
-          const bool local_pressure_field_invalid =
-              local_pressure_available &&
-              (report.pressure_representability_pressure_field ==
-                   svmp::FE::INVALID_FIELD_ID ||
-               report.pressure_representability_pressure_field ==
-                   level_set_field);
-          if (globalAnyBool(local_pressure_field_invalid, comm)) {
+          case Defect::ConstraintFieldInvalid:
             evaluation.success = false;
             evaluation.diagnostic =
                 "pressure_certificate_field_is_invalid";
             return evaluation;
-          }
-          const bool local_pressure_scalar_invalid =
-              local_pressure_available &&
-              (!std::isfinite(
-                   report.pressure_representability_residual_norm) ||
-               !std::isfinite(
-                   report.pressure_representability_relative_distance));
-          if (globalAnyBool(
-                  local_pressure_scalar_invalid, comm)) {
+          case Defect::RangeNonfinite:
             evaluation.success = false;
             evaluation.diagnostic =
                 "pressure_certificate_representability_scalar_is_nonfinite";
             return evaluation;
-          }
-          const bool local_kkt_available =
-              local_diagnostic_sampled &&
-              report.constant_pressure_kkt_available;
-          const bool diagnostic_sampled_identical =
-              globalMinDouble(
-                  local_diagnostic_sampled ? 1.0 : 0.0,
-                  comm) ==
-              globalMaxDouble(
-                  local_diagnostic_sampled ? 1.0 : 0.0,
-                  comm);
-          const bool pressure_available_identical =
-              globalMinDouble(
-                  local_pressure_available ? 1.0 : 0.0,
-                  comm) ==
-              globalMaxDouble(
-                  local_pressure_available ? 1.0 : 0.0,
-                  comm);
-          const bool pressure_field_identical =
-              globalMinDouble(
-                  static_cast<double>(
-                      report.pressure_representability_pressure_field),
-                  comm) ==
-              globalMaxDouble(
-                  static_cast<double>(
-                      report.pressure_representability_pressure_field),
-                  comm);
-          const bool kkt_available_identical =
-              globalMinDouble(
-                  local_kkt_available ? 1.0 : 0.0,
-                  comm) ==
-              globalMaxDouble(
-                  local_kkt_available ? 1.0 : 0.0,
-                  comm);
-          const bool pressure_convergence_identical =
-              globalMinDouble(
-                  report.pressure_representability_converged ? 1.0 : 0.0,
-                  comm) ==
-                  globalMaxDouble(
-                      report.pressure_representability_converged ? 1.0 : 0.0,
-                      comm) &&
-              globalMinDouble(
-                  report.pressure_representability_breakdown ? 1.0 : 0.0,
-                  comm) ==
-                  globalMaxDouble(
-                      report.pressure_representability_breakdown ? 1.0 : 0.0,
-                      comm);
-          const bool constant_pressure_trace_flags_identical =
-              globalMinDouble(
-                  report
-                          .constant_pressure_unit_coefficients_represent_constant
-                      ? 1.0
-                      : 0.0,
-                  comm) ==
-                  globalMaxDouble(
-                      report
-                              .constant_pressure_unit_coefficients_represent_constant
-                          ? 1.0
-                          : 0.0,
-                      comm) &&
-              globalMinDouble(
-                  report.constant_pressure_constraints_preserve_constants
-                      ? 1.0
-                      : 0.0,
-                  comm) ==
-                  globalMaxDouble(
-                      report.constant_pressure_constraints_preserve_constants
-                          ? 1.0
-                          : 0.0,
-                      comm);
-          if (!diagnostic_sampled_identical ||
-              !pressure_available_identical ||
-              !pressure_field_identical ||
-              !kkt_available_identical ||
-              !pressure_convergence_identical ||
-              !constant_pressure_trace_flags_identical) {
+          case Defect::AvailabilityDiffersAcrossRanks:
             evaluation.success = false;
             evaluation.diagnostic =
                 "pressure_certificate_availability_differs_across_communicator";
             return evaluation;
-          }
-          if (local_pressure_available) {
-            const bool pressure_scalars_identical =
-                globalMinDouble(
-                    report.pressure_representability_residual_norm,
-                    comm) ==
-                    globalMaxDouble(
-                        report.pressure_representability_residual_norm,
-                        comm) &&
-                globalMinDouble(
-                    report.pressure_representability_relative_distance,
-                    comm) ==
-                    globalMaxDouble(
-                        report.pressure_representability_relative_distance,
-                        comm);
-            if (!pressure_scalars_identical) {
-              evaluation.success = false;
-              evaluation.diagnostic =
-                  "pressure_certificate_representability_scalars_differ_across_communicator";
-              return evaluation;
-            }
-          }
-          if (local_kkt_available) {
-            const bool kkt_scalars_identical =
-                globalMinDouble(
-                    report
-                        .constant_pressure_kkt_residual_norm,
-                    comm) ==
-                    globalMaxDouble(
-                        report
-                            .constant_pressure_kkt_residual_norm,
-                        comm) &&
-                globalMinDouble(
-                    report
-                        .constant_pressure_kkt_relative_distance,
-                    comm) ==
-                    globalMaxDouble(
-                        report
-                            .constant_pressure_kkt_relative_distance,
-                        comm) &&
-                globalMinDouble(
-                    report
-                        .constant_pressure_kkt_pressure_jump,
-                    comm) ==
-                    globalMaxDouble(
-                        report
-                            .constant_pressure_kkt_pressure_jump,
-                        comm) &&
-                globalMinDouble(
-                    report
-                        .constant_pressure_kkt_volume_multiplier,
-                    comm) ==
-                    globalMaxDouble(
-                        report
-                            .constant_pressure_kkt_volume_multiplier,
-                        comm);
-            if (!kkt_scalars_identical) {
-              evaluation.success = false;
-              evaluation.diagnostic =
-                  "pressure_certificate_constant_kkt_scalars_differ_across_communicator";
-              return evaluation;
-            }
+          case Defect::RangeDiffersAcrossRanks:
+            evaluation.success = false;
+            evaluation.diagnostic =
+                "pressure_certificate_representability_scalars_differ_across_communicator";
+            return evaluation;
+          case Defect::ConstantFieldKktDiffersAcrossRanks:
+            evaluation.success = false;
+            evaluation.diagnostic =
+                "pressure_certificate_constant_kkt_scalars_differ_across_communicator";
+            return evaluation;
           }
           auto& pressure_certificate =
               evaluation.checks[kStaticCapillaryPressureRepresentability];
-          pressure_certificate.available = local_pressure_available;
-          pressure_certificate.converged =
-              local_pressure_available &&
-              report.pressure_representability_converged;
-          pressure_certificate.breakdown =
-              local_pressure_available &&
-              report.pressure_representability_breakdown;
+          pressure_certificate.available = evidence.range_available;
+          pressure_certificate.converged = evidence.range_converged;
+          pressure_certificate.breakdown = evidence.range_breakdown;
           pressure_certificate.values = {
-              static_cast<svmp::FE::Real>(
-                  report.pressure_representability_residual_norm),
-              static_cast<svmp::FE::Real>(
-                  report.pressure_representability_relative_distance)};
+              static_cast<svmp::FE::Real>(evidence.range_residual_norm),
+              static_cast<svmp::FE::Real>(evidence.range_relative_distance)};
           evaluation.checks[kStaticCapillaryPhysicalEquilibrium].values = {
-              static_cast<svmp::FE::Real>(report.residual_norm)};
+              static_cast<svmp::FE::Real>(evidence.production_residual_norm)};
           auto& kkt_certificate =
               evaluation.checks[kStaticCapillaryConstantPressureKkt];
-          kkt_certificate.required =
-              gravitational_acceleration_is_zero &&
-              report
-                  .constant_pressure_unit_coefficients_represent_constant &&
-              report.constant_pressure_constraints_preserve_constants;
-          kkt_certificate.available = local_kkt_available;
+          kkt_certificate.required = evidence.constant_field_kkt_required;
+          kkt_certificate.available = evidence.constant_field_kkt_available;
           kkt_certificate.values = {
               static_cast<svmp::FE::Real>(
-                  report
-                      .constant_pressure_kkt_residual_norm),
+                  evidence.constant_field_kkt_residual_norm),
               static_cast<svmp::FE::Real>(
-                  report
-                      .constant_pressure_kkt_relative_distance)};
+                  evidence.constant_field_kkt_relative_distance)};
           evaluation.diagnostic =
-              local_pressure_available
+              evidence.range_available
                   ? "acceptance_certificate_available"
                   : "acceptance_certificate_pressure_unavailable:" +
-                        report.pressure_representability_reason;
-          certified_constant_pressure_jump =
-              report.constant_pressure_kkt_pressure_jump;
+                        evidence.range_reason;
+          certified_constant_pressure_jump = evidence.constant_field_jump;
           certified_constant_pressure_volume_multiplier =
-              report
-                  .constant_pressure_kkt_volume_multiplier;
+              evidence.constant_field_multiplier;
           certified_constant_pressure_multiplier_comparison_available =
-              local_kkt_available && kkt_certificate.required;
-          certified_pressure_field =
-              report.pressure_representability_pressure_field;
+              evidence.constant_field_kkt_available &&
+              evidence.constant_field_kkt_required;
+          certified_pressure_field = evidence.constraint_field;
           certified_solution =
               std::move(certificate.certified_solution);
         }

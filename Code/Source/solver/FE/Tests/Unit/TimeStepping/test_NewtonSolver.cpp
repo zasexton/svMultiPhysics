@@ -9067,6 +9067,13 @@ TEST(NewtonSolver,
     EXPECT_FALSE(report.pressure_representability_distance_gate_passed);
     EXPECT_EQ(report.pressure_representability_reason,
               "nonzero_pressure_constraint_inhomogeneity");
+    // The veto is one decision, for missing evidence.
+    ASSERT_EQ(report.certificates.size(), 1u);
+    EXPECT_EQ(report.certificates.front().id, "constraint_range.range_distance");
+    EXPECT_EQ(report.certificates.front().status,
+              svmp::FE::timestepping::CertificateStatus::Unavailable);
+    EXPECT_EQ(report.certificates.front().reason, "diagnostic_unavailable");
+    EXPECT_EQ(report.certificates.front().threshold, 0.5);
     EXPECT_NE(telemetry.find("reason=diagnostic_unavailable"),
               std::string::npos);
     EXPECT_NE(
@@ -9078,6 +9085,72 @@ TEST(NewtonSolver,
     RecordProperty(
         "pressure_representability_distance_gate_unavailable_reject_count",
         1);
+}
+
+TEST(NewtonSolver, ConstraintRangeProbeReportsFiniteRankUniformEvidence)
+{
+#if !defined(FE_HAS_EIGEN) || !FE_HAS_EIGEN
+    GTEST_SKIP() << "NewtonSolver tests require the Eigen backend (enable FE_ENABLE_EIGEN)";
+#endif
+    FreeSurfaceConservativeBalanceKernelCounts diagnostic_counts;
+    auto problem = makePressureRepresentabilityProblem(diagnostic_counts);
+    const auto entry_state = ts_test::getVectorByDof(problem.history.u());
+
+    auto certificate =
+        std::make_shared<svmp::FE::analysis::ConstraintRangeCertificate>(
+            svmp::FE::analysis::ConstraintRangeMethod{.max_range_distance = 0.5});
+    // The probe observes the supplied state and changes nothing.
+    auto options = svmp::FE::analysis::constraintRangeProbeOptions("op", certificate, {});
+    EXPECT_TRUE(options.initial_residual_only_certificate);
+    EXPECT_EQ(options.max_iterations, 1);
+    EXPECT_FALSE(options.use_line_search);
+    EXPECT_EQ(options.extensions.acceptance_checks.size(), 1u);
+    svmp::FE::timestepping::NewtonSolver probe(options);
+    svmp::FE::timestepping::NewtonWorkspace workspace;
+    probe.allocateWorkspace(*problem.sys, *problem.factory, workspace);
+    problem.history.repack(*problem.factory);
+    testing::internal::CaptureStdout();
+    testing::internal::CaptureStderr();
+    const auto report = probe.solveStep(
+        *problem.transient,
+        *problem.linear,
+        /*solve_time=*/problem.history.dt(),
+        problem.history,
+        workspace);
+    (void)testing::internal::GetCapturedStdout();
+    (void)testing::internal::GetCapturedStderr();
+    EXPECT_EQ(ts_test::getVectorByDof(problem.history.u()), entry_state);
+    ASSERT_TRUE(report.pressure_representability_available);
+
+    using Defect = svmp::FE::analysis::ConstraintRangeProbeEvidence::Defect;
+    const auto evidence = certificate->probeEvidence(
+        report, *problem.sys, /*constant_field_is_physical=*/true,
+        /*distinct_field=*/svmp::FE::INVALID_FIELD_ID);
+    EXPECT_EQ(evidence.defect, Defect::None);
+    EXPECT_TRUE(evidence.range_available);
+    EXPECT_EQ(evidence.constraint_field, problem.pressure_field);
+    EXPECT_EQ(evidence.range_relative_distance,
+              report.pressure_representability_relative_distance);
+    EXPECT_EQ(evidence.production_residual_norm, report.residual_norm);
+    EXPECT_EQ(evidence.constant_field_kkt_required,
+              report.constant_pressure_unit_coefficients_represent_constant &&
+                  report.constant_pressure_constraints_preserve_constants);
+    EXPECT_FALSE(certificate
+                     ->probeEvidence(report, *problem.sys,
+                                     /*constant_field_is_physical=*/false,
+                                     svmp::FE::INVALID_FIELD_ID)
+                     .constant_field_kkt_required);
+    // The constraint field must differ from the named field.
+    EXPECT_EQ(certificate
+                  ->probeEvidence(report, *problem.sys, true, problem.pressure_field)
+                  .defect,
+              Defect::ConstraintFieldInvalid);
+    auto nonfinite = report;
+    nonfinite.residual_norm = std::numeric_limits<double>::quiet_NaN();
+    EXPECT_EQ(certificate->probeEvidence(nonfinite, *problem.sys, true,
+                                         svmp::FE::INVALID_FIELD_ID)
+                  .defect,
+              Defect::ProductionResidualNonfinite);
 }
 
 TEST(NewtonSolver,
@@ -10069,6 +10142,15 @@ TEST(NewtonSolver,
         retry_report.pressure_representability_distance_gate_passed);
     EXPECT_TRUE(retry_report.constant_pressure_kkt_distance_gate_applied);
     EXPECT_TRUE(retry_report.constant_pressure_kkt_distance_gate_passed);
+    // The outer acceptance recorded both decisions of the certificate.
+    ASSERT_EQ(retry_report.certificates.size(), 2u);
+    EXPECT_EQ(retry_report.certificates[0].id, "constraint_range.range_distance");
+    EXPECT_EQ(retry_report.certificates[1].id,
+              "constraint_range.constant_field_kkt_distance");
+    for (const auto& decision : retry_report.certificates) {
+        EXPECT_EQ(decision.status, svmp::FE::timestepping::CertificateStatus::Passed);
+        EXPECT_EQ(decision.reason, "within_threshold");
+    }
     EXPECT_TRUE(workspace.initializer_ledger.isConsumed(0));
     ASSERT_GE(outer_entry_initializer_states.size(), 4u);
     EXPECT_FALSE(outer_entry_initializer_states[0]);

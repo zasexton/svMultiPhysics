@@ -21,6 +21,7 @@
 #include "Interfaces/FreeSurfaceGeometrySnapshot.h"
 #include "Spaces/FunctionSpace.h"
 #include "Systems/FESystem.h"
+#include "Systems/SystemCollectives.h"
 #include "Systems/SystemsExceptions.h"
 #include "Systems/TransientSystem.h"
 
@@ -2935,6 +2936,145 @@ void installConstraintRangeCertificate(timestepping::NewtonExtensions& extension
     extensions.observers.push_back(certificate);
     extensions.acceptance_checks.push_back(certificate);
     extensions.initializers.push_back(certificate);
+}
+
+ConstraintRangeProbeEvidence ConstraintRangeCertificate::probeEvidence(
+    const timestepping::NewtonReport& report,
+    const systems::FESystem& system,
+    bool constant_field_is_physical,
+    FieldId distinct_field) const
+{
+    using Defect = ConstraintRangeProbeEvidence::Defect;
+#if FE_HAS_MPI
+    const systems::CollectiveCommunicator comm(system.activeMpiCommunicator());
+#else
+    (void)system;
+    const systems::CollectiveCommunicator comm{};
+#endif
+    const auto any_rank = [&](bool local) { return systems::collectiveAnyTrue(local, comm); };
+    const auto identical = [&](double local) {
+        return systems::collectiveMinDouble(local, comm) ==
+               systems::collectiveMaxDouble(local, comm);
+    };
+    const auto flag = [](bool value) { return value ? 1.0 : 0.0; };
+
+    ConstraintRangeProbeEvidence evidence;
+    evidence.production_residual_norm = report.residual_norm;
+    const auto fail = [&](Defect defect) {
+        evidence.defect = defect;
+        return evidence;
+    };
+
+    if (any_rank(!std::isfinite(report.residual_norm))) {
+        return fail(Defect::ProductionResidualNonfinite);
+    }
+    if (!identical(report.residual_norm)) {
+        return fail(Defect::ProductionResidualDiffersAcrossRanks);
+    }
+    const bool local_kkt_scalar_invalid =
+        report.constant_pressure_kkt_available &&
+        (!std::isfinite(report.constant_pressure_kkt_residual_norm) ||
+         !std::isfinite(report.constant_pressure_kkt_relative_distance) ||
+         !std::isfinite(report.constant_pressure_kkt_pressure_jump) ||
+         !std::isfinite(report.constant_pressure_kkt_volume_multiplier));
+    if (any_rank(local_kkt_scalar_invalid)) {
+        return fail(Defect::ConstantFieldKktNonfinite);
+    }
+    const bool local_sampled = report.pressure_representability_diagnostic_sampled;
+    const bool local_range_available =
+        local_sampled && report.pressure_representability_available;
+    const bool local_field_invalid =
+        local_range_available &&
+        (report.pressure_representability_pressure_field == INVALID_FIELD_ID ||
+         report.pressure_representability_pressure_field == distinct_field);
+    if (any_rank(local_field_invalid)) {
+        return fail(Defect::ConstraintFieldInvalid);
+    }
+    const bool local_range_scalar_invalid =
+        local_range_available &&
+        (!std::isfinite(report.pressure_representability_residual_norm) ||
+         !std::isfinite(report.pressure_representability_relative_distance));
+    if (any_rank(local_range_scalar_invalid)) {
+        return fail(Defect::RangeNonfinite);
+    }
+    const bool local_kkt_available = local_sampled && report.constant_pressure_kkt_available;
+    const bool sampled_identical = identical(flag(local_sampled));
+    const bool range_available_identical = identical(flag(local_range_available));
+    const bool field_identical =
+        identical(static_cast<double>(report.pressure_representability_pressure_field));
+    const bool kkt_available_identical = identical(flag(local_kkt_available));
+    const bool range_convergence_identical =
+        identical(flag(report.pressure_representability_converged)) &&
+        identical(flag(report.pressure_representability_breakdown));
+    const bool constant_trace_flags_identical =
+        identical(flag(report.constant_pressure_unit_coefficients_represent_constant)) &&
+        identical(flag(report.constant_pressure_constraints_preserve_constants));
+    if (!sampled_identical || !range_available_identical || !field_identical ||
+        !kkt_available_identical || !range_convergence_identical ||
+        !constant_trace_flags_identical) {
+        return fail(Defect::AvailabilityDiffersAcrossRanks);
+    }
+    if (local_range_available) {
+        const bool range_scalars_identical =
+            identical(report.pressure_representability_residual_norm) &&
+            identical(report.pressure_representability_relative_distance);
+        if (!range_scalars_identical) {
+            return fail(Defect::RangeDiffersAcrossRanks);
+        }
+    }
+    if (local_kkt_available) {
+        const bool kkt_scalars_identical =
+            identical(report.constant_pressure_kkt_residual_norm) &&
+            identical(report.constant_pressure_kkt_relative_distance) &&
+            identical(report.constant_pressure_kkt_pressure_jump) &&
+            identical(report.constant_pressure_kkt_volume_multiplier);
+        if (!kkt_scalars_identical) {
+            return fail(Defect::ConstantFieldKktDiffersAcrossRanks);
+        }
+    }
+
+    evidence.range_available = local_range_available;
+    evidence.range_converged =
+        local_range_available && report.pressure_representability_converged;
+    evidence.range_breakdown =
+        local_range_available && report.pressure_representability_breakdown;
+    evidence.range_residual_norm = report.pressure_representability_residual_norm;
+    evidence.range_relative_distance = report.pressure_representability_relative_distance;
+    evidence.range_reason = report.pressure_representability_reason;
+    evidence.constraint_field = report.pressure_representability_pressure_field;
+    evidence.constant_field_kkt_required =
+        constant_field_is_physical &&
+        report.constant_pressure_unit_coefficients_represent_constant &&
+        report.constant_pressure_constraints_preserve_constants;
+    evidence.constant_field_kkt_available = local_kkt_available;
+    evidence.constant_field_kkt_residual_norm = report.constant_pressure_kkt_residual_norm;
+    evidence.constant_field_kkt_relative_distance = report.constant_pressure_kkt_relative_distance;
+    evidence.constant_field_jump = report.constant_pressure_kkt_pressure_jump;
+    evidence.constant_field_multiplier = report.constant_pressure_kkt_volume_multiplier;
+    return evidence;
+}
+
+timestepping::NewtonOptions constraintRangeProbeOptions(
+    const systems::OperatorTag& op,
+    const std::shared_ptr<ConstraintRangeCertificate>& certificate,
+    std::vector<std::shared_ptr<timestepping::NewtonObserver>> observers)
+{
+    FE_CHECK_NOT_NULL(certificate.get(), "constraintRangeProbeOptions: certificate");
+    timestepping::NewtonOptions options;
+    options.residual_op = op;
+    options.jacobian_op = op;
+    options.max_iterations = 1;
+    options.min_iterations = 0;
+    options.abs_tolerance = std::numeric_limits<double>::max();
+    options.rel_tolerance = 0.0;
+    options.step_tolerance = 0.0;
+    options.use_line_search = false;
+    options.assemble_both_when_possible = false;
+    options.initial_residual_only_certificate = !certificate->enabled();
+    options.external_state_fixed_point.enabled = false;
+    options.extensions.observers = std::move(observers);
+    installConstraintRangeCertificate(options.extensions, certificate);
+    return options;
 }
 
 std::shared_ptr<ConstraintRangeCertificate> environmentConstraintRangeCertificate()

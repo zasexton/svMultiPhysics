@@ -267,6 +267,48 @@ public:
 /// The certificate's storage in @p workspace, or null.
 [[nodiscard]] ConstraintRangeStorage* findConstraintRangeStorage(timestepping::NewtonWorkspace& workspace);
 
+/**
+ * What a consumer of one probe of the certificate reads (the static
+ * startup): the range certificate, the production residual of the probed
+ * state, and the constant-field KKT, each checked to be finite and the same
+ * on every rank.  `defect` names the first check that failed.
+ */
+struct ConstraintRangeProbeEvidence {
+    enum class Defect : std::uint8_t {
+        None,
+        ProductionResidualNonfinite,
+        ProductionResidualDiffersAcrossRanks,
+        ConstantFieldKktNonfinite,
+        ConstraintFieldInvalid,
+        RangeNonfinite,
+        AvailabilityDiffersAcrossRanks,
+        RangeDiffersAcrossRanks,
+        ConstantFieldKktDiffersAcrossRanks
+    };
+    Defect defect{Defect::None};
+
+    bool range_available{false};
+    bool range_converged{false};
+    bool range_breakdown{false};
+    double range_residual_norm{std::numeric_limits<double>::quiet_NaN()};
+    double range_relative_distance{std::numeric_limits<double>::quiet_NaN()};
+    /// Why the range certificate is unavailable.
+    std::string range_reason{};
+    FieldId constraint_field{INVALID_FIELD_ID};
+
+    double production_residual_norm{std::numeric_limits<double>::quiet_NaN()};
+
+    /// The constant-field KKT is required when the constant field is a
+    /// physical mode of the problem, the space represents the unit field
+    /// and the constraints preserve it.
+    bool constant_field_kkt_required{false};
+    bool constant_field_kkt_available{false};
+    double constant_field_kkt_residual_norm{std::numeric_limits<double>::quiet_NaN()};
+    double constant_field_kkt_relative_distance{std::numeric_limits<double>::quiet_NaN()};
+    double constant_field_jump{std::numeric_limits<double>::quiet_NaN()};
+    double constant_field_multiplier{std::numeric_limits<double>::quiet_NaN()};
+};
+
 class ConstraintRangeCertificate final : public timestepping::NewtonObserver,
                                          public timestepping::NewtonAcceptanceCheck,
                                          public timestepping::NewtonInitializer {
@@ -280,6 +322,17 @@ public:
     ConstraintRangeCertificate& operator=(const ConstraintRangeCertificate&) = delete;
 
     [[nodiscard]] const ConstraintRangeMethod& method() const noexcept { return method_; }
+
+    /// The evidence of @p report, a probe of this certificate on @p system.
+    /// @p constant_field_is_physical states whether a constant constraint
+    /// field is a physical mode of the problem; @p distinct_field is a field
+    /// the constraint field must differ from (or INVALID_FIELD_ID).
+    /// Collective on the active communicator of @p system.
+    [[nodiscard]] ConstraintRangeProbeEvidence probeEvidence(
+        const timestepping::NewtonReport& report,
+        const systems::FESystem& system,
+        bool constant_field_is_physical,
+        FieldId distinct_field) const;
 
     [[nodiscard]] std::string_view id() const override { return "constraint_range"; }
     [[nodiscard]] std::unique_ptr<timestepping::NewtonExtensionStorage> allocate(
@@ -316,6 +369,17 @@ private:
 /// @p extensions (after the extensions already installed); no-op for null.
 void installConstraintRangeCertificate(timestepping::NewtonExtensions& extensions,
                                        const std::shared_ptr<ConstraintRangeCertificate>& certificate);
+
+/**
+ * The options of a probe of @p certificate at a supplied state: one Newton
+ * iteration of @p op, the entry residual alone (or, when the certificate
+ * initializes, its correction and nothing more), no line search, no outer
+ * fixed point, and only the given observers and the certificate.
+ */
+[[nodiscard]] timestepping::NewtonOptions constraintRangeProbeOptions(
+    const systems::OperatorTag& op,
+    const std::shared_ptr<ConstraintRangeCertificate>& certificate,
+    std::vector<std::shared_ptr<timestepping::NewtonObserver>> observers);
 
 /// The certificate the environment gates request, or null when they request none.
 [[nodiscard]] std::shared_ptr<ConstraintRangeCertificate> environmentConstraintRangeCertificate();
