@@ -1200,5 +1200,138 @@ TEST(GeneralityBenchmark, DISABLED_P06_LossyEddyCurrentsSolveBothPartsWithAntisy
     EXPECT_GT(rates(im_err).back(), 0.85) << join(im_err);
 }
 
+// ===========================================================================
+// 7. Clamped C0 interior-penalty plate
+// ===========================================================================
+//
+// lap^2 u = f in the unit square, u = 0 and du/dn = 0 on the boundary, with
+// u = x^2 (1-x)^2 y^2 (1-y)^2.  Continuous P2 (Q2) with the interior-penalty
+// terms on the slope jumps, the clamped slope imposed by the same terms on
+// the boundary, and u = 0 strongly.  The broken H^2 seminorm error is O(h).
+
+struct Quartic {
+    Real v, d1, d2, d3, d4;
+};
+
+Quartic bump(Real t)
+{
+    return {t * t * (1 - t) * (1 - t), 2 * t - 6 * t * t + 4 * t * t * t, 2 - 12 * t + 12 * t * t, -12 + 24 * t, 24.0};
+}
+
+// ---------------------------------------------------------------------------
+// The formulation: everything an author writes for problem 7.
+// ---------------------------------------------------------------------------
+FieldId defineClampedPlate(FESystem& system, std::shared_ptr<const spaces::FunctionSpace> V, const FormExpr& f,
+                           Real eta, const std::vector<int>& walls)
+{
+    using namespace forms;
+    FieldBinding fields(system, "ClampedPlate");
+    const auto U = fields.unknown("u", std::move(V));
+    const auto& u = U.state;
+    const auto& v = U.test;
+    const auto n = FormExpr::normal();
+    // Slope jumps along the minus side's normal: grad(u)(-).n(-) + grad(u)(+).n(+).
+    const auto ju = inner(jump(grad(u)), n.minus());
+    const auto jv = inner(jump(grad(v)), n.minus());
+    const auto penalty = FormExpr::constant(eta);
+    auto R = (laplacian(u) * laplacian(v) - f * v).dx() +
+             (-avg(laplacian(u)) * jv - avg(laplacian(v)) * ju + penalty / avg(hNormal()) * ju * jv).dS();
+    BoundaryConditionManager bcs;
+    for (const int wall : walls) {
+        const auto su = inner(grad(u), n);
+        const auto sv = inner(grad(v), n);
+        R = R + (-laplacian(u) * sv - laplacian(v) * su + penalty / hNormal() * su * sv).ds(wall);  // du/dn = 0
+        bcs.add(std::make_unique<bc::Dirichlet>(wall, FormExpr::constant(0.0)));                    // u = 0
+    }
+    constraints::ConstraintPlan plan(system);
+    plan.essentials(bcs, R, u, v, U.id);
+    plan.commit();
+    FormulationBuilder F(system, "equations", {});
+    F.symbolicTangent();
+    (void)F.residual(R);
+    return U.id;
+}
+// ---------------------------------------------------------------------------
+
+struct PlateRun {
+    Real h2{0.0};
+    Real l2{0.0};
+    Real asymmetry{-1.0};
+    Real scale{0.0};
+};
+
+PlateRun runClampedPlate(Cell cell, int n, bool reverse = false, bool check_symmetry = false)
+{
+    BoxOptions options;
+    options.reverse_cells = reverse;
+    FESystem system(boxMesh(cell, n, boxSides(), options));
+    const auto V = std::make_shared<spaces::H1Space>(elementType(cell), 2);
+    const auto f = scalarCoefficient("f", [](const Point& p) {
+        const auto X = bump(p[0]), Y = bump(p[1]);
+        return X.d4 * Y.v + 2.0 * X.d2 * Y.d2 + X.v * Y.d4;
+    });
+    const auto u_id = defineClampedPlate(system, V, f, 16.0, {1, 2, 3, 4});
+    system.setup();
+    const auto solved = solveSteady(system, "equations");
+    EXPECT_TRUE(solved.converged) << cellName(cell) << " n=" << n;
+    const auto u_h = FormExpr::discreteField(u_id, *V, "u");
+    const auto e = u_h - scalarCoefficient("u_exact", [](const Point& p) { return bump(p[0]).v * bump(p[1]).v; });
+    const auto H = forms::as_tensor(
+        {{scalarCoefficient("u_xx", [](const Point& p) { return bump(p[0]).d2 * bump(p[1]).v; }),
+          scalarCoefficient("u_xy", [](const Point& p) { return bump(p[0]).d1 * bump(p[1]).d1; })},
+         {scalarCoefficient("u_yx", [](const Point& p) { return bump(p[0]).d1 * bump(p[1]).d1; }),
+          scalarCoefficient("u_yy", [](const Point& p) { return bump(p[0]).v * bump(p[1]).d2; })}});
+    const auto eh = forms::hessian(u_h) - H;
+    PlateRun run;
+    run.h2 = norm(system, forms::inner(eh, eh).dx(), solved.u);
+    run.l2 = norm(system, (e * e).dx(), solved.u);
+    if (check_symmetry) {
+        const auto J = assembleDense(system, "equations", solved.u);
+        run.asymmetry = 0.0;
+        for (GlobalIndex a = 0; a < J.n; ++a) {
+            for (GlobalIndex b = 0; b < J.n; ++b) {
+                if (system.constraints().isConstrained(a) || system.constraints().isConstrained(b)) {
+                    continue;
+                }
+                run.asymmetry = std::max(run.asymmetry, std::abs(J(a, b) - J(b, a)));
+                run.scale = std::max(run.scale, std::abs(J(a, b)));
+            }
+        }
+    }
+    return run;
+}
+
+TEST(GeneralityBenchmark, DISABLED_P07_ClampedInteriorPenaltyPlateConvergesInBrokenH2)
+{
+    // Defect found by this benchmark (reported; not a vocabulary gap): on
+    // interior facets the residual of avg(laplacian(u)) * jv evaluates to
+    // zero for a P2 or Q2 state, while its (symbolic) tangent does not; the
+    // consistency terms are missing from the residual, Newton does not
+    // converge and the error does not decrease.  The cell Hessian, the slope
+    // jumps and the boundary slope terms assemble.
+    for (const auto cell : {Cell::Tri3, Cell::Quad4}) {
+        std::vector<Real> h2, l2;
+        for (const int n : {4, 8, 16}) {
+            const auto run = runClampedPlate(cell, n, false, n == 4);
+            h2.push_back(run.h2);
+            l2.push_back(run.l2);
+            if (n == 4) {
+                EXPECT_GT(run.scale, 0.0);
+                EXPECT_LT(run.asymmetry, 1e-12 * run.scale) << cellName(cell);
+                // Facet reversal: the cells in reverse order swap the sides of
+                // every interior facet and give the same discrete solution.
+                const auto reversed = runClampedPlate(cell, n, /*reverse=*/true);
+                EXPECT_NEAR(reversed.h2, run.h2, 1e-9 * run.h2) << cellName(cell);
+                EXPECT_NEAR(reversed.l2, run.l2, 1e-9 * run.l2) << cellName(cell);
+            }
+        }
+        const std::string label = cellName(cell);
+        RecordProperty("p07_" + label + "_h2_rates", join(rates(h2)));
+        RecordProperty("p07_" + label + "_l2_rates", join(rates(l2)));
+        EXPECT_GT(rates(h2).back(), 0.85) << label << " " << join(h2);
+        EXPECT_GT(rates(l2).back(), 1.7) << label << " " << join(l2);
+    }
+}
+
 } // namespace
 } // namespace svmp::FE::systems::generality
