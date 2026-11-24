@@ -3117,6 +3117,7 @@ if(FE_BUILD_TESTS)
                 Tests/Unit/Systems/test_InterfaceTraceConventions.cpp
                 Tests/Unit/Systems/test_GlobalMultiplier.cpp
                 Tests/Unit/Systems/test_InterfaceMultiplier.cpp
+                Tests/Unit/Systems/test_InterfaceOrientation.cpp
 	                Tests/Unit/Systems/test_BackendParity.cpp
 	                Tests/Unit/Systems/test_CanonicalWorkflow.cpp
 	                Tests/Unit/Systems/test_GaugeIntegration.cpp

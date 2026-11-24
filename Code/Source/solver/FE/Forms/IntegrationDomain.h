@@ -29,9 +29,10 @@
  * the JIT kernels and the cache keys of that indicator form; the cells of
  * other subdomains integrate zero, and a field scoped to the subdomain
  * (FieldSpec::participant_domain_id on a single mesh) has no degree of
- * freedom there.  InterfaceBetween names the sides of a fitted interface by
- * subdomain (side(), lowering to minus()/plus(); systems::interfaceBetween
- * reads the orientation from the interface mesh).
+ * freedom there.  InterfaceBetween names the sides of an interface by their
+ * volumes, a fitted interface by subdomain (systems::interfaceBetween reads
+ * the orientation from the interface mesh) and a generated one by cut side:
+ * trace() lowers to minus()/plus(), normalFrom() to the oriented normal.
  */
 
 #include "FormExpr.h"
@@ -40,6 +41,7 @@
 #include <optional>
 #include <stdexcept>
 #include <string>
+#include <utility>
 
 namespace svmp {
 namespace FE {
@@ -202,57 +204,171 @@ private:
     int wall_boundary_marker_;
 };
 
+/// A weight attached to one side of an interface, named by the side's volume:
+/// the arguments of InterfaceBetween::average().
+struct SideWeight {
+    SideWeight(VolumeIntegrationDomain side_volume, FormExpr side_weight)
+        : side(side_volume)
+        , weight(std::move(side_weight))
+    {
+    }
+    SideWeight(VolumeIntegrationDomain side_volume, Real side_weight)
+        : side(side_volume)
+        , weight(FormExpr::constant(side_weight))
+    {
+    }
+
+    VolumeIntegrationDomain side;
+    FormExpr weight;
+};
+
 /**
- * A fitted interface between the subdomains cells(minus) and cells(plus):
- * the interface marker and the subdomain on each side of its faces.  side()
- * names a trace by subdomain; systems::interfaceBetween builds it from the
- * orientation of the interface mesh.
+ * An interface between two volumes, with the volume on each side: a fitted
+ * interface between the subdomains cells(minus) and cells(plus) (an
+ * interface mesh; systems::interfaceBetween reads its orientation), or the
+ * generated interface {phi = c} of a level set between its sides
+ * cut(marker, Negative) and cut(marker, Positive) (generated()).
+ *
+ * trace(), normalFrom() and average() name a side by its volume, so a term
+ * means the same on both kinds of interface whichever side the assembler
+ * calls minus:
+ * @code
+ *   const auto bn  = inner(beta, I.normalFrom(A));
+ *   const auto cUp = conditional(ge(bn, FormExpr::constant(0.0)), I.trace(c, A), I.trace(c, B));
+ *   auto face = (bn * cUp * (I.trace(v, A) - I.trace(v, B))).dI(I.domain());
+ * @endcode
+ * Exchanging A and B gives the same term (normalFrom(B) is -normalFrom(A)).
  */
 class InterfaceBetween {
 public:
+    /// The fitted interface @p interface_marker with the subdomain
+    /// cells(@p minus_domain_id) on the minus side of its faces and
+    /// cells(@p plus_domain_id) on the plus side.
     InterfaceBetween(int interface_marker, int minus_domain_id, int plus_domain_id)
+        : InterfaceBetween(interface_marker, checkedCells(interface_marker, minus_domain_id, plus_domain_id, true),
+                           checkedCells(interface_marker, minus_domain_id, plus_domain_id, false),
+                           /*generated=*/false)
+    {
+    }
+
+    /// The two-sided generated interface @p interface_marker of a level set:
+    /// the minus side is cut(marker, Negative) (phi < c), the plus side
+    /// cut(marker, Positive).  Its terms need both sides retained; the boundary
+    /// of one retained side has the outward normal of level_set::CutSide.
+    [[nodiscard]] static InterfaceBetween generated(int interface_marker)
+    {
+        if (interface_marker < 0) {
+            throw std::invalid_argument("InterfaceBetween::generated requires a nonnegative interface marker");
+        }
+        return InterfaceBetween(interface_marker,
+                                VolumeIntegrationDomain::cut(interface_marker, CutVolumeSide::Negative),
+                                VolumeIntegrationDomain::cut(interface_marker, CutVolumeSide::Positive),
+                                /*generated=*/true);
+    }
+
+    [[nodiscard]] int marker() const noexcept { return marker_; }
+    /// The volume on the minus side: cells(k), or cut(marker, Negative).
+    [[nodiscard]] const VolumeIntegrationDomain& minusSide() const noexcept { return minus_; }
+    /// The volume on the plus side: cells(k), or cut(marker, Positive).
+    [[nodiscard]] const VolumeIntegrationDomain& plusSide() const noexcept { return plus_; }
+    [[nodiscard]] bool isGenerated() const noexcept { return generated_; }
+    /// The interface as an integration domain: dI(marker()).
+    [[nodiscard]] InterfaceDomain domain() const { return InterfaceDomain(marker_); }
+
+    /// The side of the interface that is not @p side.
+    [[nodiscard]] const VolumeIntegrationDomain& otherSide(const VolumeIntegrationDomain& side) const
+    {
+        return isMinus(side, "otherSide") ? plus_ : minus_;
+    }
+
+    /// The trace of @p expr from @p side: expr.minus() or expr.plus().
+    [[nodiscard]] FormExpr trace(const FormExpr& expr, const VolumeIntegrationDomain& side) const
+    {
+        return isMinus(side, "trace") ? expr.minus() : expr.plus();
+    }
+
+    /**
+     * The unit normal pointing out of @p side toward the other side.
+     *
+     * Fitted: normal().minus() is the outward normal of the minus cell, so
+     * the minus side gets normal().minus() and the plus side
+     * -normal().minus().  Generated: in a two-sided term normal().plus() is
+     * the level-set normal grad(phi)/|grad(phi)|, which points out of the
+     * negative side, so the negative side gets normal().plus() and the
+     * positive side -normal().plus().  Both sides read the one normal, so
+     * normalFrom(otherSide(A)) is exactly -normalFrom(A).  The plus
+     * restriction also makes the term two-sided, where normal().minus() is
+     * -grad(phi)/|grad(phi)|; in a kernel without a plus restriction, jump()
+     * or avg() a generated interface is assembled one-sided, and there
+     * normal().minus() is the level-set normal itself.
+     */
+    [[nodiscard]] FormExpr normalFrom(const VolumeIntegrationDomain& side) const
+    {
+        const bool minus = isMinus(side, "normalFrom");
+        const auto out_of_minus = generated_ ? FormExpr::normal().plus() : FormExpr::normal().minus();
+        return minus ? out_of_minus : -out_of_minus;
+    }
+
+    /**
+     * The weighted average a.weight trace(expr, a.side) + b.weight
+     * trace(expr, b.side) of two sides named in either order (Hansbo or
+     * harmonic weights): average(k, {A, wA}, {B, wB}) and
+     * average(k, {B, wB}, {A, wA}) are equal.
+     */
+    [[nodiscard]] FormExpr average(const FormExpr& expr, const SideWeight& a, const SideWeight& b) const
+    {
+        if (isMinus(a.side, "average") == isMinus(b.side, "average")) {
+            throw std::invalid_argument("InterfaceBetween::average: both weights name the same side of interface " +
+                                        std::to_string(marker_));
+        }
+        return a.weight * trace(expr, a.side) + b.weight * trace(expr, b.side);
+    }
+
+    [[nodiscard]] friend bool operator==(const InterfaceBetween&, const InterfaceBetween&) noexcept = default;
+
+private:
+    InterfaceBetween(int interface_marker,
+                     VolumeIntegrationDomain minus_side,
+                     VolumeIntegrationDomain plus_side,
+                     bool generated)
         : marker_(interface_marker)
-        , minus_(minus_domain_id)
-        , plus_(plus_domain_id)
+        , minus_(minus_side)
+        , plus_(plus_side)
+        , generated_(generated)
+    {
+    }
+
+    [[nodiscard]] static VolumeIntegrationDomain checkedCells(int interface_marker,
+                                                              int minus_domain_id,
+                                                              int plus_domain_id,
+                                                              bool minus)
     {
         if (interface_marker < 0 || minus_domain_id < 0 || plus_domain_id < 0 ||
             minus_domain_id == plus_domain_id) {
             throw std::invalid_argument(
                 "InterfaceBetween requires a nonnegative marker and two distinct nonnegative domain ids");
         }
+        return VolumeIntegrationDomain::cells(minus ? minus_domain_id : plus_domain_id);
     }
 
-    [[nodiscard]] int marker() const noexcept { return marker_; }
-    [[nodiscard]] int minusDomainId() const noexcept { return minus_; }
-    [[nodiscard]] int plusDomainId() const noexcept { return plus_; }
-    /// The interface as an integration domain: dI(marker()).
-    [[nodiscard]] InterfaceDomain domain() const { return InterfaceDomain(marker_); }
+    [[nodiscard]] bool isMinus(const VolumeIntegrationDomain& side, const char* what) const
+    {
+        if (side == minus_) {
+            return true;
+        }
+        if (side == plus_) {
+            return false;
+        }
+        throw std::invalid_argument(std::string("InterfaceBetween::") + what +
+                                    ": the volume is on neither side of interface marker " +
+                                    std::to_string(marker_));
+    }
 
-    [[nodiscard]] friend bool operator==(const InterfaceBetween&, const InterfaceBetween&) noexcept = default;
-
-private:
     int marker_;
-    int minus_;
-    int plus_;
+    VolumeIntegrationDomain minus_;
+    VolumeIntegrationDomain plus_;
+    bool generated_;
 };
-
-/// The trace of @p expr on @p interface from the side of @p subdomain (a
-/// cells() domain): expr.minus() or expr.plus().  Throws
-/// std::invalid_argument for a subdomain on neither side.
-[[nodiscard]] inline FormExpr side(const FormExpr& expr,
-                                   const InterfaceBetween& interface,
-                                   const VolumeIntegrationDomain& subdomain)
-{
-    const auto id = subdomain.domainId();
-    if (id && *id == interface.minusDomainId()) {
-        return expr.minus();
-    }
-    if (id && *id == interface.plusDomainId()) {
-        return expr.plus();
-    }
-    throw std::invalid_argument("side(): the subdomain is on neither side of interface marker " +
-                                std::to_string(interface.marker()));
-}
 
 /// A physical exterior boundary, whole or restricted to a generated active
 /// subset: lowers to dExteriorBoundary(domain).

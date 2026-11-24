@@ -341,7 +341,7 @@ lowers to the tree of the untyped call (tested in
 | `.dx(VolumeDomain::full())`, `integrate(expr, VolumeDomain::full())` | `.dx()` |
 | `.dx(VolumeDomain::cut(m, side))` | `.dCutVolume(m, side)` |
 | `.dx(VolumeDomain::cells(k))` | `(eq(domainId(), k) * expr).dx()`: the cells of domain id (mesh region label) `k`; other cells integrate zero |
-| `side(expr, G, VolumeDomain::cells(k))` with `G = systems::interfaceBetween(system, a, b, marker)` | `expr.minus()` or `expr.plus()`, the side of subdomain `k` on the fitted interface `marker` (`InterfaceBetween`; the interface mesh's orientation must put one subdomain on the minus side of every face, on every rank) |
+| `I.trace(expr, VolumeDomain::cells(k))` with `I = systems::interfaceBetween(system, a, b, marker)` | `expr.minus()` or `expr.plus()`, the side of subdomain `k` on the fitted interface `marker` (`InterfaceBetween`; the interface mesh's orientation must put one subdomain on the minus side of every face, on every rank); see Interface Orientation |
 | `.dI(InterfaceDomain(m))` | `.dI(m)` |
 | `.dL(ContactLineDomain(m, wall))`, `dInterfaceBoundary(expr, ContactLineDomain)` | `.dI(m)` with the codimension-two generated rule |
 | `.ds(BoundaryDomain::fullPhysical(b))` | `.dExteriorBoundary(fullPhysical(b))`; not the same tree as `.ds(b)` |
@@ -540,12 +540,11 @@ Status: `implemented/public`.
 |------------|-------|
 | `u.minus()`, `u.plus()`, `minus(u)`, `plus(u)` | Interior/interface side restrictions |
 | `jump(u)`, `avg(u)` | `jump(u) = u(-) - u(+)`, `avg(u) = (u(-) + u(+)) / 2` |
-| `weightedAverage(u, w_plus, w_minus)` | `w_plus u(+) + w_minus u(-)` |
 | `harmonicAverage(k)` | `2 k(+) k(-) / (k(+) + k(-))` |
 | `upwindValue(u, beta)`, `downwindValue(u, beta)` | Basic DG upwind/downwind selection using `n(-)` |
 | `interiorPenaltyCoefficient(eta, p)` | SIPG scaling `eta p^2 avg(1 / hNormal())` |
 | `SidePair{neg, pos}` | One quantity held by two fields, one on each side of an interface (`neg` on `phi < c`, the minus side of `jump()`), e.g. `SidePair{u_neg, u_pos}` of StateFields or `SidePair{v_neg, v_pos}` of their TestFields |
-| `jump(pair)`, `avg(pair, w_neg, w_pos)`, `avg(pair)` | `neg - pos` (the `jump()` convention), `w_neg neg + w_pos pos`, and `0.5 neg + 0.5 pos` |
+| `jump(pair)`, `avg(pair, {.neg = w_neg, .pos = w_pos})`, `avg(pair)` | `neg - pos` (the `jump()` convention), `w_neg neg + w_pos pos` (`SidePairWeights`, the weights named by side), and `0.5 neg + 0.5 pos` |
 | `map(f, A)`, `map(f, A, B)` | `{f(A.neg, B.neg), f(A.pos, B.pos)}`; `f` may take the side (`CutVolumeSide`) as its last argument for per-side parameters. `pair * e`, `e * pair`, `pair + pair`, `pair - pair` act side by side |
 | `bc::normalComponent(u)` | Scalar normal trace `inner(u, n)` |
 | `bc::interfaceNormalComponent(u, reduction)` | Interface scalar normal trace helper |
@@ -578,8 +577,8 @@ Identity trace and the average flux `avg(u).n(-) = (u(-).n(-) - u(+).n(+)) / 2`
 for `NormalComponent`.
 
 A coupling of two fields is one integral: the symmetric Nitsche coupling of
-two phases is `(-inner(avg(map(sigma, U, P) * n, w_neg, w_pos), jump(V)) -
-inner(avg(map(sigma, V, Q) * n, w_neg, w_pos), jump(U)) + gamma *
+two phases is `(-inner(avg(map(sigma, U, P) * n, {.neg = w_neg, .pos = w_pos}), jump(V)) -
+inner(avg(map(sigma, V, Q) * n, {.neg = w_neg, .pos = w_pos}), jump(U)) + gamma *
 inner(jump(U), jump(V))).dI(m)` with `U`, `P`, `V`, `Q` side pairs, and a
 trace multiplier's is `(lam * v + mu * (u - g)).ds(m)`. `installFormulation`
 splits an integral that holds the test functions of several fields into one
@@ -588,6 +587,37 @@ integral per test field (see Installation and Compilation).
 This is enough for current weak trace loads, trace Robin terms, Nitsche terms,
 interface exchange, and simple DG terms. First-class normal/tangential jump
 families are not implemented.
+
+### Interface Orientation
+
+Status: `implemented/public`. `Forms/IntegrationDomain.h`.
+
+An `InterfaceBetween` names the two sides of an interface by their volumes, so
+"from A toward B" is stated once and means the same on a fitted interface and
+on a generated one, whichever side the assembler calls minus.
+
+| Vocabulary | Meaning |
+|------------|---------|
+| `systems::interfaceBetween(system, a, b, marker)` | The fitted interface `marker` between the subdomains `a` and `b` (`VolumeDomain::cells`), with the minus side read from the interface mesh |
+| `InterfaceBetween::generated(marker)` | The two-sided generated interface of a level set: the minus side `VolumeDomain::cut(marker, Negative)` (phi < c), the plus side `cut(marker, Positive)`; both sides retained (a one-sided boundary uses `L.outwardNormal()`) |
+| `I.minusSide()`, `I.plusSide()`, `I.otherSide(A)`, `I.domain()` | The side volumes, the side that is not `A`, and `InterfaceDomain(marker)` |
+| `I.trace(u, A)` | The trace of `u` from `A`: `u.minus()` or `u.plus()` |
+| `I.normalFrom(A)` | The unit normal pointing out of `A` toward `I.otherSide(A)`: fitted `normal().minus()` for the minus side and `-normal().minus()` for the plus side; generated `normal().plus()` (the level-set normal grad(phi)/\|grad(phi)\|) for the negative side and `-normal().plus()` for the positive side. `I.normalFrom(I.otherSide(A))` is exactly `-I.normalFrom(A)` |
+| `I.average(u, {A, wA}, {B, wB})` | `wA I.trace(u, A) + wB I.trace(u, B)` (`SideWeight`, a weight named by its side, `FormExpr` or `Real`); the two sides in either order give the same value, the same side twice is refused |
+
+```cpp
+const auto I = systems::interfaceBetween(system, VolumeDomain::cells(1), VolumeDomain::cells(2), gamma);
+// or: const auto I = InterfaceBetween::generated(G.interfaceMarker());  A = G.side(Negative).volume()
+const auto bn = inner(beta, I.normalFrom(A));
+const auto cUp = conditional(ge(bn, FormExpr::constant(0.0)), I.trace(c, A), I.trace(c, B));
+auto face = (bn * cUp * (I.trace(v, A) - I.trace(v, B))).dI(I.domain());   // the same residual with A, B exchanged
+```
+
+`test_InterfaceOrientation.cpp` checks the direction of `normalFrom` and the
+upwind side on a fitted interface (with either subdomain on the minus side)
+and on a generated one, the residual of the upwind term and of a 1:100
+weighted average under the exchange of A and B, and the trees.  The
+`upwindValue`/`downwindValue` helpers keep their `n(-)` convention.
 
 ### Boundary Conditions and Constraints
 
@@ -1143,7 +1173,7 @@ expected leverage.
 #### Trace and Interface Algebra
 
 Current public pieces include side restrictions, `jump`, `avg`,
-`weightedAverage`, `normalComponent`, normal/tangential trace-projection
+`InterfaceBetween` (`trace`, `normalFrom`, `average`), `normalComponent`, normal/tangential trace-projection
 helpers, scalar trace BC helpers, `.dI`, and the level-set handles with
 `outwardNormal()`. Missing vocabulary:
 

@@ -108,8 +108,8 @@ TEST(CanonicalWorkflow, SameSpaceWeightedInterfaceSplitsByTestField)
         return (2.0 * mu * sym(grad(w))) * n + (-r * identity) * n;
     };
     const auto compact =
-        (-inner(avg(map(traction, U, P), wn, wp), jump(V)) -
-         inner(avg(map(traction, V, Q), wn, wp), jump(U)) +
+        (-inner(avg(map(traction, U, P), {.neg = wn, .pos = wp}), jump(V)) -
+         inner(avg(map(traction, V, Q), {.neg = wn, .pos = wp}), jump(U)) +
          penalty * inner(jump(U), jump(V))).dI(marker);
     // In another order than the test functions appear (v_neg, v_pos, q_neg,
     // q_pos): the record pairs each row with its field all the same.

@@ -466,7 +466,7 @@ TEST(InterfaceMultiplierI1, TwoSubdomainsGluedByAFullTraceMultiplierEqualTheSing
 
 // I1 with the subdomains, their unknowns and the interface sides named by
 // domain: dx(cells(k)), plan.activeOn(fields, cells(k)) for the unknowns of
-// each subdomain, interfaceBetween and side(), with no hand-written pin and
+// each subdomain, interfaceBetween and its trace(), with no hand-written pin and
 // no indicator coefficient.  The solution equals the single domain's, and
 // the subdomain measure and the sides are the trees of the indicator and of
 // minus()/plus().
@@ -497,8 +497,8 @@ TEST(InterfaceMultiplierI1, SubdomainMeasuresAndSidesByDomainEqualTheSingleDomai
     FESystem glued(buildSplitSquare(n));
     glued.setInterfaceMeshFromFaceSet(kGamma, "gamma");
     const auto G = systems::interfaceBetween(glued, Os, Of, kGamma);
-    EXPECT_EQ(G.minusDomainId(), kLeftDomain);
-    EXPECT_EQ(G.plusDomainId(), kRightDomain);
+    EXPECT_EQ(G.minusSide(), Of);
+    EXPECT_EQ(G.plusSide(), Os);
     const auto u1_id = glued.addField(FieldSpec{.name = "u1", .space = q1});
     const auto u2_id = glued.addField(FieldSpec{.name = "u2", .space = q1});
     auto p1_line = std::make_shared<spaces::H1Space>(ElementType::Line2, 1);
@@ -516,11 +516,11 @@ TEST(InterfaceMultiplierI1, SubdomainMeasuresAndSidesByDomainEqualTheSingleDomai
         EXPECT_EQ(systems::formExprTreeHash(bulk1.dx(Of)),
                   systems::formExprTreeHash(
                       (FormExpr::cellDomainId().eq(FormExpr::constant(kLeftDomain)) * bulk1).dx()));
-        EXPECT_EQ(systems::formExprTreeHash(forms::side(v1, G, Of)), systems::formExprTreeHash(v1.minus()));
-        EXPECT_EQ(systems::formExprTreeHash(forms::side(v2, G, Os)), systems::formExprTreeHash(v2.plus()));
-        const auto residual = bulk1.dx(Of) + bulk2.dx(Os) + (lam * forms::side(v1, G, Of)).dI(G.domain()) -
-                              (lam * forms::side(v2, G, Os)).dI(G.domain()) +
-                              (mu * (forms::side(u1, G, Of) - forms::side(u2, G, Os))).dI(G.domain());
+        EXPECT_EQ(systems::formExprTreeHash(G.trace(v1, Of)), systems::formExprTreeHash(v1.minus()));
+        EXPECT_EQ(systems::formExprTreeHash(G.trace(v2, Os)), systems::formExprTreeHash(v2.plus()));
+        const auto residual = bulk1.dx(Of) + bulk2.dx(Os) + (lam * G.trace(v1, Of)).dI(G.domain()) -
+                              (lam * G.trace(v2, Os)).dI(G.domain()) +
+                              (mu * (G.trace(u1, Of) - G.trace(u2, Os))).dI(G.domain());
         (void)systems::installFormulation(glued, "op", {u1_id, u2_id, lam_id}, residual);
         const std::array<forms::bc::StrongDirichlet, 2> bcs{forms::bc::strongDirichlet(u1_id, kLeft, g, "u1"),
                                                             forms::bc::strongDirichlet(u2_id, kRight, g, "u2")};
@@ -557,7 +557,7 @@ TEST(InterfaceMultiplierI1, SubdomainMeasuresAndSidesByDomainEqualTheSingleDomai
     EXPECT_GT(pinned_off_left, 0u);
 
     // A subdomain on neither side, or two sides of one domain, is refused.
-    EXPECT_THROW((void)forms::side(FormExpr::constant(1.0), G, forms::VolumeDomain::cells(7)),
+    EXPECT_THROW((void)G.trace(FormExpr::constant(1.0), forms::VolumeDomain::cells(7)),
                  std::invalid_argument);
     EXPECT_THROW((void)systems::interfaceBetween(glued, Of, forms::VolumeDomain::cells(7), kGamma), FEException);
 }

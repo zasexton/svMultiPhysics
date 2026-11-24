@@ -1873,7 +1873,7 @@ FormExpr regionIndicator(int domain_id);
 FormExpr laplacian(const FormExpr& a);  // trace(hessian(a))
 
 // === DG Helpers ===
-FormExpr weightedAverage(const FormExpr& a, const FormExpr& w_plus, const FormExpr& w_minus);
+// Interfaces: InterfaceBetween I; I.trace(u, A), I.normalFrom(A), I.average(u, {A, wA}, {B, wB})
 FormExpr harmonicAverage(const FormExpr& k);  // 2*k⁺*k⁻/(k⁺+k⁻)
 FormExpr upwindValue(const FormExpr& u, const FormExpr& beta);
 FormExpr downwindValue(const FormExpr& u, const FormExpr& beta);

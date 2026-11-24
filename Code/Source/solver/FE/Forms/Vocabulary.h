@@ -622,11 +622,6 @@ inline FormExpr regionIndicator(int domain_id)
     return eq(domainId(), FormExpr::constant(static_cast<Real>(domain_id)));
 }
 
-inline FormExpr weightedAverage(const FormExpr& a, const FormExpr& w_plus, const FormExpr& w_minus)
-{
-    return w_plus * a.plus() + w_minus * a.minus();
-}
-
 inline FormExpr harmonicAverage(const FormExpr& k)
 {
     // 2 k⁺ k⁻ / (k⁺ + k⁻)
@@ -672,7 +667,7 @@ inline FormExpr interiorPenaltyCoefficient(Real eta, Real p = 1.0)
  * SidePair{u_neg, u_pos} of two StateFields or SidePair{v_neg, v_pos} of
  * their TestFields.  jump(), avg() and map() build ordinary trees, so an
  * interface coupling is one integral,
- *   (-inner(avg(map(sigma, U, P) * n, w_neg, w_pos), jump(V))
+ *   (-inner(avg(map(sigma, U, P) * n, {.neg = w_neg, .pos = w_pos}), jump(V))
  *    + gamma * inner(jump(U), jump(V))).dI(m),
  * whose integrand holds the test functions of both fields; installFormulation
  * splits it into one integral per test field.
@@ -685,19 +680,24 @@ struct SidePair {
 /// neg - pos, the jump across the interface with the convention of jump().
 inline FormExpr jump(const SidePair& a) { return a.neg - a.pos; }
 
-/// w_neg neg + w_pos pos, the weighted average (Hansbo or viscosity weights).
-inline FormExpr avg(const SidePair& a, const FormExpr& w_neg, const FormExpr& w_pos)
-{
-    return w_neg * a.neg + w_pos * a.pos;
-}
+/// The weights of the two sides of a SidePair, named by side:
+/// avg(U, {.neg = w_neg, .pos = w_pos}).
+struct SidePairWeights {
+    FormExpr neg;
+    FormExpr pos;
+};
 
-inline FormExpr avg(const SidePair& a, Real w_neg, Real w_pos)
+/// w.neg neg + w.pos pos, the weighted average (Hansbo or viscosity weights).
+inline FormExpr avg(const SidePair& a, const SidePairWeights& w)
 {
-    return avg(a, FormExpr::constant(w_neg), FormExpr::constant(w_pos));
+    return w.neg * a.neg + w.pos * a.pos;
 }
 
 /// (neg + pos) / 2, written 0.5 neg + 0.5 pos.
-inline FormExpr avg(const SidePair& a) { return avg(a, 0.5, 0.5); }
+inline FormExpr avg(const SidePair& a)
+{
+    return avg(a, {.neg = FormExpr::constant(0.5), .pos = FormExpr::constant(0.5)});
+}
 
 /**
  * @brief One law on both sides: {f(a.neg), f(a.pos)}
