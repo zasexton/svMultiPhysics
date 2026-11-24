@@ -5175,17 +5175,20 @@ struct StaticCapillaryFunctionalCandidate {
 };
 
 // The static cap as the minimizer's problem: two energy components, and
-// three pressure certificates of the unprojected physical-potential load,
-// in this order.
+// the three acceptance checks of the certificate probe of the unprojected
+// physical-potential load, in this order.
 enum StaticCapillaryEnergyComponent : std::size_t {
   kStaticCapillarySurfaceWallEnergy = 0u,
   kStaticCapillaryGravitationalPotentialEnergy = 1u,
 };
 
-enum StaticCapillaryCertificate : std::size_t {
-  kStaticCapillaryPressureRepresentability = 0u,
-  kStaticCapillaryPhysicalEquilibrium = 1u,
-  kStaticCapillaryConstantPressureKkt = 2u,
+// The acceptance checks, each named by the probe result it reads: the
+// certificate's range distance, the production residual of the probed
+// state, and the certificate's constant-field KKT distance.
+constexpr std::array<std::string_view, 3> kStaticCapillaryChecks{
+    "constraint_range.range_distance",
+    "production_residual",
+    "constraint_range.constant_field_kkt_distance",
 };
 
 svmp::FE::level_set::LevelSetVolumeConstrainedProblem
@@ -5197,7 +5200,7 @@ staticCapillaryEquilibriumProblem(
                                "gravitational_potential_energy"};
   // The constrained pressure-space certificate.
   svmp::FE::level_set::LevelSetVolumeConstrainedAcceptanceCheck pressure;
-  pressure.name = "pressure_representability";
+  pressure.name = std::string(kStaticCapillaryChecks[0]);
   pressure.limits = {options.pressure_representability_max_residual_norm,
                      options.pressure_representability_max_relative_distance};
   pressure.invalid_state_diagnostic =
@@ -5208,14 +5211,14 @@ staticCapillaryEquilibriumProblem(
       "pressure_representability_gate_failed_at_parameter_stationary_geometry";
   // The production residual (always measured with the certificate).
   svmp::FE::level_set::LevelSetVolumeConstrainedAcceptanceCheck equilibrium;
-  equilibrium.name = "physical_equilibrium_residual";
+  equilibrium.name = std::string(kStaticCapillaryChecks[1]);
   equilibrium.limits = {options.physical_equilibrium_max_residual_norm};
   equilibrium.failed_diagnostic =
       "physical_equilibrium_residual_gate_failed_at_parameter_stationary_geometry";
   // The constant-pressure KKT certificate, required when the pressure
   // constraints keep the constant mode at zero gravity.
   svmp::FE::level_set::LevelSetVolumeConstrainedAcceptanceCheck kkt;
-  kkt.name = "constant_pressure_kkt";
+  kkt.name = std::string(kStaticCapillaryChecks[2]);
   kkt.limits = {options.constant_pressure_kkt_max_residual_norm,
                 options.constant_pressure_kkt_max_relative_distance};
   kkt.invalid_state_diagnostic =
@@ -5233,63 +5236,110 @@ staticCapillaryEquilibriumProblem(
   return problem;
 }
 
-// The certificates of a functional trial, which measures none of them.
-std::vector<svmp::FE::level_set::LevelSetVolumeConstrainedCheckValue>
-unmeasuredStaticCapillaryCertificates()
+// The value of the acceptance check @p id on a candidate, from the
+// evidence of its certificate probe, or unmeasured (a functional trial,
+// @p evidence null).
+svmp::FE::level_set::LevelSetVolumeConstrainedCheckValue
+staticCapillaryCheckValue(
+    std::string_view id,
+    const svmp::FE::analysis::ConstraintRangeProbeEvidence* evidence)
 {
-  constexpr auto nan = std::numeric_limits<svmp::FE::Real>::quiet_NaN();
-  std::vector<svmp::FE::level_set::LevelSetVolumeConstrainedCheckValue>
-      checks(3u);
-  checks[kStaticCapillaryPressureRepresentability].converged = false;
-  checks[kStaticCapillaryPressureRepresentability].values = {nan, nan};
-  checks[kStaticCapillaryPhysicalEquilibrium].available = true;
-  checks[kStaticCapillaryPhysicalEquilibrium].values = {nan};
-  checks[kStaticCapillaryConstantPressureKkt].values = {nan, nan};
-  return checks;
+  using svmp::FE::Real;
+  constexpr auto nan = std::numeric_limits<Real>::quiet_NaN();
+  svmp::FE::level_set::LevelSetVolumeConstrainedCheckValue value;
+  if (id == kStaticCapillaryChecks[0]) {
+    value.converged = false;
+    value.values = {nan, nan};
+    if (evidence != nullptr) {
+      value.available = evidence->range_available;
+      value.converged = evidence->range_converged;
+      value.breakdown = evidence->range_breakdown;
+      value.values = {static_cast<Real>(evidence->range_residual_norm),
+                      static_cast<Real>(evidence->range_relative_distance)};
+    }
+  } else if (id == kStaticCapillaryChecks[1]) {
+    value.available = true;
+    value.values = {nan};
+    if (evidence != nullptr) {
+      value.values = {static_cast<Real>(evidence->production_residual_norm)};
+    }
+  } else if (id == kStaticCapillaryChecks[2]) {
+    value.values = {nan, nan};
+    if (evidence != nullptr) {
+      value.required = evidence->constant_field_kkt_required;
+      value.available = evidence->constant_field_kkt_available;
+      value.values = {
+          static_cast<Real>(evidence->constant_field_kkt_residual_norm),
+          static_cast<Real>(evidence->constant_field_kkt_relative_distance)};
+    }
+  } else {
+    throw std::logic_error(
+        "[svMultiPhysics::Application] Static capillary acceptance check '" +
+        std::string(id) + "' is not a check of the certificate probe.");
+  }
+  return value;
 }
 
-// The minimizer's final certificates under their Navier-Stokes names (the
-// unmeasured values before the initial candidate is evaluated).
-struct StaticCapillaryCertificateValues {
-  bool pressure_representability_available{false};
-  bool pressure_representability_converged{false};
-  bool pressure_representability_breakdown{false};
-  svmp::FE::Real pressure_representability_residual_norm{
-      std::numeric_limits<svmp::FE::Real>::quiet_NaN()};
-  svmp::FE::Real pressure_representability_relative_distance{
-      std::numeric_limits<svmp::FE::Real>::quiet_NaN()};
-  svmp::FE::Real production_residual_norm{
-      std::numeric_limits<svmp::FE::Real>::quiet_NaN()};
-  bool constant_pressure_kkt_required{true};
-  bool constant_pressure_kkt_available{false};
-  svmp::FE::Real constant_pressure_kkt_residual_norm{
-      std::numeric_limits<svmp::FE::Real>::quiet_NaN()};
-  svmp::FE::Real constant_pressure_kkt_relative_distance{
-      std::numeric_limits<svmp::FE::Real>::quiet_NaN()};
-};
-
-StaticCapillaryCertificateValues staticCapillaryCertificateValues(
-    std::span<const svmp::FE::level_set::LevelSetVolumeConstrainedCheckValue>
-        checks)
+// The values of the acceptance checks of a candidate, in the problem's
+// order (staticCapillaryCheckValue).
+std::vector<svmp::FE::level_set::LevelSetVolumeConstrainedCheckValue>
+staticCapillaryCheckValues(
+    const svmp::FE::analysis::ConstraintRangeProbeEvidence* evidence)
 {
-  StaticCapillaryCertificateValues values;
-  if (checks.size() != 3u) {
-    return values;
+  std::vector<svmp::FE::level_set::LevelSetVolumeConstrainedCheckValue>
+      values;
+  values.reserve(kStaticCapillaryChecks.size());
+  for (const auto id : kStaticCapillaryChecks) {
+    values.push_back(staticCapillaryCheckValue(id, evidence));
   }
-  const auto& pressure = checks[kStaticCapillaryPressureRepresentability];
-  const auto& equilibrium = checks[kStaticCapillaryPhysicalEquilibrium];
-  const auto& kkt = checks[kStaticCapillaryConstantPressureKkt];
-  values.pressure_representability_available = pressure.available;
-  values.pressure_representability_converged = pressure.converged;
-  values.pressure_representability_breakdown = pressure.breakdown;
-  values.pressure_representability_residual_norm = pressure.values[0];
-  values.pressure_representability_relative_distance = pressure.values[1];
-  values.production_residual_norm = equilibrium.values[0];
-  values.constant_pressure_kkt_required = kkt.required;
-  values.constant_pressure_kkt_available = kkt.available;
-  values.constant_pressure_kkt_residual_norm = kkt.values[0];
-  values.constant_pressure_kkt_relative_distance = kkt.values[1];
   return values;
+}
+
+// The certificate evidence of the accepted candidate on the static-capillary
+// record line, under the record's labels, which qualification scripts parse:
+// the constant-pressure fit and its comparison with the minimizer's
+// multiplier, the pressure range certificate, the production residual and
+// the constant-pressure KKT.
+void writeStaticCapillaryCertificateEvidence(
+    std::ostream& stream,
+    const svmp::FE::analysis::ConstraintRangeProbeEvidence& certified,
+    svmp::FE::Real final_volume_multiplier)
+{
+  const bool multiplier_comparison_available =
+      certified.constant_field_kkt_available &&
+      certified.constant_field_kkt_required;
+  stream
+      << " constant_pressure_jump="
+      << certified.constant_field_jump
+      << " constant_pressure_volume_multiplier="
+      << certified.constant_field_multiplier
+      << " parameter_to_physical_multiplier_comparison_available="
+      << (multiplier_comparison_available ? 1 : 0)
+      << " parameter_to_physical_multiplier_difference="
+      << (multiplier_comparison_available
+              ? final_volume_multiplier -
+                    certified.constant_field_multiplier
+              : std::numeric_limits<double>::quiet_NaN())
+      << " pressure_representability_available="
+      << (certified.range_available ? 1 : 0)
+      << " pressure_representability_converged="
+      << (certified.range_converged ? 1 : 0)
+      << " pressure_representability_breakdown="
+      << (certified.range_breakdown ? 1 : 0)
+      << " pressure_representability_residual_norm="
+      << certified.range_residual_norm
+      << " pressure_representability_relative_distance="
+      << certified.range_relative_distance
+      << " production_residual_norm="
+      << certified.production_residual_norm
+      << " constant_pressure_kkt_required="
+      << (certified.constant_field_kkt_required ? 1 : 0)
+      << " constant_pressure_kkt_available="
+      << (certified.constant_field_kkt_available ? 1 : 0)
+      << " constant_pressure_kkt_residual_norm="
+      << certified.constant_field_kkt_residual_norm
+      << " constant_pressure_kkt_relative_distance="
+      << certified.constant_field_kkt_relative_distance;
 }
 
 // One energy component of the minimizer's result (NaN before the initial
@@ -5460,7 +5510,7 @@ evaluateStaticCapillaryFunctionalCandidate(
   // kinematic-area-gradient producer of exact derivatives was retired with
   // decision D48).
   evaluation.functional_derivatives_available = false;
-  evaluation.checks = unmeasuredStaticCapillaryCertificates();
+  evaluation.checks = staticCapillaryCheckValues(nullptr);
   evaluation.forbidden_substitution_applied = false;
   evaluation.diagnostic = "functional_trial_available";
   return result;
@@ -5924,14 +5974,10 @@ bool initializeDiscreteStaticCapillaryEquilibrium(
   auto minimization_options =
       capillary_options;
   minimization_options.allow_topology_epoch_transitions = false;
+  // The solution and the evidence of the last certificate probe; when the
+  // minimizer succeeds, those of the candidate it accepted.
   std::vector<svmp::FE::Real> certified_solution;
-  svmp::FE::FieldId certified_pressure_field{
-      svmp::FE::INVALID_FIELD_ID};
-  double certified_constant_pressure_jump =
-      std::numeric_limits<double>::quiet_NaN();
-  double certified_constant_pressure_volume_multiplier =
-      std::numeric_limits<double>::quiet_NaN();
-  bool certified_constant_pressure_multiplier_comparison_available = false;
+  svmp::FE::analysis::ConstraintRangeProbeEvidence certified{};
   const auto evaluator =
       [&](std::span<const svmp::FE::Real> coefficients,
           svmp::FE::level_set::
@@ -6043,37 +6089,13 @@ bool initializeDiscreteStaticCapillaryEquilibrium(
                 "pressure_certificate_constant_kkt_scalars_differ_across_communicator";
             return evaluation;
           }
-          auto& pressure_certificate =
-              evaluation.checks[kStaticCapillaryPressureRepresentability];
-          pressure_certificate.available = evidence.range_available;
-          pressure_certificate.converged = evidence.range_converged;
-          pressure_certificate.breakdown = evidence.range_breakdown;
-          pressure_certificate.values = {
-              static_cast<svmp::FE::Real>(evidence.range_residual_norm),
-              static_cast<svmp::FE::Real>(evidence.range_relative_distance)};
-          evaluation.checks[kStaticCapillaryPhysicalEquilibrium].values = {
-              static_cast<svmp::FE::Real>(evidence.production_residual_norm)};
-          auto& kkt_certificate =
-              evaluation.checks[kStaticCapillaryConstantPressureKkt];
-          kkt_certificate.required = evidence.constant_field_kkt_required;
-          kkt_certificate.available = evidence.constant_field_kkt_available;
-          kkt_certificate.values = {
-              static_cast<svmp::FE::Real>(
-                  evidence.constant_field_kkt_residual_norm),
-              static_cast<svmp::FE::Real>(
-                  evidence.constant_field_kkt_relative_distance)};
+          evaluation.checks = staticCapillaryCheckValues(&evidence);
           evaluation.diagnostic =
               evidence.range_available
                   ? "acceptance_certificate_available"
                   : "acceptance_certificate_pressure_unavailable:" +
                         evidence.range_reason;
-          certified_constant_pressure_jump = evidence.constant_field_jump;
-          certified_constant_pressure_volume_multiplier =
-              evidence.constant_field_multiplier;
-          certified_constant_pressure_multiplier_comparison_available =
-              evidence.constant_field_kkt_available &&
-              evidence.constant_field_kkt_required;
-          certified_pressure_field = evidence.constraint_field;
+          certified = evidence;
           certified_solution =
               std::move(certificate.certified_solution);
         }
@@ -6096,21 +6118,18 @@ bool initializeDiscreteStaticCapillaryEquilibrium(
     transaction.rollback();
     throw;
   }
-  const auto final_certificates =
-      staticCapillaryCertificateValues(result.final_checks);
   const bool local_prepublication_result_valid =
       result.success &&
       result.converged &&
       result.accepted_coefficients_assigned &&
       accepted_parameters.size() == field_count &&
       certified_solution.size() == baseline.size() &&
-      certified_pressure_field != svmp::FE::INVALID_FIELD_ID &&
-      certified_pressure_field != level_set_field &&
-      (!final_certificates.constant_pressure_kkt_required ||
-       (final_certificates.constant_pressure_kkt_available &&
-        std::isfinite(certified_constant_pressure_jump) &&
-        std::isfinite(
-            certified_constant_pressure_volume_multiplier)));
+      certified.constraint_field != svmp::FE::INVALID_FIELD_ID &&
+      certified.constraint_field != level_set_field &&
+      (!certified.constant_field_kkt_required ||
+       (certified.constant_field_kkt_available &&
+        std::isfinite(certified.constant_field_jump) &&
+        std::isfinite(certified.constant_field_multiplier)));
   if (globalAnyBool(
           !local_prepublication_result_valid, comm)) {
     transaction.rollback();
@@ -6258,7 +6277,7 @@ bool initializeDiscreteStaticCapillaryEquilibrium(
       staticCapillaryHistoryPublicationTargetLayoutError(
           system,
           level_set_field,
-          certified_pressure_field,
+          certified.constraint_field,
           certified_solution,
           history);
   if (globalAnyBool(
@@ -6296,7 +6315,7 @@ bool initializeDiscreteStaticCapillaryEquilibrium(
       staticCapillaryHistoryPublicationLayoutError(
           system,
           level_set_field,
-          certified_pressure_field,
+          certified.constraint_field,
           certified_solution,
           history_backups,
           history);
@@ -6333,7 +6352,7 @@ bool initializeDiscreteStaticCapillaryEquilibrium(
     stageStaticCapillaryHistoryForPublication(
         system,
         level_set_field,
-        certified_pressure_field,
+        certified.constraint_field,
         certified_solution,
         history_backups,
         history);
@@ -6391,7 +6410,8 @@ bool initializeDiscreteStaticCapillaryEquilibrium(
   }
 
   request.runtime.static_capillary_equilibrium_initialized = true;
-  application::core::oopCout()
+  auto& initialized_record = application::core::oopCout();
+  initialized_record
       << std::setprecision(17)
       << "[svMultiPhysics::Application] Static capillary equilibrium initialized"
       << " diagnostic=static_capillary_equilibrium_initialization"
@@ -6420,38 +6440,10 @@ bool initializeDiscreteStaticCapillaryEquilibrium(
       << " final_projected_gradient_norm="
       << result.final_projected_gradient_norm
       << " final_volume_multiplier="
-      << result.final_volume_multiplier
-      << " constant_pressure_jump="
-      << certified_constant_pressure_jump
-      << " constant_pressure_volume_multiplier="
-      << certified_constant_pressure_volume_multiplier
-      << " parameter_to_physical_multiplier_comparison_available="
-      << (certified_constant_pressure_multiplier_comparison_available ? 1 : 0)
-      << " parameter_to_physical_multiplier_difference="
-      << (certified_constant_pressure_multiplier_comparison_available
-              ? result.final_volume_multiplier -
-                    certified_constant_pressure_volume_multiplier
-              : std::numeric_limits<double>::quiet_NaN())
-      << " pressure_representability_available="
-      << (final_certificates.pressure_representability_available ? 1 : 0)
-      << " pressure_representability_converged="
-      << (final_certificates.pressure_representability_converged ? 1 : 0)
-      << " pressure_representability_breakdown="
-      << (final_certificates.pressure_representability_breakdown ? 1 : 0)
-      << " pressure_representability_residual_norm="
-      << final_certificates.pressure_representability_residual_norm
-      << " pressure_representability_relative_distance="
-      << final_certificates.pressure_representability_relative_distance
-      << " production_residual_norm="
-      << final_certificates.production_residual_norm
-      << " constant_pressure_kkt_required="
-      << (final_certificates.constant_pressure_kkt_required ? 1 : 0)
-      << " constant_pressure_kkt_available="
-      << (final_certificates.constant_pressure_kkt_available ? 1 : 0)
-      << " constant_pressure_kkt_residual_norm="
-      << final_certificates.constant_pressure_kkt_residual_norm
-      << " constant_pressure_kkt_relative_distance="
-      << final_certificates.constant_pressure_kkt_relative_distance
+      << result.final_volume_multiplier;
+  writeStaticCapillaryCertificateEvidence(
+      initialized_record, certified, result.final_volume_multiplier);
+  initialized_record
       << " volume_tolerance="
       << capillary_options.volume_tolerance
       << " projected_gradient_tolerance="
