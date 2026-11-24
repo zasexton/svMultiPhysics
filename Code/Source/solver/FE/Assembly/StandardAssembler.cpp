@@ -13222,13 +13222,54 @@ AssemblyResult StandardAssembler::assembleCellsFused(
         const auto cell_type = mesh.getCellType(first_cell);
         fused_quad_rule = resolveQuadratureRule(*first_t.test_space, first_cell, cell_type);
 
-        // Verify all terms produce the same quad rule
+        // Verify all terms produce the same quad rule (the same points and
+        // weights, not only as many)
+        const auto same_rule = [](const quadrature::QuadratureRule& a, const quadrature::QuadratureRule& b) {
+            if (&a == &b) {
+                return true;
+            }
+            if (a.num_points() != b.num_points()) {
+                return false;
+            }
+            const auto& pa = a.points();
+            const auto& pb = b.points();
+            const auto& wa = a.weights();
+            const auto& wb = b.weights();
+            for (std::size_t q = 0; q < a.num_points(); ++q) {
+                if (wa[q] != wb[q] || pa[q][0] != pb[q][0] || pa[q][1] != pb[q][1] || pa[q][2] != pb[q][2]) {
+                    return false;
+                }
+            }
+            return true;
+        };
         for (std::size_t ti = 1; ti < terms.size(); ++ti) {
             auto other_qr = resolveQuadratureRule(*terms[ti].test_space, first_cell, cell_type);
-            if (other_qr->num_points() != fused_quad_rule->num_points()) {
+            if (!same_rule(*other_qr, *fused_quad_rule)) {
                 // Quad rule mismatch — fall back to default sequential path
                 return Assembler::assembleCellsFused(mesh, terms);
             }
+        }
+
+        // The rule was chosen on the first cell and serves the whole loop: a
+        // space whose element depends on the cell, or cells of another type,
+        // take the per-term path, which integrates each cell with its own rule.
+        bool one_rule = true;
+        for (const auto& t : terms) {
+            if (t.kernel->hasCell() &&
+                (t.test_space->space_type() == spaces::SpaceType::Adaptive ||
+                 t.trial_space->space_type() == spaces::SpaceType::Adaptive)) {
+                one_rule = false;
+            }
+        }
+        if (one_rule) {
+            mesh.forEachCell([&](GlobalIndex cell_id) {
+                if (one_rule && mesh.getCellType(cell_id) != cell_type) {
+                    one_rule = false;
+                }
+            });
+        }
+        if (!one_rule) {
+            return Assembler::assembleCellsFused(mesh, terms);
         }
     }
     if (cached_quad_rule_.get() != fused_quad_rule.get()) {

@@ -37,7 +37,9 @@
 #include "Interfaces/LevelSetInterfaceDomain.h"
 #include "Spaces/FunctionSpace.h"
 #include "Spaces/HDivSpace.h"
+#include "Spaces/AdaptiveSpace.h"
 #include "Spaces/H1Space.h"
+#include "Spaces/L2Space.h"
 #include "Spaces/ProductSpace.h"
 #include "Systems/MaterialStateProvider.h"
 #include "Constraints/AffineConstraints.h"
@@ -6253,6 +6255,118 @@ TEST(StandardAssemblerCaches, FusedBatchSlotsSeeTheCurrentLegacyAuxiliaryState)
         for (std::size_t i = 0; i < kernel.legacy.size(); ++i) {
             EXPECT_EQ(kernel.neutral[i], (*state)[0]);
             EXPECT_EQ(kernel.legacy[i], (*state)[0]);
+        }
+    }
+}
+
+/// The unit square cut into two triangles.
+class TwoTriangleSquareMeshAccess final : public IMeshAccess {
+public:
+    [[nodiscard]] GlobalIndex numCells() const override { return 2; }
+    [[nodiscard]] GlobalIndex numOwnedCells() const override { return 2; }
+    [[nodiscard]] GlobalIndex numBoundaryFaces() const override { return 0; }
+    [[nodiscard]] GlobalIndex numInteriorFaces() const override { return 0; }
+    [[nodiscard]] int dimension() const override { return 2; }
+    [[nodiscard]] bool isOwnedCell(GlobalIndex /*cell_id*/) const override { return true; }
+    [[nodiscard]] ElementType getCellType(GlobalIndex /*cell_id*/) const override { return ElementType::Triangle3; }
+    void getCellNodes(GlobalIndex cell_id, std::vector<GlobalIndex>& nodes) const override
+    {
+        const auto& cell = cells_.at(static_cast<std::size_t>(cell_id));
+        nodes.assign(cell.begin(), cell.end());
+    }
+    [[nodiscard]] std::array<Real, 3> getNodeCoordinates(GlobalIndex node_id) const override
+    {
+        return nodes_.at(static_cast<std::size_t>(node_id));
+    }
+    void getCellCoordinates(GlobalIndex cell_id, std::vector<std::array<Real, 3>>& coords) const override
+    {
+        const auto& cell = cells_.at(static_cast<std::size_t>(cell_id));
+        coords.resize(cell.size());
+        for (std::size_t i = 0; i < cell.size(); ++i) {
+            coords[i] = nodes_.at(static_cast<std::size_t>(cell[i]));
+        }
+    }
+    [[nodiscard]] LocalIndex getLocalFaceIndex(GlobalIndex /*face_id*/, GlobalIndex /*cell_id*/) const override
+    {
+        return 0;
+    }
+    [[nodiscard]] int getBoundaryFaceMarker(GlobalIndex /*face_id*/) const override { return -1; }
+    [[nodiscard]] std::pair<GlobalIndex, GlobalIndex> getInteriorFaceCells(GlobalIndex /*face_id*/) const override
+    {
+        return {0, 0};
+    }
+    void forEachCell(std::function<void(GlobalIndex)> callback) const override
+    {
+        callback(0);
+        callback(1);
+    }
+    void forEachOwnedCell(std::function<void(GlobalIndex)> callback) const override { forEachCell(callback); }
+    void forEachBoundaryFace(int /*marker*/, std::function<void(GlobalIndex, GlobalIndex)> /*callback*/) const override {}
+    void forEachInteriorFace(std::function<void(GlobalIndex, GlobalIndex, GlobalIndex)> /*callback*/) const override {}
+
+private:
+    std::vector<std::array<Real, 3>> nodes_{{0.0, 0.0, 0.0}, {1.0, 0.0, 0.0}, {0.0, 1.0, 0.0}, {1.0, 1.0, 0.0}};
+    std::array<std::array<GlobalIndex, 3>, 2> cells_{{{0, 1, 2}, {1, 3, 2}}};
+};
+
+// Fused assembly of a space whose element depends on the cell (a P1 and a P2
+// triangle) integrates each cell with the rule of its own element, as
+// assembly cell by cell does, whichever cell comes first.
+TEST(StandardAssemblerFused, CellDependentSpaceUsesEachCellsQuadrature)
+{
+    for (const bool p2_first : {false, true}) {
+        SCOPED_TRACE(p2_first ? "P2 cell first" : "P1 cell first");
+        TwoTriangleSquareMeshAccess mesh;
+        spaces::AdaptiveSpace space;
+        space.add_level(1, std::make_shared<spaces::L2Space>(ElementType::Triangle3, 1));
+        space.add_level(2, std::make_shared<spaces::L2Space>(ElementType::Triangle3, 2));
+        space.resize_element_orders(2);
+        space.set_element_order(0, p2_first ? 2 : 1);
+        space.set_element_order(1, p2_first ? 1 : 2);
+        const auto n0 = static_cast<GlobalIndex>(space.dofs_per_element(0));
+        const auto n1 = static_cast<GlobalIndex>(space.dofs_per_element(1));
+        const auto n = n0 + n1;
+        dofs::DofMap dof_map(2, n, static_cast<LocalIndex>(std::max(n0, n1)));
+        std::vector<GlobalIndex> cell0(static_cast<std::size_t>(n0));
+        std::vector<GlobalIndex> cell1(static_cast<std::size_t>(n1));
+        std::iota(cell0.begin(), cell0.end(), GlobalIndex{0});
+        std::iota(cell1.begin(), cell1.end(), n0);
+        dof_map.setCellDofs(0, cell0);
+        dof_map.setCellDofs(1, cell1);
+        dof_map.setNumDofs(n);
+        dof_map.setNumLocalDofs(n);
+        dof_map.finalize();
+
+        StandardAssembler per_cell;
+        per_cell.setDofMap(dof_map);
+        MassKernel per_cell_kernel;
+        TestDenseSystemView expected(n);
+        expected.zero();
+        EXPECT_TRUE(per_cell.assembleMatrix(mesh, space, space, per_cell_kernel, expected).success);
+
+        StandardAssembler fused;
+        fused.setDofMap(dof_map);
+        MassKernel fused_kernel;
+        TestDenseSystemView actual(n);
+        actual.zero();
+        const FusedCellTerm term{
+            .test_space = &space,
+            .trial_space = &space,
+            .kernel = &fused_kernel,
+            .row_dof_map = &dof_map,
+            .col_dof_map = &dof_map,
+            .row_dof_offset = 0,
+            .col_dof_offset = 0,
+            .matrix_view = &actual,
+            .vector_view = nullptr,
+            .assemble_matrix = true,
+            .assemble_vector = false,
+        };
+        EXPECT_TRUE(fused.assembleCellsFused(mesh, std::span<const FusedCellTerm>(&term, 1)).success);
+        for (GlobalIndex i = 0; i < n; ++i) {
+            for (GlobalIndex j = 0; j < n; ++j) {
+                EXPECT_NEAR(actual.getMatrixEntry(i, j), expected.getMatrixEntry(i, j), 1e-14) << i << "," << j;
+            }
         }
     }
 }
