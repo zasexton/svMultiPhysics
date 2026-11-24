@@ -6,6 +6,7 @@
  */
 
 #include "Interfaces/detail/ProducerArithmeticAssessment.h"
+#include "Core/EnvironmentNames.h"
 
 #include <array>
 #include <atomic>
@@ -816,7 +817,7 @@ std::atomic<int> g_arithmetic_path{kPathUnset};
 
 [[nodiscard]] bool environmentFlagSet(const char* name) noexcept
 {
-    const char* text = std::getenv(name);
+    const char* text = environment::value(name);
     return text != nullptr && text[0] != '\0' &&
            !(text[0] == '0' && text[1] == '\0');
 }

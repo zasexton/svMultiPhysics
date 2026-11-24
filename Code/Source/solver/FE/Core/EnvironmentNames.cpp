@@ -49,6 +49,7 @@ std::span<const NameDeclaration> solverCatalogue() noexcept
     constexpr const char* kAggregation = "FE/Constraints/SmallCutAggregationConstraint";
     constexpr const char* kCore = "FE/Core";
     constexpr const char* kJit = "FE/Forms/JIT";
+    constexpr const char* kInterfaces = "FE/Interfaces";
     constexpr const char* kLevelSetExtension = "FE/LevelSet/Extension";
     constexpr const char* kLevelSetGeometry = "FE/LevelSet/LevelSetGeometryService";
     constexpr const char* kLevelSetMaintenance = "FE/LevelSet/Maintenance";
@@ -522,6 +523,12 @@ std::span<const NameDeclaration> solverCatalogue() noexcept
          "prints JIT code-generation telemetry"},
         {"SVMP_SIMD_BATCH", Performance, kJit, Flag, "the JIT options (on)", NonReference,
          "cross-element SIMD batching of linear JIT kernels (0 turns it off)"},
+
+        // FE/Interfaces: interface producers.
+        {"SVMP_PRODUCER_ARITHMETIC_EXACT", Performance, kInterfaces, Flag, "off", Reference,
+         "computes the interface-producer interval arithmetic exactly, without the filtered fast path"},
+        {"SVMP_PRODUCER_ARITHMETIC_SELF_CHECK", Diagnostic, kInterfaces, Flag, "off", Reference,
+         "runs the filtered and the exact producer arithmetic and aborts on a difference"},
 
         // FE/LevelSet: the generated cut geometry, the PDE velocity extension and
         // level-set maintenance.
