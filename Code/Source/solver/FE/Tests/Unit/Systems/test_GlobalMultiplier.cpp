@@ -1550,7 +1550,14 @@ constexpr Real kCapacitance = 0.8;
 constexpr Real kResistance = 0.5;
 constexpr Real kInitialValue = 3.0;
 
-ScalarOde buildScalarOde(MultiplierLowering lowering = MultiplierLowering::Auto)
+/// With @p split_terms the rate and the other terms are separate terms of
+/// each row: (C dt(w) v).dx() + ((w/R - f) v).dx() for w, and for X the
+/// point term (z C dt(X)).dGlobal() with the measured term (z 2 (X/R - f)).dx()
+/// on the strip of area 1/2.  The theta method weights the terms without a
+/// time derivative by theta (and 1 - theta at the old state), and the
+/// first rates of generalized alpha solve with the rate terms only, term by
+/// term, so a row written as one term containing dt() is weighted as a whole.
+ScalarOde buildScalarOde(MultiplierLowering lowering = MultiplierLowering::Auto, bool split_terms = false)
 {
     ScalarOde out;
     auto h1 = quadSpace(1);
@@ -1567,8 +1574,11 @@ ScalarOde buildScalarOde(MultiplierLowering lowering = MultiplierLowering::Auto)
     const auto C = FormExpr::constant(kCapacitance);
     const auto R = FormExpr::constant(kResistance);
     const auto f = FormExpr::constant(2.0) + FormExpr::time() * FormExpr::time().exp();
-    (void)installFormulation(sys, "ode", {out.w, out.x},
-                             ((C * w.dt(1) + w / R - f) * v).dx() + (z * (C * x.dt(1) + x / R - f)).dGlobal());
+    const auto volume = split_terms ? (C * w.dt(1) * v).dx() + ((w / R - f) * v).dx()
+                                    : ((C * w.dt(1) + w / R - f) * v).dx();
+    const auto row = split_terms ? (z * C * x.dt(1)).dGlobal() + (FormExpr::constant(2.0) * z * (x / R - f)).dx()
+                                 : (z * (C * x.dt(1) + x / R - f)).dGlobal();
+    (void)installFormulation(sys, "ode", {out.w, out.x}, volume + row);
     SetupOptions options;
     options.multiplier_lowering = lowering;
     sys.setup(options);
@@ -1579,10 +1589,12 @@ ScalarOde buildScalarOde(MultiplierLowering lowering = MultiplierLowering::Auto)
 /// @p extend may add to the callbacks of the time loop.
 std::vector<std::array<Real, 2>> runScalarOde(
     timestepping::SchemeKind scheme,
-    const std::function<void(ScalarOde&, timestepping::TimeLoopCallbacks&)>& extend = {})
+    const std::function<void(ScalarOde&, timestepping::TimeLoopCallbacks&)>& extend = {},
+    bool split_terms = false,
+    std::vector<int>* iterations = nullptr)
 {
     std::vector<std::array<Real, 2>> out;
-    auto problem = buildScalarOde();
+    auto problem = buildScalarOde(MultiplierLowering::Auto, split_terms);
     auto& sys = *problem.system;
     auto factory = backends::BackendFactory::create(backends::BackendKind::Eigen);
     EXPECT_NE(factory, nullptr);
@@ -1629,6 +1641,9 @@ std::vector<std::array<Real, 2>> runScalarOde(
     const auto w_dof = sys.fieldDofOffset(problem.w);
     callbacks.on_nonlinear_done = [&](const timestepping::TimeHistory& h, const timestepping::NewtonReport& report) {
         EXPECT_TRUE(report.converged);
+        if (iterations != nullptr) {
+            iterations->push_back(report.iterations);
+        }
         const auto u = h.uSpan();
         out.push_back({u[static_cast<std::size_t>(x_dof)], u[static_cast<std::size_t>(w_dof)]});
     };
@@ -2188,6 +2203,29 @@ TEST(GlobalTimeDerivative, AFrozenCopyInAPointRowIsDataInTheTangent)
         const auto minus = globalPointRowAt(held_row, transient, 3.0 - h).first;
         EXPECT_NEAR((plus - minus) / (2.0 * h), J, 1e-9);
         EXPECT_NEAR(globalPointRowAt(held_row, transient).first, r, 1e-12);
+    }
+}
+
+TEST(GlobalTimeDerivative, AMeasuredTermOfTheRowTakesTheTermWeightOfTheScheme)
+{
+    // The theta method weights the terms without a time derivative by theta
+    // at the new state and 1 - theta at the old one (BDF2 starts with the
+    // Crank-Nicolson step), and the first rates of generalized alpha solve
+    // with the rate terms alone.  With the non-rate terms of X's row
+    // measured, X follows the volume field w written term by term in the
+    // same way, step by step, and Newton solves each step of this linear
+    // problem in one update.
+    for (const auto scheme : {timestepping::SchemeKind::BackwardEuler, timestepping::SchemeKind::ThetaMethod,
+                              timestepping::SchemeKind::BDF2, timestepping::SchemeKind::GeneralizedAlpha}) {
+        SCOPED_TRACE(static_cast<int>(scheme));
+        std::vector<int> iterations;
+        const auto values = runScalarOde(scheme, {}, /*split_terms=*/true, &iterations);
+        ASSERT_EQ(values.size(), 10u);
+        for (std::size_t step = 0; step < values.size(); ++step) {
+            EXPECT_NEAR(values[step][0], values[step][1], 1e-12) << "step " << step;
+            EXPECT_LE(iterations[step], 2) << "step " << step;
+        }
+        EXPECT_GT(std::abs(values.back()[0] - kInitialValue), 0.1);
     }
 }
 

@@ -181,6 +181,29 @@ void collectGlobalDataFields(const FormExprNode& node, std::vector<FieldId>& out
     return false;
 }
 
+/// The integrator's weight of a term with time derivatives of @p order (0:
+/// none), 1 without a time-integration context, as the form kernels take it.
+[[nodiscard]] Real termWeight(const assembly::TimeIntegrationContext* time_ctx, int order) noexcept
+{
+    if (time_ctx == nullptr) {
+        return Real(1.0);
+    }
+    return order > 0 ? time_ctx->time_derivative_term_weight * time_ctx->derivativeTermWeight(order)
+                     : time_ctx->non_time_derivative_term_weight;
+}
+
+/// The highest order of the time derivatives in @p node (0 without one).
+[[nodiscard]] int highestTimeDerivativeOrder(const FormExprNode& node)
+{
+    int order = node.type() == FormExprType::TimeDerivative ? node.timeDerivativeOrder().value_or(1) : 0;
+    for (const auto& child : node.childrenShared()) {
+        if (child) {
+            order = std::max(order, highestTimeDerivativeOrder(*child));
+        }
+    }
+    return order;
+}
+
 /// The terms of the sum @p expr, each with its sign.
 void collectSignedTerms(const FormExpr& expr, bool negated, std::vector<FormExpr>& out)
 {
@@ -300,6 +323,23 @@ GlobalRowKernel::GlobalRowKernel(FieldId test_field,
     FE_THROW_IF(!measured_terms.isValid() && !point_integrand.isValid(), InvalidArgumentException,
                 "GlobalRowKernel: the row of '" + test_field_name_ + "' has no terms");
     measured_value_form_ = withUnitTestFunction(measured_terms);
+    if (measured_value_form_.isValid()) {
+        // The measured terms by their highest time-derivative order: each
+        // group takes the integrator's term weight of that order, as the
+        // element kernels of the row's Jacobian do.
+        std::vector<FormExpr> terms;
+        collectSignedTerms(measured_value_form_, /*negated=*/false, terms);
+        for (auto& term : terms) {
+            const int order = highestTimeDerivativeOrder(*term.node());
+            auto group = std::find_if(measured_by_order_.begin(), measured_by_order_.end(),
+                                      [order](const auto& entry) { return entry.first == order; });
+            if (group == measured_by_order_.end()) {
+                measured_by_order_.emplace_back(order, std::move(term));
+            } else {
+                group->second = group->second + term;
+            }
+        }
+    }
     if (point_integrand.isValid()) {
         validatePointIntegrand(point_integrand, test_field_name_);
         point_value_ = withUnitTestFunction(point_integrand);
@@ -577,13 +617,34 @@ assembly::AssemblyResult GlobalRowKernel::assemble(const FESystem& system,
         }
         Real value = Real(0.0);
         if (measured_value_form_.isValid()) {
-            const auto values = evaluateFunctionalFormsWithQuadratureOf(
-                system,
-                quadratureField(system),
-                std::span<const FormExpr>(&measured_value_form_, 1u),
-                state,
-                comm);
-            value = values.front().value;
+            // Under weights other than 1 (the stages of the theta method and
+            // the rate initialization), each group of measured terms takes
+            // the term weight of its time-derivative order.
+            const bool unweighted =
+                time_ctx == nullptr ||
+                std::all_of(measured_by_order_.begin(), measured_by_order_.end(), [&](const auto& group) {
+                    return termWeight(time_ctx, group.first) == Real(1.0);
+                });
+            if (unweighted) {
+                const auto values = evaluateFunctionalFormsWithQuadratureOf(
+                    system,
+                    quadratureField(system),
+                    std::span<const FormExpr>(&measured_value_form_, 1u),
+                    state,
+                    comm);
+                value = values.front().value;
+            } else {
+                std::vector<FormExpr> groups;
+                groups.reserve(measured_by_order_.size());
+                for (const auto& group : measured_by_order_) {
+                    groups.push_back(group.second);
+                }
+                const auto values =
+                    evaluateFunctionalFormsWithQuadratureOf(system, quadratureField(system), groups, state, comm);
+                for (std::size_t g = 0; g < groups.size(); ++g) {
+                    value += termWeight(time_ctx, measured_by_order_[g].first) * values[g].value;
+                }
+            }
         }
         if (owner) {
             if (!time_symbols_.empty()) {
@@ -591,7 +652,7 @@ assembly::AssemblyResult GlobalRowKernel::assemble(const FESystem& system,
                     value += term_weight(term.order) * evaluatePoint(term.value, system, state, symbol_values);
                 }
             } else if (point_value_.isValid()) {
-                value += evaluatePoint(point_value_, system, state);
+                value += termWeight(time_ctx, 0) * evaluatePoint(point_value_, system, state);
             }
             vector_out->addVectorEntry(row, value, assembly::AddMode::Add);
             ++result.vector_entries_inserted;
@@ -602,7 +663,7 @@ assembly::AssemblyResult GlobalRowKernel::assemble(const FESystem& system,
         for (const auto& [field, derivative] : point_derivatives_) {
             matrix_out->addMatrixEntry(row,
                                        system.fieldDofOffset(field),
-                                       evaluatePoint(derivative, system, state),
+                                       termWeight(time_ctx, 0) * evaluatePoint(derivative, system, state),
                                        assembly::AddMode::Add);
             ++result.matrix_entries_inserted;
         }

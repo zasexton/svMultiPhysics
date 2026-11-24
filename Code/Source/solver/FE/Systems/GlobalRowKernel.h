@@ -145,6 +145,8 @@ private:
     FieldId test_field_{INVALID_FIELD_ID};
     std::string test_field_name_;
     forms::FormExpr measured_value_form_{};
+    /// The measured terms grouped by their highest time-derivative order.
+    std::vector<std::pair<int, forms::FormExpr>> measured_by_order_{};
     forms::FormExpr point_value_{};
     /// d(point value)/d(global field), for each global field of the point terms
     std::vector<std::pair<FieldId, forms::FormExpr>> point_derivatives_{};
