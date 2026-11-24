@@ -53,6 +53,76 @@ dofs::DofMap makeContiguousSingleCellDofMap(GlobalIndex num_dofs)
     return dof_map;
 }
 
+/// Two triangles of the unit square in two domains (ids 2 and 7).
+class TwoTriangleDomainMeshAccess final : public assembly::IMeshAccess {
+public:
+    [[nodiscard]] GlobalIndex numCells() const override { return 2; }
+    [[nodiscard]] GlobalIndex numOwnedCells() const override { return 2; }
+    [[nodiscard]] GlobalIndex numBoundaryFaces() const override { return 0; }
+    [[nodiscard]] GlobalIndex numInteriorFaces() const override { return 0; }
+    [[nodiscard]] int dimension() const override { return 2; }
+    [[nodiscard]] bool isOwnedCell(GlobalIndex /*cell_id*/) const override { return true; }
+    [[nodiscard]] ElementType getCellType(GlobalIndex /*cell_id*/) const override { return ElementType::Triangle3; }
+    [[nodiscard]] int getCellDomainId(GlobalIndex cell_id) const override { return cell_id == 0 ? 2 : 7; }
+
+    void getCellNodes(GlobalIndex cell_id, std::vector<GlobalIndex>& nodes) const override
+    {
+        const auto& cell = cells_.at(static_cast<std::size_t>(cell_id));
+        nodes.assign(cell.begin(), cell.end());
+    }
+
+    [[nodiscard]] std::array<Real, 3> getNodeCoordinates(GlobalIndex node_id) const override
+    {
+        return nodes_.at(static_cast<std::size_t>(node_id));
+    }
+
+    void getCellCoordinates(GlobalIndex cell_id, std::vector<std::array<Real, 3>>& coords) const override
+    {
+        const auto& cell = cells_.at(static_cast<std::size_t>(cell_id));
+        coords.resize(cell.size());
+        for (std::size_t i = 0; i < cell.size(); ++i) {
+            coords[i] = nodes_.at(static_cast<std::size_t>(cell[i]));
+        }
+    }
+
+    [[nodiscard]] LocalIndex getLocalFaceIndex(GlobalIndex /*face_id*/, GlobalIndex /*cell_id*/) const override
+    {
+        return 0;
+    }
+    [[nodiscard]] int getBoundaryFaceMarker(GlobalIndex /*face_id*/) const override { return -1; }
+    [[nodiscard]] std::pair<GlobalIndex, GlobalIndex> getInteriorFaceCells(GlobalIndex /*face_id*/) const override
+    {
+        return {0, 0};
+    }
+    void forEachCell(std::function<void(GlobalIndex)> callback) const override
+    {
+        callback(0);
+        callback(1);
+    }
+    void forEachOwnedCell(std::function<void(GlobalIndex)> callback) const override { forEachCell(callback); }
+    void forEachBoundaryFace(int /*marker*/, std::function<void(GlobalIndex, GlobalIndex)> /*callback*/) const override
+    {
+    }
+    void forEachInteriorFace(std::function<void(GlobalIndex, GlobalIndex, GlobalIndex)> /*callback*/) const override
+    {
+    }
+
+private:
+    std::vector<std::array<Real, 3>> nodes_{{0.0, 0.0, 0.0}, {1.0, 0.0, 0.0}, {0.0, 1.0, 0.0}, {1.0, 1.0, 0.0}};
+    std::array<std::array<GlobalIndex, 3>, 2> cells_{{{0, 1, 2}, {1, 3, 2}}};
+};
+
+[[nodiscard]] dofs::DofMap createTwoTriangleDGDofMap()
+{
+    dofs::DofMap dof_map(2, 6, 3);
+    dof_map.setCellDofs(0, std::vector<GlobalIndex>{0, 1, 2});
+    dof_map.setCellDofs(1, std::vector<GlobalIndex>{3, 4, 5});
+    dof_map.setNumDofs(6);
+    dof_map.setNumLocalDofs(6);
+    dof_map.finalize();
+    return dof_map;
+}
+
 [[nodiscard]] std::string readFileToString(const std::filesystem::path& path)
 {
     std::ifstream in(path);
@@ -600,6 +670,56 @@ TEST(JITVectorization, VectorOnlyLinearKernelBatchIncludesTheBilinearPart)
         EXPECT_TRUE(compiled.isJITReady());
         for (std::size_t i = 0; i < expected.size(); ++i) {
             EXPECT_NEAR(actual[i], expected[i], 1e-13) << "row " << i;
+        }
+    }
+}
+
+// The cell's domain id is per cell: in the two-lane compiled batch each lane
+// reads the id of its own cell.  A mass matrix weighted by the domain id on
+// two triangles in domains 2 and 7 matches the interpreted one.
+TEST(JITVectorization, TwoLaneBatchReadsEachCellsDomainId)
+{
+    requireLLVMJITOrSkip();
+    TwoTriangleDomainMeshAccess mesh;
+    auto dof_map = createTwoTriangleDGDofMap();
+    spaces::L2Space space(ElementType::Triangle3, 1);
+
+    FormCompiler compiler;
+    const auto u = FormExpr::trialFunction(space, "u");
+    const auto v = FormExpr::testFunction(space, "v");
+    const auto form = (FormExpr::cellDomainId() * u * v).dx();
+    const auto matrix = [&](assembly::AssemblyKernel& kernel) {
+        assembly::StandardAssembler assembler;
+        assembler.setDofMap(dof_map);
+        assembly::DenseMatrixView A(6);
+        A.zero();
+        (void)assembler.assembleMatrix(mesh, space, space, kernel, A);
+        std::vector<Real> out;
+        for (GlobalIndex i = 0; i < 6; ++i) {
+            for (GlobalIndex j = 0; j < 6; ++j) {
+                out.push_back(A.getMatrixEntry(i, j));
+            }
+        }
+        return out;
+    };
+
+    FormKernel interpreted(compiler.compileBilinear(form));
+    const auto expected = matrix(interpreted);
+    // Diagonal of the second cell: 7 * (area 1/2) / 6.
+    EXPECT_NEAR(expected[3 * 6 + 3], 7.0 / 12.0, 1e-14);
+    for (const bool simd_batch : {false, true}) {
+        SCOPED_TRACE(::testing::Message() << "simd_batch " << simd_batch);
+        JITOptions options;
+        options.enable = true;
+        options.optimization_level = 2;
+        options.vectorize = true;
+        options.simd_batch = simd_batch;
+        options.cache_kernels = false;
+        jit::JITKernelWrapper compiled(std::make_shared<FormKernel>(compiler.compileBilinear(form)), options);
+        const auto actual = matrix(compiled);
+        EXPECT_TRUE(compiled.isJITReady());
+        for (std::size_t i = 0; i < expected.size(); ++i) {
+            EXPECT_NEAR(actual[i], expected[i], 1e-14) << "entry " << i;
         }
     }
 }

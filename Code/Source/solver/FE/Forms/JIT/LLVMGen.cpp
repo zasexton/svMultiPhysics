@@ -2372,6 +2372,8 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
             llvm::Value* trial_uses_vector_basis{nullptr};
 
             llvm::Value* cell_domain_id{nullptr}; // i32
+            // In a two-lane batch: each lane's domain id, <simd_w x double>.
+            llvm::Value* cell_domain_id_lanes{nullptr};
             llvm::Value* cell_diameter{nullptr};
             llvm::Value* cell_volume{nullptr};
             llvm::Value* facet_area{nullptr};
@@ -3379,6 +3381,15 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
 	                        side_single.cell_diameter = gatherF64Field(side_single.cell_diameter, ABIV3::side_cell_diameter_off);
 	                        side_single.cell_volume = gatherF64Field(side_single.cell_volume, ABIV3::side_cell_volume_off);
 	                        side_single.facet_area = gatherF64Field(side_single.facet_area, ABIV3::side_facet_area_off);
+	                        {
+	                            auto* lane1_id = loadI32(simd_side_ptr_1, ABIV3::side_cell_domain_id_off);
+	                            llvm::Value* ids = llvm::UndefValue::get(vf64);
+	                            ids = builder.CreateInsertElement(
+	                                ids, builder.CreateSIToFP(side_single.cell_domain_id, f64), static_cast<uint64_t>(0));
+	                            ids = builder.CreateInsertElement(
+	                                ids, builder.CreateSIToFP(lane1_id, f64), static_cast<uint64_t>(1));
+	                            side_single.cell_domain_id_lanes = ids;
+	                        }
 
 	                        // Batch-invariant scalars: splat to <simd_w x double>
 	                        side_single.time = splatF64(side_single.time);
@@ -3849,6 +3860,15 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
         auto nodePtrFromImm0 = [&](std::uint64_t imm0) -> llvm::Value* {
             auto* addr = llvm::ConstantInt::get(i64, imm0);
             return builder.CreateIntToPtr(addr, i8_ptr);
+        };
+
+        // The cell's domain id as a Real: per lane in a two-lane batch.
+        auto cellDomainIdValue = [&](const SideView& side) -> llvm::Value* {
+            if (simd_active && side.cell_domain_id_lanes != nullptr) {
+                return side.cell_domain_id_lanes;
+            }
+            auto* id_f64 = builder.CreateSIToFP(side.cell_domain_id, f64);
+            return simd_active ? builder.CreateVectorSplat(simd_w, id_f64) : id_f64;
         };
 
         auto evalExternalCoefficient = [&](const SideView& side,
@@ -6836,11 +6856,9 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
                         values[op_idx] = makeScalar(side.facet_area);
                         break;
 
-                    case FormExprType::CellDomainId: {
-                        auto* id_f64 = builder.CreateSIToFP(side.cell_domain_id, f64);
-                        values[op_idx] = makeScalar(simd_active ? builder.CreateVectorSplat(simd_w, id_f64) : id_f64);
+                    case FormExprType::CellDomainId:
+                        values[op_idx] = makeScalar(cellDomainIdValue(side));
                         break;
-                    }
 
                     case FormExprType::Coordinate:
                         values[op_idx] =
@@ -10110,7 +10128,7 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
                         values[op_idx] = makeScalar(side.facet_area);
                         break;
                     case FormExprType::CellDomainId:
-                        values[op_idx] = makeScalar(builder.CreateSIToFP(side.cell_domain_id, f64));
+                        values[op_idx] = makeScalar(cellDomainIdValue(side));
                         break;
                     case FormExprType::Coordinate:
                         values[op_idx] =
