@@ -618,6 +618,65 @@ TEST(FrameGeometry, CurvedQuad9CurrentReferenceBoundaryNormalsAndMeasuresChange)
     EXPECT_TRUE(saw_measure_change);
 }
 
+TEST(FrameGeometry, CurvedQuad9HasOutwardNormalsAndZeroClosedFlux)
+{
+    auto basis = std::make_shared<basis::LagrangeBasis>(ElementType::Quad4, 2);
+    auto nodes = basis->nodes();
+    for (auto& node : nodes) {
+        node[1] += Real(2) * node[0] * node[0];
+    }
+    const IsoparametricMapping mapping(basis, nodes);
+    const auto rule = quadrature::QuadratureFactory::create(ElementType::Line2, 5);
+    for (const auto& alignment : {std::array<LocalIndex, 2>{0, 1},
+                                  std::array<LocalIndex, 2>{1, 0}}) {
+        Vector3D closed_flux{};
+        for (LocalIndex edge = 0; edge < 4; ++edge) {
+            const auto face = evaluateFaceFrame(mapping, ElementType::Quad9, edge,
+                                                ElementType::Line2, *rule, alignment);
+            for (std::size_t q = 0; q < rule->num_points(); ++q) {
+                const auto& x = face.cell_geometry.points[q];
+                const auto& n = face.normals[q];
+                const Real ds = face.surface_measures[q] * rule->weight(q);
+                for (std::size_t d = 0; d < 2; ++d) {
+                    closed_flux[d] += n[d] * ds;
+                }
+                if (edge == 2) {
+                    // The top is y = 1 + 2x², with the fluid below it.
+                    const Real length = std::hypot(Real(1), Real(4) * x[0]);
+                    EXPECT_NEAR(n[0], -Real(4) * x[0] / length, 1e-12);
+                    EXPECT_NEAR(n[1], Real(1) / length, 1e-12);
+                    EXPECT_NEAR(face.mean_curvatures[q],
+                                -Real(4) / (length * length * length), 1e-12);
+                }
+            }
+        }
+        EXPECT_NEAR(closed_flux[0], 0.0, 1e-12);
+        EXPECT_NEAR(closed_flux[1], 0.0, 1e-12);
+    }
+}
+
+TEST(FrameGeometry, ReflectedTetrahedronPreservesPhysicalOutwardNormals)
+{
+    const auto rule = quadrature::QuadratureFactory::create(ElementType::Triangle3, 2);
+    for (const Real scale : {Real(1), Real(1e-16)}) {
+        for (const Real x_sign : {Real(1), Real(-1)}) {
+            const std::vector<Point3D> nodes{{0, 0, 0}, {x_sign * scale, 0, 0},
+                                             {0, scale, 0}, {0, 0, scale}};
+            const auto face = evaluateFaceFrame(ElementType::Tetra4, 3,
+                                                ElementType::Triangle3, *rule, nodes);
+            Real area = 0;
+            for (std::size_t q = 0; q < rule->num_points(); ++q) {
+                const auto& n = face.normals[q];
+                EXPECT_NEAR(n[0], -x_sign, 1e-12);
+                EXPECT_NEAR(n[1], 0.0, 1e-12);
+                EXPECT_NEAR(n[2], 0.0, 1e-12);
+                area += rule->weight(q) * face.surface_measures[q];
+            }
+            EXPECT_NEAR(area / (scale * scale), 0.5, 1e-12);
+        }
+    }
+}
+
 TEST(FrameGeometry, Quad9GeometrySensitivityCoversHighOrderControlPoints)
 {
     auto basis = std::make_shared<basis::LagrangeBasis>(ElementType::Quad4, 2);

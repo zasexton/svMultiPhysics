@@ -1129,6 +1129,10 @@ ValidationResult canCompileImpl(const FormExpr& integrand,
                     n,
                     "JIT: AuxiliaryOutputRef requires runtime entity-aware lookup; use interpreter fallback");
                 return;
+            case FormExprType::CutSurfaceVariation:
+                out.ok = false;
+                out.first_issue = issue(n, "JIT: differentiated cut quadrature uses the assembly-context interpreter fallback");
+                return;
             case FormExprType::CellDiameterVariation:
             case FormExprType::CellVolumeVariation:
             case FormExprType::FacetAreaVariation:

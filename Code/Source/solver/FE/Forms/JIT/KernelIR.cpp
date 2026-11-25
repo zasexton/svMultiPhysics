@@ -93,6 +93,7 @@ inline void hashMix(std::uint64_t& h, std::uint64_t v) noexcept
         case FormExprType::CellDiameterVariation: return "CellDiameterVariation";
         case FormExprType::CellVolumeVariation: return "CellVolumeVariation";
         case FormExprType::FacetAreaVariation: return "FacetAreaVariation";
+        case FormExprType::CutSurfaceVariation: return "CutSurfaceVariation";
         case FormExprType::Time: return "Time";
         case FormExprType::TimeStep: return "TimeStep";
         case FormExprType::EffectiveTimeStep: return "EffectiveTimeStep";

@@ -2141,7 +2141,7 @@ static_assert(sizeof(interfaces::CutInterfaceVertex) == 64u);
 static_assert(sizeof(interfaces::CutInterfaceQuadraturePoint) == 104u);
 static_assert(sizeof(interfaces::CutInterfaceReferenceSimplex) == 152u);
 static_assert(sizeof(geometry::CutQuadraturePoint) == 152u);
-static_assert(sizeof(interfaces::CutInterfaceFragment) == 400u);
+static_assert(sizeof(interfaces::CutInterfaceFragment) == 432u);
 static_assert(sizeof(interfaces::CutInterfaceVolumeRegion) == 288u);
 static_assert(sizeof(GeneratedInterfaceCellDiagnostics) == 144u);
 
@@ -2232,6 +2232,7 @@ template <typename T, typename Same>
            sameBits(a.max_level_set_value, b.max_level_set_value) &&
            a.topology_id == b.topology_id &&
            a.parent_corner_topology_key == b.parent_corner_topology_key &&
+           a.linear_corner_surface == b.linear_corner_surface &&
            a.implicit_quadrature_backend == b.implicit_quadrature_backend &&
            a.implicit_fallback_status == b.implicit_fallback_status &&
            a.branch_id == b.branch_id &&

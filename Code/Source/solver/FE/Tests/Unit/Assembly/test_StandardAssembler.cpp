@@ -29,6 +29,7 @@
 #include "Assembly/CutIntegrationContext.h"
 #include "Core/FEException.h"
 #include "Dofs/DofMap.h"
+#include "Forms/CutSurfaceGeometry.h"
 #include "Forms/FormCompiler.h"
 #include "Forms/FormKernels.h"
 #include "Forms/JIT/JITCompiler.h"
@@ -36,6 +37,7 @@
 #include "Forms/MonolithicCellKernel.h"
 #include "Forms/Vocabulary.h"
 #include "Interfaces/GeneratedInterfaceBoundaryIntersectionDomain.h"
+#include "Interfaces/LevelSetInterfaceBuilder.h"
 #include "Interfaces/LevelSetInterfaceDomain.h"
 #include "Spaces/FunctionSpace.h"
 #include "Spaces/HDivSpace.h"
@@ -5842,6 +5844,121 @@ TEST(StandardAssemblerCutInterfaces,
     EXPECT_EQ(result.interface_faces_assembled, 1);
     ASSERT_EQ(kernel.last_values.size(), 1u);
     EXPECT_EQ(kernel.last_values.front(), 2);
+}
+
+TEST(StandardAssemblerCutInterfaces, InternalInterfaceNormalLengthUsesFullPhysicalTetrahedronOnBothSides)
+{
+    constexpr int marker = 317;
+    const std::array<std::array<Real, 3>, 4> reference{{
+        {0, 0, 0}, {1, 0, 0}, {0, 1, 0}, {0, 0, 1}}};
+    spaces::H1Space space(ElementType::Tetra4, 1);
+    auto dofs = createSingleCellDofMap(4);
+    const auto v = forms::TestFunction(space, "v");
+    forms::FormCompiler compiler;
+    for (Real scale : {1.0, 3.0}) {
+        auto nodes = reference;
+        for (auto& point : nodes) {
+            for (auto& x : point) x *= scale;
+        }
+        ConfigurableSingleTetraMeshAccess mesh(nodes, {0, 1, 2, 3});
+        StandardAssembler assembler;
+        assembler.setDofMap(dofs);
+        for (Real cut : {0.25, 0.625}) {
+            interfaces::CutInterfaceDomainRequest request;
+            request.source = interfaces::LevelSetInterfaceSource::fromField(FieldId{1}, 0u, 1u);
+            request.interface_marker = marker;
+            request.quadrature_order = 2;
+            interfaces::LevelSetInterfaceDomain domain(request);
+            interfaces::appendLinearLevelSetCellCut3D(domain, {
+                .parent_cell = 0, .element_type = ElementType::Tetra4,
+                .node_coordinates = {reference.begin(), reference.end()},
+                .level_set_values = {-cut, 1 - cut, -cut, -cut}});
+            CutIntegrationContext context;
+            context.addGeneratedInterfaceDomain(domain);
+            const Real area = scale * scale * (1 - cut) * (1 - cut) / 2;
+            const Real volume = scale * scale * scale / 6;
+            for (bool plus : {false, true}) {
+                SCOPED_TRACE(::testing::Message() << "scale=" << scale << ", cut=" << cut << ", plus=" << plus);
+                // Summing the P1 test loads integrates the terminal over the physical cut.
+                const auto integrate = [&](const forms::FormExpr& terminal) {
+                    const auto load = plus ? terminal.plus() * v.plus() : terminal.minus() * v.minus();
+                    forms::FormKernel kernel(compiler.compileLinear(load.dI(marker)));
+                    DenseVectorView rhs(4);
+                    const auto result = assembler.assembleCutInterfaces(mesh, context, marker, space, space,
+                        kernel, nullptr, &rhs, false, true);
+                    EXPECT_TRUE(result.success);
+                    Real integral = 0;
+                    for (GlobalIndex i = 0; i < 4; ++i) integral += rhs.getVectorEntry(i);
+                    return integral;
+                };
+                EXPECT_NEAR(integrate(forms::FormExpr::constant(1)), area, 1e-12);
+                EXPECT_NEAR(integrate(forms::vol()), volume * area, 1e-12);
+                EXPECT_NEAR(integrate(forms::hNormal()), 2 * volume, 1e-12);
+            }
+        }
+    }
+}
+
+TEST(StandardAssemblerCutInterfaces, InternalInterfaceMeasuresUseFullTrapezoidWithVaryingJacobian)
+{
+    // The physical width is 2 + y. At y = 1/4 it differs from the average width.
+    AffineSingleQuadMeshAccess mesh(std::array<std::array<Real, 3>, 4>{{
+        {0, 0, 0}, {2, 0, 0}, {3, 1, 0}, {0, 1, 0}}});
+    interfaces::CutInterfaceDomainRequest request;
+    request.source = interfaces::LevelSetInterfaceSource::fromField(FieldId{1}, 0u, 1u);
+    request.interface_marker = 318;
+    request.quadrature_order = 2;
+    interfaces::LevelSetInterfaceDomain domain(request);
+    interfaces::appendLinearLevelSetCellCut2D(domain, {
+        .parent_cell = 0, .element_type = ElementType::Quad4,
+        .node_coordinates = {{-1, -1, 0}, {1, -1, 0}, {1, 1, 0}, {-1, 1, 0}},
+        .level_set_values = {-0.25, -0.25, 0.75, 0.75}});
+    CutIntegrationContext context;
+    context.addGeneratedInterfaceDomain(domain);
+    spaces::H1Space space(ElementType::Quad4, 1);
+    auto dofs = createSingleCellDofMap(4);
+    StandardAssembler assembler;
+    assembler.setDofMap(dofs);
+    CutInterfaceEntityMeasuresKernel kernel;
+    DenseVectorView measures(4);
+    ASSERT_TRUE(assembler.assembleCutInterfaces(mesh, context, request.interface_marker, space, space,
+        kernel, nullptr, &measures, false, true).success);
+    EXPECT_NEAR(measures.getVectorEntry(1), 2.5, 1e-12);
+    EXPECT_NEAR(measures.getVectorEntry(2), 2.25, 1e-12);
+    EXPECT_NEAR(measures.getVectorEntry(3), 5.0 / 2.25, 1e-12);
+}
+
+TEST(StandardAssemblerCutInterfaces, CutSurfaceFieldMotionScalesWithThePhysicalCell)
+{
+    const std::vector<Real> coefficients{-1, 1, 1, -1};
+    interfaces::CutInterfaceDomainRequest request;
+    request.source = interfaces::LevelSetInterfaceSource::fromField(FieldId{1}, 0u, 1u);
+    request.interface_marker = 318;
+    request.quadrature_order = 2;
+    interfaces::LevelSetInterfaceDomain domain(request);
+    interfaces::appendLinearLevelSetCellCut2D(domain, {
+        .parent_cell = 0, .element_type = ElementType::Quad4,
+        .node_coordinates = {{-1, -1, 0}, {1, -1, 0}, {1, 1, 0}, {-1, 1, 0}},
+        .level_set_values = coefficients});
+    CutIntegrationContext context;
+    context.addGeneratedInterfaceDomain(domain);
+    ASSERT_EQ(context.interfaceRules().size(), 1u);
+    const auto& rule = context.interfaceRules().front();
+    spaces::H1Space space(ElementType::Quad4, 1);
+    for (const Real length : {1., 1.e8}) {
+        SCOPED_TRACE(length);
+        AffineSingleQuadMeshAccess mesh(std::array<std::array<Real, 3>, 4>{{
+            {0, 0, 0}, {length, 0, 0}, {length, length, 0}, {0, length, 0}}});
+        const auto variations = forms::cut_surface::differentiateRule(mesh, 0, rule, space, coefficients, space);
+        // A uniform increment moves the zero of phi = 2x/L - 1 by -L/2.
+        for (std::size_t q = 0; q < rule.points.size(); ++q) {
+            Real motion = 0;
+            for (const auto& column : variations) {
+                motion += column[q].field_point[0];
+            }
+            EXPECT_NEAR(motion / length, -0.5, 1.e-13);
+        }
+    }
 }
 
 TEST(StandardAssemblerCutInterfaces, DispatchesTwoSidedGeneratedInterfaceBlocks)

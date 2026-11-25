@@ -12,7 +12,6 @@
 #include "Dofs/DofMap.h"
 #include "Spaces/FunctionSpace.h"
 #include "Elements/Element.h"
-#include "Elements/ElementTransform.h"
 #include "Elements/ReferenceElement.h"
 #include "Quadrature/QuadratureFactory.h"
 #include "Quadrature/QuadratureRule.h"
@@ -47,26 +46,6 @@ namespace assembly {
 
 namespace {
 
-int defaultGeometryOrder(ElementType element_type) noexcept
-{
-    switch (element_type) {
-        case ElementType::Line3:
-        case ElementType::Triangle6:
-        case ElementType::Quad8:
-        case ElementType::Quad9:
-        case ElementType::Tetra10:
-        case ElementType::Hex20:
-        case ElementType::Hex27:
-        case ElementType::Wedge15:
-        case ElementType::Wedge18:
-        case ElementType::Pyramid13:
-        case ElementType::Pyramid14:
-            return 2;
-        default:
-            return 1;
-    }
-}
-
 struct ContextScratch {
     std::vector<std::array<Real, 3>> cell_coords;
     std::vector<math::Vector<Real, 3>> node_coords;
@@ -81,7 +60,7 @@ struct ContextScratch {
     std::vector<AssemblyContext::Matrix3x3> inv_jacobians;
     std::vector<Real> jac_dets;
     std::vector<Real> integration_weights;
-    std::vector<AssemblyContext::Vector3D> normals;
+    geometry::FaceGeometryData face_geometry;
 
     std::vector<Real> basis_values;
     std::vector<AssemblyContext::Vector3D> ref_gradients;
@@ -171,81 +150,6 @@ std::span<const GlobalIndex> gatherDofsWithOffset(std::span<const GlobalIndex> d
         scratch[i] = dofs[i] + offset;
     }
     return std::span<const GlobalIndex>(scratch.data(), scratch.size());
-}
-
-[[nodiscard]] math::Vector<Real, 3> cross3(const math::Vector<Real, 3>& a,
-                                           const math::Vector<Real, 3>& b) noexcept
-{
-    return math::Vector<Real, 3>{
-        a[1] * b[2] - a[2] * b[1],
-        a[2] * b[0] - a[0] * b[2],
-        a[0] * b[1] - a[1] * b[0],
-    };
-}
-
-[[nodiscard]] Real norm3(const math::Vector<Real, 3>& v) noexcept
-{
-    return std::sqrt(v[0] * v[0] + v[1] * v[1] + v[2] * v[2]);
-}
-
-[[nodiscard]] Real canonicalFaceJacobianToReference(
-    ElementType face_type,
-    std::span<const math::Vector<Real, 3>> ref_face_coords,
-    const math::Vector<Real, 3>& facet_coords)
-{
-    // Convert canonical face quadrature weights to the element-reference facet measure.
-    //
-    // Face quadrature rules are defined on canonical domains:
-    //   - Line2:    s in [-1, 1]
-    //   - Quad4:    (xi,eta) in [-1,1]^2
-    //   - Triangle: (x,y) on reference simplex (area 0.5)
-    //
-    // ElementTransform::facet_to_reference() expects facet-local parameters:
-    //   - edges:    t in [0, 1]
-    //   - quad:     (s,t) in [0,1]^2
-    //   - triangle: (x,y) on reference simplex
-    //
-    // This function returns |dX_ref/du| where u is the canonical quadrature coordinate,
-    // so that dS_ref = jac * du. Multiply quadrature weights by this factor.
-    switch (face_type) {
-        case ElementType::Line2: {
-            FE_THROW_IF(ref_face_coords.size() < 2, FEException,
-                        "canonicalFaceJacobianToReference(Line2): missing vertices");
-            const math::Vector<Real, 3> dx = ref_face_coords[1] - ref_face_coords[0];
-            // t = (s+1)/2 => dt/ds = 1/2
-            return Real(0.5) * norm3(dx);
-        }
-        case ElementType::Triangle3: {
-            FE_THROW_IF(ref_face_coords.size() < 3, FEException,
-                        "canonicalFaceJacobianToReference(Triangle3): missing vertices");
-            (void)facet_coords;
-            const math::Vector<Real, 3> e1 = ref_face_coords[1] - ref_face_coords[0];
-            const math::Vector<Real, 3> e2 = ref_face_coords[2] - ref_face_coords[0];
-            // xi(x,y) = v0 + x*(v1-v0) + y*(v2-v0) => jac = |e1 x e2|
-            return norm3(cross3(e1, e2));
-        }
-        case ElementType::Quad4: {
-            FE_THROW_IF(ref_face_coords.size() < 4, FEException,
-                        "canonicalFaceJacobianToReference(Quad4): missing vertices");
-            const Real s = facet_coords[0];
-            const Real t = facet_coords[1];
-            // X_ref(s,t) is bilinear on [0,1]^2; canonical quad weights are on [-1,1]^2.
-            // (s,t) = ((xi+1)/2, (eta+1)/2) => dxi deta = 4 ds dt, so:
-            // |dX/dxi x dX/deta| = 0.25 * |dX/ds x dX/dt|
-            math::Vector<Real, 3> dXds{};
-            math::Vector<Real, 3> dXdt{};
-            for (std::size_t i = 0; i < 3; ++i) {
-                dXds[i] = (Real(1) - t) * (ref_face_coords[1][i] - ref_face_coords[0][i]) +
-                          t * (ref_face_coords[2][i] - ref_face_coords[3][i]);
-                dXdt[i] = (Real(1) - s) * (ref_face_coords[3][i] - ref_face_coords[0][i]) +
-                          s * (ref_face_coords[2][i] - ref_face_coords[1][i]);
-            }
-            return Real(0.25) * norm3(cross3(dXds, dXdt));
-        }
-        default:
-            break;
-    }
-    return Real(1);
 }
 
 /// Whether a functional's context evaluates the primary field's solution data
@@ -351,7 +255,6 @@ void prepareCellContext(AssemblyContext& context,
     scratch.inv_jacobians.resize(n_qpts);
     scratch.jac_dets.resize(n_qpts);
     scratch.integration_weights.resize(n_qpts);
-    scratch.normals.clear();
 
     scratch.basis_values.resize(static_cast<std::size_t>(n_dofs * n_qpts));
     scratch.ref_gradients.resize(static_cast<std::size_t>(n_dofs * n_qpts));
@@ -597,57 +500,6 @@ void prepareCellContext(AssemblyContext& context,
     }
 }
 
-AssemblyContext::Vector3D computeFaceNormal(LocalIndex local_face_id,
-                                            ElementType cell_type,
-                                            int dim) noexcept
-{
-    (void)dim;
-    auto n = elements::ElementTransform::reference_facet_normal(
-        cell_type, static_cast<int>(local_face_id));
-    return {n[0], n[1], n[2]};
-}
-
-void computeSurfaceMeasureAndNormal(const AssemblyContext::Vector3D& n_ref,
-                                    const AssemblyContext::Matrix3x3& J_inv,
-                                    Real det_J,
-                                    int dim,
-                                    Real& surface_measure,
-                                    AssemblyContext::Vector3D& n_phys) noexcept
-{
-    AssemblyContext::Vector3D Jit_n = {0.0, 0.0, 0.0};
-    for (int i = 0; i < dim; ++i) {
-        for (int k = 0; k < dim; ++k) {
-            Jit_n[static_cast<std::size_t>(i)] +=
-                J_inv[static_cast<std::size_t>(k)][static_cast<std::size_t>(i)] *
-                n_ref[static_cast<std::size_t>(k)];
-        }
-    }
-
-    if (det_J < 0.0) {
-        for (int i = 0; i < dim; ++i) {
-            Jit_n[static_cast<std::size_t>(i)] = -Jit_n[static_cast<std::size_t>(i)];
-        }
-    }
-
-    Real norm_Jit_n = 0.0;
-    for (int i = 0; i < dim; ++i) {
-        const Real v = Jit_n[static_cast<std::size_t>(i)];
-        norm_Jit_n += v * v;
-    }
-    norm_Jit_n = std::sqrt(norm_Jit_n);
-
-    surface_measure = norm_Jit_n * std::abs(det_J);
-
-    constexpr Real tol = 1e-14;
-    if (norm_Jit_n > tol) {
-        n_phys[0] = Jit_n[0] / norm_Jit_n;
-        n_phys[1] = Jit_n[1] / norm_Jit_n;
-        n_phys[2] = Jit_n[2] / norm_Jit_n;
-    } else {
-        n_phys = n_ref;
-    }
-}
-
 void prepareBoundaryFaceContext(AssemblyContext& context,
                                 const IMeshAccess& mesh,
                                 GlobalIndex face_id,
@@ -714,43 +566,23 @@ void prepareBoundaryFaceContext(AssemblyContext& context,
     const auto n_qpts = static_cast<LocalIndex>(quad_rule->num_points());
 
     mesh.getCellCoordinates(cell_id, scratch.cell_coords);
-    const auto n_nodes = scratch.cell_coords.size();
-
-    std::vector<math::Vector<Real, 3>> node_coords(n_nodes);
-    for (std::size_t i = 0; i < n_nodes; ++i) {
-        node_coords[i] = math::Vector<Real, 3>{
-            scratch.cell_coords[i][0],
-            scratch.cell_coords[i][1],
-            scratch.cell_coords[i][2]};
-    }
-
-    AssemblyContext::Vector3D cell_center{0.0, 0.0, 0.0};
-    if (!scratch.cell_coords.empty()) {
-        for (const auto& xc : scratch.cell_coords) {
-            cell_center[0] += xc[0];
-            cell_center[1] += xc[1];
-            cell_center[2] += xc[2];
-        }
-        const Real inv_n = Real(1.0) / static_cast<Real>(scratch.cell_coords.size());
-        cell_center[0] *= inv_n;
-        cell_center[1] *= inv_n;
-        cell_center[2] *= inv_n;
-    }
-
+    const auto node_coords = geometry::toGeometryNodes(scratch.cell_coords);
     geometry::MappingRequest map_request;
     map_request.element_type = cell_type;
-    map_request.geometry_order = defaultGeometryOrder(cell_type);
+    map_request.geometry_order = geometry::defaultGeometryOrder(cell_type);
     map_request.use_affine = (map_request.geometry_order <= 1);
-    auto mapping = geometry::MappingFactory::create(map_request, node_coords);
+    const auto mapping = geometry::MappingFactory::create(map_request, node_coords);
 
-    scratch.quad_points.resize(n_qpts);
-    scratch.quad_weights.resize(n_qpts);
-    scratch.phys_points.resize(n_qpts);
-    scratch.jacobians.resize(n_qpts);
-    scratch.inv_jacobians.resize(n_qpts);
-    scratch.jac_dets.resize(n_qpts);
+    auto& face = scratch.face_geometry;
+    geometry::evaluateFaceFrameInto(
+        face, *mapping, cell_type, local_face_id, face_type, *quad_rule, {},
+        need_surface_jacobians && !need_reference_face && !need_current_face,
+        /*compute_mean_curvatures=*/false);
+    const auto& cell = face.cell_geometry;
     scratch.integration_weights.resize(n_qpts);
-    scratch.normals.resize(n_qpts);
+    for (LocalIndex q = 0; q < n_qpts; ++q) {
+        scratch.integration_weights[q] = quad_rule->weight(q) * face.surface_measures[q];
+    }
 
     scratch.basis_values.resize(static_cast<std::size_t>(n_dofs * n_qpts));
     scratch.ref_gradients.resize(static_cast<std::size_t>(n_dofs * n_qpts));
@@ -764,78 +596,6 @@ void prepareBoundaryFaceContext(AssemblyContext& context,
         phys_hessians.resize(static_cast<std::size_t>(n_dofs * n_qpts));
     }
 
-    const auto& quad_points = quad_rule->points();
-    const auto& quad_weights = quad_rule->weights();
-
-    auto [vtx, ref_face_coords] =
-        elements::ElementTransform::facet_vertices(cell_type, static_cast<int>(local_face_id));
-    (void)vtx;
-
-    const AssemblyContext::Vector3D n_ref = computeFaceNormal(local_face_id, cell_type, dim);
-
-    for (LocalIndex q = 0; q < n_qpts; ++q) {
-        const auto& qpt = quad_points[q];
-        scratch.quad_weights[q] = quad_weights[q];
-
-        math::Vector<Real, 3> facet_coords{};
-        if (face_type == ElementType::Line2) {
-            Real t = (qpt[0] + Real(1)) * Real(0.5);
-            facet_coords = math::Vector<Real, 3>{t, Real(0), Real(0)};
-        } else if (face_type == ElementType::Quad4) {
-            facet_coords = math::Vector<Real, 3>{
-                (qpt[0] + Real(1)) * Real(0.5),
-                (qpt[1] + Real(1)) * Real(0.5),
-                Real(0)};
-        } else {
-            facet_coords = math::Vector<Real, 3>{qpt[0], qpt[1], Real(0)};
-        }
-
-        // Convert canonical face weights to element-reference facet measure, then map to physical.
-        const Real w = quad_weights[q] *
-                       canonicalFaceJacobianToReference(face_type,
-                                                        std::span<const math::Vector<Real, 3>>(ref_face_coords),
-                                                        facet_coords);
-
-        const math::Vector<Real, 3> xi = elements::ElementTransform::facet_to_reference(
-            cell_type, static_cast<int>(local_face_id), facet_coords);
-
-        scratch.quad_points[q] = {xi[0], xi[1], xi[2]};
-
-        const auto x_phys = mapping->map_to_physical(xi);
-        scratch.phys_points[q] = {x_phys[0], x_phys[1], x_phys[2]};
-
-        const auto J = mapping->jacobian(xi);
-        const auto J_inv = geometry::scaleConditionedJacobianInverse(J);
-        const Real det_J = mapping->jacobian_determinant(xi);
-
-        for (int i = 0; i < 3; ++i) {
-            for (int j = 0; j < 3; ++j) {
-                scratch.jacobians[q][i][j] = J(i, j);
-                scratch.inv_jacobians[q][i][j] = J_inv(i, j);
-            }
-        }
-        scratch.jac_dets[q] = det_J;
-
-        Real surface_measure = 0.0;
-        AssemblyContext::Vector3D n_phys = {0.0, 0.0, 0.0};
-        computeSurfaceMeasureAndNormal(n_ref, scratch.inv_jacobians[q], det_J, dim, surface_measure, n_phys);
-
-        {
-            const Real dx = cell_center[0] - x_phys[0];
-            const Real dy = cell_center[1] - x_phys[1];
-            const Real dz = cell_center[2] - x_phys[2];
-            const Real dot = dx * n_phys[0] + dy * n_phys[1] + dz * n_phys[2];
-            if (dot > Real(0.0)) {
-                n_phys[0] = -n_phys[0];
-                n_phys[1] = -n_phys[1];
-                n_phys[2] = -n_phys[2];
-            }
-        }
-
-        scratch.integration_weights[q] = w * surface_measure;
-        scratch.normals[q] = n_phys;
-    }
-
     const auto& basis = element.basis();
     std::vector<Real> values_at_pt;
     std::vector<basis::Gradient> gradients_at_pt;
@@ -845,11 +605,11 @@ void prepareBoundaryFaceContext(AssemblyContext& context,
     if (!basis.is_vector_valued()) {
         for (LocalIndex q = 0; q < n_qpts; ++q) {
             const math::Vector<Real, 3> xi{
-                scratch.quad_points[q][0],
-                scratch.quad_points[q][1],
-                scratch.quad_points[q][2]};
+                face.cell_reference_points[q][0],
+                face.cell_reference_points[q][1],
+                face.cell_reference_points[q][2]};
 
-            const auto& J_inv = scratch.inv_jacobians[q];
+            const auto& J_inv = cell.inverse_jacobians[q];
 
             basis.evaluate_values(xi, values_at_pt);
             basis.evaluate_gradients(xi, gradients_at_pt);
@@ -931,7 +691,6 @@ void prepareBoundaryFaceContext(AssemblyContext& context,
 
     std::optional<geometry::FaceGeometryData> reference_geometry;
     std::optional<geometry::FaceGeometryData> current_geometry;
-    std::optional<geometry::FaceGeometryData> active_surface_geometry;
     if (need_reference_face) {
         reference_geometry.emplace(evaluate_frame(
             CoordinateFrame::Reference,
@@ -944,26 +703,19 @@ void prepareBoundaryFaceContext(AssemblyContext& context,
             need_surface_jacobians,
             hasFlag(required_data, RequiredData::CurrentNormals)));
     }
-    if (need_surface_jacobians && !current_geometry.has_value() &&
-        !reference_geometry.has_value()) {
-        active_surface_geometry.emplace(evaluate_frame(
-            CoordinateFrame::Active,
-            /*compute_surface_jacobians=*/true,
-            /*compute_mean_curvatures=*/false));
-    }
 
     context.reserve(n_dofs, n_qpts, dim);
     context.configureFace(face_id, cell_id, local_face_id, space, space, required_data, ContextType::BoundaryFace);
     context.setCellDomainId(mesh.getCellDomainId(cell_id));
-    context.setQuadratureData(scratch.quad_points, scratch.quad_weights);
-    context.setPhysicalPoints(scratch.phys_points);
-    context.setJacobianData(scratch.jacobians, scratch.inv_jacobians, scratch.jac_dets);
+    context.setQuadratureData(face.cell_reference_points, quad_rule->weights());
+    context.setPhysicalPoints(cell.points);
+    context.setJacobianData(cell.jacobians, cell.inverse_jacobians, cell.jacobian_determinants);
     context.setIntegrationWeights(scratch.integration_weights);
     if (!basis.is_vector_valued()) {
         context.setTestBasisData(n_dofs, scratch.basis_values, scratch.ref_gradients);
         context.setPhysicalGradients(scratch.phys_gradients, scratch.phys_gradients);
     }
-    context.setNormals(scratch.normals);
+    context.setNormals(face.normals);
 
     if (reference_geometry.has_value()) {
         const auto& frame = *reference_geometry;
@@ -996,8 +748,7 @@ void prepareBoundaryFaceContext(AssemblyContext& context,
             context.setSurfaceJacobians(
                 reference_geometry->surface_jacobians);
         } else {
-            context.setSurfaceJacobians(
-                active_surface_geometry->surface_jacobians);
+            context.setSurfaceJacobians(face.surface_jacobians);
         }
     }
     if (hasFlag(required_data, RequiredData::ConfigurationTransforms)) {

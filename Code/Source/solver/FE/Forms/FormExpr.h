@@ -394,10 +394,27 @@ struct SymbolicOptions {
 // Expression node types
 // ============================================================================
 
+// Scalar entries of a generated cut-surface variation. Vector and matrix
+// entries are contiguous so the form compiler can index a component or row.
+enum class CutSurfaceComponent : int {
+    PointX, PointY, PointZ,
+    NormalX, NormalY, NormalZ,
+    RelativeWeight, FacetMeasure,
+    ReferencePointX, ReferencePointY, ReferencePointZ,
+    FieldPointX, FieldPointY, FieldPointZ,
+    RelativeJacobianDeterminant,
+    JacobianXX, JacobianXY, JacobianXZ,
+    JacobianYX, JacobianYY, JacobianYZ,
+    JacobianZX, JacobianZY, JacobianZZ,
+    InverseJacobianXX, InverseJacobianXY, InverseJacobianXZ,
+    InverseJacobianYX, InverseJacobianYY, InverseJacobianYZ,
+    InverseJacobianZX, InverseJacobianZY, InverseJacobianZZ
+};
+
 /**
  * @brief Node tag for the form expression AST
  */
-	enum class FormExprType : std::uint16_t {
+enum class FormExprType : std::uint16_t {
 	    // Terminals
 	    TestFunction,
 	    TrialFunction,
@@ -589,6 +606,7 @@ struct SymbolicOptions {
         CellDiameterVariation, ///< Derivative of h() in the active mesh-displacement trial function
         CellVolumeVariation,   ///< Derivative of vol() in the active mesh-displacement trial function
         FacetAreaVariation,    ///< Derivative of area() in the active mesh-displacement trial function
+        CutSurfaceVariation,    ///< Component of a differentiated generated-interface sample
 		};
 
 class FormExpr;
@@ -765,6 +783,7 @@ public:
         static FormExpr cellDiameterVariation();
         static FormExpr cellVolumeVariation();
         static FormExpr facetAreaVariation();
+        static FormExpr cutSurfaceVariation(const FormExpr& phi, const FormExpr& trial, int component);
 	    static FormExpr time();
 	    static FormExpr timeStep();
 	    static FormExpr effectiveTimeStep();

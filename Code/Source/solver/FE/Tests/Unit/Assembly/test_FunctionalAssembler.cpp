@@ -21,6 +21,10 @@
 #include "Spaces/HDivSpace.h"
 #include "Spaces/ProductSpace.h"
 #include "Tests/Unit/Forms/FormsTestHelpers.h"
+#if defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH
+#include "Assembly/MeshAccess.h"
+#include "Tests/Unit/Systems/TraceMultiplierTestMeshes.h"
+#endif
 
 #include <array>
 #include <cmath>
@@ -324,6 +328,32 @@ TEST(KahanSummationTest, Precision) {
 // ============================================================================
 // Boundary Functional Assembly (Regression/Integration)
 // ============================================================================
+
+#if defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH
+TEST(FunctionalAssemblerBoundaryTest, CurvedQuad9FluxAndPressureForceUseOutwardNormals)
+{
+    const auto mesh = test_trace_multiplier::buildBentQuadraticQuad();
+    MeshAccess access(*mesh);
+    spaces::H1Space space(ElementType::Quad9, 2);
+    dofs::DofMap dof_map(1, 9, 9);
+    const std::array<GlobalIndex, 9> ids{0, 1, 2, 3, 4, 5, 6, 7, 8};
+    dof_map.setCellDofs(0, ids);
+    dof_map.finalize();
+    FunctionalAssembler assembler;
+    assembler.setMesh(access);
+    assembler.setDofMap(dof_map);
+    assembler.setSpace(space);
+    const auto n_y = forms::FormExpr::normal().component(1);
+    const auto y = forms::FormExpr::coordinate().component(1);
+    const auto integral = [&](const forms::FormExpr& integrand) {
+        constexpr auto marker = test_trace_multiplier::kWholeBoundary;
+        auto kernel = forms::compileBoundaryFunctionalKernel(integrand, marker);
+        return assembler.assembleBoundaryScalar(*kernel, marker);
+    };
+    EXPECT_NEAR(integral(n_y), 0.0, 1e-12);
+    EXPECT_NEAR(integral(-y * n_y), -4.0, 1e-12);
+}
+#endif
 
 TEST(FunctionalAssemblerBoundaryTest, IntegrateConstantOverBoundaryFace)
 {

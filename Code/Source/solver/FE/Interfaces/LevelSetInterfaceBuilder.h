@@ -95,6 +95,9 @@ private:
     const CutInterfaceDomainRequest& request,
     const LevelSetCellCutInput& input);
 
+/// Builds a single segment and its clipped sides. If a quadrilateral corner
+/// interpolant has more than two boundary intersections, the result is
+/// unsupported and contains neither fragments nor volume regions.
 [[nodiscard]] LevelSetCellCutResult cutLinearLevelSetCell2D(
     const CutInterfaceDomainRequest& request,
     const LevelSetCellCutInput& input);

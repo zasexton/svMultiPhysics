@@ -1274,6 +1274,7 @@ set(FE_FORMS_HEADERS
     Forms/CutCellForms.h
     Forms/IntegrationDomain.h
     Forms/FiniteDeformationForms.h
+    Forms/CutSurfaceGeometry.h
     Forms/GeometrySensitivityEval.h
     Forms/MovingFrameForms.h
     Forms/MixedBlockKernelSet.h
@@ -1343,6 +1344,7 @@ set(FE_FORMS_SOURCES
 	    Forms/Tensor/SpecialTensorDerivatives.cpp
     Forms/FormIR.cpp
     Forms/FormCompiler.cpp
+    Forms/CutSurfaceGeometry.cpp
     Forms/GeometrySensitivityEval.cpp
     Forms/AffineAnalysis.cpp
 	    Forms/BoundaryFunctional.cpp

@@ -339,6 +339,14 @@ void mixRuleContentWithoutIdentities(
     mix(hash, record.reference_rule.measure);
     mix(hash, record.reference_rule.parent_measure);
     mix(hash, record.reference_rule.volume_fraction);
+    if (const auto& source = record.reference_rule.linear_corner_surface) {
+        mix(hash, source->isovalue);
+        mix(hash, static_cast<std::uint64_t>(source->count));
+        for (const auto& edge : source->edges) {
+            mix(hash, static_cast<std::uint64_t>(edge[0]));
+            mix(hash, static_cast<std::uint64_t>(edge[1]));
+        }
+    }
     mix(hash, static_cast<std::uint64_t>(
                   record.reference_rule.exact_polynomial_order + 1));
     for (const auto& point : record.reference_rule.points) {
@@ -3177,11 +3185,11 @@ template <std::size_t N>
 static_assert(sizeof(geometry::CutQuadraturePoint) == 152u);
 static_assert(sizeof(geometry::CutQuadratureProvenance) == 384u);
 static_assert(sizeof(geometry::CutQuadratureConstructionPolicy) == 56u);
-static_assert(sizeof(geometry::CutQuadratureRule) == 544u);
+static_assert(sizeof(geometry::CutQuadratureRule) == 576u);
 static_assert(sizeof(geometry::MappedCutQuadraturePoint) == 288u);
 static_assert(sizeof(geometry::MappedCutQuadratureRule) == 88u);
 static_assert(sizeof(FreeSurfaceGeometryMomentCertificate) == 40u);
-static_assert(sizeof(FreeSurfaceGeometryRuleRecord) == 776u);
+static_assert(sizeof(FreeSurfaceGeometryRuleRecord) == 808u);
 static_assert(sizeof(FreeSurfaceGeometryValidationLedger) == 440u);
 static_assert(sizeof(FreeSurfaceGeometrySnapshotPolicy) == 24u);
 
@@ -3289,7 +3297,8 @@ static_assert(sizeof(FreeSurfaceGeometrySnapshotPolicy) == 24u);
            a.provenance_id == b.provenance_id && a.frame == b.frame &&
            a.curved_geometry == b.curved_geometry &&
            a.full_cell_equivalent == b.full_cell_equivalent &&
-           a.released_point_count == b.released_point_count;
+           a.released_point_count == b.released_point_count &&
+           a.linear_corner_surface == b.linear_corner_surface;
 }
 
 [[nodiscard]] std::string firstRecordDifference(

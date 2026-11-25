@@ -3,6 +3,8 @@
 #include "Assembly/Assembler.h"
 #include "Dofs/DofHandler.h"
 #include "Dofs/EntityDofMap.h"
+#include "Mesh/Mesh.h"
+#include "Mesh/Topology/CellShape.h"
 #include "Spaces/H1Space.h"
 #include "Spaces/SpaceFactory.h"
 #include "Systems/FESystem.h"
@@ -20,6 +22,7 @@
 #include <functional>
 #include <memory>
 #include <span>
+#include <string>
 #include <utility>
 #include <vector>
 
@@ -370,3 +373,58 @@ TEST(LevelSetVolumeMPI, GeneratedQuadratureVolumeMatchesSerialReference)
     expectVolumeMatches(parallel_volume, serial_volume);
 }
 
+TEST(LevelSetVolumeMPI, OneOwnedQuadrilateralSaddleRejectsBothVolumePathsOnEveryRank)
+{
+#if !(defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH)
+    GTEST_SKIP() << "requires Mesh integration";
+#else
+    int size = 0;
+    MPI_Comm_size(MPI_COMM_WORLD, &size);
+    if (size != 2) {
+        GTEST_SKIP() << "requires exactly two ranks";
+    }
+    auto mesh = std::make_shared<svmp::Mesh>(svmp::MeshComm(MPI_COMM_WORLD));
+    svmp::CellShape shape{};
+    shape.family = svmp::CellFamily::Quad;
+    shape.order = 1;
+    shape.num_corners = 4;
+    const std::vector<svmp::real_t> coordinates{0, 0, 1, 0, 2, 0, 0, 1, 1, 1, 2, 1};
+    const std::vector<svmp::offset_t> offsets{0, 4, 8};
+    const std::vector<svmp::index_t> connectivity{0, 1, 4, 3, 1, 2, 5, 4};
+    mesh->build_from_arrays_global_and_partition(2, coordinates, offsets, connectivity, {shape, shape},
+        svmp::PartitionHint::Cells, /*ghost_layers=*/0, {{"partition_method", "block"}});
+    FE::systems::FESystem system(mesh);
+    const auto phi = system.addField(FE::systems::FieldSpec{
+        .name = "phi", .space = std::make_shared<FE::spaces::H1Space>(FE::ElementType::Quad4, 1),
+        .components = 1});
+    system.setup();
+    ASSERT_EQ(system.meshAccess().numCells(), 1);
+    const auto* entities = system.fieldDofHandler(phi).getEntityDofMap();
+    ASSERT_NE(entities, nullptr);
+    std::vector<FE::Real> solution(static_cast<std::size_t>(system.dofHandler().getNumDofs()), 0.0);
+    bool owns_saddle = false;
+    for (FE::GlobalIndex v = 0; v < system.meshAccess().numVertices(); ++v) {
+        const auto dofs = entities->getVertexDofs(v);
+        ASSERT_EQ(dofs.size(), 1u);
+        const auto x = system.meshAccess().getNodeCoordinates(v);
+        owns_saddle = owns_saddle || x[0] < 0.5;
+        // Left cell has four crossings. Right neighbor has a horizontal zero line.
+        solution[static_cast<std::size_t>(system.fieldDofOffset(phi) + dofs.front())] =
+            (2.0 * std::min(x[0], FE::Real{1.0}) - 1.0) * (2.0 * x[1] - 1.0) - 0.2;
+    }
+    for (const bool generated : {false, true}) {
+        level_set::LevelSetVolumeOptions options;
+        options.use_generated_interface_quadrature = generated;
+        options.level_set_field_name = "phi";
+        options.allow_corner_linearized_geometry = true;
+        SCOPED_TRACE(generated);
+        try {
+            (void)level_set::computeLevelSetCutCellVolume(system, phi, options, solution);
+            ADD_FAILURE() << "finished a collective measurement with a saddle on one rank";
+        } catch (const std::exception& ex) {
+            const auto* reason = owns_saddle ? "4 boundary intersections" : "another communicator rank";
+            EXPECT_NE(std::string(ex.what()).find(reason), std::string::npos) << ex.what();
+        }
+    }
+#endif
+}

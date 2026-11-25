@@ -113,16 +113,6 @@ namespace {
     return value;
 }
 
-[[nodiscard]] Real dot(const Vector3D& a, const Vector3D& b) noexcept
-{
-    return a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
-}
-
-[[nodiscard]] Real norm(const Vector3D& v) noexcept
-{
-    return std::sqrt(dot(v, v));
-}
-
 [[nodiscard]] math::Vector<Real, 3> cross(const math::Vector<Real, 3>& a,
                                           const math::Vector<Real, 3>& b) noexcept
 {
@@ -983,20 +973,6 @@ void evaluateFaceFrameImpl(
         cell_type, static_cast<int>(local_face_id));
     const Vector3D n_ref{n_ref_math[0], n_ref_math[1], n_ref_math[2]};
 
-    Vector3D cell_center{0.0, 0.0, 0.0};
-    const auto& nodes = mapping.nodes();
-    if (!nodes.empty()) {
-        for (const auto& node : nodes) {
-            cell_center[0] += node[0];
-            cell_center[1] += node[1];
-            cell_center[2] += node[2];
-        }
-        const Real inv_n = Real(1) / static_cast<Real>(nodes.size());
-        cell_center[0] *= inv_n;
-        cell_center[1] *= inv_n;
-        cell_center[2] *= inv_n;
-    }
-
     const auto& qpts = quad_rule.points();
     for (LocalIndex q = 0; q < n_qpts; ++q) {
         const auto qidx = static_cast<std::size_t>(q);
@@ -1026,22 +1002,11 @@ void evaluateFaceFrameImpl(
                                              facet_coords);
         data.canonical_to_reference_measures[qidx] = reference_measure;
 
-        auto surface = surfaceTransformFromJacobianInverse(n_ref,
-                                                           reference_measure,
-                                                           data.cell_geometry.inverse_jacobians[qidx],
-                                                           det_J);
-
-        const Vector3D to_center{
-            cell_center[0] - x[0],
-            cell_center[1] - x[1],
-            cell_center[2] - x[2]};
-        if (dot(to_center, surface.normal) > Real(0)) {
-            for (std::size_t d = 0; d < 3u; ++d) {
-                surface.normal[d] = -surface.normal[d];
-                surface.oriented_measure_vector[d] = -surface.oriented_measure_vector[d];
-            }
-        }
-
+        // The outward covector is J^{-T} n_ref for either cell numbering.
+        // The absolute determinant scales its area without changing its direction.
+        const auto surface = surfaceTransformFromJacobianInverse(
+            n_ref, reference_measure, data.cell_geometry.inverse_jacobians[qidx],
+            data.cell_geometry.measures[qidx]);
         data.normals[qidx] = surface.normal;
         data.surface_measures[qidx] = surface.measure;
         if (compute_surface_jacobians || compute_mean_curvatures) {
@@ -1265,9 +1230,9 @@ SurfaceTransform surfaceTransformFromJacobianInverse(const Vector3D& reference_n
         out.oriented_measure_vector[i] = jacobian_determinant * value * reference_measure;
     }
 
-    out.measure = norm(out.oriented_measure_vector);
-    constexpr Real tol = Real(1e-14);
-    if (out.measure > tol) {
+    const auto& area_vector = out.oriented_measure_vector;
+    out.measure = std::hypot(area_vector[0], area_vector[1], area_vector[2]);
+    if (std::isfinite(out.measure) && out.measure > Real(0)) {
         for (std::size_t i = 0; i < 3u; ++i) {
             out.normal[i] = out.oriented_measure_vector[i] / out.measure;
         }

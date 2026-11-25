@@ -1306,6 +1306,35 @@ protected:
     std::shared_ptr<FormExprNode> lhs_, rhs_;
 };
 
+class CutSurfaceVariationNode final : public BinaryNode {
+  public:
+    CutSurfaceVariationNode(std::shared_ptr<FormExprNode> phi, std::shared_ptr<FormExprNode> trial,
+                            int component)
+        : BinaryNode(std::move(phi), std::move(trial)), component_(component)
+    {
+    }
+    FormExprType type() const noexcept override
+    {
+        return FormExprType::CutSurfaceVariation;
+    }
+    std::string toString() const override
+    {
+        return "cutSurfaceVariation(" + lhs_->toString() + "," + rhs_->toString() + "," +
+               std::to_string(component_) + ")";
+    }
+    std::optional<int> componentIndex0() const override
+    {
+        return component_;
+    }
+    std::optional<FieldId> fieldId() const override
+    {
+        return lhs_->fieldId();
+    }
+
+  private:
+    int component_;
+};
+
 class MatrixPowerNode final : public BinaryNode {
 public:
     using BinaryNode::BinaryNode;
@@ -2540,6 +2569,17 @@ FormExpr FormExpr::cellDiameterVariation()
 FormExpr FormExpr::cellVolumeVariation()
 {
     return FormExpr(std::make_shared<SimpleTerminalNode>(FormExprType::CellVolumeVariation, "dvol"));
+}
+
+FormExpr FormExpr::cutSurfaceVariation(const FormExpr &phi, const FormExpr &trial, int component)
+{
+    if (!phi.isValid() || !phi.node()->fieldId() || !trial.isValid() ||
+        trial.node()->type() != FormExprType::TrialFunction || component < 0 ||
+        component > static_cast<int>(CutSurfaceComponent::InverseJacobianZZ)) {
+        throw std::invalid_argument(
+            "cutSurfaceVariation requires a source field, a trial function and a valid geometry component");
+    }
+    return FormExpr(std::make_shared<CutSurfaceVariationNode>(phi.nodeShared(), trial.nodeShared(), component));
 }
 
 FormExpr FormExpr::facetAreaVariation()
@@ -3802,6 +3842,8 @@ std::shared_ptr<FormExprNode> transformNodeShared(
             return std::make_shared<HistoryWeightedSumNode>(std::move(new_kids));
         case FormExprType::HistoryConvolution:
             return std::make_shared<HistoryConvolutionNode>(std::move(new_kids));
+        case FormExprType::CutSurfaceVariation:
+            return std::make_shared<CutSurfaceVariationNode>(new_kids[0], new_kids[1], *node->componentIndex0());
         case FormExprType::AsTensor: {
             const int rows = node->tensorRows().value_or(0);
             const int cols = node->tensorCols().value_or(0);

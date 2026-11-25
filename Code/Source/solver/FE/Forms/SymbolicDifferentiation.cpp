@@ -610,6 +610,7 @@ struct DiffTargetConfig {
 
     // SpatialCoordinate target.
     FormExpr spatial_direction{};
+    CutSurfacePointDirection cut_point{};
 
     GeometrySensitivityOptions geometry_sensitivity{};
 
@@ -1594,7 +1595,6 @@ FormExpr differentiateResidualImpl(const FormExpr& residual_form,
         switch (node->type()) {
             // ---- Terminals (treated as constants) ----
             case FormExprType::Constant:
-            case FormExprType::Coefficient:
             case FormExprType::ParameterSymbol:
             case FormExprType::ParameterRef:
             case FormExprType::BoundaryIntegralSymbol:
@@ -1606,7 +1606,6 @@ FormExpr differentiateResidualImpl(const FormExpr& residual_form,
             case FormExprType::AuxiliaryOutputSymbol:
             case FormExprType::MaterialStateOldRef:
             case FormExprType::MaterialStateWorkRef:
-            case FormExprType::PreviousSolutionRef:
             case FormExprType::GeometryTrialVectorVariation:
             case FormExprType::GeometryTrialJacobianVariation:
             case FormExprType::MeshVelocityVariation:
@@ -1616,20 +1615,65 @@ FormExpr differentiateResidualImpl(const FormExpr& residual_form,
             case FormExprType::CellDiameterVariation:
             case FormExprType::CellVolumeVariation:
             case FormExprType::FacetAreaVariation:
-                case FormExprType::Time:
+            case FormExprType::Time:
             case FormExprType::TimeStep:
             case FormExprType::EffectiveTimeStep:
             case FormExprType::Identity:
-            case FormExprType::Jacobian:
-            case FormExprType::JacobianInverse:
-            case FormExprType::JacobianDeterminant:
             case FormExprType::CellDiameter:
             case FormExprType::CellVolume:
-            case FormExprType::FacetArea:
             case FormExprType::CellDomainId:
             case FormExprType::BoundaryNormal:
                 out.primal = FormExpr(node);
                 out.deriv = zeroOf(out.primal);
+                break;
+
+            case FormExprType::PreviousSolutionRef:
+                out.primal = FormExpr(node);
+                out.deriv = zeroOf(out.primal);
+                if (cfg.cut_point.reference.isValid()) {
+                    out.deriv = spatialDirectionalDerivativeOfValue(out.primal, cfg.cut_point.field,
+                                                                    cfg.cut_point.history_space);
+                }
+                break;
+
+            case FormExprType::Jacobian:
+            case FormExprType::JacobianInverse:
+            case FormExprType::JacobianDeterminant:
+                out.primal = FormExpr(node);
+                out.deriv = zeroOf(out.primal);
+                if (cfg.cut_point.jacobian.isValid()) {
+                    if (node->type() == FormExprType::Jacobian) {
+                        out.deriv = cfg.cut_point.jacobian;
+                    } else if (node->type() == FormExprType::JacobianInverse) {
+                        out.deriv = cfg.cut_point.inverse_jacobian;
+                    } else {
+                        out.deriv = out.primal * cfg.cut_point.relative_determinant;
+                    }
+                }
+                break;
+
+            case FormExprType::Coefficient:
+                out.primal = FormExpr(node);
+                out.deriv = zeroOf(out.primal);
+                if (cfg.kind == DiffWrtKind::SpatialCoordinate && cfg.spatial_direction.isValid()) {
+                    if (node->scalarCoefficient() || node->timeScalarCoefficient()) {
+                        out.deriv = inner(out.primal.grad(), cfg.spatial_direction);
+                    } else if (node->vectorCoefficient()) {
+                        out.deriv = out.primal.grad() * cfg.spatial_direction;
+                    } else {
+                        throw std::invalid_argument(
+                            "differentiated cut point requires a spatial derivative for this coefficient rank");
+                    }
+                    if (cfg.cut_point.out_of_plane_callback_motion) {
+                        out.deriv = out.deriv + cfg.cut_point.out_of_plane_callback_motion(*node);
+                    }
+                }
+                break;
+
+            case FormExprType::FacetArea:
+                out.primal = FormExpr(node);
+                out.deriv =
+                    cfg.cut_point.facet_measure.isValid() ? cfg.cut_point.facet_measure : zeroOf(out.primal);
                 break;
 
             case FormExprType::Coordinate:
@@ -1644,7 +1688,7 @@ FormExpr differentiateResidualImpl(const FormExpr& residual_form,
 
             case FormExprType::ReferenceCoordinate:
                 out.primal = FormExpr(node);
-                out.deriv = zeroOf(out.primal);
+                out.deriv = cfg.cut_point.reference.isValid() ? cfg.cut_point.reference : zeroOf(out.primal);
                 break;
 
             case FormExprType::Normal:
@@ -1676,6 +1720,16 @@ FormExpr differentiateResidualImpl(const FormExpr& residual_form,
             case FormExprType::ReferenceMeasure:
             case FormExprType::SurfaceJacobian: {
                 out.primal = FormExpr(node);
+                if (cfg.cut_point.reference.isValid()) {
+                    if (node->type() == FormExprType::CurrentCoordinate) {
+                        out.deriv = FormExpr::currentJacobian() * cfg.cut_point.reference;
+                    } else if (node->type() == FormExprType::ReferencePhysicalCoordinate) {
+                        out.deriv = FormExpr::referenceJacobian() * cfg.cut_point.reference;
+                    } else {
+                        throw std::invalid_argument("differentiated cut surface has no spatial derivative for frame terminal " + node->toString());
+                    }
+                    break;
+                }
                 if (node->type() == FormExprType::CurrentCoordinate &&
                     cfg.kind == DiffWrtKind::SpatialCoordinate &&
                     cfg.spatial_direction.isValid()) {
@@ -1755,7 +1809,7 @@ FormExpr differentiateResidualImpl(const FormExpr& residual_form,
                     cfg.spatial_direction.isValid()) {
                     out.deriv = spatialDirectionalDerivativeOfValue(
                         out.primal,
-                        cfg.spatial_direction,
+                        cfg.cut_point.field.isValid() ? cfg.cut_point.field : cfg.spatial_direction,
                         *node->spaceSignature());
                 } else {
                     out.deriv = zeroOf(out.primal);
@@ -1773,7 +1827,7 @@ FormExpr differentiateResidualImpl(const FormExpr& residual_form,
                     cfg.spatial_direction.isValid()) {
                     out.deriv = spatialDirectionalDerivativeOfValue(
                         out.primal,
-                        cfg.spatial_direction,
+                        cfg.cut_point.field.isValid() ? cfg.cut_point.field : cfg.spatial_direction,
                         *sig);
                 } else if (isWrtTrial(*sig, name)) {
                     out.deriv = FormExpr::trialFunction(*sig, makeDeltaName(name));
@@ -1794,7 +1848,7 @@ FormExpr differentiateResidualImpl(const FormExpr& residual_form,
                     cfg.spatial_direction.isValid()) {
                     out.deriv = spatialDirectionalDerivativeOfValue(
                         out.primal,
-                        cfg.spatial_direction,
+                        cfg.cut_point.field.isValid() ? cfg.cut_point.field : cfg.spatial_direction,
                         *sig);
                 } else if (isWrtField(*sig, *fid, node->toString())) {
                     out.deriv = FormExpr::trialFunction(*sig, *wrt_field_delta_name);
@@ -1815,7 +1869,7 @@ FormExpr differentiateResidualImpl(const FormExpr& residual_form,
                     cfg.spatial_direction.isValid()) {
                     out.deriv = spatialDirectionalDerivativeOfValue(
                         out.primal,
-                        cfg.spatial_direction,
+                        cfg.cut_point.field.isValid() ? cfg.cut_point.field : cfg.spatial_direction,
                         *sig);
                 } else if (isWrtField(*sig, *fid, node->toString())) {
                     out.deriv = FormExpr::trialFunction(*sig, *wrt_field_delta_name);
@@ -1844,6 +1898,19 @@ FormExpr differentiateResidualImpl(const FormExpr& residual_form,
                     // local point derivative is Hessian(u) * w. Using
                     // grad(grad(u) . w) would also differentiate w itself.
                     out.deriv = a.primal.hessian() * cfg.spatial_direction;
+                    if (cfg.cut_point.history_space && cfg.cut_point.history_space->topological_dimension == 2 &&
+                        a.primal.node()->type() != FormExprType::Coefficient) {
+                        // Assembly stores A^T grad_ref(u) with A the leading 2x2
+                        // block of the inverse of the completed surface Jacobian.
+                        // Its physical Hessian uses the planar connection -A dJ_2 A.
+                        // Contract with the chart velocity, then replace that connection
+                        // by the actual derivative dA of the embedded parent map.
+                        const auto A = FormExpr::jacobianInverse();
+                        const auto connection_change = A.inv() * cfg.cut_point.inverse_jacobian +
+                                                       cfg.cut_point.jacobian * A;
+                        out.deriv = a.primal.hessian() * cfg.cut_point.field +
+                                    connection_change.transpose() * a.primal.grad();
+                    }
                 } else {
                     out.deriv = a.deriv.grad();
                 }
@@ -3416,19 +3483,20 @@ FormExpr directionalDerivativeWrtNormal(const FormExpr& expr,
 FormExpr directionalDerivativeWrtSpatialCoordinate(const FormExpr& expr,
                                                    const FormExpr& direction)
 {
-    if (!expr.isValid() || expr.node() == nullptr) {
-        throw std::invalid_argument(
-            "directionalDerivativeWrtSpatialCoordinate: invalid expression");
-    }
-    if (!direction.isValid() || direction.node() == nullptr) {
-        throw std::invalid_argument(
-            "directionalDerivativeWrtSpatialCoordinate: invalid direction expression");
-    }
+    return directionalDerivativeWrtCutSurfacePoint(expr, {.physical = direction});
+}
 
+FormExpr directionalDerivativeWrtCutSurfacePoint(const FormExpr &expr, const CutSurfacePointDirection &motion)
+{
+    if (!expr.isValid() || !motion.physical.isValid()) {
+        throw std::invalid_argument(
+            "directionalDerivativeWrtCutSurfacePoint requires an expression and direction");
+    }
     DiffTargetConfig cfg;
     cfg.kind = DiffWrtKind::SpatialCoordinate;
     cfg.trial_state_field = CURRENT_SOLUTION_FIELD_ID;
-    cfg.spatial_direction = direction;
+    cfg.spatial_direction = motion.physical;
+    cfg.cut_point = motion;
     return differentiateResidualImpl(expr, cfg);
 }
 

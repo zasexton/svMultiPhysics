@@ -4308,6 +4308,7 @@ TEST(LevelSetInterfaceLifecycle, LinearCorner2DSegmentSupportsHigherInterfaceQua
 
     const auto interface_rules = result.domain.interfaceQuadratureRules();
     ASSERT_EQ(interface_rules.size(), 1u);
+    EXPECT_TRUE(interface_rules.front().linear_corner_surface.has_value());
     EXPECT_EQ(interface_rules.front().exact_polynomial_order, 2);
     EXPECT_EQ(interface_rules.front().policy.name,
               "gauss-segment-level-set-interface");
@@ -10232,6 +10233,7 @@ TEST(LevelSetInterfaceLifecycle,
 
     const auto interface_rules = result.domain.interfaceQuadratureRules();
     ASSERT_EQ(interface_rules.size(), 1u);
+    EXPECT_FALSE(interface_rules.front().linear_corner_surface.has_value());
     ASSERT_EQ(interface_rules.front().points.size(), 1u);
     const auto& point = interface_rules.front().points.front();
     EXPECT_NEAR(point.point[0], 0.0, 1.0e-12);
@@ -10267,6 +10269,9 @@ TEST(LevelSetInterfaceLifecycle,
     EXPECT_EQ(result.diagnostic.find("first_curved_fragment_failure_detail"),
               std::string::npos);
     EXPECT_GT(result.summary.active_fragment_count, 1u);
+    for (const auto& rule : result.domain.interfaceQuadratureRules()) {
+        EXPECT_FALSE(rule.linear_corner_surface.has_value());
+    }
 }
 
 TEST(LevelSetInterfaceLifecycle,

@@ -10,12 +10,20 @@
 #include <algorithm>
 #include <array>
 #include <cmath>
+#include <cstring>
 #include <stdexcept>
 #include <utility>
 
 namespace svmp {
 namespace FE {
 namespace geometry {
+
+bool LinearCornerSurfaceSource::operator==(const LinearCornerSurfaceSource& other) const noexcept
+{
+    return count == other.count && edges == other.edges &&
+           std::memcmp(&isovalue, &other.isovalue, sizeof(Real)) == 0;
+}
+
 namespace {
 
 Real dot(const std::array<Real, 3>& a, const std::array<Real, 3>& b) noexcept {

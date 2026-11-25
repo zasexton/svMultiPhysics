@@ -19,6 +19,8 @@
 #include "Elements/Element.h"
 #include "Elements/ElementTransform.h"
 #include "Elements/ReferenceElement.h"
+#include "Geometry/CutQuadratureMapping.h"
+#include "Geometry/LinearMapping.h"
 #include "Quadrature/QuadratureFactory.h"
 #include "Quadrature/QuadratureRule.h"
 #include "Geometry/FrameGeometry.h"
@@ -35,6 +37,7 @@
 #include "Core/KernelTrace.h"
 #include "Coloring.h"
 #include "Forms/CutCellForms.h"
+#include "Forms/CutSurfaceGeometry.h"
 #include "Forms/FormKernels.h"
 #include "Forms/MixedBlockKernelSet.h"
 #include "Forms/MonolithicCellKernel.h"
@@ -11642,6 +11645,33 @@ void StandardAssembler::assembleCutInterfaceItem(const CutInterfaceLoop& loop,
     col_dofs = getCellDofsCached(mesh, cell_id, col_dof_map_, col_dof_offset_);
 
     const auto cell_type = mesh.getCellType(cell_id);
+    std::optional<forms::cut_surface::Binding> minus_variations;
+    std::optional<forms::cut_surface::Binding> plus_variations;
+    if (assemble_matrix && hasFlag(required_data, RequiredData::CutSurfaceVariations)) {
+        const auto build_variations = [&](FieldId field) {
+            if (!rule.linear_corner_surface) {
+                throw std::invalid_argument("differentiated cut surface requires a generated LinearCorner edge binding");
+            }
+            const auto source_id = interfaces::LevelSetInterfaceSource::fromField(field).identifier();
+            FE_THROW_IF(rule.provenance.embedded_geometry_id != source_id, FEException,
+                        "differentiated cut surface does not match its configured source field");
+            const auto* source = findFieldAccessPlan(field);
+            FE_THROW_IF(!source || !source->space || !source->dof_map, FEException,
+                        "differentiated cut surface requires the source level-set field");
+            CellCoefficientCache source_cache;
+            const auto dofs = getCellDofsCached(mesh, cell_id, source->dof_map, source->dof_offset);
+            const auto coefficients = gatherCachedCellFieldCoefficients(
+                source_cache, mesh, cell_id, *source, dofs, 0, false, "differentiated cut surface");
+            return forms::cut_surface::differentiateRule(
+                mesh, cell_id, rule, *source->space, coefficients, trial_space);
+        };
+        const auto positive = interfaces::CutInterfaceSideTag::Positive;
+        minus_variations.emplace(context_, build_variations,
+                                 two_sided_binding && two_sided_binding->minus_side == positive);
+        if (two_sided_binding) {
+            plus_variations.emplace(context_plus, build_variations, two_sided_binding->plus_side == positive);
+        }
+    }
     CutVolumeQuadratureRule cut_rule(rule, to_mesh_family(cell_type), mesh.dimension());
     cached_quad_rule_ptr_ = nullptr;
     basis_scratch_valid_ = false;
@@ -11669,8 +11699,17 @@ void StandardAssembler::assembleCutInterfaceItem(const CutInterfaceLoop& loop,
                 measure_trial_element.polynomial_order());
         } else {
             parent_measures.cell_diameter = context_.cellDiameter();
-            parent_measures.physical_cell_measure =
-                context_.associatedCellVolume();
+            // The current weights integrate the embedded facet. Its parent
+            // volume uses the full reference cell and the active geometry map.
+            if (dynamic_cast<const geometry::LinearMapping*>(cached_mapping_.get())) {
+                parent_measures.physical_cell_measure = std::abs(context_.jacobianDet(0)) *
+                    elements::ReferenceElement::shared(cell_type).reference_measure();
+            } else {
+                const int order = std::max(1, mesh.getCellGeometryOrder(cell_id));
+                // A tensor-product Jacobian determinant can have degree d*p-1 in each coordinate.
+                parent_measures.physical_cell_measure = geometry::physicalCellMeasureFromMapping(
+                    mesh, cell_id, std::max(2 * order, mesh.dimension() * order - 1));
+            }
             parent_measures.physical_parent_face_measure =
                 std::accumulate(
                     context_.integrationWeights().begin(),

@@ -1,4 +1,5 @@
 #include "Interfaces/LevelSetInterfaceBuilder.h"
+#include "LevelSet/LevelSetImplicitCutQuadratureBackend.h"
 
 #include <gtest/gtest.h>
 
@@ -863,6 +864,111 @@ TEST(LevelSetInterfaceBuilder, CutsLinearQuadWithSingleSegment)
     EXPECT_NEAR(rules.front().points.front().normal[0], 1.0, 1.0e-14);
     EXPECT_NEAR(rules.front().points.front().normal[1], 0.0, 1.0e-14);
     EXPECT_NEAR(rules.front().points.front().weight, 1.0, 1.0e-14);
+}
+
+TEST(LevelSetInterfaceBuilder, RejectsMultibranchQuadrilateralBeforePublishingEitherSide)
+{
+    auto request = make_request(/*marker=*/64);
+    request.isovalue = 2.0;
+    request.coefficient_classification_policy =
+        LevelSetCoefficientClassificationPolicy::ExactRepresentedZero;
+    const std::array<std::array<Real, 3>, 4> corners{{
+        {-1.0, -1.0, 0.0}, {1.0, -1.0, 0.0}, {1.0, 1.0, 0.0}, {-1.0, 1.0, 0.0}}};
+    // Translate the saddle so a cyclic relabeling is not just a sign reversal.
+    // Include the exact saddle and perturbations toward both possible pairings.
+    for (const Real offset : {-0.2, -1.0e-9, 0.0, 1.0e-9, 0.2}) {
+        for (const Real sign : {-1.0, 1.0}) {
+            for (std::size_t first = 0; first < 4; ++first) {
+                for (const std::size_t stride : {1u, 3u}) {
+                    LevelSetCellCutInput input{.parent_cell = 13, .element_type = ElementType::Quad4};
+                    for (std::size_t i = 0; i < 4; ++i) {
+                        const auto x = corners[(first + stride * i) % 4];
+                        input.node_coordinates.push_back(x);
+                        input.level_set_values.push_back(request.isovalue +
+                            sign * ((x[0] - 0.25) * (x[1] + 0.125) - offset));
+                    }
+                    SCOPED_TRACE(::testing::Message() << offset << " " << sign << " " << first << " " << stride);
+                    const auto cut = cutLinearLevelSetCell2D(request, input);
+                    EXPECT_FALSE(cut.supported);
+                    EXPECT_TRUE(cut.fragments.empty());
+                    EXPECT_TRUE(cut.volume_regions.empty());
+                    EXPECT_NE(cut.diagnostic.find("4 boundary intersections"), std::string::npos);
+                }
+            }
+        }
+    }
+    LevelSetCellCutInput input{.parent_cell = 13, .element_type = ElementType::Quad4,
+                               .node_coordinates = {corners.begin(), corners.end()},
+                               .level_set_values = {3.0, 1.0, 3.0, 1.0}};
+    LevelSetInterfaceDomain domain(request);
+    EXPECT_THROW(appendLinearLevelSetCellCut2D(domain, input), std::invalid_argument);
+    EXPECT_TRUE(domain.fragments().empty());
+    EXPECT_TRUE(domain.volumeRegions().empty());
+
+    // Strict roots on either side of a nearly-zero corner can coincide to the
+    // geometric point tolerance. The corner signs still identify four roots.
+    const Real near_zero = std::nextafter(request.isovalue, 0.0);
+    input.level_set_values = {3.0, near_zero, 3.0, near_zero};
+    level_set::ImplicitCutQuadratureBackendCellInput backend_input{};
+    backend_input.linearized_input = input;
+    const auto& backend = level_set::implicitCutQuadratureBackendDriver(
+        level_set::ImplicitCutQuadratureBackend::LinearCorner);
+    const auto result = backend.cut(2, request, backend_input);
+    EXPECT_EQ(result.diagnostic_status, level_set::ImplicitCutQuadratureDiagnosticStatus::Unsupported);
+    EXPECT_EQ(result.achieved_interface_quadrature_order, -1);
+    EXPECT_EQ(result.verified_volume_quadrature_order, -1);
+    EXPECT_NE(result.cut.diagnostic.find("4 boundary intersections"), std::string::npos);
+
+    // One isolated zero corner plus two crossings, or a zero edge plus an interior branch.
+    for (const std::vector<Real> values : {std::vector<Real>{2.0, 1.0, 3.0, 1.0},
+                                           std::vector<Real>{2.0, 2.0, 1.0, 3.0}}) {
+        input.level_set_values = values;
+        const auto cut = cutLinearLevelSetCell2D(request, input);
+        EXPECT_FALSE(cut.supported);
+        EXPECT_TRUE(cut.fragments.empty());
+        EXPECT_TRUE(cut.volume_regions.empty());
+        EXPECT_NE(cut.diagnostic.find("3 boundary intersections"), std::string::npos);
+    }
+}
+
+TEST(LevelSetInterfaceBuilder, SingleChordQuadrilateralsIntegrateBothSidesAfterRelabeling)
+{
+    const auto request = make_request(/*marker=*/65);
+    const std::array<std::array<Real, 3>, 4> corners{{
+        {-1.0, -1.0, 0.0}, {1.0, -1.0, 0.0}, {1.0, 1.0, 0.0}, {-1.0, 1.0, 0.0}}};
+    struct Plane { Real a, b, c, length, negative_area, positive_area; };
+    const std::array<Plane, 3> cuts{{
+        {1.0, 0.0, -0.25, 2.0, 2.5, 1.5},            // two strict edge crossings
+        {1.0, 2.0, -1.0, std::sqrt(5.0), 3.0, 1.0},  // one zero vertex
+        {1.0, 1.0, 0.0, std::sqrt(8.0), 2.0, 2.0}}}; // two opposite zero vertices
+    for (const auto type : {ElementType::Quad4, ElementType::Quad8, ElementType::Quad9}) {
+        for (const Real sign : {-1.0, 1.0}) {
+            for (const auto& plane : cuts) {
+                for (std::size_t first = 0; first < 4; ++first) {
+                    LevelSetCellCutInput input{.parent_cell = 0, .element_type = type};
+                    for (std::size_t i = 0; i < 4; ++i) {
+                        const auto x = corners[(first + i) % 4];
+                        input.node_coordinates.push_back(x);
+                        input.level_set_values.push_back(sign * (plane.a * x[0] + plane.b * x[1] + plane.c));
+                    }
+                    const auto cut = cutLinearLevelSetCell2D(request, input);
+                    ASSERT_TRUE(cut.supported) << cut.diagnostic;
+                    ASSERT_EQ(cut.fragments.size(), 1u);
+                    EXPECT_NEAR(cut.fragments.front().measure, plane.length, 1.0e-12);
+                    ASSERT_EQ(cut.volume_regions.size(), 2u);
+                    for (const auto& region : cut.volume_regions) {
+                        const bool negative = region.side == geometry::CutIntegrationSide::Negative;
+                        const Real expected = negative == (sign > 0.0) ? plane.negative_area : plane.positive_area;
+                        Real integral = 0.0;
+                        for (const auto& point : region.quadrature_points) {
+                            integral += point.weight;
+                        }
+                        EXPECT_NEAR(integral, expected, 1.0e-12);
+                    }
+                }
+            }
+        }
+    }
 }
 
 TEST(LevelSetInterfaceBuilder, ReportsNoCutAndUnsupportedElement)

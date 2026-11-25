@@ -12,6 +12,7 @@
 #include "Forms/FormExpr.h"
 #include "Forms/FormIR.h"
 
+#include <functional>
 #include <optional>
 #include <string>
 
@@ -157,6 +158,20 @@ struct SymbolicDiffResult {
 [[nodiscard]] FormExpr directionalDerivativeWrtSpatialCoordinate(
     const FormExpr& expr,
     const FormExpr& direction);
+struct CutSurfacePointDirection {
+    FormExpr physical;
+    FormExpr field;
+    FormExpr reference;
+    FormExpr jacobian;
+    FormExpr inverse_jacobian;
+    FormExpr relative_determinant;
+    FormExpr facet_measure;
+    std::optional<FormExprNode::SpaceSignature> history_space;
+    // A 2D coefficient callback receives the physical z coordinate as well.
+    std::function<FormExpr(const FormExprNode&)> out_of_plane_callback_motion;
+};
+[[nodiscard]] FormExpr directionalDerivativeWrtCutSurfacePoint(const FormExpr& expr,
+                                                              const CutSurfacePointDirection& motion);
 
 /**
  * @brief Hessian-vector product of a residual form w.r.t. the active TrialFunction

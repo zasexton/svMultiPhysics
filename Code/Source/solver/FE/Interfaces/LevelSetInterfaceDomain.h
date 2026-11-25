@@ -626,6 +626,7 @@ struct CutInterfaceFragment {
     Real min_gradient_norm{0.0};
     bool root_polished{false};
     std::vector<CutInterfaceVertex> vertices{};
+    std::optional<geometry::LinearCornerSurfaceSource> linear_corner_surface{};
     std::vector<CutInterfaceQuadraturePoint> quadrature_points{};
     int moment_certificate_order{-1};
     std::vector<CutInterfaceQuadraturePoint> moment_certificate_points{};
@@ -731,6 +732,7 @@ struct CutInterfaceFragment {
 
         geometry::CutQuadratureRule rule;
         rule.kind = geometry::CutQuadratureKind::Interface;
+        rule.linear_corner_surface = linear_corner_surface;
         rule.side = geometry::CutIntegrationSide::Interface;
         rule.measure = measure;
         rule.parent_measure = Real{0.0};

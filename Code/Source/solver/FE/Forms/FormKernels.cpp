@@ -1133,6 +1133,40 @@ void inlineInlinableConstitutives(std::span<FormIR*> irs,
 inline constexpr Real kCoeffFDStep = 1e-7;
 inline constexpr Real kCoeffFDStep2 = 1e-5;
 
+// Lift the callback's ordinary z partial into the same expression that
+// contracts its in-plane derivatives. Use the interpreter's coefficient stencil.
+template <typename Callback> Callback callbackZDerivative(Callback callback)
+{
+    return [callback = std::move(callback)](Real x, Real y, Real z, auto... time) {
+        auto derivative = callback(x, y, z + kCoeffFDStep, time...);
+        const auto minus = callback(x, y, z - kCoeffFDStep, time...);
+        if constexpr (std::is_same_v<decltype(derivative), Real>) {
+            return (derivative - minus) / (2 * kCoeffFDStep);
+        } else {
+            for (std::size_t i = 0; i < derivative.size(); ++i) {
+                derivative[i] = (derivative[i] - minus[i]) / (2 * kCoeffFDStep);
+            }
+            return derivative;
+        }
+    };
+}
+
+FormExpr outOfPlaneCallbackMotion(const FormExprNode &coefficient, const FormExpr &motion)
+{
+    const auto name = "partial_z(" + coefficient.toString() + ")";
+    if (const auto *scalar = coefficient.scalarCoefficient()) {
+        return FormExpr::coefficient(name, callbackZDerivative(*scalar)) * motion;
+    }
+    if (const auto *transient = coefficient.timeScalarCoefficient()) {
+        return FormExpr::coefficient(name, callbackZDerivative(*transient)) * motion;
+    }
+    if (const auto *vector = coefficient.vectorCoefficient()) {
+        return FormExpr::coefficient(name, callbackZDerivative(*vector)) * motion;
+    }
+    throw std::invalid_argument(
+        "differentiated cut point requires a spatial derivative for this coefficient rank");
+}
+
 std::array<Real, 3> fdGradScalar(const ScalarCoefficient& f, const std::array<Real, 3>& x, int dim)
 {
     std::array<Real, 3> g{0.0, 0.0, 0.0};
@@ -1441,6 +1475,43 @@ using geometry_sensitivity::trialMeshVelocityJacobianSeed;
 
 struct EvalEnvReal;
 struct EvalEnvDual;
+
+Real cutSurfaceComponent(const assembly::AssemblyContext &ctx, const FormExprNode &node, LocalIndex j,
+                         LocalIndex q)
+{
+    const auto &geometry = ctx.cutSurfaceVariation(*node.fieldId(), j, q);
+    const int component = *node.componentIndex0();
+    const int first_jacobian = static_cast<int>(CutSurfaceComponent::JacobianXX);
+    const int first_inverse = static_cast<int>(CutSurfaceComponent::InverseJacobianXX);
+    if (component >= first_inverse) {
+        const auto entry = component - first_inverse;
+        return geometry.inverse_jacobian.at(entry / 3).at(entry % 3);
+    }
+    if (component >= first_jacobian) {
+        const auto entry = component - first_jacobian;
+        return geometry.jacobian.at(entry / 3).at(entry % 3);
+    }
+    if (component == static_cast<int>(CutSurfaceComponent::RelativeJacobianDeterminant)) {
+        return geometry.relative_jacobian_determinant;
+    }
+    const int first_field = static_cast<int>(CutSurfaceComponent::FieldPointX);
+    if (component >= first_field) {
+        return geometry.field_point.at(component - first_field);
+    }
+    const int first_reference = static_cast<int>(CutSurfaceComponent::ReferencePointX);
+    if (component >= first_reference) {
+        return geometry.reference_point.at(component - first_reference);
+    }
+    if (component == static_cast<int>(CutSurfaceComponent::FacetMeasure)) {
+        return geometry.facet_measure;
+    }
+    if (component == static_cast<int>(CutSurfaceComponent::RelativeWeight)) {
+        return geometry.relative_weight;
+    }
+    const int first_normal = static_cast<int>(CutSurfaceComponent::NormalX);
+    return component < first_normal ? geometry.point.at(component)
+                                    : geometry.normal.at(component - first_normal);
+}
 
 [[nodiscard]] LocalIndex geometryVariationTrialIndex(const EvalEnvReal& env);
 [[nodiscard]] LocalIndex geometryVariationTrialIndex(const EvalEnvDual& env);
@@ -2454,6 +2525,14 @@ SpatialJet<Scalar> evalSpatialJet(const FormExprNode& node,
                 throw FEException("Forms: spatial derivatives of current-measure variations are not available",
                                   __FILE__, __LINE__, __func__, FEStatus::NotImplemented);
             }
+            return out;
+        }
+        case FormExprType::CutSurfaceVariation: {
+            FE_THROW_IF(out.has_grad || out.has_hess, InvalidArgumentException,
+                        "Forms: spatial derivatives of differentiated cut-surface samples are unavailable");
+            const Real v = env.trial_active == side ? cutSurfaceComponent(ctx, node, geometryVariationTrialIndex(env), q) : 0;
+            out.value.kind = EvalValue<Scalar>::Kind::Scalar;
+            out.value.s = makeScalarConstant<Scalar>(v, env);
             return out;
         }
         case FormExprType::CellDiameterVariation:
@@ -5427,7 +5506,7 @@ EvalValue<Real> evalConstitutiveOutputReal(const FormExprNode& call_node,
 
 using EvalRealDispatchFn = EvalValue<Real> (*)(const FormExprNode&, const EvalEnvReal&, Side, LocalIndex);
 constexpr std::size_t kFormExprDispatchSize =
-    static_cast<std::size_t>(FormExprType::FacetAreaVariation) + 1u;
+    static_cast<std::size_t>(FormExprType::CutSurfaceVariation) + 1u;
 
 EvalValue<Real> evalRealSwitchImpl(const FormExprNode& node,
                                    const EvalEnvReal& env,
@@ -5717,6 +5796,17 @@ EvalValue<Real> evalRealDispatchCurrentMeasureVariation(const FormExprNode&, con
     return EvalValue<Real>{EvalValue<Real>::Kind::Scalar, value};
 }
 
+EvalValue<Real> evalCutSurfaceVariation(const FormExprNode &node, const EvalEnvReal &env, Side side,
+                                        LocalIndex q)
+{
+    EvalValue<Real> out;
+    out.kind = EvalValue<Real>::Kind::Scalar;
+    out.s = env.trial_active == side ? cutSurfaceComponent(ctxForSide(env.minus, env.plus, side), node,
+                                                           geometryVariationTrialIndex(env), q)
+                                     : 0;
+    return out;
+}
+
 EvalValue<Real> evalRealDispatchEntityMeasureVariation(const FormExprNode& node, const EvalEnvReal& env, Side side, LocalIndex)
 {
     const auto& ctx = ctxForSide(env.minus, env.plus, side);
@@ -5851,6 +5941,7 @@ const std::array<EvalRealDispatchFn, kFormExprDispatchSize>& evalRealDispatchTab
         table[static_cast<std::size_t>(FormExprType::SurfaceJacobianVariation)] = &evalRealDispatchSurfaceJacobianVariation;
         table[static_cast<std::size_t>(FormExprType::CellDiameterVariation)] = &evalRealDispatchEntityMeasureVariation;
         table[static_cast<std::size_t>(FormExprType::CellVolumeVariation)] = &evalRealDispatchEntityMeasureVariation;
+        table[static_cast<std::size_t>(FormExprType::CutSurfaceVariation)] = &evalCutSurfaceVariation;
         table[static_cast<std::size_t>(FormExprType::FacetAreaVariation)] = &evalRealDispatchEntityMeasureVariation;
         table[static_cast<std::size_t>(FormExprType::Jacobian)] = &evalRealDispatchJacobian;
         table[static_cast<std::size_t>(FormExprType::JacobianInverse)] = &evalRealDispatchJacobianInverse;
@@ -5951,6 +6042,8 @@ EvalValue<Real> evalRealSwitchImpl(const FormExprNode& node,
         case FormExprType::CellVolumeVariation:
         case FormExprType::FacetAreaVariation:
             return evalRealDispatchEntityMeasureVariation(node, env, side, q);
+        case FormExprType::CutSurfaceVariation:
+            return evalCutSurfaceVariation(node, env, side, q);
         case FormExprType::Identity: {
             const int idim = node.identityDim().value_or(dim);
             EvalValue<Real> out;
@@ -15952,7 +16045,7 @@ namespace {
 // Symbolic tangent caching (per-process, in-memory)
 // ============================================================================
 
-inline constexpr std::uint32_t kSymbolicTangentCacheVersion = 7u;
+inline constexpr std::uint32_t kSymbolicTangentCacheVersion = 8u;
 inline constexpr std::size_t kSymbolicTangentCacheMaxEntries = 128u;
 
 [[nodiscard]] std::uint64_t fnv1aInit64() noexcept
@@ -16694,84 +16787,66 @@ void SymbolicNonlinearFormKernel::rebuildTangentIR()
                                   : Real{1.0};
             return FormExpr::constant(sign) * primal_integrand * dphi / grad_norm;
         };
-    const auto interface_measure_tangent_integrand =
-        [&](const IntegralTerm& term,
-            const LevelSetCutDomainSensitivity& domain) -> FormExpr {
-            if (!residual_ir_.trialSpace().has_value()) {
-                return FormExpr{};
+    const auto sample_variation = [&](const LevelSetCutDomainSensitivity &domain, int component) {
+        const auto &space = level_set_space_signature(domain);
+        const auto phi = FormExpr::stateField(domain.level_set_field, space, "level_set");
+        const auto trial = FormExpr::trialFunction(space, geometry_trial_symbol);
+        return FormExpr::cutSurfaceVariation(phi, trial, component);
+    };
+    const auto sample_vector = [&](const LevelSetCutDomainSensitivity &domain, int first) {
+        std::vector<FormExpr> components;
+        for (int d = 0; d < level_set_space_signature(domain).topological_dimension; ++d) {
+            components.push_back(sample_variation(domain, first + d));
+        }
+        return FormExpr::asVector(std::move(components));
+    };
+    const auto interface_measure_tangent_integrand = [&](const IntegralTerm &term,
+                                                         const LevelSetCutDomainSensitivity &domain) {
+        return sample_variation(domain, static_cast<int>(CutSurfaceComponent::RelativeWeight)) *
+               rewriteTrialFunctionsToState(term.integrand, trial_state_field);
+    };
+    const auto interface_point_tangent_integrand = [&](const IntegralTerm &term,
+                                                       const LevelSetCutDomainSensitivity &domain) -> FormExpr {
+        const auto point_motion = sample_vector(domain, static_cast<int>(CutSurfaceComponent::PointX));
+        if (!point_motion.isValid()) {
+            return FormExpr{};
+        }
+        const auto primal_integrand = rewriteTrialFunctionsToState(term.integrand, trial_state_field);
+        const auto dimension = level_set_space_signature(domain).topological_dimension;
+        const auto sample_matrix = [&](CutSurfaceComponent first) {
+            std::vector<std::vector<FormExpr>> rows(dimension);
+            for (int i = 0; i < dimension; ++i) {
+                for (int j = 0; j < dimension; ++j) {
+                    rows[i].push_back(sample_variation(domain, static_cast<int>(first) + 3 * i + j));
+                }
             }
-            const auto primal_integrand =
-                rewriteTrialFunctionsToState(term.integrand, trial_state_field);
-            const auto& phi_space = level_set_space_signature(domain);
-            const auto phi = FormExpr::stateField(
-                domain.level_set_field, phi_space, "level_set");
-            const auto dphi =
-                FormExpr::trialFunction(phi_space, geometry_trial_symbol);
-            const auto grad_phi = grad(phi);
-            const auto grad_norm =
-                sqrt(inner(grad_phi, grad_phi) + FormExpr::constant(Real{1.0e-30}));
-            const auto normal_speed =
-                FormExpr::constant(Real{-1.0}) * dphi / grad_norm;
-            return meanCurvatureFromLevelSet(phi) * normal_speed * primal_integrand;
+            return FormExpr::asTensor(std::move(rows));
         };
-    const auto level_set_point_motion =
-        [&](const LevelSetCutDomainSensitivity& domain) -> FormExpr {
-            if (!residual_ir_.trialSpace().has_value()) {
-                return FormExpr{};
-            }
-            const auto& phi_space = level_set_space_signature(domain);
-            const auto phi = FormExpr::stateField(
-                domain.level_set_field, phi_space, "level_set");
-            const auto dphi =
-                FormExpr::trialFunction(phi_space, geometry_trial_symbol);
-            const auto grad_phi = grad(phi);
-            const auto grad_norm =
-                sqrt(inner(grad_phi, grad_phi) + FormExpr::constant(Real{1.0e-30}));
-            const auto n0 = grad_phi / grad_norm;
-            const auto normal_speed =
-                FormExpr::constant(Real{-1.0}) * dphi / grad_norm;
-            return normal_speed * n0;
-        };
-    const auto interface_point_tangent_integrand =
-        [&](const IntegralTerm& term,
-            const LevelSetCutDomainSensitivity& domain) -> FormExpr {
-            const auto point_motion = level_set_point_motion(domain);
-            if (!point_motion.isValid()) {
-                return FormExpr{};
-            }
-            const auto primal_integrand =
-                rewriteTrialFunctionsToState(term.integrand, trial_state_field);
-            return directionalDerivativeWrtSpatialCoordinate(primal_integrand,
-                                                             point_motion);
-        };
-    const auto level_set_normal_variation =
-        [&](const LevelSetCutDomainSensitivity& domain) -> FormExpr {
-            if (!residual_ir_.trialSpace().has_value()) {
-                return FormExpr{};
-            }
-            const auto& phi_space = level_set_space_signature(domain);
-            const auto phi = FormExpr::stateField(
-                domain.level_set_field, phi_space, "level_set");
-            const auto dphi =
-                FormExpr::trialFunction(phi_space, geometry_trial_symbol);
-            const auto grad_phi = grad(phi);
-            const auto grad_norm =
-                sqrt(inner(grad_phi, grad_phi) + FormExpr::constant(Real{1.0e-30}));
-            const auto n0 = grad_phi / grad_norm;
-            const auto grad_dphi = grad(dphi);
-            const auto point_motion = level_set_point_motion(domain);
-            const auto moved_grad_dphi =
-                grad_dphi + hessian(phi) * point_motion;
-            return (moved_grad_dphi - inner(moved_grad_dphi, n0) * n0) /
-                   grad_norm;
-        };
+        CutSurfacePointDirection motion{
+            .physical = point_motion,
+            .field = sample_vector(domain, static_cast<int>(CutSurfaceComponent::FieldPointX)),
+            .reference = sample_vector(domain, static_cast<int>(CutSurfaceComponent::ReferencePointX)),
+            .jacobian = sample_matrix(CutSurfaceComponent::JacobianXX),
+            .inverse_jacobian = sample_matrix(CutSurfaceComponent::InverseJacobianXX),
+            .relative_determinant =
+                sample_variation(domain, static_cast<int>(CutSurfaceComponent::RelativeJacobianDeterminant)),
+            .facet_measure = sample_variation(domain, static_cast<int>(CutSurfaceComponent::FacetMeasure)),
+            .history_space = residual_ir_.trialSpace()};
+        if (dimension == 2) {
+            const auto dz = sample_variation(domain, static_cast<int>(CutSurfaceComponent::PointZ));
+            motion.out_of_plane_callback_motion = [dz](const FormExprNode &coefficient) {
+                return outOfPlaneCallbackMotion(coefficient, dz);
+            };
+        }
+        return directionalDerivativeWrtCutSurfacePoint(primal_integrand, motion);
+    };
     const auto interface_normal_tangent_integrand =
         [&](const IntegralTerm& term,
             const LevelSetCutDomainSensitivity& domain) -> FormExpr {
             if (!containsFormExprType(term.integrand.node(), FormExprType::Normal)) {
                 return FormExpr{};
             }
-            const auto normal_variation = level_set_normal_variation(domain);
+            const auto normal_variation = sample_vector(domain, static_cast<int>(CutSurfaceComponent::NormalX));
             if (!normal_variation.isValid()) {
                 return FormExpr{};
             }

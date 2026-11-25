@@ -18,6 +18,7 @@
 #include <array>
 #include <cstddef>
 #include <cstdint>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -116,6 +117,16 @@ struct CutQuadratureConstructionPolicy {
     std::string name{"constant-exact"};
 };
 
+/// Ordered parent edge endpoints of a retained LinearCorner segment or tetrahedral polygon.
+struct LinearCornerSurfaceSource {
+    Real isovalue{};
+    std::array<std::array<std::uint8_t, 2>, 4> edges{};
+    std::uint8_t count{};
+
+    // Snapshot reuse compares the bit patterns of all retained real values.
+    [[nodiscard]] bool operator==(const LinearCornerSurfaceSource& other) const noexcept;
+};
+
 struct CutQuadratureRule {
     CutQuadratureKind kind{CutQuadratureKind::Volume};
     CutIntegrationSide side{CutIntegrationSide::Negative};
@@ -147,6 +158,8 @@ struct CutQuadratureRule {
      * rematerializes them exactly on request.
      */
     std::uint32_t released_point_count{0};
+    std::optional<LinearCornerSurfaceSource> linear_corner_surface{};
+
 };
 
 /** Points of the rule, including any released by a classification-only owner. */

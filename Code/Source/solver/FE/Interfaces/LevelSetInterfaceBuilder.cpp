@@ -14,7 +14,9 @@
 #include <initializer_list>
 #include <numeric>
 #include <optional>
+#include <span>
 #include <stdexcept>
+#include <tuple>
 #include <utility>
 
 namespace svmp {
@@ -165,6 +167,25 @@ struct CutPointCandidate {
     PointOrigin origin{};
     detail::PointAssessment assessment{};
 };
+
+std::optional<geometry::LinearCornerSurfaceSource> linearCornerSurfaceSource(
+    std::span<const CutPointCandidate> ordered_vertices, Real isovalue)
+{
+    geometry::LinearCornerSurfaceSource source;
+    if (ordered_vertices.size() > source.edges.size()) {
+        return std::nullopt;
+    }
+    source.isovalue = isovalue;
+    source.count = static_cast<std::uint8_t>(ordered_vertices.size());
+    for (std::size_t i = 0; i < ordered_vertices.size(); ++i) {
+        const auto& origin = ordered_vertices[i].origin;
+        if (!origin.known()) {
+            return std::nullopt;
+        }
+        source.edges[i] = {static_cast<std::uint8_t>(origin.first), static_cast<std::uint8_t>(origin.second)};
+    }
+    return source;
+}
 
 struct SignedPoint {
     std::array<Real, 3> point{{0.0, 0.0, 0.0}};
@@ -630,22 +651,6 @@ void addUniqueCandidate(StrictConstructionObservation& observation, std::vector<
     }
     return unitOrDefault({{solution[0], solution[1], solution[2]}},
                          {{1.0, 0.0, 0.0}}, observation);
-}
-
-[[nodiscard]] std::pair<std::size_t, std::size_t> farthestPair(
-    const std::vector<CutPointCandidate>& points) noexcept {
-    std::pair<std::size_t, std::size_t> pair{0u, 1u};
-    Real max_distance = Real{-1.0};
-    for (std::size_t i = 0; i < points.size(); ++i) {
-        for (std::size_t j = i + 1u; j < points.size(); ++j) {
-            const Real d = distance2(points[i].point, points[j].point);
-            if (d > max_distance) {
-                max_distance = d;
-                pair = {i, j};
-            }
-        }
-    }
-    return pair;
 }
 
 [[nodiscard]] std::array<Real, 3> centroid(
@@ -1905,6 +1910,7 @@ LevelSetCellCutResult cutLinearLevelSetCell2D(const CutInterfaceDomainRequest& r
 
     std::vector<CutPointCandidate> cut_points;
     cut_points.reserve(4u);
+    std::size_t boundary_intersections = zero_count;
     bool zero_edge = false;
     for (std::size_t i = 0; i < count; ++i) {
         const std::size_t j = (i + 1u) % count;
@@ -1940,6 +1946,7 @@ LevelSetCellCutResult cutLinearLevelSetCell2D(const CutInterfaceDomainRequest& r
         }
         if ((di < Real{0.0} && dj > Real{0.0}) ||
             (di > Real{0.0} && dj < Real{0.0})) {
+            ++boundary_intersections;
             const Real denominator = di - dj;
             const Real t = di / denominator;
             if (!std::isfinite(denominator) || !std::isfinite(t) || !(t > 0 && t < 1)) observation.unresolved();
@@ -1955,6 +1962,18 @@ LevelSetCellCutResult cutLinearLevelSetCell2D(const CutInterfaceDomainRequest& r
         }
     }
 
+    // Each strict edge root and each zero corner is a separate boundary event,
+    // even if two are closer than the point-merging tolerance. A single chord
+    // and one clipped polygon per side cannot describe three or four events.
+    if (boundary_intersections > 2u) {
+        result.supported = false;
+        result.diagnostic = "LinearCorner cannot represent a quadrilateral with " +
+            std::to_string(boundary_intersections) + " boundary intersections by one interface segment";
+        observation.unresolved();
+        observation.stamp(result);
+        return result;
+    }
+
     if (cut_points.size() < 2u) {
         append_collapsed_full_region(
             zero_count > 0u ? CutInterfaceDegeneracy::VertexTouch
@@ -1964,9 +1983,8 @@ LevelSetCellCutResult cutLinearLevelSetCell2D(const CutInterfaceDomainRequest& r
         return result;
     }
 
-    const auto endpoints = farthestPair(cut_points);
-    const auto& a = cut_points[endpoints.first];
-    const auto& b = cut_points[endpoints.second];
+    const auto& a = cut_points[0];
+    const auto& b = cut_points[1];
     const Real measure = distance2(a.point, b.point);
     if (measure <= request.tolerance) {
         append_collapsed_full_region(
@@ -1998,7 +2016,7 @@ LevelSetCellCutResult cutLinearLevelSetCell2D(const CutInterfaceDomainRequest& r
                                               fragment.local_fragment_index,
                                               request.source.value_revision);
     fragment.kind = CutInterfaceFragmentKind::Segment;
-    if (zero_edge || cut_points.size() > 2u) {
+    if (zero_edge) {
         fragment.degeneracy = CutInterfaceDegeneracy::EdgeTouch;
     } else if (zero_count > 0u) {
         fragment.degeneracy = CutInterfaceDegeneracy::VertexTouch;
@@ -2063,6 +2081,7 @@ LevelSetCellCutResult cutLinearLevelSetCell2D(const CutInterfaceDomainRequest& r
     fragment.topology_id = "cell-" + std::to_string(input.parent_cell) + "-segment-0";
     fragment.parent_corner_topology_key =
         levelSetParentCornerTopologyKey(request, input);
+    fragment.linear_corner_surface = linearCornerSurfaceSource(cut_points, request.isovalue);
     fragment.vertices = {
         CutInterfaceVertex{.point = a.point,
                            .parent_coordinate = a.parent_coordinate,
@@ -2390,6 +2409,16 @@ LevelSetCellCutResult cutLinearLevelSetCell3DImpl(const CutInterfaceDomainReques
     }
 
     orderPolygonPoints(observation, cut_points, gradient_normal);
+    // The angular sort fixes orientation up to a cyclic permutation. Anchor
+    // the fan at a topological edge so a rotating normal cannot switch its
+    // diagonal while the four intersections stay on the same parent edges.
+    if (cut_points.size() == 4) {
+        const auto anchor = std::min_element(cut_points.begin(), cut_points.end(),
+            [](const auto& a, const auto& b) {
+                return std::tie(a.origin.first, a.origin.second) < std::tie(b.origin.first, b.origin.second);
+            });
+        std::rotate(cut_points.begin(), anchor, cut_points.end());
+    }
     const Real measure = polygonArea(cut_points, gradient_normal);
     if (measure <= request.tolerance) {
         append_collapsed_full_region(
@@ -2513,6 +2542,7 @@ LevelSetCellCutResult cutLinearLevelSetCell3DImpl(const CutInterfaceDomainReques
     fragment.topology_id = "cell-" + std::to_string(input.parent_cell) + "-polygon-0";
     fragment.parent_corner_topology_key =
         levelSetParentCornerTopologyKey(request, input);
+    fragment.linear_corner_surface = linearCornerSurfaceSource(cut_points, request.isovalue);
     fragment.vertices.reserve(cut_points.size());
     for (std::size_t i = 0; i < cut_points.size(); ++i) {
         const auto stable_index = static_cast<LocalIndex>(i + 1u);
@@ -2598,6 +2628,9 @@ void appendLinearLevelSetCellCut2D(LevelSetInterfaceDomain& domain,
                                    const LevelSetCellCutInput& input)
 {
     auto result = cutLinearLevelSetCell2D(domain.request(), input);
+    if (!result.supported) {
+        throw std::invalid_argument(result.diagnostic);
+    }
     for (auto& region : result.volume_regions) {
         domain.addVolumeRegion(std::move(region));
     }

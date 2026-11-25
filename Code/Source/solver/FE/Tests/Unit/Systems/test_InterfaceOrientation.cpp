@@ -42,6 +42,7 @@
 #include <cmath>
 #include <functional>
 #include <memory>
+#include <numeric>
 #include <stdexcept>
 #include <string>
 #include <utility>
@@ -167,6 +168,27 @@ FormExpr upwindFlux(const InterfaceBetween& I,
 // ---------------------------------------------------------------------------
 // Fitted interface
 // ---------------------------------------------------------------------------
+
+TEST(InterfaceOrientationFitted, AssemblesPressureTractionOnCurvedQuad9Boundary)
+{
+    using namespace test_trace_multiplier;
+    FESystem sys(buildBentQuadraticQuad());
+    auto space = quadSpace(1);
+    const auto field = sys.addField(FieldSpec{.name = "u", .space = space});
+    sys.addOperator("op");
+    const auto u = forms::StateField(field, *space, "u");
+    const auto v = forms::TestField(field, *space, "v");
+    const auto pressure = FormExpr::coordinate().component(1);
+    const auto traction = -pressure * FormExpr::normal().component(1) * v;
+    (void)systems::installFormulation(sys, "op", {field},
+                                      (u * v).dx() + traction.ds(kWholeBoundary), interpreted());
+    sys.setup();
+
+    const std::vector<Real> rest(static_cast<std::size_t>(sys.dofHandler().getNumDofs()), 0.0);
+    const auto residual = assembleResidual(sys, rest);
+    // With p = y, the total vertical pressure force is minus the area of the cell.
+    EXPECT_NEAR(std::accumulate(residual.begin(), residual.end(), Real(0)), -4.0, 1e-12);
+}
 
 struct FittedCase {
     std::unique_ptr<FESystem> system;

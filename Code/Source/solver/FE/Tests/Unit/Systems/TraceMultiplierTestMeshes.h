@@ -135,6 +135,19 @@ inline std::shared_ptr<svmp::Mesh> buildQuadGrid(int nx, int ny, Real lx, Real l
     return faces.finish(std::move(base));
 }
 
+/// Quadratic cell mapped by (r,s) -> (r,s+2r²), with one label on its closed boundary.
+inline std::shared_ptr<svmp::Mesh> buildBentQuadraticQuad()
+{
+    auto mesh = buildQuadGrid(1, 1, 2.0, 2.0, 2, kWholeBoundary);
+    auto coordinates = mesh->base().X_ref();
+    for (std::size_t i = 0; i < coordinates.size(); i += 2) {
+        coordinates[i] -= 1.0;
+        coordinates[i + 1] += 2.0 * coordinates[i] * coordinates[i] - 1.0;
+    }
+    mesh->base().rebase_reference_coordinates(std::move(coordinates));
+    return mesh;
+}
+
 /// The n x n grid of the unit square, each square split into two Triangle3
 /// cells along its diagonal; fields of any order live on these linear cells.
 inline std::shared_ptr<svmp::Mesh> buildTriangleGrid(int n, int single_label = -1)

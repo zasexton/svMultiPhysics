@@ -311,6 +311,9 @@ void appendRootPolishDiagnostics(std::string& diagnostic,
     const interfaces::CutInterfaceDomainRequest& request,
     std::chrono::steady_clock::time_point backend_start)
 {
+    if (!result.cut.supported) {
+        setUnavailableOrderMetadata(result, request);
+    }
     auto counting_request = request;
     counting_request.achieved_interface_quadrature_order =
         result.achieved_interface_quadrature_order;
@@ -4496,6 +4499,9 @@ void alignLeafCutNormalsWithEvaluator(
     const ImplicitCutQuadratureBackendCellInput& input)
 {
     for (auto& fragment : leaf_cut.fragments) {
+        // These normals depend on the full evaluator. On subdivision leaves the
+        // vertex IDs also belong to the leaf, rather than to its retained parent.
+        fragment.linear_corner_surface.reset();
         std::array<Real, 3> accumulated{{0.0, 0.0, 0.0}};
         for (auto& qp : fragment.quadrature_points) {
             qp.normal = interfaceNormalAt(input, qp.point);
@@ -5109,6 +5115,9 @@ void appendLinearizedRectangleCut(
     }
 
     auto leaf_cut = interfaces::cutLinearLevelSetCell2D(request, leaf);
+    if (!leaf_cut.supported) {
+        throw std::invalid_argument(leaf_cut.diagnostic);
+    }
     alignLeafCutNormalsWithEvaluator(leaf_cut, input);
     if (retain_interface_fragments) {
         diagnostics.interface_fragment_count +=

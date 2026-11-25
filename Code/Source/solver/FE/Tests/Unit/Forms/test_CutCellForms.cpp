@@ -15,7 +15,9 @@
 #include "Forms/JIT/JITCompiler.h"
 #include "Forms/JIT/JITFunctionalKernelWrapper.h"
 #include "Forms/JIT/JITKernelWrapper.h"
+#include "Forms/JIT/JITValidation.h"
 #include "Forms/Vocabulary.h"
+#include "Interfaces/LevelSetInterfaceBuilder.h"
 #include "Spaces/H1Space.h"
 #include "Spaces/ProductSpace.h"
 #include "Tests/Unit/Forms/FormsTestHelpers.h"
@@ -25,6 +27,7 @@
 #include <array>
 #include <cmath>
 #include <memory>
+#include <numeric>
 #include <span>
 #include <stdexcept>
 #include <type_traits>
@@ -55,6 +58,19 @@ using JITConstants = std::vector<Real, AlignedAllocator<Real, kFEPreferredAlignm
     }
     for (const auto& child : node.childrenShared()) {
         if (child && containsFormExprType(*child, type)) {
+            return true;
+        }
+    }
+    return false;
+}
+bool containsCutSurfaceComponent(const FormExprNode &node, CutSurfaceComponent component)
+{
+    if (node.type() == FormExprType::CutSurfaceVariation &&
+        node.componentIndex0() == static_cast<int>(component)) {
+        return true;
+    }
+    for (const auto *child : node.children()) {
+        if (child && containsCutSurfaceComponent(*child, component)) {
             return true;
         }
     }
@@ -668,47 +684,16 @@ void markRuleAsHighOrderImplicit(CutQuadratureRule& rule,
     return {{v[0] / n, v[1] / n, v[2] / n}};
 }
 
-[[nodiscard]] Real meanCurvatureFromGradientHessian(
-    const AssemblyContext::Vector3D& gradient,
-    const AssemblyContext::Matrix3x3& hessian)
-{
-    const Real g2 = gradient[0] * gradient[0] +
-                    gradient[1] * gradient[1] +
-                    gradient[2] * gradient[2];
-    if (!(g2 > Real(1.0e-28))) {
-        throw std::runtime_error("meanCurvatureFromGradientHessian: degenerate gradient");
-    }
-    const Real g = std::sqrt(g2);
-    const Real trace = hessian[0][0] + hessian[1][1] + hessian[2][2];
-    Real g_h_g = Real(0.0);
-    for (int r = 0; r < 3; ++r) {
-        for (int c = 0; c < 3; ++c) {
-            g_h_g += gradient[static_cast<std::size_t>(r)] *
-                     hessian[static_cast<std::size_t>(r)][static_cast<std::size_t>(c)] *
-                     gradient[static_cast<std::size_t>(c)];
-        }
-    }
-    return trace / g - g_h_g / (g2 * g);
-}
-
 [[nodiscard]] CutQuadratureRule makeQuadraticLevelSetReferenceTetraInterfaceRule(
     int marker,
     const svmp::FE::spaces::FunctionSpace& space,
-    std::span<const Real> level_set_coefficients,
-    int perturb_dof = -1,
-    Real perturbation = Real(0.0),
-    bool move_points_with_level_set = false)
+    std::span<const Real> level_set_coefficients)
 {
     const auto n_dofs = space.dofs_per_element();
     if (level_set_coefficients.size() != n_dofs) {
         throw std::runtime_error(
             "makeQuadraticLevelSetReferenceTetraInterfaceRule: coefficient size mismatch");
     }
-    if (perturb_dof >= static_cast<int>(n_dofs)) {
-        throw std::runtime_error(
-            "makeQuadraticLevelSetReferenceTetraInterfaceRule: perturbation DOF out of range");
-    }
-
     const std::array<AssemblyContext::Point3D, 4> qpts{{
         pointOnQuadraticLevelSet(Real(0.17), Real(0.11)),
         pointOnQuadraticLevelSet(Real(0.28), Real(0.09)),
@@ -744,69 +729,15 @@ void markRuleAsHighOrderImplicit(CutQuadratureRule& rule,
         }
 
         AssemblyContext::Vector3D gradient{{0.0, 0.0, 0.0}};
-        AssemblyContext::Matrix3x3 hessian{};
         for (std::size_t a = 0u; a < n_dofs; ++a) {
             const Real coeff = level_set_coefficients[a];
             for (int d = 0; d < 3; ++d) {
                 gradient[static_cast<std::size_t>(d)] +=
                     coeff * gradients[a][static_cast<std::size_t>(d)];
             }
-            for (int r = 0; r < 3; ++r) {
-                for (int c = 0; c < 3; ++c) {
-                    hessian[static_cast<std::size_t>(r)][static_cast<std::size_t>(c)] +=
-                        coeff * hessians[a](static_cast<std::size_t>(r),
-                                             static_cast<std::size_t>(c));
-                }
-            }
         }
-
-        AssemblyContext::Vector3D perturbed_gradient = gradient;
-        Real weight = base_weights[q];
-        if (perturb_dof >= 0 && perturbation != Real(0.0)) {
-            const auto p = static_cast<std::size_t>(perturb_dof);
-            const auto normal = normalized3(gradient);
-            for (int d = 0; d < 3; ++d) {
-                perturbed_gradient[static_cast<std::size_t>(d)] +=
-                    perturbation * gradients[p][static_cast<std::size_t>(d)];
-            }
-            const Real grad_norm =
-                std::sqrt(gradient[0] * gradient[0] +
-                          gradient[1] * gradient[1] +
-                          gradient[2] * gradient[2]);
-            const Real normal_speed = -perturbation * values[p] / grad_norm;
-            const Real curvature = meanCurvatureFromGradientHessian(gradient, hessian);
-            weight *= Real(1.0) + curvature * normal_speed;
-            if (move_points_with_level_set) {
-                for (int d = 0; d < 3; ++d) {
-                    qp[static_cast<std::size_t>(d)] +=
-                        normal_speed * normal[static_cast<std::size_t>(d)];
-                }
-                xi = svmp::FE::math::Vector<Real, 3>{qp[0], qp[1], qp[2]};
-                basis.evaluate_all(xi, values, gradients, hessians);
-                if (values.size() != n_dofs ||
-                    gradients.size() != n_dofs ||
-                    hessians.size() != n_dofs) {
-                    throw std::runtime_error(
-                        "makeQuadraticLevelSetReferenceTetraInterfaceRule: moved-point basis size mismatch");
-                }
-                perturbed_gradient = {{0.0, 0.0, 0.0}};
-                for (std::size_t a = 0u; a < n_dofs; ++a) {
-                    const Real coeff =
-                        level_set_coefficients[a] +
-                        (a == p ? perturbation : Real(0.0));
-                    for (int d = 0; d < 3; ++d) {
-                        perturbed_gradient[static_cast<std::size_t>(d)] +=
-                            coeff * gradients[a][static_cast<std::size_t>(d)];
-                    }
-                }
-            }
-        }
-
-        if (!(weight > Real(0.0))) {
-            throw std::runtime_error(
-                "makeQuadraticLevelSetReferenceTetraInterfaceRule: non-positive perturbed weight");
-        }
-        rule.points.push_back({qp, normalized3(perturbed_gradient), weight});
+        const Real weight=base_weights[q];
+        rule.points.push_back({qp, normalized3(gradient), weight});
         rule.measure += weight;
     }
     rule.volume_fraction = Real(0.0);
@@ -823,20 +754,14 @@ void markRuleAsHighOrderImplicit(CutQuadratureRule& rule,
 makeQuadraticLevelSetReferenceTetraInterfaceContext(
     int marker,
     const svmp::FE::spaces::FunctionSpace& space,
-    std::span<const Real> level_set_coefficients,
-    int perturb_dof = -1,
-    Real perturbation = Real(0.0),
-    bool move_points_with_level_set = false)
+    std::span<const Real> level_set_coefficients)
 {
     svmp::FE::assembly::CutIntegrationContext cut_context;
     cut_context.addInterfaceRule(
         makeQuadraticLevelSetReferenceTetraInterfaceRule(
             marker,
             space,
-            level_set_coefficients,
-            perturb_dof,
-            perturbation,
-            move_points_with_level_set));
+            level_set_coefficients));
     return cut_context;
 }
 
@@ -1949,6 +1874,267 @@ TEST(CutCellForms, HighOrderCutInterfaceTangentMatchesFixedGeometryFiniteDiffere
         /*tol=*/Real(2.0e-6));
 }
 
+enum class TractionLoad { Pressure, PlanarSum, NormalSize, PositiveNormal, History, TestGradient };
+
+struct TractionCase {
+    TractionLoad load = TractionLoad::Pressure;
+    std::array<Real, 4> signed_values{{-.25, .75, -.25, -.25}};
+    int order = 2;
+    Real isovalue = 0;
+    bool stale_source = false;
+    bool jit = false;
+};
+
+// Every perturbation rebuilds the production LinearCorner fragment and remaps the
+// residual at its own locations, normals and weights. The FD uses a frozen kernel.
+void checkRegeneratedSurfaceTangent(const svmp::FE::assembly::IMeshAccess &mesh, const TractionCase &setup = {})
+{
+    const auto &[load, signed_values, order, isovalue, stale, jit] = setup;
+    const bool planar_sum = load == TractionLoad::PlanarSum;
+    const bool normal_size = load == TractionLoad::NormalSize;
+    const bool positive_normal = load == TractionLoad::PositiveNormal;
+    const bool history = load == TractionLoad::History;
+    const bool test_gradient = load == TractionLoad::TestGradient;
+    auto origin = signed_values;
+    namespace a = svmp::FE::assembly;
+    namespace f = svmp::FE::forms;
+    namespace it = svmp::FE::interfaces;
+    using namespace svmp::FE;
+    constexpr int marker = 43;
+    constexpr FieldId field = 17;
+    const auto cell_type = mesh.getCellType(0);
+    const bool quad = cell_type == ElementType::Quad4 || cell_type == ElementType::Quad9;
+    const auto type = mesh.dimension() == 3 ? ElementType::Tetra4
+                      : quad                ? ElementType::Quad4
+                                            : ElementType::Triangle3;
+    spaces::H1Space space(type, 1);
+    const auto phi = f::TrialFunction(space, "phi"), v = f::TestFunction(space, "v");
+    const auto x = f::FormExpr::coordinate();
+    const auto n = f::FormExpr::normal();
+    auto pressure = f::FormExpr::constant(1.) + phi * phi;
+    if (!planar_sum) {
+        pressure = pressure + .07 * f::FormExpr::referenceCellCoordinate().component(0) +
+                   .1 * f::FormExpr::jacobianDeterminant();
+        pressure = pressure + f::FormExpr::coefficient("spatial pressure",
+                                                       f::ScalarCoefficient([](Real x, Real y, Real z) {
+                                                           return .3 * x * x - .2 * y + .4 * z * z + .5 * z;
+                                                       }));
+    }
+    auto traction = pressure * n.component(0);
+    if (!planar_sum) {
+        traction = traction + .4 * n.component(1);
+    }
+    if (mesh.dimension() == 3 && !planar_sum) {
+        traction = traction - .25 * n.component(2);
+    }
+    if (normal_size) {
+        traction = f::hNormal() * (1. + phi * phi);
+    }
+    if (positive_normal) {
+        traction = pressure * (n.component(0) + .4 * n.component(1)).plus();
+    }
+    if (history) {
+        traction = (1. + f::FormExpr::previousSolution()) * traction;
+    }
+    const auto residual = (traction * (test_gradient ? f::grad(v).component(0) : v)).dI(marker);
+    f::FormCompiler compiler, frozen;
+    auto options = compiler.options();
+    options.geometry_sensitivity.mode = f::GeometrySensitivityMode::LevelSetCutDomainUnknowns;
+    options.geometry_sensitivity.level_set_cut_domains.push_back(
+        {.level_set_field = field, .interface_marker = marker, .side = f::CutVolumeSide::Negative});
+    compiler.setOptions(std::move(options));
+    auto tangent = std::make_shared<f::SymbolicNonlinearFormKernel>(compiler.compileResidual(residual),
+                                                                    f::NonlinearKernelOutput::Both);
+    f::SymbolicNonlinearFormKernel force(frozen.compileResidual(residual),
+                                         f::NonlinearKernelOutput::VectorOnly);
+    tangent->resolveInlinableConstitutives();
+    force.resolveInlinableConstitutives();
+    std::unique_ptr<f::jit::JITKernelWrapper> jit_tangent;
+    if (jit) {
+        f::JITOptions jit_options;
+        jit_options.enable = true;
+        jit_options.specialization.enable = false;
+        jit_tangent = std::make_unique<f::jit::JITKernelWrapper>(tangent, jit_options);
+        const auto result = f::jit::canCompile(tangent->tangentIR());
+        ASSERT_FALSE(result.ok);
+        ASSERT_TRUE(result.first_issue.has_value());
+        EXPECT_EQ(result.first_issue->type, f::FormExprType::CutSurfaceVariation);
+    }
+    a::AssemblyKernel &matrix_kernel = jit_tangent ? static_cast<a::AssemblyKernel &>(*jit_tangent) : *tangent;
+    auto dofs = createSingleCellDofMap(space.dofs_per_element());
+    const int count = static_cast<int>(space.dofs_per_element());
+    for (auto &value : origin) {
+        value += isovalue;
+    }
+    const auto evaluate = [&](const std::array<Real, 4> &p, bool matrix) {
+        it::CutInterfaceDomainRequest request;
+        request.interface_marker = marker;
+        request.source = it::LevelSetInterfaceSource::fromField(field, 1u, 1u);
+        request.quadrature_order = order;
+        request.isovalue = isovalue;
+        it::LevelSetCellCutInput input;
+        input.parent_cell = 0;
+        input.element_type = type;
+        for (int i = 0; i < count; ++i) {
+            const auto xi = basis::ReferenceNodeLayout::get_node_coords(type, i);
+            input.node_coordinates.push_back({xi[0], xi[1], xi[2]});
+        }
+        input.level_set_values.assign(p.begin(), p.begin() + count);
+        if (stale) {
+            for (auto &value : input.level_set_values) {
+                value += .01;
+            }
+        }
+        auto cut = mesh.dimension() == 2 ? it::cutLinearLevelSetCell2D(request, input)
+                                         : it::cutLinearLevelSetCell3D(request, input);
+        a::CutIntegrationContext context;
+        if (positive_normal) {
+            it::LevelSetInterfaceDomain domain(request);
+            for (auto &fragment : cut.fragments) {
+                domain.addFragment(std::move(fragment));
+            }
+            for (auto &region : cut.volume_regions) {
+                domain.addVolumeRegion(std::move(region));
+            }
+            context.addGeneratedInterfaceDomain(domain);
+        } else {
+            for (const auto &fragment : cut.fragments) {
+                if (fragment.active()) {
+                    context.addInterfaceRule(fragment.toCutQuadratureRule(request));
+                }
+            }
+        }
+        std::array<a::FieldSolutionAccess, 1> access{
+            {{.field = field,
+              .space = &space,
+              .dof_map = &dofs,
+              .dof_offset = 0,
+              .coefficient_source = a::FieldSolutionAccess::CoefficientSource::PrescribedData,
+              .prescribed_coefficients = p,
+              .prescribed_revision = 1}}};
+        a::StandardAssembler assembler;
+        assembler.setDofMap(dofs);
+        assembler.setFieldSolutionAccess(access);
+        assembler.setCurrentSolution(p);
+        const std::array<Real, 4> previous{{.9, -.4, .57, -.3}};
+        a::TimeIntegrationContext time{};
+        if (history) {
+            time.dt1 = a::TimeDerivativeStencil{.order = 1, .a = {1., -1.}};
+            assembler.setTimeIntegrationContext(&time);
+            assembler.setPreviousSolution(previous);
+        }
+        a::DenseMatrixView m(4);
+        a::DenseVectorView r(4);
+        m.zero();
+        r.zero();
+        assembler.assembleCutInterfaces(mesh, context, marker, space, space, matrix ? matrix_kernel : force,
+                                        matrix ? &m : nullptr, &r, matrix, true);
+        std::array<Real, 20> out{};
+        for (int i = 0; i < count; ++i) {
+            out[i] = r.getVectorEntry(i);
+            for (int j = 0; j < count; ++j) {
+                out[4 + 4 * i + j] = m.getMatrixEntry(i, j);
+            }
+        }
+        return out;
+    };
+    if (stale) {
+        EXPECT_THROW((void)evaluate(origin, true), std::invalid_argument);
+        return;
+    }
+    const auto base = evaluate(origin, true);
+    if (planar_sum) {
+        EXPECT_NEAR(std::accumulate(base.begin(), base.begin() + 4, 0.), 9. / 32., 1.e-13);
+        EXPECT_NEAR(std::accumulate(base.begin() + 4, base.end(), 0.), .75, 1.e-10);
+    }
+    if (normal_size) {
+        // The residual sums to 2 V_parent at a zero isovalue, independent of cut position.
+        EXPECT_NEAR(std::accumulate(base.begin() + 4, base.end(), 0.), 0., 1.e-10);
+    }
+    for (int j = 0; j < count; ++j) {
+        constexpr Real h = 2.e-6;
+        auto plus = origin, minus = origin;
+        plus[j] += h;
+        minus[j] -= h;
+        const auto rp = evaluate(plus, false), rm = evaluate(minus, false);
+        for (int i = 0; i < count; ++i) {
+            EXPECT_NEAR(base[4 + 4 * i + j], (rp[i] - rm[i]) / (2 * h), 3.e-8)
+                << "row " << i << " column " << j;
+        }
+    }
+}
+
+TEST(CutCellForms, GeneratedTetrahedralTractionDifferentiatesTheMovingEdgeIntersections)
+{
+    svmp::FE::forms::test::SingleTetraMeshAccess mesh;
+    checkRegeneratedSurfaceTangent(mesh, {.load = TractionLoad::PlanarSum});
+}
+
+TEST(CutCellForms, DifferentiatedGeneratedTractionUsesInterpreterWhenJITIsRequested)
+{
+    svmp::FE::forms::test::SingleTetraMeshAccess mesh;
+    checkRegeneratedSurfaceTangent(mesh, {.load = TractionLoad::PlanarSum, .jit = true});
+}
+
+TEST(CutCellForms, GeneratedTractionOnACurvedParentDifferentiatesMappedPointNormalAndArea)
+{
+    svmp::FE::forms::test::CurvedTetra10MeshAccess mesh;
+    checkRegeneratedSurfaceTangent(mesh);
+}
+
+TEST(CutCellForms, FourEdgeTetrahedralFanStaysOnItsParentEdges)
+{
+    svmp::FE::forms::test::SingleTetraMeshAccess mesh;
+    for (int order : {1, 2}) {
+        checkRegeneratedSurfaceTangent(
+            mesh, {.signed_values = {.7, -1.7, -.2, .48}, .order = order, .isovalue = .37});
+        checkRegeneratedSurfaceTangent(mesh,
+                                       {.signed_values = {1., 1., -1., -1.}, .order = order, .isovalue = .37});
+    }
+}
+
+TEST(CutCellForms, GeneratedSegmentDifferentiatesMappedPressureAtAllGaussOrders)
+{
+    svmp::FE::forms::test::CurvedSingleCellMeshAccess mesh(svmp::FE::ElementType::Quad9);
+    for (int order : {1, 2, 5}) {
+        checkRegeneratedSurfaceTangent(
+            mesh, {.signed_values = {-.61, .34, .74, -.22}, .order = order, .isovalue = .37});
+    }
+}
+
+TEST(CutCellForms, PositiveTraceUsesTheOutwardNormalOfTheGeneratedSide)
+{
+    svmp::FE::forms::test::CurvedTetra10MeshAccess mesh;
+    checkRegeneratedSurfaceTangent(
+        mesh, {.load = TractionLoad::PositiveNormal, .signed_values = {-.7, 1.7, .2, -.48}, .isovalue = .37});
+}
+
+TEST(CutCellForms, PreviousSolutionTraceMovesWithTheDifferentiatedCut)
+{
+    svmp::FE::forms::test::CurvedTetra10MeshAccess mesh;
+    checkRegeneratedSurfaceTangent(
+        mesh, {.load = TractionLoad::History, .signed_values = {-.7, 1.7, .2, -.48}, .isovalue = .37});
+}
+
+TEST(CutCellForms, MovingCutSamplesTheGradientOnAnEmbeddedCurvedQuadrilateral)
+{
+    svmp::FE::forms::test::CurvedSingleCellMeshAccess mesh(svmp::FE::ElementType::Quad9);
+    checkRegeneratedSurfaceTangent(
+        mesh, {.load = TractionLoad::TestGradient, .signed_values = {-.61, .34, .74, -.22}, .isovalue = .37});
+}
+
+TEST(CutCellForms, CutFacetMeasureDifferentiatesTheNormalSizeDenominator)
+{
+    svmp::FE::forms::test::CurvedTetra10MeshAccess mesh;
+    checkRegeneratedSurfaceTangent(mesh, {.load = TractionLoad::NormalSize});
+}
+
+TEST(CutCellForms, StaleSourceCoefficientsCannotDifferentiateARetainedSurface)
+{
+    svmp::FE::forms::test::SingleTetraMeshAccess mesh;
+    checkRegeneratedSurfaceTangent(mesh, {.isovalue = .37, .stale_source = true});
+}
+
 TEST(CutCellForms, LevelSetCutDomainSymbolicTangentAddsInterfaceMeasureTerm)
 {
     constexpr int marker = 83;
@@ -1961,13 +2147,9 @@ TEST(CutCellForms, LevelSetCutDomainSymbolicTangentAddsInterfaceMeasureTerm)
 
     FormCompiler compiler;
     auto options = compiler.options();
-    options.geometry_sensitivity.mode =
-        GeometrySensitivityMode::LevelSetCutDomainUnknowns;
-    options.geometry_sensitivity.level_set_cut_domains.push_back(
-        LevelSetCutDomainSensitivity{
-            .level_set_field = phi_field,
-            .interface_marker = marker,
-            .side = CutVolumeSide::Negative});
+    options.geometry_sensitivity.mode = GeometrySensitivityMode::LevelSetCutDomainUnknowns;
+    options.geometry_sensitivity.level_set_cut_domains.push_back(LevelSetCutDomainSensitivity{
+        .level_set_field = phi_field, .interface_marker = marker, .side = CutVolumeSide::Negative});
     compiler.setOptions(std::move(options));
 
     auto ir = compiler.compileResidual(residual);
@@ -1975,22 +2157,20 @@ TEST(CutCellForms, LevelSetCutDomainSymbolicTangentAddsInterfaceMeasureTerm)
     ASSERT_NO_THROW(kernel.resolveInlinableConstitutives());
 
     int marker_interface_terms = 0;
-    bool found_curvature_measure_term = false;
-    for (const auto& term : kernel.tangentIR().terms()) {
-        if (term.domain != IntegralDomain::InterfaceFace ||
-            term.interface_marker != marker) {
+    bool found_quadrature_variation = false;
+    for (const auto &term : kernel.tangentIR().terms()) {
+        if (term.domain != IntegralDomain::InterfaceFace || term.interface_marker != marker) {
             continue;
         }
         ++marker_interface_terms;
         if (term.integrand.node() != nullptr &&
-            containsFormExprType(*term.integrand.node(),
-                                 FormExprType::Divergence)) {
-            found_curvature_measure_term = true;
+            containsFormExprType(*term.integrand.node(), FormExprType::CutSurfaceVariation)) {
+            found_quadrature_variation = true;
         }
     }
 
     EXPECT_GE(marker_interface_terms, 2);
-    EXPECT_TRUE(found_curvature_measure_term);
+    EXPECT_TRUE(found_quadrature_variation);
 }
 
 TEST(CutCellForms, LevelSetCutDomainSymbolicTangentAddsNormalTerminalVariation)
@@ -2006,13 +2186,9 @@ TEST(CutCellForms, LevelSetCutDomainSymbolicTangentAddsNormalTerminalVariation)
 
     FormCompiler compiler;
     auto options = compiler.options();
-    options.geometry_sensitivity.mode =
-        GeometrySensitivityMode::LevelSetCutDomainUnknowns;
-    options.geometry_sensitivity.level_set_cut_domains.push_back(
-        LevelSetCutDomainSensitivity{
-            .level_set_field = phi_field,
-            .interface_marker = marker,
-            .side = CutVolumeSide::Negative});
+    options.geometry_sensitivity.mode = GeometrySensitivityMode::LevelSetCutDomainUnknowns;
+    options.geometry_sensitivity.level_set_cut_domains.push_back(LevelSetCutDomainSensitivity{
+        .level_set_field = phi_field, .interface_marker = marker, .side = CutVolumeSide::Negative});
     compiler.setOptions(std::move(options));
 
     auto ir = compiler.compileResidual(residual);
@@ -2020,15 +2196,13 @@ TEST(CutCellForms, LevelSetCutDomainSymbolicTangentAddsNormalTerminalVariation)
     ASSERT_NO_THROW(kernel.resolveInlinableConstitutives());
 
     bool found_normal_variation_term = false;
-    for (const auto& term : kernel.tangentIR().terms()) {
-        if (term.domain != IntegralDomain::InterfaceFace ||
-            term.interface_marker != marker ||
+    for (const auto &term : kernel.tangentIR().terms()) {
+        if (term.domain != IntegralDomain::InterfaceFace || term.interface_marker != marker ||
             term.integrand.node() == nullptr) {
             continue;
         }
-        const auto& integrand = *term.integrand.node();
-        if (!containsFormExprType(integrand, FormExprType::Divergence) &&
-            containsFormExprType(integrand, FormExprType::Gradient) &&
+        const auto &integrand = *term.integrand.node();
+        if (containsFormExprType(integrand, FormExprType::CutSurfaceVariation) &&
             containsFormExprType(integrand, FormExprType::TrialFunction)) {
             found_normal_variation_term = true;
         }
@@ -2085,7 +2259,7 @@ TEST(CutCellForms, LevelSetCutDomainShapeTangentUsesConfiguredLevelSetSpace)
         svmp::FE::assembly::RequiredData::SolutionGradients));
 }
 
-TEST(CutCellForms, LevelSetCutDomainInterfaceNormalMeasureTangentMatchesQuadratureLocalFD)
+TEST(CutCellForms, ManuallySuppliedCurvedRuleRequiresADerivativeBinding)
 {
     constexpr int marker = 85;
     constexpr svmp::FE::FieldId phi_field = 17;
@@ -2119,20 +2293,8 @@ TEST(CutCellForms, LevelSetCutDomainInterfaceNormalMeasureTangentMatchesQuadratu
         std::move(matrix_ir), NonlinearKernelOutput::Both);
     ASSERT_NO_THROW(matrix_kernel.resolveInlinableConstitutives());
 
-    const auto field_requirements = matrix_kernel.fieldRequirements();
-    const auto phi_requirement =
-        std::find_if(field_requirements.begin(),
-                     field_requirements.end(),
-                     [](const svmp::FE::assembly::FieldRequirement& req) {
-                         return req.field == phi_field;
-                     });
-    ASSERT_NE(phi_requirement, field_requirements.end());
-    EXPECT_TRUE(svmp::FE::assembly::hasFlag(
-        phi_requirement->required,
-        svmp::FE::assembly::RequiredData::SolutionGradients));
-    EXPECT_TRUE(svmp::FE::assembly::hasFlag(
-        phi_requirement->required,
-        svmp::FE::assembly::RequiredData::SolutionHessians));
+    EXPECT_TRUE(svmp::FE::assembly::hasFlag(matrix_kernel.getRequiredData(),
+                                            RequiredData::CutSurfaceVariations));
 
     FormCompiler vector_compiler;
     auto vector_ir = vector_compiler.compileResidual(residual);
@@ -2169,61 +2331,11 @@ TEST(CutCellForms, LevelSetCutDomainInterfaceNormalMeasureTangentMatchesQuadratu
     residual_vector.zero();
 
     assembler.setCurrentSolution(level_set_coefficients);
-    const auto assembled = assembler.assembleCutInterfaces(
+    EXPECT_THROW((void)assembler.assembleCutInterfaces(
         mesh, base_context, marker, space, space, matrix_kernel,
         &jacobian, &residual_vector,
         /*assemble_matrix=*/true,
-        /*assemble_vector=*/true);
-    ASSERT_EQ(assembled.interface_faces_assembled, svmp::FE::GlobalIndex{1});
-
-    const Real eps = Real(1.0e-6);
-    const Real tolerance = Real(5.0e-5);
-    for (svmp::FE::GlobalIndex j = 0; j < n_dofs; ++j) {
-        auto solution_plus = level_set_coefficients;
-        auto solution_minus = level_set_coefficients;
-        solution_plus[static_cast<std::size_t>(j)] += eps;
-        solution_minus[static_cast<std::size_t>(j)] -= eps;
-
-        const auto plus_context =
-            makeQuadraticLevelSetReferenceTetraInterfaceContext(
-                marker, space, level_set_coefficients,
-                static_cast<int>(j), eps,
-                /*move_points_with_level_set=*/true);
-        const auto minus_context =
-            makeQuadraticLevelSetReferenceTetraInterfaceContext(
-                marker, space, level_set_coefficients,
-                static_cast<int>(j), -eps,
-                /*move_points_with_level_set=*/true);
-
-        svmp::FE::assembly::DenseVectorView residual_plus(n_dofs);
-        svmp::FE::assembly::DenseVectorView residual_minus(n_dofs);
-        residual_plus.zero();
-        residual_minus.zero();
-
-        assembler.setCurrentSolution(solution_plus);
-        (void)assembler.assembleCutInterfaces(
-            mesh, plus_context, marker, space, space, vector_kernel,
-            nullptr, &residual_plus,
-            /*assemble_matrix=*/false,
-            /*assemble_vector=*/true);
-        assembler.setCurrentSolution(solution_minus);
-        (void)assembler.assembleCutInterfaces(
-            mesh, minus_context, marker, space, space, vector_kernel,
-            nullptr, &residual_minus,
-            /*assemble_matrix=*/false,
-            /*assemble_vector=*/true);
-
-        for (svmp::FE::GlobalIndex i = 0; i < n_dofs; ++i) {
-            const Real finite_difference =
-                (residual_plus.getVectorEntry(i) -
-                 residual_minus.getVectorEntry(i)) /
-                (Real(2.0) * eps);
-            EXPECT_NEAR(jacobian.getMatrixEntry(i, j),
-                        finite_difference,
-                        tolerance)
-                << "row=" << i << " col=" << j;
-        }
-    }
+        /*assemble_vector=*/true), std::invalid_argument);
 }
 
 TEST(CutCellForms, LevelSetCutDomainCutVolumeShapeTangentMatchesQuadratureLocalFD)
@@ -2370,147 +2482,6 @@ TEST(CutCellForms, LevelSetCutDomainCutVolumeShapeTangentMatchesQuadratureLocalF
     }
 }
 
-TEST(CutCellForms, LevelSetCutDomainInterfaceShapeTangentMatchesQuadratureLocalFD)
-{
-    constexpr int marker = 87;
-    constexpr svmp::FE::FieldId phi_field = 17;
-    svmp::FE::spaces::H1Space space(svmp::FE::ElementType::Tetra4, /*order=*/2);
-    const auto n_dofs = static_cast<svmp::FE::GlobalIndex>(space.dofs_per_element());
-    const auto level_set_coefficients =
-        quadraticTetraP2LevelSetCoefficients(space);
-
-    const auto phi = TrialFunction(space, "phi");
-    const auto v = TestFunction(space, "v");
-    const auto x = FormExpr::coordinate();
-    const auto n = FormExpr::normal();
-    const auto residual =
-        ((Real(0.43) * phi +
-          Real(0.21) * x.component(0) -
-          Real(0.14) * x.component(1) +
-          Real(0.08) * x.component(2) +
-          Real(0.11) * n.component(0) -
-          Real(0.07) * n.component(1) +
-          Real(0.06) * inner(grad(phi), n) +
-          FormExpr::constant(Real(0.62))) * v)
-             .dI(marker);
-
-    FormCompiler compiler;
-    auto options = compiler.options();
-    options.geometry_sensitivity.mode =
-        GeometrySensitivityMode::LevelSetCutDomainUnknowns;
-    options.geometry_sensitivity.level_set_cut_domains.push_back(
-        LevelSetCutDomainSensitivity{
-            .level_set_field = phi_field,
-            .interface_marker = marker,
-            .side = CutVolumeSide::Negative});
-    compiler.setOptions(std::move(options));
-
-    auto matrix_ir = compiler.compileResidual(residual);
-    SymbolicNonlinearFormKernel matrix_kernel(
-        std::move(matrix_ir), NonlinearKernelOutput::Both);
-    ASSERT_NO_THROW(matrix_kernel.resolveInlinableConstitutives());
-
-    FormCompiler vector_compiler;
-    auto vector_ir = vector_compiler.compileResidual(residual);
-    SymbolicNonlinearFormKernel vector_kernel(
-        std::move(vector_ir), NonlinearKernelOutput::VectorOnly);
-    ASSERT_NO_THROW(vector_kernel.resolveInlinableConstitutives());
-
-    svmp::FE::forms::test::SingleTetraMeshAccess mesh;
-    auto dof_map = createSingleCellDofMap(space.dofs_per_element());
-    std::array<svmp::FE::assembly::FieldSolutionAccess, 1> field_access{{
-        svmp::FE::assembly::FieldSolutionAccess{
-            .field = phi_field,
-            .space = &space,
-            .dof_map = &dof_map,
-            .dof_offset = 0,
-            .coefficient_source =
-                svmp::FE::assembly::FieldSolutionAccess::CoefficientSource::PrescribedData,
-            .prescribed_coefficients = std::span<const Real>(level_set_coefficients),
-            .prescribed_revision = 1u,
-        }
-    }};
-
-    svmp::FE::assembly::StandardAssembler assembler;
-    assembler.setDofMap(dof_map);
-    assembler.setFieldSolutionAccess(field_access);
-
-    const auto base_context =
-        makeQuadraticLevelSetReferenceTetraInterfaceContext(
-            marker,
-            space,
-            level_set_coefficients);
-
-    svmp::FE::assembly::DenseMatrixView jacobian(n_dofs);
-    svmp::FE::assembly::DenseVectorView residual_vector(n_dofs);
-    jacobian.zero();
-    residual_vector.zero();
-
-    assembler.setCurrentSolution(level_set_coefficients);
-    const auto interface_assembled = assembler.assembleCutInterfaces(
-        mesh, base_context, marker, space, space, matrix_kernel,
-        &jacobian, &residual_vector,
-        /*assemble_matrix=*/true,
-        /*assemble_vector=*/true);
-    ASSERT_EQ(interface_assembled.interface_faces_assembled,
-              svmp::FE::GlobalIndex{1});
-
-    const Real eps = Real(1.0e-6);
-    const Real tolerance = Real(1.0e-5);
-    for (svmp::FE::GlobalIndex j = 0; j < n_dofs; ++j) {
-        auto solution_plus = level_set_coefficients;
-        auto solution_minus = level_set_coefficients;
-        solution_plus[static_cast<std::size_t>(j)] += eps;
-        solution_minus[static_cast<std::size_t>(j)] -= eps;
-
-        const auto plus_context =
-            makeQuadraticLevelSetReferenceTetraInterfaceContext(
-                marker,
-                space,
-                level_set_coefficients,
-                static_cast<int>(j),
-                eps,
-                /*move_points_with_level_set=*/true);
-        const auto minus_context =
-            makeQuadraticLevelSetReferenceTetraInterfaceContext(
-                marker,
-                space,
-                level_set_coefficients,
-                static_cast<int>(j),
-                -eps,
-                /*move_points_with_level_set=*/true);
-
-        svmp::FE::assembly::DenseVectorView residual_plus(n_dofs);
-        svmp::FE::assembly::DenseVectorView residual_minus(n_dofs);
-        residual_plus.zero();
-        residual_minus.zero();
-
-        assembler.setCurrentSolution(solution_plus);
-        (void)assembler.assembleCutInterfaces(
-            mesh, plus_context, marker, space, space, vector_kernel,
-            nullptr, &residual_plus,
-            /*assemble_matrix=*/false,
-            /*assemble_vector=*/true);
-        assembler.setCurrentSolution(solution_minus);
-        (void)assembler.assembleCutInterfaces(
-            mesh, minus_context, marker, space, space, vector_kernel,
-            nullptr, &residual_minus,
-            /*assemble_matrix=*/false,
-            /*assemble_vector=*/true);
-
-        for (svmp::FE::GlobalIndex i = 0; i < n_dofs; ++i) {
-            const Real finite_difference =
-                (residual_plus.getVectorEntry(i) -
-                 residual_minus.getVectorEntry(i)) /
-                (Real(2.0) * eps);
-            EXPECT_NEAR(jacobian.getMatrixEntry(i, j),
-                        finite_difference,
-                        tolerance)
-                << "row=" << i << " col=" << j;
-        }
-    }
-}
-
 TEST(CutCellForms, LevelSetCutDomainInterfaceMeasureTangentExpandsAllMarkers)
 {
     constexpr int marker_a = 183;
@@ -2542,20 +2513,19 @@ TEST(CutCellForms, LevelSetCutDomainInterfaceMeasureTangentExpandsAllMarkers)
     SymbolicNonlinearFormKernel kernel(std::move(ir), NonlinearKernelOutput::Both);
     ASSERT_NO_THROW(kernel.resolveInlinableConstitutives());
 
-    std::vector<int> curvature_term_markers;
+    std::vector<int> measure_term_markers;
     for (const auto& term : kernel.tangentIR().terms()) {
         if (term.domain != IntegralDomain::InterfaceFace ||
             term.integrand.node() == nullptr ||
-            !containsFormExprType(*term.integrand.node(),
-                                  FormExprType::Divergence)) {
+            !containsCutSurfaceComponent(*term.integrand.node(), CutSurfaceComponent::RelativeWeight)) {
             continue;
         }
-        curvature_term_markers.push_back(term.interface_marker);
+        measure_term_markers.push_back(term.interface_marker);
     }
-    std::sort(curvature_term_markers.begin(), curvature_term_markers.end());
+    std::sort(measure_term_markers.begin(), measure_term_markers.end());
 
     const std::vector<int> expected_markers = {marker_a, marker_b};
-    EXPECT_EQ(curvature_term_markers, expected_markers);
+    EXPECT_EQ(measure_term_markers, expected_markers);
 }
 
 TEST(CutCellForms, LevelSetCutDomainInterfaceTangentKeepsDistinctFieldsOnSameMarker)
@@ -2594,19 +2564,18 @@ TEST(CutCellForms, LevelSetCutDomainInterfaceTangentKeepsDistinctFieldsOnSameMar
     SymbolicNonlinearFormKernel kernel(std::move(ir), NonlinearKernelOutput::Both);
     ASSERT_NO_THROW(kernel.resolveInlinableConstitutives());
 
-    int curvature_measure_terms = 0;
+    int measure_terms = 0;
     for (const auto& term : kernel.tangentIR().terms()) {
         if (term.domain != IntegralDomain::InterfaceFace ||
             term.interface_marker != marker ||
             term.integrand.node() == nullptr ||
-            !containsFormExprType(*term.integrand.node(),
-                                  FormExprType::Divergence)) {
+            !containsCutSurfaceComponent(*term.integrand.node(), CutSurfaceComponent::RelativeWeight)) {
             continue;
         }
-        ++curvature_measure_terms;
+        ++measure_terms;
     }
 
-    EXPECT_EQ(curvature_measure_terms, 2);
+    EXPECT_EQ(measure_terms, 2);
 }
 
 TEST(CutCellForms,

@@ -7,6 +7,7 @@
 #include "Dofs/DofHandler.h"
 #include "Dofs/EntityDofMap.h"
 #include "Interfaces/FreeSurfaceGeometrySnapshot.h"
+#include "LevelSet/LevelSetGeometryService.h"
 #include "LevelSet/LevelSetInterfaceLifecycle.h"
 #include "Mesh/Core/MeshBase.h"
 #include "Mesh/Mesh.h"
@@ -26,6 +27,7 @@
 #include <cstddef>
 #include <functional>
 #include <memory>
+#include <optional>
 #include <span>
 #include <stdexcept>
 #include <utility>
@@ -507,6 +509,109 @@ TEST(LevelSetVolume,
     EXPECT_NEAR(result.negative_volume + result.positive_volume,
                 result.total_volume,
                 1.0e-12);
+#endif
+}
+
+TEST(LevelSetVolume, QuadrilateralSaddlesRejectDirectAndGeneratedVolumes)
+{
+#if !(defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH)
+    GTEST_SKIP() << "requires Mesh integration";
+#else
+    FE::systems::FESystem system(buildSingleQuadMesh());
+    const auto phi = system.addField(FE::systems::FieldSpec{
+        .name = "phi", .space = std::make_shared<FE::spaces::H1Space>(FE::ElementType::Quad4, 1),
+        .components = 1});
+    system.setup();
+    const auto* map = system.fieldDofHandler(phi).getEntityDofMap();
+    ASSERT_NE(map, nullptr);
+    std::vector<FE::Real> solution(static_cast<std::size_t>(system.dofHandler().getNumDofs()));
+    for (const FE::Real offset : {-1.0e-9, 0.0, 0.2}) {
+        for (const FE::Real sign : {-1.0, 1.0}) {
+            for (FE::GlobalIndex v = 0; v < 4; ++v) {
+                const auto dofs = map->getVertexDofs(v);
+                ASSERT_EQ(dofs.size(), 1u);
+                const auto x = system.meshAccess().getNodeCoordinates(v);
+                solution[static_cast<std::size_t>(system.fieldDofOffset(phi) + dofs.front())] =
+                    sign * ((2.0 * x[0] - 1.0) * (2.0 * x[1] - 1.0) - offset);
+            }
+            using Backend = level_set::ImplicitCutQuadratureBackend;
+            for (const auto backend : {std::optional<Backend>{}, std::optional{Backend::LinearCorner},
+                                       std::optional{Backend::SayeHyperrectangle}}) {
+                level_set::LevelSetVolumeOptions options;
+                options.use_generated_interface_quadrature = backend.has_value();
+                if (backend == Backend::SayeHyperrectangle) {
+                    options.geometry_mode = level_set::GeneratedInterfaceGeometryMode::HighOrderImplicit;
+                    options.implicit_cut_quadrature_backend = *backend;
+                }
+                options.level_set_field_name = "phi";
+                options.allow_corner_linearized_geometry = true;
+                SCOPED_TRACE(::testing::Message() << offset << " " << sign << " " <<
+                             (backend ? level_set::implicitCutQuadratureBackendName(*backend) : "direct"));
+                try {
+                    const auto volume = level_set::computeLevelSetCutCellVolume(system, phi, options, solution);
+                    ADD_FAILURE() << "Published side volumes " << volume.negative_volume << " and "
+                                  << volume.positive_volume;
+                } catch (const std::invalid_argument& ex) {
+                    EXPECT_NE(std::string(ex.what()).find("4 boundary intersections"), std::string::npos)
+                        << ex.what();
+                }
+            }
+        }
+    }
+#endif
+}
+
+TEST(LevelSetVolume, RejectedQuadrilateralSaddlePreservesTheInstalledPhysicalSnapshot)
+{
+#if !(defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH)
+    GTEST_SKIP() << "requires Mesh integration";
+#else
+    auto mesh = buildSingleQuadMesh();
+    auto space = std::make_shared<FE::spaces::H1Space>(FE::ElementType::Quad4, 1);
+    FE::systems::FESystem system(mesh);
+    const auto phi = system.addField(FE::systems::FieldSpec{
+        .name = "phi", .space = space, .source_kind = FE::systems::FieldSourceKind::PrescribedData});
+    (void)system.addField(FE::systems::FieldSpec{.name = "u", .space = space});
+    auto geometry = level_set::cutGeometry(system, *mesh, {.level_set_field_name = "phi", .domain_id = "liquid"},
+                                           {.retain_both_sides = true});
+    system.setup();
+    const auto refresh = [&](std::vector<FE::Real> values) {
+        std::vector<FE::Real> coefficients(static_cast<std::size_t>(system.fieldDofHandler(phi).getNumDofs()));
+        (void)system.projectMeshVertexValuesToFieldCoefficients(phi, values, 1u, coefficients);
+        system.setPrescribedFieldCoefficients(phi, coefficients);
+        (void)geometry.refresh();
+    };
+    // x - 1/4 on the unit square is a single segment.
+    ASSERT_NO_THROW(refresh({-0.25, 0.75, 0.75, -0.25}));
+    ASSERT_NE(system.cutIntegrationContext(), nullptr);
+    ASSERT_EQ(system.cutIntegrationContext()->freeSurfaceGeometrySnapshots().size(), 1u);
+    const auto installed = system.cutIntegrationContext()->freeSurfaceGeometrySnapshots().front();
+    ASSERT_NE(installed, nullptr);
+    FE::Real negative_area = 0;
+    FE::Real positive_area = 0;
+    for (const auto& record : installed->rules()) {
+        if (record.retention != FE::interfaces::FreeSurfaceGeometryRetention::Retained ||
+            record.reference_rule.kind != FE::geometry::CutQuadratureKind::Volume) {
+            continue;
+        }
+        auto& area = record.reference_rule.side == FE::geometry::CutIntegrationSide::Negative
+                         ? negative_area : positive_area;
+        for (const auto& qp : record.physical_rule.points) {
+            area += qp.physical_weight;
+        }
+    }
+    EXPECT_NEAR(negative_area, 0.25, 1.0e-12);
+    EXPECT_NEAR(positive_area, 0.75, 1.0e-12);
+
+    try {
+        refresh({0.8, -1.2, 0.8, -1.2});
+        ADD_FAILURE() << "refreshed the installed snapshot for a two-branch interface";
+    } catch (const std::exception& ex) {
+        EXPECT_NE(std::string(ex.what()).find("4 boundary intersections"), std::string::npos) << ex.what();
+    }
+    ASSERT_NE(system.cutIntegrationContext(), nullptr);
+    ASSERT_EQ(system.cutIntegrationContext()->freeSurfaceGeometrySnapshots().size(), 1u);
+    EXPECT_EQ(system.cutIntegrationContext()->freeSurfaceGeometrySnapshots().front(), installed);
 #endif
 }
 

@@ -701,6 +701,9 @@ assembly::RequiredData analyzeRequiredData(const FormExprNode& node, FormKind ki
             case FormExprType::FacetArea:
                 required |= RequiredData::EntityMeasures;
                 break;
+            case FormExprType::CutSurfaceVariation:
+                required |= RequiredData::CutSurfaceVariations;
+                break;
             case FormExprType::CellDiameterVariation:
             case FormExprType::CellVolumeVariation:
             case FormExprType::FacetAreaVariation:

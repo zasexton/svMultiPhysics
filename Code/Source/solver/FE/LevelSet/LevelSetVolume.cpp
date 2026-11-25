@@ -5,10 +5,12 @@
 #include "Interfaces/LevelSetInterfaceBuilder.h"
 #include "Quadrature/QuadratureFactory.h"
 #include "Spaces/FunctionSpace.h"
+#include "Systems/SystemCollectives.h"
 
 #include <algorithm>
 #include <array>
 #include <cmath>
+#include <exception>
 #include <limits>
 #include <map>
 #include <memory>
@@ -27,17 +29,9 @@ using interfaces::CutInterfaceDomainRequest;
 using interfaces::LevelSetCellCutInput;
 using interfaces::LevelSetInterfaceSource;
 
-struct CollectiveContext {
-#if FE_HAS_MPI
-    MPI_Comm communicator{MPI_COMM_NULL};
-#endif
-    bool active{false};
-};
-
-[[nodiscard]] CollectiveContext collectiveContext(
+[[nodiscard]] systems::CollectiveCommunicator collectiveContext(
     const dofs::DofHandler& dof_handler)
 {
-    CollectiveContext context;
 #if FE_HAS_MPI
     int initialized = 0;
     int finalized = 0;
@@ -47,15 +41,12 @@ struct CollectiveContext {
     }
     if (initialized != 0 && finalized == 0 &&
         dof_handler.mpiComm() != MPI_COMM_NULL) {
-        int size = 1;
-        MPI_Comm_size(dof_handler.mpiComm(), &size);
-        context.communicator = dof_handler.mpiComm();
-        context.active = size > 1;
+        return systems::CollectiveCommunicator(dof_handler.mpiComm());
     }
 #else
     (void)dof_handler;
 #endif
-    return context;
+    return {};
 }
 
 #if FE_HAS_MPI
@@ -68,33 +59,14 @@ struct CollectiveContext {
 }
 #endif
 
-[[nodiscard]] bool allReduceLogicalAnd(const CollectiveContext& context,
-                                       bool local)
-{
-#if FE_HAS_MPI
-    if (context.active) {
-        const int local_value = local ? 1 : 0;
-        int global_value = 0;
-        MPI_Allreduce(&local_value,
-                      &global_value,
-                      1,
-                      MPI_INT,
-                      MPI_MIN,
-                      context.communicator);
-        return global_value != 0;
-    }
-#else
-    (void)context;
-#endif
-    return local;
-}
-
 void globalizeVolumeResult(LevelSetVolumeResult& result,
-                           const CollectiveContext& context)
+                           const systems::CollectiveCommunicator& context,
+                           const std::exception_ptr& local_failure = {})
 {
-    result.success = allReduceLogicalAnd(context, result.success);
+    result.success = systems::agreeOnLocalPhase(
+        local_failure, result.success, context, "measure local cut-cell volumes", "LevelSetVolume");
 #if FE_HAS_MPI
-    if (context.active) {
+    if (context.isParallel()) {
         const std::array<unsigned long long, 4> local_counts{{
             static_cast<unsigned long long>(result.cells),
             static_cast<unsigned long long>(result.cut_cells),
@@ -107,7 +79,7 @@ void globalizeVolumeResult(LevelSetVolumeResult& result,
                       static_cast<int>(local_counts.size()),
                       MPI_UNSIGNED_LONG_LONG,
                       MPI_SUM,
-                      context.communicator);
+                      context.native());
         result.cells = static_cast<std::size_t>(global_counts[0]);
         result.cut_cells = static_cast<std::size_t>(global_counts[1]);
         result.full_negative_cells =
@@ -126,7 +98,7 @@ void globalizeVolumeResult(LevelSetVolumeResult& result,
                       static_cast<int>(local_volumes.size()),
                       mpiRealType(),
                       MPI_SUM,
-                      context.communicator);
+                      context.native());
         result.total_volume = global_volumes[0];
         result.negative_volume = global_volumes[1];
         result.positive_volume = global_volumes[2];
@@ -632,11 +604,16 @@ makeGeneratedVolumeCellMapping(const assembly::IMeshAccess& mesh,
 
     const auto generated_options =
         generatedInterfaceOptionsForVolume(system, level_set_field, options);
-    const auto generated =
-        lifecycle.build(system, generated_options, solution);
+    LevelSetGeneratedInterfaceResult generated;
+    std::exception_ptr local_failure;
+    try {
+        generated = lifecycle.build(system, generated_options, solution);
+    } catch (...) {
+        local_failure = std::current_exception();
+    }
+    const bool generated_success = systems::agreeOnLocalPhase(
+        local_failure, generated.success, collective, "construct generated cut-cell volumes", "LevelSetVolume");
     populateGeneratedVolumeDiagnostics(result, generated);
-    const bool generated_success =
-        allReduceLogicalAnd(collective, generated.success);
     if (!generated_success) {
         result.success = false;
         result.diagnostic = generated.success
@@ -768,7 +745,7 @@ LevelSetVolumeResult computeLevelSetCutCellVolume(
 
     std::vector<GlobalIndex> cell_nodes;
     std::vector<std::array<Real, 3>> cell_coordinates;
-    mesh.forEachOwnedCell([&](GlobalIndex cell_id) {
+    const auto measure_cell = [&](GlobalIndex cell_id) {
         const auto type = mesh.getCellType(cell_id);
         const std::size_t count = cornerCount(type);
         if (count == 0u) {
@@ -812,6 +789,10 @@ LevelSetVolumeResult computeLevelSetCutCellVolume(
                 }
                 auto cut_result =
                     interfaces::cutLinearLevelSetCell2D(request, input);
+                if (!cut_result.supported) {
+                    throw std::invalid_argument("level-set volume in cell " + std::to_string(cell_id) +
+                                                ": " + cut_result.diagnostic);
+                }
                 auto active = std::find_if(
                     cut_result.fragments.begin(),
                     cut_result.fragments.end(),
@@ -867,9 +848,15 @@ LevelSetVolumeResult computeLevelSetCutCellVolume(
         const Real negative = negative_fraction * measure;
         result.negative_volume += negative;
         result.positive_volume += measure - negative;
-    });
+    };
 
-    globalizeVolumeResult(result, collective);
+    std::exception_ptr local_failure;
+    try {
+        mesh.forEachOwnedCell(measure_cell);
+    } catch (...) {
+        local_failure = std::current_exception();
+    }
+    globalizeVolumeResult(result, collective, local_failure);
     return result;
 }
 

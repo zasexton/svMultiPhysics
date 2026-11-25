@@ -47,6 +47,25 @@ namespace interfaces = svmp::FE::interfaces;
 namespace geometry = svmp::FE::geometry;
 namespace level_set = svmp::FE::level_set;
 
+TEST(FreeSurfaceSnapshot, DifferentiatedSurfaceSourceEntersRuleContentDigest)
+{
+    interfaces::FreeSurfaceGeometryRuleRecord record;
+    auto& rule = record.reference_rule;
+    rule.kind = geometry::CutQuadratureKind::Interface;
+    const auto without_source = interfaces::freeSurfaceGeometryRuleContentDigest(record);
+    auto& source = rule.linear_corner_surface.emplace();
+    source.count = 2;
+    source.edges[0] = {0, 1};
+    source.edges[1] = {1, 2};
+    const auto original = interfaces::freeSurfaceGeometryRuleContentDigest(record);
+    EXPECT_NE(original, without_source);
+    std::swap(source.edges[0], source.edges[1]);
+    EXPECT_NE(interfaces::freeSurfaceGeometryRuleContentDigest(record), original);
+    std::swap(source.edges[0], source.edges[1]);
+    source.isovalue = 0.25;
+    EXPECT_NE(interfaces::freeSurfaceGeometryRuleContentDigest(record), original);
+}
+
 #if defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH
 
 using Point = std::array<FE::Real, 3>;

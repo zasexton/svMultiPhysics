@@ -148,6 +148,25 @@ struct AuxiliaryOutputBinding {
 // Assembly Context
 // ============================================================================
 
+// Directional derivatives for one trial basis function at one cut-surface quadrature point.
+struct CutSurfaceSampleVariation {
+    std::array<Real, 3> reference_point{};
+    std::array<Real, 3> field_point{};  // Direction in the coordinates used by FE field gradients.
+    std::array<std::array<Real, 3>, 3> jacobian{};
+    std::array<std::array<Real, 3>, 3> inverse_jacobian{};
+    Real relative_jacobian_determinant{};
+    std::array<Real, 3> point{};
+    std::array<Real, 3> normal{};
+    Real relative_weight{};  // dw / w for this physical quadrature weight.
+    Real facet_measure{};    // Absolute derivative of the entire physical facet measure.
+};
+
+class CutSurfaceVariationProvider {
+public:
+    virtual ~CutSurfaceVariationProvider() = default;
+    virtual const CutSurfaceSampleVariation& sample(FieldId field, LocalIndex trial, LocalIndex point) const = 0;
+};
+
 /**
  * @brief Context object providing data to assembly kernels
  *
@@ -1468,6 +1487,16 @@ public:
         return get_param_;
     }
 
+    void setCutSurfaceVariations(const CutSurfaceVariationProvider* provider) noexcept
+    {
+        cut_surface_variations_ = provider;
+    }
+    [[nodiscard]] const CutSurfaceSampleVariation& cutSurfaceVariation(FieldId field, LocalIndex j, LocalIndex q) const
+    {
+        if (!cut_surface_variations_) throw std::invalid_argument("cut surface variation requires generated quadrature");
+        return cut_surface_variations_->sample(field, j, q);
+    }
+
     void setUserData(const void* user_data) noexcept { user_data_ = user_data; }
     [[nodiscard]] const void* userData() const noexcept { return user_data_; }
 
@@ -2398,6 +2427,8 @@ private:
 
     // Remember last requested data flags so setSolutionCoefficients can compute only what is needed.
     RequiredData required_data_{RequiredData::None};
+    const CutSurfaceVariationProvider* cut_surface_variations_{nullptr};
+
 };
 
 namespace detail {
