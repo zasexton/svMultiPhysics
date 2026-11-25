@@ -6650,7 +6650,8 @@ AssemblyResult StandardAssembler::assembleCellsCore(
     GlobalSystemView* matrix_view,
     GlobalSystemView* vector_view,
     bool assemble_matrix,
-    bool assemble_vector)
+    bool assemble_vector,
+    const spaces::FunctionSpace* rule_space)
 {
     AssemblyResult result;
     auto start_time = std::chrono::steady_clock::now();
@@ -6783,7 +6784,7 @@ AssemblyResult StandardAssembler::assembleCellsCore(
 
         tp_s0 = TP_SUB();
         prepareContext(ctx, mesh, cell_id, test_space, trial_space, required_data,
-                       kernel.cellRuleSpace());
+                       rule_space ? rule_space : kernel.cellRuleSpace());
         tp_sub_prepare_ctx += TP_SUB() - tp_s0;
 
         tp_s0 = TP_SUB();
@@ -13220,10 +13221,58 @@ AssemblyResult StandardAssembler::assembleCellsFused(
         }
     }
 
-    for (const auto& t : terms) {
-        if (t.kernel->hasCell() && requiresMovingDomainData(t.kernel->getRequiredData())) {
-            return Assembler::assembleCellsFused(mesh, terms);
+    if (std::any_of(terms.begin(), terms.end(), [](const FusedCellTerm& t) {
+            return t.kernel->hasCell() && requiresMovingDomainData(t.kernel->getRequiredData());
+        })) {
+        // The ordinary cell loop prepares explicit frames and moving fields.
+        // Resolved containers must be unpacked before calling it: their
+        // compatibility computeCell() entry point evaluates just the first block.
+        const auto assemble = [&](const FusedCellTerm& t, const spaces::FunctionSpace* rule) {
+            const bool matrix = t.assemble_matrix && t.matrix_view;
+            const bool vector = t.assemble_vector && t.vector_view;
+            if ((!matrix && !vector) || !t.kernel->hasCell()) return;
+            setRowDofMap(*t.row_dof_map, t.row_dof_offset);
+            setColDofMap(*t.col_dof_map, t.col_dof_offset);
+            const auto part = assembleCellsCore(mesh, *t.test_space, *t.trial_space, *t.kernel,
+                t.matrix_view, t.vector_view, matrix, vector, rule);
+            result.elements_assembled += part.elements_assembled;
+            result.matrix_entries_inserted += part.matrix_entries_inserted;
+            result.vector_entries_inserted += part.vector_entries_inserted;
+            result.elapsed_time_seconds += part.elapsed_time_seconds;
+            if (!part.success) {
+                result.success = false;
+                result.error_message = part.error_message;
+            }
+        };
+        for (const auto& t : terms) {
+            const auto assemble_blocks = [&](const auto& container) {
+                for (std::size_t b = 0; b < container.numBlocks(); ++b) {
+                    const auto& block = container.blockSpec(b);
+                    if (!block.fallback_kernel) continue;
+                    FusedCellTerm leaf = t;
+                    leaf.kernel = block.fallback_kernel.get();
+                    leaf.test_space = block.test_space;
+                    leaf.trial_space = block.trial_space;
+                    leaf.row_dof_map = block.row_dof_map;
+                    leaf.col_dof_map = block.col_dof_map;
+                    leaf.row_dof_offset = block.row_dof_offset;
+                    leaf.col_dof_offset = block.col_dof_offset;
+                    leaf.assemble_matrix = t.assemble_matrix && block.want_matrix;
+                    leaf.assemble_vector = t.assemble_vector && block.want_vector;
+                    assemble(leaf, t.kernel->cellRuleSpace());
+                }
+            };
+            if (const auto* mixed = dynamic_cast<const forms::MixedBlockKernelSet*>(t.kernel);
+                mixed && mixed->isResolved()) {
+                assemble_blocks(*mixed);
+            } else if (const auto* monolithic = dynamic_cast<const forms::MonolithicCellKernel*>(t.kernel);
+                       monolithic && monolithic->isResolved()) {
+                assemble_blocks(*monolithic);
+            } else {
+                assemble(t, nullptr);
+            }
         }
+        return result;
     }
 
     ensureFieldAccessPlans(mesh);
@@ -18991,6 +19040,11 @@ void StandardAssembler::populateFieldSolutionData(
 	    }
 
     const ElementType cell_type = mesh.getCellType(cell_id);
+    // A two-sided facet can prepare another cell's mapping before this
+    // field is evaluated. Only this cell's geometry can justify a shortcut.
+    const bool affine_simplex =
+        (cell_type == ElementType::Line2 || cell_type == ElementType::Triangle3 ||
+         cell_type == ElementType::Tetra4) && mesh.getCellGeometryOrder(cell_id) <= 1;
     const int dim = mesh.dimension();
     // The mapping curvature of this cell, computed once for the fields that read Hessians.
     std::optional<std::vector<MappingCurvature>> cell_mapping_curvature;
@@ -19195,7 +19249,7 @@ void StandardAssembler::populateFieldSolutionData(
             // basis gradients at QP 0 vs QP 1.  When true:
             //  - gradient: compute gref_sum + J_inv transform at QP 0, copy to rest
             //  - hessians: zero for P1 (constant gradient → zero curvature)
-            const bool p1_affine_grad = cached_mapping_affine_ && need_gradients &&
+            const bool p1_affine_grad = affine_simplex && need_gradients &&
                                         field_bcache && n_qpts >= 2 && n_dofs > 0 &&
                                         field_bcache->gradients.size() >=
                                             static_cast<std::size_t>(n_dofs) * 3u *
@@ -19219,7 +19273,7 @@ void StandardAssembler::populateFieldSolutionData(
             const bool p1_point_independent =
                 !field_bcache &&
                 p1FieldDerivativesArePointIndependent(
-                    basis, cached_mapping_affine_, n_qpts,
+                    basis, affine_simplex, n_qpts,
                     std::span<const Real>(local_coeffs.data(),
                                           static_cast<std::size_t>(n_dofs)),
                     ctx_inv_jacs_span);
@@ -19243,7 +19297,7 @@ void StandardAssembler::populateFieldSolutionData(
                 }
 
                 // For affine elements, J_inv is the same at all QPs.
-                const auto& J_inv = ctx_inv_jacs_span[cached_mapping_affine_ ? 0 : static_cast<std::size_t>(q)];
+                const auto& J_inv = ctx_inv_jacs_span[static_cast<std::size_t>(q)];
 
                 // Values always vary per QP (different N_j at each point)
                 Real val = 0.0;
@@ -19390,7 +19444,7 @@ void StandardAssembler::populateFieldSolutionData(
 	                    const bool history_p1_point_independent =
 	                        !field_bcache && need_gradients &&
 	                        p1FieldDerivativesArePointIndependent(
-	                            basis, cached_mapping_affine_, n_qpts,
+	                            basis, affine_simplex, n_qpts,
 	                            std::span<const Real>(local_coeffs.data(),
 	                                                  static_cast<std::size_t>(n_dofs)),
 	                            ctx_inv_jacs_span);
@@ -19437,9 +19491,7 @@ void StandardAssembler::populateFieldSolutionData(
 	                            scalar_gradients[static_cast<std::size_t>(q)] = history_p1_grad;
 	                        } else if (need_gradients) {
 	                            const auto& J_inv =
-	                                ctx_inv_jacs_span[cached_mapping_affine_
-	                                                      ? 0
-	                                                      : static_cast<std::size_t>(q)];
+	                                ctx_inv_jacs_span[static_cast<std::size_t>(q)];
 	                            AssemblyContext::Vector3D grad = {0.0, 0.0, 0.0};
 	                            for (int d1 = 0; d1 < dim; ++d1) {
 	                                for (int d2 = 0; d2 < dim; ++d2) {
@@ -19756,7 +19808,7 @@ void StandardAssembler::populateFieldSolutionData(
             const bool p1_point_independent_ps =
                 !field_bcache_ps &&
                 p1FieldDerivativesArePointIndependent(
-                    basis, cached_mapping_affine_, n_qpts,
+                    basis, affine_simplex, n_qpts,
                     std::span<const Real>(local_coeffs.data(),
                                           static_cast<std::size_t>(n_dofs)),
                     ctx_inv_jacs_ps);
@@ -19781,7 +19833,7 @@ void StandardAssembler::populateFieldSolutionData(
                     }
                 }
 
-                const auto& J_inv = ctx_inv_jacs_ps[cached_mapping_affine_ ? 0 : static_cast<std::size_t>(q)];
+                const auto& J_inv = ctx_inv_jacs_ps[static_cast<std::size_t>(q)];
                 AssemblyContext::Matrix3x3 J{};
 
                 const auto q_base = static_cast<std::size_t>(q) * static_cast<std::size_t>(vd);
@@ -19963,7 +20015,7 @@ void StandardAssembler::populateFieldSolutionData(
                                 // (above), so a field equal at both steps has a
                                 // rate of exactly zero.
                                 const auto& J_inv =
-                                    ctx_inv_jacs_ps[cached_mapping_affine_ ? 0 : static_cast<std::size_t>(q)];
+                                    ctx_inv_jacs_ps[static_cast<std::size_t>(q)];
                                 auto& jac = vector_jacobians[static_cast<std::size_t>(q)];
                                 for (int d1 = 0; d1 < dim; ++d1) {
                                     Real sum = 0.0;

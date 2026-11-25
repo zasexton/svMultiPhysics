@@ -4126,11 +4126,13 @@ TEST(StandardAssemblerEmbedded, MovingTriangleReferenceAndCurrentArea)
 
 namespace {
 
+template<class Container = forms::MixedBlockKernelSet>
 void checkMixedBlockIntegrals(int spatial_dim, CellShape shape,
                               const std::vector<std::array<Real, 2>>& vertices,
                               const std::vector<Real>& expected_load,
                               const std::vector<Real>& expected_derivative,
-                              const std::vector<Real>& expected_hessian)
+                              const std::vector<Real>& expected_hessian,
+                              bool moving_surface = false, int threads = 2)
 {
     // Each cell is translated in y and has its own DOFs. This lets the colored
     // mixed-block path assemble many cells of the same color concurrently.
@@ -4160,6 +4162,13 @@ void checkMixedBlockIntegrals(int spatial_dim, CellShape shape,
     dofs.setNumLocalDofs(count);
     dofs.finalize();
     base->build_from_arrays(spatial_dim, coords, offsets, nodes, std::vector<CellShape>(cells, shape));
+    if (moving_surface) {
+        // Take the tilted z=x surface to z=2x. Its area changes by sqrt(5/2).
+        auto current = coords;
+        for (std::size_t i = 2; i < current.size(); i += 3) current[i] *= 2;
+        base->set_current_coords(current);
+        base->use_current_configuration();
+    }
     base->finalize();
     const auto mesh = create_mesh(std::move(base));
     MeshAccess access(*mesh);
@@ -4170,6 +4179,11 @@ void checkMixedBlockIntegrals(int spatial_dim, CellShape shape,
     const int direction = spatial_dim == 3 ? 2 : 0;
     const auto w = forms::FormExpr::constant(1) + 0.5 * forms::x().component(0);
     const auto y_field = forms::FormExpr::discreteField(17, space, "y");
+    const auto x_squared = forms::x().component(0) * forms::x().component(0);
+    const auto load_factor = moving_surface
+        ? (forms::FormExpr::constant(1) + x_squared * x_squared) *
+              forms::referenceMeasure() / forms::currentMeasure()
+        : forms::grad(y_field).component(1);
     const std::array<std::shared_ptr<AssemblyKernel>, 4> kernels{
         std::make_shared<SourceKernel>(1.0),
         std::make_shared<forms::FormKernel>(
@@ -4177,10 +4191,10 @@ void checkMixedBlockIntegrals(int spatial_dim, CellShape shape,
         std::make_shared<forms::FormKernel>(
             compiler.compileLinear((w * forms::hessian(v).component(direction, 1)).dx())),
         std::make_shared<forms::FormKernel>(
-            compiler.compileLinear((v * forms::grad(y_field).component(1)).dx()))};
-    std::vector<forms::MixedBlockKernelSet::BlockSpec> blocks;
+            compiler.compileLinear((v * load_factor).dx()))};
+    std::vector<typename Container::BlockSpec> blocks;
     for (std::size_t field = 0; field < kernels.size(); ++field) {
-        forms::MixedBlockKernelSet::BlockSpec block;
+        typename Container::BlockSpec block;
         block.test_field = block.trial_field = static_cast<FieldId>(field);
         block.want_vector = true;
         block.fallback_kernel = kernels[field];
@@ -4189,8 +4203,11 @@ void checkMixedBlockIntegrals(int spatial_dim, CellShape shape,
         block.row_dof_offset = block.col_dof_offset = field * count;
         blocks.push_back(std::move(block));
     }
-    forms::MixedBlockKernelSet mixed(std::move(blocks), nullptr, {});
+    Container mixed(std::move(blocks), nullptr, {});
     mixed.setResolved();
+    if (moving_surface) {
+        mixed.setCellRuleSpace(std::make_shared<spaces::H1Space>(ElementType::Triangle3, 4));
+    }
     struct ResolvedVector : DenseVectorView {
         using DenseVectorView::DenseVectorView;
         const void* vectorLayoutHandle() const noexcept override { return this; }
@@ -4210,7 +4227,7 @@ void checkMixedBlockIntegrals(int spatial_dim, CellShape shape,
     assembler.setFieldSolutionAccess(std::span(&field, 1));
 #ifdef _OPENMP
     const int previous_threads = omp_get_max_threads();
-    omp_set_num_threads(2);
+    omp_set_num_threads(threads);
 #endif
     const auto assembled = assembler.assembleCellsFused(access, std::span(&term, 1));
 #ifdef _OPENMP
@@ -4219,8 +4236,13 @@ void checkMixedBlockIntegrals(int spatial_dim, CellShape shape,
     ASSERT_TRUE(assembled.success);
     std::array<Real, 4> max_error{};
     for (GlobalIndex i = 0; i < count; ++i) {
+        // On the reference triangle the x^4 moments are 1/35 of its area
+        // at the x=1 vertex and 3/35 at each of the other two vertices.
+        const Real frame_load = moving_surface
+            ? expected_load[i % n] * std::sqrt(2./5) * (i % n == 1 ? 38./35 : 44./35)
+            : expected_load[i % n];
         const std::array<Real, 4> expected{expected_load[i % n], expected_derivative[i % n],
-                                           expected_hessian[i % n], expected_load[i % n]};
+                                           expected_hessian[i % n], frame_load};
         for (std::size_t field = 0; field < kernels.size(); ++field) {
             const Real value = result.getVectorEntry(field * count + i);
             ASSERT_TRUE(std::isfinite(value));
@@ -4230,7 +4252,7 @@ void checkMixedBlockIntegrals(int spatial_dim, CellShape shape,
     EXPECT_LT(max_error[0], 1e-11) << "constant source";
     EXPECT_LT(max_error[1], 1e-11) << "weak first derivative";
     EXPECT_LT(max_error[2], 1e-11) << "weighted mixed second derivative";
-    EXPECT_LT(max_error[3], 1e-11) << "gradient of the interpolated y coordinate";
+    EXPECT_LT(max_error[3], 1e-11) << (moving_surface ? "reference area" : "gradient of interpolated y");
 }
 
 } // namespace
@@ -4241,6 +4263,21 @@ TEST(StandardAssemblerEmbedded, ColoredMixedBlocksOnTiltedTriangles)
     checkMixedBlockIntegrals(3, {CellFamily::Triangle, 3, 1}, {{-1, -1}, {1, -1}, {-1, 1}},
                              {2 * scale / 3, 2 * scale / 3, 2 * scale / 3},
                              {-1 / scale, 1 / scale, 0}, {0, 0, 0});
+}
+
+TEST(StandardAssemblerEmbedded, MixedBlocksIntegrateMovingReferenceAndCurrentTriangles)
+{
+    const Real stretch = std::sqrt(5.0);
+    for (int threads : {1, 2}) {
+        SCOPED_TRACE(threads);
+        checkMixedBlockIntegrals(3, {CellFamily::Triangle, 3, 1}, {{-1, -1}, {1, -1}, {-1, 1}},
+                                 {2 * stretch / 3, 2 * stretch / 3, 2 * stretch / 3},
+                                 {-2 / stretch, 2 / stretch, 0}, {0, 0, 0}, true, threads);
+        checkMixedBlockIntegrals<forms::MonolithicCellKernel>(
+            3, {CellFamily::Triangle, 3, 1}, {{-1, -1}, {1, -1}, {-1, 1}},
+            {2 * stretch / 3, 2 * stretch / 3, 2 * stretch / 3},
+            {-2 / stretch, 2 / stretch, 0}, {0, 0, 0}, true, threads);
+    }
 }
 
 TEST(StandardAssemblerEmbedded, MixedBlocksOnNonAffineTrapezoids)
@@ -4255,6 +4292,67 @@ TEST(StandardAssemblerEmbedded, MixedBlocksOnNonAffineTrapezoids)
                                  {5 * scale / 6, 7 * scale / 6, 7 * scale / 6, 5 * scale / 6},
                                  {-1 / scale, 1 / scale, 1 / scale, -1 / scale},
                                  {1.5 / scale, -0.5 / scale, 0.5 / scale, -1.5 / scale});
+    }
+}
+
+TEST(StandardAssemblerFaces, FieldGradientUsesEachSidesOwnMappingOnMixedAffineFacets)
+{
+    // The trapezoid x=s, y=t*(1+s/2) and a rectangle share the edge x=1.
+    // The interpolated field Y=y has Cartesian gradient (0,1) on both sides.
+    const std::vector<real_t> xy{-1,-0.5, 1,-1.5, 1,1.5, -1,0.5, 2,-1.5, 2,1.5};
+    for (bool trapezoid_first : {true, false}) {
+        SCOPED_TRACE(trapezoid_first);
+        const std::vector<index_t> nodes = trapezoid_first
+            ? std::vector<index_t>{0,1,2,3, 1,4,5,2}
+            : std::vector<index_t>{1,4,5,2, 0,1,2,3};
+        auto base = std::make_shared<MeshBase>();
+        base->build_from_arrays(2, xy, {0,4,8}, nodes, std::vector<CellShape>(2, {CellFamily::Quad,4,1}));
+        base->finalize();
+        const auto mesh = create_mesh(std::move(base));
+        MeshAccess access(*mesh);
+        ASSERT_EQ(access.numInteriorFaces(), 1);
+        spaces::H1Space space(ElementType::Quad4, 1);
+        auto dofs = createTwoCellDisjointDofMap(4);
+        std::vector<Real> y;
+        for (const auto node : nodes) y.push_back(xy[2 * node + 1]);
+        const FieldSolutionAccess field{.field = 17, .space = &space, .dof_map = &dofs,
+            .coefficient_source = FieldSolutionAccess::CoefficientSource::PrescribedData,
+            .prescribed_coefficients = y};
+        struct FieldDerivativeLoad final : AssemblyKernel {
+            RequiredData getRequiredData() const override {
+                return RequiredData::BasisValues | RequiredData::IntegrationWeights;
+            }
+            std::vector<FieldRequirement> fieldRequirements() const override {
+                return {{17, RequiredData::SolutionGradients}};
+            }
+            bool hasInteriorFace() const noexcept override { return true; }
+            void computeCell(const AssemblyContext&, KernelOutput&) override {}
+            void computeInteriorFace(const AssemblyContext& minus, const AssemblyContext& plus,
+                                     KernelOutput& minus_out, KernelOutput& plus_out,
+                                     KernelOutput&, KernelOutput&) override {
+                const auto integrate = [](const AssemblyContext& ctx, KernelOutput& out) {
+                    out.reserve(ctx.numTestDofs(), ctx.numTrialDofs(), false, true);
+                    for (LocalIndex q = 0; q < ctx.numQuadraturePoints(); ++q) {
+                        const auto derivative = ctx.fieldGradient(17, q);
+                        for (LocalIndex i = 0; i < ctx.numTestDofs(); ++i) {
+                            out.vectorEntry(i) += (derivative[0] + derivative[1]) *
+                                ctx.basisValue(i, q) * ctx.integrationWeight(q);
+                        }
+                    }
+                };
+                integrate(minus, minus_out);
+                integrate(plus, plus_out);
+            }
+        } kernel;
+        StandardAssembler assembler;
+        assembler.setDofMap(dofs);
+        assembler.setFieldSolutionAccess(std::span(&field, 1));
+        TestDenseSystemView output(8);
+        const auto result = assembler.assembleInteriorFaces(access, space, space, kernel, output, &output);
+        ASSERT_EQ(result.interior_faces_assembled, 1);
+        for (std::size_t i = 0; i < nodes.size(); ++i) {
+            EXPECT_NEAR(output.getVectorEntry(i), nodes[i] == 1 || nodes[i] == 2 ? 1.5 : 0, 1e-12);
+        }
     }
 }
 

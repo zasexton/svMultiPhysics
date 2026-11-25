@@ -583,7 +583,8 @@ private:
         GlobalSystemView* matrix_view,
         GlobalSystemView* vector_view,
         bool assemble_matrix,
-        bool assemble_vector);
+        bool assemble_vector,
+        const spaces::FunctionSpace* rule_space = nullptr);
 
     /**
      * @brief Prepare assembly context for a cell
