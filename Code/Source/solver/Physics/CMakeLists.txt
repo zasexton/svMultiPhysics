@@ -287,6 +287,7 @@ if(PHYSICS_BUILD_TESTS)
         Tests/Unit/test_SolidMaterialModels.cpp
         Tests/Unit/test_FormIntegrationJacobian.cpp
         Tests/Unit/test_NavierStokesPressureGauge.cpp
+        Tests/Unit/test_NavierStokesVMSManufactured.cpp
         Tests/Unit/test_NavierStokesLegacyBCs.cpp
         Tests/Unit/test_NavierStokesOutletFactory.cpp
         Tests/Unit/test_IncompressibleTwoFluidInterface.cpp
@@ -348,11 +349,19 @@ if(PHYSICS_BUILD_TESTS)
     set(_SVMP_WP7_SERIAL_MATRIX_TEST
         "FreeSurfaceCutStability.FrozenFractionOrientationRefinementRegimeMatrixRecordsConditionAndIterations")
 
+    set(_SVMP_NS_VMS_CONVERGENCE_TEST "NavierStokesVMSManufactured.SpatialConvergence")
+    svmp_add_gtest(Physics_NavierStokesVMS_Convergence
+        TARGET test_physics
+        FILTER "${_SVMP_NS_VMS_CONVERGENCE_TEST}"
+        SHARDS 1
+        LABELS physics convergence
+    )
+
     # COST: serial seconds of the whole entry (Xeon Gold 5118); sets the
     # shard count, see Code/CMake/SvmpTestEntries.cmake.
     svmp_add_gtest(Physics_Tests
         TARGET test_physics
-        FILTER "-${_SVMP_WP7_SERIAL_MATRIX_TEST}"
+        FILTER "-${_SVMP_WP7_SERIAL_MATRIX_TEST}:${_SVMP_NS_VMS_CONVERGENCE_TEST}"
         COST 790
     )
 
