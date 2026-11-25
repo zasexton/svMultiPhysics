@@ -129,6 +129,69 @@ def test_measure_state_recovers_cap_angles_and_wall_speed(tmp_path: Path):
     assert state["liquid_area"] == pytest.approx(case["initial_cap"]["area"], rel=5e-3)
 
 
+def strip_snapshot(wall_phi, top_phi, mirror=False):
+    """A one-cell-high triangulated strip with one interior fan per wall vertex."""
+    n = len(wall_phi)
+    points = np.array([(x, y, 0.) for y in (0., 1.) for x in range(n)], dtype=float)
+    if mirror:
+        points[:, 0] *= -1
+    cells = np.array([tri for i in range(n - 1)
+                      for tri in ((i, i + 1, i + n + 1), (i, i + n + 1, i + n))])
+    velocity = np.zeros_like(points)
+    velocity[:, 0] = points[:, 0]
+    return {"points": points, "cells": cells, "phi": np.r_[wall_phi, top_phi], "Velocity": velocity}
+
+
+@pytest.mark.parametrize("mirror,theta_e", [(False, 60.), (True, 120.)])
+def test_vertex_contact_uses_the_actual_interior_segment(mirror, theta_e):
+    verify = load("verify")
+    # At x=3 both incident wall triangles are sign definite apart from the
+    # shared zero. The contour in the interior triangle ends at (3.1, 1).
+    state = strip_snapshot([1, -1, -1, 0, 1], [1, -1, -1.2, -.2, 1.8], mirror)
+    case = {"contact_wall_y": 0., "h": 1., "surface_tension": 1., "mobility": 1.,
+            "equilibrium_angle_degrees": theta_e}
+    contact = verify.measure_state(state, case)["contacts"][0 if mirror else 1]
+    cosine = -0.1 / math.hypot(0.1, 1.)
+    assert contact["x"] == pytest.approx(-3. if mirror else 3.)
+    assert contact["dynamic_angle_degrees"] == pytest.approx(math.degrees(math.acos(cosine)))
+    assert contact["predicted_speed"] == pytest.approx(math.cos(math.radians(theta_e)) - cosine)
+    assert contact["wall_fluid_speed"] == pytest.approx(3.)
+
+
+def test_strict_crossing_next_to_a_vertex_keeps_its_cut_cell_angle():
+    verify = load("verify")
+    # Both segment endpoints round to x=3, but the P1 contour in its
+    # nonzero-measure wall triangle has normal proportional to (1, 0.8).
+    state = strip_snapshot([1, -1, -1, -1e-20, 1], [1, -1, -1.2, -.2, 1.8])
+    case = {"contact_wall_y": 0., "h": 1., "surface_tension": 1., "mobility": 1.,
+            "equilibrium_angle_degrees": 60.}
+    right = verify.measure_state(state, case)["contacts"][1]
+    assert right["dynamic_angle_degrees"] == pytest.approx(math.degrees(math.acos(0.8 / math.hypot(1., 0.8))))
+
+
+@pytest.mark.parametrize("prefix", [[1, 0, 1], [1, 0, 0, 1], [0, 1]])
+def test_ignores_wall_tangency_zero_interval_and_endpoint(prefix):
+    verify = load("verify")
+    # The right root follows a radial edge shared by two triangles.
+    wall = np.array(prefix + [1, -1, -1, 0, 1], dtype=float)
+    top = wall - .2
+    top[-2] = 0.
+    case = {"contact_wall_y": 0., "h": 1., "surface_tension": 1., "mobility": 1.,
+            "equilibrium_angle_degrees": 90.}
+    contacts = verify.measure_state(strip_snapshot(wall, top), case)["contacts"]
+    assert [p["x"] for p in contacts] == pytest.approx([len(prefix) + .5, len(prefix) + 3])
+    assert contacts[1]["dynamic_angle_degrees"] == pytest.approx(90.)
+
+
+def test_rejects_multiple_contour_branches_at_one_contact():
+    verify = load("verify")
+    state = strip_snapshot([1, -1, -1, 0, 1], [1, -1, -1, 1, -1])
+    case = {"contact_wall_y": 0., "h": 1., "surface_tension": 1., "mobility": 1.,
+            "equilibrium_angle_degrees": 60.}
+    with pytest.raises(ValueError, match="unique interface segment"):
+        verify.measure_state(state, case)
+
+
 def test_liquid_area_is_exact_for_linear_phi():
     verify = load("verify")
     points = np.array([[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [1.0, 1.0, 0.0], [0.0, 1.0, 0.0]])

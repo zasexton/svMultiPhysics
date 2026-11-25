@@ -8393,6 +8393,32 @@ void ApplicationDriver::runTransient(SimulationComponents& sim, const Parameters
             h, "time_loop_candidate_discarded");
         pending_phase_candidate = ConservativePhaseCandidateResult{};
       };
+  const auto kinematic_candidate_rejection =
+      [&](svmp::FE::timestepping::TimeHistory& h)
+          -> std::optional<svmp::FE::timestepping::StepRejectReason> {
+        const int prospective_step = h.stepIndex() + 1;
+        std::optional<std::vector<svmp::FE::Real>> endpoint;
+        for (const auto& request : level_set_maintenance) {
+          const auto& transport = request.configuration->transport;
+          if (transport.conservative_phase.enabled ||
+              !svmp::FE::level_set::shouldApplyLevelSetKinematicReconciliation(
+                  transport.kinematic_reconciliation, prospective_step)) {
+            continue;
+          }
+          if (!endpoint) {
+            endpoint = gatherFeOrderedSolution(h.u(), velocity_extension_artifact_comm);
+          }
+          if (const auto rejection = svmp::FE::level_set::levelSetKinematicCandidateRejection(
+                  *sim.fe_system, *request.configuration, prospective_step, h.dt(),
+                  *endpoint, kinematic_baselines)) {
+            oopCout() << "[svMultiPhysics::Application] diagnostic=kinematic_candidate_rejected"
+                      << " field=" << transport.level_set.field_name << " step=" << prospective_step
+                      << " dt=" << h.dt() << " reason=" << *rejection << std::endl;
+            return svmp::FE::timestepping::StepRejectReason::ErrorTooLarge;
+          }
+        }
+        return std::nullopt;
+      };
   callbacks.on_step_candidate_ready =
       [&](svmp::FE::timestepping::TimeHistory& h,
           const svmp::FE::timestepping::NewtonReport& newton_report)
@@ -8482,17 +8508,14 @@ void ApplicationDriver::runTransient(SimulationComponents& sim, const Parameters
           const auto final_cut_report = cut_geometry->refreshCached(
               h.u(), "final_candidate_topology_gate");
           two_fluid_stage.bindCandidateNumerics(newton_report);
-          if (!track_transient_cut_topology) {
-            return std::nullopt;
-          }
-          if (final_cut_report.request_policy_key !=
-              expected_cut_request_policy_key) {
+          if (track_transient_cut_topology &&
+              final_cut_report.request_policy_key != expected_cut_request_policy_key) {
             throw std::runtime_error(
                 "[svMultiPhysics::Application] Active cut request policy changed at the final transient candidate gate.");
           }
-          if (!cut_topology_attempt_tracker->candidateMustReject(
+          if (!track_transient_cut_topology || !cut_topology_attempt_tracker->candidateMustReject(
                   cut_refresh_cache->topology_key)) {
-            return std::nullopt;
+            return kinematic_candidate_rejection(h);
           }
 
           oopCout()

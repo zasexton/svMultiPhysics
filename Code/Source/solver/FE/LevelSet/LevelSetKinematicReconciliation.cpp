@@ -4,6 +4,8 @@
 #include "Basis/NodeOrderingConventions.h"
 #include "Dofs/EntityDofMap.h"
 #include "LevelSet/LevelSetVolume.h"
+#include "Quadrature/QuadratureFactory.h"
+#include "Spaces/FunctionSpace.h"
 
 #if FE_HAS_MPI
 #include <mpi.h>
@@ -14,6 +16,7 @@
 #include <cmath>
 #include <exception>
 #include <limits>
+#include <sstream>
 #include <stdexcept>
 #include <string>
 #include <type_traits>
@@ -27,8 +30,8 @@ namespace {
 // interface by a small fraction of the step's motion), so the fixed point
 // converges in a few iterations.  These are solver controls, not model
 // parameters: the result is the converged fixed point.
-constexpr int kMaxGeometryIterations = 8;
-constexpr Real kGeometryRelativeTolerance = 1.0e-8;
+constexpr int kMaxGeometryIterations = 64;
+constexpr Real kGeometryRelativeTolerance = 1.0e-10;
 
 using Point = std::array<Real, 3>;
 
@@ -148,6 +151,11 @@ void sumInPlace(const Collective& context, std::vector<Real>& values)
 // One owned affine simplex with its level-set DOFs and nodal velocities.
 // x holds the physical corner coordinates; xi the reference-element corner
 // coordinates, in which the generated-interface builder cuts the cell.
+struct CellTrace {
+    std::array<Real, 4> g{};
+    bool kinematically_exact{true};
+};
+
 struct SimplexCell {
     int corners{0};
     std::array<Point, 4> x{};
@@ -155,6 +163,13 @@ struct SimplexCell {
     std::array<std::size_t, 4> dof{};
     std::array<Point, 4> previous_velocity{};
     std::array<Point, 4> transported_velocity{};
+    std::vector<Real> previous_coefficients;
+    std::vector<Real> transported_coefficients;
+    const spaces::FunctionSpace* higher_order_velocity{};
+    std::shared_ptr<const quadrature::QuadratureRule> trace_rule;
+    Real measure{};
+    Real previous_fraction{};
+    CellTrace previous_trace;
 };
 
 // Gradient of the P1 interpolant of the corner values on the simplex.
@@ -226,9 +241,11 @@ struct InterfaceSums {
 bool accumulateCell(const SimplexCell& cell,
                     std::span<const Real> phi,
                     std::span<const Real> rate,
-                    const std::array<Point, 4>& velocity,
+                    bool previous,
                     Real isovalue,
-                    InterfaceSums& sums)
+                    Real rate_roundoff,
+                    InterfaceSums& sums,
+                    CellTrace& trace)
 {
     const int n = cell.corners;
     std::array<Real, 4> s{};
@@ -278,14 +295,29 @@ bool accumulateCell(const SimplexCell& cell,
         const Real scaled = weight / gradient_norm;
         Real advective = 0.0;
         Real rate_value = 0.0;
+        const auto& velocity = previous ? cell.previous_velocity : cell.transported_velocity;
         for (int j = 0; j < n; ++j) {
             const auto lj = lambda[static_cast<std::size_t>(j)];
             advective += lj * dot(velocity[static_cast<std::size_t>(j)], gradient);
             rate_value += lj * rate[cell.dof[static_cast<std::size_t>(j)]];
         }
+        if (cell.higher_order_velocity != nullptr) {
+            const spaces::FunctionSpace::Value xi{lambda[1], lambda[2], lambda[3]};
+            const auto& coefficients = previous ? cell.previous_coefficients : cell.transported_coefficients;
+            const auto value = cell.higher_order_velocity->evaluate(xi, coefficients);
+            advective = value[0] * gradient[0] + value[1] * gradient[1] + value[2] * gradient[2];
+        }
+        if (!std::isfinite(advective) || !std::isfinite(rate_value)) {
+            throw std::runtime_error("non-finite interface velocity or level-set rate");
+        }
+        const Real evaluation_roundoff = rate_roundoff +
+            Real{64} * std::numeric_limits<Real>::epsilon() * (std::abs(advective) + std::abs(rate_value));
+        trace.kinematically_exact = trace.kinematically_exact &&
+                                    std::abs(advective + rate_value) <= evaluation_roundoff;
         for (int i = 0; i < n; ++i) {
             const auto li = lambda[static_cast<std::size_t>(i)];
             const auto dof = cell.dof[static_cast<std::size_t>(i)];
+            trace.g[static_cast<std::size_t>(i)] += scaled * li;
             sums.g[dof] += scaled * li;
             sums.f[dof] += scaled * li * advective;
             sums.m[dof] += scaled * li * rate_value;
@@ -303,6 +335,17 @@ bool accumulateCell(const SimplexCell& cell,
         const Real area = Real{0.5} * norm(cross(sub(position(b), position(a)),
                                                  sub(position(c), position(a))));
         if (!(area > Real{0.0})) {
+            return;
+        }
+        if (cell.trace_rule) {
+            for (std::size_t q = 0; q < cell.trace_rule->num_points(); ++q) {
+                const auto xi = cell.trace_rule->point(q);
+                Bary p{};
+                for (std::size_t j = 0; j < p.size(); ++j) {
+                    p[j] = a[j] + xi[0] * (b[j] - a[j]) + xi[1] * (c[j] - a[j]);
+                }
+                addPoint(p, Real{2} * area * cell.trace_rule->weight(q));
+            }
             return;
         }
         addPoint(midpoint(a, b), area / Real{3.0});
@@ -336,6 +379,17 @@ bool accumulateCell(const SimplexCell& cell,
         const auto b = edgePoint(lone, others[1]);
         const Real length = norm(sub(position(b), position(a)));
         if (length > Real{0.0}) {
+            if (cell.trace_rule) {
+                for (std::size_t q = 0; q < cell.trace_rule->num_points(); ++q) {
+                    const Real t = Real{0.5} * (Real{1} + cell.trace_rule->point(q)[0]);
+                    Bary p{};
+                    for (std::size_t j = 0; j < p.size(); ++j) {
+                        p[j] = a[j] + t * (b[j] - a[j]);
+                    }
+                    addPoint(p, Real{0.5} * length * cell.trace_rule->weight(q));
+                }
+                return true;
+            }
             // Simpson's rule, exact for quadratics along the segment.
             addPoint(a, length / Real{6.0});
             addPoint(midpoint(a, b), Real{4.0} * length / Real{6.0});
@@ -383,7 +437,8 @@ bool accumulateCell(const SimplexCell& cell,
                            std::span<const Real> phi,
                            Real isovalue,
                            Real tolerance,
-                           Real minimum_fraction) noexcept
+                           Real minimum_fraction,
+                           Real* cut_negative_fraction = nullptr) noexcept
 {
     const int n = cell.corners;
     std::array<Real, 4> s{};
@@ -400,6 +455,9 @@ bool accumulateCell(const SimplexCell& cell,
         }
     }
     if (n_neg == 0 || n_pos == 0) {
+        if (cut_negative_fraction) {
+            *cut_negative_fraction = n_neg == 0 ? Real{0} : Real{1};
+        }
         return 3;
     }
     const auto fraction = [&](int a, int b) {
@@ -462,6 +520,9 @@ bool accumulateCell(const SimplexCell& cell,
                               tetVolume(aq, b, bp, bq);
         negative_fraction = volume > Real{0.0} ? negative / volume : Real{0.0};
     }
+    if (cut_negative_fraction) {
+        *cut_negative_fraction = negative_fraction;
+    }
     int code = measure <= tolerance ? 0 : (measure <= std::sqrt(tolerance) ? 1 : 2);
     const Real positive_fraction = Real{1.0} - negative_fraction;
     if (negative_fraction > Real{0.0} && negative_fraction < minimum_fraction) {
@@ -502,9 +563,8 @@ void maxInPlace(const Collective& context, std::vector<Real>& values)
     return 0;
 }
 
-} // namespace
-
-LevelSetKinematicReconciliationResult reconcileLevelSetWithKinematicFlux(
+// A read-only endpoint measurement stops after the first trace integration.
+LevelSetKinematicReconciliationResult integrateKinematicStep(
     const assembly::IMeshAccess& mesh,
     const dofs::DofHandler& level_set_dofs,
     const dofs::DofHandler& velocity_dofs,
@@ -515,7 +575,8 @@ LevelSetKinematicReconciliationResult reconcileLevelSetWithKinematicFlux(
     std::span<const Real> transported_level_set,
     std::span<const Real> previous_velocity,
     std::span<const Real> transported_velocity,
-    std::vector<Real>& reconciled_level_set)
+    std::vector<Real>* reconciled_level_set,
+    const spaces::FunctionSpace* velocity_space)
 {
     LevelSetKinematicReconciliationResult result;
     const auto context = collectiveFor(level_set_dofs);
@@ -523,6 +584,7 @@ LevelSetKinematicReconciliationResult reconcileLevelSetWithKinematicFlux(
     const auto n_velocity = static_cast<std::size_t>(velocity_dofs.getNumDofs());
     const int dimension = mesh.dimension();
 
+    const Real minimum_fraction = assembly::CutIntegrationContext::minGeneratedCutVolumeFraction();
     // ---- validation (collective) -------------------------------------------
     std::string local_failure;
     if (!(dt > Real{0.0}) || !std::isfinite(dt) || !std::isfinite(isovalue) ||
@@ -534,6 +596,10 @@ LevelSetKinematicReconciliationResult reconcileLevelSetWithKinematicFlux(
                previous_velocity.size() != n_velocity ||
                transported_velocity.size() != n_velocity) {
         local_failure = "received coefficient spans that do not match the field layouts";
+    } else if (velocity_space &&
+               (velocity_space->value_dimension() < dimension ||
+                (velocity_space->continuity() != Continuity::C0 && velocity_space->continuity() != Continuity::L2))) {
+        local_failure = "requires a component-valued physical velocity";
     } else if (level_set_dofs.getEntityDofMap() == nullptr ||
                velocity_dofs.getEntityDofMap() == nullptr) {
         local_failure = "requires vertex-nodal level-set and velocity layouts";
@@ -574,6 +640,38 @@ LevelSetKinematicReconciliationResult reconcileLevelSetWithKinematicFlux(
                 }
                 SimplexCell cell;
                 cell.corners = corners;
+                const auto phi_cell = level_set_dofs.getDofMap().getCellDofs(cell_id);
+                if (phi_cell.size() != static_cast<std::size_t>(corners)) {
+                    throw std::invalid_argument("requires a P1 scalar level-set space");
+                }
+                const auto velocity_cell = velocity_dofs.getDofMap().getCellDofs(cell_id);
+                const auto vertex_components = velocity_map->getVertexDofs(nodes.front()).size();
+                if (vertex_components < static_cast<std::size_t>(dimension) ||
+                    velocity_cell.size() != vertex_components * static_cast<std::size_t>(corners) ||
+                    (velocity_space && (velocity_space->polynomial_order(cell_id) != 1 ||
+                                        velocity_space->continuity() != Continuity::C0))) {
+                    if (!velocity_space || velocity_space->is_variable_order() ||
+                        velocity_cell.size() != velocity_space->dofs_per_element(cell_id)) {
+                        throw std::invalid_argument("higher-order velocity requires its matching FE space");
+                    }
+                    cell.higher_order_velocity = velocity_space;
+                    // Besides N_i times velocity, the consistency test needs
+                    // enough points to distinguish a polynomial from zero.
+                    // Exact integration of its square gives that property.
+                    const int degree = 2 * std::max(1, velocity_space->polynomial_order(cell_id));
+                    cell.trace_rule = quadrature::QuadratureFactory::create_pinned(
+                        dimension == 2 ? ElementType::Line2 : ElementType::Triangle3, degree);
+                    if (cell.trace_rule->order() < degree) {
+                        throw std::invalid_argument("insufficient quadrature for the velocity trace");
+                    }
+                    for (const auto dof : velocity_cell) {
+                        if (dof < 0 || static_cast<std::size_t>(dof) >= n_velocity) {
+                            throw std::invalid_argument("invalid cell velocity DOF");
+                        }
+                        cell.previous_coefficients.push_back(previous_velocity[dof]);
+                        cell.transported_coefficients.push_back(transported_velocity[dof]);
+                    }
+                }
                 for (int i = 0; i < corners; ++i) {
                     const auto ii = static_cast<std::size_t>(i);
                     cell.x[ii] = coordinates[ii];
@@ -587,6 +685,9 @@ LevelSetKinematicReconciliationResult reconcileLevelSetWithKinematicFlux(
                             "requires exactly one scalar level-set DOF per vertex");
                     }
                     cell.dof[ii] = static_cast<std::size_t>(phi_dofs.front());
+                    if (cell.higher_order_velocity) {
+                        continue;
+                    }
                     const auto velocity_vertex_dofs = velocity_map->getVertexDofs(nodes[ii]);
                     if (velocity_vertex_dofs.size() < static_cast<std::size_t>(dimension)) {
                         throw std::invalid_argument(
@@ -603,7 +704,13 @@ LevelSetKinematicReconciliationResult reconcileLevelSetWithKinematicFlux(
                             transported_velocity[static_cast<std::size_t>(dof)];
                     }
                 }
-                cells.push_back(cell);
+                const auto ab = sub(cell.x[1], cell.x[0]);
+                const auto ac = sub(cell.x[2], cell.x[0]);
+                cell.measure = dimension == 2 ? norm(cross(ab, ac)) / Real{2}
+                    : std::abs(dot(cross(ab, ac), sub(cell.x[3], cell.x[0]))) / Real{6};
+                (void)cutClass(cell, previous_level_set, isovalue, tolerance,
+                               minimum_fraction, &cell.previous_fraction);
+                cells.push_back(std::move(cell));
             });
         } catch (const std::exception& error) {
             local_failure = error.what();
@@ -621,12 +728,22 @@ LevelSetKinematicReconciliationResult reconcileLevelSetWithKinematicFlux(
     for (std::size_t i = 0; i < n; ++i) {
         rate[i] = (transported_level_set[i] - previous_level_set[i]) / dt;
     }
+    Real coefficient_scale = 0;
+    for (const auto value : transported_level_set) {
+        coefficient_scale = std::max(coefficient_scale, std::abs(value - isovalue));
+    }
+    // Field slices are replicated. Use the communicator maximum explicitly so
+    // every rank takes the same stopping and damping decisions.
+    std::vector<Real> scales{coefficient_scale};
+    maxInPlace(context, scales);
+    const Real rounding_floor = Real{64} * std::numeric_limits<Real>::epsilon() * scales.front();
+    const Real rate_roundoff = rounding_floor / dt;
     InterfaceSums previous(n);
     unsigned long long previous_cut_cells = 0u;
     try {
-        for (const auto& cell : cells) {
+        for (auto& cell : cells) {
             if (accumulateCell(cell, previous_level_set, rate,
-                               cell.previous_velocity, isovalue, previous)) {
+                               true, isovalue, rate_roundoff, previous, cell.previous_trace)) {
                 ++previous_cut_cells;
             }
         }
@@ -643,25 +760,33 @@ LevelSetKinematicReconciliationResult reconcileLevelSetWithKinematicFlux(
     result.previous_interface_cells =
         static_cast<std::size_t>(sumCount(context, previous_cut_cells));
 
+    LevelSetVolumeOptions volume_options{};
+    volume_options.isovalue = isovalue;
+    if (tolerance > Real{0.0}) {
+        volume_options.tolerance = tolerance;
+    }
+    if (!reconciled_level_set) {
+        const auto volume = computeLevelSetCutCellVolume(mesh, level_set_dofs, volume_options, previous_level_set);
+        result.success = volume.success;
+        result.diagnostic = volume.diagnostic;
+        result.previous_negative_volume = volume.negative_volume;
+        for (const auto flux : previous.f) {
+            result.previous_interface_flux += flux;
+        }
+        return result;
+    }
+
     // ---- fixed point on the reconciled endpoint geometry --------------------
     std::vector<Real> iterate(transported_level_set.begin(), transported_level_set.end());
     std::vector<Real> candidate(n, 0.0);
     std::vector<int> transported_class(n, 0);
-    // Rounding floor of the fixed-point test, from the replicated coefficients.
-    Real coefficient_scale = 0.0;
     for (std::size_t i = 0; i < n; ++i) {
         transported_class[i] = signClass(transported_level_set[i], isovalue, tolerance);
-        coefficient_scale = std::max(coefficient_scale,
-                                     std::abs(transported_level_set[i] - isovalue));
     }
-    const Real rounding_floor =
-        Real{64.0} * std::numeric_limits<Real>::epsilon() * coefficient_scale;
     Real current_flux = 0.0;
     unsigned long long current_cut_cells = 0u;
     // Cut degeneracy class of every owned cell in the transported state; the
     // reconciliation must leave every class unchanged.
-    const Real minimum_fraction =
-        assembly::CutIntegrationContext::minGeneratedCutVolumeFraction();
     std::vector<int> transported_cut_class(cells.size(), 3);
     for (std::size_t c = 0; c < cells.size(); ++c) {
         transported_cut_class[c] = cutClass(
@@ -670,25 +795,51 @@ LevelSetKinematicReconciliationResult reconcileLevelSetWithKinematicFlux(
     std::size_t skipped = 0u;
     std::size_t redistributed = 0u;
     std::size_t frozen = 0u;
-    for (int iteration = 0; iteration < kMaxGeometryIterations; ++iteration) {
-        InterfaceSums current(n);
-        unsigned long long local_cut_cells = 0u;
+    // For each simplex, account locally for the difference between its exact
+    // swept volume and the trapezoidal shape derivative. Distribute the scalar
+    // defect to the same nodal interface tests by their integrated weights.
+    // Exactly advected traces keep their original coefficients and their
+    // legitimate temporal quadrature remainder.
+    std::vector<bool> supported_cell(cells.size());
+    Real temporal_volume_remainder = 0;
+    auto evaluate_endpoint = [&](std::span<const Real> endpoint, InterfaceSums& current) {
+        unsigned long long local_cut_cells = 0;
+        std::vector<Real> remainder(1, 0);
         try {
-            for (const auto& cell : cells) {
-                if (accumulateCell(cell, iterate, rate,
-                                   cell.transported_velocity, isovalue, current)) {
+            for (std::size_t c = 0; c < cells.size(); ++c) {
+                const auto& cell = cells[c];
+                CellTrace trace;
+                if (accumulateCell(cell, endpoint, rate, false, isovalue, rate_roundoff, current, trace)) {
                     ++local_cut_cells;
+                }
+                Real fraction = 0;
+                (void)cutClass(cell, endpoint, isovalue, tolerance, minimum_fraction, &fraction);
+                Real defect = cell.measure * (fraction - cell.previous_fraction);
+                Real weight = 0;
+                for (int j = 0; j < cell.corners; ++j) {
+                    const Real g = Real{0.5} * (cell.previous_trace.g[j] + trace.g[j]);
+                    defect += g * (endpoint[cell.dof[j]] - previous_level_set[cell.dof[j]]);
+                    weight += g;
+                }
+                supported_cell[c] = weight > 0;
+                if (trace.kinematically_exact && cell.previous_trace.kinematically_exact && weight > 0) {
+                    remainder[0] += defect;
+                } else if (weight > 0) {
+                    for (int j = 0; j < cell.corners; ++j) {
+                        current.m[cell.dof[j]] -= defect * (cell.previous_trace.g[j] + trace.g[j]) / (dt * weight);
+                    }
                 }
             }
         } catch (const std::exception& error) {
             local_failure = error.what();
         }
         if (!allTrue(context, local_failure.empty())) {
-            result.diagnostic = local_failure.empty()
-                                    ? "another rank failed the endpoint interface integrals"
-                                    : "level-set kinematic reconciliation " + local_failure;
-            return result;
+            result.diagnostic = local_failure.empty() ? "another rank failed the endpoint interface integrals"
+                                                      : "level-set kinematic reconciliation " + local_failure;
+            return false;
         }
+        sumInPlace(context, remainder);
+        temporal_volume_remainder = remainder.front();
         current.reduce(context);
         current_cut_cells = sumCount(context, local_cut_cells);
         current_flux = 0.0;
@@ -696,17 +847,31 @@ LevelSetKinematicReconciliationResult reconcileLevelSetWithKinematicFlux(
             current_flux += value;
         }
 
+        return true;
+    };
+    Real prior_change = std::numeric_limits<Real>::infinity();
+    Real correction_volume = 0;
+    Real unplaced_volume = 0;
+    for (int iteration = 0; iteration < kMaxGeometryIterations; ++iteration) {
+        InterfaceSums current(n);
+        if (!evaluate_endpoint(iterate, current)) {
+            return result;
+        }
+        if (iteration == 0) {
+            result.transported_interface_flux = current_flux;
+        }
         // Lumped correction of every node that carries interface measure.
         // A node may not change its sign class and may not move toward the
         // isovalue by more than half of its transported distance: the cut
         // points of its edges then keep their order and stay away from the
         // vertex, so neither the cut topology nor its degeneracy class
         // changes.  The limited part of its correction is moved to the
-        // unlimited nodes of its cells (redistributed) or dropped (skipped).
+        // available tests on its connected cut-cell patch.
         const auto admissible = [&](std::size_t i, Real proposed) {
             const Real distance = transported_level_set[i] - isovalue;
             const Real moved = distance + proposed;
-            if (std::isfinite(moved) && (moved < Real{0.0}) == (distance < Real{0.0}) &&
+            if (std::isfinite(moved) &&
+                signClass(transported_level_set[i] + proposed, isovalue, tolerance) == transported_class[i] &&
                 std::abs(moved) >= Real{0.5} * std::abs(distance)) {
                 return proposed;
             }
@@ -716,6 +881,7 @@ LevelSetKinematicReconciliationResult reconcileLevelSetWithKinematicFlux(
                        ? halfway
                        : Real{0.0};
         };
+        unplaced_volume = 0;
         skipped = 0u;
         redistributed = 0u;
         std::vector<Real> delta(n, 0.0);
@@ -725,14 +891,22 @@ LevelSetKinematicReconciliationResult reconcileLevelSetWithKinematicFlux(
         bool any_limited = false;
         for (std::size_t i = 0; i < n; ++i) {
             gbar[i] = Real{0.5} * (previous.g[i] + current.g[i]);
-            if (!(gbar[i] > Real{0.0}) || transported_class[i] == 0) {
+            if (!(gbar[i] > Real{0.0})) {
                 continue;
             }
             const Real residual = Real{0.5} * (previous.m[i] + current.m[i]) +
                                   Real{0.5} * (previous.f[i] + current.f[i]);
             const Real step = -dt * residual / gbar[i];
             if (!std::isfinite(step)) {
+                unplaced_volume = std::numeric_limits<Real>::infinity();
                 ++skipped;
+                continue;
+            }
+            if (transported_class[i] == 0) {
+                // A pinned interface vertex carries flux even though its
+                // coefficient cannot move. Its other trace nodes inherit it.
+                deficit[i] = gbar[i] * step;
+                any_limited = any_limited || deficit[i] != 0;
                 continue;
             }
             delta[i] = admissible(i, step);
@@ -743,208 +917,149 @@ LevelSetKinematicReconciliationResult reconcileLevelSetWithKinematicFlux(
                 any_limited = true;
             }
         }
-        // A node j sharing c cells with a limited node i receives
-        // c * deficit_i / S_i, S_i = sum over i's cells of the eligible gbar,
-        // which moves exactly the gbar-weighted volume deficit_i.  The flags
-        // derive from replicated data, so this branch is identical on every
-        // rank.
-        if (any_limited) {
-            std::vector<Real> patch(n, 0.0);
-            for (const auto& cell : cells) {
-                for (int a = 0; a < cell.corners; ++a) {
-                    const auto i = cell.dof[static_cast<std::size_t>(a)];
-                    if (deficit[i] == Real{0.0}) {
-                        continue;
-                    }
-                    for (int b = 0; b < cell.corners; ++b) {
-                        const auto j = cell.dof[static_cast<std::size_t>(b)];
-                        if (j != i && eligible[j] != 0) {
-                            patch[i] += gbar[j];
+        // Scatter a blocked test's signed volume to the other active tests
+        // on its cut cells. Count shared cells as in the lumped one-ring
+        // projection. A share with no local recipient is retained for the
+        // wider connected patch below.
+        std::vector<Real> frozen_flag(n, 0);
+        std::vector<Real> unplaced(n, 0);
+        const auto scatter = [&](const std::vector<Real>& shares) {
+            std::vector<Real> patch(n, 0), added(n, 0);
+            const auto visit_receivers = [&](const auto& add) {
+                for (std::size_t c = 0; c < cells.size(); ++c) {
+                    if (!supported_cell[c]) continue;
+                    const auto& cell = cells[c];
+                    for (int a = 0; a < cell.corners; ++a) {
+                        const auto i = cell.dof[a];
+                        if (shares[i] == 0) continue;
+                        for (int b = 0; b < cell.corners; ++b) {
+                            const auto j = cell.dof[b];
+                            if (i != j && eligible[j] && !frozen_flag[j]) add(i, j);
                         }
                     }
                 }
-            }
+            };
+            visit_receivers([&](auto i, auto j) { patch[i] += gbar[j]; });
             sumInPlace(context, patch);
-            std::vector<Real> added(n, 0.0);
-            for (const auto& cell : cells) {
-                for (int a = 0; a < cell.corners; ++a) {
-                    const auto i = cell.dof[static_cast<std::size_t>(a)];
-                    if (deficit[i] == Real{0.0} || !(patch[i] > Real{0.0})) {
-                        continue;
-                    }
-                    for (int b = 0; b < cell.corners; ++b) {
-                        const auto j = cell.dof[static_cast<std::size_t>(b)];
-                        if (j != i && eligible[j] != 0) {
-                            added[j] += deficit[i] / patch[i];
-                        }
-                    }
-                }
-            }
+            visit_receivers([&](auto i, auto j) { added[j] += shares[i] / patch[i]; });
             sumInPlace(context, added);
             for (std::size_t i = 0; i < n; ++i) {
-                if (deficit[i] != Real{0.0}) {
-                    if (patch[i] > Real{0.0}) {
-                        ++redistributed;
-                    } else {
-                        ++skipped;
-                    }
-                }
-                if (added[i] == Real{0.0}) {
-                    continue;
-                }
-                const Real proposed = delta[i] + added[i];
-                delta[i] = admissible(i, proposed);
-                if (delta[i] != proposed) {
-                    ++skipped;
-                }
+                if (shares[i] == 0) continue;
+                if (patch[i] > 0) ++redistributed;
+                else unplaced[i] += shares[i];
             }
-        }
-        // Keep the degeneracy class of every cut: nodes of a cell whose class
-        // would change keep their transported value.  The lumped volume they
-        // would have moved is recorded and placed below.
-        frozen = 0u;
-        std::vector<Real> trial(n, 0.0);
-        std::vector<Real> frozen_flag(n, 0.0);
-        std::vector<Real> dropped(n, 0.0);
-        bool any_frozen = false;
-        for (;;) {
+            return added;
+        };
+        const auto limit_addition = [&](std::vector<Real>& added) {
             for (std::size_t i = 0; i < n; ++i) {
-                trial[i] = transported_level_set[i] + delta[i];
-            }
-            std::vector<Real> newly(n, 0.0);
-            for (std::size_t c = 0; c < cells.size(); ++c) {
-                const auto& cell = cells[c];
-                bool touched = false;
-                for (int a = 0; a < cell.corners; ++a) {
-                    touched = touched || delta[cell.dof[static_cast<std::size_t>(a)]] != Real{0.0};
-                }
-                if (!touched ||
-                    cutClass(cell, trial, isovalue, tolerance, minimum_fraction) ==
-                        transported_cut_class[c]) {
-                    continue;
-                }
-                for (int a = 0; a < cell.corners; ++a) {
-                    const auto i = cell.dof[static_cast<std::size_t>(a)];
-                    if (delta[i] != Real{0.0}) {
-                        newly[i] = Real{1.0};
-                    }
-                }
-            }
-            maxInPlace(context, newly);
-            bool any_new = false;
-            for (std::size_t i = 0; i < n; ++i) {
-                if (newly[i] > Real{0.0}) {
-                    dropped[i] += gbar[i] * delta[i];
-                    delta[i] = Real{0.0};
-                    frozen_flag[i] = Real{1.0};
-                    any_new = true;
-                }
-            }
-            if (!any_new) {
-                break;
-            }
-            any_frozen = true;
-        }
-        // Move the volume a frozen node would have moved to the eligible,
-        // unfrozen nodes of its cells, with the rule used for limited shares
-        // above (each receives c * dropped_i / S_i, S_i the sum of their gbar
-        // over i's cells).  A cell whose class this addition would change
-        // gets none: the additions of its nodes are removed again (skipped),
-        // while every node keeps its own correction, so freezing never
-        // spreads.  Without a frozen node nothing here runs.  The flags derive
-        // from replicated data, so this branch is identical on every rank.
-        if (any_frozen) {
-            std::vector<Real> patch(n, 0.0);
-            for (const auto& cell : cells) {
-                for (int a = 0; a < cell.corners; ++a) {
-                    const auto i = cell.dof[static_cast<std::size_t>(a)];
-                    if (dropped[i] == Real{0.0}) {
-                        continue;
-                    }
-                    for (int b = 0; b < cell.corners; ++b) {
-                        const auto j = cell.dof[static_cast<std::size_t>(b)];
-                        if (j != i && eligible[j] != 0 && frozen_flag[j] == Real{0.0}) {
-                            patch[i] += gbar[j];
-                        }
-                    }
-                }
-            }
-            sumInPlace(context, patch);
-            std::vector<Real> added(n, 0.0);
-            for (const auto& cell : cells) {
-                for (int a = 0; a < cell.corners; ++a) {
-                    const auto i = cell.dof[static_cast<std::size_t>(a)];
-                    if (dropped[i] == Real{0.0} || !(patch[i] > Real{0.0})) {
-                        continue;
-                    }
-                    for (int b = 0; b < cell.corners; ++b) {
-                        const auto j = cell.dof[static_cast<std::size_t>(b)];
-                        if (j != i && eligible[j] != 0 && frozen_flag[j] == Real{0.0}) {
-                            added[j] += dropped[i] / patch[i];
-                        }
-                    }
-                }
-            }
-            sumInPlace(context, added);
-            std::vector<Real> addition(n, 0.0);
-            for (std::size_t i = 0; i < n; ++i) {
-                if (dropped[i] != Real{0.0}) {
-                    if (patch[i] > Real{0.0}) {
-                        ++redistributed;
-                    } else {
-                        ++skipped;
-                    }
-                }
-                if (added[i] == Real{0.0}) {
-                    continue;
-                }
+                if (added[i] == 0) continue;
                 const Real proposed = delta[i] + added[i];
                 const Real accepted = admissible(i, proposed);
-                if (accepted != proposed) {
-                    ++skipped;
+                if (proposed != accepted) {
+                    unplaced[i] += gbar[i] * (proposed - accepted);
+                    added[i] = accepted - delta[i];
                 }
-                addition[i] = accepted - delta[i];
             }
+        };
+        if (any_limited) {
+            auto added = scatter(deficit);
+            limit_addition(added);
+            for (std::size_t i = 0; i < n; ++i) delta[i] += added[i];
+        }
+
+        // Remove only the proposed changes on cells whose builder class would
+        // change. Repeat because adjacent cells share coefficients.
+        std::vector<Real> trial(n);
+        const auto protect_cut_classes = [&](const std::vector<Real>& base, std::vector<Real>& added,
+                                             const auto& remove) {
             for (;;) {
                 for (std::size_t i = 0; i < n; ++i) {
-                    trial[i] = transported_level_set[i] + delta[i] + addition[i];
+                    trial[i] = transported_level_set[i] + base[i] + added[i];
                 }
-                std::vector<Real> strip(n, 0.0);
+                std::vector<Real> strip(n, 0);
                 for (std::size_t c = 0; c < cells.size(); ++c) {
                     const auto& cell = cells[c];
-                    bool receives = false;
-                    for (int a = 0; a < cell.corners; ++a) {
-                        receives = receives ||
-                                   addition[cell.dof[static_cast<std::size_t>(a)]] != Real{0.0};
-                    }
-                    if (!receives ||
-                        cutClass(cell, trial, isovalue, tolerance, minimum_fraction) ==
-                            transported_cut_class[c]) {
-                        continue;
-                    }
-                    for (int a = 0; a < cell.corners; ++a) {
-                        const auto i = cell.dof[static_cast<std::size_t>(a)];
-                        if (addition[i] != Real{0.0}) {
-                            strip[i] = Real{1.0};
-                        }
-                    }
+                    bool touched = false;
+                    for (int a = 0; a < cell.corners; ++a) touched = touched || added[cell.dof[a]] != 0;
+                    if (!touched || cutClass(cell, trial, isovalue, tolerance, minimum_fraction) ==
+                                        transported_cut_class[c]) continue;
+                    for (int a = 0; a < cell.corners; ++a) strip[cell.dof[a]] = 1;
                 }
                 maxInPlace(context, strip);
-                bool any_strip = false;
+                bool changed = false;
                 for (std::size_t i = 0; i < n; ++i) {
-                    if (strip[i] > Real{0.0}) {
-                        addition[i] = Real{0.0};
-                        ++skipped;
-                        any_strip = true;
+                    if (!strip[i] || added[i] == 0) continue;
+                    remove(i, gbar[i] * added[i]);
+                    added[i] = 0;
+                    changed = true;
+                }
+                if (!changed) return;
+            }
+        };
+        frozen = 0;
+        std::vector<Real> dropped(n, 0);
+        const std::vector<Real> zero(n, 0);
+        bool any_frozen = false;
+        protect_cut_classes(zero, delta, [&](auto i, Real share) {
+            dropped[i] += share;
+            frozen_flag[i] = 1;
+            any_frozen = true;
+        });
+        if (any_frozen) {
+            auto added = scatter(dropped);
+            limit_addition(added);
+            protect_cut_classes(delta, added, [&](auto i, Real share) { unplaced[i] += share; });
+            for (std::size_t i = 0; i < n; ++i) delta[i] += added[i];
+        }
+
+        // A frozen sliver can surround one of its vertices with other frozen
+        // vertices. Carry its unplaced volume outward, one cut-cell ring at a
+        // time, until it reaches an admissible trace. Never cross an uncut cell
+        // or change the existing correction of a frozen node.
+        for (std::size_t source = 0; source < n; ++source) {
+            Real remaining = unplaced[source];
+            if (remaining == 0) continue;
+            std::vector<Real> seen(n, 0), front(n, 0);
+            seen[source] = front[source] = 1;
+            while (remaining != 0) {
+                std::vector<Real> next(n, 0);
+                for (std::size_t c = 0; c < cells.size(); ++c) {
+                    if (!supported_cell[c]) continue;
+                    const auto& cell = cells[c];
+                    bool touches = false;
+                    for (int a = 0; a < cell.corners; ++a) touches = touches || front[cell.dof[a]] != 0;
+                    if (!touches) continue;
+                    for (int a = 0; a < cell.corners; ++a) {
+                        const auto i = cell.dof[a];
+                        if (!seen[i] && gbar[i] > 0) next[i] = 1;
                     }
                 }
-                if (!any_strip) {
-                    break;
+                maxInPlace(context, next);
+                if (std::none_of(next.begin(), next.end(), [](Real value) { return value != 0; })) break;
+                front.swap(next);
+                Real weight = 0;
+                for (std::size_t i = 0; i < n; ++i) {
+                    if (!front[i]) continue;
+                    seen[i] = 1;
+                    if (eligible[i] && !frozen_flag[i]) weight += gbar[i];
                 }
+                if (!(weight > 0)) continue;
+                const Real share = remaining / weight;
+                std::vector<Real> added(n, 0);
+                remaining = 0;
+                for (std::size_t i = 0; i < n; ++i) {
+                    if (!front[i] || !eligible[i] || frozen_flag[i]) continue;
+                    const Real proposed = delta[i] + share;
+                    const Real accepted = admissible(i, proposed);
+                    added[i] = accepted == proposed ? share : accepted - delta[i];
+                    remaining += gbar[i] * (share - added[i]);
+                }
+                protect_cut_classes(delta, added, [&](auto, Real rejected) { remaining += rejected; });
+                for (std::size_t i = 0; i < n; ++i) delta[i] += added[i];
             }
-            for (std::size_t i = 0; i < n; ++i) {
-                delta[i] += addition[i];
-            }
+            unplaced_volume += std::abs(remaining);
+            if (remaining == 0) ++redistributed;
+            else ++skipped;
         }
         result.degeneracy_frozen_dof_indices.clear();
         for (std::size_t i = 0; i < n; ++i) {
@@ -961,12 +1076,35 @@ LevelSetKinematicReconciliationResult reconcileLevelSetWithKinematicFlux(
             change = std::max(change, std::abs(value - iterate[i]));
             correction = std::max(correction, std::abs(delta[i]));
         }
+        correction_volume = 0;
+        for (std::size_t i = 0; i < n; ++i) {
+            correction_volume += gbar[i] * std::abs(delta[i]);
+        }
+        // If the Picard map is no longer contracting, damp its update only
+        // inside the same builder topology. Test the raw residual for convergence.
+        if (iteration >= 4 && change >= Real{0.8} * prior_change) {
+            for (std::size_t i = 0; i < n; ++i) {
+                trial[i] = iterate[i] + Real{0.5} * (candidate[i] - iterate[i]);
+            }
+            bool same_class = true;
+            for (std::size_t c = 0; c < cells.size() && same_class; ++c) {
+                same_class = cutClass(cells[c], trial, isovalue, tolerance, minimum_fraction) == transported_cut_class[c];
+            }
+            if (allTrue(context, same_class)) {
+                candidate.swap(trial);
+            }
+        }
+        prior_change = change;
         iterate.swap(candidate);
         result.iterations = iteration + 1;
         if (change <= std::max(kGeometryRelativeTolerance * correction, rounding_floor)) {
             result.converged = true;
             break;
         }
+    }
+    InterfaceSums final_sums(n);
+    if (!evaluate_endpoint(iterate, final_sums)) {
+        return result;
     }
     result.current_interface_cells = static_cast<std::size_t>(current_cut_cells);
     result.sign_preserving_skipped_dofs = skipped;
@@ -988,14 +1126,8 @@ LevelSetKinematicReconciliationResult reconcileLevelSetWithKinematicFlux(
         }
         result.max_abs_correction = std::max(result.max_abs_correction, delta);
     }
-    result.applied = result.corrected_dofs > 0u;
 
     // ---- exact sharp volumes for the report ---------------------------------
-    LevelSetVolumeOptions volume_options{};
-    volume_options.isovalue = isovalue;
-    if (tolerance > Real{0.0}) {
-        volume_options.tolerance = tolerance;
-    }
     const auto previous_volume = computeLevelSetCutCellVolume(
         mesh, level_set_dofs, volume_options, previous_level_set);
     const auto transported_volume = computeLevelSetCutCellVolume(
@@ -1013,15 +1145,69 @@ LevelSetKinematicReconciliationResult reconcileLevelSetWithKinematicFlux(
     result.reconciled_negative_volume = reconciled_volume.negative_volume;
     result.transported_volume_error =
         (transported_volume.negative_volume - previous_volume.negative_volume) -
-        result.kinematic_volume_change;
+        Real{0.5} * dt * (previous_flux + result.transported_interface_flux);
     result.reconciled_volume_error =
         (reconciled_volume.negative_volume - previous_volume.negative_volume) -
         result.kinematic_volume_change;
 
-    reconciled_level_set = std::move(iterate);
+    const Real volume_scale = std::abs(previous_volume.negative_volume) + std::abs(reconciled_volume.negative_volume)
+                            + dt * (std::abs(previous_flux) + std::abs(current_flux)) + correction_volume;
+    const Real solver_volume_tolerance = kGeometryRelativeTolerance * correction_volume
+                                       + Real{128} * std::numeric_limits<Real>::epsilon() * volume_scale;
+    result.volume_tolerance = std::abs(temporal_volume_remainder) + solver_volume_tolerance;
+    if (!std::isfinite(result.reconciled_volume_error) || !std::isfinite(result.volume_tolerance) ||
+        !std::isfinite(unplaced_volume)) {
+        result.diagnostic = "level-set kinematic reconciliation produced a nonfinite volume budget";
+        return result;
+    }
+    // Opposite infeasible fluxes on separate interfaces can sum to zero.
+    // Their unsatisfied local volume constraints cannot cancel one another.
+    result.volume_balance_satisfied = std::abs(result.reconciled_volume_error) <= result.volume_tolerance &&
+                                      unplaced_volume <= solver_volume_tolerance;
+    if (!result.converged || !result.volume_balance_satisfied) {
+        result.retryable_failure = true;
+        std::ostringstream message;
+        message.precision(std::numeric_limits<Real>::max_digits10);
+        message << (result.converged ? "kinematic volume target unattainable on the constrained interface"
+                                    : "kinematic fixed-point iteration limit")
+                << ", sharp volume defect=" << result.reconciled_volume_error
+                << ", tolerance=" << result.volume_tolerance
+                << ", unplaced constrained volume=" << unplaced_volume;
+        result.diagnostic = message.str();
+        return result;
+    }
+    *reconciled_level_set = std::move(iterate);
+    result.applied = result.corrected_dofs > 0u;
     result.success = true;
-    result.diagnostic = result.converged ? "reconciled" : "reconciled_fixed_point_iteration_limit";
+    result.diagnostic = "reconciled";
     return result;
+}
+
+} // namespace
+
+LevelSetKinematicReconciliationResult reconcileLevelSetWithKinematicFlux(
+    const assembly::IMeshAccess& mesh, const dofs::DofHandler& level_set_dofs,
+    const dofs::DofHandler& velocity_dofs, Real isovalue, Real tolerance, Real dt,
+    std::span<const Real> previous_level_set, std::span<const Real> transported_level_set,
+    std::span<const Real> previous_velocity, std::span<const Real> transported_velocity,
+    std::vector<Real>& reconciled_level_set, const spaces::FunctionSpace* velocity_space)
+{
+    return integrateKinematicStep(mesh, level_set_dofs, velocity_dofs, isovalue, tolerance, dt,
+        previous_level_set, transported_level_set, previous_velocity, transported_velocity,
+        &reconciled_level_set, velocity_space);
+}
+
+LevelSetKinematicEndpoint measureLevelSetKinematicEndpoint(
+    const assembly::IMeshAccess& mesh, const dofs::DofHandler& level_set_dofs,
+    const dofs::DofHandler& velocity_dofs, const spaces::FunctionSpace& velocity_space,
+    Real isovalue, Real tolerance, std::span<const Real> level_set, std::span<const Real> velocity)
+{
+    // Identical endpoints give zero transport rate. Only V(phi) and F(phi,w)
+    // are requested, independent of a time step.
+    auto measured = integrateKinematicStep(mesh, level_set_dofs, velocity_dofs, isovalue,
+        tolerance, Real{1}, level_set, level_set, velocity, velocity, nullptr, &velocity_space);
+    return {measured.success, measured.previous_negative_volume, measured.previous_interface_flux,
+            std::move(measured.diagnostic)};
 }
 
 } // namespace svmp::FE::level_set

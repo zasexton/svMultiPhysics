@@ -14,10 +14,8 @@
 
 #include <gtest/gtest.h>
 
-#include "Assembly/Assembler.h"
+#include "ContactPointVelocityTestMesh.h"
 #include "Constraints/ContactPointVelocityConstraint.h"
-#include "Core/FEException.h"
-#include "Dofs/DofHandler.h"
 #include "Dofs/EntityDofMap.h"
 #include "Spaces/SpaceFactory.h"
 #include "Systems/FESystem.h"
@@ -37,160 +35,6 @@ namespace constraints {
 namespace test {
 namespace {
 
-constexpr int kWallMarker = 11;
-
-// Strip [0,2]x[0,1] in four triangles; global vertices
-//   0 (0,0)  1 (1,0)  2 (2,0)  3 (0,1)  4 (1,1)  5 (2,1),
-// cells T0 (0,1,4), T1 (0,4,3) on rank 0 and T2 (1,2,5), T3 (1,5,4) on rank 1.
-// The bottom faces (0,1) of T0 and (1,2) of T2 carry the wall marker.
-// With left_only the rank sees T0 and T1 only (local vertices 0,1,3,4).
-class StripMeshAccess final : public assembly::IMeshAccess {
-public:
-    StripMeshAccess(int rank, bool left_only) : rank_(rank), left_only_(left_only)
-    {
-        const std::array<std::array<Real, 3>, 6> all{{
-            {0.0, 0.0, 0.0}, {1.0, 0.0, 0.0}, {2.0, 0.0, 0.0},
-            {0.0, 1.0, 0.0}, {1.0, 1.0, 0.0}, {2.0, 1.0, 0.0},
-        }};
-        if (left_only_) {
-            gids_ = {0, 1, 3, 4};
-            cells_ = {{0, 1, 3}, {0, 3, 2}};
-            cell_gids_ = {0, 1};
-        } else {
-            gids_ = {0, 1, 2, 3, 4, 5};
-            cells_ = {{0, 1, 4}, {0, 4, 3}, {1, 2, 5}, {1, 5, 4}};
-            cell_gids_ = {0, 1, 2, 3};
-        }
-        for (const auto g : gids_) {
-            nodes_.push_back(all[static_cast<std::size_t>(g)]);
-        }
-    }
-
-    [[nodiscard]] GlobalIndex numCells() const override
-    {
-        return static_cast<GlobalIndex>(cells_.size());
-    }
-    [[nodiscard]] GlobalIndex numOwnedCells() const override
-    {
-        GlobalIndex n = 0;
-        forEachOwnedCell([&](GlobalIndex) { ++n; });
-        return n;
-    }
-    [[nodiscard]] GlobalIndex numBoundaryFaces() const override { return left_only_ ? 1 : 2; }
-    [[nodiscard]] GlobalIndex numInteriorFaces() const override { return 0; }
-    [[nodiscard]] int dimension() const override { return 2; }
-    [[nodiscard]] bool globalEntityIdsAvailable() const override { return true; }
-    [[nodiscard]] GlobalIndex getCellGlobalId(GlobalIndex cell) const override
-    {
-        return cell_gids_.at(static_cast<std::size_t>(cell));
-    }
-    [[nodiscard]] bool isOwnedCell(GlobalIndex cell) const override
-    {
-        return ownerOf(cell) == rank_;
-    }
-    [[nodiscard]] ElementType getCellType(GlobalIndex) const override
-    {
-        return ElementType::Triangle3;
-    }
-    void getCellNodes(GlobalIndex cell, std::vector<GlobalIndex>& nodes) const override
-    {
-        const auto& c = cells_.at(static_cast<std::size_t>(cell));
-        nodes.assign(c.begin(), c.end());
-    }
-    [[nodiscard]] std::array<Real, 3> getNodeCoordinates(GlobalIndex node) const override
-    {
-        return nodes_.at(static_cast<std::size_t>(node));
-    }
-    void getCellCoordinates(GlobalIndex cell,
-                            std::vector<std::array<Real, 3>>& coordinates) const override
-    {
-        const auto& c = cells_.at(static_cast<std::size_t>(cell));
-        coordinates.clear();
-        for (const auto n : c) {
-            coordinates.push_back(nodes_.at(static_cast<std::size_t>(n)));
-        }
-    }
-    [[nodiscard]] LocalIndex getLocalFaceIndex(GlobalIndex, GlobalIndex) const override
-    {
-        return LocalIndex{0};  // the bottom edge is local edge (0,1)
-    }
-    [[nodiscard]] int getBoundaryFaceMarker(GlobalIndex) const override { return kWallMarker; }
-    [[nodiscard]] std::pair<GlobalIndex, GlobalIndex> getInteriorFaceCells(GlobalIndex) const override
-    {
-        return {-1, -1};
-    }
-    void forEachCell(std::function<void(GlobalIndex)> callback) const override
-    {
-        for (GlobalIndex c = 0; c < numCells(); ++c) {
-            callback(c);
-        }
-    }
-    void forEachOwnedCell(std::function<void(GlobalIndex)> callback) const override
-    {
-        for (GlobalIndex c = 0; c < numCells(); ++c) {
-            if (ownerOf(c) == rank_) {
-                callback(c);
-            }
-        }
-    }
-    void forEachBoundaryFace(int marker,
-                             std::function<void(GlobalIndex, GlobalIndex)> callback) const override
-    {
-        if (marker >= 0 && marker != kWallMarker) {
-            return;
-        }
-        callback(0, 0);  // T0
-        if (!left_only_) {
-            callback(1, 2);  // T2
-        }
-    }
-    void forEachInteriorFace(
-        std::function<void(GlobalIndex, GlobalIndex, GlobalIndex)>) const override
-    {
-    }
-
-    [[nodiscard]] const std::vector<GlobalIndex>& gids() const noexcept { return gids_; }
-
-private:
-    [[nodiscard]] int ownerOf(GlobalIndex cell) const
-    {
-        return cell_gids_.at(static_cast<std::size_t>(cell)) < 2 ? 0 : 1;
-    }
-
-    int rank_{0};
-    bool left_only_{false};
-    std::vector<GlobalIndex> gids_{};
-    std::vector<std::array<GlobalIndex, 3>> cells_{};
-    std::vector<GlobalIndex> cell_gids_{};
-    std::vector<std::array<Real, 3>> nodes_{};
-};
-
-dofs::MeshTopologyInfo topologyFor(const StripMeshAccess& mesh, bool left_only, int rank)
-{
-    dofs::MeshTopologyInfo t;
-    t.dim = 2;
-    t.n_cells = static_cast<GlobalIndex>(mesh.numCells());
-    t.n_vertices = static_cast<GlobalIndex>(mesh.gids().size());
-    t.cell2vertex_offsets.push_back(0);
-    std::vector<GlobalIndex> nodes;
-    for (GlobalIndex c = 0; c < mesh.numCells(); ++c) {
-        mesh.getCellNodes(c, nodes);
-        for (const auto n : nodes) {
-            t.cell2vertex_data.push_back(static_cast<MeshIndex>(n));
-        }
-        t.cell2vertex_offsets.push_back(static_cast<MeshOffset>(t.cell2vertex_data.size()));
-        t.cell_gids.push_back(mesh.getCellGlobalId(c));
-        t.cell_owner_ranks.push_back(mesh.getCellGlobalId(c) < 2 ? 0 : 1);
-    }
-    for (std::size_t v = 0; v < mesh.gids().size(); ++v) {
-        t.vertex_gids.push_back(mesh.gids()[v]);
-        const auto x = mesh.getNodeCoordinates(static_cast<GlobalIndex>(v));
-        t.vertex_coords.insert(t.vertex_coords.end(), {x[0], x[1]});
-    }
-    t.neighbor_ranks = left_only ? std::vector<int>{1} : std::vector<int>{rank == 0 ? 1 : 0};
-    return t;
-}
-
 systems::SetupOptions setupOptions(int rank, int world_size)
 {
     systems::SetupOptions options;
@@ -201,11 +45,6 @@ systems::SetupOptions setupOptions(int rank, int world_size)
     options.dof_options.mpi_comm = MPI_COMM_WORLD;
     return options;
 }
-
-// phi = (x - 1.3) - 0.2 y: the contact point is at x = 1.3 on edge (1,2),
-// s = 0.3 from the wet vertex 1; cos(theta) = -n.n_wall = n_y.
-Real phiAt(const std::array<Real, 3>& x) { return (x[0] - 1.3) - 0.2 * x[1]; }
-Real law(Real cos_theta) { return 0.5 - cos_theta; }
 
 struct Outcome {
     int threw{0};
@@ -231,12 +70,14 @@ struct Fixture {
     std::shared_ptr<StripMeshAccess> mesh;
     std::unique_ptr<systems::FESystem> system;
     FieldId velocity{INVALID_FIELD_ID};
+    ContactPointVelocityConstraint* constraint{};
 };
 
-Fixture makeFixture(int rank, int world_size, bool left_only)
+Fixture makeFixture(int rank, int world_size, bool owned_only,
+                    std::function<Real(const std::array<Real, 3>&)> phi = phiAt)
 {
     Fixture f;
-    f.mesh = std::make_shared<StripMeshAccess>(rank, left_only);
+    f.mesh = std::make_shared<StripMeshAccess>(rank, world_size, owned_only);
     f.system = std::make_unique<systems::FESystem>(f.mesh);
     auto space = spaces::VectorSpace(spaces::SpaceType::H1, ElementType::Triangle3, 1, 2);
     f.velocity = f.system->addField(systems::FieldSpec{
@@ -247,14 +88,15 @@ Fixture makeFixture(int rank, int world_size, bool left_only)
     contact.wall_normal = {0.0, -1.0, 0.0};
     contact.level_set_field_name = "phi";
     auto mesh = f.mesh;
-    contact.level_set_vertex_value = [mesh](GlobalIndex v) {
-        return phiAt(mesh->getNodeCoordinates(v));
+    contact.level_set_vertex_value = [mesh, phi](GlobalIndex v) {
+        return phi(mesh->getNodeCoordinates(v));
     };
     contact.contact_speed = law;
-    f.system->addSystemConstraint(
-        std::make_unique<ContactPointVelocityConstraint>(f.velocity, std::move(contact)));
+    auto owned = std::make_unique<ContactPointVelocityConstraint>(f.velocity, std::move(contact));
+    f.constraint = owned.get();
+    f.system->addSystemConstraint(std::move(owned));
     systems::SetupInputs inputs;
-    inputs.topology_override = topologyFor(*f.mesh, left_only, rank);
+    inputs.topology_override = topologyFor(*f.mesh);
     f.system->setup(setupOptions(rank, world_size), inputs);
     return f;
 }
@@ -312,6 +154,81 @@ TEST(ContactPointVelocityConstraintMPI, CrossRankContactEdgeInstallsTheSerialLin
     EXPECT_NEAR(line->entries[0].weight, -0.3 / 0.7, 1.0e-14);
     EXPECT_NEAR(line->inhomogeneity, target / 0.7, 1.0e-14);
     EXPECT_FALSE(f.system->constraints().isConstrained(dry));
+}
+
+TEST(ContactPointVelocityConstraintMPI, ResolvesOneSharedVertexUsingBothOwnedWallEdges)
+{
+    int rank = 0;
+    int world_size = 1;
+    MPI_Comm_rank(MPI_COMM_WORLD, &rank);
+    MPI_Comm_size(MPI_COMM_WORLD, &world_size);
+    if (world_size != 2) {
+        GTEST_SKIP() << "Run with exactly two MPI ranks";
+    }
+    // Neither rank has the other wall edge. Global vertex 1 is local vertex
+    // 1 on rank 0 and local vertex 0 on rank 1. The two cell angles differ.
+    std::array<Real, 3> wall_phi{};
+    std::array<Real, 3> vertical_slope{-0.2, -0.2, 0.8};
+    Fixture f;
+    const auto setup = collectively([&] {
+        f = makeFixture(rank, world_size, true, [&](const auto& x) {
+            const auto i = static_cast<std::size_t>(x[0]);
+            return wall_phi[i] + vertical_slope[i] * x[1];
+        });
+    });
+    ASSERT_EQ(setup.any_threw, 0) << setup.message;
+    const auto root = tangentialDof(f, 1);
+    for (const Real direction : {1.0, -1.0}) {
+        wall_phi = {-direction, 0, direction};
+        const auto rebuild = collectively([&] { f.system->rebuildConstraintState(); });
+        ASSERT_EQ(rebuild.any_threw, 0) << rebuild.message;
+        const auto& samples = f.constraint->samples();
+        // For +x the contour enters T3 on rank 1, from (1,0) to
+        // (1.1,1); both wall triangles only touch the vertex. For -x it
+        // enters T0 on rank 0 with gradient (-1,-0.2).
+        const Real cos_theta = -0.2 / std::sqrt(direction > 0.0 ? 4.04 : 1.04);
+        EXPECT_EQ(samples.size(), 1u) << "rank " << rank;
+        if (samples.size() == 1u) {
+            EXPECT_EQ(samples[0].slave_dof, root);
+            EXPECT_EQ(samples[0].point[0], 1.0);
+            EXPECT_EQ(samples[0].fraction, direction > 0.0 ? 1.0 : 0.0);
+            EXPECT_NEAR(samples[0].cos_theta, cos_theta, 1.0e-14);
+        }
+        const auto line = f.system->constraints().getConstraint(root);
+        EXPECT_TRUE(line.has_value()) << "rank " << rank;
+        if (line) {
+            EXPECT_TRUE(line->isDirichlet());
+            EXPECT_NEAR(line->inhomogeneity, direction * law(cos_theta), 1.0e-14);
+        }
+    }
+    for (const std::array<Real, 3>& values : std::vector<std::array<Real, 3>>{
+             {-1, 0, -1}, {1, 0, 1}, {-1, 0, 0}, {0, 0, 1}}) {
+        wall_phi = values;
+        const auto rebuild = collectively([&] { f.system->rebuildConstraintState(); });
+        ASSERT_EQ(rebuild.any_threw, 0) << rebuild.message;
+        EXPECT_TRUE(f.constraint->samples().empty()) << "rank " << rank;
+        EXPECT_FALSE(f.system->constraints().isConstrained(root)) << "rank " << rank;
+    }
+    // The contour follows the radial edge (1,0)--(1,1), shared by T0
+    // and T3 on different ranks. Its two traces are one physical segment.
+    wall_phi = {-1, 0, 1};
+    vertical_slope[1] = 0;
+    auto rebuilt = collectively([&] { f.system->rebuildConstraintState(); });
+    ASSERT_EQ(rebuilt.any_threw, 0) << rebuilt.message;
+    const auto& samples = f.constraint->samples();
+    EXPECT_EQ(samples.size(), 1u);
+    if (samples.size() == 1u) {
+        EXPECT_NEAR(samples[0].cos_theta, 0., 1.0e-14);
+    }
+
+    // Alternating signs around the star give three distinct segments.
+    // The strong law needs a unique through-liquid angle on every rank.
+    vertical_slope[1] = 1;
+    vertical_slope[2] = -2;
+    rebuilt = collectively([&] { f.system->rebuildConstraintState(); });
+    EXPECT_EQ(rebuilt.threw, 1);
+    EXPECT_NE(rebuilt.message.find("unique interface segment"), std::string::npos);
+
 }
 
 TEST(ContactPointVelocityConstraintMPI, MissingMasterFailsClosedOnEveryRank)

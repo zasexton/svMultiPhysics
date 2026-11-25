@@ -59,6 +59,14 @@ std::size_t initializeFieldFromMeshVertexField(
     FieldId field_id,
     const std::string& message_prefix);
 
+/// Use the supplied uniform vertex value if the named mesh field is absent.
+std::size_t initializeFieldFromMeshVertexField(
+    const FESystem& system,
+    backends::GenericVector& u0,
+    FieldId field_id,
+    const std::string& message_prefix,
+    std::optional<Real> value_if_missing);
+
 /// A vertex field of the native mesh: @p components values per vertex.
 struct MeshVertexFieldView {
     const Real* values{nullptr};

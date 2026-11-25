@@ -4,11 +4,9 @@
 For every saved state (and the initial mesh) the two phi = 0 roots on the
 contact wall y = 0 are located.  At each root:
 
-* the dynamic angle theta_d (through the liquid) is taken from the P1
-  gradient of phi in the wall triangle that holds the root edge, the
-  generated LinearCorner fragment normal of that cell: cos(theta_d) = n_y for
-  the outward liquid normal n = grad(phi)/|grad(phi)| and the wall normal
-  (0, -1);
+* the dynamic angle theta_d (through the liquid) is measured from the
+  physical P1 contour segment entering the domain. At an exact wall vertex
+  its triangle can lie inside the vertex fan;
 * the Ren-E prediction is V = gamma M (cos theta_e - cos theta_d), positive
   when the line advances;
 * the wall fluid speed is the outward wall-tangential velocity interpolated
@@ -104,6 +102,83 @@ def liquid_area(points: np.ndarray, cells: np.ndarray, phi: np.ndarray) -> float
     return total
 
 
+def _opposite(a, b):
+    return (a < 0 < b) or (b < 0 < a)
+
+
+def _cut_fraction(phi, a, b):
+    return phi[a] / (phi[a] - phi[b])
+
+
+def _vertex_segment_tip(xy, phi, vertex, left, right, triangles):
+    # Order the fan from the right wall edge to the left wall edge through
+    # the interior (y above the planar contact wall). A sign change in this
+    # ordered link locates the ray even when neither wall triangle is cut.
+    neighbors = {int(n) for tri in triangles for n in tri} - {vertex, left, right}
+
+    def polar_angle(n):
+        dx, dy = xy[n] - xy[vertex]
+        return math.atan2(dy, dx)
+
+    fan = [right, *sorted(neighbors, key=polar_angle), left]
+    if any(phi[a] == phi[b] == 0 for a, b in zip(fan, fan[1:])):
+        raise ValueError(f"wall vertex {vertex} has no unique interface segment")
+    nonzero = [i for i, n in enumerate(fan) if phi[n] != 0]
+    tips = []
+    for i, j in zip(nonzero, nonzero[1:]):
+        a, b = fan[i], fan[j]
+        if _opposite(phi[a], phi[b]):
+            if j == i + 1:
+                tips.append(xy[a] + _cut_fraction(phi, a, b) * (xy[b] - xy[a]))
+            else:
+                # A radial mesh edge at the isovalue is a single branch.
+                tips.append(xy[fan[i + 1]])
+    if len(tips) != 1:
+        raise ValueError(f"wall vertex {vertex} has no unique interface segment")
+    return tips[0]
+
+
+def _wall_crossings(xy, cells, phi, velocity_x, wall):
+    wall_set = set(wall)
+    stars = {v: [] for v in wall if phi[v] == 0}
+    wall_neighbors = {v: [] for v in stars}
+    roots = []
+    for tri in cells:
+        on_wall = [v for v in tri if v in wall_set]
+        for v in on_wall:
+            if v in stars:
+                stars[v].append(tri)
+        if len(on_wall) != 2:
+            continue
+        a, b = sorted(on_wall, key=lambda v: xy[v, 0])
+        if a in stars:
+            wall_neighbors[a].append(b)
+        if b in stars:
+            wall_neighbors[b].append(a)
+        if not _opposite(phi[a], phi[b]):
+            continue
+        t = _cut_fraction(phi, a, b)
+        point = xy[a] + t * (xy[b] - xy[a])
+        vx = velocity_x[a] + t * (velocity_x[b] - velocity_x[a])
+        c = next(v for v in tri if v != a and v != b)
+        outward = 1.0 if phi[b] > 0 else -1.0
+        # The affine contour direction, expressed in differences along the
+        # triangle's own edges, is accurate even for an arbitrarily short cut.
+        tangent = outward * ((phi[b] - phi[a]) * (xy[c] - xy[a])
+                             - (phi[c] - phi[a]) * (xy[b] - xy[a]))
+        roots.append((point, tangent, vx, outward))
+
+    for v, adjacent in wall_neighbors.items():
+        if len(adjacent) != 2:
+            continue
+        a, b = sorted(adjacent, key=lambda n: xy[n, 0])
+        if not (xy[a, 0] < xy[v, 0] < xy[b, 0] and _opposite(phi[a], phi[b])):
+            continue
+        tip = _vertex_segment_tip(xy, phi, v, a, b, stars[v])
+        roots.append((xy[v], tip - xy[v], velocity_x[v], 1.0 if phi[b] > 0 else -1.0))
+    return sorted(roots, key=lambda root: root[0][0])
+
+
 def measure_state(state, case: dict) -> dict:
     if isinstance(state, pv.DataSet):
         state = {"points": np.asarray(state.points, dtype=float),
@@ -121,48 +196,29 @@ def measure_state(state, case: dict) -> dict:
         raise ValueError("ren_e_2d states must be triangle meshes")
     h = float(case["h"])
     wall = np.flatnonzero(np.abs(points[:, 1] - float(case["contact_wall_y"])) <= 1.0e-9 * h)
-    wall = wall[np.argsort(points[wall, 0], kind="stable")]
-    edge_cell: dict[tuple[int, int], int] = {}
-    wall_set = set(int(v) for v in wall)
-    for index, tri in enumerate(cells):
-        on_wall = [int(v) for v in tri if int(v) in wall_set]
-        if len(on_wall) == 2:
-            edge_cell[tuple(sorted(on_wall))] = index
-    roots = []
-    for a, b in zip(wall[:-1], wall[1:]):
-        pa, pb = phi[a], phi[b]
-        if pa == 0.0 and pb == 0.0:
-            raise ValueError("zero-valued wall edge")
-        if pa * pb < 0.0 or (pa == 0.0) != (pb == 0.0):
-            fraction = pa / (pa - pb)
-            x = points[a, 0] + fraction * (points[b, 0] - points[a, 0])
-            if roots and abs(x - roots[-1]["x"]) <= 1.0e-12 * h:
-                continue
-            roots.append({"x": float(x), "edge": (int(a), int(b)), "fraction": float(fraction)})
+    roots = _wall_crossings(points[:, :2], cells, phi, velocity[:, 0], wall)
     if len(roots) != 2:
         raise ValueError(f"expected two wall roots, found {len(roots)}")
     gamma = float(case["surface_tension"])
     mobility = float(case["mobility"])
     cos_e = math.cos(math.radians(float(case["equilibrium_angle_degrees"])))
     out = []
-    for side, root in zip((-1.0, 1.0), roots):
-        key = tuple(sorted(root["edge"]))
-        if key not in edge_cell:
-            raise ValueError("wall root edge has no triangle")
-        tri = cells[edge_cell[key]]
-        design = np.column_stack((points[tri, 0], points[tri, 1], np.ones(3)))
-        gradient = np.linalg.solve(design, phi[tri])[:2]
-        normal = gradient / np.linalg.norm(gradient)
-        cos_d = float(np.clip(normal[1], -1.0, 1.0))
-        a, b = root["edge"]
-        u = velocity[a, :2] + root["fraction"] * (velocity[b, :2] - velocity[a, :2])
+    for name, (point, tangent, vx, outward) in zip(("left", "right"), roots):
+        # Project the unit contour tangent pointing into the domain onto
+        # the direction from dry to wet to obtain the through-liquid cosine.
+        dx, dy = tangent
+        length = math.hypot(dx, dy)
+        if length == 0:
+            raise ValueError("zero-length interface segment at a wall contact")
+        cos_d = float(np.clip(-outward * dx / length, -1.0, 1.0))
+        x = float(point[0])
         out.append({
-            "side": "left" if side < 0 else "right",
-            "outward_position": side * root["x"],
-            "x": root["x"],
+            "side": name,
+            "outward_position": outward * x,
+            "x": x,
             "dynamic_angle_degrees": math.degrees(math.acos(cos_d)),
             "predicted_speed": gamma * mobility * (cos_e - cos_d),
-            "wall_fluid_speed": float(side * u[0]),
+            "wall_fluid_speed": float(outward * vx),
         })
     return {"contacts": out, "liquid_area": liquid_area(points, cells, phi)}
 

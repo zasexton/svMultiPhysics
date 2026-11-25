@@ -5,6 +5,8 @@
 #include "Dofs/EntityDofMap.h"
 #include "Interfaces/LevelSetInterfaceBuilder.h"
 #include "LevelSet/LevelSetVolume.h"
+#include "LevelSet/Maintenance/LevelSetMaintenancePipeline.h"
+#include "Tests/Unit/TimeStepping/TimeSteppingTestHelpers.h"
 #include "Spaces/H1Space.h"
 #include "Spaces/SpaceFactory.h"
 #include "Systems/FESystem.h"
@@ -151,7 +153,7 @@ struct SimplexSystem {
     FE::FieldId velocity{FE::INVALID_FIELD_ID};
     int dimension{2};
 
-    SimplexSystem(std::shared_ptr<svmp::Mesh> m, int dim)
+    SimplexSystem(std::shared_ptr<svmp::Mesh> m, int dim, int velocity_order = 1)
         : mesh(std::move(m)), system(mesh), dimension(dim)
     {
         const auto type = dim == 2 ? FE::ElementType::Triangle3 : FE::ElementType::Tetra4;
@@ -161,7 +163,7 @@ struct SimplexSystem {
             .components = 1,
         });
         auto velocity_space =
-            FE::spaces::VectorSpace(FE::spaces::SpaceType::H1, type, /*order=*/1, dim);
+            FE::spaces::VectorSpace(FE::spaces::SpaceType::H1, type, velocity_order, dim);
         velocity = system.addField(FE::systems::FieldSpec{
             .name = "w",
             .space = velocity_space,
@@ -216,7 +218,8 @@ struct SimplexSystem {
         return level_set::reconcileLevelSetWithKinematicFlux(
             system.meshAccess(), phiDofs(), velocityDofs(),
             /*isovalue=*/0.0, /*tolerance=*/1.0e-12, dt,
-            phi_previous, phi_transported, w_previous, w_transported, reconciled);
+            phi_previous, phi_transported, w_previous, w_transported, reconciled,
+            system.fieldRecord(velocity).space.get());
     }
 
     [[nodiscard]] FE::Real negativeVolume(const std::vector<FE::Real>& phi_values) const
@@ -288,7 +291,212 @@ std::vector<std::vector<long>> builderCutClasses(const SimplexSystem& s,
     return classes;
 }
 
+// One open simplex. Its negative-phase area for phi=x-a is a-a*a/2.
+std::shared_ptr<svmp::Mesh> buildUnitTriangle()
+{
+    auto base = std::make_shared<svmp::MeshBase>();
+    base->build_from_arrays(
+        2, {0., 0., 1., 0., 0., 1.}, {0, 3}, {0, 1, 2},
+        {svmp::CellShape{svmp::CellFamily::Triangle, 3, 1}});
+    base->finalize();
+    return svmp::create_mesh(std::move(base));
+}
+
+// The single cell uses the canonical reference-node ordering. A component
+// block in the velocity field is one scalar node per local Lagrange basis.
+std::vector<FE::Real> quadraticShear(const SimplexSystem& s)
+{
+    std::vector<FE::Real> velocity(s.velocityDofs().getNumDofs(), 0.);
+    const auto& dofs = s.velocityDofs().getDofMap().getCellDofs(0);
+    const auto type = s.dimension == 2 ? FE::ElementType::Triangle3 : FE::ElementType::Tetra4;
+    const auto nodes = FE::basis::ReferenceNodeLayout::get_lagrange_node_coords(type, 2);
+    for (std::size_t i = 0; i < nodes.size(); ++i) {
+        const auto y = nodes[i][1];
+        velocity[dofs[i]] = 4. * y * (1. - y);
+    }
+    return velocity;
+}
+
 } // namespace
+
+TEST(LevelSetKinematicReconciliation, ResolvesStationaryFiniteStepAreaBeforePublishing)
+{
+    SimplexSystem s(buildUnitTriangle(), 2);
+    const auto previous = s.scalar([](const Point& x) { return x[0] - 0.25; });
+    const auto transported = s.scalar([](const Point& x) { return -0.24 + 0.79 * x[0] - 0.02 * x[1]; });
+    const auto zero = s.vector([](const Point&) { return Point{}; });
+    std::vector<FE::Real> endpoint;
+    const auto result = s.reconcile(0.05, previous, transported, zero, zero, endpoint);
+    ASSERT_TRUE(result.success) << result.diagnostic;
+    EXPECT_TRUE(result.converged) << result.diagnostic;
+    EXPECT_NEAR(s.negativeVolume(endpoint), 0.21875, 1.0e-11);
+    EXPECT_NEAR(result.reconciled_volume_error, 0., 1.0e-11);
+}
+
+TEST(LevelSetKinematicReconciliation, LeavesOutputAloneWhenTheTransportedTopologyCannotReachTheFlux)
+{
+    SimplexSystem s(buildUnitTriangle(), 2);
+    const auto previous = s.scalar([](const Point&) { return -1.; });
+    const auto transported = s.scalar([](const Point&) { return 1.; });
+    const auto zero = s.vector([](const Point&) { return Point{}; });
+    std::vector<FE::Real> endpoint{3.};
+    const auto result = s.reconcile(0.1, previous, transported, zero, zero, endpoint);
+    EXPECT_FALSE(result.success);
+    EXPECT_FALSE(result.applied);
+    EXPECT_FALSE(result.volume_balance_satisfied);
+    EXPECT_NEAR(result.reconciled_volume_error, -0.5, 1.0e-14);
+    EXPECT_EQ(endpoint, (std::vector<FE::Real>{3.}));
+}
+
+TEST(LevelSetKinematicReconciliation, RedistributesTheFluxShareOfAnInterfaceVertex)
+{
+    SimplexSystem s(buildUnitTriangle(), 2);
+    const auto phi = s.scalar([](const Point& x) { return x[0] - x[1]; });
+    const auto velocity = s.vector([](const Point&) { return Point{1., 0., 0.}; });
+    // The interface passes through the origin. Its value stays pinned and the
+    // other two coefficients can rotate the segment to realize the outward flux.
+    std::vector<FE::Real> output;
+    const auto result = s.reconcile(0.01, phi, phi, velocity, velocity, output);
+    ASSERT_TRUE(result.success) << result.diagnostic;
+    EXPECT_DOUBLE_EQ(output[s.phiDofs().getEntityDofMap()->getVertexDofs(0).front()], 0.);
+    EXPECT_GT(result.sign_preserving_redistributed_dofs, 0u);
+    EXPECT_EQ(builderCutClasses(s, output), builderCutClasses(s, phi));
+    EXPECT_NEAR(s.negativeVolume(output) - s.negativeVolume(phi),
+                result.kinematic_volume_change, result.volume_tolerance);
+}
+
+TEST(LevelSetKinematicReconciliation, OppositeUnplacedFluxesOnDisconnectedCutsCannotCancel)
+{
+    auto mesh = std::make_shared<svmp::MeshBase>();
+    const svmp::CellShape triangle{svmp::CellFamily::Triangle, 3, 1};
+    mesh->build_from_arrays(2, {0., 0., 1., 0., 0., 1., 2., 0., 3., 0., 2., 1.},
+                            {0, 3, 6}, {0, 1, 2, 3, 4, 5}, {triangle, triangle});
+    mesh->finalize();
+    SimplexSystem s(svmp::create_mesh(std::move(mesh)), 2);
+    const auto phi = s.scalar([](const Point& x) { return -x[1]; });
+    const auto velocity = s.vector([](const Point& x) { return Point{0., x[0] < 1.5 ? 1. : -1., 0.}; });
+    const std::vector<FE::Real> sentinel{42.};
+    auto output = sentinel;
+    const auto result = s.reconcile(0.01, phi, phi, velocity, velocity, output);
+    EXPECT_NEAR(result.kinematic_volume_change, 0., 1.e-15);
+    EXPECT_FALSE(result.success);
+    EXPECT_GT(result.sign_preserving_skipped_dofs, 0u);
+    EXPECT_EQ(output, sentinel);
+}
+
+TEST(LevelSetKinematicReconciliation, UsesTheActualQuadraticVelocityOnTheReturnedInterface)
+{
+    SimplexSystem s(buildUnitTriangle(), 2, 2);
+    const auto previous = s.scalar([](const Point& x) { return x[0] - 0.25; });
+    // P2 divergence-free shear with zero corner velocities and nonzero edge modes.
+    const auto velocity = quadraticShear(s);
+    std::vector<FE::Real> endpoint;
+    const auto result = s.reconcile(0.01, previous, previous, velocity, velocity, endpoint);
+    ASSERT_TRUE(result.success) << result.diagnostic;
+    ASSERT_TRUE(result.converged);
+    EXPECT_NEAR(result.previous_interface_flux, 9.0 / 16.0, 2.0e-14);
+    EXPECT_NEAR(result.transported_volume_error, -0.01 * (9.0 / 16.0), 2.0e-14);
+    const auto& phi = s.phiDofs().getDofMap().getCellDofs(0);
+    // One endpoint of the segment lies on y=0, the other on x+y=1.
+    const auto y = endpoint[phi[1]] / (endpoint[phi[1]] - endpoint[phi[2]]);
+    const auto flux = 2.0 * y * y - (4.0 / 3.0) * y * y * y;
+    EXPECT_NEAR(result.current_interface_flux, flux, 2.0e-14);
+    EXPECT_NEAR(result.kinematic_volume_change, 0.005 * (9.0 / 16.0 + flux), 2.0e-14);
+}
+
+TEST(LevelSetKinematicReconciliation, TwoGaussZerosDoNotCertifyAQuadraticTrace)
+{
+    SimplexSystem s(buildUnitTriangle(), 2, 2);
+    const auto previous = s.scalar([](const Point& x) { return x[0] - 0.25; });
+    const auto transported = s.scalar([](const Point& x) { return 2.0 * (x[0] - 0.4); });
+    const auto velocity = [&](FE::Real height, FE::Real offset) {
+        auto w = quadraticShear(s);
+        const auto& dofs = s.velocityDofs().getDofMap().getCellDofs(0);
+        const auto nodes = FE::basis::ReferenceNodeLayout::get_lagrange_node_coords(
+            FE::ElementType::Triangle3, 2);
+        for (std::size_t i = 0; i < nodes.size(); ++i) {
+            const auto t = nodes[i][1] / height;
+            w[dofs[i]] = offset + 1.0 - 6.0 * t + 6.0 * t * t;
+        }
+        return w;
+    };
+    std::vector<FE::Real> endpoint;
+    const auto result = s.reconcile(0.1, previous, transported, velocity(0.75, 3.0),
+                                    velocity(0.6, 0.75), endpoint);
+    // At either initial trace, the nonzero quadratic kinematic residual
+    // vanishes at both degree-three Gauss points. Its integral alone is zero.
+    EXPECT_NEAR(result.previous_interface_flux, 2.25, 1.0e-13);
+    EXPECT_NEAR(result.transported_volume_error, -0.03375, 1.0e-13);
+    EXPECT_LT(result.volume_tolerance, 1.0e-7);
+    ASSERT_TRUE(result.success) << result.diagnostic;
+    EXPECT_NEAR(result.reconciled_volume_error, 0.0, 1.0e-9);
+}
+
+TEST(LevelSetKinematicReconciliation, IntegratesQuadraticVelocityOnATetrahedralCut)
+{
+    auto mesh = std::make_shared<svmp::MeshBase>();
+    mesh->build_from_arrays(
+        3, {0., 0., 0., 1., 0., 0., 0., 1., 0., 0., 0., 1.},
+        {0, 4}, {0, 1, 2, 3}, {svmp::CellShape{svmp::CellFamily::Tetra, 4, 1}});
+    mesh->finalize();
+    SimplexSystem s(svmp::create_mesh(std::move(mesh)), 3, 2);
+    const auto previous = s.scalar([](const Point& x) { return x[0] - 0.25; });
+    const auto velocity = quadraticShear(s);
+    std::vector<FE::Real> endpoint;
+    const auto result = s.reconcile(0.01, previous, previous, velocity, velocity, endpoint);
+    ASSERT_TRUE(result.success) << result.diagnostic;
+    // Integral of 4 y (1-y) over y,z >= 0, y+z <= 3/4.
+    EXPECT_NEAR(result.previous_interface_flux, 45.0 / 256.0, 2.0e-14);
+    EXPECT_NEAR(result.reconciled_volume_error, 0.0, 1.0e-12);
+}
+
+#if FE_HAS_EIGEN
+TEST(LevelSetKinematicReconciliation, RedistancingCannotPublishAChangeToThePhysicalFlux)
+{
+    namespace ts = FE::timestepping;
+    SimplexSystem s(buildStructuredTriangleMesh(14), 2);
+    const auto previous = s.scalar([](const Point& x) {
+        return ellipse(x) * (0.4 + x[0] + 0.3 * x[1]);
+    });
+    const auto velocity = s.vector([](const Point& x) { return Point{0.2 * x[0] * x[0], 0., 0.}; });
+    const auto factory = ts::test::createTestFactory();
+    auto history = ts::TimeHistory::allocate(*factory, s.system.dofHandler().getNumDofs(), 1);
+    std::vector<FE::Real> state(s.system.dofHandler().getNumDofs(), 0.);
+    std::copy(previous.begin(), previous.end(), state.begin() + s.system.fieldDofOffset(s.phi));
+    std::copy(velocity.begin(), velocity.end(), state.begin() + s.system.fieldDofOffset(s.velocity));
+    ts::test::setVectorByDof(history.u(), state);
+    ts::test::setVectorByDof(history.uPrev(), state);
+    history.setStepIndex(1);
+    history.setTime(0.001);
+    history.setDt(0.001);
+    auto config = std::make_shared<level_set::LevelSetMaintenanceConfiguration>();
+    config->transport.level_set.field_name = "phi";
+    config->transport.velocity.field_name = "w";
+    config->transport.kinematic_reconciliation.enabled = true;
+    config->transport.interface_preserving_redistancing.enabled = true;
+    std::vector<level_set::LevelSetMaintenanceRequest> requests{{.configuration = config}};
+    requests.front().runtime.redistancing_accumulated_displacement = 1.;
+    const auto baseline = level_set::LevelSetKinematicBaseline{.level_set_field=s.phi, .velocity_field=s.velocity, .step=0, .level_set=previous, .velocity=velocity};
+    std::vector<FE::Real> physical_endpoint;
+    int published_redistancings = 0;
+    const level_set::LevelSetMaintenanceStageObserver observe =
+        [&](level_set::MaintenanceSubstage stage, auto, std::span<const FE::Real> after) {
+            if (stage == level_set::MaintenanceSubstage::GeometryReconciliation) {
+                physical_endpoint.assign(after.begin(), after.end());
+            }
+            if (stage == level_set::MaintenanceSubstage::Reinitialization) {
+                ++published_redistancings;
+            }
+        };
+    ASSERT_TRUE(level_set::applyLevelSetMaintenance({.fe_system = &s.system}, history,
+        requests, {}, observe, nullptr, nullptr, {&baseline, 1}));
+    ASSERT_FALSE(physical_endpoint.empty());
+    EXPECT_EQ(published_redistancings, 0);
+    EXPECT_EQ(requests.front().runtime.redistancing_calls, 0u);
+    EXPECT_GT(requests.front().runtime.redistancing_accumulated_displacement, 1.);
+    EXPECT_EQ(ts::test::getVectorByDof(history.u()), physical_endpoint);
+}
+#endif
 
 TEST(LevelSetKinematicReconciliation, LeavesAConsistentTranslationUnchanged)
 {
@@ -306,7 +514,7 @@ TEST(LevelSetKinematicReconciliation, LeavesAConsistentTranslationUnchanged)
     std::vector<FE::Real> reconciled;
     const auto result = s.reconcile(dt, previous, transported, velocity, velocity, reconciled);
     ASSERT_TRUE(result.success) << result.diagnostic;
-    EXPECT_TRUE(result.converged);
+    EXPECT_TRUE(result.converged) << result.diagnostic;
     EXPECT_GT(result.previous_interface_cells, 0u);
     EXPECT_LT(result.max_abs_correction, 1.0e-14);
     EXPECT_NEAR(result.transported_volume_error, 0.0, 1.0e-13);
@@ -333,7 +541,7 @@ TEST(LevelSetKinematicReconciliation, RemovesALocalVolumeErrorWithoutAGlobalShif
     std::vector<FE::Real> reconciled;
     const auto result = s.reconcile(dt, previous, transported, zero, zero, reconciled);
     ASSERT_TRUE(result.success) << result.diagnostic;
-    EXPECT_TRUE(result.converged);
+    EXPECT_TRUE(result.converged) << result.diagnostic;
     EXPECT_EQ(result.sign_preserving_skipped_dofs, 0u);
     EXPECT_EQ(result.sign_preserving_redistributed_dofs, 0u);
     EXPECT_NEAR(result.kinematic_volume_change, 0.0, 1.0e-15);
@@ -388,7 +596,7 @@ TEST(LevelSetKinematicReconciliation, UsesTheKinematicFluxOfARigidRotation)
     std::vector<FE::Real> reconciled;
     const auto result = s.reconcile(dt, previous, transported, velocity, velocity, reconciled);
     ASSERT_TRUE(result.success) << result.diagnostic;
-    EXPECT_TRUE(result.converged);
+    EXPECT_TRUE(result.converged) << result.diagnostic;
     EXPECT_NEAR(result.previous_interface_flux, 0.0, 1.0e-13);
     EXPECT_NEAR(result.current_interface_flux, 0.0, 1.0e-13);
     EXPECT_GT(std::abs(result.transported_volume_error), 1.0e-8);
@@ -407,25 +615,19 @@ TEST(LevelSetKinematicReconciliation, PreservesTheSignClassOfEveryNode)
     // change goes to the neighbouring columns.
     const auto transported = s.scalar([](const Point& x) { return x[0] - 0.49; });
     const auto zero = s.vector([](const Point&) { return Point{0.0, 0.0, 0.0}; });
-    std::vector<FE::Real> reconciled;
+    auto reconciled = transported;
     const auto result = s.reconcile(dt, previous, transported, zero, zero, reconciled);
-    ASSERT_TRUE(result.success) << result.diagnostic;
+    EXPECT_FALSE(result.success);
+    EXPECT_FALSE(result.applied);
+    EXPECT_TRUE(result.converged) << result.diagnostic;
+    EXPECT_GT(std::abs(result.reconciled_volume_error), result.volume_tolerance);
+    EXPECT_EQ(reconciled, transported);
     EXPECT_EQ(result.sign_preserving_redistributed_dofs, 9u);
     EXPECT_GT(std::abs(result.transported_volume_error), 1.0e-2);
     // The whole interface is blocked here, so only part of the change can be
     // undone without moving the zero set across the column.
     EXPECT_LT(std::abs(result.reconciled_volume_error),
               0.75 * std::abs(result.transported_volume_error));
-    const auto* map = s.phiDofs().getEntityDofMap();
-    for (FE::GlobalIndex v = 0; v < map->numVertices(); ++v) {
-        const auto dof = static_cast<std::size_t>(map->getVertexDofs(v).front());
-        const auto x = s.system.meshAccess().getNodeCoordinates(v);
-        EXPECT_EQ(std::signbit(reconciled[dof]), std::signbit(transported[dof]));
-        EXPECT_GE(std::abs(reconciled[dof]), 0.5 * std::abs(transported[dof]) - 1.0e-15);
-        if (std::abs(x[0] - 0.5) < 1.0e-12) {
-            EXPECT_NEAR(reconciled[dof], 0.5 * transported[dof], 1.0e-15);
-        }
-    }
 }
 
 TEST(LevelSetKinematicReconciliation, KeepsTheDegeneracyClassOfEveryCut)
@@ -445,21 +647,22 @@ TEST(LevelSetKinematicReconciliation, KeepsTheDegeneracyClassOfEveryCut)
     const auto previous = s.scalar([](const Point& x) { return x[0] - 0.51; });
     const auto transported = s.scalar([&](const Point& x) { return x[0] - 0.5 + gap; });
     const auto zero = s.vector([](const Point&) { return Point{0.0, 0.0, 0.0}; });
-    std::vector<FE::Real> reconciled;
+    auto reconciled = transported;
     const auto result = s.reconcile(dt, previous, transported, zero, zero, reconciled);
-    ASSERT_TRUE(result.success) << result.diagnostic;
+    EXPECT_FALSE(result.success);
+    EXPECT_FALSE(result.applied);
+    EXPECT_TRUE(result.converged) << result.diagnostic;
+    EXPECT_GT(std::abs(result.reconciled_volume_error), result.volume_tolerance);
+    EXPECT_EQ(reconciled, transported);
     EXPECT_GE(result.degeneracy_frozen_dofs, 5u);
     const auto* map = s.phiDofs().getEntityDofMap();
     for (FE::GlobalIndex v = 0; v < map->numVertices(); ++v) {
         const auto dof = static_cast<std::size_t>(map->getVertexDofs(v).front());
         const auto x = s.system.meshAccess().getNodeCoordinates(v);
-        if (std::abs(x[0] - 0.5) < 1.0e-12) {
-            const auto row = static_cast<int>(std::lround(x[1] * 8.0));
-            if (row % 2 == 0) {
-                EXPECT_EQ(reconciled[dof], transported[dof]) << "row " << row;
-            } else {
-                EXPECT_NEAR(reconciled[dof], 0.5 * transported[dof], 1.0e-18) << "row " << row;
-            }
+        if (std::abs(x[0] - 0.5) < 1.0e-12 &&
+            static_cast<int>(std::lround(x[1]*8.0)) % 2 == 0) {
+            EXPECT_TRUE(std::binary_search(result.degeneracy_frozen_dof_indices.begin(),
+                                           result.degeneracy_frozen_dof_indices.end(), dof));
         }
     }
     const auto before = builderCutClasses(s, transported);
@@ -509,7 +712,7 @@ TEST(LevelSetKinematicReconciliation, ReconcilesTetrahedralCuts)
         std::vector<FE::Real> reconciled;
         const auto result = s.reconcile(dt, previous, transported, zero, zero, reconciled);
         ASSERT_TRUE(result.success) << result.diagnostic;
-        EXPECT_TRUE(result.converged);
+        EXPECT_TRUE(result.converged) << result.diagnostic;
         EXPECT_GT(std::abs(result.transported_volume_error), 1.0e-6);
         EXPECT_LT(std::abs(result.reconciled_volume_error),
                   1.0e-3 * std::abs(result.transported_volume_error));
@@ -541,9 +744,13 @@ TEST(LevelSetKinematicReconciliation, KeepsTheBuilderCutClassOfTetrahedra)
     }
     ASSERT_GT(changed, 0u);
 
-    std::vector<FE::Real> reconciled;
+    auto reconciled = transported;
     const auto result = s.reconcile(1.0, previous, transported, zero, zero, reconciled);
-    ASSERT_TRUE(result.success) << result.diagnostic;
+    EXPECT_FALSE(result.success);
+    EXPECT_FALSE(result.applied);
+    EXPECT_TRUE(result.converged) << result.diagnostic;
+    EXPECT_GT(std::abs(result.reconciled_volume_error), result.volume_tolerance);
+    EXPECT_EQ(reconciled, transported);
     EXPECT_GT(result.degeneracy_frozen_dofs, 0u);
     const auto after = builderCutClasses(s, reconciled);
     ASSERT_EQ(before.size(), after.size());
@@ -578,7 +785,7 @@ TEST(LevelSetKinematicReconciliation, RedistributesTheShareOfFrozenNodes)
     std::vector<FE::Real> reconciled;
     const auto result = s.reconcile(1.0, previous, transported, zero, zero, reconciled);
     ASSERT_TRUE(result.success) << result.diagnostic;
-    EXPECT_TRUE(result.converged);
+    EXPECT_TRUE(result.converged) << result.diagnostic;
     EXPECT_GT(result.degeneracy_frozen_dofs, 0u);
     EXPECT_GE(result.sign_preserving_redistributed_dofs, result.degeneracy_frozen_dofs);
     EXPECT_GT(std::abs(result.transported_volume_error), 1.0e-5);
@@ -604,21 +811,35 @@ TEST(LevelSetKinematicReconciliation, FreezingDoesNotSpreadThroughRedistribution
     // y = 0.5 at 1.6e-3 h, the others at 3e-3 h, and the correction lowers
     // each to 3/4 of its distance.  Only cells at the near row change class,
     // but moving their volume into the other rows would push those below the
-    // pruning threshold too.  The addition is withheld there, so exactly the
-    // nodes that freezing alone would freeze stay frozen and every other node
-    // keeps its own correction.
+    // pruning threshold too. A second, stationary interface near x=0.9
+    // has no connection to that cut-cell patch.
     const auto gap = [&](const Point& x) {
         return (std::abs(x[1] - 0.5) < 1.0e-9 ? 1.6e-3 : 3.0e-3) * h;
     };
-    const auto previous = s.scalar([&](const Point& x) { return x[0] - 0.5 + 0.75 * gap(x); });
-    const auto transported = s.scalar([&](const Point& x) { return x[0] - 0.5 + gap(x); });
+    const auto previous = s.scalar([&](const Point& x) {
+        return x[0] < 0.7 ? x[0] - 0.5 + 0.75 * gap(x) : 0.9 - x[0];
+    });
+    const auto transported = s.scalar([&](const Point& x) {
+        return x[0] < 0.7 ? x[0] - 0.5 + gap(x) : 0.9 - x[0];
+    });
     const auto zero = s.vector([](const Point&) { return Point{0.0, 0.0, 0.0}; });
-    std::vector<FE::Real> reconciled;
+    auto reconciled = transported;
     const auto result = s.reconcile(1.0, previous, transported, zero, zero, reconciled);
     ASSERT_TRUE(result.success) << result.diagnostic;
+    EXPECT_TRUE(result.volume_balance_satisfied);
     EXPECT_EQ(result.degeneracy_frozen_dofs, 20u);
-    EXPECT_LT(std::abs(result.reconciled_volume_error),
-              0.12 * std::abs(result.transported_volume_error));
+    EXPECT_EQ(result.sign_preserving_skipped_dofs, 0u);
+    EXPECT_NEAR(s.negativeVolume(reconciled), s.negativeVolume(previous), result.volume_tolerance);
+    for (const auto dof : result.degeneracy_frozen_dof_indices) {
+        EXPECT_EQ(reconciled[dof], transported[dof]);
+    }
+    const auto* map = s.phiDofs().getEntityDofMap();
+    for (FE::GlobalIndex v = 0; v < map->numVertices(); ++v) {
+        if (s.system.meshAccess().getNodeCoordinates(v)[0] > 0.7) {
+            const auto i = map->getVertexDofs(v).front();
+            EXPECT_EQ(reconciled[i], transported[i]) << "stationary interface vertex " << v;
+        }
+    }
     const auto before = builderCutClasses(s, transported);
     const auto after = builderCutClasses(s, reconciled);
     ASSERT_EQ(before.size(), after.size());

@@ -121,6 +121,14 @@ struct LevelSetRedistancingTrigger {
     std::span<const Real> fe_solution,
     int step);
 
+/// Check the primary kinematic correction of a projected endpoint against the
+/// previous accepted step. A numerical failure returns its diagnostic so the
+/// time loop can reject and retry. Invalid inputs throw. No state is published.
+[[nodiscard]] std::optional<std::string> levelSetKinematicCandidateRejection(
+    const systems::FESystem& system, const LevelSetMaintenanceConfiguration& configuration,
+    int prospective_step, Real dt, std::span<const Real> fe_solution,
+    std::span<const LevelSetKinematicBaseline> baselines);
+
 /**
  * @brief Accepted-step maintenance of every non-conservative request, as
  *        one transaction.

@@ -32,6 +32,7 @@
 #include "Physics/Formulations/NavierStokes/NavierStokesPostProcessing.h"
 
 #include "FE/Systems/TwoFluidStageRecords.h"
+#include "FE/TimeStepping/GeneralizedAlpha.h"
 
 #include "FE/Analysis/ConstitutiveLawMetadata.h"
 #include "FE/Constitutive/MetadataTaggedModel.h"
@@ -53,6 +54,7 @@
 #include "FE/Systems/FormsInstaller.h"
 #include "FE/Systems/FormulationBuilder.h"
 #include "FE/Systems/MeshBoundaryKinematics.h"
+#include "FE/Systems/SystemCollectives.h"
 #include "FE/Systems/VertexFieldInitialization.h"
 #include "FE/Assembly/Assembler.h"
 #include "FE/Backends/Interfaces/GenericVector.h"
@@ -72,6 +74,7 @@
 #include <string>
 #include <string_view>
 #include <utility>
+#include <variant>
 #include <vector>
 
 namespace svmp {
@@ -116,7 +119,12 @@ IncompressibleNavierStokesVMSModule::IncompressibleNavierStokesVMSModule(
 
 namespace {
 
-FormExpr bulkCellMetric(const NavierStokesTerms& terms)
+struct BulkCellScales {
+    FormExpr metric;
+    FormExpr inverse_divergence_length_squared;
+};
+
+BulkCellScales bulkCellScales(const NavierStokesTerms& terms, bool phase_restricted)
 {
     auto cell = FE::ElementType::Unknown;
     bool mixed_families = false;
@@ -134,11 +142,21 @@ FormExpr bulkCellMetric(const NavierStokesTerms& terms)
         fs::forEachNodeThroughLawBodies(*field, read_space);
     }
     if (cell != FE::ElementType::Unknown && !mixed_families) {
-        return cellMetric(cell);
+        auto metric = cellMetric(cell);
+        auto inverse_length_squared = trace(metric);
+        if (phase_restricted && to_mesh_family(cell) == CellFamily::Tetra) {
+            // On the active tetrahedral mesh, scale the pressure subscale by
+            // sum_a |grad lambda_a|^2 for the four parent barycentric coordinates.
+            // Their reference Gram sum is I + 11^T, whereas cellMetric normalizes
+            // that matrix to unit determinant. This length also applies on fully wet parents.
+            inverse_length_squared = FormExpr::constant(std::cbrt(4.0)) * inverse_length_squared;
+        }
+        return {metric, inverse_length_squared};
     }
     // A form written without a unique parent cell uses the original chart metric.
     const auto inverse = Jinv();
-    return transpose(inverse) * inverse;
+    auto metric = transpose(inverse) * inverse;
+    return {metric, trace(metric)};
 }
 
 } // namespace
@@ -182,17 +200,17 @@ NavierStokesVMSIntegrands navierStokesVMSIntegrands(const NavierStokesTerms& t,
 
     // Static subscales use the physical step between endpoints and the parent cell's inverse-length metric.
     //   tau_M = 1 / (rho sqrt(4 ct_m^2/dt^2 + a.K a + ct_c (K:K) nu^2 + eps)),
-    //   tau_C = 1 / (tau_M tr K + eps).
+    //   tau_C = 1 / (tau_M h_div^-2 + eps).
     const auto eps = FormExpr::constant(s.epsilon);
     const auto dts = FormExpr::timeStep();
     const auto ct_m = FormExpr::constant(s.ct_m);
     const auto ct_c = FormExpr::constant(s.ct_c);
-    const auto K = bulkCellMetric(t);
+    const auto [K, inverse_divergence_length_squared] = bulkCellScales(t, s.phase_restricted);
     const auto nu = mu / rho;
     const auto kT = FormExpr::constant(4.0) * (ct_m * ct_m) / (dts * dts);
     const auto tau_m = FormExpr::constant(1.0) /
                        (rho * sqrt(kT + inner(a, K * a) + ct_c * doubleContraction(K, K) * (nu * nu) + eps));
-    const auto tau_c = FormExpr::constant(1.0) / (tau_m * trace(K) + eps);
+    const auto tau_c = FormExpr::constant(1.0) / (tau_m * inverse_divergence_length_squared + eps);
     const auto u_s = -tau_m * R_m;                                         // u'
     const auto p_s = -tau_c * div(u);                                      // p'
     const auto u_adv = s.convection ? (u + u_s - w) : a;
@@ -376,6 +394,7 @@ void IncompressibleNavierStokesVMSModule::registerOn(fs::FESystem& system) const
     const auto P = fields.unknownSymbols(std::move(preflight.p_spec), "pressure", o.pressure_field_name, "q");
     const auto& [u_id, u, v] = U;
     const auto& [p_id, p, q] = P;
+    system.attachment<FE::timestepping::GeneralizedAlphaEndpointFields>().algebraic_fields.insert(p_id);
     const auto body_force = preflight.body_force_spec
         ? fields.prescribedSymbol(std::move(*preflight.body_force_spec),
                                   o.auto_register_body_force_field, "momentum source", o.body_force_field_name)
@@ -455,7 +474,8 @@ void IncompressibleNavierStokesVMSModule::registerOn(fs::FESystem& system) const
     const auto r = navierStokesVMSIntegrands(
         t, {.convection = o.enable_convection, .ale = o.enable_ale, .moving_control_volume = mcv,
             .conservative_transport = conservative, .vms = preflight.enable_vms,
-            .ct_m = o.ct_m, .ct_c = o.ct_c, .epsilon = o.stabilization_epsilon});
+            .ct_m = o.ct_m, .ct_c = o.ct_c, .epsilon = o.stabilization_epsilon,
+            .phase_restricted = cut_liquid});
     FormExpr M = r.momentum.dx(Omega);
     FormExpr C = r.continuity.dx(Omega);
     const auto pspg_grad_p = r.pspg_pressure_gradient.isValid() ? r.pspg_pressure_gradient.dx(Omega) : FormExpr{};
@@ -575,6 +595,75 @@ void IncompressibleNavierStokesVMSModule::registerOn(fs::FESystem& system) const
 // Initial state
 // ---------------------------------------------------------------------------
 
+namespace {
+
+// With zero velocity and body force, the resting fluid pressure can equal
+// the common prescribed pressure. Capillarity or an internal pressure jump
+// requires information about the interface geometry or the other phase.
+std::optional<Real> restingPressureDatum(const Options& o, int dimension)
+{
+    if (!o.traction_neumann.empty() || !o.traction_robin.empty() ||
+        o.body_force_vertex_data || !o.body_force_field_name.empty()) {
+        return std::nullopt;
+    }
+    for (int d = 0; d < dimension; ++d) {
+        if (o.body_force[d] != 0 ||
+            (o.has_body_force_spacetime && !bc::isZeroConstantScalarValue(o.body_force_spacetime[d]))) {
+            return std::nullopt;
+        }
+    }
+    std::optional<Real> datum;
+    const auto agrees = [&](const Options::ScalarValue& value) {
+        const auto* constant = std::get_if<Real>(&value);
+        if (!constant || (datum && *datum != *constant)) return false;
+        datum = *constant;
+        return true;
+    };
+    for (const auto& boundary : o.free_surface) {
+        if (!isExteriorOnePhaseBoundary(boundary) || surfaceStressActive(boundary) ||
+            !agrees(boundary.external_pressure)) return std::nullopt;
+    }
+    for (const auto& bc : o.coupled_outflow_rcr) {
+        if (!agrees(bc.C == 0 ? bc.Pd : bc.X0)) return std::nullopt;
+    }
+    for (const auto& bc : o.coupled_outflow_rcrcr) {
+        if (!agrees(bc.P10)) return std::nullopt;
+    }
+    for (const auto& bc : o.pressure_outflow) {
+        if (!agrees(bc.pressure)) return std::nullopt;
+    }
+    for (const auto& bc : o.pressure_dirichlet) {
+        if (!agrees(bc.value)) return std::nullopt;
+    }
+    for (const auto& gauge : o.node_pressure_constraints.values) {
+        if (!agrees(gauge.pressure)) return std::nullopt;
+    }
+    return datum;
+}
+
+bool hasInitialFluidState(const fs::FESystem& system, FE::backends::GenericVector& state,
+                          FieldId velocity, FieldId pressure)
+{
+    const auto rows = state.ownedGlobalRows();
+    const auto view = state.createAssemblyView();
+    if (!view) throw std::runtime_error("Navier-Stokes initial fluid state requires a vector read view");
+    bool supplied = false;
+    for (const auto field : {velocity, pressure}) {
+        const auto first = system.fieldDofOffset(field);
+        const auto end = first + system.fieldDofHandler(field).getNumDofs();
+        const auto begin_row = std::lower_bound(rows.begin(), rows.end(), first);
+        const auto end_row = std::lower_bound(begin_row, rows.end(), end);
+        supplied |= std::any_of(begin_row, end_row, [&](auto row) { return view->getVectorEntry(row) != 0; });
+    }
+#if FE_HAS_MPI
+    return fs::collectiveAnyTrue(supplied, fs::CollectiveCommunicator(system.activeMpiCommunicator()));
+#else
+    return supplied;
+#endif
+}
+
+} // namespace
+
 void IncompressibleNavierStokesVMSModule::applyInitialConditions(const fs::FESystem& system,
                                                                  FE::backends::GenericVector& u0) const
 {
@@ -584,15 +673,22 @@ void IncompressibleNavierStokesVMSModule::applyInitialConditions(const fs::FESys
     }
     const auto& o = options_;
     const auto& init = o.hydrostatic_pressure_initialization;
+    const auto velocity = system.findFieldByName(o.velocity_field_name);
     auto initialized_dofs = fs::initializeFieldFromMeshVertexField(
-        system, u0, system.findFieldByName(o.velocity_field_name),
+        system, u0, velocity,
         "IncompressibleNavierStokesVMSModule: mesh-field velocity initialization");
     if (!init.enabled) {
+        const auto pressure = system.findFieldByName(o.pressure_field_name);
+        std::optional<Real> datum;
+        if (velocity != FE::INVALID_FIELD_ID && pressure != FE::INVALID_FIELD_ID) {
+            datum = restingPressureDatum(o, system.meshAccess().dimension());
+            if (datum && (*datum == 0 || hasInitialFluidState(system, u0, velocity, pressure))) datum.reset();
+        }
         initialized_dofs += fs::initializeFieldFromMeshVertexField(
-            system, u0, system.findFieldByName(o.pressure_field_name),
-            "IncompressibleNavierStokesVMSModule: mesh-field pressure initialization");
+            system, u0, pressure,
+            "IncompressibleNavierStokesVMSModule: mesh-field pressure initialization", datum);
         if (initialized_dofs > 0u) {
-            FE::logRecord(post::navierStokesLog("mesh-field initialization")
+            FE::logRecord(post::navierStokesLog("fluid field initialization")
                               .diagnostic("mesh_field_initialization")
                               .integer("initialized_dofs", initialized_dofs)
                               .quoted("velocity_field", o.velocity_field_name)

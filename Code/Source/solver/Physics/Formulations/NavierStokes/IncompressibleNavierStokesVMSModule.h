@@ -1110,6 +1110,9 @@ struct NavierStokesVMSSettings {
     FE::Real ct_m{1.0};
     FE::Real ct_c{36.0};
     FE::Real epsilon{1.0e-12};
+    // For integration on one side of a level set. On tetrahedra the pressure
+    // subscale uses the parent barycentric gradients throughout this phase.
+    bool phase_restricted{false};
 };
 
 /// Integrands of the bulk residual.

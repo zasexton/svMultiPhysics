@@ -38,6 +38,7 @@
 #include <iostream>
 #include <memory>
 #include <numeric>
+#include <optional>
 #include <span>
 #include <sstream>
 #include <stdexcept>
@@ -329,7 +330,7 @@ FourNorms rates(const FourNorms& coarse, const FourNorms& fine)
 
 void expectSimplexGradDivWork(int dim, const std::vector<real_t>& coordinates,
                               const std::vector<std::vector<index_t>>& orderings,
-                              double measure, double expected_tau_c)
+                              double measure, double expected_tau_c, bool cut = false)
 {
     const CellShape shape{dim == 2 ? CellFamily::Triangle : CellFamily::Tetra, dim + 1, 1};
     const auto element = dim == 2 ? FE::ElementType::Triangle3 : FE::ElementType::Tetra4;
@@ -339,7 +340,7 @@ void expectSimplexGradDivWork(int dim, const std::vector<real_t>& coordinates,
         auto base = std::make_shared<MeshBase>();
         base->build_from_arrays(dim, coordinates, {0, dim + 1}, vertices, {shape});
         base->finalize();
-        auto mesh = create_mesh(std::move(base));
+        auto mesh = create_mesh(base);
         FE::systems::FESystem system(mesh);
         auto scalar = std::make_shared<FE::spaces::H1Space>(element, 1);
         auto velocity = std::make_shared<FE::spaces::ProductSpace>(scalar, dim);
@@ -350,11 +351,39 @@ void expectSimplexGradDivWork(int dim, const std::vector<real_t>& coordinates,
         options.enable_vms = true;
         options.jit_policy.enable = true;
         options.jit_policy.enable_was_explicitly_set = true;
-        options.node_pressure_constraints.id_type =
-            ns::IncompressibleNavierStokesVMSOptions::NodePressureConstraintIdType::LocalVertexId;
-        options.node_pressure_constraints.values = {{.node_id = 0, .pressure = 0.0}};
+        std::optional<FE::level_set::CutGeometry> geometry;
+        std::vector<double> nodal_phi;
+        FE::FieldId phi = FE::INVALID_FIELD_ID;
+        if (cut) {
+            // Retain x < h_x/2. Its fraction of the parent measure is 1 - 2^(-dim).
+            for (int node = 0; node <= dim; ++node) {
+                nodal_phi.push_back(coordinates[node * dim] - 0.5 * coordinates[dim]);
+            }
+            const auto field = base->attach_field(EntityKind::Vertex, "phi", FieldScalarType::Float64, 1);
+            std::copy(nodal_phi.begin(), nodal_phi.end(), base->field_data_as<real_t>(field));
+            phi = system.addField({.name = "phi", .space = scalar,
+                                   .source_kind = FE::systems::FieldSourceKind::PrescribedData});
+            constexpr int marker = 27190;
+            geometry = FE::level_set::cutGeometry(system, *mesh, {.level_set_field_name = "phi",
+                .domain_id = "half_leg", .interface_marker = marker});
+            (void)geometry->side(FE::forms::CutVolumeSide::Negative);
+            options.free_surface.push_back({.implementation = ns::FreeSurfaceImplementation::UnfittedLevelSet,
+                .interface_marker = marker, .level_set_field_name = "phi", .generated_interface_domain_id = "half_leg",
+                .active_domain = ns::FreeSurfaceActiveDomain::LevelSetNegative, .surface_tension = 0.0,
+                .small_cut_aggregation = false});
+        } else {
+            options.node_pressure_constraints.id_type =
+                ns::IncompressibleNavierStokesVMSOptions::NodePressureConstraintIdType::LocalVertexId;
+            options.node_pressure_constraints.values = {{.node_id = 0, .pressure = 0.0}};
+        }
         ns::IncompressibleNavierStokesVMSModule(velocity, scalar, std::move(options)).registerOn(system);
         system.setup();
+        if (geometry) {
+            std::vector<double> coefficients(system.fieldDofHandler(phi).getNumDofs());
+            (void)system.projectMeshVertexValuesToFieldCoefficients(phi, nodal_phi, 1, coefficients);
+            system.setPrescribedFieldCoefficients(phi, coefficients);
+            (void)geometry->refresh();
+        }
 
         // u = x/dim has unit divergence and zero strong momentum residual at constant time.
         const auto u = system.findFieldByName("u");
@@ -381,7 +410,11 @@ void expectSimplexGradDivWork(int dim, const std::vector<real_t>& coordinates,
         FE::assembly::DenseVectorView residual(n);
         const auto result = system.assemble(request, state, nullptr, &residual);
         ASSERT_TRUE(result.success) << result.error_message;
-        expectCompiled(system);
+        if (cut) {
+            EXPECT_FALSE(system.operatorDefinition("equations").cut_volumes.empty());
+        } else {
+            expectCompiled(system);
+        }
 
         // Testing the momentum residual with u gives integral(2 mu / dim + tau_C).
         const double work = std::inner_product(values.begin(), values.end(), residual.data().begin(), 0.0);
@@ -448,6 +481,28 @@ TEST(NavierStokesVMSManufactured, TetrahedronGradDivWorkIsInvariantToVertexOrder
     expectSimplexGradDivWork(3, {0, 0, 0, 0.025, 0, 0, 0, 0.0125, 0, 0, 0, 0.05},
                              {{0, 1, 2, 3}, {1, 2, 0, 3}, {2, 3, 0, 1}, {3, 0, 2, 1}},
                              0.025 * 0.0125 * 0.05 / 6.0, 188.409386781600);
+}
+
+TEST(NavierStokesVMSManufactured, CutTetrahedronGradDivWorkUsesBarycentricGradientsAcrossReferenceOrigins)
+{
+    // For an axis-aligned tetrahedron sum_a |grad lambda_a|^2 = 2 sum_i h_i^-2.
+    // The transient and viscous terms in tau_M still use the unit-determinant metric.
+    constexpr double hx = 0.025, hy = 0.0125, hz = 0.05;
+    const double inverse_length_squared = 2.0 * (1.0 / (hx * hx) + 1.0 / (hy * hy) + 1.0 / (hz * hz));
+    const std::array<double, 3> h{hx, hy, hz};
+    double metric_norm_squared = 0.0;
+    for (int i = 0; i < 3; ++i) {
+        for (int j = 0; j < 3; ++j) {
+            const double gij = (i == j ? 2.0 : 1.0) / (std::cbrt(4.0) * h[i] * h[j]);
+            metric_norm_squared += gij * gij;
+        }
+    }
+    constexpr double nu = 0.00088733 / 997.0;
+    const double tau_m = 1.0 / (997.0 * std::sqrt(4.0e6 + 36.0 * nu * nu * metric_norm_squared + 1.0e-12));
+    const double expected_tau_c = 1.0 / (tau_m * inverse_length_squared + 1.0e-12);
+    expectSimplexGradDivWork(3, {0, 0, 0, hx, 0, 0, 0, hy, 0, 0, 0, hz},
+                             {{0, 1, 2, 3}, {1, 2, 0, 3}, {2, 3, 0, 1}, {3, 0, 2, 1}},
+                             (7.0 / 8.0) * hx * hy * hz / 6.0, expected_tau_c, true);
 }
 
 TEST(NavierStokesVMSManufactured, CutTractionAnchorsUniformPressureDuringUniformAcceleration)

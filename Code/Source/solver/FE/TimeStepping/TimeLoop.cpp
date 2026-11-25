@@ -822,59 +822,56 @@ void zeroVectorEntries(std::span<const GlobalIndex> dofs, backends::GenericVecto
     view->finalizeAssembly();
 }
 
-void copyVectorEntries(std::span<const GlobalIndex> dofs, backends::GenericVector& dst, backends::GenericVector& src)
+using FieldDofRange = std::pair<GlobalIndex, GlobalIndex>;
+
+void copyVectorRanges(std::span<const FieldDofRange> ranges, backends::GenericVector& dst, backends::GenericVector& src)
 {
-    if (dofs.empty()) {
+    if (ranges.empty()) {
         return;
     }
 
     auto dst_view = dst.createAssemblyView();
     auto src_view = src.createAssemblyView();
-    FE_CHECK_NOT_NULL(dst_view.get(), "TimeLoop: copyVectorEntries dst view");
-    FE_CHECK_NOT_NULL(src_view.get(), "TimeLoop: copyVectorEntries src view");
+    FE_CHECK_NOT_NULL(dst_view.get(), "TimeLoop: copyVectorRanges dst view");
+    FE_CHECK_NOT_NULL(src_view.get(), "TimeLoop: copyVectorRanges src view");
 
     dst_view->beginAssemblyPhase();
-    for (const auto dof : dofs) {
-        const auto value = src_view->getVectorEntry(dof);
-        dst_view->addVectorEntry(dof, value, assembly::AddMode::Insert);
+    for (const auto& [first, last] : ranges) {
+        for (auto dof = first; dof < last; ++dof) {
+            dst_view->addVectorEntry(dof, src_view->getVectorEntry(dof), assembly::AddMode::Insert);
+        }
     }
     dst_view->finalizeAssembly();
 }
 
-std::vector<GlobalIndex> collectNonTimeDerivativeDofs(
-    const systems::FESystem& system,
-    const std::vector<FieldId>& dt_fields)
+struct GeneralizedAlphaAlgebraicDofs {
+    std::vector<GlobalIndex> all;
+    std::vector<FieldDofRange> stage_only;
+};
+
+GeneralizedAlphaAlgebraicDofs generalizedAlphaAlgebraicDofs(
+    const systems::FESystem& system, const std::vector<FieldId>& dt_fields)
 {
-    std::vector<GlobalIndex> nondt_dofs;
+    GeneralizedAlphaAlgebraicDofs dofs;
     if (dt_fields.empty()) {
-        return nondt_dofs;
+        return dofs;
     }
-
+    const auto* endpoints = system.findAttachment<GeneralizedAlphaEndpointFields>();
     const auto& fmap = system.fieldMap();
-    std::vector<unsigned char> is_dt_field(fmap.numFields(), 0u);
-    for (const auto fid : dt_fields) {
-        if (fid == INVALID_FIELD_ID) {
+    for (std::size_t i = 0; i < fmap.numFields(); ++i) {
+        const auto field = system.findFieldByName(fmap.getField(i).name);
+        if (std::find(dt_fields.begin(), dt_fields.end(), field) != dt_fields.end()) {
             continue;
         }
-        const auto& rec = system.fieldRecord(fid);
-        const auto field_index = fmap.getFieldIndex(rec.name);
-        if (field_index < 0) {
-            continue;
+        const auto [first, last] = fmap.getFieldDofRange(i);
+        for (auto dof = first; dof < last; ++dof) {
+            dofs.all.push_back(dof);
         }
-        is_dt_field[static_cast<std::size_t>(field_index)] = 1u;
-    }
-
-    nondt_dofs.reserve(static_cast<std::size_t>(system.dofHandler().getNumDofs()));
-    for (std::size_t field_index = 0; field_index < fmap.numFields(); ++field_index) {
-        if (is_dt_field[field_index] != 0u) {
-            continue;
-        }
-        const auto range = fmap.getFieldDofRange(field_index);
-        for (GlobalIndex dof = range.first; dof < range.second; ++dof) {
-            nondt_dofs.push_back(dof);
+        if (first != last && (!endpoints || !endpoints->algebraic_fields.contains(field))) {
+            dofs.stage_only.emplace_back(first, last);
         }
     }
-    return nondt_dofs;
+    return dofs;
 }
 
 class Dt1NoHistoryIntegrator final : public systems::TimeIntegrator {
@@ -2544,6 +2541,7 @@ TimeLoopReport TimeLoop::run(systems::TransientSystem& transient,
             std::optional<double> monolithic_aux_stage_alpha_f{};
             int collocation_stages_used = 0;
             bool generalized_alpha_first_order_rate_n_saved = false;
+            GeneralizedAlphaAlgebraicDofs algebraic_dofs;
             std::optional<CandidateStageObservation>
                 prepared_candidate_stage{};
 
@@ -2787,7 +2785,8 @@ TimeLoopReport TimeLoop::run(systems::TransientSystem& transient,
 	                        auto& sys = transient.system();
 	                        const auto& constraints = sys.constraints();
 	                            const auto dt_fields = sys.timeDerivativeFields(options_.newton.residual_op);
-                            const auto nondt_dofs = collectNonTimeDerivativeDofs(sys, dt_fields);
+                            algebraic_dofs = generalizedAlphaAlgebraicDofs(sys, dt_fields);
+                            const auto& nondt_dofs = algebraic_dofs.all;
 
 	                        // Ensure uDot storage exists and is initialized before the stage solve.
 	                        const bool had_u_dot = history.hasUDotState();
@@ -3154,23 +3153,21 @@ TimeLoopReport TimeLoop::run(systems::TransientSystem& transient,
                                 });
                             const double inv_af = 1.0 / ga1_params->alpha_f;
                             const double c_prev = (ga1_params->alpha_f - 1.0) * inv_af;
-	                            if (!nondt_dofs.empty()) {
-	                                copyVector(*scratch_vec0, history.u());
-	                            }
-	                            auto cur = history.uSpan();
-	                            const auto prev = history.uPrevSpan();
-	                            FE_CHECK_ARG(cur.size() == prev.size(), "TimeLoop: generalized-alpha size mismatch");
-	                            for (std::size_t i = 0; i < cur.size(); ++i) {
-	                                cur[i] = static_cast<Real>(inv_af) * cur[i] + static_cast<Real>(c_prev) * prev[i];
-	                            }
-	                            if (!nondt_dofs.empty()) {
-	                                // Algebraic fields (e.g., pressure for incompressible flow) should not be
-	                                // extrapolated via the generalized-α stage relation. Preserve the stage
-	                                // values returned by the nonlinear solve for these DOFs.
-	                                copyVectorEntries(nondt_dofs, history.u(), *scratch_vec0);
-	                            }
+                            if (!algebraic_dofs.stage_only.empty()) {
+                                copyVector(*scratch_vec0, history.u());
+                            }
+                            auto cur = history.uSpan();
+                            const auto prev = history.uPrevSpan();
+                            FE_CHECK_ARG(cur.size() == prev.size(), "TimeLoop: generalized-alpha size mismatch");
+                            // The Newton unknown is u_{n+alpha_f}. Recover the endpoint from
+                            // the accepted u_n for differential fields and declared algebraic
+                            // interpolants (including fluid pressure).
+                            for (std::size_t i = 0; i < cur.size(); ++i) {
+                                cur[i] = static_cast<Real>(inv_af) * cur[i] + static_cast<Real>(c_prev) * prev[i];
+                            }
+                            copyVectorRanges(algebraic_dofs.stage_only, history.u(), *scratch_vec0);
 
-	                            // Update uDot_{n+1} (stored as TimeHistory::uDot) for use by later stages
+                            // Update uDot_{n+1} (stored as TimeHistory::uDot) for use by later stages
 	                            // and end-of-step finalization.
 	                            const double gamma = ga1_params->gamma;
                             const double inv_gamma_dt = 1.0 / (gamma * dt);
@@ -4242,16 +4239,7 @@ TimeLoopReport TimeLoop::run(systems::TransientSystem& transient,
                                     (u_np1[i] - u_n[i]) -
                                 static_cast<Real>(c_old) * rate_n[i];
                         }
-                        const auto dt_fields =
-                            transient.system().timeDerivativeFields(
-                                options_.newton.residual_op);
-                        const auto nondt_dofs =
-                            collectNonTimeDerivativeDofs(
-                                transient.system(), dt_fields);
-                        if (!nondt_dofs.empty()) {
-                            zeroVectorEntries(nondt_dofs,
-                                              history.uDot());
-                        }
+                        zeroVectorEntries(algebraic_dofs.all, history.uDot());
                     }
 
                     if (options_.newton.synchronize_state) {

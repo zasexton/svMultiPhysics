@@ -30,9 +30,11 @@
 #include <cstdint>
 #include <cstdlib>
 #include <exception>
+#include <limits>
 #include <map>
 #include <optional>
 #include <set>
+#include <sstream>
 #include <stdexcept>
 #include <string>
 #include <utility>
@@ -237,8 +239,50 @@ LevelSetRedistancingTrigger resolveLevelSetRedistancingTrigger()
 
 namespace {
 
+using RepresentationCheck = std::function<bool(MaintenanceSubstage, std::span<const Real>)>;
+
+// One physical correction for both the reversible gate and accepted publication.
+LevelSetKinematicReconciliationResult solveKinematicCandidate(
+    const systems::FESystem& system, const LevelSetMaintenanceConfiguration& configuration,
+    FieldId field, int prospective_step, Real dt, std::span<const Real> fe_solution,
+    std::span<const LevelSetKinematicBaseline> baselines, std::vector<Real>& reconciled)
+{
+  const auto baseline = std::find_if(baselines.begin(), baselines.end(),
+      [field](const auto& candidate) { return candidate.level_set_field == field; });
+  std::span<const Real> transported;
+  std::vector<Real> velocity;
+  LevelSetVolumeOptions volume_options;
+  std::exception_ptr preparation_failure;
+  try {
+    if (!system.hasMeshAccess()) {
+      throw std::runtime_error("Level-set kinematic reconciliation requires a mesh.");
+    }
+    if (field == INVALID_FIELD_ID || baseline == baselines.end() ||
+        baseline->step != prospective_step - 1) {
+      throw std::runtime_error("Level-set kinematic reconciliation for field '" +
+          configuration.transport.level_set.field_name + "' has no accepted baseline from the previous step.");
+    }
+    const auto offset = static_cast<std::size_t>(system.fieldDofOffset(field));
+    const auto count = static_cast<std::size_t>(system.fieldDofHandler(field).getNumDofs());
+    if (offset > fe_solution.size() || count > fe_solution.size() - offset) {
+      throw std::runtime_error("Level-set kinematic reconciliation field slice exceeds the solution vector.");
+    }
+    transported = fe_solution.subspan(offset, count);
+    velocity = levelSetTransportVelocityCoefficients(system, baseline->velocity_field, fe_solution);
+    volume_options = levelSetVolumeOptionsForMaintenance(configuration);
+  } catch (...) {
+    preparation_failure = std::current_exception();
+  }
+  requireCollectivePhasePreparation(preparation_failure, activeFESystemCommunicator(system),
+                                    "kinematic_candidate_inputs");
+  return reconcileLevelSetWithKinematicFlux(system.meshAccess(), system.fieldDofHandler(field),
+      system.fieldDofHandler(baseline->velocity_field), volume_options.isovalue, volume_options.tolerance,
+      dt, baseline->level_set, transported, baseline->velocity, velocity, reconciled,
+      system.fieldRecord(baseline->velocity_field).space.get());
+}
+
 // Stage 1, kinematic reconciliation of the transport step.
-void reconcileMaintainedLevelSetStep(
+LevelSetKinematicReconciliationResult reconcileMaintainedLevelSetStep(
     const LevelSetMaintenanceHost& host,
     svmp::FE::timestepping::TimeHistory& history,
     const LevelSetMaintenanceRequest& request,
@@ -251,52 +295,11 @@ void reconcileMaintainedLevelSetStep(
     std::set<svmp::FE::FieldId>& modified_level_set_fields,
     std::vector<svmp::FE::LogRecord>& staged_commit_logs)
 {
-  // Reconcile the transport step before any representation change: the
-  // baseline is the accepted state the transport started from.
-  const auto baseline = std::find_if(
-      kinematic_baselines.begin(),
-      kinematic_baselines.end(),
-      [field](const auto& candidate) {
-        return candidate.level_set_field == field;
-      });
-  if (baseline == kinematic_baselines.end() ||
-      baseline->step != completed_step - 1) {
-    throw std::runtime_error(
-        "[svMultiPhysics::Application] Level-set kinematic reconciliation "
-        "for field '" +
-        request.configuration->transport.level_set.field_name +
-        "' has no accepted baseline from the previous step.");
-  }
   const auto before_reconciliation = fe_solution;
-  const auto offset =
-      static_cast<std::size_t>(host.fe_system->fieldDofOffset(field));
-  const auto count = static_cast<std::size_t>(
-      host.fe_system->fieldDofHandler(field).getNumDofs());
-  if (offset > fe_solution.size() || count > fe_solution.size() - offset) {
-    throw std::runtime_error(
-        "[svMultiPhysics::Application] Level-set kinematic reconciliation "
-        "field slice exceeds the solution vector.");
-  }
-  const std::span<const svmp::FE::Real> transported(
-      fe_solution.data() + offset, count);
-  const auto transported_velocity =
-      levelSetTransportVelocityCoefficients(
-          *host.fe_system, baseline->velocity_field, fe_solution);
-  const auto volume_options = levelSetVolumeOptionsForMaintenance(*request.configuration);
-  std::vector<svmp::FE::Real> reconciled;
-  const auto result =
-      svmp::FE::level_set::reconcileLevelSetWithKinematicFlux(
-          host.fe_system->meshAccess(),
-          host.fe_system->fieldDofHandler(field),
-          host.fe_system->fieldDofHandler(baseline->velocity_field),
-          volume_options.isovalue,
-          volume_options.tolerance,
-          static_cast<svmp::FE::Real>(history.dt()),
-          baseline->level_set,
-          transported,
-          baseline->velocity,
-          transported_velocity,
-          reconciled);
+  const auto offset = host.fe_system->fieldDofOffset(field);
+  std::vector<Real> reconciled;
+  const auto result = solveKinematicCandidate(*host.fe_system, *request.configuration, field,
+      completed_step, history.dt(), fe_solution, kinematic_baselines, reconciled);
   if (!result.success) {
     throw std::runtime_error(
         "[svMultiPhysics::Application] Level-set kinematic reconciliation "
@@ -336,13 +339,16 @@ void reconcileMaintainedLevelSetStep(
       .value("transported_negative_volume", result.transported_negative_volume)
       .value("reconciled_negative_volume", result.reconciled_negative_volume)
       .value("previous_interface_flux", result.previous_interface_flux)
+      .value("transported_interface_flux", result.transported_interface_flux)
       .value("current_interface_flux", result.current_interface_flux)
       .value("kinematic_volume_change", result.kinematic_volume_change)
       .value("transported_volume_error", result.transported_volume_error)
       .value("reconciled_volume_error", result.reconciled_volume_error)
+      .value("volume_balance_tolerance", result.volume_tolerance)
       .value("max_abs_correction", result.max_abs_correction)
       .quoted("status", result.diagnostic);
   staged_commit_logs.push_back(std::move(record));
+  return result;
 }
 
 // Stage 2, sign-definite patch bounds.
@@ -352,6 +358,7 @@ void boundMaintainedLevelSetPatches(
     svmp::FE::FieldId field,
     int completed_step,
     std::span<const LevelSetKinematicBaseline> kinematic_baselines,
+    const RepresentationCheck& permits_representation,
     const LevelSetMaintenanceStageObserver& observe_stage,
     std::vector<svmp::FE::Real>& fe_solution,
     bool& changed,
@@ -419,6 +426,9 @@ void boundMaintainedLevelSetPatches(
         result.diagnostic);
   }
   if (result.applied) {
+    // This declared bound is required. Failure to meet both the physical
+    // balance and the bound rejects the enclosing maintenance transaction.
+    (void)permits_representation(MaintenanceSubstage::Limiting, bounded);
     std::copy(bounded.begin(), bounded.end(),
               fe_solution.begin() + static_cast<std::ptrdiff_t>(offset));
     changed = true;
@@ -452,6 +462,7 @@ void redistanceMaintainedLevelSet(
     LevelSetMaintenanceRequest& request,
     svmp::FE::FieldId field,
     int completed_step,
+    const RepresentationCheck& permits_representation,
     const LevelSetMaintenanceStageObserver& observe_stage,
     std::vector<svmp::FE::Real>& fe_solution,
     bool& changed,
@@ -583,17 +594,7 @@ void redistanceMaintainedLevelSet(
             redistanced,
             zero_velocity,
             zero_velocity,
-            restored);
-        if (!restoration.success) {
-          throw std::runtime_error(
-              "[svMultiPhysics::Application] Level-set interface-preserving "
-              "redistancing could not restore the interface of field '" +
-              request.configuration->transport.level_set.field_name + "': " +
-              restoration.diagnostic);
-        }
-        if (!restoration.applied) {
-          restored = redistanced;
-        }
+            restored, host.fe_system->fieldRecord(velocity_field).space.get());
         bool reverted = false;
         // Revert the whole cells around a frozen DOF: their other DOFs
         // would otherwise keep raw redistanced values whose interface
@@ -616,6 +617,11 @@ void redistanceMaintainedLevelSet(
           }
         }
         if (!reverted) {
+          if (!restoration.success) {
+            throw std::runtime_error(
+                "[svMultiPhysics::Application] Level-set redistancing could not restore field '" +
+                request.configuration->transport.level_set.field_name + "': " + restoration.diagnostic);
+          }
           break;
         }
       }
@@ -639,6 +645,11 @@ void redistanceMaintainedLevelSet(
           change.diagnostic + " " + change_raw.diagnostic);
     }
     const bool applied = redistance.applied && restored != input;
+    if (applied && !permits_representation(MaintenanceSubstage::Reinitialization, restored)) {
+      // The accepted flux and bounds take precedence over this optional
+      // change of representation. Keep accumulated motion for the next try.
+      return;
+    }
     if (applied) {
       std::copy(restored.begin(), restored.end(),
                 fe_solution.begin() + static_cast<std::ptrdiff_t>(offset));
@@ -838,6 +849,25 @@ void publishMaintainedLevelSetChanges(
 
 } // namespace
 
+std::optional<std::string> levelSetKinematicCandidateRejection(
+    const systems::FESystem& system, const LevelSetMaintenanceConfiguration& configuration,
+    int prospective_step, Real dt, std::span<const Real> fe_solution,
+    std::span<const LevelSetKinematicBaseline> baselines)
+{
+  const auto field = system.findFieldByName(configuration.transport.level_set.field_name);
+  std::vector<Real> reconciled;
+  const auto result = solveKinematicCandidate(system, configuration, field, prospective_step,
+                                              dt, fe_solution, baselines, reconciled);
+  if (result.success) {
+    return std::nullopt;
+  }
+  if (result.retryable_failure) {
+    return result.diagnostic;
+  }
+  throw std::runtime_error("Level-set kinematic reconciliation failed for field '" +
+                           configuration.transport.level_set.field_name + "': " + result.diagnostic);
+}
+
 bool applyLevelSetMaintenance(
     const LevelSetMaintenanceHost& host,
     svmp::FE::timestepping::TimeHistory& history,
@@ -901,23 +931,66 @@ bool applyLevelSetMaintenance(
           request.configuration->transport.level_set.field_name + "'.");
     }
 
+    std::optional<LevelSetKinematicReconciliationResult> transport;
     if (do_kinematic) {
-      reconcileMaintainedLevelSetStep(
+      transport = reconcileMaintainedLevelSetStep(
           host, history, request, field, completed_step, kinematic_baselines,
           observe_stage, fe_solution, changed, modified_level_set_fields,
           staged_commit_logs);
     }
 
+    if (!do_patch_bounds && !do_redistancing) {
+      continue;
+    }
+    const RepresentationCheck permits_representation =
+        [&](MaintenanceSubstage stage, std::span<const Real> candidate) {
+          if (!transport) {
+            return true;
+          }
+          const auto& system = *host.fe_system;
+          const auto velocity_field = system.findFieldByName(request.configuration->transport.velocity.field_name);
+          const auto velocity = levelSetTransportVelocityCoefficients(system, velocity_field, fe_solution);
+          const auto options = levelSetVolumeOptionsForMaintenance(*request.configuration);
+          const auto measured = measureLevelSetKinematicEndpoint(
+              system.meshAccess(), system.fieldDofHandler(field), system.fieldDofHandler(velocity_field),
+              *system.fieldRecord(velocity_field).space, options.isovalue, options.tolerance, candidate, velocity);
+          if (!measured.success) {
+            throw std::runtime_error("Cannot measure the physical kinematic endpoint after maintenance: " +
+                                     measured.diagnostic);
+          }
+          const auto target = Real{0.5} * history.dt() * (transport->previous_interface_flux + measured.interface_flux);
+          const auto defect = (measured.negative_volume - transport->previous_negative_volume) - target;
+          const bool accepted = std::abs(defect) <= transport->volume_tolerance;
+          const bool required_bound = stage == MaintenanceSubstage::Limiting;
+          if (!accepted && required_bound) {
+            std::ostringstream message;
+            message.precision(std::numeric_limits<Real>::max_digits10);
+            message << "Required level-set patch bounds violate the physical kinematic balance of '"
+                    << request.configuration->transport.level_set.field_name << "', sharp volume defect="
+                    << defect << ", tolerance=" << transport->volume_tolerance;
+            throw std::runtime_error(message.str());
+          }
+          LogRecord record("LevelSetMaintenancePipeline", "representation kinematic balance");
+          record.diagnostic("level_set_representation_kinematic_balance").rootOnly()
+              .quoted("field", request.configuration->transport.level_set.field_name)
+              .value("step", completed_step).text("stage", required_bound ? "patch_bounds" : "redistancing")
+              .boolean("accepted", accepted).value("negative_volume", measured.negative_volume)
+              .value("interface_flux", measured.interface_flux).value("kinematic_volume_change", target)
+              .value("volume_error", defect).value("volume_balance_tolerance", transport->volume_tolerance);
+          staged_commit_logs.push_back(std::move(record));
+          return accepted;
+        };
+
     if (do_patch_bounds) {
       boundMaintainedLevelSetPatches(
           host, request, field, completed_step, kinematic_baselines,
-          observe_stage, fe_solution, changed, modified_level_set_fields,
+          permits_representation, observe_stage, fe_solution, changed, modified_level_set_fields,
           staged_commit_logs);
     }
 
     if (do_redistancing) {
       redistanceMaintainedLevelSet(
-          host, history, request, field, completed_step, observe_stage,
+          host, history, request, field, completed_step, permits_representation, observe_stage,
           fe_solution, changed, modified_level_set_fields,
           staged_commit_logs);
     }

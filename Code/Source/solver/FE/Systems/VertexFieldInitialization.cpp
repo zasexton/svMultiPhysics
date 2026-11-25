@@ -35,6 +35,16 @@ std::size_t initializeFieldFromMeshVertexField(
     FieldId field_id,
     const std::string& message_prefix)
 {
+    return initializeFieldFromMeshVertexField(system, u0, field_id, message_prefix, std::nullopt);
+}
+
+std::size_t initializeFieldFromMeshVertexField(
+    const FESystem& system,
+    backends::GenericVector& u0,
+    FieldId field_id,
+    const std::string& message_prefix,
+    std::optional<Real> value_if_missing)
+{
 #if defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH
     if (field_id == INVALID_FIELD_ID) {
         return 0u;
@@ -45,35 +55,26 @@ std::size_t initializeFieldFromMeshVertexField(
     }
     const auto& rec = system.fieldRecord(field_id);
     const auto& local_mesh = native_mesh->local_mesh();
-    if (!MeshFields::has_field(local_mesh, EntityKind::Vertex, rec.name)) {
-        return 0u;
-    }
-    const auto handle =
-        MeshFields::get_field_handle(local_mesh, EntityKind::Vertex, rec.name);
-    if (MeshFields::field_type(local_mesh, handle) != FieldScalarType::Float64) {
-        throw std::runtime_error(
-            message_prefix +
-            " requires a Float64 vertex mesh field '" + rec.name + "'");
-    }
     const auto components = static_cast<std::size_t>(std::max(1, rec.components));
-    const auto mesh_components = MeshFields::field_components(local_mesh, handle);
-    if (mesh_components < components) {
-        throw std::runtime_error(
-            message_prefix +
-            " mesh field '" + rec.name + "' has fewer components than the FE field");
-    }
     const auto n_vertices = static_cast<GlobalIndex>(native_mesh->n_vertices());
-    const auto entity_count = MeshFields::field_entity_count(local_mesh, handle);
-    if (entity_count < static_cast<std::size_t>(n_vertices)) {
-        throw std::runtime_error(
-            message_prefix +
-            " mesh field '" + rec.name + "' has fewer entries than mesh vertices");
-    }
-    const auto* mesh_values = MeshFields::field_data_as<Real>(local_mesh, handle);
-    if (mesh_values == nullptr) {
-        throw std::runtime_error(
-            message_prefix +
-            " found an empty mesh field '" + rec.name + "'");
+    MeshVertexFieldView source;
+    std::vector<Real> uniform;
+    if (MeshFields::has_field(local_mesh, EntityKind::Vertex, rec.name)) {
+        const std::string field = " mesh field '" + rec.name + "'";
+        const auto too_few_components = message_prefix + field + " has fewer components than the FE field";
+        source = requireMeshVertexField(system, rec.name, n_vertices, {
+            .not_float64 = message_prefix + " requires a Float64 vertex mesh field '" + rec.name + "'",
+            .no_components = too_few_components,
+            .too_few_entries = message_prefix + field + " has fewer entries than mesh vertices",
+            .empty = message_prefix + " found an empty mesh field '" + rec.name + "'"});
+        if (source.components < components) {
+            throw std::runtime_error(too_few_components);
+        }
+    } else if (value_if_missing) {
+        uniform.assign(static_cast<std::size_t>(n_vertices) * components, *value_if_missing);
+        source = {uniform.data(), components, static_cast<std::size_t>(n_vertices)};
+    } else {
+        return 0u;
     }
     const auto& field_dofs = system.fieldDofHandler(field_id);
     const auto* entity_map = field_dofs.getEntityDofMap();
@@ -89,10 +90,8 @@ std::size_t initializeFieldFromMeshVertexField(
     const auto projection =
         system.projectMeshVertexValuesToFieldCoefficients(
             field_id,
-            std::span<const Real>(
-                reinterpret_cast<const Real*>(mesh_values),
-                entity_count * mesh_components),
-            mesh_components,
+            std::span<const Real>(source.values, source.entity_count * source.components),
+            source.components,
             std::span<Real>(coefficients.data(), coefficients.size()),
             std::span<std::uint8_t>(assigned.data(), assigned.size()),
             message_prefix);
@@ -115,9 +114,7 @@ std::size_t initializeFieldFromMeshVertexField(
         dofs.push_back(field_offset + static_cast<GlobalIndex>(dof));
         values.push_back(coefficients[dof]);
     }
-    if (dofs.empty()) {
-        return 0u;
-    }
+    // Vector finalization can be collective even on ranks without local coefficients.
     auto view = u0.createAssemblyView();
     if (!view) {
         throw std::runtime_error(
@@ -134,6 +131,7 @@ std::size_t initializeFieldFromMeshVertexField(
     (void)u0;
     (void)field_id;
     (void)message_prefix;
+    (void)value_if_missing;
     return 0u;
 #endif
 }

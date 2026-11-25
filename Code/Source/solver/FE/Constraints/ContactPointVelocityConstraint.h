@@ -23,6 +23,14 @@
  * (cos theta = -n . n_wall, n = grad phi / |grad phi|) and V is supplied by
  * the caller (for the Ren-E law V = M gamma (cos theta_e - cos theta)).
  *
+ * An isolated zero at a vertex is a contact point if its two marked wall
+ * neighbors have opposite signs. Its angle comes from the unique P1 interface
+ * segment entering the domain in an incident triangle. A segment coincident
+ * with an interior edge has one angle across its two cell traces. The wall
+ * edge on the lower tangential-coordinate side owns the line, with fraction
+ * exactly 0 or 1. A wall endpoint, tangency or interval of zeros has no
+ * transversal crossing. Branched contours have no unique contact angle.
+ *
  * The constraint is applied after every other constraint of the field.  The
  * DOFs of the functional that are already constrained (typically the dry
  * vertex, an aggregation slave) are expanded through their closed lines, so

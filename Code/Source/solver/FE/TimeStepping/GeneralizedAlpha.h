@@ -10,9 +10,19 @@
 
 #include "Systems/TimeIntegrator.h"
 
+#include <set>
+
 namespace svmp {
 namespace FE {
 namespace timestepping {
+
+/// Per-system declaration for algebraic unknowns whose converged first-order
+/// generalized-alpha stage is the linear interpolant of successive endpoint
+/// values. The initial and restarted values of these fields are endpoint data.
+/// Their time derivatives remain absent from the semidiscrete equations.
+struct GeneralizedAlphaEndpointFields {
+    std::set<FieldId> algebraic_fields;
+};
 
 struct GeneralizedAlphaFirstOrderIntegratorOptions {
     double alpha_m{0.0};

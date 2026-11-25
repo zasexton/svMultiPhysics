@@ -23,6 +23,8 @@
 #include "Forms/FormCompiler.h"
 #include "Forms/FormKernels.h"
 
+#include "LevelSet/Maintenance/LevelSetMaintenancePipeline.h"
+#include "Spaces/SpaceFactory.h"
 #include "Spaces/H1Space.h"
 
 #include "Systems/FESystem.h"
@@ -2748,6 +2750,90 @@ TEST(TimeLoopCallbacks, GeneralizedAlphaRejectedCandidateRestoresExistingRateSta
     EXPECT_EQ(restored_projected_state_callbacks, 1);
     EXPECT_EQ(endpoint_state_callbacks, 2);
     EXPECT_EQ(projected_endpoint_state_callbacks, 2);
+}
+
+TEST(TimeLoopCallbacks, KinematicBudgetRejectsBeforeCommitAndTheSmallerRetryPreservesVolume)
+{
+#if !defined(FE_HAS_EIGEN) || !FE_HAS_EIGEN
+    GTEST_SKIP() << "Requires the Eigen backend";
+#endif
+    namespace fe = svmp::FE;
+    namespace ls = fe::level_set;
+    namespace ts = fe::timestepping;
+    ls::LevelSetMaintenanceConfiguration config;
+    config.transport.level_set.field_name = "u";
+    config.transport.kinematic_reconciliation.enabled = true;
+    config.transport.velocity.field_name = "w";
+    config.transport.velocity.source = ls::LevelSetVelocitySource::PrescribedData;
+    fe::systems::FESystem* system = nullptr;
+    fe::FieldId w = fe::INVALID_FIELD_ID;
+    ls::LevelSetKinematicBaseline baseline;
+    std::vector<Real> initial;
+    auto controller = std::make_shared<RecordingAcceptanceGateController>();
+    int rejected = 0;
+    int accepted = 0;
+    const auto fields = [&](fe::systems::FESystem& sys, fe::FieldId) {
+        system = &sys;
+        auto space = fe::spaces::VectorSpace(fe::spaces::SpaceType::H1, ElementType::Tetra4, 1, 3);
+        w = sys.addField({.name = "w", .space = space, .components = 3,
+                          .source_kind = fe::systems::FieldSourceKind::PrescribedData});
+    };
+    const auto hooks = [&](ts::TimeLoopCallbacks& cb, ts::TimeHistory& history) {
+        system->setPrescribedFieldCoefficients(w, std::vector<Real>(system->fieldDofHandler(w).getNumDofs(), 0.));
+        initial = getVectorByDof(history.u());
+        baseline = ls::makeLevelSetKinematicBaseline(*system, config, initial, 0);
+        // A missing accepted baseline and an invalid field slice are structural errors.
+        EXPECT_THROW((void)ls::levelSetKinematicCandidateRejection(*system, config, 1, 0.2,
+                     initial, {}), std::exception);
+        EXPECT_THROW((void)ls::levelSetKinematicCandidateRejection(*system, config, 1, 0.2,
+                     {}, {&baseline, 1}), std::exception);
+        // A coarse, projected transport candidate loses the whole liquid
+        // corner. The two smaller steps retain the stationary physical state.
+        cb.on_before_step_accept = [&](auto& h, const auto&) {
+            if (h.dt() > 0.1) {
+                setVectorByDof(h.u(), std::vector<Real>(initial.size(), 1.));
+            }
+            return true;
+        };
+        cb.on_step_candidate_ready = [&](auto& h, const auto&) -> std::optional<ts::StepRejectReason> {
+            const auto endpoint = getVectorByDof(h.u());
+            const auto failure = ls::levelSetKinematicCandidateRejection(
+                *system, config, h.stepIndex() + 1, h.dt(), endpoint, {&baseline, 1});
+            EXPECT_EQ(getVectorByDof(h.u()), endpoint);
+            return failure ? std::optional{ts::StepRejectReason::ErrorTooLarge} : std::nullopt;
+        };
+        cb.on_step_rejected = [&](const auto& h, auto reason, const auto&) {
+            ++rejected;
+            EXPECT_EQ(reason, ts::StepRejectReason::ErrorTooLarge);
+            EXPECT_EQ(h.time(), 0.);
+            EXPECT_EQ(h.stepIndex(), 0);
+            for (const auto state : {h.uSpan(), h.uPrevSpan(), h.uPrev2Span()}) {
+                EXPECT_EQ(std::vector<Real>(state.begin(), state.end()), initial);
+            }
+            EXPECT_EQ(baseline.step, 0);
+            EXPECT_EQ(baseline.level_set, initial);
+        };
+        cb.on_step_accepted = [&](auto& h) {
+            ++accepted;
+            const auto endpoint = getVectorByDof(h.u());
+            EXPECT_NEAR(h.dt(), 0.1, 1.e-14);
+            const auto before = ls::computeLevelSetCutCellVolume(
+                system->meshAccess(), system->fieldDofHandler(baseline.level_set_field), {}, initial);
+            const auto after = ls::computeLevelSetCutCellVolume(
+                system->meshAccess(), system->fieldDofHandler(baseline.level_set_field), {}, endpoint);
+            EXPECT_TRUE(before.success && after.success);
+            EXPECT_GT(before.negative_volume, 0.);
+            EXPECT_NEAR(after.negative_volume, before.negative_volume, 1.e-14);
+            baseline = ls::makeLevelSetKinematicBaseline(*system, config, endpoint, h.stepIndex());
+        };
+    };
+    const auto final = runReactionProblem(ts::SchemeKind::BackwardEuler, 0.2, 0.2,
+        /*lambda=*/0., /*history_depth=*/2, controller, 1., 1, 2,
+        ts::CollocationSolveStrategy::Monolithic, 4, 0., false, 0.5, 8, 1.e-12, 0.,
+        hooks, {}, {}, fields);
+    EXPECT_EQ(rejected, 1);
+    EXPECT_EQ(accepted, 2);
+    EXPECT_EQ(final, initial);
 }
 
 TEST(TimeLoopCallbacks,

@@ -336,18 +336,19 @@ TEST(LevelSetKinematicReconciliationMPI, BlockedNodeRedistributionMatchesSerialR
     std::vector<FE::Real> serial_values;
     const auto p = run(parallel, parallel_values);
     const auto s = run(serial, serial_values);
-    ASSERT_TRUE(p.success) << p.diagnostic;
-    ASSERT_TRUE(s.success) << s.diagnostic;
+    EXPECT_FALSE(p.success);
+    EXPECT_FALSE(s.success);
+    EXPECT_FALSE(p.applied);
+    EXPECT_FALSE(s.applied);
+    EXPECT_GT(std::abs(s.reconciled_volume_error), s.volume_tolerance);
+    EXPECT_NEAR(p.reconciled_volume_error, s.reconciled_volume_error, 1.0e-14);
     EXPECT_EQ(s.sign_preserving_redistributed_dofs, static_cast<std::size_t>(n + 1));
     EXPECT_EQ(p.sign_preserving_redistributed_dofs, s.sign_preserving_redistributed_dofs);
     EXPECT_EQ(p.sign_preserving_skipped_dofs, s.sign_preserving_skipped_dofs);
     EXPECT_EQ(p.iterations, s.iterations);
     EXPECT_NEAR(p.reconciled_negative_volume, s.reconciled_negative_volume, 1.0e-14);
-    const auto pv = parallel.byVertex(parallel_values);
-    const auto sv = serial.byVertex(serial_values);
-    for (std::size_t v = 0; v < pv.size(); ++v) {
-        EXPECT_NEAR(pv[v], sv[v], 1.0e-14) << "vertex " << v;
-    }
+    EXPECT_TRUE(parallel_values.empty());
+    EXPECT_TRUE(serial_values.empty());
 }
 
 TEST(LevelSetKinematicReconciliationMPI, FrozenShareRedistributionMatchesSerialReference)

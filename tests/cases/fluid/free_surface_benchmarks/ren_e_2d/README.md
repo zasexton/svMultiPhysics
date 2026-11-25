@@ -36,11 +36,13 @@ writes one run (18 runs in all).  Runs are 2D; serial or up to 4 ranks.
 ## Measurement (verify.py)
 
 At every saved state the two phi = 0 roots on y = 0 are found.  At each root the
-dynamic angle is that of the P1 level-set gradient in the wall triangle holding
-the root (the LinearCorner fragment normal), the prediction is the Ren-E speed at
-that angle, the wall fluid speed is the outward wall-tangential velocity
-interpolated at the root, and the geometric speed is the central difference of
-the outward contact position.  Errors are relative to the prediction, RMS over
+dynamic angle comes from the P1 contour segment entering the liquid domain.
+For a root exactly at a wall vertex, the verifier follows the segment into the
+incident triangle or along the shared mesh edge. A crossing needs wet and dry
+wall neighbors and one interface branch. The prediction is the Ren-E speed at
+that angle. The wall fluid speed is the outward tangential velocity interpolated
+at the root, and the geometric speed is the central difference of the outward
+contact position. Errors are relative to the prediction, RMS over
 the window t >= 0.025 and both contact points.
 
 ## Criteria for the exactly imposed law (decision D39, 2026-10-11)

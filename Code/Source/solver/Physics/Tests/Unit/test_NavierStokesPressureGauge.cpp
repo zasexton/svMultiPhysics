@@ -21,6 +21,9 @@
 #include "FE/Spaces/SpaceFactory.h"
 #include "FE/Systems/FESystem.h"
 #include "FE/Systems/TimeIntegrator.h"
+#include "FE/Systems/FormsInstaller.h"
+#include "FE/Forms/Forms.h"
+#include "FE/TimeStepping/TimeLoop.h"
 
 #if defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH
 #  include "Mesh/Core/MeshBase.h"
@@ -437,6 +440,211 @@ template <typename Action>
 }
 
 } // namespace
+
+#if SVMP_FE_WITH_MESH && FE_HAS_EIGEN
+TEST(NavierStokesInitialConditions, FreshFreeSurfacePressureUsesUniformRestingExteriorLoad)
+{
+    namespace ns = formulations::navier_stokes;
+    const auto velocity = FE::spaces::SpaceFactory::create_vector_h1(FE::ElementType::Quad4, 1, 2);
+    const auto scalar = FE::spaces::SpaceFactory::create_h1(FE::ElementType::Quad4, 1);
+    const auto factory = FE::backends::BackendFactory::create(FE::backends::BackendKind::Eigen);
+    enum class Load { UniformNegative, UniformPositive, Gravity, Capillary, Variable, Conflicting };
+    for (const auto load : {Load::UniformNegative, Load::UniformPositive, Load::Gravity,
+                            Load::Capillary, Load::Variable, Load::Conflicting}) {
+        SCOPED_TRACE(static_cast<int>(load));
+        auto mesh = makeTwoQuadStripNativeMeshWithPhi();
+        FE::systems::FESystem system(mesh);
+        (void)system.addField({.name = "phi", .space = scalar, .source_kind = FE::systems::FieldSourceKind::PrescribedData});
+        auto fluid = pressureAnchorOptions();
+        fluid.jit_policy.enable = false;
+        auto& surface = fluid.free_surface.front();
+        surface.external_pressure = 37.0;
+        if (load == Load::UniformPositive) surface.active_domain = ns::FreeSurfaceActiveDomain::LevelSetPositive;
+        if (load == Load::Gravity) fluid.body_force[1] = -9.81;
+        if (load == Load::Capillary) surface.surface_tension = 1.0;
+        if (load == Load::Variable) surface.external_pressure = FE::forms::FormExpr::time();
+        if (load == Load::Conflicting) fluid.node_pressure_constraints.values.push_back({.node_id = 0, .pressure = 13.0});
+        ns::IncompressibleNavierStokesVMSModule module(velocity, scalar, fluid);
+        module.registerOn(system);
+        system.setup();
+        auto state = factory->createVector(system.dofHandler().getNumDofs());
+        state->zero();
+        module.applyInitialConditions(system, *state);
+        const bool uniform = load == Load::UniformNegative || load == Load::UniformPositive;
+        for (const auto row : system.fieldMap().getComponentDofs(fluid.pressure_field_name, 0)) {
+            EXPECT_DOUBLE_EQ(state->localSpan()[row], uniform ? 37.0 : 0.0);
+        }
+    }
+}
+
+TEST(NavierStokesInitialConditions, FreshFluidPressureUsesRestingOutletPressureOrExplicitMeshValues)
+{
+    namespace ns = formulations::navier_stokes;
+    const auto velocity = FE::spaces::SpaceFactory::create_vector_h1(FE::ElementType::Triangle3, 1, 2);
+    const auto scalar = FE::spaces::SpaceFactory::create_h1(FE::ElementType::Triangle3, 1);
+    const auto factory = FE::backends::BackendFactory::create(FE::backends::BackendKind::Eigen);
+    enum class Outlet { Resistance, RCR, RCRCR };
+    for (auto outlet : {Outlet::Resistance, Outlet::RCR, Outlet::RCRCR}) {
+        for (bool explicit_pressure : {false, true}) {
+            SCOPED_TRACE(::testing::Message() << "outlet=" << static_cast<int>(outlet)
+                                              << ", explicit=" << explicit_pressure);
+            auto mesh = makeSingleTriangleNativeMesh();
+            auto& local = mesh->local_mesh();
+            local.register_label("outlet", 8);
+            local.set_boundary_label(local.boundary_faces().front(), 8);
+            ns::IncompressibleNavierStokesVMSOptions fluid;
+            fluid.enable_vms = false;
+            fluid.jit_policy.enable = false;
+            if (explicit_pressure) {
+                const auto field = MeshFields::attach_field(local, EntityKind::Vertex, fluid.pressure_field_name,
+                                                            FieldScalarType::Float64, 1);
+                auto* values = MeshFields::field_data_as<real_t>(local, field);
+                for (index_t v = 0; v < local.n_vertices(); ++v) {
+                    values[v] = 2.0 * v;
+                }
+            }
+            if (outlet == Outlet::RCRCR) {
+                fluid.coupled_outflow_rcrcr.push_back({.boundary_marker = 8, .C1 = 1.0, .C2 = 1.0, .Pd = 23.0,
+                    .P10 = 11.0, .P20 = 17.0, .functional_name = "outlet_flow"});
+            } else {
+                fluid.coupled_outflow_rcr.push_back({.boundary_marker = 8, .C = outlet == Outlet::RCR ? 1.0 : 0.0,
+                    .Pd = 23.0, .X0 = 11.0, .functional_name = "outlet_flow"});
+            }
+            ns::IncompressibleNavierStokesVMSModule module(velocity, scalar, fluid);
+            FE::systems::FESystem system(mesh);
+            module.registerOn(system);
+            system.setup();
+            auto state = factory->createVector(system.dofHandler().getNumDofs());
+            state->zero();
+            module.applyInitialConditions(system, *state);
+            const auto p = system.findFieldByName(fluid.pressure_field_name);
+            const auto* dofs = system.fieldDofHandler(p).getEntityDofMap();
+            const double resting_datum = outlet == Outlet::Resistance ? 23.0 : 11.0;
+            for (index_t v = 0; v < local.n_vertices(); ++v) {
+                const auto row = system.fieldDofOffset(p) + dofs->getVertexDofs(v).front();
+                EXPECT_DOUBLE_EQ(state->localSpan()[row], explicit_pressure ? 2.0 * v : resting_datum);
+            }
+            if (!explicit_pressure) {
+                // A caller may have already populated this endpoint pressure.
+                const auto p0 = system.fieldDofOffset(p);
+                state->zero();
+                state->localSpan()[p0] = -43.0;
+                module.applyInitialConditions(system, *state);
+                EXPECT_DOUBLE_EQ(state->localSpan()[p0], -43.0);
+                EXPECT_DOUBLE_EQ(state->localSpan()[p0 + 1], 0.0);
+
+                state->zero();
+                state->localSpan()[system.fieldDofOffset(system.findFieldByName(fluid.velocity_field_name))] = 1.0;
+                module.applyInitialConditions(system, *state);
+                EXPECT_DOUBLE_EQ(state->localSpan()[p0], 0.0);
+            }
+        }
+    }
+}
+
+TEST(NavierStokesPressureGauge, GeneralizedAlphaPublishesNaturalTractionPressureAtTheEndpoint)
+{
+    namespace ns = formulations::navier_stokes;
+    namespace fs = FE::systems;
+    namespace f = FE::forms;
+    namespace ts = FE::timestepping;
+    for (double curvature : {0.0, 1.0}) {
+        fs::FESystem system(makeSingleTriangleNativeMesh());
+        const auto velocity = FE::spaces::SpaceFactory::create_vector_h1(FE::ElementType::Triangle3, 1, 2);
+        const auto scalar = FE::spaces::SpaceFactory::create_l2(FE::ElementType::Triangle3, 0);
+        ns::IncompressibleNavierStokesVMSOptions fluid;
+        fluid.pressure_field_name = "liquid_head";
+        fluid.enable_convection = false;
+        fluid.enable_vms = false;
+        fluid.jit_policy.enable = false;
+        ns::IncompressibleNavierStokesVMSModule(velocity, scalar, fluid).registerOn(system);
+        const auto u = system.findFieldByName(fluid.velocity_field_name);
+        const auto p = system.findFieldByName(fluid.pressure_field_name);
+        const auto multiplier = system.addField({.name = "p", .space = scalar, .solver_role = fs::SolverRole::Constraint});
+
+        // The traction -P(t)n on every face balances a spatially constant pressure at zero velocity.
+        const auto t = f::FormExpr::time();
+        const auto load = t + curvature * t * t;
+        const auto v = f::FormExpr::testFunction(u, *velocity, "v");
+        const auto lambda = f::FormExpr::stateField(multiplier, *scalar, "lambda");
+        const auto r = f::FormExpr::testFunction(multiplier, *scalar, "r");
+        fs::FormInstallOptions form_options;
+        form_options.compiler_options.jit.enable = false;
+        (void)fs::installFormulation(system, fluid.operator_tag, {u, multiplier},
+            (load * f::inner(f::FormExpr::normal(), v)).ds() + ((lambda - t) * r).dx(), form_options);
+        system.gaugeRegistry().addAnchoring({.field = p, .family = FE::gauge::NullspaceModeFamily::ScalarConstant,
+            .verdict = FE::gauge::AnchoringVerdict::Anchored, .source = "normal traction on every face"});
+        system.setup();
+        ASSERT_EQ(countConstrainedPressureDofs(system, fluid.pressure_field_name), 0u);
+        const auto p_dof = system.fieldDofOffset(p);
+        const auto lambda_dof = system.fieldDofOffset(multiplier);
+        const auto exact = [curvature](double time) { return time + curvature * time * time; };
+
+        const auto factory = FE::backends::BackendFactory::create(FE::backends::BackendKind::Eigen);
+        FE::backends::SolverOptions direct;
+        direct.method = FE::backends::SolverMethod::Direct;
+        auto linear = factory->createLinearSolver(direct);
+        fs::TransientSystem transient(system, std::make_shared<fs::BackwardDifferenceIntegrator>());
+        for (double dt : {0.05, 0.025}) {
+            SCOPED_TRACE(::testing::Message() << "curvature=" << curvature << ", dt=" << dt);
+            ts::TimeLoopOptions options;
+            options.t0 = 0.125;
+            options.dt = dt;
+            options.scheme = ts::SchemeKind::GeneralizedAlpha;
+            options.generalized_alpha_rho_inf = 0.5;
+            options.step_controller = std::make_shared<ts::SimpleStepController>(
+                ts::SimpleStepControllerOptions{.max_dt = dt});
+            options.newton.residual_op = options.newton.jacobian_op = fluid.operator_tag;
+            options.newton.abs_tolerance = 1e-12;
+            options.newton.rel_tolerance = 0.0;
+            auto history = ts::TimeHistory::allocate(*factory, system.dofHandler().getNumDofs());
+            history.uPrev().zero();
+            history.uPrev().localSpan()[p_dof] = exact(options.t0);
+            history.uPrev().localSpan()[lambda_dof] = options.t0;
+            history.resetCurrentToPrevious();
+            history.primeDtHistory(dt);
+            history.ensureSecondOrderState(*factory);
+            history.uDot().zero();
+
+            ts::TimeLoopCallbacks callbacks;
+            double last_stage_time = 0.0;
+            int rejected = 0;
+            callbacks.on_before_step_accept = [&](ts::TimeHistory&, const ts::NewtonReport&) {
+                return rejected > 0;
+            };
+            callbacks.on_step_rejected = [&](const ts::TimeHistory& restored, ts::StepRejectReason reason,
+                                             const ts::NewtonReport&) {
+                ++rejected;
+                EXPECT_EQ(reason, ts::StepRejectReason::ErrorTooLarge);
+                EXPECT_DOUBLE_EQ(restored.uSpan()[p_dof], exact(options.t0));
+            };
+            callbacks.on_candidate_stage = [&](const ts::CandidateStageObservation& stage) {
+                last_stage_time = stage.state_time;
+                EXPECT_NEAR(stage.state_vector->localSpan()[p_dof], exact(last_stage_time), 1e-11);
+            };
+            callbacks.on_step_accepted = [&](const ts::TimeHistory& accepted) {
+                const auto state = accepted.uSpan();
+                // For quadratic P, linear stage interpolation has a bounded O(dt^2) endpoint error.
+                EXPECT_NEAR(state[p_dof], exact(accepted.time()), curvature * dt * dt + 1e-11);
+                EXPECT_NEAR(state[lambda_dof], last_stage_time, 1e-11);
+                EXPECT_DOUBLE_EQ(accepted.uDotSpan()[p_dof], 0.0);
+                for (FE::GlobalIndex i = 0; i < p_dof; ++i) {
+                    EXPECT_NEAR(state[i], 0.0, 1e-11);
+                }
+            };
+            // Continue from the accepted history with a shorter last step in each run.
+            for (double end_time : {0.2, 0.235}) {
+                options.t_end = end_time;
+                const auto report = ts::TimeLoop(options).run(transient, *factory, *linear, history, callbacks);
+                ASSERT_TRUE(report.success) << report.message;
+                EXPECT_DOUBLE_EQ(report.final_time, end_time);
+                options.t0 = history.time();
+            }
+            EXPECT_EQ(rejected, 1);
+        }
+    }
+}
+#endif
 
 TEST(NavierStokesPressureGauge, PressureNotPinnedWhenUnconstrainedBoundaryExists)
 {
