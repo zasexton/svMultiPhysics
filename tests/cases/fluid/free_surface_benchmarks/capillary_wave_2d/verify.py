@@ -281,30 +281,48 @@ def output_series(run: Path, case: dict) -> list[tuple[float, Path]]:
     return series
 
 
-def logged_wet_volumes(run: Path, domain_id: str) -> dict[int, float]:
-    """Per-step liquid area from the solver's 'Wet volume diagnostic' log lines.
+def check_step_time(source: Path, step: int, time: float, dt: float) -> None:
+    # Older timestamps can have only six significant digits.
+    if not math.isclose(time, step * dt, rel_tol=5e-6):
+        raise DataError(f"{source}: step {step} at time {time:g} disagrees with the "
+                        f"declared time step {dt:g}")
 
-    The solver prints one such line per accepted step (step 0 is the initial
-    state).  Returns {} when no log is present.
-    """
+
+def read_run_log(run: Path, domain_id: str, dt: float | None = None) -> tuple[dict[int, float], int]:
+    """Read wet volumes and, for a fixed-step run, check the accepted-step clock."""
     for name in ("solver_run.log", "solver_run.log.gz"):
         path = run / name
         if path.is_file():
             break
     else:
-        return {}
+        return {}, 0
     opener = gzip.open if path.suffix == ".gz" else open
     records = _log_records()
     volumes: dict[int, float] = {}
+    last_accepted = 0
     with opener(path, "rt", errors="replace") as log:
         for line in log:
+            if dt is not None and "TimeLoop: step_accepted " in line:
+                fields = records.line_fields(line)
+                step = int(fields["step"])
+                check_step_time(path, step, float(fields["time"]), dt)
+                if not math.isclose(float(fields["dt"]), dt, rel_tol=5e-6):
+                    raise DataError(f"{path}: accepted time step {fields['dt']} disagrees "
+                                    f"with the declared time step {dt:g}")
+                last_accepted = max(last_accepted, step)
+                continue
             if not records.is_record(line, "wet_volume"):
                 continue
             fields = records.line_fields(line)
             if (records.value(fields.get("domain_id", "")) == domain_id and "step" in fields
                     and "physical_wet_volume" in fields):
                 volumes[int(fields["step"])] = float(fields["physical_wet_volume"])
-    return volumes
+    return volumes, last_accepted
+
+
+def logged_wet_volumes(run: Path, domain_id: str) -> dict[int, float]:
+    """Per-step wet volumes, also used by the oscillating-drop verifier."""
+    return read_run_log(run, domain_id)[0]
 
 
 def snapshot_measures(snap: dict, case: dict) -> dict:
@@ -326,14 +344,30 @@ def analyse_run(run: Path) -> dict:
     case = json.loads(case_file.read_text())
     if case.get("benchmark") != "capillary_wave_2d":
         raise DataError(f"{run}: case.json is not a capillary_wave_2d case")
+    dt = case["dt"]
+    if not math.isfinite(dt) or dt <= 0.0:
+        raise DataError(f"{run}: expected a finite positive time step, got {dt}")
     width = case["box"][1] - case["box"][0]
     if not math.isclose(2.0 * width / case["wavelength"], round(2.0 * width / case["wavelength"]),
                         abs_tol=1e-12):
         raise DataError(f"{run}: box width must be a multiple of half a wavelength")
     series = output_series(run, case)
-    if abs(series[-1][0] - case["end_time"]) > 0.5 * case["dt"]:
-        raise DataError(f"{run}: incomplete run, last output t={series[-1][0]:.6g} "
+    last_time = series[-1][0]
+    if abs(last_time - case["end_time"]) > 0.5 * dt:
+        raise DataError(f"{run}: incomplete run, last output t={last_time:.6g} "
                         f"but the case ends at t={case['end_time']:.6g}")
+    # In the solver's own output names the number is an integration step.
+    # Other PVD entries may be numbered by snapshot instead.
+    prefix = Path(case.get("result_prefix", "result")).name
+    solver_output = re.compile(rf"{re.escape(prefix)}_(\d+)\.p?vtu")
+    final_step = None
+    for time, path in series:
+        match = solver_output.fullmatch(path.name)
+        if match:
+            step = int(match[1])
+            check_step_time(path, step, time, dt)
+            if time == last_time:
+                final_step = step
 
     initial = snapshot_measures(read_level_set(run / "mesh" / "mesh-complete.mesh.vtu", case), case)
     rows = [(0.0, initial)]
@@ -348,7 +382,9 @@ def analyse_run(run: Path) -> dict:
     # D11: the area criterion is the maximum deviation over the whole run.
     # The outputs are sampled every `output_cadence` steps; the solver log,
     # when present, adds the area of every accepted step.
-    logged = logged_wet_volumes(run, case.get("interface_domain_id", "capillary_wave_surface"))
+    logged, last_accepted = read_run_log(run, case.get("interface_domain_id", "capillary_wave_surface"), dt)
+    if final_step is None and last_accepted and math.isclose(last_time, last_accepted * dt, rel_tol=5e-6):
+        final_step = last_accepted
     logged_drift = (max(abs(v - area[0]) for v in logged.values()) / area[0]) if logged else 0.0
     output_drift = float(np.max(np.abs(area - area[0])) / area[0])
 
@@ -373,6 +409,7 @@ def analyse_run(run: Path) -> dict:
         "surface_tension_semi_implicit": case.get("surface_tension_semi_implicit", "None"),
         "truncated": bool(case.get("truncated", False)),
         "end_time": float(times[-1]),
+        "final_step": final_step,
         "periods_simulated": periods,
         "outputs": int(len(times) - 1),
         "initial_amplitude_discrete_relative": float(amp[0] / a0 - 1.0),
@@ -488,13 +525,27 @@ def required_levels_at(divisor: int, tolerances: dict) -> set:
     return levels if rule == "all" else set(rule)
 
 
+def refinement_mismatch(coarse: dict, fine: dict) -> str | None:
+    """Check the step sizes and observed step counts over the same time interval."""
+    coarse_divisor, fine_divisor = coarse["dt_divisor"], fine["dt_divisor"]
+    if not math.isclose(coarse["dt"] * coarse_divisor, fine["dt"] * fine_divisor, rel_tol=1e-9):
+        return (f"dt/{coarse_divisor} = {coarse['dt']:.8g} and dt/{fine_divisor} = {fine['dt']:.8g} "
+                "do not have the declared refinement ratio")
+    coarse_steps, fine_steps = coarse["final_step"], fine["final_step"]
+    if not coarse_steps or not fine_steps:
+        return "missing final integration step in the numbered outputs or accepted-step log"
+    if coarse_steps * fine_divisor != fine_steps * coarse_divisor:
+        return f"final integration steps {coarse_steps} and {fine_steps} do not cover the same time interval"
+    return None
+
+
 def evaluate_time_step(groups: dict, tolerances: dict) -> list[dict]:
     """D13 time-step criterion for every (capillary form, transport, Laplace number).
 
     Compares the fitted frequency and damping rate of the divisor-1 and
     divisor-2 runs at their finest common level: |q(dt) - q(dt/2)| / q(dt/2)
-    within the limit of each quantity.  With only one divisor, or no common
-    level, the criterion is not evaluated and does not fail.
+    within the limit of each quantity. A single divisor leaves the criterion
+    unevaluated. A pair must include the required meshes and a verified halving.
     """
     crit = tolerances.get("time_step_criterion")
     if crit is None:
@@ -505,18 +556,31 @@ def evaluate_time_step(groups: dict, tolerances: dict) -> list[dict]:
         entry = {"id": crit["id"], "capillary_form": key[0], "transport": key[1],
                  "laplace_number": key[2], "evaluated": False, "passed": True,
                  "level": None, "changes": {}, "details": []}
-        common = (sorted({r["level"] for r in coarse} & {r["level"] for r in fine})
-                  if coarse and fine else [])
-        if not common:
+        if not coarse or not fine:
             present = sorted({k[3] for k in groups if k[:3] == key})
             entry["details"].append("not evaluated: needs runs at dt divisors 1 and 2 at a "
                                     f"common level (divisors present: {present})")
             out.append(entry)
             continue
-        level = common[-1]
+        entry["evaluated"] = True
+        common = {r["level"] for r in coarse} & {r["level"] for r in fine}
+        missing = required_levels_at(2, tolerances) - common
+        if missing or not common:
+            entry["passed"] = False
+            entry["details"].append(f"missing common refinement levels: {sorted(missing)}"
+                                    if missing else "no common refinement level")
+            out.append(entry)
+            continue
+        level = max(common)
         a = next(r for r in coarse if r["level"] == level)
         b = next(r for r in fine if r["level"] == level)
-        entry.update(evaluated=True, level=level, dt=[a["dt"], b["dt"]])
+        entry.update(level=level, dt=[a["dt"], b["dt"]], final_steps=[a["final_step"], b["final_step"]])
+        mismatch = refinement_mismatch(a, b)
+        if mismatch:
+            entry["passed"] = False
+            entry["details"].append(f"lambda/h={level}: {mismatch}")
+            out.append(entry)
+            continue
         fa, fb = a["fit"], b["fit"]
         messages = [f"lambda/h={level} (finest common level), dt={a['dt']:.4g} vs {b['dt']:.4g}"]
         ok = True
@@ -626,15 +690,17 @@ def main(argv=None) -> int:
             continue
         runs.sort(key=lambda r: r["dt_divisor"])
         finest = runs[-1]["fit"] or {}
+        comparable = [refinement_mismatch(r, runs[-1]) is None for r in runs[:-1]]
+        comparable.append(any(comparable))
         print(f"\n-- time-step study {form}, transport {transport}, La = {laplace:g}, "
               f"lambda/h = {level} (reported; change relative to dt/{runs[-1]['dt_divisor']})")
         rows = []
-        for r in runs:
+        for r, can_compare in zip(runs, comparable):
             fit = r["fit"] or {}
             d_omega = (abs(fit["omega"] - finest["omega"]) / finest["omega"]
-                       if fit and finest else None)
+                       if can_compare and fit and finest else None)
             d_beta = (abs(fit["beta"] - finest["beta"]) / finest["beta"]
-                      if fit and finest else None)
+                      if can_compare and fit and finest else None)
             print(f"   dt/{r['dt_divisor']}: omega err {_fmt(r['frequency_relative_error'], '.3e')}, "
                   f"beta err {_fmt(r['damping_rate_relative_error'], '.3e')}, "
                   f"rms err {r['amplitude_rms_error']:.3e}; omega change {_fmt(d_omega, '.3e')}, "

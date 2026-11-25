@@ -184,21 +184,29 @@ def analyse_run(run: Path, *, allow_short: bool = False) -> dict:
 # Studies
 # ---------------------------------------------------------------------------
 def richardson(steps: list[float], values: list[float]) -> dict:
-    """Extrapolate values(dt) to dt -> 0 from three or more nested steps.
+    """Extrapolate from the three finest steps with a common refinement ratio.
 
-    The observed order p comes from the three smallest steps; the limit is
-    extrapolated from the two smallest.  Without monotone differences the
-    smallest-step value is taken as the limit and p is NaN.
+    A constant history needs zero correction. Otherwise a limit requires
+    successive changes of the same sign that shrink beyond roundoff.
     """
-    pts = sorted(zip(steps, values), key=lambda x: -x[0])       # decreasing dt
-    s = [p[0] for p in pts]
-    v = [p[1] for p in pts]
-    d1, d2 = v[-2] - v[-3], v[-1] - v[-2]
-    ratio = s[-2] / s[-1]
-    if d1 == 0.0 or d2 == 0.0 or d1 * d2 < 0.0:
-        return {"order": float("nan"), "limit": v[-1]}
-    order = math.log(abs(d1 / d2)) / math.log(ratio)
-    return {"order": order, "limit": v[-1] + d2 / (ratio ** order - 1.0)}
+    if len(steps) != len(values) or len(steps) < 3:
+        raise DataError("Richardson extrapolation needs at least three paired steps and values")
+    if not all(math.isfinite(s) and s > 0 for s in steps) or not all(map(math.isfinite, values)):
+        raise DataError("Richardson extrapolation needs positive finite steps and finite values")
+    finest, middle, coarse = sorted(zip(steps, values))[:3]
+    ratio = middle[0] / finest[0]
+    if ratio <= 1.0 or not math.isclose(coarse[0] / middle[0], ratio, rel_tol=1e-9):
+        raise DataError("Richardson extrapolation needs distinct steps with a common refinement ratio")
+    v0, v1, v2 = coarse[1], middle[1], finest[1]
+    d1, d2 = v1 - v0, v2 - v1
+    if d1 == d2 == 0.0:
+        return {"order": None, "limit": v2}
+    # Subtracting sampled values can move either increment by a few ulps.
+    roundoff = 4 * max(map(math.ulp, (v0, v1, v2)))
+    if abs(d2) <= roundoff or (d1 > 0.0) != (d2 > 0.0) or abs(d1) - abs(d2) <= roundoff:
+        return {"order": None, "limit": None}
+    order = (math.log(abs(d1)) - math.log(abs(d2))) / math.log(ratio)
+    return {"order": order, "limit": v2 + d2 * (d2 / (d1 - d2))}
 
 
 def time_step_study(runs: list[dict]) -> dict | None:
@@ -215,8 +223,10 @@ def time_step_study(runs: list[dict]) -> dict | None:
         "omega": [r["omega"] for r in usable], "beta": [r["beta"] for r in usable],
         "observed_order_omega": omega["order"], "observed_order_beta": beta["order"],
         "omega_dt_to_zero": omega["limit"], "beta_dt_to_zero": beta["limit"],
-        "omega_time_error": {r["dt_divisor"]: r["omega"] - omega["limit"] for r in usable},
-        "beta_time_error": {r["dt_divisor"]: r["beta"] - beta["limit"] for r in usable},
+        "omega_time_error": {r["dt_divisor"]: r["omega"] - omega["limit"]
+                             if omega["limit"] is not None else None for r in usable},
+        "beta_time_error": {r["dt_divisor"]: r["beta"] - beta["limit"]
+                            if beta["limit"] is not None else None for r in usable},
     }
 
 
@@ -230,17 +240,16 @@ def evaluate(runs: list[dict], tolerances: dict) -> tuple[list[dict], dict]:
     dts = time_step_study(timing)
     summary = {"time_step_study": dts}
     for r in spatial.values():
-        if dts is None or r["omega"] is None:
-            r["time_error_removed"] = None
-            r["frequency_spatial_relative_error"] = None
-            r["damping_spatial_relative_error"] = None
-            continue
-        e_omega, e_beta = dts["omega_time_error"][1], dts["beta_time_error"][1]
-        r["time_error_removed"] = {"omega": e_omega, "beta": e_beta}
-        r["frequency_spatial_signed_error"] = (r["omega"] - e_omega) / r["omega_reference"] - 1.0
-        r["damping_spatial_signed_error"] = (r["beta"] - e_beta) / r["beta_reference"] - 1.0
-        r["frequency_spatial_relative_error"] = abs(r["frequency_spatial_signed_error"])
-        r["damping_spatial_relative_error"] = abs(r["damping_spatial_signed_error"])
+        corrections = None
+        if dts is not None and r["omega"] is not None:
+            corrections = {"omega": dts["omega_time_error"][1], "beta": dts["beta_time_error"][1]}
+        r["time_error_removed"] = corrections
+        for param, quantity in (("omega", "frequency"), ("beta", "damping")):
+            signed = None
+            if corrections is not None and corrections[param] is not None:
+                signed = (r[param] - corrections[param]) / r[f"{param}_reference"] - 1.0
+            r[f"{quantity}_spatial_signed_error"] = signed
+            r[f"{quantity}_spatial_relative_error"] = abs(signed) if signed is not None else None
 
     results = []
     for crit in tolerances["criteria"]:
@@ -339,7 +348,11 @@ def main(argv=None) -> int:
     if len(keys) != len(set(keys)):
         print(f"ERROR: duplicate protocol runs {keys}", file=sys.stderr)
         return 2
-    verdicts, summary = evaluate(protocol, tolerances)
+    try:
+        verdicts, summary = evaluate(protocol, tolerances)
+    except DataError as exc:
+        print(f"ERROR: {exc}", file=sys.stderr)
+        return 2
     all_pass = all(v["passed"] for v in verdicts)
 
     everything = sorted(runs, key=lambda r: (not r["protocol_run"], r["level"], r["dt_divisor"],
@@ -370,14 +383,17 @@ def main(argv=None) -> int:
           f"{ref['reference_normal_mode_damping_rate']:.7g}; omega0 = {ref['reference_omega0']:.7g}")
     dts = summary["time_step_study"]
     if dts is not None:
-        print("time-step study (lambda/h = {}): omega(dt->0) = {:.8f} (order {:.2f}), "
-              "beta(dt->0) = {:.6f} (order {:.2f}); time errors of the shared step: "
-              "omega {:+.2e}, beta {:+.2e} (relative)".format(
-                  tolerances["protocol"]["time_step_study_level"],
-                  dts["omega_dt_to_zero"], dts["observed_order_omega"],
-                  dts["beta_dt_to_zero"], dts["observed_order_beta"],
-                  dts["omega_time_error"][1] / ref_fit.get("omega", 1.0),
-                  dts["beta_time_error"][1] / ref_fit.get("beta", 1.0)))
+        print(f"time-step study (lambda/h = {tolerances['protocol']['time_step_study_level']})")
+        for param, spec in (("omega", ".8f"), ("beta", ".6f")):
+            limit = dts[f"{param}_dt_to_zero"]
+            if limit is None:
+                print(f"  {param}(dt->0) unresolved: the limit requires same-sign, "
+                      "shrinking changes distinguishable from roundoff")
+            else:
+                order = _fmt(dts[f"observed_order_{param}"], ".2f")
+                relative = dts[f"{param}_time_error"][1] / ref_fit.get(param, 1.0)
+                print(f"  {param}(dt->0) = {limit:{spec}} (order {order}), "
+                      f"relative time error of the shared step {relative:+.2e}")
     for v in verdicts:
         print(f"  [{'PASS' if v['passed'] else 'FAIL'}] {v['id']}: " + "; ".join(v["details"]))
     if args.json:

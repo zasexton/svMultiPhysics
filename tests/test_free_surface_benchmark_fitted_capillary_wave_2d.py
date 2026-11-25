@@ -343,5 +343,40 @@ def test_missing_and_incomplete_data_fail_clearly(tmp_path, capsys):
 def test_richardson_extrapolation():
     r = ver.richardson([4e-3, 2e-3, 1e-3], [1.0 + 16e-6, 1.0 + 4e-6, 1.0 + 1e-6])
     assert r["order"] == pytest.approx(2.0) and r["limit"] == pytest.approx(1.0, abs=1e-15)
-    flat = ver.richardson([4e-3, 2e-3, 1e-3], [1.0, 1.0 + 1e-9, 1.0])
-    assert math.isnan(flat["order"]) and flat["limit"] == 1.0
+
+
+@pytest.mark.parametrize("values", [[1., 2., 3.], [1., 2., 4.], [4., 3., 1.], [0.1, 0.2, 0.3],
+                                    [1.0, 1.0 + 1e-9, 1.0], [1.5, 1.0, math.nextafter(1.0, 0.0)]])
+def test_richardson_has_no_limit_for_unresolved_changes(values):
+    result = ver.richardson([1., .5, .25], values)
+    assert result["order"] is None and result["limit"] is None
+
+
+def test_richardson_constant_history_needs_no_correction():
+    result = ver.richardson([1., .5, .25], [2., 2., 2.])
+    assert result["order"] is None and result["limit"] == 2.
+
+
+@pytest.mark.parametrize("steps", [[1., .5, .5], [1., .5, .125]])
+def test_richardson_requires_a_common_refinement_ratio(steps):
+    with pytest.raises(ver.DataError, match="refinement ratio"):
+        ver.richardson(steps, [1., .25, .0625])
+
+
+def test_unresolved_damping_cannot_qualify_the_spatial_study(study, tmp_path, capsys):
+    # Damping increments double on the second halving. Frequency still converges.
+    timing = {2: (SPATIAL[32][0] + TIME[2][0], 0.012),
+              4: (SPATIAL[32][0] + TIME[4][0], 0.016)}
+    report = tmp_path / "report.json"
+    assert ver.main([*study(with_time_error(SPATIAL), timing), "--json", str(report)]) == 1
+    assert "unresolved" in capsys.readouterr().out.lower()
+    data = json.loads(report.read_text())
+    assert {c["id"]: c["passed"] for c in data["criteria"]} == {
+        "frequency": True, "damping": False, "volume": True}
+    dts = data["summary"]["time_step_study"]
+    assert dts["observed_order_beta"] is None and dts["beta_dt_to_zero"] is None
+    for row in data["runs"]:
+        if row["study"] == "spatial":
+            assert row["damping_spatial_relative_error"] is None
+            assert row["frequency_spatial_relative_error"] is not None
+            assert row["damping_rate_relative_error"] is not None

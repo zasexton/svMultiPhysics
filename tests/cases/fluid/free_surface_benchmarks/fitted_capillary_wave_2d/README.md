@@ -61,6 +61,9 @@ The separate time-step study runs `lambda/h = 32` at `dt`, `dt/2` and `dt/4`
 `dt -> 0` (order from the three steps, limit from the two smallest) and
 subtracts the time error `e_t(dt)` of the shared step from every
 spatial-study frequency and damping rate, as `fitted_sloshing_2d` does.
+For each quantity, successive changes must have the same sign and shrink
+beyond roundoff. Three identical values give zero correction. Any other
+unresolved sequence leaves that quantity's corrected spatial criterion failed.
 
 **Capillary time-step limit.** The limit is a stability bound for surface
 tension that is explicit in the interface geometry (Brackbill, Kothe and

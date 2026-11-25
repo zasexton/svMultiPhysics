@@ -4,6 +4,7 @@ import gzip
 import importlib.util
 import json
 import math
+import shutil
 import sys
 import xml.etree.ElementTree as ET
 from pathlib import Path
@@ -438,10 +439,13 @@ def test_time_step_criterion_fails_and_dt2_study_is_gated(study, tmp_path, capsy
     assert "lambda/h=32: not run at this step (not required)" in out
     assert "order not evaluated at this step" in out
     other = tmp_path / "L32_dt2"
-    write_synthetic_run(other, 32, dt_divisor=2)
-    assert ver.main([*runs, str(other)]) == 1           # dt/2 study without lambda/h = 64
+    write_synthetic_run(other, 32, dt_divisor=2, omega_error=0.012 / 2**1.5,
+                        beta_error=0.04 / 2**1.5)
+    report = tmp_path / "missing-level.json"
+    assert ver.main([*runs, str(other), "--json", str(report)]) == 1
     out = capsys.readouterr().out
     assert "missing run at lambda/h=64" in out
+    assert not json.loads(report.read_text())["time_step_criterion"][0]["passed"]
 
 
 def test_time_step_criterion_not_evaluated_with_one_divisor(study, tmp_path, capsys):
@@ -454,12 +458,91 @@ def test_time_step_criterion_not_evaluated_with_one_divisor(study, tmp_path, cap
     assert "criteria cannot be applied" in capsys.readouterr().out
 
 
+def test_time_step_criterion_rejects_a_relabeled_copy(study, tmp_path):
+    runs = study()
+    fine = tmp_path / "relabeled"
+    shutil.copytree(runs[-1], fine)
+    case_file = fine / "case.json"
+    case = json.loads(case_file.read_text())
+    case["dt_divisor"] = 2
+    case_file.write_text(json.dumps(case))
+    report = tmp_path / "verdict.json"
+    assert ver.main([*runs, str(fine), "--json", str(report)]) == 1
+    result = json.loads(report.read_text())
+    criterion = result["time_step_criterion"][0]
+    assert not criterion["passed"] and not criterion["changes"]
+    assert criterion["dt"] == [case["dt"], case["dt"]]
+    assert criterion["final_steps"] == [case["steps"], case["steps"]]
+    for row in result["time_step_study"][0]["rows"]:
+        assert row["omega_change_from_smallest_dt"] is None
+        assert row["beta_change_from_smallest_dt"] is None
+
+
+def test_time_step_criterion_needs_integration_steps_not_just_snapshot_times(study, tmp_path):
+    runs = study()
+    fine = tmp_path / "fine"
+    case = write_synthetic_run(fine, 64, dt_divisor=2, omega_error=.0005)
+    # The output times of both runs are identical. Without solver step
+    # indices these snapshots alone cannot establish which time step ran.
+    pvd = fine / "result.pvd"
+    tree = ET.parse(pvd)
+    for i, entry in enumerate(tree.iter("DataSet")):
+        name = f"frame_{i:03d}.vtu"
+        (fine / entry.get("file")).rename(fine / name)
+        entry.set("file", name)
+    tree.write(pvd)
+    report = tmp_path / "verdict.json"
+    args = [*runs, str(fine), "--json", str(report)]
+    assert ver.main(args) == 1
+    assert not json.loads(report.read_text())["time_step_criterion"][0]["passed"]
+    with (fine / "solver_run.log").open("w") as log:
+        for step in range(1, case["steps"] + 1):
+            log.write(f"TimeLoop: step_accepted step={step} time={step * case['dt']} dt={case['dt']}\n")
+    assert ver.main(args) == 0
+
+
+def test_time_step_criterion_supports_numbered_output_without_pvd_or_log(study, tmp_path):
+    runs = study()
+    fine = tmp_path / "fine"
+    write_synthetic_run(fine, 64, dt_divisor=2, omega_error=.0005)
+    for run in [*map(Path, runs), fine]:
+        (run / "result.pvd").unlink()
+    assert ver.main([*runs, str(fine)]) == 0
+
+
+def test_time_step_criterion_requires_twice_as_many_steps_over_the_same_run():
+    fit = {"converged": True, "omega": 15.5, "beta": 1.2}
+    base = {"level": 64, "dt": 0.01, "dt_divisor": 1, "final_step": 200, "fit": fit}
+    short = dict(base, dt=0.005, dt_divisor=2)
+    key = ("surface_stress", "pde_extension", 3000)
+    groups = {(*key, 1): [base], (*key, 2): [short]}
+    tolerances = json.loads((BENCHMARK / "tolerances.json").read_text())
+    criterion, = ver.evaluate_time_step(groups, tolerances)
+    assert not criterion["passed"] and not criterion["changes"]
+
+
+@pytest.mark.parametrize("clock", ["pvd", "accepted_step"])
+def test_time_step_must_match_solver_clock(tmp_path, clock):
+    pytest.importorskip("pyvista")
+    run = tmp_path / "wave"
+    case = write_synthetic_run(run, 16, max_steps=4)
+    if clock == "pvd":
+        case["dt"] /= 2
+        (run / "case.json").write_text(json.dumps(case))
+    else:
+        with gzip.open(run / "solver_run.log.gz", "wt") as log:
+            log.write(f"TimeLoop: step_accepted step=1 time={case['dt']} dt={case['dt'] / 2}\n")
+    with pytest.raises(ver.DataError, match="time step"):
+        ver.analyse_run(run)
+
+
 def test_spatial_study_requires_one_shared_time_step(study, tmp_path, capsys):
     runs = study()
-    case_file = Path(runs[2]) / "case.json"
-    case = json.loads(case_file.read_text())
-    case["dt"] *= 1.5
-    case_file.write_text(json.dumps(case))
+    fine = tmp_path / "different_step"
+    case = write_synthetic_run(fine, 64, dt_divisor=2)
+    case["dt_divisor"] = 1
+    (fine / "case.json").write_text(json.dumps(case))
+    runs[2] = str(fine)
     assert ver.main(runs) == 2
     assert "one shared step (D10)" in capsys.readouterr().err
 

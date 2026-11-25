@@ -157,8 +157,11 @@ and §9.9).
 output times; the protocol runs it at `lambda/h = 64`. Every gate must also
 pass for the `dt/2` run, and between `dt` and `dt/2` at the finest common
 level the fitted frequency may change by at most 0.2% and the damping by at
-most 1% (`time_step_criterion` in `tolerances.json`). Other levels run at two
-or more divisors (1, 2, 4) are reported in the time-step study.
+most 1% (`time_step_criterion` in `tolerances.json`). The verifier checks the
+declared steps against the available PVD and solver clocks. Numbered output
+files or accepted-step log records must show twice as many integration steps
+over the same duration at `dt/2`. Other levels run at two or more divisors
+(1, 2, 4) are reported in the time-step study.
 
 **Earlier protocol (D10, until 2026-10-05).** All levels used the one-sided
 capillary limit `dt <= sqrt(rho h^3 / (4 pi gamma))` of the finest level,
