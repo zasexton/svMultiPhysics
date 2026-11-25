@@ -248,13 +248,26 @@ std::span<const GlobalIndex> gatherDofsWithOffset(std::span<const GlobalIndex> d
     return Real(1);
 }
 
-/// Whether the cells bind the solution of the primary field: not for a vector
-/// basis (H(div), H(curl)), which has no tables in a functional's context and
-/// whose integrands measured forms refuse; the other fields' data are bound
-/// apart (bindFieldSolutionData).
+/// Whether a functional's context evaluates the primary field's solution data
+/// at the points: not for a vector basis (H(div), H(curl)), which has no tables
+/// there; the other fields' data are bound apart (bindFieldSolutionData).
 [[nodiscard]] bool bindsPrimarySolution(const spaces::FunctionSpace& space)
 {
     return !space.element().basis().is_vector_valued();
+}
+
+/// Binds the primary field's local coefficients.  A vector basis keeps its
+/// coefficients only: it has no tables to evaluate them with in a functional's
+/// context, and its fields enter measured forms through their own data.
+void bindPrimarySolution(AssemblyContext& context,
+                         const spaces::FunctionSpace& space,
+                         std::span<const Real> coefficients)
+{
+    if (bindsPrimarySolution(space)) {
+        context.setSolutionCoefficients(coefficients);
+    } else {
+        context.setSolutionCoefficientsOnly(coefficients);
+    }
 }
 
 void prepareCellContext(AssemblyContext& context,
@@ -827,65 +840,69 @@ void prepareBoundaryFaceContext(AssemblyContext& context,
     std::vector<Real> values_at_pt;
     std::vector<basis::Gradient> gradients_at_pt;
 
-    for (LocalIndex q = 0; q < n_qpts; ++q) {
-        const math::Vector<Real, 3> xi{
-            scratch.quad_points[q][0],
-            scratch.quad_points[q][1],
-            scratch.quad_points[q][2]};
+    // A vector basis (H(div), H(curl)) has no scalar tables: its fields enter
+    // through their own solution data, as in prepareCellContext.
+    if (!basis.is_vector_valued()) {
+        for (LocalIndex q = 0; q < n_qpts; ++q) {
+            const math::Vector<Real, 3> xi{
+                scratch.quad_points[q][0],
+                scratch.quad_points[q][1],
+                scratch.quad_points[q][2]};
 
-        const auto& J_inv = scratch.inv_jacobians[q];
+            const auto& J_inv = scratch.inv_jacobians[q];
 
-        basis.evaluate_values(xi, values_at_pt);
-        basis.evaluate_gradients(xi, gradients_at_pt);
-        if (need_basis_hessians) {
-            basis.evaluate_hessians(xi, hessians_at_pt);
-        }
-
-        for (LocalIndex i = 0; i < n_dofs; ++i) {
-            const LocalIndex si = is_product ? static_cast<LocalIndex>(i % n_scalar_dofs) : i;
-            const std::size_t idx = static_cast<std::size_t>(i * n_qpts + q);
-            const std::size_t idx_phys = static_cast<std::size_t>(q * n_dofs + i);
-            scratch.basis_values[idx] = values_at_pt[static_cast<std::size_t>(si)];
-            scratch.ref_gradients[idx] = {
-                gradients_at_pt[static_cast<std::size_t>(si)][0],
-                gradients_at_pt[static_cast<std::size_t>(si)][1],
-                gradients_at_pt[static_cast<std::size_t>(si)][2]};
-
-            const auto& grad_ref = scratch.ref_gradients[idx];
-            AssemblyContext::Vector3D grad_phys = {0.0, 0.0, 0.0};
-            for (int d1 = 0; d1 < dim; ++d1) {
-                for (int d2 = 0; d2 < dim; ++d2) {
-                    grad_phys[d1] += J_inv[d2][d1] * grad_ref[d2];
-                }
-            }
-            scratch.phys_gradients[idx_phys] = grad_phys;
-
+            basis.evaluate_values(xi, values_at_pt);
+            basis.evaluate_gradients(xi, gradients_at_pt);
             if (need_basis_hessians) {
-                AssemblyContext::Matrix3x3 H_ref{};
-                for (int r = 0; r < 3; ++r) {
-                    for (int c = 0; c < 3; ++c) {
-                        H_ref[static_cast<std::size_t>(r)][static_cast<std::size_t>(c)] =
-                            hessians_at_pt[static_cast<std::size_t>(si)](
-                                static_cast<std::size_t>(r), static_cast<std::size_t>(c));
-                    }
-                }
-                ref_hessians[idx] = H_ref;
+                basis.evaluate_hessians(xi, hessians_at_pt);
+            }
 
-                AssemblyContext::Matrix3x3 H_phys{};
-                for (int r = 0; r < dim; ++r) {
-                    for (int c = 0; c < dim; ++c) {
-                        Real sum = 0.0;
-                        for (int a = 0; a < dim; ++a) {
-                            for (int b = 0; b < dim; ++b) {
-                                sum += J_inv[static_cast<std::size_t>(a)][static_cast<std::size_t>(r)] *
-                                       H_ref[static_cast<std::size_t>(a)][static_cast<std::size_t>(b)] *
-                                       J_inv[static_cast<std::size_t>(b)][static_cast<std::size_t>(c)];
-                            }
-                        }
-                        H_phys[static_cast<std::size_t>(r)][static_cast<std::size_t>(c)] = sum;
+            for (LocalIndex i = 0; i < n_dofs; ++i) {
+                const LocalIndex si = is_product ? static_cast<LocalIndex>(i % n_scalar_dofs) : i;
+                const std::size_t idx = static_cast<std::size_t>(i * n_qpts + q);
+                const std::size_t idx_phys = static_cast<std::size_t>(q * n_dofs + i);
+                scratch.basis_values[idx] = values_at_pt[static_cast<std::size_t>(si)];
+                scratch.ref_gradients[idx] = {
+                    gradients_at_pt[static_cast<std::size_t>(si)][0],
+                    gradients_at_pt[static_cast<std::size_t>(si)][1],
+                    gradients_at_pt[static_cast<std::size_t>(si)][2]};
+
+                const auto& grad_ref = scratch.ref_gradients[idx];
+                AssemblyContext::Vector3D grad_phys = {0.0, 0.0, 0.0};
+                for (int d1 = 0; d1 < dim; ++d1) {
+                    for (int d2 = 0; d2 < dim; ++d2) {
+                        grad_phys[d1] += J_inv[d2][d1] * grad_ref[d2];
                     }
                 }
-                phys_hessians[idx] = H_phys;
+                scratch.phys_gradients[idx_phys] = grad_phys;
+
+                if (need_basis_hessians) {
+                    AssemblyContext::Matrix3x3 H_ref{};
+                    for (int r = 0; r < 3; ++r) {
+                        for (int c = 0; c < 3; ++c) {
+                            H_ref[static_cast<std::size_t>(r)][static_cast<std::size_t>(c)] =
+                                hessians_at_pt[static_cast<std::size_t>(si)](
+                                    static_cast<std::size_t>(r), static_cast<std::size_t>(c));
+                        }
+                    }
+                    ref_hessians[idx] = H_ref;
+
+                    AssemblyContext::Matrix3x3 H_phys{};
+                    for (int r = 0; r < dim; ++r) {
+                        for (int c = 0; c < dim; ++c) {
+                            Real sum = 0.0;
+                            for (int a = 0; a < dim; ++a) {
+                                for (int b = 0; b < dim; ++b) {
+                                    sum += J_inv[static_cast<std::size_t>(a)][static_cast<std::size_t>(r)] *
+                                           H_ref[static_cast<std::size_t>(a)][static_cast<std::size_t>(b)] *
+                                           J_inv[static_cast<std::size_t>(b)][static_cast<std::size_t>(c)];
+                                }
+                            }
+                            H_phys[static_cast<std::size_t>(r)][static_cast<std::size_t>(c)] = sum;
+                        }
+                    }
+                    phys_hessians[idx] = H_phys;
+                }
             }
         }
     }
@@ -942,8 +959,10 @@ void prepareBoundaryFaceContext(AssemblyContext& context,
     context.setPhysicalPoints(scratch.phys_points);
     context.setJacobianData(scratch.jacobians, scratch.inv_jacobians, scratch.jac_dets);
     context.setIntegrationWeights(scratch.integration_weights);
-    context.setTestBasisData(n_dofs, scratch.basis_values, scratch.ref_gradients);
-    context.setPhysicalGradients(scratch.phys_gradients, scratch.phys_gradients);
+    if (!basis.is_vector_valued()) {
+        context.setTestBasisData(n_dofs, scratch.basis_values, scratch.ref_gradients);
+        context.setPhysicalGradients(scratch.phys_gradients, scratch.phys_gradients);
+    }
     context.setNormals(scratch.normals);
 
     if (reference_geometry.has_value()) {
@@ -1001,7 +1020,7 @@ void prepareBoundaryFaceContext(AssemblyContext& context,
         context.setConfigurationTransforms(transforms);
     }
 
-    if (need_basis_hessians) {
+    if (need_basis_hessians && !basis.is_vector_valued()) {
         context.setTestBasisHessians(n_dofs, ref_hessians);
         context.setPhysicalHessians(phys_hessians, phys_hessians);
     }
@@ -2161,12 +2180,11 @@ std::vector<Real> FunctionalAssembler::assembleMultiple(
     }
 
     const bool need_solution =
-        bindsPrimarySolution(*space_) &&
-        (hasFlag(all_required, RequiredData::SolutionCoefficients) ||
-         hasFlag(all_required, RequiredData::SolutionValues) ||
-         hasFlag(all_required, RequiredData::SolutionGradients) ||
-         hasFlag(all_required, RequiredData::SolutionHessians) ||
-         hasFlag(all_required, RequiredData::SolutionLaplacians));
+        hasFlag(all_required, RequiredData::SolutionCoefficients) ||
+        hasFlag(all_required, RequiredData::SolutionValues) ||
+        hasFlag(all_required, RequiredData::SolutionGradients) ||
+        hasFlag(all_required, RequiredData::SolutionHessians) ||
+        hasFlag(all_required, RequiredData::SolutionLaplacians);
 
     GlobalIndex elements_processed = 0;
 
@@ -2183,7 +2201,7 @@ std::vector<Real> FunctionalAssembler::assembleMultiple(
                                            solution_,
                                            local_solution,
                                            "FunctionalAssembler::assembleMultiple");
-            context_.setSolutionCoefficients(local_solution);
+            bindPrimarySolution(context_, *space_, local_solution);
         }
 
         // Evaluate all kernels for this cell
@@ -2262,13 +2280,12 @@ void FunctionalAssembler::evaluateCellFunctionals(std::span<FunctionalKernel* co
     }
 
     const bool need_solution =
-        bindsPrimarySolution(*space_) &&
-        (hasFlag(required, RequiredData::SolutionCoefficients) ||
-         hasFlag(required, RequiredData::SolutionValues) ||
-         hasFlag(required, RequiredData::SolutionGradients) ||
-         hasFlag(required, RequiredData::SolutionHessians) ||
-         hasFlag(required, RequiredData::SolutionLaplacians) ||
-         !field_reqs.empty());
+        hasFlag(required, RequiredData::SolutionCoefficients) ||
+        hasFlag(required, RequiredData::SolutionValues) ||
+        hasFlag(required, RequiredData::SolutionGradients) ||
+        hasFlag(required, RequiredData::SolutionHessians) ||
+        hasFlag(required, RequiredData::SolutionLaplacians) ||
+        !field_reqs.empty();
 
     const std::size_t requested_batch_size = std::max<std::size_t>(options_.cell_batch_size, 1u);
     const std::size_t batch_size = std::min<std::size_t>(requested_batch_size, 256u);
@@ -2306,7 +2323,7 @@ void FunctionalAssembler::evaluateCellFunctionals(std::span<FunctionalKernel* co
                                            solution_,
                                            local_solution,
                                            "FunctionalAssembler::evaluateCellFunctionals");
-            ctx.setSolutionCoefficients(local_solution);
+            bindPrimarySolution(ctx, *space_, local_solution);
         }
 
         if (bindsPrimarySolution(*space_) && !previous_solutions_.empty()) {
@@ -2431,7 +2448,7 @@ std::vector<Real> FunctionalAssembler::computeGoalOrientedIndicators(
                                        solution_,
                                        local_solution,
                                        "FunctionalAssembler::computeGoalOrientedIndicators");
-        context_.setSolutionCoefficients(local_solution);
+        bindPrimarySolution(context_, *space_, local_solution);
 
         // Compute DWR indicator: R(u_h) * z_h integrated over element
         // Simplified: we use the kernel evaluation weighted by dual solution
@@ -2544,13 +2561,12 @@ Real FunctionalAssembler::assembleCellsCore(
         }
     }
     const bool need_solution =
-        bindsPrimarySolution(*space_) &&
-        (hasFlag(required, RequiredData::SolutionCoefficients) ||
-         hasFlag(required, RequiredData::SolutionValues) ||
-         hasFlag(required, RequiredData::SolutionGradients) ||
-         hasFlag(required, RequiredData::SolutionHessians) ||
-         hasFlag(required, RequiredData::SolutionLaplacians) ||
-         !field_reqs.empty());
+        hasFlag(required, RequiredData::SolutionCoefficients) ||
+        hasFlag(required, RequiredData::SolutionValues) ||
+        hasFlag(required, RequiredData::SolutionGradients) ||
+        hasFlag(required, RequiredData::SolutionHessians) ||
+        hasFlag(required, RequiredData::SolutionLaplacians) ||
+        !field_reqs.empty();
 
     Real total = 0.0;
     KahanAccumulator accumulator;
@@ -2617,7 +2633,7 @@ Real FunctionalAssembler::assembleCellsCore(
 		                                                  solution_,
 		                                                  local_solution,
 		                                                  "FunctionalAssembler::assembleCellsCore");
-		                    thread_context.setSolutionCoefficients(local_solution);
+		                    bindPrimarySolution(thread_context, *space_, local_solution);
 		                }
 		                if (bindsPrimarySolution(*space_) && !previous_solutions_.empty()) {
 		                    for (std::size_t k = 0; k < previous_solutions_.size(); ++k) {
@@ -2667,7 +2683,7 @@ Real FunctionalAssembler::assembleCellsCore(
 		                                              solution_,
 		                                              local_solution,
 		                                              "FunctionalAssembler::assembleCellsCore");
-		                context_.setSolutionCoefficients(local_solution);
+		                bindPrimarySolution(context_, *space_, local_solution);
 		            }
 		            if (bindsPrimarySolution(*space_) && !previous_solutions_.empty()) {
 		                for (std::size_t k = 0; k < previous_solutions_.size(); ++k) {
@@ -2717,7 +2733,7 @@ Real FunctionalAssembler::assembleCellsCore(
 	                                              solution_,
 	                                              local_solution,
 	                                              "FunctionalAssembler::assembleCellsCore");
-	                context_.setSolutionCoefficients(local_solution);
+	                bindPrimarySolution(context_, *space_, local_solution);
 	            }
 	            if (bindsPrimarySolution(*space_) && !previous_solutions_.empty()) {
 	                for (std::size_t k = 0; k < previous_solutions_.size(); ++k) {
@@ -2795,13 +2811,12 @@ Real FunctionalAssembler::assembleBoundaryCore(
     }
 
     const bool need_solution =
-        bindsPrimarySolution(*space_) &&
-        (hasFlag(required, RequiredData::SolutionCoefficients) ||
-         hasFlag(required, RequiredData::SolutionValues) ||
-         hasFlag(required, RequiredData::SolutionGradients) ||
-         hasFlag(required, RequiredData::SolutionHessians) ||
-         hasFlag(required, RequiredData::SolutionLaplacians) ||
-         !field_reqs.empty());
+        hasFlag(required, RequiredData::SolutionCoefficients) ||
+        hasFlag(required, RequiredData::SolutionValues) ||
+        hasFlag(required, RequiredData::SolutionGradients) ||
+        hasFlag(required, RequiredData::SolutionHessians) ||
+        hasFlag(required, RequiredData::SolutionLaplacians) ||
+        !field_reqs.empty();
 
     Real total = 0.0;
     KahanAccumulator accumulator;
@@ -2839,7 +2854,7 @@ Real FunctionalAssembler::assembleBoundaryCore(
 	                                              solution_,
 	                                              local_solution,
 	                                              "FunctionalAssembler::assembleBoundaryCore");
-	                context_.setSolutionCoefficients(local_solution);
+	                bindPrimarySolution(context_, *space_, local_solution);
                     if (environment::isSet("SVMP_MONO_AUX_TRACE") && result.faces_processed < 8) {
                         Real coeff_sq = 0.0;
                         for (const auto value : local_solution) {

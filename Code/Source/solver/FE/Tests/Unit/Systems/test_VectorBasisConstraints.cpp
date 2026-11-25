@@ -1440,40 +1440,53 @@ TEST(OtherFieldRates, RateDerivativesOnTheFacetsOfAffineCellsVanishExactlyForACo
 
 // The measured terms of a global row on a system whose quadrature field has a
 // vector basis: the RT0 flux of a Quad4 mesh has a higher quadrature order
-// than the DG0 pressure, so the row of a mean multiplier takes its cells from
-// the H(div) field.  Its residual entry, the integral of p, is assembled (the
-// cell loop bound the H(div) field's solution, which the context has no
-// tables for, and threw "vector basis values not set").
+// than the DG0 pressure, so the row of a mean multiplier takes its cells and
+// faces from the H(div) field.  Its residual entry, the integral of p over the
+// cells or over the boundary, is assembled (the cell loop bound the H(div)
+// field's solution, which the context has no tables for, and threw "vector
+// basis values not set"; the face loop evaluated the RT0 basis's scalar
+// values and threw).
 TEST(VectorBasisMixedInstall, GlobalRowWithAVectorBasisQuadratureField)
 {
-    FESystem system(unitBoxTensorMesh(svmp::CellFamily::Quad, 2));
-    FieldBinding fields(system, "VectorBasisMixedInstall");
-    const auto P = fields.unknown("p", std::make_shared<spaces::L2Space>(ElementType::Quad4, 0));
-    const auto Q = fields.unknown("q", std::make_shared<spaces::HDivSpace>(ElementType::Quad4, 0));
-    const auto lambda = fields.global("lambda", "mean multiplier");
-    const auto& R1 = *system.fieldRecord(lambda).space;
-    {
-        FormulationBuilder F(system, "equations", {});
-        (void)F.residual((forms::inner(Q.state, Q.test) + P.state * P.test).dx() +
-                         (forms::StateField(lambda, R1, "lambda") * P.test + forms::TestField(lambda, R1, "m") * P.state).dx());
+    constexpr int marker = 3;
+    for (const bool boundary : {false, true}) {
+        SCOPED_TRACE(boundary ? "integral of p over the boundary" : "integral of p over the cells");
+        auto mesh = unitBoxTensorMesh(svmp::CellFamily::Quad, 2);
+        for (const auto face : mesh->local_mesh().boundary_faces()) {
+            mesh->set_boundary_label(face, marker);
+        }
+        FESystem system(mesh);
+        FieldBinding fields(system, "VectorBasisMixedInstall");
+        const auto P = fields.unknown("p", std::make_shared<spaces::L2Space>(ElementType::Quad4, 0));
+        const auto Q = fields.unknown("q", std::make_shared<spaces::HDivSpace>(ElementType::Quad4, 0));
+        const auto lambda = fields.global("lambda", "mean multiplier");
+        const auto& R1 = *system.fieldRecord(lambda).space;
+        {
+            FormulationBuilder F(system, "equations", {});
+            const auto row = forms::TestField(lambda, R1, "m") * P.state;
+            (void)F.residual((forms::inner(Q.state, Q.test) + P.state * P.test).dx() +
+                             (forms::StateField(lambda, R1, "lambda") * P.test).dx() +
+                             (boundary ? row.ds(marker) : row.dx()));
+        }
+        system.setup();
+        const auto n = system.dofHandler().getNumDofs();
+        std::vector<Real> U(static_cast<std::size_t>(n), 0.0);
+        const auto p0 = system.fieldDofOffset(P.id);
+        for (GlobalIndex i = p0; i < p0 + system.fieldDofHandler(P.id).getNumDofs(); ++i) {
+            U[static_cast<std::size_t>(i)] = 0.25;
+        }
+        SystemStateView state;
+        state.u = U;
+        assembly::DenseVectorView R(n);
+        R.zero();
+        AssemblyRequest request;
+        request.op = "equations";
+        request.want_vector = true;
+        ASSERT_TRUE(system.assemble(request, state, nullptr, &R).success);
+        // The multiplier's row: p = 0.25 integrated over the unit square, or
+        // over its boundary of length 4.
+        EXPECT_NEAR(R.getVectorEntry(system.fieldDofOffset(lambda)), boundary ? 1.0 : 0.25, 1e-14);
     }
-    system.setup();
-    const auto n = system.dofHandler().getNumDofs();
-    std::vector<Real> U(static_cast<std::size_t>(n), 0.0);
-    const auto p0 = system.fieldDofOffset(P.id);
-    for (GlobalIndex i = p0; i < p0 + system.fieldDofHandler(P.id).getNumDofs(); ++i) {
-        U[static_cast<std::size_t>(i)] = 0.25;
-    }
-    SystemStateView state;
-    state.u = U;
-    assembly::DenseVectorView R(n);
-    R.zero();
-    AssemblyRequest request;
-    request.op = "equations";
-    request.want_vector = true;
-    ASSERT_TRUE(system.assemble(request, state, nullptr, &R).success);
-    // The multiplier's row: the integral of p = 0.25 over the unit square.
-    EXPECT_NEAR(R.getVectorEntry(system.fieldDofOffset(lambda)), 0.25, 1e-14);
 }
 
 } // namespace test

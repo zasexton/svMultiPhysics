@@ -18,6 +18,7 @@
 #include "Forms/BoundaryFunctional.h"
 #include "Forms/FormExpr.h"
 #include "Spaces/H1Space.h"
+#include "Spaces/HDivSpace.h"
 #include "Spaces/ProductSpace.h"
 #include "Tests/Unit/Forms/FormsTestHelpers.h"
 
@@ -53,6 +54,43 @@ public:
     }
 
     [[nodiscard]] std::string name() const override { return "BoundaryMeasureKernel"; }
+};
+
+// Sums the raw local coefficients of the primary field: the only solution data
+// it asks for, which needs no basis tables.
+class CoefficientSumKernel final : public FunctionalKernel {
+public:
+    [[nodiscard]] RequiredData getRequiredData() const noexcept override
+    {
+        return RequiredData::IntegrationWeights | RequiredData::SolutionCoefficients;
+    }
+
+    [[nodiscard]] bool hasCell() const noexcept override { return true; }
+    [[nodiscard]] bool hasBoundaryFace() const noexcept override { return true; }
+
+    [[nodiscard]] Real evaluateCell(const AssemblyContext& ctx, LocalIndex /*q*/) override
+    {
+        return sum(ctx);
+    }
+
+    [[nodiscard]] Real evaluateBoundaryFace(const AssemblyContext& ctx,
+                                           LocalIndex /*q*/,
+                                           int /*boundary_marker*/) override
+    {
+        return sum(ctx);
+    }
+
+    [[nodiscard]] std::string name() const override { return "CoefficientSumKernel"; }
+
+private:
+    [[nodiscard]] static Real sum(const AssemblyContext& ctx)
+    {
+        Real total = 0.0;
+        for (const Real c : ctx.solutionCoefficients()) {
+            total += c;
+        }
+        return total;
+    }
 };
 
 } // namespace
@@ -384,6 +422,37 @@ TEST(FunctionalAssemblerBoundaryTest, BoundaryFluxUsesElementLocalCoefficients)
     // On face {0,1,2} (z=0 plane), outward normal is -e_z and grad(z)=+e_z.
     // So ∫ grad(u)·n ds = ∫ (-1) ds = -area = -0.5.
     EXPECT_NEAR(flux, -0.5, 1e-12);
+}
+
+// A kernel asking only for the raw coefficients of an H(div) field gets them,
+// on cells and on boundary faces, although a functional's context has no
+// tables for a vector basis: RT0 on one tetrahedron, coefficients 1..4 summed
+// over the cell (volume 1/6) and over the marked face (area 1/2).
+TEST(FunctionalAssemblerTest, VectorBasisKernelReceivesRawCoefficients)
+{
+    forms::test::SingleTetraOneBoundaryFaceMeshAccess mesh(/*boundary_marker=*/2);
+    auto dof_map = forms::test::createSingleTetraDofMap();
+    spaces::HDivSpace space(ElementType::Tetra4, /*order=*/0, BasisType::RaviartThomas);
+    ASSERT_EQ(space.dofs_per_element(), 4u);
+    const std::vector<Real> u = {1.0, 2.0, 3.0, 4.0};
+
+    CoefficientSumKernel kernel;
+    {
+        FunctionalAssembler assembler;
+        assembler.setMesh(mesh);
+        assembler.setDofMap(dof_map);
+        assembler.setSpace(space);
+        assembler.setSolution(u);
+        EXPECT_NEAR(assembler.assembleScalar(kernel), 10.0 / 6.0, 1e-12);
+    }
+    {
+        FunctionalAssembler assembler;
+        assembler.setMesh(mesh);
+        assembler.setDofMap(dof_map);
+        assembler.setSpace(space);
+        assembler.setSolution(u);
+        EXPECT_NEAR(assembler.assembleBoundaryScalar(kernel, /*boundary_marker=*/2), 5.0, 1e-12);
+    }
 }
 
 TEST(FunctionalAssemblerBoundaryTest, FormsBoundaryFunctionalKernelEvaluatesDiscreteField)
