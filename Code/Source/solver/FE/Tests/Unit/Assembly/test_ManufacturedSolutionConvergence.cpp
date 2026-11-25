@@ -1848,7 +1848,11 @@ struct StokesNitscheMmsErrors {
 // row (-1 adjoint consistent, +1 the earlier sign). The exact solution is
 // shifted by 1/4 so that the wall-normal data are nonzero; its pressure varies.
 // Velocity order 2 (Taylor-Hood Q2/Q1) or 1 (Q1/Q1 with the pressure-gradient
-// stabilization tau (grad p - f).grad q, tau = h^2 / (12 mu)).
+// stabilization tau (grad p - f).grad q, tau = h^2 / (12 mu)). That
+// stabilization omits the viscous part -mu div(2 eps(u_h)) of the production
+// PSPG residual, which bilinear velocities do not annihilate, so it is not
+// consistent (a residual of order tau remains) and the Q1/Q1 rows of the
+// study compare the two wall signs, not the production discretization.
 [[nodiscard]] StokesNitscheMmsErrors stokesNitscheMmsErrors(int n_cells_per_axis, int velocity_order, Real gamma,
                                                             Real pressure_sign)
 {
