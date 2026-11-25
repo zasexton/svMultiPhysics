@@ -39,6 +39,7 @@
 #include "FE/Constraints/CoupledFieldGaugeConstraint.h"
 #include "FE/Constraints/GaugeRegistry.h"
 #include "FE/Constraints/VertexDirichletConstraint.h"
+#include "FE/Forms/CellMetric.h"
 #include "FE/Forms/CutCellForms.h"
 #include "FE/Forms/IntegrationDomain.h"
 #include "FE/Forms/Vocabulary.h"
@@ -113,6 +114,35 @@ IncompressibleNavierStokesVMSModule::IncompressibleNavierStokesVMSModule(
 // Bulk residual
 // ---------------------------------------------------------------------------
 
+namespace {
+
+FormExpr bulkCellMetric(const NavierStokesTerms& terms)
+{
+    auto cell = FE::ElementType::Unknown;
+    bool mixed_families = false;
+    const auto read_space = [&](const FormExprNode& node, const FormExprNode*) {
+        const auto* space = node.spaceSignature();
+        if (!space || element_dimension(space->element_type) != terms.dim) {
+            return;
+        }
+        if (cell != FE::ElementType::Unknown && to_mesh_family(cell) != to_mesh_family(space->element_type)) {
+            mixed_families = true;
+        }
+        cell = space->element_type;
+    };
+    for (const auto* field : {&terms.v, &terms.q, &terms.u, &terms.p}) {
+        fs::forEachNodeThroughLawBodies(*field, read_space);
+    }
+    if (cell != FE::ElementType::Unknown && !mixed_families) {
+        return cellMetric(cell);
+    }
+    // A form written without a unique parent cell uses the original chart metric.
+    const auto inverse = Jinv();
+    return transpose(inverse) * inverse;
+}
+
+} // namespace
+
 NavierStokesVMSIntegrands navierStokesVMSIntegrands(const NavierStokesTerms& t,
                                                     const NavierStokesVMSSettings& s)
 {
@@ -150,15 +180,14 @@ NavierStokesVMSIntegrands navierStokesVMSIntegrands(const NavierStokesTerms& t,
         return r;
     }
 
-    // Static subscales use the physical step dt between endpoints and the element metric K = J^{-T} J^{-1}.
+    // Static subscales use the physical step between endpoints and the parent cell's inverse-length metric.
     //   tau_M = 1 / (rho sqrt(4 ct_m^2/dt^2 + a.K a + ct_c (K:K) nu^2 + eps)),
     //   tau_C = 1 / (tau_M tr K + eps).
     const auto eps = FormExpr::constant(s.epsilon);
     const auto dts = FormExpr::timeStep();
     const auto ct_m = FormExpr::constant(s.ct_m);
     const auto ct_c = FormExpr::constant(s.ct_c);
-    const auto Jinv_expr = Jinv();
-    const auto K = transpose(Jinv_expr) * Jinv_expr;
+    const auto K = bulkCellMetric(t);
     const auto nu = mu / rho;
     const auto kT = FormExpr::constant(4.0) * (ct_m * ct_m) / (dts * dts);
     const auto tau_m = FormExpr::constant(1.0) /

@@ -1719,15 +1719,89 @@ TEST(LevelSetTransport, SUPGUsesTransientDirectionalMetric)
 
     (void)level_set::installLevelSetTransport(system, phi_space, options);
 
-    // The directional metric J^{-T} J^{-1} sets the SUPG scale; no cell
-    // diameter enters (the retired discontinuity capturing was its only
-    // user on this path).
+    // The SUPG scale follows transport along the physical streamline.
     EXPECT_FALSE(formulationRecordsContain(system, FormExprType::CellDiameter));
     EXPECT_TRUE(formulationRecordsContain(system, FormExprType::TimeDerivative));
     EXPECT_TRUE(formulationRecordsContain(system, FormExprType::Gradient));
     EXPECT_TRUE(formulationRecordsContain(system, FormExprType::EffectiveTimeStep));
     EXPECT_TRUE(formulationRecordsContain(system, FormExprType::JacobianInverse));
 }
+
+#if defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH
+namespace {
+
+void expectSimplexSUPGResidual(int dim, const std::vector<svmp::real_t>& coordinates,
+                               const std::vector<std::vector<svmp::index_t>>& orderings,
+                               double measure)
+{
+    const svmp::CellShape shape{dim == 2 ? svmp::CellFamily::Triangle : svmp::CellFamily::Tetra,
+                                dim + 1, 1};
+    const auto element = dim == 2 ? FE::ElementType::Triangle3 : FE::ElementType::Tetra4;
+    for (const auto& vertices : orderings) {
+        SCOPED_TRACE(::testing::PrintToString(vertices));
+        auto base = std::make_shared<svmp::MeshBase>();
+        base->build_from_arrays(dim, coordinates, {0, dim + 1}, vertices, {shape});
+        base->finalize();
+        auto mesh = svmp::create_mesh(std::move(base));
+        auto scalar = std::make_shared<FE::spaces::H1Space>(element, 1);
+        FE::systems::FESystem system(mesh);
+        const auto phi = system.addField({.name = "phi", .space = scalar, .components = 1});
+        level_set::LevelSetTransportOptions options;
+        options.level_set.field_name = "phi";
+        options.level_set.auto_register_field = false;
+        options.velocity.source = level_set::LevelSetVelocitySource::ConstantVector;
+        options.velocity.constant_value = {2.0, 1.0, 0.5};
+        options.supg.enabled = true;
+        (void)level_set::installLevelSetTransport(system, scalar, options);
+        system.setup();
+
+        // phi = x/2 is constant in time and a.grad(phi) = 1 throughout the cell.
+        std::vector<FE::Real> values(system.dofHandler().getNumDofs(), 0.0);
+        for (const auto vertex : vertices) {
+            setScalarVertexValue(values, system, phi, vertex, mesh->get_vertex_coords(vertex)[0] / 2.0);
+        }
+        FE::systems::SystemStateView state;
+        state.dt = state.dt_prev = 1.5;
+        state.u = state.u_prev = state.u_prev2 = values;
+        const auto time = FE::systems::BDF2Integrator().buildContext(1, state);
+        state.time_integration = &time;
+        const auto residual = assembleLevelSetResidual(system, state);
+
+        // The velocity traverses each coordinate leg in unit time. The physical
+        // barycentric rates are (-dim, 1, ... , 1), so their squared sum gives
+        // a.G.a after division by the regular reference normalization.
+        const double rate_squared = dim * (dim + 1) / std::pow(dim + 1, 1.0 / dim);
+        // At this BDF2 step, 1/a0 = 1. Integrating each P1 test function
+        // exactly gives |cell| * (1/(dim+1) + tau * a.grad(N_vertex)).
+        const double tau = options.supg.tau_scale /
+            std::sqrt(options.supg.transient_scale * options.supg.transient_scale +
+                      rate_squared + options.supg.velocity_epsilon);
+        const auto* map = system.fieldDofHandler(phi).getEntityDofMap();
+        ASSERT_NE(map, nullptr);
+        for (const auto vertex : vertices) {
+            const auto row = system.fieldDofOffset(phi) + map->getVertexDofs(vertex).front();
+            const double rate = vertex == 0 ? -dim : 1.0;
+            EXPECT_NEAR(residual[row], measure * (1.0 / (dim + 1) + tau * rate), 1.0e-12)
+                << "physical vertex " << vertex;
+        }
+    }
+}
+
+} // namespace
+
+TEST(LevelSetTransport, TriangleSUPGResidualIsInvariantToVertexOrdering)
+{
+    expectSimplexSUPGResidual(2, {0, 0, 2, 0, 0, 1},
+                              {{0, 1, 2}, {1, 2, 0}, {2, 0, 1}}, 1.0);
+}
+
+TEST(LevelSetTransport, TetrahedronSUPGResidualIsInvariantToVertexOrdering)
+{
+    expectSimplexSUPGResidual(3, {0, 0, 0, 2, 0, 0, 0, 1, 0, 0, 0, 0.5},
+                              {{0, 1, 2, 3}, {1, 2, 0, 3}, {2, 3, 0, 1}, {3, 0, 2, 1}},
+                              1.0 / 6.0);
+}
+#endif
 
 TEST(LevelSetTransport, SUPGJitRequestUsesCompiledPath)
 {

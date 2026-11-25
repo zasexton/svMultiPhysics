@@ -73,7 +73,7 @@ struct LevelSetSUPGOptions {
     Real tau_scale{0.5};
     Real velocity_epsilon{1.0e-12};
     // Tezduyar-style transient contribution to the inverse stabilization
-    // time scale.  The metric contribution is u . (J^-T J^-1) u.
+    // time scale. The directional contribution is u . G u for the cell metric G.
     Real transient_scale{2.0};
 };
 

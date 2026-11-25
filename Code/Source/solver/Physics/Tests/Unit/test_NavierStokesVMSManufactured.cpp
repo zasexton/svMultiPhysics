@@ -12,14 +12,18 @@
 #include "NavierStokesManufacturedSolution.h"
 #include "Physics/Formulations/NavierStokes/IncompressibleNavierStokesVMSModule.h"
 
+#include "FE/Assembly/FunctionalAssembler.h"
+#include "FE/Assembly/GlobalSystemView.h"
 #include "FE/Backends/Interfaces/BackendFactory.h"
 #include "FE/Dofs/EntityDofMap.h"
+#include "FE/Forms/FormKernels.h"
 #include "FE/Forms/JIT/JITKernelWrapper.h"
 #include "FE/Forms/MixedBlockKernelSet.h"
 #include "FE/Forms/MonolithicCellKernel.h"
 #include "FE/Spaces/H1Space.h"
 #include "FE/Spaces/ProductSpace.h"
 #include "FE/Systems/FESystem.h"
+#include "FE/Systems/TimeIntegrator.h"
 #include "FE/Systems/TimeSeries.h"
 #include "FE/TimeStepping/GeneralizedAlpha.h"
 #include "FE/TimeStepping/TimeLoop.h"
@@ -37,6 +41,7 @@
 #include <sstream>
 #include <stdexcept>
 #include <string>
+#include <type_traits>
 #include <utility>
 #include <vector>
 
@@ -319,6 +324,129 @@ FourNorms rates(const FourNorms& coarse, const FourNorms& fine)
         result[i] = std::log2(coarse[i] / fine[i]);
     }
     return result;
+}
+
+void expectSimplexGradDivWork(int dim, const std::vector<real_t>& coordinates,
+                              const std::vector<std::vector<index_t>>& orderings,
+                              double measure, double expected_tau_c)
+{
+    const CellShape shape{dim == 2 ? CellFamily::Triangle : CellFamily::Tetra, dim + 1, 1};
+    const auto element = dim == 2 ? FE::ElementType::Triangle3 : FE::ElementType::Tetra4;
+    constexpr double viscosity = 0.00088733;
+    for (const auto& vertices : orderings) {
+        SCOPED_TRACE(::testing::PrintToString(vertices));
+        auto base = std::make_shared<MeshBase>();
+        base->build_from_arrays(dim, coordinates, {0, dim + 1}, vertices, {shape});
+        base->finalize();
+        auto mesh = create_mesh(std::move(base));
+        FE::systems::FESystem system(mesh);
+        auto scalar = std::make_shared<FE::spaces::H1Space>(element, 1);
+        auto velocity = std::make_shared<FE::spaces::ProductSpace>(scalar, dim);
+        ns::IncompressibleNavierStokesVMSOptions options;
+        options.density = 997.0;
+        options.viscosity = viscosity;
+        options.enable_convection = false;
+        options.enable_vms = true;
+        options.jit_policy.enable = true;
+        options.jit_policy.enable_was_explicitly_set = true;
+        options.node_pressure_constraints.id_type =
+            ns::IncompressibleNavierStokesVMSOptions::NodePressureConstraintIdType::LocalVertexId;
+        options.node_pressure_constraints.values = {{.node_id = 0, .pressure = 0.0}};
+        ns::IncompressibleNavierStokesVMSModule(velocity, scalar, std::move(options)).registerOn(system);
+        system.setup();
+
+        // u = x/dim has unit divergence and zero strong momentum residual at constant time.
+        const auto u = system.findFieldByName("u");
+        const auto* map = system.fieldDofHandler(u).getEntityDofMap();
+        ASSERT_NE(map, nullptr);
+        const auto n = system.dofHandler().getNumDofs();
+        std::vector<double> values(n, 0.0);
+        for (const auto vertex : vertices) {
+            const auto x = mesh->get_vertex_coords(vertex);
+            const auto dofs = map->getVertexDofs(vertex);
+            ASSERT_EQ(dofs.size(), dim);
+            for (int i = 0; i < dim; ++i) {
+                values[system.fieldDofOffset(u) + dofs[i]] = x[i] / dim;
+            }
+        }
+        FE::systems::SystemStateView state;
+        state.dt = 0.001;
+        state.u = state.u_prev = values;
+        const auto time = FE::systems::BackwardDifferenceIntegrator().buildContext(1, state);
+        state.time_integration = &time;
+        FE::systems::AssemblyRequest request;
+        request.op = "equations";
+        request.want_vector = true;
+        FE::assembly::DenseVectorView residual(n);
+        const auto result = system.assemble(request, state, nullptr, &residual);
+        ASSERT_TRUE(result.success) << result.error_message;
+        expectCompiled(system);
+
+        // Testing the momentum residual with u gives integral(2 mu / dim + tau_C).
+        const double work = std::inner_product(values.begin(), values.end(), residual.data().begin(), 0.0);
+        EXPECT_NEAR(work / measure - 2.0 * viscosity / dim, expected_tau_c, 1.0e-8);
+    }
+}
+
+TEST(NavierStokesVMSManufactured, BulkIntegrandsInferTheCellFromACompositeTestField)
+{
+    using FE::forms::FormExpr;
+    using FE::forms::FunctionalFormKernel;
+    using IntegrandsBuilder = ns::NavierStokesVMSIntegrands (*)(
+        const ns::NavierStokesTerms&, const ns::NavierStokesVMSSettings&);
+    static_assert(std::is_same_v<decltype(&ns::navierStokesVMSIntegrands), IntegrandsBuilder>);
+    const IntegrandsBuilder build = &ns::navierStokesVMSIntegrands;
+
+    auto scalar = std::make_shared<FE::spaces::H1Space>(FE::ElementType::Triangle3, 1);
+    FE::systems::FESystem system(makeSquare(1));
+    const auto field = system.addField({.name = "p", .space = scalar, .components = 1});
+    system.setup();
+    FE::assembly::FunctionalAssembler assembler;
+    assembler.setMesh(system.meshAccess());
+    assembler.setSpace(*scalar);
+    assembler.setDofMap(system.fieldDofHandler(field).getDofMap());
+    assembler.setTimeStep(1.0);
+
+    const auto zero = FormExpr::constant(0.0);
+    const auto one = FormExpr::constant(1.0);
+    const auto zero_vector = FormExpr::asVector({zero, zero});
+    const auto x = FormExpr::coordinate().component(0);
+    // A symbolic field can be constructed before the caller has chosen an element.
+    const FE::forms::SpaceSignature vector_space{.space_type = FE::spaces::SpaceType::Product,
+        .field_type = FE::FieldType::Vector, .value_dimension = 2};
+    const auto u = FormExpr::trialFunction(vector_space, "u");
+    const auto pressure_work = [&](const FormExpr& v) {
+        const ns::NavierStokesTerms terms{u, x, v, x, one, one, zero_vector, 2};
+        const auto r = build(terms, {.convection = false, .ct_m = 0.0, .ct_c = 1.0, .epsilon = 1.0});
+        FunctionalFormKernel kernel(r.pspg_pressure_gradient, FunctionalFormKernel::Domain::Cell,
+                                    FE::assembly::RequiredData::BasicGeometry);
+        return assembler.assembleScalar(kernel);
+    };
+    // With p = q = x, the pressure work integrates 1/sqrt(1 + G:G).
+    // The two unit-square triangles both have G:G = (4 + 1 + 1 + 4) / 3.
+    auto triangle = vector_space;
+    triangle.element_type = FE::ElementType::Triangle3;
+    EXPECT_NEAR(pressure_work(FormExpr::constant(2.0) * FormExpr::testFunction(triangle)),
+                std::sqrt(3.0 / 13.0), 1e-12);
+    // An unspecified element uses the original chart metric, with G:G = 7 on both triangles.
+    EXPECT_NEAR(pressure_work(FormExpr::testFunction(vector_space)), 1.0 / std::sqrt(8.0), 1e-12);
+}
+
+// On a coordinate-axis simplex with leg lengths h_i, the unit-determinant
+// regular-simplex metric has G_ij = (1 + delta_ij) / ((dim+1)^(1/dim) h_i h_j).
+// The two tau_C values use this closed form and the 1 ms physical step.
+TEST(NavierStokesVMSManufactured, TriangleGradDivWorkIsInvariantToVertexOrdering)
+{
+    expectSimplexGradDivWork(2, {0, 0, 0.025, 0, 0, 0.0125},
+                             {{0, 1, 2}, {1, 2, 0}, {2, 0, 1}},
+                             0.025 * 0.0125 / 2.0, 215.856831896576);
+}
+
+TEST(NavierStokesVMSManufactured, TetrahedronGradDivWorkIsInvariantToVertexOrdering)
+{
+    expectSimplexGradDivWork(3, {0, 0, 0, 0.025, 0, 0, 0, 0.0125, 0, 0, 0, 0.05},
+                             {{0, 1, 2, 3}, {1, 2, 0, 3}, {2, 3, 0, 1}, {3, 0, 2, 1}},
+                             0.025 * 0.0125 * 0.05 / 6.0, 188.409386781600);
 }
 
 TEST(NavierStokesVMSManufactured, SpatialConvergence)

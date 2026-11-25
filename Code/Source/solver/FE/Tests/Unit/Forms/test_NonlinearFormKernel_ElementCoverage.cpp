@@ -12,12 +12,13 @@
 
 #include <gtest/gtest.h>
 
+#include "Assembly/FunctionalAssembler.h"
 #include "Assembly/GlobalSystemView.h"
 #include "Assembly/StandardAssembler.h"
 #include "Basis/NodeOrderingConventions.h"
 #include "Basis/SerendipityBasis.h"
 #include "Dofs/DofMap.h"
-#include "Elements/ReferenceElement.h"
+#include "Forms/CellMetric.h"
 #include "Forms/FormCompiler.h"
 #include "Forms/FormKernels.h"
 #include "Forms/Vocabulary.h"
@@ -26,8 +27,11 @@
 #include "Spaces/GenericBasisSpace.h"
 #include "Spaces/SpaceFactory.h"
 #include "Tests/Unit/Forms/FormsTestHelpers.h"
+#include "Tests/Unit/Forms/JITTestHelpers.h"
 
 #include <array>
+#include <cmath>
+#include <initializer_list>
 #include <vector>
 
 namespace svmp {
@@ -344,19 +348,18 @@ private:
 
 class CanonicalSingleElementMeshAccess final : public assembly::IMeshAccess {
 public:
-    explicit CanonicalSingleElementMeshAccess(ElementType elem_type)
-        : elem_type_(elem_type)
+    explicit CanonicalSingleElementMeshAccess(ElementType elem_type,
+        const math::Matrix<Real, 3, 3>& map = math::Matrix<Real, 3, 3>::identity(), int ambient_dim = 0)
+        : elem_type_(elem_type), dim_(ambient_dim > 0 ? ambient_dim : element_dimension(elem_type))
     {
-        const auto ref = elements::ReferenceElement::create(elem_type_);
-        dim_ = ref.dimension();
-
         const auto n_nodes = basis::ReferenceNodeLayout::num_nodes(elem_type_);
         nodes_.reserve(n_nodes);
         cell_.reserve(n_nodes);
 
         for (std::size_t i = 0; i < n_nodes; ++i) {
             const auto xi = basis::ReferenceNodeLayout::get_node_coords(elem_type_, i);
-            nodes_.push_back({xi[0], xi[1], xi[2]});
+            const auto x = map * xi;
+            nodes_.push_back({x[0], x[1], x[2]});
             cell_.push_back(static_cast<GlobalIndex>(i));
         }
     }
@@ -470,7 +473,102 @@ void expectJacobianMatchesCentralDifferences(const assembly::IMeshAccess& mesh,
     }
 }
 
+using Matrix = math::Matrix<Real, 3, 3>;
+
+void expectCellMetric(ElementType linear, ElementType chart, const Matrix& map, int ambient_dim,
+                      const FormExpr& metric, const Matrix& expected,
+                      std::initializer_list<std::array<Real, 3>> normals = {})
+{
+    SCOPED_TRACE(::testing::Message() << "ElementType " << static_cast<int>(chart) << ", dimension " << ambient_dim);
+    CanonicalSingleElementMeshAccess mesh(chart, map, ambient_dim);
+    spaces::H1Space space(linear, 1);
+    auto dofs = makeSingleCellDofMap(space.dofs_per_element());
+    assembly::FunctionalAssembler assembler;
+    assembler.setMesh(mesh);
+    assembler.setSpace(space);
+    assembler.setDofMap(dofs);
+    const auto integrate = [&](const FormExpr& expr) {
+        auto kernel = makeFunctionalFormKernel(expr, FunctionalFormKernel::Domain::Cell);
+        return assembler.assembleScalar(*kernel);
+    };
+    const double measure = integrate(FormExpr::constant(1.0));
+    ASSERT_GT(measure, 0.0);
+    for (int i = 0; i < ambient_dim; ++i) {
+        for (int j = 0; j < ambient_dim; ++j) {
+            EXPECT_NEAR(integrate(metric.component(i, j)) / measure, expected(i, j), 1.0e-12)
+                << "entry (" << i << ", " << j << ")";
+        }
+    }
+    for (const auto& normal : normals) {
+        const auto n = constantVector(normal, ambient_dim);
+        EXPECT_NEAR(integrate(inner(n, metric * n)) / measure, 0.0, 1e-12);
+    }
+}
+
 } // namespace
+
+TEST(CellMetric, PhysicalComponentsOnLinearAndQuadraticReferenceCells)
+{
+    // Map xi to (2 xi_x + xi_y, xi_y, xi_z / 2) in the active dimensions.
+    const Matrix map{{2, 1, 0}, {0, 1, 0}, {0, 0, 0.5}};
+    const auto check = [&](ElementType linear, std::initializer_list<ElementType> charts,
+                           const Matrix& expected) {
+        for (const auto chart : charts) {
+            expectCellMetric(linear, chart, map, element_dimension(chart), cellMetric(chart), expected);
+        }
+    };
+
+    using enum ElementType;
+    const Matrix cartesian{{0.25, -0.25, 0}, {-0.25, 1.25, 0}, {0, 0, 4}};
+    check(Line2, {Line2, Line3}, cartesian);
+    check(Quad4, {Quad4, Quad8, Quad9}, cartesian);
+    check(Hex8, {Hex8, Hex20, Hex27}, cartesian);
+    check(Pyramid5, {Pyramid5, Pyramid13, Pyramid14}, cartesian);
+
+    // The shear aligns the triangular reference metric with the physical axes.
+    // The extruded triangle keeps the independent axial scale of the map.
+    const double tri_scale = 1.0 / std::sqrt(3.0);
+    const Matrix prism{{0.5 * tri_scale, 0, 0}, {0, 1.5 * tri_scale, 0}, {0, 0, 4}};
+    check(Triangle3, {Triangle3, Triangle6}, prism);
+    check(Wedge6, {Wedge6, Wedge15, Wedge18}, prism);
+    const double tet_scale = 1.0 / std::cbrt(4.0);
+    const Matrix tetra{{0.5 * tet_scale, 0, tet_scale}, {0, 1.5 * tet_scale, tet_scale},
+                       {tet_scale, tet_scale, 8 * tet_scale}};
+    check(Tetra4, {Tetra4, Tetra10}, tetra);
+}
+
+TEST(CellMetric, EmbeddedCellsUseOnlyTangentialInverseLengths)
+{
+    using enum ElementType;
+    // The line tangent is (1,2) or (1,2,3). Its dual is t / (t.t).
+    const Matrix plane{{1, 0, 0}, {2, 1, 0}, {0, 0, 0}};
+    Matrix line2{{1, 2, 0}, {2, 4, 0}, {0, 0, 0}};
+    line2 /= 25.0;
+    expectCellMetric(Line2, Line3, plane, 2, cellMetric(Line3, 2), line2, {{2, -1, 0}});
+    const Matrix space{{1, 0, 0}, {2, 1, 0}, {3, 2, 0}};
+    Matrix line3{{1, 2, 3}, {2, 4, 6}, {3, 6, 9}};
+    line3 /= 196.0;
+    expectCellMetric(Line2, Line2, space, 3, cellMetric(Line2, 3), line3, {{2, -1, 0}, {3, 0, -1}});
+
+    // For tangents (1,2,3) and (0,1,2), the duals within the plane are
+    // (5,2,-1)/6 and (-8,-2,4)/6. The quad metric sums their outer products.
+    Matrix quad{{89, 26, -37}, {26, 8, -10}, {-37, -10, 17}};
+    quad /= 36.0;
+    expectCellMetric(Quad4, Quad4, space, 3, cellMetric(Quad4, 3), quad, {{1, -2, 1}});
+    // The third barycentric gradient is (3,0,-3)/6. The triangle uses all three.
+    Matrix triangle{{98, 26, -46}, {26, 8, -10}, {-46, -10, 26}};
+    triangle /= 36.0 * std::sqrt(3.0);
+    expectCellMetric(Triangle3, Triangle6, space, 3, cellMetric(Triangle6, 3), triangle, {{1, -2, 1}});
+}
+
+TEST(CellMetric, RequiresAValidIntrinsicAndAmbientDimension)
+{
+    using enum ElementType;
+    EXPECT_THROW((void)cellMetric(Triangle3, 1), std::invalid_argument);
+    EXPECT_THROW((void)cellMetric(Line2, 4), std::invalid_argument);
+    EXPECT_THROW((void)cellMetric(Point1, 3), std::invalid_argument);
+    EXPECT_THROW((void)cellMetric(Unknown), std::invalid_argument);
+}
 
 TEST(NonlinearFormKernelElementCoverageTest, PoissonJacobian_Quad4_P1_MatchesCentralDifferences)
 {

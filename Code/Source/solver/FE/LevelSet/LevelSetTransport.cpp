@@ -2,6 +2,7 @@
 #include "Systems/TimeSeries.h"
 #include "LevelSet/LevelSetVelocityExtensionConstraint.h"
 
+#include "Forms/CellMetric.h"
 #include "Forms/Vocabulary.h"
 #include "Interfaces/MaterialInterfaceTransportVelocity.h"
 
@@ -758,13 +759,13 @@ systems::CoupledResidualKernels installLevelSetTransport(
         }
         // Directional/transient SUPG scale:
         //   tau = c_tau / sqrt((c_t/dt_eff)^2 + u . G u + eps),
-        //   G   = J^{-T} J^{-1}.
+        //   G is the physical inverse-length metric of the parent cell.
         // Unlike h/|u| this remains finite as u -> 0, responds to anisotropic
         // cells in the streamline direction, and contracts with the actual
         // transient integration scale.
         const auto eps = FormExpr::constant(options.supg.velocity_epsilon);
         const auto dt_eff = deltat_eff();
-        const auto metric = transpose(Jinv()) * Jinv();
+        const auto metric = cellMetric(phi_rec.space->element_type());
         const auto transient_rate =
             FormExpr::constant(options.supg.transient_scale) / dt_eff;
         const auto directional_rate_squared =

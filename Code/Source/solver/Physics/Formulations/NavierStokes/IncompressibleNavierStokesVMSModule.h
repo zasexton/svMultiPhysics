@@ -666,7 +666,7 @@ struct IncompressibleNavierStokesVMSOptions {
 
     // Volume tau_M uses the physical step dt between endpoints (Bazilevs et al., 2007, Eq. 63).
     //   tau_M = 1 / (rho * sqrt(4*(ct_m/dt)^2 + a^T K a + ct_c*(K:K)*nu^2 + epsilon))
-    // where a is the advective velocity, K = J^{-T} J^{-1} and nu = mu/rho.
+    // where a is the advective velocity, K is the cell's inverse-length metric and nu = mu/rho.
     FE::Real ct_m{1.0};
     FE::Real ct_c{36.0};
 
@@ -1126,6 +1126,8 @@ struct NavierStokesVMSIntegrands {
     FE::forms::FormExpr forcing;                 // -rho f . v
 };
 
+/// Velocity and pressure fields and their tests identify the parent cell family.
+/// Expressions without a unique volume family use the chart metric J^{-T} J^{-1}.
 [[nodiscard]] NavierStokesVMSIntegrands navierStokesVMSIntegrands(
     const NavierStokesTerms& terms,
     const NavierStokesVMSSettings& settings);
