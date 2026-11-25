@@ -1193,6 +1193,23 @@ These are proposals. Each lists a recommended option and an alternative. Record 
       - trace relations with a selectable enforcement;
       - normals, traces and measures from one oriented domain;
       - inspectable named contributions.
+- **D77, 2026-11-24 (owner): the new OOP solver is the reference, and coupled conditions share the main equation's time stencil.**
+  - **Reference:** the new solver's conventions are kept where it differs from legacy only by convention. Its accuracy is judged against independent references: analytic solutions, exact 0D solutions, time and mesh refinement, flux balance, and the Jacobian against finite differences. Legacy results are a diagnostic, not an acceptance criterion.
+  - **Time stencil:** a coupled boundary condition or auxiliary model integrates, applies and records its values with the time stencil of the equation it is coupled to, unless a staggered scheme says otherwise explicitly. For generalized-α, the RCR scalar history now records the stage values X_s, Q_s and P_s = X_s + R_p Q_s with the stage time. Previously it recorded X_{n+1} + R_p Q_{n+α_f}, which mixed time levels.
+  - **RCR accuracy on pipe_RCR_3d:**
+    - Over one inflow cycle, the stage outlet pressure matches the exact windkessel solution to 1.4e-4 of peak, and the 0D state converges at second order. The RCRCR deck matches to 4.1e-4.
+    - The difference from the legacy reference has four sources:
+      - legacy's Fourier inflow reconstruction;
+      - legacy's endpoint pressure output;
+      - legacy imposing the inlet value on an initial state at rest;
+      - legacy applying the endpoint RCR pressure at the stage, which is first order.
+    - It also came from one new-solver defect, D78.
+- **D78, 2026-11-24 (owner): a strong imposed-flux inflow delivers the requested flow.** A parabolic profile with `<Impose_flux>` was normalized by the integral of the continuous weight while the strong constraint imposes nodal values, so the inflow delivered 0.985 of the request on the pipe inlet. It is now normalized by the flux of the nodal interpolant in each face's basis. A declared correction: the seven outlet decks move by +1.5% (pipe) and +2.05% (iliac), and the outlet baseline becomes outlet-w3int-v16. No gated reference deck uses the key.
+- **D79, 2026-11-24 (owner): a weak fluid wall reads `<Penalty_parameter>` as the Nitsche γ of the new solver's symmetric form.** When the key is unset, γ stays at 10. The legacy tangential and normal penalty keys are refused. A new-solver weak-wall pipe deck checks convergence. Separately, the continuity term of the symmetric wall is being corrected to −⟨q,(u−g)·n⟩, the sign that matches the module's +(q, div u). That correction is a declared change and is measured first.
+- **D80, 2026-11-24 (owner, pending a refinement study): the VMS τ_M time scale.**
+  - The module uses the effective time step 1/a₀ = (8/15)Δt at ρ∞ = 0.5. The published generalized-α convention uses Δt.
+  - Switching changes every VMS deck: refset9 0/9 bitwise, the outlet decks by up to 40% in pressure.
+  - It lands only after a manufactured transient flow study (three meshes and four time steps) confirms it.
 - **D16, 2026-10-05: production binaries will use LTO + PGO** (`SV_ENABLE_LTO=ON`, `SV_PGO=USE`). The outputs are bitwise identical.
   - Adoption waits until the current speed-up branches settle (post-merge hotspots, dry-cell records, constraint build), because they move the hot paths.
   - The profile is then trained on the tip and stored in group storage (not scratch, which is purged), and refreshed after hot-path changes.
