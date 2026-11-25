@@ -362,7 +362,11 @@ TEST(FormsBoundaryConditions, DirichletNitscheOfAStressEntersTheVelocityAndPress
     const auto uD = FormExpr::asVector({FormExpr::constant(1.0), FormExpr::constant(0.0), FormExpr::constant(0.0)});
     const auto measure = forms::ExteriorBoundaryMeasure::fullPhysical(3);
     const auto stress = [mu](const FormExpr& w) { return FormExpr::constant(2.0) * mu * forms::symgrad(w); };
-    const bc::NaturalFlux flux{.parts = {bc::isotropicFlux(p_id, p, q), bc::conormalFlux(stress)},
+    // The continuity row holds +(q, div u), so the pressure part is tested with
+    // -q (the Navier-Stokes wall's binding): the symmetric route's continuity
+    // term is -(q, (u - g).n) and the unsymmetric route's +(q, (u - g).n).
+    const auto minus_q = -q;
+    const bc::NaturalFlux flux{.parts = {bc::isotropicFlux(p_id, p, minus_q), bc::conormalFlux(stress)},
                                .penalty_weight = mu / forms::hNormal()};
 
     for (const auto variant : {bc::NitscheVariant::Symmetric, bc::NitscheVariant::Unsymmetric}) {
@@ -383,7 +387,8 @@ TEST(FormsBoundaryConditions, DirichletNitscheOfAStressEntersTheVelocityAndPress
         expected_M = expected_M + -integrate(inner(stress(u) * n, v));
         expected_M = expected_M + (symmetric ? -integrate(inner(stress(v) * n, diff))
                                              : integrate(inner(stress(v) * n, diff)));
-        expected_C = expected_C + (symmetric ? integrate(q * inner(n, diff)) : -integrate(q * inner(n, diff)));
+        expected_C = expected_C +
+                     (symmetric ? integrate(minus_q * inner(n, diff)) : -integrate(minus_q * inner(n, diff)));
         const auto penalty = bc::buildTraceNitschePenalty(mu / forms::hNormal(), u, nitsche);
         expected_M = expected_M + integrate(penalty * inner(diff, v));
         EXPECT_EQ(M.toString(), expected_M.toString());
@@ -396,7 +401,7 @@ TEST(FormsBoundaryConditions, DirichletNitscheOfAStressEntersTheVelocityAndPress
     // bilinear form builds the route between the pressure terms.
     const auto generated = forms::ExteriorBoundaryMeasure::generatedActiveSubset(3, 103);
     const bc::NaturalFlux certified_flux{
-        .parts = {bc::isotropicFlux(p_id, p, q), bc::conormalFlux(stress, bc::symmetricGradientForm(mu))},
+        .parts = {bc::isotropicFlux(p_id, p, minus_q), bc::conormalFlux(stress, bc::symmetricGradientForm(mu))},
         .penalty_weight = mu / forms::hNormal()};
     for (const auto variant : {bc::NitscheVariant::Symmetric, bc::NitscheVariant::Unsymmetric}) {
         const bc::Nitsche nitsche{.gamma = 10.0, .variant = variant, .scale_with_p = true};
@@ -413,8 +418,8 @@ TEST(FormsBoundaryConditions, DirichletNitscheOfAStressEntersTheVelocityAndPress
         const auto diff = u - uD;
         expected_M = expected_M + integrate(p * inner(n, v));
         expected_M = expected_M + route.route_contribution;
-        expected_C = expected_C + (variant == bc::NitscheVariant::Symmetric ? integrate(q * inner(n, diff))
-                                                                            : -integrate(q * inner(n, diff)));
+        expected_C = expected_C + (variant == bc::NitscheVariant::Symmetric ? integrate(minus_q * inner(n, diff))
+                                                                            : -integrate(minus_q * inner(n, diff)));
         EXPECT_EQ(M.toString(), expected_M.toString());
         EXPECT_EQ(C.toString(), expected_C.toString());
         ASSERT_EQ(bindings.size(), 1u);

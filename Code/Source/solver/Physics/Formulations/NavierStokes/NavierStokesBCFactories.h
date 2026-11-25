@@ -582,8 +582,13 @@ namespace detail {
 
 /// sigma(u, p) n = 2 mu eps(u) n - p n: the flux of the momentum operator on
 /// a boundary, the pressure part in the continuity row @p continuity_row.
-/// Its conormal part carries the symmetric-gradient form that certified
-/// generated-boundary routes are built from.
+/// The operator states -(p, div v) in the momentum row and +(q, div u) in the
+/// continuity row, so the pressure part's test function is -q: the symmetric
+/// route's continuity term is -(q, (u - g).n), the transpose of the momentum
+/// row's +(p n, v) up to the row's sign (K_pu = -K_up^T), and the
+/// unsymmetric route's is +(q, (u - g).n).  Its conormal part carries the
+/// symmetric-gradient form that certified generated-boundary routes are built
+/// from.
 [[nodiscard]] inline FE::forms::bc::NaturalFlux wallStressFlux(FE::FieldId continuity_row,
                                                                const FE::forms::FormExpr& p,
                                                                const FE::forms::FormExpr& q,
@@ -593,7 +598,7 @@ namespace detail {
         return FE::forms::FormExpr::constant(2.0) * mu * FE::forms::symgrad(w);
     };
     return FE::forms::bc::NaturalFlux{
-        .parts = {FE::forms::bc::isotropicFlux(continuity_row, p, q),
+        .parts = {FE::forms::bc::isotropicFlux(continuity_row, p, -q),
                   FE::forms::bc::conormalFlux(std::move(stress), FE::forms::bc::symmetricGradientForm(mu))},
         .penalty_weight = mu / FE::forms::hNormal()};
 }

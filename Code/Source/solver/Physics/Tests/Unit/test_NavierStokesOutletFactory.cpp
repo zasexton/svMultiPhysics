@@ -4218,12 +4218,12 @@ TEST(NavierStokesWeakVelocityDirichlet, ConditionGammaScalesTheNitschePenalty)
             const auto diff =
                 u - FormExpr::asVector({FormExpr::constant(g[0]), FormExpr::constant(g[1]), FormExpr::constant(g[2])});
             const auto two_mu = FormExpr::constant(2.0 * mu);
-            // Consistency -(sigma(u, p) n).v, adjoint -(2 mu eps(v) n).(u - g) and +q (u - g).n,
-            // penalty gamma p^2 mu / h_n (u - g).v with p = 1.
+            // Consistency -(sigma(u, p) n).v, adjoint -(2 mu eps(v) n).(u - g) and -q (u - g).n
+            // (the continuity row holds +(q, div u)), penalty gamma p^2 mu / h_n (u - g).v with p = 1.
             const auto momentum = P.state * inner(n, v) - inner(two_mu * symgrad(u) * n, v) -
                                   inner(two_mu * symgrad(v) * n, diff) +
                                   FormExpr::constant(gamma) * (FormExpr::constant(mu) / hNormal()) * inner(diff, v);
-            const auto continuity = P.test * inner(diff, n);
+            const auto continuity = -(P.test * inner(diff, n));
             return (momentum + continuity).ds(marker);
         };
     };
@@ -4258,4 +4258,98 @@ TEST(NavierStokesWeakVelocityDirichlet, ConditionGammaScalesTheNitschePenalty)
                 << "tangent entry (" << i << ", " << j << ")";
         }
     }
+}
+
+TEST(NavierStokesWeakVelocityDirichlet, SymmetricWallKeepsTheStokesBlocksAdjointConsistent)
+{
+    // Stokes with constant viscosity (convection and VMS off) and a weak wall
+    // on the tetrahedron's boundary face: the module's matrix has
+    // K_uu = K_uu^T and K_pu = -K_up^T to round-off, the wall's continuity
+    // term being the transpose of its momentum pressure term.
+    constexpr int marker = 4;
+    auto mesh = std::make_shared<svmp::FE::forms::test::SingleTetraOneBoundaryFaceMeshAccess>(marker);
+    auto u_space = svmp::FE::spaces::VectorSpace(svmp::FE::spaces::SpaceType::H1, mesh, 1, 3);
+    auto p_space = svmp::FE::spaces::Space(svmp::FE::spaces::SpaceType::H1, mesh, 1);
+
+    Opts opts;
+    opts.jit_policy.enable = false;
+    opts.enable_convection = false;
+    opts.enable_vms = false;
+    opts.density = 1.06;
+    opts.viscosity = 0.04;
+    opts.velocity_field_name = "Velocity";
+    opts.pressure_field_name = "Pressure";
+    Opts::VelocityDirichletBC wall;
+    wall.boundary_marker = marker;
+    wall.value = {Opts::ScalarValue{0.1}, Opts::ScalarValue{-0.2}, Opts::ScalarValue{0.05}};
+    opts.velocity_dirichlet_weak.push_back(wall);
+
+    FESystem sys(mesh);
+    svmp::Physics::formulations::navier_stokes::IncompressibleNavierStokesVMSModule module(u_space, p_space, opts);
+    module.registerOn(sys);
+    SetupInputs si;
+    si.topology_override = singleTetraTopology();
+    sys.setup({}, si);
+
+    const auto n_dofs = static_cast<std::size_t>(sys.dofHandler().getNumDofs());
+    std::vector<Real> u_stage(n_dofs, 0.0);
+    std::vector<Real> u_prev(n_dofs, 0.0);
+    std::vector<Real> u_prev2(n_dofs, 0.0);
+    const auto ga = svmp::FE::timestepping::utils::generalizedAlphaFirstOrderFromRhoInf(0.5);
+    auto integrator = std::make_shared<svmp::FE::timestepping::GeneralizedAlphaFirstOrderIntegrator>(
+        svmp::FE::timestepping::GeneralizedAlphaFirstOrderIntegratorOptions{
+            .alpha_m = ga.alpha_m, .alpha_f = ga.alpha_f, .gamma = ga.gamma, .history_rate_order = 2});
+    std::array<std::span<const Real>, 2> u_hist{u_prev, u_prev2};
+    std::array<double, 2> dt_hist{0.05, 0.05};
+    SystemStateView state;
+    state.time = ga.alpha_f * 0.05;
+    state.dt = 0.05;
+    state.effective_dt = ga.alpha_f * state.dt;
+    state.dt_prev = state.dt;
+    state.u = u_stage;
+    state.u_prev = u_prev;
+    state.u_prev2 = u_prev2;
+    state.u_history = u_hist;
+    state.dt_history = dt_hist;
+    TransientSystem transient(sys, integrator);
+    AssemblyRequest req;
+    req.op = "equations";
+    req.want_matrix = true;
+    req.want_vector = true;
+    req.is_nonlinear_iteration = true;
+    svmp::FE::assembly::DenseSystemView out(static_cast<svmp::FE::GlobalIndex>(n_dofs));
+    out.zero();
+    ASSERT_TRUE(transient.assemble(req, state, &out, &out).success);
+    const auto K = [&](svmp::FE::GlobalIndex i, svmp::FE::GlobalIndex j) { return out.getMatrixEntry(i, j); };
+
+    std::vector<svmp::FE::GlobalIndex> velocity;
+    for (svmp::FE::LocalIndex c = 0; c < 3; ++c) {
+        const auto dofs = sys.fieldMap().getComponentDofs("Velocity", c).toVector();
+        velocity.insert(velocity.end(), dofs.begin(), dofs.end());
+    }
+    const auto pressure = sys.fieldMap().getComponentDofs("Pressure", 0).toVector();
+    Real scale = 0.0;
+    for (std::size_t i = 0; i < n_dofs; ++i) {
+        for (std::size_t j = 0; j < n_dofs; ++j) {
+            scale = std::max(scale, std::abs(K(static_cast<svmp::FE::GlobalIndex>(i), static_cast<svmp::FE::GlobalIndex>(j))));
+        }
+    }
+    ASSERT_GT(scale, 0.0);
+    Real uu_defect = 0.0;
+    for (const auto i : velocity) {
+        for (const auto j : velocity) {
+            uu_defect = std::max(uu_defect, std::abs(K(i, j) - K(j, i)));
+        }
+    }
+    Real coupling = 0.0;
+    Real pu_defect = 0.0;
+    for (const auto a : pressure) {
+        for (const auto i : velocity) {
+            coupling = std::max(coupling, std::abs(K(a, i)));
+            pu_defect = std::max(pu_defect, std::abs(K(a, i) + K(i, a)));
+        }
+    }
+    EXPECT_LE(uu_defect, 1e-13 * scale);
+    ASSERT_GT(coupling, 0.0);
+    EXPECT_LE(pu_defect, 1e-13 * scale) << "max |K_pu + K_up^T| = " << pu_defect << " of max |K_pu| = " << coupling;
 }
