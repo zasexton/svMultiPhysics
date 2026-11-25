@@ -1,8 +1,6 @@
 # Free-surface benchmarks
 
-Short, self-contained benchmarks for the free-surface boundary condition.
-They supply the evidence required by decision D6 in
-`Documentation/free_surface_program_tracker.md`. Each result is recorded as:
+These benchmarks supply the evidence for decision D6. Record progress in the [free-surface program tracker](../../../../Documentation/free_surface_program_tracker.md). Each result includes the following items.
 
 - the commit hash;
 - the benchmark's driver and tolerance file from this directory;
@@ -99,14 +97,4 @@ change it once, with a one-line justification in the tracker.
     - The weights come from the initial level set only, so they go stale as the interface moves. In the 3D sessile drop at R/h = 16, once the drop has spread, the busiest rank's liquid work is 1.4–2.0 times the mean on 4–16 ranks, against 2.7–3.8 without weighting (offline METIS estimate).
     - History: opt-in before 2026-10-22; class weights 3, 4 and 1 before 2026-10-21. No recorded run used the key before then.
 
-## Planned benchmarks
-
-| Benchmark | Milestone | Purpose |
-|---|---|---|
-| `tank_at_rest` | M1 | Hydrostatic balance with a flat interface, 2D and 3D |
-| `linear_sloshing_2d` | M1 | Frequency and damping against linear theory. Reuses `open_vessel_free_surface/unfitted_level_set/linear_sloshing_2d`. |
-| `static_drop_2d` | M2 | Laplace pressure and spurious currents. Capillary-route comparison (D2). |
-| `capillary_wave_2d` | M3 | Frequency and damping against Prosperetti |
-| `sessile_drop_2d` | M4 | Relaxation to the Young angle with Navier slip (D4) |
-| `sessile_drop_3d` | M4 | 3D sessile drop at 90 degrees (quarter domain with symmetry planes; tolerances approved under D38, amended by D43); 60 and 120 degrees added on 2026-10-22 with the same criteria, approved under D48 before their first run |
-| `ren_e_2d` | M4 | Ren–E moving contact line (DynamicRenE), advancing and receding: law consistency on 3 meshes (l_s/h = 2, 4, 8) and 3 time steps |
+The [milestone list](../../../../Documentation/free_surface_program_tracker.md#5-remaining-work) gives each benchmark's purpose, acceptance criteria and outstanding work.

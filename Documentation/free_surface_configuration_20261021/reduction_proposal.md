@@ -1,5 +1,7 @@
 # Reducing the free-surface configuration to a small typed schema
 
+The [program tracker](../free_surface_program_tracker.md#recorded-decisions) records the adopted design under D47, the parser ownership under D52 and the later input-removal and profile decisions under D60 and D62. The options below describe the October proposal.
+
 2026-10-21. This proposal follows the inventory in `inventory.tsv` and `inventory_summary.md`, taken at integration tip `490f03aa`. It builds on decision D42:
 
 - a typed option schema: `OptionSchema<T>` in FE/Core, with the physics schemas in Physics/Core;

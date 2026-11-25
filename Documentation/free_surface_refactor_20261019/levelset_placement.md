@@ -1,9 +1,10 @@
 # C-levelset-placement.md: where the level-set code belongs
 
-Branch issue-449-modern-mesh-core @ e7080344. Paths are relative to `Code/Source/solver/` unless absolute. This was a read-only study; nothing was built or run. Cross-references:
-- **B §x** = B-infrastructure-design.md;
-- **A §x** = A-formulation-design.md;
-- **Plan Rx** = Documentation/free_surface_architecture_refactoring_plan_20260904.md.
+This design study describes `issue-449-modern-mesh-core` at `e7080344`. Paths are relative to `Code/Source/solver/` unless absolute. D42 and milestone MR in the [program tracker](../free_surface_program_tracker.md) record the decisions and implementation.
+
+- **B §x** refers to the [infrastructure design](infrastructure_design.md).
+- **A §x** refers to the [formulation design](formulation_design.md).
+- **Plan Rx** refers to a package in the September design, archived in [tracker §10.3](../free_surface_program_tracker.md#103-removed-h-and-suspended-s-documents).
 
 ## 0. Answer to the user's question
 
