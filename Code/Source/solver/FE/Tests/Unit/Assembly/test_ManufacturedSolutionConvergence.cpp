@@ -1832,6 +1832,249 @@ TEST(ManufacturedSolutionConvergence, ElasticityQuad4_Q1_L2Converges_Nu0499)
     EXPECT_GT(rates[1], Real(0.5));
 }
 
+namespace {
+
+struct StokesNitscheMmsErrors {
+    Real u_l2{0.0};
+    Real u_h1{0.0};
+    Real p_l2{0.0};
+    Real normal_slip{0.0};  ///< max over boundary velocity nodes of |(u_h - g).n|
+};
+
+// Stokes, mu = 1, on the unit square with u = g weakly on the whole boundary
+// by symmetric Nitsche, as the Navier-Stokes wall states it: the bulk
+// -(p, div v) + (q, div u), the wall -(sigma(u, p) n).v - (2 mu eps(v) n).(u - g)
+// + gamma k^2 mu / h_n (u - g).v and pressure_sign q (u - g).n in the continuity
+// row (-1 adjoint consistent, +1 the earlier sign). The exact solution is
+// shifted by 1/4 so that the wall-normal data are nonzero; its pressure varies.
+// Velocity order 2 (Taylor-Hood Q2/Q1) or 1 (Q1/Q1 with the pressure-gradient
+// stabilization tau (grad p - f).grad q, tau = h^2 / (12 mu)).
+[[nodiscard]] StokesNitscheMmsErrors stokesNitscheMmsErrors(int n_cells_per_axis, int velocity_order, Real gamma,
+                                                            Real pressure_sign)
+{
+    constexpr int marker = 1;
+    StructuredQuadBoundaryMeshAccess mesh(n_cells_per_axis, marker);
+    const auto topo = buildQuadGridTopology(mesh);
+    constexpr Real mu = 1.0;
+    const Real pi = std::acos(Real(-1.0));
+    constexpr Real shift = 0.25;
+
+    auto u_scalar = std::make_shared<spaces::H1Space>(ElementType::Quad4, velocity_order);
+    spaces::ProductSpace u_space(std::move(u_scalar), /*components=*/2);
+    spaces::H1Space p_space(ElementType::Quad4, /*order=*/1);
+    dofs::DofHandler u_dofs;
+    u_dofs.distributeDofs(topo, u_space);
+    u_dofs.finalize();
+    dofs::DofHandler p_dofs;
+    p_dofs.distributeDofs(topo, p_space);
+    p_dofs.finalize();
+    const auto& u_map = u_dofs.getDofMap();
+    const auto& p_map = p_dofs.getDofMap();
+    const GlobalIndex n_u = u_map.getNumDofs();
+    const GlobalIndex n_p = p_map.getNumDofs();
+    const GlobalIndex n = n_u + n_p;
+    const auto u_dof_info = computeDofCoordinatesProductSpace(mesh, u_space, u_map);
+    const auto p_dof_coords = computeDofCoordinates(mesh, p_space, p_map);
+
+    const auto u_exact = [pi](Real x, Real y) -> std::array<Real, 2> {
+        return {std::sin(pi * (x + shift)) * std::cos(pi * (y + shift)),
+                -std::cos(pi * (x + shift)) * std::sin(pi * (y + shift))};
+    };
+    const auto p_exact = [pi](Real x, Real y) -> Real { return std::sin(pi * (x + shift)) * std::sin(pi * (y + shift)); };
+    const Real p_origin = p_exact(Real(0.0), Real(0.0));
+    const auto p_gauged = [&](Real x, Real y) -> Real { return p_exact(x, y) - p_origin; };
+
+    constraints::AffineConstraints constraints;
+    constraints.addDirichlet(n_u + findDofAtPoint(p_dof_coords, Real(0.0), Real(0.0)), Real(0.0));
+    constraints.close();
+
+    const auto u = forms::TrialFunction(u_space, "u");
+    const auto v = forms::TestFunction(u_space, "v");
+    const auto p = forms::TrialFunction(p_space, "p");
+    const auto q = forms::TestFunction(p_space, "q");
+    const auto n_vec = forms::FormExpr::normal();
+    const auto two_mu = forms::FormExpr::constant(2.0 * mu);
+    const auto f = forms::FormExpr::coefficient("f", [pi](Real x, Real y, Real /*z*/) {
+        const Real u1 = std::sin(pi * (x + shift)) * std::cos(pi * (y + shift));
+        const Real u2 = -std::cos(pi * (x + shift)) * std::sin(pi * (y + shift));
+        const Real dpdx = pi * std::cos(pi * (x + shift)) * std::sin(pi * (y + shift));
+        const Real dpdy = pi * std::sin(pi * (x + shift)) * std::cos(pi * (y + shift));
+        return std::array<Real, 3>{Real(2.0) * pi * pi * u1 + dpdx, Real(2.0) * pi * pi * u2 + dpdy, 0.0};
+    });
+    const auto g = forms::FormExpr::coefficient("g", [pi](Real x, Real y, Real /*z*/) {
+        return std::array<Real, 3>{std::sin(pi * (x + shift)) * std::cos(pi * (y + shift)),
+                                   -std::cos(pi * (x + shift)) * std::sin(pi * (y + shift)), 0.0};
+    });
+    const auto e = u - g;
+    const auto k2 = forms::FormExpr::constant(static_cast<Real>(velocity_order * velocity_order));
+
+    // True residuals R(U); the solve is J x = -R(0).
+    const auto uu = (two_mu * forms::inner(forms::sym(forms::grad(u)), forms::sym(forms::grad(v))) - forms::inner(f, v)).dx() +
+                    (-forms::inner(two_mu * forms::sym(forms::grad(u)) * n_vec, v) -
+                     forms::inner(two_mu * forms::sym(forms::grad(v)) * n_vec, e) +
+                     forms::FormExpr::constant(gamma) * k2 * (forms::FormExpr::constant(mu) / forms::hNormal()) *
+                         forms::inner(e, v))
+                        .ds(marker);
+    const auto up = (-p * forms::div(v)).dx() + (p * forms::inner(n_vec, v)).ds(marker);
+    const auto pu = (q * forms::div(u)).dx() +
+                    (forms::FormExpr::constant(pressure_sign) * q * forms::inner(e, n_vec)).ds(marker);
+    const auto tau = forms::FormExpr::constant(1.0 / (12.0 * mu * n_cells_per_axis * n_cells_per_axis));
+    const auto pp_stab =
+        (tau * forms::inner(forms::grad(p), forms::grad(q)) - tau * forms::inner(f, forms::grad(q))).dx();
+
+    forms::FormCompiler compiler;
+    const auto kernel = [&](const forms::FormExpr& residual) {
+        auto k = std::make_unique<forms::SymbolicNonlinearFormKernel>(compiler.compileResidual(residual),
+                                                                      forms::NonlinearKernelOutput::Both);
+        k->resolveInlinableConstitutives();
+        return k;
+    };
+    StandardAssembler assembler;
+    assembler.setConstraints(&constraints);
+    std::vector<Real> U0(static_cast<std::size_t>(n), 0.0);
+    assembler.setCurrentSolution(U0);
+    DenseMatrixView J(n);
+    DenseVectorView R(n);
+    J.zero();
+    R.zero();
+    const auto add = [&](const forms::FormExpr& residual, const dofs::DofMap& rows, GlobalIndex row_offset,
+                         const spaces::FunctionSpace& test, const dofs::DofMap& cols, GlobalIndex col_offset,
+                         const spaces::FunctionSpace& trial, bool boundary) {
+        auto k = kernel(residual);
+        assembler.setRowDofMap(rows, row_offset);
+        assembler.setColDofMap(cols, col_offset);
+        if (k->hasCell()) {
+            (void)assembler.assembleBoth(mesh, test, trial, *k, J, R);
+        }
+        if (boundary && k->hasBoundaryFace()) {
+            (void)assembler.assembleBoundaryFaces(mesh, marker, test, trial, *k, &J, &R);
+        }
+    };
+    add(uu, u_map, 0, u_space, u_map, 0, u_space, true);
+    add(up, u_map, 0, u_space, p_map, n_u, p_space, true);
+    add(pu, p_map, n_u, p_space, u_map, 0, u_space, true);
+    if (velocity_order == 1) {
+        add(pp_stab, p_map, n_u, p_space, p_map, n_u, p_space, false);
+    }
+    assembler.finalize(&J, &R);
+
+    std::vector<Real> rhs(static_cast<std::size_t>(n), 0.0);
+    for (GlobalIndex i = 0; i < n; ++i) {
+        rhs[static_cast<std::size_t>(i)] = -R.getVectorEntry(i);
+    }
+    auto solve = solveDenseWithPartialPivoting(std::move(J), std::move(rhs));
+    FE_THROW_IF(!solve.ok, FEException, solve.message);
+    constraints.distribute(solve.x.data(), n);
+    std::vector<Real> u_sol(solve.x.begin(), solve.x.begin() + n_u);
+    std::vector<Real> p_sol(solve.x.begin() + n_u, solve.x.end());
+
+    StokesNitscheMmsErrors out;
+    out.u_l2 = computeL2ErrorVector(mesh, u_space, u_map, u_sol, u_exact, /*quad_order=*/12);
+    out.p_l2 = computeL2Error(mesh, p_space, p_map, p_sol, p_gauged, /*quad_order=*/10);
+
+    // H1 seminorm error: gradients of u_h by central differences in the
+    // reference cell, mapped with the (affine) cell Jacobian.
+    auto quad = quadrature::QuadratureFactory::create(ElementType::Quad4, 12);
+    std::vector<Real> coeffs;
+    Real h1 = 0.0;
+    for (GlobalIndex c = 0; c < u_map.getNumCells(); ++c) {
+        auto mapping = buildAffineMappingForQuad4(mesh, c);
+        const auto cell_dofs = u_map.getCellDofs(c);
+        coeffs.resize(cell_dofs.size());
+        for (std::size_t i = 0; i < cell_dofs.size(); ++i) {
+            coeffs[i] = u_sol[static_cast<std::size_t>(cell_dofs[i])];
+        }
+        for (std::size_t qi = 0; qi < quad->num_points(); ++qi) {
+            const auto& qp = quad->point(qi);
+            constexpr Real d = 1e-6;
+            std::array<std::array<Real, 2>, 2> du_dxi{};  // [component][xi direction]
+            std::array<std::array<Real, 2>, 2> dx_dxi{};  // [x direction][xi direction]
+            for (int a = 0; a < 2; ++a) {
+                math::Vector<Real, 3> xp{qp[0], qp[1], qp[2]};
+                math::Vector<Real, 3> xm{qp[0], qp[1], qp[2]};
+                xp[a] += d;
+                xm[a] -= d;
+                const auto up_val = u_space.evaluate(xp, coeffs);
+                const auto um_val = u_space.evaluate(xm, coeffs);
+                const auto Xp = mapping->map_to_physical(xp);
+                const auto Xm = mapping->map_to_physical(xm);
+                for (int i = 0; i < 2; ++i) {
+                    du_dxi[i][a] = (up_val[i] - um_val[i]) / (2.0 * d);
+                    dx_dxi[i][a] = (Xp[i] - Xm[i]) / (2.0 * d);
+                }
+            }
+            const Real det = dx_dxi[0][0] * dx_dxi[1][1] - dx_dxi[0][1] * dx_dxi[1][0];
+            // dxi/dx = inverse of dx/dxi
+            const std::array<std::array<Real, 2>, 2> inv{{{dx_dxi[1][1] / det, -dx_dxi[0][1] / det},
+                                                          {-dx_dxi[1][0] / det, dx_dxi[0][0] / det}}};
+            const math::Vector<Real, 3> xi{qp[0], qp[1], qp[2]};
+            const auto X = mapping->map_to_physical(xi);
+            const Real xs = X[0] + shift;
+            const Real ys = X[1] + shift;
+            const std::array<std::array<Real, 2>, 2> grad_exact{
+                {{pi * std::cos(pi * xs) * std::cos(pi * ys), -pi * std::sin(pi * xs) * std::sin(pi * ys)},
+                 {pi * std::sin(pi * xs) * std::sin(pi * ys), -pi * std::cos(pi * xs) * std::cos(pi * ys)}}};
+            for (int i = 0; i < 2; ++i) {
+                for (int j = 0; j < 2; ++j) {
+                    const Real g_h = du_dxi[i][0] * inv[0][j] + du_dxi[i][1] * inv[1][j];
+                    const Real diff = g_h - grad_exact[i][j];
+                    h1 += diff * diff * quad->weight(qi) * std::abs(det);
+                }
+            }
+        }
+    }
+    out.u_h1 = std::sqrt(h1);
+
+    // Wall-normal slip at the boundary velocity nodes.
+    for (GlobalIndex dof = 0; dof < n_u; ++dof) {
+        const auto& x = u_dof_info.coords[static_cast<std::size_t>(dof)];
+        const int comp = u_dof_info.component[static_cast<std::size_t>(dof)];
+        const bool normal_x = comp == 0 && (near(x[0], Real(0.0), Real(1e-12)) || near(x[0], Real(1.0), Real(1e-12)));
+        const bool normal_y = comp == 1 && (near(x[1], Real(0.0), Real(1e-12)) || near(x[1], Real(1.0), Real(1e-12)));
+        if (normal_x || normal_y) {
+            const auto ue = u_exact(x[0], x[1]);
+            out.normal_slip = std::max(out.normal_slip, std::abs(u_sol[static_cast<std::size_t>(dof)] - ue[comp]));
+        }
+    }
+    return out;
+}
+
+} // namespace
+
+TEST(ManufacturedSolutionConvergence, StokesNitscheWallConvergesWithTheAdjointConsistentPressureTerm)
+{
+    // Taylor-Hood Q2/Q1 at gamma = 10 with the -q (u - g).n wall term: optimal
+    // velocity L2 and pressure L2 rates with nonzero wall-normal data.
+    std::vector<Real> u_errors;
+    std::vector<Real> p_errors;
+    for (const int N : {4, 8, 16}) {
+        const auto err = stokesNitscheMmsErrors(N, /*velocity_order=*/2, /*gamma=*/10.0, /*pressure_sign=*/-1.0);
+        u_errors.push_back(err.u_l2);
+        p_errors.push_back(err.p_l2);
+    }
+    const auto u_rates = convergenceRates(u_errors);
+    const auto p_rates = convergenceRates(p_errors);
+    EXPECT_GT(u_rates[1], Real(2.6));
+    EXPECT_GT(p_rates[1], Real(1.8));
+}
+
+TEST(ManufacturedSolutionConvergence, DISABLED_StokesNitscheWallSignAndPenaltyStudy)
+{
+    // The full study: both signs, gamma in {4, 10, 30, 1000}, Q2/Q1 and
+    // stabilized Q1/Q1, three meshes. Run with --gtest_also_run_disabled_tests.
+    for (const int order : {2, 1}) {
+        for (const Real sign : {Real(-1.0), Real(1.0)}) {
+            for (const Real gamma : {Real(4.0), Real(10.0), Real(30.0), Real(1000.0)}) {
+                for (const int N : {4, 8, 16}) {
+                    const auto err = stokesNitscheMmsErrors(N, order, gamma, sign);
+                    std::printf("STUDY order=%d sign=%+.0f gamma=%g N=%d u_L2=%.4e u_H1=%.4e p_L2=%.4e slip=%.4e\n",
+                                order, sign, gamma, N, err.u_l2, err.u_h1, err.p_l2, err.normal_slip);
+                }
+            }
+        }
+    }
+}
+
 } // namespace testing
 } // namespace assembly
 } // namespace FE
