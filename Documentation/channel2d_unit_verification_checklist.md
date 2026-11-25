@@ -67,7 +67,7 @@ Legend:
 - [ ] `Invoked` `FormExpr::constant` - scalar/vector/tensor constant construction.
 - [ ] `Invoked` `FormExpr::asVector` - vector construction.
 - [ ] `Invoked` `FormExpr::asTensor` - tensor construction.
-- [ ] `Invoked` `FormExpr::effectiveTimeStep` - time-step terminal in form AST.
+- [ ] `Invoked` `FormExpr::timeStep` - physical time step between endpoints in the volume `tau_M` (R1, D80).
 - [ ] `Invoked` `FormExpr::Jinv` - inverse Jacobian terminal in form AST.
 - [ ] `Invoked` `grad` - differential operator.
 - [ ] `Invoked` `div` - differential operator.

@@ -911,7 +911,7 @@ VMSTerms vmsTerms(const Symbols& s)
     using namespace svmp::FE::forms;
     const auto nu = FormExpr::constant(0.05);
     const auto eps = FormExpr::constant(1e-12);
-    const auto dts = FormExpr::effectiveTimeStep();
+    const auto dts = FormExpr::timeStep();
     VMSTerms t;
     t.K = transpose(Jinv()) * Jinv();
     t.a = s.u - meshVelocity();

@@ -616,7 +616,7 @@ TEST(JITSIMDBatchParity, StokesVMS_VV_Triangle3)
     const auto viscous = FormExpr::constant(2.0) * mu * inner(sym(grad(u)), sym(grad(v)));
     const auto forcing = -rho * inner(f, v);
 
-    const auto dt_step = FormExpr::effectiveTimeStep();
+    const auto dt_step = FormExpr::timeStep();
     const auto ct_m = FormExpr::constant(Real(1.0));
     const auto ct_c = FormExpr::constant(Real(36.0));
 

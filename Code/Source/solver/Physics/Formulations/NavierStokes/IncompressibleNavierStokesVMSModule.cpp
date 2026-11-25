@@ -150,10 +150,11 @@ NavierStokesVMSIntegrands navierStokesVMSIntegrands(const NavierStokesTerms& t,
         return r;
     }
 
-    // Static subscales with the element metric K = J^{-T} J^{-1}:
-    //   tau_M = 1 / (rho sqrt(4 ct_m^2/dt^2 + a.K a + ct_c K:K nu^2)),  tau_C = 1 / (tau_M tr K).
+    // Static subscales use the physical step dt between endpoints and the element metric K = J^{-T} J^{-1}.
+    //   tau_M = 1 / (rho sqrt(4 ct_m^2/dt^2 + a.K a + ct_c (K:K) nu^2 + eps)),
+    //   tau_C = 1 / (tau_M tr K + eps).
     const auto eps = FormExpr::constant(s.epsilon);
-    const auto dts = FormExpr::effectiveTimeStep();
+    const auto dts = FormExpr::timeStep();
     const auto ct_m = FormExpr::constant(s.ct_m);
     const auto ct_c = FormExpr::constant(s.ct_c);
     const auto Jinv_expr = Jinv();

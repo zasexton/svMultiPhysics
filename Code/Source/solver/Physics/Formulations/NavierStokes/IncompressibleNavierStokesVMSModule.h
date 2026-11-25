@@ -664,9 +664,9 @@ struct IncompressibleNavierStokesVMSOptions {
     // decision D47; empty when the options are built in code).
     std::string resolved_input_json{};
 
-    // Legacy-inspired tuning constants used in tau_M (metric-based):
-    //   tau_M/rho = 1 / (rho * sqrt( 4*(ct_m/dt)^2 + u^T Kxi u + ct_c * ||Kxi||_F^2 * nu^2 ))
-    // with Kxi = J^{-T} J^{-1} and nu = mu/rho.
+    // Volume tau_M uses the physical step dt between endpoints (Bazilevs et al., 2007, Eq. 63).
+    //   tau_M = 1 / (rho * sqrt(4*(ct_m/dt)^2 + a^T K a + ct_c*(K:K)*nu^2 + epsilon))
+    // where a is the advective velocity, K = J^{-T} J^{-1} and nu = mu/rho.
     FE::Real ct_m{1.0};
     FE::Real ct_c{36.0};
 

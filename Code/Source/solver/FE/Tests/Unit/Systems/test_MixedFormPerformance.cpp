@@ -145,7 +145,7 @@ svmp::FE::forms::FormExpr makeTransientNavierStokesResidual(
         return momentum + continuity;
     }
 
-    const auto dt_step = FormExpr::effectiveTimeStep();
+    const auto dt_step = FormExpr::timeStep();
     const auto Jinv_expr = Jinv();
     const auto K = transpose(Jinv_expr) * Jinv_expr;
     const auto nu = mu / rho;

@@ -77,7 +77,7 @@ FormExpr makeStokesVMSMomentumForm(const spaces::FunctionSpace& velocity_space,
 
     // Residual-based VMS static subscales.
     const auto eps = FormExpr::constant(params.eps);
-    const auto dt_step = FormExpr::effectiveTimeStep();
+    const auto dt_step = FormExpr::timeStep();
     const auto ct_m = FormExpr::constant(params.ct_m);
     const auto ct_c = FormExpr::constant(params.ct_c);
 
@@ -140,7 +140,7 @@ FormExpr makeStokesVMSContinuityForm(const spaces::FunctionSpace& velocity_space
 
     // Residual-based VMS static subscales.
     const auto eps = FormExpr::constant(params.eps);
-    const auto dt_step = FormExpr::effectiveTimeStep();
+    const auto dt_step = FormExpr::timeStep();
     const auto ct_m = FormExpr::constant(params.ct_m);
     const auto ct_c = FormExpr::constant(params.ct_c);
 
@@ -263,7 +263,7 @@ TEST(JITCompilerStokesVMS, Triangle3_CellAssembly_JITMatchesInterpreter_ForAllBl
 
     auto dof_map_p = createSingleTriangleDofMap(); // [0,1,2]
 
-    // Time integration: simple first-derivative stencil so dt(u) and effectiveTimeStep() are defined.
+    // Backward Euler supplies the first-derivative stencil for dt(u).
     constexpr Real dt = Real(0.05);
     assembly::TimeIntegrationContext ti;
     ti.integrator_name = "unit";
