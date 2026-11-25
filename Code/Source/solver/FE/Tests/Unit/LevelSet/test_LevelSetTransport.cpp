@@ -1,4 +1,5 @@
 #include "LevelSet/LevelSetTransport.h"
+#include "LevelSet/LevelSetKinematicReconciliation.h"
 #include "LevelSet/LevelSetVelocityExtensionConstraint.h"
 
 #include "Assembly/Assembler.h"
@@ -3212,6 +3213,66 @@ TEST(LevelSetTransport,
     EXPECT_GT(coarse, 0.0);
     EXPECT_LT(medium, 0.8 * coarse);
     EXPECT_LT(fine, 0.8 * medium);
+}
+
+TEST(LevelSetTransport, AdvectsAndReconcilesBothSlipCornerEndpoints)
+{
+    const auto mesh = std::make_shared<SingleTriangleMeshAccess>();
+    auto scalar = scalarSpace(mesh);
+    auto vector = FE::spaces::VectorSpace(FE::spaces::SpaceType::H1, mesh, 1, 2);
+    FE::systems::FESystem system(mesh);
+    addScalarAndVelocityFields(system, scalar, vector);
+    level_set::LevelSetTransportOptions options;
+    options.level_set.field_name = "phi";
+    options.velocity.field_name = "advecting_velocity";
+    options.velocity.source = level_set::LevelSetVelocitySource::PrescribedData;
+    options.supg.enabled = true;
+    (void)level_set::installLevelSetTransport(system, scalar, options);
+    system.setup({}, makeSingleTriangleSetupInputs());
+    const auto phi = system.findFieldByName("phi");
+    const auto velocity = system.findFieldByName("advecting_velocity");
+    const auto& velocity_dofs = system.fieldDofHandler(velocity);
+
+    constexpr FE::Real gap = 0.14, height = 0.37, dt = 0.02;
+    std::vector<FE::Real> initial(system.dofHandler().getNumDofs());
+    for (FE::GlobalIndex v = 0; v < 3; ++v) {
+        const auto x = mesh->getNodeCoordinates(v);
+        setScalarVertexValue(initial, system, phi, v, 1.0 - x[0]/gap - x[1]/height);
+    }
+    const auto intercept = [&](const std::vector<FE::Real>& field, int axis) {
+        const FE::GlobalIndex far_vertex = axis + 1;
+        const auto near = scalarVertexValue(field, system, phi, 0);
+        const auto far = scalarVertexValue(field, system, phi, far_vertex);
+        return mesh->getNodeCoordinates(far_vertex)[axis] * near / (near - far);
+    };
+    // x is distance from the vertical wall. The linear divergence-free flow
+    // (-a*x, a*z) sends the two intercepts in opposite directions.
+    for (const FE::Real a : {-1.0, 1.0}) {
+        SCOPED_TRACE(a);
+        std::vector<FE::Real> w(velocity_dofs.getNumDofs());
+        for (FE::GlobalIndex v = 0; v < 3; ++v) {
+            const auto x = mesh->getNodeCoordinates(v);
+            const auto dofs = velocity_dofs.getEntityDofMap()->getVertexDofs(v);
+            w[dofs[0]] = -a*x[0];
+            w[dofs[1]] = a*x[1];
+        }
+        system.setPrescribedFieldCoefficients(velocity, w);
+        const auto transported = solveLinearLevelSetStep(system, initial, dt);
+        // Backward Euler solves the two affine scalar coefficients exactly
+        // in space, giving these discrete intercepts on the entire triangle.
+        EXPECT_NEAR(intercept(transported, 0), gap * (1.0 - a*dt), 1.0e-13);
+        EXPECT_NEAR(intercept(transported, 1), height * (1.0 + a*dt), 1.0e-13);
+        std::vector<FE::Real> reconciled;
+        const auto result = level_set::reconcileLevelSetWithKinematicFlux(
+            *mesh, system.fieldDofHandler(phi), velocity_dofs, 0.0, 1.0e-12,
+            dt, initial, transported, w, w, reconciled);
+        ASSERT_TRUE(result.success) << result.diagnostic;
+        EXPECT_NEAR(result.previous_interface_flux, 0.0, 1.0e-13);
+        EXPECT_LT(std::abs(result.reconciled_volume_error),
+                  0.05 * std::abs(result.transported_volume_error));
+        EXPECT_NEAR(intercept(reconciled, 0), gap * std::exp(-a*dt), gap*dt*dt);
+        EXPECT_NEAR(intercept(reconciled, 1), height * std::exp(a*dt), height*dt*dt);
+    }
 }
 
 TEST(LevelSetTransport, InterfaceKinematicAddsInterfaceResidual)
