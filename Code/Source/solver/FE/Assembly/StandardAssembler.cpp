@@ -1974,6 +1974,21 @@ AssemblyContext::CellDiameterNodes cellDiameterNodePair(const Nodes& nodes, std:
 
 using MappingCurvature = std::array<AssemblyContext::Matrix3x3, 3>;
 
+/// Second derivatives of the inverse mapping at the active quadrature points.
+std::vector<MappingCurvature> mappingCurvatureAtQuadrature(const geometry::GeometryMapping& mapping,
+                                                         const AssemblyContext& context)
+{
+    const int dim = context.dimension();
+    const auto points = context.quadraturePoints();
+    const auto inverse_jacobians = context.inverseJacobians();
+    std::vector<MappingCurvature> out(points.size());
+    for (std::size_t q = 0; q < points.size(); ++q) {
+        const math::Vector<Real, 3> xi{points[q][0], points[q][1], points[q][2]};
+        (void)detail::inverseMappingSecondDerivatives(inverse_jacobians[q], mapping.mapping_hessian(xi), dim, out[q]);
+    }
+    return out;
+}
+
 /// d2 xi / dx2 at the context's quadrature points of @p cell_id: the mapping
 /// curvature that physical Hessians add to J^-T (reference Hessian) J^-1, as
 /// the basis Hessians carry it.  Empty on an affine cell, where it vanishes.
@@ -2001,15 +2016,7 @@ std::vector<MappingCurvature> fieldHessianMappingCurvature(const IMeshAccess& me
     if (mapping->isAffine()) {
         return {};
     }
-    const int dim = context.dimension();
-    const auto points = context.quadraturePoints();
-    const auto inverse_jacobians = context.inverseJacobians();
-    std::vector<MappingCurvature> out(points.size());
-    for (std::size_t q = 0; q < points.size(); ++q) {
-        const math::Vector<Real, 3> xi{points[q][0], points[q][1], points[q][2]};
-        (void)detail::inverseMappingSecondDerivatives(inverse_jacobians[q], mapping->mapping_hessian(xi), dim, out[q]);
-    }
-    return out;
+    return mappingCurvatureAtQuadrature(*mapping, context);
 }
 
 void addMappingCurvature(AssemblyContext::Matrix3x3& H,
@@ -7278,7 +7285,6 @@ void StandardAssembler::prepareGeometry(
     double pc_t0 = PC_TP();
 
     const ElementType cell_type = mesh.getCellType(cell_id);
-    const int dim = mesh.dimension();
 
     // Get cell node coordinates — use flat table when available (Tier 2/3),
     // bypassing virtual dispatch through IMeshAccess::getCellCoordinates.
@@ -7410,6 +7416,8 @@ void StandardAssembler::prepareGeometry(
         }
     }
     const auto& geom_bcache = *geom_bcache_ptr;
+    // Only reference directions supply tangent columns, even on a higher-dimensional mesh.
+    const int reference_dim = mapping->dimension();
     const auto& geom_nodes = mapping->nodes();
     const auto n_geom_dofs = geom_bcache.num_dofs;
 
@@ -7417,7 +7425,7 @@ void StandardAssembler::prepareGeometry(
         // Affine element: Jacobian is constant across all QPs.
         math::Matrix<Real, 3, 3> J{};
         for (std::size_t a = 0; a < n_geom_dofs; ++a) {
-            for (int j = 0; j < dim; ++j) {
+            for (int j = 0; j < reference_dim; ++j) {
                 for (int i = 0; i < 3; ++i) {
                     J(i, j) += geom_nodes[a][i] *
                                geom_bcache.gradientValue(a, static_cast<std::size_t>(j), 0u);
@@ -7425,14 +7433,14 @@ void StandardAssembler::prepareGeometry(
             }
         }
 
-        // Frame completion for embedded geometry (dim < 3)
-        if (dim == 1) {
+        // Frame completion for embedded geometry (reference_dim < 3)
+        if (reference_dim == 1) {
             const math::Vector<Real, 3> t{J(0, 0), J(1, 0), J(2, 0)};
             math::Vector<Real, 3> n1{}, n2{};
             geometry::detail::complete_curve_frame(t, n1, n2);
             J(0, 1) = n1[0]; J(1, 1) = n1[1]; J(2, 1) = n1[2];
             J(0, 2) = n2[0]; J(1, 2) = n2[1]; J(2, 2) = n2[2];
-        } else if (dim == 2) {
+        } else if (reference_dim == 2) {
             const math::Vector<Real, 3> tu{J(0, 0), J(1, 0), J(2, 0)};
             const math::Vector<Real, 3> tv{J(0, 1), J(1, 1), J(2, 1)};
             math::Vector<Real, 3> nv_unit{};
@@ -7494,7 +7502,7 @@ void StandardAssembler::prepareGeometry(
 
             math::Matrix<Real, 3, 3> J{};
             for (std::size_t a = 0; a < n_geom_dofs; ++a) {
-                for (int j = 0; j < dim; ++j) {
+                for (int j = 0; j < reference_dim; ++j) {
                     for (int i = 0; i < 3; ++i) {
                         J(i, j) += geom_nodes[a][i] *
                                    geom_bcache.gradientValue(a, static_cast<std::size_t>(j), qidx);
@@ -7502,13 +7510,13 @@ void StandardAssembler::prepareGeometry(
                 }
             }
 
-            if (dim == 1) {
+            if (reference_dim == 1) {
                 const math::Vector<Real, 3> t{J(0, 0), J(1, 0), J(2, 0)};
                 math::Vector<Real, 3> n1{}, n2{};
                 geometry::detail::complete_curve_frame(t, n1, n2);
                 J(0, 1) = n1[0]; J(1, 1) = n1[1]; J(2, 1) = n1[2];
                 J(0, 2) = n2[0]; J(1, 2) = n2[1]; J(2, 2) = n2[2];
-            } else if (dim == 2) {
+            } else if (reference_dim == 2) {
                 const math::Vector<Real, 3> tu{J(0, 0), J(1, 0), J(2, 0)};
                 const math::Vector<Real, 3> tv{J(0, 1), J(1, 1), J(2, 1)};
                 math::Vector<Real, 3> nv_unit{};
@@ -7588,7 +7596,6 @@ void StandardAssembler::prepareGeometry(
     GeometryWorkspace& ws)
 {
     const ElementType cell_type = mesh.getCellType(cell_id);
-    const int dim = mesh.dimension();
 
     mesh.getCellCoordinates(cell_id, ws.cell_coords);
     const auto n_nodes = ws.cell_coords.size();
@@ -7641,25 +7648,27 @@ void StandardAssembler::prepareGeometry(
         ws.geom_bcache = &ws.geom_bcache_handle.entry();
     }
     const auto& geom_bcache = *ws.geom_bcache;
+    // Only reference directions supply tangent columns, even on a higher-dimensional mesh.
+    const int reference_dim = mapping->dimension();
     const auto& geom_nodes = mapping->nodes();
     const auto n_geom_dofs = geom_bcache.num_dofs;
 
     if (mapping->isAffine()) {
         math::Matrix<Real, 3, 3> J{};
         for (std::size_t a = 0; a < n_geom_dofs; ++a) {
-            for (int j = 0; j < dim; ++j)
+            for (int j = 0; j < reference_dim; ++j)
                 for (int i = 0; i < 3; ++i)
                     J(i, j) += geom_nodes[a][i] *
                                geom_bcache.gradientValue(a, static_cast<std::size_t>(j), 0u);
         }
 
-        if (dim == 1) {
+        if (reference_dim == 1) {
             const math::Vector<Real, 3> t{J(0, 0), J(1, 0), J(2, 0)};
             math::Vector<Real, 3> n1{}, n2{};
             geometry::detail::complete_curve_frame(t, n1, n2);
             J(0, 1) = n1[0]; J(1, 1) = n1[1]; J(2, 1) = n1[2];
             J(0, 2) = n2[0]; J(1, 2) = n2[1]; J(2, 2) = n2[2];
-        } else if (dim == 2) {
+        } else if (reference_dim == 2) {
             const math::Vector<Real, 3> tu{J(0, 0), J(1, 0), J(2, 0)};
             const math::Vector<Real, 3> tv{J(0, 1), J(1, 1), J(2, 1)};
             math::Vector<Real, 3> nv_unit{};
@@ -7715,18 +7724,18 @@ void StandardAssembler::prepareGeometry(
             ctx_phys_pts[q] = {x0, x1, x2};
             math::Matrix<Real, 3, 3> J{};
             for (std::size_t a = 0; a < n_geom_dofs; ++a) {
-                for (int j = 0; j < dim; ++j)
+                for (int j = 0; j < reference_dim; ++j)
                     for (int i = 0; i < 3; ++i)
                         J(i, j) += geom_nodes[a][i] *
                                    geom_bcache.gradientValue(a, static_cast<std::size_t>(j), qidx);
             }
-            if (dim == 1) {
+            if (reference_dim == 1) {
                 const math::Vector<Real, 3> t{J(0, 0), J(1, 0), J(2, 0)};
                 math::Vector<Real, 3> n1{}, n2{};
                 geometry::detail::complete_curve_frame(t, n1, n2);
                 J(0, 1) = n1[0]; J(1, 1) = n1[1]; J(2, 1) = n1[2];
                 J(0, 2) = n2[0]; J(1, 2) = n2[1]; J(2, 2) = n2[2];
-            } else if (dim == 2) {
+            } else if (reference_dim == 2) {
                 const math::Vector<Real, 3> tu{J(0, 0), J(1, 0), J(2, 0)};
                 const math::Vector<Real, 3> tv{J(0, 1), J(1, 1), J(2, 1)};
                 math::Vector<Real, 3> nv_unit{};
@@ -15689,16 +15698,14 @@ AssemblyResult StandardAssembler::assembleCellsFused(
         //
         // Conditions:
         //  - coupled_kernel + use_coupled_scalar_cache (all blocks share basis)
-        //  - affine elements (determined from first cell's geometry order)
+        //  - a first-order geometry group (tensor-product maps can be non-affine)
         //  - OMP available with > 1 thread
         //  - enough cells to amortize coloring/OMP overhead
         //  - not using monolithic/pairwise JIT (those have own parallelism)
         //  - not using constraints (insertLocalConstrained is not thread-safe)
         // =================================================================
-        const bool all_affine = !gids.empty() &&
+        const bool first_order_geometry = !gids.empty() &&
             (mesh.getCellGeometryOrder(gids[0]) <= 1);
-        const bool use_batch_basis_early =
-            use_coupled_scalar_cache && all_affine;
 
         int max_omp_threads = 1;
 #ifdef _OPENMP
@@ -15707,7 +15714,7 @@ AssemblyResult StandardAssembler::assembleCellsFused(
         const bool has_active_constraints =
             options_.use_constraints && constraint_distributor_ && constraints_;
         const bool use_colored_parallel =
-            use_batch_basis_early &&
+            use_coupled_scalar_cache && first_order_geometry &&
             max_omp_threads > 1 &&
             gids.size() >= 256 &&
             !has_active_constraints;
@@ -15843,10 +15850,13 @@ AssemblyResult StandardAssembler::assembleCellsFused(
                         // --- 4. Gradient transform (ref → physical) ---
                         {
                             const auto ctx_inv_jacs = thread_ctx.inverseJacobians();
-                            const auto& J_inv = ctx_inv_jacs[0]; // affine
+                            const auto curvature = need_hess && !geom_ws.mapping_affine
+                                ? mappingCurvatureAtQuadrature(*geom_ws.mapping, thread_ctx)
+                                : std::vector<MappingCurvature>{};
 
                             for (LocalIndex si = 0; si < ns; ++si) {
                                 for (LocalIndex q = 0; q < nq; ++q) {
+                                    const auto& J_inv = ctx_inv_jacs[q];
                                     const auto ri = static_cast<std::size_t>(
                                         si * nq + q);
                                     const auto& gr = ref_grads[ri];
@@ -15870,6 +15880,7 @@ AssemblyResult StandardAssembler::assembleCellsFused(
                             if (need_hess) {
                                 for (LocalIndex si = 0; si < ns; ++si) {
                                     for (LocalIndex q = 0; q < nq; ++q) {
+                                        const auto& J_inv = ctx_inv_jacs[q];
                                         const auto ri = static_cast<std::size_t>(
                                             si * nq + q);
                                         const auto& Hr = ref_hess[ri];
@@ -15884,6 +15895,9 @@ AssemblyResult StandardAssembler::assembleCellsFused(
                                                              J_inv[static_cast<std::size_t>(b)][static_cast<std::size_t>(c_d)];
                                                 Hp[static_cast<std::size_t>(r)][static_cast<std::size_t>(c_d)] = s;
                                             }
+                                        if (!curvature.empty()) {
+                                            addMappingCurvature(Hp, ref_grads[ri], curvature[q], dim);
+                                        }
                                     }
                                 }
                             }
@@ -20265,7 +20279,7 @@ void StandardAssembler::populateFieldSolutionData(
                 }
 
                 // For affine elements, J_inv is the same at all QPs.
-                const auto& J_inv = ctx_inv_jacs_span[cached_mapping_affine_ ? 0 : static_cast<std::size_t>(q)];
+                const auto& J_inv = ctx_inv_jacs_span[static_cast<std::size_t>(q)];
                 Real val = 0.0;
 
                 // Accumulate in reference space first, then apply J_inv
@@ -20421,9 +20435,7 @@ void StandardAssembler::populateFieldSolutionData(
 	                        scalar_values[static_cast<std::size_t>(q)] = val;
 	                        if (need_gradients) {
 	                            const auto& J_inv =
-	                                ctx_inv_jacs_span[cached_mapping_affine_
-	                                                      ? 0
-	                                                      : static_cast<std::size_t>(q)];
+	                                ctx_inv_jacs_span[static_cast<std::size_t>(q)];
 	                            AssemblyContext::Vector3D grad = {0.0, 0.0, 0.0};
 	                            for (int d1 = 0; d1 < dim; ++d1) {
 	                                for (int d2 = 0; d2 < dim; ++d2) {
@@ -20706,7 +20718,7 @@ void StandardAssembler::populateFieldSolutionData(
                     }
                 }
 
-                const auto& J_inv = ctx_inv_jacs_ps[cached_mapping_affine_ ? 0 : static_cast<std::size_t>(q)];
+                const auto& J_inv = ctx_inv_jacs_ps[static_cast<std::size_t>(q)];
                 AssemblyContext::Matrix3x3 J{};
 
                 const auto q_base = static_cast<std::size_t>(q) * static_cast<std::size_t>(vd);
@@ -20875,7 +20887,7 @@ void StandardAssembler::populateFieldSolutionData(
                                 // (above), so a field equal at both steps has a
                                 // rate of exactly zero.
                                 const auto& J_inv =
-                                    ctx_inv_jacs_ps[cached_mapping_affine_ ? 0 : static_cast<std::size_t>(q)];
+                                    ctx_inv_jacs_ps[static_cast<std::size_t>(q)];
                                 auto& jac = vector_jacobians[static_cast<std::size_t>(q)];
                                 for (int d1 = 0; d1 < dim; ++d1) {
                                     Real sum = 0.0;

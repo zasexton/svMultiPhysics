@@ -23,6 +23,7 @@
 #include "Assembly/StandardAssembler.h"
 #include "Assembly/BackgroundEntityMeasures.h"
 #include "Assembly/GlobalSystemView.h"
+#include "Assembly/MeshAccess.h"
 #include "Assembly/AssemblyKernel.h"
 #include "Assembly/Assembler.h"
 #include "Assembly/CutIntegrationContext.h"
@@ -31,6 +32,7 @@
 #include "Forms/FormCompiler.h"
 #include "Forms/FormKernels.h"
 #include "Forms/JIT/JITCompiler.h"
+#include "Forms/MixedBlockKernelSet.h"
 #include "Forms/MonolithicCellKernel.h"
 #include "Forms/Vocabulary.h"
 #include "Interfaces/GeneratedInterfaceBoundaryIntersectionDomain.h"
@@ -47,6 +49,7 @@
 #include "Basis/LagrangeBasis.h"
 #include "Geometry/MappingFactory.h"
 #include "Interfaces/GeneratedActiveBoundaryDomain.h"
+#include "Mesh/Mesh.h"
 
 #include <algorithm>
 #include <cmath>
@@ -61,6 +64,10 @@
 #include <span>
 #include <string>
 #include <utility>
+
+#ifdef _OPENMP
+#include <omp.h>
+#endif
 
 namespace svmp {
 namespace FE {
@@ -3962,6 +3969,293 @@ TEST(StandardAssemblerHessianTest, PhysicalBasisHessiansMatchFiniteDifferenceGra
 
     const auto result = assembler.assembleVector(mesh, space, kernel, vec);
     EXPECT_TRUE(result.success);
+}
+
+namespace {
+
+std::shared_ptr<Mesh> singleCellMesh(
+    int spatial_dim, CellShape shape, const std::vector<real_t>& coordinates)
+{
+    auto base = std::make_shared<MeshBase>();
+    const auto count = static_cast<offset_t>(coordinates.size() / spatial_dim);
+    std::vector<index_t> nodes(count);
+    std::iota(nodes.begin(), nodes.end(), index_t{0});
+    base->build_from_arrays(spatial_dim, coordinates, {0, count}, nodes, {shape});
+    base->finalize();
+    return create_mesh(std::move(base));
+}
+
+void checkAffineP1Cell(int spatial_dim, CellShape shape, const std::vector<real_t>& coordinates,
+                       Real measure, const std::vector<std::array<Real, 3>>& gradients)
+{
+    const auto mesh = singleCellMesh(spatial_dim, shape, coordinates);
+    MeshAccess access(*mesh);
+    spaces::H1Space space(access.getCellType(0), 1);
+    const auto n = static_cast<GlobalIndex>(space.dofs_per_element());
+    auto dofs = createSingleCellDofMap(n);
+    StandardAssembler assembler;
+    assembler.setDofMap(dofs);
+    DenseMatrixView stiffness(n);
+    DenseVectorView load(n);
+    PoissonKernel poisson(1.0);
+    ASSERT_TRUE(assembler.assembleBoth(access, space, space, poisson, stiffness, load).success);
+    for (GlobalIndex i = 0; i < n; ++i) {
+        EXPECT_NEAR(load.getVectorEntry(i), measure / n, 1e-12);
+        for (GlobalIndex j = 0; j < n; ++j) {
+            const auto dot = std::inner_product(gradients[i].begin(), gradients[i].end(),
+                                                gradients[j].begin(), Real{0});
+            EXPECT_NEAR(stiffness.getMatrixEntry(i, j), measure * dot, 1e-12);
+        }
+    }
+
+    // The individual Cartesian derivatives also distinguish a tangential
+    // gradient from a rotated vector with the same inner products.
+    forms::FormCompiler compiler;
+    const auto v = forms::TestFunction(space, "v");
+    for (int d = 0; d < spatial_dim; ++d) {
+        forms::FormKernel derivative(compiler.compileLinear(forms::grad(v).component(d).dx()));
+        DenseVectorView result(n);
+        ASSERT_TRUE(assembler.assembleVector(access, space, derivative, result).success);
+        for (GlobalIndex i = 0; i < n; ++i) {
+            EXPECT_NEAR(result.getVectorEntry(i), measure * gradients[i][d], 1e-12);
+        }
+    }
+}
+
+} // namespace
+
+TEST(StandardAssemblerEmbedded, TiltedSegments)
+{
+    checkAffineP1Cell(2, {CellFamily::Line, 2, 1}, {-1, -2, 1, 2}, 2 * std::sqrt(5.0),
+                      {{-0.1, -0.2, 0}, {0.1, 0.2, 0}});
+    checkAffineP1Cell(3, {CellFamily::Line, 2, 1}, {-1, -2, -3, 1, 2, 3}, 2 * std::sqrt(14.0),
+                      {{-1./28, -2./28, -3./28}, {1./28, 2./28, 3./28}});
+}
+
+TEST(StandardAssemblerEmbedded, TiltedTriangle)
+{
+    checkAffineP1Cell(3, {CellFamily::Triangle, 3, 1}, {0, 0, 0, 1, 2, 3, 0, 1, 2},
+                      std::sqrt(6.0) / 2,
+                      {{0.5, 0, -0.5}, {5./6, 2./6, -1./6}, {-8./6, -2./6, 4./6}});
+}
+
+TEST(StandardAssemblerEmbedded, FullDimensionalTriangle)
+{
+    checkAffineP1Cell(2, {CellFamily::Triangle, 3, 1}, {0, 0, 1, 2, 0, 1}, 0.5,
+                      {{1, -1, 0}, {1, 0, 0}, {-2, 1, 0}});
+}
+
+TEST(StandardAssemblerEmbedded, CurvedQuadraticLineWithLinearField)
+{
+    // x(s) = (s, s^2/4, s), -1 <= s <= 1. The length integrates
+    // sqrt(2 + s^2/4) and the two diagonal stiffnesses integrate its reciprocal / 4.
+    const auto mesh = singleCellMesh(3, {CellFamily::Line, 2, 2},
+                                     {-1, 0.25, -1, 1, 0.25, 1, 0, 0, 0});
+    MeshAccess access(*mesh);
+    spaces::H1Space space(ElementType::Line2, 1);
+    auto dofs = createSingleCellDofMap(2);
+    StandardAssembler assembler;
+    assembler.setDofMap(dofs);
+    PoissonKernel poisson(1.0);
+    poisson.setCellRuleSpace(std::make_shared<spaces::H1Space>(ElementType::Line2, 10));
+    DenseMatrixView stiffness(2);
+    DenseVectorView load(2);
+    ASSERT_TRUE(assembler.assembleBoth(access, space, space, poisson, stiffness, load).success);
+    const Real a = std::asinh(1 / std::sqrt(8.0));
+    for (GlobalIndex i = 0; i < 2; ++i) {
+        EXPECT_NEAR(load.getVectorEntry(i), (1.5 + 4 * a) / 2, 1e-12);
+        EXPECT_NEAR(stiffness.getMatrixEntry(i, i), a, 1e-12);
+        EXPECT_NEAR(stiffness.getMatrixEntry(i, 1 - i), -a, 1e-12);
+    }
+}
+
+TEST(StandardAssemblerEmbedded, CurvedQuadraticSurfaceWithBilinearField)
+{
+    // (s,t,s^2/4) has area density sqrt(1+s^2/4). The energy of u=x=s
+    // integrates the reciprocal density on [-1,1]^2.
+    const auto mesh = singleCellMesh(3, {CellFamily::Quad, 4, 2},
+        {-1, -1, 0.25, 1, -1, 0.25, 1, 1, 0.25, -1, 1, 0.25,
+          0, -1, 0,    1,  0, 0.25, 0, 1, 0,    -1, 0, 0.25, 0, 0, 0});
+    MeshAccess access(*mesh);
+    spaces::H1Space space(ElementType::Quad4, 1);
+    auto dofs = createSingleCellDofMap(4);
+    StandardAssembler assembler;
+    assembler.setDofMap(dofs);
+    PoissonKernel poisson(1.0);
+    poisson.setCellRuleSpace(std::make_shared<spaces::H1Space>(ElementType::Quad4, 10));
+    DenseMatrixView stiffness(4);
+    DenseVectorView load(4);
+    ASSERT_TRUE(assembler.assembleBoth(access, space, space, poisson, stiffness, load).success);
+    const Real a = std::asinh(0.5);
+    const std::array<Real, 4> x{-1, 1, 1, -1};
+    Real energy = 0;
+    for (GlobalIndex i = 0; i < 4; ++i) {
+        EXPECT_NEAR(load.getVectorEntry(i), (std::sqrt(1.25) + 2 * a) / 2, 1e-12);
+        for (GlobalIndex j = 0; j < 4; ++j) {
+            energy += x[i] * stiffness.getMatrixEntry(i, j) * x[j];
+        }
+    }
+    EXPECT_NEAR(energy, 8 * a, 1e-12);
+}
+
+TEST(StandardAssemblerEmbedded, MovingTriangleReferenceAndCurrentArea)
+{
+    const auto mesh = singleCellMesh(3, {CellFamily::Triangle, 3, 1},
+                                     {0, 0, 0, 1, 0, 0, 0, 1, 0});
+    mesh->base().set_current_coords({0, 0, 0, 1, 2, 3, 0, 1, 2});
+    mesh->base().use_current_configuration();
+    MeshAccess access(*mesh);
+    spaces::H1Space space(ElementType::Triangle3, 1);
+    auto dofs = createSingleCellDofMap(3);
+    StandardAssembler assembler;
+    assembler.setDofMap(dofs);
+    const auto v = forms::TestFunction(space, "v");
+    forms::FormCompiler compiler;
+    forms::FormKernel reference_area(compiler.compileLinear(
+        (v * forms::referenceMeasure() / forms::currentMeasure()).dx()));
+    DenseVectorView reference(3);
+    ASSERT_TRUE(assembler.assembleVector(access, space, reference_area, reference).success);
+    SourceKernel source(1.0);
+    DenseVectorView current(3);
+    ASSERT_TRUE(assembler.assembleVector(access, space, source, current).success);
+    for (GlobalIndex i = 0; i < 3; ++i) {
+        EXPECT_NEAR(reference.getVectorEntry(i), 1./6, 1e-12);
+        EXPECT_NEAR(current.getVectorEntry(i), std::sqrt(6.0) / 6, 1e-12);
+    }
+}
+
+namespace {
+
+void checkMixedBlockIntegrals(int spatial_dim, CellShape shape,
+                              const std::vector<std::array<Real, 2>>& vertices,
+                              const std::vector<Real>& expected_load,
+                              const std::vector<Real>& expected_derivative,
+                              const std::vector<Real>& expected_hessian)
+{
+    // Each cell is translated in y and has its own DOFs. This lets the colored
+    // mixed-block path assemble many cells of the same color concurrently.
+    constexpr GlobalIndex cells = 256;
+    const auto n = static_cast<LocalIndex>(vertices.size());
+    const GlobalIndex count = cells * n;
+    auto base = std::make_shared<MeshBase>();
+    std::vector<real_t> coords;
+    std::vector<Real> y;
+    std::vector<index_t> nodes(count);
+    std::vector<offset_t> offsets{0};
+    std::iota(nodes.begin(), nodes.end(), index_t{0});
+    dofs::DofMap dofs(cells, count, n);
+    for (GlobalIndex c = 0; c < cells; ++c) {
+        std::vector<GlobalIndex> local(n);
+        std::iota(local.begin(), local.end(), c * n);
+        dofs.setCellDofs(c, local);
+        offsets.push_back(static_cast<offset_t>((c + 1) * n));
+        for (const auto& [x, local_y] : vertices) {
+            coords.push_back(x);
+            coords.push_back(local_y + 4 * c);
+            if (spatial_dim == 3) coords.push_back(x);
+            y.push_back(local_y);
+        }
+    }
+    dofs.setNumDofs(count);
+    dofs.setNumLocalDofs(count);
+    dofs.finalize();
+    base->build_from_arrays(spatial_dim, coords, offsets, nodes, std::vector<CellShape>(cells, shape));
+    base->finalize();
+    const auto mesh = create_mesh(std::move(base));
+    MeshAccess access(*mesh);
+    spaces::H1Space space(access.getCellType(0), 1);
+
+    forms::FormCompiler compiler;
+    const auto v = forms::TestFunction(space, "v");
+    const int direction = spatial_dim == 3 ? 2 : 0;
+    const auto w = forms::FormExpr::constant(1) + 0.5 * forms::x().component(0);
+    const auto y_field = forms::FormExpr::discreteField(17, space, "y");
+    const std::array<std::shared_ptr<AssemblyKernel>, 4> kernels{
+        std::make_shared<SourceKernel>(1.0),
+        std::make_shared<forms::FormKernel>(
+            compiler.compileLinear(forms::grad(v).component(direction).dx())),
+        std::make_shared<forms::FormKernel>(
+            compiler.compileLinear((w * forms::hessian(v).component(direction, 1)).dx())),
+        std::make_shared<forms::FormKernel>(
+            compiler.compileLinear((v * forms::grad(y_field).component(1)).dx()))};
+    std::vector<forms::MixedBlockKernelSet::BlockSpec> blocks;
+    for (std::size_t field = 0; field < kernels.size(); ++field) {
+        forms::MixedBlockKernelSet::BlockSpec block;
+        block.test_field = block.trial_field = static_cast<FieldId>(field);
+        block.want_vector = true;
+        block.fallback_kernel = kernels[field];
+        block.test_space = block.trial_space = &space;
+        block.row_dof_map = block.col_dof_map = &dofs;
+        block.row_dof_offset = block.col_dof_offset = field * count;
+        blocks.push_back(std::move(block));
+    }
+    forms::MixedBlockKernelSet mixed(std::move(blocks), nullptr, {});
+    mixed.setResolved();
+    struct ResolvedVector : DenseVectorView {
+        using DenseVectorView::DenseVectorView;
+        const void* vectorLayoutHandle() const noexcept override { return this; }
+    };
+    ResolvedVector result(kernels.size() * count);
+    FusedCellTerm term{.test_space = &space, .trial_space = &space, .kernel = &mixed,
+                       .row_dof_map = &dofs, .col_dof_map = &dofs, .vector_view = &result,
+                       .assemble_matrix = false, .assemble_vector = true};
+    AssemblyOptions options;
+    options.use_batching = true;
+    options.batch_size = 8;
+    StandardAssembler assembler(options);
+    assembler.setDofMap(dofs);
+    const FieldSolutionAccess field{.field = 17, .space = &space, .dof_map = &dofs,
+        .coefficient_source = FieldSolutionAccess::CoefficientSource::PrescribedData,
+        .prescribed_coefficients = y};
+    assembler.setFieldSolutionAccess(std::span(&field, 1));
+#ifdef _OPENMP
+    const int previous_threads = omp_get_max_threads();
+    omp_set_num_threads(2);
+#endif
+    const auto assembled = assembler.assembleCellsFused(access, std::span(&term, 1));
+#ifdef _OPENMP
+    omp_set_num_threads(previous_threads);
+#endif
+    ASSERT_TRUE(assembled.success);
+    std::array<Real, 4> max_error{};
+    for (GlobalIndex i = 0; i < count; ++i) {
+        const std::array<Real, 4> expected{expected_load[i % n], expected_derivative[i % n],
+                                           expected_hessian[i % n], expected_load[i % n]};
+        for (std::size_t field = 0; field < kernels.size(); ++field) {
+            const Real value = result.getVectorEntry(field * count + i);
+            ASSERT_TRUE(std::isfinite(value));
+            max_error[field] = std::max(max_error[field], std::abs(value - expected[field]));
+        }
+    }
+    EXPECT_LT(max_error[0], 1e-11) << "constant source";
+    EXPECT_LT(max_error[1], 1e-11) << "weak first derivative";
+    EXPECT_LT(max_error[2], 1e-11) << "weighted mixed second derivative";
+    EXPECT_LT(max_error[3], 1e-11) << "gradient of the interpolated y coordinate";
+}
+
+} // namespace
+
+TEST(StandardAssemblerEmbedded, ColoredMixedBlocksOnTiltedTriangles)
+{
+    const Real scale = std::sqrt(2.0);
+    checkMixedBlockIntegrals(3, {CellFamily::Triangle, 3, 1}, {{-1, -1}, {1, -1}, {-1, 1}},
+                             {2 * scale / 3, 2 * scale / 3, 2 * scale / 3},
+                             {-1 / scale, 1 / scale, 0}, {0, 0, 0});
+}
+
+TEST(StandardAssemblerEmbedded, MixedBlocksOnNonAffineTrapezoids)
+{
+    // x=s, y=t*(1+s/2): det(dx/d(s,t)) varies even though the geometry is Q1.
+    // Setting z=x stretches area by sqrt(2) and splits the x derivative between x and z.
+    for (int spatial_dim : {2, 3}) {
+        SCOPED_TRACE(spatial_dim);
+        const Real scale = spatial_dim == 3 ? std::sqrt(2.0) : 1.0;
+        checkMixedBlockIntegrals(spatial_dim, {CellFamily::Quad, 4, 1},
+                                 {{-1, -0.5}, {1, -1.5}, {1, 1.5}, {-1, 0.5}},
+                                 {5 * scale / 6, 7 * scale / 6, 7 * scale / 6, 5 * scale / 6},
+                                 {-1 / scale, 1 / scale, 1 / scale, -1 / scale},
+                                 {1.5 / scale, -0.5 / scale, 0.5 / scale, -1.5 / scale});
+    }
 }
 
 // ============================================================================
