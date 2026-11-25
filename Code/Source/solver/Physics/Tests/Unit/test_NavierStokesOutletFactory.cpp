@@ -4353,3 +4353,92 @@ TEST(NavierStokesWeakVelocityDirichlet, SymmetricWallKeepsTheStokesBlocksAdjoint
     ASSERT_GT(coupling, 0.0);
     EXPECT_LE(pu_defect, 1e-13 * scale) << "max |K_pu + K_up^T| = " << pu_defect << " of max |K_pu| = " << coupling;
 }
+
+TEST(NavierStokesWeakVelocityDirichlet, ImpermeableWallKeepsTheMassBalanceForBothVariants)
+{
+    // The continuity rows of an impermeable weak wall (g = 0) tested with the
+    // constant pressure: their sum is the velocity flux through the faces
+    // that are not the wall, whatever the wall's leakage, for the symmetric
+    // and the unsymmetric route, so a discrete solution has inflow equal to
+    // outflow. A wall term of the wrong sign adds twice the wall's leakage.
+    constexpr int marker = 4;
+    auto mesh = std::make_shared<svmp::FE::forms::test::SingleTetraOneBoundaryFaceMeshAccess>(marker);
+    auto u_space = svmp::FE::spaces::VectorSpace(svmp::FE::spaces::SpaceType::H1, mesh, 1, 3);
+    auto p_space = svmp::FE::spaces::Space(svmp::FE::spaces::SpaceType::H1, mesh, 1);
+    // u(x) = A x + b at the vertices (0,0,0), (1,0,0), (0,1,0), (0,0,1).
+    const std::array<std::array<Real, 3>, 3> A{{{0.3, -0.2, 0.1}, {0.05, 0.4, -0.3}, {0.2, -0.1, 0.25}}};
+    const std::array<Real, 3> b{0.1, -0.05, 0.35};
+    const std::array<std::array<Real, 3>, 4> vertices{{{0, 0, 0}, {1, 0, 0}, {0, 1, 0}, {0, 0, 1}}};
+    // Flux through the other faces: int_K div u - int_wall u.n, the wall
+    // being z = 0 with n = -e_z: int_wall u.n = -(b_z / 2 + (A_zx + A_zy) / 6).
+    const Real div_u = A[0][0] + A[1][1] + A[2][2];
+    const Real wall_flux = -(b[2] / 2.0 + (A[2][0] + A[2][1]) / 6.0);
+    const Real open_flux = div_u / 6.0 - wall_flux;
+    ASSERT_GT(std::abs(wall_flux), 0.1);
+
+    for (const bool symmetric : {true, false}) {
+        SCOPED_TRACE(symmetric ? "symmetric" : "unsymmetric");
+        Opts opts;
+        opts.jit_policy.enable = false;
+        opts.enable_convection = false;
+        opts.enable_vms = false;
+        opts.density = 1.06;
+        opts.viscosity = 0.04;
+        opts.nitsche_symmetric = symmetric;
+        opts.velocity_field_name = "Velocity";
+        opts.pressure_field_name = "Pressure";
+        Opts::VelocityDirichletBC wall;
+        wall.boundary_marker = marker;
+        opts.velocity_dirichlet_weak.push_back(wall);
+        FESystem sys(mesh);
+        svmp::Physics::formulations::navier_stokes::IncompressibleNavierStokesVMSModule module(u_space, p_space, opts);
+        module.registerOn(sys);
+        SetupInputs si;
+        si.topology_override = singleTetraTopology();
+        sys.setup({}, si);
+
+        const auto n_dofs = static_cast<std::size_t>(sys.dofHandler().getNumDofs());
+        std::vector<Real> u_stage(n_dofs, 0.0);
+        const auto u_field = sys.findFieldByName("Velocity");
+        for (svmp::FE::GlobalIndex vertex = 0; vertex < 4; ++vertex) {
+            const auto& x = vertices[static_cast<std::size_t>(vertex)];
+            for (int i = 0; i < 3; ++i) {
+                const auto& row = A[static_cast<std::size_t>(i)];
+                setFieldComponent(u_stage, sys, u_field, vertex, i,
+                                  row[0] * x[0] + row[1] * x[1] + row[2] * x[2] + b[static_cast<std::size_t>(i)]);
+            }
+        }
+        std::vector<Real> u_prev(u_stage);
+        std::vector<Real> u_prev2(u_stage);
+        const auto ga = svmp::FE::timestepping::utils::generalizedAlphaFirstOrderFromRhoInf(0.5);
+        auto integrator = std::make_shared<svmp::FE::timestepping::GeneralizedAlphaFirstOrderIntegrator>(
+            svmp::FE::timestepping::GeneralizedAlphaFirstOrderIntegratorOptions{
+                .alpha_m = ga.alpha_m, .alpha_f = ga.alpha_f, .gamma = ga.gamma, .history_rate_order = 2});
+        std::array<std::span<const Real>, 2> u_hist{u_prev, u_prev2};
+        std::array<double, 2> dt_hist{0.05, 0.05};
+        SystemStateView state;
+        state.time = ga.alpha_f * 0.05;
+        state.dt = 0.05;
+        state.effective_dt = ga.alpha_f * state.dt;
+        state.dt_prev = state.dt;
+        state.u = u_stage;
+        state.u_prev = u_prev;
+        state.u_prev2 = u_prev2;
+        state.u_history = u_hist;
+        state.dt_history = dt_hist;
+        TransientSystem transient(sys, integrator);
+        AssemblyRequest req;
+        req.op = "equations";
+        req.want_matrix = false;
+        req.want_vector = true;
+        req.is_nonlinear_iteration = true;
+        svmp::FE::assembly::DenseVectorView R(static_cast<svmp::FE::GlobalIndex>(n_dofs));
+        R.zero();
+        ASSERT_TRUE(transient.assemble(req, state, nullptr, &R).success);
+        Real continuity_sum = 0.0;
+        for (const auto dof : sys.fieldMap().getComponentDofs("Pressure", 0).toVector()) {
+            continuity_sum += R.getVectorEntry(dof);
+        }
+        EXPECT_NEAR(continuity_sum, open_flux, 1e-12) << "wall flux " << wall_flux;
+    }
+}

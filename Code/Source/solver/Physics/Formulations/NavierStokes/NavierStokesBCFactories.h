@@ -583,22 +583,27 @@ namespace detail {
 /// sigma(u, p) n = 2 mu eps(u) n - p n: the flux of the momentum operator on
 /// a boundary, the pressure part in the continuity row @p continuity_row.
 /// The operator states -(p, div v) in the momentum row and +(q, div u) in the
-/// continuity row, so the pressure part's test function is -q: the symmetric
-/// route's continuity term is -(q, (u - g).n), the transpose of the momentum
-/// row's +(p n, v) up to the row's sign (K_pu = -K_up^T), and the
-/// unsymmetric route's is +(q, (u - g).n).  Its conormal part carries the
-/// symmetric-gradient form that certified generated-boundary routes are built
-/// from.
+/// continuity row, and both routes have the continuity term -(q, (u - g).n):
+/// for the symmetric route it is the transpose of the momentum row's
+/// +(p n, v) up to the row's sign (K_pu = -K_up^T); the unsymmetric route
+/// reverses only the viscous adjoint term (Boiveau and Burman, IMA J. Numer.
+/// Anal. 36, 2016, eq. 4.1).  Either way the constant pressure test balances
+/// the flux through the other boundaries, whatever the wall's leakage.  The
+/// adjoint term of a part changes sign with the variant, so the pressure part
+/// is tested with -q for the symmetric route and q for the unsymmetric one.
+/// Its conormal part carries the symmetric-gradient form that certified
+/// generated-boundary routes are built from.
 [[nodiscard]] inline FE::forms::bc::NaturalFlux wallStressFlux(FE::FieldId continuity_row,
                                                                const FE::forms::FormExpr& p,
                                                                const FE::forms::FormExpr& q,
-                                                               const FE::forms::FormExpr& mu)
+                                                               const FE::forms::FormExpr& mu,
+                                                               bool symmetric)
 {
     auto stress = [mu](const FE::forms::FormExpr& w) {
         return FE::forms::FormExpr::constant(2.0) * mu * FE::forms::symgrad(w);
     };
     return FE::forms::bc::NaturalFlux{
-        .parts = {FE::forms::bc::isotropicFlux(continuity_row, p, -q),
+        .parts = {FE::forms::bc::isotropicFlux(continuity_row, p, symmetric ? -q : q),
                   FE::forms::bc::conormalFlux(std::move(stress), FE::forms::bc::symmetricGradientForm(mu))},
         .penalty_weight = mu / FE::forms::hNormal()};
 }
@@ -678,7 +683,7 @@ inline void appendVelocityNitscheBoundaries(
         .variant = options.nitsche_symmetric ? FE::forms::bc::NitscheVariant::Symmetric
                                              : FE::forms::bc::NitscheVariant::Unsymmetric,
         .scale_with_p = options.nitsche_scale_with_p};
-    const auto flux = wallStressFlux(Rows::continuity, p, q, mu);
+    const auto flux = wallStressFlux(Rows::continuity, p, q, mu, options.nitsche_symmetric);
     for (const auto& boundary : boundaries) {
         const auto& prepared = resolve_boundary(boundary);
         auto condition_nitsche = nitsche;

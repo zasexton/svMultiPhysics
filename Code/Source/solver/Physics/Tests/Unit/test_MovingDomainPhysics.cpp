@@ -12376,15 +12376,17 @@ TEST(MovingDomainPhysics, WeakVelocityNitscheSinksKeepSequentialAppendOrder)
                  .variant = symmetric ? bc::NitscheVariant::Symmetric : bc::NitscheVariant::Unsymmetric,
                  .scale_with_p = scale_with_p});
             const auto adjoint = inner(stress_v * n, diff).dExteriorBoundary(measure);
-            // The wall tests its pressure part with -q (the continuity row holds +(q, div u)).
+            // Both routes add -q (u - g).n to the continuity row, which holds +(q, div u):
+            // the symmetric one through the test function -q, the unsymmetric one through q.
             const auto continuity = ((-q) * inner(n, diff)).dExteriorBoundary(measure);
+            const auto continuity_unsymmetric = (q * inner(n, diff)).dExteriorBoundary(measure);
             // This event order is observable when destinations alias. Each event
             // updates production and then its observation before the next event.
             const std::array events{
                 std::pair{true, (p * inner(n, v)).dExteriorBoundary(measure)},
                 std::pair{true, -inner(stress_u * n, v).dExteriorBoundary(measure)},
                 std::pair{true, symmetric ? -adjoint : adjoint},
-                std::pair{false, symmetric ? continuity : -continuity},
+                std::pair{false, symmetric ? continuity : -continuity_unsymmetric},
                 std::pair{true, (penalty * inner(diff, v)).dExteriorBoundary(measure)},
             };
             for (const bool use_prepared : {false, true}) {
