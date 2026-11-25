@@ -21,7 +21,7 @@ def _load_reference_profile(path: Path) -> np.ndarray:
     return data.astype(float) * 0.01
 
 
-def _contour_level_set(result_path: Path, scalar_name: str) -> np.ndarray:
+def _interface_contour(result_path: Path, scalar_name: str) -> pv.PolyData:
     mesh = pv.read(result_path)
     if scalar_name not in mesh.point_data:
         available = ", ".join(sorted(mesh.point_data.keys()))
@@ -34,7 +34,46 @@ def _contour_level_set(result_path: Path, scalar_name: str) -> np.ndarray:
     if interface.n_points == 0:
         raise ValueError(f"no {scalar_name}=0 contour was generated from {result_path}")
 
-    return np.asarray(interface.points, dtype=float)
+    return interface
+
+
+def _contour_level_set(result_path: Path, scalar_name: str) -> np.ndarray:
+    """Contour vertices used by the archived point-window scorer."""
+    return np.asarray(_interface_contour(result_path, scalar_name).points, dtype=float)
+
+
+def _contour_segments(interface: pv.PolyData) -> np.ndarray:
+    """Edges of the isolines (2D) or triangular isosurface (3D), projected into x,y."""
+    cells = interface.triangulate(pass_lines=True)
+    lines = cells.lines.reshape(-1, 3)[:, 1:]
+    triangles = cells.faces.reshape(-1, 4)[:, 1:]
+    # The highest point of a planar triangle at fixed x lies on one of its edges.
+    pairs = np.concatenate((lines, triangles[:, [0, 1]], triangles[:, [1, 2]],
+                            triangles[:, [2, 0]]))
+    if not len(pairs):
+        raise ValueError("the zero contour has no line segments or surface faces")
+    return np.asarray(cells.points)[pairs, :2]
+
+
+def _upper_heights(segments: np.ndarray, stations: np.ndarray) -> np.ndarray:
+    """Highest intersection at each x. A gap in the curve has no observed height."""
+    start, end = segments[:, 0], segments[:, 1]
+    lower_x = np.minimum(start[:, 0], end[:, 0])
+    upper_x = np.maximum(start[:, 0], end[:, 0])
+    # Allow only coordinate roundoff at segment endpoints, including Float32 VTK data.
+    tolerance = 4 * np.finfo(segments.dtype).eps * max(1.0, np.abs(segments[:, :, 0]).max())
+    heights = np.full(stations.shape, np.nan)
+    for i, x in enumerate(stations):
+        crosses = (lower_x - tolerance <= x) & (x <= upper_x + tolerance)
+        if not np.any(crosses):
+            continue
+        a, b = start[crosses], end[crosses]
+        dx = b[:, 0] - a[:, 0]
+        fraction = np.divide(x - a[:, 0], dx, out=np.zeros(len(dx)), where=dx != 0)
+        fraction = np.clip(fraction, 0., 1.)
+        y = (1 - fraction) * a[:, 1] + fraction * b[:, 1]
+        heights[i] = np.max(np.where(dx == 0, np.maximum(a[:, 1], b[:, 1]), y))
+    return heights
 
 
 def _sample_top_profile(
@@ -44,6 +83,7 @@ def _sample_top_profile(
     x_max: float,
     sample_radius: float,
 ) -> tuple[np.ndarray, np.ndarray]:
+    """Historical maximum over nearby contour vertices, retained for explicit radii."""
     selected = points[(points[:, 0] >= x_min) & (points[:, 0] <= x_max)]
     if selected.size == 0:
         raise ValueError(
@@ -345,37 +385,52 @@ def compare(args: argparse.Namespace) -> dict[str, object]:
         return report
 
     reference = _load_reference_profile(args.reference_profile)
-    reference_x = reference[:, 0]
-    reference_y = reference[:, 1]
+    reference_x, reference_y = reference.T
     x_min = args.x_min if args.x_min is not None else float(reference_x.min())
     x_max = args.x_max if args.x_max is not None else float(reference_x.max())
     sample_radius = args.sample_radius
-    if sample_radius is None:
-        spacing = np.diff(np.unique(np.sort(reference_x)))
-        sample_radius = max(0.005, float(np.median(spacing)) if len(spacing) else 0.005)
-    points = _contour_level_set(args.result, args.scalar)
-    sim_y, support_counts = _sample_top_profile(
-        points=points,
-        reference_x=reference_x,
-        x_min=x_min,
-        x_max=x_max,
-        sample_radius=sample_radius,
-    )
-
+    interface = _interface_contour(args.result, args.scalar)
+    points = np.asarray(interface.points, dtype=float)
     selected = points[(points[:, 0] >= x_min) & (points[:, 0] <= x_max)]
+
+    if sample_radius is None:
+        method = "same_x_upper_envelope"
+        reference_x = np.unique(reference_x[(reference_x >= x_min) & (reference_x <= x_max)])
+        if not len(reference_x):
+            raise ValueError(f"no measured stations in requested x-window [{x_min}, {x_max}]")
+        # Retain the digitizer's tracing order when constructing the measured curve.
+        reference_segments = np.stack((reference[:-1], reference[1:]), axis=1)
+        reference_y = _upper_heights(reference_segments, reference_x)
+        segments = _contour_segments(interface)
+        sim_y = _upper_heights(segments, reference_x)
+        direct = int(np.count_nonzero(np.isfinite(sim_y)))
+        if not direct:
+            raise ValueError("no contour intersects a measured station in the requested x-window")
+        # A segment can cross the whole observation window with both vertices outside.
+        segment_x = segments[:, :, 0]
+        overlap = (segment_x.min(axis=1) <= x_max) & (segment_x.max(axis=1) >= x_min)
+        last_station = reference_x[np.isfinite(sim_y)].max()
+        simulated_front = min(x_max, float(segment_x[overlap].max(initial=last_station)))
+    else:
+        method = "legacy_vertex_window"
+        sim_y, support_counts = _sample_top_profile(points, reference_x, x_min, x_max, sample_radius)
+        direct = int(np.count_nonzero(support_counts))
+        simulated_front = float(selected[:, 0].max())
+
     metric_values = _metrics(sim_y, reference_y)
     metric_values.update(
         {
-            "sample_radius_m": float(sample_radius),
+            "profile_method": method,
+            "sample_radius_m": sample_radius,
             "interface_points_total": int(points.shape[0]),
             "interface_points_in_window": int(selected.shape[0]),
-            "reference_points": int(reference.shape[0]),
-            "direct_samples": int(np.count_nonzero(support_counts)),
-            "direct_coverage_fraction": float(np.count_nonzero(support_counts) / len(reference_y)),
-            "interpolated_samples": int(np.count_nonzero(np.isfinite(sim_y)) - np.count_nonzero(support_counts)),
-            "simulated_front_x_m": float(selected[:, 0].max()),
+            "reference_points": len(reference_x),
+            "direct_samples": direct,
+            "direct_coverage_fraction": direct / len(reference_x),
+            "interpolated_samples": int(metric_values["samples"]) - direct,
+            "simulated_front_x_m": simulated_front,
             "reference_front_x_m": float(reference_x.max()),
-            "front_error_m": float(selected[:, 0].max() - reference_x.max()),
+            "front_error_m": float(simulated_front - reference_x.max()),
             "simulated_peak_y_m": float(np.nanmax(sim_y)),
             "reference_peak_y_m": float(np.max(reference_y)),
             "peak_y_error_m": float(np.nanmax(sim_y) - np.max(reference_y)),
@@ -447,7 +502,9 @@ def main() -> None:
     parser.add_argument("--min-velocity-max", type=float)
     parser.add_argument("--x-min", type=float)
     parser.add_argument("--x-max", type=float)
-    parser.add_argument("--sample-radius", type=float)
+    parser.add_argument("--sample-radius", type=float, metavar="METRES",
+                        help="Reproduce the historical nearby-vertex comparison with this radius. "
+                             "The default compares both upper contours at the exact measured stations.")
     parser.add_argument("--elevated-front-clearance", type=float, default=0.005)
     parser.add_argument("--max-elevated-front-lag", type=float)
     parser.add_argument("--plot-output", type=Path)

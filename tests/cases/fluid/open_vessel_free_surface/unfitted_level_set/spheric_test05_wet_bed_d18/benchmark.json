@@ -56,8 +56,9 @@
   },
   "qualification_criteria": {
     "false_wetting": "no vertex with phi < 0 above y = 0.16 m",
-    "profile_rmse_justification": "no regression from the June RMSE of about 0.02 m (0.0184 m d18, 0.0158 m d38 at 0.156 s)",
+    "profile_rmse_justification": "The M1 limit is 0.02 m per published photo time. June scores used the historical vertex-window method.",
     "profile_rmse_max_m": 0.02,
+    "profile_rmse_method": "same_x_upper_envelope",
     "profile_rmse_times_s": [
       0.156,
       0.219,
