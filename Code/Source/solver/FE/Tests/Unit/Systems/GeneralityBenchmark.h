@@ -342,16 +342,14 @@ struct Solution {
     }
 };
 
-/// The Eigen direct solver, every Newton step a sparse LU solve.  It accepts
-/// a solve whose relative residual is below 1e-8 (the C0 interior-penalty
-/// plate on fine Tri3 meshes is ill-conditioned); Newton's own tolerance
-/// decides convergence, refining the step when the residual is not met.
-inline backends::SolverOptions directSolverOptions()
+/// The Eigen direct solver, every Newton step a sparse LU solve, accepted when
+/// its relative residual is below @p rel_tolerance.
+inline backends::SolverOptions directSolverOptions(Real rel_tolerance = 1e-14)
 {
     backends::SolverOptions direct;
     direct.method = backends::SolverMethod::Direct;
     direct.preconditioner = backends::PreconditionerType::None;
-    direct.rel_tol = 1e-8;
+    direct.rel_tol = rel_tolerance;
     direct.abs_tol = 1e-14;
     direct.max_iter = 1;
     return direct;
@@ -366,7 +364,8 @@ inline Solution solveSteady(FESystem& sys,
                             const OperatorTag& op,
                             int max_iterations = 8,
                             Real abs_tolerance = 1e-11,
-                            Real rel_tolerance = 1e-12)
+                            Real rel_tolerance = 1e-12,
+                            Real linear_rel_tolerance = 1e-14)
 {
     Solution out;
     auto factory = backends::BackendFactory::create(backends::BackendKind::Eigen);
@@ -374,7 +373,7 @@ inline Solution solveSteady(FESystem& sys,
     if (!factory) {
         return out;
     }
-    auto linear = factory->createLinearSolver(directSolverOptions());
+    auto linear = factory->createLinearSolver(directSolverOptions(linear_rel_tolerance));
     TransientSystem transient(sys, std::make_shared<ZeroTimeDerivativeIntegrator>());
     const auto n = sys.dofHandler().getNumDofs();
     auto history = timestepping::TimeHistory::allocate(*factory, n);

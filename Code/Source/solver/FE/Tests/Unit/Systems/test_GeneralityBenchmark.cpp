@@ -950,9 +950,11 @@ void expectMixedDarcyRates(const std::vector<FamilyOrder>& cases, bool strong_no
         if (strong_normal_flux) {
             // The multiplier is the mean defect of the prescribed normal moments
             // against the source (zero for the continuous data); it vanishes
-            // with the quadrature error of the moments.
+            // with the quadrature error of the moments, or is zero to round-off
+            // when the moments are exactly compatible.
             ::testing::Test::RecordProperty("p05_" + label + "_multiplier", join(multiplier));
-            EXPECT_LT(multiplier.back(), 0.3 * multiplier.front()) << label << " multiplier " << join(multiplier);
+            EXPECT_LE(multiplier.back(), std::max(0.3 * multiplier.front(), Real(1e-11)))
+                << label << " multiplier " << join(multiplier);
         }
         const Real expected = c.order + 1;
         EXPECT_GT(rates(eq).back(), expected - 0.2) << label << " flux " << join(eq);
@@ -1292,6 +1294,9 @@ struct PlateRun {
     Real l2{0.0};
     Real asymmetry{-1.0};
     Real scale{0.0};
+    int iterations{0};
+    /// Moments of u_h against weights no symmetry of the square preserves.
+    std::array<Real, 3> moments{};
 };
 
 PlateRun runClampedPlate(Cell cell, int n, bool reverse = false, bool check_symmetry = false)
@@ -1306,7 +1311,9 @@ PlateRun runClampedPlate(Cell cell, int n, bool reverse = false, bool check_symm
     });
     const auto u_id = defineClampedPlate(system, V, f, 16.0, {1, 2, 3, 4});
     system.setup();
-    const auto solved = solveSteady(system, "equations");
+    // The direct solve is accepted below a relative residual of 1e-8: the C0
+    // interior-penalty plate on fine Tri3 meshes is ill-conditioned.
+    const auto solved = solveSteady(system, "equations", 8, 1e-11, 1e-12, /*linear_rel_tolerance=*/1e-8);
     EXPECT_TRUE(solved.converged) << cellName(cell) << " n=" << n;
     const auto u_h = FormExpr::discreteField(u_id, *V, "u");
     const auto e = u_h - scalarCoefficient("u_exact", [](const Point& p) { return bump(p[0]).v * bump(p[1]).v; });
@@ -1319,6 +1326,13 @@ PlateRun runClampedPlate(Cell cell, int n, bool reverse = false, bool check_symm
     PlateRun run;
     run.h2 = norm(system, forms::inner(eh, eh).dx(), solved.u);
     run.l2 = norm(system, (e * e).dx(), solved.u);
+    run.iterations = solved.iterations;
+    const auto x = forms::x().component(0);
+    const auto y = forms::x().component(1);
+    const std::array<FormExpr, 3> weights = {x + 2.0 * y * y, x * y * y * y, (x - 0.3) * (y - 0.7) * (y - 0.7) + x * x * y};
+    for (std::size_t k = 0; k < weights.size(); ++k) {
+        run.moments[k] = integrate(system, (u_h * weights[k]).dx(), solved.u);
+    }
     if (check_symmetry) {
         const auto J = assembleDense(system, "equations", solved.u);
         run.asymmetry = 0.0;
@@ -1343,14 +1357,23 @@ TEST(GeneralityBenchmark, P07_ClampedInteriorPenaltyPlateConvergesInBrokenH2)
             const auto run = runClampedPlate(cell, n, false, n == 8);
             h2.push_back(run.h2);
             l2.push_back(run.l2);
+            RecordProperty(std::string("p07_") + cellName(cell) + "_n" + std::to_string(n) + "_newton_iterations", run.iterations);
+            // One Newton step; on n = 32 a second removes the residual the
+            // ill-conditioned direct solve leaves above Newton's tolerance.
+            EXPECT_LE(run.iterations, n == 32 ? 2 : 1) << cellName(cell) << " n=" << n;
             if (n == 8) {
                 EXPECT_GT(run.scale, 0.0);
                 EXPECT_LT(run.asymmetry, 1e-12 * run.scale) << cellName(cell);
                 // Facet reversal: the cells in reverse order swap the sides of
-                // every interior facet and give the same discrete solution.
+                // every interior facet and give the same discrete solution,
+                // compared through moments that a reflection or rotation of
+                // the solution on the symmetric square would change.
                 const auto reversed = runClampedPlate(cell, n, /*reverse=*/true);
-                EXPECT_NEAR(reversed.h2, run.h2, 1e-9 * run.h2) << cellName(cell);
-                EXPECT_NEAR(reversed.l2, run.l2, 1e-9 * run.l2) << cellName(cell);
+                for (std::size_t k = 0; k < run.moments.size(); ++k) {
+                    EXPECT_NE(run.moments[k], 0.0) << cellName(cell) << " moment " << k;
+                    EXPECT_NEAR(reversed.moments[k], run.moments[k], 1e-9 * std::abs(run.moments[k]))
+                        << cellName(cell) << " moment " << k;
+                }
             }
         }
         const std::string label = cellName(cell);

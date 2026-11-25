@@ -213,6 +213,13 @@ void expectSpeciesReservoirOrder(timestepping::SchemeKind scheme, Real order, in
             const auto run = runSpeciesReservoir(scheme, 0.4 / steps, steps, options);
             c_err.push_back(run.c_error);
             z_err.push_back(run.z_error);
+            // A linear problem with its exact symbolic tangent: one Newton
+            // step at every time step, none rejected.
+            EXPECT_EQ(run.run.rejections, 0) << steps;
+            ASSERT_EQ(run.run.iterations.size(), static_cast<std::size_t>(steps));
+            for (std::size_t k = 0; k < run.run.iterations.size(); ++k) {
+                EXPECT_EQ(run.run.iterations[k], 1) << steps << " steps, step " << k;
+            }
             if (scheme == timestepping::SchemeKind::BackwardEuler) {
                 // int c + C z changes by dt times the supply at every step.
                 EXPECT_LT(run.balance_defect, 1e-12) << steps;
@@ -413,8 +420,17 @@ TEST(GeneralityBenchmarkGaps, P09_TheDivergenceOfARateIsTheTraceOfItsGradient)
         system.setup();
         const auto run = runTransient(system, "equations", std::vector<Real>(system.dofHandler().getNumDofs(), 0.0),
                                       timestepping::SchemeKind::BackwardEuler, 0.1, 4);
-        for (const auto& state : run.states) {
-            EXPECT_NEAR(integrate(system, B.state.dx(), state), 1.0, 1e-12) << (divergence ? "div" : "trace grad");
+        ASSERT_TRUE(run.success);
+        ASSERT_EQ(run.states.size(), 4u);
+        // Every cell's value, not only their mean.
+        const auto b0 = system.fieldDofOffset(B.id);
+        const auto n_b = system.fieldDofHandler(B.id).getNumDofs();
+        ASSERT_EQ(n_b, static_cast<GlobalIndex>(system.mesh()->local_mesh().n_cells()));
+        for (std::size_t step = 0; step < run.states.size(); ++step) {
+            for (GlobalIndex i = b0; i < b0 + n_b; ++i) {
+                EXPECT_NEAR(run.states[step][static_cast<std::size_t>(i)], 1.0, 1e-12)
+                    << (divergence ? "div" : "trace grad") << " step " << step << " cell dof " << i - b0;
+            }
         }
     }
 }
