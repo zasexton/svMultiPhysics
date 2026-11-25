@@ -1423,6 +1423,15 @@ public:
      * @brief Check if assembler is thread-safe
      */
     [[nodiscard]] virtual bool isThreadSafe() const noexcept { return false; }
+
+    /// Bind a system registry's constants. Its compact named-value aliases are
+    /// positional inputs on ordinary regions; local cut metadata owns those
+    /// lanes wherever a cut rule is bound.
+    virtual void setSystemJITConstants(std::span<const Real> constants,
+                                       std::size_t /*positional_aliases*/) noexcept
+    {
+        setJITConstants(constants);
+    }
 };
 
 // ============================================================================

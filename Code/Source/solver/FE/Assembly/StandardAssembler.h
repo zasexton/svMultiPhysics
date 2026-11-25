@@ -222,6 +222,7 @@ public:
         const std::function<std::optional<params::Value>(std::string_view)>* get_param) noexcept override;
     void setUserData(const void* user_data) noexcept override;
     void setJITConstants(std::span<const Real> constants) noexcept override;
+    void setSystemJITConstants(std::span<const Real> constants, std::size_t positional_aliases) noexcept override;
     void setCutIntegrationContext(const CutIntegrationContext* context) noexcept override;
     void setAssemblyDiagnosticContext(
         const AssemblyDiagnosticContext& context) noexcept override;
@@ -1209,6 +1210,7 @@ private:
     const std::function<std::optional<params::Value>(std::string_view)>* get_param_{nullptr};
     const void* user_data_{nullptr};
     std::span<const Real> jit_constants_{};
+    std::size_t jit_positional_aliases_{0};
     const CutIntegrationContext* cut_integration_context_{nullptr};
     std::optional<AssemblyDiagnosticContext> diagnostic_context_{};
     std::span<const Real> coupled_integrals_{};

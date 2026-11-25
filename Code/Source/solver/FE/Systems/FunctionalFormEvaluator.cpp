@@ -529,10 +529,10 @@ std::vector<FunctionalFormValue> evaluateOnSystem(
     assembler.setUserData(&external_calls);
     std::vector<Real, AlignedAllocator<Real, kFEPreferredAlignmentBytes>> constants;
     if (have_parameter_contracts && parameters.slotCount() > 0u) {
-        const auto slots = parameters.evaluateRealSlots(state);
+        const auto slots = parameters.evaluateKernelSlots(state);
         constants.assign(slots.begin(), slots.end());
     }
-    assembler.setJITConstants(constants);
+    assembler.setSystemJITConstants(constants, parameters.slotCount());
     assembler.setCoupledValues({}, {});
 
     assembler.setSolution(state.u);
@@ -586,8 +586,23 @@ std::vector<FunctionalFormValue> evaluateOnSystem(
         }
     }
 
+    // A prebound named expression may have originated in a different system.
+    // This snapshot evaluator has an explicit name getter for the receiving one.
+    std::vector<forms::FormExpr> snapshot_forms;
+    snapshot_forms.reserve(forms.size());
+    for (const auto& form : forms) {
+        snapshot_forms.push_back(form.transformNodes([](const forms::FormExprNode& node)
+            -> std::optional<forms::FormExpr> {
+            if (node.type() == forms::FormExprType::ParameterRef) {
+                if (const auto name = node.symbolName()) {
+                    return forms::FormExpr::parameter(std::string(*name));
+                }
+            }
+            return std::nullopt;
+        }));
+    }
     return evaluateFunctionalForms(assembler,
-                                   forms,
+                                   snapshot_forms,
                                    cut_context != nullptr ? cut_context : system.cutIntegrationContext(),
                                    comm);
 }

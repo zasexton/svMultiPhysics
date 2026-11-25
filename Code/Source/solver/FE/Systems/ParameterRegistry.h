@@ -84,6 +84,13 @@ public:
      */
     [[nodiscard]] std::vector<Real> evaluateRealSlots(const SystemStateView& state) const;
 
+    /// Physical slots used when compiling named terminals. Ordinary positional
+    /// references retain the compact public layout; cut rules own its low lanes
+    /// during cut integration. Named terminals always use the protected copy.
+    [[nodiscard]] std::optional<std::uint32_t> kernelSlotOf(std::string_view key) const;
+    [[nodiscard]] std::optional<std::string_view> keyForKernelSlot(std::uint32_t slot) const;
+    [[nodiscard]] std::vector<Real> evaluateKernelSlots(const SystemStateView& state) const;
+
     /**
      * @brief Validate that the provided SystemStateView can satisfy required parameters.
      *

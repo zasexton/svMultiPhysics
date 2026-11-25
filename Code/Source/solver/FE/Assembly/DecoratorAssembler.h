@@ -163,6 +163,10 @@ public:
     void setUserData(const void* user_data) noexcept override { base_->setUserData(user_data); }
 
     void setJITConstants(std::span<const Real> constants) noexcept override { base_->setJITConstants(constants); }
+    void setSystemJITConstants(std::span<const Real> constants, std::size_t positional_aliases) noexcept override
+    {
+        base_->setSystemJITConstants(constants, positional_aliases);
+    }
     void setCutIntegrationContext(const CutIntegrationContext* context) noexcept override
     {
         base_->setCutIntegrationContext(context);

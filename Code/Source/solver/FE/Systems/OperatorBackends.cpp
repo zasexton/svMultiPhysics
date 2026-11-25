@@ -266,9 +266,9 @@ Real OperatorBackends::evaluateFunctional(const FESystem& system,
     assembler.setUserData(&jit_table);
     std::vector<Real, AlignedAllocator<Real, kFEPreferredAlignmentBytes>> jit_constants;
     if (have_param_contracts && preg.slotCount() > 0u) {
-        const auto slots = preg.evaluateRealSlots(state);
+        const auto slots = preg.evaluateKernelSlots(state);
         jit_constants.assign(slots.begin(), slots.end());
-        assembler.setJITConstants(jit_constants);
+        assembler.setSystemJITConstants(jit_constants, preg.slotCount());
     } else {
         assembler.setJITConstants({});
     }
@@ -357,9 +357,9 @@ Real OperatorBackends::evaluateBoundaryFunctional(const FESystem& system,
     assembler.setUserData(&jit_table);
     std::vector<Real, AlignedAllocator<Real, kFEPreferredAlignmentBytes>> jit_constants;
     if (have_param_contracts && preg.slotCount() > 0u) {
-        const auto slots = preg.evaluateRealSlots(state);
+        const auto slots = preg.evaluateKernelSlots(state);
         jit_constants.assign(slots.begin(), slots.end());
-        assembler.setJITConstants(jit_constants);
+        assembler.setSystemJITConstants(jit_constants, preg.slotCount());
     } else {
         assembler.setJITConstants({});
     }

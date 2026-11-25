@@ -20,6 +20,7 @@
 #include "FE/Forms/JIT/JITKernelWrapper.h"
 #include "FE/Forms/MixedBlockKernelSet.h"
 #include "FE/Forms/MonolithicCellKernel.h"
+#include "FE/LevelSet/LevelSetGeometryService.h"
 #include "FE/Spaces/H1Space.h"
 #include "FE/Spaces/ProductSpace.h"
 #include "FE/Systems/FESystem.h"
@@ -447,6 +448,104 @@ TEST(NavierStokesVMSManufactured, TetrahedronGradDivWorkIsInvariantToVertexOrder
     expectSimplexGradDivWork(3, {0, 0, 0, 0.025, 0, 0, 0, 0.0125, 0, 0, 0, 0.05},
                              {{0, 1, 2, 3}, {1, 2, 0, 3}, {2, 3, 0, 1}, {3, 0, 2, 1}},
                              0.025 * 0.0125 * 0.05 / 6.0, 188.409386781600);
+}
+
+TEST(NavierStokesVMSManufactured, CutTractionAnchorsUniformPressureDuringUniformAcceleration)
+{
+    namespace fs = FE::systems;
+    // The wet part of the unit reference tetrahedron lies below z = 0.4.
+    auto base = std::make_shared<MeshBase>();
+    base->build_from_arrays(3, {0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0, 1}, {0, 4}, {0, 1, 2, 3},
+                            {{CellFamily::Tetra, 4, 1}});
+    base->finalize();
+    const double diagonal = 1.0 / std::sqrt(3.0);
+    const std::array<std::array<double, 3>, 4> normals{{
+        {diagonal, diagonal, diagonal}, {-1, 0, 0}, {0, -1, 0}, {0, 0, -1}}};
+    for (int v = 0; v < 4; ++v) {
+        const int marker = v + 1;
+        base->register_label("opposite_" + std::to_string(v), marker);
+        for (auto face : base->boundary_faces()) {
+            const auto vertices = base->face_vertices(face);
+            if (std::find(vertices.begin(), vertices.end(), v) == vertices.end()) {
+                base->set_boundary_label(face, marker);
+            }
+        }
+    }
+    const std::array<double, 4> nodal_phi{-0.4, -0.4, -0.4, 0.6};
+    const auto attached = base->attach_field(EntityKind::Vertex, "phi", FieldScalarType::Float64, 1);
+    std::copy(nodal_phi.begin(), nodal_phi.end(), base->field_data_as<real_t>(attached));
+    auto mesh = create_mesh(base);
+    fs::FESystem system(mesh);
+    auto scalar = std::make_shared<FE::spaces::H1Space>(FE::ElementType::Tetra4, 1);
+    auto velocity = std::make_shared<FE::spaces::ProductSpace>(scalar, 3);
+    const auto phi = system.addField({.name = "phi", .space = scalar, .source_kind = fs::FieldSourceKind::PrescribedData});
+    constexpr int interface_marker = 27190;
+    auto geometry = FE::level_set::cutGeometry(system, *mesh, {.level_set_field_name = "phi",
+        .domain_id = "slab", .interface_marker = interface_marker});
+    (void)geometry.side(FE::forms::CutVolumeSide::Negative);
+
+    // sigma = -P I for a uniform velocity.  Apply its traction on each wetted
+    // exterior face and the generated cut. No pressure pin or velocity constraint.
+    const auto pressure = fs::timeFunction(system, "P", [](double t) { return 1.0 + 2.0 * t; });
+    ns::IncompressibleNavierStokesVMSOptions options;
+    options.density = 1.0;
+    options.viscosity = 0.01;
+    options.enable_convection = false;
+    options.has_body_force_spacetime = true;
+    options.body_force_spacetime = {0.1, 0.0, fs::timeFunction(system, "az", [](double) { return 0.2; })};
+    options.free_surface.push_back({.implementation = ns::FreeSurfaceImplementation::UnfittedLevelSet,
+        .interface_marker = interface_marker, .level_set_field_name = "phi", .generated_interface_domain_id = "slab",
+        .active_domain = ns::FreeSurfaceActiveDomain::LevelSetNegative, .external_pressure = pressure,
+        .surface_tension = 0.0, .small_cut_aggregation = false});
+    for (int i = 0; i < 4; ++i) {
+        const auto& normal = normals[i];
+        options.traction_neumann.push_back({.boundary_marker = i + 1,
+            .traction = {-normal[0] * pressure, -normal[1] * pressure, -normal[2] * pressure}});
+    }
+    ns::IncompressibleNavierStokesVMSModule(velocity, scalar, options).registerOn(system);
+    system.setup();
+    std::vector<double> coefficients(system.fieldDofHandler(phi).getNumDofs());
+    (void)system.projectMeshVertexValuesToFieldCoefficients(phi, nodal_phi, 1, coefficients);
+    system.setPrescribedFieldCoefficients(phi, coefficients);
+    (void)geometry.refresh();
+    const auto u = system.findFieldByName("u");
+    const auto p = system.findFieldByName("p");
+    const auto n = system.dofHandler().getNumDofs();
+    const auto state_at = [&](double time, double pressure_error) {
+        std::vector<double> values(n);
+        const std::array<double, 3> velocity_value{0.45 + 0.1 * time, -0.2, 0.35 + 0.2 * time};
+        for (int vertex = 0; vertex < 4; ++vertex) {
+            const auto ud = system.fieldDofHandler(u).getEntityDofMap()->getVertexDofs(vertex);
+            const auto pd = system.fieldDofHandler(p).getEntityDofMap()->getVertexDofs(vertex);
+            for (int i = 0; i < 3; ++i) values[system.fieldDofOffset(u) + ud[i]] = velocity_value[i];
+            values[system.fieldDofOffset(p) + pd[0]] = 1.0 + 2.0 * time + pressure_error;
+        }
+        return values;
+    };
+    constexpr double dt = 0.1;
+    for (double t : {0.25, 0.75}) {
+        const auto previous = state_at(t - dt, 0.0);
+        for (double pressure_error : {0.0, 1.0}) {
+            const auto state = state_at(t, pressure_error);
+            fs::SystemStateView view{.time = t, .dt = dt, .u = state, .u_prev = previous};
+            const auto integration = fs::BackwardDifferenceIntegrator().buildContext(1, view);
+            view.time_integration = &integration;
+            fs::AssemblyRequest request;
+            request.op = "equations";
+            request.want_vector = true;
+            FE::assembly::DenseVectorView residual(n);
+            const auto assembled = system.assemble(request, view, nullptr, &residual);
+            ASSERT_TRUE(assembled.success) << assembled.error_message;
+            // Test with v=(x,0,0), q=0. A unit pressure error gives -|Omega_wet|.
+            const auto x_dofs = system.fieldDofHandler(u).getEntityDofMap()->getVertexDofs(1);
+            const double wet_volume = (1.0 - std::pow(0.6, 3)) / 6.0;
+            EXPECT_NEAR(residual.getVectorEntry(system.fieldDofOffset(u) + x_dofs[0]),
+                        -pressure_error * wet_volume, 1e-12);
+            if (pressure_error == 0.0) {
+                for (auto r : residual.data()) EXPECT_NEAR(r, 0.0, 1e-12);
+            }
+        }
+    }
 }
 
 TEST(NavierStokesVMSManufactured, SpatialConvergence)

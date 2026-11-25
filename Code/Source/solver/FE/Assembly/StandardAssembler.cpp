@@ -810,6 +810,19 @@ struct CutFaceStabilizationConstants {
     return constants;
 }
 
+// A system's dense aliases are positional constants on ordinary cells. A cut
+// volume fills these lanes from its rule; unspecified sensitivities are zero.
+// Explicit constants supplied by low-level callers have no such aliases.
+void initializeCutVolumeConstants(std::vector<Real>& result,
+                                  std::span<const Real> constants,
+                                  std::size_t positional_aliases)
+{
+    const std::size_t cut_slots = forms::cutCellParameterCount();
+    result.assign(constants.begin(), constants.end());
+    if (result.size() < cut_slots) result.resize(cut_slots, Real{0});
+    std::fill_n(result.begin(), std::min(positional_aliases, cut_slots), Real{0});
+}
+
 void bindCutStabilizationScaleConstants(AssemblyContext& context,
                                         std::span<const Real> base_constants,
                                         const CutFaceStabilizationConstants& constants,
@@ -2432,7 +2445,7 @@ void StandardAssembler::prepareThreadWorkers(int n)
         w.get_real_param_ = get_real_param_;
         w.get_param_ = get_param_;
         w.user_data_ = user_data_;
-        w.jit_constants_ = jit_constants_;
+        w.setSystemJITConstants(jit_constants_, jit_positional_aliases_);
         if (w.cut_integration_context_ != cut_integration_context_) {
             w.setCutIntegrationContext(cut_integration_context_);
         }
@@ -3311,7 +3324,14 @@ void StandardAssembler::setUserData(const void* user_data) noexcept
 
 void StandardAssembler::setJITConstants(std::span<const Real> constants) noexcept
 {
+    setSystemJITConstants(constants, 0);
+}
+
+void StandardAssembler::setSystemJITConstants(std::span<const Real> constants,
+                                              std::size_t positional_aliases) noexcept
+{
     jit_constants_ = constants;
+    jit_positional_aliases_ = positional_aliases;
 }
 
 void StandardAssembler::setCutIntegrationContext(const CutIntegrationContext* context) noexcept
@@ -10014,12 +10034,7 @@ AssemblyResult StandardAssembler::assembleCutVolumes(
     std::span<const GlobalIndex> col_dofs;
     std::vector<Real> cut_jit_constants;
     constexpr forms::CutCellParameterSlots cut_parameter_slots{};
-    const auto cut_parameter_count =
-        static_cast<std::size_t>(forms::cutCellParameterCount(cut_parameter_slots));
-    cut_jit_constants.assign(jit_constants_.begin(), jit_constants_.end());
-    if (cut_jit_constants.size() < cut_parameter_count) {
-        cut_jit_constants.resize(cut_parameter_count, Real{0.0});
-    }
+    initializeCutVolumeConstants(cut_jit_constants, jit_constants_, jit_positional_aliases_);
 
     const auto iteration_count = use_indexed_rules ? indexed_rule_indices.size() : rules.size();
     for (std::size_t ordinal = 0u; ordinal < iteration_count; ++ordinal) {
@@ -10450,6 +10465,7 @@ struct alignas(64) StandardAssembler::CutVolumeFusedThreadState {
 
     void reset(const CutVolumeFusedLoop& loop,
                std::span<const Real> jit_constants,
+               std::size_t positional_aliases,
                bool epoch_cache)
     {
         term_scratch.assign(loop.terms.size(), TermScratch{});
@@ -10457,13 +10473,7 @@ struct alignas(64) StandardAssembler::CutVolumeFusedThreadState {
             term_scratch[ti].insert_matrix = loop.term_targets[ti].insert_matrix;
             term_scratch[ti].insert_vector = loop.term_targets[ti].insert_vector;
         }
-        constexpr forms::CutCellParameterSlots cut_parameter_slots{};
-        const auto cut_parameter_count =
-            static_cast<std::size_t>(forms::cutCellParameterCount(cut_parameter_slots));
-        cut_jit_constants.assign(jit_constants.begin(), jit_constants.end());
-        if (cut_jit_constants.size() < cut_parameter_count) {
-            cut_jit_constants.resize(cut_parameter_count, Real{0.0});
-        }
+        initializeCutVolumeConstants(cut_jit_constants, jit_constants, positional_aliases);
         use_epoch_cache = epoch_cache;
     }
 
@@ -10720,7 +10730,7 @@ AssemblyResult StandardAssembler::assembleCutVolumesFused(
                                   cut_timing};
 
     CutVolumeFusedThreadState serial_state;
-    serial_state.reset(loop, jit_constants_, use_epoch_cache);
+    serial_state.reset(loop, jit_constants_, jit_positional_aliases_, use_epoch_cache);
     std::vector<CutVolumeFusedThreadState> thread_states;
 
     const AssemblyLoopTimer loop_timer;
@@ -10762,7 +10772,7 @@ AssemblyResult StandardAssembler::assembleCutVolumesFused(
                 use_epoch_cache &&
                 worker.beginCutVolumeEpochCacheWithKey(last_cut_volume_epoch_key_);
             worker.context_.reserve(max_dofs, reserve_qpts, mesh.dimension());
-            thread_states[static_cast<std::size_t>(t)].reset(loop, jit_constants_, worker_epoch);
+            thread_states[static_cast<std::size_t>(t)].reset(loop, jit_constants_, jit_positional_aliases_, worker_epoch);
         }
         InsertSink owner_sink(*this);
         serial_begin = runThreadedItems(

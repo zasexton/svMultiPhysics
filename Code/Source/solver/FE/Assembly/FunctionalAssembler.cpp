@@ -1448,7 +1448,14 @@ void FunctionalAssembler::setUserData(const void* user_data) noexcept
 
 void FunctionalAssembler::setJITConstants(std::span<const Real> constants) noexcept
 {
+    setSystemJITConstants(constants, 0);
+}
+
+void FunctionalAssembler::setSystemJITConstants(std::span<const Real> constants,
+                                                std::size_t positional_aliases) noexcept
+{
     jit_constants_ = constants;
+    jit_positional_aliases_ = positional_aliases;
 }
 
 void FunctionalAssembler::setCoupledValues(std::span<const Real> integrals,
@@ -2141,7 +2148,7 @@ AssemblyResult FunctionalAssembler::runCutRuleBridge(
     bridge.setRealParameterGetter(get_real_param_);
     bridge.setParameterGetter(get_param_);
     bridge.setUserData(user_data_);
-    bridge.setJITConstants(jit_constants_);
+    bridge.setSystemJITConstants(jit_constants_, jit_positional_aliases_);
     bridge.setCutIntegrationContext(&cut_context);
     bridge.setCoupledValues(coupled_integrals_, coupled_aux_state_);
     bridge.setAuxiliaryValues(auxiliary_inputs_,

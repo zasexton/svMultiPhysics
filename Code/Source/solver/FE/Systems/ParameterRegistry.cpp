@@ -7,7 +7,10 @@
 
 #include "Systems/ParameterRegistry.h"
 
+#include "Forms/CutCellForms.h"
+
 #include <algorithm>
+#include <limits>
 
 namespace svmp {
 namespace FE {
@@ -310,6 +313,45 @@ std::vector<Real> ParameterRegistry::evaluateRealSlots(const SystemStateView& st
     }
     return out;
 }
+namespace {
+
+std::size_t namedKernelSlotBase(std::size_t count)
+{
+    // Keep both the public positional parameters and the cut geometry lanes.
+    return std::max<std::size_t>(count, forms::cutCellParameterCount());
+}
+
+} // namespace
+
+std::optional<std::uint32_t> ParameterRegistry::kernelSlotOf(std::string_view key) const
+{
+    const auto slot = slotOf(key);
+    if (!slot) return std::nullopt;
+    const auto index = namedKernelSlotBase(slotCount()) + *slot;
+    FE_THROW_IF(index > std::numeric_limits<std::uint32_t>::max(), InvalidArgumentException,
+                "ParameterRegistry: too many real parameter slots");
+    return static_cast<std::uint32_t>(index);
+}
+
+std::optional<std::string_view> ParameterRegistry::keyForKernelSlot(std::uint32_t slot) const
+{
+    const auto base = namedKernelSlotBase(slotCount());
+    if (slot < base) return keyForSlot(slot);
+    return keyForSlot(static_cast<std::uint32_t>(slot - base));
+}
+
+std::vector<Real> ParameterRegistry::evaluateKernelSlots(const SystemStateView& state) const
+{
+    auto values = evaluateRealSlots(state);
+    const auto count = values.size();
+    if (count > 0) {
+        const auto base = namedKernelSlotBase(count);
+        values.resize(base + count, Real{0});
+        std::copy_n(values.begin(), count, values.begin() + base);
+    }
+    return values;
+}
+
 
 } // namespace systems
 } // namespace FE

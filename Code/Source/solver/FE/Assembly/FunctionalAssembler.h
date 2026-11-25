@@ -728,6 +728,7 @@ public:
      * @brief Bind a flat array of Real-valued parameter slots for JIT-friendly kernels.
      */
     void setJITConstants(std::span<const Real> constants) noexcept;
+    void setSystemJITConstants(std::span<const Real> constants, std::size_t positional_aliases) noexcept;
 
     /**
      * @brief Bind coupled boundary-condition scalar arrays (integrals + auxiliary state).
@@ -1042,6 +1043,7 @@ private:
     const std::function<std::optional<params::Value>(std::string_view)>* get_param_{nullptr};
     const void* user_data_{nullptr};
     std::span<const Real> jit_constants_{};
+    std::size_t jit_positional_aliases_{0};
     std::span<const Real> coupled_integrals_{};
     std::span<const Real> coupled_aux_state_{};
     std::span<const Real> auxiliary_inputs_{};

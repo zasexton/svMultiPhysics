@@ -6,6 +6,7 @@
  */
 
 #include "Forms/MonolithicCellKernel.h"
+#include "Forms/ParameterBinding.h"
 
 #include "Core/FEException.h"
 #include "Core/KernelTrace.h"
@@ -157,28 +158,6 @@ std::vector<params::Spec> gatherParameterSpecs(
     return specs;
 }
 
-void resolveParameterSlotsInIR(
-    FormIR& ir,
-    const std::function<std::optional<std::uint32_t>(std::string_view)>& slot_of_real_param,
-    std::string_view where)
-{
-    const auto transform = [&](const FormExprNode& n) -> std::optional<FormExpr> {
-        if (n.type() != FormExprType::ParameterSymbol) {
-            return std::nullopt;
-        }
-        const auto key = n.symbolName();
-        FE_THROW_IF(!key || key->empty(), InvalidArgumentException,
-                    std::string(where) + ": ParameterSymbol node missing name");
-        const auto slot = slot_of_real_param(*key);
-        FE_THROW_IF(!slot.has_value(), InvalidArgumentException,
-                    std::string(where) + ": could not resolve parameter slot for '" +
-                        std::string(*key) + "'");
-        return FormExpr::parameterRef(*slot);
-    };
-
-    ir.transformIntegrands(transform);
-}
-
 } // namespace
 
 MonolithicCellKernel::MonolithicCellKernel(
@@ -237,15 +216,18 @@ std::vector<params::Spec> MonolithicCellKernel::parameterSpecs() const
 void MonolithicCellKernel::resolveParameterSlots(
     const std::function<std::optional<std::uint32_t>(std::string_view)>& slot_of_real_param)
 {
+    const auto transform = [&](const FormExprNode& node) {
+        return detail::bindNamedParameter(node, slot_of_real_param);
+    };
     for (auto& block : blocks_) {
         if (block.fallback_kernel) {
             block.fallback_kernel->resolveParameterSlots(slot_of_real_param);
         }
         if (block.tangent_ir) {
-            resolveParameterSlotsInIR(*block.tangent_ir, slot_of_real_param, "MonolithicCellKernel::tangent_ir");
+            block.tangent_ir->transformIntegrands(transform);
         }
         if (block.residual_ir) {
-            resolveParameterSlotsInIR(*block.residual_ir, slot_of_real_param, "MonolithicCellKernel::residual_ir");
+            block.residual_ir->transformIntegrands(transform);
         }
     }
     invalidateCompiledDispatch();

@@ -183,6 +183,7 @@ public:
         const std::function<std::optional<params::Value>(std::string_view)>* get_param) noexcept override;
     void setUserData(const void* user_data) noexcept override;
     void setJITConstants(std::span<const Real> constants) noexcept override;
+    void setSystemJITConstants(std::span<const Real> constants, std::size_t positional_aliases) noexcept override;
     void setCutIntegrationContext(const CutIntegrationContext* context) noexcept override;
     void setAssemblyDiagnosticContext(
         const AssemblyDiagnosticContext& context) noexcept override;

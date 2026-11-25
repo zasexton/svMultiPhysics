@@ -304,7 +304,7 @@ void collectSignedTerms(const FormExpr& expr, bool negated, std::vector<FormExpr
 
     std::vector<Real> slots;
     if (parameters.slotCount() > 0u) {
-        slots = parameters.evaluateRealSlots(state);
+        slots = parameters.evaluateKernelSlots(state);
     }
 
     forms::PointEvalContext context;

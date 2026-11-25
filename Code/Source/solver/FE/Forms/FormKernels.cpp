@@ -6,6 +6,7 @@
  */
 
 #include "Forms/FormKernels.h"
+#include "Forms/ParameterBinding.h"
 
 #include "Assembly/ConcurrentCompute.h"
 
@@ -71,6 +72,7 @@ struct ConstitutiveStateLayout {
 };
 
 namespace {
+
 
 /// The eigen index of an eigenvalue or eigenvector node of an n x n matrix.
 /// One rule for the interpreter and the JIT validator (eigenIndexInRange):
@@ -13329,17 +13331,11 @@ void FormKernel::resolveInlinableConstitutives()
 void FormKernel::resolveParameterSlots(
     const std::function<std::optional<std::uint32_t>(std::string_view)>& slot_of_real_param)
 {
-    const auto transform = [&](const FormExprNode& n) -> std::optional<FormExpr> {
-        if (n.type() != FormExprType::ParameterSymbol) {
-            return std::nullopt;
-        }
-        const auto key = n.symbolName();
-        FE_THROW_IF(!key || key->empty(), InvalidArgumentException,
-                    "Forms::FormKernel: ParameterSymbol node missing name");
-        const auto slot = slot_of_real_param(*key);
-        FE_THROW_IF(!slot.has_value(), InvalidArgumentException,
-                    "Forms::FormKernel: could not resolve parameter slot for '" + std::string(*key) + "'");
-        return FormExpr::parameterRef(*slot);
+    bool changed = false;
+    const auto transform = [&](const FormExprNode& node) {
+        auto bound = detail::bindNamedParameter(node, slot_of_real_param);
+        changed = changed || bound.has_value();
+        return bound;
     };
 
     ir_.transformIntegrands(transform);
@@ -13356,6 +13352,7 @@ void FormKernel::resolveParameterSlots(
     rewrite_updates(inlined_state_updates_.interior_face);
     rewrite_updates(inlined_state_updates_.interface_face);
 
+    if (changed) setTensorInterpreterOptions(tensor_interpreter_options_);
     matrix_state_independent_ =
         ir_.kind() == FormKind::Bilinear &&
         material_state_spec_.bytes_per_qpt == 0u &&
@@ -14601,18 +14598,9 @@ void LinearFormKernel::resolveInlinableConstitutives()
 void LinearFormKernel::resolveParameterSlots(
     const std::function<std::optional<std::uint32_t>(std::string_view)>& slot_of_real_param)
 {
-    auto rewrite = [&](FormIR& ir, std::string_view where) {
-        const auto transform = [&](const FormExprNode& n) -> std::optional<FormExpr> {
-            if (n.type() != FormExprType::ParameterSymbol) {
-                return std::nullopt;
-            }
-            const auto key = n.symbolName();
-            FE_THROW_IF(!key || key->empty(), InvalidArgumentException,
-                        std::string(where) + ": ParameterSymbol node missing name");
-            const auto slot = slot_of_real_param(*key);
-            FE_THROW_IF(!slot.has_value(), InvalidArgumentException,
-                        std::string(where) + ": could not resolve parameter slot for '" + std::string(*key) + "'");
-            return FormExpr::parameterRef(*slot);
+    auto rewrite = [&](FormIR& ir) {
+        const auto transform = [&](const FormExprNode& node) {
+            return detail::bindNamedParameter(node, slot_of_real_param);
         };
         ir.transformIntegrands(transform);
         const auto rewrite_updates = [&](std::vector<MaterialStateUpdate>& updates) {
@@ -14629,9 +14617,9 @@ void LinearFormKernel::resolveParameterSlots(
         rewrite_updates(inlined_state_updates_.interface_face);
     };
 
-    rewrite(bilinear_ir_, "Forms::LinearFormKernel(bilinear)");
+    rewrite(bilinear_ir_);
     if (linear_ir_.has_value()) {
-        rewrite(*linear_ir_, "Forms::LinearFormKernel(linear)");
+        rewrite(*linear_ir_);
     }
 
     matrix_state_independent_ =
@@ -15293,17 +15281,8 @@ void NonlinearFormKernel::resolveInlinableConstitutives()
 void NonlinearFormKernel::resolveParameterSlots(
     const std::function<std::optional<std::uint32_t>(std::string_view)>& slot_of_real_param)
 {
-    const auto transform = [&](const FormExprNode& n) -> std::optional<FormExpr> {
-        if (n.type() != FormExprType::ParameterSymbol) {
-            return std::nullopt;
-        }
-        const auto key = n.symbolName();
-        FE_THROW_IF(!key || key->empty(), InvalidArgumentException,
-                    "Forms::NonlinearFormKernel: ParameterSymbol node missing name");
-        const auto slot = slot_of_real_param(*key);
-        FE_THROW_IF(!slot.has_value(), InvalidArgumentException,
-                    "Forms::NonlinearFormKernel: could not resolve parameter slot for '" + std::string(*key) + "'");
-        return FormExpr::parameterRef(*slot);
+    const auto transform = [&](const FormExprNode& node) {
+        return detail::bindNamedParameter(node, slot_of_real_param);
     };
     residual_ir_.transformIntegrands(transform);
     const auto rewrite_updates = [&](std::vector<MaterialStateUpdate>& updates) {
@@ -17138,17 +17117,8 @@ void SymbolicNonlinearFormKernel::resolveInlinableConstitutives()
 void SymbolicNonlinearFormKernel::resolveParameterSlots(
     const std::function<std::optional<std::uint32_t>(std::string_view)>& slot_of_real_param)
 {
-    const auto transform = [&](const FormExprNode& n) -> std::optional<FormExpr> {
-        if (n.type() != FormExprType::ParameterSymbol) {
-            return std::nullopt;
-        }
-        const auto key = n.symbolName();
-        FE_THROW_IF(!key || key->empty(), InvalidArgumentException,
-                    "Forms::SymbolicNonlinearFormKernel: ParameterSymbol node missing name");
-        const auto slot = slot_of_real_param(*key);
-        FE_THROW_IF(!slot.has_value(), InvalidArgumentException,
-                    "Forms::SymbolicNonlinearFormKernel: could not resolve parameter slot for '" + std::string(*key) + "'");
-        return FormExpr::parameterRef(*slot);
+    const auto transform = [&](const FormExprNode& node) {
+        return detail::bindNamedParameter(node, slot_of_real_param);
     };
 
     residual_ir_.transformIntegrands(transform);

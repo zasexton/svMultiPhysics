@@ -913,9 +913,9 @@ void BoundaryReductionService::configureAssembler(assembly::FunctionalAssembler&
     // JIT constants from parameter registry.
     thread_local std::vector<Real, AlignedAllocator<Real, kFEPreferredAlignmentBytes>> jit_constants;
     if (have_param_contracts && preg.slotCount() > 0u) {
-        const auto slots = preg.evaluateRealSlots(state);
+        const auto slots = preg.evaluateKernelSlots(state);
         jit_constants.assign(slots.begin(), slots.end());
-        assembler.setJITConstants(jit_constants);
+        assembler.setSystemJITConstants(jit_constants, preg.slotCount());
     } else {
         assembler.setJITConstants({});
     }

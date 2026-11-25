@@ -309,6 +309,12 @@ void DeviceAssembler::setJITConstants(std::span<const Real> constants) noexcept
     impl_->cpu_assembler->setJITConstants(constants);
 }
 
+void DeviceAssembler::setSystemJITConstants(std::span<const Real> constants,
+                                            std::size_t positional_aliases) noexcept
+{
+    impl_->cpu_assembler->setSystemJITConstants(constants, positional_aliases);
+}
+
 void DeviceAssembler::setCutIntegrationContext(const CutIntegrationContext* context) noexcept
 {
     impl_->cpu_assembler->setCutIntegrationContext(context);

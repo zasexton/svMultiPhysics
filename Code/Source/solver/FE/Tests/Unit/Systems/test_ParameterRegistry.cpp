@@ -7,14 +7,20 @@
 
 #include "Systems/FESystem.h"
 #include "Systems/FormsInstaller.h"
+#include "Systems/FunctionalFormEvaluator.h"
 #include "Systems/TimeSeries.h"
 
 #include "Assembly/AssemblyContext.h"
 #include "Assembly/AssemblyKernel.h"
+#include "Assembly/CutIntegrationContext.h"
 #include "Assembly/GlobalSystemView.h"
 
+#include "Forms/CutCellForms.h"
+#include "Forms/FormCompiler.h"
+#include "Forms/MonolithicCellKernel.h"
 #include "Forms/JIT/JITValidation.h"
 #include "Forms/Vocabulary.h"
+#include "LevelSet/LevelSetGeometryService.h"
 #include "Spaces/H1Space.h"
 #include "Spaces/SpaceFactory.h"
 
@@ -27,6 +33,7 @@
 #include <filesystem>
 #include <fstream>
 #include <limits>
+#include <numeric>
 #include <string>
 #include <vector>
 
@@ -283,7 +290,7 @@ TEST(TimeFunction, DeclaresAParameterThatSetupRegistersAndKernelsReadAsASlot)
         (void)installFormulation(sys, "op", {u_id}, (u * v - Qw * v).dx());
         sys.setup();
         if (parameter) {
-            EXPECT_TRUE(sys.parameterRegistry().slotOf("Q").has_value());
+            EXPECT_EQ(sys.parameterRegistry().slotOf("Q"), 0u);
         }
         const auto n = sys.dofHandler().getNumDofs();
         std::vector<Real> U(static_cast<std::size_t>(n), 0.5);
@@ -350,6 +357,215 @@ TEST(TimeFunction, ResolvedParameterIsJITStrictWhereTheCallbackIsNot)
     const auto callback = forms::FormExpr::coefficient(
         "Q", forms::TimeScalarCoefficient([&](Real, Real, Real, Real t) { return flow(t); }));
     EXPECT_FALSE(forms::jit::canCompile(callback * (1.0 + x.component(0)) * v).ok);
+}
+
+TEST(TimeFunction, MonolithicTangentAndResidualRebindNamedParameters)
+{
+    auto space = std::make_shared<spaces::H1Space>(ElementType::Quad4, 1);
+    const auto u = forms::FormExpr::trialFunction(*space, "u");
+    const auto v = forms::FormExpr::testFunction(*space, "v");
+    const auto load = forms::FormExpr::parameter("Q") + forms::FormExpr::parameterRef(5);
+    forms::FormCompiler compiler;
+    std::vector<forms::MonolithicCellKernel::BlockSpec> blocks(1);
+    auto& block = blocks.front();
+    block.tangent_ir = compiler.compileBilinear((load * u * v).dx());
+    block.residual_ir = compiler.compileResidual((load * (1.0 + u) * v).dx());
+    forms::MonolithicCellKernel kernel(std::move(blocks), nullptr, {});
+    ParameterRegistry registry;
+    registry.addTimeFunction("Q", [](Real) { return 5.0; });
+    const auto check = [&] {
+        const auto slot = registry.kernelSlotOf("Q");
+        kernel.resolveParameterSlots([&](std::string_view key) { return registry.kernelSlotOf(key); });
+        const auto& resolved = kernel.blockSpec(0);
+        for (const auto* ir : {&*resolved.tangent_ir, &*resolved.residual_ir}) {
+            unsigned named = 0, positional = 0;
+            for (const auto& term : ir->terms()) {
+                (void)term.integrand.transformNodes([&](const forms::FormExprNode& node) -> std::optional<forms::FormExpr> {
+                    if (node.type() == forms::FormExprType::ParameterRef) {
+                        if (const auto name = node.symbolName()) {
+                            EXPECT_EQ(*name, "Q");
+                            EXPECT_EQ(node.slotIndex(), slot);
+                            ++named;
+                        } else {
+                            EXPECT_EQ(node.slotIndex(), 5u);
+                            ++positional;
+                        }
+                    }
+                    return std::nullopt;
+                });
+            }
+            EXPECT_EQ(named, 1u);
+            EXPECT_EQ(positional, 1u);
+        }
+    };
+    check();
+    registry.addTimeFunction("A", [](Real) { return 7.0; });
+    check();
+}
+
+TEST(TimeFunction, OrdinaryInteriorFacetRetainsDensePositionalParameters)
+{
+    auto base = std::make_shared<MeshBase>();
+    const CellShape quad{.family = CellFamily::Quad, .num_corners = 4, .order = 1};
+    base->build_from_arrays(2, {0, 0, 1, 0, 2, 0, 0, 1, 1, 1, 2, 1},
+                            {0, 4, 8}, {0, 1, 4, 3, 1, 2, 5, 4}, {quad, quad});
+    base->finalize();
+    FESystem system(svmp::create_mesh(std::move(base)));
+    auto space = std::make_shared<spaces::H1Space>(ElementType::Quad4, 1);
+    const auto field = system.addField({.name = "u", .space = space});
+    auto u = forms::StateField(field, *space, "u");
+    auto v = forms::TestField(field, *space, "v");
+    auto load = timeFunction(system, "load", [](Real t) { return 2.0 + 3.0 * t; });
+    system.addOperator("facet");
+    (void)installFormulation(system, "facet", {field},
+        ((load + forms::FormExpr::parameterRef(0)) * (1.0 + forms::avg(u)) * forms::avg(v)).dS());
+    system.setup();
+
+    const auto n = system.dofHandler().getNumDofs();
+    std::vector<Real> zero(n, 0.0);
+    const auto check = [&] {
+        EXPECT_EQ(system.parameterRegistry().slotCount(), 1u);
+        EXPECT_EQ(system.parameterRegistry().slotOf("load"), 0u);
+        SystemStateView state;
+        state.u = zero;
+        state.time = 0.5;
+        AssemblyRequest request;
+        request.op = "facet";
+        request.want_vector = true;
+        assembly::DenseVectorView result(n);
+        const auto assembled = system.assemble(request, state, nullptr, &result);
+        ASSERT_TRUE(assembled.success) << assembled.error_message;
+        // One unit-length interior facet. Both slots carry the load at t = 1/2.
+        EXPECT_NEAR(std::accumulate(result.data().begin(), result.data().end(), 0.0), 7.0, 1e-13);
+    };
+    check();
+    system.setCutIntegrationContext(std::make_shared<assembly::CutIntegrationContext>());
+    check();
+    system.setup();
+    check();
+    system.setCutIntegrationContext(nullptr);
+    system.setup();
+    check();
+}
+
+TEST(TimeFunction, NamedValueAndCutMetadataReachTheSameVolumeKernel)
+{
+    auto mesh = build_single_quad_mesh();
+    FESystem system(mesh);
+    auto space = std::make_shared<spaces::H1Space>(ElementType::Quad4, 1);
+    const auto phi = system.addField({.name = "phi", .space = space, .source_kind = FieldSourceKind::PrescribedData});
+    const auto field = system.addField({.name = "u", .space = space});
+    auto geometry = level_set::cutGeometry(system, *mesh, {.level_set_field_name = "phi", .domain_id = "quarter"});
+    const auto side = geometry.side(forms::CutVolumeSide::Negative);
+    const auto u = forms::StateField(field, *space, "u");
+    const auto v = forms::TestField(field, *space, "v");
+    const auto load = timeFunction(system, "load", [](Real t) { return 2.0 + 3.0 * t; });
+    for (int i = 1; i <= 6; ++i) {
+        (void)timeFunction(system, "other" + std::to_string(i), [i](Real) { return 10.0 + i; });
+    }
+    const auto metadata = 2.0 * forms::cutVolumeFraction() + forms::cutSideIndicator()
+                        + forms::cutMeasureSensitivity().component(0);
+    const auto residual = ((1.0 + u) * (load + metadata) * v).dx(side.volume());
+    system.addOperator("cut");
+    (void)installFormulation(system, "cut", {field}, residual);
+    system.setup();
+    const std::array<Real, 4> nodal_phi{-0.25, 0.75, 0.75, -0.25}; // x - 1/4 on the unit square
+    std::vector<Real> coefficients(system.fieldDofHandler(phi).getNumDofs());
+    (void)system.projectMeshVertexValuesToFieldCoefficients(phi, nodal_phi, 1, coefficients);
+    system.setPrescribedFieldCoefficients(phi, coefficients);
+    const auto cut_context = geometry.refresh().installed_context.lock();
+    ASSERT_NE(cut_context, nullptr);
+
+    // A second system acquires just the snapshot for a post-setup functional.
+    // Its compact named parameter is evaluated through the functional's getter.
+    FESystem snapshot_reader(mesh);
+    const auto snapshot_field = snapshot_reader.addField({.name = "u", .space = space});
+    const auto snapshot_load = timeFunction(snapshot_reader, "load", [](Real t) { return 2.0 + 3.0 * t; });
+    for (int i = 1; i <= 6; ++i) {
+        (void)timeFunction(snapshot_reader, "other" + std::to_string(i), [i](Real) { return 10.0 + i; });
+    }
+    const auto reader_u = forms::StateField(snapshot_field, *space, "u");
+    const auto reader_v = forms::TestField(snapshot_field, *space, "v");
+    snapshot_reader.addOperator("whole");
+    (void)installFormulation(snapshot_reader, "whole", {snapshot_field},
+                             ((1.0 + reader_u) * snapshot_load * reader_v).dx());
+    snapshot_reader.setup();
+    ASSERT_EQ(snapshot_reader.parameterRegistry().slotOf("load"), 0u);
+    const std::array snapshot_forms{
+        (snapshot_load + metadata).dx(side.volume()),
+        (forms::FormExpr::boundParameter("load", 99) + metadata).dx(side.volume()),
+        forms::FormExpr::parameterRef(6).dx()};
+    const auto n = system.dofHandler().getNumDofs();
+    std::vector<Real> zero(n, 0.0);
+    for (Real t : {0.0, 0.5}) {
+        SystemStateView state;
+        state.time = t;
+        state.u = zero;
+        const auto& registry = system.parameterRegistry();
+        const auto slot = registry.slotOf("load");
+        ASSERT_TRUE(slot.has_value());
+        EXPECT_EQ(registry.keyForSlot(*slot), "load");
+        ASSERT_EQ(*slot, 0u);
+        const auto compiled_slot = registry.kernelSlotOf("load");
+        ASSERT_TRUE(compiled_slot);
+        EXPECT_GE(*compiled_slot, forms::cutCellParameterCount());
+        EXPECT_EQ(registry.keyForKernelSlot(*compiled_slot), "load");
+        const auto values = registry.evaluateRealSlots(state);
+        ASSERT_EQ(values.size(), registry.slotCount());
+        ASSERT_LT(*slot, values.size());
+        EXPECT_EQ(values[*slot], 2.0 + 3.0 * t);
+        AssemblyRequest request;
+        request.op = "cut";
+        request.want_vector = true;
+        request.want_matrix = true;
+        assembly::DenseVectorView result(n);
+        assembly::DenseMatrixView tangent(n);
+        const auto assembled = system.assemble(request, state, &tangent, &result);
+        ASSERT_TRUE(assembled.success) << assembled.error_message;
+        // Test with 1.  The cut has area and volume fraction 1/4, and side indicator -1.
+        const double expected = 0.25 * (2.0 + 3.0 * t + 0.5 - 1.0);
+        EXPECT_NEAR(std::accumulate(result.data().begin(), result.data().end(), 0.0), expected, 1e-13);
+        EXPECT_NEAR(std::accumulate(tangent.data().begin(), tangent.data().end(), 0.0), expected, 1e-13);
+        const auto measured = evaluateFunctionalForms(snapshot_reader, snapshot_forms, state, {},
+                                                      system.cutIntegrationContext());
+        ASSERT_EQ(measured.size(), 3u);
+        EXPECT_NEAR(measured[0].value, expected, 1e-13);
+        EXPECT_NEAR(measured[1].value, expected, 1e-13);
+        EXPECT_NEAR(measured[2].value, 16.0, 1e-13);
+    }
+
+    const auto check_whole = [&] {
+        SystemStateView state;
+        state.u = zero;
+        state.time = 0.5;
+        AssemblyRequest request;
+        request.op = "whole";
+        request.want_vector = true;
+        assembly::DenseVectorView result(n);
+        const auto assembled = snapshot_reader.assemble(request, state, nullptr, &result);
+        ASSERT_TRUE(assembled.success) << assembled.error_message;
+        EXPECT_NEAR(std::accumulate(result.data().begin(), result.data().end(), 0.0), 3.5, 1e-13);
+    };
+    check_whole();
+    snapshot_reader.setCutIntegrationContext(cut_context);
+    snapshot_reader.setup();
+    check_whole();
+    snapshot_reader.setCutIntegrationContext(nullptr);
+    snapshot_reader.setup();
+    check_whole();
+    // Add a cut term and a lexically earlier key after the first setup. The
+    // existing whole-cell kernel must still evaluate the same named load.
+    snapshot_reader.addOperator("late_cut");
+    const auto earlier = timeFunction(snapshot_reader, "another", [](Real) { return 7.0; });
+    for (int i = 7; i <= 13; ++i) {
+        (void)timeFunction(snapshot_reader, "other" + std::to_string(i), [i](Real) { return 10.0 + i; });
+    }
+    (void)installFormulation(snapshot_reader, "late_cut", {snapshot_field},
+        ((earlier + reader_u) * reader_v).dx(side.volume()));
+    snapshot_reader.setCutIntegrationContext(cut_context);
+    snapshot_reader.setup();
+    EXPECT_EQ(snapshot_reader.parameterRegistry().slotCount(), 15u);
+    check_whole();
 }
 
 namespace {

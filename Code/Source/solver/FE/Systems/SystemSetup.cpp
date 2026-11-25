@@ -6456,7 +6456,7 @@ void FESystem::setup(const SetupOptions& user_opts, const SetupInputs& inputs)
     // ---------------------------------------------------------------------
     {
         const auto slot_of_real_param = [&](std::string_view key) -> std::optional<std::uint32_t> {
-            return parameter_registry_.slotOf(key);
+            return parameter_registry_.kernelSlotOf(key);
         };
 
         for (const auto& tag : operator_registry_.list()) {

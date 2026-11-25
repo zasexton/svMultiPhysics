@@ -714,6 +714,8 @@ public:
 
     static FormExpr parameter(std::string name);
     static FormExpr parameterRef(std::uint32_t slot);
+    /// A resolved named terminal retains its key so another setup can rebind it.
+    static FormExpr boundParameter(std::string name, std::uint32_t slot);
 
     static FormExpr constant(Real value);
     static FormExpr typedZero();

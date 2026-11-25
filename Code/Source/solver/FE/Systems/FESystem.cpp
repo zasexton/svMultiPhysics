@@ -4085,7 +4085,7 @@ makeCoefficientSummaryFromParameterUsage(
 
     std::string key = usage.name;
     if (key.empty() && usage.slot.has_value()) {
-        if (auto slot_key = parameter_registry.keyForSlot(*usage.slot)) {
+        if (auto slot_key = parameter_registry.keyForKernelSlot(*usage.slot)) {
             key = std::string(*slot_key);
         }
     }
@@ -4660,7 +4660,7 @@ void applyPowerRange(Real& min_value,
         }
     }
     for (auto slot : usage.parameter_slots) {
-        if (auto key = parameter_registry.keyForSlot(slot)) {
+        if (auto key = parameter_registry.keyForKernelSlot(slot)) {
             if (const auto value =
                     realParameterValue(parameter_registry, state, *key)) {
                 const Real abs_value = std::abs(*value);

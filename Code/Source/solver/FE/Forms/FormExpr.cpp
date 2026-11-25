@@ -493,7 +493,7 @@ private:
     std::string name_{};
 };
 
-class ParameterRefNode final : public FormExprNode {
+class ParameterRefNode : public FormExprNode {
 public:
     explicit ParameterRefNode(std::uint32_t slot)
         : slot_(slot)
@@ -510,6 +510,18 @@ public:
 
 private:
     std::uint32_t slot_{0u};
+};
+
+class BoundParameterNode final : public ParameterRefNode {
+public:
+    BoundParameterNode(std::string name, std::uint32_t slot)
+        : ParameterRefNode(slot), name_(std::move(name))
+    {}
+
+    [[nodiscard]] std::optional<std::string_view> symbolName() const override { return name_; }
+
+private:
+    std::string name_;
 };
 
 class BoundaryIntegralSymbolNode final : public FormExprNode {
@@ -2248,6 +2260,12 @@ FormExpr FormExpr::parameter(std::string name)
 FormExpr FormExpr::parameterRef(std::uint32_t slot)
 {
     return FormExpr(std::make_shared<ParameterRefNode>(slot));
+}
+
+FormExpr FormExpr::boundParameter(std::string name, std::uint32_t slot)
+{
+    if (name.empty()) throw std::invalid_argument("FormExpr::boundParameter: empty name");
+    return FormExpr(std::make_shared<BoundParameterNode>(std::move(name), slot));
 }
 
 FormExpr FormExpr::constant(Real value)

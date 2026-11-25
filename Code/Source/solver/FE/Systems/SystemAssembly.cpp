@@ -2588,9 +2588,9 @@ assembly::AssemblyResult assembleOperator(
     // JIT-friendly constant slots (Real-valued parameters resolved to stable indices).
     std::vector<Real, AlignedAllocator<Real, kFEPreferredAlignmentBytes>> jit_constants;
     if (have_param_contracts && system.parameter_registry_.slotCount() > 0u) {
-        const auto slots = system.parameter_registry_.evaluateRealSlots(state);
+        const auto slots = system.parameter_registry_.evaluateKernelSlots(state);
         jit_constants.assign(slots.begin(), slots.end());
-        assembler.setJITConstants(jit_constants);
+        assembler.setSystemJITConstants(jit_constants, system.parameter_registry_.slotCount());
     } else {
         assembler.setJITConstants({});
     }

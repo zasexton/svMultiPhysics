@@ -814,6 +814,12 @@ void ParallelAssembler::setJITConstants(std::span<const Real> constants) noexcep
     local_assembler_.setJITConstants(constants);
 }
 
+void ParallelAssembler::setSystemJITConstants(std::span<const Real> constants,
+                                              std::size_t positional_aliases) noexcept
+{
+    local_assembler_.setSystemJITConstants(constants, positional_aliases);
+}
+
 void ParallelAssembler::setCutIntegrationContext(const CutIntegrationContext* context) noexcept
 {
     local_assembler_.setCutIntegrationContext(context);

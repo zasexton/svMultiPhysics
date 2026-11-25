@@ -825,9 +825,9 @@ void bindDerivedFunctionalRuntime(assembly::FunctionalAssembler& assembler,
     assembler.setUserData(&bindings.jit_table);
 
     if (have_param_contracts && preg.slotCount() > 0u) {
-        const auto slots = preg.evaluateRealSlots(state);
+        const auto slots = preg.evaluateKernelSlots(state);
         bindings.jit_constants.assign(slots.begin(), slots.end());
-        assembler.setJITConstants(bindings.jit_constants);
+        assembler.setSystemJITConstants(bindings.jit_constants, preg.slotCount());
     } else {
         assembler.setJITConstants({});
     }
