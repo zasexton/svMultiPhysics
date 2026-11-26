@@ -190,7 +190,7 @@ struct LevelSetSideVertexStatistics {
     Real supported_value_max{0.0};
 };
 
-/// The vertex coefficients of a field and their statistics.
+/// The coefficients of a field and the statistics of its vertex values.
 struct LevelSetSideVertexEntries {
     std::vector<GlobalIndex> dofs{};
     std::vector<Real> values{};
@@ -198,9 +198,12 @@ struct LevelSetSideVertexEntries {
 };
 
 /**
- * @brief The vertex coefficients of @p field, whose vertex DOF map is
+ * @brief The coefficients of @p field, whose vertex DOF map is
  *        @p vertex_dof_map (systems::requireVertexDofMap): every mesh vertex
- *        with DOFs takes levelSetSideVertexValue, for each of its DOFs.
+ *        takes levelSetSideVertexValue, and on a native mesh every nodal
+ *        coefficient (vertex, edge, face and interior) interpolates these
+ *        vertex values (FESystem::projectMeshVertexValuesToFieldCoefficients).
+ *        Without a native mesh only the vertex coefficients are collected.
  *
  * The side counts are taken when the values are restricted to a side.
  * Throws std::runtime_error "<non_finite_prefix><vertex><non_finite_suffix>"

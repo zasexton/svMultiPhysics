@@ -19,6 +19,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstdint>
 #include <limits>
 #include <sstream>
 #include <stdexcept>
@@ -297,6 +298,21 @@ LevelSetSideVertexEntries collectVertexFieldOnLevelSetSide(
     const auto& mesh = system.meshAccess();
     const auto field_offset = system.fieldDofOffset(field);
     const auto n_vertices = mesh.numVertices();
+    const auto components = static_cast<std::size_t>(
+        std::max(1, system.fieldRecord(field).components));
+    // On a native mesh every nodal coefficient (edge, face and interior DOFs
+    // too) interpolates the vertex values, as the mesh-field initialization
+    // does; otherwise only the vertex coefficients are written.
+#if defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH
+    const bool project_every_coefficient = system.mesh() != nullptr;
+#else
+    const bool project_every_coefficient = false;
+#endif
+    std::vector<Real> vertex_values;
+    if (project_every_coefficient) {
+        vertex_values.assign(static_cast<std::size_t>(n_vertices) * components,
+                             Real{0.0});
+    }
 
     LevelSetSideVertexEntries result{};
     auto& statistics = result.statistics;
@@ -306,12 +322,27 @@ LevelSetSideVertexEntries collectVertexFieldOnLevelSetSide(
     statistics.supported_value_max = -std::numeric_limits<Real>::infinity();
     for (GlobalIndex vertex = 0; vertex < n_vertices; ++vertex) {
         const auto vertex_dofs = vertex_dof_map.getVertexDofs(vertex);
-        if (vertex_dofs.empty()) {
+        if (vertex_dofs.empty() && !project_every_coefficient) {
             continue;
         }
 
         const auto x = mesh.getNodeCoordinates(vertex);
         const auto choice = levelSetSideVertexChoice(values, vertex);
+        const Real value = sideVertexValue(values, choice.supported, vertex, x);
+        if (!std::isfinite(value)) {
+            std::ostringstream oss;
+            oss << non_finite_prefix << vertex << non_finite_suffix;
+            throw std::runtime_error(oss.str());
+        }
+        if (project_every_coefficient) {
+            std::fill_n(vertex_values.begin() +
+                            static_cast<std::ptrdiff_t>(
+                                static_cast<std::size_t>(vertex) * components),
+                        components, value);
+        }
+        if (vertex_dofs.empty()) {
+            continue;
+        }
         if (values.side.has_value()) {
             if (choice.on_side) {
                 ++statistics.on_side_vertices;
@@ -324,12 +355,6 @@ LevelSetSideVertexEntries collectVertexFieldOnLevelSetSide(
                     ++statistics.off_side_supported_vertices;
                 }
             }
-        }
-        const Real value = sideVertexValue(values, choice.supported, vertex, x);
-        if (!std::isfinite(value)) {
-            std::ostringstream oss;
-            oss << non_finite_prefix << vertex << non_finite_suffix;
-            throw std::runtime_error(oss.str());
         }
         statistics.value_min = std::min(statistics.value_min, value);
         statistics.value_max = std::max(statistics.value_max, value);
@@ -345,6 +370,39 @@ LevelSetSideVertexEntries collectVertexFieldOnLevelSetSide(
             result.values.push_back(value);
         }
     }
+#if defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH
+    if (project_every_coefficient) {
+        // The vertex coefficients above are their own vertex values; append
+        // the interpolated others.
+        const auto n_field_dofs = static_cast<std::size_t>(
+            system.fieldDofHandler(field).getNumDofs());
+        std::vector<std::uint8_t> collected(n_field_dofs, 0u);
+        for (const auto dof : result.dofs) {
+            collected[static_cast<std::size_t>(dof - field_offset)] = 1u;
+        }
+        std::vector<Real> coefficients(n_field_dofs, Real{0.0});
+        std::vector<std::uint8_t> assigned(n_field_dofs, 0u);
+        const std::string context =
+            "level-set side initialization of field '" +
+            system.fieldRecord(field).name + "'";
+        const auto projection = system.projectMeshVertexValuesToFieldCoefficients(
+            field, vertex_values, components, coefficients, assigned, context);
+        if (projection.unassigned_dofs != 0u) {
+            throw std::runtime_error(
+                context + " could not project " +
+                std::to_string(projection.unassigned_dofs) +
+                " coefficient(s) from the mesh vertices");
+        }
+        result.dofs.reserve(n_field_dofs);
+        result.values.reserve(n_field_dofs);
+        for (std::size_t dof = 0; dof < n_field_dofs; ++dof) {
+            if (assigned[dof] != 0u && collected[dof] == 0u) {
+                result.dofs.push_back(field_offset + static_cast<GlobalIndex>(dof));
+                result.values.push_back(coefficients[dof]);
+            }
+        }
+    }
+#endif
     return result;
 }
 

@@ -128,7 +128,7 @@ TEST(LevelSetSideSupport, AdmissibilityIncludesNonlocalValuesAndStopsAtFirstViol
 }
 
 #if defined(FE_HAS_EIGEN)
-TEST(LevelSetSideSupport, VertexInitializationLeavesQuadraticNonvertexCoefficientsUntouched)
+TEST(LevelSetSideSupport, VertexInitializationWritesEveryQuadraticCoefficient)
 {
     using namespace svmp::FE;
     using namespace level_set;
@@ -151,13 +151,27 @@ TEST(LevelSetSideSupport, VertexInitializationLeavesQuadraticNonvertexCoefficien
         .comparisons = {.values = prescribed},
         .messages = {.non_finite_prefix = "nonfinite ", .no_entries = "no entries", .no_view = "no view"}};
     const auto result = initializeVertexFieldOnLevelSetSide(system, state, target, declaration);
-    EXPECT_EQ(result.initialized_dofs, 4u);
+    // The edge coefficients interpolate the affine vertex values exactly.
+    EXPECT_EQ(result.initialized_dofs, 9u);
     EXPECT_EQ(result.comparisons.checked, 2u);
     EXPECT_EQ(result.comparisons.skipped, 1u);
     EXPECT_EQ(result.comparisons.maximum_absolute_error, 4.0);
     std::vector<Real> actual(state.localSpan().begin(), state.localSpan().end());
     std::sort(actual.begin(), actual.end());
-    EXPECT_EQ(actual, (std::vector<Real>{-37, -37, -37, -37, -37, 20, 20, 21, 21}));
+    EXPECT_EQ(actual, (std::vector<Real>{20, 20, 20, 20.5, 20.5, 20.5, 21, 21, 21}));
+
+    // A constant hydrostatic start of 1 is 1 at every P2 node, including the
+    // edge midpoints (not (1, 1, 1, 0, 0, 0) on each triangle).
+    std::fill(state.localSpan().begin(), state.localSpan().end(), -37.0);
+    auto constant = declaration;
+    constant.source = [](const std::array<Real, 3>&) { return Real{1}; };
+    constant.comparisons = {};
+    EXPECT_EQ(initializeVertexFieldOnLevelSetSide(system, state, target, constant)
+                  .initialized_dofs,
+              9u);
+    for (const auto value : state.localSpan()) {
+        EXPECT_EQ(value, 1.0);
+    }
 
     // The optional same-name operation deliberately projects all P2 coefficients.
     EXPECT_EQ(systems::initializeFieldFromMeshVertexField(system, state, field, "projection"), 9u);
