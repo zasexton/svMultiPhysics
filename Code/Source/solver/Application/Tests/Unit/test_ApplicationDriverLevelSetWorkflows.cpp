@@ -5808,6 +5808,239 @@ TEST(ApplicationDriverLevelSetWorkflows,
 #endif
 }
 
+// A declared functional is evaluated at the accepted time of its record (and
+// with its step), not at t = 0: the gravitational potential power declared as
+// the integral of t over the liquid records 2 V at t = 2.
+TEST(ApplicationDriverLevelSetWorkflows,
+     AcceptedFunctionalFormsAreEvaluatedAtTheAcceptedTime)
+{
+#if !(defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH)
+  GTEST_SKIP() << "Requires FE built with Mesh integration.";
+#else
+  constexpr int interface_marker = 707;
+  constexpr svmp::FE::Real gamma = svmp::FE::Real{0.65};
+  auto mesh = makeWorkflowBiquadraticQuadMesh();
+  const auto mesh_field = svmp::MeshFields::attach_field(
+      mesh->local_mesh(),
+      svmp::EntityKind::Vertex,
+      "phi",
+      svmp::FieldScalarType::Float64,
+      1);
+  ASSERT_NE(svmp::MeshFields::field_data_as<svmp::real_t>(
+                mesh->local_mesh(), mesh_field),
+            nullptr);
+  auto scalar_space = std::make_shared<svmp::FE::spaces::H1Space>(
+      svmp::FE::ElementType::Quad4,
+      /*order=*/2);
+  auto velocity_space =
+      std::make_shared<svmp::FE::spaces::ProductSpace>(
+          scalar_space, 2);
+  auto system = std::make_unique<svmp::FE::systems::FESystem>(mesh);
+  const auto phi = system->addField(svmp::FE::systems::FieldSpec{
+      .name = "phi",
+      .space = scalar_space,
+      .components = 1});
+  const auto velocity =
+      system->addField(svmp::FE::systems::FieldSpec{
+          .name = "Velocity",
+          .space = velocity_space,
+          .components = 2});
+  svmp::FE::interfaces::FreeSurfaceDiscreteFunctionalParameters parameters;
+  parameters.liquid_side =
+      svmp::FE::geometry::CutIntegrationSide::Negative;
+  parameters.surface_tension = gamma;
+  svmp::FE::systems::functionalRecords(*system).declareFunctional(
+      svmp::FE::systems::FreeSurfaceDiscreteFunctionalDeclaration{
+          .interface_marker = interface_marker,
+          .level_set_field = phi,
+          .velocity_field = velocity,
+          .geometry_domain_id = "functional_interface",
+          .parameters = parameters,
+          .active_volume_energy_parameters =
+              svmp::FE::interfaces::
+                  FreeSurfaceActiveVolumeEnergyParameters{
+                      .liquid_side =
+                          svmp::FE::geometry::CutIntegrationSide::Negative,
+                      .density = svmp::FE::Real{2.0},
+                      .gravitational_acceleration =
+                          {{svmp::FE::Real{0.0},
+                            svmp::FE::Real{-1.0},
+                            svmp::FE::Real{0.0}}},
+                      .gravitational_reference_point =
+                          {{svmp::FE::Real{0.0},
+                            svmp::FE::Real{0.0},
+                            svmp::FE::Real{0.0}}},
+                  },
+          .active_volume_dissipation_parameters =
+              svmp::FE::interfaces::
+                  FreeSurfaceActiveVolumeDissipationParameters{
+                      .liquid_side =
+                          svmp::FE::geometry::CutIntegrationSide::Negative,
+                      .dynamic_viscosity = svmp::FE::Real{0.5},
+                  },
+          .external_pressure_power_parameters =
+              svmp::FE::interfaces::
+                  FreeSurfaceExternalPressurePowerParameters{
+                      .liquid_side =
+                          svmp::FE::geometry::CutIntegrationSide::Negative,
+                      .external_pressure = svmp::FE::Real{2.5},
+                  },
+          .endpoint_functional_power_enabled = true,
+          .capillary_balance_method =
+              svmp::FE::systems::
+                  FreeSurfaceCapillaryBalanceMethod::
+                      DiscreteEnergyVolumeStationarity,
+          .capillary_balance_qualification =
+              svmp::FE::systems::
+                  FreeSurfaceCapillaryBalanceQualification::
+                      PrerequisiteOnly,
+          .owner_component =
+              "ApplicationDriverLevelSetWorkflows.FunctionalFixture",
+      });
+  // The energy functionals the Navier-Stokes formulation declares for this
+  // free surface (D49 step E3): the record logs their values.
+  {
+    namespace post = svmp::Physics::formulations::navier_stokes::post;
+    post::FreeSurfaceEnergyStatement statement;
+    statement.interface_marker = interface_marker;
+    statement.liquid_side = svmp::FE::forms::CutVolumeSide::Negative;
+    statement.velocity_field = velocity;
+    statement.velocity_space = velocity_space.get();
+    statement.dimension = 2;
+    statement.surface_tension = gamma;
+    statement.density = svmp::FE::Real{2.0};
+    statement.gravitational_acceleration = {
+        {svmp::FE::Real{0.0}, svmp::FE::Real{-1.0}, svmp::FE::Real{0.0}}};
+    statement.dynamic_viscosity = svmp::FE::Real{0.5};
+    statement.external_pressure = svmp::FE::Real{2.5};
+    statement.endpoint_functional_power = true;
+    bool time_scaled = false;
+    for (auto& declaration : post::freeSurfaceEnergyFunctionals(statement)) {
+      if (declaration.name == "free_surface.707.gravitational_potential_power") {
+        declaration.form = svmp::FE::forms::FormExpr::time().dCutVolume(
+            interface_marker, svmp::FE::forms::CutVolumeSide::Negative);
+        time_scaled = true;
+      }
+      svmp::FE::systems::declareFunctionalForm(*system, std::move(declaration));
+    }
+    ASSERT_TRUE(time_scaled);
+  }
+  ASSERT_NO_THROW(system->setup({}));
+
+  std::vector<svmp::FE::Real> phi_vertex_values(mesh->n_vertices(), 0.0);
+  for (std::size_t vertex = 0; vertex < mesh->n_vertices(); ++vertex) {
+    phi_vertex_values[vertex] = workflowPhi(*mesh, vertex);
+  }
+  const auto phi_coefficients = projectWorkflowVertexValues(
+      *system,
+      phi,
+      std::span<const svmp::FE::Real>(phi_vertex_values.data(),
+                                      phi_vertex_values.size()),
+      1u,
+      "ApplicationDriver accepted functional phi");
+  std::vector<svmp::FE::Real> velocity_vertex_values(
+      mesh->n_vertices() * 2u, svmp::FE::Real{0.0});
+  for (std::size_t vertex = 0; vertex < mesh->n_vertices(); ++vertex) {
+    velocity_vertex_values[2u * vertex] = svmp::FE::Real{2.0};
+    velocity_vertex_values[2u * vertex + 1u] =
+        svmp::FE::Real{-1.0};
+  }
+  const auto velocity_coefficients = projectWorkflowVertexValues(
+      *system,
+      velocity,
+      velocity_vertex_values,
+      2u,
+      "ApplicationDriver accepted functional velocity");
+  std::vector<svmp::FE::Real> solution(
+      static_cast<std::size_t>(system->dofHandler().getNumDofs()), 0.0);
+  writeWorkflowFieldSlice(*system, phi, phi_coefficients, solution);
+  writeWorkflowFieldSlice(
+      *system, velocity, velocity_coefficients, solution);
+  std::vector<svmp::FE::Real> previous_velocity_vertex_values(
+      mesh->n_vertices() * 2u, svmp::FE::Real{0.0});
+  for (std::size_t vertex = 0; vertex < mesh->n_vertices(); ++vertex) {
+    previous_velocity_vertex_values[2u * vertex] =
+        svmp::FE::Real{1.0};
+  }
+  const auto previous_velocity_coefficients =
+      projectWorkflowVertexValues(
+          *system,
+          velocity,
+          previous_velocity_vertex_values,
+          2u,
+          "ApplicationDriver previous accepted functional velocity");
+  auto previous_solution = solution;
+  writeWorkflowFieldSlice(
+      *system,
+      velocity,
+      previous_velocity_coefficients,
+      previous_solution);
+
+  application::core::SimulationComponents sim;
+  sim.primary_mesh = mesh;
+  sim.fe_system = std::move(system);
+  auto params = parseWorkflowParametersXml(R"xml(
+<svMultiPhysicsFile>
+  <Add_equation type="fluid">
+    <Add_BC name="free_surface">
+      <Type>Free_surface</Type>
+      <Implementation>UnfittedLevelSet</Implementation>
+      <Level_set_field_name>phi</Level_set_field_name>
+      <Generated_interface_domain_id>functional_interface</Generated_interface_domain_id>
+      <Interface_marker>707</Interface_marker>
+      <Allow_corner_linearized_cut_geometry>true</Allow_corner_linearized_cut_geometry>
+      <Active_domain>LevelSetNegative</Active_domain>
+    </Add_BC>
+  </Add_equation>
+</svMultiPhysicsFile>
+)xml");
+  svmp::FE::level_set::LevelSetGeneratedInterfaceLifecycle lifecycle;
+  const auto report = refreshActiveCutIntegrationContextFromSolution(
+      sim,
+      *params,
+      std::span<const svmp::FE::Real>(solution.data(), solution.size()),
+      lifecycle,
+      "application-driver-accepted-functional-test");
+  ASSERT_TRUE(report.refreshed);
+  const auto accepted_state_revision =
+      collectiveLevelSetMaintenanceAlgebraicRevision(
+          solution,
+          activeFESystemCommunicator(*sim.fe_system));
+  ASSERT_NO_THROW(recordInitialAcceptedFunctionalBaseline(
+      sim,
+      /*initial_step=*/0u,
+      svmp::FE::Real{0.0},
+      std::span<const svmp::FE::Real>(
+          previous_solution.data(), previous_solution.size()),
+      /*record_backward_euler_kinetic_baseline=*/true));
+  ASSERT_NO_THROW(recordAcceptedFunctionals(
+      sim,
+      /*accepted_step=*/3u,
+      svmp::FE::Real{2.0},
+      svmp::FE::Real{0.5},
+      accepted_state_revision,
+      accepted_state_revision,
+      {},
+      std::span<const svmp::FE::Real>(solution.data(), solution.size()),
+      std::span<const svmp::FE::Real>(
+          previous_solution.data(), previous_solution.size())));
+  const auto history =
+      svmp::FE::systems::functionalRecords(*sim.fe_system).acceptedFunctionalHistory();
+  ASSERT_EQ(history.size(), 2u);
+  ASSERT_TRUE(history.front().active_volume_energy.has_value());
+  EXPECT_DOUBLE_EQ(
+      history.front().active_volume_energy->gravitational_potential_power,
+      svmp::FE::Real{0.0});
+  const auto& record = history.back();
+  EXPECT_DOUBLE_EQ(record.accepted_time, svmp::FE::Real{2.0});
+  ASSERT_TRUE(record.active_volume_energy.has_value());
+  EXPECT_GT(record.state.owned_liquid_volume, 0.0);
+  EXPECT_NEAR(record.active_volume_energy->gravitational_potential_power,
+              svmp::FE::Real{2.0} * record.state.owned_liquid_volume,
+              1.0e-12);
+#endif
+}
+
 TEST(ApplicationDriverLevelSetWorkflows,
      AcceptedFunctionalUsesAuthoritativeSnapshotAndRecordsGlobalState)
 {

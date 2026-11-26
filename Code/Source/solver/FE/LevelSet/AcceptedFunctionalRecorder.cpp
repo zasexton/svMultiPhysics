@@ -1484,11 +1484,15 @@ void recomputeTotals(
  * form that reads fields is skipped when no solution is supplied.  Returns
  * the absolute masses, for the record log.
  */
+// The forms are evaluated at @p time with step @p dt: the accepted time of a
+// record, so a declared time-dependent functional is labelled consistently.
 std::vector<DeclaredFunctionalMasses> applyDeclaredFunctionalForms(
     const FESystemHandle& sim,
     std::span<const svmp::FE::Real> solution,
     std::span<const svmp::FE::Real> previous_solution,
-    std::span<svmp::FE::systems::AcceptedFreeSurfaceDiscreteFunctionalState> states)
+    std::span<svmp::FE::systems::AcceptedFreeSurfaceDiscreteFunctionalState> states,
+    svmp::FE::Real time,
+    svmp::FE::Real dt)
 {
   std::vector<DeclaredFunctionalMasses> out;
   const auto declared = systems::functionalForms(*sim.fe_system);
@@ -1642,6 +1646,8 @@ std::vector<DeclaredFunctionalMasses> applyDeclaredFunctionalForms(
           std::to_string(accepted.interface_marker) + " differ across the FE communicator.");
     }
     systems::SystemStateView state;
+    state.time = time;
+    state.dt = dt;
     state.u = solution;
     const auto values = systems::evaluateFunctionalForms(system, forms, state, comm);
     DeclaredFunctionalMasses masses{.interface_marker = accepted.interface_marker};
@@ -1659,9 +1665,13 @@ std::vector<DeclaredFunctionalMasses> applyDeclaredFunctionalForms(
       }
       const std::vector<svmp::FE::forms::FormExpr> kinetic_form{kinetic->form};
       systems::SystemStateView before_state;
+      before_state.time = time - dt;
+      before_state.dt = dt;
       before_state.u = previous_solution;
       const auto before = systems::evaluateFunctionalForms(system, kinetic_form, before_state, comm);
       systems::SystemStateView change_state;
+      change_state.time = time;
+      change_state.dt = dt;
       change_state.u = change;
       const auto loss = systems::evaluateFunctionalForms(system, kinetic_form, change_state, comm);
       auto& work = *accepted.backward_euler_kinetic_work;
@@ -1836,7 +1846,7 @@ evaluateDeclaredAcceptedFunctionals(
     attachAcceptedFreeSurfaceActiveVolumeDissipation(sim, solution, states);
     attachAcceptedFreeSurfaceExternalPressurePowers(sim, solution, states);
   }
-  (void)applyDeclaredFunctionalForms(sim, solution, {}, states);
+  (void)applyDeclaredFunctionalForms(sim, solution, {}, states, svmp::FE::Real{0.0}, svmp::FE::Real{0.0});
   return states;
 }
 
@@ -1909,7 +1919,8 @@ levelSetMaintenanceFunctionalValues(
     attachAcceptedFreeSurfaceExternalPressurePowers(
         sim, solution, enriched_states);
   }
-  (void)applyDeclaredFunctionalForms(sim, solution, {}, enriched_states);
+  (void)applyDeclaredFunctionalForms(
+      sim, solution, {}, enriched_states, svmp::FE::Real{0.0}, svmp::FE::Real{0.0});
   const auto& snapshots = context->freeSurfaceGeometrySnapshots();
   for (const auto& state : enriched_states) {
     const auto marker = static_cast<double>(state.interface_marker);
@@ -2189,7 +2200,8 @@ recordAcceptedFunctionals(
       accepted_solution,
       accepted_states);
   const auto declared_masses = applyDeclaredFunctionalForms(
-      sim, accepted_solution, backward_euler_previous_solution, accepted_states);
+      sim, accepted_solution, backward_euler_previous_solution, accepted_states,
+      accepted_time, dt);
   const bool has_backward_euler_work = std::any_of(
       accepted_states.begin(),
       accepted_states.end(),
