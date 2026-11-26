@@ -82,7 +82,7 @@ def generate(benchmarks, bench, args, edits, out, steps):
     deck.write_text(text)
 
 
-def read_vtu(path):
+def read_vtu(path, fields=FIELDS):
     """Point arrays of an appended-raw VTU written by svmultiphysics."""
     data = path.read_bytes()
     marker = data.find(b"<AppendedData")
@@ -99,7 +99,7 @@ def read_vtu(path):
     out = {}
     for array in grid.find("Piece").find("PointData").findall("DataArray"):
         name = array.get("Name")
-        if name not in FIELDS and name != "GlobalNodeID":
+        if name not in fields and name != "GlobalNodeID":
             continue
         code, size = types[array.get("type")]
         offset = start + int(array.get("offset"))

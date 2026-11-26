@@ -4,7 +4,7 @@ Reviewed 25 November 2026 at commit `4510bb8aec481e33a2afb6434759c86e2946815c`. 
 
 At the audited revision, a 32-step capillary-wave run accepted one step after kinematic reconciliation exhausted all eight iterations. The area change exceeded the reported kinematic target by **1.20421 × 10⁻⁶**. Five hydrostatic tank runs on the same executable preserved height and volume through 100 steps each. The review also reproduced a pressure time-labeling error in first-order generalized-α and three pressure-control failures on cut tetrahedra.
 
-**Original audit status.** A01–A20 and A22–A25 are resolved. **2 findings remain open** in the original set of 26, A21 and A26.
+**Original audit status.** A01–A20 and A22–A26 are resolved. **A21 is the remaining open finding** in the original set of 26.
 
 ## Resolution of the first four findings
 
@@ -73,6 +73,8 @@ The solver’s FSILS assembly path with precomputed entry locations had similar 
 **A24 · Contact integration on fitted faces.** The penalty kernel obtains face points and physical integration weights from the common geometry evaluator at the mesh geometry order. A constant traction on reflected parallel solids now integrates to the analytic force on all eight tested faces across triangle, quadrilateral, tetrahedron, hexahedron, wedge and pyramid cells. The unit triangle edge and hexahedron face give magnitudes 1 and 4. All 11 focused contact checks passed. [Contact integration](../Code/Source/solver/FE/Systems/SurfaceContactKernel.cpp) · [Load regressions](../Code/Source/solver/FE/Tests/Unit/Systems/test_SurfaceContactKernel.cpp)
 
 **A25 · Pointwise cut-interface normals in Forms.** `cutInterfaceNormal()` and the cut-cell terminal `interface_normal` read the physical normal at each quadrature point. `cutRuleNormal()` names the existing single normal stored with a rule, which existing callers can still request through `cutEmbeddedNormal()`. In a stretched cell with two distinct reference normals, interpreted and JIT forms reproduce the analytical y-flux 0.282842712474619. The constant rule normal gives zero. [Cut-cell terminals](../Code/Source/solver/FE/Forms/CutCellForms.h) · [Flux regression](../Code/Source/solver/FE/Tests/Unit/Forms/test_CutCellForms.cpp)
+
+**A26 · Fitted ALE mesh velocity in VTK.** At accepted output times, the application writes the endpoint displacement rate. Generalized-alpha supplies its stored endpoint derivative and backward Euler uses the displacement increment over the accepted time step. On the fitted capillary wave the peak saved mesh speed was 0.001286450741. Across four outputs on one and two ranks, the maximum discrepancy from a displacement-history reconstruction was 8.1 × 10⁻¹⁸. Shared vertices agreed exactly between output pieces. A prescribed nonlinear displacement independently distinguishes the endpoint derivative from the step-average velocity. [Application writer](../Code/Source/solver/Application/Core/ApplicationDriver.cpp) · [On-disk output regression](../Code/Source/solver/Application/Tests/Support/ale_mesh_velocity_output.py)
 
 ## Index of the original findings
 

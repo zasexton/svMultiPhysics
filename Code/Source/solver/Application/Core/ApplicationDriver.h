@@ -9,6 +9,8 @@
 #include <string>
 #include <vector>
 
+namespace svmp::FE::timestepping { enum class SchemeKind : std::uint8_t; }
+
 class Parameters;
 
 namespace application {
@@ -59,7 +61,8 @@ private:
   static void runSteadyState(SimulationComponents& sim, const Parameters& params, VtkTimeSeriesCollection* pvd);
   static void runTransient(SimulationComponents& sim, const Parameters& params, VtkTimeSeriesCollection* pvd);
   static void outputResults(const SimulationComponents& sim, const Parameters& params, int step,
-                            double time, VtkTimeSeriesCollection* pvd);
+                            double time, VtkTimeSeriesCollection* pvd,
+                            std::optional<svmp::FE::timestepping::SchemeKind> transient_scheme = std::nullopt);
 };
 
 } // namespace core

@@ -69,6 +69,16 @@ endif()
 # count, see Code/CMake/SvmpTestEntries.cmake.
 svmp_add_gtest(Application_Tests TARGET test_application COST 240)
 
+find_package(Python3 COMPONENTS Interpreter QUIET)
+set(_ale_test_mesh "${CMAKE_SOURCE_DIR}/../tests/cases/stokes/manufactured_solution/P1P1/mesh/N004")
+if(Python3_Interpreter_FOUND AND TARGET ${SV_MULTIPHYSICS_EXE} AND
+   FE_WITH_MESH AND MESH_ENABLE_VTK AND FE_ENABLE_EIGEN AND EXISTS "${_ale_test_mesh}")
+  add_test(NAME Application_ALEMeshVelocityOutput
+    COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/Support/ale_mesh_velocity_output.py
+            --solver $<TARGET_FILE:${SV_MULTIPHYSICS_EXE}> --mesh ${_ale_test_mesh})
+  set_tests_properties(Application_ALEMeshVelocityOutput PROPERTIES TIMEOUT 120)
+endif()
+
 if(FE_ENABLE_MPI AND MPIEXEC_EXECUTABLE)
   add_executable(test_application_mpi
     Unit/test_ApplicationDriverLevelSetWorkflowsMPI.cpp
@@ -189,7 +199,6 @@ if(FE_ENABLE_MPI AND MPIEXEC_EXECUTABLE)
   # static-drop, capillary-wave and sessile-drop decks, a few steps of
   # svmultiphysics on 1, 2 and 4 ranks, fields and Newton counts compared
   # with the 1-rank run.  Exit code 77 (no numpy for the generators) is a skip.
-  find_package(Python3 COMPONENTS Interpreter QUIET)
   set(_free_surface_benchmarks
     "${CMAKE_SOURCE_DIR}/../tests/cases/fluid/free_surface_benchmarks")
   if(Python3_Interpreter_FOUND AND TARGET ${SV_MULTIPHYSICS_EXE} AND

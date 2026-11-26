@@ -10007,7 +10007,7 @@ void ApplicationDriver::runTransient(SimulationComponents& sim, const Parameters
         h.time(),
         initial_wet_volume_by_key);
     auto vtk_start = std::chrono::steady_clock::now();
-    outputResults(sim, params, h.stepIndex(), h.time(), pvd);
+    outputResults(sim, params, h.stepIndex(), h.time(), pvd, opts.scheme);
     vtk_total_time += std::chrono::duration<double>(std::chrono::steady_clock::now() - vtk_start).count();
   };
   callbacks.on_step_rejected = [&](const svmp::FE::timestepping::TimeHistory& h,
@@ -10170,7 +10170,8 @@ void ApplicationDriver::runTransient(SimulationComponents& sim, const Parameters
 }
 
 void ApplicationDriver::outputResults(const SimulationComponents& sim, const Parameters& params, int step, double time,
-                                      VtkTimeSeriesCollection* pvd)
+                                      VtkTimeSeriesCollection* pvd,
+                                      std::optional<svmp::FE::timestepping::SchemeKind> transient_scheme)
 {
   if (!params.general_simulation_parameters.save_results_to_vtk_format.defined() ||
       !params.general_simulation_parameters.save_results_to_vtk_format.value()) {
@@ -10271,29 +10272,26 @@ void ApplicationDriver::outputResults(const SimulationComponents& sim, const Par
   std::vector<std::pair<std::string, bool>> field_fast_paths;
   field_timings.reserve(output_fields.size());
   field_fast_paths.reserve(output_fields.size());
-  for (const auto field_id : output_fields) {
+  const auto write_point_field = [&](svmp::FE::FieldId source_field, const std::string& output_name,
+                                     const svmp::FE::systems::SystemStateView& coefficients) {
     const auto field_start = Clock::now();
-    const auto& rec = sim.fe_system->fieldRecord(field_id);
-    if (rec.scope == svmp::FE::systems::FieldScope::Global) {
-      // A global field (a multiplier) has no mesh entity and no point values.
-      continue;
-    }
+    const auto& rec = sim.fe_system->fieldRecord(source_field);
     const auto ncomp = static_cast<std::size_t>(std::max(1, rec.components));
 
     if (oopTraceEnabled()) {
-      oopCout() << "[svMultiPhysics::Application] VTK output: evaluating field '" << rec.name
+      oopCout() << "[svMultiPhysics::Application] VTK output: evaluating field '" << output_name
                 << "' components=" << ncomp << std::endl;
     }
 
-    auto h = ensure_point_field(rec.name, ncomp);
+    auto h = ensure_point_field(output_name, ncomp);
     auto* data = static_cast<double*>(mesh.field_data(h));
-    if (!data) {
-      throw std::runtime_error("[svMultiPhysics::Application] Failed to allocate VTK field '" + rec.name + "'.");
+    if (!data && mesh.n_vertices() != 0u) {
+      throw std::runtime_error("[svMultiPhysics::Application] Failed to allocate VTK field '" + output_name + "'.");
     }
 
     const auto nv = static_cast<svmp::FE::GlobalIndex>(mesh.n_vertices());
-    const bool fast = sim.fe_system->evaluateFieldAtVertices(
-        field_id, state, nv, std::span<double>(data, static_cast<std::size_t>(nv) * ncomp));
+    const auto values = std::span<double>(data, static_cast<std::size_t>(nv) * ncomp);
+    const bool fast = sim.fe_system->evaluateFieldAtVertices(source_field, coefficients, nv, values);
 
     if (!fast) {
       // Fallback: per-vertex spatial search + basis evaluation
@@ -10304,9 +10302,9 @@ void ApplicationDriver::outputResults(const SimulationComponents& sim, const Par
                                                                              static_cast<std::size_t>(d)]);
         }
 
-        const auto val = sim.fe_system->evaluateFieldAtPoint(field_id, state, p);
+        const auto val = sim.fe_system->evaluateFieldAtPoint(source_field, coefficients, p);
         if (!val) {
-          throw std::runtime_error("[svMultiPhysics::Application] Failed to evaluate field '" + rec.name +
+          throw std::runtime_error("[svMultiPhysics::Application] Failed to evaluate field '" + output_name +
                                    "' at a mesh vertex for VTK output.");
         }
 
@@ -10317,12 +10315,53 @@ void ApplicationDriver::outputResults(const SimulationComponents& sim, const Par
     }
 
     if (oopTraceEnabled()) {
-      oopCout() << "[svMultiPhysics::Application] VTK output: field '" << rec.name << "' done." << std::endl;
+      oopCout() << "[svMultiPhysics::Application] VTK output: field '" << output_name << "' done." << std::endl;
     }
     const double field_seconds = secondsSince(field_start);
     primary_field_seconds += field_seconds;
-    field_timings.emplace_back(rec.name, field_seconds);
-    field_fast_paths.emplace_back(rec.name, fast);
+    field_timings.emplace_back(output_name, field_seconds);
+    field_fast_paths.emplace_back(output_name, fast);
+    return values;
+  };
+
+  for (const auto field_id : output_fields) {
+    const auto& rec = sim.fe_system->fieldRecord(field_id);
+    if (rec.scope != svmp::FE::systems::FieldScope::Global) {
+      write_point_field(field_id, rec.name, state);
+    }
+  }
+
+  // Coupled ALE registers velocity as a time derivative of its displacement.
+  // The PVD timestamp and displacement are both at the accepted endpoint.
+  if (const auto velocity = sim.fe_system->meshMotionField(svmp::FE::systems::MeshMotionFieldRole::Velocity)) {
+    const auto& rec = sim.fe_system->fieldRecord(*velocity);
+    if (rec.source_kind == svmp::FE::systems::FieldSourceKind::DerivedFromUnknown) {
+      const auto source = rec.derived.source_field;
+      if (!transient_scheme) {
+        const auto components = static_cast<std::size_t>(rec.components);
+        const auto h = ensure_point_field(rec.name, components);
+        std::fill_n(static_cast<double*>(mesh.field_data(h)), mesh.n_vertices() * components, 0.0);
+      } else {
+        using svmp::FE::timestepping::SchemeKind;
+        const bool backward_euler = *transient_scheme == SchemeKind::BackwardEuler;
+        // acceptStep has already shifted u_{n+1} into uPrev and u_n into uPrev2.
+        auto& history = *sim.time_history;
+        auto& coefficients = backward_euler ? history.uPrev2() : history.uDot();
+        coefficients.updateGhosts();
+        auto rate_state = state;
+        rate_state.u_vector = &coefficients;
+        rate_state.u = coefficients.localSpan();
+        const auto values = write_point_field(source, rec.name, rate_state);
+        if (backward_euler) {
+          const auto& displacement = sim.fe_system->fieldRecord(source);
+          const auto h = mesh.field_handle(svmp::EntityKind::Vertex, displacement.name);
+          const auto* current = static_cast<const double*>(mesh.field_data(h));
+          for (std::size_t i = 0; i < values.size(); ++i) {
+            values[i] = (current[i] - values[i]) / history.dtPrev();
+          }
+        }
+      }
+    }
   }
 
   const auto derived = sim.fe_system->derivedResults();
