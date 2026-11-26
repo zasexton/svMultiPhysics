@@ -869,7 +869,7 @@ TEST(IncompressibleTwoFluidInterface, PhaseBundlesPreserveEveryOrderedChannel) {
             append(expected.consistency, measure(w * inner(traction, e.v_positive)));
             append(expected.consistency, measure(w * inner(pressure_traction, e.v_positive)));
             const auto test_traction = (FormExpr::constant(2.0) * mu * sym(grad(tests[phase]))) * n;
-            const auto pressure_test_traction = (-pressure_tests[phase] * identity) * n;
+            const auto pressure_test_traction = (pressure_tests[phase] * identity) * n;
             append(expected.adjoint, measure(-w * inner(test_traction, e.u_negative)));
             append(expected.adjoint, measure(-w * inner(pressure_test_traction, e.u_negative)));
             append(expected.adjoint, measure(w * inner(test_traction, e.u_positive)));
@@ -1286,8 +1286,9 @@ TEST(IncompressibleTwoFluidDiagnostics,
   EXPECT_NEAR(state.nitsche_consistency_work,
               FE::Real{-7.0} / FE::Real{6.0},
               tolerance);
+  // The adjoint reverses the pressure part {p}_w [u].n = 3 * 1 * 0.5.
   EXPECT_NEAR(state.nitsche_adjoint_work,
-              state.nitsche_consistency_work,
+              FE::Real{-25.0} / FE::Real{6.0},
               tolerance);
   EXPECT_NEAR(state.nitsche_penalty_work, FE::Real{132.0}, tolerance);
 
@@ -1745,6 +1746,91 @@ TEST(IncompressibleTwoFluidInterface,
     maximum_entry = std::max(maximum_entry, std::abs(value));
   }
   EXPECT_GT(maximum_entry, FE::Real{0.0});
+}
+
+TEST(IncompressibleTwoFluidInterface,
+     UnitPressureTestOfContinuityLeavesOnlyTheExteriorFlux) {
+  // The unit triangle is split at x = 1/2 with u- = (x, 0) and u+ = (x - 1, 0).
+  // Both phases have unit divergence (total 1/2), [u].n = 1 on the interface
+  // of length 1/2, and the exterior flux vanishes. Testing continuity with
+  // q = 1 in both phases must return that exterior flux, so the interface
+  // term has to be -<{q}_w, [u].n>.
+  TwoFluidRegistrationFixture fixture;
+  ns::IncompressibleTwoFluidOptions options;
+  options.interface_marker = 71;
+  options.surface_tension = FE::Real{0.0};
+  options.include_transient_interface_penalty = false;
+  options.enable_convection = false;
+  auto module = fixture.makeModule(std::move(options));
+  module.registerOn(fixture.system);
+
+  auto context = std::make_shared<FE::assembly::CutIntegrationContext>();
+  context->addFreeSurfaceGeometrySnapshot(
+      makeTwoFluidDiagnosticSnapshot(*fixture.mesh, 71));
+  FE::assembly::CutFacetSetHandle facet_set;
+  facet_set.marker = 71;
+  facet_set.name = "generated-cut-adjacent-facets";
+  context->addFacetSetHandle(std::move(facet_set));
+  fixture.system.setCutIntegrationContext(context);
+  // Keep every pressure row, including the one the shared gauge pins.
+  FE::systems::SetupOptions setup;
+  setup.use_constraints_in_assembly = false;
+  fixture.system.setup(setup);
+
+  const auto field = [&](const char* name) {
+    const auto id = fixture.system.findFieldByName(name);
+    EXPECT_NE(id, FE::INVALID_FIELD_ID);
+    return id;
+  };
+  const auto u_negative = field("u_negative");
+  const auto u_positive = field("u_positive");
+  const auto dofs = fixture.system.dofHandler().getNumDofs();
+  std::vector<FE::Real> solution(
+      static_cast<std::size_t>(dofs), FE::Real{0.0});
+  for (FE::GlobalIndex vertex = 0; vertex < 3; ++vertex) {
+    const FE::Real x = fixture.mesh->getNodeCoordinates(vertex)[0];
+    for (const auto& [velocity, shift] :
+         {std::pair{u_negative, FE::Real{0.0}},
+          std::pair{u_positive, FE::Real{1.0}}}) {
+      const auto vertex_dofs = fixture.system.fieldDofHandler(velocity)
+                                   .getEntityDofMap()
+                                   ->getVertexDofs(vertex);
+      ASSERT_EQ(vertex_dofs.size(), 2u);
+      solution[static_cast<std::size_t>(
+          fixture.system.fieldDofOffset(velocity) + vertex_dofs[0])] =
+          x - shift;
+    }
+  }
+  FE::systems::SystemStateView state;
+  state.dt = FE::Real{0.1};
+  state.effective_dt = state.dt;
+  state.u = std::span<const FE::Real>(solution);
+  state.u_prev = std::span<const FE::Real>(solution);
+  const FE::systems::BackwardDifferenceIntegrator integrator;
+  const auto time_context =
+      integrator.buildContext(/*max_time_derivative_order=*/1, state);
+  state.time_integration = &time_context;
+
+  FE::assembly::DenseVectorView residual(dofs);
+  residual.zero();
+  FE::systems::AssemblyRequest request;
+  request.op = "equations";
+  request.want_vector = true;
+  const auto result =
+      fixture.system.assemble(request, state, nullptr, &residual);
+  ASSERT_TRUE(result.success) << result.error_message;
+
+  FE::Real unit_pressure_work{0.0};
+  for (const auto* name : {"p_negative", "p_positive"}) {
+    const auto pressure = field(name);
+    const auto offset = fixture.system.fieldDofOffset(pressure);
+    const auto count = fixture.system.fieldDofHandler(pressure).getNumDofs();
+    ASSERT_EQ(count, 3);
+    for (FE::GlobalIndex local = 0; local < count; ++local) {
+      unit_pressure_work += residual.getVectorEntry(offset + local);
+    }
+  }
+  EXPECT_NEAR(unit_pressure_work, FE::Real{0.0}, FE::Real{1.0e-13});
 }
 
 TEST(IncompressibleTwoFluidModule,

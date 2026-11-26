@@ -529,6 +529,13 @@ evaluateLocalIncompressibleTwoFluidDiagnostics(
 
             const Real pressure_jump = p_negative - p_positive;
             const Real consistency_density = -dot(weighted_traction, jump);
+            // The adjoint tests with sigma(v,-q): its pressure part,
+            // -{p}_w [u].n, has the opposite sign of the consistency term.
+            const Real weighted_pressure =
+                weights[0] * p_negative + weights[1] * p_positive;
+            const Real adjoint_density =
+                consistency_density -
+                Real{2.0} * weighted_pressure * normal_jump;
             ++state.owned_interface_quadrature_point_count;
             state.interface_measure += weight;
             for (std::size_t component = 0u; component < 3u; ++component) {
@@ -571,7 +578,7 @@ evaluateLocalIncompressibleTwoFluidDiagnostics(
                 parameters.surface_tension *
                 projector_gradient_contraction * weight;
             state.nitsche_consistency_work += consistency_density * weight;
-            state.nitsche_adjoint_work += consistency_density * weight;
+            state.nitsche_adjoint_work += adjoint_density * weight;
             state.nitsche_penalty_work +=
                 penalty_scale * jump_squared * weight;
 

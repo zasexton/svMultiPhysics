@@ -1632,12 +1632,14 @@ struct StablePositivePair {
   const auto positive_pressure_traction = (-positive_pressure * identity) * n;
   const auto negative_viscous_test_traction =
       (two * mu_negative * symgrad(negative_velocity_test)) * n;
+  // The continuity block is the negative transpose of the momentum pressure
+  // block, so the pressure test enters the adjoint traction as sigma(v,-q).
   const auto negative_pressure_test_traction =
-      (-negative_pressure_test * identity) * n;
+      (negative_pressure_test * identity) * n;
   const auto positive_viscous_test_traction =
       (two * mu_positive * symgrad(positive_velocity_test)) * n;
   const auto positive_pressure_test_traction =
-      (-positive_pressure_test * identity) * n;
+      (positive_pressure_test * identity) * n;
 
   const auto negative_weight = FormExpr::constant(weights.negative_traction);
   const auto positive_weight = FormExpr::constant(weights.positive_traction);
@@ -1682,7 +1684,9 @@ struct StablePositivePair {
                                                positive_velocity_test))
                           .dI(parameters.interface_marker);
 
-  // The adjoint channel is the expanded -<{sigma(v,q)n}_w, [u]> term.
+  // The adjoint channel is the expanded -<{sigma(v,-q)n}_w, [u]> term:
+  // symmetric in the viscous part and -<{q}_w, [u].n> in continuity, matching
+  // the bulk +(q, div u) against -(p, div v) in momentum.
   forms.adjoint = (-negative_weight *
                    inner(negative_viscous_test_traction, negative_velocity))
                       .dI(parameters.interface_marker) +

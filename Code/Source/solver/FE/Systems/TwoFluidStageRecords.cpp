@@ -1376,9 +1376,6 @@ void TwoFluidStageRecords::stageTwoFluidAcceptedStageDiagnostics(
                         state.mean_pressure_jump,
                         state.pressure_jump_integral /
                             state.interface_measure) ||
-                    !near(
-                        state.nitsche_consistency_work,
-                        state.nitsche_adjoint_work) ||
                     state.transient_penalty_effective_dt.has_value() !=
                         parameters.include_transient_penalty ||
                     (state.transient_penalty_effective_dt.has_value() &&
