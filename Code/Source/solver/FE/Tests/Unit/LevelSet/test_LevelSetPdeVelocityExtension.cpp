@@ -581,7 +581,11 @@ TEST(LevelSetPdeVelocityExtension, KnownVerticesKeepTheSourceVelocity)
   }
 }
 
-TEST(LevelSetPdeVelocityExtension, WallsZeroOnlyTheConstrainedComponent)
+// A homogeneous wall holds the constrained component of a dry vertex only
+// against inflow: the flow u_x > 0 enters through the left wall, where the
+// dry vertices are held at w_x = 0, and leaves through the right wall, where
+// they keep the extension; the tangential component stays free.
+TEST(LevelSetPdeVelocityExtension, WallsHoldOnlyTheConstrainedComponentAgainstInflow)
 {
   const auto mesh = makeSquareTriangleMesh(8);
   const auto s = makeSetup(
@@ -601,15 +605,22 @@ TEST(LevelSetPdeVelocityExtension, WallsZeroOnlyTheConstrainedComponent)
     EXPECT_GT(report.wall_fixed[0], 0u);
     EXPECT_EQ(report.wall_fixed[1], 0u);  // the bottom wall is wet
     bool saw_tangential = false;
+    std::size_t outflow_vertices = 0u;
     for (std::size_t v = 0; v < mesh->n_vertices(); ++v) {
       const auto p = vertexPoint(*mesh, v);
-      const bool side = p[0] < 1e-12 || p[0] > 1 - 1e-12;
-      if (side && s.known[v] == 0u) {
-        EXPECT_EQ(w[2 * v], 0.0);
+      if (s.known[v] != 0u) {
+        continue;
+      }
+      if (p[0] < 1e-12) {
+        EXPECT_EQ(w[2 * v], 0.0) << "inflow wall vertex " << v;
         saw_tangential = saw_tangential || std::abs(w[2 * v + 1]) > 0.5;
+      } else if (p[0] > 1 - 1e-12) {
+        EXPECT_GT(w[2 * v], 0.0) << "outflow wall vertex " << v;
+        ++outflow_vertices;
       }
     }
     EXPECT_TRUE(saw_tangential);
+    EXPECT_GT(outflow_vertices, 0u);
     if (op == PdeVelocityExtensionOperator::LeastSquaresNormal) {
       // n = e_y: the tangential (y) component is carried up the wall unchanged.
       for (std::size_t v = 0; v < mesh->n_vertices(); ++v) {
@@ -618,6 +629,47 @@ TEST(LevelSetPdeVelocityExtension, WallsZeroOnlyTheConstrainedComponent)
           EXPECT_NEAR(w[2 * v + 1], 1.0, 1e-11);
         }
       }
+    }
+  }
+}
+
+// A liquid translating toward a slip wall: the dry vertices of the wall keep
+// the approach velocity w = (U, 0) (free-surface audit A27; holding w_x = 0
+// there slowed the front), and a liquid receding from the wall, which would
+// draw the extension in through it, holds them at w_x = 0.
+TEST(LevelSetPdeVelocityExtension, DryWallVerticesKeepTheApproachAndHoldOnlyInflow)
+{
+  const auto mesh = makeSquareTriangleMesh(8);
+  const std::vector<WallVelocityExtensionConstraint> walls{
+      {.boundary_label = kSideWall, .constrained_components = {true, false, false}},
+      {.boundary_label = kBottomWall, .constrained_components = {false, true, false}}};
+  for (const double U : {1.0, -1.0}) {
+    SCOPED_TRACE(U > 0.0 ? "approaching" : "receding");
+    const auto s = makeSetup(
+        *mesh, [](double x, double) { return x - 0.6; },
+        [U](double, double) { return std::array<double, 2>{U, 0.0}; });
+    for (const auto op : {PdeVelocityExtensionOperator::Harmonic,
+                          PdeVelocityExtensionOperator::LeastSquaresNormal}) {
+      std::vector<double> w;
+      std::vector<svmp::FE::level_set::VelocityExtensionConstraintRow> rows;
+      PdeVelocityExtensionOptions options;
+      options.op = op;
+      const auto report = extendVelocityByPde(
+          *mesh, svmp::MeshComm::self(), s.phi, s.source, 2u, s.known, 2u,
+          std::span<const WallVelocityExtensionConstraint>(walls), options, w, &rows);
+      EXPECT_LT(maxRowResidual(rows, w, s.source, 2u), 1e-12);
+      std::size_t right_wall = 0u;
+      for (std::size_t v = 0; v < mesh->n_vertices(); ++v) {
+        const auto p = vertexPoint(*mesh, v);
+        if (s.known[v] != 0u || p[0] < 1 - 1e-12) {
+          continue;
+        }
+        ++right_wall;
+        EXPECT_NEAR(w[2 * v], U > 0.0 ? U : 0.0, 1e-12) << "dry right-wall vertex " << v;
+        EXPECT_NEAR(w[2 * v + 1], 0.0, 1e-12) << "dry right-wall vertex " << v;
+      }
+      EXPECT_GT(right_wall, 0u);
+      EXPECT_EQ(report.wall_fixed[0], U > 0.0 ? 0u : right_wall);
     }
   }
 }
@@ -706,16 +758,24 @@ TEST(LevelSetPdeVelocityExtension, HarmonicReproducesLinearFieldWithPrescribedWa
 }
 
 // A prescribed wall velocity that is zero gives the homogeneous wall's
-// extension bit for bit; only the wall rows differ (w_c = u_c instead of
-// w_c = 0).
+// extension bit for bit where the homogeneous wall holds every dry vertex
+// (the flow would enter through both side walls); only the wall rows differ
+// (w_c = u_c instead of w_c = 0).
 TEST(LevelSetPdeVelocityExtension, ZeroPrescribedWallMatchesTheHomogeneousWall)
 {
   const auto mesh = makeSquareTriangleMesh(8);
-  const auto s = makeSetup(
+  auto s = makeSetup(
       *mesh, [](double, double y) { return y - 0.43; },
       [](double x, double y) {
-        return std::array<double, 2>{x * (1 - x) * (1 + y), 1.0 + 0.3 * x};
+        return std::array<double, 2>{(0.5 - x) * (1 + y), 1.0 + 0.3 * x};
       });
+  // The source carries the zero prescribed value on the dry side walls.
+  for (std::size_t v = 0; v < mesh->n_vertices(); ++v) {
+    const auto p = vertexPoint(*mesh, v);
+    if (s.known[v] == 0u && (p[0] < 1e-12 || p[0] > 1 - 1e-12)) {
+      s.source[2 * v] = 0.0;
+    }
+  }
   for (const auto op : {PdeVelocityExtensionOperator::Harmonic,
                         PdeVelocityExtensionOperator::LeastSquaresNormal}) {
     SCOPED_TRACE(svmp::FE::level_set::pdeVelocityExtensionOperatorName(op));
@@ -1482,8 +1542,8 @@ TEST(LevelSetPdeVelocityExtensionHighOrderCells, HarmonicKeepsConstantsAndKnownV
 
 // The owner-local rows of a quadratic mesh: one per vertex (corner, mid-edge
 // and centre) and component, satisfied by the solved extension, with the
-// strong wall masks on the high-order wall nodes as well.
-TEST(LevelSetPdeVelocityExtensionHighOrderCells, AlgebraicRowsAreSatisfiedAndWallNodesAreMasked)
+// strong wall masks on the high-order wall nodes as well (against inflow).
+TEST(LevelSetPdeVelocityExtensionHighOrderCells, AlgebraicRowsAreSatisfiedAndInflowWallNodesAreMasked)
 {
   for (const auto family :
        {svmp::CellFamily::Quad, svmp::CellFamily::Triangle}) {
@@ -1536,21 +1596,31 @@ TEST(LevelSetPdeVelocityExtensionHighOrderCells, AlgebraicRowsAreSatisfiedAndWal
       EXPECT_LT(max_residual, 1e-11)
           << svmp::FE::level_set::pdeVelocityExtensionOperatorName(op);
 
-      // Dry vertices on the side walls, mid-edge nodes included, carry no
-      // normal velocity.
+      // Dry vertices on the left wall, mid-edge nodes included, where the
+      // flow (u_x > 0) would enter, carry no normal velocity; those of the
+      // right wall, where it leaves, keep it.
       std::size_t masked_mid_edge = 0u;
+      std::size_t outflow = 0u;
       for (std::size_t v = 0; v < mesh->n_vertices(); ++v) {
         const auto p = vertexPoint(*mesh, v);
-        if (s.known[v] != 0u ||
-            (std::abs(p[0]) > 1e-12 && std::abs(p[0] - 1.0) > 1e-12)) {
+        if (s.known[v] != 0u) {
           continue;
         }
-        EXPECT_EQ(w[2 * v], 0.0) << "dry side-wall vertex " << v;
+        if (std::abs(p[0] - 1.0) < 1e-12) {
+          EXPECT_GT(w[2 * v], 0.0) << "dry outflow-wall vertex " << v;
+          ++outflow;
+          continue;
+        }
+        if (std::abs(p[0]) > 1e-12) {
+          continue;
+        }
+        EXPECT_EQ(w[2 * v], 0.0) << "dry inflow-wall vertex " << v;
         const double steps = p[1] * 6.0;
         masked_mid_edge +=
             std::abs(steps - std::round(steps)) > 0.25 ? 1u : 0u;
       }
       EXPECT_GT(masked_mid_edge, 0u);
+      EXPECT_GT(outflow, 0u);
     }
   }
 }
@@ -2142,14 +2212,16 @@ const std::vector<WallVelocityExtensionConstraint>& cacheTestWalls()
 
 double wavyPhi(double x, double y) { return y - 0.41 - 0.05 * std::sin(5 * x); }
 
+// The flows of the cache tests leave through both side walls, so their
+// homogeneous walls hold no dry vertex and every call solves once.
 std::array<double, 2> firstVelocity(double x, double y)
 {
-  return {std::sin(2 * x) * std::cosh(y), std::cos(2 * x) * std::sinh(y)};
+  return {std::sin(2 * x - 1) * std::cosh(y), std::cos(2 * x - 1) * std::sinh(y)};
 }
 
 std::array<double, 2> secondVelocity(double x, double y)
 {
-  return {0.3 - 0.8 * x * y, 1.1 + 0.25 * std::cos(3 * x)};
+  return {(x - 0.5) * (1.0 + 0.8 * y), 1.1 + 0.25 * std::cos(3 * x)};
 }
 
 } // namespace
@@ -2204,7 +2276,7 @@ TEST(LevelSetPdeVelocityExtensionCache, RefactorsWhenTheKnownSetWallsOrMeshChang
   const auto base = makeSetup(*mesh, wavyPhi, firstVelocity);
   const auto& walls = cacheTestWalls();
   const auto op = PdeVelocityExtensionOperator::Harmonic;
-  PdeVelocityExtensionCache cache;
+  PdeVelocityExtensionCache cache(1u);   // each change evicts the previous entry
 
   const auto expect_miss_matching_reference =
       [&](const svmp::Mesh& m, const auto& s,

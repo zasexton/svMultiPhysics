@@ -29,11 +29,12 @@ namespace level_set {
 inline constexpr double kVelocityExtensionMaxWetToDryAmplification = 16.0;
 
 // The velocity components a strong Dirichlet condition constrains on one
-// wall.  On the dry vertices of the wall the extension keeps them as known
-// data: zero for a homogeneous condition (no penetration), and, for a wall
-// whose velocity is prescribed (any value: a moving wall, the exact velocity
-// of a manufactured solution), the source velocity, which carries the
-// prescribed value there.
+// wall.  On the dry vertices of the wall the extension holds them at zero
+// for a homogeneous condition where it would otherwise flow in through the
+// wall (extendVelocityByPde), and, for a wall whose velocity is prescribed
+// (any value: a moving wall, the exact velocity of a manufactured solution),
+// keeps them as the source velocity, which carries the prescribed value
+// there.
 struct WallVelocityExtensionConstraint {
   svmp::label_t boundary_label{svmp::INVALID_LABEL};
   std::array<bool, 3> constrained_components{false, false, false};

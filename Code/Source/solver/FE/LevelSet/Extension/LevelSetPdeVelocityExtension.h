@@ -23,10 +23,14 @@
 // D is the union of the cells that contain a dry vertex.  The outer boundary
 // of D carries the natural (zero-flux) condition.  Velocity components that a
 // strong wall Dirichlet condition constrains are known data on dry wall
-// vertices: zero for a homogeneous condition (no penetration), the source
-// velocity for a wall whose velocity is prescribed (any value; the source
-// carries the prescribed value there).  The other components keep the
-// natural condition.  Components are independent because every supported
+// vertices for a wall whose velocity is prescribed (any value; the source
+// carries the prescribed value there).  A homogeneous condition holds them
+// at zero only against inflow: where the solve without them gives
+// w . n < 0 through a wall face of the vertex, and the solve is repeated
+// until that set no longer grows.  The level-set equation needs data only on
+// its inflow boundary, and holding the normal velocity of dry wall vertices
+// would slow a front that approaches the wall.  The other components keep
+// the natural condition.  Components are independent because every supported
 // wall mask is axis-aligned.
 //
 // Cells: every first-order Lagrange cell (Triangle3 and Quad4 in 2D; Tetra4,
@@ -158,13 +162,14 @@ struct PdeVelocityExtensionReport {
   double max_known_speed{0.0};
   double max_extended_speed{0.0};
   double max_relative_residual{0.0};
-  // Largest |w| of a component fixed by a homogeneous wall.
+  // Largest |w| of a component held by a homogeneous wall.
   double max_wall_normal_velocity{0.0};
   // Largest speed of the prescribed wall components of the dry vertices
   // (zero without a wall with a prescribed velocity).  max_known_speed
   // includes it.
   double max_prescribed_wall_speed{0.0};
-  // True when the call reused the cached dry-region factorization (and rows).
+  // True when every solve of the call reused a cached dry-region
+  // factorization (and rows).
   bool reused_factorization{false};
   // True when the components were factorized and solved on one rank each.
   bool distributed_solves{false};
@@ -220,7 +225,9 @@ struct PdeVelocityExtensionMeshRevisions {
 //
 // The cache keeps several entries (most recently used first): the known set
 // of successive outer passes can return to an earlier state, whose entry is
-// then reused.  An entry is reused only if it matches on every rank; entries
+// then reused, and a call whose homogeneous walls hold dry vertices against
+// inflow solves twice (without and with the held components), so the
+// replicated default keeps both systems.  An entry is reused only if it matches on every rank; entries
 // are added and evicted by collective decisions, so every rank holds the
 // same entries.  With distributed component solves an entry keeps the matrix
 // and factorization of a component only on the rank that solves it, so
@@ -233,7 +240,7 @@ struct PdeVelocityExtensionMeshRevisions {
 class PdeVelocityExtensionCache {
 public:
   static constexpr std::size_t kMaxEntries = 8u;
-  static constexpr std::size_t kDefaultEntries = 1u;
+  static constexpr std::size_t kDefaultEntries = 2u;
   static constexpr std::size_t kDefaultDistributedEntries = 3u;
 
   struct Statistics {
@@ -291,7 +298,7 @@ private:
 //                          over the vertices j sharing a dry-region cell
 //                          with i (extension dependencies),
 //   fixed by a wall with a prescribed velocity:  w_c = u_c,
-//   fixed by a homogeneous wall or outside the band:  w_c = 0.
+//   held by a homogeneous wall (inflow) or outside the band:  w_c = 0.
 // Together with the physical velocity these rows determine exactly the
 // extension returned in `extended`.
 // cache (optional): reuse of the dry-region factorization and rows between

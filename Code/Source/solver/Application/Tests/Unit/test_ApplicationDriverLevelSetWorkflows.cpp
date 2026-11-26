@@ -9786,7 +9786,7 @@ TEST(ApplicationDriverLevelSetWorkflows,
 }
 
 TEST(ApplicationDriverLevelSetWorkflows,
-     VelocityExtensionMatchesGeneratedInterfaceTraceAndZerosOuterDryWalls)
+     VelocityExtensionMatchesGeneratedInterfaceTraceAndHoldsOuterDryWallsAgainstInflow)
 {
 #if !(defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH)
   GTEST_SKIP() << "Requires FE built with Mesh integration.";
@@ -9981,20 +9981,30 @@ TEST(ApplicationDriverLevelSetWorkflows,
   }
   EXPECT_GT(checked_interface_points, 0u);
 
-  // Outside the cut-cell trace support, the strong wall masks hold: vertex
-  // 3 is a dry outer corner on the labelled wall, so the extension is zero
-  // there.
-  const auto outer_dry_wall_vertex = std::size_t{3};
-  ASSERT_GT(phi_vertex_values[outer_dry_wall_vertex], 0.0);
-  const auto outer_point =
-      workflowVertexPoint(*mesh, outer_dry_wall_vertex);
-  const auto outer_value = sim.fe_system->evaluateFieldAtPoint(
-      target_velocity,
-      svmp::FE::systems::SystemStateView{},
-      outer_point);
-  ASSERT_TRUE(outer_value.has_value());
-  EXPECT_NEAR((*outer_value)[0], 0.0, 1.0e-12);
-  EXPECT_NEAR((*outer_value)[1], 0.0, 1.0e-12);
+  // Outside the cut-cell trace support, the (no-slip) wall holds the dry
+  // vertices only against inflow: no extension velocity enters through the
+  // floor (y = 0), the lid (y = 1) or the end wall (x = 3), and the dry outer
+  // corner 3 keeps the outflow through the end wall instead of being zeroed
+  // (free-surface audit A27).
+  const auto extension_at = [&](std::size_t vertex) {
+    EXPECT_GT(phi_vertex_values[vertex], 0.0);
+    const auto value = sim.fe_system->evaluateFieldAtPoint(
+        target_velocity,
+        svmp::FE::systems::SystemStateView{},
+        workflowVertexPoint(*mesh, vertex));
+    EXPECT_TRUE(value.has_value());
+    return value.value_or(std::array<svmp::FE::Real, 3>{});
+  };
+  for (const auto floor_vertex : {std::size_t{2}, std::size_t{3}}) {
+    EXPECT_LE(extension_at(floor_vertex)[1], 1.0e-12) << "dry floor vertex " << floor_vertex;
+  }
+  for (const auto lid_vertex : {std::size_t{6}, std::size_t{7}}) {
+    EXPECT_GE(extension_at(lid_vertex)[1], -1.0e-12) << "dry lid vertex " << lid_vertex;
+  }
+  for (const auto end_vertex : {std::size_t{3}, std::size_t{7}}) {
+    EXPECT_GE(extension_at(end_vertex)[0], -1.0e-12) << "dry end-wall vertex " << end_vertex;
+  }
+  EXPECT_GT(extension_at(3)[0], 1.0);
 #endif
 }
 

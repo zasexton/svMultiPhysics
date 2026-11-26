@@ -1443,7 +1443,12 @@ std::uint64_t communicatorCombinedRevision(std::uint64_t local_key,
   return hash == 0u ? 1u : hash;
 }
 
-PdeVelocityExtensionReport extendVelocityByPde(
+namespace {
+
+/// One solve of the extension in which a homogeneous wall holds component c
+/// of a dry vertex v only where held_walls[3 v + c] is set (a prescribed
+/// wall always holds its components).
+PdeVelocityExtensionReport extendVelocityByPdePass(
     const svmp::Mesh& mesh,
     const svmp::MeshComm& comm,
     std::span<const double> level_set,
@@ -1456,7 +1461,8 @@ PdeVelocityExtensionReport extendVelocityByPde(
     std::vector<double>& extended,
     std::vector<svmp::FE::level_set::VelocityExtensionConstraintRow>* rows,
     PdeVelocityExtensionCache* cache,
-    const PdeVelocityExtensionMeshRevisions& revisions)
+    const PdeVelocityExtensionMeshRevisions& revisions,
+    std::span<const std::uint8_t> held_walls)
 {
   CacheFailureGuard cache_guard(cache);
   const auto call_start = std::chrono::steady_clock::now();
@@ -1622,6 +1628,15 @@ PdeVelocityExtensionReport extendVelocityByPde(
   const auto prescribed = [&](std::size_t c, std::size_t v) {
     return prescribed_walls && prescribed_mask[c][v] != 0u;
   };
+  // On the dry vertices, a homogeneous wall holds only the components the
+  // inflow test selected.
+  for (std::size_t c = 0; c < 3u; ++c) {
+    for (std::size_t v = 0; v < n_vertices; ++v) {
+      if (domain[v] != 0u && wall_mask[c][v] != 0u && !prescribed(c, v) && held_walls[3u * v + c] == 0u) {
+        wall_mask[c][v] = 0u;
+      }
+    }
+  }
 
   // ---- local records -------------------------------------------------------
   std::vector<CellRecord> local_cells;
@@ -2735,10 +2750,11 @@ PdeVelocityExtensionReport extendVelocityByPde(
     std::vector<double> reference_extended;
     std::vector<svmp::FE::level_set::VelocityExtensionConstraintRow>
         reference_rows;
-    const auto reference = extendVelocityByPde(
+    const auto reference = extendVelocityByPdePass(
         mesh, comm, level_set, source, source_components, known,
         target_components, walls, options, reference_extended,
-        rows != nullptr ? &reference_rows : nullptr, nullptr, revisions);
+        rows != nullptr ? &reference_rows : nullptr, nullptr, revisions,
+        held_walls);
     std::size_t mismatches = 0u;
     const bool round_off =
         options.factorization == PdeVelocityExtensionFactorization::Mumps;
@@ -2770,6 +2786,122 @@ PdeVelocityExtensionReport extendVelocityByPde(
   }
   cache_guard.dismiss();
   return report;
+}
+
+} // namespace
+
+PdeVelocityExtensionReport extendVelocityByPde(
+    const svmp::Mesh& mesh,
+    const svmp::MeshComm& comm,
+    std::span<const double> level_set,
+    std::span<const double> source,
+    std::size_t source_components,
+    std::span<const std::uint8_t> known,
+    std::size_t target_components,
+    std::span<const WallVelocityExtensionConstraint> walls,
+    const PdeVelocityExtensionOptions& options,
+    std::vector<double>& extended,
+    std::vector<svmp::FE::level_set::VelocityExtensionConstraintRow>* rows,
+    PdeVelocityExtensionCache* cache,
+    const PdeVelocityExtensionMeshRevisions& revisions)
+{
+  // A dry vertex of a homogeneous wall is held (u_c = 0) only against inflow
+  // (u . n < 0 through one of its wall faces): the level-set equation needs
+  // data only on its inflow boundary, and holding the normal velocity of dry
+  // wall vertices would slow a front that approaches the wall.  The held set
+  // grows from empty, one solve per change, and is the same on every rank.
+  const auto n_vertices = mesh.n_vertices();
+  std::vector<std::uint8_t> held(3u * n_vertices, 0u);
+  const auto pass = [&] {
+    return extendVelocityByPdePass(mesh, comm, level_set, source, source_components, known, target_components,
+                                   walls, options, extended, rows, cache, revisions, held);
+  };
+  if (!options.enforce_wall_impermeability ||
+      std::all_of(walls.begin(), walls.end(), [](const auto& wall) { return wall.prescribed_velocity; })) {
+    return pass();
+  }
+  const auto& local_mesh = mesh.local_mesh();
+  auto boundary_faces = svmp::DistributedTopology::global_boundary_faces(mesh, /*owned_only=*/false);
+  if (boundary_faces.empty()) {
+    boundary_faces = local_mesh.boundary_faces();
+  }
+  const auto vertex_gids = localVertexGids(mesh);
+  const auto dim = static_cast<std::size_t>(mesh.dim());
+  const auto copy_components = std::min({source_components, target_components, dim});
+  bool every_pass_reused = true;
+  while (true) {
+    auto report = pass();
+    every_pass_reused = every_pass_reused && report.reused_factorization;
+    const double tolerance = 64.0 * std::numeric_limits<double>::epsilon() *
+                             std::max(report.max_known_speed, report.max_extended_speed);
+    std::array<std::vector<std::uint8_t>, 3> inflow{std::vector<std::uint8_t>(n_vertices, 0u),
+                                                    std::vector<std::uint8_t>(n_vertices, 0u),
+                                                    std::vector<std::uint8_t>(n_vertices, 0u)};
+    for (const auto face : boundary_faces) {
+      if (face < 0 || face >= local_mesh.n_faces()) {
+        continue;
+      }
+      const auto label = local_mesh.boundary_label(face);
+      auto raw = local_mesh.face_normal(face);
+      const double norm = std::sqrt(raw[0] * raw[0] + raw[1] * raw[1] + raw[2] * raw[2]);
+      const auto& cells = local_mesh.face_cells(face);
+      const auto cell = cells[0] != svmp::INVALID_INDEX ? cells[0] : cells[1];
+      if (!(norm > 0.0) || !std::isfinite(norm) || cell == svmp::INVALID_INDEX) {
+        continue;
+      }
+      // Outward: away from the cell that holds the face.
+      const auto face_center = local_mesh.face_center(face);
+      const auto cell_center = local_mesh.cell_center(cell);
+      double outward = 0.0;
+      for (std::size_t c = 0; c < 3u; ++c) {
+        outward += raw[c] * (face_center[c] - cell_center[c]);
+      }
+      if (outward < 0.0) {
+        for (auto& c : raw) {
+          c = -c;
+        }
+      }
+      auto [fv, count] = local_mesh.face_vertices_span(face);
+      for (const auto& wall : walls) {
+        if (wall.prescribed_velocity ||
+            (wall.boundary_label != svmp::INVALID_LABEL && wall.boundary_label != label)) {
+          continue;
+        }
+        for (std::size_t i = 0; fv != nullptr && i < count; ++i) {
+          const auto v = static_cast<std::size_t>(fv[i]);
+          if (fv[i] < 0 || v >= n_vertices || known[v] != 0u) {
+            continue;
+          }
+          double un = 0.0;
+          for (std::size_t c = 0; c < copy_components; ++c) {
+            un += extended[v * target_components + c] * raw[c] / norm;
+          }
+          if (!(un < -tolerance)) {
+            continue;
+          }
+          for (std::size_t c = 0; c < dim; ++c) {
+            if (wall.constrained_components[c] && std::abs(raw[c]) > 1.0e-12 * norm) {
+              inflow[c][v] = 1u;
+            }
+          }
+        }
+      }
+    }
+    std::size_t added = 0u;
+    for (std::size_t c = 0; c < 3u; ++c) {
+      unionVertexMask(mesh, comm, vertex_gids, inflow[c]);
+      for (std::size_t v = 0; v < n_vertices; ++v) {
+        if (inflow[c][v] != 0u && held[3u * v + c] == 0u) {
+          held[3u * v + c] = 1u;
+          ++added;
+        }
+      }
+    }
+    if (globalMax(static_cast<double>(added), comm) == 0.0) {
+      report.reused_factorization = every_pass_reused;
+      return report;
+    }
+  }
 }
 
 } // namespace level_set
