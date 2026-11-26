@@ -41,6 +41,7 @@
 #include <iomanip>
 #include <iostream>
 #include <limits>
+#include <numeric>
 #include <set>
 #include <sstream>
 #include <stdexcept>
@@ -3131,10 +3132,15 @@ bool activeCutLevelSetFieldLayoutIsAvailable(
   return true;
 }
 
+// Hashes the FE-ordered values of the requested level-set fields.
+// read(offset, count) returns the solution entries [offset, offset + count)
+// in FE order.
+template <class ReadFieldValues>
 std::optional<std::uint64_t> hashActiveCutLevelSetFieldBytes(
     const svmp::FE::systems::FESystem& system,
     const std::vector<ActiveCutVolumeRequest>& requests,
-    std::span<const svmp::FE::Real> values)
+    std::size_t solution_size,
+    ReadFieldValues&& read)
 {
   std::set<std::string> field_names;
   for (const auto& request : requests) {
@@ -3155,7 +3161,7 @@ std::optional<std::uint64_t> hashActiveCutLevelSetFieldBytes(
     const auto n_field_dofs = system.fieldDofHandler(field).getNumDofs();
     if (field_offset < 0 ||
         n_field_dofs < 0 ||
-        static_cast<std::size_t>(field_offset + n_field_dofs) > values.size()) {
+        static_cast<std::size_t>(field_offset + n_field_dofs) > solution_size) {
       return std::nullopt;
     }
 
@@ -3163,9 +3169,8 @@ std::optional<std::uint64_t> hashActiveCutLevelSetFieldBytes(
     mixCutContextHash(h, static_cast<std::uint64_t>(field));
     mixCutContextHash(h, static_cast<std::uint64_t>(field_offset));
     mixCutContextHash(h, static_cast<std::uint64_t>(n_field_dofs));
-    for (svmp::FE::GlobalIndex local_dof = 0; local_dof < n_field_dofs; ++local_dof) {
-      const auto value =
-          values[static_cast<std::size_t>(field_offset + local_dof)];
+    const std::span<const svmp::FE::Real> values = read(field_offset, n_field_dofs);
+    for (const auto value : values) {
       const auto* bytes = reinterpret_cast<const unsigned char*>(&value);
       for (std::size_t i = 0; i < sizeof(value); ++i) {
         mixCutContextHash(h, static_cast<std::uint64_t>(bytes[i]));
@@ -3185,8 +3190,12 @@ std::optional<ActiveCutContextRefreshSignature> activeCutContextRefreshSignature
   if (!sim.fe_system || requests.empty()) {
     return std::nullopt;
   }
-  const auto solution_hash =
-      hashActiveCutLevelSetFieldBytes(*sim.fe_system, requests, fe_solution);
+  const auto solution_hash = hashActiveCutLevelSetFieldBytes(
+      *sim.fe_system, requests, fe_solution.size(),
+      [&](svmp::FE::GlobalIndex offset, svmp::FE::GlobalIndex count) {
+        return fe_solution.subspan(static_cast<std::size_t>(offset),
+                                   static_cast<std::size_t>(count));
+      });
   if (!solution_hash.has_value()) {
     return std::nullopt;
   }
@@ -3216,10 +3225,23 @@ std::optional<ActiveCutContextRefreshSignature> activeCutContextRefreshSignature
   }
   const auto solution_size = static_cast<std::size_t>(raw_solution_size);
   try {
-    const auto values = fe_solution.localSpan();
-    if (values.size() == solution_size) {
-      const auto solution_hash =
-          hashActiveCutLevelSetFieldBytes(*sim.fe_system, requests, values);
+    if (fe_solution.localSpan().size() == solution_size) {
+      // Every entry is local. Backend storage may be permuted and
+      // node-interleaved (FSILS), so the level-set values are read by FE
+      // index rather than at FE offsets of localSpan().
+      auto view = const_cast<svmp::FE::backends::GenericVector&>(fe_solution)
+                      .createGhostedReadView();
+      std::vector<svmp::FE::GlobalIndex> rows;
+      std::vector<svmp::FE::Real> field_values;
+      const auto solution_hash = hashActiveCutLevelSetFieldBytes(
+          *sim.fe_system, requests, solution_size,
+          [&](svmp::FE::GlobalIndex offset, svmp::FE::GlobalIndex count) {
+            rows.resize(static_cast<std::size_t>(count));
+            std::iota(rows.begin(), rows.end(), offset);
+            field_values.resize(rows.size());
+            view->getVectorEntries(rows, field_values);
+            return std::span<const svmp::FE::Real>(field_values);
+          });
       if (solution_hash.has_value()) {
         ActiveCutContextRefreshSignature signature;
         signature.request_policy_key =
@@ -3252,7 +3274,13 @@ std::optional<ActiveCutContextRefreshSignature> activeCutContextRefreshSignature
       ActiveCutContextRefreshSignature::SolutionSignatureKind::
           VectorValueRevision;
   signature.solution_size = solution_size;
-  signature.solution_hash = fe_solution.valueRevision();
+  // A revision counts the writes to one vector, so it identifies values
+  // only together with that vector.
+  std::uint64_t revision_key = kCutContextHashOffset;
+  mixCutContextHash(revision_key, static_cast<std::uint64_t>(
+                                      reinterpret_cast<std::uintptr_t>(&fe_solution)));
+  mixCutContextHash(revision_key, fe_solution.valueRevision());
+  signature.solution_hash = revision_key;
   return signature;
 }
 

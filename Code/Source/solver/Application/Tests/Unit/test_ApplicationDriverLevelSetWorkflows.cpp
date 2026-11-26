@@ -13983,6 +13983,108 @@ TEST_F(ApplicationDriverConservativePhaseCandidatesTest,
 }
 
 TEST_F(ApplicationDriverConservativePhaseCandidatesTest,
+       VectorCutCacheSeesLevelSetValuesOutsideTheirStorageSlice)
+{
+  // With two DOFs per node, as the simulation builder configures FSILS, the
+  // state vector stores phi and phase node-interleaved, so the FE offsets of
+  // phi address a storage slice that holds only some phi coefficients.
+  // Changing a phi coefficient stored outside that slice must still rebuild
+  // the cut.
+  const auto offset = fieldOffset(phi_);
+  const auto count = fieldCount(phi_);
+  auto permutation = std::make_shared<svmp::FE::backends::DofPermutation>();
+  permutation->forward.assign(solutionSize(), svmp::FE::INVALID_GLOBAL_INDEX);
+  permutation->inverse.assign(solutionSize(), svmp::FE::INVALID_GLOBAL_INDEX);
+  permutation->owner_rank.assign(solutionSize(), 0);
+  for (const auto& [field, component] :
+       {std::pair{phi_, 0}, std::pair{phase_, 1}}) {
+    const auto* map = sim_.fe_system->fieldDofHandler(field).getEntityDofMap();
+    ASSERT_NE(map, nullptr);
+    for (svmp::FE::GlobalIndex vertex = 0; vertex < 3; ++vertex) {
+      const auto fe_dof =
+          sim_.fe_system->fieldDofOffset(field) + map->getVertexDofs(vertex)[0];
+      const auto backend_dof = 2 * vertex + component;
+      permutation->forward[static_cast<std::size_t>(fe_dof)] = backend_dof;
+      permutation->inverse[static_cast<std::size_t>(backend_dof)] = fe_dof;
+    }
+  }
+  svmp::FE::backends::BackendFactory::CreateOptions options;
+  options.dof_per_node = 2;
+  options.dof_permutation = permutation;
+  const auto factory = svmp::FE::backends::BackendFactory::create(
+      svmp::FE::backends::BackendKind::FSILS, options);
+  const auto n = static_cast<svmp::FE::GlobalIndex>(solutionSize());
+  svmp::FE::sparsity::SparsityPattern pattern(n, n);
+  for (svmp::FE::GlobalIndex row = 0; row < n; ++row) {
+    for (svmp::FE::GlobalIndex column = 0; column < n; ++column) {
+      pattern.addEntry(row, column);
+    }
+  }
+  pattern.finalize();
+  const auto matrix = factory->createMatrix(pattern);
+  auto state = factory->createVector(n);
+  ASSERT_NE(state, nullptr);
+
+  const auto negative_area = [&] {
+    svmp::FE::Real area{0.0};
+    for (const auto& rule :
+         sim_.fe_system->cutIntegrationContext()->volumeRules()) {
+      if (rule.side == svmp::FE::geometry::CutIntegrationSide::Negative) {
+        area += rule.measure;
+      }
+    }
+    return area;
+  };
+  const auto write_phi = [&](const std::array<svmp::FE::Real, 3>& phi) {
+    auto solution = initialized_solution_;
+    writeWorkflowFieldSlice(
+        *sim_.fe_system, phi_,
+        projectWorkflowVertexValues(*sim_.fe_system, phi_, phi, 1u,
+                                    "vector cut cache phi"),
+        solution);
+    scatterFeOrderedSolution(*state, solution);
+    const auto& stored = *state;
+    const auto values = stored.localSpan();
+    return std::vector<svmp::FE::Real>(values.begin(), values.end());
+  };
+  const auto refresh = [&](const char* provenance) {
+    return refreshActiveCutIntegrationContextCached(
+        sim_, *params_, *state, lifecycle_, refresh_cache_, provenance);
+  };
+
+  // The cut x + y = 1/2 leaves the negative area 1/8.
+  constexpr std::array<svmp::FE::Real, 3> base_phi{{-1.0, 1.0, 1.0}};
+  const auto base_storage = write_phi(base_phi);
+  ASSERT_EQ(base_storage.size(), solutionSize());
+  EXPECT_TRUE(refresh("before_physics_solve").refreshed);
+  EXPECT_NEAR(negative_area(), svmp::FE::Real{0.125}, 1.0e-14);
+
+  // Tripling phi at vertex 0 moves the cut to x + y = 3/4 (area 9/32); at
+  // vertex 1 or 2 it leaves the area 1/16. Use a vertex whose coefficient is
+  // stored outside the FE-offset slice.
+  std::optional<std::size_t> moved_vertex;
+  for (std::size_t vertex = 0u; vertex < 3u && !moved_vertex; ++vertex) {
+    auto phi = base_phi;
+    phi[vertex] *= svmp::FE::Real{3.0};
+    const auto moved_storage = write_phi(phi);
+    if (std::equal(base_storage.begin() + offset,
+                   base_storage.begin() + offset + count,
+                   moved_storage.begin() + offset)) {
+      moved_vertex = vertex;
+    }
+  }
+  ASSERT_TRUE(moved_vertex.has_value());
+
+  const auto* installed = sim_.fe_system->cutIntegrationContext();
+  EXPECT_TRUE(refresh("outer_fixed_point").refreshed);
+  EXPECT_NE(sim_.fe_system->cutIntegrationContext(), installed);
+  EXPECT_NEAR(negative_area(),
+              *moved_vertex == 0u ? svmp::FE::Real{9.0} / 32.0
+                                  : svmp::FE::Real{1.0} / 16.0,
+              1.0e-14);
+}
+
+TEST_F(ApplicationDriverConservativePhaseCandidatesTest,
        RestoredStateReinstallsTheRetainedEntryGeometry)
 {
   const auto entry_solution = gatherFeOrderedSolution(history().u());
