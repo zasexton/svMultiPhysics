@@ -402,6 +402,48 @@ TEST(ExternalCallsNewPhysics, EigGeneralHandlesComplexConjugatePair)
     }
 }
 
+TEST(ExternalCallsNewPhysics, GeneralEigenpairsOnRealCubicBranches)
+{
+    using Complex = std::complex<double>;
+    const auto verify = [](const Mat<3>& entries, const std::array<Complex, 3>& roots) {
+        for (const int exponent : {0, -300, 300}) {
+            SCOPED_TRACE(exponent);
+            Mat<3> matrix = entries;
+            for (auto& a : matrix) a = std::scalbn(a, exponent);
+            double re[3]{}, im[3]{}, vr[9]{}, vi[9]{};
+            svmp::FE::forms::jit::svmp_fe_jit_eig_general_3x3_v1(matrix.data(), re, im, vr, vi);
+            std::array<std::array<Complex, 3>, 3> vectors{};
+            for (std::size_t j = 0; j < roots.size(); ++j) {
+                const Complex lambda{std::scalbn(re[j], -exponent), std::scalbn(im[j], -exponent)};
+                EXPECT_NEAR(std::abs(lambda - roots[j]), 0.0, 1e-12);
+                auto& v = vectors[j];
+                for (std::size_t r = 0; r < 3; ++r) v[r] = {vr[3 * r + j], vi[3 * r + j]};
+                double norm = 0;
+                for (std::size_t r = 0; r < 3; ++r) {
+                    norm += std::norm(v[r]);
+                    Complex residual = -lambda * v[r];
+                    for (std::size_t c = 0; c < 3; ++c) residual += entries[3 * r + c] * v[c];
+                    EXPECT_NEAR(std::abs(residual), 0.0, 1e-12);
+                }
+                EXPECT_NEAR(norm, 1.0, 1e-12);
+                for (std::size_t k = 0; k < j; ++k) {
+                    if (roots[k] != roots[j]) continue;
+                    Complex inner{};
+                    for (std::size_t r = 0; r < 3; ++r) inner += std::conj(vectors[k][r]) * v[r];
+                    EXPECT_NEAR(std::abs(inner), 0.0, 1e-12);
+                }
+            }
+        }
+    };
+    // Companion matrix of (x+1)(x²−x+2) = x³+x+2.
+    const double omega = std::sqrt(7.0) / 2;
+    verify({0,0,-2, 1,0,-1, 0,1,0}, {Complex{.5,omega}, Complex{.5,-omega}, -1.0});
+    // 2I − 8 nnᵀ has a two-dimensional eigenspace perpendicular to n=(1,1,0)/√2.
+    verify({-2,-4,0, -4,-2,0, 0,0,2}, {2.0, 2.0, -6.0});
+    verify({3,0,0, 0,3,0, 0,0,3}, {3.0, 3.0, 3.0});
+    verify({1,0,0, 0,3,0, 0,0,-2}, {3.0, 1.0, -2.0});
+}
+
 TEST(ExternalCallsNewPhysics, EigvecSymDD3x3MatchesFiniteDifferenceWithSignAlignment)
 {
     const Mat<3> A{
