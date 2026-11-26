@@ -28,6 +28,22 @@ namespace basis { class BasisFunction; }
 namespace geometry {
 
 /**
+ * @brief Invert a 3x3 Jacobian after removing its physical column scales.
+ *
+ * The normalized determinant check is invariant under positive rescaling of
+ * the Jacobian columns.  It therefore rejects singular and near-collinear
+ * frames without rejecting a uniformly small, shape-regular physical cell
+ * solely because its determinant is small in the chosen coordinate units.
+ */
+[[nodiscard]] math::Matrix<Real, 3, 3> scaleConditionedJacobianInverse(
+    const math::Matrix<Real, 3, 3>& jacobian);
+
+/// Return the signed physical determinant after checking column directions for degeneracy.
+/// The optional inverse uses the same normalized columns.
+[[nodiscard]] Real checkedJacobianDeterminant(const math::Matrix<Real, 3, 3>& jacobian,
+                                              math::Matrix<Real, 3, 3>* inverse = nullptr);
+
+/**
  * @brief Base interface for geometric mappings
  *
  * Implementations consume nodal coordinates (typically provided by the Mesh module)
@@ -116,7 +132,7 @@ public:
 // -----------------------------------------------------------------------------
 
 inline math::Matrix<Real, 3, 3> GeometryMapping::jacobian_inverse(const math::Vector<Real, 3>& xi) const {
-    return jacobian(xi).inverse();
+    return scaleConditionedJacobianInverse(jacobian(xi));
 }
 
 inline Real GeometryMapping::jacobian_determinant(const math::Vector<Real, 3>& xi) const {

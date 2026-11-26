@@ -53,7 +53,7 @@ JacobianCacheEntry JacobianCache::compute(const GeometryMapping& mapping,
 
     if (mapping.isAffine()) {
         const auto J = mapping.jacobian(pts.front());
-        const auto J_inv = J.inverse();
+        const auto J_inv = scaleConditionedJacobianInverse(J);
         const auto J_invT = J_inv.transpose();
         const auto detJ = J.determinant();
 
@@ -70,7 +70,7 @@ JacobianCacheEntry JacobianCache::compute(const GeometryMapping& mapping,
     for (std::size_t i = 0; i < pts.size(); ++i) {
         auto& d = entry.data[i];
         d.J = mapping.jacobian(pts[i]);
-        d.J_inv = d.J.inverse();
+        d.J_inv = scaleConditionedJacobianInverse(d.J);
         d.J_invT = d.J_inv.transpose();
         d.detJ = d.J.determinant();
     }

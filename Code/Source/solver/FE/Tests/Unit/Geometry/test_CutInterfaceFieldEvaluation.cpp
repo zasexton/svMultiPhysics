@@ -209,6 +209,31 @@ TEST(CutInterfaceFieldEvaluation,
     EXPECT_NEAR(gradient.average.components.front()[2], 0.0, 1.0e-14);
 }
 
+TEST(CutInterfaceFieldEvaluation, PhysicalGradientsAreIndependentOfLengthUnits)
+{
+    H1NodalFieldData field;
+    for (const double h : {1.e-8, 1.e-5, 1., 1.e5}) {
+        SCOPED_TRACE(h);
+        field.element_type = ElementType::Tetra4;
+        field.node_coordinates = {{0., 0., 0.}, {h, 0., 0.}, {0., h, 0.}, {0., 0., h}};
+        field.nodal_values = {0., h, 0., 0.};
+        const auto gradient = evaluateH1FieldGradientAtPoint(field, {.2, .2, .2}).components.front();
+        EXPECT_NEAR(gradient[0], 1., 1.e-13);
+        EXPECT_DOUBLE_EQ(gradient[1], 0.);
+        EXPECT_DOUBLE_EQ(gradient[2], 0.);
+
+        field.element_type = ElementType::Triangle3;
+        field.node_coordinates = {{0., 0., 0.}, {0., h, 0.}, {0., 0., h}};
+        field.nodal_values = {0., h, 2. * h};
+        const auto tangent = evaluateH1FieldGradientAtPoint(field, {.2, .2, 0.}).components.front();
+        EXPECT_DOUBLE_EQ(tangent[0], 0.);
+        EXPECT_NEAR(tangent[1], 1., 1.e-13);
+        EXPECT_NEAR(tangent[2], 2., 1.e-13);
+    }
+    field.node_coordinates[2] = field.node_coordinates[1];
+    EXPECT_THROW(evaluateH1FieldGradientAtPoint(field, {.2, .2, 0.}), std::invalid_argument);
+}
+
 TEST(CutInterfaceFieldEvaluation, EvaluatesVectorH1GradientOnCutInterfacePoints)
 {
     LevelSetInterfaceDomain domain(field_eval_request());

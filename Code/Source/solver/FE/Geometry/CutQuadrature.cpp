@@ -174,16 +174,18 @@ MappedCutCodimensionTwoGeometry mapReferenceCutCodimensionTwoGeometry(
             inverse[0][2] * value[0] + inverse[1][2] * value[1] +
                 inverse[2][2] * value[2]}};
     };
+    const auto length_of = [](const std::array<Real, 3>& value) {
+        return std::hypot(value[0], value[1], value[2]);
+    };
     const auto normalize_checked = [&](const std::array<Real, 3>& value,
                                        const char* label) {
-        const Real length = norm(value);
-        if (!finite_vector(value) || !std::isfinite(length) ||
-            length <= Real{1.0e-30}) {
+        const Real length = length_of(value);
+        if (!finite_vector(value) || !std::isfinite(length) || length <= Real{0}) {
             throw std::invalid_argument(
                 std::string("codimension-two cut geometry has an invalid ") +
                 label);
         }
-        return scale(value, Real{1.0} / length);
+        return std::array<Real, 3>{value[0] / length, value[1] / length, value[2] / length};
     };
 
     if (!std::isfinite(point.weight) || point.weight <= Real{0.0}) {
@@ -202,14 +204,14 @@ MappedCutCodimensionTwoGeometry mapReferenceCutCodimensionTwoGeometry(
         const auto tangent_ref = normalize_checked(point.tangent,
                                                    "reference tangent");
         const auto tangent_physical = map_vector(jacobian, tangent_ref);
-        mapped.measure_scale = norm(tangent_physical);
+        mapped.measure_scale = length_of(tangent_physical);
         mapped.tangent = normalize_checked(tangent_physical,
                                            "physical tangent");
     } else {
         mapped.measure_scale = Real{1.0};
-        if (norm(point.tangent) > Real{1.0e-30}) {
+        if (length_of(point.tangent) > Real{0}) {
             mapped.tangent = normalize_checked(
-                map_vector(jacobian, unit_or_default(point.tangent)),
+                map_vector(jacobian, normalize_checked(point.tangent, "reference tangent")),
                 "physical tangent");
         }
     }

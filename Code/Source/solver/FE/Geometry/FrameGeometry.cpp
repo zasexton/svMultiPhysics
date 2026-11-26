@@ -693,54 +693,38 @@ makeMapping(ElementType cell_type, std::span<const Point3D> coordinates)
            std::isfinite(value[2]);
 }
 
-[[nodiscard]] Real stableVectorNorm(const math::Vector<Real, 3>& value) noexcept
+struct NormalizedJacobian {
+    math::Matrix<Real, 3, 3> columns{};
+    std::array<Real, 3> lengths{};
+    Real determinant{};
+};
+
+[[nodiscard]] NormalizedJacobian normalizeJacobianColumns(const math::Matrix<Real, 3, 3>& jacobian)
 {
-    const Real scale = std::max(
-        {std::abs(value[0]), std::abs(value[1]), std::abs(value[2])});
-    if (scale == Real(0)) {
-        return Real(0);
+    NormalizedJacobian frame;
+    for (std::size_t c = 0; c < 3; ++c) {
+        const auto column = jacobian.column(c);
+        const Real length = detail::stable_vector_norm(column);
+        FE_THROW_IF(!std::isfinite(length) || length <= Real(0), FEException,
+                    "Invalid Jacobian column length");
+        frame.lengths[c] = length;
+        frame.columns.set_column(c, column / length);
     }
-    if (!std::isfinite(scale)) {
-        return std::numeric_limits<Real>::infinity();
-    }
-    const math::Vector<Real, 3> scaled = value / scale;
-    return scale * std::sqrt(scaled.dot(scaled));
+    frame.determinant = frame.columns.determinant();
+    FE_THROW_IF(!std::isfinite(frame.determinant) || math::approx_zero(frame.determinant),
+                FEException, "Singular scale-conditioned Jacobian");
+    return frame;
 }
 
-[[nodiscard]] math::Matrix<Real, 3, 3> scaleConditionedInverse(
-    const math::Matrix<Real, 3, 3>& matrix)
+[[nodiscard]] math::Matrix<Real, 3, 3> inverseFromNormalizedColumns(const NormalizedJacobian& frame)
 {
-    // Matrix::inverse uses an absolute determinant tolerance.  Normalize the
-    // columns so face-frame evaluation tests shape regularity rather than the
-    // physical units of an otherwise valid uniformly small element.  For
-    // J = A D, J^{-1} = D^{-1} A^{-1}.
-    std::array<Real, 3> column_scales{};
-    math::Matrix<Real, 3, 3> normalized{};
-    for (std::size_t c = 0; c < 3u; ++c) {
-        const math::Vector<Real, 3> column{
-            matrix(0, c), matrix(1, c), matrix(2, c)};
-        const Real column_scale = stableVectorNorm(column);
-        FE_THROW_IF(!std::isfinite(column_scale) || column_scale <= Real(0),
-                    FEException,
-                    "FrameGeometry: invalid Jacobian column scale");
-        column_scales[c] = column_scale;
-        for (std::size_t r = 0; r < 3u; ++r) {
-            normalized(r, c) = matrix(r, c) / column_scale;
-        }
-    }
-
-    const Real normalized_determinant = normalized.determinant();
-    FE_THROW_IF(!std::isfinite(normalized_determinant) ||
-                    math::approx_zero(normalized_determinant),
-                FEException,
-                "FrameGeometry: singular scale-conditioned Jacobian");
-    const auto normalized_inverse = normalized.inverse();
-    math::Matrix<Real, 3, 3> inverse{};
-    for (std::size_t r = 0; r < 3u; ++r) {
-        for (std::size_t c = 0; c < 3u; ++c) {
-            inverse(r, c) = normalized_inverse(r, c) / column_scales[r];
+    // J = U D, so each row of U^{-1} is divided by its own column length.
+    auto inverse = frame.columns.inverse();
+    for (std::size_t r = 0; r < 3; ++r) {
+        for (std::size_t c = 0; c < 3; ++c) {
+            inverse(r, c) /= frame.lengths[r];
             FE_THROW_IF(!std::isfinite(inverse(r, c)), FEException,
-                        "FrameGeometry: non-finite inverse Jacobian entry");
+                        "Non-finite inverse Jacobian entry");
         }
     }
     return inverse;
@@ -765,7 +749,7 @@ makeMapping(ElementType cell_type, std::span<const Point3D> coordinates)
             maximum[d] = std::max(maximum[d], node[d]);
         }
     }
-    return stableVectorNorm(maximum - minimum);
+    return detail::stable_vector_norm(maximum - minimum);
 }
 
 [[nodiscard]] math::Vector<Real, 3> faceSecondDerivative(
@@ -811,7 +795,7 @@ makeMapping(ElementType cell_type, std::span<const Point3D> coordinates)
     const int face_dim = (face_type == ElementType::Line2) ? 1 : 2;
     const int cell_dim = element_dimension(cell_type);
     auto n = toMathVector(normal);
-    const Real normal_norm = stableVectorNorm(n);
+    const Real normal_norm = detail::stable_vector_norm(n);
     FE_THROW_IF(!std::isfinite(normal_norm) || normal_norm <= Real(0),
                 FEException,
                 "FrameGeometry: invalid normal while computing mean curvature");
@@ -852,7 +836,7 @@ makeMapping(ElementType cell_type, std::span<const Point3D> coordinates)
     }
 
     const auto t0 = surfaceJacobianColumn(surface_jacobian, 0u);
-    const Real t0_norm = stableVectorNorm(t0);
+    const Real t0_norm = detail::stable_vector_norm(t0);
     const Real coordinate_span = mappingCoordinateSpan(mapping);
     constexpr Real relative_degenerate_tolerance =
         Real(64) * std::numeric_limits<Real>::epsilon();
@@ -882,7 +866,7 @@ makeMapping(ElementType cell_type, std::span<const Point3D> coordinates)
     }
 
     const auto t1 = surfaceJacobianColumn(surface_jacobian, 1u);
-    const Real t1_norm = stableVectorNorm(t1);
+    const Real t1_norm = detail::stable_vector_norm(t1);
     FE_THROW_IF(!std::isfinite(t1_norm) ||
                     t1_norm <= relative_degenerate_tolerance *
                                    std::max(coordinate_span, t1_norm),
@@ -895,7 +879,7 @@ makeMapping(ElementType cell_type, std::span<const Point3D> coordinates)
     const Real E = t0_scaled.dot(t0_scaled);
     const Real F = t0_scaled.dot(t1_scaled);
     const Real G = t1_scaled.dot(t1_scaled);
-    const Real area = stableVectorNorm(t0_scaled.cross(t1_scaled));
+    const Real area = detail::stable_vector_norm(t0_scaled.cross(t1_scaled));
     const Real relative_area_tolerance =
         Real(8) * std::sqrt(std::numeric_limits<Real>::epsilon());
     FE_THROW_IF(!std::isfinite(area) ||
@@ -1036,7 +1020,28 @@ void evaluateFaceFrameImpl(
 math::Matrix<Real, 3, 3> scaleConditionedJacobianInverse(
     const math::Matrix<Real, 3, 3>& jacobian)
 {
-    return scaleConditionedInverse(jacobian);
+    return inverseFromNormalizedColumns(normalizeJacobianColumns(jacobian));
+}
+
+Real checkedJacobianDeterminant(const math::Matrix<Real, 3, 3>& jacobian,
+                                math::Matrix<Real, 3, 3>* inverse)
+{
+    const auto frame = normalizeJacobianColumns(jacobian);
+    if (inverse) {
+        *inverse = inverseFromNormalizedColumns(frame);
+    }
+    Real determinant = jacobian.determinant();
+    if (!std::isfinite(determinant) || determinant == Real(0)) {
+        // Intermediate cofactor products can overflow or underflow for anisotropic units.
+        long double scaled = frame.determinant;
+        for (const auto length : frame.lengths) {
+            scaled *= length;
+        }
+        determinant = static_cast<Real>(scaled);
+    }
+    FE_THROW_IF(!std::isfinite(determinant) || determinant == Real(0), FEException,
+                "Unrepresentable physical Jacobian determinant");
+    return determinant;
 }
 
 Real NodalScalarSensitivity::at(LocalIndex q, LocalIndex node, int component) const
@@ -1209,11 +1214,12 @@ SurfaceTransform nansonSurfaceTransform(const Vector3D& reference_normal,
                                         const Matrix3x3& deformation_gradient)
 {
     const auto F = toMatrix(deformation_gradient);
-    const auto F_inv = F.inverse();
+    math::Matrix<Real, 3, 3> F_inv;
+    const Real determinant = checkedJacobianDeterminant(F, &F_inv);
     return surfaceTransformFromJacobianInverse(reference_normal,
                                                reference_measure,
                                                toArray(F_inv),
-                                               F.determinant());
+                                               determinant);
 }
 
 SurfaceTransform surfaceTransformFromJacobianInverse(const Vector3D& reference_normal,

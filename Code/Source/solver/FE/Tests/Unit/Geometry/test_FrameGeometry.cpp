@@ -205,6 +205,29 @@ TEST(FrameGeometry, CellFrameAcceptsUniformlySmallShapeRegularTetrahedron)
     }
 }
 
+TEST(FrameGeometry, TetrahedralSurfaceTransformsPreserveAreaAtSmallLengthScales)
+{
+    const auto quadrature = quadrature::QuadratureFactory::create(ElementType::Triangle3, 2);
+    for (const double h : {1.e-8, 1., 1.e5}) {
+        SCOPED_TRACE(h);
+        const std::array<Point3D, 4> nodes{{{0., 0., 0.}, {h, 0., 0.}, {0., h, 0.}, {0., 0., h}}};
+        LinearMapping mapping(ElementType::Tetra4, toGeometryNodes(nodes));
+        double area = 0.;
+        for (LocalIndex face = 0; face < 4; ++face) {
+            const auto frame = evaluateFaceFrame(mapping, ElementType::Tetra4, face,
+                                                 ElementType::Triangle3, *quadrature);
+            for (std::size_t q = 0; q < quadrature->num_points(); ++q) {
+                area += quadrature->weight(q) * frame.surface_measures[q];
+            }
+        }
+        EXPECT_NEAR(area / (h * h), (3. + std::sqrt(3.)) / 2., 1.e-13);
+        const Matrix3x3 isotropic{{{h, 0., 0.}, {0., h, 0.}, {0., 0., h}}};
+        const auto transformed = nansonSurfaceTransform({0., 0., 1.}, .5, isotropic);
+        EXPECT_NEAR(transformed.measure / (h * h), .5, 1.e-13);
+        EXPECT_DOUBLE_EQ(transformed.normal[2], 1.);
+    }
+}
+
 TEST(FrameGeometry, CellFrameRejectsScaleIndependentNearCollinearTetrahedron)
 {
     const auto quad =

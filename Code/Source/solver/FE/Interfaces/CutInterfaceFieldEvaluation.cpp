@@ -6,6 +6,8 @@
  */
 
 #include "Interfaces/CutInterfaceFieldEvaluation.h"
+#include "Geometry/GeometryFrameUtils.h"
+#include "Geometry/GeometryMapping.h"
 
 #include <array>
 #include <cmath>
@@ -17,77 +19,32 @@ namespace interfaces {
 
 namespace {
 
-using Matrix3 = std::array<std::array<Real, 3>, 3>;
-
-[[nodiscard]] Matrix3 fieldGeometryJacobian(
+[[nodiscard]] math::Matrix<Real, 3, 3> fieldGeometryInverse(
     const std::vector<std::array<Real, 3>>& shape_gradients,
     const std::vector<std::array<Real, 3>>& node_coordinates,
     int dimension)
 {
-    Matrix3 jacobian{};
+    math::Matrix<Real, 3, 3> jacobian{};
     for (std::size_t node = 0; node < shape_gradients.size(); ++node) {
-        for (int physical = 0; physical < dimension; ++physical) {
+        for (std::size_t physical = 0; physical < 3; ++physical) {
+            const Real displacement = node_coordinates[node][physical] - node_coordinates.front()[physical];
             for (int reference = 0; reference < dimension; ++reference) {
-                jacobian[static_cast<std::size_t>(physical)]
-                        [static_cast<std::size_t>(reference)] +=
-                    node_coordinates[node][static_cast<std::size_t>(physical)] *
-                    shape_gradients[node][static_cast<std::size_t>(reference)];
+                jacobian(physical, reference) += displacement * shape_gradients[node][reference];
             }
         }
     }
-    return jacobian;
-}
-
-[[nodiscard]] Matrix3 invertJacobian(const Matrix3& jacobian, int dimension)
-{
-    Matrix3 inverse{};
     if (dimension == 2) {
-        const Real det = jacobian[0][0] * jacobian[1][1] -
-                         jacobian[0][1] * jacobian[1][0];
-        if (std::abs(det) <= Real{1.0e-14}) {
+        math::Vector<Real, 3> normal;
+        if (!geometry::detail::complete_surface_frame(jacobian.column(0), jacobian.column(1), normal)) {
             throw std::invalid_argument("H1 cut-interface gradient evaluation received singular cell geometry");
         }
-        inverse[0][0] = jacobian[1][1] / det;
-        inverse[0][1] = -jacobian[0][1] / det;
-        inverse[1][0] = -jacobian[1][0] / det;
-        inverse[1][1] = jacobian[0][0] / det;
-        return inverse;
+        jacobian.set_column(2, normal);
     }
-
-    if (dimension == 3) {
-        const Real det =
-            jacobian[0][0] * (jacobian[1][1] * jacobian[2][2] -
-                              jacobian[1][2] * jacobian[2][1]) -
-            jacobian[0][1] * (jacobian[1][0] * jacobian[2][2] -
-                              jacobian[1][2] * jacobian[2][0]) +
-            jacobian[0][2] * (jacobian[1][0] * jacobian[2][1] -
-                              jacobian[1][1] * jacobian[2][0]);
-        if (std::abs(det) <= Real{1.0e-14}) {
-            throw std::invalid_argument("H1 cut-interface gradient evaluation received singular cell geometry");
-        }
-
-        inverse[0][0] = (jacobian[1][1] * jacobian[2][2] -
-                         jacobian[1][2] * jacobian[2][1]) / det;
-        inverse[0][1] = (jacobian[0][2] * jacobian[2][1] -
-                         jacobian[0][1] * jacobian[2][2]) / det;
-        inverse[0][2] = (jacobian[0][1] * jacobian[1][2] -
-                         jacobian[0][2] * jacobian[1][1]) / det;
-        inverse[1][0] = (jacobian[1][2] * jacobian[2][0] -
-                         jacobian[1][0] * jacobian[2][2]) / det;
-        inverse[1][1] = (jacobian[0][0] * jacobian[2][2] -
-                         jacobian[0][2] * jacobian[2][0]) / det;
-        inverse[1][2] = (jacobian[0][2] * jacobian[1][0] -
-                         jacobian[0][0] * jacobian[1][2]) / det;
-        inverse[2][0] = (jacobian[1][0] * jacobian[2][1] -
-                         jacobian[1][1] * jacobian[2][0]) / det;
-        inverse[2][1] = (jacobian[0][1] * jacobian[2][0] -
-                         jacobian[0][0] * jacobian[2][1]) / det;
-        inverse[2][2] = (jacobian[0][0] * jacobian[1][1] -
-                         jacobian[0][1] * jacobian[1][0]) / det;
-        return inverse;
+    try {
+        return geometry::scaleConditionedJacobianInverse(jacobian);
+    } catch (const FEException&) {
+        throw std::invalid_argument("H1 cut-interface gradient evaluation received singular cell geometry");
     }
-
-    throw std::invalid_argument("H1 cut-interface gradient evaluation requires a two- or three-dimensional element");
 }
 
 void validateTwoSidedBinding(const GeneratedInterfaceTwoSidedBinding& binding)
@@ -285,9 +242,7 @@ CutInterfaceFieldGradient evaluateH1FieldGradientAtPoint(
     }
 
     const int dimension = element_dimension(field.element_type);
-    const auto jacobian =
-        fieldGeometryJacobian(shape_gradients, field.node_coordinates, dimension);
-    const auto inverse_jacobian = invertJacobian(jacobian, dimension);
+    const auto inverse_jacobian = fieldGeometryInverse(shape_gradients, field.node_coordinates, dimension);
 
     CutInterfaceFieldGradient gradient;
     gradient.components.assign(components, std::array<Real, 3>{{0.0, 0.0, 0.0}});
@@ -300,11 +255,10 @@ CutInterfaceFieldGradient evaluateH1FieldGradientAtPoint(
                     value * shape_gradients[node][static_cast<std::size_t>(reference)];
             }
         }
-        for (int physical = 0; physical < dimension; ++physical) {
+        for (int physical = 0; physical < 3; ++physical) {
             for (int reference = 0; reference < dimension; ++reference) {
                 gradient.components[component][static_cast<std::size_t>(physical)] +=
-                    inverse_jacobian[static_cast<std::size_t>(reference)]
-                                    [static_cast<std::size_t>(physical)] *
+                    inverse_jacobian(reference, physical) *
                     reference_gradient[static_cast<std::size_t>(reference)];
             }
         }

@@ -29,6 +29,7 @@
 #include <array>
 #include <cmath>
 #include <functional>
+#include <numeric>
 #include <vector>
 
 namespace svmp {
@@ -37,6 +38,49 @@ namespace assembly {
 namespace test {
 
 namespace {
+
+class PhysicalHessianError final : public FunctionalKernel {
+public:
+    FieldId field{INVALID_FIELD_ID};
+    int component{-1};
+    Real expected_xx{0.0};
+
+    RequiredData getRequiredData() const noexcept override {
+        return RequiredData::SolutionHessians | RequiredData::SolutionLaplacians;
+    }
+    std::vector<FieldRequirement> fieldRequirements() const override {
+        if (field == INVALID_FIELD_ID) return {};
+        return {{field, RequiredData::SolutionHessians | RequiredData::SolutionLaplacians}};
+    }
+    bool hasBoundaryFace() const noexcept override { return true; }
+    Real evaluateCell(const AssemblyContext& ctx, LocalIndex q) override {
+        const auto H = field == INVALID_FIELD_ID ? ctx.solutionHessian(q) :
+            component < 0 ? ctx.fieldHessian(field, q) : ctx.fieldComponentHessian(field, q, component);
+        const Real lap = field == INVALID_FIELD_ID ? ctx.solutionLaplacian(q) :
+            component < 0 ? ctx.fieldLaplacian(field, q) : ctx.fieldComponentLaplacian(field, q, component);
+        Real error = (lap - expected_xx) * (lap - expected_xx);
+        for (int i = 0; i < ctx.dimension(); ++i) {
+            for (int j = 0; j < ctx.dimension(); ++j) {
+                const Real delta = H[i][j] - (i == 0 && j == 0 ? expected_xx : 0.0);
+                error += delta * delta;
+            }
+        }
+        return error;
+    }
+    Real evaluateBoundaryFace(const AssemblyContext& ctx, LocalIndex q, int) override {
+        return evaluateCell(ctx, q);
+    }
+};
+
+dofs::DofMap singleCellDofs(LocalIndex n)
+{
+    dofs::DofMap map(1, n, n);
+    std::vector<GlobalIndex> ids(n);
+    std::iota(ids.begin(), ids.end(), 0);
+    map.setCellDofs(0, ids);
+    map.finalize();
+    return map;
+}
 
 class BoundaryMeasureKernel final : public FunctionalKernel {
 public:
@@ -330,6 +374,50 @@ TEST(KahanSummationTest, Precision) {
 // ============================================================================
 
 #if defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH
+TEST(FunctionalAssemblerTest, CurvedQuadPhysicalQuadraticsOnCellsAndFaces)
+{
+    // F(r,s) = (r, s + 2r²). Each of y + k x² is exactly representable in Q2.
+    const auto mesh = test_trace_multiplier::buildBentQuadraticQuad();
+    MeshAccess access(*mesh);
+    auto scalar = std::make_shared<spaces::H1Space>(ElementType::Quad9, 2);
+    spaces::ProductSpace vector(scalar, 2);
+    constexpr int n = 9;
+    auto map = singleCellDofs(4 * n);
+    std::vector<std::array<Real, 3>> nodes;
+    access.getCellCoordinates(0, nodes);
+    ASSERT_EQ(nodes.size(), n);
+    std::vector<Real> coefficients(4 * n);
+    for (int k = 0; k < 4; ++k) {
+        for (int i = 0; i < n; ++i) {
+            coefficients[k * n + i] = nodes[i][1] + k * nodes[i][0] * nodes[i][0];
+        }
+    }
+    FunctionalAssembler a;
+    a.setMesh(access);
+    a.setDofMap(map);
+    a.setSpace(*scalar);
+    a.setPrimaryField(0);
+    a.setDofPerNode(0);
+    a.registerFieldBinding({.field=0, .space=scalar.get(), .field_type=FieldType::Scalar,
+                            .value_dimension=1, .component_offset=0, .n_components=1});
+    a.registerFieldBinding({.field=1, .space=scalar.get(), .field_type=FieldType::Scalar,
+                            .value_dimension=1, .component_offset=n, .n_components=1});
+    a.registerFieldBinding({.field=2, .space=&vector, .field_type=FieldType::Vector,
+                            .value_dimension=2, .component_offset=2*n, .n_components=2});
+    a.setSolution(coefficients);
+    for (int k = 0; k < 4; ++k) {
+        SCOPED_TRACE(k);
+        PhysicalHessianError error;
+        error.field = k < 2 ? static_cast<FieldId>(k) : 2;
+        error.component = k < 2 ? -1 : k - 2;
+        error.expected_xx = 2.0 * k;
+        EXPECT_NEAR(a.assembleScalar(error), 0.0, 1e-23);
+        EXPECT_NEAR(a.assembleBoundaryScalar(error, test_trace_multiplier::kWholeBoundary), 0.0, 1e-23);
+        const std::array<FunctionalKernel*, 1> kernels{&error};
+        EXPECT_NEAR(a.assembleMultiple(kernels).at(0), 0.0, 1e-23);
+    }
+}
+
 TEST(FunctionalAssemblerBoundaryTest, CurvedQuad9FluxAndPressureForceUseOutwardNormals)
 {
     const auto mesh = test_trace_multiplier::buildBentQuadraticQuad();
@@ -354,6 +442,24 @@ TEST(FunctionalAssemblerBoundaryTest, CurvedQuad9FluxAndPressureForceUseOutwardN
     EXPECT_NEAR(integral(-y * n_y), -4.0, 1e-12);
 }
 #endif
+
+TEST(FunctionalAssemblerTest, PhysicalCoordinatesHaveZeroHessianOnCurvedTetra)
+{
+    forms::test::CurvedTetra10MeshAccess mesh;
+    spaces::H1Space space(ElementType::Tetra10, 2);
+    auto map = singleCellDofs(10);
+    FunctionalAssembler a;
+    a.setMesh(mesh);
+    a.setDofMap(map);
+    a.setSpace(space);
+    for (int d = 0; d < 3; ++d) {
+        std::array<Real, 10> coordinates{};
+        for (int i = 0; i < 10; ++i) coordinates[i] = mesh.getNodeCoordinates(i)[d];
+        a.setSolution(coordinates);
+        PhysicalHessianError error;
+        EXPECT_NEAR(a.assembleScalar(error), 0.0, 1e-25) << d;
+    }
+}
 
 TEST(FunctionalAssemblerBoundaryTest, IntegrateConstantOverBoundaryFace)
 {

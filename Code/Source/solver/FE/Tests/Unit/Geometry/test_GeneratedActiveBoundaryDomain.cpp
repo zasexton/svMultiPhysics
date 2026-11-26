@@ -7644,7 +7644,7 @@ TEST(CutQuadratureMapping, AffineRuleReusesTheJacobianOfEveryPoint)
                                                    reference_points[q][1],
                                                    reference_points[q][2]};
             const auto jacobian = mapping->jacobian(xi);
-            const auto inverse = jacobian.inverse();
+            const auto inverse = mapping->jacobian_inverse(xi);
             const auto physical = mapping->map_to_physical(xi);
             const auto& out = mapped.points[q];
             for (std::size_t i = 0; i < 3u; ++i) {
@@ -7753,6 +7753,63 @@ TEST(CutQuadratureMapping, AffineMeasureWithoutAMappingMatchesTheMappedRuleBitwi
                  std::out_of_range);
     EXPECT_THROW((void)FE::geometry::mapCutQuadratureRuleToPhysical(tet, outside),
                  std::out_of_range);
+}
+
+TEST(CutQuadratureMapping, RetainedMeasuresScaleWithDimensionAndRejectSingularParents)
+{
+    FE::geometry::CutQuadratureRule rule;
+    rule.kind = FE::geometry::CutQuadratureKind::Volume;
+    rule.frame = FE::geometry::CutGeometryFrame::Reference;
+    rule.provenance.parent_entity = 0;
+    FE::geometry::CutQuadraturePoint point;
+    point.point = {0.2, 0.2, 0.};
+    point.weight = 1. / 48.;
+    point.normal = {1., 0., 0.};
+    rule.points = {point};
+
+    const auto check = [&](const FE::assembly::IMeshAccess& mesh, double determinant) {
+        const auto expected = point.weight * determinant;
+        EXPECT_NEAR(FE::geometry::physicalCutQuadratureMeasure(mesh, rule) / expected, 1., 1.e-13);
+        const auto mapped = FE::geometry::mapCutQuadratureRuleToPhysical(mesh, rule);
+        EXPECT_NEAR(mapped.physical_measure / expected, 1., 1.e-13);
+        const auto& sample = mapped.points.front();
+        for (int i = 0; i < 3; ++i) {
+            for (int j = 0; j < 3; ++j) {
+                double product = 0.;
+                for (int k = 0; k < 3; ++k) {
+                    product += sample.jacobian[i][k] * sample.inverse_jacobian[k][j];
+                }
+                EXPECT_NEAR(product, i == j ? 1. : 0., 1.e-13);
+            }
+        }
+    };
+    for (const double h : {1.e-8, 1.e-5, 1., 1.e5}) {
+        SCOPED_TRACE(h);
+        const SingleTetraBoundaryMesh tet(17, {{0., 0., 0.}, {h, 0., 0.}, {0., h, 0.}, {0., 0., h}});
+        check(tet, h * h * h);
+        const SingleQuadBoundaryMesh triangle(7, 0, 1, 0, true, FE::ElementType::Triangle3,
+            {{0., 0., 0.}, {0., h, 0.}, {0., 0., h}});
+        check(triangle, h * h);
+    }
+    for (const double h : {1.e-40, 1.e40}) {
+        auto contact = rule;
+        contact.kind = FE::geometry::CutQuadratureKind::Interface;
+        contact.geometric_dimension = 1;
+        contact.points.front().boundary_normal = {0., 1., 0.};
+        contact.points.front().tangent = {0., 0., 1.};
+        const SingleTetraBoundaryMesh tet(17, {{0., 0., 0.}, {h, 0., 0.}, {0., h, 0.}, {0., 0., h}});
+        const auto mapped = FE::geometry::mapCutQuadratureRuleToPhysical(tet, contact);
+        EXPECT_NEAR(mapped.physical_measure / (point.weight * h), 1., 1.e-13);
+        EXPECT_DOUBLE_EQ(mapped.points.front().tangent[2], 1.);
+    }
+    const SingleTetraBoundaryMesh flat(17, {{0., 0., 0.}, {1., 0., 0.}, {0., 1., 0.}, {1., 1., 0.}});
+    const SingleTetraBoundaryMesh near_flat(17, {{0., 0., 0.}, {1.e8, 0., 0.}, {1.e8, 1.e-8, 0.}, {0., 0., 1.e8}});
+    const SingleQuadBoundaryMesh line(7, 0, 1, 0, true, FE::ElementType::Triangle3,
+        {{0., 0., 0.}, {1., 0., 0.}, {2., 0., 0.}});
+    for (const auto* mesh : std::array<const FE::assembly::IMeshAccess*, 3>{&flat, &near_flat, &line}) {
+        EXPECT_THROW(FE::geometry::physicalCutQuadratureMeasure(*mesh, rule), std::invalid_argument);
+        EXPECT_THROW(FE::geometry::mapCutQuadratureRuleToPhysical(*mesh, rule), std::invalid_argument);
+    }
 }
 
 TEST(GeneratedActiveBoundaryDomain, FragmentsAreIndependentOfTheThreadCount)

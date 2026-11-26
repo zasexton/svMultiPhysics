@@ -8,6 +8,8 @@
 #include "FE/Geometry/InverseMapping.h"
 #include "FE/Geometry/MappingFactory.h"
 #include "FE/Geometry/GeometryValidator.h"
+#include "FE/Geometry/JacobianCache.h"
+#include "FE/Quadrature/QuadratureFactory.h"
 #include "FE/Basis/LagrangeBasis.h"
 #include "FE/Basis/HierarchicalBasis.h"
 #include <cmath>
@@ -34,6 +36,52 @@ TEST(IsoparametricMapping, IdentityQuadOrder2) {
     auto xi_back = map.map_to_reference(x);
     EXPECT_NEAR(xi_back[0], xi[0], 1e-8);
     EXPECT_NEAR(xi_back[1], xi[1], 1e-8);
+}
+
+TEST(IsoparametricMapping, Hex27AffineClassificationUsesAllGeometryCoefficients) {
+    const auto basis = std::make_shared<basis::LagrangeBasis>(ElementType::Hex27, 2);
+    const auto quadrature = quadrature::QuadratureFactory::create(ElementType::Hex27, 2);
+    ASSERT_EQ(quadrature->num_points(), 8u);
+    for (const double sign : {1., -1.}) {
+        for (const double scale : {1., 1.e-6}) {
+            SCOPED_TRACE(sign);
+            SCOPED_TRACE(scale);
+            auto nodes = basis->nodes();
+            for (auto& x : nodes) {
+                x[0] *= sign;
+                x *= scale;
+            }
+            IsoparametricMapping mapping(basis, nodes);
+            EXPECT_TRUE(mapping.isAffine());
+
+            for (std::size_t i = 0; i < nodes.size(); ++i) {
+                const auto& xi = basis->nodes()[i];
+                const double r = sign * xi[0], s = xi[1], t = xi[2];
+                const double perturbation = 37*s*t*t - 50*s*s*t - 12*r*t*t + 70*r*s*t - 18*r*s*s +
+                    10*s*s*t*t - 40*r*s*t*t - 100*r*s*s*t + 600*r*s*s*t*t;
+                nodes[i][0] += scale * perturbation / 2048.;
+            }
+            mapping.resetNodes(nodes);
+            EXPECT_FALSE(mapping.isAffine());
+            auto& cache = JacobianCache::instance();
+            cache.clear();
+            const auto& prepared = cache.get_or_compute(mapping, *quadrature);
+            for (std::size_t q = 0; q < quadrature->num_points(); ++q) {
+                const auto& xi = quadrature->point(q);
+                const double s = xi[1], t = xi[2];
+                const double dr = -12*t*t + 70*s*t - 18*s*s - 40*s*t*t - 100*s*s*t + 600*s*s*t*t;
+                const double unit_det = sign * (1. + dr / 2048.);
+                EXPECT_NEAR(prepared.data[q].detJ / (scale * scale * scale), unit_det, 1.e-13);
+                const auto jacobian = mapping.jacobian(xi);
+                for (int i = 0; i < 3; ++i) {
+                    for (int j = 0; j < 3; ++j) {
+                        EXPECT_NEAR(prepared.data[q].J(i, j) / scale, jacobian(i, j) / scale, 1.e-13);
+                    }
+                }
+            }
+            cache.clear();
+        }
+    }
 }
 
 TEST(IsoparametricMapping, FactoryCreatesLinearTriangle) {

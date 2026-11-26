@@ -46,6 +46,11 @@ namespace assembly {
 
 namespace {
 
+struct InverseMappingHessian {
+    std::array<AssemblyContext::Matrix3x3, 3> derivatives{};
+    bool zero{false};
+};
+
 struct ContextScratch {
     std::vector<std::array<Real, 3>> cell_coords;
     std::vector<math::Vector<Real, 3>> node_coords;
@@ -61,6 +66,7 @@ struct ContextScratch {
     std::vector<Real> jac_dets;
     std::vector<Real> integration_weights;
     geometry::FaceGeometryData face_geometry;
+    std::vector<InverseMappingHessian> inverse_mapping_hessians;
 
     std::vector<Real> basis_values;
     std::vector<AssemblyContext::Vector3D> ref_gradients;
@@ -79,6 +85,26 @@ ContextScratch& scratchStorage()
 {
     static thread_local ContextScratch scratch;
     return scratch;
+}
+
+bool needsBasisHessians(RequiredData required)
+{
+    return hasFlag(required, RequiredData::BasisHessians) ||
+           hasFlag(required, RequiredData::SolutionHessians) ||
+           hasFlag(required, RequiredData::SolutionLaplacians);
+}
+
+void prepareInverseMappingHessians(const geometry::GeometryMapping& mapping, int dim,
+                                   std::span<const AssemblyContext::Point3D> points,
+                                   std::span<const AssemblyContext::Matrix3x3> inverse_jacobians,
+                                   std::vector<InverseMappingHessian>& out)
+{
+    out.resize(points.size());
+    for (std::size_t q = 0; q < points.size(); ++q) {
+        const math::Vector<Real, 3> xi{points[q][0], points[q][1], points[q][2]};
+        out[q].zero = detail::inverseMappingSecondDerivatives(
+            inverse_jacobians[q], mapping.mapping_hessian(xi), dim, out[q].derivatives);
+    }
 }
 
 void gatherVectorCoefficients(std::span<const GlobalIndex> dofs,
@@ -220,7 +246,7 @@ void prepareCellContext(AssemblyContext& context,
         FE_CHECK_ARG(n_dofs == n_scalar_dofs,
                      "FunctionalAssembler::prepareCellContext: non-Product space DOF count mismatch");
     }
-    const bool need_basis_hessians = hasFlag(required_data, RequiredData::BasisHessians);
+    const bool need_basis_hessians = needsBasisHessians(required_data);
 
     mesh.getCellCoordinates(cell_id, scratch.cell_coords);
 
@@ -333,6 +359,10 @@ void prepareCellContext(AssemblyContext& context,
         }
     }
 
+    if (need_basis_hessians) {
+        prepareInverseMappingHessians(*mapping, dim, scratch.quad_points, scratch.inv_jacobians,
+                                      scratch.inverse_mapping_hessians);
+    }
     const auto& basis = element.basis();
     if (basis.is_vector_valued()) {
         // A functional has no test function: a vector basis (H(div), H(curl))
@@ -387,21 +417,9 @@ void prepareCellContext(AssemblyContext& context,
                     }
                     ref_hessians[idx] = H_ref;
 
-                    AssemblyContext::Matrix3x3 H_phys{};
-                    for (int r = 0; r < dim; ++r) {
-                        for (int c = 0; c < dim; ++c) {
-                            Real sum = 0.0;
-                            for (int a = 0; a < dim; ++a) {
-                                for (int b = 0; b < dim; ++b) {
-                                    sum += J_inv[static_cast<std::size_t>(a)][static_cast<std::size_t>(r)] *
-                                           H_ref[static_cast<std::size_t>(a)][static_cast<std::size_t>(b)] *
-                                           J_inv[static_cast<std::size_t>(b)][static_cast<std::size_t>(c)];
-                                }
-                            }
-                            H_phys[static_cast<std::size_t>(r)][static_cast<std::size_t>(c)] = sum;
-                        }
-                    }
-                    phys_hessians[idx] = H_phys;
+                    const auto& curvature = scratch.inverse_mapping_hessians[q];
+                    phys_hessians[idx] = detail::physicalBasisHessian(
+                        J_inv, H_ref, grad_ref, curvature.derivatives, dim, curvature.zero);
                 }
             }
         }
@@ -531,7 +549,7 @@ void prepareBoundaryFaceContext(AssemblyContext& context,
         FE_CHECK_ARG(n_dofs == n_scalar_dofs,
                      "FunctionalAssembler::prepareBoundaryFaceContext: non-Product space DOF count mismatch");
     }
-    const bool need_basis_hessians = hasFlag(required_data, RequiredData::BasisHessians);
+    const bool need_basis_hessians = needsBasisHessians(required_data);
     const bool need_reference_face =
         hasFlag(required_data, RequiredData::ReferencePhysicalPoints) ||
         hasFlag(required_data, RequiredData::ReferenceJacobians) ||
@@ -569,7 +587,7 @@ void prepareBoundaryFaceContext(AssemblyContext& context,
     const auto node_coords = geometry::toGeometryNodes(scratch.cell_coords);
     geometry::MappingRequest map_request;
     map_request.element_type = cell_type;
-    map_request.geometry_order = geometry::defaultGeometryOrder(cell_type);
+    map_request.geometry_order = mesh.getCellGeometryOrder(cell_id);
     map_request.use_affine = (map_request.geometry_order <= 1);
     const auto mapping = geometry::MappingFactory::create(map_request, node_coords);
 
@@ -596,6 +614,10 @@ void prepareBoundaryFaceContext(AssemblyContext& context,
         phys_hessians.resize(static_cast<std::size_t>(n_dofs * n_qpts));
     }
 
+    if (need_basis_hessians) {
+        prepareInverseMappingHessians(*mapping, dim, face.cell_reference_points, cell.inverse_jacobians,
+                                      scratch.inverse_mapping_hessians);
+    }
     const auto& basis = element.basis();
     std::vector<Real> values_at_pt;
     std::vector<basis::Gradient> gradients_at_pt;
@@ -647,21 +669,9 @@ void prepareBoundaryFaceContext(AssemblyContext& context,
                     }
                     ref_hessians[idx] = H_ref;
 
-                    AssemblyContext::Matrix3x3 H_phys{};
-                    for (int r = 0; r < dim; ++r) {
-                        for (int c = 0; c < dim; ++c) {
-                            Real sum = 0.0;
-                            for (int a = 0; a < dim; ++a) {
-                                for (int b = 0; b < dim; ++b) {
-                                    sum += J_inv[static_cast<std::size_t>(a)][static_cast<std::size_t>(r)] *
-                                           H_ref[static_cast<std::size_t>(a)][static_cast<std::size_t>(b)] *
-                                           J_inv[static_cast<std::size_t>(b)][static_cast<std::size_t>(c)];
-                                }
-                            }
-                            H_phys[static_cast<std::size_t>(r)][static_cast<std::size_t>(c)] = sum;
-                        }
-                    }
-                    phys_hessians[idx] = H_phys;
+                    const auto& curvature = scratch.inverse_mapping_hessians[q];
+                    phys_hessians[idx] = detail::physicalBasisHessian(
+                        J_inv, H_ref, grad_ref, curvature.derivatives, dim, curvature.zero);
                 }
             }
         }
@@ -1463,146 +1473,79 @@ void FunctionalAssembler::bindFieldSolutionData(AssemblyContext& context,
         const int dim = context.dimension();
         const bool component_blocked = usesComponentBlockedFieldOrdering(*binding);
 
-        // Scratch for basis evaluation
+        const bool scalar = binding->field_type == FieldType::Scalar;
+        FE_THROW_IF(!scalar && binding->field_type != FieldType::Vector, NotImplementedException,
+                    "FunctionalAssembler: unsupported secondary field type");
+        const int components = scalar ? 1 : binding->value_dimension;
+        const auto n_nodes = field_element.num_dofs();
+        const bool hessians = hasFlag(fr.required, RequiredData::SolutionHessians);
+        const bool laplacians = hasFlag(fr.required, RequiredData::SolutionLaplacians);
+        const bool second = hessians || laplacians;
+        const bool gradients = hasFlag(fr.required, RequiredData::SolutionGradients) || second;
         std::vector<Real> basis_vals;
         std::vector<basis::Gradient> basis_grads;
-
-        const bool need_grads = hasFlag(fr.required, RequiredData::SolutionGradients) ||
-                                hasFlag(fr.required, RequiredData::SolutionHessians) ||
-                                hasFlag(fr.required, RequiredData::SolutionLaplacians);
-        const int n_nodes = (binding->field_type == FieldType::Vector && component_blocked)
-            ? static_cast<int>(binding->space->dofs_per_element(cell_id) /
-                               static_cast<std::size_t>(std::max(binding->n_components, 1)))
-            : static_cast<int>(field_element.num_dofs());
-
-        if (binding->field_type == FieldType::Scalar) {
-            // Evaluate scalar field at QPs
-            scalar_values.resize(static_cast<std::size_t>(n_qpts));
-            scalar_gradients.clear();
-            if (need_grads) {
-                scalar_gradients.resize(static_cast<std::size_t>(n_qpts));
-            }
-
-            for (LocalIndex q = 0; q < n_qpts; ++q) {
-                const auto qpt = context.quadraturePoint(q);
-                const math::Vector<Real, 3> xi{qpt[0], qpt[1], qpt[2]};
-
-                field_basis.evaluate_values(xi, basis_vals);
-
-                Real val = 0.0;
-                for (int i = 0; i < n_nodes; ++i) {
-                    val += field_coeffs[static_cast<std::size_t>(i)] *
-                           basis_vals[static_cast<std::size_t>(i)];
-                }
-                scalar_values[static_cast<std::size_t>(q)] = val;
-
-                if (need_grads) {
-                    field_basis.evaluate_gradients(xi, basis_grads);
-                    const auto J_inv = context.inverseJacobian(q);
-
-                    // Accumulate in reference space first, then transform
-                    AssemblyContext::Vector3D gref = {0.0, 0.0, 0.0};
-                    for (int i = 0; i < n_nodes; ++i) {
-                        const Real ci = field_coeffs[static_cast<std::size_t>(i)];
-                        const auto& gi = basis_grads[static_cast<std::size_t>(i)];
-                        for (int d = 0; d < dim; ++d) {
-                            gref[static_cast<std::size_t>(d)] += ci * gi[static_cast<std::size_t>(d)];
-                        }
-                    }
-
-                    // Transform: grad_phys = J_inv^T * grad_ref
-                    AssemblyContext::Vector3D grad_phys = {0.0, 0.0, 0.0};
-                    for (int d1 = 0; d1 < dim; ++d1) {
-                        for (int d2 = 0; d2 < dim; ++d2) {
-                            grad_phys[static_cast<std::size_t>(d1)] +=
-                                J_inv[static_cast<std::size_t>(d2)][static_cast<std::size_t>(d1)] *
-                                gref[static_cast<std::size_t>(d2)];
-                        }
-                    }
-                    scalar_gradients[static_cast<std::size_t>(q)] = grad_phys;
-                }
-            }
-
-            context.setFieldSolutionScalar(fr.field, scalar_values,
-                                           need_grads ? std::span<const AssemblyContext::Vector3D>(scalar_gradients)
-                                                      : std::span<const AssemblyContext::Vector3D>{});
-        } else if (binding->field_type == FieldType::Vector) {
-            const int vd = binding->value_dimension;
-
-            vector_values.resize(static_cast<std::size_t>(n_qpts));
-            vector_jacobians.clear();
-            if (need_grads) {
-                vector_jacobians.resize(static_cast<std::size_t>(n_qpts));
-            }
-
-            for (LocalIndex q = 0; q < n_qpts; ++q) {
-                const auto qpt = context.quadraturePoint(q);
-                const math::Vector<Real, 3> xi{qpt[0], qpt[1], qpt[2]};
-
-                field_basis.evaluate_values(xi, basis_vals);
-
-                AssemblyContext::Vector3D val = {0.0, 0.0, 0.0};
-                if (component_blocked) {
-                    for (int comp = 0; comp < vd; ++comp) {
-                        const auto base = static_cast<std::size_t>(comp * n_nodes);
-                        for (int i = 0; i < n_nodes; ++i) {
-                            val[static_cast<std::size_t>(comp)] +=
-                                field_coeffs[base + static_cast<std::size_t>(i)] *
-                                basis_vals[static_cast<std::size_t>(i)];
-                        }
-                    }
-                } else {
-                    for (int i = 0; i < n_nodes; ++i) {
-                        for (int comp = 0; comp < vd; ++comp) {
-                            val[static_cast<std::size_t>(comp)] +=
-                                field_coeffs[static_cast<std::size_t>(i * n_comp + comp)] *
-                                basis_vals[static_cast<std::size_t>(i)];
-                        }
-                    }
-                }
-                vector_values[static_cast<std::size_t>(q)] = val;
-
-                if (need_grads) {
-                    field_basis.evaluate_gradients(xi, basis_grads);
-                    const auto J_inv = context.inverseJacobian(q);
-
-                    AssemblyContext::Matrix3x3 jac = {};
-                    for (int comp = 0; comp < vd; ++comp) {
-                        // Accumulate reference gradient for this component
-                        AssemblyContext::Vector3D gref = {0.0, 0.0, 0.0};
-                        const auto base = component_blocked
-                            ? static_cast<std::size_t>(comp * n_nodes)
-                            : static_cast<std::size_t>(comp);
-                        for (int i = 0; i < n_nodes; ++i) {
-                            const Real ci = component_blocked
-                                ? field_coeffs[base + static_cast<std::size_t>(i)]
-                                : field_coeffs[static_cast<std::size_t>(i * n_comp + comp)];
-                            const auto& gi = basis_grads[static_cast<std::size_t>(i)];
-                            for (int d = 0; d < dim; ++d) {
-                                gref[static_cast<std::size_t>(d)] += ci * gi[static_cast<std::size_t>(d)];
-                            }
-                        }
-
-                        // Transform to physical
-                        for (int d1 = 0; d1 < dim; ++d1) {
-                            Real g = 0.0;
-                            for (int d2 = 0; d2 < dim; ++d2) {
-                                g += J_inv[static_cast<std::size_t>(d2)][static_cast<std::size_t>(d1)] *
-                                     gref[static_cast<std::size_t>(d2)];
-                            }
-                            jac[static_cast<std::size_t>(comp)][static_cast<std::size_t>(d1)] = g;
-                        }
-                    }
-                    vector_jacobians[static_cast<std::size_t>(q)] = jac;
-                }
-            }
-
-            context.setFieldSolutionVector(fr.field, vd, vector_values,
-                                           need_grads ? std::span<const AssemblyContext::Matrix3x3>(vector_jacobians)
-                                                      : std::span<const AssemblyContext::Matrix3x3>{});
+        std::vector<basis::Hessian> basis_hessians;
+        auto& field_hessians = scalar ? scalar_hessians : vector_component_hessians;
+        auto& field_laplacians = scalar ? scalar_laplacians : vector_component_laplacians;
+        field_hessians.resize(hessians ? n_qpts * components : 0);
+        field_laplacians.resize(laplacians ? n_qpts * components : 0);
+        if (scalar) {
+            scalar_values.resize(n_qpts);
+            scalar_gradients.resize(gradients ? n_qpts : 0);
         } else {
-            FE_THROW(NotImplementedException,
-                     "FunctionalAssembler: unsupported secondary field type");
+            vector_values.assign(n_qpts, {});
+            vector_jacobians.assign(gradients ? n_qpts : 0, {});
+        }
+
+        for (LocalIndex q = 0; q < n_qpts; ++q) {
+            const auto& point = context.quadraturePoint(q);
+            const math::Vector<Real, 3> xi{point[0], point[1], point[2]};
+            field_basis.evaluate_values(xi, basis_vals);
+            if (gradients) field_basis.evaluate_gradients(xi, basis_grads);
+            if (second) field_basis.evaluate_hessians(xi, basis_hessians);
+            const auto& J_inv = context.inverseJacobian(q);
+            for (int component = 0; component < components; ++component) {
+                Real value = 0.0;
+                AssemblyContext::Vector3D grad_ref{};
+                AssemblyContext::Matrix3x3 H_ref{};
+                for (std::size_t i = 0; i < n_nodes; ++i) {
+                    const std::size_t index = component_blocked ? component * n_nodes + i :
+                                                       i * n_comp + component;
+                    const Real coefficient = field_coeffs[index];
+                    value += coefficient * basis_vals[i];
+                    if (gradients) {
+                        for (int d = 0; d < dim; ++d) grad_ref[d] += coefficient * basis_grads[i][d];
+                    }
+                    if (second) {
+                        for (int a = 0; a < dim; ++a)
+                            for (int b = 0; b < dim; ++b) H_ref[a][b] += coefficient * basis_hessians[i](a, b);
+                    }
+                }
+                if (scalar) scalar_values[q] = value;
+                else vector_values[q][component] = value;
+                if (gradients) {
+                    AssemblyContext::Vector3D grad{};
+                    for (int r = 0; r < dim; ++r)
+                        for (int a = 0; a < dim; ++a) grad[r] += J_inv[a][r] * grad_ref[a];
+                    if (scalar) scalar_gradients[q] = grad;
+                    else vector_jacobians[q][component] = grad;
+                }
+                if (second) {
+                    const auto& curvature = scratchStorage().inverse_mapping_hessians[q];
+                    const auto H = detail::physicalBasisHessian(
+                        J_inv, H_ref, grad_ref, curvature.derivatives, dim, curvature.zero);
+                    const auto index = static_cast<std::size_t>(q * components + component);
+                    if (hessians) field_hessians[index] = H;
+                    if (laplacians) field_laplacians[index] = H[0][0] + H[1][1] + H[2][2];
+                }
+            }
+        }
+        if (scalar) {
+            context.setFieldSolutionScalar(fr.field, scalar_values, scalar_gradients,
+                                           field_hessians, field_laplacians);
+        } else {
+            context.setFieldSolutionVector(fr.field, components, vector_values, vector_jacobians,
+                                           field_hessians, field_laplacians);
         }
     }
 }
@@ -1925,70 +1868,19 @@ std::vector<Real> FunctionalAssembler::assembleMultiple(
         return {};
     }
 
-    auto start_time = std::chrono::steady_clock::now();
-
-    const std::size_t num_kernels = kernels.size();
-    std::vector<Real> totals(num_kernels, 0.0);
-    std::vector<KahanAccumulator> accumulators(num_kernels);
-
-    // Compute union of required data
-    RequiredData all_required = RequiredData::None;
-    for (auto* kernel : kernels) {
-        all_required = all_required | kernel->getRequiredData();
-    }
-
-    const bool need_solution =
-        hasFlag(all_required, RequiredData::SolutionCoefficients) ||
-        hasFlag(all_required, RequiredData::SolutionValues) ||
-        hasFlag(all_required, RequiredData::SolutionGradients) ||
-        hasFlag(all_required, RequiredData::SolutionHessians) ||
-        hasFlag(all_required, RequiredData::SolutionLaplacians);
-
-    GlobalIndex elements_processed = 0;
-
-    // Loop over cells
-    std::vector<Real> local_solution;
-    mesh_->forEachCell([&](GlobalIndex cell_id) {
-        prepareContext(cell_id, all_required);
-
-        if (need_solution) {
-            FE_THROW_IF(solution_view_ == nullptr && solution_.empty(), FEException,
-                        "FunctionalAssembler::assembleMultiple: kernels require solution but no solution was set");
-            gatherPrimaryFieldCoefficients(cell_id,
-                                           solution_view_,
-                                           solution_,
-                                           local_solution,
-                                           "FunctionalAssembler::assembleMultiple");
-            bindPrimarySolution(context_, *space_, local_solution);
+    std::vector<Real> totals(kernels.size(), 0.0);
+    std::vector<KahanAccumulator> accumulators(kernels.size());
+    evaluateCellFunctionals(kernels, [&](GlobalIndex, std::span<const Real> cell_values, Real) {
+        for (std::size_t k = 0; k < kernels.size(); ++k) {
+            if (options_.use_kahan_summation) accumulators[k].add(cell_values[k]);
+            else totals[k] += cell_values[k];
         }
-
-        // Evaluate all kernels for this cell
-        for (std::size_t k = 0; k < num_kernels; ++k) {
-            if (kernels[k]->hasCell()) {
-                Real cell_value = kernels[k]->evaluateCellTotal(context_);
-                if (options_.use_kahan_summation) {
-                    accumulators[k].add(cell_value);
-                } else {
-                    totals[k] += cell_value;
-                }
-            }
-        }
-
-        elements_processed++;
     });
-
-    // Extract final values
-    std::vector<Real> results(num_kernels);
-    for (std::size_t k = 0; k < num_kernels; ++k) {
-        Real raw = options_.use_kahan_summation ? accumulators[k].get() : totals[k];
-        results[k] = kernels[k]->postProcess(raw);
+    for (std::size_t k = 0; k < kernels.size(); ++k) {
+        const Real sum = options_.use_kahan_summation ? accumulators[k].get() : totals[k];
+        totals[k] = kernels[k]->postProcess(sum);
     }
-
-    auto end_time = std::chrono::steady_clock::now();
-    last_result_.elapsed_seconds = std::chrono::duration<double>(end_time - start_time).count();
-    last_result_.elements_processed = elements_processed;
-
-    return results;
+    return totals;
 }
 
 void FunctionalAssembler::evaluateCellFunctionals(std::span<FunctionalKernel* const> kernels,

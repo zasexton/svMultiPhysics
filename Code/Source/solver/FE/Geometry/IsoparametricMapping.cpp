@@ -8,9 +8,13 @@
 #include "IsoparametricMapping.h"
 #include "InverseMapping.h"
 #include "Core/FEException.h"
+#include "Basis/LagrangeBasis.h"
+#include "Basis/SerendipityBasis.h"
 #include "GeometryFrameUtils.h"
-#include <numeric>
+#include <algorithm>
 #include <cmath>
+#include <limits>
+#include <typeinfo>
 
 namespace svmp {
 namespace FE {
@@ -18,59 +22,17 @@ namespace geometry {
 
 namespace {
 
-std::vector<math::Vector<Real, 3>> affine_check_points(ElementType type, int dim)
+// For these nodal bases, agreement of every geometry coefficient with an affine
+// map proves equality throughout the cell by unisolvence and linear precision.
+const std::vector<math::Vector<Real, 3>>* interpolationNodes(const basis::BasisFunction& basis)
 {
-    using Vec3 = math::Vector<Real, 3>;
-    switch (type) {
-    case ElementType::Line2:
-    case ElementType::Line3:
-        return {Vec3{Real(0), Real(0), Real(0)},
-                Vec3{Real(0.5), Real(0), Real(0)}};
-    case ElementType::Triangle3:
-    case ElementType::Triangle6:
-        return {Vec3{Real(1) / Real(3), Real(1) / Real(3), Real(0)},
-                Vec3{Real(0.2), Real(0.3), Real(0)}};
-    case ElementType::Quad4:
-    case ElementType::Quad8:
-    case ElementType::Quad9:
-        return {Vec3{Real(0), Real(0), Real(0)},
-                Vec3{Real(0.5), Real(-0.25), Real(0)},
-                Vec3{Real(-0.35), Real(0.4), Real(0)}};
-    case ElementType::Tetra4:
-    case ElementType::Tetra10:
-        return {Vec3{Real(0.25), Real(0.25), Real(0.25)},
-                Vec3{Real(0.2), Real(0.3), Real(0.1)}};
-    case ElementType::Hex8:
-    case ElementType::Hex20:
-    case ElementType::Hex27:
-        return {Vec3{Real(0), Real(0), Real(0)},
-                Vec3{Real(0.35), Real(-0.2), Real(0.45)},
-                Vec3{Real(-0.4), Real(0.3), Real(-0.2)}};
-    case ElementType::Wedge6:
-    case ElementType::Wedge15:
-        return {Vec3{Real(0.2), Real(0.3), Real(0)},
-                Vec3{Real(0.1), Real(0.2), Real(0.5)},
-                Vec3{Real(0.25), Real(0.1), Real(-0.35)}};
-    case ElementType::Pyramid5:
-    case ElementType::Pyramid13:
-    case ElementType::Pyramid14:
-        return {Vec3{Real(0), Real(0), Real(0.25)},
-                Vec3{Real(0.2), Real(-0.1), Real(0.35)},
-                Vec3{Real(-0.15), Real(0.25), Real(0.6)}};
-    default:
-        break;
+    if (typeid(basis) == typeid(basis::LagrangeBasis)) {
+        return &static_cast<const basis::LagrangeBasis&>(basis).nodes();
     }
-
-    if (dim == 1) {
-        return {Vec3{Real(0), Real(0), Real(0)},
-                Vec3{Real(0.5), Real(0), Real(0)}};
+    if (typeid(basis) == typeid(basis::SerendipityBasis)) {
+        return &static_cast<const basis::SerendipityBasis&>(basis).nodes();
     }
-    if (dim == 2) {
-        return {Vec3{Real(0), Real(0), Real(0)},
-                Vec3{Real(0.25), Real(-0.25), Real(0)}};
-    }
-    return {Vec3{Real(0), Real(0), Real(0)},
-            Vec3{Real(0.25), Real(-0.25), Real(0.5)}};
+    return nullptr;
 }
 
 } // namespace
@@ -174,18 +136,34 @@ GeometryMapping::MappingHessian IsoparametricMapping::mapping_hessian(const math
 bool IsoparametricMapping::isAffine() const noexcept
 {
     try {
-        constexpr Real tol = Real(1e-12);
-        const int dim = basis_->dimension();
-        for (const auto& xi : affine_check_points(basis_->element_type(), dim)) {
-            const auto H = mapping_hessian(xi);
-            for (std::size_t m = 0; m < 3; ++m) {
-                for (int i = 0; i < dim; ++i) {
-                    for (int j = 0; j < dim; ++j) {
-                        if (std::abs(H[m](static_cast<std::size_t>(i), static_cast<std::size_t>(j))) > tol) {
-                            return false;
-                        }
-                    }
+        const auto* reference = interpolationNodes(*basis_);
+        if (!reference || reference->empty() || reference->size() != nodes_.size()) {
+            return false;
+        }
+        math::Vector<Real, 3> center{};
+        for (const auto& point : *reference) {
+            center += point;
+        }
+        center /= static_cast<Real>(reference->size());
+        const auto linear = jacobian(center);
+        math::Vector<Real, 3> span{}, error{};
+        for (std::size_t node = 0; node < nodes_.size(); ++node) {
+            const math::Vector<Real, 3> delta = (*reference)[node] - reference->front();
+            const auto displacement = nodes_[node] - nodes_.front();
+            const auto predicted = linear * delta;
+            for (std::size_t component = 0; component < 3; ++component) {
+                if (!std::isfinite(displacement[component]) || !std::isfinite(predicted[component])) {
+                    return false;
                 }
+                span[component] = std::max(span[component], std::abs(displacement[component]));
+                error[component] = std::max(error[component],
+                                            std::abs(displacement[component] - predicted[component]));
+            }
+        }
+        constexpr Real roundoff = Real(32) * std::numeric_limits<Real>::epsilon();
+        for (std::size_t component = 0; component < 3; ++component) {
+            if (error[component] > roundoff * span[component]) {
+                return false;
             }
         }
         return true;
