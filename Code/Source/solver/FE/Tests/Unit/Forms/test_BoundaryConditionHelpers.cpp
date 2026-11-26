@@ -333,11 +333,16 @@ TEST(FormsBoundaryConditions, DirichletNitscheOnAScalarIsTheIdentityTraceNitsche
     EXPECT_EQ(penalty.analysisMetadata(0, nullptr).front().enforcement_kind,
               svmp::FE::analysis::EnforcementKind::WeakPenalty);
 
-    // Strong enforcement acts on mesh faces; a generated subset is refused,
-    // and Nitsche needs the flux.
-    EXPECT_THROW(bc::Dirichlet(forms::ExteriorBoundaryMeasure::generatedActiveSubset(4, 104), g),
-                 std::invalid_argument);
-    EXPECT_NO_THROW(bc::Dirichlet(forms::ExteriorBoundaryMeasure::fullPhysical(4), g));
+    // Strong enforcement on a generated subset declares its wetted marker (the
+    // degrees of freedom of its wetted faces); Nitsche needs the flux.
+    const auto wetted =
+        bc::Dirichlet(forms::ExteriorBoundaryMeasure::generatedActiveSubset(4, 104), g).getStrongConstraints(0);
+    ASSERT_EQ(wetted.size(), 1u);
+    EXPECT_EQ(wetted.front().boundary_marker, 4);
+    EXPECT_EQ(wetted.front().active_boundary_marker, 104);
+    const auto whole = bc::Dirichlet(forms::ExteriorBoundaryMeasure::fullPhysical(4), g).getStrongConstraints(0);
+    ASSERT_EQ(whole.size(), 1u);
+    EXPECT_EQ(whole.front().active_boundary_marker, -1);
     EXPECT_THROW(bc::Dirichlet(4, g, bc::Nitsche{}), std::invalid_argument);
     EXPECT_THROW(bc::Dirichlet(4, g, bc::Nitsche{.gamma = 0.0}, bc::diffusionFlux(k)), std::invalid_argument);
     EXPECT_EQ(bc::Dirichlet(4, g).label(), "EssentialBC");

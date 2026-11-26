@@ -357,13 +357,17 @@ inline void declareVelocityDirichletTimeFunctions(
     }
 }
 
+/// The strong velocity condition on @p target: the condition's marker, or
+/// its wetted part when the liquid is a cut side, where only the degrees of
+/// freedom with a trace on a wetted face are prescribed (the dry nodes of cut
+/// cells are left to the active-side constraints and aggregation).
 [[nodiscard]] inline std::unique_ptr<FE::forms::bc::BoundaryCondition> toVelocityEssentialBC(
     const IncompressibleNavierStokesVMSOptions::VelocityDirichletBC& bc,
     int dim,
-    std::string_view symbol)
+    std::string_view symbol,
+    const FE::forms::bc::Boundary& target)
 {
-    const int marker =
-        FE::forms::bc::boundaryMarkerOrThrow(bc, "navier_stokes::Factories::toVelocityEssentialBC");
+    const int marker = detail::conditionMarker(bc, target, "navier_stokes::Factories::toVelocityEssentialBC");
 
     auto uD_comp = FE::forms::bc::toVectorExpr(
         bc.value, dim, "ns_u_dirichlet", marker, FE::forms::bc::ComponentValueNameStyle::Component);
@@ -373,7 +377,7 @@ inline void declareVelocityDirichletTimeFunctions(
         all_active = all_active && bc.active_components[static_cast<std::size_t>(d)];
     }
     if (all_active) {
-        return std::make_unique<FE::forms::bc::Dirichlet>(marker, std::move(uD_comp), FE::forms::bc::Strong{},
+        return std::make_unique<FE::forms::bc::Dirichlet>(target, std::move(uD_comp), FE::forms::bc::Strong{},
                                                           FE::forms::bc::NaturalFlux{}, std::string(symbol));
     }
 
@@ -381,11 +385,23 @@ inline void declareVelocityDirichletTimeFunctions(
         bc.value,
         bc.active_components,
         dim,
-        marker,
+        target,
         "ns_u_dirichlet",
         symbol,
         "Navier-Stokes velocity Dirichlet",
         FE::forms::bc::ComponentValueNameStyle::Component);
+}
+
+/// The strong velocity condition on the whole marker of @p bc.
+[[nodiscard]] inline std::unique_ptr<FE::forms::bc::BoundaryCondition> toVelocityEssentialBC(
+    const IncompressibleNavierStokesVMSOptions::VelocityDirichletBC& bc,
+    int dim,
+    std::string_view symbol)
+{
+    return toVelocityEssentialBC(
+        bc, dim, symbol,
+        FE::forms::bc::Boundary(
+            FE::forms::bc::boundaryMarkerOrThrow(bc, "navier_stokes::Factories::toVelocityEssentialBC")));
 }
 
 [[nodiscard]] inline std::unique_ptr<FE::forms::bc::BoundaryCondition> toPressureEssentialBC(

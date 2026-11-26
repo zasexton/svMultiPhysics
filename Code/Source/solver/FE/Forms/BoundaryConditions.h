@@ -645,6 +645,12 @@ struct StrongDirichlet {
     /// precedences must agree.
     int precedence{0};
 
+    /// When >= 0, the generated active subset of boundary_marker (the wetted
+    /// part of a cut boundary): only the degrees of freedom whose basis
+    /// function has a nonzero trace on a face of positive wetted measure take
+    /// the value (StrongDirichletConstraint).
+    int active_boundary_marker{-1};
+
     [[nodiscard]] bool isValid() const noexcept
     {
         return field != INVALID_FIELD_ID && component >= -1 && value.isValid();
@@ -654,7 +660,11 @@ struct StrongDirichlet {
     {
         const std::string sym = (component >= 0) ? (symbol + "[" + std::to_string(component) + "]") : symbol;
         const std::string where = (boundary_marker >= 0)
-                                      ? ("ds(" + std::to_string(boundary_marker) + ")")
+                                      ? ("ds(" + std::to_string(boundary_marker) +
+                                         (active_boundary_marker >= 0
+                                              ? ", wetted " + std::to_string(active_boundary_marker)
+                                              : std::string()) +
+                                         ")")
                                       : "ds(*)";
         return sym + " = " + value.toString() + " on " + where;
     }

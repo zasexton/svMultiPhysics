@@ -41,6 +41,12 @@
  * The value g may read the position, the time and the time step.  The
  * normals follow the active mesh: the lines are rebuilt when the geometry
  * changes.
+ *
+ * A boundary may be the generated active subset of a marker (the wetted part
+ * of a cut boundary): only its faces of positive wetted measure hold points
+ * and give normals (wettedBoundaryFaces), so a point on dry faces only is
+ * left to the constraints of the active side; the lines are rebuilt with
+ * each new cut-integration context.
  */
 
 #include "Constraints/SystemConstraint.h"
@@ -52,6 +58,7 @@
 #include <span>
 #include <string>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 namespace svmp {
@@ -68,6 +75,14 @@ public:
     /// u . n = @p value on the boundary faces of @p boundary_markers.
     NormalComponentConstraint(FieldId field,
                               std::vector<int> boundary_markers,
+                              forms::FormExpr value = forms::FormExpr::constant(0.0),
+                              NormalComponentOptions options = {});
+
+    /// u . n = @p value on @p boundaries: each the faces of a whole marker
+    /// or the wetted faces of its generated active subset; one boundary per
+    /// marker.
+    NormalComponentConstraint(FieldId field,
+                              std::vector<forms::ExteriorBoundaryMeasure> boundaries,
                               forms::FormExpr value = forms::FormExpr::constant(0.0),
                               NormalComponentOptions options = {});
 
@@ -100,7 +115,7 @@ public:
 
 private:
     FieldId field_{INVALID_FIELD_ID};
-    std::vector<int> boundary_markers_{};
+    std::vector<forms::ExteriorBoundaryMeasure> boundaries_{};   ///< by physical marker
     forms::FormExpr value_{};
     NormalComponentOptions options_{};
     bool is_time_dependent_{false};
@@ -122,6 +137,21 @@ boundaryPointNormals(const systems::FESystem& system,
                      FieldId field,
                      std::span<const int> boundary_markers,
                      Real feature_angle_degrees = NormalComponentOptions{}.feature_angle_degrees);
+
+/**
+ * @brief The faces of @p boundary_marker that its generated active subset
+ *        @p active_boundary_marker wets
+ *
+ * The boundary faces (IMeshAccess::forEachBoundaryFace ids) that carry a rule
+ * of positive measure of the subset in the installed cut-integration context:
+ * the faces of this rank's owned cells, where the subset is built.  nullopt
+ * when @p active_boundary_marker is negative or the context has no such
+ * subset (the whole marker then holds); a subset of another marker throws.
+ * A strong condition restricted to these faces acts on the degrees of freedom
+ * whose basis function has a nonzero trace on the wetted part of the marker.
+ */
+[[nodiscard]] std::optional<std::unordered_set<GlobalIndex>>
+wettedBoundaryFaces(const systems::FESystem& system, int boundary_marker, int active_boundary_marker);
 
 } // namespace constraints
 } // namespace FE

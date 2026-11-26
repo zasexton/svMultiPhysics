@@ -7,6 +7,7 @@
 
 #include "Constraints/NormalComponentConstraint.h"
 
+#include "Assembly/CutIntegrationContext.h"
 #include "Elements/ElementTransform.h"
 #include "Elements/ReferenceElement.h"
 #include "Forms/PointEvaluator.h"
@@ -88,11 +89,12 @@ struct FacetContribution {
 }
 
 /// The facet contributions this rank sees: the boundary facets of the
-/// markers on its owned cells, at every support point of the field (of
-/// @p components components) there.
+/// boundaries on its owned cells (the wetted ones of a generated active
+/// subset), at every support point of the field (of @p components
+/// components) there.
 std::vector<FacetContribution> collectContributions(const FESystem& system,
                                                     FieldId field,
-                                                    std::span<const int> markers,
+                                                    std::span<const forms::ExteriorBoundaryMeasure> boundaries,
                                                     int components)
 {
     const auto& rec = system.fieldRecord(field);
@@ -106,8 +108,13 @@ std::vector<FacetContribution> collectContributions(const FESystem& system,
     std::vector<std::array<Real, 3>> corners;
     std::vector<FacetContribution> out;
 
-    for (const int marker : markers) {
+    for (const auto& boundary : boundaries) {
+        const int marker = boundary.physicalBoundaryMarker();
+        const auto wetted = wettedBoundaryFaces(system, marker, boundary.generatedActiveBoundaryMarker());
         mesh.forEachBoundaryFace(marker, [&](GlobalIndex face_id, GlobalIndex cell_id) {
+            if (wetted && !wetted->contains(face_id)) {
+                return;
+            }
             const ElementType cell_type = mesh.getCellType(cell_id);
             auto it = restrictions.find(static_cast<int>(cell_type));
             if (it == restrictions.end()) {
@@ -335,10 +342,10 @@ std::vector<std::array<Real, 3>> pointDirections(std::span<const FacetContributi
 /// The contributions of each owned point, sorted by (first DOF, facet id).
 std::vector<FacetContribution> ownedPointContributions(const FESystem& system,
                                                        FieldId field,
-                                                       std::span<const int> markers,
+                                                       std::span<const forms::ExteriorBoundaryMeasure> boundaries,
                                                        int components)
 {
-    auto contributions = gatherAtOwners(system, collectContributions(system, field, markers, components));
+    auto contributions = gatherAtOwners(system, collectContributions(system, field, boundaries, components));
     std::sort(contributions.begin(), contributions.end(), [](const FacetContribution& a, const FacetContribution& b) {
         return a.dofs[0] != b.dofs[0] ? a.dofs[0] < b.dofs[0] : a.facet < b.facet;
     });
@@ -471,7 +478,52 @@ std::vector<NormalComponentConstraint::Line> pointLines(std::span<const FacetCon
     return lines;
 }
 
+/// The whole faces of each of @p markers.
+std::vector<forms::ExteriorBoundaryMeasure> fullBoundaries(std::span<const int> markers)
+{
+    std::vector<forms::ExteriorBoundaryMeasure> out;
+    out.reserve(markers.size());
+    for (const int marker : markers) {
+        if (marker < 0) {
+            throw std::invalid_argument("NormalComponentConstraint: the boundary markers must be nonempty and >= 0");
+        }
+        out.push_back(forms::ExteriorBoundaryMeasure::fullPhysical(marker));
+    }
+    return out;
+}
+
 } // namespace
+
+std::optional<std::unordered_set<GlobalIndex>>
+wettedBoundaryFaces(const FESystem& system, int boundary_marker, int active_boundary_marker)
+{
+    if (active_boundary_marker < 0) {
+        return std::nullopt;
+    }
+    const auto* context = system.cutIntegrationContext();
+    if (context == nullptr || !context->hasGeneratedActiveBoundaryMarker(active_boundary_marker)) {
+        return std::nullopt;
+    }
+    context->assertAllFreeSurfaceGeometrySnapshotsCurrent(system.meshAccess());
+    const auto* provenance = context->findGeneratedActiveBoundaryProvenance(active_boundary_marker);
+    FE_THROW_IF(provenance == nullptr || provenance->physicalBoundaryMarker() != boundary_marker,
+                InvalidArgumentException,
+                "wettedBoundaryFaces: generated active-boundary marker " + std::to_string(active_boundary_marker) +
+                    " is not a subset of boundary marker " + std::to_string(boundary_marker));
+    std::unordered_set<GlobalIndex> faces;
+    const auto& rules = context->interfaceRules();
+    for (const auto index : context->generatedInterfaceRuleIndexSpanForMarker(active_boundary_marker)) {
+        if (index >= rules.size()) {
+            continue;
+        }
+        const auto& rule = rules[index];
+        if (std::isfinite(rule.measure) && rule.measure > Real{0.0} &&
+            rule.provenance.parent_boundary_entity >= 0) {
+            faces.insert(static_cast<GlobalIndex>(rule.provenance.parent_boundary_entity));
+        }
+    }
+    return faces;
+}
 
 std::unordered_map<GlobalIndex, std::optional<std::array<Real, 3>>>
 boundaryPointNormals(const FESystem& system,
@@ -492,7 +544,7 @@ boundaryPointNormals(const FESystem& system,
     const Real cos_feature_angle = std::cos(feature_angle_degrees * kPi / 180.0);
 
     std::unordered_map<GlobalIndex, std::optional<std::array<Real, 3>>> normals;
-    forEachPoint(ownedPointContributions(system, field, boundary_markers, components),
+    forEachPoint(ownedPointContributions(system, field, fullBoundaries(boundary_markers), components),
                  [&](std::span<const FacetContribution> point) {
                      const auto directions = pointDirections(point, cos_feature_angle);
                      std::optional<std::array<Real, 3>> normal;
@@ -510,21 +562,36 @@ NormalComponentConstraint::NormalComponentConstraint(FieldId field,
                                                      std::vector<int> boundary_markers,
                                                      forms::FormExpr value,
                                                      NormalComponentOptions options)
+    : NormalComponentConstraint(field, fullBoundaries(boundary_markers), std::move(value), options)
+{
+}
+
+NormalComponentConstraint::NormalComponentConstraint(FieldId field,
+                                                     std::vector<forms::ExteriorBoundaryMeasure> boundaries,
+                                                     forms::FormExpr value,
+                                                     NormalComponentOptions options)
     : field_(field)
-    , boundary_markers_(std::move(boundary_markers))
+    , boundaries_(std::move(boundaries))
     , value_(std::move(value))
     , options_(options)
 {
     if (field_ == INVALID_FIELD_ID) {
         throw std::invalid_argument("NormalComponentConstraint: invalid FieldId");
     }
-    if (boundary_markers_.empty() ||
-        std::any_of(boundary_markers_.begin(), boundary_markers_.end(), [](int m) { return m < 0; })) {
+    if (boundaries_.empty()) {
         throw std::invalid_argument("NormalComponentConstraint: the boundary markers must be nonempty and >= 0");
     }
-    std::sort(boundary_markers_.begin(), boundary_markers_.end());
-    boundary_markers_.erase(std::unique(boundary_markers_.begin(), boundary_markers_.end()),
-                            boundary_markers_.end());
+    std::sort(boundaries_.begin(), boundaries_.end(), [](const auto& a, const auto& b) {
+        return a.physicalBoundaryMarker() < b.physicalBoundaryMarker();
+    });
+    boundaries_.erase(std::unique(boundaries_.begin(), boundaries_.end()), boundaries_.end());
+    for (std::size_t i = 1; i < boundaries_.size(); ++i) {
+        if (boundaries_[i].physicalBoundaryMarker() == boundaries_[i - 1].physicalBoundaryMarker()) {
+            throw std::invalid_argument("NormalComponentConstraint: boundary marker " +
+                                        std::to_string(boundaries_[i].physicalBoundaryMarker()) +
+                                        " is given with two different subsets");
+        }
+    }
     if (!value_.isValid() || value_.hasTest() || value_.hasTrial()) {
         throw std::invalid_argument("NormalComponentConstraint: the value must be a valid expression without "
                                     "test or trial functions");
@@ -548,7 +615,7 @@ void NormalComponentConstraint::apply(const FESystem& system, AffineConstraints&
     FE_THROW_IF(dim < 2 || dim > 3 || rec.space->value_dimension() != dim, InvalidArgumentException,
                 "NormalComponentConstraint: field '" + rec.name + "' must have one component per space dimension");
 
-    const auto contributions = ownedPointContributions(system, field_, boundary_markers_, dim);
+    const auto contributions = ownedPointContributions(system, field_, boundaries_, dim);
     const Real cos_feature_angle = std::cos(options_.feature_angle_degrees * kPi / 180.0);
     forms::PointEvalContext pctx;
     lines_.clear();
@@ -600,6 +667,14 @@ ConstraintDependencyDeclaration NormalComponentConstraint::dependencyDeclaration
     ConstraintDependencyDeclaration out = ISystemConstraint::dependencyDeclaration();
     // The normals, and so the slaves, follow the geometry.
     merge_into(out.structural, ConstraintDependencyMask::meshGeometry());
+    if (std::any_of(boundaries_.begin(), boundaries_.end(),
+                    [](const auto& boundary) { return boundary.isGeneratedActiveSubset(); })) {
+        // The wetted faces come from the installed cut-integration context; a
+        // new context rebuilds the constraint state.
+        out.structural.fe_constraint_layout = true;
+        out.structural.mesh_field_layout = true;
+        out.structural.active_configuration = true;
+    }
     return out;
 }
 
@@ -615,8 +690,11 @@ std::string NormalComponentConstraint::manifestDescription() const
 {
     std::ostringstream oss;
     oss << "field=" << field_ << " markers=";
-    for (std::size_t i = 0; i < boundary_markers_.size(); ++i) {
-        oss << (i > 0 ? "," : "") << boundary_markers_[i];
+    for (std::size_t i = 0; i < boundaries_.size(); ++i) {
+        oss << (i > 0 ? "," : "") << boundaries_[i].physicalBoundaryMarker();
+        if (boundaries_[i].isGeneratedActiveSubset()) {
+            oss << "(wetted " << boundaries_[i].generatedActiveBoundaryMarker() << ")";
+        }
     }
     oss << " feature_angle=" << options_.feature_angle_degrees
         << " time_dependent=" << (is_time_dependent_ ? 1 : 0) << " value=" << value_.toString();

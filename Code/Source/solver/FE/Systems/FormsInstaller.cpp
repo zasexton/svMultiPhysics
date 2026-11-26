@@ -2353,11 +2353,11 @@ void installStrongDirichlet(FESystem& system, std::span<const forms::bc::StrongD
             if (other.field == bc.field && other.precedence > bc.precedence &&
                 other.boundary_marker != bc.boundary_marker &&
                 (other.component == bc.component || other.component < 0 || bc.component < 0)) {
-                yields.push_back({other.boundary_marker, other.component});
+                yields.push_back({other.boundary_marker, other.component, other.active_boundary_marker});
             }
         }
         system.addSystemConstraint(std::make_unique<constraints::StrongDirichletConstraint>(
-            bc.field, bc.boundary_marker, bc.value, bc.component, std::move(yields)));
+            bc.field, bc.boundary_marker, bc.value, bc.component, std::move(yields), bc.active_boundary_marker));
     }
 }
 

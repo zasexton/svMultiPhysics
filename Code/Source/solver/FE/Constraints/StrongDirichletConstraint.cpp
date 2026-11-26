@@ -254,7 +254,8 @@ void completeOwnedDofsWithCoords(const FESystem& system,
     int boundary_marker,
     int component,
     std::span<const FieldId> sampled_field_ids = {},
-    bool require_coefficients = true)
+    bool require_coefficients = true,
+    const std::unordered_set<GlobalIndex>* wetted_faces = nullptr)
 {
     BoundaryDofsWithCoords out;
 
@@ -321,6 +322,9 @@ void completeOwnedDofsWithCoords(const FESystem& system,
     std::vector<math::Vector<Real, 3>> geom_nodes;
 
     mesh.forEachBoundaryFace(boundary_marker, [&](GlobalIndex face_id, GlobalIndex cell_id) {
+        if (wetted_faces != nullptr && !wetted_faces->contains(face_id)) {
+            return;
+        }
         const ElementType cell_type = mesh.getCellType(cell_id);
 
         auto& face_restriction = getFaceRestriction(face_restriction_cache,
@@ -444,11 +448,13 @@ StrongDirichletConstraint::StrongDirichletConstraint(FieldId field,
                                                      int boundary_marker,
                                                      forms::FormExpr value,
                                                      int component,
-                                                     std::vector<Yield> yields)
+                                                     std::vector<Yield> yields,
+                                                     int active_boundary_marker)
     : yields_(std::move(yields)),
       field_(field),
       boundary_marker_(boundary_marker),
       component_(component),
+      active_boundary_marker_(active_boundary_marker),
       value_(std::move(value))
 {
     if (field_ == INVALID_FIELD_ID) {
@@ -505,8 +511,9 @@ void StrongDirichletConstraint::apply(const FESystem& system, constraints::Affin
         throw std::invalid_argument("StrongDirichletConstraint: value expression must not contain test/trial functions");
     }
 
+    const auto wetted = wettedBoundaryFaces(system, boundary_marker_, active_boundary_marker_);
     auto extracted = boundaryDofsWithCoordsByMarker(system, field_, boundary_marker_, component_, sampled_fields_,
-                                                    /*require_coefficients=*/false);
+                                                    /*require_coefficients=*/false, wetted ? &*wetted : nullptr);
     dropYieldedPoints(system, extracted.dofs, extracted.coords, extracted.samples);
     dofs_ = std::move(extracted.dofs);
     coords_ = std::move(extracted.coords);
@@ -588,7 +595,9 @@ bool StrongDirichletConstraint::updateValues(const FESystem& system,
                                              double time,
                                              double dt)
 {
-    auto extracted = boundaryDofsWithCoordsByMarker(system, field_, boundary_marker_, component_, sampled_fields_);
+    const auto wetted = wettedBoundaryFaces(system, boundary_marker_, active_boundary_marker_);
+    auto extracted = boundaryDofsWithCoordsByMarker(system, field_, boundary_marker_, component_, sampled_fields_,
+                                                    /*require_coefficients=*/true, wetted ? &*wetted : nullptr);
     dropYieldedPoints(system, extracted.dofs, extracted.coords, extracted.samples);
     FE_THROW_IF(extracted.dofs.size() != dofs_.size(), InvalidStateException,
                 "StrongDirichletConstraint::updateValues: geometry-dependent update changed constrained DOF count; rebuild constraints instead");
@@ -681,6 +690,14 @@ ConstraintDependencyDeclaration StrongDirichletConstraint::dependencyDeclaration
     if (is_time_dependent_) {
         out.value.time = true;
     }
+    if (active_boundary_marker_ >= 0) {
+        // The wetted faces come from the installed cut-integration context; a
+        // new context rebuilds the constraint state (as for the constraints of
+        // the active side), so the constrained set follows the cut.
+        out.structural.fe_constraint_layout = true;
+        out.structural.mesh_field_layout = true;
+        out.structural.active_configuration = true;
+    }
     return out;
 }
 
@@ -702,8 +719,10 @@ void StrongDirichletConstraint::dropYieldedPoints(const FESystem& system,
     }
     std::unordered_set<GlobalIndex> held;
     for (const auto& yield : yields_) {
+        const auto wetted = wettedBoundaryFaces(system, yield.boundary_marker, yield.active_boundary_marker);
         for (const auto dof : boundaryDofsWithCoordsByMarker(system, field_, yield.boundary_marker, yield.component,
-                                                             {}, /*require_coefficients=*/false)
+                                                             {}, /*require_coefficients=*/false,
+                                                             wetted ? &*wetted : nullptr)
                                   .dofs) {
             held.insert(dof);
         }
@@ -728,7 +747,11 @@ void StrongDirichletConstraint::dropYieldedPoints(const FESystem& system,
 std::string StrongDirichletConstraint::manifestDescription() const
 {
     std::ostringstream oss;
-    oss << "field=" << field_ << " marker=" << boundary_marker_ << " component=" << component_
+    oss << "field=" << field_ << " marker=" << boundary_marker_;
+    if (active_boundary_marker_ >= 0) {
+        oss << " wetted=" << active_boundary_marker_;
+    }
+    oss << " component=" << component_
         << " time_dependent=" << (is_time_dependent_ ? 1 : 0)
         << " value=" << (value_.isValid() ? value_.toString() : std::string("<none>"));
     if (!yields_.empty()) {

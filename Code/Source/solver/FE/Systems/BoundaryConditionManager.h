@@ -113,19 +113,30 @@ class BoundaryConditionManager {
 public:
     /// Adds @p bc.  A strong component condition joins an earlier one of the
     /// same boundary (forms::bc::Dirichlet::mergeComponents): the components
-    /// of one boundary may be stated apart, each at most once.
+    /// of one boundary may be stated apart, each at most once.  A strong
+    /// normal condition of a constant value joins the normal constraint of an
+    /// earlier one of the same value on another boundary
+    /// (forms::bc::Dirichlet::joinNormals), so that their corners see both
+    /// walls; it stays a condition of its own boundary.
     void add(std::unique_ptr<forms::bc::BoundaryCondition> bc)
     {
         if (!bc) {
             throw std::invalid_argument("BoundaryConditionManager::add: null boundary condition");
         }
-        if (const auto* condition = dynamic_cast<const forms::bc::Dirichlet*>(bc.get());
-            condition != nullptr && condition->mergesComponents()) {
+        if (auto* condition = dynamic_cast<forms::bc::Dirichlet*>(bc.get()); condition != nullptr) {
             for (auto& existing : bcs_) {
                 auto* earlier = dynamic_cast<forms::bc::Dirichlet*>(existing.get());
-                if (earlier != nullptr && earlier->mergesComponents() && earlier->sameTarget(*condition)) {
+                if (earlier == nullptr) {
+                    continue;
+                }
+                if (condition->mergesComponents() && earlier->mergesComponents() &&
+                    earlier->sameTarget(*condition)) {
                     earlier->mergeComponents(*condition);
                     return;
+                }
+                if (earlier->joinsNormalsOf(*condition)) {
+                    earlier->joinNormals(*condition);
+                    break;
                 }
             }
         }

@@ -14,6 +14,15 @@
  * marker's averaged facet normal at the node (boundaryPointNormals, the same
  * at any rank count), refused at a node where the facets meet at an edge or
  * corner.  It must not read an unknown.
+ *
+ * With a generated active subset of the marker (the wetted part of a cut
+ * boundary, by its generated marker in the installed cut-integration
+ * context), only the faces of positive wetted measure hold nodes: a degree of
+ * freedom whose basis function has a nonzero trace only on dry faces is left
+ * to the constraints of the active side (a dry node of a cut cell would
+ * otherwise shape the liquid velocity inside that cell).  A new cut context
+ * rebuilds the constraint state, so the set follows the cut; while the
+ * installed context has no such subset, the whole marker counts.
  */
 
 #include "Constraints/SystemConstraint.h"
@@ -37,13 +46,17 @@ public:
     struct Yield {
         int boundary_marker{-1};
         int component{-1};
+        int active_boundary_marker{-1};   ///< its wetted subset, when restricted
     };
 
+    /// @p active_boundary_marker, when >= 0, is the generated active subset
+    /// of @p boundary_marker the condition acts on.
     StrongDirichletConstraint(FieldId field,
                               int boundary_marker,
                               forms::FormExpr value,
                               int component = -1,
-                              std::vector<Yield> yields = {});
+                              std::vector<Yield> yields = {},
+                              int active_boundary_marker = -1);
 
     void apply(const systems::FESystem& system, AffineConstraints& constraints) override;
 
@@ -78,6 +91,7 @@ private:
     FieldId field_{INVALID_FIELD_ID};
     int boundary_marker_{-1};
     int component_{-1};
+    int active_boundary_marker_{-1};
     forms::FormExpr value_{};
     forms::FormExpr point_value_{};             ///< value_ with parameter i as slot i
     std::vector<std::string> parameter_names_{};

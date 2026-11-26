@@ -16,10 +16,16 @@
 #include "Auxiliary/AuxiliaryStateManager.h"
 
 #include "Assembly/AssemblyKernel.h"
+#include "Assembly/CutIntegrationContext.h"
 #include "Assembly/GlobalSystemView.h"
 
+#include "Constraints/NormalComponentConstraint.h"
+#include "Forms/StandardBCs.h"
 #include "Forms/Vocabulary.h"
+#include "Interfaces/GeneratedActiveBoundaryDomain.h"
 #include "Spaces/H1Space.h"
+#include "Spaces/SpaceFactory.h"
+#include "Systems/BoundaryConditionManager.h"
 
 #include "Mesh/Mesh.h"
 #include "Mesh/Core/MeshBase.h"
@@ -29,8 +35,10 @@
 #include <array>
 #include <functional>
 #include <memory>
+#include <optional>
 #include <span>
 #include <string>
+#include <utility>
 #include <vector>
 
 using svmp::CellFamily;
@@ -762,4 +770,235 @@ TEST(StrongDirichletConstraint, ValueRefusesUnknownsUndeclaredParametersAndForei
         return FormExpr::discreteField(w, *quadratic, "w");
     });
     EXPECT_THROW(foreign.system->setup(), svmp::FE::InvalidArgumentException);
+}
+
+namespace {
+
+/// Two unit quads side by side, (0,0)-(2,1): vertices 0..2 on the floor
+/// y = 0, 3..5 on top; the floor faces carry @p floor, the face x = 2 carries
+/// @p right.  Records each wall face with the cell that holds it.
+struct TwoQuadTank {
+    std::shared_ptr<Mesh> mesh{};
+    std::pair<GlobalIndex, GlobalIndex> floor_left{};    ///< face 0-1, cell 0
+    std::pair<GlobalIndex, GlobalIndex> floor_right{};   ///< face 1-2, cell 1
+    std::pair<GlobalIndex, GlobalIndex> right_wall{};    ///< face 2-5, cell 1
+};
+
+TwoQuadTank buildTwoQuadTank(int floor, int right)
+{
+    auto base = std::make_shared<MeshBase>();
+    const std::vector<svmp::real_t> X_ref = {0.0, 0.0, 1.0, 0.0, 2.0, 0.0, 0.0, 1.0, 1.0, 1.0, 2.0, 1.0};
+    const std::vector<svmp::offset_t> cell2vertex_offsets = {0, 4, 8};
+    const std::vector<svmp::index_t> cell2vertex = {0, 1, 4, 3, 1, 2, 5, 4};
+    CellShape shape{};
+    shape.family = CellFamily::Quad;
+    shape.num_corners = 4;
+    shape.order = 1;
+    base->build_from_arrays(/*spatial_dim=*/2, X_ref, cell2vertex_offsets, cell2vertex, {shape, shape});
+    base->finalize();
+    TwoQuadTank out;
+    for (svmp::index_t f = 0; f < static_cast<svmp::index_t>(base->n_faces()); ++f) {
+        const auto verts = base->face_vertices(f);
+        if (verts.size() != 2u) {
+            continue;
+        }
+        const auto has = [&](svmp::index_t vertex) { return verts[0] == vertex || verts[1] == vertex; };
+        if (has(0) && has(1)) {
+            base->set_boundary_label(f, floor);
+            out.floor_left = {f, 0};
+        } else if (has(1) && has(2)) {
+            base->set_boundary_label(f, floor);
+            out.floor_right = {f, 1};
+        } else if (has(2) && has(5)) {
+            base->set_boundary_label(f, right);
+            out.right_wall = {f, 1};
+        }
+    }
+    out.mesh = svmp::create_mesh(std::move(base));
+    return out;
+}
+
+/// The wetted part of one physical marker: its generated marker and the
+/// (face, cell) pairs of its faces of positive wetted measure.
+struct WettedWall {
+    int physical{-1};
+    int generated{-1};
+    std::vector<std::pair<GlobalIndex, GlobalIndex>> wet_faces{};
+};
+
+/// A cut-integration context that holds the generated active boundary of
+/// each wall (half of each wet face wetted).
+std::shared_ptr<svmp::FE::assembly::CutIntegrationContext>
+wettedWallContext(svmp::FE::FieldId level_set, const std::vector<WettedWall>& walls)
+{
+    namespace geometry = svmp::FE::geometry;
+    namespace interfaces = svmp::FE::interfaces;
+    auto context = std::make_shared<svmp::FE::assembly::CutIntegrationContext>();
+    for (const auto& wall : walls) {
+        interfaces::GeneratedActiveBoundaryRequest request;
+        request.source = interfaces::LevelSetInterfaceSource::fromField(level_set, /*layout_revision=*/1u,
+                                                                         /*value_revision=*/1u);
+        request.generated_domain_id = "wetted-wall";
+        request.interface_marker = 901;
+        request.boundary_marker = wall.physical;
+        request.active_boundary_marker = wall.generated;
+        request.side = geometry::CutIntegrationSide::Negative;
+        request.quadrature_order = 1;
+        request.source_value_revision = 1u;
+        interfaces::GeneratedActiveBoundaryDomain domain(request);
+        for (const auto& [face, cell] : wall.wet_faces) {
+            interfaces::GeneratedActiveBoundaryFragment fragment;
+            fragment.parent_cell = static_cast<svmp::FE::MeshIndex>(cell);
+            fragment.parent_face = static_cast<svmp::FE::MeshIndex>(face);
+            fragment.represented_implicit_geometry_mode = "LinearCorner";
+            fragment.represented_implicit_quadrature_backend = "LinearCorner";
+            fragment.represented_implicit_fallback_status = "None";
+            fragment.measure = 0.5;
+            fragment.parent_measure = 1.0;
+            fragment.achieved_quadrature_order = 1;
+            fragment.topology_id = "wetted-wall-face-" + std::to_string(face);
+            geometry::CutQuadraturePoint point;
+            point.point = {{0.25, 0.0, 0.0}};
+            point.weight = 0.5;
+            point.reference_measure_factor = 0.5;
+            fragment.quadrature_points.push_back(point);
+            domain.addFragment(std::move(fragment));
+        }
+        context->addGeneratedActiveBoundaryDomain(domain);
+    }
+    return context;
+}
+
+} // namespace
+
+// A strong wall condition on the wetted part of its marker holds only the
+// nodes of faces with wetted measure: the dry wall nodes of a cut cell are
+// released (free-surface audit A27), and a face holds its nodes once it is
+// wet.  Without a generated subset in the context the whole marker holds.
+TEST(StrongDirichletConstraint, WettedSubsetHoldsOnlyTheNodesOfWettedFaces)
+{
+    constexpr int floor = 11;
+    constexpr int right = 12;
+    constexpr int floor_wet = 3000111;
+    constexpr int right_wet = 3000112;
+    const auto tank = buildTwoQuadTank(floor, right);
+    auto space = std::make_shared<H1Space>(ElementType::Quad4, /*order=*/1);
+    FESystem sys(tank.mesh);
+    const auto u = sys.addField(FieldSpec{.name = "u", .space = space, .components = 1});
+    sys.addOperator("mass");
+    sys.addCellKernel("mass", u, std::make_shared<MassKernel>(1.0));
+    auto floor_bc = strongDirichlet(u, floor, FormExpr::constant(1.0), "u");
+    floor_bc.active_boundary_marker = floor_wet;
+    auto right_bc = strongDirichlet(u, right, FormExpr::constant(2.0), "u");
+    right_bc.active_boundary_marker = right_wet;
+    right_bc.precedence = 1;   // the right wall holds the corner once it is wet
+    svmp::FE::systems::installStrongDirichlet(sys, std::vector{floor_bc, right_bc});
+    ASSERT_NO_THROW(sys.setup());
+
+    // The value at a vertex, or nullopt where it is free.
+    const auto held = [&](GlobalIndex vertex) -> std::optional<double> {
+        const auto dof = vertexDof(sys, u, vertex);
+        if (!sys.constraints().isConstrained(dof)) {
+            return std::nullopt;
+        }
+        return sys.constraints().getInhomogeneity(dof);
+    };
+    const auto expect_holds = [&](const std::array<std::optional<double>, 6>& expected, const char* stage) {
+        for (GlobalIndex v = 0; v < 6; ++v) {
+            EXPECT_EQ(held(v), expected[static_cast<std::size_t>(v)]) << stage << ": vertex " << v;
+        }
+    };
+    const std::optional<double> free;
+
+    // No cut context: the whole markers hold.
+    expect_holds({1.0, 1.0, 2.0, free, free, 2.0}, "no cut context");
+
+    // The liquid wets the left floor face; the cut cell 1 touches the floor
+    // and the right wall only at the dry nodes 2 and 5: no row there.
+    sys.setCutIntegrationContext(
+        wettedWallContext(u, {{floor, floor_wet, {tank.floor_left}}, {right, right_wet, {}}}));
+    ASSERT_NO_THROW(sys.rebuildConstraintState());
+    expect_holds({1.0, 1.0, free, free, free, free}, "dry corner cell");
+    sys.updateConstraints(/*time=*/1.0, /*dt=*/0.5);
+    expect_holds({1.0, 1.0, free, free, free, free}, "dry corner cell, updated");
+
+    // The front reaches the floor face of the corner cell: its nodes hold.
+    sys.setCutIntegrationContext(
+        wettedWallContext(u, {{floor, floor_wet, {tank.floor_left, tank.floor_right}}, {right, right_wet, {}}}));
+    ASSERT_NO_THROW(sys.rebuildConstraintState());
+    expect_holds({1.0, 1.0, 1.0, free, free, free}, "wet floor face");
+
+    // The right wall wets: the corner rule (the higher precedence) returns.
+    sys.setCutIntegrationContext(wettedWallContext(
+        u, {{floor, floor_wet, {tank.floor_left, tank.floor_right}}, {right, right_wet, {tank.right_wall}}}));
+    ASSERT_NO_THROW(sys.rebuildConstraintState());
+    expect_holds({1.0, 1.0, 2.0, free, free, 2.0}, "wet corner");
+}
+
+// The strong normal (slip) route: walls of one constant value join one
+// NormalComponentConstraint, so a wet corner keeps both normals (u = 0) in
+// either order of the conditions (audit A43; apart, the second wall was
+// dropped and u = (1, 0) passed the corner), and a dry wall gives no normal
+// at a node of a wet one (audit A27).
+TEST(NormalComponentConstraint, JoinedWettedWallsHoldTheCornerOnlyOnWetFaces)
+{
+    namespace bc = svmp::FE::forms::bc;
+    constexpr int floor = 11;
+    constexpr int right = 12;
+    constexpr int floor_wet = 3000111;
+    constexpr int right_wet = 3000112;
+    const auto tank = buildTwoQuadTank(floor, right);
+    auto space = svmp::FE::spaces::SpaceFactory::create_vector_h1(ElementType::Quad4, /*order=*/1, /*components=*/2);
+    for (const bool floor_first : {true, false}) {
+        FESystem sys(tank.mesh);
+        const auto u = sys.addField(FieldSpec{.name = "u", .space = space, .components = 2});
+        sys.addOperator("mass");
+        sys.addCellKernel("mass", u, std::make_shared<MassKernel>(1.0));
+        const auto slip = [](int marker, int wetted) {
+            return std::make_unique<bc::Dirichlet>(bc::Boundary::of(marker, wetted), bc::Trace::Normal,
+                                                   FormExpr::constant(0.0), bc::Strong{});
+        };
+        svmp::FE::systems::BoundaryConditionManager manager;
+        manager.add(slip(floor_first ? floor : right, floor_first ? floor_wet : right_wet));
+        manager.add(slip(floor_first ? right : floor, floor_first ? right_wet : floor_wet));
+        manager.applyAll(sys, u);
+        ASSERT_NO_THROW(sys.setup());
+
+        const auto* map = sys.fieldDofHandler(u).getEntityDofMap();
+        ASSERT_NE(map, nullptr);
+        const auto offset = sys.fieldDofOffset(u);
+        // Whether component c of vertex v is constrained.
+        const auto held = [&](GlobalIndex vertex, int c) {
+            return sys.constraints().isConstrained(offset +
+                                                   map->getVertexDofs(vertex)[static_cast<std::size_t>(c)]);
+        };
+        const std::string order = floor_first ? "floor first" : "right wall first";
+
+        // Whole walls: the corner (vertex 2) holds both components.
+        EXPECT_TRUE(held(2, 0) && held(2, 1)) << order;
+        EXPECT_TRUE(held(5, 0) && !held(5, 1)) << order;
+        EXPECT_TRUE(!held(0, 0) && held(0, 1)) << order;
+
+        // The floor face of the corner cell is wet, the right wall dry: the
+        // corner keeps only the floor normal and the right wall releases 5.
+        sys.setCutIntegrationContext(wettedWallContext(
+            u, {{floor, floor_wet, {tank.floor_left, tank.floor_right}}, {right, right_wet, {}}}));
+        ASSERT_NO_THROW(sys.rebuildConstraintState());
+        EXPECT_TRUE(!held(2, 0) && held(2, 1)) << order;
+        EXPECT_TRUE(!held(5, 0) && !held(5, 1)) << order;
+
+        // Only the left floor face is wet: the dry corner node is free.
+        sys.setCutIntegrationContext(
+            wettedWallContext(u, {{floor, floor_wet, {tank.floor_left}}, {right, right_wet, {}}}));
+        ASSERT_NO_THROW(sys.rebuildConstraintState());
+        EXPECT_TRUE(!held(2, 0) && !held(2, 1)) << order;
+        EXPECT_TRUE(!held(1, 0) && held(1, 1)) << order;
+
+        // A wet corner: both normals again.
+        sys.setCutIntegrationContext(wettedWallContext(
+            u, {{floor, floor_wet, {tank.floor_left, tank.floor_right}}, {right, right_wet, {tank.right_wall}}}));
+        ASSERT_NO_THROW(sys.rebuildConstraintState());
+        EXPECT_TRUE(held(2, 0) && held(2, 1)) << order;
+        EXPECT_TRUE(held(5, 0) && !held(5, 1)) << order;
+    }
 }

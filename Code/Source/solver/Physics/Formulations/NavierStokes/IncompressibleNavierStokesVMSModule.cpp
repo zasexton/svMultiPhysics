@@ -535,9 +535,15 @@ void IncompressibleNavierStokesVMSModule::registerOn(fs::FESystem& system) const
     const auto rcr = [&](const auto& bc) { return Factories::toCoupledOutflowBC(bc, system, u, rho, on(bc)); };
     bcs.install(o.coupled_outflow_rcr, rcr);
     bcs.install(o.coupled_outflow_rcrcr, rcr);
+    // Strong velocity conditions act on the wetted part of their boundary: no form integrates over it, so
+    // the generated marker is resolved without registering it.
     Factories::declareVelocityDirichletTimeFunctions(system, o.velocity_dirichlet);
-    bcs.install(o.velocity_dirichlet,
-                [&](const auto& bc) { return Factories::toVelocityEssentialBC(bc, dim, o.velocity_field_name); });
+    bcs.install(o.velocity_dirichlet, [&](const auto& bc) {
+        return Factories::toVelocityEssentialBC(
+            bc, dim, o.velocity_field_name,
+            FE::forms::bc::Boundary::of(bc.boundary_marker,
+                                        preflight.generated_active_boundary_for(bc.boundary_marker)));
+    });
     plan.essentials(bcs, M, u, v, u_id);   // weak terms into M
     fs::BoundaryConditionManager pressure_bcs;
     pressure_bcs.install(o.pressure_dirichlet,

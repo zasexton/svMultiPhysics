@@ -464,11 +464,18 @@ enum class Trace : std::uint8_t {
  *   constant of u (setup reads them).
  *
  * The target is a Boundary: a marker or an exterior measure (the generated
- * wet part of a cut boundary: Nitsche or penalty only).  The value is the
- * whole field (a scalar, or a vector expression), every component of a vector
- * field, some components, or the trace's value (a scalar for the normal
- * trace, a vector for the tangential part); strong component conditions of
- * one boundary merge (mergeComponents, BoundaryConditionManager::add).  The
+ * wet part of a cut boundary).  On the wet part, a strong condition acts on
+ * the degrees of freedom whose basis function has a nonzero trace on a face
+ * of positive wetted measure (StrongDirichletConstraint,
+ * NormalComponentConstraint); a multiplier needs the whole marker.  Strong
+ * normal conditions of one constant value on several boundaries join one
+ * NormalComponentConstraint (joinNormals, BoundaryConditionManager::add), so
+ * that a corner or an edge where their walls meet sees every normal.  The
+ * value is the whole field (a scalar, or a vector expression), every
+ * component of a vector field, some components, or the trace's value (a
+ * scalar for the normal trace, a vector for the tangential part); strong
+ * component conditions of one boundary merge (mergeComponents,
+ * BoundaryConditionManager::add).  The
  * manifest names the condition by its trace and enforcement: EssentialBC
  * (strong, the whole field or every component), ComponentEssentialBC,
  * NormalEssentialBC, NitscheBC, ComponentNitscheBC, NormalNitscheBC,
@@ -627,6 +634,11 @@ public:
         const auto& rec = system.fieldRecord(field_id);
         const auto& value = components_.front().second;
         if (rec.space && rec.space->continuity() == Continuity::H_div) {
+            // Face degrees of freedom: each condition holds its own (joined or not).
+            if (targetMeasure().isGeneratedActiveSubset()) {
+                throw std::invalid_argument("bc::Dirichlet on boundary_marker " + std::to_string(boundary_marker_) +
+                                            ": the strong normal trace of an H(div) field acts on a whole marker");
+            }
             system.addSystemConstraint(
                 std::make_unique<constraints::HDivNormalConstraint>(field_id, boundary_marker_, value));
             return;
@@ -636,8 +648,41 @@ public:
                                         ": a strong normal trace needs an H(div) field or a vector Lagrange field, "
                                         "not '" + rec.name + "'");
         }
-        system.addSystemConstraint(std::make_unique<constraints::NormalComponentConstraint>(
-            field_id, std::vector<int>{boundary_marker_}, value));
+        if (normal_joined_) {
+            return;   // its boundary is in the constraint of the condition it joined
+        }
+        std::vector<ExteriorBoundaryMeasure> boundaries{targetMeasure()};
+        boundaries.insert(boundaries.end(), joined_normal_boundaries_.begin(), joined_normal_boundaries_.end());
+        system.addSystemConstraint(
+            std::make_unique<constraints::NormalComponentConstraint>(field_id, std::move(boundaries), value));
+    }
+
+    /// Whether @p other, a strong normal condition of the same constant
+    /// value, symbol and precedence on another marker, can join the normal
+    /// constraint of this one (joinNormals).
+    [[nodiscard]] bool joinsNormalsOf(const Dirichlet& other) const
+    {
+        const auto joinable = [](const Dirichlet& c) {
+            return c.isStrong() && c.trace_ == Trace::Normal && !c.normal_joined_ &&
+                   c.constantNormalValue().has_value();
+        };
+        return &other != this && joinable(*this) && joinable(other) && symbol_ == other.symbol_ &&
+               precedence() == other.precedence() && boundary_marker_ != other.boundary_marker_ &&
+               *constantNormalValue() == *other.constantNormalValue();
+    }
+
+    /// Adds the boundary of @p other (joinsNormalsOf) to the normal
+    /// constraint of this one; @p other then registers none.  The walls of a
+    /// corner or an edge belong in one NormalComponentConstraint: apart, the
+    /// first would hold the point and the second wall would be dropped.
+    void joinNormals(Dirichlet& other)
+    {
+        if (!joinsNormalsOf(other)) {
+            throw std::invalid_argument(
+                "bc::Dirichlet::joinNormals: strong normal conditions of one constant value on two markers join");
+        }
+        joined_normal_boundaries_.push_back(other.targetMeasure());
+        other.normal_joined_ = true;
     }
 
     [[nodiscard]] const Enforcement& enforcement() const noexcept { return how_; }
@@ -742,6 +787,12 @@ public:
         }
         std::vector<StrongDirichlet> out;
         out.reserve(components_.size());
+        const int wetted = targetMeasure().isGeneratedActiveSubset() ? measure_->generatedActiveBoundaryMarker() : -1;
+        const auto declare = [&](FormExpr value, int component) {
+            out.push_back(strongDirichlet(field_id, boundary_marker_, std::move(value), symbol_, component));
+            out.back().precedence = std::get<Strong>(how_).precedence;
+            out.back().active_boundary_marker = wetted;
+        };
         for (const auto& [component, value] : components_) {
             // A whole-field vector value as_vector({g0, g1, ...}) states
             // u_i = g_i, the declarations of its component list (the strong
@@ -749,14 +800,11 @@ public:
             if (component < 0 && value.isValid() && value.node()->type() == FormExprType::AsVector) {
                 const auto entries = value.node()->childrenShared();
                 for (std::size_t c = 0; c < entries.size(); ++c) {
-                    out.push_back(strongDirichlet(field_id, boundary_marker_, FormExpr(entries[c]), symbol_,
-                                                  static_cast<int>(c)));
-                    out.back().precedence = std::get<Strong>(how_).precedence;
+                    declare(FormExpr(entries[c]), static_cast<int>(c));
                 }
                 continue;
             }
-            out.push_back(strongDirichlet(field_id, boundary_marker_, value, symbol_, component));
-            out.back().precedence = std::get<Strong>(how_).precedence;
+            declare(value, component);
         }
         return out;
     }
@@ -838,6 +886,19 @@ private:
         measure_ = target.exteriorMeasure();
     }
 
+    /// The target as an exterior measure (the whole marker unless given as a subset).
+    [[nodiscard]] ExteriorBoundaryMeasure targetMeasure() const
+    {
+        return measure_.value_or(ExteriorBoundaryMeasure::fullPhysical(boundary_marker_));
+    }
+
+    /// The value of a normal condition, when it is a constant.
+    [[nodiscard]] std::optional<Real> constantNormalValue() const
+    {
+        const auto& value = components_.front().second;
+        return value.isValid() ? value.node()->constantValue() : std::nullopt;
+    }
+
     void validate() const
     {
         for (const auto& [component, value] : components_) {
@@ -846,11 +907,6 @@ private:
             }
         }
         if (isStrong()) {
-            if (measure_.has_value() && !measure_->isFullPhysical()) {
-                throw std::invalid_argument(
-                    "bc::Dirichlet: strong enforcement acts on the mesh faces of a marker; a generated active "
-                    "subset needs Nitsche{} or Penalty{}");
-            }
             if (trace_ == Trace::Tangential) {
                 throw std::invalid_argument(
                     "bc::Dirichlet: a tangential trace has no strong form; enforce it with Nitsche{} or Penalty{}");
@@ -1192,23 +1248,27 @@ private:
     std::string symbol_{"u"};
     std::string source_name_{};
     bool some_components_{false};
+    std::vector<ExteriorBoundaryMeasure> joined_normal_boundaries_{};   ///< joinNormals
+    bool normal_joined_{false};   ///< joined the normal constraint of another condition
     std::shared_ptr<const spaces::FunctionSpace> multiplier_space_{};   ///< bound by setup()
     std::string multiplier_name_{};
 };
 
 /// The strong Dirichlet condition of the active components of @p values on
-/// @p marker, named @p source_name in its descriptors.
+/// @p target (a marker, or its generated wet part), named @p source_name in
+/// its descriptors.
 template <class Values, class ActiveComponents>
 [[nodiscard]] inline std::unique_ptr<Dirichlet>
 componentDirichlet(const Values& values,
                    const ActiveComponents& active_components,
                    int dim,
-                   int marker,
+                   const Boundary& target,
                    std::string_view value_prefix,
                    std::string_view symbol,
                    std::string_view source_name,
                    ComponentValueNameStyle name_style = ComponentValueNameStyle::Indexed)
 {
+    const int marker = target.marker();
     std::vector<std::pair<int, FormExpr>> components;
     components.reserve(static_cast<std::size_t>(dim));
     for (int d = 0; d < dim; ++d) {
@@ -1221,7 +1281,7 @@ componentDirichlet(const Values& values,
                          detail::makeComponentValueName(value_prefix, marker, d, name_style)));
     }
 
-    return std::make_unique<Dirichlet>(marker, std::move(components), Strong{}, NaturalFlux{}, std::string(symbol),
+    return std::make_unique<Dirichlet>(target, std::move(components), Strong{}, NaturalFlux{}, std::string(symbol),
                                        std::string(source_name));
 }
 
