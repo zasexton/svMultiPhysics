@@ -678,6 +678,31 @@ TEST(FrameGeometry, CurvedQuad9HasOutwardNormalsAndZeroClosedFlux)
     }
 }
 
+TEST(FrameGeometry, DyadicJacobianPreservesExactGradientDependenciesAcrossScales)
+{
+    // These integer cofactors are exactly representable. The exact trace quotient
+    // uses their null space, including after an independent binary change of units.
+    const Matrix3x3 jacobian{{{1, 1, 0}, {1, 2, 0}, {1, 1, 1}}};
+    const Matrix3x3 inverse{{{2, -1, 0}, {-1, 1, 0}, {-1, 0, 1}}};
+    for (auto powers : {std::array{0, 0, 0}, std::array{-50, 35, 15},
+                        std::array{-128, -128, -128}}) {
+        math::Matrix<Real, 3, 3> J;
+        for (std::size_t r = 0; r < 3; ++r) {
+            for (std::size_t c = 0; c < 3; ++c) {
+                J(r, c) = std::scalbn(jacobian[r][c], powers[c]);
+            }
+        }
+        math::Matrix<Real, 3, 3> actual;
+        EXPECT_EQ(checkedJacobianDeterminant(J, &actual),
+                  std::scalbn(Real(1), powers[0] + powers[1] + powers[2]));
+        for (std::size_t r = 0; r < 3; ++r) {
+            for (std::size_t c = 0; c < 3; ++c) {
+                EXPECT_EQ(actual(r, c), std::scalbn(inverse[r][c], -powers[r]));
+            }
+        }
+    }
+}
+
 TEST(FrameGeometry, ReflectedTetrahedronPreservesPhysicalOutwardNormals)
 {
     const auto rule = quadrature::QuadratureFactory::create(ElementType::Triangle3, 2);

@@ -695,34 +695,40 @@ makeMapping(ElementType cell_type, std::span<const Point3D> coordinates)
 
 struct NormalizedJacobian {
     math::Matrix<Real, 3, 3> columns{};
-    std::array<Real, 3> lengths{};
+    std::array<int, 3> exponents{};
     Real determinant{};
 };
 
 [[nodiscard]] NormalizedJacobian normalizeJacobianColumns(const math::Matrix<Real, 3, 3>& jacobian)
 {
     NormalizedJacobian frame;
+    Real length_product = Real(1);
     for (std::size_t c = 0; c < 3; ++c) {
-        const auto column = jacobian.column(c);
-        const Real length = detail::stable_vector_norm(column);
-        FE_THROW_IF(!std::isfinite(length) || length <= Real(0), FEException,
+        auto column = jacobian.column(c);
+        const Real scale = std::max({std::abs(column[0]), std::abs(column[1]), std::abs(column[2])});
+        FE_THROW_IF(!finiteVector(column) || scale == Real(0), FEException,
                     "Invalid Jacobian column length");
-        frame.lengths[c] = length;
-        frame.columns.set_column(c, column / length);
+        // Binary scaling preserves exact cofactor cancellations used by trace certificates.
+        frame.exponents[c] = std::ilogb(scale);
+        for (auto& entry : column) {
+            entry = std::scalbn(entry, -frame.exponents[c]);
+        }
+        length_product *= column.norm();
+        frame.columns.set_column(c, column);
     }
     frame.determinant = frame.columns.determinant();
-    FE_THROW_IF(!std::isfinite(frame.determinant) || math::approx_zero(frame.determinant),
+    FE_THROW_IF(math::approx_zero(frame.determinant / length_product),
                 FEException, "Singular scale-conditioned Jacobian");
     return frame;
 }
 
 [[nodiscard]] math::Matrix<Real, 3, 3> inverseFromNormalizedColumns(const NormalizedJacobian& frame)
 {
-    // J = U D, so each row of U^{-1} is divided by its own column length.
+    // J = U D, so the row scaling of J^{-1} = D^{-1} U^{-1} is also exact.
     auto inverse = frame.columns.inverse();
     for (std::size_t r = 0; r < 3; ++r) {
         for (std::size_t c = 0; c < 3; ++c) {
-            inverse(r, c) /= frame.lengths[r];
+            inverse(r, c) = std::scalbn(inverse(r, c), -frame.exponents[r]);
             FE_THROW_IF(!std::isfinite(inverse(r, c)), FEException,
                         "Non-finite inverse Jacobian entry");
         }
@@ -1030,15 +1036,8 @@ Real checkedJacobianDeterminant(const math::Matrix<Real, 3, 3>& jacobian,
     if (inverse) {
         *inverse = inverseFromNormalizedColumns(frame);
     }
-    Real determinant = jacobian.determinant();
-    if (!std::isfinite(determinant) || determinant == Real(0)) {
-        // Intermediate cofactor products can overflow or underflow for anisotropic units.
-        long double scaled = frame.determinant;
-        for (const auto length : frame.lengths) {
-            scaled *= length;
-        }
-        determinant = static_cast<Real>(scaled);
-    }
+    const Real determinant = std::scalbn(frame.determinant,
+        frame.exponents[0] + frame.exponents[1] + frame.exponents[2]);
     FE_THROW_IF(!std::isfinite(determinant) || determinant == Real(0), FEException,
                 "Unrepresentable physical Jacobian determinant");
     return determinant;
