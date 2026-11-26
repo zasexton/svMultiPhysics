@@ -37,6 +37,7 @@
 #include <algorithm>
 #include <array>
 #include <cmath>
+#include <limits>
 #include <cstddef>
 #include <cstdint>
 #include <cstdlib>
@@ -1827,9 +1828,11 @@ TEST(GeneratedBoundaryAggregateTraceCertificateMPI,
         bound.largest_quotient_eigenvalue,
         analytic_bound,
         Real{1.0e-10});
+    // The bound certifies the assembled pencil; with non-dyadic quadrature
+    // weights its entries carry rounding.
     EXPECT_GE(
         bound.conservative_upper_bound,
-        analytic_bound);
+        analytic_bound * (Real{1.0} - Real{16.0} * std::numeric_limits<Real>::epsilon()));
     EXPECT_NEAR(
         bound.conservative_upper_bound,
         analytic_bound,

@@ -100,6 +100,14 @@ std::array<double, 2> uAt(double x, double y)
   return {std::sin(2.0 * x) * std::cosh(y), std::cos(2.0 * x) * std::sinh(y)};
 }
 
+// A source whose x component is odd about x = 1/2: its extension keeps that
+// sign up to the top, so it leaves through both side walls, the inflow-only
+// wall hold stays empty, and each cached call factors exactly one system.
+std::array<double, 2> uLeavingAt(double x, double y)
+{
+  return {2.0 * (x - 0.5), uAt(x, y)[1]};
+}
+
 // Extension on `mesh`, returned per vertex coordinate (rounded key).
 std::map<std::pair<long long, long long>, std::array<double, 2>> extend(
     const svmp::Mesh& mesh, const svmp::MeshComm& comm,
@@ -497,7 +505,7 @@ PdeCachedRun extendCached(const svmp::Mesh& mesh, const svmp::MeshComm& comm,
   for (std::size_t v = 0; v < n; ++v) {
     const double x = X[2 * v], y = X[2 * v + 1];
     phi[v] = phiAt(x, y);
-    const auto u = uAt(x, y);
+    const auto u = uLeavingAt(x, y);
     source[2 * v] = scale * u[0];
     source[2 * v + 1] = scale * u[1] + (scale - 1.0);
     known[v] = phi[v] < 0.0 ? 1u : 0u;
@@ -634,7 +642,7 @@ TEST(LevelSetPdeVelocityExtensionMPI, CacheReuseDecisionIsCollective)
   for (const auto op : {PdeVelocityExtensionOperator::Harmonic,
                         PdeVelocityExtensionOperator::LeastSquaresNormal}) {
     SCOPED_TRACE(svmp::FE::level_set::pdeVelocityExtensionOperatorName(op));
-    svmp::FE::level_set::PdeVelocityExtensionCache cache;
+    svmp::FE::level_set::PdeVelocityExtensionCache cache(1u);  // one entry: a changed known set evicts the last
     const auto check = [&](double scale,
                            const std::vector<std::pair<long long, long long>>& extra,
                            bool expect_reuse, const char* what) {
