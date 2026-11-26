@@ -67,7 +67,8 @@ redistanceLevelSetToZeroSurface(const assembly::IMeshAccess& mesh,
     const dofs::DofHandler& velocity_dofs,
     Real isovalue,
     std::span<const Real> level_set,
-    std::span<const Real> velocity);
+    std::span<const Real> velocity,
+    const spaces::FunctionSpace* velocity_space = nullptr);
 
 /**
  * @brief Change of the zero surface between two P1 fields on the same mesh.

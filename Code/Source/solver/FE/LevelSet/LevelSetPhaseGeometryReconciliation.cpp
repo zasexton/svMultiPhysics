@@ -197,6 +197,7 @@ reconcileConservativePhaseGeometry(
         candidate.data() + level_set_offset, level_set_count);
     svmp::FE::level_set::LevelSetP1PhaseGeometryCorrectionOptions
         correction_options;
+    correction_options.isovalue = volume_options.isovalue;
     correction_options.invariant_tolerance =
         request.configuration->transport.conservative_phase.invariant_tolerance;
     correction_options.relative_linear_tolerance = std::max(
@@ -347,6 +348,14 @@ reconcileConservativePhaseGeometry(
             trial_mismatch.maximum_nodal_residual;
         result.final_total_residual = trial_mismatch.total_residual;
         result.iterations = iteration + 1;
+        if (trial_reached) {
+          // Also on the last allowed iteration: the geometry already holds
+          // this candidate.
+          result.success = true;
+          result.target_reached = true;
+          result.diagnostic = "ok";
+          return result;
+        }
         accepted_line_search = true;
         break;
       }

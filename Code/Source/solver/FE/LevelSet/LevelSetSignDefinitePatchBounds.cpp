@@ -134,7 +134,8 @@ LevelSetSignDefinitePatchBoundsResult boundLevelSetOnSignDefinitePatches(
     Real tolerance,
     std::span<const Real> previous_level_set,
     std::span<const Real> candidate_level_set,
-    std::vector<Real>& bounded_level_set)
+    std::vector<Real>& bounded_level_set,
+    const LevelSetPatchBoundTransport* transport)
 {
     LevelSetSignDefinitePatchBoundsResult result;
     const auto context = collectiveFor(level_set_dofs);
@@ -152,6 +153,13 @@ LevelSetSignDefinitePatchBoundsResult boundLevelSetOnSignDefinitePatches(
         local_failure = "received coefficient spans that do not match the field layout";
     } else if (level_set_dofs.getEntityDofMap() == nullptr) {
         local_failure = "requires a vertex-nodal level-set layout";
+    } else if (transport != nullptr &&
+               (transport->velocity_dofs == nullptr || transport->velocity_dofs->getEntityDofMap() == nullptr ||
+                !(transport->dt >= Real{0.0}) ||
+                transport->previous_velocity.size() !=
+                    static_cast<std::size_t>(transport->velocity_dofs->getNumDofs()) ||
+                transport->transported_velocity.size() != transport->previous_velocity.size())) {
+        local_failure = "received a transport without a vertex-nodal velocity layout or time step";
     }
     for (std::size_t i = 0; local_failure.empty() && i < n; ++i) {
         if (!std::isfinite(previous_level_set[i]) ||
@@ -164,14 +172,22 @@ LevelSetSignDefinitePatchBoundsResult boundLevelSetOnSignDefinitePatches(
     // For every node: the number of cells around it, the number of those cells
     // that are sign definite for it in the negative and in the positive class,
     // and the range of the previous values over its patch.
+    // With a transport also the reach dt max |w| of the patch and the room,
+    // the smallest distance from the node to an opposite facet.
     std::vector<unsigned long long> counts;
     std::vector<Real> lower;
     std::vector<Real> upper;
+    std::vector<Real> reach;
+    std::vector<Real> room;
     if (local_failure.empty()) {
         try {
             counts.assign(3u * n, 0u);
             lower.assign(n, std::numeric_limits<Real>::infinity());
             upper.assign(n, -std::numeric_limits<Real>::infinity());
+            if (transport != nullptr) {
+                reach.assign(n, Real{0.0});
+                room.assign(n, std::numeric_limits<Real>::infinity());
+            }
             const auto* phi_map = level_set_dofs.getEntityDofMap();
             const ElementType expected =
                 dimension == 2 ? ElementType::Triangle3 : ElementType::Tetra4;
@@ -207,6 +223,51 @@ LevelSetSignDefinitePatchBoundsResult boundLevelSetOnSignDefinitePatches(
                         signClass(candidate_level_set[dof[kk]], isovalue, tolerance);
                     cell_minimum = std::min(cell_minimum, previous);
                     cell_maximum = std::max(cell_maximum, previous);
+                }
+                if (transport != nullptr) {
+                    std::vector<std::array<Real, 3>> x;
+                    mesh.getCellCoordinates(cell_id, x);
+                    const auto* velocity_map = transport->velocity_dofs->getEntityDofMap();
+                    Real speed = 0.0;
+                    for (int k = 0; k < corners; ++k) {
+                        const auto vdofs = velocity_map->getVertexDofs(nodes[static_cast<std::size_t>(k)]);
+                        Real speed2 = 0.0;
+                        for (int d = 0; d < dimension && static_cast<std::size_t>(d) < vdofs.size(); ++d) {
+                            const auto v = static_cast<std::size_t>(vdofs[static_cast<std::size_t>(d)]);
+                            const Real w = Real{0.5} * (transport->previous_velocity[v] + transport->transported_velocity[v]);
+                            speed2 += w * w;
+                        }
+                        speed = std::max(speed, std::sqrt(speed2));
+                    }
+                    const auto e = [&](int a, int b) {
+                        return std::array<Real, 3>{x[b][0] - x[a][0], x[b][1] - x[a][1], x[b][2] - x[a][2]};
+                    };
+                    const auto cross = [](const std::array<Real, 3>& a, const std::array<Real, 3>& b) {
+                        return std::array<Real, 3>{a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2],
+                                                   a[0] * b[1] - a[1] * b[0]};
+                    };
+                    const auto length = [](const std::array<Real, 3>& a) {
+                        return std::sqrt(a[0] * a[0] + a[1] * a[1] + a[2] * a[2]);
+                    };
+                    for (int k = 0; k < corners; ++k) {
+                        // Height of vertex k over the facet opposite it.
+                        const int a = (k + 1) % corners;
+                        const int b = (k + 2) % corners;
+                        Real height = 0.0;
+                        if (dimension == 2) {
+                            const auto facet = e(a, b);
+                            height = std::abs(cross(facet, e(a, k))[2]) / length(facet);
+                        } else {
+                            const int c = (k + 3) % corners;
+                            const auto normal = cross(e(a, b), e(a, c));
+                            const auto to_vertex = e(a, k);
+                            height = std::abs(normal[0] * to_vertex[0] + normal[1] * to_vertex[1] +
+                                              normal[2] * to_vertex[2]) / length(normal);
+                        }
+                        const auto i = dof[static_cast<std::size_t>(k)];
+                        reach[i] = std::max(reach[i], transport->dt * speed);
+                        room[i] = std::min(room[i], height);
+                    }
                 }
                 const int cell_class = previous_class[0];
                 bool previous_definite = cell_class != 0;
@@ -249,6 +310,8 @@ LevelSetSignDefinitePatchBoundsResult boundLevelSetOnSignDefinitePatches(
     sumInPlace(context, counts);
     reduceInPlace(context, lower, /*minimum=*/true);
     reduceInPlace(context, upper, /*minimum=*/false);
+    reduceInPlace(context, reach, /*minimum=*/false);
+    reduceInPlace(context, room, /*minimum=*/true);
 
     // ---- bound the sign-definite nodes (replicated, identical on all ranks) --
     bounded_level_set.assign(candidate_level_set.begin(), candidate_level_set.end());
@@ -259,7 +322,7 @@ LevelSetSignDefinitePatchBoundsResult boundLevelSetOnSignDefinitePatches(
         }
         const bool negative = counts[3u * i + 1u] == cells_around;
         const bool positive = counts[3u * i + 2u] == cells_around;
-        if (!negative && !positive) {
+        if ((!negative && !positive) || (transport != nullptr && !(reach[i] <= room[i]))) {
             continue;
         }
         ++result.sign_definite_dofs;

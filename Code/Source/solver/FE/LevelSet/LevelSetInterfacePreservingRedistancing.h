@@ -82,9 +82,11 @@ redistanceLevelSetToZeroPolygon(const assembly::IMeshAccess& mesh,
 /**
  * @brief Interface motion scale for the redistancing trigger.
  *
- * max_speed is the largest nodal speed |w| over the vertices of cut cells
- * (cells whose vertex values lie on both sides of the isovalue); min_edge is
- * the smallest edge length of those cells.  Communicator-global.
+ * max_speed is the largest nodal speed |w| over the nodes of cut cells
+ * (cells whose vertex values lie on both sides of the isovalue): the
+ * vertices of a P1 velocity, every Lagrange node of a higher-order velocity
+ * whose space is given; min_edge is the smallest edge length of those cells.
+ * Communicator-global.
  */
 struct LevelSetInterfaceMotionScale {
     bool success{false};
@@ -99,7 +101,15 @@ struct LevelSetInterfaceMotionScale {
     const dofs::DofHandler& velocity_dofs,
     Real isovalue,
     std::span<const Real> level_set,
-    std::span<const Real> velocity);
+    std::span<const Real> velocity,
+    const spaces::FunctionSpace* velocity_space = nullptr);
+
+/// Largest speed of a cell's velocity at the equispaced Lagrange points of
+/// its order on the reference simplex of the given dimension.
+[[nodiscard]] Real levelSetVelocityNodalSpeed(const spaces::FunctionSpace& velocity_space,
+                                              GlobalIndex cell,
+                                              int dimension,
+                                              const std::vector<Real>& cell_coefficients);
 
 /**
  * @brief Change of the zero polygon between two P1 fields on the same mesh.

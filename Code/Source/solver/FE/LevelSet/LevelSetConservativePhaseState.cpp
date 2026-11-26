@@ -1328,8 +1328,8 @@ solveLevelSetP1PhaseGeometryCorrection(
                 continue;
             }
             const auto index = component[node];
-            null_norm_squared[index] +=
-                current_level_set[node] * current_level_set[node];
+            const Real mode = current_level_set[node] - options.isovalue;
+            null_norm_squared[index] += mode * mode;
         }
         for (const Real norm_squared : null_norm_squared) {
             if (!std::isfinite(norm_squared) ||
@@ -1362,7 +1362,7 @@ solveLevelSetP1PhaseGeometryCorrection(
             for (std::size_t node = 0u; node < nodes; ++node) {
                 if (active[node] != 0u) {
                     coefficients[component[node]] +=
-                        values[node] * current_level_set[node];
+                        values[node] * (current_level_set[node] - options.isovalue);
                 }
             }
             for (std::size_t index = 0u;
@@ -1372,7 +1372,7 @@ solveLevelSetP1PhaseGeometryCorrection(
             for (std::size_t node = 0u; node < nodes; ++node) {
                 if (active[node] != 0u) {
                     values[node] -= coefficients[component[node]] *
-                                    current_level_set[node];
+                                    (current_level_set[node] - options.isovalue);
                 } else {
                     values[node] = Real{0.0};
                 }

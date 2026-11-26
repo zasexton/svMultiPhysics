@@ -139,6 +139,8 @@ buildLevelSetP1PhaseGeometrySensitivity(
     std::span<const Real> solution);
 
 struct LevelSetP1PhaseGeometryCorrectionOptions {
+    /// Isovalue of the interface; the scaling null modes are phi - isovalue.
+    Real isovalue{0.0};
     Real invariant_tolerance{1.0e-12};
     Real relative_linear_tolerance{1.0e-10};
     /// Zero selects a size-dependent bounded iteration count.
@@ -149,8 +151,8 @@ struct LevelSetP1PhaseGeometryCorrectionOptions {
  * @brief Minimum-norm fixed-topology update for local phase-moment closure.
  *
  * The trace mass matrix has at least one scaling null mode per disconnected
- * interface component because multiplying `phi` by a positive constant does
- * not move its zero set. Tensor-product traces can have additional
+ * interface component because multiplying `phi - isovalue` by a positive
+ * constant does not move its zero set. Tensor-product traces can have additional
  * zero-on-interface modes. The projected, unpreconditioned solve removes the
  * known scaling modes and returns the minimum-norm range-space update across
  * any remaining trace kernel.

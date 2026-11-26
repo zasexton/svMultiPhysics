@@ -938,10 +938,15 @@ minimizeLevelSetVolumeConstrained(
             search_used_limited_memory_direction = false;
             used_projected_gradient_fallback = true;
         }
-        if (!finitePositive(tangent_direction_norm)) {
+        if (!std::isfinite(tangent_direction_norm)) {
             result.diagnostic =
                 "static_capillary_equilibrium_tangent_step_is_nonfinite";
             return result;
+        }
+        if (!(tangent_direction_norm > Real{0.0})) {
+            // A stationary energy on an infeasible candidate leaves the
+            // pure feasibility step along the volume gradient.
+            std::fill(tangent_direction.begin(), tangent_direction.end(), Real{0.0});
         }
         if (tangent_direction_norm >
             options.tangent_trust_radius) {

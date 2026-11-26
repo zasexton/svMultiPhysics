@@ -600,6 +600,85 @@ TEST(LevelSetKinematicReconciliation, RedistancingCarriesTheRateIntoItsRepresent
 }
 #endif
 
+#if FE_HAS_EIGEN
+TEST(LevelSetKinematicReconciliation, RedistancingTriggerSeesHigherOrderVelocityModes)
+{
+    // A P2 transport velocity that vanishes at every vertex but is (1, 1) at
+    // every edge node.  The redistancing trigger sampled vertex velocities
+    // only and accumulated no interface motion.
+    namespace ts = FE::timestepping;
+    SimplexSystem s(buildStructuredTriangleMesh(8), 2, /*velocity_order=*/2);
+    const FE::Real dt = 1.0e-3;
+    const auto phi = s.scalar([](const Point& x) { return x[0] - 0.4173; });
+    std::vector<FE::Real> velocity(static_cast<std::size_t>(s.velocityDofs().getNumDofs()), 1.0);
+    const auto* map = s.velocityDofs().getEntityDofMap();
+    for (FE::GlobalIndex v = 0; v < map->numVertices(); ++v) {
+        for (const auto dof : map->getVertexDofs(v)) velocity[static_cast<std::size_t>(dof)] = 0.0;
+    }
+    std::vector<FE::Real> state(static_cast<std::size_t>(s.system.dofHandler().getNumDofs()), 0.0);
+    std::copy(phi.begin(), phi.end(), state.begin() + s.system.fieldDofOffset(s.phi));
+    std::copy(velocity.begin(), velocity.end(), state.begin() + s.system.fieldDofOffset(s.velocity));
+    const auto factory = ts::test::createTestFactory();
+    auto history = ts::TimeHistory::allocate(*factory, s.system.dofHandler().getNumDofs(), 1);
+    ts::test::setVectorByDof(history.u(), state);
+    ts::test::setVectorByDof(history.uPrev(), state);
+    history.setStepIndex(1);
+    history.setTime(dt);
+    history.setDt(dt);
+    auto config = std::make_shared<level_set::LevelSetMaintenanceConfiguration>();
+    config->transport.level_set.field_name = "phi";
+    config->transport.velocity.field_name = "w";
+    config->transport.interface_preserving_redistancing.enabled = true;
+    std::vector<level_set::LevelSetMaintenanceRequest> requests{{.configuration = config}};
+    (void)level_set::applyLevelSetMaintenance({.fe_system = &s.system}, history, requests);
+    EXPECT_EQ(requests.front().runtime.redistancing_calls, 0u);
+    EXPECT_NEAR(requests.front().runtime.redistancing_accumulated_displacement, std::sqrt(2.0) * dt, 1.0e-15);
+}
+#endif
+
+#if FE_HAS_EIGEN
+TEST(LevelSetKinematicReconciliation, PatchBoundsKeepAnIslandCarriedBeyondItsPatch)
+{
+    // One liquid node translated exactly by three cell widths in one step.
+    // Around its new position the previous patch was all gas, so the bound
+    // clamped the exact value -1 to +1 and erased the island.  Beyond a
+    // one-ring Courant number of one the previous patch range is no bound.
+    namespace ts = FE::timestepping;
+    SimplexSystem s(buildStructuredTriangleMesh(10), 2);
+    const FE::Real dt = 1.0;
+    const auto at = [](const Point& x, FE::Real cx) {
+        return std::abs(x[0] - cx) < 1.0e-12 && std::abs(x[1] - 0.5) < 1.0e-12;
+    };
+    const auto previous = s.scalar([&](const Point& x) { return at(x, 0.3) ? -1.0 : 1.0; });
+    const auto transported = s.scalar([&](const Point& x) { return at(x, 0.6) ? -1.0 : 1.0; });
+    const auto velocity = s.vector([](const Point&) { return Point{0.3, 0.0, 0.0}; });
+    std::vector<FE::Real> state(static_cast<std::size_t>(s.system.dofHandler().getNumDofs()), 0.0);
+    std::copy(transported.begin(), transported.end(), state.begin() + s.system.fieldDofOffset(s.phi));
+    std::copy(velocity.begin(), velocity.end(), state.begin() + s.system.fieldDofOffset(s.velocity));
+    const auto factory = ts::test::createTestFactory();
+    auto history = ts::TimeHistory::allocate(*factory, s.system.dofHandler().getNumDofs(), 1);
+    ts::test::setVectorByDof(history.u(), state);
+    ts::test::setVectorByDof(history.uPrev(), state);
+    history.setStepIndex(1);
+    history.setTime(dt);
+    history.setDt(dt);
+    auto config = std::make_shared<level_set::LevelSetMaintenanceConfiguration>();
+    config->transport.level_set.field_name = "phi";
+    config->transport.velocity.field_name = "w";
+    config->transport.sign_definite_patch_bounds.enabled = true;
+    std::vector<level_set::LevelSetMaintenanceRequest> requests{{.configuration = config}};
+    const auto baseline = level_set::LevelSetKinematicBaseline{
+        .level_set_field = s.phi, .velocity_field = s.velocity, .step = 0, .level_set = previous, .velocity = velocity};
+    (void)level_set::applyLevelSetMaintenance({.fe_system = &s.system}, history, requests, {}, {}, nullptr,
+                                              nullptr, {&baseline, 1});
+    const auto u = ts::test::getVectorByDof(history.u());
+    const auto offset = static_cast<std::size_t>(s.system.fieldDofOffset(s.phi));
+    for (std::size_t i = 0; i < transported.size(); ++i) {
+        EXPECT_EQ(u[offset + i], transported[i]) << "dof " << i;
+    }
+}
+#endif
+
 TEST(LevelSetKinematicReconciliation, LeavesAConsistentTranslationUnchanged)
 {
     SimplexSystem s(buildStructuredTriangleMesh(12), 2);

@@ -73,8 +73,12 @@ struct LevelSetSignDefinitePatchBoundsResult {
  * cut cell are untouched.  There is no numerical parameter.  The bound is
  * exact for one-ring Courant numbers up to one wherever the characteristic
  * starts inside the mesh, i.e. away from inflow boundaries, so it must not
- * be used with level-set inflow boundaries.  For larger steps it only
- * restricts values away from the interface.
+ * be used with level-set inflow boundaries.  When the step's transport is
+ * given, a node is bounded only if its characteristic foot stays in its
+ * patch: dt times the largest step-mean vertex speed of the patch is at most
+ * the smallest distance from the node to the facet opposite it in a cell of
+ * the patch.  Otherwise the previous patch range is no bound at all (an
+ * exactly translated island would be erased).
  *
  * Supported cells are affine Triangle3 (2D) and Tetra4 (3D) with one scalar
  * level-set DOF per vertex.  Coefficient spans are complete (replicated)
@@ -86,6 +90,14 @@ struct LevelSetSignDefinitePatchBoundsResult {
  * @param isovalue    level-set value of the interface
  * @param tolerance   sign-class tolerance (values within it count as zero)
  */
+/// The transport of the step, for the one-ring Courant limit of the bound.
+struct LevelSetPatchBoundTransport {
+    const dofs::DofHandler* velocity_dofs{nullptr};
+    std::span<const Real> previous_velocity{};
+    std::span<const Real> transported_velocity{};
+    Real dt{0.0};
+};
+
 [[nodiscard]] LevelSetSignDefinitePatchBoundsResult
 boundLevelSetOnSignDefinitePatches(
     const assembly::IMeshAccess& mesh,
@@ -94,6 +106,7 @@ boundLevelSetOnSignDefinitePatches(
     Real tolerance,
     std::span<const Real> previous_level_set,
     std::span<const Real> candidate_level_set,
-    std::vector<Real>& bounded_level_set);
+    std::vector<Real>& bounded_level_set,
+    const LevelSetPatchBoundTransport* transport = nullptr);
 
 } // namespace svmp::FE::level_set

@@ -358,6 +358,7 @@ LevelSetKinematicReconciliationResult reconcileMaintainedLevelSetStep(
 // Stage 2, sign-definite patch bounds.
 void boundMaintainedLevelSetPatches(
     const LevelSetMaintenanceHost& host,
+    double history_dt,
     const LevelSetMaintenanceRequest& request,
     svmp::FE::FieldId field,
     int completed_step,
@@ -412,6 +413,26 @@ void boundMaintainedLevelSetPatches(
   const std::span<const svmp::FE::Real> candidate(
       fe_solution.data() + offset, count);
   const auto volume_options = levelSetVolumeOptionsForMaintenance(*request.configuration);
+  // The bound holds only where the characteristic foot stays in the patch;
+  // a nodal transport velocity of the step tells where.
+  const auto velocity_field = host.fe_system->findFieldByName(
+      request.configuration->transport.velocity.field_name);
+  std::optional<svmp::FE::level_set::LevelSetPatchBoundTransport> transport;
+  std::vector<svmp::FE::Real> transported_velocity;
+  if (velocity_field != svmp::FE::INVALID_FIELD_ID &&
+      request.configuration->transport.velocity.source !=
+          svmp::FE::level_set::LevelSetVelocitySource::ConstantVector) {
+    transported_velocity = levelSetTransportVelocityCoefficients(
+        *host.fe_system, velocity_field, fe_solution);
+    transport = svmp::FE::level_set::LevelSetPatchBoundTransport{
+        .velocity_dofs = &host.fe_system->fieldDofHandler(velocity_field),
+        .previous_velocity = baseline->velocity.size() == transported_velocity.size()
+                                 ? std::span<const svmp::FE::Real>(baseline->velocity)
+                                 : std::span<const svmp::FE::Real>(transported_velocity),
+        .transported_velocity = transported_velocity,
+        .dt = static_cast<svmp::FE::Real>(history_dt),
+    };
+  }
   std::vector<svmp::FE::Real> bounded;
   const auto result =
       svmp::FE::level_set::boundLevelSetOnSignDefinitePatches(
@@ -421,7 +442,8 @@ void boundMaintainedLevelSetPatches(
           volume_options.tolerance,
           baseline->level_set,
           candidate,
-          bounded);
+          bounded,
+          transport ? &*transport : nullptr);
   if (!result.success) {
     throw std::runtime_error(
         "[svMultiPhysics::Application] Level-set sign-definite patch "
@@ -527,10 +549,12 @@ void redistanceMaintainedLevelSet(
       three_dimensional
           ? svmp::FE::level_set::levelSetInterfaceMotionScale3D(
                 mesh_access, phi_dofs, host.fe_system->fieldDofHandler(velocity_field),
-                volume_options.isovalue, input, transport_velocity)
+                volume_options.isovalue, input, transport_velocity,
+                host.fe_system->fieldRecord(velocity_field).space.get())
           : svmp::FE::level_set::levelSetInterfaceMotionScale(
                 mesh_access, phi_dofs, host.fe_system->fieldDofHandler(velocity_field),
-                volume_options.isovalue, input, transport_velocity);
+                volume_options.isovalue, input, transport_velocity,
+                host.fe_system->fieldRecord(velocity_field).space.get());
   if (!motion.success) {
     throw std::runtime_error(
         "[svMultiPhysics::Application] Level-set interface-preserving "
@@ -1027,7 +1051,7 @@ bool applyLevelSetMaintenance(
 
     if (do_patch_bounds) {
       boundMaintainedLevelSetPatches(
-          host, request, field, completed_step, kinematic_baselines,
+          host, history.dt(), request, field, completed_step, kinematic_baselines,
           permits_representation, observe_stage, fe_solution, changed, modified_level_set_fields,
           staged_commit_logs);
     }

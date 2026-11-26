@@ -1,6 +1,7 @@
 #include "LevelSet/LevelSetInterfacePreservingRedistancing.h"
 
 #include "Dofs/EntityDofMap.h"
+#include "Spaces/FunctionSpace.h"
 
 #if FE_HAS_MPI
 #include <mpi.h>
@@ -150,6 +151,7 @@ struct CellData {
     std::array<std::size_t, 3> dof{};
     std::array<Point2, 3> x{};
     std::array<GlobalIndex, 3> vertex{};
+    GlobalIndex id{};
 };
 
 // The owned affine Triangle3 cells with their DOFs and vertex coordinates.
@@ -176,6 +178,7 @@ struct CellData {
             throw std::invalid_argument("found an incomplete cell");
         }
         CellData cell;
+        cell.id = cell_id;
         for (std::size_t k = 0; k < 3u; ++k) {
             const auto vdofs = map->getVertexDofs(nodes[k]);
             if (vdofs.size() != 1u || vdofs.front() < 0 ||
@@ -482,13 +485,36 @@ std::vector<std::size_t> levelSetDofCellClosure(const assembly::IMeshAccess& mes
     return closure;
 }
 
+Real levelSetVelocityNodalSpeed(const spaces::FunctionSpace& velocity_space,
+                                GlobalIndex cell,
+                                int dimension,
+                                const std::vector<Real>& cell_coefficients)
+{
+    const int order = std::max(1, velocity_space.polynomial_order(cell));
+    Real speed = 0.0;
+    for (int i = 0; i <= order; ++i) {
+        for (int j = 0; i + j <= order; ++j) {
+            for (int k = 0; k <= (dimension == 3 ? order - i - j : 0); ++k) {
+                const spaces::FunctionSpace::Value xi{static_cast<Real>(i) / order, static_cast<Real>(j) / order,
+                                                      static_cast<Real>(k) / order};
+                const auto w = velocity_space.evaluate(xi, cell_coefficients);
+                Real speed2 = 0.0;
+                for (int d = 0; d < dimension; ++d) speed2 += w[static_cast<std::size_t>(d)] * w[static_cast<std::size_t>(d)];
+                speed = std::max(speed, std::sqrt(speed2));
+            }
+        }
+    }
+    return speed;
+}
+
 LevelSetInterfaceMotionScale levelSetInterfaceMotionScale(
     const assembly::IMeshAccess& mesh,
     const dofs::DofHandler& level_set_dofs,
     const dofs::DofHandler& velocity_dofs,
     Real isovalue,
     std::span<const Real> level_set,
-    std::span<const Real> velocity)
+    std::span<const Real> velocity,
+    const spaces::FunctionSpace* velocity_space)
 {
     LevelSetInterfaceMotionScale scale;
     const auto context = collectiveFor(level_set_dofs);
@@ -511,6 +537,19 @@ LevelSetInterfaceMotionScale levelSetInterfaceMotionScale(
                 }
                 if (!(below && above)) {
                     continue;
+                }
+                const auto cell_dofs = velocity_dofs.getDofMap().getCellDofs(cell.id);
+                if (velocity_space != nullptr &&
+                    cell_dofs.size() > 3u * velocity_map->getVertexDofs(cell.vertex[0]).size()) {
+                    std::vector<Real> coefficients;
+                    for (const auto d : cell_dofs) {
+                        if (d < 0 || static_cast<std::size_t>(d) >= velocity.size()) {
+                            throw std::invalid_argument("velocity DOF outside the coefficient span");
+                        }
+                        coefficients.push_back(velocity[static_cast<std::size_t>(d)]);
+                    }
+                    extrema[0] = std::max(extrema[0],
+                                          levelSetVelocityNodalSpeed(*velocity_space, cell.id, 2, coefficients));
                 }
                 for (std::size_t k = 0; k < 3u; ++k) {
                     const auto vdofs = velocity_map->getVertexDofs(cell.vertex[k]);

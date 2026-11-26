@@ -1,6 +1,7 @@
 #include "LevelSet/LevelSetInterfacePreservingRedistancing3D.h"
 
 #include "Dofs/EntityDofMap.h"
+#include "Spaces/FunctionSpace.h"
 
 #if FE_HAS_MPI
 #include <mpi.h>
@@ -150,6 +151,7 @@ struct Tetra {
     std::array<std::size_t, 4> dof{};
     std::array<Point3, 4> x{};
     std::array<GlobalIndex, 4> vertex{};
+    GlobalIndex id{};
 };
 
 // The owned affine Tetra4 cells with their DOFs and vertex coordinates.
@@ -176,6 +178,7 @@ struct Tetra {
             throw std::invalid_argument("found an incomplete cell");
         }
         Tetra cell;
+        cell.id = cell_id;
         for (std::size_t k = 0; k < 4u; ++k) {
             const auto vdofs = map->getVertexDofs(nodes[k]);
             if (vdofs.size() != 1u || vdofs.front() < 0 ||
@@ -743,7 +746,8 @@ LevelSetInterfaceMotionScale levelSetInterfaceMotionScale3D(
     const dofs::DofHandler& velocity_dofs,
     Real isovalue,
     std::span<const Real> level_set,
-    std::span<const Real> velocity)
+    std::span<const Real> velocity,
+    const spaces::FunctionSpace* velocity_space)
 {
     LevelSetInterfaceMotionScale scale;
     const auto context = collectiveFor(level_set_dofs);
@@ -766,6 +770,19 @@ LevelSetInterfaceMotionScale levelSetInterfaceMotionScale3D(
                 }
                 if (!(below && above)) {
                     continue;
+                }
+                const auto cell_dofs = velocity_dofs.getDofMap().getCellDofs(cell.id);
+                if (velocity_space != nullptr &&
+                    cell_dofs.size() > 4u * velocity_map->getVertexDofs(cell.vertex[0]).size()) {
+                    std::vector<Real> coefficients;
+                    for (const auto d : cell_dofs) {
+                        if (d < 0 || static_cast<std::size_t>(d) >= velocity.size()) {
+                            throw std::invalid_argument("velocity DOF outside the coefficient span");
+                        }
+                        coefficients.push_back(velocity[static_cast<std::size_t>(d)]);
+                    }
+                    extrema[0] = std::max(extrema[0],
+                                          levelSetVelocityNodalSpeed(*velocity_space, cell.id, 3, coefficients));
                 }
                 for (std::size_t k = 0; k < 4u; ++k) {
                     const auto vdofs = velocity_map->getVertexDofs(cell.vertex[k]);

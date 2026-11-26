@@ -282,6 +282,51 @@ piecewiseTransitionOptions(int line_search_trials, FE::Real shrink = 0.5)
     return options;
 }
 
+TEST(LevelSetVolumeConstrainedMinimizer, TakesAPureFeasibilityStepAtAStationaryEnergy)
+{
+    // E = (x - 1)^2 / 2 with V = 2 + y + x^2 / 10 and V* = 2.  At (1, 0) the
+    // energy gradient vanishes but V = 2.1: the tangent step is zero and the
+    // normal correction -0.1 (0.2, 1) / 1.04 alone reaches the constrained
+    // minimum (1, -0.1).  The solver refused the zero tangent.
+    const auto evaluator = [](std::span<const FE::Real> c, EvaluationPurpose purpose) {
+        auto e = capillaryEvaluation();
+        const FE::Real x = c[0];
+        const FE::Real y = c[1];
+        const std::array<FE::Real, 2> ge{x - 1.0, 0.0};
+        const std::array<FE::Real, 2> gv{0.2 * x, 1.0};
+        const FE::Real lambda = -(ge[0] * gv[0] + ge[1] * gv[1]) / (gv[0] * gv[0] + gv[1] * gv[1]);
+        const FE::Real residual = std::hypot(ge[0] + lambda * gv[0], ge[1] + lambda * gv[1]);
+        e.success = true;
+        e.snapshot_revision_key = coefficientRevision(c);
+        e.cut_topology_key = 11u;
+        e.constraint_semantics_key = 33u;
+        e.energy_components[kSurfaceWallEnergy] = 0.5 * ge[0] * ge[0];
+        e.liquid_volume = 2.0 + y + 0.1 * x * x;
+        e.functional_derivatives_available = true;
+        e.energy_derivative = {ge[0], ge[1]};
+        e.liquid_volume_derivative = {gv[0], gv[1]};
+        const bool certify = purpose == EvaluationPurpose::AcceptanceCertificate;
+        e.checks[kPressureRepresentability].available = certify;
+        e.checks[kPressureRepresentability].converged = certify;
+        e.checks[kPressureRepresentability].values = {residual, residual};
+        e.checks[kPhysicalEquilibrium].values = {residual};
+        e.checks[kConstantPressureKkt].available = certify;
+        e.checks[kConstantPressureKkt].values = {residual, residual};
+        e.diagnostic = "available";
+        return e;
+    };
+    auto options = quadraticOptions();
+    options.target_liquid_volume = 2.0;
+    const std::vector<FE::Real> input{1.0, 0.0};
+    const std::array<std::size_t, 2> active{0u, 1u};
+    std::vector<FE::Real> accepted;
+    const auto result = minimizeCapillary(options, input, active, evaluator, accepted);
+    ASSERT_TRUE(result.success) << result.diagnostic;
+    ASSERT_EQ(accepted.size(), 2u);
+    EXPECT_NEAR(accepted[0], 1.0, 1.0e-8);
+    EXPECT_NEAR(accepted[1], -0.1, 1.0e-8);
+}
+
 TEST(LevelSetVolumeConstrainedMinimizer,
      RecordsUnpublishedStateAndModelForExhaustedLineSearch)
 {

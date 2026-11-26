@@ -482,6 +482,63 @@ TEST(LevelSetConservativePhaseState,
     }
 }
 
+TEST(LevelSetConservativePhaseState, ScalingNullModeIsTheLevelSetRelativeToItsIsovalue)
+{
+    // The same geometry stated as phi + 3 with the isovalue 3.  Its scaling
+    // null mode is (phi + 3) - 3; projecting the raw values instead distorts
+    // a realizable target.
+    PhaseStateFixture fixture;
+    const auto graph = level_set::buildLevelSetP1PhaseTransportGraph(fixture.system, fixture.indicator);
+    ASSERT_TRUE(graph.success) << graph.diagnostic;
+    level_set::LevelSetP1PhaseProjectionOptions options;
+    options.interface_marker = PhaseStateFixture::interface_marker;
+    const auto projection = level_set::projectLevelSetP1PhaseIndicatorFromCutContext(
+        fixture.system, fixture.indicator, graph, options);
+    ASSERT_TRUE(projection.success) << projection.diagnostic;
+    const auto sensitivity = level_set::buildLevelSetP1PhaseGeometrySensitivity(
+        fixture.system, fixture.phi, fixture.indicator, graph, options, fixture.solution);
+    ASSERT_TRUE(sensitivity.success) << sensitivity.diagnostic;
+    const auto phi = fixture.phiValues();
+    // A realizable target: the response to an increment orthogonal to phi.
+    std::vector<FE::Real> increment{0.02, -0.01, 0.015};
+    FE::Real along = 0.0;
+    FE::Real norm2 = 0.0;
+    for (std::size_t node = 0u; node < graph.nodes; ++node) {
+        along += increment[node] * phi[node];
+        norm2 += phi[node] * phi[node];
+    }
+    for (std::size_t node = 0u; node < graph.nodes; ++node) increment[node] -= along / norm2 * phi[node];
+    auto target = projection.liquid_phase_mass;
+    for (std::size_t node = 0u; node < graph.nodes; ++node) target[node] -= sensitivity.diagonal[node] * increment[node];
+    for (const auto& edge : sensitivity.edges) {
+        const auto first = static_cast<std::size_t>(edge.first_node);
+        const auto second = static_cast<std::size_t>(edge.second_node);
+        target[first] -= edge.coefficient * increment[second];
+        target[second] -= edge.coefficient * increment[first];
+    }
+    std::vector<FE::Real> shifted = phi;
+    for (auto& value : shifted) value += 3.0;
+    // Projected along the raw values the update misses the target's own
+    // increment (or is refused).
+    const auto raw = level_set::solveLevelSetP1PhaseGeometryCorrection(
+        sensitivity, FE::geometry::CutIntegrationSide::Negative, shifted,
+        projection.liquid_phase_mass, target, {});
+    FE::Real raw_error = raw.success ? 0.0 : 1.0;
+    for (std::size_t node = 0u; raw.success && node < graph.nodes; ++node) {
+        raw_error = std::max(raw_error, std::abs(raw.level_set_increment[node] - increment[node]));
+    }
+    EXPECT_GT(raw_error, 1.0e-4);
+    level_set::LevelSetP1PhaseGeometryCorrectionOptions signed_options;
+    signed_options.isovalue = 3.0;
+    const auto correction = level_set::solveLevelSetP1PhaseGeometryCorrection(
+        sensitivity, FE::geometry::CutIntegrationSide::Negative, shifted,
+        projection.liquid_phase_mass, target, signed_options);
+    ASSERT_TRUE(correction.success) << correction.diagnostic;
+    for (std::size_t node = 0u; node < graph.nodes; ++node) {
+        EXPECT_NEAR(correction.level_set_increment[node], increment[node], 2.0e-11);
+    }
+}
+
 TEST(LevelSetConservativePhaseState,
      SolvesTheRepresentableLocalMomentUpdateAndRejectsAPureScalingTarget)
 {

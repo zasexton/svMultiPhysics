@@ -15383,6 +15383,48 @@ TEST_F(ApplicationDriverConservativePhaseCandidatesTest,
 }
 
 TEST_F(ApplicationDriverConservativePhaseCandidatesTest,
+       LastAllowedGeometryIterationMayReachTheTarget)
+{
+  // A step that reaches the moment target on the last allowed iteration
+  // was rejected; one more allowed iteration accepted the same state.
+  auto& graph = requireCurrentConservativePhaseGraph(
+      *sim_.fe_system, requests_.front());
+  auto raw_candidate = initialized_solution_;
+  raw_candidate[fieldOffset(phi_)] += svmp::FE::Real{0.01};
+  scatterFeOrderedSolution(history().u(), raw_candidate);
+  refreshCurrentCandidate("application-driver-conservative-phase-last-iteration");
+  const auto candidate = gatherFeOrderedSolution(history().u());
+  const auto previous_phase = fieldSlice(
+      gatherFeOrderedSolution(history().uPrev()), phase_);
+  std::vector<svmp::FE::Real> target_mass(graph.nodes, svmp::FE::Real{0.0});
+  for (std::size_t node = 0u; node < graph.nodes; ++node) {
+    target_mass[node] = graph.lumped_control_volume[node] * previous_phase[node];
+  }
+  const auto reconcile = [&](int iterations, std::vector<svmp::FE::Real>& trial) {
+    auto request = withMaintenanceConfiguration(requests_.front(), [&](auto& configured) {
+      configured.transport.conservative_phase.geometry_correction_max_iterations = iterations;
+      configured.transport.conservative_phase.geometry_measure_tolerance = 1.0e-6;
+    });
+    trial = candidate;
+    LevelSetMaintenanceGeometryTransaction transaction(
+        sim_, lifecycle_, refresh_cache_, active_requests_);
+    const auto result = reconcileConservativePhaseGeometry(
+        sim_, request, *params_, target_mass, trial, transaction);
+    transaction.rollback();
+    return result;
+  };
+  std::vector<svmp::FE::Real> two_step;
+  const auto two = reconcile(2, two_step);
+  ASSERT_TRUE(two.success) << two.diagnostic;
+  ASSERT_EQ(two.iterations, 1);
+  std::vector<svmp::FE::Real> one_step;
+  const auto one = reconcile(1, one_step);
+  EXPECT_TRUE(one.success) << one.diagnostic;
+  EXPECT_TRUE(one.target_reached);
+  EXPECT_EQ(one_step, two_step);
+}
+
+TEST_F(ApplicationDriverConservativePhaseCandidatesTest,
        ContactParentProtectionRejectsAnIncompatibleGeometryTarget)
 {
   auto& graph = requireCurrentConservativePhaseGraph(
