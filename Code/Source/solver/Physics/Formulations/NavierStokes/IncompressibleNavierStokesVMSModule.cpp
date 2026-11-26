@@ -168,7 +168,9 @@ NavierStokesVMSIntegrands navierStokesVMSIntegrands(const NavierStokesTerms& t,
     const auto zero = zeroVector(dim);
     const auto w_mesh = meshVelocity();
     const auto w = s.ale ? w_mesh : zero;                                 // mesh velocity
-    const auto a = s.convection ? (s.ale ? (u - w_mesh) : u) : zero;      // velocity relative to the mesh
+    // Velocity relative to the mesh. Without convection the ALE rate still
+    // needs the mesh transport, so a = -w.
+    const auto a = s.convection ? (s.ale ? (u - w_mesh) : u) : (s.ale ? -w_mesh : zero);
     const auto chi = s.moving_control_volume ? (div(w) * u) : zero;       // moving control volume
     // (a.grad) u, plus div(a) u for the conservative transport (div(a) taken
     // term by term, as divergences of the fields).

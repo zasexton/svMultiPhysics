@@ -11843,6 +11843,64 @@ TEST(MovingDomainPhysics, NavierStokesCoupledALEAcceptsADReferenceTangentPathOve
     EXPECT_EQ(system.dofHandler().getNumDofs(), 28);
 }
 
+TEST(MovingDomainPhysics, NavierStokesALEStokesKeepsMeshTransport)
+{
+    // The stationary shear u = (0, x0, 0) on a mesh translating with
+    // w = (1, 0, 0): the nodal values change at the ALE rate (0, 1, 0), and
+    // -w.grad u cancels it with convection disabled. The momentum residual is
+    // then that of the same field on a resting mesh.
+    for (const bool vms : {false, true}) {
+        SCOPED_TRACE(vms ? "VMS" : "Galerkin");
+        const auto mesh = makeMesh();
+        auto u_space = makeVelocitySpace(mesh);
+        auto p_space = makePressureSpace(mesh);
+        auto opts = baseNavierStokesOptions();
+        opts.enable_convection = false;
+        opts.enable_vms = vms;
+        opts.enable_ale = true;
+        opts.mesh_displacement_field_name = "mesh_displacement";
+        opts.mesh_velocity_field_name = "mesh_velocity";
+
+        FE::systems::FESystem system(mesh);
+        const auto displacement =
+            system.addField(FE::systems::FieldSpec{.name = "mesh_displacement",
+                                                   .space = u_space,
+                                                   .components = 3});
+        ns::IncompressibleNavierStokesVMSModule module(u_space, p_space, opts);
+        module.registerOn(system);
+        ASSERT_NO_THROW(system.setup({}, makeSingleTetraSetupInputs()));
+        const auto u = system.findFieldByName("u");
+
+        constexpr FE::Real dt = 0.1;
+        std::vector<FE::Real> current(
+            static_cast<std::size_t>(system.dofHandler().getNumDofs()), 0.0);
+        auto translated = current;
+        for (FE::GlobalIndex vertex = 0; vertex < 4; ++vertex) {
+            const FE::Real x0 = mesh->getNodeCoordinates(vertex)[0];
+            setFieldComponentValue(current, system, u, vertex, 1, x0);
+            setFieldComponentValue(translated, system, u, vertex, 1, x0 - dt);
+            setFieldComponentValue(translated, system, displacement, vertex, 0, -dt);
+        }
+        const auto residual = [&](const std::vector<FE::Real>& previous) {
+            FE::systems::SystemStateView state;
+            state.dt = dt;
+            state.u = std::span<const FE::Real>(current);
+            state.u_prev = std::span<const FE::Real>(previous);
+            const FE::systems::BackwardDifferenceIntegrator integrator;
+            const auto time_context =
+                integrator.buildContext(/*max_time_derivative_order=*/1, state);
+            state.time_integration = &time_context;
+            return residualVector(system, state, "equations");
+        };
+        const auto moving = residual(translated);
+        const auto resting = residual(current);
+        ASSERT_EQ(moving.size(), resting.size());
+        for (std::size_t row = 0; row < moving.size(); ++row) {
+            EXPECT_NEAR(moving[row], resting[row], 1.0e-12) << "row " << row;
+        }
+    }
+}
+
 TEST(MovingDomainPhysics, MixedFluidMeshBoundaryGeometryResidualMatchesFiniteDifference)
 {
     using namespace FE::forms;
