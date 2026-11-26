@@ -85,7 +85,8 @@ struct ConstrainedStrip {
 
     explicit ConstrainedStrip(std::function<Real(const std::array<Real, 3>&)> phi,
                               std::array<GlobalIndex, 3> extrapolation = {2, 1, 0},
-                              std::vector<int> wall_markers = {kWallMarker})
+                              std::vector<int> wall_markers = {kWallMarker},
+                              LevelSetConstraintSide liquid_side = LevelSetConstraintSide::Negative)
     {
         auto space = spaces::VectorSpace(spaces::SpaceType::H1, ElementType::Triangle3, 1, 2);
         u = system.addField(systems::FieldSpec{
@@ -99,6 +100,7 @@ struct ConstrainedStrip {
             return phi(mesh->getNodeCoordinates(v));
         };
         contact.contact_speed = law;
+        contact.liquid_side = liquid_side;
         auto owned = std::make_unique<ContactPointVelocityConstraint>(u, std::move(contact));
         constraint = owned.get();
         system.addSystemConstraint(std::move(owned));
@@ -149,6 +151,36 @@ TEST(ContactPointVelocityConstraint, ExpandsTheDryVertexLineAndLeavesNormalDiric
     const double interpolated = 0.7 * state[static_cast<std::size_t>(u1)] +
                                 0.3 * state[static_cast<std::size_t>(u2)];
     EXPECT_NEAR(interpolated, target, 1.0e-13);
+}
+
+// Reversing both the level set and the liquid side describes the same liquid,
+// so the contact point keeps its Cartesian velocity (free-surface audit A34:
+// the lower level set was taken as wet, and a positive-side liquid moved the
+// contact point at -0.5 instead of +0.5).
+TEST(ContactPointVelocityConstraint, ReversingTheLevelSetAndTheLiquidSideKeepsTheContactVelocity)
+{
+    const auto phi = [](const std::array<Real, 3>& x) { return x[0] - Real{0.5}; };
+    std::vector<Real> velocities;
+    for (const bool positive_liquid : {false, true}) {
+        ConstrainedStrip strip(
+            positive_liquid ? std::function<Real(const std::array<Real, 3>&)>(
+                                  [phi](const std::array<Real, 3>& x) { return -phi(x); })
+                            : std::function<Real(const std::array<Real, 3>&)>(phi),
+            {2, 1, 0}, {kWallMarker},
+            positive_liquid ? LevelSetConstraintSide::Positive : LevelSetConstraintSide::Negative);
+        ASSERT_NO_THROW(strip.system.rebuildConstraintState());
+        ASSERT_EQ(strip.constraint->samples().size(), 1u);
+        EXPECT_NEAR(strip.constraint->samples().front().cos_theta, 0.0, 1e-14);
+        // u_x at the contact point x = 1/2 of the wall edge (0, 1), every free DOF at zero.
+        const auto& c = strip.system.constraints();
+        const auto value = [&](GlobalIndex vertex) {
+            const auto line = c.getConstraint(componentDof(strip.system, strip.u, vertex, 0));
+            return line.has_value() ? line->inhomogeneity : Real{0.0};
+        };
+        velocities.push_back(Real{0.5} * value(0) + Real{0.5} * value(1));
+    }
+    EXPECT_NEAR(velocities[0], law(0.0), 1e-14);   // toward the dry side, +x
+    EXPECT_NEAR(velocities[1], velocities[0], 1e-14);
 }
 
 TEST(ContactPointVelocityConstraint, MaintainsTheSignedLawThroughAWallVertex)

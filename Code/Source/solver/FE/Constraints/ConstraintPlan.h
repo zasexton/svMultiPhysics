@@ -214,14 +214,15 @@ public:
     ConstraintPlan& contactPointVelocity(FieldId velocity, ContactPointVelocityLaw law);
 
     /**
-     * PointLaw: the contact-point velocity law where the interface of
-     * @p geometry meets the wall @p wall_marker (unit @p wall_normal out of
-     * the fluid): the law reads the level set of the geometry at its
-     * isovalue, and @p contact_speed maps cos(theta) of a contact cell to
-     * the outward wall-tangential contact-point speed.
+     * PointLaw: the contact-point velocity law where the interface bounding
+     * the liquid side @p liquid meets the wall @p wall_marker (unit
+     * @p wall_normal out of the fluid): the law reads the level set of the
+     * side's geometry at its isovalue, oriented by the side, and
+     * @p contact_speed maps cos(theta) of a contact cell (through the
+     * liquid) to the outward wall-tangential contact-point speed.
      */
     ConstraintPlan& contactPointVelocity(FieldId velocity,
-                                         const level_set::LevelSetGeometry& geometry,
+                                         const level_set::CutSide& liquid,
                                          int wall_marker,
                                          const std::array<Real, 3>& wall_normal,
                                          std::function<Real(Real)> contact_speed,

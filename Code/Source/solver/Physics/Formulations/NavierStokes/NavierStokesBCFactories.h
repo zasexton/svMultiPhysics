@@ -1371,7 +1371,7 @@ inline void addUnfittedFreeSurface(FE::forms::FormExpr& M, FE::systems::FESystem
         }
         F.log(contactLineLogs(b, *c.line, CL.marker(), wetted_marker));
         if (c.strong) {   // PointLaw phase: registered after the aggregation, so it can expand aggregated DOFs
-            plan.contactPointVelocity(u_id, L.geometry(), c.wall, c.wall_normal, c.contact_speed,
+            plan.contactPointVelocity(u_id, L, c.wall, c.wall_normal, c.contact_speed,
                                       "ren_e_contact_point:" + std::to_string(c.wall));
             F.log(strongContactPointLog(*c.line));
         }

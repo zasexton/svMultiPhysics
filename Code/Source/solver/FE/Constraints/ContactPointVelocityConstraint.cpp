@@ -307,9 +307,11 @@ void ContactPointVelocityConstraint::apply(const systems::FESystem& system,
         if (mesh.dimension() != 2) {
             throw std::invalid_argument("supports only 2D meshes");
         }
+        // The level set oriented by the liquid side: negative in the liquid.
+        const Real orientation = law_.liquid_side == LevelSetConstraintSide::Positive ? Real{-1.0} : Real{1.0};
         if (law_.level_set_vertex_value) {
-            phi_at = [&](GlobalIndex vertex) {
-                return law_.level_set_vertex_value(vertex) - law_.isovalue;
+            phi_at = [&, orientation](GlobalIndex vertex) {
+                return orientation * (law_.level_set_vertex_value(vertex) - law_.isovalue);
             };
         } else {
             const auto* native_mesh = system.mesh();
@@ -330,11 +332,11 @@ void ContactPointVelocityConstraint::apply(const systems::FESystem& system,
             if (phi == nullptr || phi_components < 1u) {
                 throw std::runtime_error("level-set field has no scalar data");
             }
-            phi_at = [this, phi, phi_components, phi_count](GlobalIndex vertex) {
+            phi_at = [this, phi, phi_components, phi_count, orientation](GlobalIndex vertex) {
                 if (vertex < 0 || static_cast<std::size_t>(vertex) >= phi_count) {
                     throw std::runtime_error("vertex outside the level-set field");
                 }
-                return phi[static_cast<std::size_t>(vertex) * phi_components] - law_.isovalue;
+                return orientation * (phi[static_cast<std::size_t>(vertex) * phi_components] - law_.isovalue);
             };
         }
         entity_map = system.fieldDofHandler(velocity_field_).getEntityDofMap();
@@ -662,6 +664,7 @@ std::string ContactPointVelocityConstraint::manifestDescription() const
         << law_.wall_normal[2]
         << " level_set='" << law_.level_set_field_name << "'"
         << " isovalue=" << law_.isovalue
+        << " liquid_side=" << (law_.liquid_side == LevelSetConstraintSide::Positive ? "positive" : "negative")
         << " vertex_value_source=" << (law_.level_set_vertex_value ? "callback" : "mesh_field");
     // The contact-speed law is a closure; sample it so that the manifest
     // compares its values exactly.

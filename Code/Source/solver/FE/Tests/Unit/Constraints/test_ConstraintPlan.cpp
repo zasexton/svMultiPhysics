@@ -456,29 +456,35 @@ TEST(ConstraintPlan, ActiveOnWithAggregationRequiresBothCutVolumes)
     }
 }
 
-TEST(ConstraintPlan, ContactPointVelocityFromAGeometryBuildsTheSameLaw)
+TEST(ConstraintPlan, ContactPointVelocityFromALiquidSideBuildsTheSameLaw)
 {
     const auto speed = [](Real cos_d) { return Real{0.5} * (Real{0.25} - cos_d); };
+    std::vector<std::vector<std::string>> by_side;
+    for (const auto side : {forms::CutVolumeSide::Negative, forms::CutVolumeSide::Positive}) {
+        PlanSystem explicit_law;
+        ContactPointVelocityLaw law;
+        law.wall_boundary_markers = {2};
+        law.wall_normal = {0.0, -1.0, 0.0};
+        law.level_set_field_name = "phi";
+        law.isovalue = 0.5;
+        law.liquid_side = side == forms::CutVolumeSide::Positive ? LevelSetConstraintSide::Positive
+                                                                 : LevelSetConstraintSide::Negative;
+        law.contact_speed = speed;
+        law.name = "ren_e_contact_point:2";
+        ConstraintPlan(*explicit_law.system).contactPointVelocity(explicit_law.u, law).commit();
 
-    PlanSystem explicit_law;
-    ContactPointVelocityLaw law;
-    law.wall_boundary_markers = {2};
-    law.wall_normal = {0.0, -1.0, 0.0};
-    law.level_set_field_name = "phi";
-    law.isovalue = 0.5;
-    law.contact_speed = speed;
-    law.name = "ren_e_contact_point:2";
-    ConstraintPlan(*explicit_law.system).contactPointVelocity(explicit_law.u, law).commit();
+        PlanSystem from_geometry;
+        const auto G = level_set::LevelSetGeometry::bind(
+            *from_geometry.system, {.level_set_field = from_geometry.phi, .domain_id = "drop", .isovalue = 0.5});
+        ConstraintPlan(*from_geometry.system)
+            .contactPointVelocity(from_geometry.u, G.side(side), 2, {0.0, -1.0, 0.0}, speed, "ren_e_contact_point:2")
+            .commit();
 
-    PlanSystem from_geometry;
-    const auto G = level_set::LevelSetGeometry::bind(
-        *from_geometry.system, {.level_set_field = from_geometry.phi, .domain_id = "drop", .isovalue = 0.5});
-    ConstraintPlan(*from_geometry.system)
-        .contactPointVelocity(from_geometry.u, G, 2, {0.0, -1.0, 0.0}, speed, "ren_e_contact_point:2")
-        .commit();
-
-    ASSERT_EQ(explicit_law.registered().size(), 1u);
-    EXPECT_EQ(from_geometry.registered(), explicit_law.registered());
+        ASSERT_EQ(explicit_law.registered().size(), 1u);
+        EXPECT_EQ(from_geometry.registered(), explicit_law.registered());
+        by_side.push_back(explicit_law.registered());
+    }
+    EXPECT_NE(by_side[0], by_side[1]);   // the liquid side is part of the law
 }
 
 TEST(ConstraintPlan, AnchorGaugeRecordsTheEvidenceOnceAndAddsTheMeasureKernel)

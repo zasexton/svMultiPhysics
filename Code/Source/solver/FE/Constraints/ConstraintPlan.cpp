@@ -310,7 +310,7 @@ ConstraintPlan& ConstraintPlan::contactPointVelocity(FieldId velocity, ContactPo
 }
 
 ConstraintPlan& ConstraintPlan::contactPointVelocity(FieldId velocity,
-                                                     const level_set::LevelSetGeometry& geometry,
+                                                     const level_set::CutSide& liquid,
                                                      int wall_marker,
                                                      const std::array<Real, 3>& wall_normal,
                                                      std::function<Real(Real)> contact_speed,
@@ -319,8 +319,9 @@ ConstraintPlan& ConstraintPlan::contactPointVelocity(FieldId velocity,
     ContactPointVelocityLaw law;
     law.wall_boundary_markers = {wall_marker};
     law.wall_normal = wall_normal;
-    law.level_set_field_name = system_->fieldRecord(geometry.levelSetField()).name;
-    law.isovalue = geometry.isovalue();
+    law.level_set_field_name = system_->fieldRecord(liquid.geometry().levelSetField()).name;
+    law.isovalue = liquid.geometry().isovalue();
+    law.liquid_side = levelSetConstraintSide(liquid.side());
     law.contact_speed = std::move(contact_speed);
     law.name = std::move(name);
     return contactPointVelocity(velocity, std::move(law));
