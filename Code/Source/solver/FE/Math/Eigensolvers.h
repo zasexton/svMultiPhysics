@@ -42,6 +42,27 @@ T remove_diagonal_shift(Matrix<T, N, N>& matrix)
     return shift;
 }
 
+/// Normalize extreme spectra with an exact power of two, leaving headroom
+/// for the sum of up to N entries during orthogonal transformations.
+template<typename T, std::size_t N>
+int scale_symmetric_spectrum(Matrix<T, N, N>& matrix)
+{
+    T magnitude = 0;
+    for (std::size_t i = 0; i < N; ++i)
+        for (std::size_t j = i; j < N; ++j)
+            magnitude = std::max(magnitude, std::abs(matrix(i, j)));
+    int exponent = 0;
+    if (magnitude > std::numeric_limits<T>::max() / T(N))
+        exponent = N == 2 ? 1 : 2;
+    else if (magnitude > 0 && magnitude < std::numeric_limits<T>::min() / std::numeric_limits<T>::epsilon())
+        std::frexp(magnitude, &exponent);
+    if (exponent != 0)
+        for (std::size_t i = 0; i < N; ++i)
+            for (std::size_t j = 0; j < N; ++j)
+                matrix(i, j) = std::scalbn(matrix(i, j), -exponent);
+    return exponent;
+}
+
 namespace detail {
 
 // A Jacobi rotation diagonalizes a 2x2 pivot exactly. Scaling its half-gap
@@ -57,19 +78,7 @@ std::pair<Vector<T, N>, Matrix<T, N, N>> small_symmetric_eigenpairs(Matrix<T, N,
         }
     }
     const T shift = remove_diagonal_shift(matrix);
-    // Perform rotations in normal precision even when the entire centered
-    // matrix is subnormal. Powers of two do not perturb the rotation angles.
-    T magnitude = 0;
-    for (std::size_t i = 0; i < N; ++i)
-        for (std::size_t j = i; j < N; ++j)
-            magnitude = std::max(magnitude, std::abs(matrix(i, j)));
-    int exponent = 0;
-    if (magnitude > 0 && magnitude < std::numeric_limits<T>::min() / std::numeric_limits<T>::epsilon()) {
-        std::frexp(magnitude, &exponent);
-        for (std::size_t i = 0; i < N; ++i)
-            for (std::size_t j = 0; j < N; ++j)
-                matrix(i, j) = std::scalbn(matrix(i, j), -exponent);
-    }
+    const int exponent = scale_symmetric_spectrum(matrix);
     constexpr int max_rotations = N == 2 ? 1 : 24;
     for (int step = 0; step < max_rotations; ++step) {
         std::size_t p = 0, q = 1;
@@ -118,7 +127,12 @@ std::pair<Vector<T, N>, Matrix<T, N, N>> small_symmetric_eigenpairs(Matrix<T, N,
                 for (std::size_t k = 0; k < N; ++k) std::swap(vectors(k, i), vectors(k, j));
             }
         }
-        values[i] = (exponent ? std::scalbn(values[i], exponent) : values[i]) + shift;
+        // A centered root may exceed the finite range even though translating
+        // it back gives a representable eigenvalue.
+        if (exponent > 0 && std::abs(values[i]) > std::scalbn(std::numeric_limits<T>::max(), -exponent))
+            values[i] = std::scalbn(values[i] + std::scalbn(shift, -exponent), exponent);
+        else
+            values[i] = (exponent ? std::scalbn(values[i], exponent) : values[i]) + shift;
     }
     return {values, vectors};
 }

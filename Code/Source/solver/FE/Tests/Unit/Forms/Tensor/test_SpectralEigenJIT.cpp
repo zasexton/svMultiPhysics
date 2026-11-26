@@ -8,6 +8,8 @@
 #include <gtest/gtest.h>
 
 #include <array>
+#include <cmath>
+#include <limits>
 #include <utility>
 
 #include "Assembly/GlobalSystemView.h"
@@ -50,6 +52,14 @@ TEST(SpectralEigen, SimpleRootDerivativesAcrossUnitsAndShifts)
     EXPECT_NEAR(svmp_fe_sym_eigenvalue_ddA_2x2_v1(a.data(), b.data(), d.data(), 0) / 1.e210, 2., 1e-13);
     const std::array<double, 4> wide{-1.e308, 0., 0., 1.e308}, cross{0., 1.e154, 1.e154, 0.};
     EXPECT_NEAR(svmp_fe_sym_eigenvalue_ddA_2x2_v1(wide.data(), cross.data(), cross.data(), 0), 1., 1e-13);
+    const double limit = std::numeric_limits<double>::max();
+    std::array<double, 9> shifted{};
+    for (int i = 0; i < 3; ++i)
+        for (int j = 0; j < 3; ++j)
+            shifted[3*i+j] = (i == j ? .30 : -.63) * limit;
+    const std::array<double, 9> xx{std::sqrt(limit)};
+    EXPECT_NEAR(svmp_fe_sym_eigenvalue_ddA_3x3_v1(shifted.data(), xx.data(), xx.data(), 2),
+                -4. / (9. * 1.89), 1.e-14);
 }
 
 #ifndef SVMP_FE_ENABLE_LLVM_JIT

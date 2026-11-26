@@ -429,6 +429,16 @@ TEST_F(EigensolversTest, ShiftedAndRescaledSymmetricEigenpairs)
     const auto [ws, vs] = eigen_2x2_symmetric(subnormal);
     EXPECT_DOUBLE_EQ(ws[0], 4*tiny);
     EXPECT_NEAR(std::abs(vs(0,0)), std::sqrt((1. - 1./std::sqrt(5.))/2.), 1e-14);
+
+    const double limit = std::numeric_limits<double>::max();
+    Matrix3x3<double> large;
+    for (int i = 0; i < 3; ++i)
+        for (int j = 0; j < 3; ++j)
+            large(i,j) = (i == j ? .30 : -.63) * limit;
+    const auto [wl, vl] = eigen_3x3_symmetric(large);
+    for (int i = 0; i < 3; ++i)
+        EXPECT_NEAR(wl[i] / limit, i == 0 ? -.96 : .93, 1.e-14);
+    EXPECT_NEAR(std::abs(vl(0,0)), 1. / std::sqrt(3.), 1.e-14);
 }
 
 // =============================================================================

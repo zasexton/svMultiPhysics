@@ -94,7 +94,8 @@ namespace {
 
 // For a repeated eigenvalue the ordered derivative is not unique. Omit
 // directions in its own eigenspace, retaining the contributions from distinct roots.
-[[nodiscard]] double gapTerm(double eigenvalue, double other, double first, double second) noexcept
+[[nodiscard]] double gapTerm(double eigenvalue, double other, int eigen_exponent,
+                             double first, double second) noexcept
 {
     if (eigenvalue == other || first == 0.0 || second == 0.0) return 0.0;
     const double gap = eigenvalue - other;
@@ -104,7 +105,7 @@ namespace {
     const double b = std::frexp(second, &second_exp);
     const double g = std::frexp(full_gap ? gap : std::midpoint(eigenvalue, -other), &gap_exp);
     // Combine exponents only after dividing the bounded mantissas.
-    return std::scalbn(a * b / g, first_exp + second_exp - gap_exp + (full_gap ? 1 : 0));
+    return std::scalbn(a * b / g, first_exp + second_exp - gap_exp - eigen_exponent + (full_gap ? 1 : 0));
 }
 
 } // namespace
@@ -206,6 +207,7 @@ extern "C" double svmp_fe_sym_eigenvalue_ddA_2x2_v1(const double* A,
     M(1, 1) = S[3];
 
     svmp::FE::math::remove_diagonal_shift(M);
+    const int exponent = svmp::FE::math::scale_symmetric_spectrum(M);
     const auto [evals, evecs] = svmp::FE::math::eigen_2x2_symmetric(M);
 
     const int i = static_cast<int>(which);
@@ -226,7 +228,7 @@ extern "C" double svmp_fe_sym_eigenvalue_ddA_2x2_v1(const double* A,
     const double vjBvi = dot2(vj, mat2_vec(SB, vi));
     const double vjDvi = dot2(vj, mat2_vec(Sd, vi));
 
-    return gapTerm(evals[i], evals[j], vjBvi, vjDvi);
+    return gapTerm(evals[i], evals[j], exponent, vjBvi, vjDvi);
 }
 
 extern "C" double svmp_fe_sym_eigenvalue_ddA_3x3_v1(const double* A,
@@ -246,6 +248,7 @@ extern "C" double svmp_fe_sym_eigenvalue_ddA_3x3_v1(const double* A,
     }
 
     svmp::FE::math::remove_diagonal_shift(M);
+    const int exponent = svmp::FE::math::scale_symmetric_spectrum(M);
     const auto [evals, evecs] = svmp::FE::math::eigen_3x3_symmetric(M); // ascending
 
     std::array<double, 3> vi{
@@ -270,7 +273,7 @@ extern "C" double svmp_fe_sym_eigenvalue_ddA_3x3_v1(const double* A,
         const double vjBvi = dot3(vj, mat3_vec(SB, vi));
         const double vjDvi = dot3(vj, mat3_vec(Sd, vi));
 
-        sum += gapTerm(evals[asc_i], evals[asc_j], vjBvi, vjDvi);
+        sum += gapTerm(evals[asc_i], evals[asc_j], exponent, vjBvi, vjDvi);
     }
 
     return sum;
