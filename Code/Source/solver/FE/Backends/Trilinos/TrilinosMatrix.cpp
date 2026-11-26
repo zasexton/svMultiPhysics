@@ -16,10 +16,14 @@
 
 #include <Teuchos_ArrayView.hpp>
 #include <Teuchos_OrdinalTraits.hpp>
-#include <Teuchos_Transp.hpp>
+#include <Teuchos_BLAS_types.hpp>
+#ifdef HAVE_TEUCHOS_MPI
+#include <Teuchos_DefaultMpiComm.hpp>
+#endif
 
 #include <algorithm>
 #include <limits>
+#include <utility>
 #include <vector>
 
 namespace svmp {
@@ -31,13 +35,42 @@ namespace {
 [[nodiscard]] trilinos::GO asGo(GlobalIndex v, const char* what)
 {
     FE_THROW_IF(v < 0, InvalidArgumentException, std::string("Trilinos: negative ") + what);
-    FE_THROW_IF(v > static_cast<GlobalIndex>(std::numeric_limits<trilinos::GO>::max()),
+    FE_THROW_IF(!std::in_range<trilinos::GO>(v),
                 InvalidArgumentException,
                 std::string("Trilinos: ") + what + " exceeds GO range");
     return static_cast<trilinos::GO>(v);
 }
 
 [[nodiscard]] trilinos::Scalar toScalar(Real v) { return static_cast<trilinos::Scalar>(v); }
+
+using LocalMatrix = trilinos::CrsMatrix::local_matrix_host_type;
+constexpr auto no_slot = std::numeric_limits<std::size_t>::max();
+
+[[nodiscard]] std::size_t findSlot(const LocalMatrix& local, trilinos::LO row, trilinos::LO col)
+{
+    const auto begin = local.graph.row_map(row);
+    const auto end = local.graph.row_map(row + 1);
+    if (begin == end || col == Teuchos::OrdinalTraits<trilinos::LO>::invalid()) return no_slot;
+
+    // fillComplete sorts each CSR row by local column index.
+    const auto* entries = local.graph.entries.data();
+    const auto* found = std::lower_bound(entries + begin, entries + end, col);
+    return found != entries + end && *found == col ? static_cast<std::size_t>(found - entries) : no_slot;
+}
+
+void writeSlot(const LocalMatrix& local, std::size_t slot, Real value, assembly::AddMode mode)
+{
+    if (slot == no_slot) return;
+    auto& current = local.values(slot);
+    switch (mode) {
+        case assembly::AddMode::Add:    current += value; break;
+        case assembly::AddMode::Insert: current = value; break;
+        case assembly::AddMode::Max:    current = std::max(current, value); break;
+        case assembly::AddMode::Min:    current = std::min(current, value); break;
+    }
+}
+
+} // namespace
 
 class TrilinosMatrixView final : public assembly::GlobalSystemView {
 public:
@@ -55,88 +88,45 @@ public:
                           std::span<const Real> local_matrix,
                           assembly::AddMode mode) override
     {
-        FE_CHECK_NOT_NULL(matrix_, "TrilinosMatrixView::matrix");
-        const GlobalIndex n_rows = static_cast<GlobalIndex>(row_dofs.size());
-        const GlobalIndex n_cols = static_cast<GlobalIndex>(col_dofs.size());
+        FE_THROW_IF(local_matrix.size() != row_dofs.size() * col_dofs.size(), InvalidArgumentException,
+                    "TrilinosMatrixView::addMatrixEntries: local_matrix size mismatch");
 
-        if (local_matrix.size() != static_cast<std::size_t>(n_rows * n_cols)) {
-            FE_THROW(InvalidArgumentException, "TrilinosMatrixView::addMatrixEntries: local_matrix size mismatch");
-        }
-
-        for (GlobalIndex i = 0; i < n_rows; ++i) {
-            const GlobalIndex row = row_dofs[static_cast<std::size_t>(i)];
-            if (row < 0 || row >= matrix_->numRows()) continue;
-
-            for (GlobalIndex j = 0; j < n_cols; ++j) {
-                const GlobalIndex col = col_dofs[static_cast<std::size_t>(j)];
-                if (col < 0 || col >= matrix_->numCols()) continue;
-
-                const auto local_idx = static_cast<std::size_t>(i * n_cols + j);
-                addMatrixEntry(row, col, local_matrix[local_idx], mode);
+        const std::lock_guard lock(matrix_->assembly_->host_access);
+        const auto local = matrix_->mat_->getLocalMatrixHost();
+        std::vector<std::size_t> slots(local_matrix.size(), no_slot);
+        // An element can be retried after rebuilding its graph. Validate its entire
+        // contribution before changing the matrix, including newly activated masters.
+        for (std::size_t i = 0; i < row_dofs.size(); ++i) {
+            for (std::size_t j = 0; j < col_dofs.size(); ++j) {
+                const auto k = i * col_dofs.size() + j;
+                if (!resolveSlot(local, row_dofs[i], col_dofs[j], local_matrix[k], slots[k])) return;
             }
+        }
+        for (std::size_t k = 0; k < slots.size(); ++k) {
+            writeSlot(local, slots[k], local_matrix[k], mode);
         }
     }
 
     void addMatrixEntry(GlobalIndex row, GlobalIndex col, Real value, assembly::AddMode mode) override
     {
-        FE_CHECK_NOT_NULL(matrix_, "TrilinosMatrixView::matrix");
-        if (row < 0 || row >= matrix_->numRows() || col < 0 || col >= matrix_->numCols()) {
-            return;
-        }
-
-        const auto A = matrix_->tpetra();
-        const auto rowMap = A->getRowMap();
-        const auto colMap = A->getColMap();
-
-        const auto lrow = rowMap->getLocalElement(asGo(row, "row"));
-        if (lrow == Teuchos::OrdinalTraits<trilinos::LO>::invalid()) {
-            FE_THROW(NotImplementedException,
-                     "TrilinosMatrixView::addMatrixEntry: nonlocal row insertion is not supported; "
-                     "assemble owned rows only or use PETSc for off-process insertion");
-        }
-
-        const auto lcol = colMap->getLocalElement(asGo(col, "col"));
-        if (lcol == Teuchos::OrdinalTraits<trilinos::LO>::invalid()) {
-            return; // not in this rank's column map
-        }
-
-        const trilinos::LO col_idx[1] = {static_cast<trilinos::LO>(lcol)};
-        const trilinos::Scalar val[1] = {toScalar(value)};
-        const Teuchos::ArrayView<const trilinos::LO> cols(col_idx, 1);
-        const Teuchos::ArrayView<const trilinos::Scalar> vals(val, 1);
-
-        switch (mode) {
-            case assembly::AddMode::Add:
-                A->sumIntoLocalValues(static_cast<trilinos::LO>(lrow), cols, vals);
-                break;
-            case assembly::AddMode::Insert:
-                A->replaceLocalValues(static_cast<trilinos::LO>(lrow), cols, vals);
-                break;
-            case assembly::AddMode::Max: {
-                const auto cur = matrix_->getEntry(row, col);
-                const auto next = std::max(cur, value);
-                const trilinos::Scalar v2[1] = {toScalar(next)};
-                A->replaceLocalValues(static_cast<trilinos::LO>(lrow), cols, Teuchos::ArrayView<const trilinos::Scalar>(v2, 1));
-                break;
-            }
-            case assembly::AddMode::Min: {
-                const auto cur = matrix_->getEntry(row, col);
-                const auto next = std::min(cur, value);
-                const trilinos::Scalar v2[1] = {toScalar(next)};
-                A->replaceLocalValues(static_cast<trilinos::LO>(lrow), cols, Teuchos::ArrayView<const trilinos::Scalar>(v2, 1));
-                break;
-            }
-        }
+        const std::lock_guard lock(matrix_->assembly_->host_access);
+        const auto local = matrix_->mat_->getLocalMatrixHost();
+        std::size_t slot = no_slot;
+        if (resolveSlot(local, row, col, value, slot)) writeSlot(local, slot, value, mode);
     }
 
-    void setDiagonal(std::span<const GlobalIndex> dofs,
-                     std::span<const Real> values) override
+    void setDiagonal(std::span<const GlobalIndex> dofs, std::span<const Real> values) override
     {
-        if (dofs.size() != values.size()) {
-            FE_THROW(InvalidArgumentException, "TrilinosMatrixView::setDiagonal: size mismatch");
+        FE_THROW_IF(dofs.size() != values.size(), InvalidArgumentException,
+                    "TrilinosMatrixView::setDiagonal: size mismatch");
+        const std::lock_guard lock(matrix_->assembly_->host_access);
+        const auto local = matrix_->mat_->getLocalMatrixHost();
+        std::vector<std::size_t> slots(dofs.size(), no_slot);
+        for (std::size_t i = 0; i < dofs.size(); ++i) {
+            if (!resolveSlot(local, dofs[i], dofs[i], values[i], slots[i])) return;
         }
         for (std::size_t i = 0; i < dofs.size(); ++i) {
-            setDiagonal(dofs[i], values[i]);
+            writeSlot(local, slots[i], values[i], assembly::AddMode::Insert);
         }
     }
 
@@ -147,28 +137,20 @@ public:
 
     void zeroRows(std::span<const GlobalIndex> rows, bool set_diagonal) override
     {
-        FE_CHECK_NOT_NULL(matrix_, "TrilinosMatrixView::matrix");
-        const auto A = matrix_->tpetra();
-        const auto rowMap = A->getRowMap();
-
-        for (const auto row : rows) {
-            if (row < 0 || row >= matrix_->numRows()) continue;
-            const auto lrow = rowMap->getLocalElement(asGo(row, "row"));
-            if (lrow == Teuchos::OrdinalTraits<trilinos::LO>::invalid()) continue;
-
-            Teuchos::ArrayView<const trilinos::LO> cols;
-            Teuchos::ArrayView<const trilinos::Scalar> vals;
-            A->getLocalRowView(static_cast<trilinos::LO>(lrow), cols, vals);
-            if (cols.empty()) continue;
-
-            std::vector<trilinos::Scalar> zeros(static_cast<std::size_t>(cols.size()), toScalar(0.0));
-            A->replaceLocalValues(static_cast<trilinos::LO>(lrow),
-                                  cols,
-                                  Teuchos::ArrayView<const trilinos::Scalar>(zeros.data(), zeros.size()));
-
-            if (set_diagonal && row < matrix_->numCols()) {
-                addMatrixEntry(row, row, 1.0, assembly::AddMode::Insert);
+        const std::lock_guard lock(matrix_->assembly_->host_access);
+        const auto local = matrix_->mat_->getLocalMatrixHost();
+        std::vector<std::size_t> diagonals(set_diagonal ? rows.size() : 0, no_slot);
+        for (std::size_t i = 0; set_diagonal && i < rows.size(); ++i) {
+            if (ownedRow(rows[i]) != Teuchos::OrdinalTraits<trilinos::LO>::invalid() &&
+                !resolveSlot(local, rows[i], rows[i], 1., diagonals[i])) return;
+        }
+        for (std::size_t i = 0; i < rows.size(); ++i) {
+            const auto row = ownedRow(rows[i]);
+            if (row == Teuchos::OrdinalTraits<trilinos::LO>::invalid()) continue;
+            for (auto k = local.graph.row_map(row); k < local.graph.row_map(row + 1); ++k) {
+                local.values(k) = 0.;
             }
+            if (set_diagonal) writeSlot(local, diagonals[i], 1., assembly::AddMode::Insert);
         }
     }
 
@@ -180,7 +162,11 @@ public:
 
     void beginAssemblyPhase() override { phase_ = assembly::AssemblyPhase::Building; }
     void endAssemblyPhase() override { phase_ = assembly::AssemblyPhase::Flushing; }
-    void finalizeAssembly() override { phase_ = assembly::AssemblyPhase::Finalized; }
+    void finalizeAssembly() override
+    {
+        matrix_->finalizeAssembly();
+        phase_ = assembly::AssemblyPhase::Finalized;
+    }
     [[nodiscard]] assembly::AssemblyPhase getPhase() const noexcept override { return phase_; }
 
     [[nodiscard]] bool hasMatrix() const noexcept override { return true; }
@@ -203,11 +189,31 @@ public:
     }
 
 private:
+    [[nodiscard]] trilinos::LO ownedRow(GlobalIndex row) const
+    {
+        if (row < 0 || row >= matrix_->numRows()) return Teuchos::OrdinalTraits<trilinos::LO>::invalid();
+        return matrix_->row_map_->getLocalElement(asGo(row, "row"));
+    }
+
+    // A masked index or an exact zero in an absent slot contributes nothing.
+    // For a valid nonzero, a missing column and a hole in a CSR row are both errors.
+    bool resolveSlot(const LocalMatrix& local, GlobalIndex row, GlobalIndex col, Real value,
+                     std::size_t& slot) const
+    {
+        if (row < 0 || row >= matrix_->numRows() || col < 0 || col >= matrix_->numCols()) return true;
+        const auto local_row = ownedRow(row);
+        FE_THROW_IF(local_row == Teuchos::OrdinalTraits<trilinos::LO>::invalid(), NotImplementedException,
+                    "TrilinosMatrixView: nonlocal row insertion requires assembly on its owner");
+        const auto local_col = matrix_->mat_->getColMap()->getLocalElement(asGo(col, "col"));
+        slot = findSlot(local, local_row, local_col);
+        if (slot != no_slot || value == 0.) return true;
+        matrix_->assembly_->error.reject("Trilinos", row, col, value, matrix_->row_map_->getComm()->getSize() > 1);
+        return false;
+    }
+
     TrilinosMatrix* matrix_{nullptr};
     assembly::AssemblyPhase phase_{assembly::AssemblyPhase::NotStarted};
 };
-
-} // namespace
 
 TrilinosMatrix::TrilinosMatrix(const sparsity::SparsityPattern& sparsity)
 {
@@ -352,12 +358,19 @@ GlobalIndex TrilinosMatrix::numCols() const noexcept
 
 void TrilinosMatrix::zero()
 {
-    mat_->setAllToScalar(toScalar(0.0));
+    const std::lock_guard lock(assembly_->host_access);
+    Kokkos::deep_copy(mat_->getLocalMatrixDevice().values, toScalar(0.0));
+    assembly_->error.reset();
 }
 
 void TrilinosMatrix::finalizeAssembly()
 {
-    // Values are inserted directly into the fixed structure.
+#ifdef HAVE_TEUCHOS_MPI
+    const auto comm = row_map_->getComm();
+    assembly_->error.check("Trilinos", comm->getSize() > 1 ? Teuchos::getRawMpiComm(*comm) : MPI_COMM_NULL);
+#else
+    assembly_->error.check("Trilinos");
+#endif
 }
 
 void TrilinosMatrix::mult(const GenericVector& x_in, GenericVector& y_in) const
@@ -389,7 +402,8 @@ std::unique_ptr<assembly::GlobalSystemView> TrilinosMatrix::createAssemblyView()
 
 Real TrilinosMatrix::getEntry(GlobalIndex row, GlobalIndex col) const
 {
-    if (row < 0 || col < 0) return 0.0;
+    if (row < 0 || row >= numRows() || col < 0 || col >= numCols()) return 0.0;
+    const std::lock_guard lock(assembly_->host_access);
     const auto A = mat_;
     const auto rowMap = A->getRowMap();
     const auto colMap = A->getColMap();
@@ -398,15 +412,9 @@ Real TrilinosMatrix::getEntry(GlobalIndex row, GlobalIndex col) const
     const auto lcol = colMap->getLocalElement(asGo(col, "col"));
     if (lcol == Teuchos::OrdinalTraits<trilinos::LO>::invalid()) return 0.0;
 
-    Teuchos::ArrayView<const trilinos::LO> cols;
-    Teuchos::ArrayView<const trilinos::Scalar> vals;
-    A->getLocalRowView(static_cast<trilinos::LO>(lrow), cols, vals);
-    for (trilinos::LO i = 0; i < cols.size(); ++i) {
-        if (cols[i] == static_cast<trilinos::LO>(lcol)) {
-            return static_cast<Real>(vals[i]);
-        }
-    }
-    return 0.0;
+    const auto local = A->getLocalMatrixHost();
+    const auto slot = findSlot(local, lrow, lcol);
+    return slot == no_slot ? 0.0 : static_cast<Real>(local.values(slot));
 }
 
 } // namespace backends

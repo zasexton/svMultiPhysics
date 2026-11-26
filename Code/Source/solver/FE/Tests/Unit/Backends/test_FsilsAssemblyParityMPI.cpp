@@ -1325,7 +1325,11 @@ TEST(FsilsAssemblyParityMPI, MatrixInsertionCountersAreOwnedRowAuthoritative)
     };
     auto expect_global_counters = [&](std::uint64_t expected_off_owner,
                                       std::uint64_t expected_dropped) {
-        matrix->finalizeAssembly();
+        if (expected_dropped > 0) {
+            EXPECT_THROW(matrix->finalizeAssembly(), FEException);
+        } else {
+            EXPECT_NO_THROW(matrix->finalizeAssembly());
+        }
         const auto off_owner =
             allreduceSum(FsilsMatrix::offOwnerWriteCount(), comm);
         const auto dropped =

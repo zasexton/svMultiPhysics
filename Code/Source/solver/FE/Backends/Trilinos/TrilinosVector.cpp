@@ -18,6 +18,7 @@
 #include <cmath>
 #include <limits>
 #include <unordered_set>
+#include <utility>
 
 namespace svmp {
 namespace FE {
@@ -28,6 +29,8 @@ namespace {
 [[nodiscard]] trilinos::GO asGo(GlobalIndex v, const char* what)
 {
     FE_THROW_IF(v < 0, InvalidArgumentException, std::string("Trilinos: negative ") + what);
+    FE_THROW_IF(!std::in_range<trilinos::GO>(v), InvalidArgumentException,
+                std::string("Trilinos: ") + what + " exceeds GO range");
     return static_cast<trilinos::GO>(v);
 }
 
@@ -72,7 +75,7 @@ TrilinosVector::TrilinosVector(GlobalIndex owned_first,
         owned_first >= 0 &&
         owned_first <= global_size &&
         local_owned_size <= global_size - owned_first &&
-        map_->getLocalNumElements() == n_local &&
+        vec_->getLocalLength() == n_local &&
         ghost_global_indices.size() <=
             static_cast<std::size_t>(std::numeric_limits<int>::max()) &&
         n_local <= static_cast<std::size_t>(
@@ -151,7 +154,7 @@ std::vector<GlobalIndex> TrilinosVector::ownedGlobalRows() const
             map_->getIndexBase() != trilinos::GO{0},
         FEException,
         "TrilinosVector::ownedGlobalRows: primary map is not a certified one-to-one global layout");
-    const auto local_size = map_->getLocalNumElements();
+    const auto local_size = vec_->getLocalLength();
     std::vector<GlobalIndex> rows;
     rows.reserve(local_size);
     for (std::size_t local_row = 0u; local_row < local_size; ++local_row) {
@@ -269,7 +272,7 @@ void TrilinosVector::copyFrom(const GenericVector& other)
     FE_THROW_IF(size() != o->size(), InvalidArgumentException, "TrilinosVector::copyFrom: size mismatch");
     o->syncVectorFromCache();
     syncVectorFromCache();
-    Tpetra::deep_copy(*vec_->tpetra(), *o->vec_->tpetra());
+    Tpetra::deep_copy(*vec_, *o->vec_);
     invalidateLocalCache();
     markModified();
 }
@@ -442,7 +445,7 @@ public:
     {
         FE_CHECK_NOT_NULL(vec_, "TrilinosVectorView::vec");
         if (!locally_relevant_reads_) {
-            if (dof < 0) return 0.0;
+            if (dof < 0 || dof >= vec_->size()) return 0.0;
             const auto lid = vec_->map()->getLocalElement(
                 static_cast<trilinos::GO>(dof));
             if (lid ==

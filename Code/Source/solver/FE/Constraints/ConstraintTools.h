@@ -314,9 +314,12 @@ void makeHangingNodeConstraints1D(
  * @brief Create hanging node constraints for 2D edges (midpoint refinement)
  *
  * @param hanging_dof Hanging node DOF
- * @param parent_dofs Parent DOFs (vertices of the unrefined edge)
- * @param order Polynomial order (determines interpolation weights)
+ * @param parent_dofs Two edge endpoints for linear interpolation, or all
+ *        order + 1 parent field nodes in FE order (endpoints first, then
+ *        interior nodes from the first endpoint to the second).
+ * @param order Positive edge polynomial order
  * @param constraints Output constraint container
+ * @note A shared parent midpoint DOF already satisfies the constraint.
  */
 void makeHangingNodeConstraint2D(
     GlobalIndex hanging_dof,
@@ -366,13 +369,18 @@ void makeHangingNodeConstraints3D(
 /**
  * @brief Compute interpolation weights for a point within a cell
  *
- * Given reference coordinates of a point within a cell, computes the
- * shape function values (interpolation weights) at that point.
+ * Returns scalar nodal field weights in FE reference-node order. The field
+ * degree can differ from the degree of the geometry. Complete cell families
+ * use Lagrange interpolation. Quad8, Hex20, Wedge15 and Pyramid13 select
+ * serendipity interpolation at degree two. Quad8 also supports higher-degree
+ * serendipity fields. At degree zero and one these families share the
+ * constant and vertex bases with their complete counterparts.
  *
- * @param reference_point Point in reference coordinates
- * @param cell_type Cell topology type
- * @param order Polynomial order
- * @return Vector of weights (one per cell DOF)
+ * @param reference_point Cell-local coordinates in the ReferenceNodeLayout convention
+ * @param cell_type Cell topology and nodal family
+ * @param order Nonnegative field polynomial degree
+ * @return One weight per scalar field DOF
+ * @throws FEException for an unknown cell or an unavailable degree
  */
 [[nodiscard]] std::vector<double> computeInterpolationWeights(
     std::array<double, 3> reference_point,

@@ -9,6 +9,7 @@
 #define SVMP_FE_BACKENDS_FSILS_MATRIX_H
 
 #include "Backends/Interfaces/GenericMatrix.h"
+#include "Backends/Interfaces/MatrixAssemblyError.h"
 #include "Backends/Interfaces/DofPermutation.h"
 #include "Backends/FSILS/FsilsShared.h"
 
@@ -64,6 +65,8 @@ public:
 
     void zero() override;
     void finalizeAssembly() override;
+    // Finalization of either the matrix or its assembly view checks the same pending write error.
+    void checkAssemblyErrors() const;
     bool reinitFromPattern(const sparsity::SparsityPattern& pattern) override;
     bool reinitFromPattern(
         const sparsity::DistributedSparsityPattern& pattern) override;
@@ -122,7 +125,7 @@ public:
         return layout_revision_;
     }
 
-    /// Number of entries silently dropped by addValue() since last reset.
+    /// Missing owned nonzero entries since reset, counting the first failure of a rejected batch.
     [[nodiscard]] static std::uint64_t droppedEntryCount() noexcept;
     /// Reset the dropped-entry counter to zero.
     static void resetDroppedEntryCount() noexcept;
@@ -138,6 +141,7 @@ public:
 
 private:
     bool adoptCompatibleReinitialization(FsilsMatrix&& replacement);
+    void rejectMissingOwnedEntry(GlobalIndex row, GlobalIndex col, Real value) const;
 
     static std::atomic<std::uint64_t> dropped_entry_count_;
     static std::atomic<std::uint64_t> off_owner_write_count_;
@@ -154,6 +158,7 @@ private:
     std::shared_ptr<FsilsShared> shared_{};        ///< operator layout (see operatorShared())
     std::shared_ptr<FsilsShared> vector_shared_{}; ///< vector layout (see shared()); == shared_ normally
     std::vector<Real> values_{}; // (dof*dof) x nnz (column-major for FSILS Array wrapper)
+    std::unique_ptr<MatrixAssemblyError> assembly_error_{std::make_unique<MatrixAssemblyError>()};
 };
 
 } // namespace backends

@@ -1144,7 +1144,12 @@ TEST_P(LinearSolverConformance, MissingPatternEntryBehaviorIsDeterministic)
     auto A = factory->createMatrix(pat);
     auto viewA = A->createAssemblyView();
     viewA->beginAssemblyPhase();
-    viewA->addMatrixEntry(0, 1, 2.0, assembly::AddMode::Insert); // not in pattern
+    if (kind == BackendKind::FSILS) {
+        EXPECT_THROW(viewA->addMatrixEntry(0, 1, 2.0, assembly::AddMode::Insert), FEException);
+        A->zero();
+    } else {
+        viewA->addMatrixEntry(0, 1, 2.0, assembly::AddMode::Insert);
+    }
     viewA->addMatrixEntry(0, 0, 1.0, assembly::AddMode::Insert);
     viewA->addMatrixEntry(1, 1, 1.0, assembly::AddMode::Insert);
     viewA->finalizeAssembly();
@@ -1155,6 +1160,8 @@ TEST_P(LinearSolverConformance, MissingPatternEntryBehaviorIsDeterministic)
     } else {
         EXPECT_DOUBLE_EQ(A->getEntry(0, 1), 0.0);
     }
+    EXPECT_DOUBLE_EQ(A->getEntry(0, 0), 1.0);
+    EXPECT_DOUBLE_EQ(A->getEntry(1, 1), 1.0);
 }
 
 TEST_P(LinearSolverConformance, ZeroRowsImposesDirichletConstraint)

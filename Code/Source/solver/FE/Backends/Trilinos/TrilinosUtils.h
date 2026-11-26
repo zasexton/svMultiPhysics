@@ -25,11 +25,10 @@ namespace backends {
 namespace trilinos {
 
 using Scalar = Real;
-using LO = int;
-using GO = GlobalIndex;
-using Node = Tpetra::Map<LO, GO>::node_type;
-
-using Map = Tpetra::Map<LO, GO, Node>;
+using Map = Tpetra::Map<>;
+using LO = Map::local_ordinal_type;
+using GO = Map::global_ordinal_type;
+using Node = Map::node_type;
 using Vector = Tpetra::Vector<Scalar, LO, GO, Node>;
 using CrsMatrix = Tpetra::CrsMatrix<Scalar, LO, GO, Node>;
 

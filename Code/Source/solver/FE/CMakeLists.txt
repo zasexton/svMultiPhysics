@@ -1477,6 +1477,7 @@ set(FE_BACKENDS_HEADERS
     Backends/Interfaces/BackendFactory.h
     Backends/Interfaces/GenericVector.h
     Backends/Interfaces/GenericMatrix.h
+    Backends/Interfaces/MatrixAssemblyError.h
     Backends/Interfaces/LinearSolver.h
     Backends/Interfaces/BlockVector.h
     Backends/Interfaces/BlockMatrix.h
@@ -2855,6 +2856,7 @@ if(FE_BUILD_TESTS)
 	        if(FE_ENABLE_TRILINOS AND EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/Tests/Unit/Backends/test_trilinos_main.cpp)
 	            set(FE_TRILINOS_BACKENDS_TEST_SOURCES
 	                Tests/Unit/Backends/test_TrilinosBackend.cpp
+	                Tests/Unit/Backends/test_TrilinosMatrixAssembly.cpp
 	                Tests/Unit/Backends/test_LinearSolverConformance_Trilinos.cpp
 	                Tests/Unit/Backends/test_trilinos_main.cpp
 		            )
@@ -2866,6 +2868,11 @@ if(FE_BUILD_TESTS)
 		                    ${GTEST_LIBRARIES}
 	            )
 	            svmp_add_gtest(FE_Trilinos_Backends_Tests TARGET test_fe_backends_trilinos)
+	            if(MPIEXEC_EXECUTABLE AND "MPI" IN_LIST Trilinos_TPL_LIST)
+	                svmp_add_gtest(FE_Trilinos_Matrix_Assembly_MPI
+	                    TARGET test_fe_backends_trilinos MPI_RANKS 2 TIMEOUT 120
+	                    LABELS MPI FILTER "TrilinosMatrixAssembly.*")
+	            endif()
 	        endif()
 
         # Forms module tests (depends on Assembly)

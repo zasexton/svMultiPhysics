@@ -478,6 +478,52 @@ TEST(FsilsBackendMPI, SolveCGOverlap1DChain)
     }
 }
 
+TEST(FsilsBackendMPI, MissingColumnIsAnErrorOnItsRowOwnerOnly)
+{
+    int rank = 0, size = 1;
+    MPI_Comm_rank(MPI_COMM_WORLD, &rank);
+    MPI_Comm_size(MPI_COMM_WORLD, &size);
+    if (size != 2) {
+        GTEST_SKIP() << "This test requires exactly two ranks";
+    }
+    auto pattern = makeTwoRankOverlapPatternDof2(rank);
+    FsilsMatrix matrix(pattern, 2);
+    auto view = matrix.createAssemblyView();
+    FsilsMatrix::resetOffOwnerWriteCount();
+    // The last node is outside rank 0's halo. Only rank 0 owns FE row 0.
+    if (rank == 0) {
+        const std::array<GlobalIndex, 1> rows{0};
+        const std::array<GlobalIndex, 2> cols{0, 4};
+        const std::array<Real, 2> values{9.0, 2.5};
+        EXPECT_NO_THROW(view->addMatrixEntries(rows, cols, values, assembly::AddMode::Add));
+        EXPECT_NO_THROW(view->addMatrixEntry(0, 4, 0., assembly::AddMode::Insert));
+        // Node 1 is a locally present ghost. Its row belongs to rank 1.
+        EXPECT_NO_THROW(view->addMatrixEntry(2, 4, 3., assembly::AddMode::Add));
+        EXPECT_DOUBLE_EQ(matrix.getEntry(0, 0), 0.);
+    } else {
+        EXPECT_NO_THROW(view->addMatrixEntry(0, 4, 2.5, assembly::AddMode::Add));
+    }
+    EXPECT_EQ(allreduceU64(FsilsMatrix::offOwnerWriteCount()), 1u);
+    try {
+        view->finalizeAssembly();
+        ADD_FAILURE() << "every rank must reject the incomplete matrix";
+    } catch (const FEException& error) {
+        EXPECT_NE(error.message().find("rank 0"), std::string::npos);
+        EXPECT_NE(error.message().find("row 0, column 4"), std::string::npos);
+        EXPECT_NE(error.message().find("2.5"), std::string::npos);
+    }
+    EXPECT_THROW(matrix.finalizeAssembly(), FEException);
+    matrix.zero();
+    if (rank == 1) {
+        view->addMatrixEntry(4, 4, 7., assembly::AddMode::Add);
+    }
+    EXPECT_NO_THROW(view->finalizeAssembly());
+    EXPECT_NO_THROW(matrix.finalizeAssembly());
+    if (rank == 1) {
+        EXPECT_DOUBLE_EQ(matrix.getEntry(4, 4), 7.);
+    }
+}
+
 TEST(FsilsBackendMPI, RefreshedDistributedConstraintFillAcceptsNewEntry)
 {
     int rank = 0;

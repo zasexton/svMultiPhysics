@@ -110,7 +110,7 @@ void DofConstraints::addLinearConstraint(GlobalIndex constrained_dof,
     line.type = ConstraintType::Linear;
 
     for (std::size_t i = 0; i < dofs.size(); ++i) {
-        if (std::abs(coefficients[i]) > 1e-15) {
+        if (std::abs(coefficients[i]) > 0.0) {
             line.entries.push_back({dofs[i], coefficients[i]});
         }
     }
@@ -140,7 +140,7 @@ void DofConstraints::addHangingNodeConstraint(GlobalIndex hanging_dof,
     line.type = ConstraintType::HangingNode;
 
     for (std::size_t i = 0; i < parent_dofs.size(); ++i) {
-        if (std::abs(weights[i]) > 1e-15) {
+        if (std::abs(weights[i]) > 0.0) {
             line.entries.push_back({parent_dofs[i], weights[i]});
         }
     }
@@ -422,7 +422,7 @@ void DofConstraints::closeConstraint(GlobalIndex dof,
     new_entries.reserve(coeffs.size());
 
     for (const auto& [master_dof, coeff] : coeffs) {
-        if (std::abs(coeff) > 1e-15) {
+        if (std::abs(coeff) > 0.0) {
             new_entries.push_back({master_dof, coeff});
         }
     }

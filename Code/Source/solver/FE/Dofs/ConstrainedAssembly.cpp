@@ -7,11 +7,38 @@
 
 #include "ConstrainedAssembly.h"
 #include <algorithm>
-#include <cmath>
+#include <optional>
+#include <string>
+#include <utility>
 
 namespace svmp {
 namespace FE {
 namespace dofs {
+namespace {
+
+std::optional<ConstraintLine> constraintLineForAssembly(const DofConstraints& constraints, GlobalIndex dof) {
+    auto line = constraints.getConstraintLine(dof);
+    if (line && !constraints.isClosed()) {
+        for (const auto& master : line->entries) {
+            if (constraints.isConstrained(master.dof)) {
+                throw FEException("ConstrainedAssembly: DOF " + std::to_string(dof) +
+                    " depends on constrained master " + std::to_string(master.dof) +
+                    ". Call DofConstraints::close() before assembly.");
+            }
+        }
+    }
+    return line;
+}
+
+void checkOpenBatchConstraints(const DofConstraints* constraints, std::span<const GlobalIndex> dofs) {
+    if (constraints && !constraints->isClosed()) {
+        for (const auto dof : dofs) {
+            constraintLineForAssembly(*constraints, dof);
+        }
+    }
+}
+
+} // namespace
 
 // =============================================================================
 // ConstrainedAssembly Implementation
@@ -39,97 +66,78 @@ void ConstrainedAssembly::distributeLocalToGlobal(
     std::span<const GlobalIndex> cell_dof_ids,
     BackendAdapter& adapter) const {
 
-    if (!constraints_) {
-        // No constraints - direct assembly
-        adapter.addMatrixValues(cell_dof_ids, cell_dof_ids, cell_matrix);
-        adapter.addVectorValues(cell_dof_ids, cell_rhs);
+    const bool constrained = constraints_ && std::any_of(cell_dof_ids.begin(), cell_dof_ids.end(),
+        [&](GlobalIndex dof) { return constraints_->isConstrained(dof); });
+    if (!constrained) {
+        if (!cell_matrix.empty()) adapter.addMatrixValues(cell_dof_ids, cell_dof_ids, cell_matrix);
+        if (!cell_rhs.empty()) adapter.addVectorValues(cell_dof_ids, cell_rhs);
         return;
     }
 
-    // Check if any DOFs are constrained
-    bool has_constrained = false;
-    for (auto dof : cell_dof_ids) {
-        if (constraints_->isConstrained(dof)) {
-            has_constrained = true;
-            break;
+    // Each line represents x_i = P_i y + g_i. A free DOF has an identity
+    // row in P, and a fixed DOF has an empty row and its prescribed offset.
+    const auto n = cell_dof_ids.size();
+    std::vector<ConstraintLine> lines;
+    lines.reserve(n);
+    for (const auto dof : cell_dof_ids) {
+        if (auto constraint = constraintLineForAssembly(*constraints_, dof)) {
+            lines.push_back(std::move(*constraint));
+        } else {
+            lines.push_back({dof, {{dof, 1.0}}});
         }
     }
 
-    if (!has_constrained) {
-        // No constrained DOFs - direct assembly
-        adapter.addMatrixValues(cell_dof_ids, cell_dof_ids, cell_matrix);
-        adapter.addVectorValues(cell_dof_ids, cell_rhs);
-        return;
-    }
-
-    // Apply element-level constraint modification
     work_rows_.clear();
     work_cols_.clear();
     work_values_.clear();
     work_rhs_indices_.clear();
     work_rhs_.clear();
 
-    applyElementConstraints(cell_matrix, cell_rhs, cell_dof_ids,
-                            work_rows_, work_cols_, work_values_,
-                            work_rhs_indices_, work_rhs_);
+    for (std::size_t i = 0; i < n; ++i) {
+        const auto& test = lines[i].entries;
+        if (test.empty()) continue;
 
-    // Assemble modified contributions
-    if (!work_values_.empty()) {
-        adapter.addMatrixValuesSparse(work_rows_, work_cols_, work_values_);
+        double load = cell_rhs.empty() ? 0.0 : cell_rhs[i];
+        if (!cell_matrix.empty()) {
+            for (std::size_t j = 0; j < n; ++j) {
+                const double value = cell_matrix[i * n + j];
+                if (value == 0.0) continue;
+                const auto& trial = lines[j];
+                if (!cell_rhs.empty()) load -= value * trial.inhomogeneity;
+
+                for (const auto& row : test) {
+                    for (const auto& col : trial.entries) {
+                        work_rows_.push_back(row.dof);
+                        work_cols_.push_back(col.dof);
+                        work_values_.push_back(row.coefficient * value * col.coefficient);
+                    }
+                }
+            }
+        }
+        if (!cell_rhs.empty()) {
+            for (const auto& row : test) {
+                work_rhs_indices_.push_back(row.dof);
+                work_rhs_.push_back(row.coefficient * load);
+            }
+        }
     }
-    if (!work_rhs_.empty()) {
-        adapter.addVectorValues(work_rhs_indices_, work_rhs_);
-    }
+
+    if (!work_values_.empty()) adapter.addMatrixValuesSparse(work_rows_, work_cols_, work_values_);
+    if (!work_rhs_.empty()) adapter.addVectorValues(work_rhs_indices_, work_rhs_);
 }
 
 void ConstrainedAssembly::distributeMatrixToGlobal(
     std::span<const double> cell_matrix,
     std::span<const GlobalIndex> cell_dof_ids,
     BackendAdapter& adapter) const {
-
-    // Create zero RHS
-    work_zero_rhs_.assign(cell_dof_ids.size(), 0.0);
-    distributeLocalToGlobal(cell_matrix, work_zero_rhs_, cell_dof_ids, adapter);
+    distributeLocalToGlobal(cell_matrix, {}, cell_dof_ids, adapter);
 }
 
 void ConstrainedAssembly::distributeRhsToGlobal(
     std::span<const double> cell_rhs,
     std::span<const GlobalIndex> cell_dof_ids,
     BackendAdapter& adapter) const {
-
-    if (!constraints_) {
-        adapter.addVectorValues(cell_dof_ids, cell_rhs);
-        return;
-    }
-
-    // Apply constraints to RHS
-    work_rhs_indices_.clear();
-    work_rhs_.clear();
-
-    for (std::size_t i = 0; i < cell_dof_ids.size(); ++i) {
-        GlobalIndex dof = cell_dof_ids[i];
-
-        if (constraints_->isConstrained(dof)) {
-            // Get constraint line
-            auto constraint_opt = constraints_->getConstraintLine(dof);
-            if (constraint_opt && !constraint_opt->isDirichlet()) {
-                // Distribute to master DOFs
-                double val = cell_rhs[i];
-                for (const auto& entry : constraint_opt->entries) {
-                    work_rhs_indices_.push_back(entry.dof);
-                    work_rhs_.push_back(entry.coefficient * val);
-                }
-            }
-            // For Dirichlet, RHS contribution is dropped
-        } else {
-            work_rhs_indices_.push_back(dof);
-            work_rhs_.push_back(cell_rhs[i]);
-        }
-    }
-
-    if (!work_rhs_.empty()) {
-        adapter.addVectorValues(work_rhs_indices_, work_rhs_);
-    }
+    distributeLocalToGlobal({}, cell_rhs, cell_dof_ids, adapter);
 }
 
 void ConstrainedAssembly::distributeLocalToGlobalBatch(
@@ -140,6 +148,11 @@ void ConstrainedAssembly::distributeLocalToGlobalBatch(
     std::span<const GlobalIndex> cell_dof_ids,
     BackendAdapter& adapter) const {
 
+    if (n_cells > 0) {
+        const auto first = static_cast<std::size_t>(cell_dof_offsets.front());
+        const auto end = static_cast<std::size_t>(cell_dof_offsets[static_cast<std::size_t>(n_cells)]);
+        checkOpenBatchConstraints(constraints_, cell_dof_ids.subspan(first, end - first));
+    }
     adapter.beginAssembly();
 
     GlobalIndex matrix_offset = 0;
@@ -171,6 +184,9 @@ void ConstrainedAssembly::distributeLocalToGlobalUniform(
     std::span<const GlobalIndex> cell_dof_ids,
     BackendAdapter& adapter) const {
 
+    if (n_cells > 0) {
+        checkOpenBatchConstraints(constraints_, cell_dof_ids.first(static_cast<std::size_t>(n_cells) * dofs_per_cell));
+    }
     adapter.beginAssembly();
 
     auto mat_size = static_cast<std::size_t>(dofs_per_cell) * dofs_per_cell;
@@ -187,88 +203,6 @@ void ConstrainedAssembly::distributeLocalToGlobalUniform(
     }
 
     adapter.endAssembly();
-}
-
-void ConstrainedAssembly::applyElementConstraints(
-    std::span<const double> cell_matrix,
-    std::span<const double> cell_rhs,
-    std::span<const GlobalIndex> cell_dof_ids,
-    std::vector<GlobalIndex>& out_rows,
-    std::vector<GlobalIndex>& out_cols,
-    std::vector<double>& out_values,
-    std::vector<GlobalIndex>& out_rhs_indices,
-    std::vector<double>& out_rhs_values) const {
-
-    auto n = static_cast<LocalIndex>(cell_dof_ids.size());
-
-    // Process each entry in the element matrix
-    for (LocalIndex i = 0; i < n; ++i) {
-        GlobalIndex row_dof = cell_dof_ids[static_cast<std::size_t>(i)];
-        double rhs_val = cell_rhs[static_cast<std::size_t>(i)];
-
-        auto row_constraint = constraints_->getConstraintLine(row_dof);
-
-        for (LocalIndex j = 0; j < n; ++j) {
-            GlobalIndex col_dof = cell_dof_ids[static_cast<std::size_t>(j)];
-            double mat_val = cell_matrix[static_cast<std::size_t>(i * n + j)];
-
-            if (std::abs(mat_val) < 1e-15) continue;
-
-            auto col_constraint = constraints_->getConstraintLine(col_dof);
-
-            if (!row_constraint && !col_constraint) {
-                // No constraints - direct assembly
-                out_rows.push_back(row_dof);
-                out_cols.push_back(col_dof);
-                out_values.push_back(mat_val);
-            } else if (row_constraint && !col_constraint) {
-                // Row constrained: distribute to master DOFs
-                if (!row_constraint->isDirichlet()) {
-                    for (const auto& entry : row_constraint->entries) {
-                        out_rows.push_back(entry.dof);
-                        out_cols.push_back(col_dof);
-                        out_values.push_back(entry.coefficient * mat_val);
-                    }
-                }
-            } else if (!row_constraint && col_constraint) {
-                // Column constrained
-                if (!col_constraint->isDirichlet()) {
-                    for (const auto& entry : col_constraint->entries) {
-                        out_rows.push_back(row_dof);
-                        out_cols.push_back(entry.dof);
-                        out_values.push_back(entry.coefficient * mat_val);
-                    }
-                }
-                // Add inhomogeneity contribution to RHS
-                if (std::abs(col_constraint->inhomogeneity) > 1e-15) {
-                    rhs_val -= mat_val * col_constraint->inhomogeneity;
-                }
-            } else {
-                // Both constrained
-                if (!row_constraint->isDirichlet() && !col_constraint->isDirichlet()) {
-                    for (const auto& row_entry : row_constraint->entries) {
-                        for (const auto& col_entry : col_constraint->entries) {
-                            out_rows.push_back(row_entry.dof);
-                            out_cols.push_back(col_entry.dof);
-                            out_values.push_back(
-                                row_entry.coefficient * col_entry.coefficient * mat_val);
-                        }
-                    }
-                }
-            }
-        }
-
-        // Handle RHS
-        if (!row_constraint) {
-            out_rhs_indices.push_back(row_dof);
-            out_rhs_values.push_back(rhs_val);
-        } else if (!row_constraint->isDirichlet()) {
-            for (const auto& entry : row_constraint->entries) {
-                out_rhs_indices.push_back(entry.dof);
-                out_rhs_values.push_back(entry.coefficient * rhs_val);
-            }
-        }
-    }
 }
 
 // =============================================================================

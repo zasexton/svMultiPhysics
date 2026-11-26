@@ -3064,7 +3064,9 @@ TimeLoopReport TimeLoop::run(systems::TransientSystem& transient,
                                             sys,
                                             A,
                                             options_.newton.jacobian_op);
-                                    if (!exact_zero_mass_dofs.empty()) {
+                                    // These rows are rank-local. Every rank must participate
+                                    // in vector and matrix finalization when any rank has one.
+                                    if (!trueOnEveryActiveRank(sys, exact_zero_mass_dofs.empty())) {
                                         auto b_zero = b.createAssemblyView();
                                         FE_CHECK_NOT_NULL(
                                             b_zero.get(),

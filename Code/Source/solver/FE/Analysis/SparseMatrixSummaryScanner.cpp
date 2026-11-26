@@ -1019,7 +1019,7 @@ public:
     }
     [[nodiscard]] bool hasCompleteGlobalRows() const noexcept override {
         const auto matrix = matrix_.tpetra();
-        return matrix->getLocalNumRows() == matrix->getGlobalNumRows();
+        return matrix->getCrsGraph()->getLocalGraphHost().numRows() == matrix->getGlobalNumRows();
     }
 
     void forEachLocalRow(const SparseMatrixRowVisitor& visitor) const override
@@ -1030,9 +1030,9 @@ public:
         const int rank = row_map->getComm()->getRank();
 
         std::vector<SparseMatrixRowEntry> entries;
+        const auto local_rows = matrix->getCrsGraph()->getLocalGraphHost().numRows();
         for (backends::trilinos::LO local_row = 0;
-             local_row < static_cast<backends::trilinos::LO>(row_map->getLocalNumElements());
-             ++local_row) {
+             local_row < static_cast<backends::trilinos::LO>(local_rows); ++local_row) {
             Teuchos::ArrayView<const backends::trilinos::LO> cols;
             Teuchos::ArrayView<const backends::trilinos::Scalar> values;
             matrix->getLocalRowView(local_row, cols, values);

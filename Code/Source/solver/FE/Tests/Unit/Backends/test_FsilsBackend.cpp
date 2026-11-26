@@ -8,6 +8,8 @@
 #include <gtest/gtest.h>
 
 #include "Assembly/GlobalSystemView.h"
+#include "Assembly/AssemblyConstraintDistributor.h"
+#include "Constraints/AffineConstraints.h"
 #include "Analysis/SparseMatrixSummaryScanner.h"
 #include "Backends/FSILS/FsilsMatrix.h"
 #include "Backends/Interfaces/DofPermutation.h"
@@ -4893,6 +4895,152 @@ TEST(FsilsBackend, ResolvedMatrixEntriesContiguousBlockMatchesDirectAdd)
             EXPECT_DOUBLE_EQ(direct_fsils->getEntry(row, col),
                              resolved_fsils->getEntry(row, col))
                 << "row=" << row << " col=" << col;
+        }
+    }
+}
+
+TEST(FsilsBackend, NonzeroWritesOutsideOwnedPatternRejectTheBatchBeforeMutation)
+{
+    sparsity::SparsityPattern diagonal(2, 2);
+    diagonal.ensureDiagonal();
+    diagonal.finalize();
+    FsilsMatrix matrix(diagonal);
+    const std::array<GlobalIndex, 2> dofs{0, 1};
+    const std::array<Real, 4> local{7.0, 2.5, 0.0, 9.0};
+    std::array<GlobalIndex, 4> slots{};
+    matrix.resolveMatrixEntrySlotsCached(dofs, dofs, slots);
+    auto view = matrix.createAssemblyView();
+    for (const auto mode : {assembly::AddMode::Add, assembly::AddMode::Insert,
+                            assembly::AddMode::Min, assembly::AddMode::Max}) {
+        EXPECT_THROW(view->addMatrixEntry(0, 1, 2.5, mode), FEException);
+        EXPECT_THROW(view->addMatrixEntries(dofs, local, mode), FEException);
+        EXPECT_THROW(matrix.addMatrixEntriesCached(dofs, dofs, local, mode), FEException);
+        EXPECT_THROW(matrix.addResolvedMatrixEntries(dofs, dofs, slots, local, mode), FEException);
+        EXPECT_DOUBLE_EQ(matrix.getEntry(0, 0), 0.0);
+        EXPECT_DOUBLE_EQ(matrix.getEntry(1, 1), 0.0);
+        EXPECT_NO_THROW(view->addMatrixEntry(0, 1, 0.0, mode));
+    }
+    // Structural zero slots stay legal when other entries in the same element contribute.
+    const std::array<Real, 4> supported{7.0, 0.0, -0.0, 9.0};
+    matrix.addResolvedMatrixEntries(dofs, dofs, slots, supported, assembly::AddMode::Add);
+    EXPECT_DOUBLE_EQ(matrix.getEntry(0, 0), 7.0);
+    EXPECT_DOUBLE_EQ(matrix.getEntry(1, 1), 9.0);
+}
+
+TEST(FsilsBackend, ParallelWriteReportsTheMissingEntryAfterWorkersJoin)
+{
+#ifdef _OPENMP
+    sparsity::SparsityPattern diagonal(2, 2);
+    diagonal.ensureDiagonal();
+    diagonal.finalize();
+    FsilsMatrix matrix(diagonal);
+    auto view = matrix.createAssemblyView();
+    for (int team_size : {1, 2}) {
+        SCOPED_TRACE(team_size);
+        int worker_exceptions = 0;
+#pragma omp parallel num_threads(team_size) reduction(+:worker_exceptions)
+        {
+            try {
+                matrix.addValue(0, 1, 2.5, assembly::AddMode::Add);
+            } catch (const FEException&) {
+                ++worker_exceptions;
+            }
+        }
+        EXPECT_EQ(worker_exceptions, 0);
+        EXPECT_THROW(view->finalizeAssembly(), FEException);
+        matrix.zero();
+        EXPECT_NO_THROW(matrix.finalizeAssembly());
+    }
+#else
+    GTEST_SKIP() << "requires OpenMP";
+#endif
+}
+
+TEST(FsilsBackend, MatrixViewTraceCountsParallelScalarDenseAndResolvedWrites)
+{
+    ScopedEnvVar enable_trace("SVMP_FSILS_MATRIX_VIEW_TRACE", "1");
+    sparsity::SparsityPattern diagonal(2, 2);
+    diagonal.ensureDiagonal();
+    diagonal.finalize();
+    FsilsMatrix matrix(diagonal);
+    auto view = matrix.createAssemblyView();
+
+#ifdef _OPENMP
+#pragma omp parallel for num_threads(2)
+#endif
+    for (int row = 0; row < 2; ++row) {
+        const std::array<GlobalIndex, 1> rows{row};
+        const std::array<GlobalIndex, 2> columns{row, 1 - row};
+        const std::array<Real, 2> dense{-2., 0.}, resolved_values{3., 0.};
+        std::array<GlobalIndex, 2> slots{};
+        view->resolveMatrixEntries(rows, columns, slots);
+        for (int i = 0; i < 2800; ++i) {
+            view->addMatrixEntry(row, row, 1.);
+            view->addMatrixEntries(rows, columns, dense);
+            view->addMatrixEntriesResolved(rows, columns, slots, resolved_values);
+        }
+    }
+    EXPECT_DOUBLE_EQ(matrix.getEntry(0, 0), 5600.);
+    EXPECT_DOUBLE_EQ(matrix.getEntry(1, 1), 5600.);
+    testing::internal::CaptureStderr();
+    view->finalizeAssembly();
+    const auto trace = testing::internal::GetCapturedStderr();
+    EXPECT_NE(trace.find("requested=28000 valid=16800 invalid=11200 nonzero=16800 "
+                         "value_l1=33600 value_l2=280 value_max_abs=3"),
+              std::string::npos) << trace;
+}
+
+TEST(FsilsBackend, MissingNodalBlockRejectsANonzeroComponent)
+{
+    sparsity::SparsityPattern diagonal(4, 4);
+    diagonal.ensureDiagonal();
+    diagonal.finalize();
+    FsilsMatrix matrix(diagonal, 2);
+    const int row = matrix.operatorShared()->globalNodeToInternal(0);
+    const int column = matrix.operatorShared()->globalNodeToInternal(1);
+    const std::array<Real, 4> component{0.0, 0.0, 2.5, 0.0};
+    const std::array<Real, 4> empty{};
+    EXPECT_NO_THROW(matrix.addBlock(row, column, empty.data(), 2, assembly::AddMode::Add));
+    EXPECT_THROW(matrix.addBlock(row, column, component.data(), 2, assembly::AddMode::Add), FEException);
+}
+
+TEST(FsilsBackend, ActivatedMasterRequiresFillAndMatchesDenseReducedOperatorAfterRebuild)
+{
+    // The element carries slave 1 and DOF 0. Activating u1 = .5*u2 creates (0,2) and (2,0).
+    constraints::AffineConstraints constraints;
+    constraints.addLine(1);
+    constraints.addEntry(1, 2, .5);
+    constraints.close();
+    assembly::AssemblyConstraintOptions options;
+    options.symmetric_elimination = true;
+    assembly::AssemblyConstraintDistributor distribute(constraints, options);
+    const std::array<GlobalIndex, 2> active{0, 1};
+    const std::array<Real, 4> stiffness{4.0, 5.0, 6.0, 8.0};
+    sparsity::SparsityPattern original(3, 3);
+    original.ensureDiagonal();
+    original.addEntry(0, 1);
+    original.addEntry(1, 0);
+    original.finalize();
+    FsilsMatrix matrix(original);
+    auto view = matrix.createAssemblyView();
+    EXPECT_THROW(distribute.distributeMatrixToGlobal(stiffness, active, *view), FEException);
+
+    sparsity::SparsityPattern filled(3, 3);
+    filled.ensureDiagonal();
+    filled.addEntry(0, 2);
+    filled.addEntry(2, 0);
+    filled.finalize();
+    ASSERT_TRUE(matrix.reinitFromPattern(filled));
+    matrix.zero();
+    assembly::DenseMatrixView dense(3);
+    distribute.distributeMatrixToGlobal(stiffness, active, dense);
+    distribute.distributeMatrixToGlobal(stiffness, active, *view);
+    EXPECT_DOUBLE_EQ(dense.getMatrixEntry(0, 2), 2.5);
+    EXPECT_DOUBLE_EQ(dense.getMatrixEntry(2, 0), 3.0);
+    EXPECT_DOUBLE_EQ(dense.getMatrixEntry(2, 2), 2.0);
+    for (GlobalIndex i = 0; i < 3; ++i) {
+        for (GlobalIndex j = 0; j < 3; ++j) {
+            EXPECT_DOUBLE_EQ(matrix.getEntry(i, j), dense.getMatrixEntry(i, j));
         }
     }
 }

@@ -12,9 +12,11 @@
 
 #if defined(FE_HAS_TRILINOS)
 
+#include "Backends/Interfaces/MatrixAssemblyError.h"
 #include "Backends/Trilinos/TrilinosUtils.h"
 
 #include <Teuchos_RCP.hpp>
+#include <mutex>
 
 namespace svmp {
 namespace FE {
@@ -44,6 +46,7 @@ public:
     [[nodiscard]] Teuchos::RCP<trilinos::CrsMatrix> tpetra() const { return mat_; }
 
 private:
+    friend class TrilinosMatrixView;
     void allocateFromSequential(const sparsity::SparsityPattern& sparsity);
     void allocateFromDistributed(const sparsity::DistributedSparsityPattern& sparsity);
 
@@ -51,6 +54,12 @@ private:
     Teuchos::RCP<const trilinos::Map> row_map_{};
     Teuchos::RCP<const trilinos::Map> domain_map_{};
     Teuchos::RCP<const trilinos::Map> range_map_{};
+    struct AssemblyState {
+        MatrixAssemblyError error;
+        // Host CSR access also updates Tpetra's shared host/device bookkeeping.
+        std::mutex host_access;
+    };
+    std::shared_ptr<AssemblyState> assembly_ = std::make_shared<AssemblyState>();
 };
 
 } // namespace backends

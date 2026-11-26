@@ -146,6 +146,11 @@ public:
     /**
      * @brief Initialize with constraints and options
      *
+     * An open manager can assemble fixed DOFs and constraints whose masters are free.
+     * Call DofConstraints::close() before assembling a constraint that depends on
+     * another constrained DOF. Distribution checks the active DOFs of each element
+     * or batch before writing its contributions to the adapter.
+     *
      * @param constraints Constraint manager
      * @param options Assembly options
      */
@@ -157,7 +162,7 @@ public:
     // =========================================================================
 
     /**
-     * @brief Distribute element matrix and RHS to global system
+     * @brief Add the condensed matrix P^T A P and load P^T (b - A g) for x = P y + g.
      *
      * @param cell_matrix Element stiffness matrix (row-major, n_dofs x n_dofs)
      * @param cell_rhs Element right-hand side (n_dofs)
@@ -171,7 +176,7 @@ public:
         BackendAdapter& adapter) const;
 
     /**
-     * @brief Distribute element matrix only
+     * @brief Add only the condensed element matrix P^T A P.
      */
     void distributeMatrixToGlobal(
         std::span<const double> cell_matrix,
@@ -179,7 +184,7 @@ public:
         BackendAdapter& adapter) const;
 
     /**
-     * @brief Distribute element RHS only
+     * @brief Add only the projected element load P^T b. Use joint assembly for an affine lift.
      */
     void distributeRhsToGlobal(
         std::span<const double> cell_rhs,
@@ -265,18 +270,7 @@ private:
     mutable std::vector<double> work_values_;
     mutable std::vector<GlobalIndex> work_rhs_indices_;
     mutable std::vector<double> work_rhs_;
-    mutable std::vector<double> work_zero_rhs_;
 
-    // Apply constraints to element matrix/RHS before distribution
-    void applyElementConstraints(
-        std::span<const double> cell_matrix,
-        std::span<const double> cell_rhs,
-        std::span<const GlobalIndex> cell_dof_ids,
-        std::vector<GlobalIndex>& out_rows,
-        std::vector<GlobalIndex>& out_cols,
-        std::vector<double>& out_values,
-        std::vector<GlobalIndex>& out_rhs_indices,
-        std::vector<double>& out_rhs_values) const;
 };
 
 // =============================================================================

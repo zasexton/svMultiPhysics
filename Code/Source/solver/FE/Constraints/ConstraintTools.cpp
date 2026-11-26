@@ -6,6 +6,9 @@
  */
 
 #include "ConstraintTools.h"
+#include "Basis/BasisTraits.h"
+#include "Basis/LagrangeBasis.h"
+#include "Basis/SerendipityBasis.h"
 #include "MultiPointConstraint.h"
 #include "PeriodicBC.h"
 #include "Spaces/HDivSpace.h"
@@ -505,31 +508,31 @@ void makeHangingNodeConstraint2D(
     int order,
     AffineConstraints& constraints)
 {
-    if (order == 1) {
-        // Linear interpolation: midpoint
-        if (parent_dofs.size() != 2) {
-            CONSTRAINT_THROW("P1 edge hanging node requires 2 parent DOFs");
-        }
-        constraints.addLine(hanging_dof);
-        constraints.addEntry(hanging_dof, parent_dofs[0], 0.5);
-        constraints.addEntry(hanging_dof, parent_dofs[1], 0.5);
-    } else if (order == 2) {
-        // Quadratic interpolation
-        // For midpoint on quadratic edge with 3 DOFs:
-        // u_h = 0.5*u_0 + 0.5*u_2 (vertices), midpoint is interpolated
-        if (parent_dofs.size() >= 2) {
-            constraints.addLine(hanging_dof);
-            constraints.addEntry(hanging_dof, parent_dofs[0], 0.5);
-            constraints.addEntry(hanging_dof, parent_dofs[parent_dofs.size()-1], 0.5);
-        }
-    } else {
-        // General case: compute Lagrange interpolation weights
-        // Simplified: assume midpoint interpolation
-        constraints.addLine(hanging_dof);
-        double weight = 1.0 / static_cast<double>(parent_dofs.size());
-        for (GlobalIndex parent_dof : parent_dofs) {
-            constraints.addEntry(hanging_dof, parent_dof, weight);
-        }
+    if (order < 1 || (parent_dofs.size() != 2 &&
+                      parent_dofs.size() != static_cast<std::size_t>(order) + 1)) {
+        CONSTRAINT_THROW("Edge midpoint requires a positive order and either two endpoints or all edge nodes");
+    }
+    if (hanging_dof < 0 || std::any_of(parent_dofs.begin(), parent_dofs.end(),
+                                       [](GlobalIndex dof) { return dof < 0; })) {
+        CONSTRAINT_THROW("Edge midpoint requires nonnegative DOF indices");
+    }
+
+    const int field_order = parent_dofs.size() == 2 ? 1 : order;
+    const auto weights = computeInterpolationWeights({0., 0., 0.}, ElementType::Line2, field_order);
+    bool uses_self = false;
+    bool uses_other = false;
+    for (std::size_t i = 0; i < weights.size(); ++i) {
+        if (weights[i] == 0.0) continue;
+        if (parent_dofs[i] == hanging_dof) uses_self = true;
+        else uses_other = true;
+    }
+    if (uses_self) {
+        if (!uses_other) return;  // The parent midpoint already has this global DOF.
+        CONSTRAINT_THROW_DOF("Edge midpoint interpolation references itself and other masters", hanging_dof);
+    }
+    constraints.addLine(hanging_dof);
+    for (std::size_t i = 0; i < weights.size(); ++i) {
+        if (weights[i] != 0.0) constraints.addEntry(hanging_dof, parent_dofs[i], weights[i]);
     }
 }
 
@@ -611,63 +614,24 @@ std::vector<double> computeInterpolationWeights(
     ElementType cell_type,
     int order)
 {
+    const math::Vector<Real, 3> xi{reference_point[0], reference_point[1], reference_point[2]};
     std::vector<double> weights;
-
-    // Simplified implementation for common cases
-    double xi = reference_point[0];
-    double eta = reference_point[1];
-    double zeta = reference_point[2];
-
-    switch (cell_type) {
-        case ElementType::Line2:
-            // Linear line: 2 nodes at xi = -1, 1
-            weights = {0.5 * (1.0 - xi), 0.5 * (1.0 + xi)};
-            break;
-
-        case ElementType::Triangle3:
-            // Linear triangle: barycentric coordinates
-            // Assumes reference is [0,1] x [0,1] with node at (0,0), (1,0), (0,1)
-            weights = {1.0 - xi - eta, xi, eta};
-            break;
-
-        case ElementType::Quad4:
-            // Bilinear quad: 4 nodes at corners
-            weights = {
-                0.25 * (1.0 - xi) * (1.0 - eta),
-                0.25 * (1.0 + xi) * (1.0 - eta),
-                0.25 * (1.0 + xi) * (1.0 + eta),
-                0.25 * (1.0 - xi) * (1.0 + eta)
-            };
-            break;
-
-        case ElementType::Tetra4:
-            // Linear tetrahedron: barycentric coordinates
-            weights = {1.0 - xi - eta - zeta, xi, eta, zeta};
-            break;
-
-        case ElementType::Hex8:
-            // Trilinear hex: 8 nodes at corners
-            weights = {
-                0.125 * (1.0 - xi) * (1.0 - eta) * (1.0 - zeta),
-                0.125 * (1.0 + xi) * (1.0 - eta) * (1.0 - zeta),
-                0.125 * (1.0 + xi) * (1.0 + eta) * (1.0 - zeta),
-                0.125 * (1.0 - xi) * (1.0 + eta) * (1.0 - zeta),
-                0.125 * (1.0 - xi) * (1.0 - eta) * (1.0 + zeta),
-                0.125 * (1.0 + xi) * (1.0 - eta) * (1.0 + zeta),
-                0.125 * (1.0 + xi) * (1.0 + eta) * (1.0 + zeta),
-                0.125 * (1.0 - xi) * (1.0 + eta) * (1.0 + zeta)
-            };
-            break;
-
-        default:
-            // General case: uniform weights (placeholder)
-            if (order > 0) {
-                int n_nodes = (order + 1) * (order + 1);  // Rough estimate
-                weights.resize(static_cast<std::size_t>(n_nodes), 1.0 / static_cast<double>(n_nodes));
+    ElementType topology = basis::canonical_lagrange_type(cell_type);
+    for (const auto& [reduced, linear] : {
+             std::pair{ElementType::Quad8, ElementType::Quad4}, {ElementType::Hex20, ElementType::Hex8},
+             {ElementType::Wedge15, ElementType::Wedge6}, {ElementType::Pyramid13, ElementType::Pyramid5}}) {
+        if (cell_type == reduced) {
+            if (order >= 2) {
+                // The general quadrilateral serendipity basis takes the canonical Quad4 topology.
+                const ElementType basis_type = linear == ElementType::Quad4 ? linear : reduced;
+                basis::SerendipityBasis(basis_type, order).evaluate_values(xi, weights);
+                return weights;
             }
+            topology = linear;
             break;
+        }
     }
-
+    basis::LagrangeBasis(topology, order).evaluate_values(xi, weights);
     return weights;
 }
 
