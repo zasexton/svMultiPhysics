@@ -43,16 +43,16 @@ struct JacobianCacheEntry {
 };
 
 struct JacobianCacheKey {
-    const GeometryMapping* mapping{nullptr};
+    std::uint64_t geometry_generation{0};
     std::size_t quad_hash{0};
     bool operator==(const JacobianCacheKey& other) const noexcept {
-        return mapping == other.mapping && quad_hash == other.quad_hash;
+        return geometry_generation == other.geometry_generation && quad_hash == other.quad_hash;
     }
 };
 
 struct JacobianCacheKeyHash {
     std::size_t operator()(const JacobianCacheKey& key) const noexcept {
-        return std::hash<const GeometryMapping*>()(key.mapping) ^ (key.quad_hash << 1);
+        return std::hash<std::uint64_t>{}(key.geometry_generation) ^ (key.quad_hash << 1);
     }
 };
 
@@ -76,8 +76,13 @@ private:
 
     std::size_t quadrature_hash(const quadrature::QuadratureRule& quad) const;
 
+    struct CachedGeometry {
+        std::vector<math::Vector<Real, 3>> nodes;
+        JacobianCacheEntry jacobians;
+    };
     mutable std::mutex mutex_;
-    std::unordered_map<JacobianCacheKey, std::shared_ptr<JacobianCacheEntry>, JacobianCacheKeyHash> cache_;
+    std::uint64_t next_generation_{0};
+    std::unordered_map<JacobianCacheKey, CachedGeometry, JacobianCacheKeyHash> cache_;
 };
 
 } // namespace geometry

@@ -20,10 +20,34 @@
 #include "FE/Quadrature/QuadratureRule.h"
 #include <array>
 #include <cmath>
+#include <optional>
 #include <thread>
 
 using namespace svmp::FE;
 using namespace svmp::FE::geometry;
+
+TEST(JacobianCache, TracksNodeResetsAndMappingLifetimesAtTheSameAddress) {
+    auto basis = std::make_shared<basis::LagrangeBasis>(ElementType::Tetra4, 1);
+    auto nodes = basis->nodes();
+    quadrature::TetrahedronQuadrature quad(2);
+    auto& cache = JacobianCache::instance();
+    cache.clear();
+    std::optional<LinearMapping> linear(std::in_place, ElementType::Tetra4, nodes);
+    IsoparametricMapping isoparametric(basis, nodes);
+    for (GeometryMapping* mapping : std::array<GeometryMapping*, 2>{&*linear, &isoparametric}) {
+        const auto& unit = cache.get_or_compute(*mapping, quad);
+        EXPECT_DOUBLE_EQ(unit.detJ_val(0), 1.0);
+        auto stretched = nodes;
+        for (auto& point : stretched) point[0] *= 2.0;
+        mapping->resetNodes(stretched);
+        const auto& updated = cache.get_or_compute(*mapping, quad);
+        EXPECT_DOUBLE_EQ(updated.detJ_val(0), 2.0);
+        EXPECT_DOUBLE_EQ(unit.detJ_val(0), 1.0);
+    }
+    for (auto& point : nodes) point[0] *= 3.0;
+    linear.emplace(ElementType::Tetra4, nodes);
+    EXPECT_DOUBLE_EQ(cache.get_or_compute(*linear, quad).detJ_val(0), 3.0);
+}
 
 TEST(JacobianCache, ReusesEntryAcrossThreads) {
     std::vector<math::Vector<Real, 3>> nodes = {

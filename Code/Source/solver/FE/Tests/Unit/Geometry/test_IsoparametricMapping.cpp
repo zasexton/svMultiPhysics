@@ -176,7 +176,7 @@ TEST(MappingFactory, CreatesSuperparametricMapping) {
 
 TEST(MappingFactory, CreatesWedge15GeometryUsingLinearWedge6) {
     // Geometry should be constructed using the 6 vertex nodes of Wedge15
-    MappingRequest req{ElementType::Wedge15, 2, false, nullptr};
+    MappingRequest req{ElementType::Wedge15, 1, false, nullptr};
     // Start from canonical Wedge6 vertex nodes, then append dummy mid-edge nodes
     auto w6_basis = std::make_shared<basis::LagrangeBasis>(ElementType::Wedge6, 1);
     const auto& w6_nodes = w6_basis->nodes();
@@ -212,7 +212,7 @@ TEST(MappingFactory, CreatesWedge15GeometryUsingLinearWedge6) {
 
 TEST(MappingFactory, CreatesQuadraticPyramidGeometryUsingLinearPyramid5) {
     // Geometry should be constructed using the 5 vertex nodes of Pyramid13
-    MappingRequest req{ElementType::Pyramid13, 2, false, nullptr};
+    MappingRequest req{ElementType::Pyramid13, 1, false, nullptr};
     // Reference pyramid vertices plus quadratic mid-edge/face nodes (unused by geometry)
     std::vector<math::Vector<Real,3>> nodes = {
         // base z=0
@@ -267,31 +267,7 @@ TEST(MappingFactory, Quad8SerendipityGeometry) {
 TEST(MappingFactory, Hex20SerendipityGeometry) {
     // Identity geometry mapping for Hex20 using serendipity basis
     MappingRequest req{ElementType::Hex20, 2, false, nullptr};
-    std::vector<math::Vector<Real,3>> nodes = {
-        {Real(-1), Real(-1), Real(-1)},
-        {Real(1),  Real(-1), Real(-1)},
-        {Real(1),  Real(1),  Real(-1)},
-        {Real(-1), Real(1),  Real(-1)},
-        {Real(-1), Real(-1), Real(1)},
-        {Real(1),  Real(-1), Real(1)},
-        {Real(1),  Real(1),  Real(1)},
-        {Real(-1), Real(1),  Real(1)},
-        // x-edges (y,z fixed)
-        {Real(0), Real(-1), Real(-1)},
-        {Real(0), Real(-1), Real(1)},
-        {Real(0), Real(1),  Real(-1)},
-        {Real(0), Real(1),  Real(1)},
-        // y-edges
-        {Real(-1), Real(0), Real(-1)},
-        {Real(1),  Real(0), Real(-1)},
-        {Real(-1), Real(0), Real(1)},
-        {Real(1),  Real(0), Real(1)},
-        // z-edges
-        {Real(-1), Real(-1), Real(0)},
-        {Real(1),  Real(-1), Real(0)},
-        {Real(-1), Real(1),  Real(0)},
-        {Real(1),  Real(1),  Real(0)},
-    };
+    const auto nodes = basis::SerendipityBasis(ElementType::Hex20, 2).nodes();
     auto mapping = MappingFactory::create(req, nodes);
     math::Vector<Real,3> xi{Real(0.1), Real(-0.1), Real(0.2)};
     auto x = mapping->map_to_physical(xi);

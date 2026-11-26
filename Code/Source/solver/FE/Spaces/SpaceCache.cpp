@@ -21,41 +21,18 @@ SpaceCache& SpaceCache::instance() {
 }
 
 const SpaceCache::CachedData&
-SpaceCache::get(const elements::Element& elem, int poly_order) {
+SpaceCache::get(const elements::Element& elem, int /*poly_order*/) {
     const auto& basis = elem.basis();
     const auto quad = elem.quadrature();
-
-    const int quad_order = quad ? quad->order() : 0;
-    Key key{elem.element_type(), poly_order, quad_order};
-
-    {
-        std::lock_guard<std::mutex> lock(mutex_);
-        auto it = cache_.find(key);
-        if (it != cache_.end()) {
-            return it->second;
-        }
+    if (basis.is_vector_valued() || !quad) {
+        static const CachedData empty;
+        return empty;
     }
-
-    // Compute scalar basis values; vector-valued bases are not cached
-    CachedData data;
-    if (!basis.is_vector_valued() && quad) {
-        const auto& entry =
-            basis::BasisCache::instance().get_or_compute(basis, *quad, /*gradients=*/false, /*hessians=*/false);
-
-        const std::size_t ndofs = basis.size();
-        const std::size_t nq = quad->num_points();
-
-        data.num_dofs = ndofs;
-        data.num_qpts = nq;
-        FE_CHECK_ARG(entry.num_dofs == ndofs, "SpaceCache: BasisCache dof count mismatch");
-        FE_CHECK_ARG(entry.num_qpts == nq, "SpaceCache: BasisCache quadrature size mismatch");
-        FE_CHECK_ARG(entry.scalar_values.size() == ndofs * nq,
-                     "SpaceCache: BasisCache scalar storage size mismatch");
-        data.basis_values = std::span<const Real>(entry.scalar_values.data(), entry.scalar_values.size());
-    }
-
+    auto handle = basis::BasisCache::instance().prewarm_handle(basis, *quad, false, false);
+    const auto& entry = handle.entry();
     std::lock_guard<std::mutex> lock(mutex_);
-    auto it = cache_.emplace(key, std::move(data)).first;
+    const auto it = cache_.try_emplace(&entry, CachedData{
+        entry.num_dofs, entry.num_qpts, entry.scalar_values, std::move(handle)}).first;
     return it->second;
 }
 

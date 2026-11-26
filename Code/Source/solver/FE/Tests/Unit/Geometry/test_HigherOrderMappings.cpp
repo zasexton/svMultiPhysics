@@ -4,13 +4,25 @@
  */
 
 #include <gtest/gtest.h>
-#include "FE/Geometry/IsoparametricMapping.h"
+
+#include "FE/Assembly/FunctionalAssembler.h"
+#include "FE/Assembly/MeshAccess.h"
 #include "FE/Basis/LagrangeBasis.h"
-#include "FE/Basis/SerendipityBasis.h"
 #include "FE/Basis/NodeOrderingConventions.h"
+#include "FE/Basis/SerendipityBasis.h"
+#include "FE/Dofs/DofMap.h"
+#include "FE/Elements/ReferenceElement.h"
+#include "FE/Geometry/CutQuadratureMapping.h"
+#include "FE/Geometry/FrameGeometry.h"
+#include "FE/Geometry/IsoparametricMapping.h"
+#include "FE/Geometry/MappingFactory.h"
+#include "FE/Quadrature/QuadratureFactory.h"
+#include "FE/Spaces/H1Space.h"
 #include "Mesh/Core/MeshBase.h"
+#include "Mesh/Mesh.h"
 #include "Mesh/Topology/CellShape.h"
 
+#include <array>
 #include <numeric>
 
 using namespace svmp::FE;
@@ -316,3 +328,112 @@ TEST(HigherOrderMapping, MeshGeometryDofsBuildReferenceAndCurrentQuadraticMappin
     EXPECT_GT(ref_map.jacobian_determinant(xi), 0.0);
     EXPECT_GT(cur_map.jacobian_determinant(xi), 0.0);
 }
+
+#if defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH
+TEST(HigherOrderMapping, SerendipityMeshOrderControlsGeometryInVolumeAssembly) {
+    struct Case {
+        ElementType type;
+        ElementType vertex_type;
+        svmp::CellFamily family;
+        int vertex_count;
+        math::Vector<Real, 3> probe;
+        Real curved_volume;
+        Real vertex_volume;
+    };
+    const std::array cases{
+        Case{ElementType::Hex20, ElementType::Hex8, svmp::CellFamily::Hex, 8, {0., 0., 1.}, 8.8, 8.},
+        Case{ElementType::Wedge15, ElementType::Wedge6, svmp::CellFamily::Wedge, 6, {.5, 0., 1.}, 1.05, 1.},
+        Case{ElementType::Pyramid13, ElementType::Pyramid5, svmp::CellFamily::Pyramid, 5,
+             {0., 0., 0.}, 4. / 3. - .3, 4. / 3.}
+    };
+    for (const auto& test : cases) {
+        SCOPED_TRACE(static_cast<int>(test.type));
+        const auto displacement = [&](const math::Vector<Real, 3>& x) {
+            const double r = x[0], s = x[1], t = x[2];
+            if (test.type == ElementType::Hex20) {
+                return .15 * (1. + t) * (1. - r * r);
+            }
+            if (test.type == ElementType::Wedge15) {
+                return .6 * (1. + t) * r * (1. - r - s);
+            }
+            return .15 * ((1. - t) * (1. - t) - r * r);
+        };
+        auto nodes = basis::SerendipityBasis(test.type, 2).nodes();
+        std::vector<svmp::real_t> coordinates;
+        for (auto& node : nodes) {
+            node[2] += displacement(node);
+            coordinates.insert(coordinates.end(), {node[0], node[1], node[2]});
+        }
+        std::vector<svmp::index_t> ids(nodes.size());
+        std::iota(ids.begin(), ids.end(), 0);
+        svmp::Mesh mesh;
+        mesh.build_from_arrays(3, coordinates, {0, static_cast<svmp::offset_t>(ids.size())}, ids,
+                               {{test.family, test.vertex_count, 2}});
+        assembly::MeshAccess access(mesh);
+        ASSERT_EQ(access.getCellType(0), test.type);
+        ASSERT_EQ(access.getCellGeometryOrder(0), 2);
+        auto mapping = makeCutCellGeometryMapping(access, 0);
+        EXPECT_EQ(mapping->geometryBasis().order(), 2);
+        EXPECT_EQ(mapping->num_nodes(), nodes.size());
+        EXPECT_NEAR(mapping->map_to_physical(test.probe)[2], test.probe[2] + displacement(test.probe), 1.e-12);
+
+        std::shared_ptr<GeometryMapping> inferred;
+        EXPECT_NO_THROW(inferred = MappingFactory::create(MappingRequest{test.type}, nodes));
+        if (inferred) {
+            EXPECT_EQ(inferred->geometryBasis().order(), 2);
+            EXPECT_NEAR(inferred->map_to_physical(test.probe)[2],
+                        test.probe[2] + displacement(test.probe), 1.e-12);
+        }
+
+        dofs::DofMap dofs(1, test.vertex_count, test.vertex_count);
+        std::vector<GlobalIndex> vertex_ids(test.vertex_count);
+        std::iota(vertex_ids.begin(), vertex_ids.end(), 0);
+        dofs.setCellDofs(0, vertex_ids);
+        dofs.finalize();
+        spaces::H1Space space(test.vertex_type, 1);
+        assembly::FunctionalAssembler assembler;
+        assembler.setMesh(access);
+        assembler.setDofMap(dofs);
+        assembler.setSpace(space);
+        EXPECT_NEAR(assembler.computeVolume(), test.curved_volume, 1.e-12);
+
+        // Integrating div(z e_z) = 1 also exercises each fitted face's curved
+        // position, outward normal and physical quadrature weight.
+        const auto& topology = elements::ReferenceElement::shared(test.type);
+        Real flux = 0.;
+        for (std::size_t face = 0; face < topology.num_faces(); ++face) {
+            const auto face_type = topology.face_nodes(face).size() == 3
+                                       ? ElementType::Triangle3 : ElementType::Quad4;
+            const auto rule = quadrature::QuadratureFactory::create(face_type, 5);
+            const auto frame = evaluateFaceFrame(*mapping, test.type, face, face_type, *rule);
+            for (std::size_t q = 0; q < rule->num_points(); ++q) {
+                flux += rule->weight(q) * frame.surface_measures[q] *
+                        frame.cell_geometry.points[q][2] * frame.normals[q][2];
+            }
+        }
+        EXPECT_NEAR(flux, test.curved_volume, 1.e-12);
+
+        MappingRequest straight{test.type, 1};
+        std::shared_ptr<GeometryMapping> vertex_mapping;
+        EXPECT_NO_THROW(vertex_mapping = MappingFactory::create(straight, nodes));
+        if (!vertex_mapping) {
+            continue;
+        }
+        EXPECT_EQ(vertex_mapping->geometryBasis().order(), 1);
+        EXPECT_EQ(vertex_mapping->num_nodes(), static_cast<std::size_t>(test.vertex_count));
+        EXPECT_NEAR(vertex_mapping->map_to_physical(test.probe)[2], test.probe[2], 1.e-12);
+        for (auto& node : nodes) {
+            node[2] += 2.;
+        }
+        vertex_mapping->resetNodes(nodes);
+        EXPECT_EQ(vertex_mapping->num_nodes(), static_cast<std::size_t>(test.vertex_count));
+        EXPECT_NEAR(vertex_mapping->map_to_physical(test.probe)[2], test.probe[2] + 2., 1.e-12);
+        const auto quadrature = quadrature::QuadratureFactory::create(test.type, 4);
+        double volume = 0.;
+        for (std::size_t q = 0; q < quadrature->num_points(); ++q) {
+            volume += quadrature->weight(q) * vertex_mapping->jacobian_determinant(quadrature->point(q));
+        }
+        EXPECT_NEAR(volume, test.vertex_volume, 1.e-12);
+    }
+}
+#endif

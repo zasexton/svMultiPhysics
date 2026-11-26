@@ -18,6 +18,7 @@
 #include "Math/Matrix.h"
 #include "Math/Vector.h"
 #include <array>
+#include <cstdint>
 #include <vector>
 
 namespace svmp {
@@ -125,6 +126,29 @@ public:
     /// Convenience: transform a reference gradient using a precomputed inverse Jacobian.
     math::Vector<Real, 3> transform_gradient(const math::Vector<Real, 3>& grad_ref,
                                              const math::Matrix<Real, 3, 3>& jacobian_inverse) const;
+
+protected:
+    GeometryMapping() = default;
+    // Copies and moved objects receive independent cache generations on first use.
+    GeometryMapping(const GeometryMapping&) noexcept {}
+    GeometryMapping(GeometryMapping&& other) noexcept { other.invalidateJacobianCache(); }
+    GeometryMapping& operator=(const GeometryMapping&) noexcept {
+        invalidateJacobianCache();
+        return *this;
+    }
+    GeometryMapping& operator=(GeometryMapping&& other) noexcept {
+        invalidateJacobianCache();
+        other.invalidateJacobianCache();
+        return *this;
+    }
+
+    /// Call when changing a mapping parameter that is not represented by nodes().
+    void invalidateJacobianCache() noexcept { jacobian_cache_generation_ = 0; }
+
+private:
+    friend class JacobianCache;
+    // Issued under the cache mutex. Uncached element mappings incur no synchronization.
+    mutable std::uint64_t jacobian_cache_generation_{0};
 };
 
 // -----------------------------------------------------------------------------

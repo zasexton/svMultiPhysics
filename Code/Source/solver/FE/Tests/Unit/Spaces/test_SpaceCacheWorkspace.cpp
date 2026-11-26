@@ -5,9 +5,11 @@
 
 #include <gtest/gtest.h>
 
+#include <array>
 #include "FE/Spaces/SpaceCache.h"
 #include "FE/Spaces/SpaceWorkspace.h"
 #include "FE/Spaces/H1Space.h"
+#include "FE/Basis/BasisCache.h"
 
 using namespace svmp::FE;
 using namespace svmp::FE::spaces;
@@ -69,6 +71,37 @@ TEST_F(SpaceCacheTest, CacheReusesEntries) {
     const auto& d2 = cache.get(elem, space.polynomial_order());
 
     EXPECT_EQ(&d1, &d2);
+}
+
+TEST_F(SpaceCacheTest, QuadraticProjectionIsIndependentOfBasisWarmupOrder) {
+    H1Space lagrange(ElementType::Line2, 2, BasisType::Lagrange);
+    H1Space bernstein(ElementType::Line2, 2, BasisType::Bernstein);
+    for (const bool lagrange_first : {false, true}) {
+        SpaceCache::instance().clear();
+        const auto order = lagrange_first
+            ? std::array{&lagrange, &bernstein} : std::array{&bernstein, &lagrange};
+        for (const auto* space : order) {
+            std::vector<Real> coefficients;
+            space->interpolate_scalar([](const auto& xi) { return xi[0] * xi[0]; }, coefficients);
+            EXPECT_NEAR(space->evaluate_scalar({0.25, 0., 0.}, coefficients), 0.0625, tol);
+        }
+    }
+}
+
+TEST_F(SpaceCacheTest, ScalarViewsKeepTheSelectedTabulationAcrossCacheClears) {
+    H1Space lagrange(ElementType::Line2, 2, BasisType::Lagrange);
+    H1Space bernstein(ElementType::Line2, 2, BasisType::Bernstein);
+    auto& cache = SpaceCache::instance();
+    const auto one = cache.get(lagrange.element(), 2);
+    const auto two = cache.get(bernstein.element(), 2);
+    cache.clear();
+    basis::BasisCache::instance().clear();
+    const auto point = bernstein.element().quadrature()->point(0);
+    std::vector<Real> values;
+    lagrange.element().basis().evaluate_values(point, values);
+    EXPECT_NEAR(one.basisValue(0, 0), values[0], tol);
+    bernstein.element().basis().evaluate_values(point, values);
+    EXPECT_NEAR(two.basisValue(0, 0), values[0], tol);
 }
 
 // =============================================================================

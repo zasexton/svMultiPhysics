@@ -7,78 +7,68 @@
 
 #include "MappingFactory.h"
 
-namespace svmp {
-namespace FE {
-namespace geometry {
+#include "Basis/BasisTraits.h"
+#include "Basis/NodeOrderingConventions.h"
+#include "Geometry/FrameGeometry.h"
+
+namespace svmp::FE::geometry {
+namespace {
+
+ElementType vertexElementType(ElementType type)
+{
+    switch (type) {
+    case ElementType::Quad8:     return ElementType::Quad4;
+    case ElementType::Hex20:     return ElementType::Hex8;
+    case ElementType::Wedge15:   return ElementType::Wedge6;
+    case ElementType::Pyramid13: return ElementType::Pyramid5;
+    default:                     return basis::canonical_lagrange_type(type);
+    }
+}
+
+} // namespace
 
 std::shared_ptr<GeometryMapping> MappingFactory::create(const MappingRequest& req,
                                                         const std::vector<math::Vector<Real, 3>>& nodes) {
-    // Prefer user-provided basis when present
     if (req.basis) {
         return std::make_shared<IsoparametricMapping>(req.basis, nodes);
     }
 
-    // Affine for simplices
-    if (req.use_affine && (req.element_type == ElementType::Line2 ||
-                           req.element_type == ElementType::Triangle3 ||
-                           req.element_type == ElementType::Tetra4)) {
-        return std::make_shared<LinearMapping>(req.element_type, nodes);
+    const auto type = req.element_type;
+    const int order = req.geometry_order == -1 ? defaultGeometryOrder(type) : req.geometry_order;
+    FE_THROW_IF(order < 0, FEException, "MappingFactory: invalid geometry order");
+    const auto vertex_type = vertexElementType(type);
+    if (order == 1 && vertex_type != type) {
+        const auto vertex_basis = std::make_shared<basis::LagrangeBasis>(vertex_type, 1);
+        const auto parent_nodes = basis::ReferenceNodeLayout::num_nodes(type);
+        FE_THROW_IF(nodes.size() != vertex_basis->size() && nodes.size() != parent_nodes, FEException,
+                    "MappingFactory: vertex geometry requires the vertices or the complete parent node set");
+        std::vector<math::Vector<Real, 3>> vertices(nodes.begin(), nodes.begin() + vertex_basis->size());
+        return std::make_shared<SubparametricMapping>(vertex_basis, std::move(vertices), order, parent_nodes);
+    }
+    if (req.use_affine && order == 1 &&
+        (type == ElementType::Line2 || type == ElementType::Triangle3 || type == ElementType::Tetra4)) {
+        return std::make_shared<LinearMapping>(type, nodes);
     }
 
-    // Build a geometry basis and geometry node set. For some higher-order
-    // elements we intentionally use a lower-order geometry mapping (subparametric)
-    // by selecting only the vertex nodes.
-    std::shared_ptr<basis::BasisFunction> geom_basis;
-    std::vector<math::Vector<Real, 3>> geom_nodes = nodes;
-
-    if (req.element_type == ElementType::Quad8 || req.element_type == ElementType::Hex20) {
-        // geometry_mode=true: may use reduced polynomial order for robust mapping
-        geom_basis = std::make_shared<basis::SerendipityBasis>(
-            req.element_type,
-            req.geometry_order > 0 ? req.geometry_order : 2,
-            true);
-    } else if (req.element_type == ElementType::Wedge15) {
-        // Geometry: use linear Wedge6 mapping based on the six vertices.
-        if (nodes.size() < 6) {
-            throw FEException("MappingFactory: Wedge15 geometry requires at least 6 vertex nodes",
-                              __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
-        }
-        geom_basis = std::make_shared<basis::LagrangeBasis>(ElementType::Wedge6, 1);
-        geom_nodes.assign(nodes.begin(), nodes.begin() + 6);
-    } else if (req.element_type == ElementType::Pyramid13) {
-        // Geometry: use linear Pyramid5 mapping based on the five vertices.
-        if (nodes.size() < 5) {
-            throw FEException("MappingFactory: Quadratic pyramid geometry requires at least 5 vertex nodes",
-                              __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
-        }
-        geom_basis = std::make_shared<basis::LagrangeBasis>(ElementType::Pyramid5, 1);
-        geom_nodes.assign(nodes.begin(), nodes.begin() + 5);
-    } else if (req.element_type == ElementType::Pyramid14) {
-        // Geometry: use full quadratic rational Pyramid14 mapping with all 14 nodes.
-        if (nodes.size() < 14) {
-            throw FEException("MappingFactory: Pyramid14 geometry requires 14 nodes",
-                              __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
-        }
-        geom_basis = std::make_shared<basis::LagrangeBasis>(ElementType::Pyramid14, 2);
-        geom_nodes.assign(nodes.begin(), nodes.begin() + 14);
+    std::shared_ptr<basis::BasisFunction> geometry_basis;
+    if (order == 0) {
+        geometry_basis = std::make_shared<basis::LagrangeBasis>(vertex_type, order);
+    } else if (type == ElementType::Quad8 || type == ElementType::Hex20 ||
+               type == ElementType::Wedge15 || type == ElementType::Pyramid13) {
+        FE_THROW_IF(order != 2, FEException, "MappingFactory: serendipity geometry requires order one or two");
+        geometry_basis = std::make_shared<basis::SerendipityBasis>(type, order);
     } else {
-        geom_basis = std::make_shared<basis::LagrangeBasis>(req.element_type, req.geometry_order);
+        geometry_basis = std::make_shared<basis::LagrangeBasis>(type, order);
     }
-
-    if (static_cast<int>(geom_basis->size()) != static_cast<int>(geom_nodes.size())) {
-        throw FEException("MappingFactory: node count does not match geometry basis",
-                          __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
+    FE_THROW_IF(geometry_basis->size() != nodes.size(), FEException,
+                "MappingFactory: node count does not match geometry basis");
+    if (order < 1) {
+        return std::make_shared<SubparametricMapping>(geometry_basis, nodes, order);
     }
-
-    if (req.geometry_order < 1) {
-        return std::make_shared<SubparametricMapping>(geom_basis, geom_nodes, req.geometry_order);
+    if (order > 1) {
+        return std::make_shared<SuperparametricMapping>(geometry_basis, nodes, order);
     }
-    if (req.geometry_order > 1) {
-        return std::make_shared<SuperparametricMapping>(geom_basis, geom_nodes, req.geometry_order);
-    }
-    return std::make_shared<IsoparametricMapping>(geom_basis, geom_nodes);
+    return std::make_shared<IsoparametricMapping>(geometry_basis, nodes);
 }
 
-} // namespace geometry
-} // namespace FE
-} // namespace svmp
+} // namespace svmp::FE::geometry

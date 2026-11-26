@@ -28,8 +28,9 @@ namespace FE {
 namespace geometry {
 
 struct MappingRequest {
-    ElementType element_type;
-    int geometry_order{1};
+    ElementType element_type{ElementType::Unknown};
+    /// A value of -1 uses the element's nominal order. Order one selects vertex geometry.
+    int geometry_order{-1};
     bool use_affine{true};
     std::shared_ptr<basis::BasisFunction> basis; // optional
 };

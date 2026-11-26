@@ -19,16 +19,20 @@ JacobianCache& JacobianCache::instance() {
 
 const JacobianCacheEntry& JacobianCache::get_or_compute(const GeometryMapping& mapping,
                                                         const quadrature::QuadratureRule& quad) {
-    JacobianCacheKey key{&mapping, quadrature_hash(quad)};
+    const auto quad_hash = quadrature_hash(quad);
     std::lock_guard<std::mutex> lock(mutex_);
-    auto it = cache_.find(key);
+    auto& generation = mapping.jacobian_cache_generation_;
+    if (generation == 0) generation = ++next_generation_;
+    auto it = cache_.find({generation, quad_hash});
     if (it != cache_.end()) {
-        return *(it->second);
+        if (it->second.nodes == mapping.nodes()) return it->second.jacobians;
+        // A reused mapping can change its nodes without changing its address.
+        // Keep published entries valid for callers holding an earlier reference.
+        generation = ++next_generation_;
     }
-
-    auto entry = std::make_shared<JacobianCacheEntry>(compute(mapping, quad));
-    cache_.emplace(key, entry);
-    return *entry;
+    auto inserted = cache_.emplace(JacobianCacheKey{generation, quad_hash},
+                                   CachedGeometry{mapping.nodes(), compute(mapping, quad)});
+    return inserted.first->second.jacobians;
 }
 
 void JacobianCache::clear() {

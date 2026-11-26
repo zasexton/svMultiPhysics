@@ -8,8 +8,8 @@
 
 #include "Spaces/FunctionSpace.h"
 
+#include "Basis/BasisCache.h"
 #include "Basis/BasisFunction.h"
-#include "Spaces/SpaceCache.h"
 
 #include <cmath>
 #include <limits>
@@ -109,12 +109,13 @@ void FunctionSpace::interpolate(const ValueFunction& function,
     const std::size_t nqp = quad->num_points();
 
     // Use cached scalar basis values when available
-    const SpaceCache::CachedData* cached = nullptr;
+    basis::BasisCacheHandle tabulation;
+    const basis::BasisCacheEntry* cached = nullptr;
     if (!vector_basis) {
-        cached = &SpaceCache::instance().get(elem, polynomial_order());
-        // If cache is empty (e.g., no quadrature), fall back to direct evaluation
-        if (cached->num_qpts != nqp || cached->num_dofs != ndofs) {
-            cached = nullptr;
+        tabulation = basis::BasisCache::instance().prewarm_handle(basis, *quad, false, false);
+        const auto& entry = tabulation.entry();
+        if (entry.num_qpts == nqp && entry.num_dofs == ndofs) {
+            cached = &entry;
         }
     }
 
@@ -139,7 +140,7 @@ void FunctionSpace::interpolate(const ValueFunction& function,
             }
         } else {
             if (cached) {
-                const auto& values_iq = cached->basis_values;
+                const auto& values_iq = cached->scalar_values;
                 const std::size_t nqp_cached = cached->num_qpts;
                 const Real f_scalar = f_val[0];
                 for (std::size_t i = 0; i < ndofs; ++i) {
