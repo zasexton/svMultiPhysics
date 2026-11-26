@@ -165,6 +165,17 @@ struct GeneratedInterfaceBoundaryIntersectionFragment {
     [[nodiscard]] bool active() const noexcept;
 };
 
+/// Whether @p fragment rejects a geometry refresh: an inactive contact
+/// record other than one of vanishing measure.  A 3D interface that touches
+/// a wall face at one point (or along a segment shorter than the tolerance)
+/// has a contact of zero length, which contributes nothing.
+[[nodiscard]] inline bool rejectsGeneratedContactRefresh(
+    const GeneratedInterfaceBoundaryIntersectionFragment& fragment) noexcept
+{
+    return !fragment.active() &&
+           fragment.degeneracy != GeneratedInterfaceBoundaryIntersectionDegeneracy::VanishingMeasure;
+}
+
 struct GeneratedInterfaceBoundaryIntersectionSummary {
     int interface_marker{-1};
     int boundary_marker{-1};

@@ -282,6 +282,9 @@ ownedBoundaryIntersectionSummary(
     ++summary.fragment_count;
     if (!fragment.active()) {
       ++summary.skipped_fragment_count;
+      if (!svmp::FE::interfaces::rejectsGeneratedContactRefresh(fragment)) {
+        ++summary.vanishing_measure_count;
+      }
       continue;
     }
     ++summary.active_fragment_count;
@@ -1899,6 +1902,11 @@ ActiveCutContextRefreshReport refreshActiveCutIntegrationContextFromSolution(
           globalSumSize(intersection_summary.active_fragment_count, comm);
       const auto global_marker_skipped_fragments =
           globalSumSize(intersection_summary.skipped_fragment_count, comm);
+      // Contacts of zero length (a 3D interface touching a wall face at a
+      // point) are kept as skipped records but do not reject the refresh.
+      const auto global_marker_rejected_fragments =
+          global_marker_skipped_fragments -
+          globalSumSize(intersection_summary.vanishing_measure_count, comm);
       const auto global_marker_qpoints =
           globalSumSize(intersection_summary.quadrature_point_count, comm);
       const auto global_marker_measure =
@@ -1929,7 +1937,7 @@ ActiveCutContextRefreshReport refreshActiveCutIntegrationContextFromSolution(
       const bool contact_marker_is_consumed =
           sim.fe_system->isGeneratedEmbeddedInterfaceMarkerRegistered(
               intersection_domain.marker());
-      if (global_marker_skipped_fragments > 0u) {
+      if (global_marker_rejected_fragments > 0u) {
         throw std::runtime_error(
             std::string("[svMultiPhysics::Application] Generated "
                         "interface-boundary intersection validation rejected "

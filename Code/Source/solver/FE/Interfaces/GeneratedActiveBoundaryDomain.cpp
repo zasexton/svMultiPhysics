@@ -3,6 +3,7 @@
 #include "Basis/NodeOrderingConventions.h"
 #include "Core/DeterministicParallel.h"
 #include "Interfaces/detail/ProducerArithmeticAssessment.h"
+#include "Quadrature/SymmetricTriangleQuadrature.h"
 
 #include <algorithm>
 #include <cmath>
@@ -676,13 +677,21 @@ constexpr int kEdgeLevelSetDegree = 4;
         if (order <= 1) {
             constexpr Real third = Real{1.0} / Real{3.0};
             append(third, third, third, Real{1.0});
-        } else {
+        } else if (order == 2) {
             constexpr Real high = Real{2.0} / Real{3.0};
             constexpr Real low = Real{1.0} / Real{6.0};
             constexpr Real weight = Real{1.0} / Real{3.0};
             append(high, low, low, weight);
             append(low, high, low, weight);
             append(low, low, high, weight);
+        } else {
+            // A symmetric rule with positive weights (degree 3 takes the
+            // degree-4 rule); its weights sum to the reference area 1/2.
+            const quadrature::SymmetricTriangleQuadrature rule(order == 3 ? 4 : order);
+            for (std::size_t q = 0; q < rule.num_points(); ++q) {
+                const auto xi = rule.point(q);
+                append(Real{1.0} - xi[0] - xi[1], xi[0], xi[1], Real{2.0} * rule.weight(q));
+            }
         }
     }
     return points;
@@ -1412,9 +1421,7 @@ GeneratedActiveBoundaryDomain buildGeneratedActiveBoundaryDomain(
                     Real{128.0} * std::numeric_limits<Real>::epsilon() *
                         std::max(Real{1.0}, parent_measure);
                 fragment.achieved_quadrature_order =
-                    mesh.dimension() == 2
-                        ? std::min(req.quadrature_order, 5)
-                        : std::min(req.quadrature_order, 2);
+                    std::min(req.quadrature_order, 5);
                 fragment.topology_id =
                     "active-boundary:" +
                     std::to_string(fragment.parent_face_global_id) + ":" +

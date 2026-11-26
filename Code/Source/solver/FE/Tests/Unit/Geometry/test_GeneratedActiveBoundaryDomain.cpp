@@ -7841,3 +7841,96 @@ TEST(GeneratedActiveBoundaryDomain, FragmentsAreIndependentOfTheThreadCount)
         }
     }
 }
+
+namespace {
+
+/// The interface and contact domains of the reference tetrahedron (wall:
+/// the face z = 0) for vertex level-set @p values, and the level set.
+struct TetraWallDomains {
+    interfaces::LevelSetInterfaceDomain interface_domain;
+    interfaces::GeneratedInterfaceBoundaryIntersectionDomain contact;
+    interfaces::GeneratedActiveBoundaryScalarField field;
+};
+
+TetraWallDomains tetraWallDomains(const SingleTetraBoundaryMesh& mesh,
+                                  int interface_marker,
+                                  int wall_marker,
+                                  const std::array<FE::Real, 4>& values)
+{
+    TetraWallDomains out{linearTetraCutDomain(interface_marker, values), {}, {}};
+    out.contact = interfaces::buildGeneratedInterfaceBoundaryIntersectionDomain(
+        contactRequest(interface_marker, wall_marker), out.interface_domain, mesh);
+    out.field.value_at_node = [values](FE::GlobalIndex node) {
+        return values.at(static_cast<std::size_t>(node));
+    };
+    return out;
+}
+
+} // namespace
+
+// The wetted part of a 3D wall face is integrated to the requested order
+// (free-surface audit A44: the rule was capped at degree two in 3D, so a
+// cubic integrand on the wetted face was not integrated exactly).
+TEST(GeneratedActiveBoundaryDomain, ThreeDimensionalWettedFaceRuleReachesTheRequestedOrder)
+{
+    constexpr int interface_marker = 131;
+    constexpr int wall_marker = 13;
+    const SingleTetraBoundaryMesh mesh(wall_marker);
+    // phi = x - 1/2: the wetted part of the face is {x < 1/2, x + y < 1}.
+    const auto domains = tetraWallDomains(mesh, interface_marker, wall_marker, {{-0.5, 0.5, -0.5, -0.5}});
+    for (const int order : {3, 4, 5}) {
+        SCOPED_TRACE(order);
+        auto request = activeRequest(interface_marker, wall_marker, FE::geometry::CutIntegrationSide::Negative);
+        request.quadrature_order = order;
+        const auto wetted = interfaces::buildGeneratedActiveBoundaryDomain(
+            request, domains.interface_domain, domains.contact, mesh, domains.field);
+        ASSERT_EQ(wetted.fragments().size(), 1u);
+        const auto& fragment = wetted.fragments().front();
+        EXPECT_EQ(fragment.achieved_quadrature_order, order);
+        FE::Real area = 0.0;
+        FE::Real cubic = 0.0;
+        for (const auto& qp : fragment.quadrature_points) {
+            area += qp.weight;
+            cubic += qp.weight * qp.point[0] * qp.point[0] * qp.point[1];
+        }
+        EXPECT_NEAR(area, 3.0 / 8.0, 1e-14);
+        EXPECT_NEAR(cubic, 1.0 / 120.0, 1e-14);
+    }
+}
+
+// A 3D interface that touches the wall face at one vertex has a contact of
+// zero length: the intersection records it with a vanishing measure, which
+// does not reject the geometry refresh (free-surface audit A44), and the
+// wetted part of the face is empty.
+TEST(GeneratedActiveBoundaryDomain, SingletonContactHasVanishingMeasureAndDoesNotRejectTheRefresh)
+{
+    constexpr int interface_marker = 132;
+    constexpr int wall_marker = 14;
+    const SingleTetraBoundaryMesh mesh(wall_marker);
+    // Zero at the wall vertex 0, dry at the wall vertices 1 and 2, liquid at the apex.
+    const auto domains = tetraWallDomains(mesh, interface_marker, wall_marker, {{0.0, 0.5, 0.5, -0.5}});
+    ASSERT_FALSE(domains.contact.fragments().empty());
+    for (const auto& fragment : domains.contact.fragments()) {
+        EXPECT_FALSE(fragment.active());
+        EXPECT_EQ(fragment.degeneracy,
+                  interfaces::GeneratedInterfaceBoundaryIntersectionDegeneracy::VanishingMeasure);
+        EXPECT_FALSE(interfaces::rejectsGeneratedContactRefresh(fragment));
+    }
+    const auto negative = interfaces::buildGeneratedActiveBoundaryDomain(
+        activeRequest(interface_marker, wall_marker, FE::geometry::CutIntegrationSide::Negative),
+        domains.interface_domain, domains.contact, mesh, domains.field);
+    const auto positive = interfaces::buildGeneratedActiveBoundaryDomain(
+        activeRequest(interface_marker, wall_marker, FE::geometry::CutIntegrationSide::Positive),
+        domains.interface_domain, domains.contact, mesh, domains.field);
+    EXPECT_EQ(negative.summary().measure, 0.0);
+    EXPECT_GT(positive.summary().measure, 0.0);
+    const auto partition = interfaces::validateGeneratedActiveBoundaryPartition(
+        negative, positive, domains.interface_domain, domains.contact, mesh);
+    EXPECT_LT(partition.max_partition_error, 1e-14);
+
+    // A degenerate contact that carries measure (the interface along the
+    // face) still rejects the refresh.
+    interfaces::GeneratedInterfaceBoundaryIntersectionFragment tangent;
+    tangent.degeneracy = interfaces::GeneratedInterfaceBoundaryIntersectionDegeneracy::TangentIntersection;
+    EXPECT_TRUE(interfaces::rejectsGeneratedContactRefresh(tangent));
+}
