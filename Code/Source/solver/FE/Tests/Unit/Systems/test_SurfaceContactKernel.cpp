@@ -14,6 +14,7 @@
 #include "Assembly/GlobalSystemView.h"
 
 #include "Dofs/EntityDofMap.h"
+#include "Basis/NodeOrderingConventions.h"
 
 #include "Spaces/H1Space.h"
 #include "Spaces/ProductSpace.h"
@@ -22,6 +23,7 @@
 #include "Mesh/Core/MeshBase.h"
 #include "Mesh/Topology/CellShape.h"
 
+#include <algorithm>
 #include <array>
 #include <cmath>
 #include <memory>
@@ -213,6 +215,112 @@ TEST(SurfaceContactKernel, AssemblesOppositeForces)
     const Real total_fx = rhs.getVectorEntry(v1x) + rhs.getVectorEntry(v2x) +
                           rhs.getVectorEntry(v4x) + rhs.getVectorEntry(v7x);
     EXPECT_NEAR(total_fx, 0.0, tol);
+}
+
+TEST(SurfaceContactKernel, ConstantPenaltyTractionHasThePhysicalFaceMeasure)
+{
+    namespace fe = svmp::FE;
+    using Point = std::array<Real, 3>;
+    struct Case {
+        ElementType type;
+        Point outward;
+        Real plane;
+        Real area;
+    };
+    const Real diagonal = 1. / std::sqrt(2.);
+    const std::vector<Case> cases{
+        {ElementType::Triangle3, {0., -1., 0.}, 0., 1.},
+        {ElementType::Quad4, {0., -1., 0.}, 1., 2.},
+        {ElementType::Tetra4, {0., 0., -1.}, 0., 0.5},
+        {ElementType::Hex8, {0., 0., -1.}, 1., 4.},
+        {ElementType::Wedge6, {0., 0., -1.}, 1., 0.5},
+        {ElementType::Wedge6, {0., -1., 0.}, 0., 2.},
+        {ElementType::Pyramid5, {0., 0., -1.}, 0., 4.},
+        {ElementType::Pyramid5, {0., -diagonal, diagonal}, diagonal, std::sqrt(2.)},
+    };
+    constexpr Real gap = 0.1;
+    for (const auto& [type, normal, plane, area] : cases) {
+        SCOPED_TRACE(::testing::Message() << "cell=" << static_cast<int>(type) << " area=" << area);
+        const int dim = fe::element_dimension(type);
+        const auto count = fe::basis::ReferenceNodeLayout::num_nodes(type);
+        auto height = [&](const auto& x) {
+            Real h = 0.;
+            for (int d = 0; d < dim; ++d) h += normal[d] * x[d];
+            return h;
+        };
+
+        // Reflect the second solid through the selected face, then separate
+        // the two planes by gap. Swap reference x/y to retain positive orientation.
+        std::vector<svmp::real_t> coordinates;
+        std::vector<svmp::index_t> connectivity;
+        for (int side : {0, 1}) {
+            for (std::size_t i = 0; i < count; ++i) {
+                auto x = fe::basis::ReferenceNodeLayout::get_node_coords(type, i);
+                if (side) {
+                    std::swap(x[0], x[1]);
+                    const Real shift = 2. * (plane - height(x)) + gap;
+                    for (int d = 0; d < dim; ++d) x[d] += shift * normal[d];
+                }
+                for (int d = 0; d < dim; ++d) coordinates.push_back(x[d]);
+                connectivity.push_back(static_cast<svmp::index_t>(side * count + i));
+            }
+        }
+        auto base = std::make_shared<MeshBase>();
+        CellShape shape{};
+        shape.family = fe::to_mesh_family(type);
+        shape.num_corners = static_cast<int>(count);
+        shape.order = 1;
+        const auto n = static_cast<svmp::offset_t>(count);
+        base->build_from_arrays(dim, coordinates, {0, n, 2 * n}, connectivity, {shape, shape});
+        base->finalize();
+        int selected = 0;
+        for (svmp::index_t face = 0; face < static_cast<svmp::index_t>(base->n_faces()); ++face) {
+            const auto vertices = base->face_vertices(face);
+            const int side = static_cast<std::size_t>(vertices[0]) >= count ? 1 : 0;
+            if (std::all_of(vertices.begin(), vertices.end(), [&](auto id) {
+                    return std::abs(height(base->get_vertex_coords(id)) - (plane + side * gap)) < 1e-12;
+                })) {
+                base->set_boundary_label(face, 10 + side);
+                ++selected;
+            }
+        }
+        ASSERT_EQ(selected, 2);
+        FESystem system(svmp::create_mesh(std::move(base)));
+        auto scalar = std::make_shared<H1Space>(type, 1);
+        const auto field = system.addField(FieldSpec{
+            .name = "u", .space = std::make_shared<ProductSpace>(scalar, dim), .components = dim});
+        system.addOperator("contact");
+        PenaltySurfaceContactConfig config;
+        config.field = field;
+        config.slave_marker = 10;
+        config.master_marker = 11;
+        config.search_radius = 0.3;
+        config.activation_distance = 0.2;
+        config.penalty = 10.;
+        config.quadrature_order = 2;
+        system.addGlobalKernel("contact", std::make_shared<PenaltySurfaceContactKernel>(config));
+        system.setup();
+        const auto dofs = system.dofHandler().getNumDofs();
+        std::vector<Real> state(dofs, 0.);
+        DenseVectorView residual(dofs);
+        AssemblyRequest request;
+        request.op = "contact";
+        request.want_vector = true;
+        ASSERT_TRUE(system.assemble(request, SystemStateView{.u = state}, nullptr, &residual).success);
+        const auto* entity = system.fieldDofHandler(field).getEntityDofMap();
+        ASSERT_NE(entity, nullptr);
+        for (int side : {0, 1}) {
+            Point force{};
+            for (std::size_t i = 0; i < count; ++i) {
+                auto ids = entity->getVertexDofs(static_cast<GlobalIndex>(side * count + i));
+                for (int d = 0; d < dim; ++d) force[d] += residual.getVectorEntry(ids[d]);
+            }
+            // k(h-gap) = 1 on each parallel plane, with opposite resultant forces.
+            for (int d = 0; d < dim; ++d) {
+                EXPECT_NEAR(force[d], (side ? 1. : -1.) * area * normal[d], 2e-12);
+            }
+        }
+    }
 }
 
 TEST(SurfaceContactKernel, AssemblesSymmetricJacobian)

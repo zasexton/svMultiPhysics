@@ -60,7 +60,7 @@ struct QuadratureKey {
         }
         // For position-based quadrature, also compare the modifier
         if (type == QuadratureType::PositionBased) {
-            return std::abs(position_modifier - other.position_modifier) < 1e-14;
+            return position_modifier == other.position_modifier;
         }
         return true;
     }
@@ -69,9 +69,7 @@ struct QuadratureKey {
 /**
  * @brief Hash function for QuadratureKey
  *
- * For position-based rules, the hash includes a discretized version of
- * the position modifier to ensure consistent hashing while allowing
- * for small floating-point variations.
+ * For position-based rules, equality and hashing use the actual modifier.
  */
 struct QuadratureKeyHash {
     std::size_t operator()(const QuadratureKey& key) const noexcept {
@@ -80,13 +78,8 @@ struct QuadratureKeyHash {
         std::size_t h3 = std::hash<int>()(static_cast<int>(key.type));
         std::size_t base = h1 ^ (h2 << 1) ^ (h3 << 2);
 
-        // For position-based quadrature, include the modifier in the hash
-        // Discretize to avoid floating-point precision issues
         if (key.type == QuadratureType::PositionBased) {
-            // Round to 10 decimal places for consistent hashing
-            long long discretized = static_cast<long long>(key.position_modifier * 1e10);
-            std::size_t h4 = std::hash<long long>()(discretized);
-            base ^= (h4 << 3);
+            base ^= std::hash<Real>{}(key.position_modifier) << 3;
         }
 
         return base;

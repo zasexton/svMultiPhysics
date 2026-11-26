@@ -73,7 +73,7 @@ public:
 
     /**
      * @brief Check if this rule uses the standard Gaussian position
-     * @return true if modifier is approximately 2/3
+     * @return true if modifier is the Gaussian placement
      */
     bool is_gaussian() const noexcept;
 
@@ -92,16 +92,6 @@ public:
 private:
     Real modifier_;  ///< The position parameter s
 
-    /**
-     * @brief Compute the polynomial exactness order based on position
-     *
-     * The Gaussian position (s = 2/3) achieves order 2.
-     * Non-Gaussian positions achieve reduced accuracy.
-     *
-     * @param s Position modifier
-     * @return Estimated polynomial exactness order
-     */
-    static int compute_order(Real s) noexcept;
 
     /**
      * @brief Initialize points and weights from modifier

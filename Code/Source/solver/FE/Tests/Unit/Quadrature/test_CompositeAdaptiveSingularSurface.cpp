@@ -12,6 +12,8 @@
 #include "FE/Quadrature/QuadrilateralQuadrature.h"
 #include "FE/Quadrature/WedgeQuadrature.h"
 #include "FE/Quadrature/GaussQuadrature.h"
+#include "FE/Quadrature/PyramidQuadrature.h"
+#include "FE/Quadrature/TetrahedronQuadrature.h"
 #include <algorithm>
 #include <cmath>
 
@@ -84,6 +86,42 @@ TEST(AdaptiveQuadrature, ConvergesOnPolynomial) {
     auto result = adaptive.integrate(base, f);
     EXPECT_TRUE(result.converged);
     EXPECT_NEAR(result.value, 2.0 / 5.0, 1e-10);
+}
+
+TEST(AdaptiveQuadrature, RefinesTetrahedraAndPyramidsForAnUnresolvedQuartic) {
+    TetrahedronQuadrature tetra(1);
+    PyramidQuadrature pyramid(1);
+    auto quartic = [](const QuadPoint& p) { return std::pow(p[0], 4); };
+    auto integral = [&](const QuadratureRule& rule) {
+        Real value = 0;
+        for (std::size_t q = 0; q < rule.num_points(); ++q) value += rule.weight(q) * quartic(rule.point(q));
+        return value;
+    };
+    for (const QuadratureRule* base : std::array<const QuadratureRule*, 2>{&tetra, &pyramid}) {
+        const bool simplex = base->cell_family() == svmp::CellFamily::Tetra;
+        const Real exact = simplex ? 1.0 / 210.0 : 4.0 / 35.0;
+        Real error_at_four = 0.0;
+        for (int n : {2, 3, 4}) {
+            CompositeQuadrature rule(*base, n);
+            EXPECT_EQ(rule.num_points(), n * n * n * base->num_points());
+            Real volume = 0.0;
+            for (std::size_t q = 0; q < rule.num_points(); ++q) {
+                const auto& p = rule.point(q);
+                const Real width = 1 - p[2];
+                EXPECT_TRUE(simplex ? point_in_reference_tetrahedron(p) :
+                    p[2] >= 0 && width >= 0 && std::abs(p[0]) <= width && std::abs(p[1]) <= width);
+                volume += rule.weight(q);
+            }
+            EXPECT_NEAR(volume, simplex ? 1.0 / 6.0 : 4.0 / 3.0, 1e-13);
+            if (n == 4) error_at_four = std::abs(integral(rule) - exact);
+        }
+        const auto result = AdaptiveQuadrature(1e-12, 2).integrate(*base, quartic);
+        EXPECT_FALSE(result.converged);
+        EXPECT_EQ(result.levels_used, 2);
+        EXPECT_NEAR(std::abs(result.value - exact), error_at_four, 1e-14);
+        const auto fine = CompositeQuadrature(*base, 16);
+        EXPECT_LT(std::abs(integral(fine) - exact), error_at_four / 8);
+    }
 }
 
 TEST(AdaptiveQuadrature, OddIntegrandConvergesToZero) {

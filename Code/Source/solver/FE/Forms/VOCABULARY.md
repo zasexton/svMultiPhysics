@@ -1114,7 +1114,8 @@ embedded-boundary formulations, and the facet terms of cut-cell stabilization
 | `CutCellParameterSlots` | Slot layout constants |
 | `cutVolumeFraction()` | Cut-cell volume fraction |
 | `cutSideIndicator()` | Side/phase indicator |
-| `cutEmbeddedNormal()` | Embedded-boundary normal |
+| `cutInterfaceNormal()` | Physical unit normal at each cut-interface quadrature point, also available as `cutCellTerminals().interface_normal` |
+| `cutRuleNormal()`, `cutEmbeddedNormal()` | Constant normal metadata taken from the first sample, in the rule's coordinate frame |
 | `cutStabilizationScale()` | Stabilization scale of the cut cells next to a facet; zero away from cut cells |
 | `cutMeasureSensitivity()` | Measure sensitivity |
 | `cutNormalSensitivity()` | Normal sensitivity vector |

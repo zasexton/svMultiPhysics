@@ -1099,7 +1099,6 @@ private:
         Real scale;
     };
     std::vector<KernelEntry> kernels_;
-    KernelOutput temp_output_;
 };
 
 } // namespace assembly

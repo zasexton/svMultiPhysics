@@ -12,6 +12,7 @@
 #include <algorithm>
 #include <array>
 #include <cmath>
+#include <numeric>
 #include <cstdint>
 #include <limits>
 
@@ -29,7 +30,7 @@ namespace {
 {
     // row-major: [a00 a01; a10 a11]
     const double a00 = A[0];
-    const double a01 = 0.5 * (A[1] + A[2]);
+    const double a01 = std::midpoint(A[1], A[2]);
     const double a11 = A[3];
     return {a00, a01, a01, a11};
 }
@@ -43,7 +44,7 @@ namespace {
     }
     for (int r = 0; r < 3; ++r) {
         for (int c = r + 1; c < 3; ++c) {
-            const double v = 0.5 * (A[static_cast<std::size_t>(r * 3 + c)] + A[static_cast<std::size_t>(c * 3 + r)]);
+            const double v = std::midpoint(A[static_cast<std::size_t>(r * 3 + c)], A[static_cast<std::size_t>(c * 3 + r)]);
             S[static_cast<std::size_t>(r * 3 + c)] = v;
             S[static_cast<std::size_t>(c * 3 + r)] = v;
         }
@@ -91,15 +92,19 @@ namespace {
     return dot3(v, mv);
 }
 
-[[nodiscard]] double safeDenom(double denom, double scale) noexcept
+// For a repeated eigenvalue the ordered derivative is not unique. Omit
+// directions in its own eigenspace, retaining the contributions from distinct roots.
+[[nodiscard]] double gapTerm(double eigenvalue, double other, double first, double second) noexcept
 {
-    // For repeated/near-repeated eigenvalues, eigenvector derivatives are not defined.
-    // Avoid numerical blow-up by clamping the denominator away from 0.
-    const double eps = 1e-12 * std::max(1.0, scale);
-    if (std::abs(denom) < eps) {
-        return (denom < 0.0) ? -eps : eps;
-    }
-    return denom;
+    if (eigenvalue == other || first == 0.0 || second == 0.0) return 0.0;
+    const double gap = eigenvalue - other;
+    const bool full_gap = std::isfinite(gap);
+    int first_exp, second_exp, gap_exp;
+    const double a = std::frexp(first, &first_exp);
+    const double b = std::frexp(second, &second_exp);
+    const double g = std::frexp(full_gap ? gap : std::midpoint(eigenvalue, -other), &gap_exp);
+    // Combine exponents only after dividing the bounded mantissas.
+    return std::scalbn(a * b / g, first_exp + second_exp - gap_exp + (full_gap ? 1 : 0));
 }
 
 } // namespace
@@ -200,6 +205,7 @@ extern "C" double svmp_fe_sym_eigenvalue_ddA_2x2_v1(const double* A,
     M(1, 0) = S[2];
     M(1, 1) = S[3];
 
+    svmp::FE::math::remove_diagonal_shift(M);
     const auto [evals, evecs] = svmp::FE::math::eigen_2x2_symmetric(M);
 
     const int i = static_cast<int>(which);
@@ -220,10 +226,7 @@ extern "C" double svmp_fe_sym_eigenvalue_ddA_2x2_v1(const double* A,
     const double vjBvi = dot2(vj, mat2_vec(SB, vi));
     const double vjDvi = dot2(vj, mat2_vec(Sd, vi));
 
-    const double denom_raw = evals[static_cast<std::size_t>(i)] - evals[static_cast<std::size_t>(j)];
-    const double denom = safeDenom(denom_raw, std::max(std::abs(evals[0]), std::abs(evals[1])));
-
-    return 2.0 * vjBvi * vjDvi / denom;
+    return gapTerm(evals[i], evals[j], vjBvi, vjDvi);
 }
 
 extern "C" double svmp_fe_sym_eigenvalue_ddA_3x3_v1(const double* A,
@@ -242,6 +245,7 @@ extern "C" double svmp_fe_sym_eigenvalue_ddA_3x3_v1(const double* A,
         }
     }
 
+    svmp::FE::math::remove_diagonal_shift(M);
     const auto [evals, evecs] = svmp::FE::math::eigen_3x3_symmetric(M); // ascending
 
     std::array<double, 3> vi{
@@ -254,7 +258,6 @@ extern "C" double svmp_fe_sym_eigenvalue_ddA_3x3_v1(const double* A,
     const auto Sd = sym3(dA);
 
     double sum = 0.0;
-    const double scale = std::max({std::abs(evals[0]), std::abs(evals[1]), std::abs(evals[2])});
     for (int asc_j = 0; asc_j < 3; ++asc_j) {
         if (asc_j == asc_i) continue;
 
@@ -267,10 +270,7 @@ extern "C" double svmp_fe_sym_eigenvalue_ddA_3x3_v1(const double* A,
         const double vjBvi = dot3(vj, mat3_vec(SB, vi));
         const double vjDvi = dot3(vj, mat3_vec(Sd, vi));
 
-        const double denom_raw = evals[static_cast<std::size_t>(asc_i)] - evals[static_cast<std::size_t>(asc_j)];
-        const double denom = safeDenom(denom_raw, scale);
-
-        sum += 2.0 * vjBvi * vjDvi / denom;
+        sum += gapTerm(evals[asc_i], evals[asc_j], vjBvi, vjDvi);
     }
 
     return sum;

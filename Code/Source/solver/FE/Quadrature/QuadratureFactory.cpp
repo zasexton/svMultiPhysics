@@ -171,35 +171,6 @@ std::shared_ptr<QuadratureRule> build_position_based_rule(
     }
 }
 
-/**
- * @brief Compute effective order for position-based rules (for cache key)
- *
- * This is a heuristic since position-based rules don't have a well-defined
- * polynomial exactness except at specific positions.
- */
-int effective_order_for_position_based(ElementType element_type, Real modifier) {
-    switch (canonical(element_type)) {
-        case ElementType::Triangle3: {
-            // Gaussian position for TRI3 is 2/3
-            const Real gaussian = 2.0 / 3.0;
-            if (std::abs(modifier - gaussian) < 0.01) {
-                return 2;
-            }
-            return 1;
-        }
-        case ElementType::Tetra4: {
-            // Gaussian position for TET4 is (5+3*sqrt(5))/20
-            const Real gaussian = (5.0 + 3.0 * std::sqrt(5.0)) / 20.0;
-            if (std::abs(modifier - gaussian) < 0.01) {
-                return 2;
-            }
-            return 1;
-        }
-        default:
-            return 1;
-    }
-}
-
 } // anonymous namespace
 
 // =============================================================================
@@ -263,7 +234,8 @@ std::shared_ptr<const QuadratureRule> QuadratureFactory::create_position_based(
     }
 
     // Create cache key with position modifier
-    int effective_order = effective_order_for_position_based(element_type, params.modifier);
+    const int effective_order = canonical(element_type) == ElementType::Triangle3
+        ? params.triangle_exactness() : params.tetrahedron_exactness();
     QuadratureKey key{element_type, effective_order, QuadratureType::PositionBased, params.modifier};
 
     return QuadratureCache::instance().get_or_create(

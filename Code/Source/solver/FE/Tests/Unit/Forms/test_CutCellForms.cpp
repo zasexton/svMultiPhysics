@@ -10,6 +10,7 @@
 #include "Basis/NodeOrderingConventions.h"
 #include "Core/AlignedAllocator.h"
 #include "Geometry/CutQuadrature.h"
+#include "Geometry/CutQuadratureMapping.h"
 #include "Forms/FormCompiler.h"
 #include "Forms/FormKernels.h"
 #include "Forms/JIT/JITCompiler.h"
@@ -3229,4 +3230,44 @@ TEST(CutCellForms, CutInterfaceSurfaceTractionSignFollowsQuadratureNormal)
 
     EXPECT_NEAR(positive, 2.0 * rule.measure, 1.0e-13);
     EXPECT_NEAR(negative, -2.0 * rule.measure, 1.0e-13);
+}
+
+TEST(CutCellForms, InterfaceNormalUsesEachMappedQuadraturePoint)
+{
+    requireLLVMJITOrSkip();
+    class StretchedTetra : public svmp::FE::forms::test::SingleTetraMeshAccess {
+        std::array<Real, 3> getNodeCoordinates(svmp::FE::GlobalIndex id) const override {
+            auto x = SingleTetraMeshAccess::getNodeCoordinates(id);
+            x[0] *= 2;
+            return x;
+        }
+        void getCellCoordinates(svmp::FE::GlobalIndex,
+                                std::vector<std::array<Real, 3>>& coordinates) const override {
+            coordinates.clear();
+            for (int i = 0; i < 4; ++i) coordinates.push_back(getNodeCoordinates(i));
+        }
+    } mesh;
+
+    constexpr int marker = 19;
+    const Real s = 1 / std::sqrt(2.0);
+    auto rule = makeHighOrderReferenceTetraInterfaceRule(marker);
+    rule.points = {{.point = {0.2, 0.1, 0.1}, .normal = {1, 0, 0}, .weight = 0.1},
+                   {.point = {0.2, 0.3, 0.1}, .normal = {s, s, 0}, .weight = 0.2}};
+    rule.measure = 0.3;
+    const auto constants = makeCutConstants(rule, 0, 0, 0);
+    const auto mapped = svmp::FE::geometry::mapCutQuadratureRuleToPhysical(mesh, rule);
+    rule.measure = mapped.physical_measure;
+    for (std::size_t q = 0; q < rule.points.size(); ++q) {
+        rule.points[q].normal = mapped.points[q].normal;
+        rule.points[q].weight = mapped.points[q].physical_weight;
+    }
+    const auto ctx = makeCutAssemblyContext(rule, constants);
+    // For J = diag(2,1,1), the y component of the oriented area vector doubles.
+    const Real expected = 0.2 * 2 * s;
+    const auto y_normal = cutInterfaceNormal().component(1);
+    EXPECT_NEAR(assembleInterpreterInterfaceTotal(y_normal, ctx, marker), expected, 1e-14);
+    EXPECT_NEAR(assembleJITInterfaceTotal(y_normal, ctx, marker), expected, 1e-14);
+    const auto rule_y = cutRuleNormal().component(1);
+    EXPECT_DOUBLE_EQ(assembleInterpreterInterfaceTotal(rule_y, ctx, marker), 0.0);
+    EXPECT_DOUBLE_EQ(assembleJITInterfaceTotal(rule_y, ctx, marker), 0.0);
 }

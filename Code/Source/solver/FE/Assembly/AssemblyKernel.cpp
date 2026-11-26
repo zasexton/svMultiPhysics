@@ -832,23 +832,24 @@ void CompositeKernel::computeCell(const AssemblyContext& ctx, KernelOutput& outp
 
     output.reserve(n_test, n_trial, need_matrix, need_vector);
 
+    KernelOutput contribution;
     for (const auto& entry : kernels_) {
-        temp_output_.clear();
-        entry.kernel->computeCell(ctx, temp_output_);
+        contribution.reserve(n_test, n_trial, !entry.kernel->isVectorOnly(), !entry.kernel->isMatrixOnly());
+        entry.kernel->computeCell(ctx, contribution);
 
         // Accumulate matrix
-        if (temp_output_.has_matrix && need_matrix) {
+        if (contribution.has_matrix && need_matrix) {
             for (LocalIndex i = 0; i < n_test; ++i) {
                 for (LocalIndex j = 0; j < n_trial; ++j) {
-                    output.matrixEntry(i, j) += entry.scale * temp_output_.matrixEntry(i, j);
+                    output.matrixEntry(i, j) += entry.scale * contribution.matrixEntry(i, j);
                 }
             }
         }
 
         // Accumulate vector
-        if (temp_output_.has_vector && need_vector) {
+        if (contribution.has_vector && need_vector) {
             for (LocalIndex i = 0; i < n_test; ++i) {
-                output.vectorEntry(i) += entry.scale * temp_output_.vectorEntry(i);
+                output.vectorEntry(i) += entry.scale * contribution.vectorEntry(i);
             }
         }
     }
@@ -884,8 +885,11 @@ void CompositeKernel::computeCellBatch(std::span<const AssemblyContext* const> c
             continue;
         }
 
-        for (auto& out : temp_outputs) {
-            out.clear();
+        for (std::size_t idx = 0; idx < n; ++idx) {
+            if (const auto* ctx = contexts[idx]) {
+                temp_outputs[idx].reserve(ctx->numTestDofs(), ctx->numTrialDofs(),
+                                          !entry.kernel->isVectorOnly(), !entry.kernel->isMatrixOnly());
+            }
         }
 
         if (entry.kernel->supportsCellBatch()) {
@@ -946,23 +950,24 @@ void CompositeKernel::computeBoundaryFace(
 
     output.reserve(n_test, n_trial, need_matrix, need_vector);
 
+    KernelOutput contribution;
     for (const auto& entry : kernels_) {
         if (!entry.kernel->hasBoundaryFace()) continue;
 
-        temp_output_.clear();
-        entry.kernel->computeBoundaryFace(ctx, boundary_marker, temp_output_);
+        contribution.reserve(n_test, n_trial, !entry.kernel->isVectorOnly(), !entry.kernel->isMatrixOnly());
+        entry.kernel->computeBoundaryFace(ctx, boundary_marker, contribution);
 
-        if (temp_output_.has_matrix && need_matrix) {
+        if (contribution.has_matrix && need_matrix) {
             for (LocalIndex i = 0; i < n_test; ++i) {
                 for (LocalIndex j = 0; j < n_trial; ++j) {
-                    output.matrixEntry(i, j) += entry.scale * temp_output_.matrixEntry(i, j);
+                    output.matrixEntry(i, j) += entry.scale * contribution.matrixEntry(i, j);
                 }
             }
         }
 
-        if (temp_output_.has_vector && need_vector) {
+        if (contribution.has_vector && need_vector) {
             for (LocalIndex i = 0; i < n_test; ++i) {
-                output.vectorEntry(i) += entry.scale * temp_output_.vectorEntry(i);
+                output.vectorEntry(i) += entry.scale * contribution.vectorEntry(i);
             }
         }
     }

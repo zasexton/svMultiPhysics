@@ -13,6 +13,7 @@
 #include "Core/FEException.h"
 
 #include "Elements/ElementTransform.h"
+#include "Geometry/FrameGeometry.h"
 #include "Geometry/MappingFactory.h"
 #include "Quadrature/QuadratureFactory.h"
 #include "Quadrature/SurfaceQuadrature.h"
@@ -100,8 +101,8 @@ const CellCache& getCellCache(std::unordered_map<GlobalIndex, CellCache>& cache,
 
     geometry::MappingRequest req;
     req.element_type = cc.cell_type;
-    req.geometry_order = 1;
-    req.use_affine = true;
+    req.geometry_order = mesh.getCellGeometryOrder(cell_id);
+    req.use_affine = req.geometry_order <= 1;
     cc.mapping = geometry::MappingFactory::create(req, nodes);
 
     const auto cell_dofs = system.fieldDofHandler(field).getCellDofs(cell_id);
@@ -445,32 +446,30 @@ assembly::AssemblyResult PenaltySurfaceContactKernel::assemble(const FESystem& s
                         "PenaltySurfaceContactKernel: contact_count state bytes_per_qpt too small");
         }
 
+        geometry::FaceGeometryData face;
+        const auto family = face_rule->cell_family();
+        if (family == svmp::CellFamily::Point) {
+            const auto endpoint = elements::ElementTransform::facet_vertices(cell_type, local_face).second.front();
+            face.cell_reference_points.push_back(toArray(endpoint));
+            face.cell_geometry.points.push_back(toArray(slave_cc.mapping->map_to_physical(endpoint)));
+            face.surface_measures.push_back(1.);
+        } else {
+            const auto face_type = family == svmp::CellFamily::Line ? ElementType::Line2 :
+                                   family == svmp::CellFamily::Triangle ? ElementType::Triangle3 : ElementType::Quad4;
+            geometry::evaluateFaceFrameInto(face, *slave_cc.mapping, cell_type, local_face, face_type, *face_rule,
+                                            {}, /*compute_surface_jacobians=*/false, /*compute_mean_curvatures=*/false);
+        }
+
         for (std::size_t q = 0; q < face_rule->num_points(); ++q) {
-            math::Vector<Real, 3> facet_coords = face_rule->point(q);
-            if (face_rule->cell_family() == svmp::CellFamily::Line) {
-                facet_coords[0] = (facet_coords[0] + Real(1)) * Real(0.5);
-            } else if (face_rule->cell_family() == svmp::CellFamily::Quad) {
-                facet_coords[0] = (facet_coords[0] + Real(1)) * Real(0.5);
-                facet_coords[1] = (facet_coords[1] + Real(1)) * Real(0.5);
-            }
-
-            const auto xi_slave = elements::ElementTransform::facet_to_reference(cell_type,
-                                                                                 static_cast<int>(local_face),
-                                                                                 facet_coords);
-
-            const auto frame = elements::ElementTransform::compute_facet_frame(*slave_cc.mapping,
-                                                                               xi_slave,
-                                                                               static_cast<int>(local_face),
-                                                                               cell_type);
-            const Real w = face_rule->weight(q) * frame.jacobian_det;
+            const auto xi_slave = toVec(face.cell_reference_points[q]);
+            const Real w = face_rule->weight(q) * face.surface_measures[q];
 
             field.space->element().basis().evaluate_values(xi_slave, N_slave);
             FE_THROW_IF(N_slave.size() != scalar_dofs, FEException,
                         "PenaltySurfaceContactKernel: unexpected slave basis size");
 
             const auto u_slave = evaluateDisplacementAt(dim, N_slave, slave_cc.u_local);
-            const auto x_slave_ref = slave_cc.mapping->map_to_physical(xi_slave);
-            auto x_slave = toArray(x_slave_ref);
+            auto x_slave = face.cell_geometry.points[q];
             for (int d = 0; d < dim; ++d) {
                 x_slave[static_cast<std::size_t>(d)] += u_slave[static_cast<std::size_t>(d)];
             }

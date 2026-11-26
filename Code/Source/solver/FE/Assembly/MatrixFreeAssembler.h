@@ -85,6 +85,7 @@ namespace FE {
 // Forward declarations
 namespace dofs {
     class DofMap;
+    class DofHandler;
 }
 
 namespace spaces {
@@ -198,7 +199,7 @@ public:
      *
      * @param context Assembly context with cached data
      * @param x_local Local input vector (values at element DOFs)
-     * @param y_local Output: local result vector (same size as x_local)
+     * @param y_local Output in the test space; x_local is in the trial space
      */
     virtual void applyLocal(
         const AssemblyContext& context,
@@ -237,7 +238,7 @@ public:
     {
         // Default: ignore cached data, call regular apply
         (void)element_data;
-        applyLocal(context, x_local, const_cast<std::span<Real>&>(y_local));
+        applyLocal(context, x_local, y_local);
     }
 
     /**
@@ -281,6 +282,15 @@ public:
     {
         FE_THROW(NotImplementedException, "Batched apply not implemented for this kernel");
     }
+
+    /// A nonlinear residual cannot in general be inferred from a linear action.
+    [[nodiscard]] virtual bool supportsResidual() const noexcept { return false; }
+    virtual void computeResidual(const AssemblyContext&, std::span<Real>) {
+        FE_THROW(NotImplementedException, "Matrix-free kernel does not provide a cell residual");
+    }
+
+    /// Optional quadrature space shared by the blocks of a coupled operator.
+    [[nodiscard]] virtual const spaces::FunctionSpace* cellRuleSpace() const noexcept { return nullptr; }
 };
 
 // ============================================================================
@@ -440,6 +450,10 @@ public:
      * @brief Set DOF map
      */
     void setDofMap(const dofs::DofMap& dof_map);
+    /// Independent row and column numbering for a rectangular field block.
+    void setDofMaps(const dofs::DofMap& test_map, const dofs::DofMap& trial_map);
+    /// Supply mesh entity orientations for conforming H(div) and H(curl) fields.
+    void setDofHandler(const dofs::DofHandler& handler);
 
     /**
      * @brief Set function space
@@ -461,6 +475,9 @@ public:
      * @brief Set constraints
      */
     void setConstraints(const constraints::AffineConstraints& constraints);
+    /// Apply P_test^T A P_trial, using the numbering of each field map.
+    void setConstraints(const constraints::AffineConstraints& test_constraints,
+                        const constraints::AffineConstraints& trial_constraints);
 
     /**
      * @brief Set options
@@ -603,38 +620,8 @@ private:
     // Internal Implementation
     // =========================================================================
 
-    /**
-     * @brief Cache geometry data for all elements
-     */
-    void cacheGeometryData();
-
-    /**
-     * @brief Cache basis evaluations for all elements
-     */
-    void cacheBasisData();
-
-    /**
-     * @brief Cache kernel-specific data for all elements
-     */
-    void cacheKernelData();
-
-    /**
-     * @brief Apply for a single element
-     */
-    void applyElement(
-        const MatrixFreeElementData& elem_data,
-        std::span<const Real> x_global,
-        std::span<Real> y_global);
-
-    /**
-     * @brief Apply constraints to input/output vectors
-     */
-    void applyConstraints(std::span<Real> y) const;
-
-    /**
-     * @brief Zero constrained entries
-     */
-    void zeroConstrainedEntries(std::span<Real> y) const;
+    enum class Evaluation { Action, Residual };
+    void evaluate(Evaluation evaluation, std::span<const Real> x, std::span<Real> output, bool add);
 
     // =========================================================================
     // Data Members
@@ -643,22 +630,17 @@ private:
     // Configuration
     MatrixFreeOptions options_;
     const IMeshAccess* mesh_{nullptr};
-    const dofs::DofMap* dof_map_{nullptr};
+    const dofs::DofMap* test_map_{nullptr};
+    const dofs::DofMap* trial_map_{nullptr};
+    const dofs::DofHandler* orientation_handler_{nullptr};
     const spaces::FunctionSpace* test_space_{nullptr};
     const spaces::FunctionSpace* trial_space_{nullptr};
     IMatrixFreeKernel* kernel_{nullptr};
-    const constraints::AffineConstraints* constraints_{nullptr};
+    const constraints::AffineConstraints* test_constraints_{nullptr};
+    const constraints::AffineConstraints* trial_constraints_{nullptr};
 
-    // Cached element data
-    std::vector<MatrixFreeElementData> element_cache_;
-
-    // Assembly infrastructure
-    std::unique_ptr<AssemblyLoop> loop_;
-
-    // Thread-local storage
-    std::vector<std::unique_ptr<AssemblyContext>> thread_contexts_;
-    std::vector<std::vector<Real>> thread_x_local_;
-    std::vector<std::vector<Real>> thread_y_local_;
+    // Cached traversal for this rank. The field maps own their DOF spans.
+    std::vector<GlobalIndex> owned_cells_;
 
     // Current solution (for nonlinear problems)
     std::vector<Real> current_solution_;

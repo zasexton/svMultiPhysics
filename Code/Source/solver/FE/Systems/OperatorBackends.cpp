@@ -150,6 +150,7 @@ OperatorBackends::matrixFreeOperator(const FESystem& system, const OperatorTag& 
 
     entry.assembler->setMesh(mesh);
     entry.assembler->setDofMap(dof_map);
+    entry.assembler->setDofHandler(system.dof_handler_);
     entry.assembler->setSpace(space);
     entry.assembler->setKernel(*entry.kernel);
     entry.assembler->setConstraints(system.affine_constraints_);

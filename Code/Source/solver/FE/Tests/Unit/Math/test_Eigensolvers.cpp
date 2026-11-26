@@ -390,6 +390,47 @@ TEST_F(EigensolversTest, RepeatedEigenvalues) {
     }
 }
 
+TEST_F(EigensolversTest, ShiftedAndRescaledSymmetricEigenpairs)
+{
+    const Matrix3x3<double> q{{2./3, -2./3, 1./3}, {1./3, 2./3, 2./3}, {-2./3, -1./3, 2./3}};
+    const Vector3<double> spectrum{1., 2., 4.};
+    auto unit = Matrix3x3<double>::zeros();
+    for (int k = 0; k < 3; ++k)
+        for (int i = 0; i < 3; ++i)
+            for (int j = 0; j < 3; ++j)
+                unit(i,j) += q(i,k) * spectrum[k] * q(j,k);
+    for (auto [scale, shift] : {std::pair{1.e-160, 0.}, {1.e-9, 0.}, {1.e150, 0.}, {1., 1.e8}}) {
+        SCOPED_TRACE(::testing::Message() << "scale=" << scale << ", shift=" << shift);
+        Matrix3x3<double> a = scale * unit;
+        for (int k = 0; k < 3; ++k) a(k,k) += shift;
+        const auto [w, v] = eigen_3x3_symmetric(a);
+        const double tol = 16 * std::numeric_limits<double>::epsilon() * (4. + std::abs(shift / scale));
+        for (int k = 0; k < 3; ++k) {
+            const double lambda = (w[k] - shift) / scale;
+            EXPECT_NEAR(lambda, spectrum[k], tol);
+            const Vector3<double> residual = unit * v.col(k) - lambda * v.col(k);
+            EXPECT_LE(residual.norm(), tol);
+            for (int j = 0; j <= k; ++j)
+                EXPECT_NEAR(v.col(j).dot(v.col(k)), j == k ? 1. : 0., 2e-14);
+        }
+        Matrix2x2<double> two{{shift + 3*scale, scale}, {scale, shift + 3*scale}};
+        const auto [w2, v2] = eigen_2x2_symmetric(two);
+        EXPECT_NEAR((w2[0] - shift) / scale, 4., tol);
+        EXPECT_NEAR((w2[1] - shift) / scale, 2., tol);
+        EXPECT_NEAR(std::abs(v2(0,0)), std::sqrt(.5), 1e-13);
+        EXPECT_NEAR(v2.col(0).dot(v2.col(1)), 0., 2e-14);
+    }
+    const Matrix2x2<double> diagonal{{1.e8 + 1., 0.}, {0., 1.e8 - 1.}};
+    const auto [w, v] = eigen_2x2_symmetric(diagonal);
+    EXPECT_DOUBLE_EQ(w[0], 1.e8 + 1.);
+    EXPECT_DOUBLE_EQ(w[1], 1.e8 - 1.);
+    const double tiny = std::numeric_limits<double>::denorm_min();
+    const Matrix2x2<double> subnormal{{2*tiny, tiny}, {tiny, 3*tiny}};
+    const auto [ws, vs] = eigen_2x2_symmetric(subnormal);
+    EXPECT_DOUBLE_EQ(ws[0], 4*tiny);
+    EXPECT_NEAR(std::abs(vs(0,0)), std::sqrt((1. - 1./std::sqrt(5.))/2.), 1e-14);
+}
+
 // =============================================================================
 // Performance Tests
 // =============================================================================

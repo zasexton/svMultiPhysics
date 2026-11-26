@@ -402,6 +402,8 @@ public:
     [[nodiscard]] bool isThreadSafe() const noexcept override { return false; }
 
 private:
+    friend class MatrixFreeAssembler;  // Shares cell geometry, basis and orientation transforms.
+
     /**
      * @brief Apply global->local orientation transforms to vector-basis coefficients
      *

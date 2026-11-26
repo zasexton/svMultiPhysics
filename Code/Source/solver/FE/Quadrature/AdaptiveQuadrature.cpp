@@ -7,6 +7,7 @@
 
 #include "AdaptiveQuadrature.h"
 #include <cmath>
+#include <limits>
 
 namespace svmp {
 namespace FE {
@@ -33,10 +34,12 @@ AdaptiveQuadrature::Result AdaptiveQuadrature::integrate(
 
     Real previous = result.value;
 
+    int subdivisions = 1;
     for (int level = 1; level <= max_levels_; ++level) {
-        int subdivisions = 1 << level;  // 2, 4, 8, ...
-        const int sub_safe = std::max(2, subdivisions);
-        CompositeQuadrature refined(rule, sub_safe);
+        FE_CHECK_ARG(subdivisions <= std::numeric_limits<int>::max() / 2,
+                     "Adaptive quadrature exceeds the representable subdivision count");
+        subdivisions *= 2;
+        CompositeQuadrature refined(rule, subdivisions);
         Real refined_value = evaluate(refined, f);
 
         result.levels_used = level;

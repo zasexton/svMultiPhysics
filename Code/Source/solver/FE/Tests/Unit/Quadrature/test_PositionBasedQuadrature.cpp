@@ -203,6 +203,35 @@ TEST(PositionBasedTriangleQuadrature, GaussianIntegratesLinear) {
     EXPECT_NEAR(val, 1.0 / 3.0, 1e-12);
 }
 
+TEST(PositionBasedQuadrature, ModifiedPointsRetainOnlyLinearExactness) {
+    PositionBasedTriangleQuadrature tri(position_defaults::TRI3_GAUSSIAN + 0.009);
+    PositionBasedTetrahedronQuadrature tet(position_defaults::TET4_GAUSSIAN + 0.009);
+    for (const auto* rule : std::array<const QuadratureRule*, 2>{&tri, &tet}) {
+        const bool triangle = rule == &tri;
+        Real linear = 0, square = 0;
+        for (std::size_t q = 0; q < rule->num_points(); ++q) {
+            const Real x = rule->point(q)[0];
+            linear += rule->weight(q) * x;
+            square += rule->weight(q) * x * x;
+        }
+        EXPECT_NEAR(linear, triangle ? 1.0 / 6 : 1.0 / 24, 1e-14);
+        EXPECT_GT(std::abs(square - (triangle ? 1.0 / 12 : 1.0 / 60)), 1e-5);
+        EXPECT_EQ(rule->order(), 1);
+    }
+    EXPECT_EQ(PositionBasedTriangleQuadrature(position_defaults::TRI3_GAUSSIAN).order(), 2);
+    EXPECT_EQ(PositionBasedTetrahedronQuadrature(position_defaults::TET4_GAUSSIAN).order(), 2);
+}
+
+TEST(QuadratureFactoryPositionBased, NearbyDistinctPlacementsSurviveTheCache) {
+    const Real a = 0.6;
+    const Real b = std::nextafter(a, 1.0);
+    auto first = QuadratureFactory::create_position_based(ElementType::Triangle3, PositionBasedParams{a}, true);
+    auto second = QuadratureFactory::create_position_based(ElementType::Triangle3, PositionBasedParams{b}, true);
+    EXPECT_EQ(first->point(1)[0], a);
+    EXPECT_EQ(second->point(1)[0], b);
+    EXPECT_EQ(first, QuadratureFactory::create_position_based(ElementType::Triangle3, PositionBasedParams{a}, true));
+}
+
 TEST(PositionBasedTriangleQuadrature, IsGaussianMethod) {
     PositionBasedTriangleQuadrature gaussian(PositionBasedParams::tri3_gaussian());
     PositionBasedTriangleQuadrature central(PositionBasedParams::tri3_central());

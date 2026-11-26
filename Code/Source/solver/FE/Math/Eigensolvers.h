@@ -3,12 +3,11 @@
 
 /**
  * @file Eigensolvers.h
- * @brief Analytical eigensolvers for symmetric 2x2 and 3x3 matrices
+ * @brief Fixed-size eigensolvers for symmetric 2x2 and 3x3 matrices
  *
  * This header provides specialized eigenvalue/eigenvector computations for
  * symmetric matrices commonly encountered in continuum mechanics, particularly
- * for computing principal stresses and strains. Only analytical solutions are
- * implemented for maximum performance and numerical stability.
+ * for computing principal stresses and strains.
  */
 
 #include "Matrix.h"
@@ -19,6 +18,7 @@
 #include <array>
 #include <cmath>
 #include <limits>
+#include <numeric>
 #include <tuple>
 #include <utility>
 
@@ -26,13 +26,111 @@ namespace svmp {
 namespace FE {
 namespace math {
 
+/// Remove a scalar multiple of I before computing spectral gaps. Using the
+/// diagonal entry nearest zero (or zero for mixed signs) avoids overflow in
+/// the subtraction and preserves the small differences of a shifted spectrum.
+template<typename T, std::size_t N>
+T remove_diagonal_shift(Matrix<T, N, N>& matrix)
+{
+    T low = matrix(0, 0), high = low;
+    for (std::size_t i = 1; i < N; ++i) {
+        low = std::min(low, matrix(i, i));
+        high = std::max(high, matrix(i, i));
+    }
+    const T shift = std::clamp(T(0), low, high);
+    for (std::size_t i = 0; i < N; ++i) matrix(i, i) -= shift;
+    return shift;
+}
+
+namespace detail {
+
+// A Jacobi rotation diagonalizes a 2x2 pivot exactly. Scaling its half-gap
+// and off-diagonal together keeps the angle independent of the units.
+template<typename T, std::size_t N>
+std::pair<Vector<T, N>, Matrix<T, N, N>> small_symmetric_eigenpairs(Matrix<T, N, N> matrix)
+{
+    static_assert((N == 2 || N == 3) && std::is_floating_point_v<T>);
+    auto vectors = Matrix<T, N, N>::identity();
+    for (std::size_t i = 0; i < N; ++i) {
+        for (std::size_t j = i + 1; j < N; ++j) {
+            matrix(i, j) = matrix(j, i) = std::midpoint(matrix(i, j), matrix(j, i));
+        }
+    }
+    const T shift = remove_diagonal_shift(matrix);
+    // Perform rotations in normal precision even when the entire centered
+    // matrix is subnormal. Powers of two do not perturb the rotation angles.
+    T magnitude = 0;
+    for (std::size_t i = 0; i < N; ++i)
+        for (std::size_t j = i; j < N; ++j)
+            magnitude = std::max(magnitude, std::abs(matrix(i, j)));
+    int exponent = 0;
+    if (magnitude > 0 && magnitude < std::numeric_limits<T>::min() / std::numeric_limits<T>::epsilon()) {
+        std::frexp(magnitude, &exponent);
+        for (std::size_t i = 0; i < N; ++i)
+            for (std::size_t j = 0; j < N; ++j)
+                matrix(i, j) = std::scalbn(matrix(i, j), -exponent);
+    }
+    constexpr int max_rotations = N == 2 ? 1 : 24;
+    for (int step = 0; step < max_rotations; ++step) {
+        std::size_t p = 0, q = 1;
+        for (std::size_t i = 0; i < N; ++i) {
+            for (std::size_t j = i + 1; j < N; ++j) {
+                if (std::abs(matrix(i, j)) > std::abs(matrix(p, q))) {
+                    p = i;
+                    q = j;
+                }
+            }
+        }
+        const T off = matrix(p, q);
+        if (off == T(0)) break;
+        const T difference = matrix(q, q) - matrix(p, p);
+        // Scale before halving a tiny pivot difference. For opposite,
+        // near-limit diagonals their half-difference is representable.
+        const bool full_gap = std::isfinite(difference);
+        const T gap = full_gap ? difference : std::midpoint(matrix(q, q), -matrix(p, p));
+        const T scale = std::max(std::abs(gap), std::abs(off));
+        const T d = (gap / scale) * (full_gap ? T(0.5) : T(1)), b = off / scale;
+        const T tangent = b / (d + std::copysign(std::hypot(d, b), d));
+        const T cosine = T(1) / std::sqrt(T(1) + tangent * tangent);
+        const T sine = tangent * cosine;
+        matrix(p, p) -= tangent * off;
+        matrix(q, q) += tangent * off;
+        matrix(p, q) = matrix(q, p) = T(0);
+        for (std::size_t k = 0; k < N; ++k) {
+            if (k != p && k != q) {
+                const T a = matrix(k, p), c = matrix(k, q);
+                matrix(k, p) = matrix(p, k) = cosine * a - sine * c;
+                matrix(k, q) = matrix(q, k) = sine * a + cosine * c;
+            }
+            const T a = vectors(k, p), c = vectors(k, q);
+            vectors(k, p) = cosine * a - sine * c;
+            vectors(k, q) = sine * a + cosine * c;
+        }
+    }
+    Vector<T, N> values;
+    for (std::size_t i = 0; i < N; ++i) values[i] = matrix(i, i);
+    // Preserve the public ordering conventions, including when adding the
+    // shift makes two distinct, centered eigenvalues round to the same value.
+    for (std::size_t i = 0; i < N; ++i) {
+        for (std::size_t j = i + 1; j < N; ++j) {
+            if ((N == 2) ? values[j] > values[i] : values[j] < values[i]) {
+                std::swap(values[i], values[j]);
+                for (std::size_t k = 0; k < N; ++k) std::swap(vectors(k, i), vectors(k, j));
+            }
+        }
+        values[i] = (exponent ? std::scalbn(values[i], exponent) : values[i]) + shift;
+    }
+    return {values, vectors};
+}
+
+} // namespace detail
+
 /**
  * @brief Eigendecomposition for symmetric 3x3 matrices
  * @tparam T Scalar type (float, double)
  *
  * Used for material characterization, computing principal stresses/strains,
- * and tensor decomposition. Uses analytical solution via characteristic polynomial
- * for guaranteed convergence and optimal performance.
+ * and tensor decomposition.
  */
 template<typename T>
 class SymmetricEigen3x3 {
@@ -47,10 +145,6 @@ public:
      * @brief Compute eigendecomposition of symmetric 3x3 matrix
      * @param A Symmetric 3x3 matrix
      *
-     * Uses analytical solution of characteristic polynomial:
-     * det(A - λI) = 0
-     * λ³ - I₁λ² + I₂λ - I₃ = 0
-     * where I₁, I₂, I₃ are the invariants of A
      */
     explicit SymmetricEigen3x3(const Matrix3x3<T>& A) {
         compute(A);
@@ -95,159 +189,7 @@ public:
 
 private:
     void compute(const Matrix3x3<T>& A) {
-        // Ensure symmetry (use average of A and A^T)
-        Matrix3x3<T> S;
-        for (std::size_t i = 0; i < 3; ++i) {
-            S(i, i) = A(i, i);
-            for (std::size_t j = i + 1; j < 3; ++j) {
-                T avg = (A(i, j) + A(j, i)) / T(2);
-                S(i, j) = avg;
-                S(j, i) = avg;
-            }
-        }
-
-        // Compute characteristic polynomial coefficients
-        // char poly: λ³ - I₁λ² + I₂λ - I₃ = 0
-        T I1 = S(0, 0) + S(1, 1) + S(2, 2);  // Trace
-
-        T I2 = S(0, 0) * S(1, 1) + S(1, 1) * S(2, 2) + S(2, 2) * S(0, 0)
-             - S(0, 1) * S(0, 1) - S(1, 2) * S(1, 2) - S(0, 2) * S(0, 2);
-
-        T I3 = S.determinant();
-
-        // Solve characteristic polynomial using Cardano's method
-        // The characteristic polynomial is: λ³ - I₁λ² + I₂λ - I₃ = 0
-        // Transform to depressed cubic: t³ + pt + q = 0
-        // where λ = t + I₁/3
-        // Substituting: (t + I₁/3)³ - I₁(t + I₁/3)² + I₂(t + I₁/3) - I₃ = 0
-        // Expanding and simplifying: t³ + pt + q = 0
-        T p = I2 - I1 * I1 / T(3);
-        T q = -T(2) * I1 * I1 * I1 / T(27) + I1 * I2 / T(3) - I3;
-
-        // For symmetric matrices, all roots are real
-        // Use trigonometric solution
-        if (std::abs(p) < epsilon<T>) {
-            // Special case: p ≈ 0
-            eigenvalues_[0] = eigenvalues_[1] = eigenvalues_[2] = I1 / T(3);
-        } else if (p < 0) {
-            // For symmetric matrices with p < 0, use trigonometric solution
-            // This gives three real roots using Vieta's substitution
-            T r = std::sqrt(-p * p * p / T(27));
-            T arg = -q / (T(2) * r);
-            // Clamp argument to valid range for acos
-            arg = std::max(T(-1), std::min(T(1), arg));
-            T theta = std::acos(arg);
-            T two_cbrt_r = T(2) * std::cbrt(r);
-
-            eigenvalues_[0] = two_cbrt_r * std::cos(theta / T(3)) + I1 / T(3);
-            eigenvalues_[1] = two_cbrt_r * std::cos((theta + T(2) * pi<T>) / T(3)) + I1 / T(3);
-            eigenvalues_[2] = two_cbrt_r * std::cos((theta + T(4) * pi<T>) / T(3)) + I1 / T(3);
-        } else {
-            // p > 0 shouldn't happen for symmetric matrices, but handle it anyway
-            // This would give one real root and two complex roots
-            // For now, just return diagonal approximation
-            eigenvalues_[0] = eigenvalues_[1] = eigenvalues_[2] = I1 / T(3);
-        }
-
-        // Compute eigenvectors for each eigenvalue (before sorting)
-        for (std::size_t k = 0; k < 3; ++k) {
-            T lambda = eigenvalues_[k];
-
-            // Solve (A - λI)v = 0
-            Matrix3x3<T> B = S;
-            B(0, 0) -= lambda;
-            B(1, 1) -= lambda;
-            B(2, 2) -= lambda;
-
-            // Find the eigenvector using cross products of rows
-            Vector3<T> row0{B(0, 0), B(0, 1), B(0, 2)};
-            Vector3<T> row1{B(1, 0), B(1, 1), B(1, 2)};
-            Vector3<T> row2{B(2, 0), B(2, 1), B(2, 2)};
-
-            Vector3<T> v1 = cross(row0, row1);
-            Vector3<T> v2 = cross(row1, row2);
-            Vector3<T> v3 = cross(row0, row2);
-
-            // Choose the cross product with largest magnitude
-            T norm1 = v1.norm_squared();
-            T norm2 = v2.norm_squared();
-            T norm3 = v3.norm_squared();
-
-            Vector3<T> eigenvector;
-            if (norm1 >= norm2 && norm1 >= norm3) {
-                eigenvector = v1.normalized();
-            } else if (norm2 >= norm3) {
-                eigenvector = v2.normalized();
-            } else {
-                eigenvector = v3.normalized();
-            }
-
-            // Handle degenerate cases
-            if (eigenvector.norm_squared() < epsilon<T>) {
-                // Use a default vector orthogonal to previous eigenvectors
-                if (k == 0) {
-                    eigenvector = Vector3<T>{T(1), T(0), T(0)};
-                } else if (k == 1) {
-                    Vector3<T> v0;
-                    v0[0] = eigenvectors_(0, 0);
-                    v0[1] = eigenvectors_(1, 0);
-                    v0[2] = eigenvectors_(2, 0);
-                    eigenvector = cross(v0, Vector3<T>{T(0), T(1), T(0)});
-                    if (eigenvector.norm_squared() < epsilon<T>) {
-                        eigenvector = cross(v0, Vector3<T>{T(0), T(0), T(1)});
-                    }
-                    eigenvector = eigenvector.normalized();
-                } else { // k == 2
-                    Vector3<T> v0{eigenvectors_(0, 0), eigenvectors_(1, 0), eigenvectors_(2, 0)};
-                    Vector3<T> v1_prev{eigenvectors_(0, 1), eigenvectors_(1, 1), eigenvectors_(2, 1)};
-                    eigenvector = cross(v0, v1_prev).normalized();
-                }
-            }
-
-            // Store eigenvector as column
-            eigenvectors_(0, k) = eigenvector[0];
-            eigenvectors_(1, k) = eigenvector[1];
-            eigenvectors_(2, k) = eigenvector[2];
-        }
-
-        // Ensure eigenvectors are orthonormal (Gram-Schmidt if needed)
-        orthonormalize_eigenvectors();
-
-        // Sort eigenvalues and eigenvectors in ascending order (smallest to largest)
-        // Use bubble sort to keep eigenvector columns synchronized with eigenvalues
-        auto swap_columns = [this](std::size_t i, std::size_t j) {
-            std::swap(eigenvalues_[i], eigenvalues_[j]);
-            // Swap eigenvector columns
-            for (std::size_t row = 0; row < 3; ++row) {
-                std::swap(eigenvectors_(row, i), eigenvectors_(row, j));
-            }
-        };
-
-        if (eigenvalues_[0] > eigenvalues_[1]) swap_columns(0, 1);
-        if (eigenvalues_[1] > eigenvalues_[2]) swap_columns(1, 2);
-        if (eigenvalues_[0] > eigenvalues_[1]) swap_columns(0, 1);
-    }
-
-    void orthonormalize_eigenvectors() {
-        // Apply Gram-Schmidt orthogonalization to ensure orthonormality
-        for (std::size_t i = 0; i < 3; ++i) {
-            Vector3<T> vi{eigenvectors_(0, i), eigenvectors_(1, i), eigenvectors_(2, i)};
-
-            // Orthogonalize against previous vectors
-            for (std::size_t j = 0; j < i; ++j) {
-                Vector3<T> vj{eigenvectors_(0, j), eigenvectors_(1, j), eigenvectors_(2, j)};
-                T proj = vi.dot(vj);
-                vi = vi - proj * vj;
-            }
-
-            // Normalize
-            vi = vi.normalized();
-
-            // Store back
-            eigenvectors_(0, i) = vi[0];
-            eigenvectors_(1, i) = vi[1];
-            eigenvectors_(2, i) = vi[2];
-        }
+        std::tie(eigenvalues_, eigenvectors_) = detail::small_symmetric_eigenpairs(A);
     }
 };
 
@@ -257,93 +199,14 @@ private:
  * @param A Symmetric 2x2 matrix
  * @return Pair of (eigenvalues, eigenvectors) where eigenvalues are sorted descending
  *
- * Uses closed-form solution:
- * λ = (trace ± √(trace² - 4·det)) / 2
  */
 template<typename T>
 std::pair<Vector2<T>, Matrix2x2<T>> eigen_2x2_symmetric(const Matrix2x2<T>& A) {
-    static_assert(std::is_floating_point_v<T>, "T must be a floating point type");
-
-    // Ensure symmetry
-    T a00 = A(0, 0);
-    T a11 = A(1, 1);
-    T a01 = (A(0, 1) + A(1, 0)) / T(2);
-
-    // Compute eigenvalues using trace and determinant
-    T trace = a00 + a11;
-    T det = a00 * a11 - a01 * a01;
-    T discriminant = trace * trace - T(4) * det;
-
-    Vector2<T> eigenvalues;
-    Matrix2x2<T> eigenvectors;
-
-    if (discriminant < T(0)) {
-        discriminant = T(0);  // Clamp negative values due to rounding
-    }
-
-    T sqrt_disc = std::sqrt(discriminant);
-    eigenvalues[0] = (trace + sqrt_disc) / T(2);  // First eigenvalue
-    eigenvalues[1] = (trace - sqrt_disc) / T(2);  // Second eigenvalue
-
-    // Ensure eigenvalues are sorted in descending order
-    if (eigenvalues[0] < eigenvalues[1]) {
-        std::swap(eigenvalues[0], eigenvalues[1]);
-    }
-
-    // Compute eigenvectors
-    if (std::abs(a01) > epsilon<T>) {
-        // Non-diagonal matrix
-        // For eigenvalue λ, eigenvector is [λ - a11, a01] or [a01, λ - a00]
-        // We use the more numerically stable choice
-        Vector2<T> v1, v2;
-
-        // For first eigenvalue
-        if (std::abs(eigenvalues[0] - a00) > std::abs(eigenvalues[0] - a11)) {
-            v1 = Vector2<T>{a01, eigenvalues[0] - a00};
-        } else {
-            v1 = Vector2<T>{eigenvalues[0] - a11, a01};
-        }
-
-        // For second eigenvalue
-        if (std::abs(eigenvalues[1] - a00) > std::abs(eigenvalues[1] - a11)) {
-            v2 = Vector2<T>{a01, eigenvalues[1] - a00};
-        } else {
-            v2 = Vector2<T>{eigenvalues[1] - a11, a01};
-        }
-
-        // Normalize
-        v1 = v1.normalized();
-        v2 = v2.normalized();
-
-        eigenvectors(0, 0) = v1[0];
-        eigenvectors(1, 0) = v1[1];
-        eigenvectors(0, 1) = v2[0];
-        eigenvectors(1, 1) = v2[1];
-    } else if (std::abs(a00 - a11) > epsilon<T>) {
-        // Diagonal matrix with different eigenvalues
-        if (eigenvalues[0] == a00) {
-            // First eigenvalue corresponds to first diagonal
-            eigenvectors(0, 0) = T(1);
-            eigenvectors(1, 0) = T(0);
-            eigenvectors(0, 1) = T(0);
-            eigenvectors(1, 1) = T(1);
-        } else {
-            // First eigenvalue corresponds to second diagonal
-            eigenvectors(0, 0) = T(0);
-            eigenvectors(1, 0) = T(1);
-            eigenvectors(0, 1) = T(1);
-            eigenvectors(1, 1) = T(0);
-        }
-    } else {
-        // Multiple eigenvalue (spherical tensor)
-        eigenvectors = Matrix2x2<T>::identity();
-    }
-
-    return {eigenvalues, eigenvectors};
+    return detail::small_symmetric_eigenpairs(A);
 }
 
 /**
- * @brief Analytical eigendecomposition for symmetric 3x3 matrix (function interface)
+ * @brief Eigendecomposition for symmetric 3x3 matrix (function interface)
  * @tparam T Scalar type (float, double)
  * @param A Symmetric 3x3 matrix
  * @return Pair of (eigenvalues, eigenvectors) where eigenvalues are sorted ascending

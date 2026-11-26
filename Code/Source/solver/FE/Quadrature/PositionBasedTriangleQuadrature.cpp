@@ -15,17 +15,15 @@ namespace quadrature {
 
 PositionBasedTriangleQuadrature::PositionBasedTriangleQuadrature(
     const PositionBasedParams& params)
-    : QuadratureRule(svmp::CellFamily::Triangle, 2, compute_order(params.modifier))
+    : QuadratureRule(svmp::CellFamily::Triangle, 2, params.triangle_exactness())
     , modifier_(params.modifier)
 {
     initialize(params.modifier);
 }
 
 PositionBasedTriangleQuadrature::PositionBasedTriangleQuadrature(Real modifier)
-    : QuadratureRule(svmp::CellFamily::Triangle, 2, compute_order(modifier))
-    , modifier_(modifier)
+    : PositionBasedTriangleQuadrature(PositionBasedParams{modifier})
 {
-    initialize(modifier);
 }
 
 void PositionBasedTriangleQuadrature::initialize(Real s) {
@@ -33,7 +31,7 @@ void PositionBasedTriangleQuadrature::initialize(Real s) {
     const Real min_s = 1.0 / 3.0 - 1e-14;  // Small tolerance for floating point
     const Real max_s = 1.0 + 1e-14;
 
-    if (s < min_s || s > max_s) {
+    if (!std::isfinite(s) || s < min_s || s > max_s) {
         throw FEException(
             "PositionBasedTriangleQuadrature: modifier must be in [1/3, 1.0], got " +
             std::to_string(s),
@@ -61,30 +59,8 @@ void PositionBasedTriangleQuadrature::initialize(Real s) {
     set_data(std::move(pts), std::move(wts));
 }
 
-int PositionBasedTriangleQuadrature::compute_order(Real s) noexcept {
-    // The standard Gaussian rule (s = 2/3) achieves polynomial exactness of order 2
-    // meaning it can exactly integrate polynomials of total degree <= 2.
-    //
-    // For non-Gaussian positions, the exactness is reduced:
-    // - Central rule (s = 1/3) only integrates constants exactly
-    // - Nodal rule (s = 1.0) only integrates constants exactly
-    //
-    // We use a heuristic based on distance from the Gaussian position.
-
-    const Real gaussian_s = 2.0 / 3.0;
-    const Real tolerance = 0.01;
-
-    if (std::abs(s - gaussian_s) < tolerance) {
-        return 2;  // Full polynomial exactness for Gaussian position
-    }
-
-    // For positions significantly different from Gaussian, reduce reported order
-    return 1;
-}
-
 bool PositionBasedTriangleQuadrature::is_gaussian() const noexcept {
-    const Real gaussian_s = 2.0 / 3.0;
-    return std::abs(modifier_ - gaussian_s) < 1e-10;
+    return order() == 2;
 }
 
 bool PositionBasedTriangleQuadrature::is_central() const noexcept {

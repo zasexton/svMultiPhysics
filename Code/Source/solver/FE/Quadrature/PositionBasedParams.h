@@ -184,9 +184,17 @@ struct PositionBasedParams {
     // Comparison operators
     // =========================================================================
 
+    /// Symmetry integrates affine data for every placement. The Gaussian
+    /// placement also integrates the quadratic moments.
+    constexpr int triangle_exactness() const noexcept {
+        return modifier == tri3_gaussian().modifier ? 2 : 1;
+    }
+    int tetrahedron_exactness() const noexcept {
+        return modifier == tet4_gaussian().modifier ? 2 : 1;
+    }
+
     constexpr bool operator==(const PositionBasedParams& other) const noexcept {
-        // Use tolerance for floating-point comparison
-        return std::abs(modifier - other.modifier) < 1e-14;
+        return modifier == other.modifier;
     }
 
     constexpr bool operator!=(const PositionBasedParams& other) const noexcept {

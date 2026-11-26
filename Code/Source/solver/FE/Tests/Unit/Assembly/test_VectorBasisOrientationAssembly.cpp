@@ -6,6 +6,7 @@
 #include <gtest/gtest.h>
 
 #include "Assembly/GlobalSystemView.h"
+#include "Assembly/MatrixFreeAssembler.h"
 #include "Assembly/StandardAssembler.h"
 #include "Dofs/DofHandler.h"
 #include "Forms/FormCompiler.h"
@@ -15,6 +16,7 @@
 
 #include <array>
 #include <memory>
+#include <numeric>
 #include <sstream>
 #include <vector>
 
@@ -207,6 +209,29 @@ void expectDenseMatrixNear(const assembly::DenseMatrixView& a,
     }
 }
 
+void checkMatrixFreeMassAction(const TwoTetraMeshAccess& mesh, const dofs::DofHandler& handler,
+                             const spaces::FunctionSpace& space, assembly::AssemblyKernel& kernel,
+                             const assembly::DenseMatrixView& matrix)
+{
+    auto wrapper = assembly::wrapAsMatrixFreeKernel(kernel);
+    assembly::MatrixFreeAssembler assembler({.num_threads = 2});
+    assembler.setMesh(mesh);
+    assembler.setDofMap(handler.getDofMap());
+    assembler.setDofHandler(handler);
+    assembler.setSpace(space);
+    assembler.setKernel(*wrapper);
+    std::vector<Real> x(matrix.numCols()), y(matrix.numRows());
+    std::iota(x.begin(), x.end(), 1.);
+    assembler.apply(x, y);
+    for (GlobalIndex i = 0; i < matrix.numRows(); ++i) {
+        Real expected = 0.;
+        for (GlobalIndex j = 0; j < matrix.numCols(); ++j) {
+            expected += matrix.getMatrixEntry(i, j) * x[j];
+        }
+        EXPECT_NEAR(y[i], expected, 1e-12) << "i=" << i;
+    }
+}
+
 } // namespace
 
 TEST(VectorBasisOrientationAssembly, HDivMassMatrixInvariantToCellVertexPermutation)
@@ -235,6 +260,7 @@ TEST(VectorBasisOrientationAssembly, HDivMassMatrixInvariantToCellVertexPermutat
 
         TwoTetraMeshAccess mesh(flipped);
         (void)assembler.assembleMatrix(mesh, space, space, kernel, mat);
+        checkMatrixFreeMassAction(mesh, dh, space, kernel, mat);
         return mat;
     };
 
@@ -345,6 +371,7 @@ TEST(VectorBasisOrientationAssembly, HCurlMassMatrixInvariantToCellVertexPermuta
 
         TwoTetraMeshAccess mesh(flipped);
         (void)assembler.assembleMatrix(mesh, space, space, kernel, mat);
+        checkMatrixFreeMassAction(mesh, dh, space, kernel, mat);
         return mat;
     };
 

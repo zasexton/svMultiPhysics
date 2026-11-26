@@ -25,9 +25,11 @@ namespace quadrature {
  *
  * CompositeQuadrature reuses an existing rule on the reference element and
  * applies it to each subcell, scaling points/weights appropriately. Tensor
- * elements (line/quad/hex) are fully supported; triangles and wedges are
- * subdivided using barycentric grids. Other element families fallback to the
- * provided rule without subdivision to preserve correctness.
+ * elements use Cartesian subdivisions. Triangle and tetrahedron grids use
+ * the first subdivision count on all simplex axes. Wedges also refine the
+ * axial direction. Pyramid layers use collapsed Gauss quadrature, retaining
+ * the axis orders of a PyramidQuadrature or the declared degree of another
+ * pyramid rule. A subdivision count of one preserves the supplied rule.
  */
 class CompositeQuadrature : public QuadratureRule {
 public:

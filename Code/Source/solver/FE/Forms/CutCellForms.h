@@ -108,13 +108,27 @@ using CutCellParameterVector =
     return FormExpr::parameterRef(slots.side_indicator);
 }
 
-[[nodiscard]] inline FormExpr cutEmbeddedNormal(
+/// Normal of the first sample in the rule's own coordinate frame, constant
+/// over the rule. Volume forms may use these slots as rule metadata.
+[[nodiscard]] inline FormExpr cutRuleNormal(
     const CutCellParameterSlots& slots = {})
 {
     return FormExpr::asVector({
         FormExpr::parameterRef(slots.embedded_normal[0]),
         FormExpr::parameterRef(slots.embedded_normal[1]),
         FormExpr::parameterRef(slots.embedded_normal[2])});
+}
+
+/// Compatibility spelling for the constant cut-rule metadata.
+[[nodiscard]] inline FormExpr cutEmbeddedNormal(const CutCellParameterSlots& slots = {})
+{
+    return cutRuleNormal(slots);
+}
+
+/// Physical unit normal at the current embedded-interface quadrature point.
+[[nodiscard]] inline FormExpr cutInterfaceNormal()
+{
+    return FormExpr::normal();
 }
 
 [[nodiscard]] inline FormExpr cutStabilizationScale(
@@ -150,11 +164,12 @@ using CutCellParameterVector =
 struct CutCellFormTerminals {
     FormExpr volume_fraction{};
     FormExpr side_indicator{};
-    FormExpr embedded_normal{};
+    FormExpr embedded_normal{}; ///< First rule normal, in the rule's coordinate frame.
     FormExpr stabilization_scale{};
     FormExpr measure_sensitivity{};
     FormExpr normal_sensitivity{};
     FormExpr quadrature_weight_sensitivity{};
+    FormExpr interface_normal{}; ///< Pointwise physical normal on a cut interface.
 };
 
 [[nodiscard]] inline CutCellFormTerminals cutCellTerminals(
@@ -163,11 +178,12 @@ struct CutCellFormTerminals {
     CutCellFormTerminals terminals;
     terminals.volume_fraction = cutVolumeFraction(slots);
     terminals.side_indicator = cutSideIndicator(slots);
-    terminals.embedded_normal = cutEmbeddedNormal(slots);
+    terminals.embedded_normal = cutRuleNormal(slots);
     terminals.stabilization_scale = cutStabilizationScale(slots);
     terminals.measure_sensitivity = cutMeasureSensitivity(slots);
     terminals.normal_sensitivity = cutNormalSensitivity(slots);
     terminals.quadrature_weight_sensitivity = cutQuadratureWeightSensitivity(slots);
+    terminals.interface_normal = cutInterfaceNormal();
     return terminals;
 }
 

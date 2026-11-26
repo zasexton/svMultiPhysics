@@ -14,14 +14,22 @@
 #include "Assembly/MatrixFreeAssembler.h"
 #include "Assembly/GlobalSystemView.h"
 #include "Assembly/StandardAssembler.h"
+#include "Constraints/AffineConstraints.h"
 #include "Core/Types.h"
 #include "Dofs/DofMap.h"
+#include "Spaces/AdaptiveSpace.h"
 #include "Spaces/H1Space.h"
+#include "Spaces/ProductSpace.h"
 
 #include <vector>
 #include <memory>
+#include <mutex>
+#include <set>
+#include <thread>
 #include <cmath>
 #include <array>
+#include <atomic>
+#include <numeric>
 
 namespace svmp {
 namespace FE {
@@ -143,7 +151,7 @@ public:
     void resetApplyCount() { apply_count_ = 0; }
 
 private:
-    mutable int apply_count_{0};
+    std::atomic<int> apply_count_{0};
 };
 
 /**
@@ -601,6 +609,293 @@ TEST(MatrixFreeAssemblerOperationTest, ApplyMatchesExplicitStiffnessAssemblySing
 
     for (std::size_t i = 0; i < y_mf.size(); ++i) {
         EXPECT_NEAR(y_mf[i], y_exp[i], 1e-10);
+    }
+}
+
+TEST(MatrixFreeAssemblerOperationTest, ConstrainedIdentityUsesBothSidesOfTheProlongation)
+{
+    ValidTetraMeshAccess mesh(1);
+    auto map = buildDisjointTetra4DofMap(1);
+    spaces::H1Space p1(ElementType::Tetra4, 1);
+    MockMatrixFreeKernel identity;
+    constraints::AffineConstraints constraints;
+    constraints.addLine(1);
+    constraints.addEntry(1, 0, 1.0);
+    constraints.setInhomogeneity(1, 7.0);
+    constraints.addDirichlet(2, 3.0);
+    constraints.close();
+    MatrixFreeAssembler assembler({.num_threads = 1});
+    assembler.setMesh(mesh);
+    assembler.setSpace(p1);
+    assembler.setDofMap(map);
+    assembler.setConstraints(constraints);
+    assembler.setKernel(identity);
+    const std::array<Real, 4> x{1., 9., 5., -2.};
+    std::array<Real, 4> y{};
+    assembler.apply(x, y);
+    EXPECT_EQ(y, (std::array<Real, 4>{2., 0., 0., -2.}));
+    y.fill(5.);
+    assembler.applyAdd(x, y);
+    EXPECT_EQ(y, (std::array<Real, 4>{7., 5., 5., 3.}));
+    assembler.getDiagonal(y);
+    EXPECT_EQ(y, (std::array<Real, 4>{2., 0., 0., 1.}));
+    y = {4., 3., 2., 1.};
+    EXPECT_THROW(assembler.assembleResidual(y), NotImplementedException);
+    EXPECT_EQ(y, (std::array<Real, 4>{4., 3., 2., 1.}));
+}
+
+TEST(MatrixFreeAssemblerOperationTest, BothWrappedKernelsActOnEveryProductComponent)
+{
+    class Identity final : public AssemblyKernel {
+    public:
+        RequiredData getRequiredData() const override { return RequiredData::BasisValues; }
+        void computeCell(const AssemblyContext& ctx, KernelOutput& out) override {
+            for (LocalIndex i = 0; i < ctx.numTestDofs(); ++i) out.matrixEntry(i, i) += 1.;
+        }
+    };
+    ValidTetraMeshAccess mesh(1);
+    auto scalar = std::make_shared<spaces::H1Space>(ElementType::Tetra4, 1);
+    spaces::ProductSpace vector(scalar, 3);
+    dofs::DofMap map(1, 12, 12);
+    std::array<GlobalIndex, 12> ids;
+    std::iota(ids.begin(), ids.end(), 0);
+    map.setCellDofs(0, ids);
+    map.finalize();
+    auto kernel = std::make_shared<Identity>();
+    for (bool owning : {false, true}) {
+        auto wrapper = owning ? wrapAsMatrixFreeKernel(kernel) : wrapAsMatrixFreeKernel(*kernel);
+        MatrixFreeAssembler assembler({.num_threads = 1});
+        assembler.setMesh(mesh);
+        assembler.setSpace(vector);
+        assembler.setDofMap(map);
+        assembler.setKernel(*wrapper);
+        std::array<Real, 12> x, y{};
+        std::iota(x.begin(), x.end(), 1.);
+        assembler.apply(x, y);
+        EXPECT_EQ(y, x);
+    }
+}
+
+TEST(MatrixFreeAssemblerOperationTest, RectangularMixedBlockMatchesConstrainedAssembledAction)
+{
+    constexpr int cells = 4;
+    ValidTetraMeshAccess mesh(cells);
+    auto rows = buildDisjointTetra4DofMap(cells);
+    auto scalar = std::make_shared<spaces::H1Space>(ElementType::Tetra4, 1);
+    spaces::ProductSpace vector(scalar, 2);
+    dofs::DofMap cols(cells, 8 * cells, 8);
+    for (int cell = 0; cell<cells; ++cell) {
+        std::array<GlobalIndex, 8> ids;
+        std::iota(ids.begin(), ids.end(), 8 * cell);
+        cols.setCellDofs(cell, ids);
+    }
+    cols.finalize();
+    class MixedMass final : public BilinearFormKernel {
+    public:
+        RequiredData getRequiredData() const override { return RequiredData::BasisValues | RequiredData::IntegrationWeights; }
+        void computeCell(const AssemblyContext& ctx, KernelOutput& out) override {
+            out.reserve(ctx.numTestDofs(), ctx.numTrialDofs(), true, false);
+            for (LocalIndex q = 0; q < ctx.numQuadraturePoints(); ++q)
+                for (LocalIndex i = 0; i < ctx.numTestDofs(); ++i)
+                    for (LocalIndex j = 0; j < ctx.numTrialDofs(); ++j)
+                        out.matrixEntry(i, j) += ctx.integrationWeight(q) * ctx.basisValue(i, q) *
+                            ctx.trialBasisValue(j, q) * (j < 4 ? 1. : -2.);
+        }
+    };
+    auto kernel = std::make_shared<MixedMass>();
+    StandardAssembler assembled;
+    assembled.setRowDofMap(rows);
+    assembled.setColDofMap(cols);
+    DenseMatrixView A(4 * cells, 8 * cells);
+    assembled.assembleMatrix(mesh, *scalar, vector, *kernel, A);
+    constraints::AffineConstraints test, trial;
+    test.addLine(2);
+    test.addEntry(2, 9, -.5);  // Master on another cell.
+    trial.addLine(5);
+    trial.addEntry(5, 18, .75);
+    trial.setInhomogeneity(5, 4.);
+    test.close();
+    trial.close();
+    std::vector<Real> x(8 * cells), expected(4 * cells);
+    std::iota(x.begin(), x.end(), 1.);
+    auto prolonged = x;
+    prolonged[5] = .75 * x[18];
+    for (GlobalIndex i = 0; i < 4 * cells; ++i)
+        for (GlobalIndex j = 0; j < 8 * cells; ++j) expected[i] += A.getMatrixEntry(i, j) * prolonged[j];
+    expected[9] -= .5 * expected[2];
+    expected[2] = 0.;
+    for (bool owning : {false, true}) {
+        auto wrapper = owning ? wrapAsMatrixFreeKernel(kernel) : wrapAsMatrixFreeKernel(*kernel);
+        MatrixFreeAssembler assembler;
+        assembler.setMesh(mesh);
+        assembler.setSpaces(*scalar, vector);
+        assembler.setDofMaps(rows, cols);
+        assembler.setConstraints(test, trial);
+        assembler.setKernel(*wrapper);
+        for (int threads : {1, 4}) {
+            assembler.setOptions({.num_threads = threads});
+            std::vector<Real> actual(expected.size());
+            assembler.apply(x, actual);
+            EXPECT_EQ(assembler.numRows(), 4 * cells);
+            EXPECT_EQ(assembler.numCols(), 8 * cells);
+            for (std::size_t i = 0; i < expected.size(); ++i) EXPECT_NEAR(actual[i], expected[i], 1e-12);
+        }
+    }
+}
+
+TEST(MatrixFreeAssemblerOperationTest, UnboundTimeDependentResidualPreservesTheOutput)
+{
+    class TimeLoad final : public LinearFormKernel {
+    public:
+        RequiredData getRequiredData() const override { return RequiredData::None; }
+        bool hasExplicitTimeDependency() const noexcept override { return true; }
+        void computeCell(const AssemblyContext& ctx, KernelOutput& out) override {
+            for (LocalIndex i = 0; i < ctx.numTestDofs(); ++i) out.vectorEntry(i) = ctx.time();
+        }
+    };
+    ValidTetraMeshAccess mesh(2);
+    auto map = buildDisjointTetra4DofMap(2);
+    spaces::H1Space space(ElementType::Tetra4, 1);
+    auto kernel = std::make_shared<TimeLoad>();
+    const std::array<Real, 8> original{1., 2., 3., 4., 5., 6., 7., 8.};
+    for (bool owning : {false, true}) {
+        auto wrapper = owning ? wrapAsMatrixFreeKernel(kernel) : wrapAsMatrixFreeKernel(*kernel);
+        MatrixFreeAssembler assembler({.num_threads = 2});
+        assembler.setMesh(mesh);
+        assembler.setDofMap(map);
+        assembler.setSpace(space);
+        assembler.setKernel(*wrapper);
+        auto y = original;
+        EXPECT_THROW(assembler.assembleResidual(y), NotImplementedException);
+        EXPECT_EQ(y, original);
+    }
+}
+
+TEST(MatrixFreeAssemblerOperationTest, AdaptiveOrdersUseIndependentWorkerStorageInBothWrappers)
+{
+    class ScaledIdentity final : public BilinearFormKernel {
+    public:
+        RequiredData getRequiredData() const override { return RequiredData::BasisValues; }
+        void computeCell(const AssemblyContext& ctx, KernelOutput& out) override {
+            {
+                std::lock_guard lock(mutex);
+                workers.insert(std::this_thread::get_id());
+                addresses.insert(&out);
+            }
+            for (LocalIndex i = 0; i < ctx.numTestDofs(); ++i) {
+                out.matrixEntry(i, i) = static_cast<Real>(ctx.cellId() + 1);
+            }
+        }
+        std::mutex mutex;
+        std::set<std::thread::id> workers;
+        std::set<const KernelOutput*> addresses;
+    };
+
+    constexpr int cells = 4;
+    ValidTetraMeshAccess mesh(cells);
+    spaces::AdaptiveSpace space;
+    space.add_level(1, std::make_shared<spaces::H1Space>(ElementType::Tetra4, 1));
+    space.add_level(2, std::make_shared<spaces::H1Space>(ElementType::Tetra4, 2));
+    dofs::DofMap map(cells, 28);
+    std::vector<Real> x(28), expected(28);
+    std::iota(x.begin(), x.end(), 1.);
+    GlobalIndex first = 0;
+    for (int cell = 0; cell < cells; ++cell) {
+        space.set_element_order(cell, 1 + cell % 2);
+        std::vector<GlobalIndex> ids(space.dofs_per_element(cell));
+        std::iota(ids.begin(), ids.end(), first);
+        for (auto id : ids) expected[id] = (cell + 1) * x[id];
+        map.setCellDofs(cell, ids);
+        first += static_cast<GlobalIndex>(ids.size());
+    }
+    ASSERT_EQ(first, 28);
+    map.finalize();
+
+    for (bool compound : {false, true}) {
+        auto probe = std::make_shared<ScaledIdentity>();
+        auto composite = std::make_shared<CompositeKernel>();
+        composite->addKernel(probe);
+        std::shared_ptr<AssemblyKernel> kernel = probe;
+        if (compound) kernel = composite;
+        for (bool owning : {false, true}) {
+            probe->workers.clear();
+            probe->addresses.clear();
+            auto wrapper = owning ? wrapAsMatrixFreeKernel(kernel) : wrapAsMatrixFreeKernel(*kernel);
+            MatrixFreeAssembler assembler({.num_threads = cells});
+            assembler.setMesh(mesh);
+            assembler.setSpace(space);
+            assembler.setDofMap(map);
+            assembler.setKernel(*wrapper);
+            std::vector<Real> y(28);
+            assembler.apply(x, y);
+            EXPECT_EQ(y, expected);
+            EXPECT_GE(probe->addresses.size(), probe->workers.size());
+        }
+    }
+}
+
+TEST(MatrixFreeAssemblerOperationTest, NonlinearResidualAndTangentMatchAssemblyAtAffineState)
+{
+    class Square final : public AssemblyKernel {
+    public:
+        RequiredData getRequiredData() const override {
+            return RequiredData::SolutionValues | RequiredData::BasisValues | RequiredData::IntegrationWeights;
+        }
+        void computeCell(const AssemblyContext& ctx, KernelOutput& out) override {
+            out.reserve(ctx.numTestDofs(), ctx.numTrialDofs(), true, true);
+            for (LocalIndex q = 0; q < ctx.numQuadraturePoints(); ++q) {
+                const Real u = ctx.solutionValue(q);
+                for (LocalIndex i = 0; i < ctx.numTestDofs(); ++i) {
+                    const Real vi = ctx.basisValue(i, q) * ctx.integrationWeight(q);
+                    out.vectorEntry(i) += vi * u*u;
+                    for (LocalIndex j = 0; j < ctx.numTrialDofs(); ++j)
+                        out.matrixEntry(i, j) += vi * 2. * u * ctx.trialBasisValue(j, q);
+                }
+            }
+        }
+    };
+    ValidTetraMeshAccess mesh(1);
+    spaces::H1Space p1(ElementType::Tetra4, 1);
+    auto map = buildDisjointTetra4DofMap(1);
+    auto kernel = std::make_shared<Square>();
+    constraints::AffineConstraints constraints;
+    constraints.addLine(1);
+    constraints.addEntry(1, 0, 2.);
+    constraints.setInhomogeneity(1, .5);
+    constraints.close();
+    const std::array<Real, 4> u{1., 99., -2., .25}, x{2., -10., .5, 3.};
+    const std::array<Real, 4> physical_u{1., 2.5, -2., .25}, physical_x{2., 4., .5, 3.};
+    StandardAssembler assembled;
+    assembled.setDofMap(map);
+    assembled.setCurrentSolution(physical_u);
+    DenseMatrixView J(4);
+    DenseVectorView F(4);
+    assembled.assembleBoth(mesh, p1, p1, *kernel, J, F);
+    std::array<Real, 4> tangent{}, residual{};
+    for (int i = 0; i < 4; ++i) {
+        residual[i] = F.getVectorEntry(i);
+        for (int j = 0; j < 4; ++j) tangent[i] += J.getMatrixEntry(i, j) * physical_x[j];
+    }
+    for (auto* v : {&tangent, &residual}) {
+        (*v)[0] += 2.*(*v)[1];
+        (*v)[1] = 0.;
+    }
+    for (bool owning : {false, true}) {
+        auto wrapper = owning ? wrapAsMatrixFreeKernel(kernel) : wrapAsMatrixFreeKernel(*kernel);
+        MatrixFreeAssembler assembler({.num_threads = 2});
+        assembler.setMesh(mesh);
+        assembler.setDofMap(map);
+        assembler.setSpace(p1);
+        assembler.setConstraints(constraints);
+        assembler.setKernel(*wrapper);
+        std::array<Real, 4> result{4., 3., 2., 1.};
+        EXPECT_THROW(assembler.assembleResidual(result), FEException);
+        EXPECT_EQ(result, (std::array<Real, 4>{4., 3., 2., 1.}));
+        assembler.setCurrentSolution(u);
+        assembler.assembleResidual(result);
+        for (int i = 0; i < 4; ++i) EXPECT_NEAR(result[i], residual[i], 1e-14);
+        assembler.apply(x, result);
+        for (int i = 0; i < 4; ++i) EXPECT_NEAR(result[i], tangent[i], 1e-14);
     }
 }
 

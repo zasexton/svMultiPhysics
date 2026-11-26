@@ -7,15 +7,50 @@
 
 #include <gtest/gtest.h>
 
+#include <array>
+#include <utility>
+
 #include "Assembly/GlobalSystemView.h"
 #include "Assembly/StandardAssembler.h"
 #include "Forms/FormCompiler.h"
 #include "Forms/FormKernels.h"
 #include "Forms/JIT/JITKernelWrapper.h"
+#include "Forms/Tensor/SpectralEigen.h"
 #include "Spaces/H1Space.h"
 #include "Tests/Unit/Forms/FormsTestHelpers.h"
 
 namespace svmp::FE::forms::test {
+
+TEST(SpectralEigen, SimpleRootDerivativesAcrossUnitsAndShifts)
+{
+    for (const auto [scale, shift] : {std::pair{1.e-18, 0.}, {1.e-9, 0.}, {1., 1.e15}, {1.e110, 0.}}) {
+        SCOPED_TRACE(::testing::Message() << "scale=" << scale << ", shift=" << shift);
+        const std::array<double, 4> a2{shift + scale, 0., 0., shift + 2*scale};
+        const std::array<double, 4> cross2{0., 1., 1., 0.}, xy{0., scale, scale, 0.};
+        const std::array<double, 9> a3{shift + scale, 0., 0., 0., shift + 2*scale, 0., 0., 0., shift + 3*scale};
+        const std::array<double, 9> zz{0., 0., 0., 0., 0., 0., 0., 0., 1.};
+        const std::array<double, 9> cross3{0., 0., 0., 0., 0., 1., 0., 1., 0.};
+        const std::array<double, 9> yz{0., 0., 0., 0., 0., scale, 0., scale, 0.};
+        EXPECT_NEAR(svmp_fe_sym_eigenvalue_dd_3x3_v1(a3.data(), zz.data(), 0), 1., 1e-13);
+        EXPECT_NEAR(svmp_fe_sym_eigenvalue_ddA_2x2_v1(a2.data(), cross2.data(), xy.data(), 0), 2., 1e-12);
+        const double hessian = svmp_fe_sym_eigenvalue_ddA_3x3_v1(a3.data(), cross3.data(), yz.data(), 0);
+        EXPECT_NEAR(hessian, 2., 1e-12);
+        auto plus = a3, minus = a3;
+        constexpr double h = 1e-5;
+        for (std::size_t k = 0; k < yz.size(); ++k) {
+            plus[k] += h * yz[k];
+            minus[k] -= h * yz[k];
+        }
+        const double fd = (svmp_fe_sym_eigenvalue_dd_3x3_v1(plus.data(), cross3.data(), 0) -
+                           svmp_fe_sym_eigenvalue_dd_3x3_v1(minus.data(), cross3.data(), 0)) / (2*h);
+        EXPECT_NEAR(hessian, fd, 1e-8);
+    }
+    const std::array<double, 4> a{0., 0., 0., 1.e-210};
+    const std::array<double, 4> b{0., 1.e-240, 1.e-240, 0.}, d{0., 1.e240, 1.e240, 0.};
+    EXPECT_NEAR(svmp_fe_sym_eigenvalue_ddA_2x2_v1(a.data(), b.data(), d.data(), 0) / 1.e210, 2., 1e-13);
+    const std::array<double, 4> wide{-1.e308, 0., 0., 1.e308}, cross{0., 1.e154, 1.e154, 0.};
+    EXPECT_NEAR(svmp_fe_sym_eigenvalue_ddA_2x2_v1(wide.data(), cross.data(), cross.data(), 0), 1., 1e-13);
+}
 
 #ifndef SVMP_FE_ENABLE_LLVM_JIT
 #define SVMP_FE_ENABLE_LLVM_JIT 0

@@ -6,6 +6,7 @@
  */
 
 #include "CompositeQuadrature.h"
+#include "PyramidQuadrature.h"
 #include <algorithm>
 #include <array>
 #include <cmath>
@@ -123,6 +124,67 @@ void build_triangle(const QuadratureRule& base,
     }
 }
 
+void build_tetrahedron(const QuadratureRule& base, int n,
+                       std::vector<QuadPoint>& points, std::vector<Real>& weights) {
+    const Real h = Real{1} / n;
+    // The ordered cube coordinates 0 <= k <= j <= i <= n map onto the
+    // reference tetrahedron by (i,j,k) -> (i-j,j-k,k)/n. Each unit cube
+    // splits into six tetrahedra along its body diagonal. Retain the ones
+    // whose vertices satisfy the ordering, including along the sloping faces.
+    for (int i = 0; i < n; ++i) {
+        for (int j = 0; j <= i; ++j) {
+            for (int k = 0; k <= j; ++k) {
+                const QuadPoint origin{(i - j) * h, (j - k) * h, k * h};
+                std::array<int, 3> order{0, 1, 2};
+                do {
+                    std::array<int, 3> corner{i, j, k};
+                    std::array<QuadPoint, 3> edges;
+                    bool inside = true;
+                    for (int e = 0; e < 3; ++e) {
+                        ++corner[order[e]];
+                        if (corner[0] < corner[1] || corner[1] < corner[2]) {
+                            inside = false;
+                            break;
+                        }
+                        edges[e] = QuadPoint{(corner[0] - corner[1]) * h,
+                                             (corner[1] - corner[2]) * h, corner[2] * h} - origin;
+                    }
+                    if (!inside) continue;
+                    for (std::size_t q = 0; q < base.num_points(); ++q) {
+                        const auto& p = base.point(q);
+                        points.push_back(origin + edges[0] * p[0] + edges[1] * p[1] + edges[2] * p[2]);
+                        weights.push_back(base.weight(q) * h * h * h);
+                    }
+                } while (std::next_permutation(order.begin(), order.end()));
+            }
+        }
+    }
+}
+
+void build_pyramid(const PyramidQuadrature& base, const std::array<int, 3>& sub,
+                   std::vector<QuadPoint>& points, std::vector<Real>& weights) {
+    const Real cell_scale = Real{1} / sub[0] / sub[1] / sub[2];
+    // Refine the two lateral axes and the height in collapsed-cube
+    // coordinates. Replace the base point's (1-z)^2 volume factor with
+    // the factor at the new height. The Gauss points are below the apex.
+    for (int i = 0; i < sub[0]; ++i) {
+        for (int j = 0; j < sub[1]; ++j) {
+            for (int k = 0; k < sub[2]; ++k) {
+                for (std::size_t q = 0; q < base.num_points(); ++q) {
+                    const auto& p = base.point(q);
+                    const Real width = 1 - p[2];
+                    const Real z = (k + p[2]) / sub[2];
+                    const Real a = -1 + (2.0 * i + 1 + p[0] / width) / sub[0];
+                    const Real b = -1 + (2.0 * j + 1 + p[1] / width) / sub[1];
+                    const Real ratio = (1 - z) / width;
+                    points.push_back({(1 - z) * a, (1 - z) * b, z});
+                    weights.push_back(base.weight(q) * cell_scale * ratio * ratio);
+                }
+            }
+        }
+    }
+}
+
 void build_wedge(const QuadratureRule& base,
                  const std::array<int, 3>& sub,
                  std::vector<QuadPoint>& out_pts,
@@ -196,8 +258,21 @@ CompositeQuadrature::CompositeQuadrature(const QuadratureRule& base_rule,
 
     std::vector<QuadPoint> pts;
     std::vector<Real> wts;
-    pts.reserve(base_rule.num_points() * static_cast<std::size_t>(sub[0] * sub[1] * sub[2]));
-    wts.reserve(pts.capacity());
+    if (sub == std::array<int, 3>{1, 1, 1}) {
+        set_data(base_rule.points(), base_rule.weights());
+        return;
+    }
+    const auto family = base_rule.cell_family();
+    if (family == svmp::CellFamily::Triangle || family == svmp::CellFamily::Wedge ||
+        family == svmp::CellFamily::Tetra) sub[1] = sub[0];
+    if (family == svmp::CellFamily::Tetra) sub[2] = sub[0];
+    std::size_t count = base_rule.num_points();
+    for (int d = 0; d < base_rule.dimension(); ++d) {
+        FE_CHECK_ARG(count <= pts.max_size() / sub[d], "Composite quadrature point count exceeds capacity");
+        count *= sub[d];
+    }
+    pts.reserve(count);
+    wts.reserve(count);
 
     switch (base_rule.cell_family()) {
         case svmp::CellFamily::Line:
@@ -211,11 +286,18 @@ CompositeQuadrature::CompositeQuadrature(const QuadratureRule& base_rule,
         case svmp::CellFamily::Wedge:
             build_wedge(base_rule, sub, pts, wts);
             break;
-        default:
-            // Fallback: no subdivision support for this family yet
-            pts.assign(base_rule.points().begin(), base_rule.points().end());
-            wts.assign(base_rule.weights().begin(), base_rule.weights().end());
+        case svmp::CellFamily::Tetra:
+            build_tetrahedron(base_rule, sub[0], pts, wts);
             break;
+        case svmp::CellFamily::Pyramid:
+            if (const auto* pyramid = dynamic_cast<const PyramidQuadrature*>(&base_rule)) {
+                build_pyramid(*pyramid, sub, pts, wts);
+            } else {
+                build_pyramid(PyramidQuadrature(std::max(1, base_rule.order())), sub, pts, wts);
+            }
+            break;
+        default:
+            FE_THROW(NotImplementedException, "Composite quadrature does not support refinement for this cell family");
     }
 
     set_data(std::move(pts), std::move(wts));

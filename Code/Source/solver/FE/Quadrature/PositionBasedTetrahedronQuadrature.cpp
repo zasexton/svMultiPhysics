@@ -15,17 +15,15 @@ namespace quadrature {
 
 PositionBasedTetrahedronQuadrature::PositionBasedTetrahedronQuadrature(
     const PositionBasedParams& params)
-    : QuadratureRule(svmp::CellFamily::Tetra, 3, compute_order(params.modifier))
+    : QuadratureRule(svmp::CellFamily::Tetra, 3, params.tetrahedron_exactness())
     , modifier_(params.modifier)
 {
     initialize(params.modifier);
 }
 
 PositionBasedTetrahedronQuadrature::PositionBasedTetrahedronQuadrature(Real modifier)
-    : QuadratureRule(svmp::CellFamily::Tetra, 3, compute_order(modifier))
-    , modifier_(modifier)
+    : PositionBasedTetrahedronQuadrature(PositionBasedParams{modifier})
 {
-    initialize(modifier);
 }
 
 void PositionBasedTetrahedronQuadrature::initialize(Real s) {
@@ -33,7 +31,7 @@ void PositionBasedTetrahedronQuadrature::initialize(Real s) {
     const Real min_s = 0.25 - 1e-14;  // Small tolerance for floating point
     const Real max_s = 1.0 + 1e-14;
 
-    if (s < min_s || s > max_s) {
+    if (!std::isfinite(s) || s < min_s || s > max_s) {
         throw FEException(
             "PositionBasedTetrahedronQuadrature: modifier must be in [0.25, 1.0], got " +
             std::to_string(s),
@@ -63,32 +61,8 @@ void PositionBasedTetrahedronQuadrature::initialize(Real s) {
     set_data(std::move(pts), std::move(wts));
 }
 
-int PositionBasedTetrahedronQuadrature::compute_order(Real s) noexcept {
-    // The standard Gaussian rule achieves polynomial exactness of order 2
-    // meaning it can exactly integrate polynomials of total degree <= 2.
-    //
-    // The Gaussian position is s = (5 + 3*sqrt(5))/20 ≈ 0.5854101966249685
-    //
-    // For non-Gaussian positions, the exactness is reduced:
-    // - Central rule (s = 0.25) only integrates constants exactly
-    // - Nodal rule (s = 1.0) only integrates constants exactly
-    //
-    // We use a heuristic based on distance from the Gaussian position.
-
-    const Real gaussian_s = (5.0 + 3.0 * std::sqrt(5.0)) / 20.0;
-    const Real tolerance = 0.01;
-
-    if (std::abs(s - gaussian_s) < tolerance) {
-        return 2;  // Full polynomial exactness for Gaussian position
-    }
-
-    // For positions significantly different from Gaussian, reduce reported order
-    return 1;
-}
-
 bool PositionBasedTetrahedronQuadrature::is_gaussian() const noexcept {
-    const Real gaussian_s = (5.0 + 3.0 * std::sqrt(5.0)) / 20.0;
-    return std::abs(modifier_ - gaussian_s) < 1e-10;
+    return order() == 2;
 }
 
 bool PositionBasedTetrahedronQuadrature::is_central() const noexcept {

@@ -94,16 +94,6 @@ public:
 private:
     Real modifier_;  ///< The position parameter s
 
-    /**
-     * @brief Compute the polynomial exactness order based on position
-     *
-     * The Gaussian position (s ≈ 0.585) achieves order 2.
-     * Non-Gaussian positions achieve reduced accuracy.
-     *
-     * @param s Position modifier
-     * @return Estimated polynomial exactness order
-     */
-    static int compute_order(Real s) noexcept;
 
     /**
      * @brief Initialize points and weights from modifier
