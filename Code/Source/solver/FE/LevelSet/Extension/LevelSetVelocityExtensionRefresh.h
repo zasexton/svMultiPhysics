@@ -124,6 +124,22 @@ struct LevelSetVelocityExtensionRefreshOptions {
     std::span<const int> effective_direction,
     int dimension);
 
+/// The speeds the wet-to-dry amplification guard of an extension compares
+/// on this rank: the largest over its data (the @p known vertices: the
+/// retained side and every trace seed, whose values are the physical
+/// velocity, the dry vertices of the retained cut cells included) and the
+/// largest over the other, extended vertices.  @p values holds @p components
+/// values per vertex, of which the first @p speed_components form the speed.
+struct VelocityExtensionSpeeds {
+  double known{0.0};
+  double extended{0.0};
+};
+[[nodiscard]] VelocityExtensionSpeeds velocityExtensionSpeeds(
+    std::span<const double> values,
+    std::size_t components,
+    std::size_t speed_components,
+    std::span<const std::uint8_t> known);
+
 /// phi - isovalue, negated when the retained side is the positive one, so
 /// that the retained side is nonpositive.
 [[nodiscard]] std::vector<double> orientedLevelSetForVelocityExtension(

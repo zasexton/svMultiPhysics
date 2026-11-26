@@ -487,6 +487,34 @@ TEST(LevelSetVelocityExtensionRefresh, PrescribedFieldMatchesTheDirectExtension)
   }
 }
 
+// The dry vertices of the retained cut cells (trace seeds) carry the
+// physical velocity, so the wet-to-dry amplification guard counts them as
+// data (free-surface audit A41: counted as extended vertices, they gave a
+// ratio of 1.4e12 against the guard 16 for phi = x + y - 0.99, u = (x, -y)).
+TEST(LevelSetVelocityExtensionRefresh, AmplificationGuardCountsTheTraceSeedsAsData)
+{
+  using svmp::FE::level_set::kVelocityExtensionMaxWetToDryAmplification;
+  using svmp::FE::level_set::velocityExtensionSpeeds;
+  const auto mesh = makeSquareTriangleMesh(1);
+  const auto s = makeSetup(
+      *mesh, [](double x, double y) { return x + y - 0.99; },
+      [](double x, double y) { return std::array<double, 2>{x, -y}; });
+  // Every vertex belongs to a cut cell: the extension is the source.
+  ASSERT_TRUE(std::all_of(s.known.begin(), s.known.end(), [](auto k) { return k != 0u; }));
+  constexpr double floor = 1.0e-12;
+  const auto speeds = velocityExtensionSpeeds(s.source, 2u, 2u, s.known);
+  EXPECT_NEAR(speeds.known, std::sqrt(2.0), 1e-15);
+  EXPECT_EQ(speeds.extended, 0.0);
+  EXPECT_LE(speeds.extended / std::max(speeds.known, floor), kVelocityExtensionMaxWetToDryAmplification);
+
+  std::vector<std::uint8_t> wet(s.phi.size(), 0u);
+  for (std::size_t v = 0; v < wet.size(); ++v) {
+    wet[v] = s.phi[v] < 0.0 ? 1u : 0u;
+  }
+  const auto wet_only = velocityExtensionSpeeds(s.source, 2u, 2u, wet);
+  EXPECT_GT(wet_only.extended / std::max(wet_only.known, floor), 1.0e12);
+}
+
 TEST(LevelSetVelocityExtensionRefresh, WallMasksFollowTheEffectiveDirection)
 {
   using svmp::FE::level_set::strongZeroVelocityComponentMask;

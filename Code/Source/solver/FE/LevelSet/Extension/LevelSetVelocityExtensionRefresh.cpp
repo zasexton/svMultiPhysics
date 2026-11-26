@@ -67,6 +67,30 @@ std::array<bool, 3> strongZeroVelocityComponentMask(
   return mask;
 }
 
+VelocityExtensionSpeeds velocityExtensionSpeeds(
+    std::span<const double> values,
+    std::size_t components,
+    std::size_t speed_components,
+    std::span<const std::uint8_t> known)
+{
+  if (components == 0u || speed_components > components ||
+      values.size() != known.size() * components) {
+    throw std::invalid_argument(
+        "velocity-extension speeds received incompatible sizes");
+  }
+  VelocityExtensionSpeeds speeds;
+  for (std::size_t v = 0u; v < known.size(); ++v) {
+    double speed2 = 0.0;
+    for (std::size_t c = 0u; c < speed_components; ++c) {
+      const double value = values[v * components + c];
+      speed2 += value * value;
+    }
+    auto& max_speed = known[v] != 0u ? speeds.known : speeds.extended;
+    max_speed = std::max(max_speed, std::sqrt(speed2));
+  }
+  return speeds;
+}
+
 std::vector<double> orientedLevelSetForVelocityExtension(
     std::span<const double> level_set_values,
     double isovalue,
@@ -429,7 +453,7 @@ bool refreshLevelSetVelocityExtensions(
     }
 
     std::vector<double> extended(n_vertices * target_components, 0.0);
-    double max_active_speed = 0.0;
+    double max_known_speed = 0.0;
     double max_dry_extended_speed = 0.0;
     bool interface_sample_used_cut_context = false;
     std::size_t interface_sample_candidate_cell_count = 0u;
@@ -445,20 +469,6 @@ bool refreshLevelSetVelocityExtensions(
     // Set when the monolithic extension installs its rows.
     bool pde_algebraic = false;
     std::uint64_t pde_map_revision_key = 0u;
-
-    auto record_speed = [&](std::size_t v) {
-      double speed2 = 0.0;
-      for (std::size_t c = 0; c < copy_components; ++c) {
-        const auto value = extended[v * target_components + c];
-        speed2 += value * value;
-      }
-      const double speed = std::sqrt(speed2);
-      if (active[v]) {
-        max_active_speed = std::max(max_active_speed, speed);
-      } else {
-        max_dry_extended_speed = std::max(max_dry_extended_speed, speed);
-      }
-    };
 
     if (mesh_dim < 1 || mesh_dim > 3) {
       throw std::runtime_error(
@@ -870,19 +880,20 @@ bool refreshLevelSetVelocityExtensions(
         }
       }
     }
-    for (std::size_t v = 0; v < n_vertices; ++v) {
-      record_speed(v);
-    }
-
-    max_active_speed = systems::collectiveMaxDouble(max_active_speed, extension_comm);
+    // The trace seeds, the dry vertices of the retained cut cells included,
+    // carry the physical velocity: data of the extension like the wet side.
+    const auto speeds = velocityExtensionSpeeds(
+        std::span<const double>(extended.data(), extended.size()), target_components, copy_components,
+        std::span<const std::uint8_t>(trace_seed.data(), trace_seed.size()));
+    max_known_speed = systems::collectiveMaxDouble(speeds.known, extension_comm);
     max_dry_extended_speed =
-        systems::collectiveMaxDouble(max_dry_extended_speed, extension_comm);
+        systems::collectiveMaxDouble(speeds.extended, extension_comm);
     const double velocity_scale_floor = 1.0e-12;
     // The prescribed wall velocities are data of the extension like the wet
     // velocities (zero without such walls).
     const double wet_to_dry_amplification =
         max_dry_extended_speed /
-        std::max(std::max(max_active_speed,
+        std::max(std::max(max_known_speed,
                           pde_report.max_prescribed_wall_speed),
                  velocity_scale_floor);
     if (algebraic_extension &&
@@ -892,8 +903,8 @@ bool refreshLevelSetVelocityExtensions(
       message
           << "[svMultiPhysics::Application] The monolithic velocity "
              "extension refused to install a frozen map because the dry-region "
-             "amplification exceeded its fixed guard: max_active_speed="
-          << max_active_speed
+             "amplification exceeded its fixed guard: max_known_speed="
+          << max_known_speed
           << " max_dry_extended_speed=" << max_dry_extended_speed
           << " amplification=" << wet_to_dry_amplification
           << " guard=" << kVelocityExtensionMaxWetToDryAmplification;
@@ -1048,7 +1059,7 @@ bool refreshLevelSetVelocityExtensions(
               .value("map_max_extended_speed", pde_report.max_extended_speed)
               .value("wall_boundary_labels", wall_boundary_label_count)
               .value("max_wall_normal_velocity", pde_report.max_wall_normal_velocity)
-              .value("max_active_speed", max_active_speed)
+              .value("max_known_speed", max_known_speed)
               .value("max_dry_extended_speed", max_dry_extended_speed)
               .value("wet_to_dry_amplification", wet_to_dry_amplification)
               .value("wet_to_dry_amplification_guard", kVelocityExtensionMaxWetToDryAmplification)
