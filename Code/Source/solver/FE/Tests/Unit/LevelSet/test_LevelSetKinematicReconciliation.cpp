@@ -532,6 +532,47 @@ TEST(LevelSetKinematicReconciliation, RedistancingIsJudgedByItsOwnVolumeAndDispl
     ASSERT_TRUE(transport.success) << transport.diagnostic;
     EXPECT_GT(0.5 * 0.001 * std::abs(flux(redistanced) - flux(reconciled)), 1.0e3 * transport.volume_tolerance);
 }
+
+TEST(LevelSetKinematicReconciliation, RedistancingKeepsTheAcceptedFieldWhenItsRestorationFails)
+{
+    // Without a step to integrate over (dt = 0) the volume restoration of the
+    // redistanced candidate cannot close.  Redistancing only changes the
+    // representation, so the accepted field and its accumulated motion stay.
+    namespace ts = FE::timestepping;
+    SimplexSystem s(buildStructuredTriangleMesh(14), 2);
+    const auto previous = s.scalar([](const Point& x) {
+        return ellipse(x) * (0.4 + x[0] + 0.3 * x[1]);
+    });
+    const auto factory = ts::test::createTestFactory();
+    auto history = ts::TimeHistory::allocate(*factory, s.system.dofHandler().getNumDofs(), 1);
+    std::vector<FE::Real> state(s.system.dofHandler().getNumDofs(), 0.);
+    std::copy(previous.begin(), previous.end(), state.begin() + s.system.fieldDofOffset(s.phi));
+    ts::test::setVectorByDof(history.u(), state);
+    ts::test::setVectorByDof(history.uPrev(), state);
+    history.setStepIndex(1);
+    history.setTime(0.001);
+    history.setDt(0.0);
+    auto config = std::make_shared<level_set::LevelSetMaintenanceConfiguration>();
+    config->transport.level_set.field_name = "phi";
+    config->transport.velocity.field_name = "w";
+    config->transport.interface_preserving_redistancing.enabled = true;
+    std::vector<level_set::LevelSetMaintenanceRequest> requests{{.configuration = config}};
+    requests.front().runtime.redistancing_accumulated_displacement = 1.;
+    int published_redistancings = 0;
+    const level_set::LevelSetMaintenanceStageObserver observe =
+        [&](level_set::MaintenanceSubstage stage, auto, std::span<const FE::Real>) {
+            if (stage == level_set::MaintenanceSubstage::Reinitialization) {
+                ++published_redistancings;
+            }
+        };
+    std::vector<FE::LogRecord> logs;
+    EXPECT_FALSE(level_set::applyLevelSetMaintenance({.fe_system = &s.system}, history, requests, {},
+                                                     observe, &logs));
+    EXPECT_EQ(published_redistancings, 0);
+    EXPECT_EQ(requests.front().runtime.redistancing_calls, 0u);
+    EXPECT_EQ(requests.front().runtime.redistancing_accumulated_displacement, 1.);
+    EXPECT_EQ(ts::test::getVectorByDof(history.u()), state);
+}
 #endif
 
 #if FE_HAS_EIGEN

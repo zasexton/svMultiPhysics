@@ -599,6 +599,7 @@ void redistanceMaintainedLevelSet(
     svmp::FE::level_set::LevelSetKinematicReconciliationResult restoration{};
     std::size_t restoration_passes = 0u;
     std::size_t reverted_dofs = 0u;
+    bool restoration_failed = false;
     if (redistance.applied) {
       auto zero_velocity = levelSetTransportVelocityCoefficients(
           *host.fe_system, velocity_field, fe_solution);
@@ -645,10 +646,11 @@ void redistanceMaintainedLevelSet(
           }
         }
         if (!reverted) {
-          if (!restoration.success) {
-            throw std::runtime_error(
-                "[svMultiPhysics::Application] Level-set redistancing could not restore field '" +
-                request.configuration->transport.level_set.field_name + "': " + restoration.diagnostic);
+          // A restoration that cannot close leaves the accepted field as it
+          // is, like a candidate that fails its own tolerances below.
+          restoration_failed = !restoration.success;
+          if (restoration_failed) {
+            restored = input;
           }
           break;
         }
@@ -716,6 +718,7 @@ void redistanceMaintainedLevelSet(
         .value("max_abs_change", redistance.max_abs_change)
         .value("raw_max_crossing_shift", change_raw.max_crossing_shift)
         .value("raw_max_open_end_shift", change_raw.max_open_end_shift)
+        .boolean("restoration_failed", restoration_failed)
         .boolean("restoration_converged", restoration.converged)
         .value("restoration_iterations", restoration.iterations)
         .value("restoration_corrected_dofs", restoration.corrected_dofs)
@@ -734,9 +737,10 @@ void redistanceMaintainedLevelSet(
         .value("accumulated_displacement_over_h", accumulated / motion.min_edge)
         .value("trigger_cells", trigger_cells)
         .value("time", history.time())
-        .quoted("status", redistance.diagnostic);
+        .quoted("status", redistance.diagnostic)
+        .quoted("restoration_status", restoration.diagnostic);
     staged_commit_logs.push_back(std::move(record));
-    if (representation_changed && !applied) {
+    if ((representation_changed && !applied) || restoration_failed) {
       return;  // keep the accumulated motion for the next try
     }
     accumulated = svmp::FE::Real{0.0};
