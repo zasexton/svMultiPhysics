@@ -38,7 +38,9 @@
 #include <stdexcept>
 #include <string>
 #include <string_view>
+#include <set>
 #include <unordered_map>
+#include <unordered_set>
 #include <utility>
 #include <vector>
 
@@ -727,7 +729,8 @@ public:
      * volume rules of that side keep their classification but release their
      * points (see volumeRuleIsClassificationOnly()); the domain must then
      * outlive this context and its copies, which a context guarantees for
-     * the domain of an imported free-surface snapshot.
+     * the domain of an imported free-surface snapshot.  Interface rules whose
+     * source fragment stable id is in pruned_interface_sources are skipped.
      */
     void addGeneratedInterfaceDomain(
         const interfaces::LevelSetInterfaceDomain& domain,
@@ -735,7 +738,9 @@ public:
             std::nullopt,
         std::string_view publication_domain_id = {},
         std::optional<geometry::CutIntegrationSide>
-            classification_only_full_cell_side = std::nullopt) {
+            classification_only_full_cell_side = std::nullopt,
+        const std::unordered_set<std::uint64_t>& pruned_interface_sources =
+            {}) {
         const int marker = domain.marker();
         if (marker < 0) {
             return;
@@ -1106,6 +1111,10 @@ public:
             }
             auto& indices = stored_indices->second;
             for (auto& rule : rules) {
+                if (pruned_interface_sources.contains(
+                        rule.provenance.cut_topology_revision)) {
+                    continue;
+                }
                 indices.push_back(interface_rules_.size());
                 interface_rules_.push_back(std::move(rule));
                 markModified();
@@ -1667,14 +1676,50 @@ public:
                 interface_rule_capacity += active.fragments().size();
             }
             interface_rules_.reserve(interface_rule_capacity);
+            // Interface and contact rules pruned with their phase (see
+            // FreeSurfaceGeometrySnapshotPolicy::interface_retention_side)
+            // are not imported, as pruned exterior-boundary rules are not.
+            std::unordered_set<std::uint64_t> pruned_interface_sources;
+            std::set<std::pair<int, std::uint64_t>> pruned_contact_sources;
+            for (const auto& record : snapshot->rules()) {
+                if (record.retention ==
+                    interfaces::FreeSurfaceGeometryRetention::Retained) {
+                    continue;
+                }
+                const auto source =
+                    record.reference_rule.provenance.cut_topology_revision;
+                if (record.role ==
+                    interfaces::FreeSurfaceGeometryRuleRole::Interface) {
+                    pruned_interface_sources.insert(source);
+                } else if (record.role == interfaces::
+                                              FreeSurfaceGeometryRuleRole::
+                                                  Contact) {
+                    pruned_contact_sources.emplace(
+                        record.physical_boundary_marker, source);
+                }
+            }
             addGeneratedInterfaceDomain(
                 snapshot->interfaceDomain(),
                 volume_side_filter,
                 snapshot->revision().domain_id,
-                classification_only_full_cell_side);
+                classification_only_full_cell_side,
+                pruned_interface_sources);
             for (const auto& contact : snapshot->contactDomains()) {
+                if (pruned_contact_sources.empty()) {
+                    addGeneratedInterfaceBoundaryIntersectionDomain(
+                        contact);
+                    continue;
+                }
+                interfaces::GeneratedInterfaceBoundaryIntersectionDomain
+                    retained_contact(contact.request());
+                for (const auto& fragment : contact.fragments()) {
+                    if (!pruned_contact_sources.contains(
+                            {contact.boundaryMarker(), fragment.stable_id})) {
+                        retained_contact.addFragment(fragment);
+                    }
+                }
                 addGeneratedInterfaceBoundaryIntersectionDomain(
-                    contact);
+                    retained_contact);
             }
             // The first exterior-boundary rule record of each (role,
             // physical marker, cut-topology revision) in rule order, which is

@@ -2647,6 +2647,97 @@ TEST(GeneratedActiveBoundaryDomain,
 }
 
 TEST(FreeSurfaceGeometrySnapshot,
+     PrunedLiquidTakesItsInterfaceAndContactRulesWithIt)
+{
+    // The liquid phi = y - 2^-29 < 0 holds the fraction 3.7e-9 of the unit
+    // triangle, below the retention threshold. Its pruned volume and wetted
+    // walls carry no flux, so the flux of e_y through its retained boundary
+    // must be 0, not the 1 - 2^-29 of a retained free surface.
+    using Side = FE::geometry::CutIntegrationSide;
+    using Role = interfaces::FreeSurfaceGeometryRuleRole;
+    using Retention = interfaces::FreeSurfaceGeometryRetention;
+    constexpr int interface_marker = 107;
+    constexpr int wall_marker = 13;
+    const FE::Real delta = std::ldexp(FE::Real{1.0}, -29);
+    const SingleQuadBoundaryMesh mesh(
+        wall_marker, 0, 1, 0, true, FE::ElementType::Triangle3,
+        {{{0, 0, 0}}, {{1, 0, 0}}, {{0, 1, 0}}},
+        /*expose_opposite_face=*/true);
+    const std::array<FE::Real, 3> values{{-delta, -delta, 1.0 - delta}};
+    const auto build = [&](std::optional<Side> interface_retention_side) {
+        auto domain = linearTriangleCutDomain(interface_marker, values);
+        auto contact =
+            interfaces::buildGeneratedInterfaceBoundaryIntersectionDomain(
+                contactRequest(interface_marker, wall_marker), domain, mesh);
+        interfaces::GeneratedActiveBoundaryScalarField field;
+        field.value_at_node = [values](FE::GlobalIndex node) {
+            return values.at(static_cast<std::size_t>(node));
+        };
+        auto negative = interfaces::buildGeneratedActiveBoundaryDomain(
+            activeRequest(interface_marker, wall_marker, Side::Negative),
+            domain, contact, mesh, field);
+        auto positive = interfaces::buildGeneratedActiveBoundaryDomain(
+            activeRequest(interface_marker, wall_marker, Side::Positive),
+            domain, contact, mesh, field);
+        interfaces::FreeSurfaceGeometrySnapshotPolicy policy;
+        policy.minimum_retained_volume_fraction =
+            FE::assembly::CutIntegrationContext::
+                minGeneratedCutVolumeFraction();
+        policy.interface_retention_side = interface_retention_side;
+        return interfaces::buildFreeSurfaceGeometrySnapshot(
+            std::move(domain), {std::move(contact)},
+            {std::move(negative), std::move(positive)}, mesh, policy,
+            affineTriangleScalar(values), "sharp_boundary_test");
+    };
+    const auto liquid_flux = [](const auto& snapshot) {
+        FE::Real flux{0.0};
+        std::size_t contact_rules{0u};
+        for (const auto& record : snapshot.rules()) {
+            if (record.retention != Retention::Retained) {
+                continue;
+            }
+            contact_rules += record.role == Role::Contact ? 1u : 0u;
+            if (record.role != Role::Interface &&
+                record.role != Role::NegativeExteriorBoundary) {
+                continue;
+            }
+            for (const auto& point : record.physical_rule.points) {
+                flux += point.physical_weight * point.normal[1];
+            }
+        }
+        return std::pair{flux, contact_rules};
+    };
+
+    const auto liquid = build(Side::Negative);
+    ASSERT_TRUE(liquid);
+    std::size_t pruned_liquid_volumes = 0u;
+    for (const auto& record : liquid->rules()) {
+        if (record.role == Role::NegativeVolume) {
+            EXPECT_EQ(record.retention, Retention::PrunedSmallVolume);
+            ++pruned_liquid_volumes;
+        }
+    }
+    EXPECT_EQ(pruned_liquid_volumes, 1u);
+    const auto [flux, contact_rules] = liquid_flux(*liquid);
+    EXPECT_EQ(flux, FE::Real{0.0});
+    EXPECT_EQ(contact_rules, 0u);
+    FE::assembly::CutIntegrationContext context;
+    context.addFreeSurfaceGeometrySnapshot(liquid, Side::Negative);
+    EXPECT_TRUE(context.interfaceRulesForMarker(interface_marker).empty());
+    EXPECT_TRUE(context.interfaceRulesForMarker(
+                           liquid->contactDomains().front().marker())
+                    .empty());
+
+    // A two-phase interface also bounds the retained gas, so it is kept.
+    const auto two_phase = build(std::nullopt);
+    ASSERT_TRUE(two_phase);
+    const auto [two_phase_flux, two_phase_contacts] = liquid_flux(*two_phase);
+    EXPECT_NEAR(two_phase_flux, FE::Real{1.0} - delta, 1.0e-15);
+    // The free surface meets the wall x = 0 (the hypotenuse is not a wall).
+    EXPECT_EQ(two_phase_contacts, 1u);
+}
+
+TEST(FreeSurfaceGeometrySnapshot,
      AcceptsParallelTetrahedralCutsUnderActiveSideReversal)
 {
     constexpr int interface_marker = 107;

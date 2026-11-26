@@ -2211,6 +2211,9 @@ ActiveCutContextRefreshReport refreshActiveCutIntegrationContextFromSolution(
             minGeneratedCutVolumeFraction();
     snapshot_policy.minimum_achieved_quadrature_order = 0;
     snapshot_policy.require_complete_exterior_boundary_partition = true;
+    // One-sided geometry: the interface and contact rules of a parent cell
+    // whose active volume is pruned are pruned with it.
+    snapshot_policy.interface_retention_side = retained_volume_sides;
     if (snapshotMayStoreFullCellsClassificationOnly(sim)) {
       snapshot_policy.classification_only_full_cell_side =
           inactive_volume_side;

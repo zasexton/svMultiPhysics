@@ -3191,7 +3191,7 @@ static_assert(sizeof(geometry::MappedCutQuadratureRule) == 88u);
 static_assert(sizeof(FreeSurfaceGeometryMomentCertificate) == 40u);
 static_assert(sizeof(FreeSurfaceGeometryRuleRecord) == 808u);
 static_assert(sizeof(FreeSurfaceGeometryValidationLedger) == 440u);
-static_assert(sizeof(FreeSurfaceGeometrySnapshotPolicy) == 24u);
+static_assert(sizeof(FreeSurfaceGeometrySnapshotPolicy) == 32u);
 
 [[nodiscard]] bool samePointBits(const geometry::CutQuadraturePoint& a,
                                  const geometry::CutQuadraturePoint& b) noexcept
@@ -3979,7 +3979,8 @@ namespace {
            a.classification_only_full_cell_side ==
                b.classification_only_full_cell_side &&
            a.classification_only_full_cells_on_both_sides ==
-               b.classification_only_full_cells_on_both_sides;
+               b.classification_only_full_cells_on_both_sides &&
+           a.interface_retention_side == b.interface_retention_side;
 }
 
 [[nodiscard]] bool reuseContextMatches(
@@ -5060,6 +5061,8 @@ buildFreeSurfaceGeometrySnapshot(
         !(policy.minimum_retained_volume_fraction < Real{1.0}) ||
         policy.minimum_achieved_quadrature_order < 0 ||
         policy.classification_only_full_cell_side ==
+            geometry::CutIntegrationSide::Interface ||
+        policy.interface_retention_side ==
             geometry::CutIntegrationSide::Interface) {
         throw std::invalid_argument(
             "free-surface geometry snapshot received an invalid domain or policy");
@@ -5387,6 +5390,39 @@ buildFreeSurfaceGeometrySnapshot(
             }
         }
     }
+    // Parent cells whose interface_retention_side volume is pruned as a
+    // small volume (and has no retained rule): their interface and contact
+    // rules are pruned with that phase.
+    std::unordered_set<MeshIndex> pruned_phase_parents;
+    if (policy.interface_retention_side.has_value()) {
+        const auto phase_role =
+            *policy.interface_retention_side ==
+                    geometry::CutIntegrationSide::Negative
+                ? FreeSurfaceGeometryRuleRole::NegativeVolume
+                : FreeSurfaceGeometryRuleRole::PositiveVolume;
+        std::unordered_set<MeshIndex> retained_phase_parents;
+        for (const auto& record : records) {
+            if (record.role != phase_role) {
+                continue;
+            }
+            const auto parent = record.reference_rule.provenance.parent_entity;
+            if (record.retention == FreeSurfaceGeometryRetention::Retained) {
+                retained_phase_parents.insert(parent);
+            } else {
+                pruned_phase_parents.insert(parent);
+            }
+        }
+        std::erase_if(pruned_phase_parents, [&](MeshIndex parent) {
+            return retained_phase_parents.contains(parent);
+        });
+    }
+    const auto phase_retention =
+        [&pruned_phase_parents](const geometry::CutQuadratureRule& rule) {
+            return pruned_phase_parents.contains(
+                       rule.provenance.parent_entity)
+                       ? FreeSurfaceGeometryRetention::PrunedSmallVolume
+                       : FreeSurfaceGeometryRetention::Retained;
+        };
     const auto fragment_by_stable_id =
         firstSourceByStableId(interface_domain.fragments());
     struct InterfaceRuleOutcome {
@@ -5418,6 +5454,7 @@ buildFreeSurfaceGeometrySnapshot(
                     auto moment_certificate =
                         makeInterfaceFragmentMomentCertificate(
                             *fragment, rule, mesh.dimension());
+                    const auto retention = phase_retention(rule);
                     addRule(outcome.record,
                             outcome.counts,
                             std::move(rule),
@@ -5429,7 +5466,11 @@ buildFreeSurfaceGeometrySnapshot(
                                 *fragment,
                                 mesh.getCellType(fragment->parent_cell),
                                 policy.tolerance),
-                            fragment->construction_observation);
+                            fragment->construction_observation,
+                            /*physical_boundary_marker=*/-1,
+                            /*source_ids=*/{},
+                            /*component_id=*/-1,
+                            retention);
                 } catch (...) {
                     outcome.error = std::current_exception();
                 }
@@ -5482,6 +5523,7 @@ buildFreeSurfaceGeometrySnapshot(
             auto moment_certificate =
                 makeContactFragmentMomentCertificate(
                     *fragment, rule, mesh.dimension());
+            const auto retention = phase_retention(rule);
             addRule(records,
                     ledger,
                     std::move(rule),
@@ -5494,7 +5536,10 @@ buildFreeSurfaceGeometrySnapshot(
                         mesh.getCellType(fragment->parent_cell),
                         policy.tolerance),
                     LinearCornerStrictBranch::Unchecked,
-                    contact.boundaryMarker());
+                    contact.boundaryMarker(),
+                    /*source_ids=*/{},
+                    /*component_id=*/-1,
+                    retention);
         }
     }
     if (ledger.orphan_contact_fragment_count != 0u ||

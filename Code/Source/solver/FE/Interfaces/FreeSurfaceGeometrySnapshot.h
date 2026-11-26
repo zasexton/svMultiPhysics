@@ -162,6 +162,14 @@ struct FreeSurfaceGeometrySnapshotPolicy {
     // active-volume energy, dissipation and backward-Euler kinetic-work
     // evaluators then rematerialize them from the mesh they are given.
     bool classification_only_full_cells_on_both_sides{false};
+    // Volume side (Negative or Positive) whose interface and contact rules
+    // are pruned with it: in a parent cell where every volume rule of this
+    // side is pruned as a small volume, its interface and contact rules are
+    // pruned too, as its exterior-boundary rules are, so the retained
+    // geometry of this side stays closed. Set it to the liquid side of a
+    // one-sided free surface. Unset keeps every interface and contact rule,
+    // since a two-phase interface also bounds the other phase.
+    std::optional<geometry::CutIntegrationSide> interface_retention_side{};
 };
 
 struct FreeSurfaceGeometryScalarEvaluator {
