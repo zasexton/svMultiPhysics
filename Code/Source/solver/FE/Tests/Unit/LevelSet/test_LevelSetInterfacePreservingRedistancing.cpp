@@ -284,6 +284,33 @@ TEST(LevelSetInterfacePreservingRedistancing, ScaledPlaneBecomesItsExactDistance
     EXPECT_LT(second.max_abs_change, 1.0e-13);
 }
 
+TEST(LevelSetInterfacePreservingRedistancing, ExactDistanceThroughAZeroVertexKeepsItsOpenEnd)
+{
+    // A fan of three triangles on the floor around O = (0, 0) carrying the
+    // exact distance (x - 2y)/sqrt(5), which vanishes at O.  The cell O W L
+    // meets the zero set only at O; its zero-length segment hid the open end
+    // there, so W got sqrt(17)/4 instead of 1.5/sqrt(5) and the crossing on
+    // W A moved from 0.6 to 0.697418.  An exact distance must reproduce itself.
+    auto base = std::make_shared<svmp::MeshBase>();
+    const svmp::CellShape triangle{svmp::CellFamily::Triangle, 3, 1};
+    base->build_from_arrays(2, {0., 0., -1., 0., -1., 0.25, 2., 0.5, 2., 0.}, {0, 3, 6, 9},
+                            {0, 2, 1, 0, 3, 2, 0, 4, 3}, {triangle, triangle, triangle});
+    base->finalize();
+    ScalarSystem s(svmp::create_mesh(std::move(base)), 2);
+    const auto exact = s.scalar([](const Point& x) { return (x[0] - 2.0 * x[1]) / std::sqrt(5.0); });
+    std::vector<FE::Real> out;
+    const auto result = level_set::redistanceLevelSetToZeroPolygon(
+        s.system.meshAccess(), s.dofs(), 0.0, exact, out);
+    ASSERT_TRUE(result.success) << result.diagnostic;
+    EXPECT_EQ(result.open_ends, 2u);
+    for (std::size_t i = 0; i < out.size(); ++i) {
+        EXPECT_NEAR(out[i], exact[i], 1.0e-15) << "dof " << i;
+    }
+    const auto w = s.dofAt({-1.0, 0.25, 0.0});
+    const auto a = s.dofAt({2.0, 0.5, 0.0});
+    EXPECT_NEAR(out[w] / (out[w] - out[a]), 0.6, 1.0e-15);
+}
+
 TEST(LevelSetInterfacePreservingRedistancing, ContactCapKeepsSignsContactPointsAndAngleAndRestoresArea)
 {
     for (const FE::Real degrees : {60.0, 120.0}) {

@@ -328,6 +328,32 @@ TEST(LevelSetInterfacePreservingRedistancing3D, ScaledPlaneBecomesItsExactDistan
     EXPECT_LT(second.max_abs_change, 1.0e-13);
 }
 
+TEST(LevelSetInterfacePreservingRedistancing3D, ExactPlaneKeepsItselfBeyondAConvexCorner)
+{
+    // One tetrahedron O, (1.1, 0, 0), (0, 1, 0), (0, 0, 1) cut by the exact
+    // distance (x + y + z - 0.9)/sqrt(3).  The three open edges of its surface
+    // triangle meet at the triangle's corners, and the half-strips leave the
+    // sector between them uncovered: (1.1, 0, 0) projects into one, got too
+    // large a distance, and the x intercept moved from 0.9 to 0.813992.
+    auto base = std::make_shared<svmp::MeshBase>();
+    base->build_from_arrays(3, {0., 0., 0., 1.1, 0., 0., 0., 1., 0., 0., 0., 1.}, {0, 4}, {0, 1, 2, 3},
+                            {svmp::CellShape{svmp::CellFamily::Tetra, 4, 1}});
+    base->finalize();
+    ScalarSystem s(svmp::create_mesh(std::move(base)), 3);
+    const auto exact = s.scalar([](const Point& x) { return (x[0] + x[1] + x[2] - 0.9) / std::sqrt(3.0); });
+    std::vector<FE::Real> out;
+    const auto result = level_set::redistanceLevelSetToZeroSurface(
+        s.system.meshAccess(), s.dofs(), 0.0, exact, out);
+    ASSERT_TRUE(result.success) << result.diagnostic;
+    EXPECT_EQ(result.open_ends, 3u);
+    for (std::size_t i = 0; i < out.size(); ++i) {
+        EXPECT_NEAR(out[i], exact[i], 1.0e-15) << "dof " << i;
+    }
+    const auto o = s.dofAt({0.0, 0.0, 0.0});
+    const auto x = s.dofAt({1.1, 0.0, 0.0});
+    EXPECT_NEAR(1.1 * out[o] / (out[o] - out[x]), 0.9, 1.0e-14);
+}
+
 TEST(LevelSetInterfacePreservingRedistancing3D,
      ContactCapKeepsSignsContactLineAndAngleAndRestoresVolume)
 {

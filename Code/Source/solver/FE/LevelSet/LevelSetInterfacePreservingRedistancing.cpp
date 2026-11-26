@@ -268,7 +268,9 @@ struct Ray {
     Point2 direction{};
 };
 
-// End points that belong to a single segment, continued away from it.
+// End points that belong to a single segment, continued away from it.  A
+// cell touched by the zero set at one vertex reports a segment of zero
+// length there; it has no direction and ends nothing.
 [[nodiscard]] std::vector<Ray> openEnds(const std::vector<Real>& segments)
 {
     struct End {
@@ -281,6 +283,9 @@ struct Ray {
     for (std::size_t s = 0; s < count; ++s) {
         const Point2 p0{segments[4u * s], segments[4u * s + 1u]};
         const Point2 p1{segments[4u * s + 2u], segments[4u * s + 3u]};
+        if (p0 == p1) {
+            continue;
+        }
         ends.push_back({p0, p1});
         ends.push_back({p1, p0});
     }

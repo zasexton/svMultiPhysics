@@ -33,8 +33,11 @@ namespace svmp::FE::level_set {
  * continued beyond the edge by a half-strip in its own plane, perpendicular
  * to the edge, so that near a contact line the new field is the distance to
  * the continued interface plane and its gradient keeps the discrete contact
- * angle.  Each value is isovalue -/+ min(distance to triangles, distance to
- * half-strips), with the sign of the input value.
+ * angle.  Where two open edges meet, the planar sector spanned by the two
+ * outward directions fills the gap their half-strips leave at a convex
+ * corner, so one plane is continued as itself.  Each value is
+ * isovalue -/+ min(distance to triangles, half-strips and sectors), with the
+ * sign of the input value.
  *
  * The result has the same fields as the 2D one; interface_segments counts the
  * surface triangles and open_ends the open edges.  Supported cells are affine

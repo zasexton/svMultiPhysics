@@ -485,14 +485,66 @@ struct OpenEdge {
                  w[2] - u * s.edge[2] - t * s.outward[2]});
 }
 
-// Exact minimum distance to the triangles and half-strips.  The bounding-box
+// Where two open edges meet, the boundary rays of their half-strips leave a
+// sector of the continued surface between them uncovered (at a convex corner
+// of the open surface).  It is continued by the planar sector
+// {apex + a first + b second : a, b > 0} spanned by the two outward
+// directions; for one plane this is that plane.
+struct Wedge {
+    Point3 apex{};
+    Point3 first{};
+    Point3 second{};
+};
+
+[[nodiscard]] std::vector<Wedge> wedges(const std::vector<OpenEdge>& open, const std::vector<Strip>& strip)
+{
+    std::vector<std::pair<Point3, Point3>> ends;
+    for (std::size_t e = 0; e < open.size(); ++e) {
+        if (strip[e].has_strip) {
+            ends.push_back({open[e].a, strip[e].outward});
+            ends.push_back({open[e].b, strip[e].outward});
+        }
+    }
+    std::sort(ends.begin(), ends.end());
+    std::vector<Wedge> out;
+    for (std::size_t i = 0; i < ends.size();) {
+        std::size_t j = i + 1u;
+        while (j < ends.size() && ends[j].first == ends[i].first) {
+            ++j;
+        }
+        if (j - i == 2u && norm(cross(ends[i].second, ends[i + 1u].second)) > Real{1.0e-12}) {
+            out.push_back({ends[i].first, ends[i].second, ends[i + 1u].second});
+        }
+        i = j;
+    }
+    return out;
+}
+
+// Distance to the open sector of a wedge, or infinity where the nearest point
+// lies on its boundary rays (which belong to the half-strips).
+[[nodiscard]] Real pointWedgeDistance(const Point3& x, const Wedge& w)
+{
+    const auto r = sub(x, w.apex);
+    const Real c = dot(w.first, w.second);
+    const Real det = Real{1.0} - c * c;
+    const Real a = (dot(r, w.first) - c * dot(r, w.second)) / det;
+    const Real b = (dot(r, w.second) - c * dot(r, w.first)) / det;
+    if (!(a > Real{0.0}) || !(b > Real{0.0})) {
+        return std::numeric_limits<Real>::infinity();
+    }
+    return norm({r[0] - a * w.first[0] - b * w.second[0], r[1] - a * w.first[1] - b * w.second[1],
+                 r[2] - a * w.first[2] - b * w.second[2]});
+}
+
+// Exact minimum distance to the triangles, half-strips and wedges.  The bounding-box
 // test only skips triangles that are farther than the current minimum by a
 // margin far above round-off, so the result does not depend on the order of
 // the triangle list.
 class SurfaceDistance {
 public:
-    SurfaceDistance(const std::vector<Real>& triangles, std::vector<Strip> continuation)
-        : triangles_(triangles), strips_(std::move(continuation))
+    SurfaceDistance(const std::vector<Real>& triangles, std::vector<Strip> continuation,
+                    std::vector<Wedge> corners)
+        : triangles_(triangles), strips_(std::move(continuation)), wedges_(std::move(corners))
     {
         const std::size_t count = triangles_.size() / 9u;
         boxes_.resize(6u * count);
@@ -521,6 +573,9 @@ public:
                 best = std::min(best, pointStripDistance(x, s));
             }
         }
+        for (const auto& w : wedges_) {
+            best = std::min(best, pointWedgeDistance(x, w));
+        }
         const std::size_t count = triangles_.size() / 9u;
         for (std::size_t t = 0; t < count; ++t) {
             Real gap2 = Real{0.0};
@@ -543,6 +598,7 @@ public:
 private:
     const std::vector<Real>& triangles_;
     std::vector<Strip> strips_;
+    std::vector<Wedge> wedges_;
     std::vector<Real> boxes_;
     Real margin_{0.0};
 };
@@ -604,7 +660,9 @@ LevelSetZeroPolygonRedistancingResult redistanceLevelSetToZeroSurface(
     }
     const auto open = openEdges(triangles);
     result.open_ends = open.size();
-    const SurfaceDistance distance_to(triangles, strips(open));
+    auto continuation = strips(open);
+    auto corners = wedges(open, continuation);
+    const SurfaceDistance distance_to(triangles, std::move(continuation), std::move(corners));
 
     // Every rank evaluates the vertices of its owned cells against the common
     // triangle list; the minimum over ranks selects the (identical) value.
