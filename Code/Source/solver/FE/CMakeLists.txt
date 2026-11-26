@@ -3217,6 +3217,7 @@ if(FE_BUILD_TESTS)
 		                Tests/Unit/TimeStepping/test_TimeLoopStageTimes.cpp
 		                Tests/Unit/TimeStepping/test_TimeLoopConvergence.cpp
 		                Tests/Unit/TimeStepping/test_MasterBearingConstraintTransient.cpp
+		                Tests/Unit/TimeStepping/test_TimeLoopAcceptedState.cpp
 		                Tests/Unit/TimeStepping/test_TimeLoopDissipation.cpp
 	                Tests/Unit/TimeStepping/test_TimeLoopPerformance.cpp
 	                Tests/Unit/TimeStepping/test_StepParticipants.cpp

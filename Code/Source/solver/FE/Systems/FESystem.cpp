@@ -6763,19 +6763,29 @@ FESystem::refreshConstraintStateForCurrentRevisions(double time,
     closed_small_cut_aggregation_prolongations_.clear();
     bool any_update = false;
     try {
-        std::size_t k = 1u;
-        for (const auto& c : constraint_defs_) {
-            FE_CHECK_NOT_NULL(c.get(), "FESystem::refreshConstraintStateForCurrentRevisions: constraint");
-            if (refresh_flags[k++] != 0) {
-                any_update = c->updateValues(affine_constraints_, time) || any_update;
+        // Values that do not depend on time first, then the time-dependent
+        // ones (the stage interpolant at a stage time).
+        const auto update_flagged = [&](bool time_dependent, double t) {
+            bool any = false;
+            std::size_t k = 1u;
+            for (const auto& c : constraint_defs_) {
+                FE_CHECK_NOT_NULL(c.get(), "FESystem::refreshConstraintStateForCurrentRevisions: constraint");
+                if (refresh_flags[k++] != 0 && c->isTimeDependent() == time_dependent) {
+                    any = c->updateValues(affine_constraints_, t) || any;
+                }
             }
-        }
-        for (auto& c : system_constraint_defs_) {
-            FE_CHECK_NOT_NULL(c.get(), "FESystem::refreshConstraintStateForCurrentRevisions: system constraint");
-            if (refresh_flags[k++] != 0) {
-                any_update = c->updateValues(*this, affine_constraints_, time, dt) || any_update;
+            for (auto& c : system_constraint_defs_) {
+                FE_CHECK_NOT_NULL(c.get(), "FESystem::refreshConstraintStateForCurrentRevisions: system constraint");
+                if (refresh_flags[k++] != 0 && c->isTimeDependent() == time_dependent) {
+                    any = c->updateValues(*this, affine_constraints_, t, dt) || any;
+                }
             }
-        }
+            return any;
+        };
+        any_update = update_flagged(/*time_dependent=*/false, time);
+        any_update = updateTimeDependentConstraintValues(
+                         time, [&](double t) { return update_flagged(/*time_dependent=*/true, t); }) ||
+                     any_update;
     } catch (...) {
         invalidateGeneratedBoundaryNitscheTraceCertificates();
         closed_small_cut_aggregation_prolongations_.clear();
@@ -25934,6 +25944,44 @@ FESystem::AuxiliaryAnalysisSummary FESystem::auxiliaryAnalysisSummary() const
     return summary;
 }
 
+bool FESystem::updateTimeDependentConstraintValues(
+    double time, const std::function<bool(double)>& update)
+{
+    if (!constraint_stage_interpolation_.has_value() ||
+        time != constraint_stage_interpolation_->stage_time) {
+        return update(time);
+    }
+    const auto& stage = *constraint_stage_interpolation_;
+    const auto inhomogeneities = [this] {
+        std::vector<std::pair<GlobalIndex, double>> values;
+        values.reserve(affine_constraints_.numConstraints());
+        affine_constraints_.forEach([&values](const auto& line) {
+            values.emplace_back(line.slave_dof, line.inhomogeneity);
+        });
+        std::sort(values.begin(), values.end());
+        return values;
+    };
+    bool any = update(stage.end_time);
+    const auto end_values = inhomogeneities();
+    any = update(stage.begin_time) || any;
+    const auto begin_values = inhomogeneities();
+    FE_THROW_IF(begin_values.size() != end_values.size(), InvalidStateException,
+                "FESystem: time-dependent constraint values changed the constrained DOFs between the stage "
+                "interpolation times");
+    for (std::size_t i = 0; i < begin_values.size(); ++i) {
+        const auto [slave, g_begin] = begin_values[i];
+        FE_THROW_IF(end_values[i].first != slave, InvalidStateException,
+                    "FESystem: time-dependent constraint values changed the constrained DOFs between the stage "
+                    "interpolation times");
+        const double g_end = end_values[i].second;
+        if (g_end != g_begin) {
+            affine_constraints_.updateInhomogeneity(
+                slave, (1.0 - stage.end_weight) * g_begin + stage.end_weight * g_end);
+        }
+    }
+    return any;
+}
+
 void FESystem::updateConstraints(double time, double dt)
 {
     requireSetup();
@@ -25952,19 +26000,22 @@ void FESystem::updateConstraints(double time, double dt)
     bool any_updated = false;
 
     try {
-        for (const auto& c : constraint_defs_) {
-            FE_CHECK_NOT_NULL(c.get(), "FESystem::updateConstraints: constraint");
-            if (c->isTimeDependent()) {
-                any_updated = c->updateValues(affine_constraints_, time) || any_updated;
+        any_updated = updateTimeDependentConstraintValues(time, [&](double t) {
+            bool any = false;
+            for (const auto& c : constraint_defs_) {
+                FE_CHECK_NOT_NULL(c.get(), "FESystem::updateConstraints: constraint");
+                if (c->isTimeDependent()) {
+                    any = c->updateValues(affine_constraints_, t) || any;
+                }
             }
-        }
-
-        for (auto& c : system_constraint_defs_) {
-            FE_CHECK_NOT_NULL(c.get(), "FESystem::updateConstraints: system constraint");
-            if (c->isTimeDependent()) {
-                any_updated = c->updateValues(*this, affine_constraints_, time, dt) || any_updated;
+            for (auto& c : system_constraint_defs_) {
+                FE_CHECK_NOT_NULL(c.get(), "FESystem::updateConstraints: system constraint");
+                if (c->isTimeDependent()) {
+                    any = c->updateValues(*this, affine_constraints_, t, dt) || any;
+                }
             }
-        }
+            return any;
+        });
     } catch (...) {
         invalidateGeneratedBoundaryNitscheTraceCertificates();
         closed_small_cut_aggregation_prolongations_.clear();

@@ -415,6 +415,73 @@ void updateGhostsAndDistributeHistory(const constraints::AffineConstraints& cons
     }
 }
 
+/// Adds the inhomogeneity rate g_dot(t) to the constrained entries of a rate
+/// vector that already holds the homogeneous part W u_dot_m, so each slave
+/// carries the rate of its line.  g_dot comes from the constraint values at
+/// t, t + dt/2 and t + dt (exact for quadratic data); the constraints are left
+/// evaluated at t.  Collective.
+void addConstraintInhomogeneityRates(systems::FESystem& system,
+                                     backends::GenericVector& rate,
+                                     double t,
+                                     double dt)
+{
+    if (!system.constraintDependencyDeclaration().value.time) {
+        return;
+    }
+    const auto values_at = [&system, dt](double time) {
+        system.updateConstraints(time, dt);
+        std::vector<std::pair<GlobalIndex, double>> values;
+        system.constraints().forEach([&values](const auto& line) {
+            values.emplace_back(line.slave_dof, line.inhomogeneity);
+        });
+        std::sort(values.begin(), values.end());
+        return values;
+    };
+    const auto g_end = values_at(t + dt);
+    const auto g_mid = values_at(t + 0.5 * dt);
+    const auto g_begin = values_at(t);
+    FE_THROW_IF(g_end.size() != g_begin.size() || g_mid.size() != g_begin.size(),
+                systems::InvalidStateException,
+                "TimeLoop: time-dependent constraint values changed the constrained DOFs over the first step");
+
+    auto view = rate.createAssemblyView();
+    FE_CHECK_NOT_NULL(view.get(), "TimeLoop: constraint rate view");
+    view->beginAssemblyPhase();
+    for (std::size_t i = 0; i < g_begin.size(); ++i) {
+        const auto slave = g_begin[i].first;
+        FE_THROW_IF(g_end[i].first != slave || g_mid[i].first != slave, systems::InvalidStateException,
+                    "TimeLoop: time-dependent constraint values changed the constrained DOFs over the first step");
+        const double g_dot = (-3.0 * g_begin[i].second + 4.0 * g_mid[i].second - g_end[i].second) / dt;
+        if (g_dot != 0.0 && slave >= 0 && slave < rate.size()) {
+            view->addVectorEntry(slave, view->getVectorEntry(slave) + static_cast<Real>(g_dot),
+                                 assembly::AddMode::Insert);
+        }
+    }
+    view->finalizeAssembly();
+}
+
+/// Imposes the interpolant of the endpoint constraint values at a one-step
+/// stage time while alive (FESystem::ConstraintStageInterpolation).
+class StageConstraintInterpolationScope {
+public:
+    StageConstraintInterpolationScope(systems::FESystem& system,
+                                      double stage_time,
+                                      double t,
+                                      double dt,
+                                      double alpha_f)
+        : system_(system)
+    {
+        system_.setConstraintStageInterpolation(systems::FESystem::ConstraintStageInterpolation{
+            .stage_time = stage_time, .begin_time = t, .end_time = t + dt, .end_weight = alpha_f});
+    }
+    StageConstraintInterpolationScope(const StageConstraintInterpolationScope&) = delete;
+    StageConstraintInterpolationScope& operator=(const StageConstraintInterpolationScope&) = delete;
+    ~StageConstraintInterpolationScope() { system_.setConstraintStageInterpolation(std::nullopt); }
+
+private:
+    systems::FESystem& system_;
+};
+
 std::vector<GlobalIndex> collectDirichletDofs(const constraints::AffineConstraints& constraints)
 {
     std::vector<GlobalIndex> dirichlet_dofs;
@@ -1194,15 +1261,19 @@ TimeLoopReport TimeLoop::run(systems::TransientSystem& transient,
     // the first nonlinear solve can start from an inconsistent dt(u) jump and fail to converge.
     //
     // For fresh runs (stepIndex==0), treat all allocated history states as the initial condition
-    // at t0 and distribute constraints accordingly.
-    if (history.stepIndex() == 0) {
+    // at t0 and distribute constraints accordingly.  A restart evaluates the constraints at the
+    // restored time t0 before any stage-entry distribution; its stored history keeps its own
+    // times' values.
+    {
         auto& sys = transient.system();
         const auto& constraints = sys.constraints();
         // Constraint lines are rank-local; the update and the ghost exchange
         // below are collective.
         if (candidateStageBooleanMinMax(sys, !constraints.empty()).second) {
             sys.updateConstraints(t0, history.dt());
-            updateGhostsAndDistributeHistory(constraints, history);
+            if (history.stepIndex() == 0) {
+                updateGhostsAndDistributeHistory(constraints, history);
+            }
         }
     }
     setLinearDirichletDofs(linear, transient.system().constraints());
@@ -3092,11 +3163,22 @@ TimeLoopReport TimeLoop::run(systems::TransientSystem& transient,
 	                        // linearized uDot solve writes Dirichlet-row artifacts
 	                        // (~ -c * r at constrained rows, growing as 1/dt) into the
 	                        // constrained entries, which must be sanitized before the first
-	                        // stage solve or Newton stalls (seen on MMS nx16 dt=0.01). Set
-	                        // SVMP_ZERO_CONSTRAINED_RATES=1 to restore zeroing on every step.
+	                        // stage solve or Newton stalls (seen on MMS nx16 dt=0.01). The
+	                        // sanitized entries then receive the rate of their line,
+	                        // W u_dot_m + g_dot: a zero rate for g = t would give the first
+	                        // stage the rate alpha_m / gamma (5/4 at rho_inf = 0.5) instead
+	                        // of 1. Set SVMP_ZERO_CONSTRAINED_RATES=1 to restore zeroing on
+	                        // every step.
 	                        if (!constraints.empty() &&
 	                            (!had_u_dot || zeroConstrainedRatesRequested())) {
 	                            constraints.distributeHomogeneous(history.uDot());
+	                        }
+	                        if (!had_u_dot && !zeroConstrainedRatesRequested()) {
+	                            addConstraintInhomogeneityRates(sys, history.uDot(), t, dt);
+	                            ensure_workspace_matches_sparsity();
+	                            if (!nondt_dofs.empty()) {
+	                                zeroVectorEntries(nondt_dofs, history.uDot());
+	                            }
 	                        }
 
                         // Ensure (u_n, uDot_n) values are ghost-consistent before constructing constants.
@@ -3140,7 +3222,11 @@ TimeLoopReport TimeLoop::run(systems::TransientSystem& transient,
                             }
                         }
 
-	                        nr = newton.solveStep(transient_stage, linear, stage_time, history, workspace);
+                        {
+                            const StageConstraintInterpolationScope stage_constraints(
+                                sys, stage_time, t, dt, ga1_params->alpha_f);
+                            nr = newton.solveStep(transient_stage, linear, stage_time, history, workspace);
+                        }
                         if (nr.converged) {
                             prepareCandidateStageObservation(
                                 *generalized_alpha_fo,
@@ -3263,7 +3349,11 @@ TimeLoopReport TimeLoop::run(systems::TransientSystem& transient,
 
                         systems::TransientSystem transient_stage(transient.system(), generalized_alpha_so);
                         const double stage_time = t + ga2_params->alpha_f * dt;
-                        nr = newton.solveStep(transient_stage, linear, stage_time, history, workspace);
+                        {
+                            const StageConstraintInterpolationScope stage_constraints(
+                                transient.system(), stage_time, t, dt, ga2_params->alpha_f);
+                            nr = newton.solveStep(transient_stage, linear, stage_time, history, workspace);
+                        }
                         if (nr.converged) {
                             const double inv_af = 1.0 / ga2_params->alpha_f;
                             const double c_prev = (ga2_params->alpha_f - 1.0) * inv_af;

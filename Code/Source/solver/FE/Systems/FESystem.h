@@ -1303,6 +1303,29 @@ public:
 
     // ---- Constraints lifecycle ----
     void updateConstraints(double time, double dt = 0.0);
+
+    /**
+     * @brief Time-dependent constraint values at a one-step stage time.
+     *
+     * A stage at t_n + w (t_{n+1} - t_n) whose endpoint is recovered as
+     * u_{n+1} = (u_stage - (1 - w) u_n) / w (generalized-alpha) reaches
+     * g(t_{n+1}) at constrained DOFs only if the stage imposes the
+     * interpolant (1 - w) g(t_n) + w g(t_{n+1}).  g(t_stage) differs from it
+     * by O(dt^2) per step, which the endpoint projection turns into a
+     * first-order error.  While an interpolation is set, every evaluation of
+     * time-dependent constraint values at stage_time imposes the interpolant.
+     */
+    struct ConstraintStageInterpolation {
+        double stage_time{0.0};
+        double begin_time{0.0};
+        double end_time{0.0};
+        double end_weight{1.0};
+    };
+    void setConstraintStageInterpolation(
+        std::optional<ConstraintStageInterpolation> interpolation) noexcept
+    {
+        constraint_stage_interpolation_ = interpolation;
+    }
     /// Time of the last updateConstraints() call (for diagnostics), if any.
     [[nodiscard]] std::optional<double> lastConstraintUpdateTime() const noexcept
     {
@@ -2472,6 +2495,12 @@ public:
     /// @endcond
 
 private:
+    /// Runs @p update(t) for the values of time-dependent constraints at
+    /// @p time.  At the stage time of an active ConstraintStageInterpolation
+    /// it runs at both endpoint times and imposes the interpolated
+    /// inhomogeneities.  Returns the result of @p update.
+    bool updateTimeDependentConstraintValues(
+        double time, const std::function<bool(double)>& update);
     void emitAcceptedMeshNormalBoundaryConstraintHistory(
         std::size_t group_begin) const noexcept;
     void emitAcceptedMeshTangentialBoundaryPolicyHistory(
@@ -2787,6 +2816,7 @@ private:
     bool has_last_constraint_update_time_{false};
     double last_constraint_update_time_{0.0};
     double last_constraint_update_dt_{0.0};
+    std::optional<ConstraintStageInterpolation> constraint_stage_interpolation_{};
     assembly::MeshMotionFieldAccess mesh_motion_fields_{};
     std::vector<MeshNormalBoundaryConstraintDeclaration>
         mesh_normal_boundary_constraints_{};

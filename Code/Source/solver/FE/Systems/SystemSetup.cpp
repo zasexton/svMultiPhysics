@@ -3845,38 +3845,41 @@ void FESystem::setup(const SetupOptions& user_opts, const SetupInputs& inputs)
             });
     }
     if (has_last_constraint_update_time_) {
-        for (auto& c : system_constraint_defs_) {
-            runCoordinatedConstraintPhase(
-                *this,
-                "setup_system_constraint_time_update",
-                [&] {
-                    FE_CHECK_NOT_NULL(
-                        c.get(),
-                        "FESystem::setup: system constraint time update");
-                    if (c->isTimeDependent()) {
-                        (void)c->updateValues(
-                            *this,
-                            affine_constraints_,
-                            last_constraint_update_time_,
-                            last_constraint_update_dt_);
-                    }
-                });
-        }
-        for (const auto& c : constraint_defs_) {
-            runCoordinatedConstraintPhase(
-                *this,
-                "setup_constraint_time_update",
-                [&] {
-                    FE_CHECK_NOT_NULL(
-                        c.get(),
-                        "FESystem::setup: constraint time update");
-                    if (c->isTimeDependent()) {
-                        (void)c->updateValues(
-                            affine_constraints_,
-                            last_constraint_update_time_);
-                    }
-                });
-        }
+        (void)updateTimeDependentConstraintValues(last_constraint_update_time_, [&](double time) {
+            for (auto& c : system_constraint_defs_) {
+                runCoordinatedConstraintPhase(
+                    *this,
+                    "setup_system_constraint_time_update",
+                    [&] {
+                        FE_CHECK_NOT_NULL(
+                            c.get(),
+                            "FESystem::setup: system constraint time update");
+                        if (c->isTimeDependent()) {
+                            (void)c->updateValues(
+                                *this,
+                                affine_constraints_,
+                                time,
+                                last_constraint_update_dt_);
+                        }
+                    });
+            }
+            for (const auto& c : constraint_defs_) {
+                runCoordinatedConstraintPhase(
+                    *this,
+                    "setup_constraint_time_update",
+                    [&] {
+                        FE_CHECK_NOT_NULL(
+                            c.get(),
+                            "FESystem::setup: constraint time update");
+                        if (c->isTimeDependent()) {
+                            (void)c->updateValues(
+                                affine_constraints_,
+                                time);
+                        }
+                    });
+            }
+            return true;
+        });
     }
 
 #if FE_HAS_MPI
@@ -7984,40 +7987,43 @@ void FESystem::rebuildConstraintState()
             });
     }
     if (has_last_constraint_update_time_) {
-        for (auto& c : system_constraint_defs_) {
-            runCoordinatedConstraintPhase(
-                *this,
-                "rebuild_system_constraint_time_update",
-                [&] {
-                    FE_CHECK_NOT_NULL(
-                        c.get(),
-                        "FESystem::rebuildConstraintState: system "
-                        "constraint time update");
-                    if (c->isTimeDependent()) {
-                        (void)c->updateValues(
-                            *this,
-                            affine_constraints_,
-                            last_constraint_update_time_,
-                            last_constraint_update_dt_);
-                    }
-                });
-        }
-        for (const auto& c : constraint_defs_) {
-            runCoordinatedConstraintPhase(
-                *this,
-                "rebuild_constraint_time_update",
-                [&] {
-                    FE_CHECK_NOT_NULL(
-                        c.get(),
-                        "FESystem::rebuildConstraintState: constraint "
-                        "time update");
-                    if (c->isTimeDependent()) {
-                        (void)c->updateValues(
-                            affine_constraints_,
-                            last_constraint_update_time_);
-                    }
-                });
-        }
+        (void)updateTimeDependentConstraintValues(last_constraint_update_time_, [&](double time) {
+            for (auto& c : system_constraint_defs_) {
+                runCoordinatedConstraintPhase(
+                    *this,
+                    "rebuild_system_constraint_time_update",
+                    [&] {
+                        FE_CHECK_NOT_NULL(
+                            c.get(),
+                            "FESystem::rebuildConstraintState: system "
+                            "constraint time update");
+                        if (c->isTimeDependent()) {
+                            (void)c->updateValues(
+                                *this,
+                                affine_constraints_,
+                                time,
+                                last_constraint_update_dt_);
+                        }
+                    });
+            }
+            for (const auto& c : constraint_defs_) {
+                runCoordinatedConstraintPhase(
+                    *this,
+                    "rebuild_constraint_time_update",
+                    [&] {
+                        FE_CHECK_NOT_NULL(
+                            c.get(),
+                            "FESystem::rebuildConstraintState: constraint "
+                            "time update");
+                        if (c->isTimeDependent()) {
+                            (void)c->updateValues(
+                                affine_constraints_,
+                                time);
+                        }
+                    });
+            }
+            return true;
+        });
     }
 
 #if FE_HAS_MPI

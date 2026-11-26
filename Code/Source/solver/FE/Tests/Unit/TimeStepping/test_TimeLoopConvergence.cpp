@@ -6734,10 +6734,11 @@ TEST(TimeLoopConvergence,
     ASSERT_EQ(accepted.size(), 4u);
     EXPECT_EQ(observations.endpoint_callbacks, 1);
     EXPECT_EQ(observations.projected_endpoint_callbacks, 1);
-    // At rho_inf=0.5, alpha_f=2/3.  Extrapolating g(t_stage)=
-    // 1+(dt*alpha_f)^2 produces 151/150, while the actual endpoint
-    // constraint is g(dt)=1.01.
-    EXPECT_NEAR(observations.raw_endpoint_value, 151.0 / 150.0, 1.0e-12);
+    // At rho_inf=0.5, alpha_f=2/3.  The stage imposes the interpolant
+    // (1-alpha_f) g(0) + alpha_f g(dt) of the endpoint data, so the raw
+    // endpoint already equals g(dt)=1.01 (imposing g(t_stage)=
+    // 1+(dt*alpha_f)^2 extrapolated to 151/150).
+    EXPECT_NEAR(observations.raw_endpoint_value, 1.01, 1.0e-12);
     EXPECT_NEAR(observations.projected_endpoint_value, 1.01, 1.0e-12);
     EXPECT_NEAR(observations.projected_previous_value, 1.0, 1.0e-15)
         << "Endpoint constraint projection modified u_n history";
