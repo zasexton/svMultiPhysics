@@ -9,6 +9,7 @@
  */
 
 #include <string>
+#include <string_view>
 
 namespace svmp {
 namespace FE {
@@ -31,6 +32,8 @@ namespace jit {
  * same IR, while binaries built from the same sources share them.
  */
 [[nodiscard]] std::string jitCodegenFingerprint();
+/// View of the same fingerprint with static lifetime.
+[[nodiscard]] std::string_view jitCodegenFingerprintView() noexcept;
 
 } // namespace jit
 } // namespace forms

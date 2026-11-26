@@ -163,6 +163,15 @@ TEST(JITObjectCacheFile, RoundTripReturnsExactObjectBytes)
     EXPECT_EQ(decoded.object, object);
 }
 
+TEST(JITObjectCacheFile, RequiresTheCurrentGeneratorEvenForAMatchingModuleId)
+{
+    std::string image = oc::encodeFile(kModuleId, sampleObject(200));
+    ASSERT_EQ(image.substr(oc::kFingerprintOffset, oc::kFingerprintSize), jit::jitCodegenFingerprint());
+    auto& first_digit = image[oc::kFingerprintOffset];
+    first_digit = first_digit == '0' ? '1' : '0';
+    EXPECT_EQ(oc::decodeFile(kModuleId, image).status, oc::FileStatus::FingerprintMismatch);
+}
+
 TEST(JITObjectCacheFile, EverySingleByteCorruptionIsRejected)
 {
     const std::string object = sampleObject(300u);

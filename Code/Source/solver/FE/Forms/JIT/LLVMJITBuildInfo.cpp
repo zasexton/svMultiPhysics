@@ -40,6 +40,12 @@ std::string llvmVersionString()
 
 std::string jitCodegenFingerprint()
 {
+    return std::string(jitCodegenFingerprintView());
+}
+
+std::string_view jitCodegenFingerprintView() noexcept
+{
+    static_assert(sizeof(SVMP_FE_JIT_CODEGEN_FINGERPRINT) == 65);
     return SVMP_FE_JIT_CODEGEN_FINGERPRINT;
 }
 

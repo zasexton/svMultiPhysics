@@ -123,6 +123,7 @@ void mixCacheKey(std::uint64_t& h, std::uint64_t v) noexcept
     mixCacheKey(h, hashStringForCacheKey(in.cpu_name));
     mixCacheKey(h, hashStringForCacheKey(in.cpu_features));
     mixCacheKey(h, hashStringForCacheKey(in.llvm_version));
+    mixCacheKey(h, hashStringForCacheKey(in.codegen_fingerprint));
     if (!in.codegen_options.empty()) {
         mixCacheKey(h, hashStringForCacheKey(in.codegen_options));
     }

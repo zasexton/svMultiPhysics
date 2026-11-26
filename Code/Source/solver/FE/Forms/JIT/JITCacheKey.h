@@ -8,6 +8,7 @@
 
 #include "Forms/FormExpr.h"
 #include "Forms/JIT/JITSpecialization.h"
+#include "Forms/JIT/LLVMJITBuildInfo.h"
 
 #include <cstdint>
 #include <optional>
@@ -28,7 +29,8 @@ inline constexpr std::uint64_t kCacheKeyFNVPrime = 1099511628211ULL;
 
 // Increment this when cache-key inputs or generated kernel semantics change.
 // 11: mixCacheKey diffuses every bit of a word (every key changed).
-inline constexpr std::uint64_t kKernelCacheKeySchemaVersion = 11ULL;
+// 12 includes the digest of the sources used to generate the object.
+inline constexpr std::uint64_t kKernelCacheKeySchemaVersion = 12ULL;
 
 struct KernelCacheKeyInputs {
     std::uint64_t cache_key_schema_version{kKernelCacheKeySchemaVersion};
@@ -54,6 +56,7 @@ struct KernelCacheKeyInputs {
     std::string_view llvm_version{};
     std::uint64_t hardware_profile_hash{0};
     const JITCompileSpecialization* specialization{nullptr};
+    std::string_view codegen_fingerprint{jitCodegenFingerprintView()};
 };
 
 /// Mixes one 64-bit word into the running key @p h (start from

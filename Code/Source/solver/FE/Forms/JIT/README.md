@@ -57,17 +57,17 @@ runs can skip LLVM code generation.  The on-disk cache directory is chosen as:
 1. `JITOptions::cache_directory`, when set in code;
 2. otherwise, when `JITOptions::cache_kernels` is true, the environment
    variable `SVMP_JIT_CACHE_DIR`, when set and non-empty;
-3. otherwise `$HOME/.cache/svMultiPhysics/jit_cache`.
+3. otherwise `$HOME/.cache/svMultiPhysics/jit_cache/<code-generator fingerprint>`.
 
 For example, `export SVMP_JIT_CACHE_DIR=$SCRATCH/svmp-jit-cache` moves the
 cache off a small home filesystem, and a per-job directory isolates concurrent
 jobs.  `JITEngine::objectCacheDirectory()` reports the directory in use.
 
 If the directory was created by a different LLVM version, objects go to an
-`llvm-<version>` subdirectory.  Objects are stored under `objects-v2/`, one
+`llvm-<version>` subdirectory.  Objects are stored under `objects-v3/`, one
 `<module>.objcache` file per module, each with a header recording the module
-id, the object size and an FNV-1a 64-bit checksum of both
-(`JITObjectCacheFile.h`).  On load, a file whose header, size, module id or
+id, the code-generator fingerprint, the object size and an FNV-1a 64-bit checksum of the id and object
+(`JITObjectCacheFile.h`).  On load, a file whose generator fingerprint, header, size, module id or
 checksum does not match is rejected, deleted and recompiled (with a warning),
 so a truncated or corrupted object is never linked or executed.  Raw objects
 left in the cache root by earlier builds are ignored.

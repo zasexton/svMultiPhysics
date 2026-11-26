@@ -35,7 +35,7 @@ namespace objcache {
 
 namespace {
 
-constexpr std::string_view kMagic{"SVMPJOC2", 8u};
+constexpr std::string_view kMagic{"SVMPJOC3", 8u};
 constexpr std::uint64_t kFNVOffset = 14695981039346656037ULL;
 constexpr std::uint64_t kFNVPrime = 1099511628211ULL;
 
@@ -187,6 +187,8 @@ const char* toString(FileStatus status) noexcept
             return "shorter than header";
         case FileStatus::BadMagic:
             return "unrecognized header";
+        case FileStatus::FingerprintMismatch:
+            return "code-generator fingerprint mismatch";
         case FileStatus::ModuleIdMismatch:
             return "module id mismatch";
         case FileStatus::SizeMismatch:
@@ -222,6 +224,7 @@ std::string encodeFile(std::string_view module_id, std::string_view object_bytes
     appendLE64(out, static_cast<std::uint64_t>(module_id.size()));
     appendLE64(out, static_cast<std::uint64_t>(object_bytes.size()));
     appendLE64(out, checksum(module_id, object_bytes));
+    out.append(jitCodegenFingerprintView());
     out.append(module_id);
     out.append(object_bytes);
     return out;
@@ -239,6 +242,10 @@ DecodedFile decodeFile(std::string_view module_id, std::string_view file_bytes) 
         return result;
     }
 
+    if (file_bytes.substr(kFingerprintOffset, kFingerprintSize) != jitCodegenFingerprintView()) {
+        result.status = FileStatus::FingerprintMismatch;
+        return result;
+    }
     const std::uint64_t id_length = readLE64(file_bytes, kModuleIdLengthOffset);
     const std::uint64_t object_size = readLE64(file_bytes, kObjectSizeOffset);
     const std::uint64_t stored_checksum = readLE64(file_bytes, kChecksumOffset);

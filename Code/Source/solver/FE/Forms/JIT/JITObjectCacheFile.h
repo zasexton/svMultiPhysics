@@ -38,16 +38,19 @@ inline constexpr const char* kCacheDirectoryEnvVar = "SVMP_JIT_CACHE_DIR";
 /// Subdirectory of the (LLVM-version-validated) cache root that holds objects
 /// in the checked format below.  Raw objects written by older builds live in
 /// the root itself and are neither read nor overwritten by this format.
-inline constexpr const char* kFormatSubdirectory = "objects-v2";
+inline constexpr const char* kFormatSubdirectory = "objects-v3";
 
 /// File layout (all integers little-endian):
-///   [0, 8)    magic "SVMPJOC2"
+///   [0, 8)    magic "SVMPJOC3"
 ///   [8, 16)   module id length L
 ///   [16, 24)  object size N
 ///   [24, 32)  FNV-1a 64-bit checksum over (L, N, module id, object bytes)
-///   [32, 32+L)        module id
-///   [32+L, 32+L+N)    object bytes
-inline constexpr std::size_t kHeaderSize = 32u;
+///   [32, 96)          code-generator SHA-256 as lowercase hex
+///   [96, 96+L)        module id
+///   [96+L, 96+L+N)    object bytes
+inline constexpr std::size_t kFingerprintOffset = 32u;
+inline constexpr std::size_t kFingerprintSize = 64u;
+inline constexpr std::size_t kHeaderSize = kFingerprintOffset + kFingerprintSize;
 inline constexpr std::size_t kModuleIdLengthOffset = 8u;
 inline constexpr std::size_t kObjectSizeOffset = 16u;
 inline constexpr std::size_t kChecksumOffset = 24u;
@@ -56,6 +59,7 @@ enum class FileStatus : std::uint8_t {
     Valid,
     TooShort,
     BadMagic,
+    FingerprintMismatch,
     ModuleIdMismatch,
     SizeMismatch,
     ChecksumMismatch,
@@ -76,7 +80,7 @@ struct DecodedFile {
 [[nodiscard]] std::string encodeFile(std::string_view module_id, std::string_view object_bytes);
 
 /// Validate a complete file image written by encodeFile() for @p module_id.
-/// Any mismatch (magic, module id, sizes, checksum) yields a non-Valid status.
+/// Any mismatch (magic, code-generator fingerprint, module id, sizes, checksum) yields a non-Valid status.
 [[nodiscard]] DecodedFile decodeFile(std::string_view module_id, std::string_view file_bytes) noexcept;
 
 /// Temporary path in the directory of @p final_path whose name is unique

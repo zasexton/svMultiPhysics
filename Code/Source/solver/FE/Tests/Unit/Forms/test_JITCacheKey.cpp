@@ -186,6 +186,7 @@ TEST(JITCacheKey, TargetAndHardwareInputsChangeKey)
     expectKeyChanges("data layout", [](auto& in) { in.data_layout = "e-m:e-p:64:64"; });
     expectKeyChanges("CPU name", [](auto& in) { in.cpu_name = "generic"; });
     expectKeyChanges("CPU features", [](auto& in) { in.cpu_features = "+sse2"; });
+    expectKeyChanges("generator fingerprint", [](auto& in) { in.codegen_fingerprint = "previous-generator"; });
     expectKeyChanges("LLVM version", [](auto& in) { in.llvm_version = "LLVM 19.0.0"; });
     expectKeyChanges("hardware profile", [](auto& in) { in.hardware_profile_hash ^= 0x80ULL; });
     expectKeyChanges("codegen options", [](auto& in) { in.codegen_options = "fp-contract=off"; });
