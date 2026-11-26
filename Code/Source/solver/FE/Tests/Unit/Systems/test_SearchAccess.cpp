@@ -12,6 +12,7 @@
 
 #include "Mesh/Core/MeshBase.h"
 #include "Mesh/Mesh.h"
+#include "Mesh/Search/MeshSearch.h"
 #include "Mesh/Topology/CellShape.h"
 #endif
 
@@ -593,6 +594,38 @@ TEST(SearchAccess, MeshSearchAccess_3DMesh_QueriesWork)
     ASSERT_TRUE(cp.found);
     EXPECT_NE(cp.face_id, INVALID_GLOBAL_INDEX);
     EXPECT_TRUE(std::isfinite(cp.distance));
+}
+
+TEST(SearchAccess, MeshSearchAccess_LocatePoint_EveryAcceleratorReturnsReferenceCoordinates)
+{
+    // On the unit reference triangle the reference coordinates of (1/4, 1/4)
+    // are (1/4, 1/4), so u = x evaluates to 1/4 there.
+    using AccelType = svmp::MeshSearch::AccelType;
+    for (const auto type : {AccelType::UniformGrid, AccelType::Octree, AccelType::KDTree,
+                            AccelType::BVH, AccelType::RTree}) {
+        SCOPED_TRACE(static_cast<int>(type));
+        auto base = std::make_shared<MeshBase>();
+        CellShape shape{};
+        shape.family = CellFamily::Triangle;
+        shape.num_corners = 3;
+        shape.order = 1;
+        base->build_from_arrays(/*spatial_dim=*/2, {0.0, 0.0, 1.0, 0.0, 0.0, 1.0}, {0, 3},
+                                {0, 1, 2}, {shape});
+        base->finalize();
+        auto mesh = svmp::create_mesh(std::move(base));
+        svmp::MeshSearch::SearchConfig config;
+        config.type = type;
+        mesh->base().build_search_structure(config, svmp::Configuration::Reference);
+
+        MeshSearchAccess access(*mesh);
+        for (const GlobalIndex hint : {GlobalIndex{-1}, GlobalIndex{0}}) {
+            const auto loc = access.locatePoint({0.25, 0.25, 0.0}, hint);
+            ASSERT_TRUE(loc.found);
+            EXPECT_EQ(loc.cell_id, 0);
+            EXPECT_NEAR(loc.xi[0], 0.25, 1e-14);
+            EXPECT_NEAR(loc.xi[1], 0.25, 1e-14);
+        }
+    }
 }
 
 #endif // defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH

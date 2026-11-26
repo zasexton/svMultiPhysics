@@ -694,9 +694,10 @@ PointLocateResult RTreeAccel::locate_point(const MeshBase& mesh,
   // Check hint first
   if (hint_cell >= 0 && hint_cell < mesh.n_cells()) {
     if (SearchBuilders::point_in_cell(mesh, vertex_coords_, hint_cell, point,
-                                      result.parametric_coords)) {
+                                      result.xi)) {
       result.found = true;
       result.cell_id = hint_cell;
+      result.parametric_coords = result.xi;
 
       auto end_time = std::chrono::steady_clock::now();
       stats_.total_query_time_ms += std::chrono::duration<double, std::milli>(
@@ -731,9 +732,10 @@ void RTreeAccel::locate_point_recursive(RTreeNode* node,
       if (entry.bounds.contains(point)) {
         index_t cell_id = entry.id;
         if (SearchBuilders::point_in_cell(mesh, vertex_coords_, cell_id, point,
-                                         result.parametric_coords)) {
+                                         result.xi)) {
           result.found = true;
           result.cell_id = cell_id;
+          result.parametric_coords = result.xi;
           return;
         }
       }
