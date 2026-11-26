@@ -277,7 +277,7 @@ TEST(SymmetricTriangleQuadrature, IntegratesLinearFunctions) {
 
 TEST(SymmetricTriangleQuadrature, PolynomialExactnessUpToOrder) {
     // For each order, verify all monomials x^a * y^b with a+b <= order
-    // Only test orders 1-9 which are known to work correctly
+    // (orders 10-20 in HighOrderPolynomialExactness)
     for (int order = 1; order <= 9; ++order) {
         SymmetricTriangleQuadrature quad(order);
 
@@ -303,34 +303,27 @@ TEST(SymmetricTriangleQuadrature, PolynomialExactnessUpToOrder) {
     }
 }
 
-// High-order tests disabled due to known implementation bugs (orders 10-20)
-TEST(SymmetricTriangleQuadrature, DISABLED_HighOrderPolynomialExactness) {
-    // TODO: Fix implementation for orders 10-20
-    // Test higher orders with selected monomials
-    for (int order = 15; order <= 20; ++order) {
+TEST(SymmetricTriangleQuadrature, HighOrderPolynomialExactness) {
+    // Every monomial x^a * y^b with a + b <= order, for orders 10-20
+    for (int order = 10; order <= 20; ++order) {
         SymmetricTriangleQuadrature quad(order);
+        EXPECT_GE(quad.order(), order);
 
-        // Test a few representative high-degree monomials
-        std::vector<std::pair<int, int>> test_cases = {
-            {order, 0}, {0, order}, {order/2, order - order/2},
-            {order-1, 1}, {1, order-1}
-        };
+        for (int total_degree = 0; total_degree <= order; ++total_degree) {
+            for (int a = 0; a <= total_degree; ++a) {
+                const int b = total_degree - a;
 
-        for (const auto& [a, b] : test_cases) {
-            if (a + b > order) continue;
+                double integral = 0.0;
+                for (std::size_t i = 0; i < quad.num_points(); ++i) {
+                    const auto& p = quad.point(i);
+                    integral += quad.weight(i) *
+                                std::pow(p[0], a) * std::pow(p[1], b);
+                }
 
-            double integral = 0.0;
-            for (std::size_t i = 0; i < quad.num_points(); ++i) {
-                const auto& p = quad.point(i);
-                integral += quad.weight(i) *
-                            std::pow(p[0], a) * std::pow(p[1], b);
+                const double exact = triangle_monomial_integral(a, b);
+                EXPECT_NEAR(integral, exact, 1e-11 * exact)
+                    << "x^" << a << " * y^" << b << " failed at order " << order;
             }
-
-            double exact = triangle_monomial_integral(a, b);
-            double tol = std::max(1e-10, std::abs(exact) * 1e-8);
-
-            EXPECT_NEAR(integral, exact, tol)
-                << "x^" << a << " * y^" << b << " failed at order " << order;
         }
     }
 }
