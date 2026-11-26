@@ -571,6 +571,10 @@ void NormalComponentConstraint::apply(const FESystem& system, AffineConstraints&
                 constraints.addEntry(line.slave, line.masters[m], line.weights[m]);
             }
             constraints.setInhomogeneity(line.slave, g * line.value_factor);
+            if (is_time_dependent_ && line.value_factor != 0.0) {
+                // u . n = g(t) changes in time; stored history keeps its own g.
+                constraints.setInstantaneous(line.slave);
+            }
             lines_.push_back(std::move(line));
         }
     });

@@ -5503,7 +5503,10 @@ NewtonReport NewtonSolver::solveStep(
                     constraints.distributeMasterBearingHomogeneous(
                         history.uPrevK(k));
                 } else {
-                    constraints.distributeMasterBearing(history.uPrevK(k));
+                    constraints.distributeMasterBearing(
+                        history.uPrevK(k),
+                        constraints::AffineConstraints::MasterBearingLines::
+                            TimeInvariant);
                 }
                 syncOwnedRowHaloIfNeeded(history.uPrevK(k));
             }
@@ -6795,7 +6798,10 @@ NewtonReport NewtonSolver::solveStepFrozenExternalState(
         // rate slots get the homogeneous form: constraint coefficients are
         // time-constant within a step, so slave rates are the same master
         // combination. Dirichlet lines are untouched throughout (their
-        // finite-difference rates keep carrying g_dot).
+        // finite-difference rates keep carrying g_dot), and so are
+        // instantaneous lines (s = W(t) m + g(t), e.g. a moving contact
+        // point): each stored value keeps the relation of its own time and
+        // the stored rates keep W m_dot + W_dot m + g_dot.
         const bool any_master_bearing_lines =
             anyRank(constraints.hasMasterBearingLines());
         if (!mpcStateDistributeDisabled() && any_master_bearing_lines) {
@@ -6804,7 +6810,10 @@ NewtonReport NewtonSolver::solveStepFrozenExternalState(
                     constraints.distributeMasterBearingHomogeneous(
                         history.uPrevK(k));
                 } else {
-                    constraints.distributeMasterBearing(history.uPrevK(k));
+                    constraints.distributeMasterBearing(
+                        history.uPrevK(k),
+                        constraints::AffineConstraints::MasterBearingLines::
+                            TimeInvariant);
                 }
                 syncOwnedRowHaloIfNeeded(history.uPrevK(k));
             }

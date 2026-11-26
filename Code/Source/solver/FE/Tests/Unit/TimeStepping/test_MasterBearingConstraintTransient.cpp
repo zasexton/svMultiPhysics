@@ -256,6 +256,139 @@ struct MpcRunResult {
     return result;
 }
 
+/// s = m + t on DOFs (1, 0) with DOFs 2 and 3 fixed at zero: a master-bearing
+/// line whose inhomogeneity changes in time.
+class TimeShiftedMpcConstraint final : public svmp::FE::constraints::ISystemConstraint {
+public:
+    void apply(const svmp::FE::systems::FESystem& /*system*/,
+               svmp::FE::constraints::AffineConstraints& constraints) override
+    {
+        constraints.addLine(1);
+        constraints.addEntry(1, 0, 1.0);
+        constraints.setInstantaneous(1);
+        constraints.addDirichlet(2, 0.0);
+        constraints.addDirichlet(3, 0.0);
+    }
+
+    bool updateValues(const svmp::FE::systems::FESystem& /*system*/,
+                      svmp::FE::constraints::AffineConstraints& constraints,
+                      double time,
+                      double /*dt*/) override
+    {
+        constraints.updateInhomogeneity(1, time);
+        return true;
+    }
+
+    [[nodiscard]] bool isTimeDependent() const noexcept override { return true; }
+
+    [[nodiscard]] svmp::FE::systems::SetupStorageRequirements
+    storageRequirements() const noexcept override
+    {
+        return {};
+    }
+};
+
+/// M du/dt = 0 on the single tet with s = m + t.  The rows of m and s sum to
+/// 3 (m_dot + s_dot) = 0, so m = -t/2 and s = t/2 from a zero start.
+/// Returns the final (m, s), or an empty vector after a failure.
+std::vector<Real> runTimeShiftedMpcProblem(svmp::FE::timestepping::SchemeKind scheme,
+                                           double dt,
+                                           double t_end,
+                                           bool supply_consistent_rate)
+{
+    auto mesh = std::make_shared<svmp::FE::forms::test::SingleTetraMeshAccess>();
+    auto space = std::make_shared<svmp::FE::spaces::H1Space>(ElementType::Tetra4, 1);
+
+    svmp::FE::systems::FESystem sys(mesh);
+    const auto u_field = sys.addField(
+        svmp::FE::systems::FieldSpec{.name = "u", .space = space, .components = 1});
+    sys.addOperator("op");
+    const auto u = svmp::FE::forms::FormExpr::trialFunction(*space, "u");
+    const auto v = svmp::FE::forms::FormExpr::testFunction(*space, "v");
+    svmp::FE::forms::FormCompiler compiler;
+    auto kernel = std::make_shared<svmp::FE::forms::NonlinearFormKernel>(
+        compiler.compileResidual((svmp::FE::forms::dt(u) * v).dx()),
+        svmp::FE::forms::ADMode::Forward);
+    sys.addCellKernel("op", u_field, u_field, kernel);
+    sys.addSystemConstraint(std::make_unique<TimeShiftedMpcConstraint>());
+
+    svmp::FE::systems::SetupInputs inputs;
+    inputs.topology_override = ts_test::singleTetraTopology();
+    sys.setup({}, inputs);
+
+    auto integrator = std::make_shared<svmp::FE::systems::BackwardDifferenceIntegrator>();
+    svmp::FE::systems::TransientSystem transient(sys, integrator);
+    auto factory = ts_test::createTestFactory();
+    if (!factory) {
+        ADD_FAILURE() << "Eigen backend not available";
+        return {};
+    }
+    auto linear = factory->createLinearSolver(ts_test::directSolve());
+    auto history = svmp::FE::timestepping::TimeHistory::allocate(*factory, 4, 2);
+    for (int k = 1; k <= history.historyDepth(); ++k) {
+        ts_test::setVectorByDof(history.uPrevK(k), {0.0, 0.0, 0.0, 0.0});
+    }
+    history.resetCurrentToPrevious();
+    history.setPrevDt(dt);
+    if (supply_consistent_rate) {
+        history.ensureSecondOrderState(*factory);
+        ts_test::setVectorByDof(history.uDot(), {-0.5, 0.5, 0.0, 0.0});
+    }
+
+    svmp::FE::timestepping::TimeLoopOptions opts;
+    opts.t0 = 0.0;
+    opts.t_end = t_end;
+    opts.dt = dt;
+    opts.max_steps = 100;
+    opts.scheme = scheme;
+    opts.generalized_alpha_rho_inf = 0.5;
+    opts.newton.residual_op = "op";
+    opts.newton.jacobian_op = "op";
+    opts.newton.max_iterations = 8;
+    opts.newton.abs_tolerance = 1e-13;
+    opts.newton.rel_tolerance = 0.0;
+
+    svmp::FE::timestepping::TimeLoop loop(opts);
+    const auto rep = loop.run(transient, *factory, *linear, history, {});
+    if (!rep.success) {
+        ADD_FAILURE() << "TimeLoop failed: " << rep.message;
+        return {};
+    }
+    const auto span = history.uSpan();
+    return {span[0], span[1]};
+}
+
+TEST(MasterBearingConstraintTransient, BackwardEulerKeepsAcceptedValuesOfAMovingLine)
+{
+#if !defined(FE_HAS_EIGEN) || !FE_HAS_EIGEN
+    GTEST_SKIP() << "This transient solve requires the Eigen backend.";
+#else
+    // One step of size 0.1 from (0, 0): 2 m_1 + 0.1 = 0, so (m, s) = (-0.05, 0.05).
+    // Writing the stage line into the accepted state, s_0 = m_0 + 0.1, gives (0, 0.1).
+    const auto ms = runTimeShiftedMpcProblem(
+        svmp::FE::timestepping::SchemeKind::BackwardEuler, 0.1, 0.1, false);
+    ASSERT_EQ(ms.size(), 2u);
+    EXPECT_NEAR(ms[0], -0.05, 1e-12);
+    EXPECT_NEAR(ms[1], 0.05, 1e-12);
+#endif
+}
+
+TEST(MasterBearingConstraintTransient, GeneralizedAlphaKeepsHistoryAndRateOfAMovingLine)
+{
+#if !defined(FE_HAS_EIGEN) || !FE_HAS_EIGEN
+    GTEST_SKIP() << "This transient solve requires the Eigen backend.";
+#else
+    // With the consistent start (m_dot, s_dot) = (-1/2, 1/2) generalized-alpha
+    // reproduces the linear solution exactly when u_n keeps s_n = m_n + t_n
+    // and the stored rate keeps s_dot = m_dot + 1.
+    const auto ms = runTimeShiftedMpcProblem(
+        svmp::FE::timestepping::SchemeKind::GeneralizedAlpha, 0.1, 0.5, true);
+    ASSERT_EQ(ms.size(), 2u);
+    EXPECT_NEAR(ms[0], -0.25, 1e-12);
+    EXPECT_NEAR(ms[1], 0.25, 1e-12);
+#endif
+}
+
 TEST(MasterBearingConstraintTransient, BackwardEulerMpcConvergesAndTracksExact)
 {
 #if !defined(FE_HAS_EIGEN) || !FE_HAS_EIGEN

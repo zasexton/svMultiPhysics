@@ -417,6 +417,58 @@ TEST(AffineConstraintsTest, DistributeMasterBearingHomogeneousSkipsDirichletLine
     EXPECT_DOUBLE_EQ(vec[2], 4.5);  // Dirichlet rate (g_dot) untouched
 }
 
+TEST(AffineConstraintsTest, InstantaneousLinesKeepOtherTimesAndRates) {
+    AffineConstraints constraints;
+
+    // u_0 = u_1 + 10 changes in time; u_3 = 0.5 u_0 expands it on close.
+    constraints.addLine(0);
+    constraints.addEntry(0, 1, 1.0);
+    constraints.setInhomogeneity(0, 10.0);
+    constraints.setInstantaneous(0);
+    constraints.addLine(3);
+    constraints.addEntry(3, 0, 0.5);
+    // u_4 = u_2 holds at every time level.
+    constraints.addLine(4);
+    constraints.addEntry(4, 2, 1.0);
+    constraints.close();
+
+    EXPECT_TRUE(constraints.isInstantaneous(0));
+    EXPECT_TRUE(constraints.isInstantaneous(3));
+    EXPECT_FALSE(constraints.isInstantaneous(4));
+    EXPECT_FALSE(constraints.isInstantaneous(1));
+    ASSERT_TRUE(constraints.getConstraint(3).has_value());
+    EXPECT_TRUE(constraints.getConstraint(3)->instantaneous);
+
+    const std::vector<double> stored = {-1.0, 5.0, 2.0, -2.0, 0.0};
+    auto all = stored;
+    constraints.distributeMasterBearing(all);
+    EXPECT_DOUBLE_EQ(all[0], 15.0);
+    EXPECT_DOUBLE_EQ(all[3], 7.5);
+    EXPECT_DOUBLE_EQ(all[4], 2.0);
+
+    auto history = stored;
+    constraints.distributeMasterBearing(
+        history, AffineConstraints::MasterBearingLines::TimeInvariant);
+    EXPECT_DOUBLE_EQ(history[0], -1.0);
+    EXPECT_DOUBLE_EQ(history[3], -2.0);
+    EXPECT_DOUBLE_EQ(history[4], 2.0);
+
+    auto rates = stored;
+    constraints.distributeMasterBearingHomogeneous(rates);
+    EXPECT_DOUBLE_EQ(rates[0], -1.0);  // keeps W m_dot + W_dot m + g_dot
+    EXPECT_DOUBLE_EQ(rates[3], -2.0);
+    EXPECT_DOUBLE_EQ(rates[4], 2.0);
+
+    // Copies keep the flags; clearing drops them.
+    AffineConstraints copy(constraints);
+    EXPECT_TRUE(copy.isInstantaneous(3));
+    copy.clear();
+    copy.addLine(0);
+    copy.addEntry(0, 1, 1.0);
+    copy.close();
+    EXPECT_FALSE(copy.isInstantaneous(0));
+}
+
 // ============================================================================
 // Clear and reinitialize tests
 // ============================================================================

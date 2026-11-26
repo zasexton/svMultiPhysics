@@ -588,6 +588,9 @@ void ContactPointVelocityConstraint::apply(const systems::FESystem& system,
             constraints.addEntry(line.slave, master, weight);
         }
         constraints.setInhomogeneity(line.slave, line.inhomogeneity);
+        // The fraction and the contact speed move with the level set, so
+        // stored history keeps the relation of its own time.
+        constraints.setInstantaneous(line.slave);
     }
     if (anyRank(system, !install_failure.empty())) {
         throw InsufficientGhostHaloError(

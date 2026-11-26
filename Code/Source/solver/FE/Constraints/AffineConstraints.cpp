@@ -71,7 +71,8 @@ AffineConstraints::AffineConstraints(AffineConstraints&& other) noexcept
       constrained_bitset_max_dof_(other.constrained_bitset_max_dof_),
       entry_offsets_(std::move(other.entry_offsets_)),
       entries_(std::move(other.entries_)),
-      inhomogeneities_(std::move(other.inhomogeneities_)) {
+      inhomogeneities_(std::move(other.inhomogeneities_)),
+      instantaneous_(std::move(other.instantaneous_)) {
     other.clear();
 }
 
@@ -91,6 +92,7 @@ AffineConstraints& AffineConstraints::operator=(AffineConstraints&& other) noexc
     entry_offsets_ = std::move(other.entry_offsets_);
     entries_ = std::move(other.entries_);
     inhomogeneities_ = std::move(other.inhomogeneities_);
+    instantaneous_ = std::move(other.instantaneous_);
 
     other.clear();
     return *this;
@@ -119,6 +121,7 @@ void AffineConstraints::addLine(GlobalIndex slave_dof) {
         // Clear existing entries if overwriting
         it->second.entries.clear();
         it->second.inhomogeneity = 0.0;
+        it->second.instantaneous = false;
     } else {
         ConstraintLine line;
         line.slave_dof = slave_dof;
@@ -194,6 +197,28 @@ void AffineConstraints::addConstraintLine(const ConstraintLine& line) {
         addEntry(line.slave_dof, entry.master_dof, entry.weight);
     }
     setInhomogeneity(line.slave_dof, line.inhomogeneity);
+    if (line.instantaneous) {
+        setInstantaneous(line.slave_dof);
+    }
+}
+
+void AffineConstraints::setInstantaneous(GlobalIndex slave_dof) {
+    checkNotClosed();
+
+    auto* line = findLine(slave_dof);
+    if (!line) {
+        CONSTRAINT_THROW_DOF("Constraint line not found for DOF", slave_dof);
+    }
+    line->instantaneous = true;
+}
+
+bool AffineConstraints::isInstantaneous(GlobalIndex dof) const noexcept {
+    if (!is_closed_) {
+        const auto* line = findLine(dof);
+        return line != nullptr && line->instantaneous;
+    }
+    const auto it = slave_to_index_.find(dof);
+    return it != slave_to_index_.end() && instantaneous_[it->second];
 }
 
 void AffineConstraints::addDirichlet(GlobalIndex dof, double value) {
@@ -294,6 +319,7 @@ void AffineConstraints::clear() {
     entry_offsets_.clear();
     entries_.clear();
     inhomogeneities_.clear();
+    instantaneous_.clear();
     is_closed_ = false;
     bumpConstraintLayoutRevision();
 }
@@ -406,6 +432,7 @@ void AffineConstraints::closeLine(GlobalIndex slave_dof,
 
             // Add weighted master's inhomogeneity
             new_inhomogeneity += weight * master_line.inhomogeneity;
+            line.instantaneous = line.instantaneous || master_line.instantaneous;
         } else {
             // Master is not constrained, keep entry as-is
             new_entries.push_back(entry);
@@ -467,6 +494,8 @@ void AffineConstraints::buildCSRStorage() {
     entries_.reserve(total_entries);
     inhomogeneities_.clear();
     inhomogeneities_.reserve(n_constraints);
+    instantaneous_.clear();
+    instantaneous_.reserve(n_constraints);
 
     entry_offsets_.push_back(0);
     for (GlobalIndex slave : slave_dofs_) {
@@ -491,6 +520,7 @@ void AffineConstraints::buildCSRStorage() {
         }
         entry_offsets_.push_back(static_cast<GlobalIndex>(entries_.size()));
         inhomogeneities_.push_back(line.inhomogeneity);
+        instantaneous_.push_back(line.instantaneous);
     }
 
     // Build dense bitset for O(1) isConstrained() lookup
@@ -548,7 +578,8 @@ AffineConstraints::getConstraint(GlobalIndex dof) const {
         return ConstraintView{
             line.slave_dof,
             std::span<const ConstraintEntry>(line.entries),
-            line.inhomogeneity
+            line.inhomogeneity,
+            line.instantaneous
         };
     }
 
@@ -573,7 +604,8 @@ AffineConstraints::getConstraint(GlobalIndex dof) const {
         slave_dofs_[idx],
         std::span<const ConstraintEntry>(entries_.data() + begin_offset,
                                           end_offset - begin_offset),
-        inhomogeneities_[idx]
+        inhomogeneities_[idx],
+        instantaneous_[idx]
     };
 }
 
@@ -798,7 +830,8 @@ bool AffineConstraints::hasMasterBearingLines() const noexcept
     return false;
 }
 
-void AffineConstraints::distributeMasterBearing(double* vec, GlobalIndex vec_size) const
+void AffineConstraints::distributeMasterBearing(double* vec, GlobalIndex vec_size,
+                                                MasterBearingLines lines) const
 {
     if (!is_closed_) {
         CONSTRAINT_THROW("Cannot distributeMasterBearing: constraints not closed");
@@ -813,6 +846,9 @@ void AffineConstraints::distributeMasterBearing(double* vec, GlobalIndex vec_siz
         if (begin_offset == end_offset) {
             continue;  // Dirichlet line: no masters, leave untouched.
         }
+        if (lines == MasterBearingLines::TimeInvariant && instantaneous_[i]) {
+            continue;  // Instantaneous line: the vector keeps its own value.
+        }
 
         double value = inhomogeneities_[i];
         for (std::size_t j = begin_offset; j < end_offset; ++j) {
@@ -825,7 +861,8 @@ void AffineConstraints::distributeMasterBearing(double* vec, GlobalIndex vec_siz
     }
 }
 
-void AffineConstraints::distributeMasterBearing(backends::GenericVector& vec) const
+void AffineConstraints::distributeMasterBearing(backends::GenericVector& vec,
+                                                MasterBearingLines lines) const
 {
     if (!is_closed_) {
         CONSTRAINT_THROW("Cannot distributeMasterBearing: constraints not closed");
@@ -845,6 +882,9 @@ void AffineConstraints::distributeMasterBearing(backends::GenericVector& vec) co
         const auto end_offset = static_cast<std::size_t>(entry_offsets_[i + 1]);
         if (begin_offset == end_offset) {
             continue;  // Dirichlet line: no masters, leave untouched.
+        }
+        if (lines == MasterBearingLines::TimeInvariant && instantaneous_[i]) {
+            continue;  // Instantaneous line: the vector keeps its own value.
         }
 
         Real value = static_cast<Real>(inhomogeneities_[i]);
@@ -876,6 +916,9 @@ void AffineConstraints::distributeMasterBearingHomogeneous(double* vec,
         const auto end_offset = static_cast<std::size_t>(entry_offsets_[i + 1]);
         if (begin_offset == end_offset) {
             continue;  // Dirichlet line: no masters, leave untouched.
+        }
+        if (instantaneous_[i]) {
+            continue;  // Instantaneous line: the rate also carries W_dot m + g_dot.
         }
 
         double value = 0.0;
@@ -910,6 +953,9 @@ void AffineConstraints::distributeMasterBearingHomogeneous(backends::GenericVect
         const auto end_offset = static_cast<std::size_t>(entry_offsets_[i + 1]);
         if (begin_offset == end_offset) {
             continue;  // Dirichlet line: no masters, leave untouched.
+        }
+        if (instantaneous_[i]) {
+            continue;  // Instantaneous line: the rate also carries W_dot m + g_dot.
         }
 
         Real value = 0.0;
@@ -1097,7 +1143,8 @@ void AffineConstraints::forEach(std::function<void(const ConstraintView&)> callb
             ConstraintView view{
                 line.slave_dof,
                 std::span<const ConstraintEntry>(line.entries),
-                line.inhomogeneity
+                line.inhomogeneity,
+                line.instantaneous
             };
             callback(view);
         }
@@ -1112,7 +1159,8 @@ void AffineConstraints::forEach(std::function<void(const ConstraintView&)> callb
             slave_dofs_[i],
             std::span<const ConstraintEntry>(entries_.data() + begin_offset,
                                               end_offset - begin_offset),
-            inhomogeneities_[i]
+            inhomogeneities_[i],
+            instantaneous_[i]
         };
         callback(view);
     }

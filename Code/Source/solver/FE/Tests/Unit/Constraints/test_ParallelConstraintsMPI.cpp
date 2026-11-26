@@ -330,9 +330,10 @@ namespace {
 
 // Rank r owns DOFs [4r, 4r+4) and holds as ghosts the last two DOFs of
 // rank r-1 and the first two of rank r+1.  Lines: a two-master line and an
-// inhomogeneous Dirichlet line on owned DOFs; a line on the next rank's
-// first DOF that only this (ghost-holding) rank declares; and a Dirichlet
-// value on the previous rank's last DOF that conflicts with its owner's.
+// inhomogeneous Dirichlet line on owned DOFs; an instantaneous line on the
+// next rank's first DOF that only this (ghost-holding) rank declares; and a
+// Dirichlet value on the previous rank's last DOF that conflicts with its
+// owner's.
 struct RoutedFixture {
     dofs::DofPartition partition;
     AffineConstraints constraints;
@@ -361,6 +362,7 @@ RoutedFixture makeRoutedFixture(int my_rank, int n_ranks)
         c.addLine(begin + 4);
         c.addEntry(begin + 4, begin + 3, 2.0);
         c.addEntry(begin + 4, begin + 5, -1.0 / 3.0);
+        c.setInstantaneous(begin + 4);
     }
     if (my_rank > 0) {
         c.addDirichlet(begin - 1, 100.0 + my_rank);
@@ -379,6 +381,7 @@ bool sameLineBits(const AffineConstraints& a, const AffineConstraints& b, Global
         return true;
     }
     if (std::memcmp(&la->inhomogeneity, &lb->inhomogeneity, sizeof(double)) != 0 ||
+        la->instantaneous != lb->instantaneous ||
         la->entries.size() != lb->entries.size()) {
         return false;
     }
@@ -431,9 +434,12 @@ TEST(ParallelConstraintsMPITest, OwnerRoutedResolutionMatchesAllGather)
         EXPECT_TRUE(all_gather.validateConsistency(gathered.constraints));
 
         // The ghost-holder-only line on the next rank's first DOF is
-        // installed on its owner.
+        // installed on its owner, still instantaneous.
         const auto first = routed.constraints.getConstraint(static_cast<GlobalIndex>(4 * my_rank));
         EXPECT_EQ(first.has_value(), my_rank > 0);
+        if (first.has_value()) {
+            EXPECT_TRUE(first->instantaneous);
+        }
     }
 
     // An owner function that disagrees with the partition falls back to the

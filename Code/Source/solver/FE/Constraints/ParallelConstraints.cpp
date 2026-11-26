@@ -84,6 +84,7 @@ ConstraintLine toConstraintLine(const AffineConstraints::ConstraintView& view) {
     ConstraintLine line;
     line.slave_dof = view.slave_dof;
     line.inhomogeneity = view.inhomogeneity;
+    line.instantaneous = view.instantaneous;
     line.entries.assign(view.entries.begin(), view.entries.end());
     // Canonicalize for deterministic comparisons across ranks
     line.mergeEntries();
@@ -179,7 +180,7 @@ std::vector<char> packLocalConstraints(const AffineConstraints& constraints,
         const auto view = constraints.getConstraint(dof);
         if (!view) continue;
         add_packed_bytes(2u, sz_i64);    // slave_dof, n_entries
-        add_packed_bytes(1u, sz_int);    // owned flag
+        add_packed_bytes(1u, sz_int);    // owned and instantaneous flags
         add_packed_bytes(1u, sz_double); // inhomogeneity
         add_packed_bytes(view->entries.size(), sz_i64);
         add_packed_bytes(view->entries.size(), sz_double);
@@ -204,7 +205,8 @@ std::vector<char> packLocalConstraints(const AffineConstraints& constraints,
                 "the distributed wire range");
         }
         const std::int64_t slave = static_cast<std::int64_t>(line.slave_dof);
-        const int owned_flag = partition.isOwned(line.slave_dof) ? 1 : 0;
+        const int owned_flag = (partition.isOwned(line.slave_dof) ? 1 : 0) |
+                               (line.instantaneous ? 2 : 0);
         const double inhom = line.inhomogeneity;
         const std::int64_t n_entries = static_cast<std::int64_t>(line.entries.size());
 
@@ -260,6 +262,7 @@ std::vector<RankedConstraintLine> unpackConstraintsForRank(std::span<const char>
         ConstraintLine line;
         line.slave_dof = static_cast<GlobalIndex>(slave);
         line.inhomogeneity = inhom;
+        line.instantaneous = (owned_flag & 2) != 0;
         line.entries.reserve(static_cast<std::size_t>(std::max<std::int64_t>(n_entries, 0)));
 
         for (std::int64_t e = 0; e < n_entries; ++e) {
@@ -273,7 +276,7 @@ std::vector<RankedConstraintLine> unpackConstraintsForRank(std::span<const char>
         }
 
         line.mergeEntries();
-        lines.push_back({std::move(line), source_rank, owned_flag != 0});
+        lines.push_back({std::move(line), source_rank, (owned_flag & 1) != 0});
     }
 
     return lines;
@@ -409,7 +412,7 @@ void appendLineWords(std::vector<std::int64_t>& words,
 {
     words.push_back(static_cast<std::int64_t>(line.slave_dof));
     words.push_back(static_cast<std::int64_t>(source_rank));
-    words.push_back(claims_ownership ? 1 : 0);
+    words.push_back((claims_ownership ? 1 : 0) | (line.instantaneous ? 2 : 0));
     words.push_back(std::bit_cast<std::int64_t>(static_cast<double>(line.inhomogeneity)));
     words.push_back(static_cast<std::int64_t>(line.entries.size()));
     for (const auto& entry : line.entries) {
@@ -428,7 +431,9 @@ RankedConstraintLine readLineWords(const std::vector<std::int64_t>& words,
     RankedConstraintLine ranked;
     ranked.line.slave_dof = static_cast<GlobalIndex>(words[position++]);
     ranked.source_rank = static_cast<int>(words[position++]);
-    ranked.source_claims_ownership = words[position++] != 0;
+    const auto flags = words[position++];
+    ranked.source_claims_ownership = (flags & 1) != 0;
+    ranked.line.instantaneous = (flags & 2) != 0;
     ranked.line.inhomogeneity = std::bit_cast<double>(words[position++]);
     const auto n_entries = words[position++];
     if (n_entries < 0 ||
@@ -1010,6 +1015,7 @@ std::vector<ConstraintLine> ParallelConstraints::exportConstraints(
             ConstraintLine line;
             line.slave_dof = constraint->slave_dof;
             line.inhomogeneity = constraint->inhomogeneity;
+            line.instantaneous = constraint->instantaneous;
             for (const auto& entry : constraint->entries) {
                 line.entries.push_back(entry);
             }

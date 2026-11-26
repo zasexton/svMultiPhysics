@@ -112,6 +112,9 @@ struct ConstraintLine {
     GlobalIndex slave_dof{-1};              ///< The constrained (slave) DOF
     std::vector<ConstraintEntry> entries;   ///< Master DOFs with weights
     double inhomogeneity{0.0};              ///< Constant term
+    /// The relation holds at the current time only: its weights or
+    /// inhomogeneity change in time (see AffineConstraints::setInstantaneous).
+    bool instantaneous{false};
 
     /**
      * @brief Check if this is a homogeneous constraint (b = 0)
@@ -239,6 +242,7 @@ public:
         GlobalIndex slave_dof{-1};
         std::span<const ConstraintEntry> entries;
         double inhomogeneity{0.0};
+        bool instantaneous{false};
 
         [[nodiscard]] bool isDirichlet() const noexcept {
             return entries.empty();
@@ -353,6 +357,29 @@ public:
      * @throws FEException if already closed
      */
     void addConstraintLine(const ConstraintLine& line);
+
+    /**
+     * @brief Mark a master-bearing line as instantaneous
+     *
+     * An instantaneous line s = W(t) m + g(t) is a physical relation whose
+     * weights or inhomogeneity change in time (a time-dependent offset, a
+     * moving contact point).  Values stored for earlier times satisfy the
+     * relation of their own time, and the rate of the slave is
+     * W m_dot + W_dot m + g_dot.  Time integrators therefore neither project
+     * such a line into stored history nor apply its homogeneous form to
+     * rates.  Lines that are not marked hold at every time level of a step
+     * (for example the extension of small-cut aggregation).  A closed line
+     * that expands an instantaneous line is itself instantaneous.
+     *
+     * @param slave_dof The constrained DOF (must have been added via addLine)
+     * @throws FEException if slave not found or already closed
+     */
+    void setInstantaneous(GlobalIndex slave_dof);
+
+    /**
+     * @brief Whether the line of @p dof is instantaneous (false if unconstrained)
+     */
+    [[nodiscard]] bool isInstantaneous(GlobalIndex dof) const noexcept;
 
     /**
      * @brief Add a Dirichlet constraint: slave = value
@@ -547,6 +574,12 @@ public:
      */
     [[nodiscard]] bool hasMasterBearingLines() const noexcept;
 
+    /// Which master-bearing lines distributeMasterBearing() applies.
+    enum class MasterBearingLines {
+        All,            ///< every master-bearing line
+        TimeInvariant   ///< only lines that are not instantaneous
+    };
+
     /**
      * @brief Distribute only master-bearing lines into a vector.
      *
@@ -555,21 +588,27 @@ public:
      * Dirichlet lines (no masters) are left untouched, so time-dependent
      * Dirichlet values and their finite-difference rate history are not
      * rewritten. Used to re-impose interface-tracking MPC state (e.g.
-     * small-cut aggregation) after the slave set is re-classified.
+     * small-cut aggregation) after the slave set is re-classified.  A vector
+     * that holds values of another time than the lines uses
+     * MasterBearingLines::TimeInvariant, which leaves the slaves of
+     * instantaneous lines at their own values.
      */
-    void distributeMasterBearing(double* vec, GlobalIndex vec_size) const;
+    void distributeMasterBearing(double* vec, GlobalIndex vec_size,
+                                 MasterBearingLines lines = MasterBearingLines::All) const;
 
     /**
      * @brief Distribute only master-bearing lines (std::vector overload)
      */
-    void distributeMasterBearing(std::vector<double>& vec) const {
-        distributeMasterBearing(vec.data(), static_cast<GlobalIndex>(vec.size()));
+    void distributeMasterBearing(std::vector<double>& vec,
+                                 MasterBearingLines lines = MasterBearingLines::All) const {
+        distributeMasterBearing(vec.data(), static_cast<GlobalIndex>(vec.size()), lines);
     }
 
     /**
      * @brief Distribute only master-bearing lines into a backend vector.
      */
-    void distributeMasterBearing(backends::GenericVector& vec) const;
+    void distributeMasterBearing(backends::GenericVector& vec,
+                                 MasterBearingLines lines = MasterBearingLines::All) const;
 
     /**
      * @brief Distribute only master-bearing lines, homogeneous form.
@@ -579,6 +618,8 @@ public:
      * consistent update for derivative vectors (rates) of MPC slaves whose
      * constraint coefficients are time-constant: differentiating the
      * constraint applies the same master combination to the rates.
+     * Instantaneous lines are skipped: their slave rate also carries
+     * W_dot m + g_dot, which the vector keeps at those slaves.
      */
     void distributeMasterBearingHomogeneous(double* vec, GlobalIndex vec_size) const;
 
@@ -776,6 +817,9 @@ private:
 
     // Inhomogeneities (parallel to slave_dofs_)
     std::vector<double> inhomogeneities_;
+
+    // Instantaneous-line flags (parallel to slave_dofs_)
+    std::vector<bool> instantaneous_;
 };
 
 // ============================================================================
