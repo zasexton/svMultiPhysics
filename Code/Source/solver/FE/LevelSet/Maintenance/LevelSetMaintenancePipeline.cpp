@@ -466,7 +466,6 @@ void redistanceMaintainedLevelSet(
     LevelSetMaintenanceRequest& request,
     svmp::FE::FieldId field,
     int completed_step,
-    const RepresentationCheck& permits_representation,
     const LevelSetMaintenanceStageObserver& observe_stage,
     std::vector<svmp::FE::Real>& fe_solution,
     bool& changed,
@@ -649,12 +648,19 @@ void redistanceMaintainedLevelSet(
           request.configuration->transport.level_set.field_name + "': " +
           change.diagnostic + " " + change_raw.diagnostic);
     }
-    const bool applied = redistance.applied && restored != input;
-    if (applied && !permits_representation(MaintenanceSubstage::Reinitialization, restored)) {
-      // The accepted flux and bounds take precedence over this optional
-      // change of representation. Keep accumulated motion for the next try.
-      return;
-    }
+    // A change of representation is judged by its own tolerances: the
+    // restored volume equals the input volume within the restoration's
+    // tolerance, and no crossing or contact point ends farther from the input
+    // interface than the raw redistancing put it.  The physical flux of the
+    // accepted step is not a test of it: any moved crossing changes that flux.
+    const bool representation_changed = redistance.applied && restored != input;
+    const bool keeps_volume =
+        std::abs(volume_after.negative_volume - volume_before.negative_volume) <=
+        restoration.volume_tolerance;
+    const bool keeps_interface =
+        change.max_crossing_shift <= change_raw.max_crossing_shift &&
+        change.max_open_end_shift <= change_raw.max_open_end_shift;
+    const bool applied = representation_changed && keeps_volume && keeps_interface;
     if (applied) {
       // The stored increments and rate follow the change of representation.
       representation_slopes[field] = svmp::FE::level_set::levelSetRepresentationSlope(
@@ -677,6 +683,9 @@ void redistanceMaintainedLevelSet(
         .quoted("field", request.configuration->transport.level_set.field_name)
         .value("step", completed_step)
         .boolean("applied", applied)
+        .boolean("volume_kept", keeps_volume)
+        .boolean("interface_kept", keeps_interface)
+        .value("restoration_volume_tolerance", restoration.volume_tolerance)
         .value("segments", redistance.interface_segments)
         .value("open_ends", redistance.open_ends)
         .value("redistanced_dofs", redistance.redistanced_dofs)
@@ -703,6 +712,9 @@ void redistanceMaintainedLevelSet(
         .value("time", history.time())
         .quoted("status", redistance.diagnostic);
     staged_commit_logs.push_back(std::move(record));
+    if (representation_changed && !applied) {
+      return;  // keep the accumulated motion for the next try
+    }
     accumulated = svmp::FE::Real{0.0};
     ++request.runtime.redistancing_calls;
   }
@@ -973,8 +985,10 @@ bool applyLevelSetMaintenance(
     if (!do_patch_bounds && !do_redistancing) {
       continue;
     }
+    // The required patch bounds must keep the physical kinematic balance of
+    // the accepted step.
     const RepresentationCheck permits_representation =
-        [&](MaintenanceSubstage stage, std::span<const Real> candidate) {
+        [&](MaintenanceSubstage, std::span<const Real> candidate) {
           if (!transport) {
             return true;
           }
@@ -992,8 +1006,7 @@ bool applyLevelSetMaintenance(
           const auto target = Real{0.5} * history.dt() * (transport->previous_interface_flux + measured.interface_flux);
           const auto defect = (measured.negative_volume - transport->previous_negative_volume) - target;
           const bool accepted = std::abs(defect) <= transport->volume_tolerance;
-          const bool required_bound = stage == MaintenanceSubstage::Limiting;
-          if (!accepted && required_bound) {
+          if (!accepted) {
             std::ostringstream message;
             message.precision(std::numeric_limits<Real>::max_digits10);
             message << "Required level-set patch bounds violate the physical kinematic balance of '"
@@ -1004,7 +1017,7 @@ bool applyLevelSetMaintenance(
           LogRecord record("LevelSetMaintenancePipeline", "representation kinematic balance");
           record.diagnostic("level_set_representation_kinematic_balance").rootOnly()
               .quoted("field", request.configuration->transport.level_set.field_name)
-              .value("step", completed_step).text("stage", required_bound ? "patch_bounds" : "redistancing")
+              .value("step", completed_step).text("stage", "patch_bounds")
               .boolean("accepted", accepted).value("negative_volume", measured.negative_volume)
               .value("interface_flux", measured.interface_flux).value("kinematic_volume_change", target)
               .value("volume_error", defect).value("volume_balance_tolerance", transport->volume_tolerance);
@@ -1021,7 +1034,7 @@ bool applyLevelSetMaintenance(
 
     if (do_redistancing) {
       redistanceMaintainedLevelSet(
-          host, history, request, field, completed_step, permits_representation, observe_stage,
+          host, history, request, field, completed_step, observe_stage,
           fe_solution, changed, modified_level_set_fields, representation_slopes,
           staged_commit_logs);
     }

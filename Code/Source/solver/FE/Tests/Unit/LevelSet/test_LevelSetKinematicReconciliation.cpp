@@ -4,6 +4,7 @@
 #include "Dofs/DofHandler.h"
 #include "Dofs/EntityDofMap.h"
 #include "Interfaces/LevelSetInterfaceBuilder.h"
+#include "LevelSet/LevelSetInterfacePreservingRedistancing.h"
 #include "LevelSet/LevelSetVolume.h"
 #include "LevelSet/Maintenance/LevelSetMaintenancePipeline.h"
 #include "Tests/Unit/TimeStepping/TimeSteppingTestHelpers.h"
@@ -453,8 +454,14 @@ TEST(LevelSetKinematicReconciliation, IntegratesQuadraticVelocityOnATetrahedralC
 }
 
 #if FE_HAS_EIGEN
-TEST(LevelSetKinematicReconciliation, RedistancingCannotPublishAChangeToThePhysicalFlux)
+TEST(LevelSetKinematicReconciliation, RedistancingIsJudgedByItsOwnVolumeAndDisplacement)
 {
+    // Interface-preserving redistancing moves crossings by the defect of its
+    // zero polygon, so it changes the interface flux of the accepted step.
+    // Judged by that flux against the transport tolerance (about 1e-10
+    // relative) it was refused although it kept the volume to roundoff.  It
+    // is judged by its own volume tolerance and by the raw displacement of
+    // the redistancing instead.
     namespace ts = FE::timestepping;
     SimplexSystem s(buildStructuredTriangleMesh(14), 2);
     const auto previous = s.scalar([](const Point& x) {
@@ -493,10 +500,37 @@ TEST(LevelSetKinematicReconciliation, RedistancingCannotPublishAChangeToThePhysi
     ASSERT_TRUE(level_set::applyLevelSetMaintenance({.fe_system = &s.system}, history,
         requests, {}, observe, nullptr, nullptr, {&baseline, 1}));
     ASSERT_FALSE(physical_endpoint.empty());
-    EXPECT_EQ(published_redistancings, 0);
-    EXPECT_EQ(requests.front().runtime.redistancing_calls, 0u);
-    EXPECT_GT(requests.front().runtime.redistancing_accumulated_displacement, 1.);
-    EXPECT_EQ(ts::test::getVectorByDof(history.u()), physical_endpoint);
+    EXPECT_EQ(published_redistancings, 1);
+    EXPECT_EQ(requests.front().runtime.redistancing_calls, 1u);
+    EXPECT_EQ(requests.front().runtime.redistancing_accumulated_displacement, 0.);
+    const auto offset = static_cast<std::ptrdiff_t>(s.system.fieldDofOffset(s.phi));
+    const auto published = ts::test::getVectorByDof(history.u());
+    const std::vector<FE::Real> reconciled(physical_endpoint.begin() + offset,
+                                           physical_endpoint.begin() + offset + static_cast<std::ptrdiff_t>(previous.size()));
+    const std::vector<FE::Real> redistanced(published.begin() + offset,
+                                            published.begin() + offset + static_cast<std::ptrdiff_t>(previous.size()));
+    EXPECT_NE(redistanced, reconciled);
+    EXPECT_NEAR(s.negativeVolume(redistanced), s.negativeVolume(reconciled), 1.0e-13);
+    // Its crossings stay closer to the reconciled interface than those of
+    // the raw redistancing ...
+    std::vector<FE::Real> raw;
+    ASSERT_TRUE(level_set::redistanceLevelSetToZeroPolygon(s.system.meshAccess(), s.phiDofs(), 0.0,
+                                                           reconciled, raw).success);
+    const auto& mesh = s.system.meshAccess();
+    const auto moved = level_set::measureLevelSetZeroPolygonChange(mesh, s.phiDofs(), 0.0, reconciled, redistanced);
+    const auto moved_raw = level_set::measureLevelSetZeroPolygonChange(mesh, s.phiDofs(), 0.0, reconciled, raw);
+    EXPECT_GT(moved.max_crossing_shift, 0.0);
+    EXPECT_LE(moved.max_crossing_shift, moved_raw.max_crossing_shift);
+    // ... while the flux they carry differs by more than the transport
+    // tolerance allows for the step's volume change.
+    const auto flux = [&](const std::vector<FE::Real>& phi) {
+        return level_set::measureLevelSetKinematicEndpoint(mesh, s.phiDofs(), s.velocityDofs(),
+            *s.system.fieldRecord(s.velocity).space, 0.0, 1.0e-12, phi, velocity).interface_flux;
+    };
+    std::vector<FE::Real> scratch;
+    const auto transport = s.reconcile(0.001, previous, previous, velocity, velocity, scratch);
+    ASSERT_TRUE(transport.success) << transport.diagnostic;
+    EXPECT_GT(0.5 * 0.001 * std::abs(flux(redistanced) - flux(reconciled)), 1.0e3 * transport.volume_tolerance);
 }
 #endif
 
