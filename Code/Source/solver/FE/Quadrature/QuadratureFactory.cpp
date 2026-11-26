@@ -6,6 +6,8 @@
  */
 
 #include "QuadratureFactory.h"
+#include "SymmetricTetrahedronQuadrature.h"
+#include "SymmetricTriangleQuadrature.h"
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
@@ -55,6 +57,38 @@ int points_for_order(int order, QuadratureType type) {
 }
 
 /**
+ * @brief The tabulated permutation-symmetric simplex rule of the lowest degree
+ *        >= order whose weights are positive and whose points are interior
+ *
+ * A symmetric point set is invariant under relabeling of the vertices, so
+ * integrands that are not polynomials (stabilization scales, constitutive
+ * laws) do not depend on the vertex numbering.  Null when no such rule is
+ * tabulated.
+ */
+template <class SymmetricRule>
+std::shared_ptr<QuadratureRule> positive_interior_symmetric_rule(int order, int max_order) {
+    for (int degree = std::max(1, order); degree <= max_order; ++degree) {
+        auto rule = std::make_shared<SymmetricRule>(degree);
+        const auto& points = rule->points();
+        const auto& weights = rule->weights();
+        bool positive_interior = true;
+        for (std::size_t i = 0; i < points.size() && positive_interior; ++i) {
+            Real last_barycentric = Real(1);
+            positive_interior = weights[i] > Real(0);
+            for (int d = 0; d < rule->dimension(); ++d) {
+                positive_interior = positive_interior && points[i][d] > Real(0);
+                last_barycentric -= points[i][d];
+            }
+            positive_interior = positive_interior && last_barycentric > Real(0);
+        }
+        if (positive_interior) {
+            return rule;
+        }
+    }
+    return nullptr;
+}
+
+/**
  * @brief Build an order-based quadrature rule
  */
 std::shared_ptr<QuadratureRule> build_rule(ElementType element_type,
@@ -79,10 +113,18 @@ std::shared_ptr<QuadratureRule> build_rule(ElementType element_type,
             // Reduced integration lowers the requested exactness (fewer points).
             return std::make_shared<GaussQuadrature1D>(points_for_order(effective_order, QuadratureType::GaussLegendre));
         case ElementType::Triangle3:
+            if (auto rule = positive_interior_symmetric_rule<SymmetricTriangleQuadrature>(
+                    effective_order, SymmetricTriangleQuadrature::max_order())) {
+                return rule;
+            }
             return std::make_shared<TriangleQuadrature>(effective_order);
         case ElementType::Quad4:
             return std::make_shared<QuadrilateralQuadrature>(order, type);
         case ElementType::Tetra4:
+            if (auto rule = positive_interior_symmetric_rule<SymmetricTetrahedronQuadrature>(
+                    effective_order, SymmetricTetrahedronQuadrature::max_tabulated_order())) {
+                return rule;
+            }
             return std::make_shared<TetrahedronQuadrature>(effective_order);
         case ElementType::Hex8:
             return std::make_shared<HexahedronQuadrature>(order, type);

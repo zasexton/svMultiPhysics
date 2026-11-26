@@ -10,12 +10,14 @@
 
 /**
  * @file TriangleQuadrature.h
- * @brief Symmetric quadrature rules for reference triangles
+ * @brief Collapsed Gauss product rules for reference triangles
  *
  * Implements triangle quadrature by transforming tensor-product Gauss rules on
  * [0,1]^2 via a Duffy map to the reference simplex with vertices
  * (0,0), (1,0), (0,1). This approach provides arbitrary-order rules without
- * relying on large tabulated datasets while preserving symmetry.
+ * relying on large tabulated datasets.  The point set is not invariant under
+ * relabeling of the vertices; QuadratureFactory prefers the symmetric
+ * tabulated rules (SymmetricTriangleQuadrature) where they apply.
  */
 
 #include "QuadratureRule.h"

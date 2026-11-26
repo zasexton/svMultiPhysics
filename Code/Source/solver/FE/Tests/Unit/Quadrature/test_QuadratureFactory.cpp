@@ -8,6 +8,8 @@
 #include "FE/Quadrature/GaussLobattoQuadrature.h"
 #include "FE/Core/FEException.h"
 #include "FE/Core/Types.h"
+#include <algorithm>
+#include <array>
 #include <cmath>
 #include <vector>
 
@@ -70,7 +72,7 @@ TEST(QuadratureFactory, ReducedIntegrationSupportsSimplexAndWedge) {
     const std::vector<Case> cases = {
         {ElementType::Line2, 4},
         {ElementType::Triangle3, 5},
-        {ElementType::Tetra4, 6},
+        {ElementType::Tetra4, 3},
         {ElementType::Wedge6, 6},
     };
 
@@ -165,6 +167,23 @@ TEST(QuadratureFactory, PyramidGaussLobattoThrows) {
     }
 }
 
+namespace {
+// Whether every point of a has a point of b at the same place and weight.
+bool sameWeightedPointSet(const QuadratureRule& a, const QuadratureRule& b) {
+    if (a.num_points() != b.num_points()) return false;
+    for (std::size_t i = 0; i < a.num_points(); ++i) {
+        bool found = false;
+        for (std::size_t j = 0; j < b.num_points() && !found; ++j) {
+            Real distance = std::abs(a.weight(i) - b.weight(j));
+            for (int d = 0; d < 3; ++d) distance += std::abs(a.point(i)[d] - b.point(j)[d]);
+            found = distance < 1e-14;
+        }
+        if (!found) return false;
+    }
+    return true;
+}
+} // namespace
+
 TEST(QuadratureFactory, CreateAcceptsPositionBasedType) {
     auto tri_pos = QuadratureFactory::create(ElementType::Triangle3, 2, QuadratureType::PositionBased, false);
     auto tri_gauss = QuadratureFactory::create(ElementType::Triangle3, 2, QuadratureType::GaussLegendre, false);
@@ -173,7 +192,8 @@ TEST(QuadratureFactory, CreateAcceptsPositionBasedType) {
     EXPECT_EQ(tri_pos->cell_family(), svmp::CellFamily::Triangle);
     EXPECT_EQ(tri_pos->dimension(), 2);
     EXPECT_EQ(tri_pos->num_points(), 3u);
-    EXPECT_NE(tri_pos->num_points(), tri_gauss->num_points());
+    // The legacy Gaussian placement is the symmetric degree-2 default rule.
+    EXPECT_TRUE(sameWeightedPointSet(*tri_pos, *tri_gauss));
 
     auto tet_pos = QuadratureFactory::create(ElementType::Tetra4, 2, QuadratureType::PositionBased, false);
     auto tet_gauss = QuadratureFactory::create(ElementType::Tetra4, 2, QuadratureType::GaussLegendre, false);
@@ -182,10 +202,81 @@ TEST(QuadratureFactory, CreateAcceptsPositionBasedType) {
     EXPECT_EQ(tet_pos->cell_family(), svmp::CellFamily::Tetra);
     EXPECT_EQ(tet_pos->dimension(), 3);
     EXPECT_EQ(tet_pos->num_points(), 4u);
-    EXPECT_NE(tet_pos->num_points(), tet_gauss->num_points());
+    EXPECT_TRUE(sameWeightedPointSet(*tet_pos, *tet_gauss));
 }
 
 TEST(QuadratureFactory, InvalidInputsThrow) {
     EXPECT_THROW(QuadratureFactory::create(ElementType::Hex8, 0), FEException);
     EXPECT_THROW(QuadratureFactory::create(ElementType::Unknown, 2), FEException);
+}
+
+TEST(QuadratureFactory, DefaultSimplexRulesDoNotDependOnVertexOrdering) {
+    // A streamline-diffusion integrand tau (a.grad phi)^2 on the unit
+    // triangle, a = (-x, y), phi = x + y - 1/2, tau = (a^T G a)^(-1/2) with
+    // the regular-simplex metric G = [[2, 1], [1, 2]] / sqrt(3), is not a
+    // polynomial. Integrated through each cyclic vertex relabeling of the
+    // same triangle it must not depend on the numbering.
+    const auto supg = [](Real x, Real y) {
+        const Real streamline = y - x;
+        const Real directional =
+            (Real(2) * x * x - Real(2) * x * y + Real(2) * y * y) / std::sqrt(Real(3));
+        return directional > Real(0) ? streamline * streamline / std::sqrt(directional) : Real(0);
+    };
+    const std::array<std::array<Real, 2>, 3> vertices{{{0, 0}, {1, 0}, {0, 1}}};
+    for (int order = 1; order <= 20; ++order) {
+        const auto rule = QuadratureFactory::create(ElementType::Triangle3, order);
+        ASSERT_TRUE(rule);
+        EXPECT_GE(rule->order(), order);
+        std::array<Real, 3> integrals{};
+        for (int shift = 0; shift < 3; ++shift) {
+            const auto& v0 = vertices[static_cast<std::size_t>(shift)];
+            const auto& v1 = vertices[static_cast<std::size_t>((shift + 1) % 3)];
+            const auto& v2 = vertices[static_cast<std::size_t>((shift + 2) % 3)];
+            for (std::size_t i = 0; i < rule->num_points(); ++i) {
+                const auto& xi = rule->point(i);
+                const Real l0 = Real(1) - xi[0] - xi[1];
+                const Real x = l0 * v0[0] + xi[0] * v1[0] + xi[1] * v2[0];
+                const Real y = l0 * v0[1] + xi[0] * v1[1] + xi[1] * v2[1];
+                integrals[static_cast<std::size_t>(shift)] += rule->weight(i) * supg(x, y);
+            }
+        }
+        const auto [low, high] = std::minmax_element(integrals.begin(), integrals.end());
+        if (order < 20) {
+            EXPECT_NEAR(*low, *high, 1e-14) << "order " << order;
+        }
+    }
+
+    // On the unit tetrahedron the even vertex permutations move every point
+    // of a symmetric rule onto another point of the same weight.
+    const auto tet_integrand = [](Real x, Real y, Real z) {
+        return std::sqrt(Real(1) + x * x + Real(2) * y * y + Real(3) * z * z) * (x - z);
+    };
+    const std::array<std::array<Real, 3>, 4> tet{{{0, 0, 0}, {1, 0, 0}, {0, 1, 0}, {0, 0, 1}}};
+    const std::array<std::array<int, 4>, 3> orderings{{{0, 1, 2, 3}, {1, 2, 0, 3}, {2, 3, 0, 1}}};
+    for (int order = 1; order <= 6; ++order) {
+        const auto rule = QuadratureFactory::create(ElementType::Tetra4, order);
+        ASSERT_TRUE(rule);
+        EXPECT_GE(rule->order(), order);
+        std::vector<Real> integrals;
+        for (const auto& ordering : orderings) {
+            Real integral = 0;
+            for (std::size_t i = 0; i < rule->num_points(); ++i) {
+                const auto& xi = rule->point(i);
+                const std::array<Real, 4> lambda{Real(1) - xi[0] - xi[1] - xi[2], xi[0], xi[1], xi[2]};
+                std::array<Real, 3> x{};
+                for (int a = 0; a < 4; ++a) {
+                    for (int d = 0; d < 3; ++d) {
+                        x[static_cast<std::size_t>(d)] +=
+                            lambda[static_cast<std::size_t>(a)] *
+                            tet[static_cast<std::size_t>(ordering[static_cast<std::size_t>(a)])]
+                               [static_cast<std::size_t>(d)];
+                    }
+                }
+                integral += rule->weight(i) * tet_integrand(x[0], x[1], x[2]);
+            }
+            integrals.push_back(integral);
+        }
+        const auto [low, high] = std::minmax_element(integrals.begin(), integrals.end());
+        EXPECT_NEAR(*low, *high, 1e-14) << "order " << order;
+    }
 }

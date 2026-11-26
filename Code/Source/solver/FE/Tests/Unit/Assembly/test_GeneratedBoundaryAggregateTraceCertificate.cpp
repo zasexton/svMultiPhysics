@@ -1816,9 +1816,11 @@ TEST(GeneratedBoundaryAggregateTraceCertificate,
         bound.largest_quotient_eigenvalue,
         Real{4.0},
         Real{1.0e-10});
+    // The bound certifies the assembled pencil; with non-dyadic quadrature
+    // weights its entries round, so the analytic 4 holds to a few ulps.
     EXPECT_GE(
         bound.conservative_upper_bound,
-        Real{4.0});
+        Real{4.0} * (Real{1.0} - Real{16.0} * std::numeric_limits<Real>::epsilon()));
     EXPECT_NEAR(
         bound.conservative_upper_bound,
         Real{4.0},

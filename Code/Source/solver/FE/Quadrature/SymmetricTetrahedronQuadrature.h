@@ -55,8 +55,13 @@ public:
      */
     static constexpr int max_order() { return 14; }
 
-private:
+    /**
+     * @brief Highest order with a tabulated symmetric rule; higher orders
+     *        use the Duffy-based TetrahedronQuadrature points
+     */
     static constexpr int max_tabulated_order() { return 8; }
+
+private:
 
     void initialize_order_1();   // 1 point
     void initialize_order_2();   // 4 points

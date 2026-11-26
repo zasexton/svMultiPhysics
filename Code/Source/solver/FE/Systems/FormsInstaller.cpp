@@ -601,12 +601,21 @@ void registerKernelDomains(
     }
 }
 
+// The degree of the default cell rule of a space's element.
+[[nodiscard]] int elementRuleOrder(const spaces::FunctionSpace& space)
+{
+    const auto rule = space.element().quadrature();
+    return rule ? rule->order() : 0;
+}
+
 // The space whose element gives the cell rule of a coupled install: that of
-// its highest-order field (a global field has no element).  The kernels of
-// its lower-order rows take that rule, so that all its blocks are integrated
-// alike, whichever path assembles them and whichever field is listed first:
-// the coupling blocks of a Taylor-Hood pair are then opposite transposes.
-// Rows of that order keep their own rule.
+// its field with the highest-degree element rule, then the highest
+// polynomial order (a global field has no element).  The kernels of its
+// other rows take that rule, so that all its blocks are integrated alike,
+// whichever path assembles them and whichever field is listed first: the
+// coupling blocks of a Taylor-Hood pair are then opposite transposes, and a
+// lowest-order H(div) block is not integrated with a piecewise-constant
+// field's rule.  Rows with a rule of that degree keep their own rule.
 std::shared_ptr<const spaces::FunctionSpace> coupledInstallRuleSpace(
     const FESystem& system,
     std::span<const FieldId> test_fields,
@@ -618,7 +627,15 @@ std::shared_ptr<const spaces::FunctionSpace> coupledInstallRuleSpace(
         if (record.scope == FieldScope::Global || !record.space) {
             return;
         }
-        if (!rule_space || record.space->polynomial_order() > rule_space->polynomial_order()) {
+        if (!rule_space) {
+            rule_space = record.space;
+            return;
+        }
+        const int order = elementRuleOrder(*record.space);
+        const int chosen_order = elementRuleOrder(*rule_space);
+        if (order > chosen_order ||
+            (order == chosen_order &&
+             record.space->polynomial_order() > rule_space->polynomial_order())) {
             rule_space = record.space;
         }
     };
@@ -642,7 +659,9 @@ void applyCoupledInstallRuleSpace(
     }
     const auto& record = system.fieldRecord(test_field);
     if (record.scope == FieldScope::Global || !record.space ||
-        record.space->polynomial_order() >= rule_space->polynomial_order()) {
+        record.space == rule_space ||
+        (elementRuleOrder(*record.space) == elementRuleOrder(*rule_space) &&
+         record.space->polynomial_order() >= rule_space->polynomial_order())) {
         return;
     }
     kernel->setCellRuleSpace(rule_space);

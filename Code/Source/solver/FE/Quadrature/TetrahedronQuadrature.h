@@ -14,8 +14,10 @@
  *
  * Implements tetrahedral quadrature via a three-parameter Duffy transform from
  * [0,1]^3 to the reference simplex with vertices (0,0,0), (1,0,0), (0,1,0),
- * (0,0,1). The construction delivers arbitrary-order rules without external
- * tables while preserving positive weights and symmetry.
+ * (0,0,1). The construction delivers arbitrary-order rules with positive
+ * weights without external tables.  The point set is not invariant under
+ * relabeling of the vertices; QuadratureFactory prefers the symmetric
+ * tabulated rules (SymmetricTetrahedronQuadrature) where they apply.
  */
 
 #include "QuadratureRule.h"
