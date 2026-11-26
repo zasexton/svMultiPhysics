@@ -3525,6 +3525,55 @@ TEST(LevelSetInterfaceLifecycle, ReusesLinearFullCellsAcrossMagnitudeChanges)
                      2.0);
 }
 
+TEST(LevelSetInterfaceLifecycle, ReusedCellsCarryTheSignedExtremaOfAFreshCut)
+{
+    // At the isovalue 2 a full cell cut afresh records the extrema of
+    // phi - 2.  The same cell reused from the cache recorded raw phi.
+    constexpr int interface_marker = 877;
+    const auto mesh = std::make_shared<SingleTetraMeshAccess>();
+    auto scalar_space =
+        FE::spaces::Space(FE::spaces::SpaceType::H1, mesh, /*order=*/1, /*components=*/1);
+    FE::systems::FESystem system(mesh);
+    const auto phi = system.addField(FE::systems::FieldSpec{
+        .name = "phi",
+        .space = scalar_space,
+        .components = 1,
+    });
+    ASSERT_NO_THROW(system.setup({}, makeSingleTetraSetupInputs()));
+    std::vector<FE::Real> solution(
+        static_cast<std::size_t>(system.dofHandler().getNumDofs()), 0.0);
+    const auto set_all = [&](FE::Real value) {
+        for (FE::GlobalIndex vertex = 0; vertex < 4; ++vertex) {
+            setFieldComponentValue(solution, system, phi, vertex, value);
+        }
+    };
+    level_set::LevelSetGeneratedInterfaceOptions options{};
+    options.level_set_field_name = "phi";
+    options.requested_interface_marker = interface_marker;
+    options.domain_id = "water-air";
+    options.isovalue = 2.0;
+    options.tolerance = 1.0e-12;
+    options.interface_quadrature_order = 0;
+    options.volume_quadrature_order = 1;
+
+    set_all(1.5);
+    level_set::LevelSetGeneratedInterfaceLifecycle lifecycle;
+    const auto fresh = lifecycle.build(system, options, solution);
+    ASSERT_TRUE(fresh.success) << fresh.diagnostic;
+    EXPECT_EQ(fresh.cell_cache_misses, 1u);
+    ASSERT_EQ(fresh.domain.volumeRegions().size(), 1u);
+    EXPECT_DOUBLE_EQ(fresh.domain.volumeRegions().front().min_level_set_value, -0.5);
+    EXPECT_DOUBLE_EQ(fresh.domain.volumeRegions().front().max_level_set_value, -0.5);
+
+    set_all(1.0);
+    const auto reused = lifecycle.build(system, options, solution);
+    ASSERT_TRUE(reused.success) << reused.diagnostic;
+    EXPECT_EQ(reused.cell_cache_hits, 1u);
+    ASSERT_EQ(reused.domain.volumeRegions().size(), 1u);
+    EXPECT_DOUBLE_EQ(reused.domain.volumeRegions().front().min_level_set_value, -1.0);
+    EXPECT_DOUBLE_EQ(reused.domain.volumeRegions().front().max_level_set_value, -1.0);
+}
+
 TEST(LevelSetInterfaceLifecycle, HighOrderImplicitBypassesBackendForLinearFullCells)
 {
     constexpr int interface_marker = 879;

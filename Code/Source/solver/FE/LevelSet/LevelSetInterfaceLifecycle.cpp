@@ -1650,10 +1650,12 @@ struct GeneratedInterfaceCellSignature {
         }
     }
 
+    // Reused fragments and regions carry the extrema of phi - isovalue, as
+    // freshly cut ones do.
     return GeneratedInterfaceCellSignature{
         .value = h,
-        .min_level_set_value = min_value,
-        .max_level_set_value = max_value,
+        .min_level_set_value = min_value - isovalue,
+        .max_level_set_value = max_value - isovalue,
     };
 }
 
