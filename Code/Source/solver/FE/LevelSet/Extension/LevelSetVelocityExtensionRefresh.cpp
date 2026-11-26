@@ -213,7 +213,7 @@ std::vector<MeshIndex> interfaceVelocitySampleCandidateCells(
   if (cut_context == nullptr || !marker.has_value()) {
     return {};
   }
-  cut_context->assertAllFreeSurfaceGeometrySnapshotsCurrent(
+  cut_context->assertAllLevelSetGeometrySnapshotsCurrent(
       system.meshAccess());
 
   std::vector<svmp::FE::MeshIndex> cells;
@@ -749,16 +749,16 @@ bool refreshLevelSetVelocityExtensions(
     if (algebraic_extension) {
       // Monolithic coupling: the same discrete problem is installed as
       // frozen owner-local rows of the extension unknown.
-      std::uint64_t free_surface_geometry_revision = 0u;
+      std::uint64_t level_set_geometry_revision = 0u;
       if (const auto* cut_context = system.cutIntegrationContext()) {
-        free_surface_geometry_revision = cut_context->contentRevision();
+        level_set_geometry_revision = cut_context->contentRevision();
         if (const auto marker =
                 interfaceVelocitySampleMarker(system, request);
             marker.has_value() &&
-            cut_context->hasFreeSurfaceGeometrySnapshotForMarker(
+            cut_context->hasLevelSetGeometrySnapshotForMarker(
                 *marker)) {
-          free_surface_geometry_revision =
-              cut_context->freeSurfaceGeometrySnapshotRevisionForMarker(
+          level_set_geometry_revision =
+              cut_context->levelSetGeometrySnapshotRevisionForMarker(
                   *marker);
         }
       }
@@ -770,7 +770,7 @@ bool refreshLevelSetVelocityExtensions(
               mesh_access.topologyRevision(),
               mesh_access.ownershipRevision(),
               mesh_access.numberingRevision(),
-              free_surface_geometry_revision,
+              level_set_geometry_revision,
               std::span<const double>(oriented_level_set.data(),
                                       oriented_level_set.size()),
               std::span<const std::uint8_t>(trace_seed.data(),

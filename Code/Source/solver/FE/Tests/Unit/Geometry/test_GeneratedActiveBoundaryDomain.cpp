@@ -3,7 +3,7 @@
 #include "Assembly/StandardAssembler.h"
 #include "Basis/NodeOrderingConventions.h"
 #include "Dofs/DofMap.h"
-#include "Interfaces/FreeSurfaceGeometrySnapshot.h"
+#include "Interfaces/LevelSetGeometrySnapshot.h"
 #include "Interfaces/GeneratedActiveBoundaryDomain.h"
 #include "Interfaces/LevelSetInterfaceBuilder.h"
 #include "Quadrature/QuadratureFactory.h"
@@ -40,14 +40,14 @@ namespace interfaces = svmp::FE::interfaces;
 /// @p role (on one physical boundary when @p boundary_marker is set): the
 /// geometry the declared measures integrate (D49 E4 retired the pointwise
 /// functional evaluators that summed it).
-FE::Real ownedRuleMeasure(const interfaces::FreeSurfaceGeometrySnapshot& snapshot,
-                          interfaces::FreeSurfaceGeometryRuleRole role,
+FE::Real ownedRuleMeasure(const interfaces::LevelSetGeometrySnapshot& snapshot,
+                          interfaces::LevelSetGeometryRuleRole role,
                           int boundary_marker = -1)
 {
     FE::Real measure{0.0};
     for (const auto& record : snapshot.rules()) {
         if (!record.locally_owned ||
-            record.retention != interfaces::FreeSurfaceGeometryRetention::Retained ||
+            record.retention != interfaces::LevelSetGeometryRetention::Retained ||
             record.role != role ||
             (boundary_marker >= 0 && record.physical_boundary_marker != boundary_marker)) {
             continue;
@@ -67,18 +67,18 @@ FE::Real ownedRuleMeasure(const interfaces::FreeSurfaceGeometrySnapshot& snapsho
 // part included (the outward wetted-footprint flux on the contact rules,
 // which the formulation now declares as its wall functionals).
 interfaces::FreeSurfaceDiscreteFunctionalState referenceDiscreteFunctional(
-    const interfaces::FreeSurfaceGeometrySnapshot& snapshot,
+    const interfaces::LevelSetGeometrySnapshot& snapshot,
     const interfaces::FreeSurfaceDiscreteFunctionalParameters& parameters)
 {
     auto state = interfaces::freeSurfaceDiscreteFunctionalLayout(snapshot, parameters);
     const auto volume_role =
         parameters.liquid_side == FE::geometry::CutIntegrationSide::Negative
-            ? interfaces::FreeSurfaceGeometryRuleRole::NegativeVolume
-            : interfaces::FreeSurfaceGeometryRuleRole::PositiveVolume;
+            ? interfaces::LevelSetGeometryRuleRole::NegativeVolume
+            : interfaces::LevelSetGeometryRuleRole::PositiveVolume;
     const auto wall_role =
         parameters.liquid_side == FE::geometry::CutIntegrationSide::Negative
-            ? interfaces::FreeSurfaceGeometryRuleRole::NegativeExteriorBoundary
-            : interfaces::FreeSurfaceGeometryRuleRole::PositiveExteriorBoundary;
+            ? interfaces::LevelSetGeometryRuleRole::NegativeExteriorBoundary
+            : interfaces::LevelSetGeometryRuleRole::PositiveExteriorBoundary;
     const auto wall_of = [&state](int boundary_marker) -> interfaces::FreeSurfaceDiscreteWallFunctionalState& {
         for (auto& wall : state.walls) {
             if (wall.boundary_marker == boundary_marker) {
@@ -89,18 +89,18 @@ interfaces::FreeSurfaceDiscreteFunctionalState referenceDiscreteFunctional(
     };
     for (const auto& record : snapshot.rules()) {
         if (!record.locally_owned ||
-            record.retention != interfaces::FreeSurfaceGeometryRetention::Retained) {
+            record.retention != interfaces::LevelSetGeometryRetention::Retained) {
             continue;
         }
         const FE::Real measure = record.physical_rule.physical_measure;
         if (record.role == volume_role) {
             state.owned_liquid_volume += measure;
-        } else if (record.role == interfaces::FreeSurfaceGeometryRuleRole::Interface) {
+        } else if (record.role == interfaces::LevelSetGeometryRuleRole::Interface) {
             state.owned_liquid_gas_area += measure;
         } else if (record.role == wall_role) {
             state.owned_wetted_wall_area += measure;
             wall_of(record.physical_boundary_marker).owned_wetted_wall_area += measure;
-        } else if (record.role == interfaces::FreeSurfaceGeometryRuleRole::Contact) {
+        } else if (record.role == interfaces::LevelSetGeometryRuleRole::Contact) {
             state.owned_contact_measure += measure;
             wall_of(record.physical_boundary_marker).owned_contact_measure += measure;
         }
@@ -121,7 +121,7 @@ interfaces::FreeSurfaceDiscreteFunctionalState referenceDiscreteFunctional(
 }
 
 interfaces::FreeSurfaceDiscreteFunctionalVariationState referenceWallAreaVariation(
-    const interfaces::FreeSurfaceGeometrySnapshot& snapshot,
+    const interfaces::LevelSetGeometrySnapshot& snapshot,
     const interfaces::FreeSurfaceDiscreteFunctionalParameters& parameters,
     const interfaces::FreeSurfaceDiscreteFunctionalVectorEvaluator& deformation)
 {
@@ -151,8 +151,8 @@ interfaces::FreeSurfaceDiscreteFunctionalVariationState referenceWallAreaVariati
     const bool positive_liquid = parameters.liquid_side == FE::geometry::CutIntegrationSide::Positive;
     for (const auto& record : snapshot.rules()) {
         if (!record.locally_owned ||
-            record.retention != interfaces::FreeSurfaceGeometryRetention::Retained ||
-            record.role != interfaces::FreeSurfaceGeometryRuleRole::Contact) {
+            record.retention != interfaces::LevelSetGeometryRetention::Retained ||
+            record.role != interfaces::LevelSetGeometryRuleRole::Contact) {
             continue;
         }
         const int ambient_dimension = record.physical_rule.geometric_dimension + 2;
@@ -195,7 +195,7 @@ interfaces::FreeSurfaceDiscreteFunctionalVariationState referenceWallAreaVariati
 }
 
 interfaces::FreeSurfaceDiscreteFunctionalVariationState referenceFirstVariation(
-    const interfaces::FreeSurfaceGeometrySnapshot& snapshot,
+    const interfaces::LevelSetGeometrySnapshot& snapshot,
     const interfaces::FreeSurfaceDiscreteFunctionalParameters& parameters,
     const interfaces::FreeSurfaceDiscreteFunctionalVectorEvaluator& deformation)
 {
@@ -203,8 +203,8 @@ interfaces::FreeSurfaceDiscreteFunctionalVariationState referenceFirstVariation(
     const bool positive_liquid = parameters.liquid_side == FE::geometry::CutIntegrationSide::Positive;
     for (const auto& record : snapshot.rules()) {
         if (!record.locally_owned ||
-            record.retention != interfaces::FreeSurfaceGeometryRetention::Retained ||
-            record.role != interfaces::FreeSurfaceGeometryRuleRole::Interface) {
+            record.retention != interfaces::LevelSetGeometryRetention::Retained ||
+            record.role != interfaces::LevelSetGeometryRuleRole::Interface) {
             continue;
         }
         const int ambient_dimension = record.physical_rule.geometric_dimension + 1;
@@ -1090,10 +1090,10 @@ interfaces::LevelSetInterfaceDomain linearTriangleCutDomain(
     return domain;
 }
 
-interfaces::FreeSurfaceGeometryScalarEvaluator affineTriangleScalar(
+interfaces::LevelSetGeometryScalarEvaluator affineTriangleScalar(
     std::array<FE::Real, 3> values)
 {
-    interfaces::FreeSurfaceGeometryScalarEvaluator scalar;
+    interfaces::LevelSetGeometryScalarEvaluator scalar;
     scalar.value =
         [values](FE::GlobalIndex,
                  const std::array<FE::Real, 3>& point,
@@ -1144,10 +1144,10 @@ interfaces::LevelSetInterfaceDomain linearTetraCutDomain(
     return domain;
 }
 
-interfaces::FreeSurfaceGeometryScalarEvaluator affineTetraScalar(
+interfaces::LevelSetGeometryScalarEvaluator affineTetraScalar(
     std::array<FE::Real, 4> values)
 {
-    interfaces::FreeSurfaceGeometryScalarEvaluator scalar;
+    interfaces::LevelSetGeometryScalarEvaluator scalar;
     scalar.value =
         [values](FE::GlobalIndex,
                  const std::array<FE::Real, 3>& point,
@@ -1193,10 +1193,10 @@ std::size_t expectCanonicalToleranceBandValues(
     return tolerance_band_value_count;
 }
 
-interfaces::FreeSurfaceGeometryScalarEvaluator bilinearQuadScalar(
+interfaces::LevelSetGeometryScalarEvaluator bilinearQuadScalar(
     std::array<FE::Real, 4> values)
 {
-    interfaces::FreeSurfaceGeometryScalarEvaluator scalar;
+    interfaces::LevelSetGeometryScalarEvaluator scalar;
     scalar.value =
         [values](FE::GlobalIndex,
                  const std::array<FE::Real, 3>& point,
@@ -1368,18 +1368,18 @@ public:
     }
 };
 
-interfaces::FreeSurfaceGeometrySnapshotPolicy snapshotPolicyWithoutBoundary()
+interfaces::LevelSetGeometrySnapshotPolicy snapshotPolicyWithoutBoundary()
 {
-    interfaces::FreeSurfaceGeometrySnapshotPolicy policy;
+    interfaces::LevelSetGeometrySnapshotPolicy policy;
     policy.require_complete_exterior_boundary_partition = false;
     return policy;
 }
 
-interfaces::FreeSurfaceGeometryScalarEvaluator verticalScalar(
+interfaces::LevelSetGeometryScalarEvaluator verticalScalar(
     FE::Real sign = 1.0,
     std::array<FE::Real, 3> gradient = {{1.0, 0.0, 0.0}})
 {
-    interfaces::FreeSurfaceGeometryScalarEvaluator scalar;
+    interfaces::LevelSetGeometryScalarEvaluator scalar;
     scalar.value = [sign](FE::GlobalIndex,
                           const std::array<FE::Real, 3>& xi,
                           const FE::geometry::CutQuadratureProvenance&) {
@@ -2591,7 +2591,7 @@ TEST(GeneratedActiveBoundaryDomain,
     const int negative_marker = negative.marker();
     const int positive_marker = positive.marker();
 
-    interfaces::FreeSurfaceGeometryScalarEvaluator scalar;
+    interfaces::LevelSetGeometryScalarEvaluator scalar;
     scalar.value = [epsilon](FE::GlobalIndex,
                             const std::array<FE::Real, 3>& point,
                             const FE::geometry::CutQuadratureProvenance&) {
@@ -2603,11 +2603,11 @@ TEST(GeneratedActiveBoundaryDomain,
            const FE::geometry::CutQuadratureProvenance&) {
             return std::array<FE::Real, 3>{{0.0, 1.0, 1.0}};
         };
-    interfaces::FreeSurfaceGeometrySnapshotPolicy policy;
+    interfaces::LevelSetGeometrySnapshotPolicy policy;
     policy.minimum_retained_volume_fraction =
         FE::assembly::CutIntegrationContext::
             minGeneratedCutVolumeFraction();
-    const auto snapshot = interfaces::buildFreeSurfaceGeometrySnapshot(
+    const auto snapshot = interfaces::buildLevelSetGeometrySnapshot(
         std::move(interface_domain),
         {std::move(contact)},
         {std::move(negative), std::move(positive)},
@@ -2621,26 +2621,26 @@ TEST(GeneratedActiveBoundaryDomain,
         snapshot->rules().end(),
         [](const auto& record) {
             return record.role == interfaces::
-                                      FreeSurfaceGeometryRuleRole::
+                                      LevelSetGeometryRuleRole::
                                           NegativeExteriorBoundary;
         });
     ASSERT_NE(negative_record, snapshot->rules().end());
     EXPECT_EQ(negative_record->retention,
-              interfaces::FreeSurfaceGeometryRetention::PrunedSmallVolume);
+              interfaces::LevelSetGeometryRetention::PrunedSmallVolume);
     const auto positive_record = std::find_if(
         snapshot->rules().begin(),
         snapshot->rules().end(),
         [](const auto& record) {
             return record.role == interfaces::
-                                      FreeSurfaceGeometryRuleRole::
+                                      LevelSetGeometryRuleRole::
                                           PositiveExteriorBoundary;
         });
     ASSERT_NE(positive_record, snapshot->rules().end());
     EXPECT_EQ(positive_record->retention,
-              interfaces::FreeSurfaceGeometryRetention::Retained);
+              interfaces::LevelSetGeometryRetention::Retained);
 
     FE::assembly::CutIntegrationContext context;
-    context.addFreeSurfaceGeometrySnapshot(snapshot);
+    context.addLevelSetGeometrySnapshot(snapshot);
     EXPECT_TRUE(context.interfaceRulesForMarker(negative_marker).empty());
     EXPECT_EQ(context.interfaceRulesForMarker(positive_marker).size(), 1u);
     RecordProperty("pruned_boundary_parent_volume_case_count", 1);
@@ -2654,8 +2654,8 @@ TEST(FreeSurfaceGeometrySnapshot,
     // walls carry no flux, so the flux of e_y through its retained boundary
     // must be 0, not the 1 - 2^-29 of a retained free surface.
     using Side = FE::geometry::CutIntegrationSide;
-    using Role = interfaces::FreeSurfaceGeometryRuleRole;
-    using Retention = interfaces::FreeSurfaceGeometryRetention;
+    using Role = interfaces::LevelSetGeometryRuleRole;
+    using Retention = interfaces::LevelSetGeometryRetention;
     constexpr int interface_marker = 107;
     constexpr int wall_marker = 13;
     const FE::Real delta = std::ldexp(FE::Real{1.0}, -29);
@@ -2679,12 +2679,12 @@ TEST(FreeSurfaceGeometrySnapshot,
         auto positive = interfaces::buildGeneratedActiveBoundaryDomain(
             activeRequest(interface_marker, wall_marker, Side::Positive),
             domain, contact, mesh, field);
-        interfaces::FreeSurfaceGeometrySnapshotPolicy policy;
+        interfaces::LevelSetGeometrySnapshotPolicy policy;
         policy.minimum_retained_volume_fraction =
             FE::assembly::CutIntegrationContext::
                 minGeneratedCutVolumeFraction();
         policy.interface_retention_side = interface_retention_side;
-        return interfaces::buildFreeSurfaceGeometrySnapshot(
+        return interfaces::buildLevelSetGeometrySnapshot(
             std::move(domain), {std::move(contact)},
             {std::move(negative), std::move(positive)}, mesh, policy,
             affineTriangleScalar(values), "sharp_boundary_test");
@@ -2722,7 +2722,7 @@ TEST(FreeSurfaceGeometrySnapshot,
     EXPECT_EQ(flux, FE::Real{0.0});
     EXPECT_EQ(contact_rules, 0u);
     FE::assembly::CutIntegrationContext context;
-    context.addFreeSurfaceGeometrySnapshot(liquid, Side::Negative);
+    context.addLevelSetGeometrySnapshot(liquid, Side::Negative);
     EXPECT_TRUE(context.interfaceRulesForMarker(interface_marker).empty());
     EXPECT_TRUE(context.interfaceRulesForMarker(
                            liquid->contactDomains().front().marker())
@@ -2795,7 +2795,7 @@ TEST(FreeSurfaceGeometrySnapshot,
             for (auto& region : cut.volume_regions) {
                 interface_domain.addVolumeRegion(std::move(region));
             }
-            interfaces::FreeSurfaceGeometryScalarEvaluator scalar;
+            interfaces::LevelSetGeometryScalarEvaluator scalar;
             scalar.value =
                 [active_sign, interface_height](
                     FE::GlobalIndex,
@@ -2818,7 +2818,7 @@ TEST(FreeSurfaceGeometrySnapshot,
                     }};
                 };
             EXPECT_NO_THROW(
-                (void)interfaces::buildFreeSurfaceGeometrySnapshot(
+                (void)interfaces::buildLevelSetGeometrySnapshot(
                     std::move(interface_domain),
                     {},
                     {},
@@ -3001,7 +3001,7 @@ TEST(GeneratedActiveBoundaryDomain,
     EXPECT_NO_THROW(interfaces::validateGeneratedActiveBoundaryPartition(
         negative, positive, interface_domain, contact_domain, mesh));
 
-    auto snapshot = interfaces::buildFreeSurfaceGeometrySnapshot(
+    auto snapshot = interfaces::buildLevelSetGeometrySnapshot(
         std::move(interface_domain),
         {std::move(contact_domain)},
         {std::move(negative), std::move(positive)},
@@ -3010,7 +3010,7 @@ TEST(GeneratedActiveBoundaryDomain,
         verticalScalar(),
         "curved_quadratic_boundary");
     const auto wet_rules = snapshot->retainedRules(
-        interfaces::FreeSurfaceGeometryRuleRole::NegativeExteriorBoundary);
+        interfaces::LevelSetGeometryRuleRole::NegativeExteriorBoundary);
     ASSERT_EQ(wet_rules.size(), 1u);
     const FE::Real expected_arc =
         FE::Real{0.5} *
@@ -3063,7 +3063,7 @@ TEST(FreeSurfaceGeometrySnapshot,
             /*expose_opposite_face=*/false,
             scenario.order);
         const auto snapshot =
-            interfaces::buildFreeSurfaceGeometrySnapshot(
+            interfaces::buildLevelSetGeometrySnapshot(
                 verticalHalfCutWithQuadrature(
                     scenario.interface_marker,
                     scenario.element_type,
@@ -3078,7 +3078,7 @@ TEST(FreeSurfaceGeometrySnapshot,
         ASSERT_NE(snapshot, nullptr);
 
         const auto retained = snapshot->retainedRules(
-            interfaces::FreeSurfaceGeometryRuleRole::NegativeVolume);
+            interfaces::LevelSetGeometryRuleRole::NegativeVolume);
         ASSERT_EQ(retained.size(), 1u);
         ASSERT_NE(retained.front(), nullptr);
         const FE::Real rule_measure =
@@ -3089,9 +3089,9 @@ TEST(FreeSurfaceGeometrySnapshot,
         EXPECT_GT(std::abs(rule_measure - FE::Real{4.0}), FE::Real{0.1});
 
         FE::assembly::CutIntegrationContext context;
-        context.addFreeSurfaceGeometrySnapshot(
+        context.addLevelSetGeometrySnapshot(
             snapshot, FE::geometry::CutIntegrationSide::Negative);
-        EXPECT_TRUE(context.hasFreeSurfaceGeometrySnapshotForMarker(
+        EXPECT_TRUE(context.hasLevelSetGeometrySnapshotForMarker(
             scenario.interface_marker));
 
         FE::spaces::H1Space space(scenario.element_type, scenario.order);
@@ -3161,7 +3161,7 @@ TEST(FreeSurfaceGeometrySnapshot,
         mesh,
         nodal_field);
 
-    interfaces::FreeSurfaceGeometryScalarEvaluator scalar;
+    interfaces::LevelSetGeometryScalarEvaluator scalar;
     scalar.value = [](FE::GlobalIndex,
                       const std::array<FE::Real, 3>& xi,
                       const FE::geometry::CutQuadratureProvenance&) {
@@ -3173,7 +3173,7 @@ TEST(FreeSurfaceGeometrySnapshot,
            const FE::geometry::CutQuadratureProvenance&) {
             return std::array<FE::Real, 3>{{1.0, 0.0, 0.0}};
         };
-    const auto snapshot = interfaces::buildFreeSurfaceGeometrySnapshot(
+    const auto snapshot = interfaces::buildLevelSetGeometrySnapshot(
         std::move(interface_domain),
         {std::move(contact_domain)},
         {std::move(negative), std::move(positive)},
@@ -3238,7 +3238,7 @@ TEST(FreeSurfaceGeometrySnapshot,
     FE::Real expected_contact_measure{0.0};
     std::map<std::uint64_t, std::int64_t> surface_component_by_source;
     for (const auto& record : snapshot->rules()) {
-        if (record.role == interfaces::FreeSurfaceGeometryRuleRole::Interface) {
+        if (record.role == interfaces::LevelSetGeometryRuleRole::Interface) {
             ASSERT_EQ(record.source_fragment_stable_ids.size(), 1u);
             surface_component_by_source.emplace(
                 record.source_fragment_stable_ids.front(),
@@ -3253,23 +3253,23 @@ TEST(FreeSurfaceGeometrySnapshot,
                   mesh.dimension());
         EXPECT_FALSE(record.moment_certificate.moments.empty());
         EXPECT_EQ(record.reference_rule.provenance
-                      .free_surface_snapshot_revision_key,
+                      .level_set_snapshot_revision_key,
                   snapshot->revision().snapshot_revision_key);
-        EXPECT_EQ(record.physical_rule.free_surface_snapshot_revision_key,
+        EXPECT_EQ(record.physical_rule.level_set_snapshot_revision_key,
                   snapshot->revision().snapshot_revision_key);
         ASSERT_EQ(record.reference_rule.points.size(),
                   record.physical_rule.points.size());
         EXPECT_GT(record.physical_rule.physical_measure, 0.0);
         if (record.locally_owned &&
             record.retention ==
-                interfaces::FreeSurfaceGeometryRetention::Retained) {
-            if (record.role == interfaces::FreeSurfaceGeometryRuleRole::
+                interfaces::LevelSetGeometryRetention::Retained) {
+            if (record.role == interfaces::LevelSetGeometryRuleRole::
                                    NegativeExteriorBoundary) {
                 EXPECT_EQ(record.physical_boundary_marker, 10);
                 expected_negative_wall_area +=
                     record.physical_rule.physical_measure;
             } else if (record.role ==
-                       interfaces::FreeSurfaceGeometryRuleRole::Contact) {
+                       interfaces::LevelSetGeometryRuleRole::Contact) {
                 EXPECT_EQ(record.physical_boundary_marker, 10);
                 ASSERT_EQ(record.source_fragment_stable_ids.size(), 1u);
                 const auto source = surface_component_by_source.find(
@@ -3278,7 +3278,7 @@ TEST(FreeSurfaceGeometrySnapshot,
                 EXPECT_EQ(record.component_id, source->second);
                 expected_contact_measure +=
                     record.physical_rule.physical_measure;
-            } else if (record.role == interfaces::FreeSurfaceGeometryRuleRole::
+            } else if (record.role == interfaces::LevelSetGeometryRuleRole::
                                           PositiveExteriorBoundary) {
                 EXPECT_EQ(record.physical_boundary_marker, 10);
             } else {
@@ -3314,23 +3314,23 @@ TEST(FreeSurfaceGeometrySnapshot,
               snapshot->revision().snapshot_revision_key);
     EXPECT_NEAR(ownedRuleMeasure(
                     *snapshot,
-                    interfaces::FreeSurfaceGeometryRuleRole::NegativeVolume),
+                    interfaces::LevelSetGeometryRuleRole::NegativeVolume),
                 snapshot->ledger().owned_retained_negative_physical_volume,
                 1.0e-14);
     EXPECT_NEAR(ownedRuleMeasure(
                     *snapshot,
-                    interfaces::FreeSurfaceGeometryRuleRole::Interface),
+                    interfaces::LevelSetGeometryRuleRole::Interface),
                 snapshot->ledger().interface_physical_measure,
                 1.0e-14);
     EXPECT_NEAR(ownedRuleMeasure(
                     *snapshot,
-                    interfaces::FreeSurfaceGeometryRuleRole::NegativeExteriorBoundary,
+                    interfaces::LevelSetGeometryRuleRole::NegativeExteriorBoundary,
                     10),
                 expected_negative_wall_area,
                 1.0e-14);
     EXPECT_NEAR(ownedRuleMeasure(
                     *snapshot,
-                    interfaces::FreeSurfaceGeometryRuleRole::Contact,
+                    interfaces::LevelSetGeometryRuleRole::Contact,
                     10),
                 expected_contact_measure,
                 1.0e-14);
@@ -3527,8 +3527,8 @@ TEST(FreeSurfaceGeometrySnapshot,
         std::invalid_argument);
 
     FE::assembly::CutIntegrationContext context;
-    context.addFreeSurfaceGeometrySnapshot(snapshot);
-    EXPECT_EQ(context.freeSurfaceGeometrySnapshots().size(), 1u);
+    context.addLevelSetGeometrySnapshot(snapshot);
+    EXPECT_EQ(context.levelSetGeometrySnapshots().size(), 1u);
     const auto* interface_publication =
         context
             .findGeneratedLevelSetInterfacePublicationProvenance(
@@ -3551,35 +3551,35 @@ TEST(FreeSurfaceGeometrySnapshot,
                 .generated_domain_id,
             contact.request().generated_domain_id);
     }
-    EXPECT_EQ(context.freeSurfaceGeometrySnapshotRevisionForMarker(
+    EXPECT_EQ(context.levelSetGeometrySnapshotRevisionForMarker(
                   interface_marker),
               snapshot->revision().snapshot_revision_key);
     EXPECT_NO_THROW(
-        context.assertFreeSurfaceGeometrySnapshotCurrentForMarker(
+        context.assertLevelSetGeometrySnapshotCurrentForMarker(
             interface_marker));
     for (const auto& rule : context.volumeRules()) {
-        EXPECT_EQ(rule.provenance.free_surface_snapshot_revision_key,
+        EXPECT_EQ(rule.provenance.level_set_snapshot_revision_key,
                   snapshot->revision().snapshot_revision_key);
     }
     for (const auto& rule : context.interfaceRules()) {
-        EXPECT_EQ(rule.provenance.free_surface_snapshot_revision_key,
+        EXPECT_EQ(rule.provenance.level_set_snapshot_revision_key,
                   snapshot->revision().snapshot_revision_key);
     }
     for (const auto& metadata : context.metadata()) {
-        EXPECT_EQ(metadata.free_surface_snapshot_revision_key,
+        EXPECT_EQ(metadata.level_set_snapshot_revision_key,
                   snapshot->revision().snapshot_revision_key);
     }
     for (const auto& binding : context.bindings()) {
         EXPECT_EQ(binding.marker, interface_marker);
-        EXPECT_EQ(binding.free_surface_snapshot_revision_key,
+        EXPECT_EQ(binding.level_set_snapshot_revision_key,
                   snapshot->revision().snapshot_revision_key);
     }
     for (const auto& active : snapshot->activeBoundaryDomains()) {
-        EXPECT_EQ(context.freeSurfaceGeometrySnapshotRevisionForMarker(
+        EXPECT_EQ(context.levelSetGeometrySnapshotRevisionForMarker(
                       active.marker()),
                   snapshot->revision().snapshot_revision_key);
         EXPECT_NO_THROW(
-            context.assertFreeSurfaceGeometrySnapshotCurrentForMarker(
+            context.assertLevelSetGeometrySnapshotCurrentForMarker(
                 active.marker()));
     }
     const auto revision_before_duplicate_domain =
@@ -3591,7 +3591,7 @@ TEST(FreeSurfaceGeometrySnapshot,
     EXPECT_EQ(context.contentRevision(),
               revision_before_duplicate_domain);
     EXPECT_NO_THROW(
-        context.assertFreeSurfaceGeometrySnapshotCurrentForMarker(
+        context.assertLevelSetGeometrySnapshotCurrentForMarker(
             interface_marker));
 }
 
@@ -3600,7 +3600,7 @@ TEST(FreeSurfaceGeometrySnapshot,
 {
     constexpr int interface_marker = 125;
     const SingleQuadBoundaryMesh mesh;
-    const auto snapshot = interfaces::buildFreeSurfaceGeometrySnapshot(
+    const auto snapshot = interfaces::buildLevelSetGeometrySnapshot(
         verticalInterfaceWithVolumes(interface_marker),
         {},
         {},
@@ -3611,25 +3611,25 @@ TEST(FreeSurfaceGeometrySnapshot,
     ASSERT_NE(snapshot, nullptr);
 
     FE::assembly::CutIntegrationContext context;
-    context.addFreeSurfaceGeometrySnapshot(snapshot);
+    context.addLevelSetGeometrySnapshot(snapshot);
     const auto volume_rule_count = context.volumeRules().size();
     const auto interface_rule_count = context.interfaceRules().size();
     const auto metadata_count = context.metadata().size();
     const auto binding_count = context.bindings().size();
-    const auto snapshot_count = context.freeSurfaceGeometrySnapshots().size();
+    const auto snapshot_count = context.levelSetGeometrySnapshots().size();
     const auto content_revision = context.contentRevision();
 
     EXPECT_THROW(
-        context.addFreeSurfaceGeometrySnapshot(snapshot),
+        context.addLevelSetGeometrySnapshot(snapshot),
         std::invalid_argument);
     EXPECT_EQ(context.volumeRules().size(), volume_rule_count);
     EXPECT_EQ(context.interfaceRules().size(), interface_rule_count);
     EXPECT_EQ(context.metadata().size(), metadata_count);
     EXPECT_EQ(context.bindings().size(), binding_count);
-    EXPECT_EQ(context.freeSurfaceGeometrySnapshots().size(), snapshot_count);
+    EXPECT_EQ(context.levelSetGeometrySnapshots().size(), snapshot_count);
     EXPECT_EQ(context.contentRevision(), content_revision);
     EXPECT_NO_THROW(
-        context.assertAllFreeSurfaceGeometrySnapshotsCurrent());
+        context.assertAllLevelSetGeometrySnapshotsCurrent());
     RecordProperty("duplicate_snapshot_import_rejection_count", 1);
 }
 
@@ -3638,7 +3638,7 @@ TEST(FreeSurfaceGeometrySnapshot,
 {
     constexpr int interface_marker = 131;
     const SingleQuadBoundaryMesh mesh;
-    const auto snapshot = interfaces::buildFreeSurfaceGeometrySnapshot(
+    const auto snapshot = interfaces::buildLevelSetGeometrySnapshot(
         verticalInterfaceWithVolumes(interface_marker),
         {},
         {},
@@ -3649,12 +3649,12 @@ TEST(FreeSurfaceGeometrySnapshot,
     ASSERT_NE(snapshot, nullptr);
 
     FE::assembly::CutIntegrationContext context;
-    context.addFreeSurfaceGeometrySnapshot(snapshot);
+    context.addLevelSetGeometrySnapshot(snapshot);
     const auto expect_current =
         [interface_marker](const FE::assembly::CutIntegrationContext& ctx) {
-            EXPECT_NO_THROW(ctx.assertAllFreeSurfaceGeometrySnapshotsCurrent());
+            EXPECT_NO_THROW(ctx.assertAllLevelSetGeometrySnapshotsCurrent());
             EXPECT_NO_THROW(
-                ctx.assertFreeSurfaceGeometrySnapshotCurrentForMarker(
+                ctx.assertLevelSetGeometrySnapshotCurrentForMarker(
                     interface_marker));
             EXPECT_NO_THROW(
                 ctx.assertGeneratedInterfaceRulesCurrentForMarker(
@@ -3678,11 +3678,11 @@ TEST(FreeSurfaceGeometrySnapshot,
                 return std::string("no exception");
             };
             EXPECT_EQ(message_of([&] {
-                          ctx.assertAllFreeSurfaceGeometrySnapshotsCurrent();
+                          ctx.assertAllLevelSetGeometrySnapshotsCurrent();
                       }),
                       expected);
             EXPECT_EQ(message_of([&] {
-                          ctx.assertFreeSurfaceGeometrySnapshotCurrentForMarker(
+                          ctx.assertLevelSetGeometrySnapshotCurrentForMarker(
                               interface_marker);
                       }),
                       expected);
@@ -3722,7 +3722,7 @@ TEST(FreeSurfaceGeometrySnapshot,
     expect_current(context);
 
     // A failed mutation that is rolled back leaves the context current.
-    EXPECT_THROW(context.addFreeSurfaceGeometrySnapshot(snapshot),
+    EXPECT_THROW(context.addLevelSetGeometrySnapshot(snapshot),
                  std::invalid_argument);
     expect_current(context);
 
@@ -3742,7 +3742,7 @@ TEST(FreeSurfaceGeometrySnapshot,
 {
     constexpr int interface_marker = 278;
     const SingleQuadBoundaryMesh mesh;
-    const auto snapshot = interfaces::buildFreeSurfaceGeometrySnapshot(
+    const auto snapshot = interfaces::buildLevelSetGeometrySnapshot(
         verticalInterfaceWithVolumes(interface_marker),
         {},
         {},
@@ -3753,13 +3753,13 @@ TEST(FreeSurfaceGeometrySnapshot,
     ASSERT_NE(snapshot, nullptr);
 
     FE::assembly::CutIntegrationContext context;
-    ASSERT_NO_THROW(context.addFreeSurfaceGeometrySnapshot(snapshot));
+    ASSERT_NO_THROW(context.addLevelSetGeometrySnapshot(snapshot));
     ASSERT_TRUE(
         context.hasGeneratedLevelSetInterfaceMarker(interface_marker));
     ASSERT_FALSE(context.volumeRules().empty());
     ASSERT_EQ(context.metadata().size(), context.volumeRules().size());
     EXPECT_NO_THROW(
-        context.assertAllFreeSurfaceGeometrySnapshotsCurrent());
+        context.assertAllLevelSetGeometrySnapshotsCurrent());
 
     const auto stored_rule = context.volumeRules().front();
     const auto stored_metadata = context.metadata().front();
@@ -3776,9 +3776,9 @@ TEST(FreeSurfaceGeometrySnapshot,
         [&](std::uint64_t candidate_snapshot_revision) {
             auto rule = stored_rule;
             auto metadata = stored_metadata;
-            rule.provenance.free_surface_snapshot_revision_key =
+            rule.provenance.level_set_snapshot_revision_key =
                 candidate_snapshot_revision;
-            metadata.free_surface_snapshot_revision_key =
+            metadata.level_set_snapshot_revision_key =
                 candidate_snapshot_revision;
             EXPECT_THROW(
                 context.addGeneratedVolumeRule(
@@ -3792,7 +3792,7 @@ TEST(FreeSurfaceGeometrySnapshot,
             EXPECT_EQ(context.bindings().size(), binding_count);
             EXPECT_EQ(context.generatedVolumeMarkers(), volume_markers);
             EXPECT_NO_THROW(
-                context.assertAllFreeSurfaceGeometrySnapshotsCurrent());
+                context.assertAllLevelSetGeometrySnapshotsCurrent());
         };
 
     expect_rejected(0u);
@@ -3812,7 +3812,7 @@ TEST(FreeSurfaceGeometrySnapshot,
                                     topology_revision,
                                     ownership_revision);
         EXPECT_THROW(
-            (void)interfaces::buildFreeSurfaceGeometrySnapshot(
+            (void)interfaces::buildLevelSetGeometrySnapshot(
                 verticalInterfaceWithVolumes(interface_marker),
                 {},
                 {},
@@ -3828,7 +3828,7 @@ TEST(FreeSurfaceGeometrySnapshot,
 
     SingleQuadBoundaryMesh mesh;
     mesh.enableRevisionTracking();
-    const auto snapshot = interfaces::buildFreeSurfaceGeometrySnapshot(
+    const auto snapshot = interfaces::buildLevelSetGeometrySnapshot(
         verticalInterfaceWithVolumes(interface_marker),
         {},
         {},
@@ -3837,17 +3837,17 @@ TEST(FreeSurfaceGeometrySnapshot,
         verticalScalar(),
         "tracked_mesh_consumption");
     FE::assembly::CutIntegrationContext context;
-    context.addFreeSurfaceGeometrySnapshot(snapshot);
+    context.addLevelSetGeometrySnapshot(snapshot);
     EXPECT_TRUE(
-        context.freeSurfaceGeometrySnapshotsMatchCurrentMeshRevision(mesh));
+        context.levelSetGeometrySnapshotsMatchCurrentMeshRevision(mesh));
     EXPECT_NO_THROW(
-        context.assertAllFreeSurfaceGeometrySnapshotsCurrent(mesh));
+        context.assertAllLevelSetGeometrySnapshotsCurrent(mesh));
 
     mesh.enableRevisionTracking(12u, 12u, 13u, 0u);
     EXPECT_FALSE(
-        context.freeSurfaceGeometrySnapshotsMatchCurrentMeshRevision(mesh));
+        context.levelSetGeometrySnapshotsMatchCurrentMeshRevision(mesh));
     try {
-        context.assertAllFreeSurfaceGeometrySnapshotsCurrent(mesh);
+        context.assertAllLevelSetGeometrySnapshotsCurrent(mesh);
         ADD_FAILURE() << "stale geometry revision was accepted";
     } catch (const std::invalid_argument& error) {
         const std::string diagnostic = error.what();
@@ -3873,25 +3873,25 @@ TEST(FreeSurfaceGeometrySnapshot,
     }
     mesh.enableRevisionTracking(11u, 14u, 13u, 0u);
     EXPECT_FALSE(
-        context.freeSurfaceGeometrySnapshotsMatchCurrentMeshRevision(mesh));
-    EXPECT_THROW(context.assertAllFreeSurfaceGeometrySnapshotsCurrent(mesh),
+        context.levelSetGeometrySnapshotsMatchCurrentMeshRevision(mesh));
+    EXPECT_THROW(context.assertAllLevelSetGeometrySnapshotsCurrent(mesh),
                  std::invalid_argument);
     mesh.enableRevisionTracking(11u, 12u, 15u, 0u);
     EXPECT_FALSE(
-        context.freeSurfaceGeometrySnapshotsMatchCurrentMeshRevision(mesh));
-    EXPECT_THROW(context.assertAllFreeSurfaceGeometrySnapshotsCurrent(mesh),
+        context.levelSetGeometrySnapshotsMatchCurrentMeshRevision(mesh));
+    EXPECT_THROW(context.assertAllLevelSetGeometrySnapshotsCurrent(mesh),
                  std::invalid_argument);
     mesh.enableRevisionTracking(11u, 12u, 13u, 1u);
     EXPECT_FALSE(
-        context.freeSurfaceGeometrySnapshotsMatchCurrentMeshRevision(mesh));
-    EXPECT_THROW(context.assertAllFreeSurfaceGeometrySnapshotsCurrent(mesh),
+        context.levelSetGeometrySnapshotsMatchCurrentMeshRevision(mesh));
+    EXPECT_THROW(context.assertAllLevelSetGeometrySnapshotsCurrent(mesh),
                  std::invalid_argument);
 
     mesh.enableRevisionTracking();
     EXPECT_TRUE(
-        context.freeSurfaceGeometrySnapshotsMatchCurrentMeshRevision(mesh));
+        context.levelSetGeometrySnapshotsMatchCurrentMeshRevision(mesh));
     EXPECT_NO_THROW(
-        context.assertAllFreeSurfaceGeometrySnapshotsCurrent(mesh));
+        context.assertAllLevelSetGeometrySnapshotsCurrent(mesh));
     RecordProperty("snapshot_stale_mesh_build_rejection_count", 3);
     RecordProperty("snapshot_stale_mesh_consumption_rejection_count", 4);
 }
@@ -3905,7 +3905,7 @@ TEST(FreeSurfaceGeometrySnapshot,
     const auto expect_rejection = [&](interfaces::LevelSetInterfaceDomain domain,
                                       const char* domain_id) {
         try {
-            (void)interfaces::buildFreeSurfaceGeometrySnapshot(
+            (void)interfaces::buildLevelSetGeometrySnapshot(
                 std::move(domain),
                 {},
                 {},
@@ -4025,7 +4025,7 @@ TEST(FreeSurfaceGeometrySnapshot,
                 expectCanonicalToleranceBandValues(domain, tolerance), 0u);
 
             const auto snapshot =
-                interfaces::buildFreeSurfaceGeometrySnapshot(
+                interfaces::buildLevelSetGeometrySnapshot(
                     std::move(domain),
                     {},
                     {},
@@ -4038,13 +4038,13 @@ TEST(FreeSurfaceGeometrySnapshot,
             ASSERT_TRUE(snapshot);
             EXPECT_EQ(
                 snapshot->retainedRules(
-                            interfaces::FreeSurfaceGeometryRuleRole::
+                            interfaces::LevelSetGeometryRuleRole::
                                 NegativeVolume)
                     .size(),
                 1u);
             EXPECT_EQ(
                 snapshot->retainedRules(
-                            interfaces::FreeSurfaceGeometryRuleRole::
+                            interfaces::LevelSetGeometryRuleRole::
                                 PositiveVolume)
                     .size(),
                 1u);
@@ -4099,7 +4099,7 @@ TEST(FreeSurfaceGeometrySnapshot,
                 expectCanonicalToleranceBandValues(domain, tolerance), 0u);
 
             const auto snapshot =
-                interfaces::buildFreeSurfaceGeometrySnapshot(
+                interfaces::buildLevelSetGeometrySnapshot(
                     std::move(domain),
                     {},
                     {},
@@ -4112,13 +4112,13 @@ TEST(FreeSurfaceGeometrySnapshot,
             ASSERT_TRUE(snapshot);
             EXPECT_EQ(
                 snapshot->retainedRules(
-                            interfaces::FreeSurfaceGeometryRuleRole::
+                            interfaces::LevelSetGeometryRuleRole::
                                 NegativeVolume)
                     .size(),
                 1u);
             EXPECT_EQ(
                 snapshot->retainedRules(
-                            interfaces::FreeSurfaceGeometryRuleRole::
+                            interfaces::LevelSetGeometryRuleRole::
                                 PositiveVolume)
                     .size(),
                 1u);
@@ -4167,7 +4167,7 @@ TEST(FreeSurfaceGeometrySnapshot,
         FE::ElementType::Triangle3,
         coordinates);
 
-    const auto snapshot = interfaces::buildFreeSurfaceGeometrySnapshot(
+    const auto snapshot = interfaces::buildLevelSetGeometrySnapshot(
         std::move(domain),
         {},
         {},
@@ -4204,7 +4204,7 @@ TEST(FreeSurfaceGeometrySnapshot,
     ASSERT_FALSE(positive_region->reference_subcells.empty());
 
     const SingleTetraBoundaryMesh mesh;
-    const auto snapshot = interfaces::buildFreeSurfaceGeometrySnapshot(
+    const auto snapshot = interfaces::buildLevelSetGeometrySnapshot(
         std::move(domain),
         {},
         {},
@@ -4228,7 +4228,7 @@ TEST(FreeSurfaceGeometrySnapshot,
     std::uint64_t one_sided_aligned_cut_acceptance_count = 0u;
     std::uint64_t empty_full_zero_acceptance_count = 0u;
 
-    const auto complete_cut = interfaces::buildFreeSurfaceGeometrySnapshot(
+    const auto complete_cut = interfaces::buildLevelSetGeometrySnapshot(
         verticalInterfaceWithVolumes(interface_marker),
         {},
         {},
@@ -4240,13 +4240,13 @@ TEST(FreeSurfaceGeometrySnapshot,
     ++acceptance_count;
     ++two_sided_cut_acceptance_count;
 
-    interfaces::FreeSurfaceGeometryScalarEvaluator value_only;
+    interfaces::LevelSetGeometryScalarEvaluator value_only;
     value_only.value = [](FE::GlobalIndex,
                           const std::array<FE::Real, 3>&,
                           const FE::geometry::CutQuadratureProvenance&) {
         return FE::Real{-1.0};
     };
-    const auto full_cell = interfaces::buildFreeSurfaceGeometrySnapshot(
+    const auto full_cell = interfaces::buildLevelSetGeometrySnapshot(
         fullNegativeCell(interface_marker),
         {},
         {},
@@ -4304,7 +4304,7 @@ TEST(FreeSurfaceGeometrySnapshot,
                 }));
         }
         const auto snapshot =
-            interfaces::buildFreeSurfaceGeometrySnapshot(
+            interfaces::buildLevelSetGeometrySnapshot(
                 std::move(domain),
                 {},
                 {},
@@ -4352,7 +4352,7 @@ TEST(FreeSurfaceGeometrySnapshot,
                     FE::Real{1.0},
                     FE::Real{1.0e-14});
         const auto snapshot =
-            interfaces::buildFreeSurfaceGeometrySnapshot(
+            interfaces::buildLevelSetGeometrySnapshot(
                 std::move(domain),
                 {},
                 {},
@@ -4393,7 +4393,7 @@ TEST(FreeSurfaceGeometrySnapshot,
     std::uint64_t missing_value_rejection_count = 0u;
     std::uint64_t wrong_side_rejection_count = 0u;
     try {
-        (void)interfaces::buildFreeSurfaceGeometrySnapshot(
+        (void)interfaces::buildLevelSetGeometrySnapshot(
             fullNegativeCell(interface_marker),
             {},
             {},
@@ -4405,14 +4405,14 @@ TEST(FreeSurfaceGeometrySnapshot,
     } catch (const std::invalid_argument&) {
         ++missing_value_rejection_count;
     }
-    interfaces::FreeSurfaceGeometryScalarEvaluator wrong_side;
+    interfaces::LevelSetGeometryScalarEvaluator wrong_side;
     wrong_side.value = [](FE::GlobalIndex,
                           const std::array<FE::Real, 3>&,
                           const FE::geometry::CutQuadratureProvenance&) {
         return FE::Real{1.0};
     };
     try {
-        (void)interfaces::buildFreeSurfaceGeometrySnapshot(
+        (void)interfaces::buildLevelSetGeometrySnapshot(
             fullNegativeCell(interface_marker),
             {},
             {},
@@ -4442,13 +4442,13 @@ TEST(FreeSurfaceGeometrySnapshot,
 {
     constexpr int interface_marker = 134;
     const SingleQuadBoundaryMesh mesh;
-    interfaces::FreeSurfaceGeometryScalarEvaluator value_only;
+    interfaces::LevelSetGeometryScalarEvaluator value_only;
     value_only.value = [](FE::GlobalIndex,
                           const std::array<FE::Real, 3>&,
                           const FE::geometry::CutQuadratureProvenance&) {
         return FE::Real{-1.0};
     };
-    const auto snapshot = interfaces::buildFreeSurfaceGeometrySnapshot(
+    const auto snapshot = interfaces::buildLevelSetGeometrySnapshot(
         fullNegativeCell(interface_marker),
         {},
         {},
@@ -4458,7 +4458,7 @@ TEST(FreeSurfaceGeometrySnapshot,
         "volume_value_without_gradient");
     ASSERT_TRUE(snapshot);
     EXPECT_EQ(snapshot->retainedRules(
-                  interfaces::FreeSurfaceGeometryRuleRole::NegativeVolume)
+                  interfaces::LevelSetGeometryRuleRole::NegativeVolume)
                   .size(),
               1u);
     RecordProperty("volume_only_value_without_gradient_acceptance_count", 1);
@@ -4509,7 +4509,7 @@ TEST(FreeSurfaceGeometrySnapshot,
         stale_active.addFragment(std::move(fragment));
     }
     try {
-        (void)interfaces::buildFreeSurfaceGeometrySnapshot(
+        (void)interfaces::buildLevelSetGeometrySnapshot(
             interface_domain,
             {contact_domain},
             {std::move(stale_active), positive},
@@ -4522,7 +4522,7 @@ TEST(FreeSurfaceGeometrySnapshot,
         EXPECT_NE(std::string(error.what()).find("revision"),
                   std::string::npos);
     }
-    const auto snapshot = interfaces::buildFreeSurfaceGeometrySnapshot(
+    const auto snapshot = interfaces::buildLevelSetGeometrySnapshot(
         std::move(interface_domain),
         {std::move(contact_domain)},
         {std::move(negative), std::move(positive)},
@@ -4541,37 +4541,37 @@ TEST(FreeSurfaceGeometrySnapshot,
     ASSERT_NE(mismatched_key, revision_key);
 
     FE::assembly::CutIntegrationContext pristine;
-    pristine.addFreeSurfaceGeometrySnapshot(snapshot);
+    pristine.addLevelSetGeometrySnapshot(snapshot);
     ASSERT_FALSE(pristine.volumeRules().empty());
     ASSERT_EQ(pristine.volumeRules().size(), pristine.metadata().size());
     ASSERT_EQ(pristine.volumeRules().size(), pristine.bindings().size());
     EXPECT_NO_THROW(
-        pristine.assertAllFreeSurfaceGeometrySnapshotsCurrent());
+        pristine.assertAllLevelSetGeometrySnapshotsCurrent());
 
     auto stale_source_snapshot = pristine;
     stale_source_snapshot.setExpectedGeneratedSourceValueRevision(
         interface_marker,
         snapshot->revision().source_value_revision + 1u);
     EXPECT_THROW(
-        stale_source_snapshot.assertFreeSurfaceGeometrySnapshotCurrentForMarker(
+        stale_source_snapshot.assertLevelSetGeometrySnapshotCurrentForMarker(
             interface_marker),
         std::invalid_argument);
     EXPECT_THROW(
-        stale_source_snapshot.assertFreeSurfaceGeometrySnapshotCurrentForMarker(
+        stale_source_snapshot.assertLevelSetGeometrySnapshotCurrentForMarker(
             contact_marker),
         std::invalid_argument);
     for (const auto marker : active_markers) {
         EXPECT_THROW(
             stale_source_snapshot
-                .assertFreeSurfaceGeometrySnapshotCurrentForMarker(marker),
+                .assertLevelSetGeometrySnapshotCurrentForMarker(marker),
             std::invalid_argument);
     }
     EXPECT_THROW(
-        stale_source_snapshot.assertAllFreeSurfaceGeometrySnapshotsCurrent(),
+        stale_source_snapshot.assertAllLevelSetGeometrySnapshotsCurrent(),
         std::invalid_argument);
     EXPECT_THROW(
         stale_source_snapshot
-            .freeSurfaceGeometrySnapshotsMatchCurrentMeshRevision(mesh),
+            .levelSetGeometrySnapshotsMatchCurrentMeshRevision(mesh),
         std::invalid_argument);
 
     const auto interface_rule_index =
@@ -4597,7 +4597,7 @@ TEST(FreeSurfaceGeometrySnapshot,
 
     const auto expect_rejected = [](const auto& candidate, int marker) {
         EXPECT_THROW(
-            candidate.assertFreeSurfaceGeometrySnapshotCurrentForMarker(
+            candidate.assertLevelSetGeometrySnapshotCurrentForMarker(
                 marker),
             std::invalid_argument);
     };
@@ -4607,7 +4607,7 @@ TEST(FreeSurfaceGeometrySnapshot,
             auto& rules = const_cast<
                 std::vector<FE::geometry::CutQuadratureRule>&>(
                 candidate.volumeRules());
-            rules.front().provenance.free_surface_snapshot_revision_key = key;
+            rules.front().provenance.level_set_snapshot_revision_key = key;
             expect_rejected(candidate, interface_marker);
         };
     const auto mutate_metadata =
@@ -4615,7 +4615,7 @@ TEST(FreeSurfaceGeometrySnapshot,
             auto candidate = pristine;
             auto& metadata = const_cast<std::vector<
                 FE::assembly::CutCellAssemblyMetadata>&>(candidate.metadata());
-            metadata.front().free_surface_snapshot_revision_key = key;
+            metadata.front().level_set_snapshot_revision_key = key;
             expect_rejected(candidate, interface_marker);
         };
     const auto mutate_binding =
@@ -4623,7 +4623,7 @@ TEST(FreeSurfaceGeometrySnapshot,
             auto candidate = pristine;
             auto& bindings = const_cast<std::vector<
                 FE::assembly::CutIntegrationBinding>&>(candidate.bindings());
-            bindings.front().free_surface_snapshot_revision_key = key;
+            bindings.front().level_set_snapshot_revision_key = key;
             expect_rejected(candidate, interface_marker);
         };
     const auto mutate_interface_rule =
@@ -4632,7 +4632,7 @@ TEST(FreeSurfaceGeometrySnapshot,
             auto& rules = const_cast<
                 std::vector<FE::geometry::CutQuadratureRule>&>(
                 candidate.interfaceRules());
-            rules[index].provenance.free_surface_snapshot_revision_key = key;
+            rules[index].provenance.level_set_snapshot_revision_key = key;
             expect_rejected(candidate, marker);
         };
 
@@ -4664,27 +4664,27 @@ TEST(FreeSurfaceGeometrySnapshot,
         std::invalid_argument);
 
     auto unkeyed_metadata = pristine.metadata().front();
-    unkeyed_metadata.free_surface_snapshot_revision_key = 0u;
+    unkeyed_metadata.level_set_snapshot_revision_key = 0u;
     FE::assembly::CutIntegrationContext orphan_volume_rule;
     orphan_volume_rule.addVolumeRule(
         unkeyed_metadata, pristine.volumeRules().front());
     EXPECT_THROW(
-        orphan_volume_rule.assertAllFreeSurfaceGeometrySnapshotsCurrent(),
+        orphan_volume_rule.assertAllLevelSetGeometrySnapshotsCurrent(),
         std::invalid_argument);
 
     auto unkeyed_volume_rule = pristine.volumeRules().front();
-    unkeyed_volume_rule.provenance.free_surface_snapshot_revision_key = 0u;
+    unkeyed_volume_rule.provenance.level_set_snapshot_revision_key = 0u;
     FE::assembly::CutIntegrationContext orphan_metadata;
     orphan_metadata.addVolumeRule(
         pristine.metadata().front(), std::move(unkeyed_volume_rule));
     EXPECT_THROW(
-        orphan_metadata.assertAllFreeSurfaceGeometrySnapshotsCurrent(),
+        orphan_metadata.assertAllLevelSetGeometrySnapshotsCurrent(),
         std::invalid_argument);
 
     FE::assembly::CutIntegrationContext orphan_binding;
     orphan_binding.addBinding(pristine.bindings().front());
     EXPECT_THROW(
-        orphan_binding.assertAllFreeSurfaceGeometrySnapshotsCurrent(),
+        orphan_binding.assertAllLevelSetGeometrySnapshotsCurrent(),
         std::invalid_argument);
 
     FE::assembly::CutIntegrationContext orphan_interface;
@@ -4695,7 +4695,7 @@ TEST(FreeSurfaceGeometrySnapshot,
             interface_marker),
         std::invalid_argument);
     EXPECT_THROW(
-        orphan_interface.assertAllFreeSurfaceGeometrySnapshotsCurrent(),
+        orphan_interface.assertAllLevelSetGeometrySnapshotsCurrent(),
         std::invalid_argument);
     class BoundaryKernel final : public FE::assembly::AssemblyKernel {
     public:
@@ -4735,7 +4735,7 @@ TEST(FreeSurfaceGeometrySnapshot, RejectsStoredOffInterfaceResidual)
     auto domain = verticalInterface(interface_marker, 1.0e-4);
     addVerticalHalfVolumes(domain);
     EXPECT_THROW(
-        (void)interfaces::buildFreeSurfaceGeometrySnapshot(
+        (void)interfaces::buildLevelSetGeometrySnapshot(
             std::move(domain),
             {},
             {},
@@ -4764,7 +4764,7 @@ TEST(FreeSurfaceGeometrySnapshot,
         defect.addVolumeRegion(std::move(region));
     }
     EXPECT_THROW(
-        (void)interfaces::buildFreeSurfaceGeometrySnapshot(
+        (void)interfaces::buildLevelSetGeometrySnapshot(
             std::move(defect),
             {},
             {},
@@ -4799,7 +4799,7 @@ TEST(FreeSurfaceGeometrySnapshot,
     }
 
     EXPECT_THROW(
-        (void)interfaces::buildFreeSurfaceGeometrySnapshot(
+        (void)interfaces::buildLevelSetGeometrySnapshot(
             std::move(wrong_normal),
             {},
             {},
@@ -4820,7 +4820,7 @@ TEST(FreeSurfaceGeometrySnapshot,
     auto policy = snapshotPolicyWithoutBoundary();
     policy.minimum_retained_volume_fraction = 1.0e-6;
 
-    const auto snapshot = interfaces::buildFreeSurfaceGeometrySnapshot(
+    const auto snapshot = interfaces::buildLevelSetGeometrySnapshot(
         verticalInterfaceWithTinyNegativeVolume(
             interface_marker, negative_fraction),
         {},
@@ -4871,7 +4871,7 @@ TEST(FreeSurfaceGeometrySnapshot, RejectsStaleGlobalIdentityAndOwner)
         stale_id_domain.addVolumeRegion(std::move(region));
     }
     EXPECT_THROW(
-        (void)interfaces::buildFreeSurfaceGeometrySnapshot(
+        (void)interfaces::buildLevelSetGeometrySnapshot(
             std::move(stale_id_domain),
             {},
             {},
@@ -4891,7 +4891,7 @@ TEST(FreeSurfaceGeometrySnapshot, RejectsStaleGlobalIdentityAndOwner)
         stale_owner_domain.addVolumeRegion(std::move(region));
     }
     EXPECT_THROW(
-        (void)interfaces::buildFreeSurfaceGeometrySnapshot(
+        (void)interfaces::buildLevelSetGeometrySnapshot(
             std::move(stale_owner_domain),
             {},
             {},
@@ -4912,10 +4912,10 @@ TEST(FreeSurfaceGeometrySnapshot,
         /*size=*/2,
         /*owner_rank=*/0,
         /*owned=*/true);
-    const auto build = [&](interfaces::FreeSurfaceGeometryOwnershipCollective
+    const auto build = [&](interfaces::LevelSetGeometryOwnershipCollective
                                collective,
                            std::string domain_id) {
-        return interfaces::buildFreeSurfaceGeometrySnapshot(
+        return interfaces::buildLevelSetGeometrySnapshot(
             distributedVerticalInterfaceWithVolumes(interface_marker),
             {},
             {},
@@ -4926,7 +4926,7 @@ TEST(FreeSurfaceGeometrySnapshot,
             std::move(collective));
     };
 
-    interfaces::FreeSurfaceGeometryOwnershipCollective valid;
+    interfaces::LevelSetGeometryOwnershipCollective valid;
     valid.rank = 0;
     valid.size = 2;
     valid.all_gather_owned_rule_identity_values =
@@ -5028,7 +5028,7 @@ TEST(FreeSurfaceGeometrySnapshot,
             contact_domain,
             mesh,
             nodal_field);
-        return interfaces::buildFreeSurfaceGeometrySnapshot(
+        return interfaces::buildLevelSetGeometrySnapshot(
             std::move(interface_domain),
             {std::move(contact_domain)},
             {std::move(negative), std::move(positive)},
@@ -5367,7 +5367,7 @@ TEST(FreeSurfaceGeometrySnapshot,
                     contact_domain,
                     mesh,
                     nodal_field);
-            return interfaces::buildFreeSurfaceGeometrySnapshot(
+            return interfaces::buildLevelSetGeometrySnapshot(
                 std::move(interface_domain),
                 {std::move(contact_domain)},
                 {std::move(negative), std::move(positive)},
@@ -5387,17 +5387,17 @@ TEST(FreeSurfaceGeometrySnapshot,
     const auto volume_role =
         [](FE::geometry::CutIntegrationSide side) {
             return side == FE::geometry::CutIntegrationSide::Negative
-                ? interfaces::FreeSurfaceGeometryRuleRole::NegativeVolume
-                : interfaces::FreeSurfaceGeometryRuleRole::PositiveVolume;
+                ? interfaces::LevelSetGeometryRuleRole::NegativeVolume
+                : interfaces::LevelSetGeometryRuleRole::PositiveVolume;
         };
     const auto integrate_owned_pressure =
-        [&](const interfaces::FreeSurfaceGeometrySnapshot& snapshot,
+        [&](const interfaces::LevelSetGeometrySnapshot& snapshot,
             FE::geometry::CutIntegrationSide side) {
             FE::Real integral{0.0};
             for (const auto& record : snapshot.rules()) {
                 if (!record.locally_owned ||
                     record.retention !=
-                        interfaces::FreeSurfaceGeometryRetention::Retained ||
+                        interfaces::LevelSetGeometryRetention::Retained ||
                     record.role != volume_role(side)) {
                     continue;
                 }
@@ -5424,7 +5424,7 @@ TEST(FreeSurfaceGeometrySnapshot,
             for (const auto& record : base_snapshot->rules()) {
                 if (!record.locally_owned ||
                     record.retention !=
-                        interfaces::FreeSurfaceGeometryRetention::Retained ||
+                        interfaces::LevelSetGeometryRetention::Retained ||
                     record.role != volume_role(side)) {
                     continue;
                 }
@@ -5526,7 +5526,7 @@ TEST(FreeSurfaceGeometrySnapshot,
         return values;
     };
     const auto scalar_evaluator = [&](FE::Real perturbation) {
-        interfaces::FreeSurfaceGeometryScalarEvaluator scalar;
+        interfaces::LevelSetGeometryScalarEvaluator scalar;
         scalar.value =
             [perturbation, moved_interface_x](
                 FE::GlobalIndex,
@@ -5609,7 +5609,7 @@ TEST(FreeSurfaceGeometrySnapshot,
             contact_domain,
             mesh,
             nodal_field);
-        return interfaces::buildFreeSurfaceGeometrySnapshot(
+        return interfaces::buildLevelSetGeometrySnapshot(
             std::move(interface_domain),
             {std::move(contact_domain)},
             {std::move(negative), std::move(positive)},
@@ -5786,7 +5786,7 @@ TEST(FreeSurfaceGeometrySnapshot,
         /*owner_rank=*/0,
         /*owned=*/true);
     std::vector<std::uint64_t> owned_identities;
-    interfaces::FreeSurfaceGeometryOwnershipCollective owner_collective;
+    interfaces::LevelSetGeometryOwnershipCollective owner_collective;
     owner_collective.rank = 0;
     owner_collective.size = 2;
     owner_collective.all_gather_owned_rule_identity_values =
@@ -5801,7 +5801,7 @@ TEST(FreeSurfaceGeometrySnapshot,
             return gathered;
         };
     const auto owner_snapshot =
-        interfaces::buildFreeSurfaceGeometrySnapshot(
+        interfaces::buildLevelSetGeometrySnapshot(
             distributedVerticalInterfaceWithVolumes(interface_marker),
             {},
             {},
@@ -5846,19 +5846,19 @@ TEST(FreeSurfaceGeometrySnapshot,
     EXPECT_EQ(owner_layout.owned_liquid_volume, 0.0);
     EXPECT_GT(ownedRuleMeasure(
                   *owner_snapshot,
-                  interfaces::FreeSurfaceGeometryRuleRole::NegativeVolume),
+                  interfaces::LevelSetGeometryRuleRole::NegativeVolume),
               0.0);
     EXPECT_GT(ownedRuleMeasure(
                   *owner_snapshot,
-                  interfaces::FreeSurfaceGeometryRuleRole::Interface),
+                  interfaces::LevelSetGeometryRuleRole::Interface),
               0.0);
     EXPECT_GT(interfaces::freeSurfaceOwnedRulePointCount(
                   *owner_snapshot,
-                  interfaces::FreeSurfaceGeometryRuleRole::NegativeVolume),
+                  interfaces::LevelSetGeometryRuleRole::NegativeVolume),
               0u);
     EXPECT_GT(interfaces::freeSurfaceOwnedRulePointCount(
                   *owner_snapshot,
-                  interfaces::FreeSurfaceGeometryRuleRole::Interface),
+                  interfaces::LevelSetGeometryRuleRole::Interface),
               0u);
     EXPECT_EQ(owner_variation.owned_wetted_wall_area_variation, 0.0);
     EXPECT_EQ(owner_variation.owned_liquid_volume_variation, 0.0);
@@ -5870,7 +5870,7 @@ TEST(FreeSurfaceGeometrySnapshot,
         /*size=*/2,
         /*owner_rank=*/0,
         /*owned=*/false);
-    interfaces::FreeSurfaceGeometryOwnershipCollective ghost_collective;
+    interfaces::LevelSetGeometryOwnershipCollective ghost_collective;
     ghost_collective.rank = 1;
     ghost_collective.size = 2;
     ghost_collective.all_gather_owned_rule_identity_values =
@@ -5885,7 +5885,7 @@ TEST(FreeSurfaceGeometrySnapshot,
             return gathered;
         };
     const auto ghost_snapshot =
-        interfaces::buildFreeSurfaceGeometrySnapshot(
+        interfaces::buildLevelSetGeometrySnapshot(
             distributedVerticalInterfaceWithVolumes(interface_marker),
             {},
             {},
@@ -5905,19 +5905,19 @@ TEST(FreeSurfaceGeometrySnapshot,
     EXPECT_EQ(ghost_layout.walls.size(), owner_layout.walls.size());
     EXPECT_EQ(ownedRuleMeasure(
                   *ghost_snapshot,
-                  interfaces::FreeSurfaceGeometryRuleRole::NegativeVolume),
+                  interfaces::LevelSetGeometryRuleRole::NegativeVolume),
               0.0);
     EXPECT_EQ(ownedRuleMeasure(
                   *ghost_snapshot,
-                  interfaces::FreeSurfaceGeometryRuleRole::Interface),
+                  interfaces::LevelSetGeometryRuleRole::Interface),
               0.0);
     EXPECT_EQ(interfaces::freeSurfaceOwnedRulePointCount(
                   *ghost_snapshot,
-                  interfaces::FreeSurfaceGeometryRuleRole::NegativeVolume),
+                  interfaces::LevelSetGeometryRuleRole::NegativeVolume),
               0u);
     EXPECT_EQ(interfaces::freeSurfaceOwnedRulePointCount(
                   *ghost_snapshot,
-                  interfaces::FreeSurfaceGeometryRuleRole::Interface),
+                  interfaces::LevelSetGeometryRuleRole::Interface),
               0u);
     EXPECT_EQ(ghost_variation.owned_wetted_wall_area_variation, 0.0);
     EXPECT_EQ(ghost_variation.young_wall_energy_variation, 0.0);
@@ -5931,7 +5931,7 @@ TEST(FreeSurfaceGeometrySnapshot, RejectsPointOutsideParentReferenceCell)
     auto domain = verticalInterfaceWithVolumes(
         interface_marker, /*negative_point_x=*/2.0);
     EXPECT_THROW(
-        (void)interfaces::buildFreeSurfaceGeometrySnapshot(
+        (void)interfaces::buildLevelSetGeometrySnapshot(
             std::move(domain),
             {},
             {},
@@ -5948,7 +5948,7 @@ TEST(FreeSurfaceGeometrySnapshot, RejectsQuadraturePointOnWrongPhase)
     const SingleQuadBoundaryMesh mesh;
     auto domain = verticalInterfaceWithVolumes(interface_marker);
     EXPECT_THROW(
-        (void)interfaces::buildFreeSurfaceGeometrySnapshot(
+        (void)interfaces::buildLevelSetGeometrySnapshot(
             std::move(domain),
             {},
             {},
@@ -5965,7 +5965,7 @@ TEST(FreeSurfaceGeometrySnapshot, RejectsNormalOpposedToRepresentedGradient)
     const SingleQuadBoundaryMesh mesh;
     auto domain = verticalInterfaceWithVolumes(interface_marker);
     EXPECT_THROW(
-        (void)interfaces::buildFreeSurfaceGeometrySnapshot(
+        (void)interfaces::buildLevelSetGeometrySnapshot(
             std::move(domain),
             {},
             {},
@@ -5985,7 +5985,7 @@ TEST(FreeSurfaceGeometrySnapshot,
     const SingleQuadBoundaryMesh mesh;
     auto domain = verticalInterfaceWithVolumes(interface_marker);
     try {
-        (void)interfaces::buildFreeSurfaceGeometrySnapshot(
+        (void)interfaces::buildLevelSetGeometrySnapshot(
             std::move(domain),
             {},
             {},
@@ -6039,7 +6039,7 @@ TEST(FreeSurfaceGeometrySnapshot,
         domain.addVolumeRegion(std::move(region));
     }
 
-    interfaces::FreeSurfaceGeometryScalarEvaluator scalar;
+    interfaces::LevelSetGeometryScalarEvaluator scalar;
     scalar.value = [y_gradient](
                        FE::GlobalIndex,
                        const std::array<FE::Real, 3>& xi,
@@ -6055,7 +6055,7 @@ TEST(FreeSurfaceGeometrySnapshot,
             FE::Real{1.0}, y_gradient, FE::Real{0.0}}};
     };
 
-    const auto snapshot = interfaces::buildFreeSurfaceGeometrySnapshot(
+    const auto snapshot = interfaces::buildLevelSetGeometrySnapshot(
         std::move(domain),
         {},
         {},
@@ -6065,7 +6065,7 @@ TEST(FreeSurfaceGeometrySnapshot,
         "near_vertex_linear_corner");
     ASSERT_NE(snapshot, nullptr);
     const auto interface_rules = snapshot->retainedRules(
-        interfaces::FreeSurfaceGeometryRuleRole::Interface);
+        interfaces::LevelSetGeometryRuleRole::Interface);
     ASSERT_EQ(interface_rules.size(), 1u);
     ASSERT_FALSE(interface_rules.front()->reference_rule.points.empty());
     ASSERT_EQ(interface_rules.front()->reference_rule.points.size(),
@@ -6109,7 +6109,7 @@ TEST(FreeSurfaceGeometrySnapshot,
                     return gradient;
                 };
             EXPECT_THROW(
-                (void)interfaces::buildFreeSurfaceGeometrySnapshot(
+                (void)interfaces::buildLevelSetGeometrySnapshot(
                     verticalInterfaceWithVolumes(interface_marker),
                     {},
                     {},
@@ -6139,7 +6139,7 @@ TEST(FreeSurfaceGeometrySnapshot,
                 defect.addVolumeRegion(std::move(region));
             }
             EXPECT_THROW(
-                (void)interfaces::buildFreeSurfaceGeometrySnapshot(
+                (void)interfaces::buildLevelSetGeometrySnapshot(
                     std::move(defect),
                     {},
                     {},
@@ -6222,7 +6222,7 @@ TEST(FreeSurfaceGeometrySnapshot,
             EXPECT_EQ(contact.source_interface_stable_id, source_id);
         }
 
-        const auto snapshot = interfaces::buildFreeSurfaceGeometrySnapshot(
+        const auto snapshot = interfaces::buildLevelSetGeometrySnapshot(
             std::move(interface_domain),
             {std::move(contact_domain)},
             {},
@@ -6296,7 +6296,7 @@ TEST(FreeSurfaceGeometrySnapshot, RejectsIncorrectConstantMoment)
         /*negative_point_x=*/-0.5,
         /*negative_weight=*/1.5);
     EXPECT_THROW(
-        (void)interfaces::buildFreeSurfaceGeometrySnapshot(
+        (void)interfaces::buildLevelSetGeometrySnapshot(
             std::move(domain),
             {},
             {},
@@ -6315,7 +6315,7 @@ TEST(FreeSurfaceGeometrySnapshot, RejectsIncorrectLinearPartitionMoment)
         interface_marker,
         /*negative_point_x=*/-0.25);
     EXPECT_THROW(
-        (void)interfaces::buildFreeSurfaceGeometrySnapshot(
+        (void)interfaces::buildLevelSetGeometrySnapshot(
             std::move(domain),
             {},
             {},
@@ -6348,7 +6348,7 @@ TEST(FreeSurfaceGeometrySnapshot,
         defect.addVolumeRegion(std::move(region));
     }
     EXPECT_THROW(
-        (void)interfaces::buildFreeSurfaceGeometrySnapshot(
+        (void)interfaces::buildLevelSetGeometrySnapshot(
             std::move(defect),
             {},
             {},
@@ -6389,7 +6389,7 @@ TEST(FreeSurfaceGeometrySnapshot,
         return domain;
     };
 
-    auto snapshot = interfaces::buildFreeSurfaceGeometrySnapshot(
+    auto snapshot = interfaces::buildLevelSetGeometrySnapshot(
         make_domain(),
         {},
         {},
@@ -6411,7 +6411,7 @@ TEST(FreeSurfaceGeometrySnapshot,
         ++volume_rule_count;
         EXPECT_EQ(record.reference_rule.exact_polynomial_order, 2);
         EXPECT_EQ(record.moment_certificate.source,
-                  interfaces::FreeSurfaceGeometryMomentCertificateSource::
+                  interfaces::LevelSetGeometryMomentCertificateSource::
                       PiecewiseAffineGeometry);
         EXPECT_TRUE(record.moment_certificate.phase_sign_certified);
     }
@@ -6441,7 +6441,7 @@ TEST(FreeSurfaceGeometrySnapshot,
     }
     ASSERT_TRUE(changed);
     EXPECT_THROW(
-        (void)interfaces::buildFreeSurfaceGeometrySnapshot(
+        (void)interfaces::buildLevelSetGeometrySnapshot(
             std::move(mutated),
             {},
             {},
@@ -6467,7 +6467,7 @@ TEST(FreeSurfaceGeometrySnapshot,
     }
     ASSERT_EQ(swapped_phase_count, 2u);
     try {
-        (void)interfaces::buildFreeSurfaceGeometrySnapshot(
+        (void)interfaces::buildLevelSetGeometrySnapshot(
             std::move(swapped),
             {},
             {},
@@ -6501,7 +6501,7 @@ TEST(FreeSurfaceGeometrySnapshot,
         defect.addVolumeRegion(std::move(region));
     }
     EXPECT_THROW(
-        (void)interfaces::buildFreeSurfaceGeometrySnapshot(
+        (void)interfaces::buildLevelSetGeometrySnapshot(
             std::move(defect),
             {},
             {},
@@ -6537,14 +6537,14 @@ TEST(FreeSurfaceGeometrySnapshot,
         /*owned=*/true,
         FE::ElementType::Quad9,
         std::move(coordinates));
-    interfaces::FreeSurfaceGeometryScalarEvaluator scalar;
+    interfaces::LevelSetGeometryScalarEvaluator scalar;
     scalar.value = [](FE::GlobalIndex,
                       const std::array<FE::Real, 3>&,
                       const FE::geometry::CutQuadratureProvenance&) {
         return FE::Real{-1.0};
     };
 
-    const auto snapshot = interfaces::buildFreeSurfaceGeometrySnapshot(
+    const auto snapshot = interfaces::buildLevelSetGeometrySnapshot(
         fullNegativeCell(interface_marker),
         {},
         {},
@@ -6553,7 +6553,7 @@ TEST(FreeSurfaceGeometrySnapshot,
         std::move(scalar),
         "curved_full_cell");
     const auto rules = snapshot->retainedRules(
-        interfaces::FreeSurfaceGeometryRuleRole::NegativeVolume);
+        interfaces::LevelSetGeometryRuleRole::NegativeVolume);
     ASSERT_EQ(rules.size(), 1u);
     EXPECT_GT(rules.front()->reference_rule.points.size(), 1u);
     EXPECT_NEAR(rules.front()->physical_rule.physical_measure,
@@ -6580,7 +6580,7 @@ TEST(FreeSurfaceGeometrySnapshot, RejectsImpossibleClaimedQuadraticOrder)
         /*negative_weight=*/2.0,
         /*negative_achieved_order=*/2);
     EXPECT_THROW(
-        (void)interfaces::buildFreeSurfaceGeometrySnapshot(
+        (void)interfaces::buildLevelSetGeometrySnapshot(
             std::move(domain),
             {},
             {},
@@ -6599,7 +6599,7 @@ TEST(FreeSurfaceGeometrySnapshot, RejectsAchievedOrderBelowPolicy)
     auto policy = snapshotPolicyWithoutBoundary();
     policy.minimum_achieved_quadrature_order = 2;
     EXPECT_THROW(
-        (void)interfaces::buildFreeSurfaceGeometrySnapshot(
+        (void)interfaces::buildLevelSetGeometrySnapshot(
             std::move(domain),
             {},
             {},
@@ -6623,7 +6623,7 @@ TEST(FreeSurfaceGeometrySnapshot, RejectsStaleAndDuplicateContactDomains)
     interfaces::GeneratedInterfaceBoundaryIntersectionDomain stale_contact(
         std::move(stale_request));
     EXPECT_THROW(
-        (void)interfaces::buildFreeSurfaceGeometrySnapshot(
+        (void)interfaces::buildLevelSetGeometrySnapshot(
             verticalInterfaceWithVolumes(interface_marker),
             {std::move(stale_contact)},
             {},
@@ -6638,7 +6638,7 @@ TEST(FreeSurfaceGeometrySnapshot, RejectsStaleAndDuplicateContactDomains)
         interfaces::buildGeneratedInterfaceBoundaryIntersectionDomain(
             contactRequest(interface_marker, wall_marker), domain, mesh);
     EXPECT_THROW(
-        (void)interfaces::buildFreeSurfaceGeometrySnapshot(
+        (void)interfaces::buildLevelSetGeometrySnapshot(
             std::move(domain),
             {contact, contact},
             {},
@@ -6658,7 +6658,7 @@ TEST(FreeSurfaceGeometrySnapshot, RejectsMissingExpectedContactTrace)
         contactRequest(interface_marker, wall_marker));
 
     EXPECT_THROW(
-        (void)interfaces::buildFreeSurfaceGeometrySnapshot(
+        (void)interfaces::buildLevelSetGeometrySnapshot(
             verticalInterfaceWithVolumes(interface_marker),
             {std::move(missing_contact)},
             {},
@@ -6669,13 +6669,13 @@ TEST(FreeSurfaceGeometrySnapshot, RejectsMissingExpectedContactTrace)
         std::invalid_argument);
 }
 
-TEST(FreeSurfaceGeometrySnapshotCache,
+TEST(LevelSetGeometrySnapshotCache,
      HoldsWeakReferencesAndEvictsOnlyAfterConsumersRelease)
 {
     constexpr int interface_marker = 113;
     const SingleQuadBoundaryMesh mesh;
-    std::shared_ptr<const interfaces::FreeSurfaceGeometrySnapshot> snapshot =
-        interfaces::buildFreeSurfaceGeometrySnapshot(
+    std::shared_ptr<const interfaces::LevelSetGeometrySnapshot> snapshot =
+        interfaces::buildLevelSetGeometrySnapshot(
             verticalInterfaceWithVolumes(interface_marker),
             {},
             {},
@@ -6685,7 +6685,7 @@ TEST(FreeSurfaceGeometrySnapshotCache,
             "cache_lifetime");
     const auto key = snapshot->revision().snapshot_revision_key;
 
-    interfaces::FreeSurfaceGeometrySnapshotCache cache;
+    interfaces::LevelSetGeometrySnapshotCache cache;
     cache.insert(snapshot);
     EXPECT_EQ(cache.find(key), snapshot);
     auto live = cache.statistics();
@@ -6715,12 +6715,12 @@ TEST(FreeSurfaceGeometrySnapshotCache,
                    std::to_string(expired.miss_count));
 }
 
-TEST(FreeSurfaceGeometrySnapshotCache,
+TEST(LevelSetGeometrySnapshotCache,
      RevisionKeyIncludesAuthoritativeQuadratureContent)
 {
     constexpr int interface_marker = 114;
     const SingleQuadBoundaryMesh mesh;
-    const auto first = interfaces::buildFreeSurfaceGeometrySnapshot(
+    const auto first = interfaces::buildLevelSetGeometrySnapshot(
         verticalInterfaceWithVolumes(
             interface_marker,
             /*negative_point_x=*/-0.5),
@@ -6730,7 +6730,7 @@ TEST(FreeSurfaceGeometrySnapshotCache,
         snapshotPolicyWithoutBoundary(),
         verticalScalar(),
         "cache_content_key");
-    const auto second = interfaces::buildFreeSurfaceGeometrySnapshot(
+    const auto second = interfaces::buildLevelSetGeometrySnapshot(
         verticalInterfaceWithVolumes(
             interface_marker,
             /*negative_point_x=*/-0.25,
@@ -6754,7 +6754,7 @@ TEST(ProducerObservation, SnapshotContentBindsSourceObservationWithoutChangingTo
     constexpr int marker = 114;
     const SingleQuadBoundaryMesh mesh;
     const auto source = verticalInterfaceWithVolumes(marker);
-    const auto baseline = interfaces::buildFreeSurfaceGeometrySnapshot(
+    const auto baseline = interfaces::buildLevelSetGeometrySnapshot(
         source, {}, {}, mesh, snapshotPolicyWithoutBoundary(), verticalScalar(), "observation_content");
     ASSERT_TRUE(baseline);
     for (const bool change_volume : {false, true}) {
@@ -6771,7 +6771,7 @@ TEST(ProducerObservation, SnapshotContentBindsSourceObservationWithoutChangingTo
         }
         // A copied record is changed only to test content sensitivity. No
         // successful construction/derivative certificate is manufactured.
-        const auto candidate = interfaces::buildFreeSurfaceGeometrySnapshot(
+        const auto candidate = interfaces::buildLevelSetGeometrySnapshot(
             changed, {}, {}, mesh, snapshotPolicyWithoutBoundary(), verticalScalar(), "observation_content");
         ASSERT_TRUE(candidate);
         ASSERT_EQ(candidate->rules().size(), baseline->rules().size());
@@ -6997,7 +6997,7 @@ TEST(CoefficientClassificationPolicy,
     const auto make_snapshot = [&](auto policy) {
         const auto source =
             linearTriangleCutDomain(marker, values, 1.0e-12, policy);
-        return interfaces::buildFreeSurfaceGeometrySnapshot(
+        return interfaces::buildLevelSetGeometrySnapshot(
             source, {}, {}, mesh, snapshotPolicyWithoutBoundary(),
             affineTriangleScalar(values), "coefficient_policy_identity");
     };
@@ -7063,7 +7063,7 @@ TEST(ProducerObservation, RealDyadicTriangleBoundaryCopiesRemainUnchecked)
             EXPECT_EQ(fragment.quadrature_points[0].weight, 0.25);
             EXPECT_EQ(fragment.quadrature_points[1].weight, 0.25);
         }
-        const auto snapshot = interfaces::buildFreeSurfaceGeometrySnapshot(
+        const auto snapshot = interfaces::buildLevelSetGeometrySnapshot(
             source, {contact}, boundaries, mesh, snapshotPolicyWithoutBoundary(),
             affineTriangleScalar(values), "dyadic_boundary_observation");
         ASSERT_TRUE(snapshot);
@@ -7078,7 +7078,7 @@ TEST(ProducerObservation, RealDyadicTriangleBoundaryCopiesRemainUnchecked)
                 replacement.addFragment(std::move(fragment));
             }
             changed[selected] = std::move(replacement);
-            const auto content_variant = interfaces::buildFreeSurfaceGeometrySnapshot(
+            const auto content_variant = interfaces::buildLevelSetGeometrySnapshot(
                 source, {contact}, changed, mesh, snapshotPolicyWithoutBoundary(),
                 affineTriangleScalar(values), "dyadic_boundary_observation");
             ASSERT_TRUE(content_variant);
@@ -7118,7 +7118,7 @@ TEST(ProducerObservation, RealDyadicTetraBoundaryAndSnapshotRemainUnchecked)
             EXPECT_TRUE(fragment.measure == 0.125 || fragment.measure == 0.375);
         }
         EXPECT_EQ(boundaries[0].summary().measure + boundaries[1].summary().measure, 0.5);
-        const auto snapshot = interfaces::buildFreeSurfaceGeometrySnapshot(
+        const auto snapshot = interfaces::buildLevelSetGeometrySnapshot(
             source, {contact}, boundaries, mesh, snapshotPolicyWithoutBoundary(),
             affineTetraScalar(values), "dyadic_tetra_observation");
         ASSERT_TRUE(snapshot);
@@ -7151,7 +7151,7 @@ TEST(ProducerObservation, PositivePieceFilteringSnapshotConstructionIsRejected)
         for (const auto& fragment : cut.fragments) source.addFragment(fragment);
         for (const auto& region : cut.volume_regions) source.addVolumeRegion(region);
         try {
-            const auto snapshot = interfaces::buildFreeSurfaceGeometrySnapshot(
+            const auto snapshot = interfaces::buildLevelSetGeometrySnapshot(
                 source, {}, {}, mesh, snapshotPolicyWithoutBoundary(), affineTriangleScalar(values),
                 "filtered_piece_observation");
             (void)snapshot;
@@ -7403,8 +7403,8 @@ TEST(FreeSurfaceGeometrySnapshot,
      StripRulesBindToTheirOwnSourcesAndParentVolumes)
 {
     using Side = FE::geometry::CutIntegrationSide;
-    using Role = interfaces::FreeSurfaceGeometryRuleRole;
-    using Retention = interfaces::FreeSurfaceGeometryRetention;
+    using Role = interfaces::LevelSetGeometryRuleRole;
+    using Retention = interfaces::LevelSetGeometryRetention;
     using Branch = interfaces::LinearCornerStrictBranch;
     constexpr int interface_marker = 155;
     constexpr int wall_marker = 25;
@@ -7476,7 +7476,7 @@ TEST(FreeSurfaceGeometrySnapshot,
     const auto active_positive = positive;
     const auto contact_source = contact;
 
-    interfaces::FreeSurfaceGeometryScalarEvaluator scalar;
+    interfaces::LevelSetGeometryScalarEvaluator scalar;
     scalar.value = [](FE::GlobalIndex cell,
                       const std::array<FE::Real, 3>& point,
                       const FE::geometry::CutQuadratureProvenance&) {
@@ -7490,9 +7490,9 @@ TEST(FreeSurfaceGeometrySnapshot,
            const FE::geometry::CutQuadratureProvenance&) {
             return std::array<FE::Real, 3>{{0.5, 0.0, 0.0}};
         };
-    interfaces::FreeSurfaceGeometrySnapshotPolicy policy;
+    interfaces::LevelSetGeometrySnapshotPolicy policy;
     policy.minimum_retained_volume_fraction = FE::Real{1.0e-8};
-    const auto snapshot = interfaces::buildFreeSurfaceGeometrySnapshot(
+    const auto snapshot = interfaces::buildLevelSetGeometrySnapshot(
         std::move(domain),
         {std::move(contact)},
         {std::move(negative), std::move(positive)},
@@ -7546,7 +7546,7 @@ TEST(FreeSurfaceGeometrySnapshot,
                 EXPECT_EQ(record.construction_observation,
                           fragment->construction_observation);
                 EXPECT_EQ(record.source_topology_key,
-                          interfaces::freeSurfaceGeometrySourceTopologyKey(
+                          interfaces::levelSetGeometrySourceTopologyKey(
                               *fragment, FE::ElementType::Quad4,
                               policy.tolerance));
                 break;

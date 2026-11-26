@@ -1019,7 +1019,7 @@ void logCutVolumeRowProvenanceDiagnostics(
             .value("parent_measure", rule.parent_measure)
             .value("quadrature_points", rule.points.size())
             .value("source_revision", (rule_metadata == nullptr ? 0u : rule_metadata->source_value_revision))
-            .value("free_surface_snapshot_revision", (rule_metadata == nullptr ? 0u : rule_metadata->free_surface_snapshot_revision_key))
+            .value("free_surface_snapshot_revision", (rule_metadata == nullptr ? 0u : rule_metadata->level_set_snapshot_revision_key))
             .value("cut_topology_revision", (rule_metadata == nullptr ? 0u : rule_metadata->cut_topology_revision))
             .value("quadrature_policy_key", (rule_metadata == nullptr ? 0u : rule_metadata->quadrature_policy_key))
             .value("row_dofs", joinDofsWithOffset(row_dofs, row_dof_offset))
@@ -2993,7 +2993,7 @@ assembly::AssemblyResult assembleOperator(
         const auto* cut_context = system.cutIntegrationContext();
         FE_THROW_IF(cut_context == nullptr, InvalidArgumentException,
                     "assembleOperator: cut-volume terms require a registered CutIntegrationContext");
-        cut_context->assertAllFreeSurfaceGeometrySnapshotsCurrent(mesh);
+        cut_context->assertAllLevelSetGeometrySnapshotsCurrent(mesh);
 
         struct CutVolumeAssemblyEntry {
             const FESystem::PlannedCutVolumeTerm* term{nullptr};

@@ -22,7 +22,7 @@
 
 #include "Constraints/SmallCutAggregationConstraint.h"
 #include "Core/Types.h"
-#include "Interfaces/FreeSurfaceGeometrySnapshot.h"
+#include "Interfaces/LevelSetGeometrySnapshot.h"
 #include "Interfaces/IncompressibleTwoFluidDiagnostics.h"
 #include "Systems/OperatorRegistry.h"
 #include "Systems/OperatorStageMetadata.h"
@@ -65,8 +65,8 @@ struct TwoFluidAcceptedStageDiagnosticDeclaration {
  */
 struct AcceptedTwoFluidStageDiagnosticState {
     int interface_marker{-1};
-    interfaces::FreeSurfaceGeometryRevision geometry_revision{};
-    interfaces::FreeSurfaceGeometryLocalMeshRevision local_mesh_revision{};
+    interfaces::LevelSetGeometryRevision geometry_revision{};
+    interfaces::LevelSetGeometryLocalMeshRevision local_mesh_revision{};
     interfaces::IncompressibleTwoFluidDiagnosticState diagnostics{};
 };
 

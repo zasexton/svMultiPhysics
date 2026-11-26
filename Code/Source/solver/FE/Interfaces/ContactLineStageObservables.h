@@ -111,7 +111,7 @@ struct DeclaredWallFunctionalForm {
 [[nodiscard]] std::vector<DeclaredWallFunctionalForm> declaredWallFunctionalForms(
     const systems::FESystem& system,
     std::string_view prefix,
-    const FreeSurfaceGeometrySnapshot& snapshot,
+    const LevelSetGeometrySnapshot& snapshot,
     std::span<const int> walls,
     geometry::CutIntegrationSide liquid_side,
     std::span<const std::string_view> quantities);

@@ -1494,7 +1494,7 @@ Tolerances marked "proposal" are the working acceptance criteria under D1. Confi
     2. make the KAG finite-difference diagnostic in `LevelSetCurvatureProjection.cpp` opt-in (131,760 strict cuts per projection; about 5 min each);
     3. index fragments by cell in `buildGeneratedActiveBoundaryDomain` (about 56 s per rebuild);
     4. hash the duplicate search in `collectLevelSetCurvatureSupplementalSamples` (about 30% of a KAG projection);
-    5. a stable-id map in `buildFreeSurfaceGeometrySnapshot` (about 23 s per rebuild);
+    5. a stable-id map in `buildLevelSetGeometrySnapshot` (about 23 s per rebuild);
     6. stop the DOF-layout revision from invalidating the cut context every step (40% of a 3D tank step);
     7. skip aggregation when the topology is unchanged;
     8. classification-only records for fully dry cells (needed for R/h = 16 memory);
@@ -1550,7 +1550,7 @@ Tolerances marked "proposal" are the working acceptance criteria under D1. Confi
       - **Decided 2026-10-05 (D16–D18):** LTO+PGO once the speed-up branches settle; a shared JIT cache for benchmark runs; no round-off-changing JIT options.
     - Queued after the current merges: a fresh 2D/3D profiling pass of the post-merge step, attacking the next hotspots (results-neutral).
     - **Integrated check of the 2026-10-05 merges** (volume conservation, functional diagnostics, perf B, perf D, perf 8; tip `a4fb2de2`, jobs `46647477`/`46647480`/`46647482`): serial outputs bitwise identical on all 9 reference cases; FE 34/34, Physics 7/7, Application 4/4.
-    - **Latent uninitialized-memory bug found (2026-10-01).** `activeCutContextMatchesRefreshCache`, the cut-context reuse decision, branches on a value from an uninitialized stack allocation in `buildFreeSurfaceGeometrySnapshot`. `validateFreeSurfaceGeometrySnapshotCurrentForMarker` reads uninitialized heap memory from `makeCutCellGeometryMapping`. Memcheck reports about 45k uninitialized reads on the tip.
+    - **Latent uninitialized-memory bug found (2026-10-01).** `activeCutContextMatchesRefreshCache`, the cut-context reuse decision, branches on a value from an uninitialized stack allocation in `buildLevelSetGeometrySnapshot`. `validateLevelSetGeometrySnapshotCurrentForMarker` reads uninitialized heap memory from `makeCutCellGeometryMapping`. Memcheck reports about 45k uninitialized reads on the tip.
       - It depends on code generation: with the PDE-cache branch, `MinimizedCircleSphereAndSessileCapsMeetProductionCertificates` fails when the Workflows suite runs in one process, apparently through stale cut-context reuse (residual 0.108 instead of 4.5e-17).
       - Fix in progress on `dev/fix-uninitialized-snapshot`, including a production-impact assessment.
       - The PDE-cache merge waits for the fix.
@@ -2548,7 +2548,7 @@ The July capillary-wave and prescribed-velocity wall-advection results in the or
 |---|---|
 | `LinearCorner` | Production cut backend: a piecewise-planar interface from a P1 level set on simplices |
 | `CutVolume` | Active-domain integration over the cut liquid sub-volume |
-| Snapshot | `FreeSurfaceGeometrySnapshot`: the single published cut geometry for assembly, constraints and diagnostics |
+| Snapshot | `LevelSetGeometrySnapshot`: the single published cut geometry for assembly, constraints and diagnostics |
 | SurfaceStress | Laplace–Beltrami capillary form `γ ∫ (I − n⊗n) : ∇v` on the generated interface |
 | KAG | Kinematic area gradient: curvature recovered as `M⁻¹` times the φ-gradient of the discrete surface-plus-wall energy |
 | Aggregation (AgFEM) | Small-cut DOFs constrained to extrapolations from well-supported root cells |

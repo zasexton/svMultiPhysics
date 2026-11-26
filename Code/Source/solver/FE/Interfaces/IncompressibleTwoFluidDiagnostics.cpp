@@ -168,7 +168,7 @@ void accumulatePhasePoint(
     const IncompressibleTwoFluidPhaseEvaluators& evaluators,
     const IncompressibleTwoFluidDiagnosticParameters& parameters,
     Real density,
-    const FreeSurfaceGeometryRuleRecord& record,
+    const LevelSetGeometryRuleRecord& record,
     std::size_t point_index,
     Real weight)
 {
@@ -288,7 +288,7 @@ void requireFiniteAccumulator(
 
 IncompressibleTwoFluidDiagnosticAccumulator
 evaluateLocalIncompressibleTwoFluidDiagnostics(
-    const FreeSurfaceGeometrySnapshot& snapshot,
+    const LevelSetGeometrySnapshot& snapshot,
     const IncompressibleTwoFluidDiagnosticParameters& parameters,
     const IncompressibleTwoFluidPhaseEvaluators& negative_phase,
     const IncompressibleTwoFluidPhaseEvaluators& positive_phase,
@@ -332,13 +332,13 @@ evaluateLocalIncompressibleTwoFluidDiagnostics(
 
     for (const auto& record : snapshot.rules()) {
         if (!record.locally_owned ||
-            record.retention != FreeSurfaceGeometryRetention::Retained) {
+            record.retention != LevelSetGeometryRetention::Retained) {
             continue;
         }
         const bool negative_volume =
-            record.role == FreeSurfaceGeometryRuleRole::NegativeVolume;
+            record.role == LevelSetGeometryRuleRole::NegativeVolume;
         const bool positive_volume =
-            record.role == FreeSurfaceGeometryRuleRole::PositiveVolume;
+            record.role == LevelSetGeometryRuleRole::PositiveVolume;
         if (negative_volume || positive_volume) {
             const auto expected_side = negative_volume
                                            ? geometry::CutIntegrationSide::Negative
@@ -382,7 +382,7 @@ evaluateLocalIncompressibleTwoFluidDiagnostics(
             }
             continue;
         }
-        if (record.role != FreeSurfaceGeometryRuleRole::Interface) {
+        if (record.role != LevelSetGeometryRuleRole::Interface) {
             continue;
         }
         if (record.reference_rule.kind !=
@@ -1192,10 +1192,10 @@ void validatePhaseMomentumReconciliation(
 IncompressibleTwoFluidMomentumReconciliation
 buildIncompressibleTwoFluidMomentumReconciliation(
     int interface_marker,
-    const FreeSurfaceGeometryRevision& raw_geometry_revision,
+    const LevelSetGeometryRevision& raw_geometry_revision,
     const IncompressibleTwoFluidDiagnosticState& raw,
     std::uint64_t raw_algebraic_revision,
-    const FreeSurfaceGeometryRevision& corrected_geometry_revision,
+    const LevelSetGeometryRevision& corrected_geometry_revision,
     const IncompressibleTwoFluidDiagnosticState& corrected,
     std::uint64_t corrected_algebraic_revision,
     Real relative_tolerance)

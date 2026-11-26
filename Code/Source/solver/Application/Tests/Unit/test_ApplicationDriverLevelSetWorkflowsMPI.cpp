@@ -1631,20 +1631,20 @@ TEST(ApplicationDriverLevelSetWorkflowsMPI,
   constexpr std::uint64_t revision = 73u;
   constexpr svmp::FE::GlobalIndex parent = 23;
 
-  svmp::FE::interfaces::FreeSurfaceGeometryRuleRecord record;
+  svmp::FE::interfaces::LevelSetGeometryRuleRecord record;
   record.role =
-      svmp::FE::interfaces::FreeSurfaceGeometryRuleRole::Contact;
+      svmp::FE::interfaces::LevelSetGeometryRuleRole::Contact;
   record.retention =
-      svmp::FE::interfaces::FreeSurfaceGeometryRetention::Retained;
+      svmp::FE::interfaces::LevelSetGeometryRetention::Retained;
   record.physical_boundary_marker = wall_marker;
   record.locally_owned = true;
   record.reference_rule.geometric_dimension = 0;
   record.reference_rule.provenance.parent_entity_global_id = parent;
-  record.reference_rule.provenance.free_surface_snapshot_revision_key =
+  record.reference_rule.provenance.level_set_snapshot_revision_key =
       revision;
   record.reference_rule.points.resize(1u);
   record.physical_rule.geometric_dimension = 0;
-  record.physical_rule.free_surface_snapshot_revision_key = revision;
+  record.physical_rule.level_set_snapshot_revision_key = revision;
   record.physical_rule.physical_measure = 1.0;
   const auto constraint =
       makeAcceptedSnapshotWallConstraint(record, interface_marker, revision);
@@ -5404,7 +5404,7 @@ TEST(ApplicationDriverLevelSetWorkflowsMPI,
   EXPECT_TRUE(endpoint_report.refreshed);
   const auto endpoint_snapshot_revision =
       sim.fe_system->cutIntegrationContext()
-          ->freeSurfaceGeometrySnapshotRevisionForMarker(721);
+          ->levelSetGeometrySnapshotRevisionForMarker(721);
   EXPECT_NE(endpoint_snapshot_revision,
             contact_stages.front()
                 .geometry_revision.snapshot_revision_key);

@@ -83,7 +83,7 @@ std::uint64_t VelocityExtensionMapRevision::key() const noexcept
   hashMapWord(hash, mesh_topology);
   hashMapWord(hash, mesh_ownership);
   hashMapWord(hash, mesh_numbering);
-  hashMapWord(hash, free_surface_geometry);
+  hashMapWord(hash, level_set_geometry);
   hashMapWord(hash, level_set_values);
   hashMapWord(hash, active_set);
   return hash == 0u ? 1u : hash;
@@ -99,7 +99,7 @@ VelocityExtensionMapRevision velocityExtensionMapRevision(
     std::uint64_t mesh_topology,
     std::uint64_t mesh_ownership,
     std::uint64_t mesh_numbering,
-    std::uint64_t free_surface_geometry,
+    std::uint64_t level_set_geometry,
     std::span<const double> level_set_values,
     std::span<const std::uint8_t> active_set)
 {
@@ -119,7 +119,7 @@ VelocityExtensionMapRevision velocityExtensionMapRevision(
       .mesh_topology = mesh_topology,
       .mesh_ownership = mesh_ownership,
       .mesh_numbering = mesh_numbering,
-      .free_surface_geometry = free_surface_geometry,
+      .level_set_geometry = level_set_geometry,
       .level_set_values = hashLevelSetValues(level_set_values),
       .active_set = hashActiveSet(active_set),
   };

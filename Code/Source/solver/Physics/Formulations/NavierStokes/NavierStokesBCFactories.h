@@ -1031,7 +1031,7 @@ inline void applyFreeSurfaceContactLineConstraints(
         .quoted("generated_interface_domain_id", bc.generated_interface_domain_id)
         .text("generated_interface_geometry",
               freeSurfaceGeneratedInterfaceGeometryName(bc.generated_interface_geometry))
-        .text("geometry_tangent_policy", freeSurfaceGeometryTangentPolicyName(bc.geometry_tangent_policy))
+        .text("geometry_tangent_policy", levelSetGeometryTangentPolicyName(bc.geometry_tangent_policy))
         .text("active_domain", activeDomainName(bc.active_domain))
         .text("dynamic_stress", has_dynamic_stress ? "enabled" : "natural_zero")
         .text("curvature_policy", freeSurfaceCurvaturePolicyName(bc))
@@ -1193,7 +1193,7 @@ inline void applyFreeSurfaceContactLineConstraints(
         .text("active_domain_side", active_domain_side)
         .text("generated_interface_geometry",
               freeSurfaceGeneratedInterfaceGeometryName(bc.generated_interface_geometry))
-        .text("geometry_tangent_policy", freeSurfaceGeometryTangentPolicyName(bc.geometry_tangent_policy))
+        .text("geometry_tangent_policy", levelSetGeometryTangentPolicyName(bc.geometry_tangent_policy))
         .text("pressure_stabilization", pressure_stabilization_enabled ? "enabled" : "disabled")
         .text("pressure_stabilization_form", pressure_stabilization_enabled ? "absolute" : "disabled")
         .text("pressure_disabled_reason", "none")

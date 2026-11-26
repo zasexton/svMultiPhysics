@@ -86,7 +86,7 @@ coverage is incomplete. The selected outer iteration is therefore the only
 honest system-level AD-5 direction in the present implementation.
 
 The fixed-topology first-variation fixture in
-`FreeSurfaceGeometrySnapshot.DiscreteFunctionalFirstVariationMatchesCentralDifference`
+`LevelSetGeometrySnapshot.DiscreteFunctionalFirstVariationMatchesCentralDifference`
 is retained as a capillary-functional prerequisite. It is not evidence for a
 complete monolithic Jacobian.
 
@@ -367,7 +367,7 @@ ownership boundary is:
 | Record channel | Intended production owner | Current status |
 |---|---|---|
 | Kinetic and gravitational stored energy | Active-liquid state functional evaluated on the authoritative retained volume rules at both accepted endpoints | The Navier--Stokes declaration binds density, velocity, constant conservative body acceleration, and a zero reference point to `evaluateFreeSurfaceActiveVolumeEnergy`. The same endpoint evaluation records the gravitational-potential power \(-\rho\int g\cdot u\), needed to separate conservative body work from the changing-domain remainder. After initial constraints, cut refresh, and extension-state refresh, production records a zero-duration initial functional baseline; each accepted endpoint records the same channels. Both stored-energy values and gravitational endpoint power are connected in the narrow fixed-topology envelope. |
-| Liquid--gas surface and solid--liquid wall stored energy | `FreeSurfaceGeometrySnapshot` discrete functional | Implemented for accepted and maintenance states and connected in the narrow envelope. |
+| Liquid--gas surface and solid--liquid wall stored energy | `LevelSetGeometrySnapshot` discrete functional | Implemented for accepted and maintenance states and connected in the narrow envelope. |
 | Gas/compressibility stored energy | Gas model, when present | Explicitly inapplicable with an exact zero and named owner in the selected one-phase envelope; no gas model exists. |
 | Bulk-viscous dissipation | Active-volume Galerkin viscous form tested by the endpoint velocity | For constant Newtonian viscosity, `evaluateFreeSurfaceActiveVolumeDissipation` evaluates the production density \(2\mu\,\mathrm{sym}(\nabla u):\mathrm{sym}(\nabla u)\) on retained endpoint rules. The application path reduces it exactly once and attaches it to accepted functional history. Variable-viscosity declarations leave this channel absent rather than substituting a literal coefficient. Constant-viscosity values are connected in the narrow envelope. |
 | Navier-slip and line-friction dissipation | Accepted sharp wall/contact state at the declared endpoint | Connected when every applicable declaration publishes its accepted sharp wall/contact stage; missing coverage fails closed. Physical wetting qualification remains open. |
@@ -780,7 +780,7 @@ residual. Until those records pass, FSR-09 and WP-8 remain open.
 - Surface/wall/volume functional, first variation, rank-owned active-volume
   stored-energy and constant-viscosity dissipation primitives, and
   endpoint-domain backward-Euler kinetic identity:
-  `Code/Source/solver/FE/Interfaces/FreeSurfaceGeometrySnapshot.{h,cpp}`.
+  `Code/Source/solver/FE/Interfaces/LevelSetGeometrySnapshot.{h,cpp}`.
 - Accepted functional/contact records:
   `Code/Source/solver/FE/Systems/FESystem.{h,cpp}`.
 - Surface-stress tangent containment:

@@ -5354,7 +5354,7 @@ TEST(MovingDomainPhysics,
     const FE::Real wall_energy =
         -gamma * std::cos(theta) * wetted_wall_area;
     const FE::Real total_potential = liquid_gas_energy + wall_energy;
-    FE::interfaces::FreeSurfaceGeometryRevision geometry_revision{
+    FE::interfaces::LevelSetGeometryRevision geometry_revision{
         .source_id = "field:" + std::to_string(phi),
         .domain_id = "history_surface",
         .interface_marker = interface_marker,
@@ -5600,7 +5600,7 @@ TEST(MovingDomainPhysics,
         }));
     ASSERT_NO_THROW(system.setup({}, makeSingleTetraSetupInputs()));
 
-    FE::interfaces::FreeSurfaceGeometryRevision geometry_revision{
+    FE::interfaces::LevelSetGeometryRevision geometry_revision{
         .source_id = "field:" + std::to_string(phi),
         .domain_id = "dynamic_contact_history_surface",
         .interface_marker = interface_marker,
@@ -6208,7 +6208,7 @@ TEST(MovingDomainPhysics,
     auto p_space = makePressureSpace(mesh);
 
     const auto register_with =
-        [&](ns::FreeSurfaceGeometryTangentPolicy tangent_policy) {
+        [&](ns::LevelSetGeometryTangentPolicy tangent_policy) {
         auto opts = baseNavierStokesOptions();
         opts.free_surface.push_back(
             ns::IncompressibleNavierStokesVMSOptions::FreeSurfaceBoundary{
@@ -6234,9 +6234,9 @@ TEST(MovingDomainPhysics,
     };
 
     EXPECT_NO_THROW(register_with(
-        ns::FreeSurfaceGeometryTangentPolicy::RefreshedFrozenQuadrature));
+        ns::LevelSetGeometryTangentPolicy::RefreshedFrozenQuadrature));
     EXPECT_THROW(register_with(
-                     ns::FreeSurfaceGeometryTangentPolicy::DifferentiatedQuadrature),
+                     ns::LevelSetGeometryTangentPolicy::DifferentiatedQuadrature),
                  std::invalid_argument);
 }
 
@@ -7399,7 +7399,7 @@ TEST(MovingDomainPhysics,
         .generated_interface_geometry =
             ns::FreeSurfaceGeneratedInterfaceGeometry::HighOrderImplicit,
         .geometry_tangent_policy =
-            ns::FreeSurfaceGeometryTangentPolicy::RefreshedFrozenQuadrature,
+            ns::LevelSetGeometryTangentPolicy::RefreshedFrozenQuadrature,
         .active_domain = ns::FreeSurfaceActiveDomain::LevelSetNegative,
         .external_pressure = 1.0,
         // A zero penalty disables the pressure ghost penalty, so only

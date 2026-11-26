@@ -13,7 +13,7 @@
  * @brief Raw accepted-stage measures for a sharp two-fluid interface.
  */
 
-#include "Interfaces/FreeSurfaceGeometrySnapshot.h"
+#include "Interfaces/LevelSetGeometrySnapshot.h"
 
 #include <array>
 #include <cstddef>
@@ -48,7 +48,7 @@ struct IncompressibleTwoFluidDiagnosticParameters {
 /** Point evaluators for one phase field pair on the shared background cell. */
 struct IncompressibleTwoFluidPhaseEvaluators {
     FreeSurfaceDiscreteFunctionalVectorEvaluator velocity{};
-    FreeSurfaceGeometryScalarEvaluator pressure{};
+    LevelSetGeometryScalarEvaluator pressure{};
 };
 
 /**
@@ -208,8 +208,8 @@ struct IncompressibleTwoFluidPhaseMomentumReconciliation {
  */
 struct IncompressibleTwoFluidMomentumReconciliation {
     int interface_marker{-1};
-    FreeSurfaceGeometryRevision raw_geometry_revision{};
-    FreeSurfaceGeometryRevision corrected_geometry_revision{};
+    LevelSetGeometryRevision raw_geometry_revision{};
+    LevelSetGeometryRevision corrected_geometry_revision{};
     std::uint64_t raw_algebraic_revision{0u};
     std::uint64_t corrected_algebraic_revision{0u};
     Real relative_tolerance{0.0};
@@ -223,7 +223,7 @@ struct IncompressibleTwoFluidMomentumReconciliation {
 /** Evaluate rank-owned additive quantities on one immutable snapshot. */
 [[nodiscard]] IncompressibleTwoFluidDiagnosticAccumulator
 evaluateLocalIncompressibleTwoFluidDiagnostics(
-    const FreeSurfaceGeometrySnapshot& snapshot,
+    const LevelSetGeometrySnapshot& snapshot,
     const IncompressibleTwoFluidDiagnosticParameters& parameters,
     const IncompressibleTwoFluidPhaseEvaluators& negative_phase,
     const IncompressibleTwoFluidPhaseEvaluators& positive_phase,
@@ -240,10 +240,10 @@ finalizeIncompressibleTwoFluidDiagnostics(
 [[nodiscard]] IncompressibleTwoFluidMomentumReconciliation
 buildIncompressibleTwoFluidMomentumReconciliation(
     int interface_marker,
-    const FreeSurfaceGeometryRevision& raw_geometry_revision,
+    const LevelSetGeometryRevision& raw_geometry_revision,
     const IncompressibleTwoFluidDiagnosticState& raw,
     std::uint64_t raw_algebraic_revision,
-    const FreeSurfaceGeometryRevision& corrected_geometry_revision,
+    const LevelSetGeometryRevision& corrected_geometry_revision,
     const IncompressibleTwoFluidDiagnosticState& corrected,
     std::uint64_t corrected_algebraic_revision,
     Real relative_tolerance);

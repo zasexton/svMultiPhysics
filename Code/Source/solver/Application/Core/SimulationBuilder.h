@@ -19,8 +19,8 @@ class FESystem;
 } // namespace systems
 
 namespace interfaces {
-class FreeSurfaceGeometrySnapshotCache;
-class FreeSurfaceGeometrySnapshotReuseCache;
+class LevelSetGeometrySnapshotCache;
+class LevelSetGeometrySnapshotReuseCache;
 } // namespace interfaces
 
 namespace backends {
@@ -51,14 +51,14 @@ struct SimulationComponents {
   std::string primary_mesh_name{};
 
   std::unique_ptr<svmp::FE::systems::FESystem> fe_system{};
-  std::unique_ptr<svmp::FE::interfaces::FreeSurfaceGeometrySnapshotCache>
-      free_surface_geometry_snapshot_cache{};
+  std::unique_ptr<svmp::FE::interfaces::LevelSetGeometrySnapshotCache>
+      level_set_geometry_snapshot_cache{};
   // Previous snapshot build of each generated domain, for reusing its
   // full-cell records in the next rebuild (keyed by domain id).
   std::map<std::string,
            std::unique_ptr<
-               svmp::FE::interfaces::FreeSurfaceGeometrySnapshotReuseCache>>
-      free_surface_geometry_snapshot_reuse_caches{};
+               svmp::FE::interfaces::LevelSetGeometrySnapshotReuseCache>>
+      level_set_geometry_snapshot_reuse_caches{};
   std::vector<std::unique_ptr<svmp::Physics::PhysicsModule>> physics_modules{};
   std::vector<ResolvedLevelSetEquationHandle>
       resolved_level_set_equations_by_input_index{};

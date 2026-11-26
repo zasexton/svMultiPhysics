@@ -24,7 +24,7 @@
 #include "Geometry/GeometryFrameUtils.h"
 #include "Geometry/MappingFactory.h"
 #include "Geometry/CutQuadratureMapping.h"
-#include "Interfaces/FreeSurfaceGeometrySnapshot.h"
+#include "Interfaces/LevelSetGeometrySnapshot.h"
 #include "Systems/FESystem.h"
 #include "Core/EnvironmentNames.h"
 
@@ -77,8 +77,8 @@ struct SmallCutAggregationPendingProlongation {
     bool trace_bound_eligible{false};
     SmallCutAggregationGuardOptions guards{};
     std::uint64_t cut_context_content_revision{0u};
-    bool has_free_surface_snapshot_revision{false};
-    std::uint64_t free_surface_snapshot_revision{0u};
+    bool has_level_set_snapshot_revision{false};
+    std::uint64_t level_set_snapshot_revision{0u};
     bool has_source_value_revision{false};
     std::uint64_t source_value_revision{0u};
     std::vector<SmallCutAggregationProlongationRow> rows{};
@@ -4272,14 +4272,14 @@ prepareRefreshProvenance(
             publication->request.ownership_revision;
     }
 
-    if (cut_context.hasFreeSurfaceGeometrySnapshotForMarker(
+    if (cut_context.hasLevelSetGeometrySnapshotForMarker(
             interface_marker)) {
         const auto bound_revision =
-            cut_context.freeSurfaceGeometrySnapshotRevisionForMarker(
+            cut_context.levelSetGeometrySnapshotRevisionForMarker(
                 interface_marker);
-        const interfaces::FreeSurfaceGeometrySnapshot* selected = nullptr;
+        const interfaces::LevelSetGeometrySnapshot* selected = nullptr;
         for (const auto& snapshot :
-             cut_context.freeSurfaceGeometrySnapshots()) {
+             cut_context.levelSetGeometrySnapshots()) {
             if (snapshot != nullptr &&
                 snapshot->revision().snapshot_revision_key ==
                     bound_revision) {
@@ -4299,7 +4299,7 @@ prepareRefreshProvenance(
         }
         const auto& revision = selected->revision();
         identity.kind = SmallCutAggregationGeometryIdentityKind::
-            AuthoritativeFreeSurfaceSnapshot;
+            AuthoritativeLevelSetSnapshot;
         identity.available = true;
         identity.source_id = revision.source_id;
         identity.domain_id = revision.domain_id;
@@ -6192,7 +6192,7 @@ void SmallCutAggregationConstraint::apply(const systems::FESystem& system,
     // before any rank can enter the marker collective below.
     std::exception_ptr local_snapshot_exception;
     try {
-        cut_context->assertAllFreeSurfaceGeometrySnapshotsCurrent(
+        cut_context->assertAllLevelSetGeometrySnapshotsCurrent(
             system.meshAccess());
     } catch (...) {
         local_snapshot_exception = std::current_exception();
@@ -10454,13 +10454,13 @@ void SmallCutAggregationConstraint::apply(const systems::FESystem& system,
             pending->guards = guards_;
             pending->cut_context_content_revision =
                 cut_context->contentRevision();
-            pending->has_free_surface_snapshot_revision =
-                cut_context->hasFreeSurfaceGeometrySnapshotForMarker(
+            pending->has_level_set_snapshot_revision =
+                cut_context->hasLevelSetGeometrySnapshotForMarker(
                     interface_marker_);
-            if (pending->has_free_surface_snapshot_revision) {
-                pending->free_surface_snapshot_revision =
+            if (pending->has_level_set_snapshot_revision) {
+                pending->level_set_snapshot_revision =
                     cut_context
-                        ->freeSurfaceGeometrySnapshotRevisionForMarker(
+                        ->levelSetGeometrySnapshotRevisionForMarker(
                             interface_marker_);
             }
             pending->has_source_value_revision =
@@ -10614,15 +10614,15 @@ SmallCutAggregationConstraint::closeProlongation(
                 "between aggregation and prolongation finalization");
         }
         const bool has_snapshot =
-            cut_context->hasFreeSurfaceGeometrySnapshotForMarker(
+            cut_context->hasLevelSetGeometrySnapshotForMarker(
                 pending.interface_marker);
         if (has_snapshot !=
-                pending.has_free_surface_snapshot_revision ||
+                pending.has_level_set_snapshot_revision ||
             (has_snapshot &&
              cut_context
-                     ->freeSurfaceGeometrySnapshotRevisionForMarker(
+                     ->levelSetGeometrySnapshotRevisionForMarker(
                          pending.interface_marker) !=
-                 pending.free_surface_snapshot_revision)) {
+                 pending.level_set_snapshot_revision)) {
             throw std::runtime_error(
                 "SmallCutAggregationConstraint: free-surface snapshot "
                 "revision changed during prolongation finalization");
@@ -11045,10 +11045,10 @@ buildProlongationReport(
         closed.affine_constraint_layout_revision;
     report->revision.cut_context_content_revision =
         pending.cut_context_content_revision;
-    report->revision.has_free_surface_snapshot_revision =
-        pending.has_free_surface_snapshot_revision;
-    report->revision.free_surface_snapshot_revision =
-        pending.free_surface_snapshot_revision;
+    report->revision.has_level_set_snapshot_revision =
+        pending.has_level_set_snapshot_revision;
+    report->revision.level_set_snapshot_revision =
+        pending.level_set_snapshot_revision;
     report->revision.has_source_value_revision =
         pending.has_source_value_revision;
     report->revision.source_value_revision =
@@ -11609,10 +11609,10 @@ bool smallCutAggregationProlongationReportsBitwiseEqual(
         lr.affine_constraint_layout_revision !=
             rr.affine_constraint_layout_revision ||
         lr.cut_context_content_revision != rr.cut_context_content_revision ||
-        lr.has_free_surface_snapshot_revision !=
-            rr.has_free_surface_snapshot_revision ||
-        lr.free_surface_snapshot_revision !=
-            rr.free_surface_snapshot_revision ||
+        lr.has_level_set_snapshot_revision !=
+            rr.has_level_set_snapshot_revision ||
+        lr.level_set_snapshot_revision !=
+            rr.level_set_snapshot_revision ||
         lr.has_source_value_revision != rr.has_source_value_revision ||
         lr.source_value_revision != rr.source_value_revision ||
         lhs.canonical_content_digest != rhs.canonical_content_digest ||
@@ -11918,12 +11918,12 @@ void SmallCutAggregationConstraint::publishReusedRefresh(
         }
 
         pending->cut_context_content_revision = cut_context.contentRevision();
-        pending->has_free_surface_snapshot_revision =
-            cut_context.hasFreeSurfaceGeometrySnapshotForMarker(
+        pending->has_level_set_snapshot_revision =
+            cut_context.hasLevelSetGeometrySnapshotForMarker(
                 interface_marker_);
-        pending->free_surface_snapshot_revision =
-            pending->has_free_surface_snapshot_revision
-                ? cut_context.freeSurfaceGeometrySnapshotRevisionForMarker(
+        pending->level_set_snapshot_revision =
+            pending->has_level_set_snapshot_revision
+                ? cut_context.levelSetGeometrySnapshotRevisionForMarker(
                       interface_marker_)
                 : 0u;
         pending->has_source_value_revision =

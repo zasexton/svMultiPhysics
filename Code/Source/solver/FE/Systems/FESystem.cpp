@@ -1023,7 +1023,7 @@ cutIntegrationContextPublicationSignature(
             int marker) {
             const bool has_snapshot =
                 cut_context
-                    .hasFreeSurfaceGeometrySnapshotForMarker(
+                    .hasLevelSetGeometrySnapshotForMarker(
                         marker);
             mix_byte(
                 has_snapshot
@@ -1032,7 +1032,7 @@ cutIntegrationContextPublicationSignature(
             if (has_snapshot) {
                 mix_u64(
                     cut_context
-                        .freeSurfaceGeometrySnapshotRevisionForMarker(
+                        .levelSetGeometrySnapshotRevisionForMarker(
                             marker));
             }
         };
@@ -14101,15 +14101,15 @@ void FESystem::requireCurrentGeneratedBoundaryNitscheTraceCertificates(
                         recomputed_trace_to_penalty_ratio);
             }
             if (!cut_integration_context_
-                     ->hasFreeSurfaceGeometrySnapshotForMarker(
+                     ->hasLevelSetGeometrySnapshotForMarker(
                          record->policy
                              .volume_interface_marker) ||
                 cut_integration_context_
-                        ->freeSurfaceGeometrySnapshotRevisionForMarker(
+                        ->levelSetGeometrySnapshotRevisionForMarker(
                             record->policy
                                 .volume_interface_marker) !=
                     record->certificate
-                        .free_surface_snapshot_revision ||
+                        .level_set_snapshot_revision ||
                 !cut_integration_context_
                      ->hasExpectedGeneratedSourceValueRevision(
                          record->policy

@@ -5,11 +5,11 @@
  * See Copyright-SimVascular.txt for additional details.
  */
 
-#ifndef SVMP_FE_INTERFACES_FREESURFACEGEOMETRYSNAPSHOT_H
-#define SVMP_FE_INTERFACES_FREESURFACEGEOMETRYSNAPSHOT_H
+#ifndef SVMP_FE_INTERFACES_LEVELSETGEOMETRYSNAPSHOT_H
+#define SVMP_FE_INTERFACES_LEVELSETGEOMETRYSNAPSHOT_H
 
 /**
- * @file FreeSurfaceGeometrySnapshot.h
+ * @file LevelSetGeometrySnapshot.h
  * @brief Immutable, revision-complete geometry state for one level-set surface.
  */
 
@@ -35,9 +35,9 @@ class IMeshAccess;
 }
 namespace interfaces {
 
-class FreeSurfaceGeometrySnapshot;
+class LevelSetGeometrySnapshot;
 
-enum class FreeSurfaceGeometryRuleRole : std::uint8_t {
+enum class LevelSetGeometryRuleRole : std::uint8_t {
     NegativeVolume,
     PositiveVolume,
     Interface,
@@ -46,12 +46,12 @@ enum class FreeSurfaceGeometryRuleRole : std::uint8_t {
     Contact
 };
 
-enum class FreeSurfaceGeometryRetention : std::uint8_t {
+enum class LevelSetGeometryRetention : std::uint8_t {
     Retained,
     PrunedSmallVolume
 };
 
-enum class FreeSurfaceGeometryMomentCertificateSource : std::uint8_t {
+enum class LevelSetGeometryMomentCertificateSource : std::uint8_t {
     ParentReferenceCell,
     RegionMeasureCentroid,
     PiecewiseAffineGeometry,
@@ -59,21 +59,21 @@ enum class FreeSurfaceGeometryMomentCertificateSource : std::uint8_t {
     StoredGeneratedGeometry
 };
 
-struct FreeSurfaceGeometryMonomialMoment {
+struct LevelSetGeometryMonomialMoment {
     std::array<int, 3> exponents{{0, 0, 0}};
     Real value{0.0};
 };
 
-struct FreeSurfaceGeometryMomentCertificate {
+struct LevelSetGeometryMomentCertificate {
     int polynomial_order{-1};
     int ambient_dimension{0};
-    FreeSurfaceGeometryMomentCertificateSource source{
-        FreeSurfaceGeometryMomentCertificateSource::RegionMeasureCentroid};
+    LevelSetGeometryMomentCertificateSource source{
+        LevelSetGeometryMomentCertificateSource::RegionMeasureCentroid};
     bool phase_sign_certified{false};
-    std::vector<FreeSurfaceGeometryMonomialMoment> moments{};
+    std::vector<LevelSetGeometryMonomialMoment> moments{};
 };
 
-struct FreeSurfaceGeometryRevision {
+struct LevelSetGeometryRevision {
     std::string source_id{};
     std::string domain_id{};
     int interface_marker{-1};
@@ -92,26 +92,26 @@ struct FreeSurfaceGeometryRevision {
 
     [[nodiscard]] bool complete() const noexcept;
     [[nodiscard]] bool sameSourceState(
-        const FreeSurfaceGeometryRevision& other) const noexcept;
+        const LevelSetGeometryRevision& other) const noexcept;
 };
 
 /** Rank-local mesh epochs retained for live-consumer staleness checks. */
-struct FreeSurfaceGeometryLocalMeshRevision {
+struct LevelSetGeometryLocalMeshRevision {
     std::uint64_t mesh_geometry_revision{0};
     std::uint64_t mesh_topology_revision{0};
     std::uint64_t ownership_revision{0};
     std::uint64_t numbering_revision{0};
 
     [[nodiscard]] friend bool operator==(
-        const FreeSurfaceGeometryLocalMeshRevision&,
-        const FreeSurfaceGeometryLocalMeshRevision&) = default;
+        const LevelSetGeometryLocalMeshRevision&,
+        const LevelSetGeometryLocalMeshRevision&) = default;
 };
 
-struct FreeSurfaceGeometryRuleRecord {
+struct LevelSetGeometryRuleRecord {
     LinearCornerStrictBranch construction_observation{LinearCornerStrictBranch::Unchecked};
-    FreeSurfaceGeometryRuleRole role{FreeSurfaceGeometryRuleRole::Interface};
-    FreeSurfaceGeometryRetention retention{
-        FreeSurfaceGeometryRetention::Retained};
+    LevelSetGeometryRuleRole role{LevelSetGeometryRuleRole::Interface};
+    LevelSetGeometryRetention retention{
+        LevelSetGeometryRetention::Retained};
     int physical_boundary_marker{-1};
     geometry::CutQuadratureRule reference_rule{};
     geometry::MappedCutQuadratureRule physical_rule{};
@@ -125,25 +125,25 @@ struct FreeSurfaceGeometryRuleRecord {
     // production active-cut publisher requires a nonzero key.
     std::uint64_t source_topology_key{0};
     std::int64_t component_id{-1};
-    FreeSurfaceGeometryMomentCertificate moment_certificate{};
+    LevelSetGeometryMomentCertificate moment_certificate{};
     // Classification-only storage of a validated full-cell volume rule (see
-    // FreeSurfaceGeometrySnapshotPolicy::classification_only_full_cell_side).
+    // LevelSetGeometrySnapshotPolicy::classification_only_full_cell_side).
     // The point lists of reference_rule and physical_rule and the parent-cell
     // moments of moment_certificate are empty; every other field keeps its
     // value, and classification_only_content_digest is the content digest of
     // the materialized record.
-    // materializeFreeSurfaceGeometryRuleRecord() recomputes the points.
+    // materializeLevelSetGeometryRuleRecord() recomputes the points.
     bool classification_only{false};
     std::uint64_t classification_only_content_digest{0};
 };
 
 /** Epoch-free topology descriptor used for authoritative interface sources. */
-[[nodiscard]] std::uint64_t freeSurfaceGeometrySourceTopologyKey(
+[[nodiscard]] std::uint64_t levelSetGeometrySourceTopologyKey(
     const CutInterfaceFragment& fragment,
     ElementType parent_element_type,
     Real tolerance);
 
-struct FreeSurfaceGeometrySnapshotPolicy {
+struct LevelSetGeometrySnapshotPolicy {
     Real tolerance{1.0e-12};
     Real minimum_retained_volume_fraction{1.0e-8};
     int minimum_achieved_quadrature_order{0};
@@ -154,7 +154,7 @@ struct FreeSurfaceGeometrySnapshotPolicy {
     // rule of its parent cell.  Its points are validated and digested exactly
     // as before and then released, so the snapshot revision is unchanged.
     // Consumers that integrate over this side's volume points rematerialize
-    // them (materializeFreeSurfaceGeometryRuleRecord()) or fail closed.
+    // them (materializeLevelSetGeometryRuleRecord()) or fail closed.
     // Unset keeps every point.
     std::optional<geometry::CutIntegrationSide>
         classification_only_full_cell_side{};
@@ -172,7 +172,7 @@ struct FreeSurfaceGeometrySnapshotPolicy {
     std::optional<geometry::CutIntegrationSide> interface_retention_side{};
 };
 
-struct FreeSurfaceGeometryScalarEvaluator {
+struct LevelSetGeometryScalarEvaluator {
     std::function<Real(GlobalIndex,
                        const std::array<Real, 3>&,
                        const geometry::CutQuadratureProvenance&)>
@@ -189,7 +189,7 @@ struct FreeSurfaceGeometryScalarEvaluator {
     // Optional: an evaluator of the same scalar that another thread may use
     // concurrently with this one (evaluators that cache per-cell data are
     // not thread-safe).  The snapshot build is threaded only when it is set.
-    std::function<FreeSurfaceGeometryScalarEvaluator()> make_concurrent_copy{};
+    std::function<LevelSetGeometryScalarEvaluator()> make_concurrent_copy{};
 };
 
 /**
@@ -199,7 +199,7 @@ struct FreeSurfaceGeometryScalarEvaluator {
  * checks; callers only provide the byte-free collective operation needed to
  * exchange unsigned integer values.
  */
-struct FreeSurfaceGeometryOwnershipCollective {
+struct LevelSetGeometryOwnershipCollective {
     int rank{0};
     int size{1};
     std::function<std::vector<std::uint64_t>(
@@ -210,7 +210,7 @@ struct FreeSurfaceGeometryOwnershipCollective {
         all_gather_revision_values{};
 };
 
-struct FreeSurfaceGeometryValidationLedger {
+struct LevelSetGeometryValidationLedger {
     std::size_t rule_count{0};
     std::size_t retained_rule_count{0};
     std::size_t pruned_rule_count{0};
@@ -604,7 +604,7 @@ void finalizeFreeSurfaceDynamicContactState(
 
 [[nodiscard]] FreeSurfaceDynamicContactState
 evaluateFreeSurfaceDynamicContactState(
-    const FreeSurfaceGeometrySnapshot& snapshot,
+    const LevelSetGeometrySnapshot& snapshot,
     const FreeSurfaceDiscreteFunctionalParameters& parameters,
     const FreeSurfaceDiscreteFunctionalVectorEvaluator& velocity);
 
@@ -619,7 +619,7 @@ evaluateFreeSurfaceDynamicContactState(
  * Its source identities, and the content digest that covers them, embed the
  * source value revision and change with every build.
  *
- * A cache passed to buildFreeSurfaceGeometrySnapshot() keeps the records of
+ * A cache passed to buildLevelSetGeometrySnapshot() keeps the records of
  * the previous build together with the content-only part of their
  * validation (ledger contributions and the identity-free part of the content
  * digest).  A later build under the same mesh revisions, communicator and
@@ -629,9 +629,9 @@ evaluateFreeSurfaceDynamicContactState(
  * its region), re-stamps the identities, replays the content-only ledger
  * contributions and re-evaluates the level-set dependent checks.  Every
  * other record is built as before, so the snapshot is bitwise identical to
- * one built without the cache (compareFreeSurfaceGeometrySnapshots()).
+ * one built without the cache (compareLevelSetGeometrySnapshots()).
  */
-class FreeSurfaceGeometrySnapshotReuseCache {
+class LevelSetGeometrySnapshotReuseCache {
 public:
     struct Statistics {
         bool context_matched{false};
@@ -641,16 +641,16 @@ public:
     };
     struct State;
 
-    FreeSurfaceGeometrySnapshotReuseCache();
-    ~FreeSurfaceGeometrySnapshotReuseCache();
-    FreeSurfaceGeometrySnapshotReuseCache(
-        FreeSurfaceGeometrySnapshotReuseCache&&) noexcept;
-    FreeSurfaceGeometrySnapshotReuseCache& operator=(
-        FreeSurfaceGeometrySnapshotReuseCache&&) noexcept;
-    FreeSurfaceGeometrySnapshotReuseCache(
-        const FreeSurfaceGeometrySnapshotReuseCache&) = delete;
-    FreeSurfaceGeometrySnapshotReuseCache& operator=(
-        const FreeSurfaceGeometrySnapshotReuseCache&) = delete;
+    LevelSetGeometrySnapshotReuseCache();
+    ~LevelSetGeometrySnapshotReuseCache();
+    LevelSetGeometrySnapshotReuseCache(
+        LevelSetGeometrySnapshotReuseCache&&) noexcept;
+    LevelSetGeometrySnapshotReuseCache& operator=(
+        LevelSetGeometrySnapshotReuseCache&&) noexcept;
+    LevelSetGeometrySnapshotReuseCache(
+        const LevelSetGeometrySnapshotReuseCache&) = delete;
+    LevelSetGeometrySnapshotReuseCache& operator=(
+        const LevelSetGeometrySnapshotReuseCache&) = delete;
 
     /** Forget the previous build; the next build reuses nothing. */
     void clear() noexcept;
@@ -660,7 +660,7 @@ public:
         return last_build_;
     }
 
-    /** Internal state of buildFreeSurfaceGeometrySnapshot(). */
+    /** Internal state of buildLevelSetGeometrySnapshot(). */
     [[nodiscard]] State& state() noexcept { return *state_; }
     void setLastBuild(const Statistics& statistics) noexcept {
         last_build_ = statistics;
@@ -671,61 +671,61 @@ private:
     Statistics last_build_{};
 };
 
-class FreeSurfaceGeometrySnapshot {
+class LevelSetGeometrySnapshot {
 public:
-    FreeSurfaceGeometrySnapshot(const FreeSurfaceGeometrySnapshot&) = delete;
-    FreeSurfaceGeometrySnapshot& operator=(const FreeSurfaceGeometrySnapshot&) =
+    LevelSetGeometrySnapshot(const LevelSetGeometrySnapshot&) = delete;
+    LevelSetGeometrySnapshot& operator=(const LevelSetGeometrySnapshot&) =
         delete;
 
-    [[nodiscard]] const FreeSurfaceGeometryRevision& revision() const noexcept;
-    [[nodiscard]] const FreeSurfaceGeometryLocalMeshRevision&
+    [[nodiscard]] const LevelSetGeometryRevision& revision() const noexcept;
+    [[nodiscard]] const LevelSetGeometryLocalMeshRevision&
     localMeshRevision() const noexcept;
-    [[nodiscard]] const FreeSurfaceGeometrySnapshotPolicy& policy() const noexcept;
+    [[nodiscard]] const LevelSetGeometrySnapshotPolicy& policy() const noexcept;
     [[nodiscard]] const LevelSetInterfaceDomain& interfaceDomain() const noexcept;
     [[nodiscard]] const std::vector<GeneratedInterfaceBoundaryIntersectionDomain>&
     contactDomains() const noexcept;
     [[nodiscard]] const std::vector<GeneratedActiveBoundaryDomain>&
     activeBoundaryDomains() const noexcept;
-    [[nodiscard]] const std::vector<FreeSurfaceGeometryRuleRecord>&
+    [[nodiscard]] const std::vector<LevelSetGeometryRuleRecord>&
     rules() const noexcept;
-    [[nodiscard]] const FreeSurfaceGeometryValidationLedger& ledger() const noexcept;
+    [[nodiscard]] const LevelSetGeometryValidationLedger& ledger() const noexcept;
 
-    [[nodiscard]] std::vector<const FreeSurfaceGeometryRuleRecord*>
-    retainedRules(FreeSurfaceGeometryRuleRole role) const;
+    [[nodiscard]] std::vector<const LevelSetGeometryRuleRecord*>
+    retainedRules(LevelSetGeometryRuleRole role) const;
     [[nodiscard]] std::size_t residentBytes() const noexcept;
 
 private:
-    friend std::shared_ptr<const FreeSurfaceGeometrySnapshot>
-    buildFreeSurfaceGeometrySnapshot(
+    friend std::shared_ptr<const LevelSetGeometrySnapshot>
+    buildLevelSetGeometrySnapshot(
         LevelSetInterfaceDomain,
         std::vector<GeneratedInterfaceBoundaryIntersectionDomain>,
         std::vector<GeneratedActiveBoundaryDomain>,
         const assembly::IMeshAccess&,
-        FreeSurfaceGeometrySnapshotPolicy,
-        FreeSurfaceGeometryScalarEvaluator,
+        LevelSetGeometrySnapshotPolicy,
+        LevelSetGeometryScalarEvaluator,
         std::string,
-        FreeSurfaceGeometryOwnershipCollective,
-        FreeSurfaceGeometrySnapshotReuseCache*,
+        LevelSetGeometryOwnershipCollective,
+        LevelSetGeometrySnapshotReuseCache*,
         int);
 
-    FreeSurfaceGeometrySnapshot(
-        FreeSurfaceGeometryRevision revision,
-        FreeSurfaceGeometryLocalMeshRevision local_mesh_revision,
-        FreeSurfaceGeometrySnapshotPolicy policy,
+    LevelSetGeometrySnapshot(
+        LevelSetGeometryRevision revision,
+        LevelSetGeometryLocalMeshRevision local_mesh_revision,
+        LevelSetGeometrySnapshotPolicy policy,
         LevelSetInterfaceDomain interface_domain,
         std::vector<GeneratedInterfaceBoundaryIntersectionDomain> contact_domains,
         std::vector<GeneratedActiveBoundaryDomain> active_boundary_domains,
-        std::vector<FreeSurfaceGeometryRuleRecord> rules,
-        FreeSurfaceGeometryValidationLedger ledger);
+        std::vector<LevelSetGeometryRuleRecord> rules,
+        LevelSetGeometryValidationLedger ledger);
 
-    FreeSurfaceGeometryRevision revision_{};
-    FreeSurfaceGeometryLocalMeshRevision local_mesh_revision_{};
-    FreeSurfaceGeometrySnapshotPolicy policy_{};
+    LevelSetGeometryRevision revision_{};
+    LevelSetGeometryLocalMeshRevision local_mesh_revision_{};
+    LevelSetGeometrySnapshotPolicy policy_{};
     LevelSetInterfaceDomain interface_domain_{};
     std::vector<GeneratedInterfaceBoundaryIntersectionDomain> contact_domains_{};
     std::vector<GeneratedActiveBoundaryDomain> active_boundary_domains_{};
-    std::vector<FreeSurfaceGeometryRuleRecord> rules_{};
-    FreeSurfaceGeometryValidationLedger ledger_{};
+    std::vector<LevelSetGeometryRuleRecord> rules_{};
+    LevelSetGeometryValidationLedger ledger_{};
 };
 
 /**
@@ -737,7 +737,7 @@ private:
  */
 [[nodiscard]] FreeSurfaceDiscreteFunctionalState
 freeSurfaceDiscreteFunctionalLayout(
-    const FreeSurfaceGeometrySnapshot& snapshot,
+    const LevelSetGeometrySnapshot& snapshot,
     const FreeSurfaceDiscreteFunctionalParameters& parameters);
 
 /**
@@ -746,8 +746,8 @@ freeSurfaceDiscreteFunctionalLayout(
  * needs @p mesh).
  */
 [[nodiscard]] std::size_t freeSurfaceOwnedRulePointCount(
-    const FreeSurfaceGeometrySnapshot& snapshot,
-    FreeSurfaceGeometryRuleRole role,
+    const LevelSetGeometrySnapshot& snapshot,
+    LevelSetGeometryRuleRole role,
     const assembly::IMeshAccess* mesh = nullptr);
 
 /**
@@ -757,23 +757,23 @@ freeSurfaceDiscreteFunctionalLayout(
  */
 [[nodiscard]] FreeSurfaceDiscreteFunctionalVariationState
 freeSurfaceDiscreteFunctionalVariationLayout(
-    const FreeSurfaceGeometrySnapshot& snapshot,
+    const LevelSetGeometrySnapshot& snapshot,
     const FreeSurfaceDiscreteFunctionalParameters& parameters);
 
-[[nodiscard]] std::shared_ptr<const FreeSurfaceGeometrySnapshot>
-buildFreeSurfaceGeometrySnapshot(
+[[nodiscard]] std::shared_ptr<const LevelSetGeometrySnapshot>
+buildLevelSetGeometrySnapshot(
     LevelSetInterfaceDomain interface_domain,
     std::vector<GeneratedInterfaceBoundaryIntersectionDomain> contact_domains,
     std::vector<GeneratedActiveBoundaryDomain> active_boundary_domains,
     const assembly::IMeshAccess& mesh,
-    FreeSurfaceGeometrySnapshotPolicy policy = {},
-    FreeSurfaceGeometryScalarEvaluator scalar = {},
+    LevelSetGeometrySnapshotPolicy policy = {},
+    LevelSetGeometryScalarEvaluator scalar = {},
     std::string domain_id = {},
-    FreeSurfaceGeometryOwnershipCollective ownership_collective = {});
+    LevelSetGeometryOwnershipCollective ownership_collective = {});
 
 /**
  * As above, reusing the full-cell volume records of the previous build kept
- * in reuse_cache (see FreeSurfaceGeometrySnapshotReuseCache) and storing this
+ * in reuse_cache (see LevelSetGeometrySnapshotReuseCache) and storing this
  * build for the next one.  A null cache builds every record.  The per-rule
  * work (record construction, rule checks, content digests) runs on `threads`
  * threads (FE/Core/DeterministicParallel.h); participants other than the
@@ -781,17 +781,17 @@ buildFreeSurfaceGeometrySnapshot(
  * without it the build is serial.  The result is bitwise identical for any
  * cache state and thread count.
  */
-[[nodiscard]] std::shared_ptr<const FreeSurfaceGeometrySnapshot>
-buildFreeSurfaceGeometrySnapshot(
+[[nodiscard]] std::shared_ptr<const LevelSetGeometrySnapshot>
+buildLevelSetGeometrySnapshot(
     LevelSetInterfaceDomain interface_domain,
     std::vector<GeneratedInterfaceBoundaryIntersectionDomain> contact_domains,
     std::vector<GeneratedActiveBoundaryDomain> active_boundary_domains,
     const assembly::IMeshAccess& mesh,
-    FreeSurfaceGeometrySnapshotPolicy policy,
-    FreeSurfaceGeometryScalarEvaluator scalar,
+    LevelSetGeometrySnapshotPolicy policy,
+    LevelSetGeometryScalarEvaluator scalar,
     std::string domain_id,
-    FreeSurfaceGeometryOwnershipCollective ownership_collective,
-    FreeSurfaceGeometrySnapshotReuseCache* reuse_cache,
+    LevelSetGeometryOwnershipCollective ownership_collective,
+    LevelSetGeometrySnapshotReuseCache* reuse_cache,
     int threads = 1);
 
 /**
@@ -800,9 +800,9 @@ buildFreeSurfaceGeometrySnapshot(
  * empty string when they are identical, otherwise a description of the
  * first difference.  The source domains are not compared.
  */
-[[nodiscard]] std::string compareFreeSurfaceGeometrySnapshots(
-    const FreeSurfaceGeometrySnapshot& a,
-    const FreeSurfaceGeometrySnapshot& b);
+[[nodiscard]] std::string compareLevelSetGeometrySnapshots(
+    const LevelSetGeometrySnapshot& a,
+    const LevelSetGeometrySnapshot& b);
 
 /**
  * Recompute the reference and physical points of a classification-only
@@ -810,16 +810,16 @@ buildFreeSurfaceGeometrySnapshot(
  * before its points were released, bit for bit.  Materialized records are
  * returned unchanged.
  */
-[[nodiscard]] FreeSurfaceGeometryRuleRecord
-materializeFreeSurfaceGeometryRuleRecord(
-    const FreeSurfaceGeometryRuleRecord& record,
+[[nodiscard]] LevelSetGeometryRuleRecord
+materializeLevelSetGeometryRuleRecord(
+    const LevelSetGeometryRuleRecord& record,
     const assembly::IMeshAccess& mesh);
 
 /** Content digest that enters the snapshot revision key. */
-[[nodiscard]] std::uint64_t freeSurfaceGeometryRuleContentDigest(
-    const FreeSurfaceGeometryRuleRecord& record) noexcept;
+[[nodiscard]] std::uint64_t levelSetGeometryRuleContentDigest(
+    const LevelSetGeometryRuleRecord& record) noexcept;
 
-struct FreeSurfaceGeometrySnapshotCacheStatistics {
+struct LevelSetGeometrySnapshotCacheStatistics {
     std::size_t live_snapshot_count{0};
     std::size_t live_resident_bytes{0};
     std::size_t peak_live_snapshot_count{0};
@@ -829,23 +829,23 @@ struct FreeSurfaceGeometrySnapshotCacheStatistics {
     std::size_t expired_eviction_count{0};
 };
 
-class FreeSurfaceGeometrySnapshotCache {
+class LevelSetGeometrySnapshotCache {
 public:
-    [[nodiscard]] std::shared_ptr<const FreeSurfaceGeometrySnapshot> find(
+    [[nodiscard]] std::shared_ptr<const LevelSetGeometrySnapshot> find(
         std::uint64_t revision_key);
-    void insert(std::shared_ptr<const FreeSurfaceGeometrySnapshot> snapshot);
+    void insert(std::shared_ptr<const LevelSetGeometrySnapshot> snapshot);
     void evictExpired();
-    [[nodiscard]] FreeSurfaceGeometrySnapshotCacheStatistics statistics();
+    [[nodiscard]] LevelSetGeometrySnapshotCacheStatistics statistics();
 
 private:
     // A snapshot is immutable, so its resident size is measured once, when
     // it is inserted.
     struct Entry {
-        std::weak_ptr<const FreeSurfaceGeometrySnapshot> snapshot{};
+        std::weak_ptr<const LevelSetGeometrySnapshot> snapshot{};
         std::size_t resident_bytes{0};
     };
     std::unordered_map<std::uint64_t, Entry> snapshots_{};
-    FreeSurfaceGeometrySnapshotCacheStatistics statistics_{};
+    LevelSetGeometrySnapshotCacheStatistics statistics_{};
 };
 
 /// Test access to internals of the snapshot validation.
@@ -879,14 +879,14 @@ namespace snapshot_detail {
 /// moments of every cell with more than one rule (or a materialized one) are
 /// validated, cells in ascending global id.
 void validateVolumePartition(
-    const std::vector<FreeSurfaceGeometryRuleRecord>& records,
+    const std::vector<LevelSetGeometryRuleRecord>& records,
     const assembly::IMeshAccess& mesh,
-    const FreeSurfaceGeometrySnapshotPolicy& policy,
-    FreeSurfaceGeometryValidationLedger& ledger);
+    const LevelSetGeometrySnapshotPolicy& policy,
+    LevelSetGeometryValidationLedger& ledger);
 
 } // namespace snapshot_detail
 
 } // namespace interfaces
 } // namespace svmp::FE
 
-#endif // SVMP_FE_INTERFACES_FREESURFACEGEOMETRYSNAPSHOT_H
+#endif // SVMP_FE_INTERFACES_LEVELSETGEOMETRYSNAPSHOT_H

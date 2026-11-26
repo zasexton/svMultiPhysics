@@ -13,7 +13,7 @@
 
 #include "Backends/Interfaces/BackendFactory.h"
 #include "Backends/Interfaces/BackendKind.h"
-#include "Interfaces/FreeSurfaceGeometrySnapshot.h"
+#include "Interfaces/LevelSetGeometrySnapshot.h"
 #include "LevelSet/LevelSetGeometryService.h"
 #include "Systems/SystemCollectives.h"
 #include "Systems/SystemState.h"
@@ -33,11 +33,11 @@ namespace {
 namespace ls = svmp::FE::level_set;
 
 struct HostStorage {
-  std::unique_ptr<svmp::FE::interfaces::FreeSurfaceGeometrySnapshotCache>
+  std::unique_ptr<svmp::FE::interfaces::LevelSetGeometrySnapshotCache>
       snapshot_cache{};
   std::map<std::string,
            std::unique_ptr<
-               svmp::FE::interfaces::FreeSurfaceGeometrySnapshotReuseCache>>
+               svmp::FE::interfaces::LevelSetGeometrySnapshotReuseCache>>
       reuse_caches{};
 
   ls::LevelSetGeometryHost host()
@@ -45,8 +45,8 @@ struct HostStorage {
     return ls::LevelSetGeometryHost{
         .fe_system = nullptr,
         .primary_mesh = nullptr,
-        .free_surface_geometry_snapshot_cache = snapshot_cache,
-        .free_surface_geometry_snapshot_reuse_caches = reuse_caches,
+        .level_set_geometry_snapshot_cache = snapshot_cache,
+        .level_set_geometry_snapshot_reuse_caches = reuse_caches,
     };
   }
 };

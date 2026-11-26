@@ -22,7 +22,7 @@
  */
 
 #include "Core/Types.h"
-#include "Interfaces/FreeSurfaceGeometrySnapshot.h"
+#include "Interfaces/LevelSetGeometrySnapshot.h"
 #include "Systems/OperatorRegistry.h"
 
 #include <array>
@@ -190,7 +190,7 @@ struct FreeSurfaceAcceptedContactStageState {
     // Composite fingerprint over the previous/endpoint content, accepted
     // snapshot, stage time/parameters, and stage solution.
     std::uint64_t stage_state_revision{0};
-    interfaces::FreeSurfaceGeometryRevision geometry_revision{};
+    interfaces::LevelSetGeometryRevision geometry_revision{};
     interfaces::FreeSurfaceDynamicContactState state{};
     // The absolute mass sums |w f| of the declared wall functionals evaluated
     // on the stage (name, mass), for the record's absolute-mass line.
@@ -225,7 +225,7 @@ struct FreeSurfaceAcceptedContactLineKinematics {
 
 struct AcceptedFreeSurfaceDiscreteFunctionalState {
     int interface_marker{-1};
-    interfaces::FreeSurfaceGeometryRevision geometry_revision{};
+    interfaces::LevelSetGeometryRevision geometry_revision{};
     // Communicator-consistent topology-only fingerprint for the exact
     // authoritative snapshot rules used by this state.
     std::uint64_t cut_topology_revision{0};
@@ -261,7 +261,7 @@ struct FreeSurfaceDiscreteFunctionalHistoryRecord {
     std::uint64_t state_revision{0};
     std::optional<std::uint64_t> extension_map_revision{};
     FreeSurfaceDiscreteFunctionalDeclaration declaration{};
-    interfaces::FreeSurfaceGeometryRevision geometry_revision{};
+    interfaces::LevelSetGeometryRevision geometry_revision{};
     std::uint64_t cut_topology_revision{0};
     bool geometry_pruning_occurred{false};
     interfaces::FreeSurfaceDiscreteFunctionalState state{};

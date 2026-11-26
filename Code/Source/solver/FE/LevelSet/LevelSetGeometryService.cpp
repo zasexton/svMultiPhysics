@@ -17,7 +17,7 @@
 #include "Core/RankLog.h"
 #include "Dofs/DofHandler.h"
 #include "Dofs/EntityDofMap.h"
-#include "Interfaces/FreeSurfaceGeometrySnapshot.h"
+#include "Interfaces/LevelSetGeometrySnapshot.h"
 #include "Interfaces/GeneratedActiveBoundaryDomain.h"
 #include "Interfaces/GeneratedInterfaceBoundaryIntersectionDomain.h"
 #include "Interfaces/LevelSetInterfaceDomain.h"
@@ -143,7 +143,7 @@ svmp::FE::systems::CollectiveTimingStatistics reduceOutputTiming(
   return svmp::FE::systems::collectiveTimingStatistics(local, comm);
 }
 
-svmp::FE::interfaces::FreeSurfaceGeometryOwnershipCollective
+svmp::FE::interfaces::LevelSetGeometryOwnershipCollective
 snapshotOwnershipCollective(
     const svmp::FE::systems::CollectiveCommunicator& comm)
 {
@@ -1251,7 +1251,7 @@ void addCutGeometryContextMemory(
   }
   report::addContext(record, prefix, report::contextStorage(*context));
   std::size_t index = 0u;
-  for (const auto& snapshot : context->freeSurfaceGeometrySnapshots()) {
+  for (const auto& snapshot : context->levelSetGeometrySnapshots()) {
     if (snapshot) {
       report::addSnapshot(record,
                           prefix + "_snapshot" + std::to_string(index),
@@ -2148,7 +2148,7 @@ ActiveCutContextRefreshReport refreshActiveCutIntegrationContextFromSolution(
     const auto make_snapshot_scalar_evaluator =
         [](std::shared_ptr<svmp::FE::level_set::LevelSetCellEvaluator>
                snapshot_cell_evaluator) {
-          svmp::FE::interfaces::FreeSurfaceGeometryScalarEvaluator
+          svmp::FE::interfaces::LevelSetGeometryScalarEvaluator
               snapshot_scalar_evaluator;
           snapshot_scalar_evaluator.value =
               [snapshot_cell_evaluator](
@@ -2212,7 +2212,7 @@ ActiveCutContextRefreshReport refreshActiveCutIntegrationContextFromSolution(
         };
     const int snapshot_threads = svmp::FE::geometryThreadCount(
         sim.fe_system->assemblyThreadCount());
-    svmp::FE::interfaces::FreeSurfaceGeometrySnapshotPolicy snapshot_policy;
+    svmp::FE::interfaces::LevelSetGeometrySnapshotPolicy snapshot_policy;
     snapshot_policy.tolerance = domain_request.tolerance;
     snapshot_policy.minimum_retained_volume_fraction =
         svmp::FE::assembly::CutIntegrationContext::
@@ -2228,24 +2228,24 @@ ActiveCutContextRefreshReport refreshActiveCutIntegrationContextFromSolution(
       snapshot_policy.classification_only_full_cells_on_both_sides =
           mesh_access.dimension() == 3;
     }
-    svmp::FE::interfaces::FreeSurfaceGeometrySnapshotReuseCache*
+    svmp::FE::interfaces::LevelSetGeometrySnapshotReuseCache*
         snapshot_reuse_cache = nullptr;
     if (incrementalRebuildEnabled()) {
       auto& slot =
-          sim.free_surface_geometry_snapshot_reuse_caches[request.domain_id];
+          sim.level_set_geometry_snapshot_reuse_caches[request.domain_id];
       if (!slot) {
         slot = std::make_unique<
-            svmp::FE::interfaces::FreeSurfaceGeometrySnapshotReuseCache>();
+            svmp::FE::interfaces::LevelSetGeometrySnapshotReuseCache>();
       }
       snapshot_reuse_cache = slot.get();
     }
-    std::shared_ptr<const svmp::FE::interfaces::FreeSurfaceGeometrySnapshot>
+    std::shared_ptr<const svmp::FE::interfaces::LevelSetGeometrySnapshot>
         reference_geometry_snapshot;
     if (incrementalRebuildSelfCheckEnabled()) {
       // Every rank takes this branch (the setting is read from the
       // environment), so the reference build's collectives stay matched.
       reference_geometry_snapshot =
-          svmp::FE::interfaces::buildFreeSurfaceGeometrySnapshot(
+          svmp::FE::interfaces::buildLevelSetGeometrySnapshot(
               result.domain,
               snapshot_contact_domains,
               snapshot_active_boundary_domains,
@@ -2258,7 +2258,7 @@ ActiveCutContextRefreshReport refreshActiveCutIntegrationContextFromSolution(
               /*threads=*/1);
     }
     auto geometry_snapshot =
-        svmp::FE::interfaces::buildFreeSurfaceGeometrySnapshot(
+        svmp::FE::interfaces::buildLevelSetGeometrySnapshot(
             result.domain,
             std::move(snapshot_contact_domains),
             std::move(snapshot_active_boundary_domains),
@@ -2271,7 +2271,7 @@ ActiveCutContextRefreshReport refreshActiveCutIntegrationContextFromSolution(
             snapshot_threads);
     if (reference_geometry_snapshot) {
       const auto difference =
-          svmp::FE::interfaces::compareFreeSurfaceGeometrySnapshots(
+          svmp::FE::interfaces::compareLevelSetGeometrySnapshots(
               *geometry_snapshot, *reference_geometry_snapshot);
       if (globalAnyBool(!difference.empty(), comm)) {
         throw std::runtime_error(
@@ -2293,23 +2293,23 @@ ActiveCutContextRefreshReport refreshActiveCutIntegrationContextFromSolution(
               .rootOnly());
       reference_geometry_snapshot.reset();
     }
-    if (!sim.free_surface_geometry_snapshot_cache) {
-      sim.free_surface_geometry_snapshot_cache = std::make_unique<
-          svmp::FE::interfaces::FreeSurfaceGeometrySnapshotCache>();
+    if (!sim.level_set_geometry_snapshot_cache) {
+      sim.level_set_geometry_snapshot_cache = std::make_unique<
+          svmp::FE::interfaces::LevelSetGeometrySnapshotCache>();
     }
     const auto snapshot_revision_key =
         geometry_snapshot->revision().snapshot_revision_key;
-    if (auto cached = sim.free_surface_geometry_snapshot_cache->find(
+    if (auto cached = sim.level_set_geometry_snapshot_cache->find(
             snapshot_revision_key)) {
       geometry_snapshot = std::move(cached);
     } else {
-      sim.free_surface_geometry_snapshot_cache->insert(geometry_snapshot);
+      sim.level_set_geometry_snapshot_cache->insert(geometry_snapshot);
     }
     // The cache statistics feed only the diagnostic line below.
     const auto geometry_cache_statistics =
         svmp::FE::rank_log::oopDiagnosticsEnabled(svmp::FE::LogLevel::DEBUG)
-            ? sim.free_surface_geometry_snapshot_cache->statistics()
-            : svmp::FE::interfaces::FreeSurfaceGeometrySnapshotCacheStatistics{};
+            ? sim.level_set_geometry_snapshot_cache->statistics()
+            : svmp::FE::interfaces::LevelSetGeometrySnapshotCacheStatistics{};
     const auto& geometry_ledger = geometry_snapshot->ledger();
     if (svmp::FE::rank_log::oopDiagnosticsEnabled(svmp::FE::LogLevel::DEBUG)) {
         svmp::FE::logRecord(
@@ -2405,7 +2405,7 @@ ActiveCutContextRefreshReport refreshActiveCutIntegrationContextFromSolution(
                     result.interface_marker, inactive_volume_side) == 0u
             ? snapshot_policy.classification_only_full_cell_side
             : std::optional<svmp::FE::geometry::CutIntegrationSide>{};
-    context->addFreeSurfaceGeometrySnapshot(
+    context->addLevelSetGeometrySnapshot(
         geometry_snapshot,
         retained_volume_sides,
         classification_only_context_side);
@@ -2874,7 +2874,7 @@ bool activeCutContextMatchesRefreshCache(
   try {
     const auto* context = system.cutIntegrationContext();
     if (context != nullptr &&
-        context->freeSurfaceGeometrySnapshotsMatchCurrentMeshRevision(
+        context->levelSetGeometrySnapshotsMatchCurrentMeshRevision(
             system.meshAccess()) &&
         cache.topology_key.has_value() &&
         *cache.topology_key != 0u &&
@@ -2883,7 +2883,7 @@ bool activeCutContextMatchesRefreshCache(
       for (const auto& [marker, source_revision] :
            cache.evaluated_state_source_revisions) {
         if (source_revision == 0u ||
-            !context->hasFreeSurfaceGeometrySnapshotForMarker(marker) ||
+            !context->hasLevelSetGeometrySnapshotForMarker(marker) ||
             !context->hasExpectedGeneratedSourceValueRevision(marker) ||
             context->expectedGeneratedSourceValueRevision(marker) !=
                 source_revision) {
@@ -3378,13 +3378,13 @@ reinstallActiveCutContextCandidate(
     if (*signature == comparable && candidate.topology_key.has_value() &&
         *candidate.topology_key != 0u &&
         !candidate.evaluated_state_source_revisions.empty() &&
-        candidate.context->freeSurfaceGeometrySnapshotsMatchCurrentMeshRevision(
+        candidate.context->levelSetGeometrySnapshotsMatchCurrentMeshRevision(
             sim.fe_system->meshAccess())) {
       local_matches = true;
       for (const auto& [marker, source_revision] :
            candidate.evaluated_state_source_revisions) {
         if (source_revision == 0u ||
-            !candidate.context->hasFreeSurfaceGeometrySnapshotForMarker(
+            !candidate.context->hasLevelSetGeometrySnapshotForMarker(
                 marker) ||
             !candidate.context->hasExpectedGeneratedSourceValueRevision(
                 marker) ||
@@ -4071,13 +4071,13 @@ reinstallRetainedActiveCutContextForRestoredState(
         retained.topology_key.has_value() &&
         *retained.topology_key != 0u &&
         !retained.evaluated_state_source_revisions.empty() &&
-        retained.context->freeSurfaceGeometrySnapshotsMatchCurrentMeshRevision(
+        retained.context->levelSetGeometrySnapshotsMatchCurrentMeshRevision(
             sim.fe_system->meshAccess())) {
       local_retained_matches = true;
       for (const auto& [marker, source_revision] :
            retained.evaluated_state_source_revisions) {
         if (source_revision == 0u ||
-            !retained.context->hasFreeSurfaceGeometrySnapshotForMarker(
+            !retained.context->hasLevelSetGeometrySnapshotForMarker(
                 marker) ||
             !retained.context->hasExpectedGeneratedSourceValueRevision(
                 marker) ||
@@ -4550,7 +4550,7 @@ LevelSetGeometryTransaction::currentCandidateProducerLinkage(
       if (source ==
               refresh_report.evaluated_state_source_revisions.end() ||
           source->second == 0u || context == nullptr ||
-          !context->hasFreeSurfaceGeometrySnapshotForMarker(*marker) ||
+          !context->hasLevelSetGeometrySnapshotForMarker(*marker) ||
           !context->hasExpectedGeneratedSourceValueRevision(*marker) ||
           context->expectedGeneratedSourceValueRevision(*marker) !=
               source->second) {
@@ -5073,11 +5073,11 @@ struct CutGeometry::State {
   svmp::Mesh* mesh{nullptr};
   ActiveCutVolumeRequest request{};
   std::shared_ptr<CutGeometryRequirements> requirements{};
-  std::unique_ptr<svmp::FE::interfaces::FreeSurfaceGeometrySnapshotCache>
+  std::unique_ptr<svmp::FE::interfaces::LevelSetGeometrySnapshotCache>
       snapshot_cache{};
   std::map<std::string,
            std::unique_ptr<
-               svmp::FE::interfaces::FreeSurfaceGeometrySnapshotReuseCache>>
+               svmp::FE::interfaces::LevelSetGeometrySnapshotReuseCache>>
       reuse_caches{};
   std::shared_ptr<LevelSetGeometryService> service{};
 };
@@ -5114,8 +5114,8 @@ ActiveCutContextRefreshReport CutGeometry::refresh(
         LevelSetGeometryHost{
             .fe_system = s.system,
             .primary_mesh = s.mesh,
-            .free_surface_geometry_snapshot_cache = s.snapshot_cache,
-            .free_surface_geometry_snapshot_reuse_caches = s.reuse_caches},
+            .level_set_geometry_snapshot_cache = s.snapshot_cache,
+            .level_set_geometry_snapshot_reuse_caches = s.reuse_caches},
         std::vector<ActiveCutVolumeRequest>{current});
   } else if (s.service->requests().front().volume_retention !=
                  current.volume_retention ||

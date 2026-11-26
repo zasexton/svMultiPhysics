@@ -11,7 +11,7 @@
 #include "Backends/Interfaces/GenericVector.h"
 #include "Constraints/AffineConstraints.h"
 #include "Core/Logger.h"
-#include "Interfaces/FreeSurfaceGeometrySnapshot.h"
+#include "Interfaces/LevelSetGeometrySnapshot.h"
 #include "Systems/FESystem.h"
 #include "Systems/SystemState.h"
 
@@ -1064,10 +1064,10 @@ void scatterFeOrderedSolution(
   solution.updateGhosts();
 }
 
-interfaces::FreeSurfaceGeometryOwnershipCollective ownershipCollective(
+interfaces::LevelSetGeometryOwnershipCollective ownershipCollective(
     const CollectiveCommunicator& comm)
 {
-  svmp::FE::interfaces::FreeSurfaceGeometryOwnershipCollective collective;
+  svmp::FE::interfaces::LevelSetGeometryOwnershipCollective collective;
   collective.rank = comm.rank();
   collective.size = comm.size();
   collective.all_gather_owned_rule_identity_values =

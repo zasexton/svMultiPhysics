@@ -8,7 +8,7 @@
 #include "LevelSet/Maintenance/LevelSetMaintenanceRequestSchedule.h"
 
 #include "Assembly/CutIntegrationContext.h"
-#include "Interfaces/FreeSurfaceGeometrySnapshot.h"
+#include "Interfaces/LevelSetGeometrySnapshot.h"
 #include "LevelSet/LevelSetGeometry.h"
 #include "LevelSet/LevelSetOptions.h"
 #include "Systems/FESystem.h"
@@ -99,9 +99,9 @@ void appendMaintenanceScheduleActiveCutRequest(
       request->require_production_qualified_implicit_cut_backend);
 }
 
-void appendCanonicalFreeSurfaceGeometryRevision(
+void appendCanonicalLevelSetGeometryRevision(
     std::vector<std::uint64_t>& words,
-    const svmp::FE::interfaces::FreeSurfaceGeometryRevision& revision)
+    const svmp::FE::interfaces::LevelSetGeometryRevision& revision)
 {
   appendMaintenanceScheduleString(words, revision.source_id);
   appendMaintenanceScheduleString(words, revision.domain_id);
@@ -476,12 +476,12 @@ canonicalLevelSetMaintenanceGeometryState(
     }
 
     const bool has_snapshot_binding =
-        context->hasFreeSurfaceGeometrySnapshotForMarker(*marker);
+        context->hasLevelSetGeometrySnapshotForMarker(*marker);
     appendMaintenanceScheduleBool(
         words, has_snapshot_binding);
     const auto bound_snapshot_revision =
         has_snapshot_binding
-            ? context->freeSurfaceGeometrySnapshotRevisionForMarker(
+            ? context->levelSetGeometrySnapshotRevisionForMarker(
                   *marker)
             : 0u;
     appendMaintenanceScheduleWord(
@@ -498,7 +498,7 @@ canonicalLevelSetMaintenanceGeometryState(
             : 0u);
 
     const auto& snapshots =
-        context->freeSurfaceGeometrySnapshots();
+        context->levelSetGeometrySnapshots();
     const auto found = std::find_if(
         snapshots.begin(), snapshots.end(),
         [&](const auto& snapshot) {
@@ -512,7 +512,7 @@ canonicalLevelSetMaintenanceGeometryState(
     appendMaintenanceScheduleBool(
         words, has_bound_snapshot);
     if (has_bound_snapshot) {
-      appendCanonicalFreeSurfaceGeometryRevision(
+      appendCanonicalLevelSetGeometryRevision(
           words, (*found)->revision());
     } else {
       state.supported = false;
@@ -520,11 +520,11 @@ canonicalLevelSetMaintenanceGeometryState(
   }
 
   using GeometrySnapshot =
-      svmp::FE::interfaces::FreeSurfaceGeometrySnapshot;
+      svmp::FE::interfaces::LevelSetGeometrySnapshot;
   std::vector<const GeometrySnapshot*> ordered_snapshots;
   if (context != nullptr) {
     const auto& snapshots =
-        context->freeSurfaceGeometrySnapshots();
+        context->levelSetGeometrySnapshots();
     ordered_snapshots.reserve(snapshots.size());
     for (const auto& snapshot : snapshots) {
       ordered_snapshots.push_back(snapshot.get());
@@ -569,7 +569,7 @@ canonicalLevelSetMaintenanceGeometryState(
       state.supported = false;
       continue;
     }
-    appendCanonicalFreeSurfaceGeometryRevision(
+    appendCanonicalLevelSetGeometryRevision(
         words, snapshot->revision());
   }
   return state;

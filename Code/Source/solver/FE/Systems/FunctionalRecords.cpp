@@ -29,9 +29,9 @@ namespace systems {
 
 namespace {
 
-bool sameFreeSurfaceGeometryRevision(
-    const interfaces::FreeSurfaceGeometryRevision& lhs,
-    const interfaces::FreeSurfaceGeometryRevision& rhs) noexcept
+bool sameLevelSetGeometryRevision(
+    const interfaces::LevelSetGeometryRevision& lhs,
+    const interfaces::LevelSetGeometryRevision& rhs) noexcept
 {
     return lhs.sameSourceState(rhs) &&
            lhs.snapshot_revision_key == rhs.snapshot_revision_key;
@@ -412,7 +412,7 @@ bool sameFreeSurfaceAcceptedContactStageState(
         lhs.previous_state_revision != rhs.previous_state_revision ||
         lhs.endpoint_state_revision != rhs.endpoint_state_revision ||
         lhs.stage_state_revision != rhs.stage_state_revision ||
-        !sameFreeSurfaceGeometryRevision(lhs.geometry_revision,
+        !sameLevelSetGeometryRevision(lhs.geometry_revision,
                                          rhs.geometry_revision) ||
         lhs.state.snapshot_revision_key !=
             rhs.state.snapshot_revision_key ||
@@ -2437,7 +2437,7 @@ void FunctionalRecords::recordAcceptedFunctionals(
                                   .external_pressure_power_parameters,
                              *functional_declarations_[i]
                                   .external_pressure_power_parameters)) ||
-                        !sameFreeSurfaceGeometryRevision(
+                        !sameLevelSetGeometryRevision(
                             record.geometry_revision,
                             states[i].geometry_revision) ||
                         record.cut_topology_revision !=

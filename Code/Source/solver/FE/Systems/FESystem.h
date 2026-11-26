@@ -36,7 +36,7 @@
 #include "Systems/SystemSetup.h"
 #include "PostProcessing/DerivedResultOutput.h"
 #include "PostProcessing/DerivedResultRegistry.h"
-#include "Interfaces/FreeSurfaceGeometrySnapshot.h"
+#include "Interfaces/LevelSetGeometrySnapshot.h"
 #include "Interfaces/IncompressibleTwoFluidDiagnostics.h"
 #include "Interfaces/MaterialInterfaceTransportVelocity.h"
 

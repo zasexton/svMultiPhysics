@@ -15,7 +15,7 @@
 #include "Dofs/EntityDofMap.h"
 #include "Geometry/CutQuadratureMapping.h"
 #include "Interfaces/CopyOnWriteVector.h"
-#include "Interfaces/FreeSurfaceGeometrySnapshot.h"
+#include "Interfaces/LevelSetGeometrySnapshot.h"
 #include "LevelSet/LevelSetCellEvaluator.h"
 #include "LevelSet/LevelSetInterfaceLifecycle.h"
 #include "Spaces/H1Space.h"
@@ -47,23 +47,23 @@ namespace interfaces = svmp::FE::interfaces;
 namespace geometry = svmp::FE::geometry;
 namespace level_set = svmp::FE::level_set;
 
-TEST(FreeSurfaceSnapshot, DifferentiatedSurfaceSourceEntersRuleContentDigest)
+TEST(LevelSetSnapshot, DifferentiatedSurfaceSourceEntersRuleContentDigest)
 {
-    interfaces::FreeSurfaceGeometryRuleRecord record;
+    interfaces::LevelSetGeometryRuleRecord record;
     auto& rule = record.reference_rule;
     rule.kind = geometry::CutQuadratureKind::Interface;
-    const auto without_source = interfaces::freeSurfaceGeometryRuleContentDigest(record);
+    const auto without_source = interfaces::levelSetGeometryRuleContentDigest(record);
     auto& source = rule.linear_corner_surface.emplace();
     source.count = 2;
     source.edges[0] = {0, 1};
     source.edges[1] = {1, 2};
-    const auto original = interfaces::freeSurfaceGeometryRuleContentDigest(record);
+    const auto original = interfaces::levelSetGeometryRuleContentDigest(record);
     EXPECT_NE(original, without_source);
     std::swap(source.edges[0], source.edges[1]);
-    EXPECT_NE(interfaces::freeSurfaceGeometryRuleContentDigest(record), original);
+    EXPECT_NE(interfaces::levelSetGeometryRuleContentDigest(record), original);
     std::swap(source.edges[0], source.edges[1]);
     source.isovalue = 0.25;
-    EXPECT_NE(interfaces::freeSurfaceGeometryRuleContentDigest(record), original);
+    EXPECT_NE(interfaces::levelSetGeometryRuleContentDigest(record), original);
 }
 
 #if defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH
@@ -204,14 +204,14 @@ void expectSameProvenance(const geometry::CutQuadratureProvenance& a,
               b.implicit_cut_root_max_iterations);
     EXPECT_EQ(a.requested_quadrature_order, b.requested_quadrature_order);
     EXPECT_EQ(a.achieved_quadrature_order, b.achieved_quadrature_order);
-    EXPECT_EQ(a.free_surface_snapshot_revision_key,
-              b.free_surface_snapshot_revision_key);
+    EXPECT_EQ(a.level_set_snapshot_revision_key,
+              b.level_set_snapshot_revision_key);
 }
 
 // Every field except the point lists, the moments and the
 // classification-only marker.
-void expectSameClassification(const interfaces::FreeSurfaceGeometryRuleRecord& a,
-                              const interfaces::FreeSurfaceGeometryRuleRecord& b)
+void expectSameClassification(const interfaces::LevelSetGeometryRuleRecord& a,
+                              const interfaces::LevelSetGeometryRuleRecord& b)
 {
     EXPECT_EQ(a.construction_observation, b.construction_observation);
     EXPECT_EQ(a.role, b.role);
@@ -261,15 +261,15 @@ void expectSameClassification(const interfaces::FreeSurfaceGeometryRuleRecord& a
     EXPECT_EQ(ap.source_stable_id, bp.source_stable_id);
     EXPECT_EQ(ap.cut_topology_revision, bp.cut_topology_revision);
     EXPECT_EQ(ap.source_value_revision, bp.source_value_revision);
-    EXPECT_EQ(ap.free_surface_snapshot_revision_key,
-              bp.free_surface_snapshot_revision_key);
+    EXPECT_EQ(ap.level_set_snapshot_revision_key,
+              bp.level_set_snapshot_revision_key);
     EXPECT_TRUE(sameBits(ap.reference_measure, bp.reference_measure));
     EXPECT_TRUE(sameBits(ap.physical_measure, bp.physical_measure));
 }
 
 // The content a classification-only record releases: points and moments.
-void expectSamePoints(const interfaces::FreeSurfaceGeometryRuleRecord& a,
-                      const interfaces::FreeSurfaceGeometryRuleRecord& b)
+void expectSamePoints(const interfaces::LevelSetGeometryRuleRecord& a,
+                      const interfaces::LevelSetGeometryRuleRecord& b)
 {
     ASSERT_EQ(a.moment_certificate.moments.size(),
               b.moment_certificate.moments.size());
@@ -410,9 +410,9 @@ struct SphereSnapshotFixture {
             level_set::makeLevelSetCellEvaluator(system, phi, solution));
     }
 
-    [[nodiscard]] interfaces::FreeSurfaceGeometryScalarEvaluator scalar() const
+    [[nodiscard]] interfaces::LevelSetGeometryScalarEvaluator scalar() const
     {
-        interfaces::FreeSurfaceGeometryScalarEvaluator result;
+        interfaces::LevelSetGeometryScalarEvaluator result;
         result.value = [evaluator = evaluator](
                            FE::GlobalIndex cell,
                            const Point& xi,
@@ -429,15 +429,15 @@ struct SphereSnapshotFixture {
         return result;
     }
 
-    [[nodiscard]] std::shared_ptr<const interfaces::FreeSurfaceGeometrySnapshot>
+    [[nodiscard]] std::shared_ptr<const interfaces::LevelSetGeometrySnapshot>
     snapshot(std::optional<geometry::CutIntegrationSide> compact_side,
              bool both_sides = false) const
     {
-        interfaces::FreeSurfaceGeometrySnapshotPolicy policy;
+        interfaces::LevelSetGeometrySnapshotPolicy policy;
         policy.require_complete_exterior_boundary_partition = false;
         policy.classification_only_full_cell_side = compact_side;
         policy.classification_only_full_cells_on_both_sides = both_sides;
-        return interfaces::buildFreeSurfaceGeometrySnapshot(
+        return interfaces::buildLevelSetGeometrySnapshot(
             generated.domain,
             {},
             {},
@@ -477,13 +477,13 @@ testVelocity(FE::Real scale)
 // The physical measure of the retained, rank-owned rules of one role (the
 // geometry of a declared measure; D49 E4 retired the pointwise functionals).
 [[nodiscard]] FE::Real ownedRuleMeasure(
-    const interfaces::FreeSurfaceGeometrySnapshot& snapshot,
-    interfaces::FreeSurfaceGeometryRuleRole role)
+    const interfaces::LevelSetGeometrySnapshot& snapshot,
+    interfaces::LevelSetGeometryRuleRole role)
 {
     FE::Real measure{0.0};
     for (const auto& record : snapshot.rules()) {
         if (record.locally_owned &&
-            record.retention == interfaces::FreeSurfaceGeometryRetention::Retained &&
+            record.retention == interfaces::LevelSetGeometryRetention::Retained &&
             record.role == role) {
             measure += record.physical_rule.physical_measure;
         }
@@ -495,15 +495,15 @@ testVelocity(FE::Real scale)
 // weighted |v|^2 of a smooth velocity at the reference points, with
 // classification-only records rematerialized from @p mesh.
 [[nodiscard]] FE::Real ownedRulePointIntegral(
-    const interfaces::FreeSurfaceGeometrySnapshot& snapshot,
-    interfaces::FreeSurfaceGeometryRuleRole role,
+    const interfaces::LevelSetGeometrySnapshot& snapshot,
+    interfaces::LevelSetGeometryRuleRole role,
     const interfaces::FreeSurfaceDiscreteFunctionalVectorEvaluator& velocity,
     const FE::assembly::IMeshAccess* mesh)
 {
     FE::Real integral{0.0};
     for (const auto& stored : snapshot.rules()) {
         if (!stored.locally_owned ||
-            stored.retention != interfaces::FreeSurfaceGeometryRetention::Retained ||
+            stored.retention != interfaces::LevelSetGeometryRetention::Retained ||
             stored.role != role) {
             continue;
         }
@@ -511,7 +511,7 @@ testVelocity(FE::Real scale)
             throw std::invalid_argument("classification-only record without a mesh");
         }
         const auto record = stored.classification_only
-                                ? interfaces::materializeFreeSurfaceGeometryRuleRecord(stored, *mesh)
+                                ? interfaces::materializeLevelSetGeometryRuleRecord(stored, *mesh)
                                 : stored;
         for (std::size_t q = 0; q < record.physical_rule.points.size(); ++q) {
             const auto value = velocity.value(record.reference_rule.provenance.parent_entity,
@@ -524,7 +524,7 @@ testVelocity(FE::Real scale)
     return integral;
 }
 
-TEST(FreeSurfaceSnapshotCompactRecords,
+TEST(LevelSetSnapshotCompactRecords,
      DryFullCellRecordsAreClassificationOnlyAndRematerializeExactly)
 {
     const SphereSnapshotFixture fixture;
@@ -538,12 +538,12 @@ TEST(FreeSurfaceSnapshotCompactRecords,
     // Same content-addressed revision and the same validation ledger.
     EXPECT_EQ(full->revision().snapshot_revision_key,
               compact->revision().snapshot_revision_key);
-    static_assert(sizeof(interfaces::FreeSurfaceGeometryValidationLedger) %
+    static_assert(sizeof(interfaces::LevelSetGeometryValidationLedger) %
                       sizeof(std::uint64_t) ==
                   0u);
     EXPECT_EQ(std::memcmp(&full->ledger(),
                           &compact->ledger(),
-                          sizeof(interfaces::FreeSurfaceGeometryValidationLedger)),
+                          sizeof(interfaces::LevelSetGeometryValidationLedger)),
               0);
 
     ASSERT_EQ(full->rules().size(), compact->rules().size());
@@ -557,24 +557,24 @@ TEST(FreeSurfaceSnapshotCompactRecords,
         EXPECT_FALSE(a.classification_only);
         expectSameClassification(a, b);
         const bool dry_full =
-            a.role == interfaces::FreeSurfaceGeometryRuleRole::PositiveVolume &&
+            a.role == interfaces::LevelSetGeometryRuleRole::PositiveVolume &&
             a.reference_rule.full_cell_equivalent;
         dry_full_count += dry_full ? 1u : 0u;
         wet_full_count +=
-            a.role == interfaces::FreeSurfaceGeometryRuleRole::NegativeVolume &&
+            a.role == interfaces::LevelSetGeometryRuleRole::NegativeVolume &&
                     a.reference_rule.full_cell_equivalent
                 ? 1u
                 : 0u;
-        cut_volume_count += (a.role == interfaces::FreeSurfaceGeometryRuleRole::
+        cut_volume_count += (a.role == interfaces::LevelSetGeometryRuleRole::
                                            NegativeVolume ||
-                             a.role == interfaces::FreeSurfaceGeometryRuleRole::
+                             a.role == interfaces::LevelSetGeometryRuleRole::
                                            PositiveVolume) &&
                                     !a.reference_rule.full_cell_equivalent
                                 ? 1u
                                 : 0u;
         EXPECT_EQ(b.classification_only, dry_full);
-        EXPECT_EQ(interfaces::freeSurfaceGeometryRuleContentDigest(a),
-                  interfaces::freeSurfaceGeometryRuleContentDigest(b));
+        EXPECT_EQ(interfaces::levelSetGeometryRuleContentDigest(a),
+                  interfaces::levelSetGeometryRuleContentDigest(b));
         if (!b.classification_only) {
             expectSamePoints(a, b);
             continue;
@@ -588,14 +588,14 @@ TEST(FreeSurfaceSnapshotCompactRecords,
         EXPECT_FALSE(a.moment_certificate.moments.empty());
         // Exact recomputation of the released points.
         const auto materialized =
-            interfaces::materializeFreeSurfaceGeometryRuleRecord(
+            interfaces::materializeLevelSetGeometryRuleRecord(
                 b, fixture.system.meshAccess());
         EXPECT_FALSE(materialized.classification_only);
         expectSameClassification(a, materialized);
         expectSamePoints(a, materialized);
-        EXPECT_EQ(interfaces::freeSurfaceGeometryRuleContentDigest(
+        EXPECT_EQ(interfaces::levelSetGeometryRuleContentDigest(
                       materialized),
-                  interfaces::freeSurfaceGeometryRuleContentDigest(a));
+                  interfaces::levelSetGeometryRuleContentDigest(a));
     }
     // The record array is reserved exactly.
     EXPECT_EQ(compact->rules().capacity(), compact->rules().size());
@@ -607,14 +607,14 @@ TEST(FreeSurfaceSnapshotCompactRecords,
 
     // Materialized records are returned unchanged.
     for (const auto& record : full->rules()) {
-        const auto same = interfaces::materializeFreeSurfaceGeometryRuleRecord(
+        const auto same = interfaces::materializeLevelSetGeometryRuleRecord(
             record, fixture.system.meshAccess());
         expectSameClassification(record, same);
         expectSamePoints(record, same);
     }
 }
 
-TEST(FreeSurfaceSnapshotCompactRecords, ConsumersGetIdenticalAnswers)
+TEST(LevelSetSnapshotCompactRecords, ConsumersGetIdenticalAnswers)
 {
     const SphereSnapshotFixture fixture;
     ASSERT_TRUE(fixture.generated.success) << fixture.generated.diagnostic;
@@ -639,35 +639,35 @@ TEST(FreeSurfaceSnapshotCompactRecords, ConsumersGetIdenticalAnswers)
         EXPECT_EQ(a.snapshot_revision_key, b.snapshot_revision_key);
         EXPECT_EQ(a.walls.size(), b.walls.size());
     }
-    for (const auto role : {interfaces::FreeSurfaceGeometryRuleRole::NegativeVolume,
-                            interfaces::FreeSurfaceGeometryRuleRole::PositiveVolume,
-                            interfaces::FreeSurfaceGeometryRuleRole::Interface}) {
+    for (const auto role : {interfaces::LevelSetGeometryRuleRole::NegativeVolume,
+                            interfaces::LevelSetGeometryRuleRole::PositiveVolume,
+                            interfaces::LevelSetGeometryRuleRole::Interface}) {
         EXPECT_TRUE(sameBits(ownedRuleMeasure(*full, role), ownedRuleMeasure(*compact, role)));
     }
 
     // Wet-side point counts and point integrals are unchanged.
     const auto velocity = testVelocity(FE::Real{0.4});
     EXPECT_EQ(interfaces::freeSurfaceOwnedRulePointCount(
-                  *full, interfaces::FreeSurfaceGeometryRuleRole::NegativeVolume),
+                  *full, interfaces::LevelSetGeometryRuleRole::NegativeVolume),
               interfaces::freeSurfaceOwnedRulePointCount(
-                  *compact, interfaces::FreeSurfaceGeometryRuleRole::NegativeVolume));
+                  *compact, interfaces::LevelSetGeometryRuleRole::NegativeVolume));
     EXPECT_TRUE(sameBits(
-        ownedRulePointIntegral(*full, interfaces::FreeSurfaceGeometryRuleRole::NegativeVolume, velocity, nullptr),
-        ownedRulePointIntegral(*compact, interfaces::FreeSurfaceGeometryRuleRole::NegativeVolume, velocity,
+        ownedRulePointIntegral(*full, interfaces::LevelSetGeometryRuleRole::NegativeVolume, velocity, nullptr),
+        ownedRulePointIntegral(*compact, interfaces::LevelSetGeometryRuleRole::NegativeVolume, velocity,
                                nullptr)));
 
     // A dry-side point count fails closed instead of skipping volume.
     EXPECT_NO_THROW((void)interfaces::freeSurfaceOwnedRulePointCount(
-        *full, interfaces::FreeSurfaceGeometryRuleRole::PositiveVolume));
+        *full, interfaces::LevelSetGeometryRuleRole::PositiveVolume));
     EXPECT_THROW((void)interfaces::freeSurfaceOwnedRulePointCount(
-                     *compact, interfaces::FreeSurfaceGeometryRuleRole::PositiveVolume),
+                     *compact, interfaces::LevelSetGeometryRuleRole::PositiveVolume),
                  std::invalid_argument);
 
     // The cut integration context imports identical rules from both.
     FE::assembly::CutIntegrationContext context_full;
     FE::assembly::CutIntegrationContext context_compact;
-    context_full.addFreeSurfaceGeometrySnapshot(full);
-    context_compact.addFreeSurfaceGeometrySnapshot(compact);
+    context_full.addLevelSetGeometrySnapshot(full);
+    context_compact.addLevelSetGeometrySnapshot(compact);
     ASSERT_EQ(context_full.volumeRules().size(),
               context_compact.volumeRules().size());
     for (std::size_t i = 0; i < context_full.volumeRules().size(); ++i) {
@@ -682,7 +682,7 @@ TEST(FreeSurfaceSnapshotCompactRecords, ConsumersGetIdenticalAnswers)
     }
 }
 
-TEST(FreeSurfaceSnapshotCompactRecords,
+TEST(LevelSetSnapshotCompactRecords,
      BothSidesCompactRecordsRematerializeForPointIntegrals)
 {
     const SphereSnapshotFixture fixture;
@@ -695,7 +695,7 @@ TEST(FreeSurfaceSnapshotCompactRecords,
               compact->revision().snapshot_revision_key);
     EXPECT_EQ(std::memcmp(&full->ledger(),
                           &compact->ledger(),
-                          sizeof(interfaces::FreeSurfaceGeometryValidationLedger)),
+                          sizeof(interfaces::LevelSetGeometryValidationLedger)),
               0);
     ASSERT_EQ(full->rules().size(), compact->rules().size());
     std::size_t wet_compact = 0u;
@@ -704,15 +704,15 @@ TEST(FreeSurfaceSnapshotCompactRecords,
         const auto& b = compact->rules()[i];
         expectSameClassification(a, b);
         const bool full_volume =
-            (a.role == interfaces::FreeSurfaceGeometryRuleRole::NegativeVolume ||
-             a.role == interfaces::FreeSurfaceGeometryRuleRole::PositiveVolume) &&
+            (a.role == interfaces::LevelSetGeometryRuleRole::NegativeVolume ||
+             a.role == interfaces::LevelSetGeometryRuleRole::PositiveVolume) &&
             a.reference_rule.full_cell_equivalent;
         EXPECT_EQ(b.classification_only, full_volume);
         if (b.classification_only &&
-            b.role == interfaces::FreeSurfaceGeometryRuleRole::NegativeVolume) {
+            b.role == interfaces::LevelSetGeometryRuleRole::NegativeVolume) {
             ++wet_compact;
             const auto materialized =
-                interfaces::materializeFreeSurfaceGeometryRuleRecord(b, *mesh);
+                interfaces::materializeLevelSetGeometryRuleRecord(b, *mesh);
             expectSamePoints(a, materialized);
         }
     }
@@ -720,8 +720,8 @@ TEST(FreeSurfaceSnapshotCompactRecords,
 
     // Point counts and point integrals over both sides rematerialize exactly.
     const auto velocity = testVelocity(FE::Real{0.4});
-    for (const auto role : {interfaces::FreeSurfaceGeometryRuleRole::NegativeVolume,
-                            interfaces::FreeSurfaceGeometryRuleRole::PositiveVolume}) {
+    for (const auto role : {interfaces::LevelSetGeometryRuleRole::NegativeVolume,
+                            interfaces::LevelSetGeometryRuleRole::PositiveVolume}) {
         EXPECT_EQ(interfaces::freeSurfaceOwnedRulePointCount(*full, role),
                   interfaces::freeSurfaceOwnedRulePointCount(*compact, role, mesh));
         EXPECT_TRUE(sameBits(ownedRulePointIntegral(*full, role, velocity, nullptr),
@@ -732,7 +732,7 @@ TEST(FreeSurfaceSnapshotCompactRecords,
     }
 }
 
-TEST(FreeSurfaceSnapshotCompactRecords, PolicyValidation)
+TEST(LevelSetSnapshotCompactRecords, PolicyValidation)
 {
     const SphereSnapshotFixture fixture;
     ASSERT_TRUE(fixture.generated.success) << fixture.generated.diagnostic;
@@ -750,13 +750,13 @@ TEST(FreeSurfaceSnapshotCompactRecords, PolicyValidation)
     for (std::size_t i = 0; i < full->rules().size(); ++i) {
         const auto& record = wet_compact->rules()[i];
         EXPECT_EQ(record.classification_only,
-                  record.role == interfaces::FreeSurfaceGeometryRuleRole::
+                  record.role == interfaces::LevelSetGeometryRuleRole::
                                      NegativeVolume &&
                       record.reference_rule.full_cell_equivalent);
     }
 }
 
-TEST(FreeSurfaceSnapshotCompactRecords, CopyOnWriteVectorSharesUntilModified)
+TEST(LevelSetSnapshotCompactRecords, CopyOnWriteVectorSharesUntilModified)
 {
     using Points = interfaces::CopyOnWriteVector<geometry::CutQuadraturePoint>;
     std::vector<geometry::CutQuadraturePoint> source(3u);
@@ -789,7 +789,7 @@ TEST(FreeSurfaceSnapshotCompactRecords, CopyOnWriteVectorSharesUntilModified)
     EXPECT_EQ(empty.shareCount(), 0);
 }
 
-TEST(FreeSurfaceSnapshotCompactRecords,
+TEST(LevelSetSnapshotCompactRecords,
      GeneratedDomainCopiesShareRegionPointsAndYieldIdenticalRules)
 {
     const SphereSnapshotFixture fixture;
@@ -829,7 +829,7 @@ TEST(FreeSurfaceSnapshotCompactRecords,
     EXPECT_TRUE(shared > 0u || domain.volumeRegionShareCount() > 1);
 }
 
-TEST(FreeSurfaceSnapshotCompactRecords, DomainCopiesShareTheirArraysUntilModified)
+TEST(LevelSetSnapshotCompactRecords, DomainCopiesShareTheirArraysUntilModified)
 {
     const SphereSnapshotFixture fixture;
     ASSERT_TRUE(fixture.generated.success) << fixture.generated.diagnostic;
@@ -868,7 +868,7 @@ TEST(FreeSurfaceSnapshotCompactRecords, DomainCopiesShareTheirArraysUntilModifie
               domain.volumeRegions().data());
 }
 
-TEST(FreeSurfaceSnapshotCompactRecords,
+TEST(LevelSetSnapshotCompactRecords,
      ContextKeepsDryFullCellRulesClassificationOnly)
 {
     const SphereSnapshotFixture fixture;
@@ -878,9 +878,9 @@ TEST(FreeSurfaceSnapshotCompactRecords,
     const auto& mesh = fixture.system.meshAccess();
 
     FE::assembly::CutIntegrationContext full;
-    full.addFreeSurfaceGeometrySnapshot(snapshot);
+    full.addLevelSetGeometrySnapshot(snapshot);
     auto compact = std::make_unique<FE::assembly::CutIntegrationContext>();
-    compact->addFreeSurfaceGeometrySnapshot(
+    compact->addLevelSetGeometrySnapshot(
         snapshot, std::nullopt, geometry::CutIntegrationSide::Positive);
     // No extra modification events: the import is the same content change.
     EXPECT_EQ(full.contentRevision(), compact->contentRevision());

@@ -182,7 +182,7 @@ build(const ns::Factories::IncompressibleTwoFluidInterfaceParameters &parameters
       expressions.v_positive, expressions.q_positive, parameters);
 }
 
-std::shared_ptr<const FE::interfaces::FreeSurfaceGeometrySnapshot>
+std::shared_ptr<const FE::interfaces::LevelSetGeometrySnapshot>
 makeTwoFluidDiagnosticSnapshot(
     const FE::assembly::IMeshAccess& mesh,
     int marker) {
@@ -270,10 +270,10 @@ makeTwoFluidDiagnosticSnapshot(
                FE::Real{1.0} / FE::Real{6.0},
                0.0}});
 
-  FE::interfaces::FreeSurfaceGeometrySnapshotPolicy policy;
+  FE::interfaces::LevelSetGeometrySnapshotPolicy policy;
   policy.require_complete_exterior_boundary_partition = false;
   policy.minimum_achieved_quadrature_order = 1;
-  FE::interfaces::FreeSurfaceGeometryScalarEvaluator scalar;
+  FE::interfaces::LevelSetGeometryScalarEvaluator scalar;
   scalar.value = [](FE::GlobalIndex,
                     const std::array<FE::Real, 3>& point,
                     const FE::geometry::CutQuadratureProvenance&) {
@@ -285,7 +285,7 @@ makeTwoFluidDiagnosticSnapshot(
          const FE::geometry::CutQuadratureProvenance&) {
         return std::array<FE::Real, 3>{{1.0, 0.0, 0.0}};
       };
-  return FE::interfaces::buildFreeSurfaceGeometrySnapshot(
+  return FE::interfaces::buildLevelSetGeometrySnapshot(
       std::move(domain),
       {},
       {},
@@ -1593,7 +1593,7 @@ TEST(IncompressibleTwoFluidDiagnostics,
   auto corrected = raw;
   corrected.snapshot_revision_key = 102u;
 
-  FE::interfaces::FreeSurfaceGeometryRevision raw_geometry;
+  FE::interfaces::LevelSetGeometryRevision raw_geometry;
   raw_geometry.source_id = "field:0";
   raw_geometry.domain_id = "material_interface";
   raw_geometry.interface_marker = 71;
@@ -1649,7 +1649,7 @@ TEST(IncompressibleTwoFluidDiagnostics,
   corrected.negative_phase.momentum[0] += FE::Real{0.1};
   corrected.negative_phase.kinetic_energy = FE::Real{25.1};
 
-  FE::interfaces::FreeSurfaceGeometryRevision raw_geometry;
+  FE::interfaces::LevelSetGeometryRevision raw_geometry;
   raw_geometry.source_id = "field:0";
   raw_geometry.domain_id = "material_interface";
   raw_geometry.interface_marker = 71;
@@ -1709,7 +1709,7 @@ TEST(IncompressibleTwoFluidInterface,
   module.registerOn(fixture.system);
 
   auto context = std::make_shared<FE::assembly::CutIntegrationContext>();
-  context->addFreeSurfaceGeometrySnapshot(
+  context->addLevelSetGeometrySnapshot(
       makeTwoFluidDiagnosticSnapshot(*fixture.mesh, 71));
   FE::assembly::CutFacetSetHandle facet_set;
   facet_set.marker = 71;
@@ -1765,7 +1765,7 @@ TEST(IncompressibleTwoFluidInterface,
   module.registerOn(fixture.system);
 
   auto context = std::make_shared<FE::assembly::CutIntegrationContext>();
-  context->addFreeSurfaceGeometrySnapshot(
+  context->addLevelSetGeometrySnapshot(
       makeTwoFluidDiagnosticSnapshot(*fixture.mesh, 71));
   FE::assembly::CutFacetSetHandle facet_set;
   facet_set.marker = 71;
@@ -2122,7 +2122,7 @@ makeAcceptedTwoFluidDiagnosticState(
   return FE::systems::AcceptedTwoFluidStageDiagnosticState{
       .interface_marker = declaration.interface_marker,
       .geometry_revision =
-          FE::interfaces::FreeSurfaceGeometryRevision{
+          FE::interfaces::LevelSetGeometryRevision{
               .source_id =
                   FE::interfaces::LevelSetInterfaceSource::fromField(
                       declaration.level_set_field)
@@ -2554,7 +2554,7 @@ makeTwoFluidAcceptedStageAggregationReports(
     report.interface_marker = declaration.interface_marker;
     report.geometry_identity.kind = FE::constraints::
         SmallCutAggregationGeometryIdentityKind::
-            AuthoritativeFreeSurfaceSnapshot;
+            AuthoritativeLevelSetSnapshot;
     report.geometry_identity.available = true;
     report.geometry_identity.communicator_fingerprint_consensus_validated =
         true;

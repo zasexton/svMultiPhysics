@@ -169,7 +169,7 @@ ns::FreeSurfaceBoundary unfittedBoundary(
         .interface_marker = kInterfaceMarker,
         .level_set_field_name = "phi",
         .geometry_tangent_policy =
-            ns::FreeSurfaceGeometryTangentPolicy::RefreshedFrozenQuadrature,
+            ns::LevelSetGeometryTangentPolicy::RefreshedFrozenQuadrature,
         .active_domain = ns::FreeSurfaceActiveDomain::LevelSetNegative,
         .external_pressure = 0.0,
         .surface_tension = surface_tension,
@@ -814,7 +814,7 @@ TEST(FreeSurfaceSemiImplicitSurfaceTension, RejectsConfigurationsOutsideTheValid
         SCOPED_TRACE("differentiated geometry");
         auto bc = unfittedBoundary(SI::NormalIncrement);
         bc.geometry_tangent_policy =
-            ns::FreeSurfaceGeometryTangentPolicy::DifferentiatedQuadrature;
+            ns::LevelSetGeometryTangentPolicy::DifferentiatedQuadrature;
         expectRegistrationRejected(bc, requires_prefix + " Geometry_tangent_policy=RefreshedFrozenQuadrature");
     }
     {

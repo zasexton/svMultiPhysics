@@ -8,7 +8,7 @@
 #include "Systems/SystemCollectives.h"
 #include "Systems/SystemState.h"
 
-#include "Interfaces/FreeSurfaceGeometrySnapshot.h"
+#include "Interfaces/LevelSetGeometrySnapshot.h"
 #include "Mesh/Core/MeshComm.h"
 
 #include <gtest/gtest.h>

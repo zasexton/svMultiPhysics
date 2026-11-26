@@ -628,12 +628,12 @@ public:
     }
     const auto* context = sim_.fe_system->cutIntegrationContext();
     if (context == nullptr ||
-        context->freeSurfaceGeometrySnapshots().size() != 1u) {
+        context->levelSetGeometrySnapshots().size() != 1u) {
       throw std::runtime_error(
           "distributed native channel has no unique geometry snapshot");
     }
     const auto snapshot =
-        context->freeSurfaceGeometrySnapshots().front();
+        context->levelSetGeometrySnapshots().front();
     if (!snapshot) {
       throw std::runtime_error(
           "distributed native channel geometry snapshot is null");
@@ -691,9 +691,9 @@ public:
     std::array<svmp::FE::Real, 6> local_measures{};
     const auto selected_role =
         active_side_ == ActiveSide::Negative
-            ? svmp::FE::interfaces::FreeSurfaceGeometryRuleRole::
+            ? svmp::FE::interfaces::LevelSetGeometryRuleRole::
                   NegativeExteriorBoundary
-            : svmp::FE::interfaces::FreeSurfaceGeometryRuleRole::
+            : svmp::FE::interfaces::LevelSetGeometryRuleRole::
                   PositiveExteriorBoundary;
     for (const auto& record : snapshot->rules()) {
       if (!record.locally_owned) {
@@ -707,10 +707,10 @@ public:
         continue;
       }
       if (record.role !=
-              svmp::FE::interfaces::FreeSurfaceGeometryRuleRole::
+              svmp::FE::interfaces::LevelSetGeometryRuleRole::
                   NegativeExteriorBoundary &&
           record.role !=
-              svmp::FE::interfaces::FreeSurfaceGeometryRuleRole::
+              svmp::FE::interfaces::LevelSetGeometryRuleRole::
                   PositiveExteriorBoundary) {
         continue;
       }
@@ -1009,7 +1009,7 @@ public:
             result.active_markers[2] &&
         trace.certificate.cut_context_content_revision ==
             context->contentRevision() &&
-        trace.certificate.free_surface_snapshot_revision ==
+        trace.certificate.level_set_snapshot_revision ==
             snapshot->revision().snapshot_revision_key &&
         trace.certificate.source_value_revision ==
             refresh_report.value_revision &&

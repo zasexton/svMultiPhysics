@@ -151,7 +151,7 @@ struct GeneratedBoundaryAggregateTraceCertificate {
     // These cache-validity stamps are rank-local by report contract and are
     // intentionally excluded from the canonical certificate digest.
     std::uint64_t cut_context_content_revision{0u};
-    std::uint64_t free_surface_snapshot_revision{0u};
+    std::uint64_t level_set_snapshot_revision{0u};
     std::uint64_t source_value_revision{0u};
     std::uint64_t affine_constraint_layout_revision{0u};
     std::size_t active_cell_count{0u};

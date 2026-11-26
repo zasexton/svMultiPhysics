@@ -44,7 +44,7 @@
 #include "Forms/StandardBCs.h"
 #include "Forms/Vocabulary.h"
 
-#include "Interfaces/FreeSurfaceGeometrySnapshot.h"
+#include "Interfaces/LevelSetGeometrySnapshot.h"
 #include "Interfaces/ContactLineGeometryCertificate.h"
 #include "Interfaces/GeneratedActiveBoundaryDomain.h"
 #include "Interfaces/LevelSetInterfaceBuilder.h"
@@ -231,7 +231,7 @@ Real entrySum(const std::array<std::array<Real, 4>, 4>& A)
     return total;
 }
 
-std::shared_ptr<const svmp::FE::interfaces::FreeSurfaceGeometrySnapshot>
+std::shared_ptr<const svmp::FE::interfaces::LevelSetGeometrySnapshot>
 makeFormsInstallerFullNegativeSnapshot(
     const svmp::FE::assembly::IMeshAccess& mesh,
     int marker,
@@ -267,15 +267,15 @@ makeFormsInstallerFullNegativeSnapshot(
     region.full_cell_equivalent = true;
     domain.addVolumeRegion(std::move(region));
 
-    interfaces::FreeSurfaceGeometrySnapshotPolicy policy;
+    interfaces::LevelSetGeometrySnapshotPolicy policy;
     policy.require_complete_exterior_boundary_partition = false;
-    interfaces::FreeSurfaceGeometryScalarEvaluator scalar;
+    interfaces::LevelSetGeometryScalarEvaluator scalar;
     scalar.value = [](GlobalIndex,
                       const std::array<Real, 3>&,
                       const geometry::CutQuadratureProvenance&) {
         return Real{-1.0};
     };
-    return interfaces::buildFreeSurfaceGeometrySnapshot(
+    return interfaces::buildLevelSetGeometrySnapshot(
         std::move(domain),
         {},
         {},
@@ -4656,10 +4656,10 @@ TEST(FormsInstaller,
         makeFormsInstallerFullNegativeSnapshot(*mesh, marker, u_field);
     ASSERT_NE(snapshot, nullptr);
     ASSERT_NE(snapshot->revision().snapshot_revision_key, 0u);
-    cut_context->addFreeSurfaceGeometrySnapshot(
+    cut_context->addLevelSetGeometrySnapshot(
         snapshot,
         svmp::FE::geometry::CutIntegrationSide::Negative);
-    EXPECT_EQ(cut_context->freeSurfaceGeometrySnapshotRevisionForMarker(marker),
+    EXPECT_EQ(cut_context->levelSetGeometrySnapshotRevisionForMarker(marker),
               snapshot->revision().snapshot_revision_key);
     sys.setCutIntegrationContext(cut_context);
 
@@ -4730,7 +4730,7 @@ TEST(FormsInstaller,
     rule.frame = svmp::FE::geometry::CutGeometryFrame::Reference;
     rule.provenance.parent_entity = 0;
     rule.provenance.marker = marker;
-    rule.provenance.free_surface_snapshot_revision_key =
+    rule.provenance.level_set_snapshot_revision_key =
         orphan_snapshot_revision;
     rule.points.push_back(svmp::FE::geometry::CutQuadraturePoint{
         .point = {{Real{0.25}, Real{0.25}, Real{0.25}}},
@@ -4741,7 +4741,7 @@ TEST(FormsInstaller,
     metadata.parent_entity = 0;
     metadata.side = svmp::FE::geometry::CutIntegrationSide::Negative;
     metadata.volume_fraction = rule.volume_fraction;
-    metadata.free_surface_snapshot_revision_key = orphan_snapshot_revision;
+    metadata.level_set_snapshot_revision_key = orphan_snapshot_revision;
     cut_context->addGeneratedVolumeRule(marker, metadata, rule);
 
     svmp::FE::systems::SetupInputs inputs;

@@ -472,7 +472,7 @@ void LevelSetActiveSideVertexDirichletConstraint::apply(
     };
     const auto* cut_context = system.cutIntegrationContext();
     if (cut_context != nullptr) {
-        cut_context->assertAllFreeSurfaceGeometrySnapshotsCurrent(
+        cut_context->assertAllLevelSetGeometrySnapshotsCurrent(
             system.meshAccess());
     }
     const bool has_retained_generated_volume_support =

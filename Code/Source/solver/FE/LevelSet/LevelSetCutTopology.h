@@ -58,10 +58,10 @@ class FESystem;
 } // namespace systems
 
 namespace interfaces {
-class FreeSurfaceGeometrySnapshot;
+class LevelSetGeometrySnapshot;
 class LevelSetInterfaceDomain;
-struct FreeSurfaceGeometryRevision;
-struct FreeSurfaceGeometryRuleRecord;
+struct LevelSetGeometryRevision;
+struct LevelSetGeometryRuleRecord;
 } // namespace interfaces
 
 namespace level_set {
@@ -462,16 +462,16 @@ struct CutTopologyFingerprintMultiset {
 /// Epoch-free identity of a cut-volume request and its snapshot revision.
 [[nodiscard]] std::uint64_t activeCutTopologyRequestIdentity(
     const ActiveCutVolumeRequest& request,
-    const svmp::FE::interfaces::FreeSurfaceGeometryRevision& revision);
+    const svmp::FE::interfaces::LevelSetGeometryRevision& revision);
 
 /// Partition- and epoch-independent identity of one snapshot rule.
 [[nodiscard]] std::uint64_t freeSurfaceRuleSemanticTopologyFingerprint(
-    const svmp::FE::interfaces::FreeSurfaceGeometryRuleRecord& rule,
+    const svmp::FE::interfaces::LevelSetGeometryRuleRecord& rule,
     std::uint64_t request_identity);
 
 struct ActiveCutTopologySnapshotBinding {
   const ActiveCutVolumeRequest* request{nullptr};
-  const svmp::FE::interfaces::FreeSurfaceGeometrySnapshot* snapshot{nullptr};
+  const svmp::FE::interfaces::LevelSetGeometrySnapshot* snapshot{nullptr};
   /// The cut-structure keys of the owned cells (cutStructureCellKeys), for a
   /// request whose geometry is not LinearCorner; unused otherwise.
   const std::map<svmp::FE::GlobalIndex, std::uint64_t>* cell_structure_keys{nullptr};

@@ -44,7 +44,7 @@ class GenericVector;
 } // namespace backends
 
 namespace interfaces {
-struct FreeSurfaceGeometryOwnershipCollective;
+struct LevelSetGeometryOwnershipCollective;
 } // namespace interfaces
 
 namespace systems {
@@ -331,7 +331,7 @@ void scatterFeOrderedSolution(
  * Its gathers concatenate every rank's 64-bit words in rank order.  The
  * returned functions keep a copy of @p comm.
  */
-[[nodiscard]] interfaces::FreeSurfaceGeometryOwnershipCollective ownershipCollective(
+[[nodiscard]] interfaces::LevelSetGeometryOwnershipCollective ownershipCollective(
     const CollectiveCommunicator& comm);
 
 /**

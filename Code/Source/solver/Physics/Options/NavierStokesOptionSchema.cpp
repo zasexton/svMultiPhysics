@@ -171,11 +171,11 @@ opt::OptionSchema<FreeSurfaceBoundary> makeFreeSurfaceBoundarySchema()
                        {"highorder", "curvedimplicit", "implicitcurved"}),
              }})
         .key("Geometry_tangent_policy", &B::geometry_tangent_policy,
-             opt::EnumCodec<FreeSurfaceGeometryTangentPolicy>{{
-                 token(FreeSurfaceGeometryTangentPolicy::RefreshedFrozenQuadrature,
+             opt::EnumCodec<LevelSetGeometryTangentPolicy>{{
+                 token(LevelSetGeometryTangentPolicy::RefreshedFrozenQuadrature,
                        "RefreshedFrozenQuadrature",
                        {"refreshedfrozen", "frozenquadrature", "quasinewton", "quasinewtongeometry"}),
-                 token(FreeSurfaceGeometryTangentPolicy::DifferentiatedQuadrature,
+                 token(LevelSetGeometryTangentPolicy::DifferentiatedQuadrature,
                        "DifferentiatedQuadrature",
                        {"differentiated", "exactgeometrytangent", "exactsensitivities",
                         "shapederivative"}),
@@ -599,13 +599,13 @@ std::string resolvedFreeSurfacesJson(const std::vector<FreeSurfaceBoundary>& fre
     return "Unknown";
 }
 
-[[nodiscard]] const char* freeSurfaceGeometryTangentPolicyName(
-    FreeSurfaceGeometryTangentPolicy policy) noexcept
+[[nodiscard]] const char* levelSetGeometryTangentPolicyName(
+    LevelSetGeometryTangentPolicy policy) noexcept
 {
     switch (policy) {
-    case FreeSurfaceGeometryTangentPolicy::RefreshedFrozenQuadrature:
+    case LevelSetGeometryTangentPolicy::RefreshedFrozenQuadrature:
         return "RefreshedFrozenQuadrature";
-    case FreeSurfaceGeometryTangentPolicy::DifferentiatedQuadrature:
+    case LevelSetGeometryTangentPolicy::DifferentiatedQuadrature:
         return "DifferentiatedQuadrature";
     }
     return "Unknown";
@@ -1165,7 +1165,7 @@ tangentialPolicyProvenance(
             << json::quote(freeSurfaceGeneratedInterfaceGeometryName(
                    boundary.generated_interface_geometry))
             << ",\"geometry_tangent_policy\":"
-            << json::quote(freeSurfaceGeometryTangentPolicyName(
+            << json::quote(levelSetGeometryTangentPolicyName(
                    boundary.geometry_tangent_policy))
             << ",\"level_set_isovalue\":"
             << jsonReal(boundary.level_set_isovalue)
@@ -1428,7 +1428,7 @@ void appendVelocityBoundaryArtifact(
         << json::quote(freeSurfaceGeneratedInterfaceGeometryName(
                options.generated_interface_geometry))
         << ",\"geometry_tangent_policy\":"
-        << json::quote(freeSurfaceGeometryTangentPolicyName(
+        << json::quote(levelSetGeometryTangentPolicyName(
                options.geometry_tangent_policy))
         << ",\"surface_tension\":" << jsonReal(options.surface_tension)
         << ",\"prescribed_pressure_jump_mode\":\"manufactured_normal_traction_and_diagnostic_target\""

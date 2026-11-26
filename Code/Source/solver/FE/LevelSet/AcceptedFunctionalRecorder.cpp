@@ -18,7 +18,7 @@
 #include "Geometry/GeometryMapping.h"
 #include "Geometry/LinearMapping.h"
 #include "Interfaces/ContactLineStageObservables.h"
-#include "Interfaces/FreeSurfaceGeometrySnapshot.h"
+#include "Interfaces/LevelSetGeometrySnapshot.h"
 #include "LevelSet/LevelSetCutTopology.h"
 #include "LevelSet/Maintenance/LevelSetMaintenanceRequestSchedule.h"
 #include "Math/Matrix.h"
@@ -263,7 +263,7 @@ currentAcceptedFunctionalLayouts(
           "[svMultiPhysics::Application] Free-surface functional declaration ordering or scalar parameters differ across the FE communicator.");
     }
     const bool local_marker_available =
-        context->hasFreeSurfaceGeometrySnapshotForMarker(
+        context->hasLevelSetGeometrySnapshotForMarker(
             declaration.interface_marker);
     if (collectiveMinDouble(local_marker_available ? 1.0 : 0.0, comm) != 1.0) {
       throw std::runtime_error(
@@ -272,9 +272,9 @@ currentAcceptedFunctionalLayouts(
           " is missing an authoritative geometry snapshot on at least one rank.");
     }
     const auto snapshot_revision =
-        context->freeSurfaceGeometrySnapshotRevisionForMarker(
+        context->levelSetGeometrySnapshotRevisionForMarker(
             declaration.interface_marker);
-    const auto& snapshots = context->freeSurfaceGeometrySnapshots();
+    const auto& snapshots = context->levelSetGeometrySnapshots();
     const auto found = std::find_if(
         snapshots.begin(), snapshots.end(), [&](const auto& candidate) {
           return candidate &&
@@ -311,7 +311,7 @@ currentAcceptedFunctionalLayouts(
           "[svMultiPhysics::Application] Free-surface geometry snapshot storage is incomplete across the FE communicator for marker " +
           std::to_string(declaration.interface_marker) + ".");
     }
-    context->assertAllFreeSurfaceGeometrySnapshotsCurrent(
+    context->assertAllLevelSetGeometrySnapshotsCurrent(
         sim.fe_system->meshAccess());
     const auto& snapshot = **found;
     const bool geometry_pruning_occurred =
@@ -372,12 +372,12 @@ currentAcceptedFunctionalLayouts(
 namespace {
 
 /// The snapshot rule role of the liquid volume on @p side.
-[[nodiscard]] svmp::FE::interfaces::FreeSurfaceGeometryRuleRole liquidVolumeRole(
+[[nodiscard]] svmp::FE::interfaces::LevelSetGeometryRuleRole liquidVolumeRole(
     svmp::FE::geometry::CutIntegrationSide side) noexcept
 {
   return side == svmp::FE::geometry::CutIntegrationSide::Negative
-             ? svmp::FE::interfaces::FreeSurfaceGeometryRuleRole::NegativeVolume
-             : svmp::FE::interfaces::FreeSurfaceGeometryRuleRole::PositiveVolume;
+             ? svmp::FE::interfaces::LevelSetGeometryRuleRole::NegativeVolume
+             : svmp::FE::interfaces::LevelSetGeometryRuleRole::PositiveVolume;
 }
 
 void attachAcceptedFreeSurfaceEndpointFunctionalPowers(
@@ -434,7 +434,7 @@ void attachAcceptedFreeSurfaceEndpointFunctionalPowers(
       }
       continue;
     }
-    const auto& snapshots = context->freeSurfaceGeometrySnapshots();
+    const auto& snapshots = context->levelSetGeometrySnapshots();
     const auto found = std::find_if(
         snapshots.begin(), snapshots.end(), [&](const auto& candidate) {
           return candidate &&
@@ -583,7 +583,7 @@ void attachAcceptedActiveVolumeEnergies(
       throw std::runtime_error(
           "[svMultiPhysics::Application] Active-volume energy state ordering does not match its free-surface declaration.");
     }
-    const auto& snapshots = context->freeSurfaceGeometrySnapshots();
+    const auto& snapshots = context->levelSetGeometrySnapshots();
     const auto found = std::find_if(
         snapshots.begin(), snapshots.end(), [&](const auto& candidate) {
           return candidate &&
@@ -684,7 +684,7 @@ void attachAcceptedFreeSurfaceActiveVolumeDissipation(
       }
       continue;
     }
-    const auto& snapshots = context->freeSurfaceGeometrySnapshots();
+    const auto& snapshots = context->levelSetGeometrySnapshots();
     const auto found = std::find_if(
         snapshots.begin(), snapshots.end(), [&](const auto& candidate) {
           return candidate &&
@@ -786,7 +786,7 @@ void attachAcceptedFreeSurfaceExternalPressurePowers(
       }
       continue;
     }
-    const auto& snapshots = context->freeSurfaceGeometrySnapshots();
+    const auto& snapshots = context->levelSetGeometrySnapshots();
     const auto found = std::find_if(
         snapshots.begin(), snapshots.end(), [&](const auto& candidate) {
           return candidate &&
@@ -812,7 +812,7 @@ void attachAcceptedFreeSurfaceExternalPressurePowers(
       power.external_pressure = parameters.external_pressure;
       power.owned_quadrature_point_count =
           svmp::FE::interfaces::freeSurfaceOwnedRulePointCount(
-              **found, svmp::FE::interfaces::FreeSurfaceGeometryRuleRole::Interface);
+              **found, svmp::FE::interfaces::LevelSetGeometryRuleRole::Interface);
       local_power = std::move(power);
     } catch (...) {
       local_failure = std::current_exception();
@@ -959,7 +959,7 @@ void attachAcceptedFreeSurfaceBackwardEulerKineticWork(
         velocity_revisions_it->second.first;
     const auto endpoint_velocity_revision =
         velocity_revisions_it->second.second;
-    const auto& snapshots = context->freeSurfaceGeometrySnapshots();
+    const auto& snapshots = context->levelSetGeometrySnapshots();
     const auto found = std::find_if(
         snapshots.begin(), snapshots.end(), [&](const auto& candidate) {
           return candidate &&
@@ -1020,7 +1020,7 @@ void attachAcceptedFreeSurfaceBackwardEulerKineticWork(
 }
 
 std::uint64_t levelSetMaintenanceCutTopologyRevision(
-    const svmp::FE::interfaces::FreeSurfaceGeometrySnapshot& snapshot,
+    const svmp::FE::interfaces::LevelSetGeometrySnapshot& snapshot,
     const svmp::MeshComm& comm)
 {
   CutTopologyFingerprintMultiset local_digest;
@@ -1210,7 +1210,7 @@ struct WallFunctionalForms {
 };
 
 [[nodiscard]] WallFunctionalForms wallFunctionalForms(
-    const interfaces::FreeSurfaceGeometrySnapshot& snapshot,
+    const interfaces::LevelSetGeometrySnapshot& snapshot,
     const systems::FreeSurfaceDiscreteFunctionalDeclaration& declaration,
     int boundary_marker,
     std::optional<svmp::FE::Real> equilibrium_contact_angle_radians)
@@ -1260,14 +1260,14 @@ struct WallFunctionalForms {
 }
 
 /// The snapshot of the current geometry of @p interface_marker, or null.
-[[nodiscard]] const interfaces::FreeSurfaceGeometrySnapshot* currentSnapshot(
+[[nodiscard]] const interfaces::LevelSetGeometrySnapshot* currentSnapshot(
     const assembly::CutIntegrationContext* context, int interface_marker)
 {
-  if (context == nullptr || !context->hasFreeSurfaceGeometrySnapshotForMarker(interface_marker)) {
+  if (context == nullptr || !context->hasLevelSetGeometrySnapshotForMarker(interface_marker)) {
     return nullptr;
   }
-  const auto revision = context->freeSurfaceGeometrySnapshotRevisionForMarker(interface_marker);
-  for (const auto& candidate : context->freeSurfaceGeometrySnapshots()) {
+  const auto revision = context->levelSetGeometrySnapshotRevisionForMarker(interface_marker);
+  for (const auto& candidate : context->levelSetGeometrySnapshots()) {
     if (candidate && candidate->revision().snapshot_revision_key == revision) {
       return candidate.get();
     }
@@ -1567,9 +1567,9 @@ std::vector<DeclaredFunctionalMasses> applyDeclaredFunctionalForms(
         record_declarations.begin(), record_declarations.end(), [&](const auto& declaration) {
           return declaration.interface_marker == accepted.interface_marker;
         });
-    const interfaces::FreeSurfaceGeometrySnapshot* snapshot = nullptr;
+    const interfaces::LevelSetGeometrySnapshot* snapshot = nullptr;
     if (context != nullptr) {
-      for (const auto& candidate : context->freeSurfaceGeometrySnapshots()) {
+      for (const auto& candidate : context->levelSetGeometrySnapshots()) {
         if (candidate && candidate->revision().snapshot_revision_key ==
                              accepted.geometry_revision.snapshot_revision_key) {
           snapshot = candidate.get();
@@ -1921,7 +1921,7 @@ levelSetMaintenanceFunctionalValues(
   }
   (void)applyDeclaredFunctionalForms(
       sim, solution, {}, enriched_states, svmp::FE::Real{0.0}, svmp::FE::Real{0.0});
-  const auto& snapshots = context->freeSurfaceGeometrySnapshots();
+  const auto& snapshots = context->levelSetGeometrySnapshots();
   for (const auto& state : enriched_states) {
     const auto marker = static_cast<double>(state.interface_marker);
     if (collectiveMinDouble(marker, comm) !=
@@ -2301,7 +2301,7 @@ recordAcceptedFunctionals(
         "[svMultiPhysics::Application] Accepted free-surface functional history requires the authoritative cut-integration context.");
   }
   const auto& accepted_snapshots =
-      accepted_cut_context->freeSurfaceGeometrySnapshots();
+      accepted_cut_context->levelSetGeometrySnapshots();
   for (std::size_t index = 0; index < declarations.size(); ++index) {
     const auto& declaration = declarations[index];
     auto& accepted_state = accepted_states[index];

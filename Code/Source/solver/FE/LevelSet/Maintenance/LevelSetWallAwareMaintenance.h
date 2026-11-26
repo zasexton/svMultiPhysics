@@ -42,7 +42,7 @@ namespace svmp {
 namespace FE {
 
 namespace interfaces {
-struct FreeSurfaceGeometryRuleRecord;
+struct LevelSetGeometryRuleRecord;
 } // namespace interfaces
 
 namespace systems {
@@ -127,7 +127,7 @@ resolveLevelSetWallContactConstraints(
  * revision.  Rank-local.
  */
 [[nodiscard]] LevelSetWallContactConstraint makeAcceptedSnapshotWallConstraint(
-    const interfaces::FreeSurfaceGeometryRuleRecord& record,
+    const interfaces::LevelSetGeometryRuleRecord& record,
     int interface_marker,
     std::uint64_t snapshot_revision);
 

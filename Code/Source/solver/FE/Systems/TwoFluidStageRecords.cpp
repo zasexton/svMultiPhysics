@@ -115,7 +115,7 @@ void appendTwoFluidDiagnosticDeclaration(
 
 void appendTwoFluidGeometryRevision(
     MeshBoundaryConsensusTokens& tokens,
-    const interfaces::FreeSurfaceGeometryRevision& revision)
+    const interfaces::LevelSetGeometryRevision& revision)
 {
     appendMeshBoundaryString(tokens, revision.source_id);
     appendMeshBoundaryString(tokens, revision.domain_id);
@@ -658,7 +658,7 @@ compactTwoFluidAcceptedStageAggregationGeometry(
 
 void validateTwoFluidAcceptedStageAggregationGeometry(
     const TwoFluidAcceptedStageAggregationGeometryTelemetry& identity,
-    const interfaces::FreeSurfaceGeometryRevision& expected)
+    const interfaces::LevelSetGeometryRevision& expected)
 {
     const bool common_identity_matches =
         identity.available &&
@@ -673,7 +673,7 @@ void validateTwoFluidAcceptedStageAggregationGeometry(
     const bool authoritative =
         identity.kind == constraints::
                              SmallCutAggregationGeometryIdentityKind::
-                                 AuthoritativeFreeSurfaceSnapshot &&
+                                 AuthoritativeLevelSetSnapshot &&
         identity.snapshot_revision_key == expected.snapshot_revision_key &&
         identity.distributed_mesh_geometry_revision ==
             expected.mesh_geometry_revision &&
@@ -760,7 +760,7 @@ compactTwoFluidAcceptedStageAggregationTransition(
 [[nodiscard]] TwoFluidAcceptedStageAggregationTelemetry
 compactTwoFluidAcceptedStageAggregation(
     const constraints::SmallCutAggregationRefreshReport& source,
-    const interfaces::FreeSurfaceGeometryRevision& expected_geometry)
+    const interfaces::LevelSetGeometryRevision& expected_geometry)
 {
     const auto geometry =
         compactTwoFluidAcceptedStageAggregationGeometry(

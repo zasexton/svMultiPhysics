@@ -884,7 +884,7 @@ set(FE_GEOMETRY_HEADERS
     Interfaces/CutInterfaceFieldEvaluation.h
     Interfaces/SnapshotFieldEvaluator.h
     Interfaces/ContactLineStageObservables.h
-    Interfaces/FreeSurfaceGeometrySnapshot.h
+    Interfaces/LevelSetGeometrySnapshot.h
     Interfaces/IncompressibleTwoFluidDiagnostics.h
     Interfaces/MaterialInterfaceTransportVelocity.h
     Interfaces/GeneratedActiveBoundaryDomain.h
@@ -922,7 +922,7 @@ set(FE_GEOMETRY_SOURCES
     Interfaces/CutInterfaceFieldEvaluation.cpp
     Interfaces/SnapshotFieldEvaluator.cpp
     Interfaces/ContactLineStageObservables.cpp
-    Interfaces/FreeSurfaceGeometrySnapshot.cpp
+    Interfaces/LevelSetGeometrySnapshot.cpp
     Interfaces/IncompressibleTwoFluidDiagnostics.cpp
     Interfaces/MaterialInterfaceTransportVelocity.cpp
     Interfaces/GeneratedActiveBoundaryDomain.cpp
@@ -2588,8 +2588,8 @@ if(FE_BUILD_TESTS)
             Tests/Unit/LevelSet/test_LevelSetConservativePhaseWorkflow.cpp
             Tests/Unit/LevelSet/test_LevelSetDiagnostics.cpp
             Tests/Unit/LevelSet/test_LevelSetGeometry.cpp
-            Tests/Unit/LevelSet/test_FreeSurfaceSnapshotCompactRecords.cpp
-            Tests/Unit/LevelSet/test_FreeSurfaceSnapshotReuse.cpp
+            Tests/Unit/LevelSet/test_LevelSetSnapshotCompactRecords.cpp
+            Tests/Unit/LevelSet/test_LevelSetSnapshotReuse.cpp
             Tests/Unit/LevelSet/test_LevelSetCutTopology.cpp
             Tests/Unit/LevelSet/test_LevelSetGeometryService.cpp
             Tests/Unit/LevelSet/test_LevelSetHeaders.cpp

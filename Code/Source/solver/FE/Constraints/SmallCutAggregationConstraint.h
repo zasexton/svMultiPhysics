@@ -297,7 +297,7 @@ struct SmallCutAggregationActiveFeatureTransitionReport {
 enum class SmallCutAggregationGeometryIdentityKind : std::uint8_t {
     Unavailable,
     GeneratedPublicationSource,
-    AuthoritativeFreeSurfaceSnapshot,
+    AuthoritativeLevelSetSnapshot,
 };
 
 /**
@@ -604,8 +604,8 @@ struct SmallCutAggregationProlongationRevision {
     ConstraintRevisionSnapshot constraint{};
     std::uint64_t affine_constraint_layout_revision{0u};
     std::uint64_t cut_context_content_revision{0u};
-    bool has_free_surface_snapshot_revision{false};
-    std::uint64_t free_surface_snapshot_revision{0u};
+    bool has_level_set_snapshot_revision{false};
+    std::uint64_t level_set_snapshot_revision{0u};
     bool has_source_value_revision{false};
     std::uint64_t source_value_revision{0u};
 };

@@ -54,7 +54,7 @@ interfaceMeasureEvidence(
     InterfaceMeasureEvidence local;
     std::exception_ptr local_preflight_exception;
     try {
-        context.assertAllFreeSurfaceGeometrySnapshotsCurrent(
+        context.assertAllLevelSetGeometrySnapshotsCurrent(
             system.meshAccess());
         for (const auto* rule :
              context.interfaceRulesForMarker(

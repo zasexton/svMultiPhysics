@@ -55,7 +55,7 @@
 #include "FE/Core/AggregationGuardDiagnostics.h"
 #include "FE/Core/HaloDiagnostics.h"
 #include "FE/Interfaces/ContactLineStageObservables.h"
-#include "FE/Interfaces/FreeSurfaceGeometrySnapshot.h"
+#include "FE/Interfaces/LevelSetGeometrySnapshot.h"
 #include "FE/Interfaces/IncompressibleTwoFluidDiagnostics.h"
 #include "FE/Interfaces/MaterialInterfaceTransportVelocity.h"
 #include "FE/Interfaces/GeneratedInterfaceBoundaryIntersectionDomain.h"
@@ -1287,7 +1287,7 @@ struct WetVolumeDiagnostic {
   std::string level_set_field_name{};
   std::string domain_id{};
   int marker{-1};
-  std::uint64_t free_surface_snapshot_revision_key{0};
+  std::uint64_t level_set_snapshot_revision_key{0};
   std::uint64_t source_value_revision{0};
   LevelSetActiveSide active_side{LevelSetActiveSide::Negative};
   double isovalue{0.0};
@@ -1592,7 +1592,7 @@ void dumpActiveCutVolumeRulesForProbe(const svmp::FE::systems::FESystem& system,
   if (context == nullptr) {
     return;
   }
-  context->assertAllFreeSurfaceGeometrySnapshotsCurrent(system.meshAccess());
+  context->assertAllLevelSetGeometrySnapshotsCurrent(system.meshAccess());
   const auto& rules = context->volumeRules();
   const auto& metadata = context->metadata();
   svmp::FE::LogRecord dump("ApplicationDriver", "cut rule dump");
@@ -1995,15 +1995,15 @@ std::vector<WetVolumeDiagnostic> collectWetVolumeDiagnostics(
     diagnostic.marker = *marker;
     diagnostic.active_side = request.active_side;
     diagnostic.isovalue = request.isovalue;
-    if (cut_context->hasFreeSurfaceGeometrySnapshotForMarker(*marker)) {
-      diagnostic.free_surface_snapshot_revision_key =
-          cut_context->freeSurfaceGeometrySnapshotRevisionForMarker(*marker);
-      const auto& snapshots = cut_context->freeSurfaceGeometrySnapshots();
+    if (cut_context->hasLevelSetGeometrySnapshotForMarker(*marker)) {
+      diagnostic.level_set_snapshot_revision_key =
+          cut_context->levelSetGeometrySnapshotRevisionForMarker(*marker);
+      const auto& snapshots = cut_context->levelSetGeometrySnapshots();
       const auto found = std::find_if(
           snapshots.begin(), snapshots.end(), [&](const auto& candidate) {
             return candidate &&
                    candidate->revision().snapshot_revision_key ==
-                       diagnostic.free_surface_snapshot_revision_key;
+                       diagnostic.level_set_snapshot_revision_key;
           });
       if (found == snapshots.end()) {
         throw std::runtime_error(
@@ -2014,7 +2014,7 @@ std::vector<WetVolumeDiagnostic> collectWetVolumeDiagnostics(
           (*found)->revision().source_value_revision;
       const auto [minimum_snapshot_revision, maximum_snapshot_revision] =
           globalMinMaxUint64(
-              diagnostic.free_surface_snapshot_revision_key, comm);
+              diagnostic.level_set_snapshot_revision_key, comm);
       const auto [minimum_source_revision, maximum_source_revision] =
           globalMinMaxUint64(diagnostic.source_value_revision, comm);
       if (minimum_snapshot_revision != maximum_snapshot_revision ||
@@ -2027,8 +2027,8 @@ std::vector<WetVolumeDiagnostic> collectWetVolumeDiagnostics(
     const auto local_measure_summary =
         application::core::collectCutVolumeMeasures(mesh, rules, cut_context);
     if (local_measure_summary.revisioned_rule_count != 0u &&
-        (local_measure_summary.free_surface_snapshot_revision_key !=
-             diagnostic.free_surface_snapshot_revision_key ||
+        (local_measure_summary.level_set_snapshot_revision_key !=
+             diagnostic.level_set_snapshot_revision_key ||
          local_measure_summary.source_value_revision !=
              diagnostic.source_value_revision)) {
       throw std::runtime_error(
@@ -2036,8 +2036,8 @@ std::vector<WetVolumeDiagnostic> collectWetVolumeDiagnostics(
           "the authoritative geometry snapshot revision.");
     }
     application::core::CutVolumeMeasureSummary measure_summary;
-    measure_summary.free_surface_snapshot_revision_key =
-        diagnostic.free_surface_snapshot_revision_key;
+    measure_summary.level_set_snapshot_revision_key =
+        diagnostic.level_set_snapshot_revision_key;
     measure_summary.source_value_revision =
         diagnostic.source_value_revision;
     measure_summary.reference_measure = static_cast<svmp::FE::Real>(
@@ -2307,7 +2307,7 @@ void logWetVolumeDiagnostics(
     std::map<std::string, svmp::FE::Real>& initial_wet_volume_by_key)
 {
   if (cut_context != nullptr) {
-    cut_context->assertAllFreeSurfaceGeometrySnapshotsCurrent(mesh);
+    cut_context->assertAllLevelSetGeometrySnapshotsCurrent(mesh);
   }
   logActiveCutVolumeAvailabilityWarnings(requests, cut_context, step, time);
   const auto diagnostics =
@@ -2329,7 +2329,7 @@ void logWetVolumeDiagnostics(
             .quoted("field", diagnostic.level_set_field_name)
             .quoted("domain_id", diagnostic.domain_id)
             .value("marker", diagnostic.marker)
-            .value("free_surface_snapshot_revision_key", diagnostic.free_surface_snapshot_revision_key)
+            .value("free_surface_snapshot_revision_key", diagnostic.level_set_snapshot_revision_key)
             .value("source_value_revision", diagnostic.source_value_revision)
             .value("active_side", activeSideName(diagnostic.active_side))
             .value("isovalue", diagnostic.isovalue)
@@ -3810,10 +3810,10 @@ svmp::FE::level_set::LevelSetGeometryHost levelSetGeometryHost(
   return svmp::FE::level_set::LevelSetGeometryHost{
       .fe_system = sim.fe_system.get(),
       .primary_mesh = sim.primary_mesh.get(),
-      .free_surface_geometry_snapshot_cache =
-          sim.free_surface_geometry_snapshot_cache,
-      .free_surface_geometry_snapshot_reuse_caches =
-          sim.free_surface_geometry_snapshot_reuse_caches,
+      .level_set_geometry_snapshot_cache =
+          sim.level_set_geometry_snapshot_cache,
+      .level_set_geometry_snapshot_reuse_caches =
+          sim.level_set_geometry_snapshot_reuse_caches,
       .validate_cut_volume_consumer =
           [](const svmp::FE::systems::FESystem& system,
              const ActiveCutVolumeRequest& request,
@@ -5962,14 +5962,14 @@ bool initializeDiscreteStaticCapillaryEquilibrium(
   try {
     const auto* cut_context = system.cutIntegrationContext();
     if (cut_context == nullptr ||
-        !cut_context->hasFreeSurfaceGeometrySnapshotForMarker(*marker)) {
+        !cut_context->hasLevelSetGeometrySnapshotForMarker(*marker)) {
       local_active_support_invalid = true;
     } else {
       const auto bound_revision =
-          cut_context->freeSurfaceGeometrySnapshotRevisionForMarker(
+          cut_context->levelSetGeometrySnapshotRevisionForMarker(
               *marker);
       const auto& snapshots =
-          cut_context->freeSurfaceGeometrySnapshots();
+          cut_context->levelSetGeometrySnapshots();
       const auto snapshot = std::find_if(
           snapshots.begin(), snapshots.end(),
           [&](const auto& candidate) {
@@ -10395,7 +10395,7 @@ void ApplicationDriver::outputResults(const SimulationComponents& sim, const Par
 
   const auto active_output_requests = activeCutVolumeRequests(params);
   if (const auto* cut_context = sim.fe_system->cutIntegrationContext()) {
-    cut_context->assertAllFreeSurfaceGeometrySnapshotsCurrent(
+    cut_context->assertAllLevelSetGeometrySnapshotsCurrent(
         sim.fe_system->meshAccess());
   }
   if (!active_output_requests.empty() && is_root) {

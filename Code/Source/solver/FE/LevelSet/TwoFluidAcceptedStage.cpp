@@ -11,7 +11,7 @@
 #include "Assembly/Assembler.h"
 #include "Assembly/CutIntegrationContext.h"
 #include "Geometry/CutQuadratureMapping.h"
-#include "Interfaces/FreeSurfaceGeometrySnapshot.h"
+#include "Interfaces/LevelSetGeometrySnapshot.h"
 #include "Interfaces/LevelSetInterfaceDomain.h"
 #include "Interfaces/SnapshotFieldEvaluator.h"
 #include "LevelSet/LevelSetOptions.h"
@@ -71,7 +71,7 @@ evaluateCurrentTwoFluidStageDiagnostics(
     throw std::runtime_error(
         "[svMultiPhysics::Application] Two-fluid stage diagnostics require an authoritative cut context and a communicator-consistent stage solution.");
   }
-  context->assertAllFreeSurfaceGeometrySnapshotsCurrent(
+  context->assertAllLevelSetGeometrySnapshotsCurrent(
       sim.fe_system->meshAccess());
 
   std::vector<svmp::FE::systems::AcceptedTwoFluidStageDiagnosticState>
@@ -82,7 +82,7 @@ evaluateCurrentTwoFluidStageDiagnostics(
         svmp::FE::interfaces::LevelSetInterfaceSource::fromField(
             declaration.level_set_field)
             .identifier();
-    const auto& snapshots = context->freeSurfaceGeometrySnapshots();
+    const auto& snapshots = context->levelSetGeometrySnapshots();
     const auto found = std::find_if(
         snapshots.begin(), snapshots.end(), [&](const auto& candidate) {
           return candidate &&

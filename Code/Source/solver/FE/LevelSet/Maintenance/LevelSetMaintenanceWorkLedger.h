@@ -60,7 +60,7 @@ enum class LevelSetMaintenanceDeclaredStage : std::uint8_t {
  *        endpoint, evaluated on the authoritative snapshot of that state.
  *
  * These are the snapshot functionals of FE/Interfaces
- * (FreeSurfaceGeometrySnapshot) and of the accepted functional records of
+ * (LevelSetGeometrySnapshot) and of the accepted functional records of
  * FE/Systems (FreeSurfaceRecordTypes.h): the caller evaluates them and the
  * ledger checks their identities, records their change and sums them.
  */

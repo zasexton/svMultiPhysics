@@ -139,7 +139,7 @@ std::vector<unsigned char> levelSetSideSupportVertices(
     };
     const auto* cut_context = system.cutIntegrationContext();
     if (cut_context != nullptr) {
-        cut_context->assertAllFreeSurfaceGeometrySnapshotsCurrent(
+        cut_context->assertAllLevelSetGeometrySnapshotsCurrent(
             system.meshAccess());
     }
     if (query.use_generated_volume_rules &&

@@ -31,7 +31,7 @@
 #include "Constraints/SmallCutAggregationConstraint.h"
 #include "Constraints/SystemConstraint.h"
 #include "Dofs/EntityDofMap.h"
-#include "Interfaces/FreeSurfaceGeometrySnapshot.h"
+#include "Interfaces/LevelSetGeometrySnapshot.h"
 #include "Interfaces/LevelSetInterfaceBuilder.h"
 #include "Systems/DiagnosticRegistry.h"
 #include "Systems/FESystem.h"
@@ -2034,12 +2034,12 @@ makeRetainedVolumePressureCutContext(
             });
     }
 
-    interfaces::FreeSurfaceGeometrySnapshotPolicy policy;
+    interfaces::LevelSetGeometrySnapshotPolicy policy;
     policy.minimum_retained_volume_fraction =
         svmp::FE::assembly::CutIntegrationContext::
             minGeneratedCutVolumeFraction();
     policy.require_complete_exterior_boundary_partition = false;
-    interfaces::FreeSurfaceGeometryScalarEvaluator scalar;
+    interfaces::LevelSetGeometryScalarEvaluator scalar;
     scalar.value = [](svmp::FE::GlobalIndex cell,
                       const std::array<svmp::FE::Real, 3>& xi,
                       const geometry::CutQuadratureProvenance&) {
@@ -2059,7 +2059,7 @@ makeRetainedVolumePressureCutContext(
                    ? std::array<svmp::FE::Real, 3>{{-1.0, 0.0, 0.0}}
                    : std::array<svmp::FE::Real, 3>{{0.0, 0.0, 0.0}};
     };
-    auto snapshot = interfaces::buildFreeSurfaceGeometrySnapshot(
+    auto snapshot = interfaces::buildLevelSetGeometrySnapshot(
         std::move(domain),
         {},
         {},
@@ -2069,7 +2069,7 @@ makeRetainedVolumePressureCutContext(
         "newton-retained-volume-pressure-support");
     auto context =
         std::make_shared<svmp::FE::assembly::CutIntegrationContext>();
-    context->addFreeSurfaceGeometrySnapshot(std::move(snapshot));
+    context->addLevelSetGeometrySnapshot(std::move(snapshot));
     return context;
 }
 #endif

@@ -9,7 +9,7 @@
 
 #include "Assembly/Assembler.h"
 #include "Dofs/DofHandler.h"
-#include "Interfaces/FreeSurfaceGeometrySnapshot.h"
+#include "Interfaces/LevelSetGeometrySnapshot.h"
 #include "Interfaces/LevelSetInterfaceDomain.h"
 #include "Systems/FESystem.h"
 
@@ -278,7 +278,7 @@ std::uint64_t collectivePartitionIndependentCutTopologyFingerprint(
 
 std::uint64_t activeCutTopologyRequestIdentity(
     const ActiveCutVolumeRequest& request,
-    const svmp::FE::interfaces::FreeSurfaceGeometryRevision& revision)
+    const svmp::FE::interfaces::LevelSetGeometryRevision& revision)
 {
   if (revision.interface_marker < 0 ||
       revision.domain_id != request.domain_id ||
@@ -310,7 +310,7 @@ std::uint64_t activeCutTopologyRequestIdentity(
 }
 
 std::uint64_t freeSurfaceRuleSemanticTopologyFingerprint(
-    const svmp::FE::interfaces::FreeSurfaceGeometryRuleRecord& rule,
+    const svmp::FE::interfaces::LevelSetGeometryRuleRecord& rule,
     std::uint64_t request_identity)
 {
   const auto& reference = rule.reference_rule;
@@ -391,7 +391,7 @@ void appendCutStructureFingerprints(
   std::map<svmp::FE::GlobalIndex, std::set<RuleKind>> rules_by_cell;
   for (const auto& rule : binding.snapshot->rules()) {
     if (!rule.locally_owned ||
-        rule.retention != svmp::FE::interfaces::FreeSurfaceGeometryRetention::Retained) {
+        rule.retention != svmp::FE::interfaces::LevelSetGeometryRetention::Retained) {
       continue;
     }
     const auto& reference = rule.reference_rule;

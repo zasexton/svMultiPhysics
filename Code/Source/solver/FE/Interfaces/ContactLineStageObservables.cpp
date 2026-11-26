@@ -8,7 +8,7 @@
 #include "Interfaces/ContactLineStageObservables.h"
 
 #include "Assembly/CutIntegrationContext.h"
-#include "Interfaces/FreeSurfaceGeometrySnapshot.h"
+#include "Interfaces/LevelSetGeometrySnapshot.h"
 #include "Interfaces/SnapshotFieldEvaluator.h"
 #include "Systems/FESystem.h"
 #include "Systems/FunctionalFormEvaluator.h"
@@ -66,7 +66,7 @@ svmp::FE::systems::CollectiveCommunicator activeSystemCommunicator(
 void applyDeclaredStageWallSlipDissipation(
     const svmp::FE::systems::FESystem& system,
     const svmp::FE::systems::FreeSurfaceDiscreteFunctionalDeclaration& declaration,
-    const FreeSurfaceGeometrySnapshot& snapshot,
+    const LevelSetGeometrySnapshot& snapshot,
     std::span<const svmp::FE::Real> stage_solution,
     svmp::FE::systems::FreeSurfaceAcceptedContactStageState& stage,
     const svmp::FE::systems::CollectiveCommunicator& comm)
@@ -126,7 +126,7 @@ void applyDeclaredStageWallSlipDissipation(
 std::vector<DeclaredWallFunctionalForm> declaredWallFunctionalForms(
     const svmp::FE::systems::FESystem& system,
     std::string_view prefix,
-    const FreeSurfaceGeometrySnapshot& snapshot,
+    const LevelSetGeometrySnapshot& snapshot,
     std::span<const int> walls,
     geometry::CutIntegrationSide liquid_side,
     std::span<const std::string_view> quantities)
@@ -391,7 +391,7 @@ evaluateAcceptedFreeSurfaceContactStages(
       }
     }
     const bool local_marker_available =
-        context->hasFreeSurfaceGeometrySnapshotForMarker(
+        context->hasLevelSetGeometrySnapshotForMarker(
             declaration.interface_marker);
     if (collectiveMinDouble(local_marker_available ? 1.0 : 0.0, comm) != 1.0) {
       throw std::runtime_error(
@@ -400,7 +400,7 @@ evaluateAcceptedFreeSurfaceContactStages(
           " is missing an authoritative geometry snapshot on at least one rank.");
     }
     const auto snapshot_revision =
-        context->freeSurfaceGeometrySnapshotRevisionForMarker(
+        context->levelSetGeometrySnapshotRevisionForMarker(
             declaration.interface_marker);
     const auto [minimum_revision, maximum_revision] =
         collectiveMinMaxUint64(snapshot_revision, comm);
@@ -409,7 +409,7 @@ evaluateAcceptedFreeSurfaceContactStages(
           "[svMultiPhysics::Application] Accepted contact-stage geometry revision differs across the FE communicator for marker " +
           std::to_string(declaration.interface_marker) + ".");
     }
-    const auto& snapshots = context->freeSurfaceGeometrySnapshots();
+    const auto& snapshots = context->levelSetGeometrySnapshots();
     const auto found = std::find_if(
         snapshots.begin(), snapshots.end(), [&](const auto& candidate) {
           return candidate &&
@@ -424,7 +424,7 @@ evaluateAcceptedFreeSurfaceContactStages(
     }
     bool local_snapshot_current = true;
     try {
-      context->assertAllFreeSurfaceGeometrySnapshotsCurrent(
+      context->assertAllLevelSetGeometrySnapshotsCurrent(
           system.meshAccess());
     } catch (const std::exception&) {
       local_snapshot_current = false;

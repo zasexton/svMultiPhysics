@@ -126,7 +126,7 @@ enum class FreeSurfaceGeneratedInterfaceGeometry : std::uint8_t {
 // Newton tangent of the generated geometry: quadrature refreshed and frozen
 // within a step, or differentiated with respect to the level set (the FE
 // level-set GeometryTangentPolicy of the cut request).
-enum class FreeSurfaceGeometryTangentPolicy : std::uint8_t {
+enum class LevelSetGeometryTangentPolicy : std::uint8_t {
     RefreshedFrozenQuadrature,
     DifferentiatedQuadrature
 };
@@ -273,8 +273,8 @@ struct FreeSurfaceBoundary {
     std::string generated_interface_domain_id{"free_surface"};
     FreeSurfaceGeneratedInterfaceGeometry generated_interface_geometry{
         FreeSurfaceGeneratedInterfaceGeometry::LinearCorner};
-    FreeSurfaceGeometryTangentPolicy geometry_tangent_policy{
-        FreeSurfaceGeometryTangentPolicy::RefreshedFrozenQuadrature};
+    LevelSetGeometryTangentPolicy geometry_tangent_policy{
+        LevelSetGeometryTangentPolicy::RefreshedFrozenQuadrature};
     FE::Real level_set_isovalue{0.0};
 
     // Optional active-domain restriction for unfitted level-set volume terms.
@@ -967,7 +967,7 @@ contactLineWallNormal(const FreeSurfaceContactLine& contact_line)
     const FreeSurfaceBoundary& bc)
 {
     return bc.geometry_tangent_policy ==
-           FreeSurfaceGeometryTangentPolicy::RefreshedFrozenQuadrature;
+           LevelSetGeometryTangentPolicy::RefreshedFrozenQuadrature;
 }
 
 [[nodiscard]] inline bool pressureStabilizationActive(const FreeSurfaceBoundary& bc)
@@ -1047,8 +1047,8 @@ struct IncompressibleTwoFluidOptions {
     std::string generated_interface_domain_id{"two_fluid_interface"};
     FreeSurfaceGeneratedInterfaceGeometry generated_interface_geometry{
         FreeSurfaceGeneratedInterfaceGeometry::LinearCorner};
-    FreeSurfaceGeometryTangentPolicy geometry_tangent_policy{
-        FreeSurfaceGeometryTangentPolicy::RefreshedFrozenQuadrature};
+    LevelSetGeometryTangentPolicy geometry_tangent_policy{
+        LevelSetGeometryTangentPolicy::RefreshedFrozenQuadrature};
     int interface_marker{-1};
     FE::Real level_set_isovalue{0.0};
 

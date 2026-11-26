@@ -16,13 +16,13 @@
  * of one FE field at a reference point of a parent cell, from a solution
  * vector in FE order: the callbacks that the free-surface geometry snapshot
  * functionals and the accepted-stage diagnostics take
- * (FreeSurfaceGeometrySnapshot.h).  What they read of the field is a
+ * (LevelSetGeometrySnapshot.h).  What they read of the field is a
  * SnapshotFieldAccess, which systems::snapshotFieldAccess builds from an FE
  * system.
  */
 
 #include "Core/Types.h"
-#include "Interfaces/FreeSurfaceGeometrySnapshot.h"
+#include "Interfaces/LevelSetGeometrySnapshot.h"
 
 #include <functional>
 #include <memory>
@@ -73,7 +73,7 @@ struct SnapshotFieldAccess {
     bool allow_scalar_product_fast_path = true);
 
 /// Values and reference gradients of a scalar field (one component).
-[[nodiscard]] FreeSurfaceGeometryScalarEvaluator makeSnapshotScalarFieldEvaluator(
+[[nodiscard]] LevelSetGeometryScalarEvaluator makeSnapshotScalarFieldEvaluator(
     const SnapshotFieldAccess& field,
     std::span<const Real> solution,
     std::string_view diagnostic_context);

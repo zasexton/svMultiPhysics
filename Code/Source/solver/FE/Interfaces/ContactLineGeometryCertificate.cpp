@@ -413,7 +413,7 @@ void certifyContactLineRules(
     if (context == nullptr) {
         return;
     }
-    context->assertAllFreeSurfaceGeometrySnapshotsCurrent(
+    context->assertAllLevelSetGeometrySnapshotsCurrent(
         system.meshAccess());
     const auto rules = context->interfaceRulesForMarker(contact_marker);
     if (rules.empty()) {

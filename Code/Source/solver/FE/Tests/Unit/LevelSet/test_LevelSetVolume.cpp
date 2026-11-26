@@ -6,7 +6,7 @@
 #include "Basis/NodeOrderingConventions.h"
 #include "Dofs/DofHandler.h"
 #include "Dofs/EntityDofMap.h"
-#include "Interfaces/FreeSurfaceGeometrySnapshot.h"
+#include "Interfaces/LevelSetGeometrySnapshot.h"
 #include "LevelSet/LevelSetDiagnostics.h"
 #include "LevelSet/LevelSetGeometryService.h"
 #include "LevelSet/LevelSetInterfaceLifecycle.h"
@@ -591,13 +591,13 @@ TEST(LevelSetVolume, RejectedQuadrilateralSaddlePreservesTheInstalledPhysicalSna
     // x - 1/4 on the unit square is a single segment.
     ASSERT_NO_THROW(refresh({-0.25, 0.75, 0.75, -0.25}));
     ASSERT_NE(system.cutIntegrationContext(), nullptr);
-    ASSERT_EQ(system.cutIntegrationContext()->freeSurfaceGeometrySnapshots().size(), 1u);
-    const auto installed = system.cutIntegrationContext()->freeSurfaceGeometrySnapshots().front();
+    ASSERT_EQ(system.cutIntegrationContext()->levelSetGeometrySnapshots().size(), 1u);
+    const auto installed = system.cutIntegrationContext()->levelSetGeometrySnapshots().front();
     ASSERT_NE(installed, nullptr);
     FE::Real negative_area = 0;
     FE::Real positive_area = 0;
     for (const auto& record : installed->rules()) {
-        if (record.retention != FE::interfaces::FreeSurfaceGeometryRetention::Retained ||
+        if (record.retention != FE::interfaces::LevelSetGeometryRetention::Retained ||
             record.reference_rule.kind != FE::geometry::CutQuadratureKind::Volume) {
             continue;
         }
@@ -617,8 +617,8 @@ TEST(LevelSetVolume, RejectedQuadrilateralSaddlePreservesTheInstalledPhysicalSna
         EXPECT_NE(std::string(ex.what()).find("4 boundary intersections"), std::string::npos) << ex.what();
     }
     ASSERT_NE(system.cutIntegrationContext(), nullptr);
-    ASSERT_EQ(system.cutIntegrationContext()->freeSurfaceGeometrySnapshots().size(), 1u);
-    EXPECT_EQ(system.cutIntegrationContext()->freeSurfaceGeometrySnapshots().front(), installed);
+    ASSERT_EQ(system.cutIntegrationContext()->levelSetGeometrySnapshots().size(), 1u);
+    EXPECT_EQ(system.cutIntegrationContext()->levelSetGeometrySnapshots().front(), installed);
 #endif
 }
 
@@ -840,9 +840,9 @@ TEST(LevelSetVolume, FullCellSnapshotRulesAssembleLikeDirectBasisEvaluation)
     auto generated = lifecycle.build(system, interface_options, solution);
     ASSERT_TRUE(generated.success) << generated.diagnostic;
 
-    FE::interfaces::FreeSurfaceGeometrySnapshotPolicy snapshot_policy;
+    FE::interfaces::LevelSetGeometrySnapshotPolicy snapshot_policy;
     snapshot_policy.require_complete_exterior_boundary_partition = false;
-    FE::interfaces::FreeSurfaceGeometryScalarEvaluator scalar;
+    FE::interfaces::LevelSetGeometryScalarEvaluator scalar;
     scalar.value = [cells](FE::GlobalIndex cell,
                            const std::array<FE::Real, 3>& xi,
                            const FE::geometry::CutQuadratureProvenance&) {
@@ -856,7 +856,7 @@ TEST(LevelSetVolume, FullCellSnapshotRulesAssembleLikeDirectBasisEvaluation)
         const auto& map = cells.at(static_cast<std::size_t>(cell));
         return std::array<FE::Real, 3>{{map.J[0][0], map.J[0][1], 0.0}};
     };
-    const auto snapshot = FE::interfaces::buildFreeSurfaceGeometrySnapshot(
+    const auto snapshot = FE::interfaces::buildLevelSetGeometrySnapshot(
         std::move(generated.domain),
         {},
         {},
@@ -869,7 +869,7 @@ TEST(LevelSetVolume, FullCellSnapshotRulesAssembleLikeDirectBasisEvaluation)
     // At least two uncut cells share bitwise identical full-side points.
     std::vector<const FE::geometry::CutQuadratureRule*> full_rules;
     for (const auto* record : snapshot->retainedRules(
-             FE::interfaces::FreeSurfaceGeometryRuleRole::NegativeVolume)) {
+             FE::interfaces::LevelSetGeometryRuleRole::NegativeVolume)) {
         ASSERT_NE(record, nullptr);
         if (record->reference_rule.full_cell_equivalent) {
             full_rules.push_back(&record->reference_rule);
@@ -900,7 +900,7 @@ TEST(LevelSetVolume, FullCellSnapshotRulesAssembleLikeDirectBasisEvaluation)
     ASSERT_FALSE(installed.residual.empty());
 
     auto cut_context = std::make_shared<FE::assembly::CutIntegrationContext>();
-    cut_context->addFreeSurfaceGeometrySnapshot(
+    cut_context->addLevelSetGeometrySnapshot(
         snapshot, FE::geometry::CutIntegrationSide::Negative);
     assembly_system.setCutIntegrationContext(cut_context);
     ASSERT_NO_THROW(assembly_system.setup());
@@ -926,7 +926,7 @@ TEST(LevelSetVolume, FullCellSnapshotRulesAssembleLikeDirectBasisEvaluation)
     std::vector<FE::Real> expected(static_cast<std::size_t>(n_dofs * n_dofs), FE::Real{0.0});
     std::size_t evaluated_points = 0u;
     for (const auto* record : snapshot->retainedRules(
-             FE::interfaces::FreeSurfaceGeometryRuleRole::NegativeVolume)) {
+             FE::interfaces::LevelSetGeometryRuleRole::NegativeVolume)) {
         const auto& rule = record->reference_rule;
         const auto& map = cells.at(static_cast<std::size_t>(rule.provenance.parent_entity));
         const FE::Real det = map.J[0][0] * map.J[1][1] - map.J[0][1] * map.J[1][0];

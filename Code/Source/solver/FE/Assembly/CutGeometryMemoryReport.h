@@ -19,7 +19,7 @@
 
 #include "Assembly/CutIntegrationContext.h"
 #include "Core/LogRecord.h"
-#include "Interfaces/FreeSurfaceGeometrySnapshot.h"
+#include "Interfaces/LevelSetGeometrySnapshot.h"
 #include "Interfaces/LevelSetInterfaceDomain.h"
 
 #include <array>
@@ -223,7 +223,7 @@ struct SnapshotStorage {
 };
 
 [[nodiscard]] inline std::size_t recordBytes(
-    const interfaces::FreeSurfaceGeometryRuleRecord& record) noexcept
+    const interfaces::LevelSetGeometryRuleRecord& record) noexcept
 {
     return sizeof(record) + ruleHeapBytes(record.reference_rule) +
            vectorBytes(record.physical_rule.points) +
@@ -233,9 +233,9 @@ struct SnapshotStorage {
 }
 
 [[nodiscard]] inline SnapshotStorage snapshotStorage(
-    const interfaces::FreeSurfaceGeometrySnapshot& snapshot)
+    const interfaces::LevelSetGeometrySnapshot& snapshot)
 {
-    using Role = interfaces::FreeSurfaceGeometryRuleRole;
+    using Role = interfaces::LevelSetGeometryRuleRole;
     SnapshotStorage storage;
     storage.resident_bytes = snapshot.residentBytes();
     for (const auto& record : snapshot.rules()) {

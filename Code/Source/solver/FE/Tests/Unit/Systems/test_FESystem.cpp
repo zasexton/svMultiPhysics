@@ -520,7 +520,7 @@ TEST(FESystem, MaterialStateSetupRejectsOrphanSnapshotInterfaceRule)
     rule.side = svmp::FE::geometry::CutIntegrationSide::Interface;
     rule.provenance.marker = marker;
     rule.provenance.cut_topology_revision = 1u;
-    rule.provenance.free_surface_snapshot_revision_key = 902u;
+    rule.provenance.level_set_snapshot_revision_key = 902u;
     rule.points.push_back(svmp::FE::geometry::CutQuadraturePoint{
         .point = {{Real{0.0}, Real{0.0}, Real{0.0}}},
         .weight = Real{1.0},

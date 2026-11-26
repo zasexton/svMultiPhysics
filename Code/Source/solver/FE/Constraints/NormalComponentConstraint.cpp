@@ -529,7 +529,7 @@ wettedBoundaryFaces(const FESystem& system, int boundary_marker, int active_boun
     if (context == nullptr || !context->hasGeneratedActiveBoundaryMarker(active_boundary_marker)) {
         return std::nullopt;
     }
-    context->assertAllFreeSurfaceGeometrySnapshotsCurrent(system.meshAccess());
+    context->assertAllLevelSetGeometrySnapshotsCurrent(system.meshAccess());
     const auto* provenance = context->findGeneratedActiveBoundaryProvenance(active_boundary_marker);
     FE_THROW_IF(provenance == nullptr || provenance->physicalBoundaryMarker() != boundary_marker,
                 InvalidArgumentException,

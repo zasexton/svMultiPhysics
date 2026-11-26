@@ -19,7 +19,7 @@
 #include "Constraints/SmallCutAggregationConstraint.h"
 #include "Dofs/EntityDofMap.h"
 #include "Forms/BoundaryConditions.h"
-#include "Interfaces/FreeSurfaceGeometrySnapshot.h"
+#include "Interfaces/LevelSetGeometrySnapshot.h"
 #include "Interfaces/GeneratedActiveBoundaryDomain.h"
 #include "Interfaces/GeneratedInterfaceBoundaryIntersectionDomain.h"
 #include "Interfaces/LevelSetInterfaceDomain.h"
@@ -421,10 +421,10 @@ private:
 }
 
 [[nodiscard]]
-interfaces::FreeSurfaceGeometryOwnershipCollective
+interfaces::LevelSetGeometryOwnershipCollective
 mpiOwnershipCollective(int rank, int size)
 {
-    interfaces::FreeSurfaceGeometryOwnershipCollective collective;
+    interfaces::LevelSetGeometryOwnershipCollective collective;
     collective.rank = rank;
     collective.size = size;
     collective.all_gather_owned_rule_identity_values =
@@ -635,10 +635,10 @@ activeBoundaryRequest(const assembly::IMeshAccess& mesh)
 }
 
 [[nodiscard]]
-interfaces::FreeSurfaceGeometryScalarEvaluator
+interfaces::LevelSetGeometryScalarEvaluator
 snapshotScalar()
 {
-    interfaces::FreeSurfaceGeometryScalarEvaluator scalar;
+    interfaces::LevelSetGeometryScalarEvaluator scalar;
     scalar.value =
         [](GlobalIndex parent_cell,
            const std::array<Real, 3>& xi,
@@ -666,7 +666,7 @@ snapshotScalar()
 }
 
 [[nodiscard]]
-std::shared_ptr<const interfaces::FreeSurfaceGeometrySnapshot>
+std::shared_ptr<const interfaces::LevelSetGeometrySnapshot>
 rootedSnapshot(
     const assembly::IMeshAccess& mesh,
     int rank,
@@ -705,13 +705,13 @@ rootedSnapshot(
         active_domains;
     active_domains.push_back(
         std::move(active_domain));
-    interfaces::FreeSurfaceGeometrySnapshotPolicy policy;
+    interfaces::LevelSetGeometrySnapshotPolicy policy;
     policy.require_complete_exterior_boundary_partition =
         false;
     policy.minimum_retained_volume_fraction =
         assembly::CutIntegrationContext::
             minGeneratedCutVolumeFraction();
-    return interfaces::buildFreeSurfaceGeometrySnapshot(
+    return interfaces::buildLevelSetGeometrySnapshot(
         std::move(interface_domain),
         std::move(contact_domains),
         std::move(active_domains),
@@ -893,7 +893,7 @@ TEST(GeneratedBoundaryAggregateTraceCertificateMPI,
         << setup_outcome.local_message;
 
     std::shared_ptr<
-        const interfaces::FreeSurfaceGeometrySnapshot>
+        const interfaces::LevelSetGeometrySnapshot>
         snapshot;
     const auto snapshot_outcome =
         invokeCollectively(
@@ -912,7 +912,7 @@ TEST(GeneratedBoundaryAggregateTraceCertificateMPI,
     auto context =
         std::make_shared<
             assembly::CutIntegrationContext>();
-    context->addFreeSurfaceGeometrySnapshot(
+    context->addLevelSetGeometrySnapshot(
         snapshot,
         geometry::CutIntegrationSide::Negative);
     system.setCutIntegrationContext(context);
@@ -1037,7 +1037,7 @@ TEST(GeneratedBoundaryAggregateTraceCertificateMPI,
             .empty());
 
     std::shared_ptr<
-        const interfaces::FreeSurfaceGeometrySnapshot>
+        const interfaces::LevelSetGeometrySnapshot>
         snapshot;
     const auto snapshot_outcome =
         invokeCollectively(
@@ -1072,7 +1072,7 @@ TEST(GeneratedBoundaryAggregateTraceCertificateMPI,
                 kRevisionOnlyMarker,
                 99u);
     }
-    context->addFreeSurfaceGeometrySnapshot(
+    context->addLevelSetGeometrySnapshot(
         snapshot,
         geometry::CutIntegrationSide::Negative);
     system.setCutIntegrationContext(context);
@@ -1344,14 +1344,14 @@ TEST(GeneratedBoundaryAggregateTraceCertificateMPI,
             .cut_context_content_revision);
     EXPECT_EQ(
         certificate
-            .free_surface_snapshot_revision,
+            .level_set_snapshot_revision,
         snapshot->revision()
             .snapshot_revision_key);
     EXPECT_EQ(
         certificate
-            .free_surface_snapshot_revision,
+            .level_set_snapshot_revision,
         report->revision
-            .free_surface_snapshot_revision);
+            .level_set_snapshot_revision);
     EXPECT_EQ(
         certificate.source_value_revision,
         kSourceValueRevision);

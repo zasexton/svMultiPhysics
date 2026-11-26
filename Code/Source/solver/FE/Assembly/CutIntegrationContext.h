@@ -15,7 +15,7 @@
 
 #include "Core/Types.h"
 #include "Geometry/CutQuadrature.h"
-#include "Interfaces/FreeSurfaceGeometrySnapshot.h"
+#include "Interfaces/LevelSetGeometrySnapshot.h"
 #include "Interfaces/GeneratedActiveBoundaryDomain.h"
 #include "Interfaces/GeneratedInterfaceBoundaryIntersectionDomain.h"
 #include "Interfaces/LevelSetInterfaceDomain.h"
@@ -60,7 +60,7 @@ struct CutCellAssemblyMetadata {
     std::uint64_t cut_topology_revision = 0;
     std::uint64_t quadrature_policy_key = 0;
     std::uint64_t source_value_revision = 0;
-    std::uint64_t free_surface_snapshot_revision_key = 0;
+    std::uint64_t level_set_snapshot_revision_key = 0;
 };
 
 /**
@@ -185,7 +185,7 @@ struct CutIntegrationBinding {
     std::uint64_t source_value_revision = 0;
     std::vector<CutIntegrationAssemblyPath> visible_to_paths{};
     int marker = -1;
-    std::uint64_t free_surface_snapshot_revision_key = 0;
+    std::uint64_t level_set_snapshot_revision_key = 0;
 };
 
 struct CutScalarOperatorPoint {
@@ -435,8 +435,8 @@ public:
         generated_active_boundary_provenance_by_marker_.clear();
         generated_active_boundary_markers_by_physical_marker_.clear();
         generated_interface_boundary_provenance_by_marker_.clear();
-        free_surface_geometry_snapshots_.clear();
-        free_surface_snapshot_revision_by_marker_.clear();
+        level_set_geometry_snapshots_.clear();
+        level_set_snapshot_revision_by_marker_.clear();
         generated_interface_markers_.clear();
         facet_set_rule_indices_by_marker_.clear();
         facet_set_markers_.clear();
@@ -538,19 +538,19 @@ public:
             metadata.source_value_revision =
                 rule.provenance.source_value_revision;
         }
-        if (metadata.free_surface_snapshot_revision_key != 0u &&
-            rule.provenance.free_surface_snapshot_revision_key != 0u &&
-            metadata.free_surface_snapshot_revision_key !=
-                rule.provenance.free_surface_snapshot_revision_key) {
+        if (metadata.level_set_snapshot_revision_key != 0u &&
+            rule.provenance.level_set_snapshot_revision_key != 0u &&
+            metadata.level_set_snapshot_revision_key !=
+                rule.provenance.level_set_snapshot_revision_key) {
             throw std::invalid_argument(
                 "generated level-set volume rule snapshot revision must match metadata");
         }
-        if (rule.provenance.free_surface_snapshot_revision_key == 0u) {
-            rule.provenance.free_surface_snapshot_revision_key =
-                metadata.free_surface_snapshot_revision_key;
-        } else if (metadata.free_surface_snapshot_revision_key == 0u) {
-            metadata.free_surface_snapshot_revision_key =
-                rule.provenance.free_surface_snapshot_revision_key;
+        if (rule.provenance.level_set_snapshot_revision_key == 0u) {
+            rule.provenance.level_set_snapshot_revision_key =
+                metadata.level_set_snapshot_revision_key;
+        } else if (metadata.level_set_snapshot_revision_key == 0u) {
+            metadata.level_set_snapshot_revision_key =
+                rule.provenance.level_set_snapshot_revision_key;
         }
         const auto level_set_publication =
             generated_level_set_interface_provenance_by_marker_.find(
@@ -565,7 +565,7 @@ public:
                  marker) ||
              generated_interface_two_sided_bindings_by_marker_.contains(
                  marker) ||
-             free_surface_snapshot_revision_by_marker_.contains(marker));
+             level_set_snapshot_revision_by_marker_.contains(marker));
         if (generated_interface_boundary_provenance_by_marker_.contains(
                 marker) ||
             generated_active_boundary_provenance_by_marker_.contains(
@@ -659,8 +659,8 @@ public:
                     stored_metadata.quadrature_policy_key;
                 binding.source_value_revision =
                     stored_metadata.source_value_revision;
-                binding.free_surface_snapshot_revision_key =
-                    stored_metadata.free_surface_snapshot_revision_key;
+                binding.level_set_snapshot_revision_key =
+                    stored_metadata.level_set_snapshot_revision_key;
                 binding.visible_to_paths = {
                     CutIntegrationAssemblyPath::Standard,
                     CutIntegrationAssemblyPath::MatrixFree,
@@ -841,12 +841,12 @@ public:
         std::vector<int> affected_expected_revision_markers{
             marker};
         const auto snapshot_binding =
-            free_surface_snapshot_revision_by_marker_.find(
+            level_set_snapshot_revision_by_marker_.find(
                 marker);
         if (snapshot_binding !=
-            free_surface_snapshot_revision_by_marker_.end()) {
+            level_set_snapshot_revision_by_marker_.end()) {
             for (const auto& [bound_marker, revision] :
-                 free_surface_snapshot_revision_by_marker_) {
+                 level_set_snapshot_revision_by_marker_) {
                 if (revision == snapshot_binding->second &&
                     std::find(
                         affected_expected_revision_markers.begin(),
@@ -1071,8 +1071,8 @@ public:
             metadata.cut_topology_revision = rule.provenance.cut_topology_revision;
             metadata.quadrature_policy_key = rule.provenance.predicate_policy_key;
             metadata.source_value_revision = domain.request().source.value_revision;
-            metadata.free_surface_snapshot_revision_key =
-                rule.provenance.free_surface_snapshot_revision_key;
+            metadata.level_set_snapshot_revision_key =
+                rule.provenance.level_set_snapshot_revision_key;
             addGeneratedVolumeRule(marker, std::move(metadata), std::move(rule));
             if (pointless_source != nullptr &&
                 volume_rules_.size() == stored_rule_index + 1u) {
@@ -1478,8 +1478,8 @@ public:
      * regions alive for exact rematerialization.  Only a side that no
      * integrating consumer (cut-volume kernel) reads may be selected.
      */
-    void addFreeSurfaceGeometrySnapshot(
-        std::shared_ptr<const interfaces::FreeSurfaceGeometrySnapshot> snapshot,
+    void addLevelSetGeometrySnapshot(
+        std::shared_ptr<const interfaces::LevelSetGeometrySnapshot> snapshot,
         std::optional<geometry::CutIntegrationSide> volume_side_filter =
             std::nullopt,
         std::optional<geometry::CutIntegrationSide>
@@ -1515,7 +1515,7 @@ public:
                 throw std::invalid_argument(
                     "free-surface snapshot reuses a generated marker");
             }
-            if (free_surface_snapshot_revision_by_marker_.contains(marker) ||
+            if (level_set_snapshot_revision_by_marker_.contains(marker) ||
                 hasGeneratedLevelSetInterfaceMarker(marker) ||
                 generated_volume_rule_indices_by_marker_.contains(marker) ||
                 generated_interface_rule_indices_by_marker_.contains(marker) ||
@@ -1548,7 +1548,7 @@ public:
         const auto first_generated_level_set_interface_marker =
             generated_level_set_interface_markers_.size();
         const auto first_snapshot =
-            free_surface_geometry_snapshots_.size();
+            level_set_geometry_snapshots_.size();
         const auto old_generated_pruned_volume_rule_count =
             generated_pruned_volume_rule_count_;
         const auto old_generated_pruned_volume_measure =
@@ -1562,7 +1562,7 @@ public:
         std::vector<int> expected_source_revision_markers =
             snapshot_markers;
         for (const auto& [marker, bound_revision] :
-             free_surface_snapshot_revision_by_marker_) {
+             level_set_snapshot_revision_by_marker_) {
             if (bound_revision != revision_key ||
                 std::find(
                     expected_source_revision_markers.begin(),
@@ -1646,7 +1646,7 @@ public:
                     "free-surface snapshot contains a negative generated marker");
             }
             const auto [stored, inserted] =
-                free_surface_snapshot_revision_by_marker_.emplace(
+                level_set_snapshot_revision_by_marker_.emplace(
                     marker, revision_key);
             if (!inserted) {
                 throw std::invalid_argument(
@@ -1677,22 +1677,22 @@ public:
             }
             interface_rules_.reserve(interface_rule_capacity);
             // Interface and contact rules pruned with their phase (see
-            // FreeSurfaceGeometrySnapshotPolicy::interface_retention_side)
+            // LevelSetGeometrySnapshotPolicy::interface_retention_side)
             // are not imported, as pruned exterior-boundary rules are not.
             std::unordered_set<std::uint64_t> pruned_interface_sources;
             std::set<std::pair<int, std::uint64_t>> pruned_contact_sources;
             for (const auto& record : snapshot->rules()) {
                 if (record.retention ==
-                    interfaces::FreeSurfaceGeometryRetention::Retained) {
+                    interfaces::LevelSetGeometryRetention::Retained) {
                     continue;
                 }
                 const auto source =
                     record.reference_rule.provenance.cut_topology_revision;
                 if (record.role ==
-                    interfaces::FreeSurfaceGeometryRuleRole::Interface) {
+                    interfaces::LevelSetGeometryRuleRole::Interface) {
                     pruned_interface_sources.insert(source);
                 } else if (record.role == interfaces::
-                                              FreeSurfaceGeometryRuleRole::
+                                              LevelSetGeometryRuleRole::
                                                   Contact) {
                     pruned_contact_sources.emplace(
                         record.physical_boundary_marker, source);
@@ -1725,7 +1725,7 @@ public:
             // physical marker, cut-topology revision) in rule order, which is
             // the record a scan of snapshot->rules() finds for a fragment.
             struct ActiveBoundaryRecordKey {
-                interfaces::FreeSurfaceGeometryRuleRole role;
+                interfaces::LevelSetGeometryRuleRole role;
                 int physical_boundary_marker;
                 std::uint64_t cut_topology_revision;
                 bool operator==(const ActiveBoundaryRecordKey&) const = default;
@@ -1743,14 +1743,14 @@ public:
                 }
             };
             std::unordered_map<ActiveBoundaryRecordKey,
-                               const interfaces::FreeSurfaceGeometryRuleRecord*,
+                               const interfaces::LevelSetGeometryRuleRecord*,
                                ActiveBoundaryRecordKeyHash>
                 first_active_boundary_records;
             if (!snapshot->activeBoundaryDomains().empty()) {
                 for (const auto& candidate : snapshot->rules()) {
-                    if (candidate.role == interfaces::FreeSurfaceGeometryRuleRole::
+                    if (candidate.role == interfaces::LevelSetGeometryRuleRole::
                                               NegativeExteriorBoundary ||
-                        candidate.role == interfaces::FreeSurfaceGeometryRuleRole::
+                        candidate.role == interfaces::LevelSetGeometryRuleRole::
                                               PositiveExteriorBoundary) {
                         first_active_boundary_records.emplace(
                             ActiveBoundaryRecordKey{
@@ -1772,9 +1772,9 @@ public:
                     const auto role =
                         active.request().side ==
                                 geometry::CutIntegrationSide::Negative
-                            ? interfaces::FreeSurfaceGeometryRuleRole::
+                            ? interfaces::LevelSetGeometryRuleRole::
                                   NegativeExteriorBoundary
-                            : interfaces::FreeSurfaceGeometryRuleRole::
+                            : interfaces::LevelSetGeometryRuleRole::
                                   PositiveExteriorBoundary;
                     const auto found = first_active_boundary_records.find(
                         ActiveBoundaryRecordKey{
@@ -1788,7 +1788,7 @@ public:
                     const auto* record = found->second;
                     if (side_is_imported &&
                         record->retention == interfaces::
-                                                 FreeSurfaceGeometryRetention::
+                                                 LevelSetGeometryRetention::
                                                      Retained) {
                         retained_active.addFragment(fragment);
                     }
@@ -1800,7 +1800,7 @@ public:
                  ++index) {
                 volume_rules_[index]
                     .provenance
-                    .free_surface_snapshot_revision_key =
+                    .level_set_snapshot_revision_key =
                     revision_key;
             }
             for (std::size_t index = first_interface_rule;
@@ -1808,24 +1808,24 @@ public:
                  ++index) {
                 interface_rules_[index]
                     .provenance
-                    .free_surface_snapshot_revision_key =
+                    .level_set_snapshot_revision_key =
                     revision_key;
             }
             for (std::size_t index = first_metadata;
                  index < metadata_.size();
                  ++index) {
                 metadata_[index]
-                    .free_surface_snapshot_revision_key =
+                    .level_set_snapshot_revision_key =
                     revision_key;
             }
             for (std::size_t index = first_binding;
                  index < bindings_.size();
                  ++index) {
                 bindings_[index]
-                    .free_surface_snapshot_revision_key =
+                    .level_set_snapshot_revision_key =
                     revision_key;
             }
-            free_surface_geometry_snapshots_.push_back(
+            level_set_geometry_snapshots_.push_back(
                 std::move(snapshot));
             markModified();
         } catch (...) {
@@ -1843,11 +1843,11 @@ public:
                 first_generated_interface_marker);
             generated_level_set_interface_markers_.resize(
                 first_generated_level_set_interface_marker);
-            free_surface_geometry_snapshots_.resize(
+            level_set_geometry_snapshots_.resize(
                 first_snapshot);
 
             for (const int marker : snapshot_markers) {
-                free_surface_snapshot_revision_by_marker_.erase(
+                level_set_snapshot_revision_by_marker_.erase(
                     marker);
                 generated_volume_rule_indices_by_marker_.erase(
                     marker);
@@ -1907,16 +1907,16 @@ public:
         }
     }
 
-    [[nodiscard]] bool hasFreeSurfaceGeometrySnapshotForMarker(int marker) const {
-        return free_surface_snapshot_revision_by_marker_.find(marker) !=
-               free_surface_snapshot_revision_by_marker_.end();
+    [[nodiscard]] bool hasLevelSetGeometrySnapshotForMarker(int marker) const {
+        return level_set_snapshot_revision_by_marker_.find(marker) !=
+               level_set_snapshot_revision_by_marker_.end();
     }
 
-    [[nodiscard]] std::uint64_t freeSurfaceGeometrySnapshotRevisionForMarker(
+    [[nodiscard]] std::uint64_t levelSetGeometrySnapshotRevisionForMarker(
         int marker) const {
         const auto found =
-            free_surface_snapshot_revision_by_marker_.find(marker);
-        if (found == free_surface_snapshot_revision_by_marker_.end()) {
+            level_set_snapshot_revision_by_marker_.find(marker);
+        if (found == level_set_snapshot_revision_by_marker_.end()) {
             throw std::invalid_argument(
                 "generated marker is not bound to an authoritative free-surface geometry snapshot");
         }
@@ -1924,32 +1924,32 @@ public:
     }
 
     [[nodiscard]] const std::vector<
-        std::shared_ptr<const interfaces::FreeSurfaceGeometrySnapshot>>&
-    freeSurfaceGeometrySnapshots() const noexcept {
-        return free_surface_geometry_snapshots_;
+        std::shared_ptr<const interfaces::LevelSetGeometrySnapshot>>&
+    levelSetGeometrySnapshots() const noexcept {
+        return level_set_geometry_snapshots_;
     }
 
-    void assertFreeSurfaceGeometrySnapshotCurrentForMarker(int marker) const {
+    void assertLevelSetGeometrySnapshotCurrentForMarker(int marker) const {
         const auto key = snapshotCurrencyKey(
             SnapshotCurrencyCheck::Marker, marker, 0u);
         if (snapshot_currency_memo_.passed(key, snapshot_validation_epoch_)) {
             return;
         }
-        validateFreeSurfaceGeometrySnapshotCurrentForMarker(marker);
+        validateLevelSetGeometrySnapshotCurrentForMarker(marker);
         snapshot_currency_memo_.record(key, snapshot_validation_epoch_);
     }
 
 private:
     // Uncached structural check behind
-    // assertFreeSurfaceGeometrySnapshotCurrentForMarker. Registration is
+    // assertLevelSetGeometrySnapshotCurrentForMarker. Registration is
     // tested with per-call index masks, so the cost is linear in the number
     // of rules; failures throw the same messages as before.
-    void validateFreeSurfaceGeometrySnapshotCurrentForMarker(int marker) const {
+    void validateLevelSetGeometrySnapshotCurrentForMarker(int marker) const {
         const auto bound =
-            free_surface_snapshot_revision_by_marker_.find(marker);
-        if (bound == free_surface_snapshot_revision_by_marker_.end()) {
+            level_set_snapshot_revision_by_marker_.find(marker);
+        if (bound == level_set_snapshot_revision_by_marker_.end()) {
             const bool inspect_all =
-                free_surface_snapshot_revision_by_marker_.empty();
+                level_set_snapshot_revision_by_marker_.empty();
             const auto rule_matches_marker =
                 [marker, inspect_all](const geometry::CutQuadratureRule& rule) {
                     return inspect_all || rule.provenance.marker == marker;
@@ -1961,14 +1961,14 @@ private:
                 }
                 const bool keyed_rule =
                     volume_rules_[index]
-                        .provenance.free_surface_snapshot_revision_key != 0u;
+                        .provenance.level_set_snapshot_revision_key != 0u;
                 const bool keyed_metadata =
                     index < metadata_.size() &&
-                    metadata_[index].free_surface_snapshot_revision_key != 0u;
+                    metadata_[index].level_set_snapshot_revision_key != 0u;
                 const bool keyed_binding =
                     index < bindings_.size() &&
                     bindings_[index]
-                            .free_surface_snapshot_revision_key != 0u;
+                            .level_set_snapshot_revision_key != 0u;
                 if (keyed_rule || keyed_metadata || keyed_binding) {
                     throw std::invalid_argument(
                         "cut-volume data declares a free-surface snapshot revision without an authoritative snapshot");
@@ -1976,22 +1976,22 @@ private:
             }
             for (const auto& rule : interface_rules_) {
                 if (rule_matches_marker(rule) &&
-                    rule.provenance.free_surface_snapshot_revision_key != 0u) {
+                    rule.provenance.level_set_snapshot_revision_key != 0u) {
                     throw std::invalid_argument(
                         "cut-interface data declares a free-surface snapshot revision without an authoritative snapshot");
                 }
             }
             for (const auto& binding : bindings_) {
                 if ((inspect_all || binding.marker == marker) &&
-                    binding.free_surface_snapshot_revision_key != 0u) {
+                    binding.level_set_snapshot_revision_key != 0u) {
                     throw std::invalid_argument(
                         "cut-integration binding declares a free-surface snapshot revision without an authoritative snapshot");
                 }
             }
             return;
         }
-        const interfaces::FreeSurfaceGeometrySnapshot* snapshot = nullptr;
-        for (const auto& candidate : free_surface_geometry_snapshots_) {
+        const interfaces::LevelSetGeometrySnapshot* snapshot = nullptr;
+        for (const auto& candidate : level_set_geometry_snapshots_) {
             if (candidate &&
                 candidate->revision().snapshot_revision_key == bound->second) {
                 snapshot = candidate.get();
@@ -2036,7 +2036,7 @@ private:
                         expected_source_revision ||
                     interface_rules_[index]
                             .provenance
-                            .free_surface_snapshot_revision_key !=
+                            .level_set_snapshot_revision_key !=
                         bound->second) {
                     throw std::invalid_argument(
                         "generated interface rule does not declare its complete free-surface snapshot revision");
@@ -2075,20 +2075,20 @@ private:
                         expected_source_revision ||
                     volume_rules_[index]
                             .provenance
-                            .free_surface_snapshot_revision_key !=
+                            .level_set_snapshot_revision_key !=
                         bound->second ||
                     index >= metadata_.size() ||
                     metadata_[index].source_value_revision !=
                         expected_source_revision ||
                     metadata_[index]
-                            .free_surface_snapshot_revision_key !=
+                            .level_set_snapshot_revision_key !=
                         bound->second ||
                     index >= bindings_.size() ||
                     bindings_[index].marker != marker ||
                     bindings_[index].source_value_revision !=
                         expected_source_revision ||
                     bindings_[index]
-                            .free_surface_snapshot_revision_key !=
+                            .level_set_snapshot_revision_key !=
                         bound->second) {
                     throw std::invalid_argument(
                         "generated volume rule, metadata, or binding does not declare its complete free-surface snapshot revision");
@@ -2107,7 +2107,7 @@ private:
         for (const auto& binding : bindings_) {
             if (binding.marker == marker &&
                 (binding.source_value_revision != expected_source_revision ||
-                 binding.free_surface_snapshot_revision_key != bound->second)) {
+                 binding.level_set_snapshot_revision_key != bound->second)) {
                 throw std::invalid_argument(
                     "generated cut-integration binding does not declare its complete free-surface snapshot revision");
             }
@@ -2115,39 +2115,39 @@ private:
     }
 
 public:
-    void assertAllFreeSurfaceGeometrySnapshotsCurrent() const {
+    void assertAllLevelSetGeometrySnapshotsCurrent() const {
         const auto key =
             snapshotCurrencyKey(SnapshotCurrencyCheck::All, 0, 0u);
         if (snapshot_currency_memo_.passed(key, snapshot_validation_epoch_)) {
             return;
         }
-        validateAllFreeSurfaceGeometrySnapshotsCurrent();
+        validateAllLevelSetGeometrySnapshotsCurrent();
         snapshot_currency_memo_.record(key, snapshot_validation_epoch_);
     }
 
 private:
-    void validateAllFreeSurfaceGeometrySnapshotsCurrent() const {
+    void validateAllLevelSetGeometrySnapshotsCurrent() const {
         for (const auto& [marker, revision_key] :
-             free_surface_snapshot_revision_by_marker_) {
+             level_set_snapshot_revision_by_marker_) {
             (void)revision_key;
-            assertFreeSurfaceGeometrySnapshotCurrentForMarker(marker);
+            assertLevelSetGeometrySnapshotCurrentForMarker(marker);
         }
 
         const auto marker_is_bound = [&](int marker) {
             return marker >= 0 &&
-                   free_surface_snapshot_revision_by_marker_.find(marker) !=
-                       free_surface_snapshot_revision_by_marker_.end();
+                   level_set_snapshot_revision_by_marker_.find(marker) !=
+                       level_set_snapshot_revision_by_marker_.end();
         };
         for (std::size_t index = 0u; index < volume_rules_.size(); ++index) {
             const bool rule_is_keyed =
                 volume_rules_[index]
-                    .provenance.free_surface_snapshot_revision_key != 0u;
+                    .provenance.level_set_snapshot_revision_key != 0u;
             const bool metadata_is_keyed =
                 index < metadata_.size() &&
-                metadata_[index].free_surface_snapshot_revision_key != 0u;
+                metadata_[index].level_set_snapshot_revision_key != 0u;
             const bool binding_is_keyed =
                 index < bindings_.size() &&
-                bindings_[index].free_surface_snapshot_revision_key != 0u;
+                bindings_[index].level_set_snapshot_revision_key != 0u;
             if ((rule_is_keyed || metadata_is_keyed || binding_is_keyed) &&
                 !marker_is_bound(volume_rules_[index].provenance.marker)) {
                 throw std::invalid_argument(
@@ -2156,13 +2156,13 @@ private:
         }
         for (std::size_t index = volume_rules_.size();
              index < metadata_.size(); ++index) {
-            if (metadata_[index].free_surface_snapshot_revision_key != 0u) {
+            if (metadata_[index].level_set_snapshot_revision_key != 0u) {
                 throw std::invalid_argument(
                     "cut-volume metadata declares an orphan free-surface snapshot revision");
             }
         }
         for (const auto& rule : interface_rules_) {
-            if (rule.provenance.free_surface_snapshot_revision_key != 0u &&
+            if (rule.provenance.level_set_snapshot_revision_key != 0u &&
                 !marker_is_bound(rule.provenance.marker)) {
                 throw std::invalid_argument(
                     "cut-interface data declares an orphan free-surface snapshot revision");
@@ -2170,7 +2170,7 @@ private:
         }
         for (std::size_t index = 0u; index < bindings_.size(); ++index) {
             const auto& binding = bindings_[index];
-            if (binding.free_surface_snapshot_revision_key == 0u) {
+            if (binding.level_set_snapshot_revision_key == 0u) {
                 continue;
             }
             const bool aligned =
@@ -2186,16 +2186,16 @@ private:
 public:
     template <typename MeshAccessLike>
     [[nodiscard]] bool
-    freeSurfaceGeometrySnapshotsMatchCurrentMeshRevision(
+    levelSetGeometrySnapshotsMatchCurrentMeshRevision(
         const MeshAccessLike& mesh) const {
         // Structural and source-revision defects are not cache misses.  Keep
         // them fail-closed so only an otherwise valid snapshot whose tracked
         // mesh tuple has moved can request a rebuild.
-        assertAllFreeSurfaceGeometrySnapshotsCurrent();
+        assertAllLevelSetGeometrySnapshotsCurrent();
         if (!mesh.revisionTrackingAvailable()) {
             return true;
         }
-        for (const auto& snapshot : free_surface_geometry_snapshots_) {
+        for (const auto& snapshot : level_set_geometry_snapshots_) {
             if (!snapshot) {
                 throw std::invalid_argument(
                     "free-surface geometry snapshot storage is incomplete");
@@ -2212,17 +2212,17 @@ public:
     }
 
     template <typename MeshAccessLike>
-    void assertAllFreeSurfaceGeometrySnapshotsCurrent(
+    void assertAllLevelSetGeometrySnapshotsCurrent(
         const MeshAccessLike& mesh) const {
-        assertAllFreeSurfaceGeometrySnapshotsCurrent();
+        assertAllLevelSetGeometrySnapshotsCurrent();
         if (!mesh.revisionTrackingAvailable()) {
             return;
         }
         for (std::size_t snapshot_index = 0u;
-             snapshot_index < free_surface_geometry_snapshots_.size();
+             snapshot_index < level_set_geometry_snapshots_.size();
              ++snapshot_index) {
             const auto& snapshot =
-                free_surface_geometry_snapshots_[snapshot_index];
+                level_set_geometry_snapshots_[snapshot_index];
             if (!snapshot) {
                 throw std::invalid_argument(
                     "free-surface geometry snapshot storage is incomplete");
@@ -2287,8 +2287,8 @@ public:
         }
         bool changed = false;
         const auto bound =
-            free_surface_snapshot_revision_by_marker_.find(marker);
-        if (bound == free_surface_snapshot_revision_by_marker_.end()) {
+            level_set_snapshot_revision_by_marker_.find(marker);
+        if (bound == level_set_snapshot_revision_by_marker_.end()) {
             auto& stored_revision =
                 expected_source_value_revision_by_marker_[marker];
             if (stored_revision != revision) {
@@ -2297,7 +2297,7 @@ public:
             }
         } else {
             for (const auto& [bound_marker, snapshot_revision] :
-                 free_surface_snapshot_revision_by_marker_) {
+                 level_set_snapshot_revision_by_marker_) {
                 if (snapshot_revision != bound->second) {
                     continue;
                 }
@@ -2350,7 +2350,7 @@ public:
 
 private:
     void validateGeneratedInterfaceRulesCurrentForMarker(int marker) const {
-        assertFreeSurfaceGeometrySnapshotCurrentForMarker(marker);
+        assertLevelSetGeometrySnapshotCurrentForMarker(marker);
         const auto expected_it = expected_source_value_revision_by_marker_.find(marker);
         if (expected_it == expected_source_value_revision_by_marker_.end()) {
             return;
@@ -2376,7 +2376,7 @@ private:
     void validateGeneratedVolumeRulesCurrentForMarkerAndSide(
         int marker,
         geometry::CutIntegrationSide side) const {
-        assertFreeSurfaceGeometrySnapshotCurrentForMarker(marker);
+        assertLevelSetGeometrySnapshotCurrentForMarker(marker);
         if (side == geometry::CutIntegrationSide::Interface) {
             return;
         }
@@ -3651,26 +3651,26 @@ private:
                 "generated volume rule source revision does not match the imported level-set interface");
         }
 
-        if (metadata.free_surface_snapshot_revision_key != 0u &&
-            rule.provenance.free_surface_snapshot_revision_key != 0u &&
-            metadata.free_surface_snapshot_revision_key !=
-                rule.provenance.free_surface_snapshot_revision_key) {
+        if (metadata.level_set_snapshot_revision_key != 0u &&
+            rule.provenance.level_set_snapshot_revision_key != 0u &&
+            metadata.level_set_snapshot_revision_key !=
+                rule.provenance.level_set_snapshot_revision_key) {
             throw std::invalid_argument(
                 "generated level-set volume rule snapshot revision must match metadata");
         }
-        if (metadata.free_surface_snapshot_revision_key == 0u) {
-            metadata.free_surface_snapshot_revision_key =
-                rule.provenance.free_surface_snapshot_revision_key;
+        if (metadata.level_set_snapshot_revision_key == 0u) {
+            metadata.level_set_snapshot_revision_key =
+                rule.provenance.level_set_snapshot_revision_key;
         } else if (
-            rule.provenance.free_surface_snapshot_revision_key == 0u) {
-            rule.provenance.free_surface_snapshot_revision_key =
-                metadata.free_surface_snapshot_revision_key;
+            rule.provenance.level_set_snapshot_revision_key == 0u) {
+            rule.provenance.level_set_snapshot_revision_key =
+                metadata.level_set_snapshot_revision_key;
         }
         const auto snapshot_binding =
-            free_surface_snapshot_revision_by_marker_.find(marker);
+            level_set_snapshot_revision_by_marker_.find(marker);
         if (snapshot_binding ==
-            free_surface_snapshot_revision_by_marker_.end()) {
-            if (metadata.free_surface_snapshot_revision_key != 0u) {
+            level_set_snapshot_revision_by_marker_.end()) {
+            if (metadata.level_set_snapshot_revision_key != 0u) {
                 throw std::invalid_argument(
                     "generated volume rule declares a free-surface snapshot revision without an authoritative snapshot");
             }
@@ -3678,16 +3678,16 @@ private:
         }
         if (publication_complete ||
             snapshot_binding->second == 0u ||
-            (metadata.free_surface_snapshot_revision_key != 0u &&
-             metadata.free_surface_snapshot_revision_key !=
+            (metadata.level_set_snapshot_revision_key != 0u &&
+             metadata.level_set_snapshot_revision_key !=
                  snapshot_binding->second)) {
             throw std::invalid_argument(
                 "generated volume rule snapshot revision does not match the imported level-set interface");
         }
-        if (metadata.free_surface_snapshot_revision_key == 0u) {
-            metadata.free_surface_snapshot_revision_key =
+        if (metadata.level_set_snapshot_revision_key == 0u) {
+            metadata.level_set_snapshot_revision_key =
                 snapshot_binding->second;
-            rule.provenance.free_surface_snapshot_revision_key =
+            rule.provenance.level_set_snapshot_revision_key =
                 snapshot_binding->second;
         }
     }
@@ -3860,10 +3860,10 @@ private:
         generated_active_boundary_markers_by_physical_marker_{};
     std::unordered_map<int, GeneratedInterfaceBoundaryPublicationProvenance>
         generated_interface_boundary_provenance_by_marker_{};
-    std::vector<std::shared_ptr<const interfaces::FreeSurfaceGeometrySnapshot>>
-        free_surface_geometry_snapshots_{};
+    std::vector<std::shared_ptr<const interfaces::LevelSetGeometrySnapshot>>
+        level_set_geometry_snapshots_{};
     std::unordered_map<int, std::uint64_t>
-        free_surface_snapshot_revision_by_marker_{};
+        level_set_snapshot_revision_by_marker_{};
     std::vector<int> generated_interface_markers_{};
     std::unordered_map<int, std::vector<std::size_t>> facet_set_rule_indices_by_marker_{};
     std::vector<int> facet_set_markers_{};
@@ -3878,7 +3878,7 @@ private:
     std::vector<CutGeometrySensitivityMetadata> sensitivity_metadata_{};
     // Source regions of classification-only volume rules, ordered by rule
     // index.  The regions belong to the domain of an imported snapshot,
-    // which free_surface_geometry_snapshots_ keeps alive in every copy.
+    // which level_set_geometry_snapshots_ keeps alive in every copy.
     struct ClassificationOnlyVolumeRuleSource {
         std::size_t rule_index{0u};
         const interfaces::CutInterfaceVolumeRegion* region{nullptr};

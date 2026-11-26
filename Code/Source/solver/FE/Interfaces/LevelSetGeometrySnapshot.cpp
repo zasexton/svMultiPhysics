@@ -1,4 +1,4 @@
-#include "Interfaces/FreeSurfaceGeometrySnapshot.h"
+#include "Interfaces/LevelSetGeometrySnapshot.h"
 
 #include "Core/DeterministicParallel.h"
 
@@ -216,52 +216,52 @@ void mixCoefficientClassificationPolicy(
     }
 }
 
-[[nodiscard]] FreeSurfaceGeometryRuleRole roleFor(
+[[nodiscard]] LevelSetGeometryRuleRole roleFor(
     const geometry::CutQuadratureRule& rule,
-    FreeSurfaceGeometryRuleRole nonvolume_role)
+    LevelSetGeometryRuleRole nonvolume_role)
 {
     if (rule.kind != geometry::CutQuadratureKind::Volume) {
         return nonvolume_role;
     }
     if (rule.side == geometry::CutIntegrationSide::Negative) {
-        return FreeSurfaceGeometryRuleRole::NegativeVolume;
+        return LevelSetGeometryRuleRole::NegativeVolume;
     }
     if (rule.side == geometry::CutIntegrationSide::Positive) {
-        return FreeSurfaceGeometryRuleRole::PositiveVolume;
+        return LevelSetGeometryRuleRole::PositiveVolume;
     }
     throw std::invalid_argument(
         "free-surface snapshot volume rule cannot have Interface side");
 }
 
-[[nodiscard]] bool negativeRole(FreeSurfaceGeometryRuleRole role) noexcept
+[[nodiscard]] bool negativeRole(LevelSetGeometryRuleRole role) noexcept
 {
-    return role == FreeSurfaceGeometryRuleRole::NegativeVolume ||
-           role == FreeSurfaceGeometryRuleRole::NegativeExteriorBoundary;
+    return role == LevelSetGeometryRuleRole::NegativeVolume ||
+           role == LevelSetGeometryRuleRole::NegativeExteriorBoundary;
 }
 
-[[nodiscard]] bool positiveRole(FreeSurfaceGeometryRuleRole role) noexcept
+[[nodiscard]] bool positiveRole(LevelSetGeometryRuleRole role) noexcept
 {
-    return role == FreeSurfaceGeometryRuleRole::PositiveVolume ||
-           role == FreeSurfaceGeometryRuleRole::PositiveExteriorBoundary;
+    return role == LevelSetGeometryRuleRole::PositiveVolume ||
+           role == LevelSetGeometryRuleRole::PositiveExteriorBoundary;
 }
 
-[[nodiscard]] bool volumeRole(FreeSurfaceGeometryRuleRole role) noexcept
+[[nodiscard]] bool volumeRole(LevelSetGeometryRuleRole role) noexcept
 {
-    return role == FreeSurfaceGeometryRuleRole::NegativeVolume ||
-           role == FreeSurfaceGeometryRuleRole::PositiveVolume;
+    return role == LevelSetGeometryRuleRole::NegativeVolume ||
+           role == LevelSetGeometryRuleRole::PositiveVolume;
 }
 
-FreeSurfaceGeometryRuleRecord materializeClassificationOnlyRecord(
-    const FreeSurfaceGeometryRuleRecord& record,
+LevelSetGeometryRuleRecord materializeClassificationOnlyRecord(
+    const LevelSetGeometryRuleRecord& record,
     const assembly::IMeshAccess& mesh);
 
 // The record a point-integrating consumer integrates: classification-only
 // records are rematerialized exactly from the mesh, and without a mesh the
 // consumer fails closed instead of silently skipping their volume.
-[[nodiscard]] const FreeSurfaceGeometryRuleRecord& integrationRecord(
-    const FreeSurfaceGeometryRuleRecord& record,
+[[nodiscard]] const LevelSetGeometryRuleRecord& integrationRecord(
+    const LevelSetGeometryRuleRecord& record,
     const assembly::IMeshAccess* mesh,
-    std::optional<FreeSurfaceGeometryRuleRecord>& rematerialized,
+    std::optional<LevelSetGeometryRuleRecord>& rematerialized,
     const char* consumer)
 {
     if (!record.classification_only) {
@@ -284,7 +284,7 @@ struct OwnedRuleDigest {
 };
 
 [[nodiscard]] OwnershipRuleIdentity ownershipRuleIdentity(
-    const FreeSurfaceGeometryRuleRecord& record) noexcept
+    const LevelSetGeometryRuleRecord& record) noexcept
 {
     const auto& provenance = record.reference_rule.provenance;
     return {{
@@ -303,7 +303,7 @@ struct OwnedRuleDigest {
 // reuse cache.
 void mixRuleContentWithoutIdentities(
     std::uint64_t& hash,
-    const FreeSurfaceGeometryRuleRecord& record) noexcept
+    const LevelSetGeometryRuleRecord& record) noexcept
 {
     mix(hash, static_cast<std::uint64_t>(record.construction_observation));
     mix(hash, static_cast<std::uint64_t>(record.role));
@@ -405,7 +405,7 @@ void mixRuleContentWithoutIdentities(
 }
 
 void mixRuleIdentities(std::uint64_t& hash,
-                       const FreeSurfaceGeometryRuleRecord& record) noexcept
+                       const LevelSetGeometryRuleRecord& record) noexcept
 {
     mix(hash, static_cast<std::uint64_t>(record.component_id));
     mix(hash, record.reference_rule.provenance.cut_topology_revision);
@@ -416,7 +416,7 @@ void mixRuleIdentities(std::uint64_t& hash,
 
 // Digest state after the identity-free content of a materialized record.
 [[nodiscard]] std::uint64_t ruleContentWithoutIdentitiesState(
-    const FreeSurfaceGeometryRuleRecord& record) noexcept
+    const LevelSetGeometryRuleRecord& record) noexcept
 {
     std::uint64_t hash = kHashOffset;
     mixRuleContentWithoutIdentities(hash, record);
@@ -425,7 +425,7 @@ void mixRuleIdentities(std::uint64_t& hash,
 
 [[nodiscard]] std::uint64_t finishRuleContentDigest(
     std::uint64_t identity_free_state,
-    const FreeSurfaceGeometryRuleRecord& record) noexcept
+    const LevelSetGeometryRuleRecord& record) noexcept
 {
     std::uint64_t hash = identity_free_state;
     mixRuleIdentities(hash, record);
@@ -433,7 +433,7 @@ void mixRuleIdentities(std::uint64_t& hash,
 }
 
 [[nodiscard]] std::uint64_t ruleContentDigest(
-    const FreeSurfaceGeometryRuleRecord& record) noexcept
+    const LevelSetGeometryRuleRecord& record) noexcept
 {
     if (record.classification_only) {
         return record.classification_only_content_digest;
@@ -444,10 +444,10 @@ void mixRuleIdentities(std::uint64_t& hash,
 
 // record_digests, when given, holds ruleContentDigest() of every record.
 [[nodiscard]] std::vector<OwnedRuleDigest> validateUniqueRuleOwnership(
-    const std::vector<FreeSurfaceGeometryRuleRecord>& records,
+    const std::vector<LevelSetGeometryRuleRecord>& records,
     const assembly::IMeshAccess& mesh,
-    const FreeSurfaceGeometryOwnershipCollective& collective,
-    FreeSurfaceGeometryValidationLedger& ledger,
+    const LevelSetGeometryOwnershipCollective& collective,
+    LevelSetGeometryValidationLedger& ledger,
     std::span<const std::uint64_t> record_digests = {})
 {
     if (!record_digests.empty() && record_digests.size() != records.size()) {
@@ -571,13 +571,13 @@ void mixRuleIdentities(std::uint64_t& hash,
     return globally_owned;
 }
 
-[[nodiscard]] FreeSurfaceGeometryRevision makeRevision(
+[[nodiscard]] LevelSetGeometryRevision makeRevision(
     const LevelSetInterfaceDomain& domain,
     const assembly::IMeshAccess& mesh,
     std::string domain_id)
 {
     const auto& request = domain.request();
-    FreeSurfaceGeometryRevision revision;
+    LevelSetGeometryRevision revision;
     revision.source_id = request.source.identifier();
     revision.domain_id =
         domain_id.empty()
@@ -602,9 +602,9 @@ void mixRuleIdentities(std::uint64_t& hash,
 }
 
 void canonicalizeDistributedRevision(
-    FreeSurfaceGeometryRevision& revision,
-    const FreeSurfaceGeometrySnapshotPolicy& policy,
-    const FreeSurfaceGeometryOwnershipCollective& collective)
+    LevelSetGeometryRevision& revision,
+    const LevelSetGeometrySnapshotPolicy& policy,
+    const LevelSetGeometryOwnershipCollective& collective)
 {
     if (collective.size == 1) {
         return;
@@ -679,7 +679,7 @@ void canonicalizeDistributedRevision(
 
 void requireContactRevision(
     const GeneratedInterfaceBoundaryIntersectionDomain& contact,
-    const FreeSurfaceGeometryRevision& revision)
+    const LevelSetGeometryRevision& revision)
 {
     const auto& request = contact.request();
     if (request.source.identifier() != revision.source_id ||
@@ -702,7 +702,7 @@ void requireContactRevision(
 
 void requireActiveBoundaryRevision(
     const GeneratedActiveBoundaryDomain& active,
-    const FreeSurfaceGeometryRevision& revision)
+    const LevelSetGeometryRevision& revision)
 {
     const auto& request = active.request();
     if (request.source.identifier() != revision.source_id ||
@@ -727,7 +727,7 @@ void validateCompleteContactTrace(
     const GeneratedInterfaceBoundaryIntersectionDomain& contact,
     const LevelSetInterfaceDomain& interface_domain,
     const assembly::IMeshAccess& mesh,
-    FreeSurfaceGeometryValidationLedger& ledger)
+    LevelSetGeometryValidationLedger& ledger)
 {
     using TraceIdentity =
         std::tuple<std::uint64_t, GlobalIndex, std::uint8_t>;
@@ -817,45 +817,45 @@ void validateCompleteContactTrace(
     return stableComponentId({}, stable_id);
 }
 
-[[nodiscard]] FreeSurfaceGeometryMomentCertificate
+[[nodiscard]] LevelSetGeometryMomentCertificate
 makeParentCellMomentCertificate(const assembly::IMeshAccess& mesh,
                                 const geometry::CutQuadratureRule& rule);
 
-[[nodiscard]] FreeSurfaceGeometryMomentCertificate
+[[nodiscard]] LevelSetGeometryMomentCertificate
 makeVolumeRegionMomentCertificate(
     const CutInterfaceVolumeRegion& region,
     const geometry::CutQuadratureRule& rule,
     int ambient_dimension,
     Real tolerance);
 
-[[nodiscard]] FreeSurfaceGeometryMomentCertificate
+[[nodiscard]] LevelSetGeometryMomentCertificate
 makeInterfaceFragmentMomentCertificate(
     const CutInterfaceFragment& fragment,
     const geometry::CutQuadratureRule& rule,
     int ambient_dimension);
 
-[[nodiscard]] FreeSurfaceGeometryMomentCertificate
+[[nodiscard]] LevelSetGeometryMomentCertificate
 makeContactFragmentMomentCertificate(
     const GeneratedInterfaceBoundaryIntersectionFragment& fragment,
     const geometry::CutQuadratureRule& rule,
     int ambient_dimension);
 
-[[nodiscard]] FreeSurfaceGeometryMomentCertificate
+[[nodiscard]] LevelSetGeometryMomentCertificate
 makeActiveBoundaryFragmentMomentCertificate(
     const GeneratedActiveBoundaryFragment& fragment,
     const geometry::CutQuadratureRule& rule,
     int ambient_dimension);
 
 void validateRuleMomentCertificate(
-    const FreeSurfaceGeometryRuleRecord& record,
+    const LevelSetGeometryRuleRecord& record,
     const assembly::IMeshAccess& mesh,
-    const FreeSurfaceGeometrySnapshotPolicy& policy,
-    FreeSurfaceGeometryValidationLedger& ledger);
+    const LevelSetGeometrySnapshotPolicy& policy,
+    LevelSetGeometryValidationLedger& ledger);
 
 void completeAndValidateRuleIdentity(
     geometry::CutQuadratureRule& rule,
     const assembly::IMeshAccess& mesh,
-    FreeSurfaceGeometryValidationLedger& ledger)
+    LevelSetGeometryValidationLedger& ledger)
 {
     const auto local_cell =
         static_cast<GlobalIndex>(rule.provenance.parent_entity);
@@ -969,19 +969,19 @@ void materializeAuthoritativeFullCellPoints(
     }
 }
 
-void addRule(std::vector<FreeSurfaceGeometryRuleRecord>& records,
-             FreeSurfaceGeometryValidationLedger& ledger,
+void addRule(std::vector<LevelSetGeometryRuleRecord>& records,
+             LevelSetGeometryValidationLedger& ledger,
              geometry::CutQuadratureRule rule,
-             FreeSurfaceGeometryRuleRole role,
+             LevelSetGeometryRuleRole role,
              const assembly::IMeshAccess& mesh,
-             const FreeSurfaceGeometrySnapshotPolicy& policy,
-             FreeSurfaceGeometryMomentCertificate moment_certificate,
+             const LevelSetGeometrySnapshotPolicy& policy,
+             LevelSetGeometryMomentCertificate moment_certificate,
              std::uint64_t source_topology_key,
              LinearCornerStrictBranch construction_observation,
              int physical_boundary_marker = -1,
              std::vector<std::uint64_t> source_ids = {},
              std::int64_t component_id = -1,
-             std::optional<FreeSurfaceGeometryRetention>
+             std::optional<LevelSetGeometryRetention>
                  retention_override = std::nullopt)
 {
     if (rule.kind == geometry::CutQuadratureKind::Volume &&
@@ -989,13 +989,13 @@ void addRule(std::vector<FreeSurfaceGeometryRuleRecord>& records,
         materializeAuthoritativeFullCellPoints(rule, mesh, policy.tolerance);
     }
     completeAndValidateRuleIdentity(rule, mesh, ledger);
-    FreeSurfaceGeometryRuleRecord record;
+    LevelSetGeometryRuleRecord record;
     record.construction_observation = construction_observation;
     record.role = roleFor(rule, role);
     const bool boundary_rule =
-        record.role == FreeSurfaceGeometryRuleRole::Contact ||
-        record.role == FreeSurfaceGeometryRuleRole::NegativeExteriorBoundary ||
-        record.role == FreeSurfaceGeometryRuleRole::PositiveExteriorBoundary;
+        record.role == LevelSetGeometryRuleRole::Contact ||
+        record.role == LevelSetGeometryRuleRole::NegativeExteriorBoundary ||
+        record.role == LevelSetGeometryRuleRole::PositiveExteriorBoundary;
     if (boundary_rule != (physical_boundary_marker >= 0)) {
         throw std::invalid_argument(
             "free-surface rule has invalid physical-boundary provenance");
@@ -1006,8 +1006,8 @@ void addRule(std::vector<FreeSurfaceGeometryRuleRecord>& records,
                 std::isfinite(rule.volume_fraction) &&
                 rule.volume_fraction > Real{0.0} &&
                 rule.volume_fraction < policy.minimum_retained_volume_fraction
-            ? FreeSurfaceGeometryRetention::PrunedSmallVolume
-            : FreeSurfaceGeometryRetention::Retained);
+            ? LevelSetGeometryRetention::PrunedSmallVolume
+            : LevelSetGeometryRetention::Retained);
     record.locally_owned =
         rule.provenance.owner_rank == mesh.parallelRank();
     record.source_fragment_stable_ids = std::move(source_ids);
@@ -1032,7 +1032,7 @@ void addRule(std::vector<FreeSurfaceGeometryRuleRecord>& records,
     if (record.locally_owned) {
         ++ledger.owned_rule_count;
     }
-    if (record.retention == FreeSurfaceGeometryRetention::Retained) {
+    if (record.retention == LevelSetGeometryRetention::Retained) {
         ++ledger.retained_rule_count;
     } else {
         ++ledger.pruned_rule_count;
@@ -1055,10 +1055,10 @@ struct LinearCornerAffineRepresentation {
 
 [[nodiscard]] LinearCornerAffineRepresentation
 makeLinearCornerAffineRepresentation(
-    const FreeSurfaceGeometryRuleRecord& record,
+    const LevelSetGeometryRuleRecord& record,
     const LevelSetInterfaceDomain& interface_domain,
     const assembly::IMeshAccess& mesh,
-    const FreeSurfaceGeometryScalarEvaluator& scalar,
+    const LevelSetGeometryScalarEvaluator& scalar,
     Real tolerance)
 {
     const auto& rule = record.reference_rule;
@@ -1207,7 +1207,7 @@ makeLinearCornerAffineRepresentation(
 }
 
 void canonicalizeLinearCornerRuleGeometry(
-    FreeSurfaceGeometryRuleRecord& record,
+    LevelSetGeometryRuleRecord& record,
     const LinearCornerAffineRepresentation& represented,
     const assembly::IMeshAccess& mesh)
 {
@@ -1255,18 +1255,18 @@ void canonicalizeLinearCornerRuleGeometry(
 }
 
 void validateRule(
-    FreeSurfaceGeometryRuleRecord& record,
+    LevelSetGeometryRuleRecord& record,
     const LevelSetInterfaceDomain& interface_domain,
     const assembly::IMeshAccess& mesh,
-    const FreeSurfaceGeometryRevision& revision,
-    const FreeSurfaceGeometrySnapshotPolicy& policy,
-    const FreeSurfaceGeometryScalarEvaluator& scalar,
-    FreeSurfaceGeometryValidationLedger& ledger)
+    const LevelSetGeometryRevision& revision,
+    const LevelSetGeometrySnapshotPolicy& policy,
+    const LevelSetGeometryScalarEvaluator& scalar,
+    LevelSetGeometryValidationLedger& ledger)
 {
     auto& rule = record.reference_rule;
     const bool interface_or_contact =
-        record.role == FreeSurfaceGeometryRuleRole::Interface ||
-        record.role == FreeSurfaceGeometryRuleRole::Contact;
+        record.role == LevelSetGeometryRuleRole::Interface ||
+        record.role == LevelSetGeometryRuleRole::Contact;
     std::optional<LinearCornerAffineRepresentation>
         linear_corner_representation;
     if (interface_or_contact &&
@@ -1492,19 +1492,19 @@ void validateRule(
     validateRuleMomentCertificate(record, mesh, policy, ledger);
 }
 
-void accumulateLedger(const FreeSurfaceGeometryRuleRecord& record,
-                      FreeSurfaceGeometryValidationLedger& ledger) noexcept
+void accumulateLedger(const LevelSetGeometryRuleRecord& record,
+                      LevelSetGeometryValidationLedger& ledger) noexcept
 {
     const Real reference = record.reference_rule.measure;
     const Real physical = record.physical_rule.physical_measure;
-    if (record.role == FreeSurfaceGeometryRuleRole::NegativeVolume) {
+    if (record.role == LevelSetGeometryRuleRole::NegativeVolume) {
         ledger.unpruned_negative_reference_volume += reference;
         ledger.unpruned_negative_physical_volume += physical;
         if (record.locally_owned) {
             ledger.owned_unpruned_negative_reference_volume += reference;
             ledger.owned_unpruned_negative_physical_volume += physical;
         }
-    } else if (record.role == FreeSurfaceGeometryRuleRole::PositiveVolume) {
+    } else if (record.role == LevelSetGeometryRuleRole::PositiveVolume) {
         ledger.unpruned_positive_reference_volume += reference;
         ledger.unpruned_positive_physical_volume += physical;
         if (record.locally_owned) {
@@ -1512,11 +1512,11 @@ void accumulateLedger(const FreeSurfaceGeometryRuleRecord& record,
             ledger.owned_unpruned_positive_physical_volume += physical;
         }
     }
-    if (record.retention != FreeSurfaceGeometryRetention::Retained) {
+    if (record.retention != LevelSetGeometryRetention::Retained) {
         return;
     }
     switch (record.role) {
-    case FreeSurfaceGeometryRuleRole::NegativeVolume:
+    case LevelSetGeometryRuleRole::NegativeVolume:
         ledger.retained_negative_reference_volume += reference;
         ledger.retained_negative_physical_volume += physical;
         if (record.locally_owned) {
@@ -1524,7 +1524,7 @@ void accumulateLedger(const FreeSurfaceGeometryRuleRecord& record,
             ledger.owned_retained_negative_physical_volume += physical;
         }
         break;
-    case FreeSurfaceGeometryRuleRole::PositiveVolume:
+    case LevelSetGeometryRuleRole::PositiveVolume:
         ledger.retained_positive_reference_volume += reference;
         ledger.retained_positive_physical_volume += physical;
         if (record.locally_owned) {
@@ -1532,11 +1532,11 @@ void accumulateLedger(const FreeSurfaceGeometryRuleRecord& record,
             ledger.owned_retained_positive_physical_volume += physical;
         }
         break;
-    case FreeSurfaceGeometryRuleRole::Interface:
+    case LevelSetGeometryRuleRole::Interface:
         ledger.interface_reference_measure += reference;
         ledger.interface_physical_measure += physical;
         break;
-    case FreeSurfaceGeometryRuleRole::Contact:
+    case LevelSetGeometryRuleRole::Contact:
         ledger.contact_reference_measure += reference;
         ledger.contact_physical_measure += physical;
         break;
@@ -1690,14 +1690,14 @@ constexpr int kTabulatedMonomialOrders = 16;
            integerPower(point[2], exponents[2]);
 }
 
-[[nodiscard]] FreeSurfaceGeometryMomentCertificate
+[[nodiscard]] LevelSetGeometryMomentCertificate
 makeMomentCertificateFromSamples(
     std::span<const MomentCertificateSample> samples,
     int ambient_dimension,
     int polynomial_order,
-    FreeSurfaceGeometryMomentCertificateSource source)
+    LevelSetGeometryMomentCertificateSource source)
 {
-    FreeSurfaceGeometryMomentCertificate certificate;
+    LevelSetGeometryMomentCertificate certificate;
     certificate.polynomial_order = polynomial_order;
     certificate.ambient_dimension = ambient_dimension;
     certificate.source = source;
@@ -1712,7 +1712,7 @@ makeMomentCertificateFromSamples(
                      evaluateMonomial(sample.point, exponents);
         }
         certificate.moments.push_back(
-            FreeSurfaceGeometryMonomialMoment{
+            LevelSetGeometryMonomialMoment{
                 .exponents = exponents,
                 .value = value});
     }
@@ -2364,7 +2364,7 @@ piecewiseAffineMomentSamples(
         "piecewise-affine moment certification supports codimension-zero parent rules and geometric dimensions zero through two");
 }
 
-[[nodiscard]] FreeSurfaceGeometryMomentCertificate
+[[nodiscard]] LevelSetGeometryMomentCertificate
 makePiecewiseAffineMomentCertificate(
     std::span<const std::array<Real, 3>> vertices,
     int geometric_dimension,
@@ -2380,7 +2380,7 @@ makePiecewiseAffineMomentCertificate(
         samples,
         ambient_dimension,
         rule.exact_polynomial_order,
-        FreeSurfaceGeometryMomentCertificateSource::PiecewiseAffineGeometry);
+        LevelSetGeometryMomentCertificateSource::PiecewiseAffineGeometry);
 }
 
 [[nodiscard]] std::vector<MomentCertificateSample>
@@ -2469,7 +2469,7 @@ referenceSubcellMomentSamples(
     return samples;
 }
 
-[[nodiscard]] FreeSurfaceGeometryMomentCertificate
+[[nodiscard]] LevelSetGeometryMomentCertificate
 makeReferenceSubcellMomentCertificate(
     std::span<const CutInterfaceReferenceSimplex> subcells,
     const geometry::CutQuadratureRule& rule,
@@ -2482,13 +2482,13 @@ makeReferenceSubcellMomentCertificate(
         samples,
         ambient_dimension,
         rule.exact_polynomial_order,
-        FreeSurfaceGeometryMomentCertificateSource::PiecewiseAffineGeometry);
+        LevelSetGeometryMomentCertificateSource::PiecewiseAffineGeometry);
     certificate.phase_sign_certified = certifyRepresentedVolumePhase(
         subcells, rule, ambient_dimension, tolerance);
     return certificate;
 }
 
-[[nodiscard]] FreeSurfaceGeometryMomentCertificate
+[[nodiscard]] LevelSetGeometryMomentCertificate
 makeBackendReferenceMomentCertificate(
     std::span<const CutInterfaceQuadraturePoint> points,
     const geometry::CutQuadratureRule& rule,
@@ -2507,10 +2507,10 @@ makeBackendReferenceMomentCertificate(
         samples,
         ambient_dimension,
         rule.exact_polynomial_order,
-        FreeSurfaceGeometryMomentCertificateSource::BackendReferenceQuadrature);
+        LevelSetGeometryMomentCertificateSource::BackendReferenceQuadrature);
 }
 
-[[nodiscard]] FreeSurfaceGeometryMomentCertificate
+[[nodiscard]] LevelSetGeometryMomentCertificate
 makeParentCellMomentCertificate(const assembly::IMeshAccess& mesh,
                                 const geometry::CutQuadratureRule& rule)
 {
@@ -2534,7 +2534,7 @@ makeParentCellMomentCertificate(const assembly::IMeshAccess& mesh,
         samples,
         mesh.dimension(),
         rule.exact_polynomial_order,
-        FreeSurfaceGeometryMomentCertificateSource::ParentReferenceCell);
+        LevelSetGeometryMomentCertificateSource::ParentReferenceCell);
 }
 
 void requireUniqueAuthoritativeSourceIds(
@@ -2736,7 +2736,7 @@ void requireCompleteAuthoritativeCutFamilies(
     }
 }
 
-[[nodiscard]] FreeSurfaceGeometryMomentCertificate
+[[nodiscard]] LevelSetGeometryMomentCertificate
 makeVolumeRegionMomentCertificate(
     const CutInterfaceVolumeRegion& region,
     const geometry::CutQuadratureRule& rule,
@@ -2762,13 +2762,13 @@ makeVolumeRegionMomentCertificate(
             samples,
             ambient_dimension,
             rule.exact_polynomial_order,
-            FreeSurfaceGeometryMomentCertificateSource::RegionMeasureCentroid);
+            LevelSetGeometryMomentCertificateSource::RegionMeasureCentroid);
     }
     throw std::invalid_argument(
         "free-surface volume rule lacks independent source geometry for its polynomial-moment certificate");
 }
 
-[[nodiscard]] FreeSurfaceGeometryMomentCertificate
+[[nodiscard]] LevelSetGeometryMomentCertificate
 makeInterfaceFragmentMomentCertificate(
     const CutInterfaceFragment& fragment,
     const geometry::CutQuadratureRule& rule,
@@ -2796,7 +2796,7 @@ makeInterfaceFragmentMomentCertificate(
         "curved free-surface interface rule lacks independent backend reference quadrature");
 }
 
-[[nodiscard]] FreeSurfaceGeometryMomentCertificate
+[[nodiscard]] LevelSetGeometryMomentCertificate
 makeContactFragmentMomentCertificate(
     const GeneratedInterfaceBoundaryIntersectionFragment& fragment,
     const geometry::CutQuadratureRule& rule,
@@ -2817,7 +2817,7 @@ makeContactFragmentMomentCertificate(
         "free-surface contact rule lacks independent source geometry for its polynomial-moment certificate");
 }
 
-[[nodiscard]] FreeSurfaceGeometryMomentCertificate
+[[nodiscard]] LevelSetGeometryMomentCertificate
 makeActiveBoundaryFragmentMomentCertificate(
     const GeneratedActiveBoundaryFragment& fragment,
     const geometry::CutQuadratureRule& rule,
@@ -2836,10 +2836,10 @@ makeActiveBoundaryFragmentMomentCertificate(
 }
 
 void validateRuleMomentCertificate(
-    const FreeSurfaceGeometryRuleRecord& record,
+    const LevelSetGeometryRuleRecord& record,
     const assembly::IMeshAccess& mesh,
-    const FreeSurfaceGeometrySnapshotPolicy& policy,
-    FreeSurfaceGeometryValidationLedger& ledger)
+    const LevelSetGeometrySnapshotPolicy& policy,
+    LevelSetGeometryValidationLedger& ledger)
 {
     const auto& rule = record.reference_rule;
     const auto& certificate = record.moment_certificate;
@@ -2855,19 +2855,19 @@ void validateRuleMomentCertificate(
     }
     ++ledger.certified_rule_count;
     switch (certificate.source) {
-    case FreeSurfaceGeometryMomentCertificateSource::ParentReferenceCell:
+    case LevelSetGeometryMomentCertificateSource::ParentReferenceCell:
         ++ledger.parent_cell_moment_certificate_count;
         break;
-    case FreeSurfaceGeometryMomentCertificateSource::RegionMeasureCentroid:
+    case LevelSetGeometryMomentCertificateSource::RegionMeasureCentroid:
         ++ledger.centroid_moment_certificate_count;
         break;
-    case FreeSurfaceGeometryMomentCertificateSource::PiecewiseAffineGeometry:
+    case LevelSetGeometryMomentCertificateSource::PiecewiseAffineGeometry:
         ++ledger.piecewise_affine_moment_certificate_count;
         break;
-    case FreeSurfaceGeometryMomentCertificateSource::BackendReferenceQuadrature:
+    case LevelSetGeometryMomentCertificateSource::BackendReferenceQuadrature:
         ++ledger.backend_reference_moment_certificate_count;
         break;
-    case FreeSurfaceGeometryMomentCertificateSource::StoredGeneratedGeometry:
+    case LevelSetGeometryMomentCertificateSource::StoredGeneratedGeometry:
         ++ledger.stored_generated_moment_certificate_count;
         break;
     }
@@ -2928,12 +2928,12 @@ void validateRuleMomentCertificate(
 // Polynomial moments of the volume rules of one parent cell through their
 // common claimed order against the parent reference cell.
 void validateCellPolynomialMoments(
-    std::span<const FreeSurfaceGeometryRuleRecord* const> rules,
+    std::span<const LevelSetGeometryRuleRecord* const> rules,
     GlobalIndex local_parent,
     int common_exact_order,
     const assembly::IMeshAccess& mesh,
-    const FreeSurfaceGeometrySnapshotPolicy& policy,
-    FreeSurfaceGeometryValidationLedger& ledger)
+    const LevelSetGeometrySnapshotPolicy& policy,
+    LevelSetGeometryValidationLedger& ledger)
 {
     if (local_parent < 0 || local_parent >= mesh.numCells() ||
         common_exact_order < 0) {
@@ -2996,10 +2996,10 @@ void validateCellPolynomialMoments(
 // Cells whose only volume rule is classification-only had their moments
 // validated before the points were released.
 void validateVolumePartition(
-    const std::vector<FreeSurfaceGeometryRuleRecord>& records,
+    const std::vector<LevelSetGeometryRuleRecord>& records,
     const assembly::IMeshAccess& mesh,
-    const FreeSurfaceGeometrySnapshotPolicy& policy,
-    FreeSurfaceGeometryValidationLedger& ledger)
+    const LevelSetGeometrySnapshotPolicy& policy,
+    LevelSetGeometryValidationLedger& ledger)
 {
     // The volume records grouped by global parent cell, cells in ascending
     // global id and each cell's records in record order (a stable sort): the
@@ -3050,7 +3050,7 @@ void validateVolumePartition(
         begin = end;
     }
 
-    std::vector<const FreeSurfaceGeometryRuleRecord*> rules;
+    std::vector<const LevelSetGeometryRuleRecord*> rules;
     for (std::size_t begin = 0; begin < by_cell.size();) {
         const std::size_t end = group_end(begin);
         Real negative{0.0};
@@ -3064,7 +3064,7 @@ void validateVolumePartition(
                 common_exact_order,
                 record.reference_rule.exact_polynomial_order);
             rules.push_back(&record);
-            if (record.role == FreeSurfaceGeometryRuleRole::NegativeVolume) {
+            if (record.role == LevelSetGeometryRuleRole::NegativeVolume) {
                 negative += record.reference_rule.measure;
             } else {
                 positive += record.reference_rule.measure;
@@ -3098,8 +3098,8 @@ void validateVolumePartition(
 }
 
 [[nodiscard]] std::uint64_t finalizeRevisionKey(
-    const FreeSurfaceGeometryRevision& revision,
-    const FreeSurfaceGeometrySnapshotPolicy& policy,
+    const LevelSetGeometryRevision& revision,
+    const LevelSetGeometrySnapshotPolicy& policy,
     std::span<const OwnedRuleDigest> globally_owned_rules) noexcept
 {
     std::uint64_t hash = kHashOffset;
@@ -3188,10 +3188,10 @@ static_assert(sizeof(geometry::CutQuadratureConstructionPolicy) == 56u);
 static_assert(sizeof(geometry::CutQuadratureRule) == 576u);
 static_assert(sizeof(geometry::MappedCutQuadraturePoint) == 288u);
 static_assert(sizeof(geometry::MappedCutQuadratureRule) == 88u);
-static_assert(sizeof(FreeSurfaceGeometryMomentCertificate) == 40u);
-static_assert(sizeof(FreeSurfaceGeometryRuleRecord) == 808u);
-static_assert(sizeof(FreeSurfaceGeometryValidationLedger) == 440u);
-static_assert(sizeof(FreeSurfaceGeometrySnapshotPolicy) == 32u);
+static_assert(sizeof(LevelSetGeometryMomentCertificate) == 40u);
+static_assert(sizeof(LevelSetGeometryRuleRecord) == 808u);
+static_assert(sizeof(LevelSetGeometryValidationLedger) == 440u);
+static_assert(sizeof(LevelSetGeometrySnapshotPolicy) == 32u);
 
 [[nodiscard]] bool samePointBits(const geometry::CutQuadraturePoint& a,
                                  const geometry::CutQuadraturePoint& b) noexcept
@@ -3271,8 +3271,8 @@ static_assert(sizeof(FreeSurfaceGeometrySnapshotPolicy) == 32u);
            a.cut_topology_revision == b.cut_topology_revision &&
            a.source_stable_id == b.source_stable_id &&
            a.source_value_revision == b.source_value_revision &&
-           a.free_surface_snapshot_revision_key ==
-               b.free_surface_snapshot_revision_key;
+           a.level_set_snapshot_revision_key ==
+               b.level_set_snapshot_revision_key;
 }
 
 // Every rule field except the points and the revision stamps of its
@@ -3302,8 +3302,8 @@ static_assert(sizeof(FreeSurfaceGeometrySnapshotPolicy) == 32u);
 }
 
 [[nodiscard]] std::string firstRecordDifference(
-    const FreeSurfaceGeometryRuleRecord& a,
-    const FreeSurfaceGeometryRuleRecord& b)
+    const LevelSetGeometryRuleRecord& a,
+    const LevelSetGeometryRuleRecord& b)
 {
     if (a.construction_observation != b.construction_observation) {
         return "construction_observation";
@@ -3361,8 +3361,8 @@ static_assert(sizeof(FreeSurfaceGeometrySnapshotPolicy) == 32u);
         ap.source_stable_id != bp.source_stable_id ||
         ap.cut_topology_revision != bp.cut_topology_revision ||
         ap.source_value_revision != bp.source_value_revision ||
-        ap.free_surface_snapshot_revision_key !=
-            bp.free_surface_snapshot_revision_key ||
+        ap.level_set_snapshot_revision_key !=
+            bp.level_set_snapshot_revision_key ||
         !sameRealBits(ap.reference_measure, bp.reference_measure) ||
         !sameRealBits(ap.physical_measure, bp.physical_measure)) {
         return "physical rule fields";
@@ -3479,8 +3479,8 @@ void forEachLedgerField(Ledger& ledger,
 }
 
 [[nodiscard]] std::string firstLedgerDifference(
-    const FreeSurfaceGeometryValidationLedger& a,
-    const FreeSurfaceGeometryValidationLedger& b)
+    const LevelSetGeometryValidationLedger& a,
+    const LevelSetGeometryValidationLedger& b)
 {
     // Pair the fields of both ledgers through their addresses' offsets.
     std::vector<std::pair<const char*, std::size_t>> counts;
@@ -3568,7 +3568,7 @@ struct LedgerFieldClasses {
 {
     static const LedgerFieldClasses classes = [] {
         LedgerFieldClasses result;
-        const FreeSurfaceGeometryValidationLedger probe{};
+        const LevelSetGeometryValidationLedger probe{};
         forEachLedgerField(
             probe,
             [&result](const char* name, std::size_t) {
@@ -3597,8 +3597,8 @@ struct LedgerFieldClasses {
 // std::max; the maxima are nonnegative magnitudes that start at zero, so the
 // result is bitwise the one validating directly into the build ledger.  A
 // scratch field outside the rule-validation set is a programming error.
-void mergeRuleValidationLedger(FreeSurfaceGeometryValidationLedger& into,
-                               const FreeSurfaceGeometryValidationLedger& from)
+void mergeRuleValidationLedger(LevelSetGeometryValidationLedger& into,
+                               const LevelSetGeometryValidationLedger& from)
 {
     const auto& classes = ledgerFieldClasses();
     std::array<std::size_t, kMaxLedgerFieldsPerKind> counts{};
@@ -3646,8 +3646,8 @@ void mergeRuleValidationLedger(FreeSurfaceGeometryValidationLedger& into,
 // (addRule()) and validating them into the build ledger: every count adds,
 // the rule-validation maxima combine with std::max, and no other value may
 // have been touched.  The result is bitwise the one accumulating directly.
-void mergeScratchLedger(FreeSurfaceGeometryValidationLedger& into,
-                        const FreeSurfaceGeometryValidationLedger& from)
+void mergeScratchLedger(LevelSetGeometryValidationLedger& into,
+                        const LevelSetGeometryValidationLedger& from)
 {
     const auto& classes = ledgerFieldClasses();
     std::array<std::size_t, kMaxLedgerFieldsPerKind> counts{};
@@ -3682,7 +3682,7 @@ void mergeScratchLedger(FreeSurfaceGeometryValidationLedger& into,
 }
 
 [[nodiscard]] FullCellValidationContribution fullCellValidationContribution(
-    const FreeSurfaceGeometryValidationLedger& scratch) noexcept
+    const LevelSetGeometryValidationLedger& scratch) noexcept
 {
     FullCellValidationContribution contribution;
     contribution.represented_phase_point_count =
@@ -3715,9 +3715,9 @@ void mergeScratchLedger(FreeSurfaceGeometryValidationLedger& into,
 // fields and the represented-phase disagreement statistics.  The record is
 // a reuse template only when nothing else was touched.
 [[nodiscard]] bool onlyContentAndPhaseFieldsChanged(
-    const FreeSurfaceGeometryValidationLedger& scratch)
+    const LevelSetGeometryValidationLedger& scratch)
 {
-    FreeSurfaceGeometryValidationLedger expected{};
+    LevelSetGeometryValidationLedger expected{};
     const auto contribution = fullCellValidationContribution(scratch);
     expected.represented_phase_point_count =
         contribution.represented_phase_point_count;
@@ -3750,7 +3750,7 @@ void mergeScratchLedger(FreeSurfaceGeometryValidationLedger& into,
 }
 
 void replayFullCellValidationContribution(
-    FreeSurfaceGeometryValidationLedger& ledger,
+    LevelSetGeometryValidationLedger& ledger,
     const FullCellValidationContribution& contribution) noexcept
 {
     ledger.represented_phase_point_count +=
@@ -3786,12 +3786,12 @@ void replayFullCellValidationContribution(
 // represented phase of every point.  reference_points[q] is
 // physical_rule.points[q].reference_point of the materialized record.
 void validateVolumeRecordPhase(
-    const FreeSurfaceGeometryRuleRecord& record,
+    const LevelSetGeometryRuleRecord& record,
     std::span<const std::array<Real, 3>> reference_points,
-    const FreeSurfaceGeometryRevision& revision,
-    const FreeSurfaceGeometrySnapshotPolicy& policy,
-    const FreeSurfaceGeometryScalarEvaluator& scalar,
-    FreeSurfaceGeometryValidationLedger& ledger)
+    const LevelSetGeometryRevision& revision,
+    const LevelSetGeometrySnapshotPolicy& policy,
+    const LevelSetGeometryScalarEvaluator& scalar,
+    LevelSetGeometryValidationLedger& ledger)
 {
     if (!scalar.canEvaluateValue()) {
         return;
@@ -3904,17 +3904,17 @@ bool tetrahedronCertainlyRejectsPoint(
 }
 
 void validateVolumePartition(
-    const std::vector<FreeSurfaceGeometryRuleRecord>& records,
+    const std::vector<LevelSetGeometryRuleRecord>& records,
     const assembly::IMeshAccess& mesh,
-    const FreeSurfaceGeometrySnapshotPolicy& policy,
-    FreeSurfaceGeometryValidationLedger& ledger)
+    const LevelSetGeometrySnapshotPolicy& policy,
+    LevelSetGeometryValidationLedger& ledger)
 {
     interfaces::validateVolumePartition(records, mesh, policy, ledger);
 }
 
 } // namespace snapshot_detail
 
-struct FreeSurfaceGeometrySnapshotReuseCache::State {
+struct LevelSetGeometrySnapshotReuseCache::State {
     bool valid{false};
     // Context of the previous build.  A record is reused only under the same
     // mesh (object, revisions, communicator) and the same policy.
@@ -3923,34 +3923,34 @@ struct FreeSurfaceGeometrySnapshotReuseCache::State {
     int size{0};
     int dimension{0};
     GlobalIndex cell_count{0};
-    FreeSurfaceGeometryLocalMeshRevision mesh_revision{};
-    FreeSurfaceGeometrySnapshotPolicy policy{};
+    LevelSetGeometryLocalMeshRevision mesh_revision{};
+    LevelSetGeometrySnapshotPolicy policy{};
     // The previous snapshot, whose records are the reuse templates.  The
     // cache does not keep it alive: once every owner (typically the
     // installed integration context) has released it, nothing is reused.
-    std::weak_ptr<const FreeSurfaceGeometrySnapshot> snapshot{};
+    std::weak_ptr<const LevelSetGeometrySnapshot> snapshot{};
     // Parallel to snapshot->rules().
     std::vector<snapshot_reuse_detail::FullCellRecordReplay> replay{};
     // Local cell -> 1 + index of the cell's first volume record (0: none).
     std::vector<std::uint32_t> first_volume_record_by_cell{};
 };
 
-FreeSurfaceGeometrySnapshotReuseCache::FreeSurfaceGeometrySnapshotReuseCache()
+LevelSetGeometrySnapshotReuseCache::LevelSetGeometrySnapshotReuseCache()
     : state_(std::make_unique<State>())
 {
 }
 
-FreeSurfaceGeometrySnapshotReuseCache::~FreeSurfaceGeometrySnapshotReuseCache() =
+LevelSetGeometrySnapshotReuseCache::~LevelSetGeometrySnapshotReuseCache() =
     default;
 
-FreeSurfaceGeometrySnapshotReuseCache::FreeSurfaceGeometrySnapshotReuseCache(
-    FreeSurfaceGeometrySnapshotReuseCache&&) noexcept = default;
+LevelSetGeometrySnapshotReuseCache::LevelSetGeometrySnapshotReuseCache(
+    LevelSetGeometrySnapshotReuseCache&&) noexcept = default;
 
-FreeSurfaceGeometrySnapshotReuseCache&
-FreeSurfaceGeometrySnapshotReuseCache::operator=(
-    FreeSurfaceGeometrySnapshotReuseCache&&) noexcept = default;
+LevelSetGeometrySnapshotReuseCache&
+LevelSetGeometrySnapshotReuseCache::operator=(
+    LevelSetGeometrySnapshotReuseCache&&) noexcept = default;
 
-void FreeSurfaceGeometrySnapshotReuseCache::clear() noexcept
+void LevelSetGeometrySnapshotReuseCache::clear() noexcept
 {
     if (!state_) {
         state_ = std::make_unique<State>();
@@ -3959,15 +3959,15 @@ void FreeSurfaceGeometrySnapshotReuseCache::clear() noexcept
     last_build_ = Statistics{};
 }
 
-bool FreeSurfaceGeometrySnapshotReuseCache::empty() const noexcept
+bool LevelSetGeometrySnapshotReuseCache::empty() const noexcept
 {
     return !state_ || !state_->valid;
 }
 
 namespace {
 
-[[nodiscard]] bool samePolicyBits(const FreeSurfaceGeometrySnapshotPolicy& a,
-                                  const FreeSurfaceGeometrySnapshotPolicy& b) noexcept
+[[nodiscard]] bool samePolicyBits(const LevelSetGeometrySnapshotPolicy& a,
+                                  const LevelSetGeometrySnapshotPolicy& b) noexcept
 {
     return sameRealBits(a.tolerance, b.tolerance) &&
            sameRealBits(a.minimum_retained_volume_fraction,
@@ -3984,10 +3984,10 @@ namespace {
 }
 
 [[nodiscard]] bool reuseContextMatches(
-    const FreeSurfaceGeometrySnapshotReuseCache::State& state,
-    const FreeSurfaceGeometrySnapshot* templates,
+    const LevelSetGeometrySnapshotReuseCache::State& state,
+    const LevelSetGeometrySnapshot* templates,
     const assembly::IMeshAccess& mesh,
-    const FreeSurfaceGeometrySnapshotPolicy& policy)
+    const LevelSetGeometrySnapshotPolicy& policy)
 {
     return state.valid && templates != nullptr &&
            mesh.revisionTrackingAvailable() && state.mesh == &mesh &&
@@ -3996,7 +3996,7 @@ namespace {
            state.dimension == mesh.dimension() &&
            state.cell_count == mesh.numCells() &&
            state.mesh_revision ==
-               FreeSurfaceGeometryLocalMeshRevision{
+               LevelSetGeometryLocalMeshRevision{
                    .mesh_geometry_revision = mesh.geometryRevision(),
                    .mesh_topology_revision = mesh.topologyRevision(),
                    .ownership_revision = mesh.ownershipRevision(),
@@ -4009,7 +4009,7 @@ namespace {
 }
 
 [[nodiscard]] bool isFullCellVolumeRecord(
-    const FreeSurfaceGeometryRuleRecord& record) noexcept
+    const LevelSetGeometryRuleRecord& record) noexcept
 {
     return volumeRole(record.role) &&
            record.reference_rule.kind == geometry::CutQuadratureKind::Volume &&
@@ -4020,8 +4020,8 @@ namespace {
 // identity addRule() has completed), when every input of addRule() and of
 // the content-only validation is the same, otherwise null.
 [[nodiscard]] std::size_t findReusableFullCellRecord(
-    const FreeSurfaceGeometrySnapshotReuseCache::State& state,
-    const std::vector<FreeSurfaceGeometryRuleRecord>& templates,
+    const LevelSetGeometrySnapshotReuseCache::State& state,
+    const std::vector<LevelSetGeometryRuleRecord>& templates,
     const geometry::CutQuadratureRule& rule,
     const CutInterfaceVolumeRegion& region,
     bool classification_only)
@@ -4048,7 +4048,7 @@ namespace {
         if (state.replay[index].reusable &&
             isFullCellVolumeRecord(candidate) &&
             candidate.classification_only == classification_only &&
-            candidate.retention == FreeSurfaceGeometryRetention::Retained &&
+            candidate.retention == LevelSetGeometryRetention::Retained &&
             candidate.construction_observation ==
                 region.construction_observation &&
             candidate.source_topology_key == source_topology_key &&
@@ -4062,21 +4062,21 @@ namespace {
 
 // Gives a copied full-cell record the revision-dependent identities that
 // addRule() derives from `rule`.
-void restampReusedFullCellRecord(FreeSurfaceGeometryRuleRecord& record,
+void restampReusedFullCellRecord(LevelSetGeometryRuleRecord& record,
                                  const geometry::CutQuadratureRule& rule)
 {
     auto& provenance = record.reference_rule.provenance;
     provenance.cut_topology_revision = rule.provenance.cut_topology_revision;
     provenance.source_stable_id = rule.provenance.source_stable_id;
     provenance.source_value_revision = rule.provenance.source_value_revision;
-    provenance.free_surface_snapshot_revision_key =
-        rule.provenance.free_surface_snapshot_revision_key;
+    provenance.level_set_snapshot_revision_key =
+        rule.provenance.level_set_snapshot_revision_key;
     auto& physical = record.physical_rule;
     physical.source_stable_id = provenance.source_stable_id;
     physical.cut_topology_revision = provenance.cut_topology_revision;
     physical.source_value_revision = provenance.source_value_revision;
-    physical.free_surface_snapshot_revision_key =
-        provenance.free_surface_snapshot_revision_key;
+    physical.level_set_snapshot_revision_key =
+        provenance.level_set_snapshot_revision_key;
     record.source_fragment_stable_ids.clear();
     if (provenance.source_stable_id != 0u) {
         record.source_fragment_stable_ids.push_back(
@@ -4100,7 +4100,7 @@ void restampReusedFullCellRecord(FreeSurfaceGeometryRuleRecord& record,
 
 } // namespace
 
-std::uint64_t freeSurfaceGeometrySourceTopologyKey(
+std::uint64_t levelSetGeometrySourceTopologyKey(
     const CutInterfaceFragment& fragment,
     ElementType parent_element_type,
     Real tolerance)
@@ -4109,14 +4109,14 @@ std::uint64_t freeSurfaceGeometrySourceTopologyKey(
         fragment, parent_element_type, tolerance);
 }
 
-bool FreeSurfaceGeometryRevision::complete() const noexcept
+bool LevelSetGeometryRevision::complete() const noexcept
 {
     return !source_id.empty() && !domain_id.empty() && interface_marker >= 0 &&
            source_value_revision != 0u && snapshot_revision_key != 0u;
 }
 
-bool FreeSurfaceGeometryRevision::sameSourceState(
-    const FreeSurfaceGeometryRevision& other) const noexcept
+bool LevelSetGeometryRevision::sameSourceState(
+    const LevelSetGeometryRevision& other) const noexcept
 {
     return source_id == other.source_id && domain_id == other.domain_id &&
            interface_marker == other.interface_marker &&
@@ -4134,15 +4134,15 @@ bool FreeSurfaceGeometryRevision::sameSourceState(
                other.coefficient_classification_band;
 }
 
-FreeSurfaceGeometrySnapshot::FreeSurfaceGeometrySnapshot(
-    FreeSurfaceGeometryRevision revision,
-    FreeSurfaceGeometryLocalMeshRevision local_mesh_revision,
-    FreeSurfaceGeometrySnapshotPolicy policy,
+LevelSetGeometrySnapshot::LevelSetGeometrySnapshot(
+    LevelSetGeometryRevision revision,
+    LevelSetGeometryLocalMeshRevision local_mesh_revision,
+    LevelSetGeometrySnapshotPolicy policy,
     LevelSetInterfaceDomain interface_domain,
     std::vector<GeneratedInterfaceBoundaryIntersectionDomain> contact_domains,
     std::vector<GeneratedActiveBoundaryDomain> active_boundary_domains,
-    std::vector<FreeSurfaceGeometryRuleRecord> rules,
-    FreeSurfaceGeometryValidationLedger ledger)
+    std::vector<LevelSetGeometryRuleRecord> rules,
+    LevelSetGeometryValidationLedger ledger)
     : revision_(std::move(revision))
     , local_mesh_revision_(local_mesh_revision)
     , policy_(policy)
@@ -4154,56 +4154,56 @@ FreeSurfaceGeometrySnapshot::FreeSurfaceGeometrySnapshot(
 {
 }
 
-const FreeSurfaceGeometryRevision&
-FreeSurfaceGeometrySnapshot::revision() const noexcept
+const LevelSetGeometryRevision&
+LevelSetGeometrySnapshot::revision() const noexcept
 {
     return revision_;
 }
 
-const FreeSurfaceGeometryLocalMeshRevision&
-FreeSurfaceGeometrySnapshot::localMeshRevision() const noexcept
+const LevelSetGeometryLocalMeshRevision&
+LevelSetGeometrySnapshot::localMeshRevision() const noexcept
 {
     return local_mesh_revision_;
 }
 
-const FreeSurfaceGeometrySnapshotPolicy&
-FreeSurfaceGeometrySnapshot::policy() const noexcept
+const LevelSetGeometrySnapshotPolicy&
+LevelSetGeometrySnapshot::policy() const noexcept
 {
     return policy_;
 }
 
 const LevelSetInterfaceDomain&
-FreeSurfaceGeometrySnapshot::interfaceDomain() const noexcept
+LevelSetGeometrySnapshot::interfaceDomain() const noexcept
 {
     return interface_domain_;
 }
 
 const std::vector<GeneratedInterfaceBoundaryIntersectionDomain>&
-FreeSurfaceGeometrySnapshot::contactDomains() const noexcept
+LevelSetGeometrySnapshot::contactDomains() const noexcept
 {
     return contact_domains_;
 }
 
 const std::vector<GeneratedActiveBoundaryDomain>&
-FreeSurfaceGeometrySnapshot::activeBoundaryDomains() const noexcept
+LevelSetGeometrySnapshot::activeBoundaryDomains() const noexcept
 {
     return active_boundary_domains_;
 }
 
-const std::vector<FreeSurfaceGeometryRuleRecord>&
-FreeSurfaceGeometrySnapshot::rules() const noexcept
+const std::vector<LevelSetGeometryRuleRecord>&
+LevelSetGeometrySnapshot::rules() const noexcept
 {
     return rules_;
 }
 
-const FreeSurfaceGeometryValidationLedger&
-FreeSurfaceGeometrySnapshot::ledger() const noexcept
+const LevelSetGeometryValidationLedger&
+LevelSetGeometrySnapshot::ledger() const noexcept
 {
     return ledger_;
 }
 
 FreeSurfaceDiscreteFunctionalState freeSurfaceDiscreteFunctionalLayout(
-    const FreeSurfaceGeometrySnapshot& snapshot,
+    const LevelSetGeometrySnapshot& snapshot,
     const FreeSurfaceDiscreteFunctionalParameters& parameters)
 {
     if (!snapshot.revision().complete()) {
@@ -4252,8 +4252,8 @@ FreeSurfaceDiscreteFunctionalState freeSurfaceDiscreteFunctionalLayout(
 
     const auto wall_role =
         parameters.liquid_side == geometry::CutIntegrationSide::Negative
-            ? FreeSurfaceGeometryRuleRole::NegativeExteriorBoundary
-            : FreeSurfaceGeometryRuleRole::PositiveExteriorBoundary;
+            ? LevelSetGeometryRuleRole::NegativeExteriorBoundary
+            : LevelSetGeometryRuleRole::PositiveExteriorBoundary;
 
     FreeSurfaceDiscreteFunctionalState state;
     state.snapshot_revision_key =
@@ -4265,7 +4265,7 @@ FreeSurfaceDiscreteFunctionalState freeSurfaceDiscreteFunctionalLayout(
     // Every wall the owned retained rules touch is a wall of the layout.
     for (const auto& record : snapshot.rules()) {
         if (!record.locally_owned ||
-            record.retention != FreeSurfaceGeometryRetention::Retained) {
+            record.retention != LevelSetGeometryRetention::Retained) {
             continue;
         }
         if (record.role == wall_role) {
@@ -4274,7 +4274,7 @@ FreeSurfaceDiscreteFunctionalState freeSurfaceDiscreteFunctionalLayout(
                     "free-surface functional encountered exterior-boundary geometry without a physical marker");
             }
             ensure_geometry_wall(record.physical_boundary_marker);
-        } else if (record.role == FreeSurfaceGeometryRuleRole::Contact) {
+        } else if (record.role == LevelSetGeometryRuleRole::Contact) {
             if (record.physical_boundary_marker < 0) {
                 throw std::invalid_argument(
                     "free-surface functional encountered contact geometry without a physical marker");
@@ -4292,18 +4292,18 @@ FreeSurfaceDiscreteFunctionalState freeSurfaceDiscreteFunctionalLayout(
 }
 
 std::size_t freeSurfaceOwnedRulePointCount(
-    const FreeSurfaceGeometrySnapshot& snapshot,
-    FreeSurfaceGeometryRuleRole role,
+    const LevelSetGeometrySnapshot& snapshot,
+    LevelSetGeometryRuleRole role,
     const assembly::IMeshAccess* mesh)
 {
     std::size_t count = 0u;
     for (const auto& stored_record : snapshot.rules()) {
         if (!stored_record.locally_owned ||
-            stored_record.retention != FreeSurfaceGeometryRetention::Retained ||
+            stored_record.retention != LevelSetGeometryRetention::Retained ||
             stored_record.role != role) {
             continue;
         }
-        std::optional<FreeSurfaceGeometryRuleRecord> rematerialized;
+        std::optional<LevelSetGeometryRuleRecord> rematerialized;
         const auto& record = integrationRecord(
             stored_record, mesh, rematerialized, "free-surface functional quadrature-point count");
         if (record.reference_rule.points.size() !=
@@ -4318,7 +4318,7 @@ std::size_t freeSurfaceOwnedRulePointCount(
 
 FreeSurfaceDiscreteFunctionalVariationState
 freeSurfaceDiscreteFunctionalVariationLayout(
-    const FreeSurfaceGeometrySnapshot& snapshot,
+    const LevelSetGeometrySnapshot& snapshot,
     const FreeSurfaceDiscreteFunctionalParameters& parameters)
 {
     if (parameters.liquid_side != geometry::CutIntegrationSide::Negative &&
@@ -4530,7 +4530,7 @@ void finalizeFreeSurfaceDynamicContactState(
 }
 
 FreeSurfaceDynamicContactState evaluateFreeSurfaceDynamicContactState(
-    const FreeSurfaceGeometrySnapshot& snapshot,
+    const LevelSetGeometrySnapshot& snapshot,
     const FreeSurfaceDiscreteFunctionalParameters& parameters,
     const FreeSurfaceDiscreteFunctionalVectorEvaluator& velocity)
 {
@@ -4612,12 +4612,12 @@ FreeSurfaceDynamicContactState evaluateFreeSurfaceDynamicContactState(
     state.surface_tension = parameters.surface_tension;
     const auto wall_role =
         parameters.liquid_side == geometry::CutIntegrationSide::Negative
-            ? FreeSurfaceGeometryRuleRole::NegativeExteriorBoundary
-            : FreeSurfaceGeometryRuleRole::PositiveExteriorBoundary;
+            ? LevelSetGeometryRuleRole::NegativeExteriorBoundary
+            : LevelSetGeometryRuleRole::PositiveExteriorBoundary;
     for (const auto& record : snapshot.rules()) {
         if (!record.locally_owned ||
-            record.retention != FreeSurfaceGeometryRetention::Retained ||
-            (record.role != FreeSurfaceGeometryRuleRole::Contact &&
+            record.retention != LevelSetGeometryRetention::Retained ||
+            (record.role != LevelSetGeometryRuleRole::Contact &&
              record.role != wall_role)) {
             continue;
         }
@@ -4831,8 +4831,8 @@ FreeSurfaceDynamicContactState evaluateFreeSurfaceDynamicContactState(
     return state;
 }
 
-FreeSurfaceGeometryRuleRecord materializeFreeSurfaceGeometryRuleRecord(
-    const FreeSurfaceGeometryRuleRecord& record,
+LevelSetGeometryRuleRecord materializeLevelSetGeometryRuleRecord(
+    const LevelSetGeometryRuleRecord& record,
     const assembly::IMeshAccess& mesh)
 {
     return materializeClassificationOnlyRecord(record, mesh);
@@ -4840,8 +4840,8 @@ FreeSurfaceGeometryRuleRecord materializeFreeSurfaceGeometryRuleRecord(
 
 namespace {
 
-FreeSurfaceGeometryRuleRecord materializeClassificationOnlyRecord(
-    const FreeSurfaceGeometryRuleRecord& record,
+LevelSetGeometryRuleRecord materializeClassificationOnlyRecord(
+    const LevelSetGeometryRuleRecord& record,
     const assembly::IMeshAccess& mesh)
 {
     if (!record.classification_only) {
@@ -4853,7 +4853,7 @@ FreeSurfaceGeometryRuleRecord materializeClassificationOnlyRecord(
         throw std::invalid_argument(
             "classification-only free-surface record is not a full-cell volume rule");
     }
-    FreeSurfaceGeometryRuleRecord result = record;
+    LevelSetGeometryRuleRecord result = record;
     result.classification_only = false;
     result.classification_only_content_digest = 0u;
     materializeAuthoritativeFullCellPoints(
@@ -4862,8 +4862,8 @@ FreeSurfaceGeometryRuleRecord materializeClassificationOnlyRecord(
         makeParentCellMomentCertificate(mesh, result.reference_rule).moments;
     result.physical_rule =
         geometry::mapCutQuadratureRuleToPhysical(mesh, result.reference_rule);
-    result.physical_rule.free_surface_snapshot_revision_key =
-        record.physical_rule.free_surface_snapshot_revision_key;
+    result.physical_rule.level_set_snapshot_revision_key =
+        record.physical_rule.level_set_snapshot_revision_key;
     if (result.physical_rule.physical_measure !=
             record.physical_rule.physical_measure ||
         ruleContentDigest(result) !=
@@ -4876,27 +4876,27 @@ FreeSurfaceGeometryRuleRecord materializeClassificationOnlyRecord(
 
 } // namespace
 
-std::uint64_t freeSurfaceGeometryRuleContentDigest(
-    const FreeSurfaceGeometryRuleRecord& record) noexcept
+std::uint64_t levelSetGeometryRuleContentDigest(
+    const LevelSetGeometryRuleRecord& record) noexcept
 {
     return ruleContentDigest(record);
 }
 
-std::vector<const FreeSurfaceGeometryRuleRecord*>
-FreeSurfaceGeometrySnapshot::retainedRules(
-    FreeSurfaceGeometryRuleRole role) const
+std::vector<const LevelSetGeometryRuleRecord*>
+LevelSetGeometrySnapshot::retainedRules(
+    LevelSetGeometryRuleRole role) const
 {
-    std::vector<const FreeSurfaceGeometryRuleRecord*> result;
+    std::vector<const LevelSetGeometryRuleRecord*> result;
     for (const auto& rule : rules_) {
         if (rule.role == role &&
-            rule.retention == FreeSurfaceGeometryRetention::Retained) {
+            rule.retention == LevelSetGeometryRetention::Retained) {
             result.push_back(&rule);
         }
     }
     return result;
 }
 
-std::size_t FreeSurfaceGeometrySnapshot::residentBytes() const noexcept
+std::size_t LevelSetGeometrySnapshot::residentBytes() const noexcept
 {
     std::size_t bytes = sizeof(*this);
     bytes += revision_.source_id.capacity() + revision_.domain_id.capacity();
@@ -4995,7 +4995,7 @@ std::size_t FreeSurfaceGeometrySnapshot::residentBytes() const noexcept
                      sizeof(geometry::CutQuadraturePoint);
         }
     }
-    bytes += rules_.capacity() * sizeof(FreeSurfaceGeometryRuleRecord);
+    bytes += rules_.capacity() * sizeof(LevelSetGeometryRuleRecord);
     for (const auto& rule : rules_) {
         bytes += rule.reference_rule.points.capacity() *
                  sizeof(geometry::CutQuadraturePoint);
@@ -5004,7 +5004,7 @@ std::size_t FreeSurfaceGeometrySnapshot::residentBytes() const noexcept
         bytes += rule.source_fragment_stable_ids.capacity() *
                  sizeof(std::uint64_t);
         bytes += rule.moment_certificate.moments.capacity() *
-                 sizeof(FreeSurfaceGeometryMonomialMoment);
+                 sizeof(LevelSetGeometryMonomialMoment);
         bytes += rule.topology_id.capacity();
         bytes += rule.reference_rule.policy.name.capacity();
         bytes += rule.reference_rule.provenance.embedded_geometry_id.capacity();
@@ -5020,18 +5020,18 @@ std::size_t FreeSurfaceGeometrySnapshot::residentBytes() const noexcept
     return bytes;
 }
 
-std::shared_ptr<const FreeSurfaceGeometrySnapshot>
-buildFreeSurfaceGeometrySnapshot(
+std::shared_ptr<const LevelSetGeometrySnapshot>
+buildLevelSetGeometrySnapshot(
     LevelSetInterfaceDomain interface_domain,
     std::vector<GeneratedInterfaceBoundaryIntersectionDomain> contact_domains,
     std::vector<GeneratedActiveBoundaryDomain> active_boundary_domains,
     const assembly::IMeshAccess& mesh,
-    FreeSurfaceGeometrySnapshotPolicy policy,
-    FreeSurfaceGeometryScalarEvaluator scalar,
+    LevelSetGeometrySnapshotPolicy policy,
+    LevelSetGeometryScalarEvaluator scalar,
     std::string domain_id,
-    FreeSurfaceGeometryOwnershipCollective ownership_collective)
+    LevelSetGeometryOwnershipCollective ownership_collective)
 {
-    return buildFreeSurfaceGeometrySnapshot(std::move(interface_domain),
+    return buildLevelSetGeometrySnapshot(std::move(interface_domain),
                                             std::move(contact_domains),
                                             std::move(active_boundary_domains),
                                             mesh,
@@ -5043,17 +5043,17 @@ buildFreeSurfaceGeometrySnapshot(
                                             1);
 }
 
-std::shared_ptr<const FreeSurfaceGeometrySnapshot>
-buildFreeSurfaceGeometrySnapshot(
+std::shared_ptr<const LevelSetGeometrySnapshot>
+buildLevelSetGeometrySnapshot(
     LevelSetInterfaceDomain interface_domain,
     std::vector<GeneratedInterfaceBoundaryIntersectionDomain> contact_domains,
     std::vector<GeneratedActiveBoundaryDomain> active_boundary_domains,
     const assembly::IMeshAccess& mesh,
-    FreeSurfaceGeometrySnapshotPolicy policy,
-    FreeSurfaceGeometryScalarEvaluator scalar,
+    LevelSetGeometrySnapshotPolicy policy,
+    LevelSetGeometryScalarEvaluator scalar,
     std::string domain_id,
-    FreeSurfaceGeometryOwnershipCollective ownership_collective,
-    FreeSurfaceGeometrySnapshotReuseCache* reuse_cache,
+    LevelSetGeometryOwnershipCollective ownership_collective,
+    LevelSetGeometrySnapshotReuseCache* reuse_cache,
     int threads)
 {
     if (!interface_domain.request().valid() || !(policy.tolerance > Real{0.0}) ||
@@ -5084,32 +5084,32 @@ buildFreeSurfaceGeometrySnapshot(
             "free-surface geometry request does not match the current mesh revision");
     }
     auto revision = makeRevision(interface_domain, mesh, std::move(domain_id));
-    const FreeSurfaceGeometryLocalMeshRevision local_mesh_revision{
+    const LevelSetGeometryLocalMeshRevision local_mesh_revision{
         .mesh_geometry_revision = mesh.geometryRevision(),
         .mesh_topology_revision = mesh.topologyRevision(),
         .ownership_revision = mesh.ownershipRevision(),
         .numbering_revision = mesh.numberingRevision(),
     };
-    FreeSurfaceGeometryValidationLedger ledger;
-    std::vector<FreeSurfaceGeometryRuleRecord> records;
+    LevelSetGeometryValidationLedger ledger;
+    std::vector<LevelSetGeometryRuleRecord> records;
 
     requireUniqueAuthoritativeSourceIds(interface_domain);
     requireCompleteAuthoritativeCutFamilies(interface_domain);
     // With a reuse cache, the records of full-cell volume rules whose inputs
     // match the previous build are copied (see
-    // FreeSurfaceGeometrySnapshotReuseCache); record_replay keeps what the
+    // LevelSetGeometrySnapshotReuseCache); record_replay keeps what the
     // next build needs to reuse this build's records, and record_reused marks
     // the copied ones.  Without a cache this function runs unchanged.
     const bool reuse = reuse_cache != nullptr;
     const auto reuse_templates =
         reuse ? reuse_cache->state().snapshot.lock()
-              : std::shared_ptr<const FreeSurfaceGeometrySnapshot>{};
+              : std::shared_ptr<const LevelSetGeometrySnapshot>{};
     const bool reuse_context_matches =
         reuse && reuseContextMatches(reuse_cache->state(),
                                      reuse_templates.get(),
                                      mesh,
                                      policy);
-    FreeSurfaceGeometrySnapshotReuseCache::Statistics reuse_statistics;
+    LevelSetGeometrySnapshotReuseCache::Statistics reuse_statistics;
     reuse_statistics.context_matched = reuse_context_matches;
     std::vector<snapshot_reuse_detail::FullCellRecordReplay> record_replay;
     std::vector<unsigned char> record_reused;
@@ -5161,7 +5161,7 @@ buildFreeSurfaceGeometrySnapshot(
                         static_cast<bool>(scalar.make_concurrent_copy))
             ? threads
             : 1;
-    std::vector<FreeSurfaceGeometryScalarEvaluator> participant_scalars;
+    std::vector<LevelSetGeometryScalarEvaluator> participant_scalars;
     participant_scalars.reserve(static_cast<std::size_t>(rule_threads));
     participant_scalars.push_back(scalar);
     for (int participant = 1; participant < rule_threads; ++participant) {
@@ -5188,8 +5188,8 @@ buildFreeSurfaceGeometrySnapshot(
         std::exception_ptr error{};
         bool reused{false};
         bool full_cell{false};
-        std::vector<FreeSurfaceGeometryRuleRecord> record{};
-        FreeSurfaceGeometryValidationLedger counts{};
+        std::vector<LevelSetGeometryRuleRecord> record{};
+        LevelSetGeometryValidationLedger counts{};
         snapshot_reuse_detail::FullCellRecordReplay replay{};
     };
     const auto build_volume_rule = [&](std::size_t rule_index,
@@ -5271,7 +5271,7 @@ buildFreeSurfaceGeometrySnapshot(
         addRule(outcome.record,
                 counts,
                 std::move(rule),
-                FreeSurfaceGeometryRuleRole::Interface,
+                LevelSetGeometryRuleRole::Interface,
                 mesh,
                 policy,
                 std::move(moment_certificate),
@@ -5282,7 +5282,7 @@ buildFreeSurfaceGeometrySnapshot(
             outcome.replay.point_count = record.reference_rule.points.size();
         }
         if (!classification_only ||
-            record.retention != FreeSurfaceGeometryRetention::Retained) {
+            record.retention != LevelSetGeometryRetention::Retained) {
             return;
         }
         if (!record.moment_certificate.phase_sign_certified &&
@@ -5290,11 +5290,11 @@ buildFreeSurfaceGeometrySnapshot(
             throw std::invalid_argument(
                 "free-surface snapshot volume validation requires a scalar value evaluator when source geometry does not certify the represented phase");
         }
-        const FreeSurfaceGeometryRuleRecord* const cell_rules[] = {&record};
+        const LevelSetGeometryRuleRecord* const cell_rules[] = {&record};
         if (reuse && full_cell_volume_rule) {
             // Validate into a scratch ledger to record the content-only
             // contribution for the next build, then merge it.
-            FreeSurfaceGeometryValidationLedger scratch{};
+            LevelSetGeometryValidationLedger scratch{};
             validateRule(record,
                          interface_domain,
                          mesh,
@@ -5345,7 +5345,7 @@ buildFreeSurfaceGeometrySnapshot(
             record.physical_rule.points);
         // The parent-cell certificate depends only on the cell type and the
         // claimed order; its scalar fields stay.
-        std::vector<FreeSurfaceGeometryMonomialMoment>().swap(
+        std::vector<LevelSetGeometryMonomialMoment>().swap(
             record.moment_certificate.moments);
         record.classification_only = true;
     };
@@ -5398,15 +5398,15 @@ buildFreeSurfaceGeometrySnapshot(
         const auto phase_role =
             *policy.interface_retention_side ==
                     geometry::CutIntegrationSide::Negative
-                ? FreeSurfaceGeometryRuleRole::NegativeVolume
-                : FreeSurfaceGeometryRuleRole::PositiveVolume;
+                ? LevelSetGeometryRuleRole::NegativeVolume
+                : LevelSetGeometryRuleRole::PositiveVolume;
         std::unordered_set<MeshIndex> retained_phase_parents;
         for (const auto& record : records) {
             if (record.role != phase_role) {
                 continue;
             }
             const auto parent = record.reference_rule.provenance.parent_entity;
-            if (record.retention == FreeSurfaceGeometryRetention::Retained) {
+            if (record.retention == LevelSetGeometryRetention::Retained) {
                 retained_phase_parents.insert(parent);
             } else {
                 pruned_phase_parents.insert(parent);
@@ -5420,15 +5420,15 @@ buildFreeSurfaceGeometrySnapshot(
         [&pruned_phase_parents](const geometry::CutQuadratureRule& rule) {
             return pruned_phase_parents.contains(
                        rule.provenance.parent_entity)
-                       ? FreeSurfaceGeometryRetention::PrunedSmallVolume
-                       : FreeSurfaceGeometryRetention::Retained;
+                       ? LevelSetGeometryRetention::PrunedSmallVolume
+                       : LevelSetGeometryRetention::Retained;
         };
     const auto fragment_by_stable_id =
         firstSourceByStableId(interface_domain.fragments());
     struct InterfaceRuleOutcome {
         std::exception_ptr error{};
-        std::vector<FreeSurfaceGeometryRuleRecord> record{};
-        FreeSurfaceGeometryValidationLedger counts{};
+        std::vector<LevelSetGeometryRuleRecord> record{};
+        LevelSetGeometryValidationLedger counts{};
     };
     std::vector<InterfaceRuleOutcome> interface_outcomes;
     for (std::size_t chunk_begin = 0; chunk_begin < interface_rules.size();
@@ -5458,7 +5458,7 @@ buildFreeSurfaceGeometrySnapshot(
                     addRule(outcome.record,
                             outcome.counts,
                             std::move(rule),
-                            FreeSurfaceGeometryRuleRole::Interface,
+                            LevelSetGeometryRuleRole::Interface,
                             mesh,
                             policy,
                             std::move(moment_certificate),
@@ -5527,7 +5527,7 @@ buildFreeSurfaceGeometrySnapshot(
             addRule(records,
                     ledger,
                     std::move(rule),
-                    FreeSurfaceGeometryRuleRole::Contact,
+                    LevelSetGeometryRuleRole::Contact,
                     mesh,
                     policy,
                     std::move(moment_certificate),
@@ -5557,18 +5557,18 @@ buildFreeSurfaceGeometrySnapshot(
     // (role, parent cell global id) of every retained record, extended
     // lazily over the records appended so far.  A lookup is equivalent to
     // searching the full record list.
-    std::set<std::pair<FreeSurfaceGeometryRuleRole, GlobalIndex>>
+    std::set<std::pair<LevelSetGeometryRuleRole, GlobalIndex>>
         retained_parents;
     std::size_t retained_parents_scanned = 0u;
     const auto has_retained_record = [&records,
                                       &retained_parents,
                                       &retained_parents_scanned](
-                                         FreeSurfaceGeometryRuleRole role,
+                                         LevelSetGeometryRuleRole role,
                                          GlobalIndex parent_cell_global_id) {
         for (; retained_parents_scanned < records.size();
              ++retained_parents_scanned) {
             const auto& record = records[retained_parents_scanned];
-            if (record.retention == FreeSurfaceGeometryRetention::Retained) {
+            if (record.retention == LevelSetGeometryRetention::Retained) {
                 retained_parents.emplace(
                     record.role,
                     record.reference_rule.provenance.parent_entity_global_id);
@@ -5601,15 +5601,15 @@ buildFreeSurfaceGeometrySnapshot(
             }
             const auto role = active.request().side ==
                                       geometry::CutIntegrationSide::Negative
-                                  ? FreeSurfaceGeometryRuleRole::
+                                  ? LevelSetGeometryRuleRole::
                                         NegativeExteriorBoundary
-                                  : FreeSurfaceGeometryRuleRole::
+                                  : LevelSetGeometryRuleRole::
                                         PositiveExteriorBoundary;
             const auto volume_role =
                 active.request().side ==
                         geometry::CutIntegrationSide::Negative
-                    ? FreeSurfaceGeometryRuleRole::NegativeVolume
-                    : FreeSurfaceGeometryRuleRole::PositiveVolume;
+                    ? LevelSetGeometryRuleRole::NegativeVolume
+                    : LevelSetGeometryRuleRole::PositiveVolume;
             const auto parent_cell_global_id =
                 rule.provenance.parent_entity_global_id;
             const bool has_retained_parent_volume =
@@ -5635,8 +5635,8 @@ buildFreeSurfaceGeometrySnapshot(
                     std::move(source_ids),
                     componentIdForActiveRule(active, stable_id),
                     has_retained_parent_volume
-                        ? FreeSurfaceGeometryRetention::Retained
-                        : FreeSurfaceGeometryRetention::PrunedSmallVolume);
+                        ? LevelSetGeometryRetention::Retained
+                        : LevelSetGeometryRetention::PrunedSmallVolume);
         }
     }
     for (const auto& [boundary, contact] : contact_by_boundary) {
@@ -5668,8 +5668,8 @@ buildFreeSurfaceGeometrySnapshot(
 
     const bool has_interface_or_contact_rules =
         std::any_of(records.begin(), records.end(), [](const auto& record) {
-            return record.role == FreeSurfaceGeometryRuleRole::Interface ||
-                   record.role == FreeSurfaceGeometryRuleRole::Contact;
+            return record.role == LevelSetGeometryRuleRole::Interface ||
+                   record.role == LevelSetGeometryRuleRole::Contact;
         });
     const bool has_volume_rule_without_phase_certificate =
         std::any_of(records.begin(), records.end(), [](const auto& record) {
@@ -5699,7 +5699,7 @@ buildFreeSurfaceGeometrySnapshot(
     // keeps its exception, which the ordered loop below raises at the record
     // where the serial loop would have raised it.
     std::vector<std::exception_ptr> validation_errors(records.size());
-    std::vector<FreeSurfaceGeometryValidationLedger> participant_ledgers(
+    std::vector<LevelSetGeometryValidationLedger> participant_ledgers(
         static_cast<std::size_t>(rule_threads));
     std::vector<std::vector<std::array<Real, 3>>> participant_points(
         static_cast<std::size_t>(rule_threads));
@@ -5737,7 +5737,7 @@ buildFreeSurfaceGeometrySnapshot(
                                               participant_scalar,
                                               participant_ledger);
                 } else if (reuse && isFullCellVolumeRecord(record)) {
-                    FreeSurfaceGeometryValidationLedger scratch{};
+                    LevelSetGeometryValidationLedger scratch{};
                     validateRule(record,
                                  interface_domain,
                                  mesh,
@@ -5768,7 +5768,7 @@ buildFreeSurfaceGeometrySnapshot(
         },
         /*block_size=*/64u,
         /*min_parallel_items=*/256u);
-    std::set<std::tuple<FreeSurfaceGeometryRuleRole,
+    std::set<std::tuple<LevelSetGeometryRuleRole,
                         int,
                         GlobalIndex,
                         GlobalIndex,
@@ -5829,9 +5829,9 @@ buildFreeSurfaceGeometrySnapshot(
     }
     for (auto& record : records) {
         record.reference_rule.provenance
-            .free_surface_snapshot_revision_key =
+            .level_set_snapshot_revision_key =
             revision.snapshot_revision_key;
-        record.physical_rule.free_surface_snapshot_revision_key =
+        record.physical_rule.level_set_snapshot_revision_key =
             revision.snapshot_revision_key;
     }
     std::vector<std::uint32_t> first_volume_record_by_cell;
@@ -5856,8 +5856,8 @@ buildFreeSurfaceGeometrySnapshot(
             }
         }
     }
-    auto snapshot = std::shared_ptr<const FreeSurfaceGeometrySnapshot>(
-        new FreeSurfaceGeometrySnapshot(
+    auto snapshot = std::shared_ptr<const LevelSetGeometrySnapshot>(
+        new LevelSetGeometrySnapshot(
             std::move(revision),
             local_mesh_revision,
             policy,
@@ -5885,9 +5885,9 @@ buildFreeSurfaceGeometrySnapshot(
     return snapshot;
 }
 
-std::string compareFreeSurfaceGeometrySnapshots(
-    const FreeSurfaceGeometrySnapshot& a,
-    const FreeSurfaceGeometrySnapshot& b)
+std::string compareLevelSetGeometrySnapshots(
+    const LevelSetGeometrySnapshot& a,
+    const LevelSetGeometrySnapshot& b)
 {
     const auto& ar = a.revision();
     const auto& br = b.revision();
@@ -5940,8 +5940,8 @@ std::string compareFreeSurfaceGeometrySnapshots(
     return {};
 }
 
-std::shared_ptr<const FreeSurfaceGeometrySnapshot>
-FreeSurfaceGeometrySnapshotCache::find(std::uint64_t revision_key)
+std::shared_ptr<const LevelSetGeometrySnapshot>
+LevelSetGeometrySnapshotCache::find(std::uint64_t revision_key)
 {
     evictExpired();
     const auto found = snapshots_.find(revision_key);
@@ -5960,8 +5960,8 @@ FreeSurfaceGeometrySnapshotCache::find(std::uint64_t revision_key)
     return snapshot;
 }
 
-void FreeSurfaceGeometrySnapshotCache::insert(
-    std::shared_ptr<const FreeSurfaceGeometrySnapshot> snapshot)
+void LevelSetGeometrySnapshotCache::insert(
+    std::shared_ptr<const LevelSetGeometrySnapshot> snapshot)
 {
     if (!snapshot || !snapshot->revision().complete()) {
         throw std::invalid_argument(
@@ -5974,7 +5974,7 @@ void FreeSurfaceGeometrySnapshotCache::insert(
     (void)statistics();
 }
 
-void FreeSurfaceGeometrySnapshotCache::evictExpired()
+void LevelSetGeometrySnapshotCache::evictExpired()
 {
     for (auto iterator = snapshots_.begin(); iterator != snapshots_.end();) {
         if (iterator->second.snapshot.expired()) {
@@ -5986,8 +5986,8 @@ void FreeSurfaceGeometrySnapshotCache::evictExpired()
     }
 }
 
-FreeSurfaceGeometrySnapshotCacheStatistics
-FreeSurfaceGeometrySnapshotCache::statistics()
+LevelSetGeometrySnapshotCacheStatistics
+LevelSetGeometrySnapshotCache::statistics()
 {
     evictExpired();
     statistics_.live_snapshot_count = 0u;

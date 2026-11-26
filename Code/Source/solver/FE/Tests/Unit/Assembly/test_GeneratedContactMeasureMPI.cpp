@@ -8,7 +8,7 @@
 #include "Assembly/Assembler.h"
 #include "Assembly/CutIntegrationContext.h"
 #include "Geometry/CutQuadrature.h"
-#include "Interfaces/FreeSurfaceGeometrySnapshot.h"
+#include "Interfaces/LevelSetGeometrySnapshot.h"
 #include "Interfaces/GeneratedInterfaceBoundaryIntersectionDomain.h"
 #include "Interfaces/LevelSetInterfaceBuilder.h"
 
@@ -70,10 +70,10 @@ constexpr int kInterfaceMarker = 3041;
     return gathered;
 }
 
-[[nodiscard]] interfaces::FreeSurfaceGeometryOwnershipCollective
+[[nodiscard]] interfaces::LevelSetGeometryOwnershipCollective
 mpiOwnershipCollective(int rank, int size)
 {
-    interfaces::FreeSurfaceGeometryOwnershipCollective collective;
+    interfaces::LevelSetGeometryOwnershipCollective collective;
     collective.rank = rank;
     collective.size = size;
     collective.all_gather_owned_rule_identity_values =
@@ -770,12 +770,12 @@ buildSessileCapContactDomain(const GhostedQuadStripMeshAccess& mesh,
         pointContactRequest(source_revision, &mesh), interface_domain, mesh);
 }
 
-[[nodiscard]] std::shared_ptr<const interfaces::FreeSurfaceGeometrySnapshot>
+[[nodiscard]] std::shared_ptr<const interfaces::LevelSetGeometrySnapshot>
 buildSessileCapSnapshot(
     const GhostedQuadStripMeshAccess& mesh,
     const RotatedSessileCap& cap,
     std::uint64_t source_revision,
-    interfaces::FreeSurfaceGeometryOwnershipCollective collective,
+    interfaces::LevelSetGeometryOwnershipCollective collective,
     std::string domain_id)
 {
     auto interface_domain =
@@ -797,7 +797,7 @@ buildSessileCapSnapshot(
             sessileCapValue(cap, x0, Real{1.0}),
         }};
     };
-    interfaces::FreeSurfaceGeometryScalarEvaluator scalar;
+    interfaces::LevelSetGeometryScalarEvaluator scalar;
     scalar.value = [corner_values](
                        GlobalIndex parent_cell,
                        const std::array<Real, 3>& xi,
@@ -840,9 +840,9 @@ buildSessileCapSnapshot(
             pointContactRequest(source_revision, &mesh),
             interface_domain,
             mesh));
-    interfaces::FreeSurfaceGeometrySnapshotPolicy policy;
+    interfaces::LevelSetGeometrySnapshotPolicy policy;
     policy.require_complete_exterior_boundary_partition = false;
-    return interfaces::buildFreeSurfaceGeometrySnapshot(
+    return interfaces::buildLevelSetGeometrySnapshot(
         std::move(interface_domain),
         std::move(contact_domains),
         {},
@@ -912,7 +912,7 @@ globalContactSourceMappings(
     const interfaces::GeneratedInterfaceBoundaryIntersectionDomain& domain);
 
 [[nodiscard]] SnapshotMovingContactState movingContactSnapshotState(
-    const interfaces::FreeSurfaceGeometrySnapshot& snapshot,
+    const interfaces::LevelSetGeometrySnapshot& snapshot,
     std::uint64_t source_revision)
 {
     SnapshotMovingContactState state;
@@ -939,9 +939,9 @@ globalContactSourceMappings(
 
     for (const auto& record : snapshot.rules()) {
         if (record.reference_rule.provenance
-                    .free_surface_snapshot_revision_key !=
+                    .level_set_snapshot_revision_key !=
                 revision.snapshot_revision_key ||
-            record.physical_rule.free_surface_snapshot_revision_key !=
+            record.physical_rule.level_set_snapshot_revision_key !=
                 revision.snapshot_revision_key) {
             ++state.rule_snapshot_mismatch_count;
         }
@@ -953,7 +953,7 @@ globalContactSourceMappings(
     }
 
     const auto contact_rules = snapshot.retainedRules(
-        interfaces::FreeSurfaceGeometryRuleRole::Contact);
+        interfaces::LevelSetGeometryRuleRole::Contact);
     for (const auto* record : contact_rules) {
         EXPECT_NE(record, nullptr);
         if (record == nullptr) {
@@ -997,17 +997,17 @@ globalContactSourceMappings(
 }
 
 [[nodiscard]] std::vector<std::uint64_t> snapshotContactRuleSignature(
-    const interfaces::FreeSurfaceGeometrySnapshot& snapshot)
+    const interfaces::LevelSetGeometrySnapshot& snapshot)
 {
     std::vector<std::uint64_t> signature;
     for (const auto* record : snapshot.retainedRules(
-             interfaces::FreeSurfaceGeometryRuleRole::Contact)) {
+             interfaces::LevelSetGeometryRuleRole::Contact)) {
         EXPECT_NE(record, nullptr);
         if (record == nullptr) {
             continue;
         }
         signature.push_back(record->reference_rule.provenance
-                                .free_surface_snapshot_revision_key);
+                                .level_set_snapshot_revision_key);
         signature.push_back(static_cast<std::uint64_t>(
             record->reference_rule.provenance.parent_entity_global_id));
         signature.push_back(
@@ -1338,13 +1338,13 @@ TEST(GeneratedContactMeasureMPI,
     EXPECT_EQ(minimum_revision, maximum_revision);
 
     assembly::CutIntegrationContext live_context;
-    live_context.addFreeSurfaceGeometrySnapshot(valid_snapshot);
+    live_context.addLevelSetGeometrySnapshot(valid_snapshot);
     EXPECT_NO_THROW(
-        live_context.assertAllFreeSurfaceGeometrySnapshotsCurrent(valid_mesh));
+        live_context.assertAllLevelSetGeometrySnapshotsCurrent(valid_mesh));
     valid_mesh.advanceGeometryRevision();
     bool rejected_stale_consumption = false;
     try {
-        live_context.assertAllFreeSurfaceGeometrySnapshotsCurrent(valid_mesh);
+        live_context.assertAllLevelSetGeometrySnapshotsCurrent(valid_mesh);
     } catch (const std::invalid_argument&) {
         rejected_stale_consumption = true;
     }
@@ -1666,9 +1666,9 @@ TEST(GeneratedContactMeasureMPI,
             size,
             /*serial_owner_view=*/false,
             cell_count);
-        std::shared_ptr<const interfaces::FreeSurfaceGeometrySnapshot>
+        std::shared_ptr<const interfaces::LevelSetGeometrySnapshot>
             snapshot;
-        std::shared_ptr<const interfaces::FreeSurfaceGeometrySnapshot> repeat;
+        std::shared_ptr<const interfaces::LevelSetGeometrySnapshot> repeat;
         try {
             snapshot = buildSessileCapSnapshot(
                 mesh,
@@ -1712,12 +1712,12 @@ TEST(GeneratedContactMeasureMPI,
         missing_contact_count +=
             current.missing_contact_count + repeated.missing_contact_count;
         assembly::CutIntegrationContext live_context;
-        live_context.addFreeSurfaceGeometrySnapshot(snapshot);
+        live_context.addLevelSetGeometrySnapshot(snapshot);
         EXPECT_NO_THROW(
-            live_context.assertAllFreeSurfaceGeometrySnapshotsCurrent(mesh));
+            live_context.assertAllLevelSetGeometrySnapshotsCurrent(mesh));
         mesh.advanceGeometryRevision();
         try {
-            live_context.assertAllFreeSurfaceGeometrySnapshotsCurrent(mesh);
+            live_context.assertAllLevelSetGeometrySnapshotsCurrent(mesh);
             ADD_FAILURE()
                 << "stale sessile-cap snapshot consumption was accepted";
         } catch (const std::invalid_argument&) {

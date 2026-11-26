@@ -27,7 +27,7 @@
 
 #include "Constraints/SmallCutAggregationConstraint.h"
 #include "Core/Types.h"
-#include "Interfaces/FreeSurfaceGeometrySnapshot.h"
+#include "Interfaces/LevelSetGeometrySnapshot.h"
 #include "LevelSet/Maintenance/LevelSetMaintenanceWorkLedger.h"
 #include "Systems/EnergyBalanceLedger.h"
 #include "Systems/FESystem.h"

@@ -20,7 +20,7 @@
 #include "Constraints/SystemConstraint.h"
 #include "Dofs/EntityDofMap.h"
 #include "Forms/BoundaryConditions.h"
-#include "Interfaces/FreeSurfaceGeometrySnapshot.h"
+#include "Interfaces/LevelSetGeometrySnapshot.h"
 #include "Interfaces/GeneratedActiveBoundaryDomain.h"
 #include "Interfaces/GeneratedInterfaceBoundaryIntersectionDomain.h"
 #include "Interfaces/LevelSetInterfaceBuilder.h"
@@ -441,7 +441,7 @@ activeBoundaryRequest(
 }
 
 [[nodiscard]]
-std::shared_ptr<const interfaces::FreeSurfaceGeometrySnapshot>
+std::shared_ptr<const interfaces::LevelSetGeometrySnapshot>
 fullNegativeSnapshot(
     const assembly::IMeshAccess& mesh)
 {
@@ -478,20 +478,20 @@ fullNegativeSnapshot(
         active_domains;
     active_domains.push_back(
         std::move(active_domain));
-    interfaces::FreeSurfaceGeometrySnapshotPolicy policy;
+    interfaces::LevelSetGeometrySnapshotPolicy policy;
     policy.require_complete_exterior_boundary_partition =
         false;
     policy.minimum_retained_volume_fraction =
         assembly::CutIntegrationContext::
             minGeneratedCutVolumeFraction();
-    interfaces::FreeSurfaceGeometryScalarEvaluator scalar;
+    interfaces::LevelSetGeometryScalarEvaluator scalar;
     scalar.value =
         [](GlobalIndex,
            const std::array<Real, 3>&,
            const geometry::CutQuadratureProvenance&) {
             return Real{-1.0};
         };
-    return interfaces::buildFreeSurfaceGeometrySnapshot(
+    return interfaces::buildLevelSetGeometrySnapshot(
         std::move(interface_domain),
         std::move(contact_domains),
         std::move(active_domains),
@@ -749,7 +749,7 @@ rootedCutActiveBoundaryRequest(
 }
 
 [[nodiscard]]
-std::shared_ptr<const interfaces::FreeSurfaceGeometrySnapshot>
+std::shared_ptr<const interfaces::LevelSetGeometrySnapshot>
 rootedCutSnapshot(
     const assembly::IMeshAccess& mesh)
 {
@@ -800,14 +800,14 @@ rootedCutSnapshot(
         active_domains;
     active_domains.push_back(
         std::move(active_domain));
-    interfaces::FreeSurfaceGeometrySnapshotPolicy policy;
+    interfaces::LevelSetGeometrySnapshotPolicy policy;
     policy.require_complete_exterior_boundary_partition =
         false;
     policy.minimum_retained_volume_fraction =
         assembly::CutIntegrationContext::
             minGeneratedCutVolumeFraction();
 
-    interfaces::FreeSurfaceGeometryScalarEvaluator scalar;
+    interfaces::LevelSetGeometryScalarEvaluator scalar;
     scalar.value =
         [](GlobalIndex parent_cell,
            const std::array<Real, 3>& xi,
@@ -843,7 +843,7 @@ rootedCutSnapshot(
             throw std::runtime_error(
                 "rooted cut gradient received an invalid cell");
         };
-    return interfaces::buildFreeSurfaceGeometrySnapshot(
+    return interfaces::buildLevelSetGeometrySnapshot(
         std::move(interface_domain),
         std::move(contact_domains),
         std::move(active_domains),
@@ -854,7 +854,7 @@ rootedCutSnapshot(
 }
 
 [[nodiscard]]
-std::shared_ptr<const interfaces::FreeSurfaceGeometrySnapshot>
+std::shared_ptr<const interfaces::LevelSetGeometrySnapshot>
 rootlessCutTriangleSnapshot(
     const assembly::IMeshAccess& mesh)
 {
@@ -945,13 +945,13 @@ rootlessCutTriangleSnapshot(
         active_domains;
     active_domains.push_back(
         std::move(active_domain));
-    interfaces::FreeSurfaceGeometrySnapshotPolicy policy;
+    interfaces::LevelSetGeometrySnapshotPolicy policy;
     policy.require_complete_exterior_boundary_partition =
         false;
     policy.minimum_retained_volume_fraction =
         assembly::CutIntegrationContext::
             minGeneratedCutVolumeFraction();
-    interfaces::FreeSurfaceGeometryScalarEvaluator scalar;
+    interfaces::LevelSetGeometryScalarEvaluator scalar;
     scalar.value =
         [](GlobalIndex parent_cell,
            const std::array<Real, 3>& xi,
@@ -977,7 +977,7 @@ rootlessCutTriangleSnapshot(
                 Real{0.0},
             }};
         };
-    return interfaces::buildFreeSurfaceGeometrySnapshot(
+    return interfaces::buildLevelSetGeometrySnapshot(
         std::move(interface_domain),
         std::move(contact_domains),
         std::move(active_domains),
@@ -1450,7 +1450,7 @@ TEST(GeneratedBoundaryAggregateTraceCertificate,
         std::make_shared<
             assembly::CutIntegrationContext>();
     ASSERT_NO_THROW(
-        context->addFreeSurfaceGeometrySnapshot(
+        context->addLevelSetGeometrySnapshot(
             snapshot,
             geometry::CutIntegrationSide::Negative));
     system.setCutIntegrationContext(context);
@@ -1546,11 +1546,11 @@ TEST(GeneratedBoundaryAggregateTraceCertificate,
         certificate.cut_context_content_revision,
         report.revision.cut_context_content_revision);
     EXPECT_EQ(
-        certificate.free_surface_snapshot_revision,
+        certificate.level_set_snapshot_revision,
         snapshot->revision().snapshot_revision_key);
     EXPECT_EQ(
-        certificate.free_surface_snapshot_revision,
-        report.revision.free_surface_snapshot_revision);
+        certificate.level_set_snapshot_revision,
+        report.revision.level_set_snapshot_revision);
     EXPECT_EQ(
         certificate.source_value_revision,
         kSourceValueRevision);
@@ -2061,18 +2061,18 @@ TEST(GeneratedBoundaryAggregateTraceCertificate,
         std::make_shared<
             assembly::CutIntegrationContext>();
     ASSERT_NO_THROW(
-        context->addFreeSurfaceGeometrySnapshot(
+        context->addLevelSetGeometrySnapshot(
             snapshot,
             geometry::CutIntegrationSide::Negative));
     ASSERT_NO_THROW(
         context
-            ->assertAllFreeSurfaceGeometrySnapshotsCurrent(
+            ->assertAllLevelSetGeometrySnapshotsCurrent(
                 system.meshAccess()));
     system.setCutIntegrationContext(context);
     ASSERT_NO_THROW(system.rebuildConstraintState());
     ASSERT_NO_THROW(
         context
-            ->assertAllFreeSurfaceGeometrySnapshotsCurrent(
+            ->assertAllLevelSetGeometrySnapshotsCurrent(
                 system.meshAccess()));
 
     const auto reports =
@@ -2343,7 +2343,7 @@ TEST(GeneratedBoundaryAggregateTraceCertificate,
         report.revision.cut_context_content_revision,
         context->contentRevision());
     EXPECT_EQ(
-        report.revision.free_surface_snapshot_revision,
+        report.revision.level_set_snapshot_revision,
         snapshot->revision()
             .snapshot_revision_key);
     EXPECT_EQ(
@@ -2379,7 +2379,7 @@ TEST(GeneratedBoundaryAggregateTraceCertificate,
         certificate.cut_context_content_revision,
         context->contentRevision());
     EXPECT_EQ(
-        certificate.free_surface_snapshot_revision,
+        certificate.level_set_snapshot_revision,
         snapshot->revision()
             .snapshot_revision_key);
     EXPECT_EQ(
@@ -2612,7 +2612,7 @@ TEST(GeneratedBoundaryAggregateTraceCertificate,
     auto context =
         std::make_shared<assembly::CutIntegrationContext>();
     ASSERT_NO_THROW(
-        context->addFreeSurfaceGeometrySnapshot(
+        context->addLevelSetGeometrySnapshot(
             snapshot,
             geometry::CutIntegrationSide::Negative));
     system.setCutIntegrationContext(context);
@@ -2707,7 +2707,7 @@ TEST(GeneratedBoundaryAggregateTraceCertificate,
     auto context =
         std::make_shared<assembly::CutIntegrationContext>();
     ASSERT_NO_THROW(
-        context->addFreeSurfaceGeometrySnapshot(
+        context->addLevelSetGeometrySnapshot(
             snapshot,
             geometry::CutIntegrationSide::Negative));
     system.setCutIntegrationContext(context);
@@ -2828,7 +2828,7 @@ TEST(GeneratedBoundaryAggregateTraceCertificate,
     auto context =
         std::make_shared<
             assembly::CutIntegrationContext>();
-    context->addFreeSurfaceGeometrySnapshot(
+    context->addLevelSetGeometrySnapshot(
         rootlessCutTriangleSnapshot(
             system.meshAccess()),
         geometry::CutIntegrationSide::Negative);
@@ -2921,7 +2921,7 @@ TEST(GeneratedBoundaryAggregateTraceCertificate,
     EXPECT_TRUE(reports.front()->trace_bound_eligible);
     EXPECT_FALSE(
         reports.front()
-            ->revision.has_free_surface_snapshot_revision);
+            ->revision.has_level_set_snapshot_revision);
 
     try {
         (void)certifyGeneratedBoundaryAggregateTrace(
@@ -3038,7 +3038,7 @@ TEST(GeneratedBoundaryAggregateTraceCertificate,
     auto context =
         std::make_shared<
             assembly::CutIntegrationContext>();
-    context->addFreeSurfaceGeometrySnapshot(
+    context->addLevelSetGeometrySnapshot(
         fullNegativeSnapshot(system.meshAccess()),
         geometry::CutIntegrationSide::Negative);
     system.setCutIntegrationContext(context);
@@ -3102,7 +3102,7 @@ TEST(GeneratedBoundaryAggregateTraceCertificate,
     auto context =
         std::make_shared<
             assembly::CutIntegrationContext>();
-    context->addFreeSurfaceGeometrySnapshot(
+    context->addLevelSetGeometrySnapshot(
         fullNegativeSnapshot(system.meshAccess()),
         geometry::CutIntegrationSide::Negative);
     system.setCutIntegrationContext(context);
@@ -3193,7 +3193,7 @@ TEST(GeneratedBoundaryAggregateTraceCertificate,
             auto context =
                 std::make_shared<
                     assembly::CutIntegrationContext>();
-            context->addFreeSurfaceGeometrySnapshot(
+            context->addLevelSetGeometrySnapshot(
                 fullNegativeSnapshot(system.meshAccess()),
                 geometry::CutIntegrationSide::Negative);
             system.setCutIntegrationContext(context);
@@ -3500,7 +3500,7 @@ TEST(GeneratedBoundaryAggregateTraceCertificate,
             auto context =
                 std::make_shared<
                     assembly::CutIntegrationContext>();
-            context->addFreeSurfaceGeometrySnapshot(
+            context->addLevelSetGeometrySnapshot(
                 fullNegativeSnapshot(
                     system.meshAccess()),
                 geometry::CutIntegrationSide::Negative);
@@ -3614,7 +3614,7 @@ TEST(GeneratedBoundaryAggregateTraceCertificate,
     auto context =
         std::make_shared<
             assembly::CutIntegrationContext>();
-    context->addFreeSurfaceGeometrySnapshot(
+    context->addLevelSetGeometrySnapshot(
         fullNegativeSnapshot(system.meshAccess()),
         geometry::CutIntegrationSide::Negative);
     system.setCutIntegrationContext(context);

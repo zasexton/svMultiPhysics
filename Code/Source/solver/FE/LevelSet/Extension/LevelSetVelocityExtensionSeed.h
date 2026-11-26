@@ -50,7 +50,7 @@ struct VelocityExtensionMapRevision {
   std::uint64_t mesh_topology{0u};
   std::uint64_t mesh_ownership{0u};
   std::uint64_t mesh_numbering{0u};
-  std::uint64_t free_surface_geometry{0u};
+  std::uint64_t level_set_geometry{0u};
   std::uint64_t level_set_values{0u};
   std::uint64_t active_set{0u};
 
@@ -64,7 +64,7 @@ struct VelocityExtensionMapRevision {
     std::uint64_t mesh_topology,
     std::uint64_t mesh_ownership,
     std::uint64_t mesh_numbering,
-    std::uint64_t free_surface_geometry,
+    std::uint64_t level_set_geometry,
     std::span<const double> level_set_values,
     std::span<const std::uint8_t> active_set);
 

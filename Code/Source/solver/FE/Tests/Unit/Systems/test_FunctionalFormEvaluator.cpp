@@ -13,7 +13,7 @@
 #include "Forms/FormExpr.h"
 #include "Forms/IntegrationDomain.h"
 #include "Interfaces/ContactLineStageObservables.h"
-#include "Interfaces/FreeSurfaceGeometrySnapshot.h"
+#include "Interfaces/LevelSetGeometrySnapshot.h"
 #include "Spaces/H1Space.h"
 #include "Systems/FESystem.h"
 #include "Systems/FunctionalFormEvaluator.h"
@@ -269,7 +269,7 @@ TEST(FunctionalFormEvaluator, EvaluatesTheDeclaredFunctionalsOfASystemInOrder)
     EXPECT_NEAR(values[2].value, Real{1.0} + Real{2.0} * kInterfaceX + Real{1.5}, Real{1.0e-12});
 
     // The wall functionals over the wall domains of the snapshot.
-    const auto& snapshots = sys.cutIntegrationContext()->freeSurfaceGeometrySnapshots();
+    const auto& snapshots = sys.cutIntegrationContext()->levelSetGeometrySnapshots();
     ASSERT_EQ(snapshots.size(), 1u);
     const std::vector<int> walls{fixture::kWallMarker};
     const std::vector<std::string_view> quantities{"contact_u", "wetted_x"};

@@ -2235,7 +2235,7 @@ TEST(CutIntegrationInfrastructure,
     EXPECT_TRUE(context.interfaceRules().empty());
     EXPECT_TRUE(context.interfaceRulesForMarker(51).empty());
     EXPECT_TRUE(context.generatedInterfaceRuleIndexSpanForMarker(51).empty());
-    EXPECT_NO_THROW(context.assertAllFreeSurfaceGeometrySnapshotsCurrent());
+    EXPECT_NO_THROW(context.assertAllLevelSetGeometrySnapshotsCurrent());
 
     context.clear();
     EXPECT_FALSE(context.hasGeneratedInterfaceMarker(51));
@@ -2503,7 +2503,7 @@ TEST(CutIntegrationInfrastructure,
             rule.provenance.predicate_policy_key = 31u;
             rule.provenance.source_value_revision =
                 candidate_source_revision;
-            rule.provenance.free_surface_snapshot_revision_key =
+            rule.provenance.level_set_snapshot_revision_key =
                 snapshot_revision;
 
             CutCellAssemblyMetadata metadata;
@@ -2520,7 +2520,7 @@ TEST(CutIntegrationInfrastructure,
             metadata.quadrature_policy_key = 31u;
             metadata.source_value_revision =
                 candidate_source_revision;
-            metadata.free_surface_snapshot_revision_key =
+            metadata.level_set_snapshot_revision_key =
                 snapshot_revision;
 
             EXPECT_THROW(

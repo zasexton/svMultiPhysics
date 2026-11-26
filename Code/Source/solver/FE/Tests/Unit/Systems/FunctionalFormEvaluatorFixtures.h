@@ -25,7 +25,7 @@
 #include "Assembly/CutIntegrationContext.h"
 #include "Assembly/FunctionalAssembler.h"
 #include "Dofs/DofMap.h"
-#include "Interfaces/FreeSurfaceGeometrySnapshot.h"
+#include "Interfaces/LevelSetGeometrySnapshot.h"
 #include "Interfaces/GeneratedActiveBoundaryDomain.h"
 #include "Interfaces/GeneratedInterfaceBoundaryIntersectionDomain.h"
 #include "Interfaces/LevelSetInterfaceBuilder.h"
@@ -334,10 +334,10 @@ void setMeshRevisions(const assembly::IMeshAccess& mesh, Request& request)
  * with both cut volumes, the contact points with the wall (kContactMarker)
  * and the wetted wall phi < 0 (kWettedWallMarker).
  */
-[[nodiscard]] inline std::shared_ptr<const interfaces::FreeSurfaceGeometrySnapshot> buildQuadStripSnapshot(
+[[nodiscard]] inline std::shared_ptr<const interfaces::LevelSetGeometrySnapshot> buildQuadStripSnapshot(
     const QuadStripMeshAccess& mesh,
     const PlaneFunction& phi,
-    interfaces::FreeSurfaceGeometryOwnershipCollective collective)
+    interfaces::LevelSetGeometryOwnershipCollective collective)
 {
     auto interface_domain = quadStripInterfaceDomain(mesh, phi);
 
@@ -379,7 +379,7 @@ void setMeshRevisions(const assembly::IMeshAccess& mesh, Request& request)
         const Real x1 = mesh.x(cell + 1);
         return std::array<Real, 4>{{phi(x0, Real{0.0}), phi(x1, Real{0.0}), phi(x1, Real{1.0}), phi(x0, Real{1.0})}};
     };
-    interfaces::FreeSurfaceGeometryScalarEvaluator scalar;
+    interfaces::LevelSetGeometryScalarEvaluator scalar;
     scalar.value = [corner_values](GlobalIndex cell,
                                    const std::array<Real, 3>& xi,
                                    const geometry::CutQuadratureProvenance&) {
@@ -406,10 +406,10 @@ void setMeshRevisions(const assembly::IMeshAccess& mesh, Request& request)
     contact_domains.push_back(std::move(contact_domain));
     std::vector<interfaces::GeneratedActiveBoundaryDomain> wall_domains;
     wall_domains.push_back(std::move(wetted_wall));
-    interfaces::FreeSurfaceGeometrySnapshotPolicy policy;
+    interfaces::LevelSetGeometrySnapshotPolicy policy;
     policy.require_complete_exterior_boundary_partition = false;
     policy.minimum_retained_volume_fraction = assembly::CutIntegrationContext::minGeneratedCutVolumeFraction();
-    return interfaces::buildFreeSurfaceGeometrySnapshot(std::move(interface_domain),
+    return interfaces::buildLevelSetGeometrySnapshot(std::move(interface_domain),
                                                         std::move(contact_domains),
                                                         std::move(wall_domains),
                                                         mesh,
@@ -423,10 +423,10 @@ void setMeshRevisions(const assembly::IMeshAccess& mesh, Request& request)
 [[nodiscard]] inline std::shared_ptr<assembly::CutIntegrationContext> quadStripCutContext(
     const QuadStripMeshAccess& mesh,
     const PlaneFunction& phi,
-    interfaces::FreeSurfaceGeometryOwnershipCollective collective = {})
+    interfaces::LevelSetGeometryOwnershipCollective collective = {})
 {
     auto context = std::make_shared<assembly::CutIntegrationContext>();
-    context->addFreeSurfaceGeometrySnapshot(buildQuadStripSnapshot(mesh, phi, std::move(collective)));
+    context->addLevelSetGeometrySnapshot(buildQuadStripSnapshot(mesh, phi, std::move(collective)));
     return context;
 }
 

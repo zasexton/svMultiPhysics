@@ -86,7 +86,7 @@ MappedWetVolumeCellData collectMappedWetVolumeCellData(
           svmp::FE::geometry::physicalCutQuadratureMeasure(mesh, *rule);
       has_mapped_measure[index] = true;
     } catch (...) {
-      if (rule->provenance.free_surface_snapshot_revision_key != 0u ||
+      if (rule->provenance.level_set_snapshot_revision_key != 0u ||
           rule->provenance.source_value_revision != 0u) {
         throw;
       }

@@ -8,7 +8,7 @@
 #include "LevelSet/Maintenance/LevelSetWallAwareMaintenance.h"
 
 #include "Assembly/CutIntegrationContext.h"
-#include "Interfaces/FreeSurfaceGeometrySnapshot.h"
+#include "Interfaces/LevelSetGeometrySnapshot.h"
 #include "Systems/FESystem.h"
 #include "Systems/SystemCollectives.h"
 
@@ -99,7 +99,7 @@ std::uint64_t wallAwareInputSignature(
 
 svmp::FE::level_set::LevelSetWallContactConstraint
 makeAcceptedSnapshotWallConstraint(
-    const svmp::FE::interfaces::FreeSurfaceGeometryRuleRecord& record,
+    const svmp::FE::interfaces::LevelSetGeometryRuleRecord& record,
     int interface_marker,
     std::uint64_t snapshot_revision)
 {
@@ -108,13 +108,13 @@ makeAcceptedSnapshotWallConstraint(
   const auto parent =
       record.reference_rule.provenance.parent_entity_global_id;
   if (record.role !=
-          svmp::FE::interfaces::FreeSurfaceGeometryRuleRole::Contact ||
+          svmp::FE::interfaces::LevelSetGeometryRuleRole::Contact ||
       record.retention !=
-          svmp::FE::interfaces::FreeSurfaceGeometryRetention::Retained ||
+          svmp::FE::interfaces::LevelSetGeometryRetention::Retained ||
       parent == svmp::FE::INVALID_GLOBAL_INDEX || snapshot_revision == 0u ||
-      record.reference_rule.provenance.free_surface_snapshot_revision_key !=
+      record.reference_rule.provenance.level_set_snapshot_revision_key !=
           snapshot_revision ||
-      record.physical_rule.free_surface_snapshot_revision_key !=
+      record.physical_rule.level_set_snapshot_revision_key !=
           snapshot_revision) {
     throw std::runtime_error(
         "[svMultiPhysics::Application] Accepted contact geometry cannot "
@@ -279,7 +279,7 @@ resolveLevelSetWallContactConstraints(
     }
 
     const bool local_marker_available =
-        context->hasFreeSurfaceGeometrySnapshotForMarker(
+        context->hasLevelSetGeometrySnapshotForMarker(
             field_interface.interface_marker);
     if (globalMinDouble(local_marker_available ? 1.0 : 0.0, comm) != 1.0) {
       throw std::runtime_error(
@@ -287,7 +287,7 @@ resolveLevelSetWallContactConstraints(
           std::to_string(field_interface.interface_marker) + ".");
     }
     const auto snapshot_revision =
-        context->freeSurfaceGeometrySnapshotRevisionForMarker(
+        context->levelSetGeometrySnapshotRevisionForMarker(
             field_interface.interface_marker);
     const auto [minimum_revision, maximum_revision] =
         globalMinMaxUint64(snapshot_revision, comm);
@@ -296,7 +296,7 @@ resolveLevelSetWallContactConstraints(
           "[svMultiPhysics::Application] Wall-aware level-set maintenance found different geometry revisions across ranks for interface marker " +
           std::to_string(field_interface.interface_marker) + ".");
     }
-    const auto& snapshots = context->freeSurfaceGeometrySnapshots();
+    const auto& snapshots = context->levelSetGeometrySnapshots();
     const auto snapshot_it = std::find_if(
         snapshots.begin(), snapshots.end(), [&](const auto& candidate) {
           return candidate &&
@@ -311,7 +311,7 @@ resolveLevelSetWallContactConstraints(
     }
     bool local_snapshot_current = true;
     try {
-      context->assertAllFreeSurfaceGeometrySnapshotsCurrent(
+      context->assertAllLevelSetGeometrySnapshotsCurrent(
           system.meshAccess());
     } catch (const std::exception&) {
       local_snapshot_current = false;
@@ -345,9 +345,9 @@ resolveLevelSetWallContactConstraints(
       std::string local_rule_diagnostic;
       for (const auto& record : snapshot.rules()) {
         if (record.role != svmp::FE::interfaces::
-                               FreeSurfaceGeometryRuleRole::Contact ||
+                               LevelSetGeometryRuleRole::Contact ||
             record.retention != svmp::FE::interfaces::
-                                    FreeSurfaceGeometryRetention::Retained ||
+                                    LevelSetGeometryRetention::Retained ||
             record.physical_boundary_marker != boundary_marker ||
             !record.locally_owned) {
           continue;
@@ -417,7 +417,7 @@ captureAcceptedContactStageWallConstraints(
   }
   bool local_snapshots_current = true;
   try {
-    context->assertAllFreeSurfaceGeometrySnapshotsCurrent(
+    context->assertAllLevelSetGeometrySnapshotsCurrent(
         system.meshAccess());
   } catch (const std::exception&) {
     local_snapshots_current = false;
@@ -461,7 +461,7 @@ captureAcceptedContactStageWallConstraints(
           std::to_string(declaration.interface_marker) + ".");
     }
     const auto& stage = *stage_it->second;
-    const auto& snapshots = context->freeSurfaceGeometrySnapshots();
+    const auto& snapshots = context->levelSetGeometrySnapshots();
     const auto snapshot_it = std::find_if(
         snapshots.begin(), snapshots.end(), [&](const auto& candidate) {
           return candidate &&
@@ -501,9 +501,9 @@ captureAcceptedContactStageWallConstraints(
         declaration_constraints;
     for (const auto& record : snapshot.rules()) {
       if (record.role != svmp::FE::interfaces::
-                             FreeSurfaceGeometryRuleRole::Contact ||
+                             LevelSetGeometryRuleRole::Contact ||
           record.retention != svmp::FE::interfaces::
-                                  FreeSurfaceGeometryRetention::Retained ||
+                                  LevelSetGeometryRetention::Retained ||
           !record.locally_owned) {
         continue;
       }

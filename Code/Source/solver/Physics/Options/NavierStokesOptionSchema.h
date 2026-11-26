@@ -217,8 +217,8 @@ incompressibleTwoFluidDomainSchema();
 [[nodiscard]] const char* freeSurfaceGeneratedInterfaceGeometryName(
     FreeSurfaceGeneratedInterfaceGeometry geometry) noexcept;
 
-[[nodiscard]] const char* freeSurfaceGeometryTangentPolicyName(
-    FreeSurfaceGeometryTangentPolicy policy) noexcept;
+[[nodiscard]] const char* levelSetGeometryTangentPolicyName(
+    LevelSetGeometryTangentPolicy policy) noexcept;
 
 [[nodiscard]] const char* freeSurfaceSurfaceTensionSemiImplicitName(
     FreeSurfaceSurfaceTensionSemiImplicit value) noexcept;

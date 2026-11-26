@@ -2354,7 +2354,7 @@ IncompressibleTwoFluidPreflight preflightIncompressibleTwoFluid(
     if (options.generated_interface_geometry !=
             FreeSurfaceGeneratedInterfaceGeometry::LinearCorner ||
         options.geometry_tangent_policy !=
-            FreeSurfaceGeometryTangentPolicy::RefreshedFrozenQuadrature) {
+            LevelSetGeometryTangentPolicy::RefreshedFrozenQuadrature) {
         throw std::invalid_argument(
             "IncompressibleTwoFluidModule: the initial envelope requires LinearCorner generated geometry with RefreshedFrozenQuadrature tangents");
     }

@@ -18,7 +18,7 @@
 #include "Dofs/DofMap.h"
 #include "Dofs/EntityDofMap.h"
 #include "Geometry/CutQuadratureMapping.h"
-#include "Interfaces/FreeSurfaceGeometrySnapshot.h"
+#include "Interfaces/LevelSetGeometrySnapshot.h"
 #include "Spaces/FunctionSpace.h"
 #include "Spaces/ProductSpace.h"
 #include "Systems/FESystem.h"
@@ -869,7 +869,7 @@ struct SelectedState {
         const constraints::SmallCutAggregationProlongationReport>
         report{};
     std::shared_ptr<
-        const interfaces::FreeSurfaceGeometrySnapshot>
+        const interfaces::LevelSetGeometrySnapshot>
         snapshot{};
     const assembly::CutIntegrationContext* cut_context{nullptr};
     std::size_t dimension{0u};
@@ -1151,7 +1151,7 @@ struct SelectedState {
         reject("cut integration context is unavailable");
     }
     const auto& cut = *selected.cut_context;
-    cut.assertAllFreeSurfaceGeometrySnapshotsCurrent(mesh);
+    cut.assertAllLevelSetGeometrySnapshotsCurrent(mesh);
     if (cut.contentRevision() !=
         report.revision.cut_context_content_revision) {
         reject("aggregation report cut-context revision is stale");
@@ -1164,32 +1164,32 @@ struct SelectedState {
             "requested markers are not the generated volume and active "
             "boundary domains");
     }
-    if (!report.revision.has_free_surface_snapshot_revision ||
+    if (!report.revision.has_level_set_snapshot_revision ||
         !report.revision.has_source_value_revision) {
         reject(
             "aggregation report lacks authoritative free-surface "
             "snapshot revisions");
     }
-    if (!cut.hasFreeSurfaceGeometrySnapshotForMarker(
+    if (!cut.hasLevelSetGeometrySnapshotForMarker(
             options.volume_interface_marker) ||
-        !cut.hasFreeSurfaceGeometrySnapshotForMarker(
+        !cut.hasLevelSetGeometrySnapshotForMarker(
             options.generated_active_boundary_marker)) {
         reject("generated markers are not bound to a free-surface snapshot");
     }
     const auto volume_snapshot_revision =
-        cut.freeSurfaceGeometrySnapshotRevisionForMarker(
+        cut.levelSetGeometrySnapshotRevisionForMarker(
             options.volume_interface_marker);
     const auto boundary_snapshot_revision =
-        cut.freeSurfaceGeometrySnapshotRevisionForMarker(
+        cut.levelSetGeometrySnapshotRevisionForMarker(
             options.generated_active_boundary_marker);
     if (volume_snapshot_revision != boundary_snapshot_revision ||
         volume_snapshot_revision !=
-            report.revision.free_surface_snapshot_revision) {
+            report.revision.level_set_snapshot_revision) {
         reject("generated markers and aggregation report use different snapshots");
     }
 
     for (const auto& snapshot :
-         cut.freeSurfaceGeometrySnapshots()) {
+         cut.levelSetGeometrySnapshots()) {
         if (snapshot &&
             snapshot->revision().snapshot_revision_key ==
                 volume_snapshot_revision) {
@@ -1777,8 +1777,8 @@ struct LocalData {
                 kMaximumQuadraturePointsPerRule ||
             rule->provenance.parent_entity_global_id < 0 ||
             rule->provenance.cut_topology_revision == 0u ||
-            rule->provenance.free_surface_snapshot_revision_key !=
-                report.revision.free_surface_snapshot_revision ||
+            rule->provenance.level_set_snapshot_revision_key !=
+                report.revision.level_set_snapshot_revision ||
             rule->provenance.source_value_revision !=
                 report.revision.source_value_revision) {
             reject("retained volume rule has stale or incompatible provenance");
@@ -1950,9 +1950,9 @@ struct LocalData {
             const auto role =
                 report.active_side ==
                         geometry::CutIntegrationSide::Negative
-                    ? interfaces::FreeSurfaceGeometryRuleRole::
+                    ? interfaces::LevelSetGeometryRuleRole::
                           NegativeExteriorBoundary
-                    : interfaces::FreeSurfaceGeometryRuleRole::
+                    : interfaces::LevelSetGeometryRuleRole::
                           PositiveExteriorBoundary;
             const auto record = std::find_if(
                 selected.snapshot->rules().begin(),
@@ -1971,7 +1971,7 @@ struct LocalData {
                     "record");
             }
             if (record->retention != interfaces::
-                                         FreeSurfaceGeometryRetention::
+                                         LevelSetGeometryRetention::
                                              Retained ||
                 fragment.owner_rank != collective.rank) {
                 continue;
@@ -2015,8 +2015,8 @@ struct LocalData {
             rule->provenance.owner_rank < 0 ||
             rule->provenance.owner_rank >= collective.size ||
             rule->provenance.cut_topology_revision == 0u ||
-            rule->provenance.free_surface_snapshot_revision_key !=
-                report.revision.free_surface_snapshot_revision ||
+            rule->provenance.level_set_snapshot_revision_key !=
+                report.revision.level_set_snapshot_revision ||
             rule->provenance.source_value_revision !=
                 report.revision.source_value_revision) {
             reject(
@@ -5059,9 +5059,9 @@ certifyGeneratedBoundaryAggregateTrace(
         result.cut_context_content_revision =
             selected.report->revision
                 .cut_context_content_revision;
-        result.free_surface_snapshot_revision =
+        result.level_set_snapshot_revision =
             selected.report->revision
-                .free_surface_snapshot_revision;
+                .level_set_snapshot_revision;
         result.source_value_revision =
             selected.report->revision
                 .source_value_revision;

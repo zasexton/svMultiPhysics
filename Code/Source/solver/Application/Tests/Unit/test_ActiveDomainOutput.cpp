@@ -394,7 +394,7 @@ TEST(ActiveDomainOutput, CollectsPhysicalCutVolumeMeasureOnScaledQuad)
   cut_rule.frame = svmp::FE::geometry::CutGeometryFrame::Reference;
   cut_rule.provenance.frame = svmp::FE::geometry::CutGeometryFrame::Reference;
   cut_rule.provenance.parent_entity = 0;
-  cut_rule.provenance.free_surface_snapshot_revision_key = 7301u;
+  cut_rule.provenance.level_set_snapshot_revision_key = 7301u;
   cut_rule.provenance.source_value_revision = 4107u;
   cut_rule.points.push_back(
       svmp::FE::geometry::CutQuadraturePoint{
@@ -410,7 +410,7 @@ TEST(ActiveDomainOutput, CollectsPhysicalCutVolumeMeasureOnScaledQuad)
 
   EXPECT_EQ(summary.rule_count, 1u);
   EXPECT_EQ(summary.revisioned_rule_count, 1u);
-  EXPECT_EQ(summary.free_surface_snapshot_revision_key, 7301u);
+  EXPECT_EQ(summary.level_set_snapshot_revision_key, 7301u);
   EXPECT_EQ(summary.source_value_revision, 4107u);
   EXPECT_EQ(summary.physical_rule_count, 1u);
   EXPECT_EQ(summary.skipped_physical_rule_count, 0u);
@@ -443,7 +443,7 @@ TEST(ActiveDomainOutput, RejectsMixedGeometrySnapshotRevisions)
   first.provenance.frame =
       svmp::FE::geometry::CutGeometryFrame::Reference;
   first.provenance.parent_entity = 0;
-  first.provenance.free_surface_snapshot_revision_key = 9001u;
+  first.provenance.level_set_snapshot_revision_key = 9001u;
   first.provenance.source_value_revision = 6101u;
   first.points.push_back(svmp::FE::geometry::CutQuadraturePoint{
       .point = {{-0.5, 0.0, 0.0}},
@@ -451,7 +451,7 @@ TEST(ActiveDomainOutput, RejectsMixedGeometrySnapshotRevisions)
       .weight = 1.0});
 
   auto second = first;
-  second.provenance.free_surface_snapshot_revision_key = 9002u;
+  second.provenance.level_set_snapshot_revision_key = 9002u;
   second.provenance.parent_entity = -1;
   second.points.front().point[0] = 0.5;
   const std::vector<const svmp::FE::geometry::CutQuadratureRule*> rules = {
@@ -463,7 +463,7 @@ TEST(ActiveDomainOutput, RejectsMixedGeometrySnapshotRevisions)
       (void)application::core::collectCutVolumeMeasures(mesh_access, rules),
       std::invalid_argument);
 
-  second.provenance.free_surface_snapshot_revision_key = 0u;
+  second.provenance.level_set_snapshot_revision_key = 0u;
   second.provenance.source_value_revision = 0u;
   EXPECT_THROW(
       (void)application::core::collectCutVolumeMeasures(mesh_access, rules),

@@ -1956,7 +1956,7 @@ CutOptionRefreshRun runCutOptionRefreshCase(
   const auto* context = simulation.fe_system->cutIntegrationContext();
   run.context_installed = context != nullptr;
   if (run.refresh_completed && context != nullptr) {
-    const auto& snapshots = context->freeSurfaceGeometrySnapshots();
+    const auto& snapshots = context->levelSetGeometrySnapshots();
     const auto snapshot = std::find_if(
         snapshots.begin(), snapshots.end(), [](const auto& candidate) {
           return candidate != nullptr;
@@ -2197,12 +2197,12 @@ public:
     }
     const auto* context = sim_.fe_system->cutIntegrationContext();
     if (context == nullptr ||
-        context->freeSurfaceGeometrySnapshots().size() != 1u) {
+        context->levelSetGeometrySnapshots().size() != 1u) {
       throw std::runtime_error(
           "native manufactured channel has no unique geometry snapshot");
     }
     const auto snapshot =
-        context->freeSurfaceGeometrySnapshots().front();
+        context->levelSetGeometrySnapshots().front();
     if (!snapshot) {
       throw std::runtime_error(
           "native manufactured channel geometry snapshot is null");
@@ -2245,16 +2245,16 @@ public:
       const auto selected_rule_role =
           active_side_ == ActiveSide::Negative
               ? svmp::FE::interfaces::
-                    FreeSurfaceGeometryRuleRole::NegativeExteriorBoundary
+                    LevelSetGeometryRuleRole::NegativeExteriorBoundary
               : svmp::FE::interfaces::
-                    FreeSurfaceGeometryRuleRole::PositiveExteriorBoundary;
+                    LevelSetGeometryRuleRole::PositiveExteriorBoundary;
       for (const auto& record : snapshot->rules()) {
         if (record.physical_boundary_marker != physical_markers[role] ||
             (record.role != svmp::FE::interfaces::
-                                FreeSurfaceGeometryRuleRole::
+                                LevelSetGeometryRuleRole::
                                     NegativeExteriorBoundary &&
              record.role != svmp::FE::interfaces::
-                                FreeSurfaceGeometryRuleRole::
+                                LevelSetGeometryRuleRole::
                                     PositiveExteriorBoundary)) {
           continue;
         }
@@ -2350,7 +2350,7 @@ public:
             result.active_markers[2] &&
         trace.certificate.cut_context_content_revision ==
             context->contentRevision() &&
-        trace.certificate.free_surface_snapshot_revision ==
+        trace.certificate.level_set_snapshot_revision ==
             snapshot->revision().snapshot_revision_key &&
         trace.certificate.source_value_revision ==
             refresh_report.value_revision &&
@@ -3013,7 +3013,7 @@ TEST(ApplicationDriverLevelSetWorkflows,
   request.requested_interface_marker = 713;
   request.active_side = LevelSetActiveSide::Negative;
 
-  svmp::FE::interfaces::FreeSurfaceGeometryRevision revision;
+  svmp::FE::interfaces::LevelSetGeometryRevision revision;
   revision.source_id = "field:phi";
   revision.domain_id = request.domain_id;
   revision.interface_marker = request.requested_interface_marker;
@@ -3053,10 +3053,10 @@ TEST(ApplicationDriverLevelSetWorkflows,
       activeCutTopologyRequestIdentity(positive_request, revision),
       request_identity);
 
-  svmp::FE::interfaces::FreeSurfaceGeometryRuleRecord rule;
-  rule.role = svmp::FE::interfaces::FreeSurfaceGeometryRuleRole::Interface;
+  svmp::FE::interfaces::LevelSetGeometryRuleRecord rule;
+  rule.role = svmp::FE::interfaces::LevelSetGeometryRuleRole::Interface;
   rule.retention =
-      svmp::FE::interfaces::FreeSurfaceGeometryRetention::Retained;
+      svmp::FE::interfaces::LevelSetGeometryRetention::Retained;
   rule.physical_boundary_marker = -1;
   rule.locally_owned = true;
   rule.topology_id = "cell-101-segment-0";
@@ -3081,10 +3081,10 @@ TEST(ApplicationDriverLevelSetWorkflows,
   rule.reference_rule.provenance.cut_topology_revision = 43u;
   rule.reference_rule.provenance.source_value_revision = 47u;
   rule.reference_rule.provenance.source_stable_id = 53u;
-  rule.reference_rule.provenance.free_surface_snapshot_revision_key = 59u;
+  rule.reference_rule.provenance.level_set_snapshot_revision_key = 59u;
   rule.physical_rule.cut_topology_revision = 61u;
   rule.physical_rule.source_value_revision = 67u;
-  rule.physical_rule.free_surface_snapshot_revision_key = 71u;
+  rule.physical_rule.level_set_snapshot_revision_key = 71u;
   rule.physical_rule.physical_measure = 3.0;
 
   const auto rule_fingerprint =
@@ -3101,11 +3101,11 @@ TEST(ApplicationDriverLevelSetWorkflows,
   changed_content.reference_rule.provenance.source_value_revision += 1u;
   changed_content.reference_rule.provenance.source_stable_id += 1u;
   changed_content.reference_rule.provenance
-      .free_surface_snapshot_revision_key += 1u;
+      .level_set_snapshot_revision_key += 1u;
   changed_content.reference_rule.measure += 1.0;
   changed_content.physical_rule.cut_topology_revision += 1u;
   changed_content.physical_rule.source_value_revision += 1u;
-  changed_content.physical_rule.free_surface_snapshot_revision_key += 1u;
+  changed_content.physical_rule.level_set_snapshot_revision_key += 1u;
   changed_content.physical_rule.physical_measure += 1.0;
   EXPECT_EQ(
       freeSurfaceRuleSemanticTopologyFingerprint(
@@ -3127,7 +3127,7 @@ TEST(ApplicationDriverLevelSetWorkflows,
       rule_fingerprint);
   auto changed_retention = rule;
   changed_retention.retention =
-      svmp::FE::interfaces::FreeSurfaceGeometryRetention::PrunedSmallVolume;
+      svmp::FE::interfaces::LevelSetGeometryRetention::PrunedSmallVolume;
   EXPECT_NE(
       freeSurfaceRuleSemanticTopologyFingerprint(
           changed_retention, request_identity),
@@ -3238,15 +3238,15 @@ TEST(ApplicationDriverLevelSetWorkflows,
           svmp::FE::ElementType type) {
         fragment.parent_cell_global_id = 101;
         fragment.owner_rank = 0;
-        svmp::FE::interfaces::FreeSurfaceGeometryRuleRecord record;
+        svmp::FE::interfaces::LevelSetGeometryRuleRecord record;
         record.role =
-            svmp::FE::interfaces::FreeSurfaceGeometryRuleRole::Interface;
+            svmp::FE::interfaces::LevelSetGeometryRuleRole::Interface;
         record.retention =
-            svmp::FE::interfaces::FreeSurfaceGeometryRetention::Retained;
+            svmp::FE::interfaces::LevelSetGeometryRetention::Retained;
         record.locally_owned = true;
         record.topology_id = fragment.topology_id;
         record.source_topology_key =
-            svmp::FE::interfaces::freeSurfaceGeometrySourceTopologyKey(
+            svmp::FE::interfaces::levelSetGeometrySourceTopologyKey(
                 fragment, type, request.tolerance);
         record.reference_rule = fragment.toCutQuadratureRule(request);
         return record;
@@ -9049,9 +9049,9 @@ TEST(ApplicationDriverLevelSetWorkflows,
 
   const auto* context = sim.fe_system->cutIntegrationContext();
   ASSERT_NE(context, nullptr);
-  ASSERT_TRUE(context->hasFreeSurfaceGeometrySnapshotForMarker(contact_marker));
-  ASSERT_EQ(context->freeSurfaceGeometrySnapshots().size(), 1u);
-  const auto snapshot = context->freeSurfaceGeometrySnapshots().front();
+  ASSERT_TRUE(context->hasLevelSetGeometrySnapshotForMarker(contact_marker));
+  ASSERT_EQ(context->levelSetGeometrySnapshots().size(), 1u);
+  const auto snapshot = context->levelSetGeometrySnapshots().front();
   ASSERT_NE(snapshot, nullptr);
   ASSERT_EQ(snapshot->contactDomains().size(), 1u);
   EXPECT_EQ(snapshot->contactDomains().front().marker(), contact_marker);
@@ -9441,7 +9441,7 @@ TEST(ApplicationDriverLevelSetWorkflows,
       1.0e-12);
   const auto endpoint_snapshot_revision =
       sim.fe_system->cutIntegrationContext()
-          ->freeSurfaceGeometrySnapshotRevisionForMarker(interface_marker);
+          ->levelSetGeometrySnapshotRevisionForMarker(interface_marker);
   EXPECT_NE(endpoint_snapshot_revision,
             contact_stages.front()
                 .geometry_revision.snapshot_revision_key);
@@ -9702,20 +9702,20 @@ TEST(ApplicationDriverLevelSetWorkflows,
   constexpr std::uint64_t revision = 41u;
   constexpr svmp::FE::GlobalIndex parent = 17;
 
-  svmp::FE::interfaces::FreeSurfaceGeometryRuleRecord record;
+  svmp::FE::interfaces::LevelSetGeometryRuleRecord record;
   record.role =
-      svmp::FE::interfaces::FreeSurfaceGeometryRuleRole::Contact;
+      svmp::FE::interfaces::LevelSetGeometryRuleRole::Contact;
   record.retention =
-      svmp::FE::interfaces::FreeSurfaceGeometryRetention::Retained;
+      svmp::FE::interfaces::LevelSetGeometryRetention::Retained;
   record.physical_boundary_marker = wall_marker;
   record.locally_owned = true;
   record.reference_rule.geometric_dimension = 0;
   record.reference_rule.provenance.parent_entity_global_id = parent;
-  record.reference_rule.provenance.free_surface_snapshot_revision_key =
+  record.reference_rule.provenance.level_set_snapshot_revision_key =
       revision;
   record.reference_rule.points.resize(1u);
   record.physical_rule.geometric_dimension = 0;
-  record.physical_rule.free_surface_snapshot_revision_key = revision;
+  record.physical_rule.level_set_snapshot_revision_key = revision;
   record.physical_rule.physical_measure = 1.0;
 
   const auto constraint =
@@ -9741,7 +9741,7 @@ TEST(ApplicationDriverLevelSetWorkflows,
       std::runtime_error);
 
   auto stale = record;
-  stale.physical_rule.free_surface_snapshot_revision_key = revision + 1u;
+  stale.physical_rule.level_set_snapshot_revision_key = revision + 1u;
   EXPECT_THROW(
       (void)makeAcceptedSnapshotWallConstraint(
           stale, interface_marker, revision),
@@ -9893,7 +9893,7 @@ TEST(ApplicationDriverLevelSetWorkflows,
   // contact cells, read from the endpoint snapshot; no angle or frame.
   const auto snapshot_revision =
       sim.fe_system->cutIntegrationContext()
-          ->freeSurfaceGeometrySnapshotRevisionForMarker(interface_marker);
+          ->levelSetGeometrySnapshotRevisionForMarker(interface_marker);
   ASSERT_EQ(context.local_constraints.size(), 2u);
   for (const auto& constraint : context.local_constraints) {
     EXPECT_EQ(constraint.interface_marker, interface_marker);
@@ -14454,7 +14454,7 @@ TEST_F(ApplicationDriverConservativePhaseCandidatesTest,
   };
   const auto context_is_current = [&](const auto& context) {
     return context != nullptr &&
-           context->freeSurfaceGeometrySnapshotsMatchCurrentMeshRevision(
+           context->levelSetGeometrySnapshotsMatchCurrentMeshRevision(
                sim_.fe_system->meshAccess());
   };
 
@@ -14482,7 +14482,7 @@ TEST_F(ApplicationDriverConservativePhaseCandidatesTest,
   ASSERT_NE(sim_.fe_system->cutIntegrationContext(), nullptr);
   EXPECT_TRUE(
       sim_.fe_system->cutIntegrationContext()
-          ->freeSurfaceGeometrySnapshotsMatchCurrentMeshRevision(
+          ->levelSetGeometrySnapshotsMatchCurrentMeshRevision(
               sim_.fe_system->meshAccess()));
 
   auto stale_for_span = clone_current_context();
@@ -14511,7 +14511,7 @@ TEST_F(ApplicationDriverConservativePhaseCandidatesTest,
   ASSERT_NE(sim_.fe_system->cutIntegrationContext(), nullptr);
   EXPECT_TRUE(
       sim_.fe_system->cutIntegrationContext()
-          ->freeSurfaceGeometrySnapshotsMatchCurrentMeshRevision(
+          ->levelSetGeometrySnapshotsMatchCurrentMeshRevision(
               sim_.fe_system->meshAccess()));
 }
 

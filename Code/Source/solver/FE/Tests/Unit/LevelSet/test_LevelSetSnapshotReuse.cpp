@@ -6,7 +6,7 @@
  */
 
 // Reuse of full-cell volume records between successive free-surface geometry
-// snapshot builds (FreeSurfaceGeometrySnapshotReuseCache).  A build that
+// snapshot builds (LevelSetGeometrySnapshotReuseCache).  A build that
 // reuses the previous build's records must give the snapshot a build without
 // the cache gives, bit for bit, for every storage policy and level-set
 // motion, including motions that change the cut topology.
@@ -16,7 +16,7 @@
 #include "Dofs/DofHandler.h"
 #include "Geometry/CutQuadratureMapping.h"
 #include "Dofs/EntityDofMap.h"
-#include "Interfaces/FreeSurfaceGeometrySnapshot.h"
+#include "Interfaces/LevelSetGeometrySnapshot.h"
 #include "LevelSet/LevelSetCellEvaluator.h"
 #include "LevelSet/LevelSetInterfaceLifecycle.h"
 #include "Spaces/H1Space.h"
@@ -226,14 +226,14 @@ struct ReuseFixture {
     }
 
     struct Pair {
-        std::shared_ptr<const interfaces::FreeSurfaceGeometrySnapshot> reused;
-        std::shared_ptr<const interfaces::FreeSurfaceGeometrySnapshot> full;
+        std::shared_ptr<const interfaces::LevelSetGeometrySnapshot> reused;
+        std::shared_ptr<const interfaces::LevelSetGeometrySnapshot> full;
     };
 
     // One generated-interface rebuild, snapshotted with and without the
     // reuse cache.
-    Pair build(interfaces::FreeSurfaceGeometrySnapshotReuseCache& cache,
-               const interfaces::FreeSurfaceGeometrySnapshotPolicy& policy)
+    Pair build(interfaces::LevelSetGeometrySnapshotReuseCache& cache,
+               const interfaces::LevelSetGeometrySnapshotPolicy& policy)
     {
         level_set::LevelSetGeneratedInterfaceOptions options{};
         options.level_set_field_name = "phi";
@@ -249,7 +249,7 @@ struct ReuseFixture {
             level_set::makeLevelSetCellEvaluator(system, phi, solution));
         const auto make_scalar =
             [](std::shared_ptr<level_set::LevelSetCellEvaluator> cell) {
-                interfaces::FreeSurfaceGeometryScalarEvaluator result;
+                interfaces::LevelSetGeometryScalarEvaluator result;
                 result.value = [cell](FE::GlobalIndex id,
                                       const Point& xi,
                                       const geometry::CutQuadratureProvenance&) {
@@ -271,10 +271,10 @@ struct ReuseFixture {
         };
         Pair pair;
         // The reference: no cache, one thread.
-        pair.full = interfaces::buildFreeSurfaceGeometrySnapshot(
+        pair.full = interfaces::buildLevelSetGeometrySnapshot(
             generated.domain, {}, {}, system.meshAccess(), policy, scalar,
             "snapshot_reuse", {}, nullptr, 1);
-        pair.reused = interfaces::buildFreeSurfaceGeometrySnapshot(
+        pair.reused = interfaces::buildLevelSetGeometrySnapshot(
             generated.domain, {}, {}, system.meshAccess(), policy, scalar,
             "snapshot_reuse", {}, &cache,
             FE::geometryThreadCount(system.assemblyThreadCount()));
@@ -283,15 +283,15 @@ struct ReuseFixture {
 };
 
 [[nodiscard]] std::size_t fullCellVolumeRecordCount(
-    const interfaces::FreeSurfaceGeometrySnapshot& snapshot)
+    const interfaces::LevelSetGeometrySnapshot& snapshot)
 {
     std::size_t count = 0u;
     for (const auto& record : snapshot.rules()) {
         const bool volume =
             record.role ==
-                interfaces::FreeSurfaceGeometryRuleRole::NegativeVolume ||
+                interfaces::LevelSetGeometryRuleRole::NegativeVolume ||
             record.role ==
-                interfaces::FreeSurfaceGeometryRuleRole::PositiveVolume;
+                interfaces::LevelSetGeometryRuleRole::PositiveVolume;
         count += volume && record.reference_rule.full_cell_equivalent ? 1u
                                                                        : 0u;
     }
@@ -300,20 +300,20 @@ struct ReuseFixture {
 
 void expectIdenticalSnapshots(
     const ReuseFixture::Pair& pair,
-    const interfaces::FreeSurfaceGeometrySnapshotReuseCache& cache,
+    const interfaces::LevelSetGeometrySnapshotReuseCache& cache,
     bool expect_reuse,
     const std::string& label)
 {
     ASSERT_NE(pair.full, nullptr) << label;
     ASSERT_NE(pair.reused, nullptr) << label;
-    EXPECT_EQ(interfaces::compareFreeSurfaceGeometrySnapshots(*pair.reused,
+    EXPECT_EQ(interfaces::compareLevelSetGeometrySnapshots(*pair.reused,
                                                               *pair.full),
               "")
         << label;
     // The ledger bytes too (it holds only counts and reals, no padding).
     EXPECT_EQ(std::memcmp(&pair.reused->ledger(),
                           &pair.full->ledger(),
-                          sizeof(interfaces::FreeSurfaceGeometryValidationLedger)),
+                          sizeof(interfaces::LevelSetGeometryValidationLedger)),
               0)
         << label;
     EXPECT_EQ(pair.reused->revision().snapshot_revision_key,
@@ -337,11 +337,11 @@ void expectIdenticalSnapshots(
 // motion changes which cells are cut; every build is bitwise identical to a
 // build without the cache.
 void runMotionSequence(int dimension,
-                       const interfaces::FreeSurfaceGeometrySnapshotPolicy& policy,
+                       const interfaces::LevelSetGeometrySnapshotPolicy& policy,
                        const std::string& label)
 {
     ReuseFixture fixture(dimension);
-    interfaces::FreeSurfaceGeometrySnapshotReuseCache cache;
+    interfaces::LevelSetGeometrySnapshotReuseCache cache;
     const std::vector<std::pair<Point, FE::Real>> motion{
         {{{0.531, 0.487, 0.462}}, FE::Real{0.29}},
         {{{0.5312, 0.4871, 0.4619}}, FE::Real{0.29}},   // small move
@@ -362,25 +362,25 @@ void runMotionSequence(int dimension,
     }
 }
 
-TEST(FreeSurfaceSnapshotReuse, TetrahedraWithAllPointsStored)
+TEST(LevelSetSnapshotReuse, TetrahedraWithAllPointsStored)
 {
-    interfaces::FreeSurfaceGeometrySnapshotPolicy policy;
+    interfaces::LevelSetGeometrySnapshotPolicy policy;
     policy.require_complete_exterior_boundary_partition = false;
     runMotionSequence(3, policy, "3D all points");
 }
 
-TEST(FreeSurfaceSnapshotReuse, TetrahedraWithDryCellsClassificationOnly)
+TEST(LevelSetSnapshotReuse, TetrahedraWithDryCellsClassificationOnly)
 {
-    interfaces::FreeSurfaceGeometrySnapshotPolicy policy;
+    interfaces::LevelSetGeometrySnapshotPolicy policy;
     policy.require_complete_exterior_boundary_partition = false;
     policy.classification_only_full_cell_side =
         geometry::CutIntegrationSide::Positive;
     runMotionSequence(3, policy, "3D dry compact");
 }
 
-TEST(FreeSurfaceSnapshotReuse, TetrahedraWithBothSidesClassificationOnly)
+TEST(LevelSetSnapshotReuse, TetrahedraWithBothSidesClassificationOnly)
 {
-    interfaces::FreeSurfaceGeometrySnapshotPolicy policy;
+    interfaces::LevelSetGeometrySnapshotPolicy policy;
     policy.require_complete_exterior_boundary_partition = false;
     policy.classification_only_full_cell_side =
         geometry::CutIntegrationSide::Positive;
@@ -388,18 +388,18 @@ TEST(FreeSurfaceSnapshotReuse, TetrahedraWithBothSidesClassificationOnly)
     runMotionSequence(3, policy, "3D both compact");
 }
 
-TEST(FreeSurfaceSnapshotReuse, TrianglesWithDryCellsClassificationOnly)
+TEST(LevelSetSnapshotReuse, TrianglesWithDryCellsClassificationOnly)
 {
-    interfaces::FreeSurfaceGeometrySnapshotPolicy policy;
+    interfaces::LevelSetGeometrySnapshotPolicy policy;
     policy.require_complete_exterior_boundary_partition = false;
     policy.classification_only_full_cell_side =
         geometry::CutIntegrationSide::Positive;
     runMotionSequence(2, policy, "2D dry compact");
 }
 
-TEST(FreeSurfaceSnapshotReuse, TrianglesWithAllPointsStored)
+TEST(LevelSetSnapshotReuse, TrianglesWithAllPointsStored)
 {
-    interfaces::FreeSurfaceGeometrySnapshotPolicy policy;
+    interfaces::LevelSetGeometrySnapshotPolicy policy;
     policy.require_complete_exterior_boundary_partition = false;
     runMotionSequence(2, policy, "2D all points");
 }
@@ -407,11 +407,11 @@ TEST(FreeSurfaceSnapshotReuse, TrianglesWithAllPointsStored)
 // A different policy is a different reuse context: nothing is reused, the
 // result is still identical, and the next build under the new policy reuses
 // again.
-TEST(FreeSurfaceSnapshotReuse, PolicyChangeStartsAFreshContext)
+TEST(LevelSetSnapshotReuse, PolicyChangeStartsAFreshContext)
 {
     ReuseFixture fixture(3);
-    interfaces::FreeSurfaceGeometrySnapshotReuseCache cache;
-    interfaces::FreeSurfaceGeometrySnapshotPolicy all_points;
+    interfaces::LevelSetGeometrySnapshotReuseCache cache;
+    interfaces::LevelSetGeometrySnapshotPolicy all_points;
     all_points.require_complete_exterior_boundary_partition = false;
     auto compact = all_points;
     compact.classification_only_full_cell_side =
@@ -437,11 +437,11 @@ TEST(FreeSurfaceSnapshotReuse, PolicyChangeStartsAFreshContext)
 
 // The cache does not keep the previous snapshot alive: once it is released,
 // the next build reuses nothing (and is still identical).
-TEST(FreeSurfaceSnapshotReuse, ReleasedPreviousSnapshotIsNotReused)
+TEST(LevelSetSnapshotReuse, ReleasedPreviousSnapshotIsNotReused)
 {
     ReuseFixture fixture(3);
-    interfaces::FreeSurfaceGeometrySnapshotReuseCache cache;
-    interfaces::FreeSurfaceGeometrySnapshotPolicy policy;
+    interfaces::LevelSetGeometrySnapshotReuseCache cache;
+    interfaces::LevelSetGeometrySnapshotPolicy policy;
     policy.require_complete_exterior_boundary_partition = false;
     fixture.setLevelSet({{0.531, 0.487, 0.462}}, FE::Real{0.29});
     {
@@ -458,11 +458,11 @@ TEST(FreeSurfaceSnapshotReuse, ReleasedPreviousSnapshotIsNotReused)
 }
 
 // The reused records carry the source identities of their own build.
-TEST(FreeSurfaceSnapshotReuse, ReusedRecordsCarryTheNewSourceRevision)
+TEST(LevelSetSnapshotReuse, ReusedRecordsCarryTheNewSourceRevision)
 {
     ReuseFixture fixture(3);
-    interfaces::FreeSurfaceGeometrySnapshotReuseCache cache;
-    interfaces::FreeSurfaceGeometrySnapshotPolicy policy;
+    interfaces::LevelSetGeometrySnapshotReuseCache cache;
+    interfaces::LevelSetGeometrySnapshotPolicy policy;
     policy.require_complete_exterior_boundary_partition = false;
     policy.classification_only_full_cell_side =
         geometry::CutIntegrationSide::Positive;
@@ -479,14 +479,14 @@ TEST(FreeSurfaceSnapshotReuse, ReusedRecordsCarryTheNewSourceRevision)
         EXPECT_EQ(record.physical_rule.source_value_revision,
                   second.reused->revision().source_value_revision);
         EXPECT_EQ(record.reference_rule.provenance
-                      .free_surface_snapshot_revision_key,
+                      .level_set_snapshot_revision_key,
                   second.reused->revision().snapshot_revision_key);
     }
 }
 
 // The value-only linear-corner evaluation the snapshot validation uses is
 // the value of the full evaluation, bit for bit.
-TEST(FreeSurfaceSnapshotReuse, LinearCornerValueMatchesFullEvaluationBitwise)
+TEST(LevelSetSnapshotReuse, LinearCornerValueMatchesFullEvaluationBitwise)
 {
     for (const int dimension : {2, 3}) {
         ReuseFixture fixture(dimension);
@@ -526,19 +526,19 @@ TEST(FreeSurfaceSnapshotReuse, LinearCornerValueMatchesFullEvaluationBitwise)
 // region equals the measure of the rematerialized rule, bit for bit, and
 // the import without points gives the rule counts and diagnostics of an
 // import that releases the points afterwards.
-TEST(FreeSurfaceSnapshotReuse, ClassificationOnlyContextRuleMeasuresMatchMaterialized)
+TEST(LevelSetSnapshotReuse, ClassificationOnlyContextRuleMeasuresMatchMaterialized)
 {
     for (const int dimension : {2, 3}) {
         ReuseFixture fixture(dimension);
-        interfaces::FreeSurfaceGeometrySnapshotReuseCache cache;
-        interfaces::FreeSurfaceGeometrySnapshotPolicy policy;
+        interfaces::LevelSetGeometrySnapshotReuseCache cache;
+        interfaces::LevelSetGeometrySnapshotPolicy policy;
         policy.require_complete_exterior_boundary_partition = false;
         policy.classification_only_full_cell_side =
             geometry::CutIntegrationSide::Positive;
         fixture.setLevelSet({{0.531, 0.487, 0.462}}, FE::Real{0.29});
         const auto pair = fixture.build(cache, policy);
         FE::assembly::CutIntegrationContext context;
-        context.addFreeSurfaceGeometrySnapshot(
+        context.addLevelSetGeometrySnapshot(
             pair.full, std::nullopt, geometry::CutIntegrationSide::Positive);
         const auto& mesh = fixture.system.meshAccess();
         std::size_t released = 0u;
@@ -624,16 +624,16 @@ void expectSameDomains(const interfaces::LevelSetInterfaceDomain& a,
 // The generated geometry, and the snapshots built from it, do not depend on
 // the number of geometry threads, for full builds (first build, every cell)
 // and incremental refreshes (only cut cells).
-TEST(FreeSurfaceSnapshotReuse, GeneratedGeometryIsIndependentOfTheThreadCount)
+TEST(LevelSetSnapshotReuse, GeneratedGeometryIsIndependentOfTheThreadCount)
 {
     for (const int dimension : {2, 3}) {
         for (const int threads : {2, 3, 8}) {
             // Two systems on the same mesh, one per thread count.
             ReuseFixture fixture(dimension);
             ReuseFixture threaded(dimension, threads);
-            interfaces::FreeSurfaceGeometrySnapshotReuseCache serial_cache;
-            interfaces::FreeSurfaceGeometrySnapshotReuseCache threaded_cache;
-            interfaces::FreeSurfaceGeometrySnapshotPolicy policy;
+            interfaces::LevelSetGeometrySnapshotReuseCache serial_cache;
+            interfaces::LevelSetGeometrySnapshotReuseCache threaded_cache;
+            interfaces::LevelSetGeometrySnapshotPolicy policy;
             policy.require_complete_exterior_boundary_partition = false;
             policy.classification_only_full_cell_side =
                 geometry::CutIntegrationSide::Positive;
@@ -655,12 +655,12 @@ TEST(FreeSurfaceSnapshotReuse, GeneratedGeometryIsIndependentOfTheThreadCount)
                 expectSameDomains(a.full->interfaceDomain(),
                                   b.full->interfaceDomain(),
                                   label);
-                EXPECT_EQ(interfaces::compareFreeSurfaceGeometrySnapshots(
+                EXPECT_EQ(interfaces::compareLevelSetGeometrySnapshots(
                               *a.full, *b.full),
                           "")
                     << label;
                 // Threaded snapshot builds with reuse.
-                EXPECT_EQ(interfaces::compareFreeSurfaceGeometrySnapshots(
+                EXPECT_EQ(interfaces::compareLevelSetGeometrySnapshots(
                               *b.reused, *a.full),
                           "")
                     << label;
@@ -675,7 +675,7 @@ TEST(FreeSurfaceSnapshotReuse, GeneratedGeometryIsIndependentOfTheThreadCount)
 
 // ---------------------------------------------------------------------------
 // The double-precision rejection pre-check of the represented-phase
-// containment certificate (FreeSurfaceGeometrySnapshot.cpp) must never change
+// containment certificate (LevelSetGeometrySnapshot.cpp) must never change
 // a certificate.  Adversarial tetrahedra (reference, skewed, inverted, sliver,
 // near-flat, flat, tiny, large) and points (vertices, edge midpoints, face
 // points and points within rounding distance of a face on either side, far
@@ -795,7 +795,7 @@ bool sameCoordinateBits(const std::array<FE::Real, 4>& a,
     return std::memcmp(a.data(), b.data(), sizeof(a)) == 0;
 }
 
-TEST(FreeSurfaceSnapshotContainmentPreCheck, KeepsEveryTetrahedronCertificate)
+TEST(LevelSetSnapshotContainmentPreCheck, KeepsEveryTetrahedronCertificate)
 {
     const FE::Real tolerances[] = {FE::Real{0.0}, FE::Real{1.0e-14},
                                    FE::Real{1.0e-10}, FE::Real{1.0e-6},
@@ -845,7 +845,7 @@ TEST(FreeSurfaceSnapshotContainmentPreCheck, KeepsEveryTetrahedronCertificate)
 // subcell, in order, that contains the point.  With and without the pre-check
 // it must match the same subcell with the same coordinates, including points
 // on faces shared by two subcells (Kuhn decomposition of a box).
-TEST(FreeSurfaceSnapshotContainmentPreCheck, KeepsTheMatchedSubcellOfASearch)
+TEST(LevelSetSnapshotContainmentPreCheck, KeepsTheMatchedSubcellOfASearch)
 {
     using R = FE::Real;
     std::vector<interfaces::CutInterfaceReferenceSimplex> subcells;
@@ -913,14 +913,14 @@ TEST(FreeSurfaceSnapshotContainmentPreCheck, KeepsTheMatchedSubcellOfASearch)
 
 namespace {
 
-interfaces::FreeSurfaceGeometryRuleRecord partitionRecord(
-    interfaces::FreeSurfaceGeometryRuleRole role,
+interfaces::LevelSetGeometryRuleRecord partitionRecord(
+    interfaces::LevelSetGeometryRuleRole role,
     FE::GlobalIndex global_cell,
     FE::GlobalIndex local_parent,
     FE::Real measure,
     FE::Real parent_measure)
 {
-    interfaces::FreeSurfaceGeometryRuleRecord record;
+    interfaces::LevelSetGeometryRuleRecord record;
     record.role = role;
     record.reference_rule.provenance.parent_entity_global_id = global_cell;
     record.reference_rule.provenance.parent_entity = local_parent;
@@ -937,17 +937,17 @@ interfaces::FreeSurfaceGeometryRuleRecord partitionRecord(
 // a stable sort instead of a std::map.  The alias rule and its precedence over
 // the partition check, the partition check and the ledger maximum are
 // unchanged.
-TEST(FreeSurfaceSnapshotValidation, VolumePartitionGroupsCellsAsTheKeyOrderedMap)
+TEST(LevelSetSnapshotValidation, VolumePartitionGroupsCellsAsTheKeyOrderedMap)
 {
-    using Role = interfaces::FreeSurfaceGeometryRuleRole;
+    using Role = interfaces::LevelSetGeometryRuleRole;
     ReuseFixture fixture(3);
     const auto& mesh = fixture.system.meshAccess();
-    const interfaces::FreeSurfaceGeometrySnapshotPolicy policy{};
+    const interfaces::LevelSetGeometrySnapshotPolicy policy{};
 
     // Single classification-only full cells (no moment check), out of order,
     // with interface records interleaved; the partition errors differ in the
     // last bits so the maximum is order sensitive only through its value.
-    std::vector<interfaces::FreeSurfaceGeometryRuleRecord> records;
+    std::vector<interfaces::LevelSetGeometryRuleRecord> records;
     records.push_back(partitionRecord(Role::NegativeVolume, 40, 3, 0.125, 0.125));
     records.push_back(partitionRecord(Role::Interface, 40, 3, 0.5, 0.125));
     records.push_back(partitionRecord(Role::PositiveVolume, 7, 1, 0.3, 0.1 + 0.2));
@@ -962,7 +962,7 @@ TEST(FreeSurfaceSnapshotValidation, VolumePartitionGroupsCellsAsTheKeyOrderedMap
             expected_maximum,
             std::abs(record.reference_rule.measure - record.reference_rule.parent_measure));
     }
-    interfaces::FreeSurfaceGeometryValidationLedger ledger;
+    interfaces::LevelSetGeometryValidationLedger ledger;
     ASSERT_NO_THROW(interfaces::snapshot_detail::validateVolumePartition(
         records, mesh, policy, ledger));
     EXPECT_EQ(ledger.maximum_volume_partition_error, expected_maximum);
@@ -975,7 +975,7 @@ TEST(FreeSurfaceSnapshotValidation, VolumePartitionGroupsCellsAsTheKeyOrderedMap
     auto aliased_and_unbalanced = aliased;
     aliased_and_unbalanced.push_back(partitionRecord(Role::PositiveVolume, -9, 2, 0.5, 1.0));
     try {
-        interfaces::FreeSurfaceGeometryValidationLedger alias_ledger;
+        interfaces::LevelSetGeometryValidationLedger alias_ledger;
         interfaces::snapshot_detail::validateVolumePartition(
             aliased_and_unbalanced, mesh, policy, alias_ledger);
         ADD_FAILURE() << "an aliased cell must be rejected";
@@ -988,7 +988,7 @@ TEST(FreeSurfaceSnapshotValidation, VolumePartitionGroupsCellsAsTheKeyOrderedMap
     auto unbalanced = records;
     unbalanced.push_back(partitionRecord(Role::PositiveVolume, -9, 2, 0.5, 1.0));
     try {
-        interfaces::FreeSurfaceGeometryValidationLedger unbalanced_ledger;
+        interfaces::LevelSetGeometryValidationLedger unbalanced_ledger;
         interfaces::snapshot_detail::validateVolumePartition(
             unbalanced, mesh, policy, unbalanced_ledger);
         ADD_FAILURE() << "an unbalanced cell must be rejected";

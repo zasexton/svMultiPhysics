@@ -19,7 +19,7 @@
 #include "Core/FEException.h"
 #include "Dofs/DofIndexSet.h"
 #include "Geometry/CutQuadrature.h"
-#include "Interfaces/FreeSurfaceGeometrySnapshot.h"
+#include "Interfaces/LevelSetGeometrySnapshot.h"
 #include "Spaces/FunctionSpace.h"
 #include "Systems/FESystem.h"
 #include "Systems/SystemCollectives.h"
@@ -703,7 +703,7 @@ RetainedFieldSupportResult retainedFieldSupport(
     bool local_cut_state_current = cut != nullptr;
     if (local_cut_state_current) {
         try {
-            cut->assertAllFreeSurfaceGeometrySnapshotsCurrent(
+            cut->assertAllLevelSetGeometrySnapshotsCurrent(
                 system.meshAccess());
         } catch (...) {
             local_cut_state_current = false;
@@ -714,20 +714,20 @@ RetainedFieldSupportResult retainedFieldSupport(
         cut->contentRevision() ==
             report.revision.cut_context_content_revision &&
         cut->hasGeneratedVolumeMarker(binding->marker) &&
-        report.revision.has_free_surface_snapshot_revision &&
+        report.revision.has_level_set_snapshot_revision &&
         report.revision.has_source_value_revision &&
-        cut->hasFreeSurfaceGeometrySnapshotForMarker(binding->marker);
+        cut->hasLevelSetGeometrySnapshotForMarker(binding->marker);
     if (!all_ranks(local_cut_state_current)) {
         result.reason = "aggregation_report_stale";
         return result;
     }
 
     const auto snapshot_revision =
-        cut->freeSurfaceGeometrySnapshotRevisionForMarker(binding->marker);
-    std::shared_ptr<const interfaces::FreeSurfaceGeometrySnapshot>
+        cut->levelSetGeometrySnapshotRevisionForMarker(binding->marker);
+    std::shared_ptr<const interfaces::LevelSetGeometrySnapshot>
         selected_snapshot;
     std::size_t local_snapshot_matches = 0u;
-    for (const auto& snapshot : cut->freeSurfaceGeometrySnapshots()) {
+    for (const auto& snapshot : cut->levelSetGeometrySnapshots()) {
         if (snapshot &&
             snapshot->revision().snapshot_revision_key ==
                 snapshot_revision) {
@@ -737,7 +737,7 @@ RetainedFieldSupportResult retainedFieldSupport(
     }
     const bool local_snapshot_current =
         snapshot_revision ==
-            report.revision.free_surface_snapshot_revision &&
+            report.revision.level_set_snapshot_revision &&
         local_snapshot_matches == 1u && selected_snapshot != nullptr &&
         selected_snapshot->revision().complete() &&
         selected_snapshot->revision().interface_marker == binding->marker &&

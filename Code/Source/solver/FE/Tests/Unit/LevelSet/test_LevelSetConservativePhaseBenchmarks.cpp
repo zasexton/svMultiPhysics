@@ -4,7 +4,7 @@
 
 #include "Assembly/Assembler.h"
 #include "Dofs/EntityDofMap.h"
-#include "Interfaces/FreeSurfaceGeometrySnapshot.h"
+#include "Interfaces/LevelSetGeometrySnapshot.h"
 #include "Spaces/H1Space.h"
 #include "Systems/FESystem.h"
 #include "Systems/SystemSetup.h"

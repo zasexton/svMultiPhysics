@@ -442,7 +442,7 @@ void mixCutVolumeBasisCacheHash(std::uint64_t& h, Real value) noexcept
         mixCutVolumeBasisCacheHash(h, rule.provenance.source_value_revision);
         mixCutVolumeBasisCacheHash(
             h,
-            rule.provenance.free_surface_snapshot_revision_key);
+            rule.provenance.level_set_snapshot_revision_key);
         mixCutVolumeBasisCacheHash(
             h,
             static_cast<std::uint64_t>(rule.provenance.construction));
@@ -455,7 +455,7 @@ void mixCutVolumeBasisCacheHash(std::uint64_t& h, Real value) noexcept
             mixCutVolumeBasisCacheHash(h, meta.source_value_revision);
             mixCutVolumeBasisCacheHash(
                 h,
-                meta.free_surface_snapshot_revision_key);
+                meta.level_set_snapshot_revision_key);
         }
     }
     return h;
@@ -759,7 +759,7 @@ using CutStabilizationCellScales = std::unordered_map<GlobalIndex, Real>;
     if (cut_context == nullptr) {
         return scales;
     }
-    cut_context->assertAllFreeSurfaceGeometrySnapshotsCurrent(mesh);
+    cut_context->assertAllLevelSetGeometrySnapshotsCurrent(mesh);
 
     constexpr Real fraction_floor = Real{1.0e-12};
     constexpr Real full_fraction_tol = Real{1.0e-12};
@@ -9979,7 +9979,7 @@ AssemblyResult StandardAssembler::assembleCutVolumes(
                                   col_dof_map_, col_dof_offset_, matrix_view);
     }
     ensureCellConstrainedFlags(mesh);
-    cut_context.assertAllFreeSurfaceGeometrySnapshotsCurrent(mesh);
+    cut_context.assertAllLevelSetGeometrySnapshotsCurrent(mesh);
 
     const LocalIndex max_dofs =
         std::max(row_dof_map_->getMaxDofsPerCell(), col_dof_map_->getMaxDofsPerCell());
@@ -10089,7 +10089,7 @@ AssemblyResult StandardAssembler::assembleCutVolumes(
         const CutVolumeGeometryCacheEntry* cut_volume_geometry_cache_entry = nullptr;
         bool active_rule_is_partial_cut = false;
         if (isFullSideVolumeRule(rule) &&
-            rule.provenance.free_surface_snapshot_revision_key == 0u) {
+            rule.provenance.level_set_snapshot_revision_key == 0u) {
             const auto type_key = static_cast<std::size_t>(cell_type);
             if (type_key < full_cell_rule_cache.size()) {
                 auto& cached_rule = full_cell_rule_cache[type_key];
@@ -10634,7 +10634,7 @@ AssemblyResult StandardAssembler::assembleCutVolumesFused(
         return result;
     }
 
-    cut_context.assertAllFreeSurfaceGeometrySnapshotsCurrent(mesh);
+    cut_context.assertAllLevelSetGeometrySnapshotsCurrent(mesh);
     const auto& rules = cut_context.volumeRules();
     const auto indexed_rule_indices =
         cut_context.generatedVolumeRuleIndexSpanForMarkerAndSide(interface_marker, side);
@@ -10995,7 +10995,7 @@ void StandardAssembler::assembleCutVolumeFusedRule(const CutVolumeFusedLoop& loo
     const CutVolumeGeometryCacheEntry* cut_volume_geometry_cache_entry = nullptr;
     const bool active_rule_is_full_side =
         isFullSideVolumeRule(rule) &&
-        rule.provenance.free_surface_snapshot_revision_key == 0u;
+        rule.provenance.level_set_snapshot_revision_key == 0u;
     bool active_rule_is_partial_cut = false;
     if (active_rule_is_full_side) {
         const auto type_key = static_cast<std::size_t>(cell_type);
@@ -11427,7 +11427,7 @@ AssemblyResult StandardAssembler::assembleCutInterfaces(
                                   col_dof_map_, col_dof_offset_, matrix_view);
     }
     ensureCellConstrainedFlags(mesh);
-    cut_context.assertAllFreeSurfaceGeometrySnapshotsCurrent(mesh);
+    cut_context.assertAllLevelSetGeometrySnapshotsCurrent(mesh);
 
     std::vector<const geometry::CutQuadratureRule*> selected_rules;
     if (interface_marker >= 0) {

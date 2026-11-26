@@ -346,7 +346,7 @@ the linear solve. At `R/h = 8`, three searches that scan all cells or all
 cut regions once per cell, rule or boundary face account for about 75% of a
 rebuild (`MeshAccess::globalEntityIdsAvailable`, the per-face scans in
 `buildGeneratedActiveBoundaryDomain`, and the rule-to-region lookup in
-`buildFreeSurfaceGeometrySnapshot`). Fixing them does not change results and
+`buildLevelSetGeometrySnapshot`). Fixing them does not change results and
 makes the rebuild scale linearly. For the KAG forms, about 60% of a
 projection is a finite-difference cross-check of the analytic interface-area
 gradient (24 extra strict cuts per cut cell, 131,760 per projection) whose

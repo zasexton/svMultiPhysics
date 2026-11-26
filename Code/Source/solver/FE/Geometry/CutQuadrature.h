@@ -106,7 +106,7 @@ struct CutQuadratureProvenance {
     // Complete immutable free-surface snapshot binding.  Standalone cut
     // rules leave this zero; importing a validated snapshot stamps every
     // retained rule with the finalized, content-addressed revision key.
-    std::uint64_t free_surface_snapshot_revision_key{0};
+    std::uint64_t level_set_snapshot_revision_key{0};
 };
 
 struct CutQuadratureConstructionPolicy {

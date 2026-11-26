@@ -241,7 +241,7 @@ void SupportRestrictionConstraint::forEachSupportEntity(
     case SupportDomainKind::GeneratedInterface: {
         const auto* cut_context = system.cutIntegrationContext();
         if (cut_context != nullptr) {
-            cut_context->assertAllFreeSurfaceGeometrySnapshotsCurrent(mesh);
+            cut_context->assertAllLevelSetGeometrySnapshotsCurrent(mesh);
         }
         if (cut_context == nullptr || !cut_context->hasGeneratedInterfaceMarker(marker_)) {
             break;

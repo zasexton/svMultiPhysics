@@ -73,8 +73,8 @@ class GenericVector;
 } // namespace backends
 
 namespace interfaces {
-class FreeSurfaceGeometrySnapshotCache;
-class FreeSurfaceGeometrySnapshotReuseCache;
+class LevelSetGeometrySnapshotCache;
+class LevelSetGeometrySnapshotReuseCache;
 class LevelSetInterfaceDomain;
 } // namespace interfaces
 
@@ -102,15 +102,15 @@ struct LevelSetGeometryHost {
   svmp::Mesh* primary_mesh{nullptr};
 
   /// Free-surface geometry snapshots by revision key (created on first use).
-  std::unique_ptr<svmp::FE::interfaces::FreeSurfaceGeometrySnapshotCache>&
-      free_surface_geometry_snapshot_cache;
+  std::unique_ptr<svmp::FE::interfaces::LevelSetGeometrySnapshotCache>&
+      level_set_geometry_snapshot_cache;
 
   /// Previous snapshot build of each generated domain (keyed by domain id),
   /// for reusing its full-cell records in the next rebuild.
   std::map<std::string,
            std::unique_ptr<
-               svmp::FE::interfaces::FreeSurfaceGeometrySnapshotReuseCache>>&
-      free_surface_geometry_snapshot_reuse_caches;
+               svmp::FE::interfaces::LevelSetGeometrySnapshotReuseCache>>&
+      level_set_geometry_snapshot_reuse_caches;
 
   /// Checks that an equation-level cut-volume request has a cut-volume
   /// consumer for its resolved interface marker (Application: provenance

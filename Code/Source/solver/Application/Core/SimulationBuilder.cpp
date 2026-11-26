@@ -15,7 +15,7 @@
 #include "FE/Assembly/CompositeMeshAccess.h"
 #include "FE/Dofs/DofHandler.h"
 #include "FE/Dofs/EntityDofMap.h"
-#include "FE/Interfaces/FreeSurfaceGeometrySnapshot.h"
+#include "FE/Interfaces/LevelSetGeometrySnapshot.h"
 #include "FE/Systems/ALEBinding.h"
 #include "FE/Systems/FESystem.h"
 #include "FE/Systems/SystemManifest.h"

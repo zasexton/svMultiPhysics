@@ -3,7 +3,7 @@
 A free-surface time step rebuilds the generated cut geometry several times
 (outer fixed-point passes, the endpoint candidate, maintenance): the
 generated interface domain (`LevelSetGeneratedInterfaceLifecycle`), the
-authoritative geometry snapshot (`buildFreeSurfaceGeometrySnapshot`), the
+authoritative geometry snapshot (`buildLevelSetGeometrySnapshot`), the
 cut integration context and the constraints.  Successive passes move the level
 set only slightly.  This note describes how a rebuild reuses the work of the
 previous one and how the per-cell work runs on several threads, both without
@@ -17,7 +17,7 @@ A cell is recomputed only when its level-set coefficients changed, and a
 linear cell that stays full on one side keeps its region when its values
 change (its signature records only the side).  Cut cells are recomputed.
 
-**Snapshot records.**  `FreeSurfaceGeometrySnapshotReuseCache` (one per
+**Snapshot records.**  `LevelSetGeometrySnapshotReuseCache` (one per
 generated domain, held by the driver) keeps the previous snapshot through a
 weak pointer and, for every record, the content-only part of its validation:
 the ledger counts and maxima of its rule checks and the digest state of its
@@ -76,5 +76,5 @@ assembly thread pool provide the threads.
 | Setting | Effect |
 |---|---|
 | `SVMP_DISABLE_INCREMENTAL_REBUILD=1` | build every snapshot record |
-| `SVMP_INCREMENTAL_REBUILD_SELF_CHECK=1` | also build every snapshot without the cache on one thread; fail unless identical (`compareFreeSurfaceGeometrySnapshots`) |
+| `SVMP_INCREMENTAL_REBUILD_SELF_CHECK=1` | also build every snapshot without the cache on one thread; fail unless identical (`compareLevelSetGeometrySnapshots`) |
 | `SVMP_GEOMETRY_THREADS_SELF_CHECK=1` | recompute every threaded generated-domain cell serially; fail unless identical |

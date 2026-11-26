@@ -34,7 +34,7 @@ CutVolumeMeasureSummary collectCutVolumeMeasures(
       continue;
     }
     const auto snapshot_revision_key =
-        rule->provenance.free_surface_snapshot_revision_key;
+        rule->provenance.level_set_snapshot_revision_key;
     const auto source_value_revision =
         rule->provenance.source_value_revision;
     if ((snapshot_revision_key == 0u) != (source_value_revision == 0u)) {
@@ -44,10 +44,10 @@ CutVolumeMeasureSummary collectCutVolumeMeasures(
     }
     if (snapshot_revision_key != 0u) {
       found_revisioned_rule = true;
-      if (summary.free_surface_snapshot_revision_key == 0u) {
-        summary.free_surface_snapshot_revision_key = snapshot_revision_key;
+      if (summary.level_set_snapshot_revision_key == 0u) {
+        summary.level_set_snapshot_revision_key = snapshot_revision_key;
         summary.source_value_revision = source_value_revision;
-      } else if (summary.free_surface_snapshot_revision_key !=
+      } else if (summary.level_set_snapshot_revision_key !=
                      snapshot_revision_key ||
                  summary.source_value_revision != source_value_revision) {
         throw std::invalid_argument(

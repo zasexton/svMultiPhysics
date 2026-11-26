@@ -341,7 +341,7 @@ makeSnapshotVectorFieldEvaluator(
   return velocity;
 }
 
-svmp::FE::interfaces::FreeSurfaceGeometryScalarEvaluator
+svmp::FE::interfaces::LevelSetGeometryScalarEvaluator
 makeSnapshotScalarFieldEvaluator(
     const SnapshotFieldAccess& record,
     std::span<const svmp::FE::Real> solution,
@@ -382,7 +382,7 @@ makeSnapshotScalarFieldEvaluator(
         }
         return coefficients;
       };
-  svmp::FE::interfaces::FreeSurfaceGeometryScalarEvaluator evaluator;
+  svmp::FE::interfaces::LevelSetGeometryScalarEvaluator evaluator;
   evaluator.value =
       [space, coefficients_for_cell](
           svmp::FE::GlobalIndex cell,

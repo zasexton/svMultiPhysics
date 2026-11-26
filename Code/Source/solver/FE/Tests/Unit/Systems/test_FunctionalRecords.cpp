@@ -237,7 +237,7 @@ TEST(FunctionalRecords,
     }
     ASSERT_FALSE(fixedFiveHundredTwelveUlpNear(pointwise_volume, rulewise_volume));
 
-    const interfaces::FreeSurfaceGeometryRevision revision{
+    const interfaces::LevelSetGeometryRevision revision{
         .source_id = "field:" + std::to_string(phi),
         .domain_id = "rounding_bound",
         .interface_marker = 91,

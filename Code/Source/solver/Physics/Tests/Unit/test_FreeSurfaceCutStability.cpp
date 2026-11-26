@@ -12719,7 +12719,7 @@ TEST(FreeSurfaceCutStabilityMPI,
     FE::systems::AcceptedTwoFluidStageDiagnosticState state{
         .interface_marker = declaration.interface_marker,
         .geometry_revision =
-            FE::interfaces::FreeSurfaceGeometryRevision{
+            FE::interfaces::LevelSetGeometryRevision{
                 .source_id =
                     FE::interfaces::LevelSetInterfaceSource::fromField(
                         declaration.level_set_field)
@@ -12735,7 +12735,7 @@ TEST(FreeSurfaceCutStabilityMPI,
                 .snapshot_revision_key = 91u,
             },
         .local_mesh_revision =
-            FE::interfaces::FreeSurfaceGeometryLocalMeshRevision{
+            FE::interfaces::LevelSetGeometryLocalMeshRevision{
                 .mesh_geometry_revision = stage_geometry.geometry_revision,
                 .mesh_topology_revision = stage_geometry.topology_revision,
                 .ownership_revision = stage_geometry.ownership_revision,
@@ -12793,7 +12793,7 @@ TEST(FreeSurfaceCutStabilityMPI,
                 report.interface_marker = declaration.interface_marker;
                 report.geometry_identity.kind = FE::constraints::
                     SmallCutAggregationGeometryIdentityKind::
-                        AuthoritativeFreeSurfaceSnapshot;
+                        AuthoritativeLevelSetSnapshot;
                 report.geometry_identity.available = true;
                 report.geometry_identity
                     .communicator_fingerprint_consensus_validated = true;

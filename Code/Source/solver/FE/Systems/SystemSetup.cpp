@@ -3750,7 +3750,7 @@ void FESystem::setup(const SetupOptions& user_opts, const SetupInputs& inputs)
             }
             if (cut_integration_context_) {
                 cut_integration_context_
-                    ->assertAllFreeSurfaceGeometrySnapshotsCurrent(
+                    ->assertAllLevelSetGeometrySnapshotsCurrent(
                         meshAccess());
             }
         });
@@ -5573,7 +5573,7 @@ void FESystem::setup(const SetupOptions& user_opts, const SetupInputs& inputs)
                             if (cut_context == nullptr) {
                                 return false;
                             }
-                            cut_context->assertAllFreeSurfaceGeometrySnapshotsCurrent(
+                            cut_context->assertAllLevelSetGeometrySnapshotsCurrent(
                                 meshAccess());
 
                             auto add_for_marker = [&](int active_marker) -> bool {
@@ -6130,7 +6130,7 @@ void FESystem::setup(const SetupOptions& user_opts, const SetupInputs& inputs)
 
         std::vector<std::uint64_t> generated_interface_ids;
         if (const auto* cut_context = cutIntegrationContext()) {
-            cut_context->assertAllFreeSurfaceGeometrySnapshotsCurrent(
+            cut_context->assertAllLevelSetGeometrySnapshotsCurrent(
                 meshAccess());
             for (const auto& rule : cut_context->interfaceRules()) {
                 if (rule.kind != geometry::CutQuadratureKind::Interface ||
@@ -6178,7 +6178,7 @@ void FESystem::setup(const SetupOptions& user_opts, const SetupInputs& inputs)
             if (cut_context == nullptr) {
                 return 0;
             }
-            cut_context->assertAllFreeSurfaceGeometrySnapshotsCurrent(
+            cut_context->assertAllLevelSetGeometrySnapshotsCurrent(
                 meshAccess());
             LocalIndex max_qpts = 0;
             const auto consider_rule =

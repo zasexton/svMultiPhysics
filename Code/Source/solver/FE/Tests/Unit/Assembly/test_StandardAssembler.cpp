@@ -3647,13 +3647,13 @@ TEST(StandardAssemblerFaces,
     metadata.cell = 0;
     metadata.parent_entity = 0;
     metadata.volume_fraction = Real{0.5};
-    metadata.free_surface_snapshot_revision_key = 91u;
+    metadata.level_set_snapshot_revision_key = 91u;
     geometry::CutQuadratureRule rule;
     rule.kind = geometry::CutQuadratureKind::Volume;
     rule.side = geometry::CutIntegrationSide::Negative;
     rule.provenance.parent_entity = 0;
     rule.provenance.marker = 18;
-    rule.provenance.free_surface_snapshot_revision_key = 91u;
+    rule.provenance.level_set_snapshot_revision_key = 91u;
     CutIntegrationContext orphan;
     orphan.addVolumeRule(std::move(metadata), std::move(rule));
 
@@ -5568,7 +5568,7 @@ TEST(StandardAssemblerCutInterfaces,
         makeReferencePlaneInterfaceDomain(marker));
     ASSERT_EQ(generated.interfaceRules().size(), 1u);
     auto orphan_rule = generated.interfaceRules().front();
-    orphan_rule.provenance.free_surface_snapshot_revision_key = 91u;
+    orphan_rule.provenance.level_set_snapshot_revision_key = 91u;
     CutIntegrationContext orphan;
     orphan.addInterfaceRule(std::move(orphan_rule));
 

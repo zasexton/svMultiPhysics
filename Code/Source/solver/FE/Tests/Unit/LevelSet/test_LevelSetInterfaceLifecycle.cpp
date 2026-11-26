@@ -12,7 +12,7 @@
 #include "Dofs/EntityDofMap.h"
 #include "Geometry/FrameGeometry.h"
 #include "Geometry/MappingFactory.h"
-#include "Interfaces/FreeSurfaceGeometrySnapshot.h"
+#include "Interfaces/LevelSetGeometrySnapshot.h"
 #include "Interfaces/LevelSetInterfaceGeometryWriter.h"
 #include "Spaces/SpaceFactory.h"
 #include "Systems/FESystem.h"
@@ -8360,7 +8360,7 @@ TEST(LevelSetInterfaceLifecycle,
                                         radius);
     };
     const auto make_scalar = []() {
-        FE::interfaces::FreeSurfaceGeometryScalarEvaluator scalar;
+        FE::interfaces::LevelSetGeometryScalarEvaluator scalar;
         scalar.value = [](FE::GlobalIndex,
                           const std::array<FE::Real, 3>& xi,
                           const FE::geometry::CutQuadratureProvenance&) {
@@ -8378,7 +8378,7 @@ TEST(LevelSetInterfaceLifecycle,
             };
         return scalar;
     };
-    FE::interfaces::FreeSurfaceGeometrySnapshotPolicy policy;
+    FE::interfaces::LevelSetGeometrySnapshotPolicy policy;
     policy.require_complete_exterior_boundary_partition = false;
     const SingleQuadMeshAccess mesh(FE::ElementType::Quad9);
     const auto complete_interface_domain = [](
@@ -8396,7 +8396,7 @@ TEST(LevelSetInterfaceLifecycle,
     auto result = make_result();
     ASSERT_TRUE(result.success) << result.diagnostic;
     const auto complete_snapshot =
-        FE::interfaces::buildFreeSurfaceGeometrySnapshot(
+        FE::interfaces::buildLevelSetGeometrySnapshot(
             result.domain,
             {},
             {},
@@ -8415,7 +8415,7 @@ TEST(LevelSetInterfaceLifecycle,
 
     auto interface_domain = complete_interface_domain(result.domain);
     const auto snapshot =
-        FE::interfaces::buildFreeSurfaceGeometrySnapshot(
+        FE::interfaces::buildLevelSetGeometrySnapshot(
             std::move(interface_domain),
             {},
             {},
@@ -8431,14 +8431,14 @@ TEST(LevelSetInterfaceLifecycle,
     std::size_t curved_interface_rule_count = 0u;
     for (const auto& record : snapshot->rules()) {
         if (record.role !=
-            FE::interfaces::FreeSurfaceGeometryRuleRole::Interface) {
+            FE::interfaces::LevelSetGeometryRuleRole::Interface) {
             continue;
         }
         ++curved_interface_rule_count;
         EXPECT_TRUE(record.reference_rule.curved_geometry);
         EXPECT_EQ(
             record.moment_certificate.source,
-            FE::interfaces::FreeSurfaceGeometryMomentCertificateSource::
+            FE::interfaces::LevelSetGeometryMomentCertificateSource::
                 BackendReferenceQuadrature);
     }
     EXPECT_GT(curved_interface_rule_count, 0u);
@@ -8470,7 +8470,7 @@ TEST(LevelSetInterfaceLifecycle,
     }
     ASSERT_TRUE(changed);
     EXPECT_THROW(
-        (void)FE::interfaces::buildFreeSurfaceGeometrySnapshot(
+        (void)FE::interfaces::buildLevelSetGeometrySnapshot(
             std::move(defect),
             {},
             {},
@@ -8500,7 +8500,7 @@ TEST(LevelSetInterfaceLifecycle,
     }
     ASSERT_TRUE(duplicated);
     EXPECT_THROW(
-        (void)FE::interfaces::buildFreeSurfaceGeometrySnapshot(
+        (void)FE::interfaces::buildLevelSetGeometrySnapshot(
             std::move(duplicate),
             {},
             {},
