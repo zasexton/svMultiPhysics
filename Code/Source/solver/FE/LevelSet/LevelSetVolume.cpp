@@ -797,11 +797,20 @@ LevelSetVolumeResult computeLevelSetCutCellVolume(
                     cut_result.fragments.begin(),
                     cut_result.fragments.end(),
                     [](const auto& fragment) { return fragment.active(); });
-                if (active == cut_result.fragments.end()) {
-                    throw std::runtime_error(
-                        "level-set volume calculation found a cut cell without an active interface fragment");
+                if (active != cut_result.fragments.end()) {
+                    negative_fraction = active->negative_volume_fraction;
+                } else {
+                    // Roots closer than the cutter tolerances collapse onto
+                    // one phase, which the cutter returns as a full-cell
+                    // region without a fragment.
+                    negative_fraction = Real{0.0};
+                    for (const auto& region : cut_result.volume_regions) {
+                        if (region.active() &&
+                            region.side == geometry::CutIntegrationSide::Negative) {
+                            negative_fraction += region.volume_fraction;
+                        }
+                    }
                 }
-                negative_fraction = active->negative_volume_fraction;
                 ++result.cut_cells;
             } else if (mesh.dimension() == 3) {
                 const auto tets = tetrahedralCornerDecomposition(type);

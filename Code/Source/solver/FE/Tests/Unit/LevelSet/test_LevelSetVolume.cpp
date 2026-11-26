@@ -615,6 +615,47 @@ TEST(LevelSetVolume, RejectedQuadrilateralSaddlePreservesTheInstalledPhysicalSna
 #endif
 }
 
+TEST(LevelSetVolume, MergedRootsTakeTheCollapsedPhase)
+{
+#if defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH
+    // phi = (-2e-12, 1e3, 1e3): vertex 0 is negative beyond the 1e-12
+    // classification band, but both edge roots lie 2e-15 from it, closer than
+    // the point-merging tolerance, so the cutter collapses the sliver onto the
+    // positive phase and returns no interface fragment.
+    const std::array<std::array<FE::Real, 3>, 3> coordinates{{
+        {{0.0, 0.0, 0.0}}, {{1.0, 0.0, 0.0}}, {{0.0, 1.0, 0.0}}}};
+    auto mesh = buildSingleCellMesh(
+        /*spatial_dim=*/2,
+        std::span<const std::array<FE::Real, 3>>(coordinates.data(), coordinates.size()),
+        svmp::CellFamily::Triangle);
+    FE::systems::FESystem system(mesh);
+    const auto phi = system.addField(FE::systems::FieldSpec{
+        .name = "phi",
+        .space = std::make_shared<FE::spaces::H1Space>(FE::ElementType::Triangle3, 1),
+        .components = 1,
+    });
+    ASSERT_NO_THROW(system.setup());
+    const auto& field_dofs = system.fieldDofHandler(phi);
+    const std::array<FE::Real, 3> values{{-2.0e-12, 1.0e3, 1.0e3}};
+    std::vector<FE::Real> coefficients(3u, FE::Real{0.0});
+    for (FE::GlobalIndex vertex = 0; vertex < 3; ++vertex) {
+        coefficients[static_cast<std::size_t>(
+            field_dofs.getEntityDofMap()->getVertexDofs(vertex).front())] =
+            values[static_cast<std::size_t>(vertex)];
+    }
+    level_set::LevelSetVolumeOptions volume_opts{};
+    volume_opts.tolerance = 1.0e-12;
+    level_set::LevelSetVolumeResult result;
+    ASSERT_NO_THROW(result = level_set::computeLevelSetCutCellVolume(
+                        system.meshAccess(), field_dofs, volume_opts, coefficients));
+    ASSERT_TRUE(result.success) << result.diagnostic;
+    EXPECT_EQ(result.cut_cells, 1u);
+    EXPECT_NEAR(result.total_volume, 0.5, 1.0e-15);
+    EXPECT_NEAR(result.negative_volume, 0.0, 1.0e-20);
+    EXPECT_NEAR(result.positive_volume, 0.5, 1.0e-15);
+#endif
+}
+
 TEST(LevelSetVolume, FESystemOverloadUsesFieldSlice)
 {
     const ScalarFieldFixture fixture;
