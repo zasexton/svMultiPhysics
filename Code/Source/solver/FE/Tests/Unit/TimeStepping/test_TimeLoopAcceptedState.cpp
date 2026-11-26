@@ -9,7 +9,7 @@
  * @file test_TimeLoopAcceptedState.cpp
  * @brief The accepted state under first-order generalized-alpha: time levels
  *        of essential data (stage and endpoint values, restart, startup
- *        rates).
+ *        rates) and rollback of rejected candidates.
  *
  * The system is M du/dt = 0 on the single tetrahedron with u_1 = g(t) and
  * u_2 = u_3 = 0.  The free row of u_0 is the consistent-mass row
@@ -29,6 +29,7 @@
 #include "Systems/TransientSystem.h"
 #include "Tests/Unit/Forms/FormsTestHelpers.h"
 #include "Tests/Unit/TimeStepping/TimeSteppingTestHelpers.h"
+#include "TimeStepping/StepController.h"
 #include "TimeStepping/TimeHistory.h"
 #include "TimeStepping/TimeLoop.h"
 
@@ -78,6 +79,21 @@ public:
 
 private:
     std::function<double(double)> g_;
+};
+
+/// Retries a rejected attempt with the same step.
+class RetrySameStepController final : public ts::StepController {
+public:
+    [[nodiscard]] int maxRetries() const noexcept override { return 2; }
+    [[nodiscard]] ts::StepDecision onAccepted(const ts::StepAttemptInfo& info) override
+    {
+        return ts::StepDecision{.accept = true, .retry = false, .next_dt = info.dt};
+    }
+    [[nodiscard]] ts::StepDecision onRejected(const ts::StepAttemptInfo& info,
+                                              ts::StepRejectReason /*reason*/) override
+    {
+        return ts::StepDecision{.accept = false, .retry = true, .next_dt = info.dt};
+    }
 };
 
 /// Accepted state of a restart: step index, u_n, u_{n-1} and du_n/dt.
@@ -210,7 +226,8 @@ TEST(TimeLoopAcceptedState, GeneralizedAlphaRestartUsesConstraintsAtTheRestoredT
 {
     // Restart at t = 1 from the consistent state of b = t.  Stage entry used to
     // distribute the setup-time value g(0) = 0 into u_n, so the stage saw b jump
-    // from 0.
+    // from 0; it also wrote g(t_n) = 1.0 into u_{n-1}, whose value is 0.9.
+    std::optional<Real> b_nm1_at_gate;
     const auto result = runMassRow(
         {.g = [](double t) { return t; },
          .t0 = 1.0,
@@ -219,10 +236,71 @@ TEST(TimeLoopAcceptedState, GeneralizedAlphaRestartUsesConstraintsAtTheRestoredT
          .restart = RestartState{.step_index = 10,
                                  .u_n = {-0.5, 1.0, 0.0, 0.0},
                                  .u_nm1 = {-0.45, 0.9, 0.0, 0.0},
-                                 .u_dot_n = {-0.5, 1.0, 0.0, 0.0}}});
+                                 .u_dot_n = {-0.5, 1.0, 0.0, 0.0}},
+         .callbacks = [&](ts::TimeLoopCallbacks& callbacks) {
+             callbacks.on_step_candidate_ready =
+                 [&](ts::TimeHistory& history, const ts::NewtonReport&) -> std::optional<ts::StepRejectReason> {
+                 b_nm1_at_gate = ts_test::getVectorByDof(history.uPrev2())[1];
+                 return std::nullopt;
+             };
+         }});
     ASSERT_TRUE(result.has_value());
     EXPECT_NEAR(result->u[0], -0.55, 1e-12);
     EXPECT_NEAR(result->u[1], 1.1, 1e-12);
+    ASSERT_TRUE(b_nm1_at_gate.has_value());
+    EXPECT_DOUBLE_EQ(*b_nm1_at_gate, 0.9);
+}
+
+TEST(TimeLoopAcceptedState, RejectedCandidateRestoresStoredSolutionsAndRatesBeforeObservers)
+{
+    // b = t^2, restarted at t = 1.  The first attempt is rejected after a value
+    // has been written into u_n (as a stage solve projects trial constraint
+    // lines into it).  The rejection observer must see the accepted u_n and
+    // rate, and the retry must reproduce the run without a rejection.
+    const RestartState restart{.step_index = 10,
+                               .u_n = {-0.5, 1.0, 0.0, 0.0},
+                               .u_nm1 = {-0.405, 0.81, 0.0, 0.0},
+                               .u_dot_n = {-1.0, 2.0, 0.0, 0.0}};
+    const auto g = [](double t) { return t * t; };
+    const auto reference = runMassRow({.g = g, .t0 = 1.0, .dt = 0.1, .t_end = 1.1, .restart = restart});
+    ASSERT_TRUE(reference.has_value());
+
+    int attempts = 0;
+    std::vector<Real> observed_u_n;
+    std::vector<Real> observed_rate;
+    const auto retried = runMassRow(
+        {.g = g,
+         .t0 = 1.0,
+         .dt = 0.1,
+         .t_end = 1.1,
+         .restart = restart,
+         .callbacks =
+             [&](ts::TimeLoopCallbacks& callbacks) {
+                 callbacks.on_before_step_accept = [&](ts::TimeHistory& history, const ts::NewtonReport&) {
+                     if (attempts++ > 0) {
+                         return true;
+                     }
+                     ts_test::setVectorByDof(history.uPrev(), {2.0, 1.0, 0.0, 0.0});
+                     return false;
+                 };
+                 callbacks.on_step_rejected =
+                     [&](const ts::TimeHistory& history, ts::StepRejectReason, const ts::NewtonReport&) {
+                         observed_u_n = ts_test::getVectorByDof(const_cast<ts::TimeHistory&>(history).uPrev());
+                         observed_rate = ts_test::getVectorByDof(const_cast<ts::TimeHistory&>(history).uDot());
+                     };
+             },
+         .controller = std::make_shared<RetrySameStepController>()});
+    ASSERT_TRUE(retried.has_value());
+    EXPECT_EQ(attempts, 2);
+    ASSERT_EQ(observed_u_n.size(), 4u);
+    EXPECT_DOUBLE_EQ(observed_u_n[0], -0.5);
+    ASSERT_EQ(observed_rate.size(), 4u);
+    EXPECT_DOUBLE_EQ(observed_rate[0], -1.0);
+    EXPECT_DOUBLE_EQ(observed_rate[1], 2.0);
+    for (std::size_t i = 0; i < 4u; ++i) {
+        EXPECT_DOUBLE_EQ(retried->u[i], reference->u[i]) << "dof=" << i;
+        EXPECT_DOUBLE_EQ(retried->u_dot[i], reference->u_dot[i]) << "dof=" << i;
+    }
 }
 
 } // namespace

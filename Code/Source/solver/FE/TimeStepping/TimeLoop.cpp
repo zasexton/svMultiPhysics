@@ -401,6 +401,8 @@ void initializeBorderedRatesFromPde(systems::FESystem& system,
     throw systems::InvalidStateException(message);
 }
 
+/// Distributes the constraints into every stored solution.  Only for a fresh
+/// start, where all slots hold the initial state at the constraint time.
 void updateGhostsAndDistributeHistory(const constraints::AffineConstraints& constraints,
                                       TimeHistory& history)
 {
@@ -413,6 +415,20 @@ void updateGhostsAndDistributeHistory(const constraints::AffineConstraints& cons
     for (int k = 1; k <= history.historyDepth(); ++k) {
         constraints.distribute(history.uPrevK(k));
     }
+}
+
+/// Distributes constraints evaluated at the accepted time t_n into u and u_n
+/// at stage entry.  Older slots hold values of their own times and keep them.
+void updateGhostsAndDistributeAcceptedState(const constraints::AffineConstraints& constraints,
+                                            TimeHistory& history)
+{
+    history.updateGhosts();
+    if (constraints.empty()) {
+        return;
+    }
+
+    constraints.distribute(history.u());
+    constraints.distribute(history.uPrev());
 }
 
 /// Adds the inhomogeneity rate g_dot(t) to the constrained entries of a rate
@@ -757,30 +773,48 @@ void copyVector(backends::GenericVector& dst, const backends::GenericVector& src
 }
 
 /**
- * Roll back optional rate vectors and one-shot nonlinear workspace state
- * unless the enclosing step attempt commits.
+ * Roll back optional rate vectors, stored solutions and one-shot nonlinear
+ * workspace state unless the enclosing step attempt commits.
  *
  * Generalized-alpha and structural schemes update uDot/uDDot while forming a
  * converged candidate.  Acceptance callbacks and adaptive controllers run
  * after that update and can still reject the candidate.  `u()` is reset from
  * accepted solution history on the next attempt, but rate vectors have no
  * equivalent history slot, so they require an explicit transaction guard.
- * An initializer consumed by a converged implicit stage is equally
- * provisional: a rejected multistage/adaptive attempt must restore the
- * initializer ledger so the retry reconstructs that discarded correction.
+ * Stored solutions u_n, u_{n-1}, ... are restored as well: a stage solve
+ * projects its trial master-bearing lines into them, and a rejected attempt
+ * must not leave those values behind.  An initializer consumed by a
+ * converged implicit stage is equally provisional: a rejected
+ * multistage/adaptive attempt must restore the initializer ledger so the
+ * retry reconstructs that discarded correction.  restore() rolls back at a
+ * rejection before any rejection callback runs; the destructor rolls back an
+ * attempt left by any other path.
  */
 class AttemptStateGuard {
 public:
     AttemptStateGuard(TimeHistory& history,
                       const backends::BackendFactory& factory,
                       TimeHistory::RateStateSnapshot& snapshot,
+                      std::vector<std::unique_ptr<backends::GenericVector>>& solution_snapshot,
                       NewtonWorkspace& workspace)
         : history_(history)
         , snapshot_(snapshot)
+        , solution_snapshot_(solution_snapshot)
         , workspace_(workspace)
         , initializer_ledger_(workspace.initializer_ledger)
     {
         history_.snapshotRateState(snapshot_, factory);
+        const auto depth = static_cast<std::size_t>(history_.historyDepth());
+        solution_snapshot_.resize(depth);
+        for (std::size_t k = 0; k < depth; ++k) {
+            const auto& stored = history_.uPrevK(static_cast<int>(k + 1u));
+            auto& copy = solution_snapshot_[k];
+            if (!copy || copy->size() != stored.size()) {
+                copy = factory.createVector(stored.size());
+                FE_CHECK_NOT_NULL(copy.get(), "TimeLoop: attempt solution snapshot");
+            }
+            copy->copyFrom(stored);
+        }
     }
 
     AttemptStateGuard(const AttemptStateGuard&) = delete;
@@ -788,9 +822,23 @@ public:
 
     ~AttemptStateGuard() noexcept
     {
-        if (!committed_) {
-            history_.restoreRateState(snapshot_);
-            workspace_.initializer_ledger = initializer_ledger_;
+        try {
+            restore();
+        } catch (...) {
+        }
+    }
+
+    /// Restores the accepted rates, stored solutions and initializer ledger.
+    void restore()
+    {
+        if (committed_ || restored_) {
+            return;
+        }
+        restored_ = true;
+        history_.restoreRateState(snapshot_);
+        workspace_.initializer_ledger = initializer_ledger_;
+        for (std::size_t k = 0; k < solution_snapshot_.size(); ++k) {
+            history_.uPrevK(static_cast<int>(k + 1u)).copyFrom(*solution_snapshot_[k]);
         }
     }
 
@@ -799,9 +847,11 @@ public:
 private:
     TimeHistory& history_;
     TimeHistory::RateStateSnapshot& snapshot_;
+    std::vector<std::unique_ptr<backends::GenericVector>>& solution_snapshot_;
     NewtonWorkspace& workspace_;
     NewtonInitializerLedger initializer_ledger_{};
     bool committed_{false};
+    bool restored_{false};
 };
 
 /**
@@ -1811,7 +1861,7 @@ TimeLoopReport TimeLoop::run(systems::TransientSystem& transient,
                                         /*require_u_ddot=*/false);
         }
 
-        updateGhostsAndDistributeHistory(constraints, history);
+        updateGhostsAndDistributeAcceptedState(constraints, history);
         const auto u_n = history.uPrevSpan();
         FE_CHECK_ARG(static_cast<GlobalIndex>(u_n.size()) == n_dofs, "TimeLoop: collocation u_n size mismatch");
 
@@ -2485,6 +2535,7 @@ TimeLoopReport TimeLoop::run(systems::TransientSystem& transient,
     // checkpoint vector per rate, so adaptive runs pay O(n_dofs) copies but no
     // per-step backend-vector allocation.
     TimeHistory::RateStateSnapshot attempt_rate_state_snapshot;
+    std::vector<std::unique_ptr<backends::GenericVector>> attempt_solution_snapshot;
 
     auto adjustStepToFinalInterval = [&](double time, double candidate_dt) {
         double dt_adjusted = candidate_dt;
@@ -2571,6 +2622,7 @@ TimeLoopReport TimeLoop::run(systems::TransientSystem& transient,
                 history,
                 factory,
                 attempt_rate_state_snapshot,
+                attempt_solution_snapshot,
                 workspace);
 
             const double remaining = t_end - t;
@@ -2773,7 +2825,7 @@ TimeLoopReport TimeLoop::run(systems::TransientSystem& transient,
                                                     /*require_u_ddot=*/!had_u_ddot);
 
                         // Ensure (u_n, v_n, a_n) values are ghost-consistent before constructing constants.
-                        updateGhostsAndDistributeHistory(transient.system().constraints(), history);
+                        updateGhostsAndDistributeAcceptedState(transient.system().constraints(), history);
 
                         // Save displacement history since we overwrite the first two slots with
                         // scheme-specific constant vectors.
@@ -3182,7 +3234,7 @@ TimeLoopReport TimeLoop::run(systems::TransientSystem& transient,
 	                        }
 
                         // Ensure (u_n, uDot_n) values are ghost-consistent before constructing constants.
-                        updateGhostsAndDistributeHistory(transient.system().constraints(), history);
+                        updateGhostsAndDistributeAcceptedState(transient.system().constraints(), history);
 
                         // Save displacement history (u^{n-1}) since we overwrite uPrev2 with uDot^n
                         // for the stage solve.
@@ -3314,7 +3366,7 @@ TimeLoopReport TimeLoop::run(systems::TransientSystem& transient,
                                                     /*require_u_ddot=*/!had_u_ddot);
 
                         // Ensure (u_n, v_n, a_n) values are ghost-consistent before constructing constants.
-                        updateGhostsAndDistributeHistory(transient.system().constraints(), history);
+                        updateGhostsAndDistributeAcceptedState(transient.system().constraints(), history);
 
                         // Save displacement history since we overwrite the first two slots with
                         // scheme-specific constant vectors.
@@ -3411,7 +3463,7 @@ TimeLoopReport TimeLoop::run(systems::TransientSystem& transient,
                                                         /*overwrite_u_ddot=*/!had_u_ddot,
                                                         /*require_u_ddot=*/!had_u_ddot);
 
-                            updateGhostsAndDistributeHistory(transient.system().constraints(), history);
+                            updateGhostsAndDistributeAcceptedState(transient.system().constraints(), history);
 
                             copyVector(*scratch_vec0, history.uPrev());
                             copyVector(*scratch_vec2, history.uPrev2());
@@ -3926,6 +3978,11 @@ TimeLoopReport TimeLoop::run(systems::TransientSystem& transient,
             });
             auto restoreAcceptedGeneratedState = [&]() {
                 candidate_rollback_guard.discard();
+                // Accepted rates and stored solutions first: the stage solve
+                // may have projected trial constraint values into u_n, and
+                // every callback below (including rejection observers) must
+                // see the accepted state.
+                attempt_state.restore();
                 if (options_.newton.synchronize_state) {
                     auto restored_state = makeRestoredTimeStepStateView(
                         history, t, dt);
