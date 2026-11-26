@@ -22,6 +22,7 @@
 #include "Systems/SystemsExceptions.h"
 
 #include <cstddef>
+#include <optional>
 #include <span>
 #include <string>
 #include <vector>
@@ -56,11 +57,14 @@ struct DAEStructuralAnalysis {
     /// Estimated differential index (-1 = unknown, 0 = pure ODE, 1+ = DAE).
     int estimated_index{-1};
 
-    /// Whether the system appears structurally nonsingular.
-    bool structurally_nonsingular{true};
+    /// True if the evaluated step Jacobian admits a full row-column matching.
+    bool structurally_nonsingular{false};
 
     /// Diagnostic messages.
     std::vector<std::string> diagnostics{};
+
+    /// Rank of the nonzero pattern at the supplied state. Empty for metadata-only analysis.
+    std::optional<int> step_structural_rank{};
 };
 
 /**
@@ -118,6 +122,13 @@ public:
     [[nodiscard]] static DAEStructuralAnalysis analyze(
         const AuxiliaryStateModel& model);
 
+    /// Also evaluate the step Jacobian pattern using the same coefficient as the stepper.
+    [[nodiscard]] static DAEStructuralAnalysis analyze(
+        const AuxiliaryStateModel& model,
+        const AuxiliaryDerivativeProvider& deriv,
+        const AuxiliaryLocalContext& ctx,
+        std::optional<Real> rate_coefficient = std::nullopt);
+
     /**
      * @brief Verify Jacobian quality by comparing analytic vs FD.
      *
@@ -149,14 +160,19 @@ public:
         const AuxiliaryLocalContext& ctx);
 
     /**
-     * @brief Check if the Jacobian appears structurally singular.
+     * @brief Check for a missing full matching in the nonzero pattern of
+     * F_x + rate_coefficient * F_xdot at the supplied state.
      *
-     * Uses a simple row/column norm check.
+     * The default coefficient is 1/effective_dt for backward Euler, falling
+     * back to 1/dt. With no step size it is zero (steady-state Jacobian).
+     * Other schemes can supply their coefficient, e.g. 3/(2h) for BDF2.
+     * A full matching alone cannot establish numerical invertibility.
      */
     [[nodiscard]] static bool isStructurallySingular(
         const AuxiliaryStateModel& model,
         const AuxiliaryDerivativeProvider& deriv,
-        const AuxiliaryLocalContext& ctx);
+        const AuxiliaryLocalContext& ctx,
+        std::optional<Real> rate_coefficient = std::nullopt);
 };
 
 } // namespace systems

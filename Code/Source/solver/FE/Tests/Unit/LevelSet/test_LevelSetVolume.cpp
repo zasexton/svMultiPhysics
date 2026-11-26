@@ -7,6 +7,7 @@
 #include "Dofs/DofHandler.h"
 #include "Dofs/EntityDofMap.h"
 #include "Interfaces/FreeSurfaceGeometrySnapshot.h"
+#include "LevelSet/LevelSetDiagnostics.h"
 #include "LevelSet/LevelSetGeometryService.h"
 #include "LevelSet/LevelSetInterfaceLifecycle.h"
 #include "Mesh/Core/MeshBase.h"
@@ -509,6 +510,12 @@ TEST(LevelSetVolume,
     EXPECT_NEAR(result.negative_volume + result.positive_volume,
                 result.total_volume,
                 1.0e-12);
+    const auto diagnostics = level_set::computeLevelSetOutputDiagnostics(
+        system, phi, {.volume = options, .has_reference_negative_volume = true,
+                      .reference_negative_volume = 0.5}, solution);
+    ASSERT_TRUE(diagnostics.success) << diagnostics.diagnostic;
+    EXPECT_NEAR(diagnostics.negative_volume_loss, 0.1, 1.0e-12);
+    EXPECT_NEAR(diagnostics.relative_negative_volume_loss, 0.2, 1.0e-12);
 #endif
 }
 
@@ -750,6 +757,13 @@ TEST(LevelSetVolume, GeneratedInterfaceVolumeDiscoversInteriorIsland)
     EXPECT_NEAR(generated.negative_volume,
                 3.141592653589793238462643383279502884 * radius * radius,
                 3.0e-2);
+    // The positive corner values conceal the quadratic interior interface.
+    const auto diagnostics = level_set::computeLevelSetOutputDiagnostics(
+        system, phi, {.volume = generated_opts}, solution);
+    ASSERT_TRUE(diagnostics.success) << diagnostics.diagnostic;
+    EXPECT_EQ(diagnostics.volume.cut_cells, 1u);
+    EXPECT_DOUBLE_EQ(diagnostics.volume.negative_volume, generated.negative_volume);
+    EXPECT_DOUBLE_EQ(diagnostics.volume.positive_volume, generated.positive_volume);
 #endif
 }
 

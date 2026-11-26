@@ -4,7 +4,7 @@ Reviewed 25 November 2026 at commit `4510bb8aec481e33a2afb6434759c86e2946815c`. 
 
 At the audited revision, a 32-step capillary-wave run accepted one step after kinematic reconciliation exhausted all eight iterations. The area change exceeded the reported kinematic target by **1.20421 × 10⁻⁶**. Five hydrostatic tank runs on the same executable preserved height and volume through 100 steps each. The review also reproduced a pressure time-labeling error in first-order generalized-α and three pressure-control failures on cut tetrahedra.
 
-**Current status.** A01–A11 are resolved. **15 findings remain open**, A12–A26.
+**Original audit status.** A01–A11, A13 and A23 are resolved. **13 findings remain open** in the original set of 26.
 
 ## Resolution of the first four findings
 
@@ -45,6 +45,12 @@ The stabilization has a measurable tradeoff. In the manufactured traction-driven
 **Verification on 25 November 2026.** All 93 configured native CTest entries passed, including 33 MPI and 10 free-surface entries. All 110 tests in the optional DOF module passed. An independent comparison with dense condensation matched 26,884 entries across 900 systems. The Trilinos 13.2 backend passed the serial solve tests, including algebraic multigrid with GCC 14.2, and all six matrix tests on two MPI ranks. Two-rank checks also propagated the error on both FSILS and Tpetra when core FE MPI support was disabled. [DOF regression cases](../Code/Source/solver/FE/Tests/Unit/Dofs/test_ConstrainedAssembly.cpp) · [Trilinos solver tests](../Code/Source/solver/FE/Tests/Unit/Backends/test_LinearSolverConformance_Trilinos.cpp)
 
 The solver’s FSILS assembly path with precomputed entry locations had similar before-and-after timings in a local microbenchmark. The public direct block helper resolved and checked the full block before writing and took about twice as long for the tested blocks of four and eight nodes with four DOFs per node. The repository search found only test callers for that helper.
+
+## Further resolutions of the original findings
+
+**A13 · Structural rank of an auxiliary DAE step.** The analyzer computes a maximum row-column matching on the nonzero pattern of the evaluated step Jacobian, Fₓ + αFẋ. Backward Euler uses the local step size. Other integrators can supply their rate coefficient. Metadata-only analysis leaves the rank unevaluated. The audit's three-row counterexample now reports structural rank two. The rate-only equation has rank one for an implicit step. A test with identical numerical rows and a full matching verifies the distinction between structural and numerical rank. All 451 auxiliary tests passed. [DAE analyzer](../Code/Source/solver/FE/Auxiliary/AuxiliaryDAEAnalyzer.cpp) · [Regression tests](../Code/Source/solver/FE/Tests/Unit/Auxiliary/test_AuxiliaryStateModel.cpp)
+
+**A23 · System-aware level-set volume diagnostics.** The diagnostics pass the system and complete solution to the volume evaluator, preserving the selected field, geometry and quadrature. Both public entry points use the same conversion to output scalars and reference losses. On a warped quadrilateral the generated negative area is 0.4, giving a loss of 0.1 from a reference of 0.5. On a quadratic field with positive values at every corner, diagnostics and direct generated quadrature agree on the area of the interior island. The serial level-set suite and the two- and four-rank level-set suites passed. [Diagnostics](../Code/Source/solver/FE/LevelSet/LevelSetDiagnostics.cpp) · [Volume regressions](../Code/Source/solver/FE/Tests/Unit/LevelSet/test_LevelSetVolume.cpp)
 
 ## Index of the original findings
 

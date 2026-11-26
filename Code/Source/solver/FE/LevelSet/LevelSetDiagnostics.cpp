@@ -1,8 +1,6 @@
 #include "LevelSet/LevelSetDiagnostics.h"
 
-#include <algorithm>
 #include <cmath>
-#include <stdexcept>
 #include <utility>
 
 namespace svmp::FE::level_set {
@@ -48,6 +46,18 @@ void computeReferenceVolumeLoss(LevelSetOutputDiagnostics& result,
         denom > Real{0.0} ? result.negative_volume_loss / denom : Real{0.0};
 }
 
+LevelSetOutputDiagnostics volumeDiagnostics(LevelSetVolumeResult volume,
+                                            const LevelSetOutputDiagnosticsOptions& options)
+{
+    LevelSetOutputDiagnostics result;
+    result.volume = std::move(volume);
+    result.success = result.volume.success;
+    result.diagnostic = result.volume.diagnostic;
+    computeReferenceVolumeLoss(result, options);
+    appendVolumeScalars(result, options);
+    return result;
+}
+
 } // namespace
 
 LevelSetOutputDiagnostics computeLevelSetOutputDiagnostics(
@@ -56,17 +66,8 @@ LevelSetOutputDiagnostics computeLevelSetOutputDiagnostics(
     const LevelSetOutputDiagnosticsOptions& options,
     std::span<const Real> coefficients)
 {
-    LevelSetOutputDiagnostics result;
-    result.volume = computeLevelSetCutCellVolume(
-        mesh,
-        level_set_dofs,
-        options.volume,
-        coefficients);
-    result.success = result.volume.success;
-    result.diagnostic = result.volume.diagnostic;
-    computeReferenceVolumeLoss(result, options);
-    appendVolumeScalars(result, options);
-    return result;
+    return volumeDiagnostics(
+        computeLevelSetCutCellVolume(mesh, level_set_dofs, options.volume, coefficients), options);
 }
 
 LevelSetOutputDiagnostics computeLevelSetOutputDiagnostics(
@@ -75,19 +76,8 @@ LevelSetOutputDiagnostics computeLevelSetOutputDiagnostics(
     const LevelSetOutputDiagnosticsOptions& options,
     std::span<const Real> solution)
 {
-    const auto& field_dofs = system.fieldDofHandler(level_set_field);
-    const auto n_field_dofs = static_cast<std::size_t>(field_dofs.getNumDofs());
-    const auto offset = static_cast<std::size_t>(system.fieldDofOffset(level_set_field));
-    if (offset + n_field_dofs > solution.size()) {
-        throw std::invalid_argument(
-            "level-set output diagnostics received an incompatible system solution span");
-    }
-
-    return computeLevelSetOutputDiagnostics(
-        system.meshAccess(),
-        field_dofs,
-        options,
-        solution.subspan(offset, n_field_dofs));
+    return volumeDiagnostics(
+        computeLevelSetCutCellVolume(system, level_set_field, options.volume, solution), options);
 }
 
 } // namespace svmp::FE::level_set

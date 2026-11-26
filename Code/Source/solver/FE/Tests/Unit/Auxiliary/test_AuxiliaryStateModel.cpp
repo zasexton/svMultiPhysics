@@ -6,6 +6,8 @@
 
 #include <gtest/gtest.h>
 
+#include "Auxiliary/AuxiliaryDAEAnalyzer.h"
+#include "Auxiliary/AuxiliaryModelBuilder.h"
 #include "Auxiliary/AuxiliaryStateModel.h"
 #include "Auxiliary/AuxiliaryDerivativeProvider.h"
 #include "Auxiliary/AuxiliaryStateStepper.h"
@@ -565,7 +567,66 @@ TEST(AuxiliaryStateStepper, PerBlockMethodSelection)
 //  Symbolic Jacobian parity tests
 // ============================================================================
 
-#include "Auxiliary/AuxiliaryModelBuilder.h"
+TEST(AuxiliaryDAEAnalyzer, DetectsUnmatchedRowsInANonemptyPattern)
+{
+    const auto alg = AuxiliaryVariableKind::Algebraic;
+    auto model = AuxiliaryModelBuilder("unmatched")
+        .state("x", alg).state("y", alg).state("z", alg)
+        .algebraic("x", modelState("x"))
+        .algebraic("y", modelState("x"))
+        .algebraic("z", modelState("y") + modelState("z"))
+        .build();
+    AuxiliaryDerivativeProvider deriv;
+    deriv.setup(*model, {});
+    std::vector<Real> state(3, 0.0);
+    AuxiliaryLocalContext ctx;
+    ctx.x = state;
+    ctx.xdot = state;
+    EXPECT_TRUE(AuxiliaryDAEAnalyzer::isStructurallySingular(*model, deriv, ctx));
+    const auto metadata = AuxiliaryDAEAnalyzer::analyze(*model);
+    EXPECT_FALSE(metadata.step_structural_rank.has_value());
+    EXPECT_FALSE(metadata.structurally_nonsingular);
+    const auto evaluated = AuxiliaryDAEAnalyzer::analyze(*model, deriv, ctx);
+    EXPECT_EQ(evaluated.step_structural_rank, 2);
+    EXPECT_FALSE(evaluated.structurally_nonsingular);
+}
+
+TEST(AuxiliaryDAEAnalyzer, UsesTheRateBlockAndTheLocalImplicitStep)
+{
+    std::vector<Real> state(1, 0.0);
+    AuxiliaryLocalContext ctx;
+    ctx.x = state;
+    ctx.xdot = state;
+    ctx.dt = 1.0;
+    ctx.effective_dt = 0.5;
+    ScalarDecayModel pure_rate(0.0);
+    AuxiliaryDerivativeProvider deriv;
+    deriv.setup(pure_rate, {});
+    EXPECT_FALSE(AuxiliaryDAEAnalyzer::isStructurallySingular(pure_rate, deriv, ctx));
+
+    ScalarDecayModel cancellation(-2.0);
+    deriv.setup(cancellation, {});
+    EXPECT_TRUE(AuxiliaryDAEAnalyzer::isStructurallySingular(cancellation, deriv, ctx));
+    EXPECT_FALSE(AuxiliaryDAEAnalyzer::isStructurallySingular(cancellation, deriv, ctx, 3.0));
+}
+
+TEST(AuxiliaryDAEAnalyzer, MatchesPatternsIndependentlyOfNumericalRankOrUnits)
+{
+    std::vector<Real> state(2, 0.0);
+    AuxiliaryLocalContext ctx;
+    ctx.x = state;
+    ctx.xdot = state;
+    // Both patterns admit a full matching. The first requires reassigning
+    // row zero to column one. The second has identical numerical rows.
+    for (const Real last_entry : {0.0, 1.0}) {
+        CoupledODE2D model(1e-60, -1e-60, -1e-60, last_entry * 1e-60);
+        AuxiliaryDerivativeProvider deriv;
+        deriv.setup(model, {});
+        const auto evaluated = AuxiliaryDAEAnalyzer::analyze(model, deriv, ctx, 0.0);
+        EXPECT_EQ(evaluated.step_structural_rank, 2);
+        EXPECT_TRUE(evaluated.structurally_nonsingular);
+    }
+}
 
 TEST(AuxiliaryDerivativeProvider, SymbolicJacobian_ScalarDecay)
 {

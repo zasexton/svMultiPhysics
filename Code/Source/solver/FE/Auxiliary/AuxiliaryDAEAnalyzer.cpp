@@ -6,6 +6,63 @@
 namespace svmp {
 namespace FE {
 namespace systems {
+namespace {
+
+// Augment the row-column matching, reassigning an earlier row if needed.
+bool matchRow(int row, std::span<const Real> jacobian, std::vector<int>& matched_row,
+              std::vector<bool>& visited)
+{
+    const auto n = matched_row.size();
+    for (std::size_t col = 0; col < n; ++col) {
+        if (visited[col] || jacobian[row * n + col] == 0.0) {
+            continue;
+        }
+        visited[col] = true;
+        if (matched_row[col] < 0 || matchRow(matched_row[col], jacobian, matched_row, visited)) {
+            matched_row[col] = row;
+            return true;
+        }
+    }
+    return false;
+}
+
+int stepStructuralRank(const AuxiliaryStateModel& model, const AuxiliaryDerivativeProvider& deriv,
+                       const AuxiliaryLocalContext& ctx, std::optional<Real> rate_coefficient)
+{
+    const Real h = ctx.effective_dt != 0.0 ? ctx.effective_dt : ctx.dt;
+    const Real alpha = rate_coefficient.value_or(h != 0.0 ? 1.0 / h : 0.0);
+    FE_CHECK_ARG(std::isfinite(alpha), "Nonfinite auxiliary step Jacobian coefficient");
+
+    const int n = model.dimension();
+    const auto entries = static_cast<std::size_t>(n) * n;
+    std::vector<Real> jacobian(entries);
+    std::vector<Real> rate(alpha != 0.0 ? entries : 0);
+    AuxiliaryJacobianRequest request;
+    request.n = n;
+    request.dF_dx = jacobian;
+    request.dF_dxdot = rate;
+    request.want_dF_dxdot = alpha != 0.0;
+    deriv.evaluateJacobian(model, ctx, request);
+    for (std::size_t k = 0; k < entries; ++k) {
+        if (request.want_dF_dxdot) {
+            jacobian[k] += alpha * rate[k];
+        }
+        FE_CHECK_ARG(std::isfinite(jacobian[k]), "Nonfinite entry in auxiliary step Jacobian");
+    }
+
+    int rank = 0;
+    std::vector<int> matched_row(n, -1);
+    std::vector<bool> visited(n);
+    for (int row = 0; row < n; ++row) {
+        std::fill(visited.begin(), visited.end(), false);
+        if (matchRow(row, jacobian, matched_row, visited)) {
+            ++rank;
+        }
+    }
+    return rank;
+}
+
+} // namespace
 
 // ---------------------------------------------------------------------------
 //  Structural analysis
@@ -46,8 +103,6 @@ DAEStructuralAnalysis AuxiliaryDAEAnalyzer::analyze(
         result.estimated_index = 1; // Default assumption for mixed systems
     }
 
-    result.structurally_nonsingular = true;
-
     if (result.n_algebraic > 0) {
         result.diagnostics.push_back(
             "Mixed DAE system: " + std::to_string(result.n_differential) +
@@ -60,6 +115,16 @@ DAEStructuralAnalysis AuxiliaryDAEAnalyzer::analyze(
             " differential variables");
     }
 
+    return result;
+}
+
+DAEStructuralAnalysis AuxiliaryDAEAnalyzer::analyze(
+    const AuxiliaryStateModel& model, const AuxiliaryDerivativeProvider& deriv,
+    const AuxiliaryLocalContext& ctx, std::optional<Real> rate_coefficient)
+{
+    auto result = analyze(model);
+    result.step_structural_rank = stepStructuralRank(model, deriv, ctx, rate_coefficient);
+    result.structurally_nonsingular = *result.step_structural_rank == model.dimension();
     return result;
 }
 
@@ -219,29 +284,10 @@ DAEScalingRecommendation AuxiliaryDAEAnalyzer::computeScaling(
 bool AuxiliaryDAEAnalyzer::isStructurallySingular(
     const AuxiliaryStateModel& model,
     const AuxiliaryDerivativeProvider& deriv,
-    const AuxiliaryLocalContext& ctx)
+    const AuxiliaryLocalContext& ctx,
+    std::optional<Real> rate_coefficient)
 {
-    const int n = model.dimension();
-    std::vector<Real> dFdx(static_cast<std::size_t>(n * n), 0.0);
-    AuxiliaryJacobianRequest jreq;
-    jreq.dF_dx = dFdx;
-    jreq.n = n;
-    deriv.evaluateJacobian(model, ctx, jreq);
-
-    // Check for zero rows or zero columns.
-    for (int i = 0; i < n; ++i) {
-        Real row_norm = 0.0;
-        Real col_norm = 0.0;
-        for (int j = 0; j < n; ++j) {
-            row_norm += std::abs(dFdx[static_cast<std::size_t>(i * n + j)]);
-            col_norm += std::abs(dFdx[static_cast<std::size_t>(j * n + i)]);
-        }
-        if (row_norm < 1e-30 || col_norm < 1e-30) {
-            return true;
-        }
-    }
-
-    return false;
+    return stepStructuralRank(model, deriv, ctx, rate_coefficient) < model.dimension();
 }
 
 } // namespace systems
