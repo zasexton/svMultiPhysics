@@ -2407,63 +2407,65 @@ TEST(SmallCutAggregationConstraint,
 {
     SVMP_AGG_TEST_BODY
 #if defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH
-    // The wetting-wedge column of the previous test at the coordinates of
-    // the capillary-rise level-40 mesh next to its wall (h = 0.125 mm,
-    // y = 22.4-22.9 mm).  The coordinates are about 180 h from the origin, so
-    // their round-off maps to reference corrections of about eps |x| / h, more
-    // than the 64 eps |xi| the Newton inversion of the root asked for: on
-    // this column the inversion for vertex (1,4) cycles between round-off
-    // neighbours of xi = (-3, 4), with and without fused multiply-add, and
-    // the vertex lost its only root (aggregation_no_root_inside_guards).  It
-    // must keep the exact P1 extension weights instead.
-    const std::array<real_t, 2> xs{0.004875, 0.005};
-    const std::vector<real_t> ys{0.022375, 0.0225, 0.022625, 0.02275,
-                                 0.022875};
-    systems::FESystem system(buildTriangleColumn(4, false, xs, ys));
-    const auto pressure = system.addField(systems::FieldSpec{
-        .name = "p",
-        .space = std::make_shared<spaces::H1Space>(ElementType::Triangle3,
-                                                   /*order=*/1),
-        .components = 1});
-    system.addOperator("pressure");
-    system.addSystemConstraint(std::make_unique<SmallCutAggregationConstraint>(
-        pressure,
-        geometry::CutIntegrationSide::Negative,
-        kInterfaceMarker));
-    ASSERT_NO_THROW(system.setup());
-    std::vector<CellRuleSpec> rules{
-        {.cell = 0, .volume_fraction = Real{1.0}, .full_cell_equivalent = true}};
-    for (GlobalIndex cell = 1; cell < 8; ++cell) {
-        rules.push_back({.cell = cell,
-                         .volume_fraction = Real{0.5},
-                         .full_cell_equivalent = false});
-    }
-    system.setCutIntegrationContext(makeCutContext(rules));
+    // The original capillary-rise column and two one-cell translations have
+    // identical P1 weights. Rounding can make a Newton update converge
+    // directly on one placement and stall between adjacent iterates on another.
+    bool exercised_round_off = false;
+    constexpr real_t h = 0.000125;
+    for (const auto shift : {std::array<real_t, 2>{0, 0}, {-h, 0}, {0, h}}) {
+        SCOPED_TRACE(::testing::Message() << "translation " << shift[0] << ", " << shift[1]);
+        std::array<real_t, 2> xs{0.004875, 0.005};
+        std::vector<real_t> ys{0.022375, 0.0225, 0.022625, 0.02275, 0.022875};
+        for (auto& x : xs) x += shift[0];
+        for (auto& y : ys) y += shift[1];
+        systems::FESystem system(buildTriangleColumn(4, false, xs, ys));
+        const auto pressure = system.addField(systems::FieldSpec{
+            .name = "p",
+            .space = std::make_shared<spaces::H1Space>(ElementType::Triangle3,
+                                                       /*order=*/1),
+            .components = 1});
+        system.addOperator("pressure");
+        system.addSystemConstraint(std::make_unique<SmallCutAggregationConstraint>(
+            pressure,
+            geometry::CutIntegrationSide::Negative,
+            kInterfaceMarker));
+        ASSERT_NO_THROW(system.setup());
+        std::vector<CellRuleSpec> rules{
+            {.cell = 0, .volume_fraction = Real{1.0}, .full_cell_equivalent = true}};
+        for (GlobalIndex cell = 1; cell < 8; ++cell) {
+            rules.push_back({.cell = cell,
+                             .volume_fraction = Real{0.5},
+                             .full_cell_equivalent = false});
+        }
+        system.setCutIntegrationContext(makeCutContext(rules));
 
-    const ScopedLogLevel detailed_diagnostics(LogLevel::DEBUG);
-    testing::internal::CaptureStdout();
-    testing::internal::CaptureStderr();
-    std::string failure;
-    try {
-        system.rebuildConstraintState();
-    } catch (const std::exception& error) {
-        failure = error.what();
-    }
-    auto log_output = testing::internal::GetCapturedStdout();
-    log_output += testing::internal::GetCapturedStderr();
-    ASSERT_TRUE(failure.empty()) << "the vertex lost its only root: " << failure;
+        const ScopedLogLevel detailed_diagnostics(LogLevel::DEBUG);
+        testing::internal::CaptureStdout();
+        testing::internal::CaptureStderr();
+        std::string failure;
+        try {
+            system.rebuildConstraintState();
+        } catch (const std::exception& error) {
+            failure = error.what();
+        }
+        auto log_output = testing::internal::GetCapturedStdout();
+        log_output += testing::internal::GetCapturedStderr();
+        ASSERT_TRUE(failure.empty()) << "the vertex lost its only root: " << failure;
 
-    // Root {v0, v1, v3}: (x1, y4) = -3 v1 + 4 v3 exactly; the accepted
-    // iterate is as accurate as the coordinates allow.
-    expectEntries(lineEntries(system, vertexDof(system, pressure, 9)),
-                  {{vertexDof(system, pressure, 1), -3.0},
-                   {vertexDof(system, pressure, 3), 4.0}},
-                  1.0e-10);
-    EXPECT_NE(log_output.find("local_root_proposal_inversion_failures=0 "),
-              std::string::npos);
-    EXPECT_EQ(log_output.find(
-                  "local_root_proposal_inversion_round_off_acceptances=0 "),
-              std::string::npos);
+        // Root {v0, v1, v3}: (x1, y4) = -3 v1 + 4 v3 exactly; the accepted
+        // iterate is as accurate as the coordinates allow.
+        expectEntries(lineEntries(system, vertexDof(system, pressure, 9)),
+                      {{vertexDof(system, pressure, 1), -3.0},
+                       {vertexDof(system, pressure, 3), 4.0}},
+                      1.0e-10);
+        EXPECT_NE(log_output.find("local_root_proposal_inversion_failures=0 "),
+                  std::string::npos);
+        const std::string prefix = "local_root_proposal_inversion_round_off_acceptances=";
+        const auto counter = log_output.find(prefix);
+        ASSERT_NE(counter, std::string::npos) << log_output;
+        exercised_round_off |= std::stoul(log_output.substr(counter + prefix.size())) > 0;
+    }
+    EXPECT_TRUE(exercised_round_off);
 #endif
 }
 
