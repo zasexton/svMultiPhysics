@@ -1002,3 +1002,69 @@ TEST(NormalComponentConstraint, JoinedWettedWallsHoldTheCornerOnlyOnWetFaces)
         EXPECT_TRUE(held(5, 0) && !held(5, 1)) << order;
     }
 }
+
+namespace {
+
+/// One Quad8 cell (0,0)-(1,1) with its left edge labelled @p marker.
+std::shared_ptr<Mesh> build_single_quad8_mesh_with_left_edge_marker(int marker)
+{
+    auto base = std::make_shared<MeshBase>();
+    const std::vector<svmp::real_t> X_ref = {0.0, 0.0, 1.0, 0.0, 1.0, 1.0, 0.0, 1.0,
+                                             0.5, 0.0, 1.0, 0.5, 0.5, 1.0, 0.0, 0.5};
+    const std::vector<svmp::offset_t> cell2vertex_offsets = {0, 8};
+    const std::vector<svmp::index_t> cell2vertex = {0, 1, 2, 3, 4, 5, 6, 7};
+    CellShape shape{};
+    shape.family = CellFamily::Quad;
+    shape.num_corners = 4;
+    shape.order = 2;
+    base->build_from_arrays(/*spatial_dim=*/2, X_ref, cell2vertex_offsets, cell2vertex, {shape});
+    base->finalize();
+    for (svmp::index_t f = 0; f < static_cast<svmp::index_t>(base->n_faces()); ++f) {
+        const auto verts = base->face_vertices(f);
+        const auto has = [&](svmp::index_t vertex) {
+            return std::find(verts.begin(), verts.end(), vertex) != verts.end();
+        };
+        if (has(0) && has(3)) {
+            base->set_boundary_label(f, marker);
+        }
+    }
+    return svmp::create_mesh(std::move(base));
+}
+
+} // namespace
+
+// A wall condition builds the face degrees of freedom of the field's own
+// element and maps the cell with its own geometry order (free-surface audit
+// A52): P1 on a Tetra10 cell has three DOFs on the marked face (the Tetra10
+// layout gave six slots), and a Quad8 cell maps with its quadratic geometry
+// (an order-1 serendipity map was requested and refused).
+TEST(StrongDirichletConstraint, WallDofsFollowTheFieldElementAndTheCellGeometryOrder)
+{
+    constexpr int marker = 7;
+    {
+        auto mesh = build_single_tetra10_mesh_with_boundary_only_face_marker(marker);
+        auto space = std::make_shared<H1Space>(ElementType::Tetra4, /*order=*/1);
+        FESystem sys(mesh);
+        const auto u = sys.addField(FieldSpec{.name = "u", .space = space, .components = 1});
+        const auto bc = strongDirichlet(u, marker, FormExpr::constant(0.0), "u");
+        svmp::FE::systems::installStrongDirichlet(sys, std::span<const svmp::FE::forms::bc::StrongDirichlet>(&bc, 1));
+        ASSERT_NO_THROW(sys.setup());
+        EXPECT_EQ(sys.constraints().numConstraints(), 3);
+    }
+    {
+        auto mesh = build_single_quad8_mesh_with_left_edge_marker(marker);
+        auto space = std::make_shared<H1Space>(ElementType::Quad4, /*order=*/1);
+        FESystem sys(mesh);
+        const auto u = sys.addField(FieldSpec{.name = "u", .space = space, .components = 1});
+        sys.addOperator("mass");
+        sys.addCellKernel("mass", u, std::make_shared<MassKernel>(1.0));
+        const auto bc = strongDirichlet(u, marker, t() + FormExpr::constant(1.0), "u");
+        svmp::FE::systems::installStrongDirichlet(sys, std::span<const svmp::FE::forms::bc::StrongDirichlet>(&bc, 1));
+        ASSERT_NO_THROW(sys.setup());
+        EXPECT_EQ(sys.constraints().numConstraints(), 2);
+        sys.updateConstraints(/*time=*/2.0, /*dt=*/0.5);
+        for (const GlobalIndex vertex : {0, 3}) {
+            EXPECT_EQ(sys.constraints().getInhomogeneity(vertexDof(sys, u, vertex)), 3.0);
+        }
+    }
+}

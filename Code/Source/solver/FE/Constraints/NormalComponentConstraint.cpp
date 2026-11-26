@@ -59,6 +59,24 @@ struct FacetContribution {
     return a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
 }
 
+/// The number of corners of face @p face of a cell of @p type (its nodes
+/// list the corners first).
+[[nodiscard]] std::size_t faceCornerCount(ElementType type, std::size_t face)
+{
+    ElementType linear = ElementType::Unknown;
+    switch (to_mesh_family(type)) {
+    case svmp::CellFamily::Triangle: linear = ElementType::Triangle3; break;
+    case svmp::CellFamily::Quad: linear = ElementType::Quad4; break;
+    case svmp::CellFamily::Tetra: linear = ElementType::Tetra4; break;
+    case svmp::CellFamily::Hex: linear = ElementType::Hex8; break;
+    case svmp::CellFamily::Wedge: linear = ElementType::Wedge6; break;
+    case svmp::CellFamily::Pyramid: linear = ElementType::Pyramid5; break;
+    default:
+        throw InvalidStateException("NormalComponentConstraint: unsupported cell type of a boundary facet");
+    }
+    return elements::ReferenceElement::shared(linear).face_nodes(face).size();
+}
+
 /// The measure of the linear facet through @p corners (a segment, a
 /// triangle, or a quadrilateral by its diagonals).
 [[nodiscard]] Real facetMeasure(const std::vector<std::array<Real, 3>>& corners)
@@ -118,10 +136,15 @@ std::vector<FacetContribution> collectContributions(const FESystem& system,
             const ElementType cell_type = mesh.getCellType(cell_id);
             auto it = restrictions.find(static_cast<int>(cell_type));
             if (it == restrictions.end()) {
+                // The field's own element on a cell of its family (P1 on a
+                // Tetra10 cell has three DOFs per face).
+                const auto& space = *rec.space;
                 it = restrictions
                          .emplace(static_cast<int>(cell_type),
-                                  spaces::FaceRestriction(cell_type, rec.space->polynomial_order(),
-                                                          rec.space->continuity()))
+                                  to_mesh_family(space.element_type()) == to_mesh_family(cell_type)
+                                      ? spaces::FaceRestriction(space)
+                                      : spaces::FaceRestriction(cell_type, space.polynomial_order(),
+                                                                space.continuity()))
                          .first;
             }
             const auto& restriction = it->second;
@@ -140,15 +163,17 @@ std::vector<FacetContribution> collectContributions(const FESystem& system,
             }
             geometry::MappingRequest request;
             request.element_type = cell_type;
-            request.geometry_order = 1;
-            request.use_affine = true;
+            request.geometry_order = mesh.getCellGeometryOrder(cell_id);
+            request.use_affine = request.geometry_order <= 1;
             auto mapping = geometry::MappingFactory::create(request, geom_nodes);
             FE_CHECK_NOT_NULL(mapping.get(), "NormalComponentConstraint: mapping");
 
             const auto& reference = elements::ReferenceElement::shared(cell_type);
+            const auto& face_nodes = reference.face_nodes(static_cast<std::size_t>(face_local));
+            const auto n_corners = faceCornerCount(cell_type, static_cast<std::size_t>(face_local));
             corners.clear();
-            for (const auto node : reference.face_nodes(static_cast<std::size_t>(face_local))) {
-                corners.push_back(cell_coords.at(static_cast<std::size_t>(node)));
+            for (std::size_t k = 0; k < n_corners; ++k) {
+                corners.push_back(cell_coords.at(static_cast<std::size_t>(face_nodes[k])));
             }
             const Real measure = facetMeasure(corners);
             const auto facet = static_cast<std::int64_t>(mesh.getBoundaryFaceGlobalId(face_id));

@@ -166,20 +166,24 @@ void traceStrongDirichletEvent(const std::string& phase,
     FE_LOG_INFO(oss.str());
 }
 
+/// The face DOF table of @p space on a cell of @p cell_type: the field's own
+/// element on a cell of its family (P1 on a Triangle6 cell has three DOFs,
+/// complete P2 on a Wedge15 cell keeps its face-center node), else the
+/// field's order on the cell type.
 [[nodiscard]] spaces::FaceRestriction& getFaceRestriction(
     std::unordered_map<int, spaces::FaceRestriction>& cache,
-    ElementType element_type,
-    int order,
-    Continuity continuity)
+    ElementType cell_type,
+    const spaces::FunctionSpace& space)
 {
-    const int key = static_cast<int>(element_type);
+    const int key = static_cast<int>(cell_type);
     auto it = cache.find(key);
     if (it != cache.end()) {
         return it->second;
     }
-    auto [ins, inserted] = cache.emplace(key, spaces::FaceRestriction(element_type, order, continuity));
-    (void)inserted;
-    return ins->second;
+    auto restriction = to_mesh_family(space.element_type()) == to_mesh_family(cell_type)
+                           ? spaces::FaceRestriction(space)
+                           : spaces::FaceRestriction(cell_type, space.polynomial_order(), space.continuity());
+    return cache.emplace(key, std::move(restriction)).first->second;
 }
 
 /// The single boundary normal at a constrained node; refuses a node where
@@ -327,10 +331,7 @@ void completeOwnedDofsWithCoords(const FESystem& system,
         }
         const ElementType cell_type = mesh.getCellType(cell_id);
 
-        auto& face_restriction = getFaceRestriction(face_restriction_cache,
-                                                    cell_type,
-                                                    rec.space->polynomial_order(),
-                                                    rec.space->continuity());
+        auto& face_restriction = getFaceRestriction(face_restriction_cache, cell_type, *rec.space);
 
         const auto face_local = static_cast<int>(mesh.getLocalFaceIndex(face_id, cell_id));
         const auto local_face_dofs = face_restriction.face_dofs(face_local);
@@ -358,8 +359,8 @@ void completeOwnedDofsWithCoords(const FESystem& system,
 
         geometry::MappingRequest req;
         req.element_type = cell_type;
-        req.geometry_order = 1;
-        req.use_affine = true;
+        req.geometry_order = mesh.getCellGeometryOrder(cell_id);
+        req.use_affine = req.geometry_order <= 1;
         auto mapping = geometry::MappingFactory::create(req, geom_nodes);
         FE_CHECK_NOT_NULL(mapping.get(), "StrongDirichletConstraint: mapping");
 
