@@ -735,9 +735,18 @@ struct WallPieces {
     return value;
 }
 
+// The wall-characteristic zero of a cut wall-facet edge a-b, at the fraction
+// t from a; the correction keeps it there.
+struct WallCrossing {
+    std::size_t a{0u};
+    std::size_t b{0u};
+    Real t{0};
+};
+
 struct WallTrace {
     std::vector<char> node;   // the DOF is a vertex of a cut impermeable wall facet
     std::vector<Real> delta;  // its wall-characteristic change from the transported value
+    std::vector<WallCrossing> crossings;
     std::size_t dofs{0u};
     std::size_t unresolved{0u};
 };
@@ -1013,6 +1022,73 @@ struct DofSets {
         const Real scale = found != slopes.end() ? found->second[0] / found->second[1] : Real{1};
         const Real factor = scale > Real{0} && std::isfinite(scale) ? scale : Real{1};
         trace.delta[dof] = factor * s - (transported[dof] - isovalue);
+    }
+    // Every cut facet edge whose two wall values straddle the isovalue fixes
+    // its zero; the vertex values stay free otherwise. An unresolved vertex
+    // keeps its transported value as its wall value; a pinned one has none.
+    // The zero is the root along the edge of the previous level set at the
+    // characteristic foot, not the zero of the two vertex values: that one lags
+    // behind a slope change at a vertex (the O(h^2/dt) re-interpolation error
+    // of a semi-Lagrangian step) and stalls a slowly advancing trace.  Illinois
+    // regula falsi starts from the vertex-value zero s and keeps it when it is
+    // already the root.
+    const auto edge_root = [&](std::size_t a, std::size_t b, Real g0, Real g1, Real s) -> std::optional<Real> {
+        const Point& xa = position.at(a);
+        const Point& xb = position.at(b);
+        std::vector<std::size_t> candidates;
+        for (std::size_t p = 0; p < wall.size(); ++p) {
+            bool meets = true;
+            for (std::size_t d = 0; d < 3u; ++d) {
+                meets = meets && boxes[p][d] <= std::max(xa[d], xb[d]) + radius &&
+                        boxes[p][d + 3u] >= std::min(xa[d], xb[d]) - radius;
+            }
+            if (meets) candidates.push_back(p);
+        }
+        const Real small = Real{16} * std::numeric_limits<Real>::epsilon() * (std::abs(g0) + std::abs(g1));
+        Real s0 = 0, s1 = 1;
+        int kept = 0;
+        for (int it = 0; it < 64; ++it) {
+            Point x{};
+            for (std::size_t d = 0; d < 3u; ++d) x[d] = xa[d] + s * (xb[d] - xa[d]);
+            const auto value = previousValueAtWallFoot(wall, candidates, x, dt, substeps, reach);
+            if (!value || !std::isfinite(*value)) return std::nullopt;
+            const Real g = *value - isovalue;
+            if (std::abs(g) <= small) return s;
+            if ((g < Real{0}) == (g0 < Real{0})) {
+                s0 = s;
+                g0 = g;
+                if (kept == 1) g1 *= Real{0.5};
+                kept = 1;
+            } else {
+                s1 = s;
+                g1 = g;
+                if (kept == -1) g0 *= Real{0.5};
+                kept = -1;
+            }
+            if (!(s1 - s0 > Real{4} * std::numeric_limits<Real>::epsilon())) break;
+            s = (s0 * g1 - s1 * g0) / (g1 - g0);
+        }
+        return Real{0.5} * (s0 + s1);
+    };
+    std::set<std::pair<std::size_t, std::size_t>> seen_edges;
+    const auto has_wall_value = [&](std::size_t dof) {
+        return position.count(dof) != 0 && signClass(transported[dof], isovalue, tolerance) != 0;
+    };
+    for (std::size_t e = 0; e + 3u <= edges.size(); e += 3u) {
+        auto a = static_cast<std::size_t>(edges[e]);
+        auto b = static_cast<std::size_t>(edges[e + 1u]);
+        if (a > b) std::swap(a, b);
+        if (!has_wall_value(a) || !has_wall_value(b) || !seen_edges.insert({a, b}).second) continue;
+        const Real va = transported[a] - isovalue + trace.delta[a];
+        const Real vb = transported[b] - isovalue + trace.delta[b];
+        if (!(va * vb < Real{0})) continue;
+        Real t = va / (va - vb);
+        const auto ta = target.find(a);
+        const auto tb = target.find(b);
+        if (ta != target.end() && tb != target.end() && ta->second * tb->second < Real{0}) {
+            if (const auto root = edge_root(a, b, ta->second, tb->second, t)) t = *root;
+        }
+        trace.crossings.push_back({a, b, t});
     }
     return trace;
 }
@@ -1524,6 +1600,7 @@ LevelSetKinematicReconciliationResult integrateKinematicStep(
     Real unplaced_volume = 0;
     std::map<long long, Real> unplaced_by_interface;
     std::vector<char> limited(n, 0);
+    std::set<std::size_t> projected_groups;
     for (int iteration = 0; iteration < kMaxGeometryIterations; ++iteration) {
         InterfaceSums current(n);
         if (!evaluate_endpoint(iterate, current, false)) {
@@ -1542,6 +1619,7 @@ LevelSetKinematicReconciliationResult integrateKinematicStep(
         std::vector<Real> gbar(n, 0.0);
         std::vector<Real> deficit(n, 0.0);
         std::vector<char> eligible(n, 0);
+        std::vector<Real> free_step(n, std::numeric_limits<Real>::quiet_NaN());
         bool any_limited = false;
         for (std::size_t i = 0; i < n; ++i) {
             gbar[i] = Real{0.5} * (previous.g[i] + current.g[i]);
@@ -1557,6 +1635,7 @@ LevelSetKinematicReconciliationResult integrateKinematicStep(
                 ++skipped;
                 continue;
             }
+            free_step[i] = step;
             if (component.shared[i]) {
                 continue;  // its share is split by component below
             }
@@ -1578,6 +1657,141 @@ LevelSetKinematicReconciliationResult integrateKinematicStep(
                 limited[i] = 1;
                 deficit[i] = gbar[i] * (step - delta[i]);
                 any_limited = true;
+            }
+        }
+        // A connected group of cut wall-facet edges keeps the zero of every
+        // edge at its wall-characteristic fraction t, while its vertex values
+        // follow the lumped steps s as far as those zeros allow: the
+        // gbar-weighted least-squares projection of s onto
+        //     (1 - t) (phi_a + delta_a - c) + t (phi_b + delta_b - c) = 0.
+        // The rest of their share goes to the other trace nodes. A group that
+        // cannot be projected admissibly keeps its wall-characteristic values.
+        {
+            DofSets groups;
+            std::vector<const WallCrossing*> active;
+            for (const auto& crossing : wall.crossings) {
+                if (!wall_node[crossing.a] || !wall_node[crossing.b]) continue;
+                active.push_back(&crossing);
+                groups.unite(crossing.a, crossing.b);
+            }
+            std::map<std::size_t, std::vector<const WallCrossing*>> by_group;
+            for (const auto* crossing : active) by_group[groups.find(crossing->a)].push_back(crossing);
+            struct Row {
+                std::vector<std::pair<std::size_t, Real>> c;
+                Real rhs{0};
+            };
+            for (const auto& [root, crossings] : by_group) {
+                std::vector<std::size_t> nodes;
+                for (const auto* crossing : crossings) {
+                    nodes.push_back(crossing->a);
+                    nodes.push_back(crossing->b);
+                }
+                std::sort(nodes.begin(), nodes.end());
+                nodes.erase(std::unique(nodes.begin(), nodes.end()), nodes.end());
+                bool usable = true;
+                for (const auto i : nodes) {
+                    usable = usable && gbar[i] > Real{0} && std::isfinite(free_step[i]) &&
+                             !component.shared[i] && transported_class[i] != 0;
+                }
+                if (!usable) continue;
+                // Relative to the wall values w: delta = w + e with e the
+                // projection of r = s - w.  The characteristic values v (before
+                // the admissibility limit) need not have their zero at t.
+                const auto r = [&](std::size_t i) { return free_step[i] - wall_delta[i]; };
+                const auto v = [&](std::size_t i) {
+                    return transported_level_set[i] - isovalue + wall.delta[i];
+                };
+                Real largest = 0;
+                for (const auto i : nodes) largest = std::max(largest, std::abs(v(i)));
+                std::vector<Real> miss;
+                bool moved = false;
+                for (const auto* x : crossings) {
+                    miss.push_back((Real{1} - x->t) * v(x->a) + x->t * v(x->b));
+                    moved = moved || std::abs(miss.back()) > Real{128} * std::numeric_limits<Real>::epsilon() * largest;
+                }
+                std::vector<Row> rows;
+                for (std::size_t k = 0; k < crossings.size(); ++k) {
+                    const auto* x = crossings[k];
+                    rows.push_back({{{x->a, Real{1} - x->t}, {x->b, x->t}},
+                                    -((moved ? miss[k] : Real{0}) + (Real{1} - x->t) * r(x->a) + x->t * r(x->b))});
+                }
+                // A group whose zeros already lie at t and whose own share cancels
+                // within the solver tolerance keeps its wall values, so an exactly
+                // transported trace stays exact; a group once projected stays
+                // projected, so the set cannot cycle.
+                if (!projected_groups.count(root)) {
+                    Real share = 0;
+                    Real magnitude = 0;
+                    Real scale = 0;
+                    for (const auto i : nodes) {
+                        share += gbar[i] * r(i);
+                        magnitude += gbar[i] * std::abs(r(i));
+                        scale += gbar[i] * std::abs(transported_level_set[i] - isovalue);
+                    }
+                    if (!moved && !(std::abs(share) > kGeometryRelativeTolerance * magnitude +
+                                                Real{128} * std::numeric_limits<Real>::epsilon() * scale)) {
+                        continue;
+                    }
+                }
+                // Normal equations (C W^-1 C^T) lambda = rhs, W = diag(gbar).
+                const std::size_t m = rows.size();
+                std::vector<Real> normal(m * m, 0), lambda(m, 0);
+                for (std::size_t e = 0; e < m; ++e) {
+                    lambda[e] = rows[e].rhs;
+                    for (std::size_t f = 0; f < m; ++f) {
+                        Real value = 0;
+                        for (const auto& [i, ce] : rows[e].c) {
+                            for (const auto& [j, cf] : rows[f].c) {
+                                if (i == j) value += ce * cf / gbar[i];
+                            }
+                        }
+                        normal[e * m + f] = value;
+                    }
+                }
+                // Gaussian elimination with partial pivoting, scaled by row.
+                bool solved = true;
+                for (std::size_t k = 0; k < m && solved; ++k) {
+                    std::size_t pivot = k;
+                    for (std::size_t r = k + 1; r < m; ++r) {
+                        if (std::abs(normal[r * m + k]) > std::abs(normal[pivot * m + k])) pivot = r;
+                    }
+                    Real row_scale = 0;
+                    for (std::size_t c = 0; c < m; ++c) row_scale = std::max(row_scale, std::abs(normal[pivot * m + c]));
+                    if (!(std::abs(normal[pivot * m + k]) > Real{64} * std::numeric_limits<Real>::epsilon() * row_scale)) {
+                        solved = false;
+                        break;
+                    }
+                    if (pivot != k) {
+                        for (std::size_t c = 0; c < m; ++c) std::swap(normal[k * m + c], normal[pivot * m + c]);
+                        std::swap(lambda[k], lambda[pivot]);
+                    }
+                    for (std::size_t r = k + 1; r < m; ++r) {
+                        const Real factor = normal[r * m + k] / normal[k * m + k];
+                        for (std::size_t c = k; c < m; ++c) normal[r * m + c] -= factor * normal[k * m + c];
+                        lambda[r] -= factor * lambda[k];
+                    }
+                }
+                if (!solved) continue;
+                for (std::size_t k = m; k-- > 0;) {
+                    for (std::size_t c = k + 1; c < m; ++c) lambda[k] -= normal[k * m + c] * lambda[c];
+                    lambda[k] /= normal[k * m + k];
+                }
+                std::map<std::size_t, Real> projected;
+                for (const auto i : nodes) projected[i] = wall_delta[i] + r(i);
+                for (std::size_t e = 0; e < m; ++e) {
+                    for (const auto& [i, ce] : rows[e].c) projected[i] += ce * lambda[e] / gbar[i];
+                }
+                bool admissible_group = true;
+                for (const auto& [i, value] : projected) {
+                    admissible_group = admissible_group && std::isfinite(value) && admissible(i, value) == value;
+                }
+                if (!admissible_group) continue;
+                projected_groups.insert(root);
+                for (const auto& [i, value] : projected) {
+                    delta[i] = value;
+                    deficit[i] = gbar[i] * (free_step[i] - value);
+                    any_limited = any_limited || deficit[i] != 0;
+                }
             }
         }
         // A node shared by interface components keeps its value (or its wall
@@ -1824,8 +2038,10 @@ LevelSetKinematicReconciliationResult integrateKinematicStep(
             const Real limit = solver_tolerance(measured.negative_volume, correction_volume);
             bool released = false;
             for (std::size_t i = 0; i < n; ++i) {
-                const auto found = component.node[i] >= 0 ? unplaced_by_interface.find(component.node[i])
-                                                          : unplaced_by_interface.end();
+                // Volume of a node outside every labelled interface is kept under
+                // its own key -1 - i.
+                const auto found = unplaced_by_interface.find(
+                    component.node[i] >= 0 ? component.node[i] : -1 - static_cast<long long>(i));
                 if (wall_node[i] && found != unplaced_by_interface.end() && !(std::abs(found->second) <= limit)) {
                     wall_node[i] = 0;
                     wall_delta[i] = 0;

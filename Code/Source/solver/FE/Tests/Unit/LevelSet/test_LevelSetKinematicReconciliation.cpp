@@ -1096,6 +1096,23 @@ TEST(LevelSetKinematicReconciliation, FollowsTheWallCharacteristicOfAStrainField
     EXPECT_NEAR(wallRoot(s, endpoint, 0, 1), 0.25 * std::exp(-dt), 1.0e-12);
 }
 
+TEST(LevelSetKinematicReconciliation, AdvancesAWallRootPastASlopeChangeAtTheVertexBehindIt)
+{
+    // u = (1, 0) moves the floor root from 0.51 to 0.52.  The floor trace has
+    // slope 1/2 behind the vertex at x = 1/2 and slope 1 ahead of it, so the
+    // zero of the two characteristic vertex values would lag at 0.515625.
+    SimplexSystem s(buildStructuredTriangleMesh(8), 2);
+    const FE::Real dt = 0.01;
+    const auto trace = [](FE::Real x) { return x >= 0.5 ? x - 0.51 : -0.01 + 0.5 * (x - 0.5); };
+    const auto previous = s.scalar([&](const Point& x) { return trace(x[0]) + x[1]; });
+    const auto transported = s.scalar([&](const Point& x) { return trace(x[0] - dt) + x[1]; });
+    const auto shift = s.vector([](const Point&) { return Point{1.0, 0.0, 0.0}; });
+    std::vector<FE::Real> endpoint;
+    const auto result = s.reconcile(dt, previous, transported, shift, shift, endpoint);
+    ASSERT_TRUE(result.success) << result.diagnostic;
+    EXPECT_NEAR(wallRoot(s, endpoint, 1, 0), 0.52, 1.0e-12);
+}
+
 TEST(LevelSetKinematicReconciliation, KeepsTheWallCharacteristicUnderAnInteriorTransportError)
 {
     // The same strain field on a mesh with interior trace nodes.  An interior
