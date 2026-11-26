@@ -5,7 +5,7 @@
  * See Copyright-SimVascular.txt for additional details.
  */
 
-#include "Interfaces/IncompressibleTwoFluidDiagnostics.h"
+#include "Physics/Formulations/NavierStokes/TwoFluid/IncompressibleTwoFluidDiagnostics.h"
 
 #include <algorithm>
 #include <cmath>
@@ -13,7 +13,10 @@
 #include <limits>
 #include <stdexcept>
 
-namespace svmp::FE::interfaces {
+namespace svmp::Physics::formulations::navier_stokes::two_fluid {
+
+using namespace svmp::FE;
+using namespace svmp::FE::interfaces;
 namespace {
 
 using Vector = std::array<Real, 3>;
@@ -1307,4 +1310,4 @@ void validateIncompressibleTwoFluidMomentumReconciliation(
     }
 }
 
-} // namespace svmp::FE::interfaces
+} // namespace svmp::Physics::formulations::navier_stokes::two_fluid

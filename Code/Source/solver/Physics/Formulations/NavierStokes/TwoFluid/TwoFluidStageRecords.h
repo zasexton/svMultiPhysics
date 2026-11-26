@@ -6,8 +6,8 @@
  * See License file.
  */
 
-#ifndef SVMP_FE_SYSTEMS_TWO_FLUID_STAGE_RECORDS_H
-#define SVMP_FE_SYSTEMS_TWO_FLUID_STAGE_RECORDS_H
+#ifndef SVMP_PHYSICS_TWO_FLUID_TWO_FLUID_STAGE_RECORDS_H
+#define SVMP_PHYSICS_TWO_FLUID_TWO_FLUID_STAGE_RECORDS_H
 
 /**
  * @file
@@ -15,32 +15,29 @@
  *        declarations, the pending group of a candidate (stage diagnostics,
  *        momentum reconciliations, solve numerics) and the accepted history.
  *
- * The records are an attachment of the FE system (FESystem::attachment): an
- * accepted-stage record store (AcceptedStageRecords.h) of the two-fluid
- * declarations and records, so they live as long as the system.
- * twoFluidStageRecords(system) is the interface that FESystem had for them;
- * the record data types are in FE/Systems/TwoFluidRecordTypes.h for now.
- * The two-fluid formulation declares them; the two-fluid stage participant
- * stages, discards and publishes them.
+ * The formulation declares the quantities in TwoFluidRecordTypes.h. The
+ * step participant stages them on a candidate, discards them on rejection,
+ * and publishes them on acceptance. The FE system owns the record store
+ * through its generic attachment interface.
  */
 
-#include "Constraints/SmallCutAggregationConstraint.h"
-#include "Core/Types.h"
-#include "Interfaces/IncompressibleTwoFluidDiagnostics.h"
-#include "Systems/AcceptedStageRecords.h"
-#include "Systems/FESystem.h"
-#include "Systems/TwoFluidRecordTypes.h"
+#include "FE/Constraints/SmallCutAggregationConstraint.h"
+#include "FE/Core/Types.h"
+#include "Physics/Formulations/NavierStokes/TwoFluid/IncompressibleTwoFluidDiagnostics.h"
+#include "FE/Systems/AcceptedStageRecords.h"
+#include "FE/Systems/FESystem.h"
+#include "Physics/Formulations/NavierStokes/TwoFluid/TwoFluidRecordTypes.h"
 
 #include <cstdint>
 #include <span>
 #include <vector>
 
-namespace svmp::FE::systems {
+namespace svmp::Physics::formulations::navier_stokes::two_fluid {
 
 /// The records of one FE system (its attachment): declarations, the pending
 /// group of the current attempt and the accepted history.
 using TwoFluidStageRecordStore =
-    AcceptedStageRecordStore<TwoFluidAcceptedStageDiagnosticDeclaration,
+    FE::systems::AcceptedStageRecordStore<TwoFluidAcceptedStageDiagnosticDeclaration,
                              TwoFluidAcceptedStageDiagnosticHistoryRecord>;
 
 /**
@@ -57,24 +54,23 @@ public:
 
   /** Register one deterministic two-fluid accepted-stage diagnostic owner. */
   void declareTwoFluidAcceptedStageDiagnostics(
-      svmp::FE::systems::TwoFluidAcceptedStageDiagnosticDeclaration declaration);
+      TwoFluidAcceptedStageDiagnosticDeclaration declaration);
   [[nodiscard]] std::span<
-      const svmp::FE::systems::TwoFluidAcceptedStageDiagnosticDeclaration>
+      const TwoFluidAcceptedStageDiagnosticDeclaration>
   twoFluidAcceptedStageDiagnosticDeclarations() const noexcept {
     return two_fluid_accepted_stage_declarations_;
   }
   /** Stage communicator-global diagnostics for a prospective accepted step. */
   void stageTwoFluidAcceptedStageDiagnostics(
       svmp::FE::systems::OperatorStageMeasurementMetadata metadata,
-      std::span<const svmp::FE::systems::AcceptedTwoFluidStageDiagnosticState> states);
+      std::span<const AcceptedTwoFluidStageDiagnosticState> states);
   /** Bind required post-maintenance momentum records to the pending group. */
   void bindPendingTwoFluidMomentumReconciliations(
-      std::span<const svmp::FE::interfaces::
-                    IncompressibleTwoFluidMomentumReconciliation>
+      std::span<const IncompressibleTwoFluidMomentumReconciliation>
           reconciliations);
   /** Bind solver and canonical phase-stability evidence to the pending group. */
   void bindPendingTwoFluidAcceptedStageNumerics(
-      svmp::FE::systems::TwoFluidAcceptedStageSolveTelemetry solve,
+      TwoFluidAcceptedStageSolveTelemetry solve,
       std::span<const svmp::FE::constraints::SmallCutAggregationRefreshReport>
           aggregation_reports);
   /** Discard a rejected candidate without publishing accepted history. */
@@ -85,19 +81,18 @@ public:
       svmp::FE::Real accepted_time,
       svmp::FE::Real dt);
   [[nodiscard]] std::span<
-      const svmp::FE::systems::TwoFluidAcceptedStageDiagnosticHistoryRecord>
+      const TwoFluidAcceptedStageDiagnosticHistoryRecord>
   pendingTwoFluidAcceptedStageDiagnostics() const noexcept {
     return pending_two_fluid_accepted_stage_diagnostics_;
   }
   [[nodiscard]] std::span<
-      const svmp::FE::systems::TwoFluidAcceptedStageDiagnosticHistoryRecord>
+      const TwoFluidAcceptedStageDiagnosticHistoryRecord>
   twoFluidAcceptedStageDiagnosticHistory() const noexcept {
     return two_fluid_accepted_stage_diagnostic_history_;
   }
 
 private:
-  // The FE system state that the record code reads, under the names it had
-  // as FESystem members.
+  // Field lookup uses the owning system registry.
   struct FieldRegistryAccess {
     const svmp::FE::systems::FESystem* system;
     [[nodiscard]] const svmp::FE::systems::FieldRecord& get(svmp::FE::FieldId field) const
@@ -121,11 +116,11 @@ private:
   }
 
   svmp::FE::systems::FESystem* system_;
-  std::vector<svmp::FE::systems::TwoFluidAcceptedStageDiagnosticDeclaration>&
+  std::vector<TwoFluidAcceptedStageDiagnosticDeclaration>&
       two_fluid_accepted_stage_declarations_;
-  std::vector<svmp::FE::systems::TwoFluidAcceptedStageDiagnosticHistoryRecord>&
+  std::vector<TwoFluidAcceptedStageDiagnosticHistoryRecord>&
       pending_two_fluid_accepted_stage_diagnostics_;
-  std::vector<svmp::FE::systems::TwoFluidAcceptedStageDiagnosticHistoryRecord>&
+  std::vector<TwoFluidAcceptedStageDiagnosticHistoryRecord>&
       two_fluid_accepted_stage_diagnostic_history_;
   bool& two_fluid_accepted_stage_declarations_frozen_;
   bool& two_fluid_accepted_stage_transaction_active_;
@@ -139,13 +134,13 @@ public:
       const svmp::FE::systems::FESystem& system) noexcept;
 
   [[nodiscard]] std::span<
-      const svmp::FE::systems::TwoFluidAcceptedStageDiagnosticDeclaration>
+      const TwoFluidAcceptedStageDiagnosticDeclaration>
   twoFluidAcceptedStageDiagnosticDeclarations() const noexcept;
   [[nodiscard]] std::span<
-      const svmp::FE::systems::TwoFluidAcceptedStageDiagnosticHistoryRecord>
+      const TwoFluidAcceptedStageDiagnosticHistoryRecord>
   pendingTwoFluidAcceptedStageDiagnostics() const noexcept;
   [[nodiscard]] std::span<
-      const svmp::FE::systems::TwoFluidAcceptedStageDiagnosticHistoryRecord>
+      const TwoFluidAcceptedStageDiagnosticHistoryRecord>
   twoFluidAcceptedStageDiagnosticHistory() const noexcept;
 
 private:
@@ -159,6 +154,6 @@ private:
 [[nodiscard]] ConstTwoFluidStageRecords twoFluidStageRecords(
     const svmp::FE::systems::FESystem& system) noexcept;
 
-} // namespace svmp::FE::systems
+} // namespace svmp::Physics::formulations::navier_stokes::two_fluid
 
-#endif // SVMP_FE_SYSTEMS_TWO_FLUID_STAGE_RECORDS_H
+#endif // SVMP_PHYSICS_TWO_FLUID_TWO_FLUID_STAGE_RECORDS_H

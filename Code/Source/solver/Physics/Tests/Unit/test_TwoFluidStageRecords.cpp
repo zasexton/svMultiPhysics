@@ -12,20 +12,22 @@
 
 #include <gtest/gtest.h>
 
-#include "Systems/AcceptedStageRecords.h"
-#include "Systems/FESystem.h"
-#include "Systems/TwoFluidStageRecords.h"
-#include "Tests/Unit/Forms/FormsTestHelpers.h"
+#include "FE/Systems/AcceptedStageRecords.h"
+#include "FE/Systems/FESystem.h"
+#include "Physics/Formulations/NavierStokes/TwoFluid/TwoFluidStageRecords.h"
+#include "FE/Tests/Unit/Forms/FormsTestHelpers.h"
 
 #include <memory>
 #include <utility>
 
-namespace svmp::FE::systems::test {
+namespace svmp::Physics::formulations::navier_stokes::two_fluid::test {
+using FE::systems::FESystem;
+using FE::systems::acceptedStageRecords;
 namespace {
 
 TEST(TwoFluidStageRecords, AreOneAcceptedStageRecordStoreOfTheSystem)
 {
-    FESystem system(std::make_shared<forms::test::SingleTetraMeshAccess>());
+    FESystem system(std::make_shared<FE::forms::test::SingleTetraMeshAccess>());
     const FESystem& view = system;
     EXPECT_EQ(view.findAttachment<TwoFluidStageRecordStore>(), nullptr);
     EXPECT_TRUE(twoFluidStageRecords(view).twoFluidAcceptedStageDiagnosticDeclarations().empty());

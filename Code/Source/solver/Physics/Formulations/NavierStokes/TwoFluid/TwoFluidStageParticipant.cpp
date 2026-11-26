@@ -6,11 +6,11 @@
  * See License file.
  */
 
-#include "LevelSet/TwoFluidStageParticipant.h"
+#include "Physics/Formulations/NavierStokes/TwoFluid/TwoFluidStageParticipant.h"
 
-#include "Systems/OperatorStageMetadata.h"
-#include "Systems/SystemCollectives.h"
-#include "Systems/TwoFluidStageRecords.h"
+#include "FE/Systems/OperatorStageMetadata.h"
+#include "FE/Systems/SystemCollectives.h"
+#include "Physics/Formulations/NavierStokes/TwoFluid/TwoFluidStageRecords.h"
 
 #include <algorithm>
 #include <exception>
@@ -19,7 +19,10 @@
 #include <string>
 #include <utility>
 
-namespace svmp::FE::level_set {
+namespace svmp::Physics::formulations::navier_stokes::two_fluid {
+
+using namespace svmp::FE;
+using namespace svmp::FE::level_set;
 
 using svmp::FE::systems::captureFeOrderedVectorCollectively;
 using svmp::FE::systems::collectiveAnyTrue;
@@ -31,7 +34,7 @@ TwoFluidStageParticipant::TwoFluidStageParticipant(
     : svmp::FE::timestepping::StepContext(context)
 {
   two_fluid_stage_declarations =
-      svmp::FE::systems::twoFluidStageRecords(*sim.fe_system).twoFluidAcceptedStageDiagnosticDeclarations();
+      twoFluidStageRecords(*sim.fe_system).twoFluidAcceptedStageDiagnosticDeclarations();
   const auto [minimum_two_fluid_stage_count,
               maximum_two_fluid_stage_count] =
       collectiveMinMaxUint64(
@@ -205,7 +208,7 @@ void TwoFluidStageParticipant::onCandidateStage(
       stage_solution,
       svmp::FE::systems::operatorStageRateStencilTime(*stage_metadata),
       active_comm);
-  svmp::FE::systems::twoFluidStageRecords(*sim.fe_system).stageTwoFluidAcceptedStageDiagnostics(
+  twoFluidStageRecords(*sim.fe_system).stageTwoFluidAcceptedStageDiagnostics(
       std::move(*stage_metadata), states);
   std::vector<svmp::FE::constraints::
                   SmallCutAggregationRefreshReport>
@@ -275,7 +278,7 @@ void TwoFluidStageParticipant::bindCandidateNumerics(
       throw std::logic_error(
           "[svMultiPhysics::Application] Two-fluid candidate reached its final gate without solved operator-stage aggregation evidence.");
     }
-    svmp::FE::systems::twoFluidStageRecords(*sim.fe_system).bindPendingTwoFluidAcceptedStageNumerics(
+    twoFluidStageRecords(*sim.fe_system).bindPendingTwoFluidAcceptedStageNumerics(
         makeTwoFluidAcceptedStageSolveTelemetry(newton_report),
         pending_two_fluid_operator_stage_aggregation_reports);
     pending_two_fluid_operator_stage_aggregation_reports.clear();
@@ -291,18 +294,18 @@ void TwoFluidStageParticipant::resetAggregationEvidence() noexcept
 
 void TwoFluidStageParticipant::discardCandidate() noexcept
 {
-  svmp::FE::systems::twoFluidStageRecords(*sim.fe_system).discardPendingTwoFluidAcceptedStageDiagnostics();
+  twoFluidStageRecords(*sim.fe_system).discardPendingTwoFluidAcceptedStageDiagnostics();
 }
 
 void TwoFluidStageParticipant::commitAccepted(
     const svmp::FE::timestepping::TimeHistory& h)
 {
   if (evaluate_two_fluid_stage) {
-    svmp::FE::systems::twoFluidStageRecords(*sim.fe_system).commitPendingTwoFluidAcceptedStageDiagnostics(
+    twoFluidStageRecords(*sim.fe_system).commitPendingTwoFluidAcceptedStageDiagnostics(
         static_cast<std::uint64_t>(h.stepIndex()),
         static_cast<svmp::FE::Real>(h.time()),
         static_cast<svmp::FE::Real>(h.dt()));
   }
 }
 
-} // namespace svmp::FE::level_set
+} // namespace svmp::Physics::formulations::navier_stokes::two_fluid

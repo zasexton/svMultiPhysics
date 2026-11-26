@@ -193,6 +193,11 @@ file(GLOB_RECURSE PHYSICS_FORMULATION_SOURCES CONFIGURE_DEPENDS
 )
 list(FILTER PHYSICS_FORMULATION_HEADERS EXCLUDE REGEX ".*/(Tests|Examples)/.*")
 list(FILTER PHYSICS_FORMULATION_SOURCES EXCLUDE REGEX ".*/(Tests|Examples)/.*")
+if(NOT FE_WITH_MESH)
+    list(REMOVE_ITEM PHYSICS_FORMULATION_SOURCES
+        "${CMAKE_CURRENT_SOURCE_DIR}/Formulations/NavierStokes/TwoFluid/TwoFluidAcceptedStage.cpp"
+        "${CMAKE_CURRENT_SOURCE_DIR}/Formulations/NavierStokes/TwoFluid/TwoFluidStageParticipant.cpp")
+endif()
 
 file(GLOB_RECURSE PHYSICS_MATERIAL_HEADERS CONFIGURE_DEPENDS
     "${CMAKE_CURRENT_SOURCE_DIR}/Materials/*.h"
@@ -291,6 +296,7 @@ if(PHYSICS_BUILD_TESTS)
         Tests/Unit/test_NavierStokesLegacyBCs.cpp
         Tests/Unit/test_NavierStokesOutletFactory.cpp
         Tests/Unit/test_IncompressibleTwoFluidInterface.cpp
+        Tests/Unit/test_TwoFluidStageRecords.cpp
         Tests/Unit/test_MovingDomainPhysics.cpp
         Tests/Unit/test_FittedFreeSurfaceALE.cpp
         Tests/Unit/test_SharpBoundaryOperatorMPI.cpp

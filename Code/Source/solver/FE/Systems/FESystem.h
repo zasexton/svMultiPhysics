@@ -19,7 +19,6 @@
 #include "Systems/FEQuantityRegistry.h"
 #include "Systems/FreeSurfaceRecordTypes.h"
 #include "Systems/OperatorStageMetadata.h"
-#include "Systems/TwoFluidRecordTypes.h"
 #include "Systems/BoundaryReductionService.h"
 #include "Systems/FieldRegistry.h"
 #include "Systems/GeometricNonlinearity.h"
@@ -37,7 +36,6 @@
 #include "PostProcessing/DerivedResultOutput.h"
 #include "PostProcessing/DerivedResultRegistry.h"
 #include "Interfaces/LevelSetGeometrySnapshot.h"
-#include "Interfaces/IncompressibleTwoFluidDiagnostics.h"
 #include "Interfaces/MaterialInterfaceTransportVelocity.h"
 
 #include "Assembly/Assembler.h"

@@ -6,19 +6,19 @@
  * See License file.
  */
 
-#include "LevelSet/TwoFluidAcceptedStage.h"
+#include "Physics/Formulations/NavierStokes/TwoFluid/TwoFluidAcceptedStage.h"
 
-#include "Assembly/Assembler.h"
-#include "Assembly/CutIntegrationContext.h"
-#include "Geometry/CutQuadratureMapping.h"
-#include "Interfaces/LevelSetGeometrySnapshot.h"
-#include "Interfaces/LevelSetInterfaceDomain.h"
-#include "Interfaces/SnapshotFieldEvaluator.h"
-#include "LevelSet/LevelSetOptions.h"
-#include "Systems/FESystemHandle.h"
-#include "Systems/SnapshotFieldAccess.h"
-#include "Systems/SystemCollectives.h"
-#include "Systems/TwoFluidStageRecords.h"
+#include "FE/Assembly/Assembler.h"
+#include "FE/Assembly/CutIntegrationContext.h"
+#include "FE/Geometry/CutQuadratureMapping.h"
+#include "FE/Interfaces/LevelSetGeometrySnapshot.h"
+#include "FE/Interfaces/LevelSetInterfaceDomain.h"
+#include "FE/Interfaces/SnapshotFieldEvaluator.h"
+#include "FE/LevelSet/LevelSetOptions.h"
+#include "FE/Systems/FESystemHandle.h"
+#include "FE/Systems/SnapshotFieldAccess.h"
+#include "FE/Systems/SystemCollectives.h"
+#include "Physics/Formulations/NavierStokes/TwoFluid/TwoFluidStageRecords.h"
 
 #include <algorithm>
 #include <cmath>
@@ -30,7 +30,10 @@
 #include <string>
 #include <utility>
 
-namespace svmp::FE::level_set {
+namespace svmp::Physics::formulations::navier_stokes::two_fluid {
+
+using namespace svmp::FE;
+using namespace svmp::FE::level_set;
 
 using svmp::FE::interfaces::makeSnapshotScalarFieldEvaluator;
 using svmp::FE::interfaces::makeSnapshotVectorFieldEvaluator;
@@ -44,11 +47,10 @@ using svmp::FE::systems::collectiveSumDouble;
 using svmp::FE::systems::collectiveSumSize;
 using svmp::FE::systems::requireCollectivePhasePreparation;
 
-std::vector<svmp::FE::systems::AcceptedTwoFluidStageDiagnosticState>
+std::vector<AcceptedTwoFluidStageDiagnosticState>
 evaluateCurrentTwoFluidStageDiagnostics(
     const FESystemHandle& sim,
-    std::span<const svmp::FE::systems::
-                        TwoFluidAcceptedStageDiagnosticDeclaration>
+    std::span<const TwoFluidAcceptedStageDiagnosticDeclaration>
         declarations,
     std::span<const svmp::FE::Real> stage_solution,
     svmp::FE::Real effective_dt,
@@ -74,7 +76,7 @@ evaluateCurrentTwoFluidStageDiagnostics(
   context->assertAllLevelSetGeometrySnapshotsCurrent(
       sim.fe_system->meshAccess());
 
-  std::vector<svmp::FE::systems::AcceptedTwoFluidStageDiagnosticState>
+  std::vector<AcceptedTwoFluidStageDiagnosticState>
       states;
   states.reserve(declarations.size());
   for (const auto& declaration : declarations) {
@@ -111,11 +113,11 @@ evaluateCurrentTwoFluidStageDiagnostics(
     }
 
     std::optional<
-        svmp::FE::interfaces::IncompressibleTwoFluidDiagnosticAccumulator>
+        IncompressibleTwoFluidDiagnosticAccumulator>
         local_accumulator;
     std::exception_ptr local_evaluation_failure;
     try {
-      svmp::FE::interfaces::IncompressibleTwoFluidPhaseEvaluators negative{
+      IncompressibleTwoFluidPhaseEvaluators negative{
           .velocity = makeSnapshotVectorFieldEvaluator(
               snapshotFieldAccess(*sim.fe_system, declaration.negative_velocity_field),
               stage_solution,
@@ -125,7 +127,7 @@ evaluateCurrentTwoFluidStageDiagnostics(
               stage_solution,
               "Two-fluid negative-phase stage"),
       };
-      svmp::FE::interfaces::IncompressibleTwoFluidPhaseEvaluators positive{
+      IncompressibleTwoFluidPhaseEvaluators positive{
           .velocity = makeSnapshotVectorFieldEvaluator(
               snapshotFieldAccess(*sim.fe_system, declaration.positive_velocity_field),
               stage_solution,
@@ -138,7 +140,7 @@ evaluateCurrentTwoFluidStageDiagnostics(
       auto cell_measures =
           std::make_shared<std::map<svmp::FE::GlobalIndex, svmp::FE::Real>>();
       auto* const mesh = &sim.fe_system->meshAccess();
-      svmp::FE::interfaces::IncompressibleTwoFluidCellMeasureEvaluator
+      IncompressibleTwoFluidCellMeasureEvaluator
           cell_measure;
       cell_measure.physical_cell_measure =
           [mesh, cell_measures](svmp::FE::GlobalIndex cell) {
@@ -153,8 +155,7 @@ evaluateCurrentTwoFluidStageDiagnostics(
             return value;
           };
       local_accumulator.emplace(
-          svmp::FE::interfaces::
-              evaluateLocalIncompressibleTwoFluidDiagnostics(
+          evaluateLocalIncompressibleTwoFluidDiagnostics(
                   snapshot,
                   declaration.parameters,
                   negative,
@@ -257,13 +258,12 @@ evaluateCurrentTwoFluidStageDiagnostics(
     reduce_phase(global.negative_phase);
     reduce_phase(global.positive_phase);
     states.push_back(
-        svmp::FE::systems::AcceptedTwoFluidStageDiagnosticState{
+        AcceptedTwoFluidStageDiagnosticState{
             .interface_marker = declaration.interface_marker,
             .geometry_revision = snapshot.revision(),
             .local_mesh_revision = snapshot.localMeshRevision(),
             .diagnostics =
-                svmp::FE::interfaces::
-                    finalizeIncompressibleTwoFluidDiagnostics(
+                finalizeIncompressibleTwoFluidDiagnostics(
                         global, declaration.parameters),
         });
   }
@@ -281,12 +281,11 @@ buildCurrentTwoFluidMomentumReconciliations(
     const svmp::MeshComm& comm)
 {
   const auto declarations =
-      svmp::FE::systems::twoFluidStageRecords(*sim.fe_system).twoFluidAcceptedStageDiagnosticDeclarations();
+      twoFluidStageRecords(*sim.fe_system).twoFluidAcceptedStageDiagnosticDeclarations();
   const auto pending =
-      svmp::FE::systems::twoFluidStageRecords(*sim.fe_system).pendingTwoFluidAcceptedStageDiagnostics();
+      twoFluidStageRecords(*sim.fe_system).pendingTwoFluidAcceptedStageDiagnostics();
   TwoFluidMomentumReconciliationBatch batch;
-  std::vector<svmp::FE::systems::
-                  TwoFluidAcceptedStageDiagnosticDeclaration>
+  std::vector<TwoFluidAcceptedStageDiagnosticDeclaration>
       required_declarations;
   std::vector<std::size_t> required_indices;
   std::vector<svmp::FE::Real> tolerances;
@@ -365,8 +364,7 @@ buildCurrentTwoFluidMomentumReconciliations(
          ++required) {
       const auto& raw = pending[required_indices[required]];
       const auto& corrected = corrected_states[required];
-      auto reconciliation = svmp::FE::interfaces::
-          buildIncompressibleTwoFluidMomentumReconciliation(
+      auto reconciliation = buildIncompressibleTwoFluidMomentumReconciliation(
               raw.declaration.interface_marker,
               raw.state.geometry_revision,
               raw.state.diagnostics,
@@ -388,7 +386,7 @@ buildCurrentTwoFluidMomentumReconciliations(
   return batch;
 }
 
-svmp::FE::systems::TwoFluidAcceptedStageSolveTelemetry
+TwoFluidAcceptedStageSolveTelemetry
 makeTwoFluidAcceptedStageSolveTelemetry(
     const svmp::FE::timestepping::NewtonReport& report)
 {
@@ -407,9 +405,9 @@ makeTwoFluidAcceptedStageSolveTelemetry(
       report.iterations > 0 || report.inner_iterations_total > 0;
   const bool exact_entry_convergence =
       !linear_attempted && report.converged;
-  return svmp::FE::systems::TwoFluidAcceptedStageSolveTelemetry{
+  return TwoFluidAcceptedStageSolveTelemetry{
       .nonlinear =
-          svmp::FE::systems::TwoFluidAcceptedStageNonlinearTelemetry{
+          TwoFluidAcceptedStageNonlinearTelemetry{
               .converged = report.converged,
               .iterations = report.iterations,
               .outer_iterations = report.outer_iterations,
@@ -453,7 +451,7 @@ makeTwoFluidAcceptedStageSolveTelemetry(
               .reason = report.converged ? "converged" : "not_converged",
           },
       .linear =
-          svmp::FE::systems::TwoFluidAcceptedStageLinearTelemetry{
+          TwoFluidAcceptedStageLinearTelemetry{
               .attempted = linear_attempted,
               .converged =
                   report.linear.converged || exact_entry_convergence,
@@ -500,4 +498,4 @@ makeTwoFluidAcceptedStageSolveTelemetry(
   };
 }
 
-} // namespace svmp::FE::level_set
+} // namespace svmp::Physics::formulations::navier_stokes::two_fluid

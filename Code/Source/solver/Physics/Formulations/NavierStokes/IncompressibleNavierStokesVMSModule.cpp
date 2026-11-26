@@ -31,7 +31,7 @@
 #include "Physics/Options/NavierStokesOptionSchema.h"
 #include "Physics/Formulations/NavierStokes/NavierStokesPostProcessing.h"
 
-#include "FE/Systems/TwoFluidStageRecords.h"
+#include "Physics/Formulations/NavierStokes/TwoFluid/TwoFluidStageRecords.h"
 #include "FE/TimeStepping/GeneralizedAlpha.h"
 
 #include "FE/Analysis/ConstitutiveLawMetadata.h"
@@ -903,8 +903,8 @@ void IncompressibleNavierStokesVMSModule::registerTwoFluidOn(fs::FESystem& syste
             .owner_component = "incompressible_two_fluid",
         });
 
-    svmp::FE::systems::twoFluidStageRecords(system).declareTwoFluidAcceptedStageDiagnostics(
-        FE::systems::TwoFluidAcceptedStageDiagnosticDeclaration{
+    two_fluid::twoFluidStageRecords(system).declareTwoFluidAcceptedStageDiagnostics(
+        two_fluid::TwoFluidAcceptedStageDiagnosticDeclaration{
             .interface_marker = interface_marker,
             .level_set_field = level_set,
             .negative_velocity_field = u_negative,
@@ -921,7 +921,7 @@ void IncompressibleNavierStokesVMSModule::registerTwoFluidOn(fs::FESystem& syste
             .pressure_stabilization_coefficient =
                 o.pressure_gradient_penalty,
             .parameters =
-                FE::interfaces::IncompressibleTwoFluidDiagnosticParameters{
+                two_fluid::IncompressibleTwoFluidDiagnosticParameters{
                     .dimension = dimension,
                     .interface_marker = interface_marker,
                     .negative_density = o.negative_phase.density,

@@ -26,7 +26,7 @@
 #include "Physics/Options/NavierStokesOptionSchema.h"
 #include "Physics/Options/NavierStokesRegistration.h"
 #include "Parameters.h"
-#include "FE/Systems/TwoFluidStageRecords.h"
+#include "Physics/Formulations/NavierStokes/TwoFluid/TwoFluidStageRecords.h"
 #include "FE/Core/EnvironmentNames.h"
 
 #include <algorithm>
@@ -1055,7 +1055,7 @@ bool twoFluidMaterialInterfaceFieldContractHolds(
   const auto& material =
       system.materialInterfaceTransportVelocityDeclarations();
   const auto& diagnostics =
-      svmp::FE::systems::twoFluidStageRecords(system).twoFluidAcceptedStageDiagnosticDeclarations();
+      svmp::Physics::formulations::navier_stokes::two_fluid::twoFluidStageRecords(system).twoFluidAcceptedStageDiagnosticDeclarations();
   if (material.size() != 1u || diagnostics.size() != 1u ||
       system.registeredFieldCount() != 6u) {
     return false;
@@ -1123,7 +1123,7 @@ void detail::requireTwoFluidMaterialInterfaceSolverLayout(
   const auto material_count =
       system.materialInterfaceTransportVelocityDeclarations().size();
   const auto diagnostic_count =
-      svmp::FE::systems::twoFluidStageRecords(system).twoFluidAcceptedStageDiagnosticDeclarations().size();
+      svmp::Physics::formulations::navier_stokes::two_fluid::twoFluidStageRecords(system).twoFluidAcceptedStageDiagnosticDeclarations().size();
   if (material_count == 0u && diagnostic_count == 0u) {
     return;
   }

@@ -6,8 +6,8 @@
  * See License file.
  */
 
-#ifndef SVMP_FE_LEVELSET_TWO_FLUID_ACCEPTED_STAGE_H
-#define SVMP_FE_LEVELSET_TWO_FLUID_ACCEPTED_STAGE_H
+#ifndef SVMP_PHYSICS_TWO_FLUID_TWO_FLUID_ACCEPTED_STAGE_H
+#define SVMP_PHYSICS_TWO_FLUID_TWO_FLUID_ACCEPTED_STAGE_H
 
 /**
  * @file
@@ -17,33 +17,32 @@
  *        accepted-stage solve telemetry.
  */
 
-#include "Core/Types.h"
-#include "Interfaces/IncompressibleTwoFluidDiagnostics.h"
-#include "LevelSet/LevelSetConservativePhaseWorkflow.h"
-#include "Systems/FESystem.h"
-#include "Systems/FESystemHandle.h"
-#include "TimeStepping/NewtonSolver.h"
+#include "Physics/Formulations/NavierStokes/TwoFluid/TwoFluidRecordTypes.h"
+#include "FE/Core/Types.h"
+#include "Physics/Formulations/NavierStokes/TwoFluid/IncompressibleTwoFluidDiagnostics.h"
+#include "FE/LevelSet/LevelSetConservativePhaseWorkflow.h"
+#include "FE/Systems/FESystem.h"
+#include "FE/Systems/FESystemHandle.h"
+#include "FE/TimeStepping/NewtonSolver.h"
 #include "Mesh/Core/MeshComm.h"
 
 #include <cstdint>
 #include <span>
 #include <vector>
 
-namespace svmp::FE::level_set {
+namespace svmp::Physics::formulations::navier_stokes::two_fluid {
 
-std::vector<svmp::FE::systems::AcceptedTwoFluidStageDiagnosticState>
+std::vector<AcceptedTwoFluidStageDiagnosticState>
 evaluateCurrentTwoFluidStageDiagnostics(
     const svmp::FE::systems::FESystemHandle& sim,
-    std::span<const svmp::FE::systems::
-                        TwoFluidAcceptedStageDiagnosticDeclaration>
+    std::span<const TwoFluidAcceptedStageDiagnosticDeclaration>
         declarations,
     std::span<const svmp::FE::Real> stage_solution,
     svmp::FE::Real effective_dt,
     const svmp::MeshComm& comm);
 
 struct TwoFluidMomentumReconciliationBatch {
-  std::vector<svmp::FE::interfaces::
-                  IncompressibleTwoFluidMomentumReconciliation>
+  std::vector<IncompressibleTwoFluidMomentumReconciliation>
       records{};
   bool satisfied{true};
 };
@@ -58,10 +57,10 @@ buildCurrentTwoFluidMomentumReconciliations(
     svmp::FE::Real effective_dt,
     const svmp::MeshComm& comm);
 
-svmp::FE::systems::TwoFluidAcceptedStageSolveTelemetry
+TwoFluidAcceptedStageSolveTelemetry
 makeTwoFluidAcceptedStageSolveTelemetry(
     const svmp::FE::timestepping::NewtonReport& report);
 
-} // namespace svmp::FE::level_set
+} // namespace svmp::Physics::formulations::navier_stokes::two_fluid
 
-#endif // SVMP_FE_LEVELSET_TWO_FLUID_ACCEPTED_STAGE_H
+#endif // SVMP_PHYSICS_TWO_FLUID_TWO_FLUID_ACCEPTED_STAGE_H

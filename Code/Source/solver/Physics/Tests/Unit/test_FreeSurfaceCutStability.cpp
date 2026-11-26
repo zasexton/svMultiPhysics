@@ -86,7 +86,7 @@
 #include <utility>
 #include <vector>
 #include "FE/Constraints/SmallCutAggregationConstraint.h"
-#include "FE/Systems/TwoFluidStageRecords.h"
+#include "Physics/Formulations/NavierStokes/TwoFluid/TwoFluidStageRecords.h"
 
 
 namespace {
@@ -12676,10 +12676,10 @@ TEST(FreeSurfaceCutStabilityMPI,
     system.setup(setup);
 
     const auto declarations =
-        svmp::FE::systems::twoFluidStageRecords(system).twoFluidAcceptedStageDiagnosticDeclarations();
+        svmp::Physics::formulations::navier_stokes::two_fluid::twoFluidStageRecords(system).twoFluidAcceptedStageDiagnosticDeclarations();
     ASSERT_EQ(declarations.size(), 1u);
     const auto& declaration = declarations.front();
-    FE::interfaces::IncompressibleTwoFluidDiagnosticAccumulator accumulator;
+    svmp::Physics::formulations::navier_stokes::two_fluid::IncompressibleTwoFluidDiagnosticAccumulator accumulator;
     accumulator.snapshot_revision_key = 91u;
     accumulator.owned_interface_quadrature_point_count = 2u;
     accumulator.interface_measure = FE::Real{0.5};
@@ -12702,7 +12702,7 @@ TEST(FreeSurfaceCutStabilityMPI,
     accumulator.positive_phase.owned_quadrature_point_count = 1u;
     accumulator.positive_phase.volume = FE::Real{0.25};
     const auto diagnostics =
-        FE::interfaces::finalizeIncompressibleTwoFluidDiagnostics(
+        svmp::Physics::formulations::navier_stokes::two_fluid::finalizeIncompressibleTwoFluidDiagnostics(
             accumulator, declaration.parameters);
     const auto& mesh_access = system.meshAccess();
     const FE::systems::OperatorStageGeometryMetadata stage_geometry{
@@ -12716,7 +12716,7 @@ TEST(FreeSurfaceCutStabilityMPI,
         .coordinate_configuration_key =
             mesh_access.coordinateConfigurationKey(),
     };
-    FE::systems::AcceptedTwoFluidStageDiagnosticState state{
+    svmp::Physics::formulations::navier_stokes::two_fluid::AcceptedTwoFluidStageDiagnosticState state{
         .interface_marker = declaration.interface_marker,
         .geometry_revision =
             FE::interfaces::LevelSetGeometryRevision{
@@ -12761,9 +12761,9 @@ TEST(FreeSurfaceCutStabilityMPI,
             .rate_revision = 51u + step,
         };
     };
-    const FE::systems::TwoFluidAcceptedStageSolveTelemetry solve_telemetry{
+    const svmp::Physics::formulations::navier_stokes::two_fluid::TwoFluidAcceptedStageSolveTelemetry solve_telemetry{
         .nonlinear =
-            FE::systems::TwoFluidAcceptedStageNonlinearTelemetry{
+            svmp::Physics::formulations::navier_stokes::two_fluid::TwoFluidAcceptedStageNonlinearTelemetry{
                 .converged = true,
                 .iterations = 2,
                 .outer_iterations = 1,
@@ -12773,7 +12773,7 @@ TEST(FreeSurfaceCutStabilityMPI,
                 .reason = "converged",
             },
         .linear =
-            FE::systems::TwoFluidAcceptedStageLinearTelemetry{
+            svmp::Physics::formulations::navier_stokes::two_fluid::TwoFluidAcceptedStageLinearTelemetry{
                 .converged = true,
                 .iterations = 11,
                 .initial_residual_norm = FE::Real{1.0},
@@ -12868,14 +12868,13 @@ TEST(FreeSurfaceCutStabilityMPI,
     }();
 
     const std::array accepted_states{state};
-    ASSERT_NO_THROW(svmp::FE::systems::twoFluidStageRecords(system).stageTwoFluidAcceptedStageDiagnostics(
+    ASSERT_NO_THROW(svmp::Physics::formulations::navier_stokes::two_fluid::twoFluidStageRecords(system).stageTwoFluidAcceptedStageDiagnostics(
         metadata(1u, FE::Real{0.0}, FE::Real{0.1}), accepted_states));
     auto corrected_state = state;
     corrected_state.geometry_revision.source_value_revision = 8u;
     corrected_state.geometry_revision.snapshot_revision_key = 92u;
     corrected_state.diagnostics.snapshot_revision_key = 92u;
-    const auto accepted_reconciliation = FE::interfaces::
-        buildIncompressibleTwoFluidMomentumReconciliation(
+    const auto accepted_reconciliation = svmp::Physics::formulations::navier_stokes::two_fluid::buildIncompressibleTwoFluidMomentumReconciliation(
             declaration.interface_marker,
             state.geometry_revision,
             state.diagnostics,
@@ -12885,15 +12884,15 @@ TEST(FreeSurfaceCutStabilityMPI,
             /*corrected_algebraic_revision=*/62u,
             FE::Real{1.0e-10});
     const std::array accepted_reconciliations{accepted_reconciliation};
-    ASSERT_NO_THROW(svmp::FE::systems::twoFluidStageRecords(system).bindPendingTwoFluidMomentumReconciliations(
+    ASSERT_NO_THROW(svmp::Physics::formulations::navier_stokes::two_fluid::twoFluidStageRecords(system).bindPendingTwoFluidMomentumReconciliations(
         accepted_reconciliations));
-    ASSERT_NO_THROW(svmp::FE::systems::twoFluidStageRecords(system).bindPendingTwoFluidAcceptedStageNumerics(
+    ASSERT_NO_THROW(svmp::Physics::formulations::navier_stokes::two_fluid::twoFluidStageRecords(system).bindPendingTwoFluidAcceptedStageNumerics(
         solve_telemetry, aggregation_reports));
-    ASSERT_NO_THROW(svmp::FE::systems::twoFluidStageRecords(system).commitPendingTwoFluidAcceptedStageDiagnostics(
+    ASSERT_NO_THROW(svmp::Physics::formulations::navier_stokes::two_fluid::twoFluidStageRecords(system).commitPendingTwoFluidAcceptedStageDiagnostics(
         1u, FE::Real{0.1}, FE::Real{0.1}));
-    ASSERT_EQ(svmp::FE::systems::twoFluidStageRecords(system).twoFluidAcceptedStageDiagnosticHistory().size(), 1u);
+    ASSERT_EQ(svmp::Physics::formulations::navier_stokes::two_fluid::twoFluidStageRecords(system).twoFluidAcceptedStageDiagnosticHistory().size(), 1u);
 
-    ASSERT_NO_THROW(svmp::FE::systems::twoFluidStageRecords(system).stageTwoFluidAcceptedStageDiagnostics(
+    ASSERT_NO_THROW(svmp::Physics::formulations::navier_stokes::two_fluid::twoFluidStageRecords(system).stageTwoFluidAcceptedStageDiagnostics(
         metadata(2u, FE::Real{0.1}, FE::Real{0.2}), accepted_states));
     auto rank_divergent_corrected = corrected_state;
     rank_divergent_corrected.geometry_revision.source_value_revision =
@@ -12902,8 +12901,7 @@ TEST(FreeSurfaceCutStabilityMPI,
         93u + static_cast<std::uint64_t>(rank);
     rank_divergent_corrected.diagnostics.snapshot_revision_key =
         93u + static_cast<std::uint64_t>(rank);
-    const auto rank_divergent_reconciliation = FE::interfaces::
-        buildIncompressibleTwoFluidMomentumReconciliation(
+    const auto rank_divergent_reconciliation = svmp::Physics::formulations::navier_stokes::two_fluid::buildIncompressibleTwoFluidMomentumReconciliation(
             declaration.interface_marker,
             state.geometry_revision,
             state.diagnostics,
@@ -12915,15 +12913,15 @@ TEST(FreeSurfaceCutStabilityMPI,
             FE::Real{1.0e-10});
     const std::array rank_divergent_reconciliations{
         rank_divergent_reconciliation};
-    EXPECT_THROW(svmp::FE::systems::twoFluidStageRecords(system).bindPendingTwoFluidMomentumReconciliations(
+    EXPECT_THROW(svmp::Physics::formulations::navier_stokes::two_fluid::twoFluidStageRecords(system).bindPendingTwoFluidMomentumReconciliations(
                      rank_divergent_reconciliations),
                  FE::InvalidArgumentException);
-    EXPECT_FALSE(svmp::FE::systems::twoFluidStageRecords(system).pendingTwoFluidAcceptedStageDiagnostics()
+    EXPECT_FALSE(svmp::Physics::formulations::navier_stokes::two_fluid::twoFluidStageRecords(system).pendingTwoFluidAcceptedStageDiagnostics()
                      .front()
                      .momentum_reconciliation.has_value());
-    svmp::FE::systems::twoFluidStageRecords(system).discardPendingTwoFluidAcceptedStageDiagnostics();
+    svmp::Physics::formulations::navier_stokes::two_fluid::twoFluidStageRecords(system).discardPendingTwoFluidAcceptedStageDiagnostics();
 
-    ASSERT_NO_THROW(svmp::FE::systems::twoFluidStageRecords(system).stageTwoFluidAcceptedStageDiagnostics(
+    ASSERT_NO_THROW(svmp::Physics::formulations::navier_stokes::two_fluid::twoFluidStageRecords(system).stageTwoFluidAcceptedStageDiagnostics(
         metadata(2u, FE::Real{0.1}, FE::Real{0.2}), accepted_states));
     auto rank_divergent_aggregation = aggregation_reports;
     if (rank == 1) {
@@ -12932,13 +12930,13 @@ TEST(FreeSurfaceCutStabilityMPI,
         ++rank_divergent_aggregation.front()
               .canonical_rooted_candidate_vertices;
     }
-    EXPECT_THROW(svmp::FE::systems::twoFluidStageRecords(system).bindPendingTwoFluidAcceptedStageNumerics(
+    EXPECT_THROW(svmp::Physics::formulations::navier_stokes::two_fluid::twoFluidStageRecords(system).bindPendingTwoFluidAcceptedStageNumerics(
                      solve_telemetry, rank_divergent_aggregation),
                  FE::InvalidArgumentException);
-    EXPECT_FALSE(svmp::FE::systems::twoFluidStageRecords(system).pendingTwoFluidAcceptedStageDiagnostics()
+    EXPECT_FALSE(svmp::Physics::formulations::navier_stokes::two_fluid::twoFluidStageRecords(system).pendingTwoFluidAcceptedStageDiagnostics()
                      .front()
                      .numerics.has_value());
-    svmp::FE::systems::twoFluidStageRecords(system).discardPendingTwoFluidAcceptedStageDiagnostics();
+    svmp::Physics::formulations::navier_stokes::two_fluid::twoFluidStageRecords(system).discardPendingTwoFluidAcceptedStageDiagnostics();
 
     auto divergent_state = state;
     if (rank == 1) {
@@ -12946,11 +12944,11 @@ TEST(FreeSurfaceCutStabilityMPI,
     }
     const std::array divergent_states{divergent_state};
     EXPECT_THROW(
-        svmp::FE::systems::twoFluidStageRecords(system).stageTwoFluidAcceptedStageDiagnostics(
+        svmp::Physics::formulations::navier_stokes::two_fluid::twoFluidStageRecords(system).stageTwoFluidAcceptedStageDiagnostics(
             metadata(2u, FE::Real{0.1}, FE::Real{0.2}), divergent_states),
         FE::InvalidArgumentException);
-    EXPECT_TRUE(svmp::FE::systems::twoFluidStageRecords(system).pendingTwoFluidAcceptedStageDiagnostics().empty());
-    EXPECT_EQ(svmp::FE::systems::twoFluidStageRecords(system).twoFluidAcceptedStageDiagnosticHistory().size(), 1u);
+    EXPECT_TRUE(svmp::Physics::formulations::navier_stokes::two_fluid::twoFluidStageRecords(system).pendingTwoFluidAcceptedStageDiagnostics().empty());
+    EXPECT_EQ(svmp::Physics::formulations::navier_stokes::two_fluid::twoFluidStageRecords(system).twoFluidAcceptedStageDiagnosticHistory().size(), 1u);
     MPI_Barrier(comm);
 #endif
 }

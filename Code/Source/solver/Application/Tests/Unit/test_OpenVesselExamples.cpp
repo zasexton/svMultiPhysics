@@ -44,7 +44,7 @@
 #include <utility>
 #include <vector>
 #include "FE/Constraints/SmallCutAggregationConstraint.h"
-#include "FE/Systems/TwoFluidStageRecords.h"
+#include "Physics/Formulations/NavierStokes/TwoFluid/TwoFluidStageRecords.h"
 
 
 namespace {
@@ -1676,7 +1676,7 @@ TEST(OpenVesselExamples,
             .size(),
         1u);
     ASSERT_TRUE(
-        svmp::FE::systems::twoFluidStageRecords(*components.fe_system)
+        svmp::Physics::formulations::navier_stokes::two_fluid::twoFluidStageRecords(*components.fe_system)
             .twoFluidAcceptedStageDiagnosticDeclarations()
             .empty());
     svmp::FE::backends::BlockLayout incomplete_owner_layout{};
@@ -1741,7 +1741,7 @@ TEST(OpenVesselExamples,
             .interface_marker,
         71);
     ASSERT_EQ(
-        svmp::FE::systems::twoFluidStageRecords(*components.fe_system)
+        svmp::Physics::formulations::navier_stokes::two_fluid::twoFluidStageRecords(*components.fe_system)
             .twoFluidAcceptedStageDiagnosticDeclarations()
             .size(),
         1u);
@@ -1980,7 +1980,7 @@ TEST(OpenVesselExamples,
           .size(),
       1u);
   EXPECT_EQ(
-      svmp::FE::systems::twoFluidStageRecords(*components.fe_system)
+      svmp::Physics::formulations::navier_stokes::two_fluid::twoFluidStageRecords(*components.fe_system)
           .twoFluidAcceptedStageDiagnosticDeclarations()
           .size(),
       1u);
@@ -2257,7 +2257,7 @@ void expectMaterialInterfaceDependencyPreflightRejectedWithoutMutation(
           ->materialInterfaceTransportVelocityDeclarations()
           .empty());
   EXPECT_TRUE(
-      svmp::FE::systems::twoFluidStageRecords(*components.fe_system)
+      svmp::Physics::formulations::navier_stokes::two_fluid::twoFluidStageRecords(*components.fe_system)
           .twoFluidAcceptedStageDiagnosticDeclarations()
           .empty());
   EXPECT_FALSE(components.fe_system->hasOperator("equations"));
@@ -2506,7 +2506,7 @@ TEST(OpenVesselExamples,
           ->materialInterfaceTransportVelocityDeclarations()
           .empty());
   EXPECT_TRUE(
-      svmp::FE::systems::twoFluidStageRecords(*components.fe_system)
+      svmp::Physics::formulations::navier_stokes::two_fluid::twoFluidStageRecords(*components.fe_system)
           .twoFluidAcceptedStageDiagnosticDeclarations()
           .empty());
   EXPECT_FALSE(components.fe_system->hasOperator("equations"));

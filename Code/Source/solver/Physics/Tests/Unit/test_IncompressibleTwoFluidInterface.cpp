@@ -18,7 +18,7 @@
 #include "FE/Assembly/CutIntegrationContext.h"
 #include "FE/Assembly/GlobalSystemView.h"
 #include "FE/Dofs/EntityDofMap.h"
-#include "FE/Interfaces/IncompressibleTwoFluidDiagnostics.h"
+#include "Physics/Formulations/NavierStokes/TwoFluid/IncompressibleTwoFluidDiagnostics.h"
 #include "FE/Interfaces/LevelSetInterfaceDomain.h"
 #include "FE/Spaces/H1Space.h"
 #include "FE/Spaces/ProductSpace.h"
@@ -49,7 +49,7 @@
 #include <vector>
 #include "FE/Constraints/SmallCutAggregationConstraint.h"
 #include "FE/Systems/FunctionalRecords.h"
-#include "FE/Systems/TwoFluidStageRecords.h"
+#include "Physics/Formulations/NavierStokes/TwoFluid/TwoFluidStageRecords.h"
 
 namespace {
 // Every small-cut aggregation prolongation report requested in this test
@@ -433,7 +433,7 @@ TEST(IncompressibleTwoFluidModule,
         fixture.system.materialInterfaceTransportVelocityDeclarations()
             .empty());
     EXPECT_TRUE(
-        svmp::FE::systems::twoFluidStageRecords(fixture.system).twoFluidAcceptedStageDiagnosticDeclarations()
+        svmp::Physics::formulations::navier_stokes::two_fluid::twoFluidStageRecords(fixture.system).twoFluidAcceptedStageDiagnosticDeclarations()
             .empty());
   };
 
@@ -1137,7 +1137,7 @@ TEST(IncompressibleTwoFluidDiagnostics,
   RevisionTrackedTriangleMeshAccess mesh;
   const auto snapshot = makeTwoFluidDiagnosticSnapshot(mesh, 71);
 
-  FE::interfaces::IncompressibleTwoFluidPhaseEvaluators negative;
+  svmp::Physics::formulations::navier_stokes::two_fluid::IncompressibleTwoFluidPhaseEvaluators negative;
   negative.velocity.value =
       [](FE::GlobalIndex,
          const std::array<FE::Real, 3>&,
@@ -1168,7 +1168,7 @@ TEST(IncompressibleTwoFluidDiagnostics,
         return std::array<FE::Real, 3>{{2.0, -1.0, 0.0}};
       };
 
-  FE::interfaces::IncompressibleTwoFluidPhaseEvaluators positive;
+  svmp::Physics::formulations::navier_stokes::two_fluid::IncompressibleTwoFluidPhaseEvaluators positive;
   positive.velocity.value =
       [](FE::GlobalIndex,
          const std::array<FE::Real, 3>&,
@@ -1199,7 +1199,7 @@ TEST(IncompressibleTwoFluidDiagnostics,
         return std::array<FE::Real, 3>{{3.0, -1.0, 0.0}};
       };
 
-  FE::interfaces::IncompressibleTwoFluidDiagnosticParameters parameters{
+  svmp::Physics::formulations::navier_stokes::two_fluid::IncompressibleTwoFluidDiagnosticParameters parameters{
       .dimension = 2,
       .interface_marker = 71,
       .negative_density = FE::Real{4.0},
@@ -1212,12 +1212,12 @@ TEST(IncompressibleTwoFluidDiagnostics,
       .prescribed_pressure_jump = FE::Real{3.0},
       .body_force = {{FE::Real{0.5}, FE::Real{-0.25}, FE::Real{0.0}}},
   };
-  FE::interfaces::IncompressibleTwoFluidCellMeasureEvaluator cell_measure;
+  svmp::Physics::formulations::navier_stokes::two_fluid::IncompressibleTwoFluidCellMeasureEvaluator cell_measure;
   cell_measure.physical_cell_measure =
       [](FE::GlobalIndex) { return FE::Real{0.5}; };
 
   const auto local =
-      FE::interfaces::evaluateLocalIncompressibleTwoFluidDiagnostics(
+      svmp::Physics::formulations::navier_stokes::two_fluid::evaluateLocalIncompressibleTwoFluidDiagnostics(
           *snapshot,
           parameters,
           negative,
@@ -1225,7 +1225,7 @@ TEST(IncompressibleTwoFluidDiagnostics,
           cell_measure,
           FE::Real{0.25});
   const auto state =
-      FE::interfaces::finalizeIncompressibleTwoFluidDiagnostics(
+      svmp::Physics::formulations::navier_stokes::two_fluid::finalizeIncompressibleTwoFluidDiagnostics(
           local, parameters);
   constexpr FE::Real tolerance = FE::Real{1.0e-13};
 
@@ -1360,7 +1360,7 @@ TEST(IncompressibleTwoFluidDiagnostics,
       std::array<FE::Real, 3>{{
           FE::Real{6.0}, FE::Real{7.0}, FE::Real{0.0}}};
   const auto composed_local =
-      FE::interfaces::evaluateLocalIncompressibleTwoFluidDiagnostics(
+      svmp::Physics::formulations::navier_stokes::two_fluid::evaluateLocalIncompressibleTwoFluidDiagnostics(
           *snapshot,
           composed_parameters,
           negative,
@@ -1368,7 +1368,7 @@ TEST(IncompressibleTwoFluidDiagnostics,
           cell_measure,
           FE::Real{0.25});
   const auto composed_state =
-      FE::interfaces::finalizeIncompressibleTwoFluidDiagnostics(
+      svmp::Physics::formulations::navier_stokes::two_fluid::finalizeIncompressibleTwoFluidDiagnostics(
           composed_local, composed_parameters);
   EXPECT_EQ(composed_state.interface_normal_integral,
             (std::array<FE::Real, 3>{{0.5, 0.0, 0.0}}));
@@ -1393,7 +1393,7 @@ TEST(IncompressibleTwoFluidDiagnostics,
   auto missing_pressure_gradient = negative;
   missing_pressure_gradient.pressure.reference_gradient = {};
   EXPECT_THROW(
-      (void)FE::interfaces::evaluateLocalIncompressibleTwoFluidDiagnostics(
+      (void)svmp::Physics::formulations::navier_stokes::two_fluid::evaluateLocalIncompressibleTwoFluidDiagnostics(
           *snapshot,
           parameters,
           missing_pressure_gradient,
@@ -1406,7 +1406,7 @@ TEST(IncompressibleTwoFluidDiagnostics,
   nonfinite_body_force.body_force[0] =
       std::numeric_limits<FE::Real>::quiet_NaN();
   EXPECT_THROW(
-      (void)FE::interfaces::evaluateLocalIncompressibleTwoFluidDiagnostics(
+      (void)svmp::Physics::formulations::navier_stokes::two_fluid::evaluateLocalIncompressibleTwoFluidDiagnostics(
           *snapshot,
           nonfinite_body_force,
           negative,
@@ -1418,7 +1418,7 @@ TEST(IncompressibleTwoFluidDiagnostics,
   auto out_of_plane_body_force = parameters;
   out_of_plane_body_force.body_force[2] = FE::Real{1.0};
   EXPECT_THROW(
-      (void)FE::interfaces::evaluateLocalIncompressibleTwoFluidDiagnostics(
+      (void)svmp::Physics::formulations::navier_stokes::two_fluid::evaluateLocalIncompressibleTwoFluidDiagnostics(
           *snapshot,
           out_of_plane_body_force,
           negative,
@@ -1430,7 +1430,7 @@ TEST(IncompressibleTwoFluidDiagnostics,
 
 TEST(IncompressibleTwoFluidDiagnostics,
      SeparatesViscousTargetErrorFromComposedStressTargetResidual) {
-  FE::interfaces::IncompressibleTwoFluidDiagnosticParameters parameters{
+  svmp::Physics::formulations::navier_stokes::two_fluid::IncompressibleTwoFluidDiagnosticParameters parameters{
       .dimension = 2,
       .interface_marker = 71,
       .negative_density = FE::Real{4.0},
@@ -1445,7 +1445,7 @@ TEST(IncompressibleTwoFluidDiagnostics,
           std::array<FE::Real, 3>{{
               FE::Real{6.0}, FE::Real{7.0}, FE::Real{0.0}}},
   };
-  FE::interfaces::IncompressibleTwoFluidDiagnosticAccumulator accumulator;
+  svmp::Physics::formulations::navier_stokes::two_fluid::IncompressibleTwoFluidDiagnosticAccumulator accumulator;
   accumulator.snapshot_revision_key = 91u;
   accumulator.owned_interface_quadrature_point_count = 1u;
   accumulator.interface_measure = FE::Real{0.5};
@@ -1477,7 +1477,7 @@ TEST(IncompressibleTwoFluidDiagnostics,
   accumulator.positive_phase.volume = FE::Real{0.25};
 
   const auto state =
-      FE::interfaces::finalizeIncompressibleTwoFluidDiagnostics(
+      svmp::Physics::formulations::navier_stokes::two_fluid::finalizeIncompressibleTwoFluidDiagnostics(
           accumulator, parameters);
   EXPECT_EQ(state.negative_viscous_traction_integral,
             accumulator.negative_viscous_traction_integral);
@@ -1497,7 +1497,7 @@ TEST(IncompressibleTwoFluidDiagnostics,
 
 TEST(IncompressibleTwoFluidDiagnostics,
      AcceptsHighContrastHydrostaticIdentityWithinOperandScaledRoundoff) {
-  FE::interfaces::IncompressibleTwoFluidDiagnosticParameters parameters{
+  svmp::Physics::formulations::navier_stokes::two_fluid::IncompressibleTwoFluidDiagnosticParameters parameters{
       .dimension = 2,
       .interface_marker = 71,
       .negative_density = FE::Real{10000.0},
@@ -1509,7 +1509,7 @@ TEST(IncompressibleTwoFluidDiagnostics,
       .include_transient_penalty = false,
       .body_force = {{FE::Real{-9.81}, FE::Real{0.0}, FE::Real{0.0}}},
   };
-  FE::interfaces::IncompressibleTwoFluidDiagnosticAccumulator accumulator;
+  svmp::Physics::formulations::navier_stokes::two_fluid::IncompressibleTwoFluidDiagnosticAccumulator accumulator;
   accumulator.snapshot_revision_key = 1u;
   accumulator.owned_interface_quadrature_point_count = 1u;
   accumulator.interface_measure = FE::Real{1.0};
@@ -1537,13 +1537,13 @@ TEST(IncompressibleTwoFluidDiagnostics,
       positive_body_force_moment;
 
   EXPECT_NO_THROW(
-      (void)FE::interfaces::finalizeIncompressibleTwoFluidDiagnostics(
+      (void)svmp::Physics::formulations::navier_stokes::two_fluid::finalizeIncompressibleTwoFluidDiagnostics(
           accumulator, parameters));
 }
 
 TEST(IncompressibleTwoFluidDiagnostics,
      AcceptsTractionDifferenceWithinPhaseOperandScaledRoundoff) {
-  FE::interfaces::IncompressibleTwoFluidDiagnosticParameters parameters{
+  svmp::Physics::formulations::navier_stokes::two_fluid::IncompressibleTwoFluidDiagnosticParameters parameters{
       .dimension = 2,
       .interface_marker = 71,
       .negative_density = FE::Real{10000.0},
@@ -1554,7 +1554,7 @@ TEST(IncompressibleTwoFluidDiagnostics,
       .surface_tension = FE::Real{0.0},
       .include_transient_penalty = false,
   };
-  FE::interfaces::IncompressibleTwoFluidDiagnosticAccumulator accumulator;
+  svmp::Physics::formulations::navier_stokes::two_fluid::IncompressibleTwoFluidDiagnosticAccumulator accumulator;
   accumulator.snapshot_revision_key = 1u;
   accumulator.owned_interface_quadrature_point_count = 1u;
   accumulator.interface_measure = FE::Real{1.0};
@@ -1570,13 +1570,13 @@ TEST(IncompressibleTwoFluidDiagnostics,
       -std::numeric_limits<FE::Real>::infinity());
 
   EXPECT_NO_THROW(
-      (void)FE::interfaces::finalizeIncompressibleTwoFluidDiagnostics(
+      (void)svmp::Physics::formulations::navier_stokes::two_fluid::finalizeIncompressibleTwoFluidDiagnostics(
           accumulator, parameters));
 }
 
 TEST(IncompressibleTwoFluidDiagnostics,
      MomentumReconciliationAcceptsMeasurePreservingConstantVelocity) {
-  FE::interfaces::IncompressibleTwoFluidDiagnosticState raw;
+  svmp::Physics::formulations::navier_stokes::two_fluid::IncompressibleTwoFluidDiagnosticState raw;
   raw.snapshot_revision_key = 101u;
   raw.negative_phase.side = FE::geometry::CutIntegrationSide::Negative;
   raw.negative_phase.density = FE::Real{1000.0};
@@ -1603,8 +1603,7 @@ TEST(IncompressibleTwoFluidDiagnostics,
   corrected_geometry.source_value_revision = 12u;
   corrected_geometry.snapshot_revision_key = 102u;
 
-  const auto record = FE::interfaces::
-      buildIncompressibleTwoFluidMomentumReconciliation(
+  const auto record = svmp::Physics::formulations::navier_stokes::two_fluid::buildIncompressibleTwoFluidMomentumReconciliation(
           71,
           raw_geometry,
           raw,
@@ -1624,13 +1623,13 @@ TEST(IncompressibleTwoFluidDiagnostics,
   EXPECT_TRUE(record.negative_phase.satisfied);
   EXPECT_TRUE(record.positive_phase.satisfied);
   EXPECT_NO_THROW(
-      FE::interfaces::validateIncompressibleTwoFluidMomentumReconciliation(
+      svmp::Physics::formulations::navier_stokes::two_fluid::validateIncompressibleTwoFluidMomentumReconciliation(
           record));
 }
 
 TEST(IncompressibleTwoFluidDiagnostics,
      MomentumReconciliationRejectsUntrackedPhaseMomentumChange) {
-  FE::interfaces::IncompressibleTwoFluidDiagnosticState raw;
+  svmp::Physics::formulations::navier_stokes::two_fluid::IncompressibleTwoFluidDiagnosticState raw;
   raw.snapshot_revision_key = 301u;
   raw.negative_phase.side = FE::geometry::CutIntegrationSide::Negative;
   raw.negative_phase.density = FE::Real{1000.0};
@@ -1659,8 +1658,7 @@ TEST(IncompressibleTwoFluidDiagnostics,
   corrected_geometry.source_value_revision = 22u;
   corrected_geometry.snapshot_revision_key = 302u;
 
-  const auto record = FE::interfaces::
-      buildIncompressibleTwoFluidMomentumReconciliation(
+  const auto record = svmp::Physics::formulations::navier_stokes::two_fluid::buildIncompressibleTwoFluidMomentumReconciliation(
           71,
           raw_geometry,
           raw,
@@ -1675,17 +1673,17 @@ TEST(IncompressibleTwoFluidDiagnostics,
   EXPECT_GT(record.negative_phase.momentum_delta_norm,
             record.negative_phase.allowed_momentum_delta);
   EXPECT_NO_THROW(
-      FE::interfaces::validateIncompressibleTwoFluidMomentumReconciliation(
+      svmp::Physics::formulations::navier_stokes::two_fluid::validateIncompressibleTwoFluidMomentumReconciliation(
           record));
 
   auto malformed = record;
   malformed.negative_phase.momentum_delta[0] = FE::Real{0.0};
   EXPECT_THROW(
-      FE::interfaces::validateIncompressibleTwoFluidMomentumReconciliation(
+      svmp::Physics::formulations::navier_stokes::two_fluid::validateIncompressibleTwoFluidMomentumReconciliation(
           malformed),
       std::invalid_argument);
   EXPECT_THROW(
-      FE::interfaces::buildIncompressibleTwoFluidMomentumReconciliation(
+      svmp::Physics::formulations::navier_stokes::two_fluid::buildIncompressibleTwoFluidMomentumReconciliation(
           71,
           raw_geometry,
           raw,
@@ -1902,7 +1900,7 @@ TEST(IncompressibleTwoFluidModule,
   EXPECT_TRUE(
       svmp::FE::systems::functionalRecords(fixture.system).functionalDeclarations().empty());
   const auto diagnostic_declarations =
-      svmp::FE::systems::twoFluidStageRecords(fixture.system).twoFluidAcceptedStageDiagnosticDeclarations();
+      svmp::Physics::formulations::navier_stokes::two_fluid::twoFluidStageRecords(fixture.system).twoFluidAcceptedStageDiagnosticDeclarations();
   ASSERT_EQ(diagnostic_declarations.size(), 1u);
   EXPECT_EQ(diagnostic_declarations.front().interface_marker,
             interface_marker);
@@ -2055,11 +2053,11 @@ TEST(IncompressibleTwoFluidModule,
   EXPECT_NE(prescribed_residual, baseline_residual);
 }
 
-FE::systems::AcceptedTwoFluidStageDiagnosticState
+svmp::Physics::formulations::navier_stokes::two_fluid::AcceptedTwoFluidStageDiagnosticState
 makeAcceptedTwoFluidDiagnosticState(
-    const FE::systems::TwoFluidAcceptedStageDiagnosticDeclaration& declaration) {
+    const svmp::Physics::formulations::navier_stokes::two_fluid::TwoFluidAcceptedStageDiagnosticDeclaration& declaration) {
   const auto& parameters = declaration.parameters;
-  FE::interfaces::IncompressibleTwoFluidDiagnosticAccumulator accumulator;
+  svmp::Physics::formulations::navier_stokes::two_fluid::IncompressibleTwoFluidDiagnosticAccumulator accumulator;
   accumulator.snapshot_revision_key = 91u;
   if (parameters.include_transient_penalty) {
     accumulator.transient_penalty_effective_dt = FE::Real{0.1};
@@ -2119,7 +2117,7 @@ makeAcceptedTwoFluidDiagnosticState(
       parameters.prescribed_viscous_traction_jump.has_value()) {
     accumulator.prescribed_stress_jump_residual_squared = FE::Real{0.0};
   }
-  return FE::systems::AcceptedTwoFluidStageDiagnosticState{
+  return svmp::Physics::formulations::navier_stokes::two_fluid::AcceptedTwoFluidStageDiagnosticState{
       .interface_marker = declaration.interface_marker,
       .geometry_revision =
           FE::interfaces::LevelSetGeometryRevision{
@@ -2134,7 +2132,7 @@ makeAcceptedTwoFluidDiagnosticState(
               .snapshot_revision_key = 91u,
           },
       .diagnostics =
-          FE::interfaces::finalizeIncompressibleTwoFluidDiagnostics(
+          svmp::Physics::formulations::navier_stokes::two_fluid::finalizeIncompressibleTwoFluidDiagnostics(
               accumulator, parameters),
   };
 }
@@ -2160,8 +2158,8 @@ makeTwoFluidStageMetadata(std::uint64_t attempt = 1u) {
 
 void bindAcceptedTwoFluidStageNumerics(
     FE::systems::FESystem& system,
-    const FE::systems::TwoFluidAcceptedStageDiagnosticDeclaration& declaration,
-    const FE::systems::AcceptedTwoFluidStageDiagnosticState& state);
+    const svmp::Physics::formulations::navier_stokes::two_fluid::TwoFluidAcceptedStageDiagnosticDeclaration& declaration,
+    const svmp::Physics::formulations::navier_stokes::two_fluid::AcceptedTwoFluidStageDiagnosticState& state);
 
 TEST(IncompressibleTwoFluidModule,
      AcceptedStageAllowsTractionDifferenceWithinPhaseOperandRoundoff) {
@@ -2171,7 +2169,7 @@ TEST(IncompressibleTwoFluidModule,
   fixture.system.setup({});
 
   const auto declarations =
-      svmp::FE::systems::twoFluidStageRecords(fixture.system).twoFluidAcceptedStageDiagnosticDeclarations();
+      svmp::Physics::formulations::navier_stokes::two_fluid::twoFluidStageRecords(fixture.system).twoFluidAcceptedStageDiagnosticDeclarations();
   ASSERT_EQ(declarations.size(), 1u);
   auto state = makeAcceptedTwoFluidDiagnosticState(declarations.front());
   constexpr FE::Real hydrostatic_traction = FE::Real{36297.0};
@@ -2183,7 +2181,7 @@ TEST(IncompressibleTwoFluidModule,
   state.diagnostics.traction_jump_integral[0] = FE::Real{0.0};
   const std::array states{state};
 
-  EXPECT_NO_THROW(svmp::FE::systems::twoFluidStageRecords(fixture.system).stageTwoFluidAcceptedStageDiagnostics(
+  EXPECT_NO_THROW(svmp::Physics::formulations::navier_stokes::two_fluid::twoFluidStageRecords(fixture.system).stageTwoFluidAcceptedStageDiagnostics(
       makeTwoFluidStageMetadata(), states));
 }
 
@@ -2216,7 +2214,7 @@ TEST(IncompressibleTwoFluidModule,
     module.registerOn(fixture.system);
     fixture.system.setup({});
     const auto declarations =
-        svmp::FE::systems::twoFluidStageRecords(fixture.system)
+        svmp::Physics::formulations::navier_stokes::two_fluid::twoFluidStageRecords(fixture.system)
             .twoFluidAcceptedStageDiagnosticDeclarations();
     EXPECT_EQ(declarations.size(), 1u);
     EXPECT_TRUE(declarations.front().parameters.include_transient_penalty);
@@ -2224,7 +2222,7 @@ TEST(IncompressibleTwoFluidModule,
     state.diagnostics.transient_penalty_effective_dt = effective_dt;
     const std::array states{state};
     try {
-      svmp::FE::systems::twoFluidStageRecords(fixture.system)
+      svmp::Physics::formulations::navier_stokes::two_fluid::twoFluidStageRecords(fixture.system)
           .stageTwoFluidAcceptedStageDiagnostics(metadata, states);
     } catch (const FE::InvalidArgumentException&) {
       return false;
@@ -2243,7 +2241,7 @@ TEST(IncompressibleTwoFluidDiagnostics,
      AcceptsPrescribedPressureJumpIdentityWithinOperandScaledRoundoff) {
   constexpr FE::Real target = FE::Real{1024.0};
   const FE::Real jump = target + std::ldexp(FE::Real{1.0}, -18);
-  FE::interfaces::IncompressibleTwoFluidDiagnosticParameters parameters{
+  svmp::Physics::formulations::navier_stokes::two_fluid::IncompressibleTwoFluidDiagnosticParameters parameters{
       .dimension = 2,
       .interface_marker = 71,
       .negative_density = FE::Real{1000.0},
@@ -2255,7 +2253,7 @@ TEST(IncompressibleTwoFluidDiagnostics,
       .include_transient_penalty = false,
       .prescribed_pressure_jump = target,
   };
-  FE::interfaces::IncompressibleTwoFluidDiagnosticAccumulator accumulator;
+  svmp::Physics::formulations::navier_stokes::two_fluid::IncompressibleTwoFluidDiagnosticAccumulator accumulator;
   accumulator.snapshot_revision_key = 1u;
   accumulator.owned_interface_quadrature_point_count = 1u;
   accumulator.interface_measure = FE::Real{1.0};
@@ -2273,7 +2271,7 @@ TEST(IncompressibleTwoFluidDiagnostics,
   EXPECT_EQ(*accumulator.prescribed_pressure_jump_error_squared,
             std::ldexp(FE::Real{1.0}, -36));
   EXPECT_NO_THROW(
-      (void)FE::interfaces::finalizeIncompressibleTwoFluidDiagnostics(
+      (void)svmp::Physics::formulations::navier_stokes::two_fluid::finalizeIncompressibleTwoFluidDiagnostics(
           accumulator, parameters));
 }
 
@@ -2286,17 +2284,17 @@ TEST(IncompressibleTwoFluidModule,
     fixture.system.setup({});
 
     const auto declarations =
-        svmp::FE::systems::twoFluidStageRecords(fixture.system).twoFluidAcceptedStageDiagnosticDeclarations();
+        svmp::Physics::formulations::navier_stokes::two_fluid::twoFluidStageRecords(fixture.system).twoFluidAcceptedStageDiagnosticDeclarations();
     ASSERT_EQ(declarations.size(), 1u);
     auto state = makeAcceptedTwoFluidDiagnosticState(declarations.front());
     mutate(state.diagnostics.negative_phase);
     const std::array states{state};
 
-    EXPECT_THROW(svmp::FE::systems::twoFluidStageRecords(fixture.system).stageTwoFluidAcceptedStageDiagnostics(
+    EXPECT_THROW(svmp::Physics::formulations::navier_stokes::two_fluid::twoFluidStageRecords(fixture.system).stageTwoFluidAcceptedStageDiagnostics(
                      makeTwoFluidStageMetadata(), states),
                  FE::InvalidArgumentException);
     EXPECT_TRUE(
-        svmp::FE::systems::twoFluidStageRecords(fixture.system).pendingTwoFluidAcceptedStageDiagnostics().empty());
+        svmp::Physics::formulations::navier_stokes::two_fluid::twoFluidStageRecords(fixture.system).pendingTwoFluidAcceptedStageDiagnostics().empty());
   };
 
   expect_rejected([](auto& phase) {
@@ -2324,17 +2322,17 @@ TEST(IncompressibleTwoFluidModule,
     fixture.system.setup({});
 
     const auto declarations =
-        svmp::FE::systems::twoFluidStageRecords(fixture.system).twoFluidAcceptedStageDiagnosticDeclarations();
+        svmp::Physics::formulations::navier_stokes::two_fluid::twoFluidStageRecords(fixture.system).twoFluidAcceptedStageDiagnosticDeclarations();
     ASSERT_EQ(declarations.size(), 1u);
     auto state = makeAcceptedTwoFluidDiagnosticState(declarations.front());
     mutate(state.diagnostics.negative_phase);
     const std::array states{state};
 
-    EXPECT_THROW(svmp::FE::systems::twoFluidStageRecords(fixture.system).stageTwoFluidAcceptedStageDiagnostics(
+    EXPECT_THROW(svmp::Physics::formulations::navier_stokes::two_fluid::twoFluidStageRecords(fixture.system).stageTwoFluidAcceptedStageDiagnostics(
                      makeTwoFluidStageMetadata(), states),
                  FE::InvalidArgumentException);
     EXPECT_TRUE(
-        svmp::FE::systems::twoFluidStageRecords(fixture.system).pendingTwoFluidAcceptedStageDiagnostics().empty());
+        svmp::Physics::formulations::navier_stokes::two_fluid::twoFluidStageRecords(fixture.system).pendingTwoFluidAcceptedStageDiagnostics().empty());
   };
 
   expect_rejected([](auto& phase) {
@@ -2366,82 +2364,82 @@ TEST(IncompressibleTwoFluidModule,
   fixture.system.setup({});
 
   const auto declarations =
-      svmp::FE::systems::twoFluidStageRecords(fixture.system).twoFluidAcceptedStageDiagnosticDeclarations();
+      svmp::Physics::formulations::navier_stokes::two_fluid::twoFluidStageRecords(fixture.system).twoFluidAcceptedStageDiagnosticDeclarations();
   ASSERT_EQ(declarations.size(), 1u);
   const auto state = makeAcceptedTwoFluidDiagnosticState(declarations.front());
   const std::array states{state};
 
-  ASSERT_NO_THROW(svmp::FE::systems::twoFluidStageRecords(fixture.system).stageTwoFluidAcceptedStageDiagnostics(
+  ASSERT_NO_THROW(svmp::Physics::formulations::navier_stokes::two_fluid::twoFluidStageRecords(fixture.system).stageTwoFluidAcceptedStageDiagnostics(
       makeTwoFluidStageMetadata(), states));
-  EXPECT_EQ(svmp::FE::systems::twoFluidStageRecords(fixture.system).pendingTwoFluidAcceptedStageDiagnostics().size(),
+  EXPECT_EQ(svmp::Physics::formulations::navier_stokes::two_fluid::twoFluidStageRecords(fixture.system).pendingTwoFluidAcceptedStageDiagnostics().size(),
             1u);
-  EXPECT_TRUE(svmp::FE::systems::twoFluidStageRecords(fixture.system).twoFluidAcceptedStageDiagnosticHistory().empty());
-  svmp::FE::systems::twoFluidStageRecords(fixture.system).discardPendingTwoFluidAcceptedStageDiagnostics();
+  EXPECT_TRUE(svmp::Physics::formulations::navier_stokes::two_fluid::twoFluidStageRecords(fixture.system).twoFluidAcceptedStageDiagnosticHistory().empty());
+  svmp::Physics::formulations::navier_stokes::two_fluid::twoFluidStageRecords(fixture.system).discardPendingTwoFluidAcceptedStageDiagnostics();
   EXPECT_TRUE(
-      svmp::FE::systems::twoFluidStageRecords(fixture.system).pendingTwoFluidAcceptedStageDiagnostics().empty());
+      svmp::Physics::formulations::navier_stokes::two_fluid::twoFluidStageRecords(fixture.system).pendingTwoFluidAcceptedStageDiagnostics().empty());
 
   auto wrong_source = state;
   wrong_source.geometry_revision.source_id = "field:999";
   const std::array wrong_source_states{wrong_source};
-  EXPECT_THROW(svmp::FE::systems::twoFluidStageRecords(fixture.system).stageTwoFluidAcceptedStageDiagnostics(
+  EXPECT_THROW(svmp::Physics::formulations::navier_stokes::two_fluid::twoFluidStageRecords(fixture.system).stageTwoFluidAcceptedStageDiagnostics(
                    makeTwoFluidStageMetadata(), wrong_source_states),
                FE::InvalidArgumentException);
   EXPECT_TRUE(
-      svmp::FE::systems::twoFluidStageRecords(fixture.system).pendingTwoFluidAcceptedStageDiagnostics().empty());
+      svmp::Physics::formulations::navier_stokes::two_fluid::twoFluidStageRecords(fixture.system).pendingTwoFluidAcceptedStageDiagnostics().empty());
 
   auto stale_local_mesh = state;
   stale_local_mesh.local_mesh_revision.mesh_geometry_revision = 1u;
   const std::array stale_local_mesh_states{stale_local_mesh};
-  EXPECT_THROW(svmp::FE::systems::twoFluidStageRecords(fixture.system).stageTwoFluidAcceptedStageDiagnostics(
+  EXPECT_THROW(svmp::Physics::formulations::navier_stokes::two_fluid::twoFluidStageRecords(fixture.system).stageTwoFluidAcceptedStageDiagnostics(
                    makeTwoFluidStageMetadata(), stale_local_mesh_states),
                FE::InvalidArgumentException);
   EXPECT_TRUE(
-      svmp::FE::systems::twoFluidStageRecords(fixture.system).pendingTwoFluidAcceptedStageDiagnostics().empty());
+      svmp::Physics::formulations::navier_stokes::two_fluid::twoFluidStageRecords(fixture.system).pendingTwoFluidAcceptedStageDiagnostics().empty());
 
-  ASSERT_NO_THROW(svmp::FE::systems::twoFluidStageRecords(fixture.system).stageTwoFluidAcceptedStageDiagnostics(
+  ASSERT_NO_THROW(svmp::Physics::formulations::navier_stokes::two_fluid::twoFluidStageRecords(fixture.system).stageTwoFluidAcceptedStageDiagnostics(
       makeTwoFluidStageMetadata(), states));
   ASSERT_NO_THROW(bindAcceptedTwoFluidStageNumerics(
       fixture.system, declarations.front(), state));
-  ASSERT_NO_THROW(svmp::FE::systems::twoFluidStageRecords(fixture.system).commitPendingTwoFluidAcceptedStageDiagnostics(
+  ASSERT_NO_THROW(svmp::Physics::formulations::navier_stokes::two_fluid::twoFluidStageRecords(fixture.system).commitPendingTwoFluidAcceptedStageDiagnostics(
       1u, FE::Real{0.1}, FE::Real{0.1}));
-  ASSERT_EQ(svmp::FE::systems::twoFluidStageRecords(fixture.system).twoFluidAcceptedStageDiagnosticHistory().size(),
+  ASSERT_EQ(svmp::Physics::formulations::navier_stokes::two_fluid::twoFluidStageRecords(fixture.system).twoFluidAcceptedStageDiagnosticHistory().size(),
             1u);
   EXPECT_DOUBLE_EQ(
-      svmp::FE::systems::twoFluidStageRecords(fixture.system).twoFluidAcceptedStageDiagnosticHistory()
+      svmp::Physics::formulations::navier_stokes::two_fluid::twoFluidStageRecords(fixture.system).twoFluidAcceptedStageDiagnosticHistory()
           .front()
           .state.diagnostics.mean_pressure_jump,
       FE::Real{3.0});
-  EXPECT_TRUE(svmp::FE::systems::twoFluidStageRecords(fixture.system).twoFluidAcceptedStageDiagnosticHistory()
+  EXPECT_TRUE(svmp::Physics::formulations::navier_stokes::two_fluid::twoFluidStageRecords(fixture.system).twoFluidAcceptedStageDiagnosticHistory()
                   .front()
                   .state.diagnostics.prescribed_pressure_jump_error_squared
                   .has_value());
   EXPECT_TRUE(
-      svmp::FE::systems::twoFluidStageRecords(fixture.system).twoFluidAcceptedStageDiagnosticHistory()
+      svmp::Physics::formulations::navier_stokes::two_fluid::twoFluidStageRecords(fixture.system).twoFluidAcceptedStageDiagnosticHistory()
           .front()
           .state.diagnostics
           .prescribed_viscous_traction_jump_error_squared.has_value());
 
-  ASSERT_NO_THROW(svmp::FE::systems::twoFluidStageRecords(fixture.system).stageTwoFluidAcceptedStageDiagnostics(
+  ASSERT_NO_THROW(svmp::Physics::formulations::navier_stokes::two_fluid::twoFluidStageRecords(fixture.system).stageTwoFluidAcceptedStageDiagnostics(
       makeTwoFluidStageMetadata(), states));
   ASSERT_NO_THROW(bindAcceptedTwoFluidStageNumerics(
       fixture.system, declarations.front(), state));
-  ASSERT_NO_THROW(svmp::FE::systems::twoFluidStageRecords(fixture.system).commitPendingTwoFluidAcceptedStageDiagnostics(
+  ASSERT_NO_THROW(svmp::Physics::formulations::navier_stokes::two_fluid::twoFluidStageRecords(fixture.system).commitPendingTwoFluidAcceptedStageDiagnostics(
       1u, FE::Real{0.1}, FE::Real{0.1}));
-  EXPECT_EQ(svmp::FE::systems::twoFluidStageRecords(fixture.system).twoFluidAcceptedStageDiagnosticHistory().size(),
+  EXPECT_EQ(svmp::Physics::formulations::navier_stokes::two_fluid::twoFluidStageRecords(fixture.system).twoFluidAcceptedStageDiagnosticHistory().size(),
             1u);
 
   auto changed = state;
   changed.diagnostics.surface_energy_work = FE::Real{1.0};
   const std::array changed_states{changed};
-  ASSERT_NO_THROW(svmp::FE::systems::twoFluidStageRecords(fixture.system).stageTwoFluidAcceptedStageDiagnostics(
+  ASSERT_NO_THROW(svmp::Physics::formulations::navier_stokes::two_fluid::twoFluidStageRecords(fixture.system).stageTwoFluidAcceptedStageDiagnostics(
       makeTwoFluidStageMetadata(), changed_states));
   ASSERT_NO_THROW(bindAcceptedTwoFluidStageNumerics(
       fixture.system, declarations.front(), changed));
-  EXPECT_THROW(svmp::FE::systems::twoFluidStageRecords(fixture.system).commitPendingTwoFluidAcceptedStageDiagnostics(
+  EXPECT_THROW(svmp::Physics::formulations::navier_stokes::two_fluid::twoFluidStageRecords(fixture.system).commitPendingTwoFluidAcceptedStageDiagnostics(
                    1u, FE::Real{0.1}, FE::Real{0.1}),
                FE::InvalidArgumentException);
-  svmp::FE::systems::twoFluidStageRecords(fixture.system).discardPendingTwoFluidAcceptedStageDiagnostics();
-  EXPECT_EQ(svmp::FE::systems::twoFluidStageRecords(fixture.system).twoFluidAcceptedStageDiagnosticHistory().size(),
+  svmp::Physics::formulations::navier_stokes::two_fluid::twoFluidStageRecords(fixture.system).discardPendingTwoFluidAcceptedStageDiagnostics();
+  EXPECT_EQ(svmp::Physics::formulations::navier_stokes::two_fluid::twoFluidStageRecords(fixture.system).twoFluidAcceptedStageDiagnosticHistory().size(),
             1u);
 }
 
@@ -2455,17 +2453,17 @@ TEST(IncompressibleTwoFluidModule,
   fixture.system.setup({});
 
   const auto declarations =
-      svmp::FE::systems::twoFluidStageRecords(fixture.system).twoFluidAcceptedStageDiagnosticDeclarations();
+      svmp::Physics::formulations::navier_stokes::two_fluid::twoFluidStageRecords(fixture.system).twoFluidAcceptedStageDiagnosticDeclarations();
   ASSERT_EQ(declarations.size(), 1u);
   EXPECT_TRUE(declarations.front()
                   .require_conservative_phase_momentum_reconciliation);
   const auto raw = makeAcceptedTwoFluidDiagnosticState(declarations.front());
   const std::array raw_states{raw};
-  ASSERT_NO_THROW(svmp::FE::systems::twoFluidStageRecords(fixture.system).stageTwoFluidAcceptedStageDiagnostics(
+  ASSERT_NO_THROW(svmp::Physics::formulations::navier_stokes::two_fluid::twoFluidStageRecords(fixture.system).stageTwoFluidAcceptedStageDiagnostics(
       makeTwoFluidStageMetadata(), raw_states));
   ASSERT_NO_THROW(bindAcceptedTwoFluidStageNumerics(
       fixture.system, declarations.front(), raw));
-  EXPECT_THROW(svmp::FE::systems::twoFluidStageRecords(fixture.system).commitPendingTwoFluidAcceptedStageDiagnostics(
+  EXPECT_THROW(svmp::Physics::formulations::navier_stokes::two_fluid::twoFluidStageRecords(fixture.system).commitPendingTwoFluidAcceptedStageDiagnostics(
                    1u, FE::Real{0.1}, FE::Real{0.1}),
                FE::InvalidArgumentException);
 
@@ -2473,8 +2471,7 @@ TEST(IncompressibleTwoFluidModule,
   corrected.geometry_revision.source_value_revision = 8u;
   corrected.geometry_revision.snapshot_revision_key = 92u;
   corrected.diagnostics.snapshot_revision_key = 92u;
-  const auto valid = FE::interfaces::
-      buildIncompressibleTwoFluidMomentumReconciliation(
+  const auto valid = svmp::Physics::formulations::navier_stokes::two_fluid::buildIncompressibleTwoFluidMomentumReconciliation(
           declarations.front().interface_marker,
           raw.geometry_revision,
           raw.diagnostics,
@@ -2488,20 +2485,19 @@ TEST(IncompressibleTwoFluidModule,
   wrong_revision.raw_algebraic_revision = 99u;
   const std::array wrong_revision_records{wrong_revision};
   EXPECT_THROW(
-      svmp::FE::systems::twoFluidStageRecords(fixture.system).bindPendingTwoFluidMomentumReconciliations(
+      svmp::Physics::formulations::navier_stokes::two_fluid::twoFluidStageRecords(fixture.system).bindPendingTwoFluidMomentumReconciliations(
           wrong_revision_records),
       FE::InvalidArgumentException);
   ASSERT_EQ(
-      svmp::FE::systems::twoFluidStageRecords(fixture.system).pendingTwoFluidAcceptedStageDiagnostics().size(), 1u);
-  EXPECT_FALSE(svmp::FE::systems::twoFluidStageRecords(fixture.system).pendingTwoFluidAcceptedStageDiagnostics()
+      svmp::Physics::formulations::navier_stokes::two_fluid::twoFluidStageRecords(fixture.system).pendingTwoFluidAcceptedStageDiagnostics().size(), 1u);
+  EXPECT_FALSE(svmp::Physics::formulations::navier_stokes::two_fluid::twoFluidStageRecords(fixture.system).pendingTwoFluidAcceptedStageDiagnostics()
                    .front()
                    .momentum_reconciliation.has_value());
 
   auto changed = corrected;
   changed.diagnostics.negative_phase.momentum[0] = FE::Real{1.0};
   changed.diagnostics.negative_phase.kinetic_energy = FE::Real{1.0};
-  const auto failed = FE::interfaces::
-      buildIncompressibleTwoFluidMomentumReconciliation(
+  const auto failed = svmp::Physics::formulations::navier_stokes::two_fluid::buildIncompressibleTwoFluidMomentumReconciliation(
           declarations.front().interface_marker,
           raw.geometry_revision,
           raw.diagnostics,
@@ -2513,21 +2509,21 @@ TEST(IncompressibleTwoFluidModule,
   ASSERT_FALSE(failed.satisfied);
   const std::array failed_records{failed};
   EXPECT_THROW(
-      svmp::FE::systems::twoFluidStageRecords(fixture.system).bindPendingTwoFluidMomentumReconciliations(
+      svmp::Physics::formulations::navier_stokes::two_fluid::twoFluidStageRecords(fixture.system).bindPendingTwoFluidMomentumReconciliations(
           failed_records),
       FE::InvalidArgumentException);
 
   const std::array valid_records{valid};
   ASSERT_NO_THROW(
-      svmp::FE::systems::twoFluidStageRecords(fixture.system).bindPendingTwoFluidMomentumReconciliations(
+      svmp::Physics::formulations::navier_stokes::two_fluid::twoFluidStageRecords(fixture.system).bindPendingTwoFluidMomentumReconciliations(
           valid_records));
-  ASSERT_TRUE(svmp::FE::systems::twoFluidStageRecords(fixture.system).pendingTwoFluidAcceptedStageDiagnostics()
+  ASSERT_TRUE(svmp::Physics::formulations::navier_stokes::two_fluid::twoFluidStageRecords(fixture.system).pendingTwoFluidAcceptedStageDiagnostics()
                   .front()
                   .momentum_reconciliation.has_value());
-  ASSERT_NO_THROW(svmp::FE::systems::twoFluidStageRecords(fixture.system).commitPendingTwoFluidAcceptedStageDiagnostics(
+  ASSERT_NO_THROW(svmp::Physics::formulations::navier_stokes::two_fluid::twoFluidStageRecords(fixture.system).commitPendingTwoFluidAcceptedStageDiagnostics(
       1u, FE::Real{0.1}, FE::Real{0.1}));
   const auto history =
-      svmp::FE::systems::twoFluidStageRecords(fixture.system).twoFluidAcceptedStageDiagnosticHistory();
+      svmp::Physics::formulations::navier_stokes::two_fluid::twoFluidStageRecords(fixture.system).twoFluidAcceptedStageDiagnosticHistory();
   ASSERT_EQ(history.size(), 1u);
   ASSERT_TRUE(history.front().momentum_reconciliation.has_value());
   const auto& accepted = *history.front().momentum_reconciliation;
@@ -2543,8 +2539,8 @@ TEST(IncompressibleTwoFluidModule,
 
 std::array<FE::constraints::SmallCutAggregationRefreshReport, 4>
 makeTwoFluidAcceptedStageAggregationReports(
-    const FE::systems::TwoFluidAcceptedStageDiagnosticDeclaration& declaration,
-    const FE::systems::AcceptedTwoFluidStageDiagnosticState& state) {
+    const svmp::Physics::formulations::navier_stokes::two_fluid::TwoFluidAcceptedStageDiagnosticDeclaration& declaration,
+    const svmp::Physics::formulations::navier_stokes::two_fluid::AcceptedTwoFluidStageDiagnosticState& state) {
   const auto make_report = [&](FE::FieldId field,
                                FE::geometry::CutIntegrationSide side,
                                std::size_t candidate_vertices) {
@@ -2614,11 +2610,11 @@ makeTwoFluidAcceptedStageAggregationReports(
   };
 }
 
-FE::systems::TwoFluidAcceptedStageSolveTelemetry
+svmp::Physics::formulations::navier_stokes::two_fluid::TwoFluidAcceptedStageSolveTelemetry
 makeTwoFluidAcceptedStageSolveTelemetry() {
-  return FE::systems::TwoFluidAcceptedStageSolveTelemetry{
+  return svmp::Physics::formulations::navier_stokes::two_fluid::TwoFluidAcceptedStageSolveTelemetry{
       .nonlinear =
-          FE::systems::TwoFluidAcceptedStageNonlinearTelemetry{
+          svmp::Physics::formulations::navier_stokes::two_fluid::TwoFluidAcceptedStageNonlinearTelemetry{
               .converged = true,
               .iterations = 3,
               .outer_iterations = 1,
@@ -2628,7 +2624,7 @@ makeTwoFluidAcceptedStageSolveTelemetry() {
               .reason = "converged",
           },
       .linear =
-          FE::systems::TwoFluidAcceptedStageLinearTelemetry{
+          svmp::Physics::formulations::navier_stokes::two_fluid::TwoFluidAcceptedStageLinearTelemetry{
               .converged = true,
               .numerical_breakdown = false,
               .iterations = 17,
@@ -2647,11 +2643,11 @@ makeTwoFluidAcceptedStageSolveTelemetry() {
 
 void bindAcceptedTwoFluidStageNumerics(
     FE::systems::FESystem& system,
-    const FE::systems::TwoFluidAcceptedStageDiagnosticDeclaration& declaration,
-    const FE::systems::AcceptedTwoFluidStageDiagnosticState& state) {
+    const svmp::Physics::formulations::navier_stokes::two_fluid::TwoFluidAcceptedStageDiagnosticDeclaration& declaration,
+    const svmp::Physics::formulations::navier_stokes::two_fluid::AcceptedTwoFluidStageDiagnosticState& state) {
   const auto reports =
       makeTwoFluidAcceptedStageAggregationReports(declaration, state);
-  svmp::FE::systems::twoFluidStageRecords(system).bindPendingTwoFluidAcceptedStageNumerics(
+  svmp::Physics::formulations::navier_stokes::two_fluid::twoFluidStageRecords(system).bindPendingTwoFluidAcceptedStageNumerics(
       makeTwoFluidAcceptedStageSolveTelemetry(), reports);
 }
 
@@ -2665,20 +2661,20 @@ TEST(IncompressibleTwoFluidModule,
   fixture.system.setup({});
 
   const auto declarations =
-      svmp::FE::systems::twoFluidStageRecords(fixture.system).twoFluidAcceptedStageDiagnosticDeclarations();
+      svmp::Physics::formulations::navier_stokes::two_fluid::twoFluidStageRecords(fixture.system).twoFluidAcceptedStageDiagnosticDeclarations();
   ASSERT_EQ(declarations.size(), 1u);
   EXPECT_TRUE(declarations.front().require_accepted_stage_numerics);
   EXPECT_EQ(declarations.front().pressure_stabilization_coefficient,
             FE::Real{2.5});
   const auto state = makeAcceptedTwoFluidDiagnosticState(declarations.front());
   const std::array states{state};
-  ASSERT_NO_THROW(svmp::FE::systems::twoFluidStageRecords(fixture.system).stageTwoFluidAcceptedStageDiagnostics(
+  ASSERT_NO_THROW(svmp::Physics::formulations::navier_stokes::two_fluid::twoFluidStageRecords(fixture.system).stageTwoFluidAcceptedStageDiagnostics(
       makeTwoFluidStageMetadata(), states));
 
-  EXPECT_THROW(svmp::FE::systems::twoFluidStageRecords(fixture.system).commitPendingTwoFluidAcceptedStageDiagnostics(
+  EXPECT_THROW(svmp::Physics::formulations::navier_stokes::two_fluid::twoFluidStageRecords(fixture.system).commitPendingTwoFluidAcceptedStageDiagnostics(
                    1u, FE::Real{0.1}, FE::Real{0.1}),
                FE::InvalidArgumentException);
-  ASSERT_FALSE(svmp::FE::systems::twoFluidStageRecords(fixture.system).pendingTwoFluidAcceptedStageDiagnostics()
+  ASSERT_FALSE(svmp::Physics::formulations::navier_stokes::two_fluid::twoFluidStageRecords(fixture.system).pendingTwoFluidAcceptedStageDiagnostics()
                    .front()
                    .numerics.has_value());
 
@@ -2687,17 +2683,17 @@ TEST(IncompressibleTwoFluidModule,
       declarations.front(), state);
   auto mismatched = reports;
   mismatched.back().geometry_identity.snapshot_revision_key += 1u;
-  EXPECT_THROW(svmp::FE::systems::twoFluidStageRecords(fixture.system).bindPendingTwoFluidAcceptedStageNumerics(
+  EXPECT_THROW(svmp::Physics::formulations::navier_stokes::two_fluid::twoFluidStageRecords(fixture.system).bindPendingTwoFluidAcceptedStageNumerics(
                    solve, mismatched),
                FE::InvalidArgumentException);
-  EXPECT_FALSE(svmp::FE::systems::twoFluidStageRecords(fixture.system).pendingTwoFluidAcceptedStageDiagnostics()
+  EXPECT_FALSE(svmp::Physics::formulations::navier_stokes::two_fluid::twoFluidStageRecords(fixture.system).pendingTwoFluidAcceptedStageDiagnostics()
                    .front()
                    .numerics.has_value());
 
-  ASSERT_NO_THROW(svmp::FE::systems::twoFluidStageRecords(fixture.system).bindPendingTwoFluidAcceptedStageNumerics(
+  ASSERT_NO_THROW(svmp::Physics::formulations::navier_stokes::two_fluid::twoFluidStageRecords(fixture.system).bindPendingTwoFluidAcceptedStageNumerics(
       solve, reports));
   const auto pending =
-      svmp::FE::systems::twoFluidStageRecords(fixture.system).pendingTwoFluidAcceptedStageDiagnostics();
+      svmp::Physics::formulations::navier_stokes::two_fluid::twoFluidStageRecords(fixture.system).pendingTwoFluidAcceptedStageDiagnostics();
   ASSERT_EQ(pending.size(), 1u);
   ASSERT_TRUE(pending.front().numerics.has_value());
   const auto& numerics = *pending.front().numerics;
@@ -2715,13 +2711,13 @@ TEST(IncompressibleTwoFluidModule,
   EXPECT_EQ(numerics.negative_phase.pressure_stabilization.coefficient,
             FE::Real{2.5});
   EXPECT_EQ(numerics.negative_phase.linear_iteration_scope,
-            FE::systems::TwoFluidAcceptedStageLinearIterationScope::
+            svmp::Physics::formulations::navier_stokes::two_fluid::TwoFluidAcceptedStageLinearIterationScope::
                 SharedCoupledSolve);
   EXPECT_FALSE(numerics.negative_phase.linear_iterations.has_value());
   EXPECT_EQ(numerics.negative_phase.linear_reason,
             "not_individually_resolved_by_shared_coupled_backend");
   EXPECT_EQ(numerics.negative_phase.nonlinear_iteration_scope,
-            FE::systems::TwoFluidAcceptedStageNonlinearIterationScope::
+            svmp::Physics::formulations::navier_stokes::two_fluid::TwoFluidAcceptedStageNonlinearIterationScope::
                 SharedCoupledSolve);
   EXPECT_FALSE(numerics.negative_phase.nonlinear_iterations.has_value());
   EXPECT_EQ(numerics.negative_phase.nonlinear_reason,
@@ -2731,10 +2727,10 @@ TEST(IncompressibleTwoFluidModule,
   EXPECT_EQ(numerics.negative_phase.pressure_stabilization.work_reason,
             "not_separately_resolved_by_coupled_operator");
 
-  ASSERT_NO_THROW(svmp::FE::systems::twoFluidStageRecords(fixture.system).commitPendingTwoFluidAcceptedStageDiagnostics(
+  ASSERT_NO_THROW(svmp::Physics::formulations::navier_stokes::two_fluid::twoFluidStageRecords(fixture.system).commitPendingTwoFluidAcceptedStageDiagnostics(
       1u, FE::Real{0.1}, FE::Real{0.1}));
   const auto history =
-      svmp::FE::systems::twoFluidStageRecords(fixture.system).twoFluidAcceptedStageDiagnosticHistory();
+      svmp::Physics::formulations::navier_stokes::two_fluid::twoFluidStageRecords(fixture.system).twoFluidAcceptedStageDiagnosticHistory();
   ASSERT_EQ(history.size(), 1u);
   ASSERT_TRUE(history.front().numerics.has_value());
   EXPECT_EQ(history.front().numerics->solve.linear.iterations, 17);
@@ -2751,60 +2747,60 @@ TEST(IncompressibleTwoFluidModule,
   fixture.system.setup({});
 
   const auto declarations =
-      svmp::FE::systems::twoFluidStageRecords(fixture.system).twoFluidAcceptedStageDiagnosticDeclarations();
+      svmp::Physics::formulations::navier_stokes::two_fluid::twoFluidStageRecords(fixture.system).twoFluidAcceptedStageDiagnosticDeclarations();
   ASSERT_EQ(declarations.size(), 1u);
   const auto state = makeAcceptedTwoFluidDiagnosticState(declarations.front());
   const std::array states{state};
-  ASSERT_NO_THROW(svmp::FE::systems::twoFluidStageRecords(fixture.system).stageTwoFluidAcceptedStageDiagnostics(
+  ASSERT_NO_THROW(svmp::Physics::formulations::navier_stokes::two_fluid::twoFluidStageRecords(fixture.system).stageTwoFluidAcceptedStageDiagnostics(
       makeTwoFluidStageMetadata(), states));
 
   const auto solve = makeTwoFluidAcceptedStageSolveTelemetry();
   const auto reports = makeTwoFluidAcceptedStageAggregationReports(
       declarations.front(), state);
   const std::array missing{reports[0], reports[1], reports[2]};
-  EXPECT_THROW(svmp::FE::systems::twoFluidStageRecords(fixture.system).bindPendingTwoFluidAcceptedStageNumerics(
+  EXPECT_THROW(svmp::Physics::formulations::navier_stokes::two_fluid::twoFluidStageRecords(fixture.system).bindPendingTwoFluidAcceptedStageNumerics(
                    solve, missing),
                FE::InvalidArgumentException);
-  EXPECT_FALSE(svmp::FE::systems::twoFluidStageRecords(fixture.system).pendingTwoFluidAcceptedStageDiagnostics()
+  EXPECT_FALSE(svmp::Physics::formulations::navier_stokes::two_fluid::twoFluidStageRecords(fixture.system).pendingTwoFluidAcceptedStageDiagnostics()
                    .front()
                    .numerics.has_value());
 
   auto invalid_solve = solve;
   invalid_solve.linear.final_residual_norm =
       std::numeric_limits<FE::Real>::infinity();
-  EXPECT_THROW(svmp::FE::systems::twoFluidStageRecords(fixture.system).bindPendingTwoFluidAcceptedStageNumerics(
+  EXPECT_THROW(svmp::Physics::formulations::navier_stokes::two_fluid::twoFluidStageRecords(fixture.system).bindPendingTwoFluidAcceptedStageNumerics(
                    invalid_solve, reports),
                FE::InvalidArgumentException);
-  EXPECT_FALSE(svmp::FE::systems::twoFluidStageRecords(fixture.system).pendingTwoFluidAcceptedStageDiagnostics()
+  EXPECT_FALSE(svmp::Physics::formulations::navier_stokes::two_fluid::twoFluidStageRecords(fixture.system).pendingTwoFluidAcceptedStageDiagnostics()
                    .front()
                    .numerics.has_value());
 
   auto unattempted_solve = solve;
   unattempted_solve.linear.attempted = false;
-  EXPECT_THROW(svmp::FE::systems::twoFluidStageRecords(fixture.system).bindPendingTwoFluidAcceptedStageNumerics(
+  EXPECT_THROW(svmp::Physics::formulations::navier_stokes::two_fluid::twoFluidStageRecords(fixture.system).bindPendingTwoFluidAcceptedStageNumerics(
                    unattempted_solve, reports),
                FE::InvalidArgumentException);
-  EXPECT_FALSE(svmp::FE::systems::twoFluidStageRecords(fixture.system).pendingTwoFluidAcceptedStageDiagnostics()
+  EXPECT_FALSE(svmp::Physics::formulations::navier_stokes::two_fluid::twoFluidStageRecords(fixture.system).pendingTwoFluidAcceptedStageDiagnostics()
                    .front()
                    .numerics.has_value());
 
   auto wrong_side = reports;
   wrong_side.front().active_side =
       FE::geometry::CutIntegrationSide::Positive;
-  EXPECT_THROW(svmp::FE::systems::twoFluidStageRecords(fixture.system).bindPendingTwoFluidAcceptedStageNumerics(
+  EXPECT_THROW(svmp::Physics::formulations::navier_stokes::two_fluid::twoFluidStageRecords(fixture.system).bindPendingTwoFluidAcceptedStageNumerics(
                    solve, wrong_side),
                FE::InvalidArgumentException);
-  EXPECT_FALSE(svmp::FE::systems::twoFluidStageRecords(fixture.system).pendingTwoFluidAcceptedStageDiagnostics()
+  EXPECT_FALSE(svmp::Physics::formulations::navier_stokes::two_fluid::twoFluidStageRecords(fixture.system).pendingTwoFluidAcceptedStageDiagnostics()
                    .front()
                    .numerics.has_value());
 
   auto violated_guard = reports;
   violated_guard.front().maximum_observed_root_path =
       violated_guard.front().maximum_root_path_length + 1u;
-  EXPECT_THROW(svmp::FE::systems::twoFluidStageRecords(fixture.system).bindPendingTwoFluidAcceptedStageNumerics(
+  EXPECT_THROW(svmp::Physics::formulations::navier_stokes::two_fluid::twoFluidStageRecords(fixture.system).bindPendingTwoFluidAcceptedStageNumerics(
                    solve, violated_guard),
                FE::InvalidArgumentException);
-  EXPECT_FALSE(svmp::FE::systems::twoFluidStageRecords(fixture.system).pendingTwoFluidAcceptedStageDiagnostics()
+  EXPECT_FALSE(svmp::Physics::formulations::navier_stokes::two_fluid::twoFluidStageRecords(fixture.system).pendingTwoFluidAcceptedStageDiagnostics()
                    .front()
                    .numerics.has_value());
 
@@ -2816,20 +2812,20 @@ TEST(IncompressibleTwoFluidModule,
   transition.geometry_identity_after =
       stale_transition.front().geometry_identity;
   transition.geometry_identity_after.snapshot_revision_key += 1u;
-  EXPECT_THROW(svmp::FE::systems::twoFluidStageRecords(fixture.system).bindPendingTwoFluidAcceptedStageNumerics(
+  EXPECT_THROW(svmp::Physics::formulations::navier_stokes::two_fluid::twoFluidStageRecords(fixture.system).bindPendingTwoFluidAcceptedStageNumerics(
                    solve, stale_transition),
                FE::InvalidArgumentException);
-  EXPECT_FALSE(svmp::FE::systems::twoFluidStageRecords(fixture.system).pendingTwoFluidAcceptedStageDiagnostics()
+  EXPECT_FALSE(svmp::Physics::formulations::navier_stokes::two_fluid::twoFluidStageRecords(fixture.system).pendingTwoFluidAcceptedStageDiagnostics()
                    .front()
                    .numerics.has_value());
 
   std::vector<FE::constraints::SmallCutAggregationRefreshReport> duplicate(
       reports.begin(), reports.end());
   duplicate.push_back(reports.front());
-  EXPECT_THROW(svmp::FE::systems::twoFluidStageRecords(fixture.system).bindPendingTwoFluidAcceptedStageNumerics(
+  EXPECT_THROW(svmp::Physics::formulations::navier_stokes::two_fluid::twoFluidStageRecords(fixture.system).bindPendingTwoFluidAcceptedStageNumerics(
                    solve, duplicate),
                FE::InvalidArgumentException);
-  EXPECT_FALSE(svmp::FE::systems::twoFluidStageRecords(fixture.system).pendingTwoFluidAcceptedStageDiagnostics()
+  EXPECT_FALSE(svmp::Physics::formulations::navier_stokes::two_fluid::twoFluidStageRecords(fixture.system).pendingTwoFluidAcceptedStageDiagnostics()
                    .front()
                    .numerics.has_value());
 
@@ -2838,9 +2834,9 @@ TEST(IncompressibleTwoFluidModule,
   auto unrelated = reports.front();
   unrelated.interface_marker += 100;
   complete.push_back(std::move(unrelated));
-  ASSERT_NO_THROW(svmp::FE::systems::twoFluidStageRecords(fixture.system).bindPendingTwoFluidAcceptedStageNumerics(
+  ASSERT_NO_THROW(svmp::Physics::formulations::navier_stokes::two_fluid::twoFluidStageRecords(fixture.system).bindPendingTwoFluidAcceptedStageNumerics(
       solve, complete));
-  EXPECT_TRUE(svmp::FE::systems::twoFluidStageRecords(fixture.system).pendingTwoFluidAcceptedStageDiagnostics()
+  EXPECT_TRUE(svmp::Physics::formulations::navier_stokes::two_fluid::twoFluidStageRecords(fixture.system).pendingTwoFluidAcceptedStageDiagnostics()
                   .front()
                   .numerics.has_value());
 }
@@ -2853,11 +2849,11 @@ TEST(IncompressibleTwoFluidModule,
   fixture.system.setup({});
 
   const auto declarations =
-      svmp::FE::systems::twoFluidStageRecords(fixture.system).twoFluidAcceptedStageDiagnosticDeclarations();
+      svmp::Physics::formulations::navier_stokes::two_fluid::twoFluidStageRecords(fixture.system).twoFluidAcceptedStageDiagnosticDeclarations();
   ASSERT_EQ(declarations.size(), 1u);
   const auto state = makeAcceptedTwoFluidDiagnosticState(declarations.front());
   const std::array states{state};
-  ASSERT_NO_THROW(svmp::FE::systems::twoFluidStageRecords(fixture.system).stageTwoFluidAcceptedStageDiagnostics(
+  ASSERT_NO_THROW(svmp::Physics::formulations::navier_stokes::two_fluid::twoFluidStageRecords(fixture.system).stageTwoFluidAcceptedStageDiagnostics(
       makeTwoFluidStageMetadata(), states));
 
   const auto baseline_reports = makeTwoFluidAcceptedStageAggregationReports(
@@ -2868,10 +2864,10 @@ TEST(IncompressibleTwoFluidModule,
   unexpected.field = declarations.front().level_set_field;
   reports.push_back(std::move(unexpected));
 
-  EXPECT_THROW(svmp::FE::systems::twoFluidStageRecords(fixture.system).bindPendingTwoFluidAcceptedStageNumerics(
+  EXPECT_THROW(svmp::Physics::formulations::navier_stokes::two_fluid::twoFluidStageRecords(fixture.system).bindPendingTwoFluidAcceptedStageNumerics(
                    makeTwoFluidAcceptedStageSolveTelemetry(), reports),
                FE::InvalidArgumentException);
-  EXPECT_FALSE(svmp::FE::systems::twoFluidStageRecords(fixture.system).pendingTwoFluidAcceptedStageDiagnostics()
+  EXPECT_FALSE(svmp::Physics::formulations::navier_stokes::two_fluid::twoFluidStageRecords(fixture.system).pendingTwoFluidAcceptedStageDiagnostics()
                    .front()
                    .numerics.has_value());
 }
@@ -2884,24 +2880,24 @@ TEST(IncompressibleTwoFluidModule,
   fixture.system.setup({});
 
   const auto declarations =
-      svmp::FE::systems::twoFluidStageRecords(fixture.system).twoFluidAcceptedStageDiagnosticDeclarations();
+      svmp::Physics::formulations::navier_stokes::two_fluid::twoFluidStageRecords(fixture.system).twoFluidAcceptedStageDiagnosticDeclarations();
   ASSERT_EQ(declarations.size(), 1u);
   const auto state = makeAcceptedTwoFluidDiagnosticState(declarations.front());
   const std::array states{state};
-  ASSERT_NO_THROW(svmp::FE::systems::twoFluidStageRecords(fixture.system).stageTwoFluidAcceptedStageDiagnostics(
+  ASSERT_NO_THROW(svmp::Physics::formulations::navier_stokes::two_fluid::twoFluidStageRecords(fixture.system).stageTwoFluidAcceptedStageDiagnostics(
       makeTwoFluidStageMetadata(), states));
 
   const auto reports = makeTwoFluidAcceptedStageAggregationReports(
       declarations.front(), state);
-  const FE::systems::TwoFluidAcceptedStageSolveTelemetry solve{
+  const svmp::Physics::formulations::navier_stokes::two_fluid::TwoFluidAcceptedStageSolveTelemetry solve{
       .nonlinear =
-          FE::systems::TwoFluidAcceptedStageNonlinearTelemetry{
+          svmp::Physics::formulations::navier_stokes::two_fluid::TwoFluidAcceptedStageNonlinearTelemetry{
               .converged = true,
               .outer_iterations = 1,
               .reason = "entry state satisfies nonlinear tolerances",
           },
       .linear =
-          FE::systems::TwoFluidAcceptedStageLinearTelemetry{
+          svmp::Physics::formulations::navier_stokes::two_fluid::TwoFluidAcceptedStageLinearTelemetry{
               .attempted = false,
               .converged = true,
               .reason =
@@ -2909,13 +2905,13 @@ TEST(IncompressibleTwoFluidModule,
           },
   };
 
-  ASSERT_NO_THROW(svmp::FE::systems::twoFluidStageRecords(fixture.system).bindPendingTwoFluidAcceptedStageNumerics(
+  ASSERT_NO_THROW(svmp::Physics::formulations::navier_stokes::two_fluid::twoFluidStageRecords(fixture.system).bindPendingTwoFluidAcceptedStageNumerics(
       solve, reports));
-  ASSERT_NO_THROW(svmp::FE::systems::twoFluidStageRecords(fixture.system).commitPendingTwoFluidAcceptedStageDiagnostics(
+  ASSERT_NO_THROW(svmp::Physics::formulations::navier_stokes::two_fluid::twoFluidStageRecords(fixture.system).commitPendingTwoFluidAcceptedStageDiagnostics(
       1u, FE::Real{0.1}, FE::Real{0.1}));
 
   const auto history =
-      svmp::FE::systems::twoFluidStageRecords(fixture.system).twoFluidAcceptedStageDiagnosticHistory();
+      svmp::Physics::formulations::navier_stokes::two_fluid::twoFluidStageRecords(fixture.system).twoFluidAcceptedStageDiagnosticHistory();
   ASSERT_EQ(history.size(), 1u);
   ASSERT_TRUE(history.front().numerics.has_value());
   EXPECT_FALSE(history.front().numerics->solve.linear.attempted);
@@ -2930,11 +2926,11 @@ TEST(IncompressibleTwoFluidModule,
   fixture.system.setup({});
 
   const auto declarations =
-      svmp::FE::systems::twoFluidStageRecords(fixture.system).twoFluidAcceptedStageDiagnosticDeclarations();
+      svmp::Physics::formulations::navier_stokes::two_fluid::twoFluidStageRecords(fixture.system).twoFluidAcceptedStageDiagnosticDeclarations();
   ASSERT_EQ(declarations.size(), 1u);
   const auto state = makeAcceptedTwoFluidDiagnosticState(declarations.front());
   const std::array states{state};
-  ASSERT_NO_THROW(svmp::FE::systems::twoFluidStageRecords(fixture.system).stageTwoFluidAcceptedStageDiagnostics(
+  ASSERT_NO_THROW(svmp::Physics::formulations::navier_stokes::two_fluid::twoFluidStageRecords(fixture.system).stageTwoFluidAcceptedStageDiagnostics(
       makeTwoFluidStageMetadata(), states));
 
   auto reports = makeTwoFluidAcceptedStageAggregationReports(
@@ -2953,10 +2949,10 @@ TEST(IncompressibleTwoFluidModule,
     report.local_lineage.mesh_geometry_revision = 100u + local_ordinal;
   }
 
-  ASSERT_NO_THROW(svmp::FE::systems::twoFluidStageRecords(fixture.system).bindPendingTwoFluidAcceptedStageNumerics(
+  ASSERT_NO_THROW(svmp::Physics::formulations::navier_stokes::two_fluid::twoFluidStageRecords(fixture.system).bindPendingTwoFluidAcceptedStageNumerics(
       makeTwoFluidAcceptedStageSolveTelemetry(), reports));
   const auto pending =
-      svmp::FE::systems::twoFluidStageRecords(fixture.system).pendingTwoFluidAcceptedStageDiagnostics();
+      svmp::Physics::formulations::navier_stokes::two_fluid::twoFluidStageRecords(fixture.system).pendingTwoFluidAcceptedStageDiagnostics();
   ASSERT_TRUE(pending.front().numerics.has_value());
   EXPECT_EQ(pending.front()
                 .numerics->negative_phase.velocity_aggregation

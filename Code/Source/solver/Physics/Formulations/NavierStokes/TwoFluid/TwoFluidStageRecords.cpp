@@ -6,14 +6,14 @@
  * See License file.
  */
 
-#include "Systems/TwoFluidStageRecords.h"
+#include "Physics/Formulations/NavierStokes/TwoFluid/TwoFluidStageRecords.h"
 
-#include "Core/LogRecord.h"
+#include "FE/Core/LogRecord.h"
 
-#include "Core/FEException.h"
-#include "Core/Logger.h"
-#include "Systems/MeshBoundaryRecordSupport.h"
-#include "Systems/OperatorStageMetadata.h"
+#include "FE/Core/FEException.h"
+#include "FE/Core/Logger.h"
+#include "FE/Systems/MeshBoundaryRecordSupport.h"
+#include "FE/Systems/OperatorStageMetadata.h"
 
 #include <algorithm>
 #include <array>
@@ -29,10 +29,8 @@
 #include <mpi.h>
 #endif
 
-namespace svmp::FE::systems {
+namespace svmp::Physics::formulations::navier_stokes::two_fluid {
 
-// The record code moved from FE/Systems/FESystem.cpp and keeps the FE names
-// it used there.
 using namespace svmp::FE;
 using namespace svmp::FE::systems;
 using namespace svmp::FE::systems::record_support;
@@ -41,7 +39,7 @@ namespace {
 
 void appendTwoFluidDiagnosticParameters(
     MeshBoundaryConsensusTokens& tokens,
-    const interfaces::IncompressibleTwoFluidDiagnosticParameters& parameters)
+    const IncompressibleTwoFluidDiagnosticParameters& parameters)
 {
     appendMeshBoundaryIntegral(tokens, parameters.dimension);
     appendMeshBoundaryIntegral(tokens, parameters.interface_marker);
@@ -134,7 +132,7 @@ void appendTwoFluidGeometryRevision(
 
 void appendTwoFluidPhaseDiagnosticState(
     MeshBoundaryConsensusTokens& tokens,
-    const interfaces::IncompressibleTwoFluidPhaseDiagnosticState& state)
+    const IncompressibleTwoFluidPhaseDiagnosticState& state)
 {
     appendMeshBoundaryIntegral(tokens, state.side);
     appendMeshBoundaryToken(
@@ -182,7 +180,7 @@ void appendTwoFluidPhaseDiagnosticState(
 
 void appendTwoFluidDiagnosticState(
     MeshBoundaryConsensusTokens& tokens,
-    const interfaces::IncompressibleTwoFluidDiagnosticState& state)
+    const IncompressibleTwoFluidDiagnosticState& state)
 {
     appendMeshBoundaryToken(tokens, state.snapshot_revision_key);
     appendMeshBoundaryToken(
@@ -270,7 +268,7 @@ void appendTwoFluidDiagnosticState(
 
 void appendTwoFluidPhaseMomentumReconciliation(
     MeshBoundaryConsensusTokens& tokens,
-    const interfaces::IncompressibleTwoFluidPhaseMomentumReconciliation& phase)
+    const IncompressibleTwoFluidPhaseMomentumReconciliation& phase)
 {
     appendMeshBoundaryIntegral(tokens, phase.side);
     const std::array<Real, 7> scalars{
@@ -300,7 +298,7 @@ void appendTwoFluidPhaseMomentumReconciliation(
 
 void appendTwoFluidMomentumReconciliation(
     MeshBoundaryConsensusTokens& tokens,
-    const interfaces::IncompressibleTwoFluidMomentumReconciliation& record)
+    const IncompressibleTwoFluidMomentumReconciliation& record)
 {
     appendMeshBoundaryIntegral(tokens, record.interface_marker);
     appendTwoFluidGeometryRevision(tokens, record.raw_geometry_revision);
@@ -1696,7 +1694,7 @@ void TwoFluidStageRecords::stageTwoFluidAcceptedStageDiagnostics(
 }
 
 void TwoFluidStageRecords::bindPendingTwoFluidMomentumReconciliations(
-    std::span<const interfaces::IncompressibleTwoFluidMomentumReconciliation>
+    std::span<const IncompressibleTwoFluidMomentumReconciliation>
         reconciliations)
 {
     const auto collective = meshBoundaryCollectiveContext(*system_);
@@ -1704,7 +1702,7 @@ void TwoFluidStageRecords::bindPendingTwoFluidMomentumReconciliations(
     MeshBoundaryConsensusTokens minimum_tokens;
     MeshBoundaryConsensusTokens maximum_tokens;
     std::exception_ptr local_exception;
-    std::vector<interfaces::IncompressibleTwoFluidMomentumReconciliation>
+    std::vector<IncompressibleTwoFluidMomentumReconciliation>
         staged;
 
     try {
@@ -1742,7 +1740,7 @@ void TwoFluidStageRecords::bindPendingTwoFluidMomentumReconciliations(
 
             auto& reconciliation = staged[reconciliation_index++];
             try {
-                interfaces::validateIncompressibleTwoFluidMomentumReconciliation(
+                validateIncompressibleTwoFluidMomentumReconciliation(
                     reconciliation);
             } catch (const std::invalid_argument& error) {
                 throw InvalidArgumentException(
@@ -1819,7 +1817,7 @@ void TwoFluidStageRecords::bindPendingTwoFluidMomentumReconciliations(
         "FESystem::bindPendingTwoFluidMomentumReconciliations/consensus");
 
     static_assert(std::is_nothrow_move_constructible_v<
-                  interfaces::IncompressibleTwoFluidMomentumReconciliation>);
+                  IncompressibleTwoFluidMomentumReconciliation>);
     two_fluid_accepted_stage_transaction_active_ = true;
     std::size_t reconciliation_index = 0u;
     for (auto& pending : pending_two_fluid_accepted_stage_diagnostics_) {
@@ -2095,7 +2093,7 @@ void TwoFluidStageRecords::commitPendingTwoFluidAcceptedStageDiagnostics(
                     "shared stage, or required momentum/numerical evidence is missing");
                 if (pending.momentum_reconciliation.has_value()) {
                     try {
-                        interfaces::validateIncompressibleTwoFluidMomentumReconciliation(
+                        validateIncompressibleTwoFluidMomentumReconciliation(
                             *pending.momentum_reconciliation);
                     } catch (const std::invalid_argument& error) {
                         throw InvalidArgumentException(
@@ -2514,4 +2512,4 @@ void TwoFluidStageRecords::commitPendingTwoFluidAcceptedStageDiagnostics(
 }
 
 
-} // namespace svmp::FE::systems
+} // namespace svmp::Physics::formulations::navier_stokes::two_fluid

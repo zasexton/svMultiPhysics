@@ -56,7 +56,7 @@
 #include "FE/Core/HaloDiagnostics.h"
 #include "FE/Interfaces/ContactLineStageObservables.h"
 #include "FE/Interfaces/LevelSetGeometrySnapshot.h"
-#include "FE/Interfaces/IncompressibleTwoFluidDiagnostics.h"
+#include "Physics/Formulations/NavierStokes/TwoFluid/IncompressibleTwoFluidDiagnostics.h"
 #include "FE/Interfaces/MaterialInterfaceTransportVelocity.h"
 #include "FE/Interfaces/GeneratedInterfaceBoundaryIntersectionDomain.h"
 #include "FE/PostProcessing/DerivedResultTypes.h"
@@ -87,14 +87,14 @@
 #include "FE/LevelSet/AcceptedFunctionalRecorder.h"
 #include "FE/LevelSet/LevelSetEnergyParticipant.h"
 #include "FE/LevelSet/LevelSetVolumeConstrainedMinimizer.h"
-#include "FE/LevelSet/TwoFluidAcceptedStage.h"
-#include "FE/LevelSet/TwoFluidStageParticipant.h"
+#include "Physics/Formulations/NavierStokes/TwoFluid/TwoFluidAcceptedStage.h"
+#include "Physics/Formulations/NavierStokes/TwoFluid/TwoFluidStageParticipant.h"
 #include "Parameters.h"
 #include "tinyxml2.h"
 #include "FE/Systems/ALEBinding.h"
 #include "FE/Systems/FieldBinding.h"
 #include "FE/Systems/FunctionalRecords.h"
-#include "FE/Systems/TwoFluidStageRecords.h"
+#include "Physics/Formulations/NavierStokes/TwoFluid/TwoFluidStageRecords.h"
 
 #include <algorithm>
 #include <array>
@@ -2689,9 +2689,9 @@ using svmp::FE::level_set::recordAcceptedFunctionals;
 // service (FE/LevelSet/TwoFluidAcceptedStage.h);
 // buildCurrentTwoFluidMomentumReconciliations of the driver's maintenance
 // requests follows ConservativePhaseRequestViews below.
-using svmp::FE::level_set::evaluateCurrentTwoFluidStageDiagnostics;
-using svmp::FE::level_set::TwoFluidMomentumReconciliationBatch;
-using svmp::FE::level_set::makeTwoFluidAcceptedStageSolveTelemetry;
+using svmp::Physics::formulations::navier_stokes::two_fluid::evaluateCurrentTwoFluidStageDiagnostics;
+using svmp::Physics::formulations::navier_stokes::two_fluid::TwoFluidMomentumReconciliationBatch;
+using svmp::Physics::formulations::navier_stokes::two_fluid::makeTwoFluidAcceptedStageSolveTelemetry;
 
 // The algebraic state revision is in
 // FE/LevelSet/Maintenance/LevelSetMaintenanceRequestSchedule.h.
@@ -3827,7 +3827,7 @@ svmp::FE::level_set::LevelSetGeometryHost levelSetGeometryHost(
           },
       .two_fluid_accepted_stage_diagnostics_declared =
           sim.fe_system &&
-          !svmp::FE::systems::twoFluidStageRecords(std::as_const(*sim.fe_system))
+          !svmp::Physics::formulations::navier_stokes::two_fluid::twoFluidStageRecords(std::as_const(*sim.fe_system))
                .twoFluidAcceptedStageDiagnosticDeclarations()
                .empty(),
   };
@@ -4495,7 +4495,7 @@ buildCurrentTwoFluidMomentumReconciliations(
     const svmp::MeshComm& comm)
 {
   ConservativePhaseRequestViews views(maintenance_requests);
-  return svmp::FE::level_set::buildCurrentTwoFluidMomentumReconciliations(
+  return svmp::Physics::formulations::navier_stokes::two_fluid::buildCurrentTwoFluidMomentumReconciliations(
       sim,
       views.all(),
       corrected_solution,
@@ -7802,7 +7802,7 @@ void ApplicationDriver::runTransient(SimulationComponents& sim, const Parameters
   // Two-fluid accepted-stage diagnostics: FE step participant
   // (FE/LevelSet/TwoFluidStageParticipant.h).
   const auto two_fluid_stage_participant =
-      std::make_shared<svmp::FE::level_set::TwoFluidStageParticipant>(
+      std::make_shared<svmp::Physics::formulations::navier_stokes::two_fluid::TwoFluidStageParticipant>(
           free_surface_step_context);
   auto& two_fluid_stage = *two_fluid_stage_participant;
   const bool& evaluate_two_fluid_stage =
@@ -8386,7 +8386,7 @@ void ApplicationDriver::runTransient(SimulationComponents& sim, const Parameters
                   h, "momentum_reconciliation_rejection");
               return false;
             }
-            svmp::FE::systems::twoFluidStageRecords(*sim.fe_system)
+            svmp::Physics::formulations::navier_stokes::two_fluid::twoFluidStageRecords(*sim.fe_system)
                 .bindPendingTwoFluidMomentumReconciliations(
                     reconciliation.records);
           }

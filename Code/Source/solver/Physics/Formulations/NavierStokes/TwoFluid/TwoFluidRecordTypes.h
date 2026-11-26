@@ -5,8 +5,8 @@
  * See Copyright-SimVascular.txt for additional details.
  */
 
-#ifndef SVMP_FE_SYSTEMS_TWO_FLUID_RECORD_TYPES_H
-#define SVMP_FE_SYSTEMS_TWO_FLUID_RECORD_TYPES_H
+#ifndef SVMP_PHYSICS_TWO_FLUID_TWO_FLUID_RECORD_TYPES_H
+#define SVMP_PHYSICS_TWO_FLUID_TWO_FLUID_RECORD_TYPES_H
 
 /**
  * @file TwoFluidRecordTypes.h
@@ -14,18 +14,15 @@
  *        declarations, stage states, solve telemetry, aggregation evidence,
  *        numerics and history records.
  *
- * This header is a staging point.  The records and their logic belong to
- * the Navier-Stokes two-fluid physics (Physics/Formulations/NavierStokes/
- * TwoFluid); these plain data types left FESystem.h first and keep their
- * namespace for now.
+ * The two-fluid formulation owns these coefficients and acceptance records.
  */
 
-#include "Constraints/SmallCutAggregationConstraint.h"
-#include "Core/Types.h"
-#include "Interfaces/LevelSetGeometrySnapshot.h"
-#include "Interfaces/IncompressibleTwoFluidDiagnostics.h"
-#include "Systems/OperatorRegistry.h"
-#include "Systems/OperatorStageMetadata.h"
+#include "FE/Constraints/SmallCutAggregationConstraint.h"
+#include "FE/Core/Types.h"
+#include "FE/Interfaces/LevelSetGeometrySnapshot.h"
+#include "Physics/Formulations/NavierStokes/TwoFluid/IncompressibleTwoFluidDiagnostics.h"
+#include "FE/Systems/OperatorRegistry.h"
+#include "FE/Systems/OperatorStageMetadata.h"
 
 #include <cstddef>
 #include <cstdint>
@@ -33,25 +30,23 @@
 #include <string>
 #include <vector>
 
-namespace svmp {
-namespace FE {
-namespace systems {
+namespace svmp::Physics::formulations::navier_stokes::two_fluid {
 
 /** Setup-time owner for one sharp incompressible two-fluid history stream. */
 struct TwoFluidAcceptedStageDiagnosticDeclaration {
     int interface_marker{-1};
-    FieldId level_set_field{INVALID_FIELD_ID};
-    FieldId negative_velocity_field{INVALID_FIELD_ID};
-    FieldId negative_pressure_field{INVALID_FIELD_ID};
-    FieldId positive_velocity_field{INVALID_FIELD_ID};
-    FieldId positive_pressure_field{INVALID_FIELD_ID};
-    OperatorTag operator_tag{};
+    FE::FieldId level_set_field{FE::INVALID_FIELD_ID};
+    FE::FieldId negative_velocity_field{FE::INVALID_FIELD_ID};
+    FE::FieldId negative_pressure_field{FE::INVALID_FIELD_ID};
+    FE::FieldId positive_velocity_field{FE::INVALID_FIELD_ID};
+    FE::FieldId positive_pressure_field{FE::INVALID_FIELD_ID};
+    FE::systems::OperatorTag operator_tag{};
     std::string geometry_domain_id{};
-    Real level_set_isovalue{0.0};
+    FE::Real level_set_isovalue{0.0};
     bool require_conservative_phase_momentum_reconciliation{false};
     bool require_accepted_stage_numerics{false};
-    Real pressure_stabilization_coefficient{0.0};
-    interfaces::IncompressibleTwoFluidDiagnosticParameters parameters{};
+    FE::Real pressure_stabilization_coefficient{0.0};
+    IncompressibleTwoFluidDiagnosticParameters parameters{};
     std::string owner_component{};
 
     [[nodiscard]] friend bool operator==(
@@ -65,9 +60,9 @@ struct TwoFluidAcceptedStageDiagnosticDeclaration {
  */
 struct AcceptedTwoFluidStageDiagnosticState {
     int interface_marker{-1};
-    interfaces::LevelSetGeometryRevision geometry_revision{};
-    interfaces::LevelSetGeometryLocalMeshRevision local_mesh_revision{};
-    interfaces::IncompressibleTwoFluidDiagnosticState diagnostics{};
+    FE::interfaces::LevelSetGeometryRevision geometry_revision{};
+    FE::interfaces::LevelSetGeometryLocalMeshRevision local_mesh_revision{};
+    IncompressibleTwoFluidDiagnosticState diagnostics{};
 };
 
 /** Communicator-canonical nonlinear evidence for one accepted coupled solve. */
@@ -76,20 +71,20 @@ struct TwoFluidAcceptedStageNonlinearTelemetry {
     int iterations{0};
     int outer_iterations{0};
     int inner_iterations_total{0};
-    Real outer_state_change_norm{0.0};
+    FE::Real outer_state_change_norm{0.0};
     bool outer_dynamic_relaxation_enabled{false};
     int outer_dynamic_relaxation_updates{0};
     int outer_dynamic_relaxation_safeguards{0};
     int outer_dynamic_relaxation_resets{0};
-    Real outer_dynamic_relaxation_factor{1.0};
-    Real outer_relaxed_state_change_norm{0.0};
-    std::optional<Real> outer_raw_contraction_ratio{};
-    Real initial_residual_norm{0.0};
-    Real final_residual_norm{0.0};
-    Real initial_field_residual_norm{0.0};
-    Real final_field_residual_norm{0.0};
-    Real initial_auxiliary_residual_norm{0.0};
-    Real final_auxiliary_residual_norm{0.0};
+    FE::Real outer_dynamic_relaxation_factor{1.0};
+    FE::Real outer_relaxed_state_change_norm{0.0};
+    std::optional<FE::Real> outer_raw_contraction_ratio{};
+    FE::Real initial_residual_norm{0.0};
+    FE::Real final_residual_norm{0.0};
+    FE::Real initial_field_residual_norm{0.0};
+    FE::Real final_field_residual_norm{0.0};
+    FE::Real initial_auxiliary_residual_norm{0.0};
+    FE::Real final_auxiliary_residual_norm{0.0};
     bool component_residual_convergence{false};
     std::string reason{};
 
@@ -104,9 +99,9 @@ struct TwoFluidAcceptedStageLinearTelemetry {
     bool converged{false};
     bool numerical_breakdown{false};
     int iterations{0};
-    Real initial_residual_norm{0.0};
-    Real final_residual_norm{0.0};
-    Real relative_residual{0.0};
+    FE::Real initial_residual_norm{0.0};
+    FE::Real final_residual_norm{0.0};
+    FE::Real relative_residual{0.0};
     std::uint64_t collective_calls{0u};
     std::uint64_t collective_words{0u};
     int blockschur_outer_iterations{0};
@@ -139,14 +134,14 @@ struct TwoFluidAcceptedStageSolveTelemetry {
 
 /** Exact rank-invariant subset of an aggregation publication identity. */
 struct TwoFluidAcceptedStageAggregationGeometryTelemetry {
-    constraints::SmallCutAggregationGeometryIdentityKind kind{
-        constraints::SmallCutAggregationGeometryIdentityKind::Unavailable};
+    FE::constraints::SmallCutAggregationGeometryIdentityKind kind{
+        FE::constraints::SmallCutAggregationGeometryIdentityKind::Unavailable};
     bool available{false};
     bool communicator_fingerprint_consensus_validated{false};
     std::string source_id{};
     std::string domain_id{};
     int interface_marker{-1};
-    Real isovalue{0.0};
+    FE::Real isovalue{0.0};
     std::uint64_t source_layout_revision{0u};
     std::uint64_t source_value_revision{0u};
     std::uint64_t quadrature_policy_key{0u};
@@ -184,9 +179,9 @@ struct TwoFluidAcceptedStageAggregationTransitionTelemetry {
     std::size_t canonical_aggregate_slaves_after{0u};
     std::size_t canonical_aggregate_slaves_entered{0u};
     std::size_t canonical_aggregate_slaves_left{0u};
-    Real canonical_rootless_active_physical_volume_before{0.0};
-    Real canonical_rootless_active_physical_volume_after{0.0};
-    Real canonical_rootless_active_physical_volume_delta{0.0};
+    FE::Real canonical_rootless_active_physical_volume_before{0.0};
+    FE::Real canonical_rootless_active_physical_volume_after{0.0};
+    FE::Real canonical_rootless_active_physical_volume_delta{0.0};
     bool canonical_topology_changed{false};
 
     [[nodiscard]] friend bool operator==(
@@ -202,13 +197,13 @@ struct TwoFluidAcceptedStageAggregationTelemetry {
     std::size_t maximum_root_path_length{0u};
     std::size_t maximum_observed_root_path{0u};
     std::size_t root_path_guard_rejections{0u};
-    Real maximum_reference_extrapolation_distance{0.0};
-    Real maximum_observed_reference_extrapolation{0.0};
+    FE::Real maximum_reference_extrapolation_distance{0.0};
+    FE::Real maximum_observed_reference_extrapolation{0.0};
     std::size_t extrapolation_guard_rejections{0u};
-    Real maximum_absolute_coefficient{0.0};
-    Real maximum_observed_absolute_coefficient{0.0};
-    Real maximum_row_l1_norm{0.0};
-    Real maximum_observed_row_l1_norm{0.0};
+    FE::Real maximum_absolute_coefficient{0.0};
+    FE::Real maximum_observed_absolute_coefficient{0.0};
+    FE::Real maximum_row_l1_norm{0.0};
+    FE::Real maximum_observed_row_l1_norm{0.0};
     std::size_t line_guard_rejections{0u};
     std::size_t canonical_candidate_vertices{0u};
     std::size_t canonical_rooted_candidate_vertices{0u};
@@ -219,7 +214,7 @@ struct TwoFluidAcceptedStageAggregationTelemetry {
     std::size_t canonical_active_feature_count{0u};
     std::size_t canonical_rooted_active_feature_count{0u};
     std::size_t canonical_rootless_active_feature_count{0u};
-    Real canonical_rootless_active_physical_volume{0.0};
+    FE::Real canonical_rootless_active_physical_volume{0.0};
     std::optional<TwoFluidAcceptedStageAggregationTransitionTelemetry>
         canonical_topology_transition{};
 
@@ -229,8 +224,8 @@ struct TwoFluidAcceptedStageAggregationTelemetry {
 };
 
 struct TwoFluidAcceptedStagePressureStabilizationTelemetry {
-    Real coefficient{0.0};
-    std::optional<Real> accepted_stage_work{};
+    FE::Real coefficient{0.0};
+    std::optional<FE::Real> accepted_stage_work{};
     std::string work_reason{};
 
     [[nodiscard]] friend bool operator==(
@@ -249,8 +244,8 @@ enum class TwoFluidAcceptedStageNonlinearIterationScope : std::uint8_t {
 };
 
 struct TwoFluidAcceptedStagePhaseNumerics {
-    geometry::CutIntegrationSide side{
-        geometry::CutIntegrationSide::Negative};
+    FE::geometry::CutIntegrationSide side{
+        FE::geometry::CutIntegrationSide::Negative};
     TwoFluidAcceptedStageAggregationTelemetry velocity_aggregation{};
     TwoFluidAcceptedStageAggregationTelemetry pressure_aggregation{};
     TwoFluidAcceptedStagePressureStabilizationTelemetry
@@ -282,15 +277,13 @@ struct TwoFluidAcceptedStageNumerics {
 /** Pending or accepted two-fluid diagnostics at the converged operator stage. */
 struct TwoFluidAcceptedStageDiagnosticHistoryRecord {
     TwoFluidAcceptedStageDiagnosticDeclaration declaration{};
-    OperatorStageMeasurementMetadata stage{};
+    FE::systems::OperatorStageMeasurementMetadata stage{};
     AcceptedTwoFluidStageDiagnosticState state{};
-    std::optional<interfaces::IncompressibleTwoFluidMomentumReconciliation>
+    std::optional<IncompressibleTwoFluidMomentumReconciliation>
         momentum_reconciliation{};
     std::optional<TwoFluidAcceptedStageNumerics> numerics{};
 };
 
-} // namespace systems
-} // namespace FE
-} // namespace svmp
+} // namespace svmp::Physics::formulations::navier_stokes::two_fluid
 
-#endif // SVMP_FE_SYSTEMS_TWO_FLUID_RECORD_TYPES_H
+#endif // SVMP_PHYSICS_TWO_FLUID_TWO_FLUID_RECORD_TYPES_H

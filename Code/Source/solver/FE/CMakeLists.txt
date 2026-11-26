@@ -885,7 +885,6 @@ set(FE_GEOMETRY_HEADERS
     Interfaces/SnapshotFieldEvaluator.h
     Interfaces/ContactLineStageObservables.h
     Interfaces/LevelSetGeometrySnapshot.h
-    Interfaces/IncompressibleTwoFluidDiagnostics.h
     Interfaces/MaterialInterfaceTransportVelocity.h
     Interfaces/GeneratedActiveBoundaryDomain.h
     Interfaces/GeneratedInterfaceBoundaryIntersectionDomain.h
@@ -923,7 +922,6 @@ set(FE_GEOMETRY_SOURCES
     Interfaces/SnapshotFieldEvaluator.cpp
     Interfaces/ContactLineStageObservables.cpp
     Interfaces/LevelSetGeometrySnapshot.cpp
-    Interfaces/IncompressibleTwoFluidDiagnostics.cpp
     Interfaces/MaterialInterfaceTransportVelocity.cpp
     Interfaces/GeneratedActiveBoundaryDomain.cpp
     Interfaces/GeneratedInterfaceBoundaryIntersectionDomain.cpp
@@ -1036,19 +1034,6 @@ if(FE_WITH_MESH)
     )
 endif()
 
-# The two-fluid accepted-stage diagnostics and their step participant use
-# the Mesh library's communicator.
-if(FE_WITH_MESH)
-    list(APPEND FE_LEVELSET_HEADERS
-        LevelSet/TwoFluidAcceptedStage.h
-        LevelSet/TwoFluidStageParticipant.h
-    )
-    list(APPEND FE_LEVELSET_SOURCES
-        LevelSet/TwoFluidAcceptedStage.cpp
-        LevelSet/TwoFluidStageParticipant.cpp
-    )
-endif()
-
 # The PDE velocity extension works on the Mesh library's distributed mesh.
 if(FE_WITH_MESH)
     list(APPEND FE_LEVELSET_HEADERS
@@ -1145,8 +1130,6 @@ set(FE_SYSTEMS_HEADERS
     Systems/SnapshotFieldAccess.h
     Systems/FESystemHandle.h
     Systems/OperatorStageMetadata.h
-    Systems/TwoFluidRecordTypes.h
-    Systems/TwoFluidStageRecords.h
     Systems/BoundedUpdatePolicy.h
     Systems/BoundaryDistanceService.h
     Interfaces/ContactLineGeometryCertificate.h
@@ -1201,7 +1184,6 @@ set(FE_SYSTEMS_SOURCES
     Systems/VertexFieldInitialization.cpp
     Systems/MeshBoundaryRecordSupport.cpp
     Systems/MeshNormalConstraintStageMeasurements.cpp
-    Systems/TwoFluidStageRecords.cpp
     Systems/SnapshotFieldAccess.cpp
     Systems/FormsInstaller.cpp
     Systems/FormulationBuilder.cpp
@@ -2403,23 +2385,8 @@ if(FE_BUILD_TESTS)
     include(${CMAKE_CURRENT_LIST_DIR}/../../../CMake/SvmpTestEntries.cmake)
 
     # Math module tests
-    set(FE_MATH_TEST_SOURCES
-        Tests/Unit/Math/test_TypeTraits.cpp
-        Tests/Unit/Math/test_Vector.cpp
-        Tests/Unit/Math/test_Matrix.cpp
-        Tests/Unit/Math/test_VoigtNotation.cpp
-        Tests/Unit/Math/test_LU.cpp
-        Tests/Unit/Math/test_SIMD.cpp
-        Tests/Unit/Math/test_Eigensolvers.cpp  # Re-enabled - wrapper functions implemented
-        Tests/Unit/Math/test_Tensor.cpp  # Re-enabled - helper functions implemented
-        Tests/Unit/Math/test_MathConstants.cpp  # Re-enabled - constants namespace implemented
-        Tests/Unit/Math/test_MathUtils.cpp  # Mathematical utility functions
-        Tests/Unit/Math/test_Rotations.cpp  # Rotation matrices and transformations
-        Tests/Unit/Math/test_Interpolation.cpp  # Interpolation utilities
-        Tests/Unit/Math/test_QuadratureSupport.cpp  # Quadrature and integration support
-        Tests/Unit/Math/test_DenseLinearAlgebra.cpp
-        Tests/Unit/Math/test_main.cpp
-    )
+    file(GLOB_RECURSE FE_MATH_TEST_SOURCES CONFIGURE_DEPENDS
+        Tests/Unit/Math/test_*.cpp)
 
     # Create Math test executable
     if(EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/Tests/Unit/Math/test_main.cpp)
@@ -2878,95 +2845,8 @@ if(FE_BUILD_TESTS)
 
         # Forms module tests (depends on Assembly)
         if(EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/Tests/Unit/Forms/test_main.cpp)
-			            set(FE_FORMS_TEST_SOURCES
-			                Tests/Unit/Forms/test_FormExpr.cpp
-                            Tests/Unit/Forms/test_CutCellForms.cpp
-                            Tests/Unit/Forms/test_IntegrationDomainLowering.cpp
-                            Tests/Unit/Forms/test_FormExprOperators.cpp
-                            Tests/Unit/Forms/test_FiniteDeformationForms.cpp
-                            Tests/Unit/Forms/test_MovingFrameForms.cpp
-			                    Tests/Unit/Forms/test_CoupledTerminals.cpp
-			                    Tests/Unit/Forms/test_JITValidation.cpp
-			                    Tests/Unit/Forms/test_KernelIR_Lowering.cpp
-			                    Tests/Unit/Forms/test_ExternalCallsNewPhysics.cpp
-				                    Tests/Unit/Forms/test_JITCacheKey.cpp
-				                    Tests/Unit/Forms/test_JITCompiler_CacheAndThreads.cpp
-					                    Tests/Unit/Forms/test_JITCompiler_ErrorHandling.cpp
-						                    Tests/Unit/Forms/test_JIT_CacheRegression.cpp
-						                    Tests/Unit/Forms/test_JITEngine_Lifecycle.cpp
-					                    Tests/Unit/Forms/test_JIT_CompilationLatency.cpp
-					                    Tests/Unit/Forms/test_JIT_PerformanceRegression.cpp
-					                    Tests/Unit/Forms/test_JIT_MatrixFunctionPerformance.cpp
-					                    Tests/Unit/Forms/test_JIT_Vectorization.cpp
-					                    Tests/Unit/Forms/test_JIT_FacePerformance.cpp
-					                    Tests/Unit/Forms/test_JIT_NonlinearPerformance.cpp
-					                    Tests/Unit/Forms/test_JIT_StokesVMS_Tangent.cpp
-					                    Tests/Unit/Forms/test_JIT_TensorContractionPerformance.cpp
-					                    Tests/Unit/Forms/test_JIT_Scaling.cpp
-					                    Tests/Unit/Forms/test_JIT_SpecializationPerformance.cpp
-					                    Tests/Unit/Forms/test_JIT_DiskCache.cpp
-					                    Tests/Unit/Forms/test_JIT_ObjectCacheFile.cpp
-					                    Tests/Unit/Forms/test_JIT_MemoryOverhead.cpp
-						                    Tests/Unit/Forms/test_LLVMGen_FunctionalKernels.cpp
-					                    Tests/Unit/Forms/test_LLVMGen_ScalarOps.cpp
-					                    Tests/Unit/Forms/test_LLVMGen_SmoothOps.cpp
-					                    Tests/Unit/Forms/test_LLVMGen_TensorOps.cpp
-				                    Tests/Unit/Forms/test_LLVMGen_DifferentialOps.cpp
-				                    Tests/Unit/Forms/test_LLVMGen_MatrixFunctions.cpp
-				                    Tests/Unit/Forms/test_LLVMGen_MatrixFunctionDerivatives.cpp
-				                    Tests/Unit/Forms/test_LLVMGen_GeometryOps.cpp
-				                    Tests/Unit/Forms/test_LLVMGen_FieldOps.cpp
-				                    Tests/Unit/Forms/test_LLVMGen_TimeOps.cpp
-				                    Tests/Unit/Forms/test_PointEvaluator.cpp
-				                Tests/Unit/Forms/test_BoundaryConditionHelpers.cpp
-				                Tests/Unit/Forms/test_Authoring.cpp
-				                Tests/Unit/Forms/test_FormCompiler.cpp
-				                Tests/Unit/Forms/test_MixedFormIR.cpp
-			                Tests/Unit/Forms/test_Dual.cpp
-		                Tests/Unit/Forms/test_DynamicValueShapes.cpp
-		                Tests/Unit/Forms/test_FormKernel_Cell.cpp
-		                Tests/Unit/Forms/test_FormKernel_Boundary.cpp
-		                Tests/Unit/Forms/test_FormKernel_DG.cpp
-		                Tests/Unit/Forms/test_FormSpatialDerivatives.cpp
-		                Tests/Unit/Forms/test_FormVocabulary.cpp
-		                Tests/Unit/Forms/test_MixedSpaceVocabulary.cpp
-			                Tests/Unit/Forms/test_Einsum.cpp
-			                Tests/Unit/Forms/test_FormsPerformance.cpp
-			                Tests/Unit/Forms/test_NonlinearFormKernel.cpp
-			                Tests/Unit/Forms/test_NonlinearFormKernel_ElementCoverage.cpp
-			                Tests/Unit/Forms/test_NonlinearFormKernel_Triangle3.cpp
-			                Tests/Unit/Forms/test_NonlinearFormKernel_Boundary.cpp
-			                Tests/Unit/Forms/test_NonlinearFormKernel_DGHelpers.cpp
-				                Tests/Unit/Forms/test_NonlinearFormKernel_TimeAndHistory.cpp
-					                Tests/Unit/Forms/test_SymbolicNonlinearFormKernel_MatrixAndEigenOps.cpp
-					                Tests/Unit/Forms/test_SymbolicNonlinearFormKernel_SmoothOps.cpp
-					                Tests/Unit/Forms/test_JIT_ExtendedParity.cpp
-					                Tests/Unit/Forms/test_JIT_SIMDBatch.cpp
-					                Tests/Unit/Forms/test_JIT_TangentFiniteDifferences.cpp
-					                Tests/Unit/Forms/test_SymbolicDifferentiation.cpp
-			                    Tests/Unit/Forms/test_HessianVectorProduct.cpp
-			                Tests/Unit/Forms/Tensor/test_TensorIndex.cpp
-			                Tests/Unit/Forms/Tensor/test_TensorSymmetry.cpp
-			                Tests/Unit/Forms/Tensor/test_TensorContraction.cpp
-			                Tests/Unit/Forms/Tensor/test_TensorCanonicalize.cpp
-			                Tests/Unit/Forms/Tensor/test_TensorSimplify.cpp
-			                Tests/Unit/Forms/Tensor/test_TensorDifferentiation.cpp
-			                Tests/Unit/Forms/Tensor/test_SymmetryOptimizer.cpp
-				                Tests/Unit/Forms/Tensor/test_TensorCSE.cpp
-				                Tests/Unit/Forms/Tensor/test_LoopStructure.cpp
-				                Tests/Unit/Forms/Tensor/test_TensorAllocation.cpp
-				                Tests/Unit/Forms/Tensor/test_TensorInterpreterKernel.cpp
-				                Tests/Unit/Forms/Tensor/test_TensorBenchmarks.cpp
-				                Tests/Unit/Forms/Tensor/test_TensorSymbolicDifferentiation.cpp
-                    Tests/Unit/Forms/Tensor/test_SpectralEigenJIT.cpp
-			                Tests/Unit/Forms/Tensor/test_TensorPrettyPrinting.cpp
-			                Tests/Unit/Forms/Tensor/test_SpecialTensors.cpp
-			                Tests/Unit/Forms/Tensor/test_IndexedAccessJIT.cpp
-		                Tests/Unit/Forms/test_AuxiliaryVocabulary.cpp
-		                Tests/Unit/Forms/test_ConstitutiveModel.cpp
-	                Tests/Unit/Forms/test_PrimitiveTypes.cpp
-		                Tests/Unit/Forms/test_main.cpp
-		            )
+    file(GLOB_RECURSE FE_FORMS_TEST_SOURCES CONFIGURE_DEPENDS
+        Tests/Unit/Forms/test_*.cpp)
 	            add_executable(test_fe_forms ${FE_FORMS_TEST_SOURCES})
 	            _svmp_fe_target_enable_warnings(test_fe_forms)
 	            target_link_libraries(test_fe_forms
@@ -3136,7 +3016,6 @@ if(FE_BUILD_TESTS)
 		                Tests/Unit/Systems/test_MaterialStateProvider.cpp
 		                Tests/Unit/Systems/test_FESystem.cpp
 		                Tests/Unit/Systems/test_FESystemAttachments.cpp
-		                Tests/Unit/Systems/test_TwoFluidStageRecords.cpp
 		                Tests/Unit/Systems/test_ExactAccumulator.cpp
 		                Tests/Unit/Systems/test_AcceptedStageRecords.cpp
 		                Tests/Unit/Systems/test_FunctionalRecords.cpp

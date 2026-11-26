@@ -6,8 +6,8 @@
  * See License file.
  */
 
-#ifndef SVMP_FE_LEVELSET_TWO_FLUID_STAGE_PARTICIPANT_H
-#define SVMP_FE_LEVELSET_TWO_FLUID_STAGE_PARTICIPANT_H
+#ifndef SVMP_PHYSICS_TWO_FLUID_TWO_FLUID_STAGE_PARTICIPANT_H
+#define SVMP_PHYSICS_TWO_FLUID_TWO_FLUID_STAGE_PARTICIPANT_H
 
 /**
  * @file
@@ -19,21 +19,21 @@
  *        publishes them after acceptance.
  */
 
-#include "LevelSet/TwoFluidAcceptedStage.h"
+#include "Physics/Formulations/NavierStokes/TwoFluid/TwoFluidAcceptedStage.h"
 
-#include "Constraints/SmallCutAggregationConstraint.h"
-#include "Core/Types.h"
-#include "Systems/FESystem.h"
-#include "TimeStepping/NewtonSolver.h"
-#include "TimeStepping/StepContext.h"
-#include "TimeStepping/StepParticipants.h"
-#include "TimeStepping/TimeHistory.h"
-#include "TimeStepping/TimeLoop.h"
+#include "FE/Constraints/SmallCutAggregationConstraint.h"
+#include "FE/Core/Types.h"
+#include "FE/Systems/FESystem.h"
+#include "FE/TimeStepping/NewtonSolver.h"
+#include "FE/TimeStepping/StepContext.h"
+#include "FE/TimeStepping/StepParticipants.h"
+#include "FE/TimeStepping/TimeHistory.h"
+#include "FE/TimeStepping/TimeLoop.h"
 
 #include <span>
 #include <vector>
 
-namespace svmp::FE::level_set {
+namespace svmp::Physics::formulations::navier_stokes::two_fluid {
 
 class TwoFluidStageParticipant final
     : public svmp::FE::timestepping::IStepParticipant,
@@ -67,7 +67,7 @@ public:
   /// Publishes the pending diagnostics of the accepted step @p h.
   void commitAccepted(const svmp::FE::timestepping::TimeHistory& h);
 
-  std::span<const svmp::FE::systems::TwoFluidAcceptedStageDiagnosticDeclaration>
+  std::span<const TwoFluidAcceptedStageDiagnosticDeclaration>
       two_fluid_stage_declarations{};
   bool evaluate_two_fluid_stage{false};
   bool reconcile_two_fluid_momentum{false};
@@ -77,6 +77,6 @@ public:
   bool pending_two_fluid_operator_stage_aggregation_captured{false};
 };
 
-} // namespace svmp::FE::level_set
+} // namespace svmp::Physics::formulations::navier_stokes::two_fluid
 
-#endif // SVMP_FE_LEVELSET_TWO_FLUID_STAGE_PARTICIPANT_H
+#endif // SVMP_PHYSICS_TWO_FLUID_TWO_FLUID_STAGE_PARTICIPANT_H
