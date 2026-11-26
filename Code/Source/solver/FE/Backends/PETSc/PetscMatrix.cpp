@@ -33,6 +33,28 @@ namespace {
     return static_cast<PetscInt>(v);
 }
 
+// AIJ preallocation from row counts reserves capacity but does not install
+// column indices. Copy the actual graph before locking its structure.
+void createFromCsr(Mat* matrix, GlobalIndex local_rows, GlobalIndex local_cols,
+                   GlobalIndex global_rows, GlobalIndex global_cols,
+                   const std::vector<PetscInt>& offsets, const std::vector<PetscInt>& columns)
+{
+    FE_PETSC_CALL(MatCreate(PETSC_COMM_WORLD, matrix));
+    try {
+        FE_PETSC_CALL(MatSetSizes(*matrix, asPetscInt(local_rows, "local rows"), asPetscInt(local_cols, "local cols"),
+                                  asPetscInt(global_rows, "global rows"), asPetscInt(global_cols, "global cols")));
+        FE_PETSC_CALL(MatSetType(*matrix, MATAIJ));
+        FE_PETSC_CALL(MatSetFromOptions(*matrix));
+        FE_PETSC_CALL(MatSeqAIJSetPreallocationCSR(*matrix, offsets.data(), columns.data(), nullptr));
+        FE_PETSC_CALL(MatMPIAIJSetPreallocationCSR(*matrix, offsets.data(), columns.data(), nullptr));
+        FE_PETSC_CALL(MatSetUp(*matrix));
+        FE_PETSC_CALL(MatSetOption(*matrix, MAT_NEW_NONZERO_LOCATION_ERR, PETSC_TRUE));
+    } catch (...) {
+        MatDestroy(matrix);
+        throw;
+    }
+}
+
 InsertMode toPetscInsertMode(assembly::AddMode mode)
 {
     switch (mode) {
@@ -270,71 +292,29 @@ void PetscMatrix::allocateFromSequential(const sparsity::SparsityPattern& patter
                 "PetscMatrix: sequential SparsityPattern is only supported in serial; "
                 "use DistributedSparsityPattern for MPI runs");
 
-    const auto n_rows = pattern.numRows();
-    const auto n_cols = pattern.numCols();
-
-    const auto row_ptr = pattern.getRowPtr();
-    FE_THROW_IF(row_ptr.size() != static_cast<std::size_t>(n_rows + 1), InvalidArgumentException,
-                "PetscMatrix: invalid CSR row_ptr size");
-
-    std::vector<PetscInt> nnz_per_row(static_cast<std::size_t>(n_rows), 0);
-    for (GlobalIndex r = 0; r < n_rows; ++r) {
-        const auto start = row_ptr[static_cast<std::size_t>(r)];
-        const auto end = row_ptr[static_cast<std::size_t>(r + 1)];
-        FE_THROW_IF(end < start, InvalidArgumentException, "PetscMatrix: invalid CSR row pointers");
-        nnz_per_row[static_cast<std::size_t>(r)] = static_cast<PetscInt>(end - start);
-    }
-
-    FE_PETSC_CALL(MatCreateAIJ(PETSC_COMM_WORLD,
-                               asPetscInt(n_rows, "local rows"),
-                               asPetscInt(n_cols, "local cols"),
-                               asPetscInt(n_rows, "global rows"),
-                               asPetscInt(n_cols, "global cols"),
-                               0,
-                               nnz_per_row.data(),
-                               0,
-                               nullptr,
-                               &mat_));
-
-    FE_PETSC_CALL(MatSetOption(mat_, MAT_NEW_NONZERO_LOCATION_ERR, PETSC_TRUE));
-    FE_PETSC_CALL(MatSetFromOptions(mat_));
-    FE_PETSC_CALL(MatSetUp(mat_));
+    std::vector<PetscInt> offsets, columns;
+    offsets.reserve(pattern.getRowPtr().size());
+    columns.reserve(pattern.getColIndices().size());
+    for (auto offset : pattern.getRowPtr()) offsets.push_back(asPetscInt(offset, "row offset"));
+    for (auto col : pattern.getColIndices()) columns.push_back(asPetscInt(col, "column"));
+    createFromCsr(&mat_, pattern.numRows(), pattern.numCols(), pattern.numRows(), pattern.numCols(), offsets, columns);
 }
 
 void PetscMatrix::allocateFromDistributed(const sparsity::DistributedSparsityPattern& dist)
 {
-    FE_THROW_IF(!dist.isFinalized(), InvalidArgumentException,
-                "PetscMatrix: distributed sparsity pattern must be finalized");
-
-    const auto pre = dist.getPreallocationInfo();
-    const auto n_local_rows = dist.numOwnedRows();
-    const auto n_local_cols = dist.numOwnedCols();
-
-    FE_THROW_IF(pre.diag_nnz_per_row.size() != static_cast<std::size_t>(n_local_rows) ||
-                    pre.offdiag_nnz_per_row.size() != static_cast<std::size_t>(n_local_rows),
-                InvalidArgumentException, "PetscMatrix: invalid distributed preallocation arrays");
-
-    std::vector<PetscInt> d_nnz(pre.diag_nnz_per_row.size());
-    std::vector<PetscInt> o_nnz(pre.offdiag_nnz_per_row.size());
-    for (std::size_t i = 0; i < d_nnz.size(); ++i) {
-        d_nnz[i] = asPetscInt(pre.diag_nnz_per_row[i], "diag nnz");
-        o_nnz[i] = asPetscInt(pre.offdiag_nnz_per_row[i], "offdiag nnz");
+    FE_THROW_IF(!dist.isFinalized(), InvalidArgumentException, "PetscMatrix: distributed sparsity must be finalized");
+    std::vector<PetscInt> offsets{0}, columns;
+    offsets.reserve(static_cast<std::size_t>(dist.numOwnedRows()) + 1);
+    for (GlobalIndex row = 0; row < dist.numOwnedRows(); ++row) {
+        for (auto col : dist.getRowDiagCols(row)) {
+            columns.push_back(asPetscInt(dist.ownedCols().first + col, "diagonal column"));
+        }
+        for (auto col : dist.getRowOffdiagCols(row)) {
+            columns.push_back(asPetscInt(dist.ghostColToGlobal(col), "off-diagonal column"));
+        }
+        offsets.push_back(asPetscInt(columns.size(), "row offset"));
     }
-
-    FE_PETSC_CALL(MatCreateAIJ(PETSC_COMM_WORLD,
-                               asPetscInt(n_local_rows, "local rows"),
-                               asPetscInt(n_local_cols, "local cols"),
-                               asPetscInt(dist.globalRows(), "global rows"),
-                               asPetscInt(dist.globalCols(), "global cols"),
-                               0,
-                               d_nnz.data(),
-                               0,
-                               o_nnz.data(),
-                               &mat_));
-
-    FE_PETSC_CALL(MatSetOption(mat_, MAT_NEW_NONZERO_LOCATION_ERR, PETSC_TRUE));
-    FE_PETSC_CALL(MatSetFromOptions(mat_));
-    FE_PETSC_CALL(MatSetUp(mat_));
+    createFromCsr(&mat_, dist.numOwnedRows(), dist.numOwnedCols(), dist.globalRows(), dist.globalCols(), offsets, columns);
 }
 
 GlobalIndex PetscMatrix::numRows() const noexcept

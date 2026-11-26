@@ -2837,6 +2837,7 @@ if(FE_BUILD_TESTS)
 	                Tests/Unit/Backends/test_FsilsBackend.cpp
 	                Tests/Unit/Backends/test_LinearSolverConformance.cpp
 	                Tests/Unit/Backends/test_PetscBackend.cpp
+	                Tests/Unit/Backends/test_PetscNullspaceMPI.cpp
 	                Tests/Unit/Backends/test_GaugeDiagnostics.cpp
 	                Tests/Unit/Backends/test_FsilsBlockPreconditioners.cpp
 	                Tests/Unit/Backends/test_LinearSolverReplay.cpp

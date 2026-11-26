@@ -21,6 +21,7 @@
 #include <cctype>
 #include <cstdlib>
 #include <cmath>
+#include <limits>
 #include <sstream>
 #include <string>
 #include <vector>
@@ -36,13 +37,6 @@ PetscLinearSolver::PetscLinearSolver(const SolverOptions& options)
 
 PetscLinearSolver::~PetscLinearSolver()
 {
-    if (nullspace_) {
-        MatNullSpaceDestroy(&nullspace_);
-    }
-    for (auto& v : nullspace_vecs_) {
-        if (v) VecDestroy(&v);
-    }
-    nullspace_vecs_.clear();
     if (ksp_) {
         FE_PETSC_CALL(KSPDestroy(&ksp_));
     }
@@ -58,23 +52,13 @@ PetscLinearSolver& PetscLinearSolver::operator=(PetscLinearSolver&& other) noexc
     if (this == &other) {
         return *this;
     }
-    if (nullspace_) {
-        MatNullSpaceDestroy(&nullspace_);
-        nullspace_ = nullptr;
-    }
-    for (auto& v : nullspace_vecs_) {
-        if (v) VecDestroy(&v);
-    }
-    nullspace_vecs_.clear();
     if (ksp_) {
         KSPDestroy(&ksp_);
     }
     options_ = other.options_;
     ksp_ = other.ksp_;
     other.ksp_ = nullptr;
-    nullspace_ = other.nullspace_;
-    other.nullspace_ = nullptr;
-    nullspace_vecs_ = std::move(other.nullspace_vecs_);
+    nullspace_basis_ = std::move(other.nullspace_basis_);
     return *this;
 }
 
@@ -281,6 +265,7 @@ SolverReport PetscLinearSolver::solve(const GenericMatrix& A_in,
         FE_THROW_IF(b->size() != A->numRows() || x->size() != b->size(), InvalidArgumentException,
                     "PetscLinearSolver::solve: size mismatch");
 
+        const auto nullspace = configureNullspace(A->petsc());
         ensureKspCreated();
         FE_PETSC_CALL(KSPSetOperators(ksp_, A->petsc(), A->petsc()));
         applyBaseOptionsToKsp(options_);
@@ -303,11 +288,6 @@ SolverReport PetscLinearSolver::solve(const GenericMatrix& A_in,
             traceLog(oss.str());
         }
 
-        // Attach nullspace to the matrix if one has been set.
-        if (nullspace_) {
-            FE_PETSC_CALL(MatSetNullSpace(A->petsc(), nullspace_));
-        }
-
         // Compute initial residual ||b - A x||.
         PetscReal r0 = 0.0;
         {
@@ -320,6 +300,7 @@ SolverReport PetscLinearSolver::solve(const GenericMatrix& A_in,
         }
 
         FE_PETSC_CALL(KSPSolve(ksp_, b->petsc(), x->petsc()));
+        if (nullspace) FE_PETSC_CALL(MatNullSpaceRemove(nullspace, x->petsc()));
         x->invalidateLocalCache();
         x->markModified();
 
@@ -403,9 +384,16 @@ SolverReport PetscLinearSolver::solve(const GenericMatrix& A_in,
             b_sub[i] = pv->petsc();
         }
 
-        Mat A_nest = nullptr;
-        Vec x_nest = nullptr;
-        Vec b_nest = nullptr;
+        struct NestedSystem {
+            Mat matrix{nullptr};
+            Vec x{nullptr}, rhs{nullptr};
+            ~NestedSystem()
+            {
+                VecDestroy(&x);
+                VecDestroy(&rhs);
+                MatDestroy(&matrix);
+            }
+        } nest;
 
         FE_PETSC_CALL(MatCreateNest(PETSC_COMM_WORLD,
                                     static_cast<PetscInt>(m),
@@ -413,15 +401,20 @@ SolverReport PetscLinearSolver::solve(const GenericMatrix& A_in,
                                     static_cast<PetscInt>(n),
                                     nullptr,
                                     submats.data(),
-                                    &A_nest));
-        FE_PETSC_CALL(MatAssemblyBegin(A_nest, MAT_FINAL_ASSEMBLY));
-        FE_PETSC_CALL(MatAssemblyEnd(A_nest, MAT_FINAL_ASSEMBLY));
+                                    &nest.matrix));
+        FE_PETSC_CALL(MatAssemblyBegin(nest.matrix, MAT_FINAL_ASSEMBLY));
+        FE_PETSC_CALL(MatAssemblyEnd(nest.matrix, MAT_FINAL_ASSEMBLY));
 
-        FE_PETSC_CALL(VecCreateNest(PETSC_COMM_WORLD, static_cast<PetscInt>(n), nullptr, x_sub.data(), &x_nest));
-        FE_PETSC_CALL(VecCreateNest(PETSC_COMM_WORLD, static_cast<PetscInt>(m), nullptr, b_sub.data(), &b_nest));
+        FE_PETSC_CALL(VecCreateNest(PETSC_COMM_WORLD, static_cast<PetscInt>(n), nullptr, x_sub.data(), &nest.x));
+        FE_PETSC_CALL(VecCreateNest(PETSC_COMM_WORLD, static_cast<PetscInt>(m), nullptr, b_sub.data(), &nest.rhs));
+
+        // Field coefficients are indexed globally within each block, even when
+        // PETSc interleaves the locally owned blocks on each rank.
+        FE_PETSC_CALL(MatNestSetVecType(nest.matrix, VECNEST));
+        const auto nullspace = configureNullspace(nest.matrix);
 
         ensureKspCreated();
-        FE_PETSC_CALL(KSPSetOperators(ksp_, A_nest, A_nest));
+        FE_PETSC_CALL(KSPSetOperators(ksp_, nest.matrix, nest.matrix));
         applyBaseOptionsToKsp(solve_options);
 
         const bool wants_fieldsplit =
@@ -478,14 +471,15 @@ SolverReport PetscLinearSolver::solve(const GenericMatrix& A_in,
         PetscReal r0 = 0.0;
         {
             Vec r = nullptr;
-            FE_PETSC_CALL(VecDuplicate(b_nest, &r));
-            FE_PETSC_CALL(MatMult(A_nest, x_nest, r));
-            FE_PETSC_CALL(VecAYPX(r, static_cast<PetscScalar>(-1.0), b_nest)); // r = b - Ax
+            FE_PETSC_CALL(VecDuplicate(nest.rhs, &r));
+            FE_PETSC_CALL(MatMult(nest.matrix, nest.x, r));
+            FE_PETSC_CALL(VecAYPX(r, static_cast<PetscScalar>(-1.0), nest.rhs)); // r = b - Ax
             FE_PETSC_CALL(VecNorm(r, NORM_2, &r0));
             FE_PETSC_CALL(VecDestroy(&r));
         }
 
-        FE_PETSC_CALL(KSPSolve(ksp_, b_nest, x_nest));
+        FE_PETSC_CALL(KSPSolve(ksp_, nest.rhs, nest.x));
+        if (nullspace) FE_PETSC_CALL(MatNullSpaceRemove(nullspace, nest.x));
 
         // Invalidate caches on solution blocks (KSPSolve writes into sub-Vec objects).
         for (std::size_t j = 0; j < x->numBlocks(); ++j) {
@@ -526,10 +520,6 @@ SolverReport PetscLinearSolver::solve(const GenericMatrix& A_in,
             traceLog(oss.str());
         }
 
-        FE_PETSC_CALL(VecDestroy(&x_nest));
-        FE_PETSC_CALL(VecDestroy(&b_nest));
-        FE_PETSC_CALL(MatDestroy(&A_nest));
-
         return rep;
     }
 
@@ -538,59 +528,117 @@ SolverReport PetscLinearSolver::solve(const GenericMatrix& A_in,
 
 void PetscLinearSolver::setNullspaceBasis(std::span<const std::vector<double>> basis)
 {
-    // Destroy previous nullspace if any
-    if (nullspace_) {
-        MatNullSpaceDestroy(&nullspace_);
-        nullspace_ = nullptr;
-    }
-    for (auto& v : nullspace_vecs_) {
-        if (v) VecDestroy(&v);
-    }
-    nullspace_vecs_.clear();
+    nullspace_basis_.emplace(basis.begin(), basis.end());
+}
 
-    if (basis.empty()) {
+namespace {
+
+void copyOwnedMode(Vec vec, std::span<const double> coefficients, double scale)
+{
+    PetscInt first, last;
+    FE_PETSC_CALL(VecGetOwnershipRange(vec, &first, &last));
+    PetscScalar* values = nullptr;
+    FE_PETSC_CALL(VecGetArrayWrite(vec, &values));
+    for (PetscInt i = first; i < last; ++i) {
+        values[i - first] = static_cast<PetscScalar>(coefficients[i] / scale);
+    }
+    FE_PETSC_CALL(VecRestoreArrayWrite(vec, &values));
+}
+
+void copyMode(Vec vec, std::span<const double> coefficients, double scale)
+{
+    PetscBool nested;
+    FE_PETSC_CALL(PetscObjectTypeCompare(reinterpret_cast<PetscObject>(vec), VECNEST, &nested));
+    if (!nested) {
+        copyOwnedMode(vec, coefficients, scale);
         return;
     }
+    PetscInt count;
+    Vec* blocks;
+    FE_PETSC_CALL(VecNestGetSubVecs(vec, &count, &blocks));
+    for (PetscInt i = 0; i < count; ++i) {
+        PetscInt size;
+        FE_PETSC_CALL(VecGetSize(blocks[i], &size));
+        copyOwnedMode(blocks[i], coefficients.first(size), scale);
+        coefficients = coefficients.subspan(size);
+    }
+}
 
-    // TODO: MPI-correct — VecCreateSeq/PETSC_COMM_SELF is only valid for
-    // single-rank runs. For MPI, use VecCreateMPI with the matrix communicator.
-    // The FSILS path (post-solve projection) is the primary solver-side
-    // nullspace path; PETSc MPI nullspace is deferred.
-#ifndef NDEBUG
+struct NullspaceWork {
+    explicit NullspaceWork(std::size_t count) : modes(count, nullptr) {}
+    ~NullspaceWork()
     {
-        int nTasks = 1;
-        MPI_Comm_size(PETSC_COMM_WORLD, &nTasks);
-        FE_CHECK_ARG(nTasks == 1,
-            "PetscLinearSolver::setNullspaceBasis: MPI nullspace not yet implemented. "
-            "Use FSILS backend or single-rank PETSc.");
+        MatNullSpaceDestroy(&space);
+        for (auto& mode : modes) VecDestroy(&mode);
     }
-#endif
+    MatNullSpace space{nullptr};
+    std::vector<Vec> modes;
+};
 
-    // Create PETSc Vec objects from the basis vectors
-    nullspace_vecs_.resize(basis.size(), nullptr);
+} // namespace
+
+MatNullSpace PetscLinearSolver::configureNullspace(Mat matrix) const
+{
+    const MPI_Comm comm = PetscObjectComm(reinterpret_cast<PetscObject>(matrix));
+    // Obtain the maximum and minimum count in one reduction. -1 means the
+    // caller owns the matrix's existing attachment, 0 explicitly clears it.
+    const long long count = nullspace_basis_ ? static_cast<long long>(nullspace_basis_->size()) : -1;
+    long long bounds[2]{count, -count};
+    FE_PETSC_CALL(MPI_Allreduce(MPI_IN_PLACE, bounds, 2, MPI_LONG_LONG_INT, MPI_MAX, comm));
+    FE_THROW_IF(bounds[0] != -bounds[1], InvalidArgumentException,
+                "PetscLinearSolver: nullspace configuration and mode count must agree on every rank");
+    if (count < 0) return nullptr;
+    if (count == 0) {
+        FE_PETSC_CALL(MatSetNullSpace(matrix, nullptr));
+        return nullptr;
+    }
+    const auto& basis = *nullspace_basis_;
+    PetscInt columns;
+    FE_PETSC_CALL(MatGetSize(matrix, nullptr, &columns));
+    int valid = count <= columns && count <= std::numeric_limits<int>::max();
+    std::vector<double> scales(basis.size(), 0.);
     for (std::size_t i = 0; i < basis.size(); ++i) {
-        const auto& bvec = basis[i];
-        const auto n = static_cast<PetscInt>(bvec.size());
-        FE_PETSC_CALL(VecCreateSeq(PETSC_COMM_SELF, n, &nullspace_vecs_[i]));
-
-        PetscScalar* arr = nullptr;
-        FE_PETSC_CALL(VecGetArray(nullspace_vecs_[i], &arr));
-        for (PetscInt j = 0; j < n; ++j) {
-            arr[j] = static_cast<PetscScalar>(bvec[static_cast<std::size_t>(j)]);
+        if (basis[i].size() != static_cast<std::size_t>(columns)) valid = 0;
+        for (double value : basis[i]) {
+            if (!std::isfinite(value)) valid = 0;
+            scales[i] = std::max(scales[i], std::abs(value));
         }
-        FE_PETSC_CALL(VecRestoreArray(nullspace_vecs_[i], &arr));
     }
+    FE_PETSC_CALL(MPI_Allreduce(MPI_IN_PLACE, &valid, 1, MPI_INT, MPI_MIN, comm));
+    FE_THROW_IF(!valid, InvalidArgumentException,
+                "PetscLinearSolver: nullspace mode counts must agree on all ranks and each finite mode must span the global domain");
+    FE_PETSC_CALL(MPI_Allreduce(MPI_IN_PLACE, scales.data(), static_cast<int>(count), MPI_DOUBLE, MPI_MAX, comm));
 
-    // Create the MatNullSpace.
-    // has_const = PETSC_FALSE because we provide the constant mode explicitly
-    // in the basis vectors (already normalized).
-    // TODO: MPI-correct — use matrix communicator instead of PETSC_COMM_SELF.
-    FE_PETSC_CALL(MatNullSpaceCreate(
-        PETSC_COMM_SELF,
-        PETSC_FALSE,
-        static_cast<PetscInt>(nullspace_vecs_.size()),
-        nullspace_vecs_.data(),
-        &nullspace_));
+    NullspaceWork work(basis.size());
+    for (std::size_t i = 0; i < basis.size(); ++i) {
+        FE_THROW_IF(scales[i] == 0., InvalidArgumentException, "PetscLinearSolver: zero nullspace mode");
+        auto& mode = work.modes[i];
+        FE_PETSC_CALL(MatCreateVecs(matrix, &mode, nullptr));
+        copyMode(mode, basis[i], scales[i]);
+        PetscReal initial_norm;
+        FE_PETSC_CALL(VecNorm(mode, NORM_2, &initial_norm));
+        // Two passes of modified Gram-Schmidt retain orthogonality for an
+        // independent, nonorthogonal spanning set. All dots include every owner.
+        for (int pass = 0; pass < 2; ++pass) {
+            for (std::size_t j = 0; j < i; ++j) {
+                PetscScalar dot;
+                FE_PETSC_CALL(VecDot(mode, work.modes[j], &dot));
+                FE_PETSC_CALL(VecAXPY(mode, -dot, work.modes[j]));
+            }
+        }
+        PetscReal norm;
+        FE_PETSC_CALL(VecNorm(mode, NORM_2, &norm));
+        FE_THROW_IF(norm <= 64 * std::numeric_limits<PetscReal>::epsilon() * initial_norm,
+                    InvalidArgumentException, "PetscLinearSolver: linearly dependent nullspace modes");
+        FE_PETSC_CALL(VecScale(mode, static_cast<PetscScalar>(1. / norm)));
+    }
+    FE_PETSC_CALL(MatNullSpaceCreate(comm, PETSC_FALSE, static_cast<PetscInt>(count), work.modes.data(), &work.space));
+    PetscBool is_null;
+    FE_PETSC_CALL(MatNullSpaceTest(work.space, matrix, &is_null));
+    FE_THROW_IF(!is_null, InvalidArgumentException,
+                "PetscLinearSolver: supplied nullspace is not annihilated by the operator");
+    FE_PETSC_CALL(MatSetNullSpace(matrix, work.space));
+    return work.space; // The matrix now owns a reference.
 }
 
 } // namespace backends

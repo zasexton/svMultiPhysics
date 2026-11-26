@@ -47,12 +47,14 @@ private:
     void ensureKspCreated();
     void applyBaseOptionsToKsp(const SolverOptions& options);
     void applyKspFromOptions();
+    [[nodiscard]] MatNullSpace configureNullspace(Mat matrix) const;
 
     SolverOptions options_{};
 
     KSP ksp_{nullptr};
-    MatNullSpace nullspace_{nullptr};
-    std::vector<Vec> nullspace_vecs_{};  ///< Owned PETSc Vec objects for basis
+    // These are global, field-ordered FE coefficients. The operator determines
+    // their PETSc layout at solve time. An explicit empty basis clears a prior attachment.
+    std::optional<std::vector<std::vector<double>>> nullspace_basis_;
 };
 
 } // namespace backends
