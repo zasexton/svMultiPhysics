@@ -11,6 +11,7 @@
 
 #include "Assembly/CutIntegrationContext.h"
 #include "Assembly/FunctionalAssembler.h"
+#include "Assembly/MeshAccess.h"
 #include "Dofs/EntityDofMap.h"
 #include "Forms/BoundaryFunctional.h"
 #include "Forms/FormExpr.h"
@@ -95,9 +96,9 @@ constexpr Real kExtent = 4.0;
     return gathered;
 }
 
-[[nodiscard]] svmp::FE::interfaces::FreeSurfaceGeometryOwnershipCollective worldCollective(int rank, int size)
+[[nodiscard]] svmp::FE::interfaces::LevelSetGeometryOwnershipCollective worldCollective(int rank, int size)
 {
-    svmp::FE::interfaces::FreeSurfaceGeometryOwnershipCollective collective;
+    svmp::FE::interfaces::LevelSetGeometryOwnershipCollective collective;
     collective.rank = rank;
     collective.size = size;
     collective.all_gather_owned_rule_identity_values = allGatherUnsignedValues;
@@ -114,7 +115,7 @@ struct CapView {
     std::shared_ptr<svmp::FE::assembly::CutIntegrationContext> cut_context;
     svmp::FE::assembly::FunctionalAssembler assembler{};
 
-    CapView(int rank, int size, svmp::FE::interfaces::FreeSurfaceGeometryOwnershipCollective collective)
+    CapView(int rank, int size, svmp::FE::interfaces::LevelSetGeometryOwnershipCollective collective)
         : mesh(rank, size, kCellCount, kExtent)
         , dof_map(fixture::quadStripDofMap(mesh))
         , u_values(fixture::nodalValues(mesh, field))
@@ -337,6 +338,136 @@ struct StripSystem {
 
 
 } // namespace
+
+TEST(FunctionalFormEvaluatorMPI, FunctionalNormAndBatchUseTheMeshCommunicator)
+{
+    namespace fe = svmp::FE;
+    int world_rank = 0;
+    MPI_Comm_rank(MPI_COMM_WORLD, &world_rank);
+    MPI_Comm group;
+    MPI_Comm_split(MPI_COMM_WORLD, world_rank % 2, world_rank, &group);
+    for (auto comm : {MPI_COMM_WORLD, group}) {
+        int rank = 0, size = 1;
+        MPI_Comm_rank(comm, &rank);
+        MPI_Comm_size(comm, &size);
+        const Real left = Real(rank * (rank + 1)) / Real(size * (size + 1));
+        const Real right = Real((rank + 1) * (rank + 2)) / Real(size * (size + 1));
+        auto base = std::make_shared<svmp::MeshBase>();
+        svmp::CellShape shape{};
+        shape.family = svmp::CellFamily::Quad;
+        shape.num_corners = 4;
+        shape.order = 1;
+        base->build_from_arrays(2, {left, 0., right, 0., right, 1., left, 1.},
+                                {0, 4}, {0, 1, 2, 3}, {shape});
+        base->finalize();
+        auto mesh = svmp::create_mesh(base, svmp::MeshComm(comm));
+        fe::assembly::MeshAccess access(*mesh);
+        fe::dofs::DofMap map(1, 4, 4);
+        map.setCellDofs(0, std::array<GlobalIndex, 4>{0, 1, 2, 3});
+        map.finalize();
+        fe::spaces::H1Space space(fe::ElementType::Quad4, 1);
+        const Real value = comm == group ? 2. + world_rank % 2 : 1.;
+        const std::array<Real, 4> ones{value, value, value, value};
+        fe::assembly::FunctionalAssembler assembler;
+        assembler.setMesh(access);
+        assembler.setSpace(space);
+        assembler.setDofMap(map);
+        assembler.setSolution(ones);
+        EXPECT_NEAR(assembler.computeL2Norm(), value, 2e-14);
+        EXPECT_NEAR(assembler.computeL2Error([](Real, Real, Real) { return 0.; }), value, 2e-14);
+        fe::assembly::L2NormKernel norm;
+        fe::assembly::VolumeKernel volume;
+        std::array<fe::assembly::FunctionalKernel*, 2> kernels{&norm, &volume};
+        const auto values = assembler.assembleMultiple(kernels);
+        EXPECT_NEAR(values[0], value, 2e-14);
+        EXPECT_NEAR(values[1], 1., 2e-14);
+        const auto raw = assembler.assembleScalarDetailed(norm, fe::assembly::FunctionalReduction::LocalRaw);
+        EXPECT_NEAR(raw.value, (right - left) * value * value, 2e-14);
+        EXPECT_NEAR(assembler.assembleScalarDetailed(norm).value, value, 2e-14);
+        // On multi-rank meshes only the last rank selects a cell.
+        std::vector<GlobalIndex> selected;
+        if (rank + 1 == size) selected.push_back(0);
+        EXPECT_NEAR(assembler.assembleScalarOverCells(norm, selected),
+                    value * std::sqrt(2. / (size + 1)), 2e-14);
+        const std::array<Real, 4> linear{left, right, right, left};
+        assembler.setSolution(linear);
+        EXPECT_NEAR(assembler.computeH1Seminorm(), 1., 2e-14);
+        EXPECT_NEAR(assembler.computeH1Error([](Real, Real, Real) {
+            return std::array<Real, 3>{0., 0., 0.};
+        }), 1., 2e-14);
+        if (size > 1) {
+            // One rank passing an empty batch must not strand its peers.
+            const auto n = rank == 0 ? 0u : kernels.size();
+            EXPECT_THROW((void)assembler.assembleMultiple(std::span(kernels).first(n)), fe::FEException);
+            class FailureOnRank final : public fe::assembly::VolumeKernel {
+            public:
+                explicit FailureOnRank(bool fail) : fail_(fail) {}
+                Real evaluateCell(const fe::assembly::AssemblyContext&, fe::LocalIndex) override {
+                    if (fail_) throw std::runtime_error("injected rank-local functional failure");
+                    return 1.;
+                }
+            private:
+                bool fail_;
+            };
+            FailureOnRank failing(rank == 0);
+            EXPECT_THROW((void)assembler.assembleScalar(failing), std::exception);
+            EXPECT_NEAR(assembler.computeVolume(), 1., 2e-14);
+        }
+
+    }
+    MPI_Comm_free(&group);
+}
+
+TEST(FunctionalFormEvaluatorMPI, FittedAndCutIntegralsFinalizeExactlyOnceAfterReduction)
+{
+    namespace fe = svmp::FE;
+    namespace assembly = fe::assembly;
+    class Moment final : public assembly::FunctionalKernel {
+    public:
+        assembly::RequiredData getRequiredData() const noexcept override {
+            return assembly::RequiredData::IntegrationWeights;
+        }
+        bool hasBoundaryFace() const noexcept override { return true; }
+        Real evaluateCell(const assembly::AssemblyContext&, fe::LocalIndex) override { return 1.; }
+        Real evaluateBoundaryFace(const assembly::AssemblyContext&, fe::LocalIndex, int) override { return 1.; }
+        Real postProcess(Real raw) const noexcept override {
+            ++calls;
+            return 7. + raw * raw;
+        }
+        mutable int calls = 0;
+    };
+    int rank = 0, size = 1;
+    MPI_Comm_rank(MPI_COMM_WORLD, &rank);
+    MPI_Comm_size(MPI_COMM_WORLD, &size);
+    CapView distributed(rank, size, worldCollective(rank, size));
+    distributed.assembler.setCommunicator(MPI_COMM_WORLD);
+    CapView serial(0, 1, {});
+    const auto negative = fe::geometry::CutIntegrationSide::Negative;
+    for (int domain = 0; domain < 4; ++domain) {
+        SCOPED_TRACE(domain);
+        Moment moment;
+        const auto integrate = [&](CapView& view, assembly::FunctionalReduction mode) {
+            switch (domain) {
+            case 0: return view.assembler.assembleBoundaryScalar(moment, fixture::kWallMarker, mode);
+            case 1: return view.assembler.assembleCutVolumeScalar(moment, *view.cut_context,
+                                                                 fixture::kInterfaceMarker, negative, mode);
+            case 2: return view.assembler.assembleGeneratedInterfaceScalar(moment, *view.cut_context,
+                                                                            fixture::kInterfaceMarker, mode);
+            default: return view.assembler.assembleCutInterfaceScalar(moment, *view.cut_context,
+                                                                     fixture::kWettedWallMarker, mode);
+            }
+        };
+        const Real expected = integrate(serial, assembly::FunctionalReduction::LocalRaw);
+        EXPECT_GT(expected, 0.);
+        Real raw = integrate(distributed, assembly::FunctionalReduction::LocalRaw);
+        MPI_Allreduce(MPI_IN_PLACE, &raw, 1, MPI_DOUBLE, MPI_SUM, MPI_COMM_WORLD);
+        EXPECT_NEAR(raw, expected, 1e-12);
+        EXPECT_EQ(moment.calls, 0);
+        EXPECT_NEAR(integrate(distributed, assembly::FunctionalReduction::Global), 7. + expected * expected, 1e-11);
+        EXPECT_EQ(moment.calls, 1);
+        EXPECT_NEAR(distributed.assembler.getLastResult().value, 7. + expected * expected, 1e-11);
+    }
+}
 
 TEST(FunctionalFormEvaluatorMPI, ValuesAreTheSameAtEveryRankCount)
 {

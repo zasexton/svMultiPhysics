@@ -1459,9 +1459,9 @@ Real BoundaryReductionService::evaluateFunctionalEntryPreflighted(
                     cells.push_back(cell_id);
                 }
             });
-            raw = assembler.assembleScalarOverCells(*entry.kernel, cells);
+            raw = assembler.assembleScalarOverCells(*entry.kernel, cells, assembly::FunctionalReduction::LocalRaw);
         } else {
-            raw = assembler.assembleScalar(*entry.kernel);
+            raw = assembler.assembleScalar(*entry.kernel, assembly::FunctionalReduction::LocalRaw);
         }
     } else if (entry.def.generated_active_boundary_marker.has_value()) {
         const auto* cut_context = system_.cutIntegrationContext();
@@ -1475,12 +1475,12 @@ Real BoundaryReductionService::evaluateFunctionalEntryPreflighted(
                         std::to_string(marker) +
                         " is not a generated active-boundary marker");
         raw = assembler.assembleCutInterfaceScalar(
-            *entry.kernel, *cut_context, marker);
+            *entry.kernel, *cut_context, marker, assembly::FunctionalReduction::LocalRaw);
     } else if (summation == FaceSummation::Exact) {
         exact_faces.emplace(*entry.kernel);
-        (void)assembler.assembleBoundaryScalar(*exact_faces, entry.def.boundary_marker);
+        (void)assembler.assembleBoundaryScalar(*exact_faces, entry.def.boundary_marker, assembly::FunctionalReduction::LocalRaw);
     } else {
-        raw = assembler.assembleBoundaryScalar(*entry.kernel, entry.def.boundary_marker);
+        raw = assembler.assembleBoundaryScalar(*entry.kernel, entry.def.boundary_marker, assembly::FunctionalReduction::LocalRaw);
     }
 
     local_result = assembler.getLastResult();
@@ -1526,6 +1526,7 @@ Real BoundaryReductionService::evaluateFunctionalEntryPreflighted(
     }
 #endif
 
+    raw = entry.kernel->postProcess(raw);
     switch (entry.def.reduction) {
         case forms::BoundaryFunctional::Reduction::Sum:
             if (environment::isSet("SVMP_MONO_AUX_TRACE")) {
@@ -1681,7 +1682,7 @@ Real BoundaryReductionService::evaluateFunctionalOverCells(
         }
 
         raw = assembler.assembleScalarOverCells(
-            *entry.kernel, cell_ids);
+            *entry.kernel, cell_ids, assembly::FunctionalReduction::LocalRaw);
         local_result =
             assembler.getLastResult();
     } catch (...) {
@@ -1716,7 +1717,7 @@ Real BoundaryReductionService::evaluateFunctionalOverCells(
                        local_result.error_message));
 
     if (entry.def.reduction == forms::BoundaryFunctional::Reduction::Sum) {
-        return raw;
+        return entry.kernel->postProcess(raw);
     }
 
     FE_THROW(NotImplementedException,
@@ -1897,12 +1898,12 @@ Real BoundaryReductionService::boundaryMeasurePreflighted(
                     .assembleCutInterfaceScalar(
                         measure_kernel,
                         *cut_context,
-                        marker);
+                        marker, assembly::FunctionalReduction::LocalRaw);
         } else {
             area =
                 assembler.assembleBoundaryScalar(
                     measure_kernel,
-                    functional.boundary_marker);
+                    functional.boundary_marker, assembly::FunctionalReduction::LocalRaw);
         }
 
         local_result =

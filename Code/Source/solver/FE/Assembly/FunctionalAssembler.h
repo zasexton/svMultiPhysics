@@ -79,6 +79,10 @@
 #include <string>
 #include <cmath>
 
+#if FE_HAS_MPI
+#include <mpi.h>
+#endif
+
 namespace svmp {
 namespace FE {
 
@@ -279,13 +283,13 @@ public:
      * @brief Post-process the assembled value
      *
      * For norms, this typically involves taking a square root.
-     * Default returns the value unchanged.
+     * The default takes a square root when requiresSquareRoot() is true.
      *
      * @param raw_value Raw assembled value
      * @return Processed result
      */
     [[nodiscard]] virtual Real postProcess(Real raw_value) const noexcept {
-        return raw_value;
+        return requiresSquareRoot() ? std::sqrt(raw_value) : raw_value;
     }
 
     /**
@@ -328,10 +332,6 @@ public:
         return u * u;
     }
 
-    [[nodiscard]] Real postProcess(Real raw_value) const noexcept override {
-        return std::sqrt(raw_value);
-    }
-
     [[nodiscard]] bool requiresSquareRoot() const noexcept override { return true; }
     [[nodiscard]] std::string name() const override { return "L2Norm"; }
 };
@@ -352,10 +352,6 @@ public:
             norm_sq += grad_u[static_cast<std::size_t>(d)] * grad_u[static_cast<std::size_t>(d)];
         }
         return norm_sq;
-    }
-
-    [[nodiscard]] Real postProcess(Real raw_value) const noexcept override {
-        return std::sqrt(raw_value);
     }
 
     [[nodiscard]] bool requiresSquareRoot() const noexcept override { return true; }
@@ -385,10 +381,6 @@ public:
         Real u_exact = exact_solution_(x[0], x[1], x[2]);
         Real error = u_h - u_exact;
         return error * error;
-    }
-
-    [[nodiscard]] Real postProcess(Real raw_value) const noexcept override {
-        return std::sqrt(raw_value);
     }
 
     [[nodiscard]] bool requiresSquareRoot() const noexcept override { return true; }
@@ -425,10 +417,6 @@ public:
             norm_sq += diff * diff;
         }
         return norm_sq;
-    }
-
-    [[nodiscard]] Real postProcess(Real raw_value) const noexcept override {
-        return std::sqrt(raw_value);
     }
 
     [[nodiscard]] bool requiresSquareRoot() const noexcept override { return true; }
@@ -558,8 +546,8 @@ struct FunctionalResult {
     bool success{true};              ///< Whether computation succeeded
     std::string error_message;       ///< Error message if failed
 
-    GlobalIndex elements_processed{0};
-    GlobalIndex faces_processed{0};
+    GlobalIndex elements_processed{0};  ///< Owned cells processed on this rank
+    GlobalIndex faces_processed{0};     ///< Owned faces processed on this rank
     double elapsed_seconds{0.0};
 
     operator Real() const noexcept { return value; }
@@ -569,6 +557,11 @@ struct FunctionalResult {
 // ============================================================================
 // Functional Assembler
 // ============================================================================
+
+/// Global results sum the raw integrals across the mesh communicator before
+/// calling postProcess. LocalRaw returns the owned contribution for callers
+/// which perform their own (for example, exact) collective reduction.
+enum class FunctionalReduction { Global, LocalRaw };
 
 /**
  * @brief Assembler for scalar functionals (Quantities of Interest)
@@ -617,6 +610,12 @@ public:
      * @brief Set mesh access
      */
     void setMesh(const IMeshAccess& mesh);
+#if FE_HAS_MPI
+    /// Bind a communicator that remains valid for the assembly calls. For a
+    /// custom distributed mesh adapter, call this after
+    /// setMesh(). The native MeshAccess supplies its own communicator.
+    void setCommunicator(MPI_Comm comm) noexcept { communicator_ = comm; }
+#endif
 
     /**
      * @brief Set DOF map
@@ -772,24 +771,26 @@ public:
      * @param kernel Functional kernel
      * @return Assembled value (or FunctionalResult for detailed info)
      */
-    [[nodiscard]] Real assembleScalar(FunctionalKernel& kernel);
+    [[nodiscard]] Real assembleScalar(FunctionalKernel& kernel,
+        FunctionalReduction reduction = FunctionalReduction::Global);
 
     /**
      * @brief Assemble a scalar functional over an explicit cell subset.
      *
      * Cell ids are interpreted in the mesh-global numbering used by
      * IMeshAccess.  Non-owned cells are still ignored by the usual owned-cell
-     * assembly rule.  An empty subset evaluates to zero, so distributed callers
-     * can pass local slices and still participate in external reductions.
+     * assembly rule.  An empty local subset contributes zero and participates in a global result.
      */
     [[nodiscard]] Real assembleScalarOverCells(
         FunctionalKernel& kernel,
-        std::span<const GlobalIndex> cell_ids);
+        std::span<const GlobalIndex> cell_ids,
+        FunctionalReduction reduction = FunctionalReduction::Global);
 
     /**
      * @brief Assemble scalar with detailed result
      */
-    [[nodiscard]] FunctionalResult assembleScalarDetailed(FunctionalKernel& kernel);
+    [[nodiscard]] FunctionalResult assembleScalarDetailed(FunctionalKernel& kernel,
+        FunctionalReduction reduction = FunctionalReduction::Global);
 
     /**
      * @brief Assemble boundary functional
@@ -800,18 +801,20 @@ public:
      */
     [[nodiscard]] Real assembleBoundaryScalar(
         FunctionalKernel& kernel,
-        int boundary_marker);
+        int boundary_marker,
+        FunctionalReduction reduction = FunctionalReduction::Global);
 
     /**
      * @brief Assemble a scalar functional over a generated active boundary.
      *
      * The marker must identify a generated active-boundary domain in the
-     * supplied cut context. The caller owns any inter-rank reduction.
+     * supplied cut context.
      */
     [[nodiscard]] Real assembleCutInterfaceScalar(
         FunctionalKernel& kernel,
         const CutIntegrationContext& cut_context,
-        int generated_interface_marker);
+        int generated_interface_marker,
+        FunctionalReduction reduction = FunctionalReduction::Global);
 
     /**
      * @brief Assemble a cell functional over the cut-volume rules of one
@@ -819,14 +822,14 @@ public:
      *
      * The rules are those of the cut context (for a free surface, the rules of
      * its authoritative geometry snapshot).  Each rule of a locally owned
-     * parent cell is integrated once with the kernel's cell integrand.  The
-     * caller owns any inter-rank reduction.
+     * parent cell is integrated once with the kernel's cell integrand.
      */
     [[nodiscard]] Real assembleCutVolumeScalar(
         FunctionalKernel& kernel,
         const CutIntegrationContext& cut_context,
         int interface_marker,
-        geometry::CutIntegrationSide side);
+        geometry::CutIntegrationSide side,
+        FunctionalReduction reduction = FunctionalReduction::Global);
 
     /**
      * @brief Assemble a boundary-face functional over the generated interface
@@ -834,13 +837,13 @@ public:
      * codimension two) or a generated active boundary.
      *
      * Each rule of a locally owned parent cell is integrated once with the
-     * kernel's boundary-face integrand.  The caller owns any inter-rank
-     * reduction.
+     * kernel's boundary-face integrand.
      */
     [[nodiscard]] Real assembleGeneratedInterfaceScalar(
         FunctionalKernel& kernel,
         const CutIntegrationContext& cut_context,
-        int interface_marker);
+        int interface_marker,
+        FunctionalReduction reduction = FunctionalReduction::Global);
 
     // =========================================================================
     // Multiple Functionals
@@ -849,13 +852,14 @@ public:
     /**
      * @brief Assemble multiple functionals in a single mesh pass
      *
-     * More efficient than separate calls when computing multiple QoIs.
+     * For a global result, all communicator ranks provide the same ordered kernels.
      *
      * @param kernels Vector of functional kernels
      * @return Vector of assembled values (same order as input)
      */
     [[nodiscard]] std::vector<Real> assembleMultiple(
-        std::span<FunctionalKernel* const> kernels);
+        std::span<FunctionalKernel* const> kernels,
+        FunctionalReduction reduction = FunctionalReduction::Global);
 
     /**
      * @brief Evaluate cell-local functional totals without reducing over cells.
@@ -969,6 +973,13 @@ private:
 
     void bindFieldSolutionData(AssemblyContext& context, std::span<const FieldRequirement> reqs);
 
+    Real scalarIntegral(FunctionalKernel& kernel, FunctionalReduction reduction,
+                        const std::function<Real(FunctionalResult&)>& integrate);
+    void finishIntegrals(FunctionalReduction reduction, std::span<FunctionalKernel* const> kernels,
+                         std::span<Real> values, const std::function<void()>& integrate);
+    Real localCutIntegral(FunctionalKernel& kernel, const CutIntegrationContext& cut_context, int marker,
+                          geometry::CutIntegrationSide side, FunctionalResult& result);
+
     /**
      * @brief Core assembly loop for cells
      */
@@ -1028,6 +1039,9 @@ private:
 
     FunctionalAssemblyOptions options_;
     const IMeshAccess* mesh_{nullptr};
+#if FE_HAS_MPI
+    MPI_Comm communicator_{MPI_COMM_NULL};
+#endif
     const dofs::DofMap* dof_map_{nullptr};
     const spaces::FunctionSpace* space_{nullptr};
     FieldId primary_field_{INVALID_FIELD_ID};

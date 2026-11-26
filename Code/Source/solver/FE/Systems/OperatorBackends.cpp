@@ -217,6 +217,9 @@ Real OperatorBackends::evaluateFunctional(const FESystem& system,
 
     assembly::FunctionalAssembler assembler;
     assembler.setMesh(system.meshAccess());
+#if FE_HAS_MPI
+    if (system.meshAccess().parallelSize() > 1) assembler.setCommunicator(system.activeMpiCommunicator());
+#endif
     assembler.setDofMap(system.dof_handler_.getDofMap());
     assembler.setSpace(space);
     assembler.setPrimaryField(primary.id);
@@ -308,6 +311,9 @@ Real OperatorBackends::evaluateBoundaryFunctional(const FESystem& system,
 
     assembly::FunctionalAssembler assembler;
     assembler.setMesh(system.meshAccess());
+#if FE_HAS_MPI
+    if (system.meshAccess().parallelSize() > 1) assembler.setCommunicator(system.activeMpiCommunicator());
+#endif
     assembler.setDofMap(system.dof_handler_.getDofMap());
     assembler.setSpace(space);
     assembler.setPrimaryField(primary.id);

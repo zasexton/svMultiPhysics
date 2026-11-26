@@ -18,6 +18,7 @@
 #include "Geometry/MappingFactory.h"
 #include "Geometry/GeometryMapping.h"
 #include "Geometry/FrameGeometry.h"
+#include "Assembly/MeshAccess.h"
 #include "Math/Vector.h"
 #include "Basis/BasisCache.h"
 #include "Basis/BasisFunction.h"
@@ -28,6 +29,8 @@
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
+#include <exception>
+#include <limits>
 #include <mutex>
 #include <numeric>
 #include <optional>
@@ -919,6 +922,14 @@ FunctionalAssembler& FunctionalAssembler::operator=(FunctionalAssembler&& other)
 void FunctionalAssembler::setMesh(const IMeshAccess& mesh)
 {
     mesh_ = &mesh;
+#if FE_HAS_MPI
+    communicator_ = MPI_COMM_NULL;
+#if defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH && defined(MESH_HAS_MPI)
+    if (const auto* native_mesh = dynamic_cast<const MeshAccess*>(&mesh)) {
+        communicator_ = native_mesh->communicator();
+    }
+#endif
+#endif
 }
 
 void FunctionalAssembler::setDofMap(const dofs::DofMap& dof_map)
@@ -1564,216 +1575,167 @@ const FunctionalAssemblyOptions& FunctionalAssembler::getOptions() const noexcep
 // Scalar Assembly
 // ============================================================================
 
-Real FunctionalAssembler::assembleScalar(FunctionalKernel& kernel)
+void FunctionalAssembler::finishIntegrals(FunctionalReduction reduction, std::span<FunctionalKernel* const> kernels,
+                                         std::span<Real> values, const std::function<void()>& integrate)
 {
-    FunctionalResult result;
-    Real value = assembleCellsCore(kernel, result);
-    last_result_ = result;
-
-    // Apply post-processing (e.g., square root for norms)
-    return kernel.postProcess(value);
-}
-
-Real FunctionalAssembler::assembleScalarOverCells(
-    FunctionalKernel& kernel,
-    std::span<const GlobalIndex> cell_ids)
-{
-    if (cell_ids.empty()) {
-        FunctionalResult result;
-        result.value = Real(0.0);
-        result.elements_processed = 0;
-        last_result_ = result;
-        return kernel.postProcess(Real(0.0));
+    last_result_ = {};
+    std::exception_ptr failure;
+    try {
+        integrate();
+    } catch (...) {
+        failure = std::current_exception();
     }
-
-    FunctionalResult result;
-    Real value = assembleCellsCore(kernel, result, cell_ids);
-    last_result_ = result;
-
-    return kernel.postProcess(value);
-}
-
-FunctionalResult FunctionalAssembler::assembleScalarDetailed(FunctionalKernel& kernel)
-{
-    FunctionalResult result;
-    Real raw_value = assembleCellsCore(kernel, result);
-    result.value = kernel.postProcess(raw_value);
-    last_result_ = result;
-    return result;
-}
-
-Real FunctionalAssembler::assembleBoundaryScalar(
-    FunctionalKernel& kernel,
-    int boundary_marker)
-{
-    FunctionalResult result;
-    Real value = assembleBoundaryCore(kernel, boundary_marker, result);
-    last_result_ = result;
-    return kernel.postProcess(value);
-}
-
-Real FunctionalAssembler::assembleCutInterfaceScalar(
-    FunctionalKernel& kernel,
-    const CutIntegrationContext& cut_context,
-    int generated_interface_marker)
-{
-    FE_THROW_IF(
-        generated_interface_marker < 0 ||
-            !cut_context.hasGeneratedActiveBoundaryMarker(
-                generated_interface_marker),
-        InvalidArgumentException,
-        "FunctionalAssembler::assembleCutInterfaceScalar: marker " +
-            std::to_string(generated_interface_marker) +
-            " is not a generated active-boundary marker");
-
-    FunctionalResult result;
-    if (!isConfigured()) {
-        result.success = false;
-        result.error_message = "FunctionalAssembler not configured";
-        last_result_ = result;
-        return Real{0.0};
+#if FE_HAS_MPI
+    if (reduction == FunctionalReduction::Global) {
+        FE_THROW_IF(communicator_ == MPI_COMM_NULL && mesh_ && mesh_->parallelSize() > 1, InvalidArgumentException,
+                    "FunctionalAssembler: set the communicator of this distributed mesh adapter");
+        int size = 1;
+        if (communicator_ != MPI_COMM_NULL && communicator_ != MPI_COMM_SELF) {
+            int initialized = 0, finalized = 0;
+            MPI_Initialized(&initialized);
+            if (initialized) MPI_Finalized(&finalized);
+            FE_THROW_IF((!initialized || finalized) && mesh_ && mesh_->parallelSize() > 1, FEException,
+                        "FunctionalAssembler: MPI is inactive on a distributed mesh");
+            if (initialized && !finalized) MPI_Comm_size(communicator_, &size);
+        }
+        if (size > 1) {
+            // All ranks, even empty slices, must agree on the count before
+            // summing the batch. Coordinate local exceptions in the same vote.
+            const int count = values.size() > static_cast<std::size_t>(std::numeric_limits<int>::max())
+                ? -1 : static_cast<int>(values.size());
+            int metadata[3] = {failure ? 2 : (last_result_.success ? 0 : 1), count, -count};
+            MPI_Allreduce(MPI_IN_PLACE, metadata, 3, MPI_INT, MPI_MAX, communicator_);
+            FE_CHECK_ARG(metadata[1] == -metadata[2] && metadata[1] >= 0,
+                         "FunctionalAssembler: collective functional batch counts differ or exceed the MPI count");
+            const int status = metadata[0];
+            if (status == 2 && !failure) {
+                FE_THROW(FEException, "FunctionalAssembler: integration threw on another communicator rank");
+            }
+            if (status == 1 && last_result_.success) {
+                last_result_.success = false;
+                last_result_.error_message = "Functional integration failed on another communicator rank";
+            }
+            if (status == 0 && count > 0) {
+                const auto type = sizeof(Real) == sizeof(float) ? MPI_FLOAT :
+                                  (sizeof(Real) == sizeof(double) ? MPI_DOUBLE : MPI_LONG_DOUBLE);
+                MPI_Allreduce(MPI_IN_PLACE, values.data(), count, type, MPI_SUM, communicator_);
+            }
+        }
     }
-    if (!kernel.hasBoundaryFace()) {
-        result.success = false;
-        result.error_message =
-            "Kernel does not support boundary face integration";
-        last_result_ = result;
-        return Real{0.0};
+#else
+    FE_THROW_IF(reduction == FunctionalReduction::Global && mesh_ && mesh_->parallelSize() > 1, NotImplementedException,
+                "FunctionalAssembler: distributed global integrals require MPI");
+#endif
+    if (failure) std::rethrow_exception(failure);
+    if (!last_result_.success) {
+        std::fill(values.begin(), values.end(), 0.);
+    } else if (reduction == FunctionalReduction::Global) {
+        for (std::size_t i = 0; i < values.size(); ++i) values[i] = kernels[i]->postProcess(values[i]);
     }
+    if (values.size() == 1) last_result_.value = values.front();
+}
 
-    CutRuleFunctionalAdapter adapter(
-        kernel, CutRuleFunctionalAdapter::Rules::Interface);
-    const auto assembly_result = runCutRuleBridge(
-        cut_context,
-        [&](StandardAssembler& bridge) {
-            return bridge.assembleCutInterfaces(
-                *mesh_,
-                cut_context,
-                generated_interface_marker,
-                *space_,
-                *space_,
-                adapter,
-                nullptr,
-                nullptr,
-                false,
-                false);
-        });
-
-    const Real value = kernel.postProcess(adapter.value());
-    result.value = value;
-    result.success = assembly_result.success;
-    result.error_message = assembly_result.error_message;
-    result.faces_processed = assembly_result.interface_faces_assembled;
-    result.elapsed_seconds = assembly_result.elapsed_time_seconds;
-    last_result_ = result;
+Real FunctionalAssembler::scalarIntegral(FunctionalKernel& kernel, FunctionalReduction reduction,
+                                        const std::function<Real(FunctionalResult&)>& integrate)
+{
+    Real value = 0.;
+    FunctionalKernel* pointer = &kernel;
+    finishIntegrals(reduction, {&pointer, 1}, {&value, 1}, [&] { value = integrate(last_result_); });
     return value;
 }
 
-Real FunctionalAssembler::assembleCutVolumeScalar(
-    FunctionalKernel& kernel,
-    const CutIntegrationContext& cut_context,
-    int interface_marker,
-    geometry::CutIntegrationSide side)
+Real FunctionalAssembler::assembleScalar(FunctionalKernel& kernel, FunctionalReduction reduction)
 {
-    FE_THROW_IF(side == geometry::CutIntegrationSide::Interface,
-                InvalidArgumentException,
-                "FunctionalAssembler::assembleCutVolumeScalar: the side must be "
-                "Negative or Positive");
-
-    FunctionalResult result;
-    if (!isConfigured()) {
-        result.success = false;
-        result.error_message = "FunctionalAssembler not configured";
-        last_result_ = result;
-        return Real{0.0};
-    }
-    if (!kernel.hasCell()) {
-        result.success = false;
-        result.error_message = "Kernel does not support cell integration";
-        last_result_ = result;
-        return Real{0.0};
-    }
-
-    CutRuleFunctionalAdapter adapter(
-        kernel, CutRuleFunctionalAdapter::Rules::Volume);
-    const auto assembly_result = runCutRuleBridge(
-        cut_context,
-        [&](StandardAssembler& bridge) {
-            return bridge.assembleCutVolumes(
-                *mesh_,
-                cut_context,
-                interface_marker,
-                side,
-                *space_,
-                *space_,
-                adapter,
-                nullptr,
-                nullptr,
-                false,
-                false);
-        });
-
-    const Real value = kernel.postProcess(adapter.value());
-    result.value = value;
-    result.success = assembly_result.success;
-    result.error_message = assembly_result.error_message;
-    result.elements_processed = assembly_result.elements_assembled;
-    result.elapsed_seconds = assembly_result.elapsed_time_seconds;
-    last_result_ = result;
-    return value;
+    return scalarIntegral(kernel, reduction, [&](FunctionalResult& result) { return assembleCellsCore(kernel, result); });
 }
 
-Real FunctionalAssembler::assembleGeneratedInterfaceScalar(
-    FunctionalKernel& kernel,
-    const CutIntegrationContext& cut_context,
-    int interface_marker)
+Real FunctionalAssembler::assembleScalarOverCells(FunctionalKernel& kernel, std::span<const GlobalIndex> cell_ids,
+                                                 FunctionalReduction reduction)
 {
-    FE_THROW_IF(interface_marker < 0,
-                InvalidArgumentException,
-                "FunctionalAssembler::assembleGeneratedInterfaceScalar: the marker "
-                "must be nonnegative");
+    return scalarIntegral(kernel, reduction, [&](FunctionalResult& result) {
+        return cell_ids.empty() ? Real(0) : assembleCellsCore(kernel, result, cell_ids);
+    });
+}
 
-    FunctionalResult result;
+FunctionalResult FunctionalAssembler::assembleScalarDetailed(FunctionalKernel& kernel, FunctionalReduction reduction)
+{
+    (void)assembleScalar(kernel, reduction);
+    return last_result_;
+}
+
+Real FunctionalAssembler::assembleBoundaryScalar(FunctionalKernel& kernel, int boundary_marker,
+                                               FunctionalReduction reduction)
+{
+    return scalarIntegral(kernel, reduction, [&](FunctionalResult& result) {
+        return assembleBoundaryCore(kernel, boundary_marker, result);
+    });
+}
+
+Real FunctionalAssembler::assembleCutInterfaceScalar(FunctionalKernel& kernel,
+                                                    const CutIntegrationContext& cut_context,
+                                                    int generated_interface_marker, FunctionalReduction reduction)
+{
+    return scalarIntegral(kernel, reduction, [&](FunctionalResult& result) {
+        FE_THROW_IF(generated_interface_marker < 0 || !cut_context.hasGeneratedActiveBoundaryMarker(generated_interface_marker),
+                    InvalidArgumentException, "FunctionalAssembler::assembleCutInterfaceScalar: marker " +
+                        std::to_string(generated_interface_marker) + " is not a generated active-boundary marker");
+        return localCutIntegral(kernel, cut_context, generated_interface_marker, geometry::CutIntegrationSide::Interface, result);
+    });
+}
+
+Real FunctionalAssembler::assembleCutVolumeScalar(FunctionalKernel& kernel, const CutIntegrationContext& cut_context,
+                                                 int interface_marker, geometry::CutIntegrationSide side,
+                                                 FunctionalReduction reduction)
+{
+    return scalarIntegral(kernel, reduction, [&](FunctionalResult& result) {
+        FE_THROW_IF(side == geometry::CutIntegrationSide::Interface, InvalidArgumentException,
+                    "FunctionalAssembler::assembleCutVolumeScalar: the side must be Negative or Positive");
+        return localCutIntegral(kernel, cut_context, interface_marker, side, result);
+    });
+}
+
+Real FunctionalAssembler::assembleGeneratedInterfaceScalar(FunctionalKernel& kernel,
+                                                          const CutIntegrationContext& cut_context,
+                                                          int interface_marker, FunctionalReduction reduction)
+{
+    return scalarIntegral(kernel, reduction, [&](FunctionalResult& result) {
+        FE_THROW_IF(interface_marker < 0, InvalidArgumentException,
+                    "FunctionalAssembler::assembleGeneratedInterfaceScalar: the marker must be nonnegative");
+        return localCutIntegral(kernel, cut_context, interface_marker, geometry::CutIntegrationSide::Interface, result);
+    });
+}
+
+Real FunctionalAssembler::localCutIntegral(FunctionalKernel& kernel, const CutIntegrationContext& cut_context,
+                                          int marker, geometry::CutIntegrationSide side, FunctionalResult& result)
+{
     if (!isConfigured()) {
         result.success = false;
         result.error_message = "FunctionalAssembler not configured";
-        last_result_ = result;
-        return Real{0.0};
+        return 0.;
     }
-    if (!kernel.hasBoundaryFace()) {
+    const bool surface = side == geometry::CutIntegrationSide::Interface;
+    if (surface ? !kernel.hasBoundaryFace() : !kernel.hasCell()) {
         result.success = false;
-        result.error_message =
-            "Kernel does not support boundary face integration";
-        last_result_ = result;
-        return Real{0.0};
+        result.error_message = surface ? "Kernel does not support boundary face integration"
+                                       : "Kernel does not support cell integration";
+        return 0.;
     }
-
-    CutRuleFunctionalAdapter adapter(
-        kernel, CutRuleFunctionalAdapter::Rules::Interface);
-    const auto assembly_result = runCutRuleBridge(
-        cut_context,
-        [&](StandardAssembler& bridge) {
-            return bridge.assembleCutInterfaces(
-                *mesh_,
-                cut_context,
-                interface_marker,
-                *space_,
-                *space_,
-                adapter,
-                nullptr,
-                nullptr,
-                false,
-                false);
-        });
-
-    const Real value = kernel.postProcess(adapter.value());
-    result.value = value;
-    result.success = assembly_result.success;
-    result.error_message = assembly_result.error_message;
-    result.faces_processed = assembly_result.interface_faces_assembled;
-    result.elapsed_seconds = assembly_result.elapsed_time_seconds;
-    last_result_ = result;
-    return value;
+    using Rules = CutRuleFunctionalAdapter::Rules;
+    CutRuleFunctionalAdapter adapter(kernel, surface ? Rules::Interface : Rules::Volume);
+    const auto assembly = runCutRuleBridge(cut_context, [&](StandardAssembler& bridge) {
+        if (surface) {
+            return bridge.assembleCutInterfaces(*mesh_, cut_context, marker, *space_, *space_, adapter,
+                                                nullptr, nullptr, false, false);
+        }
+        return bridge.assembleCutVolumes(*mesh_, cut_context, marker, side, *space_, *space_, adapter,
+                                        nullptr, nullptr, false, false);
+    });
+    result.success = assembly.success;
+    result.error_message = assembly.error_message;
+    result.elapsed_seconds = assembly.elapsed_time_seconds;
+    if (surface) result.faces_processed = assembly.interface_faces_assembled;
+    else result.elements_processed = assembly.elements_assembled;
+    return adapter.value();
 }
 
 AssemblyResult FunctionalAssembler::runCutRuleBridge(
@@ -1858,28 +1820,21 @@ AssemblyResult FunctionalAssembler::runCutRuleBridge(
 // ============================================================================
 
 std::vector<Real> FunctionalAssembler::assembleMultiple(
-    std::span<FunctionalKernel* const> kernels)
+    std::span<FunctionalKernel* const> kernels, FunctionalReduction reduction)
 {
-    if (!isConfigured()) {
-        throw std::runtime_error("FunctionalAssembler: not configured");
-    }
-
-    if (kernels.empty()) {
-        return {};
-    }
-
     std::vector<Real> totals(kernels.size(), 0.0);
-    std::vector<KahanAccumulator> accumulators(kernels.size());
-    evaluateCellFunctionals(kernels, [&](GlobalIndex, std::span<const Real> cell_values, Real) {
-        for (std::size_t k = 0; k < kernels.size(); ++k) {
-            if (options_.use_kahan_summation) accumulators[k].add(cell_values[k]);
-            else totals[k] += cell_values[k];
+    finishIntegrals(reduction, kernels, totals, [&] {
+        std::vector<KahanAccumulator> accumulators(kernels.size());
+        evaluateCellFunctionals(kernels, [&](GlobalIndex, std::span<const Real> cell_values, Real) {
+            for (std::size_t k = 0; k < kernels.size(); ++k) {
+                if (options_.use_kahan_summation) accumulators[k].add(cell_values[k]);
+                else totals[k] += cell_values[k];
+            }
+        });
+        if (options_.use_kahan_summation) {
+            for (std::size_t k = 0; k < kernels.size(); ++k) totals[k] = accumulators[k].get();
         }
     });
-    for (std::size_t k = 0; k < kernels.size(); ++k) {
-        const Real sum = options_.use_kahan_summation ? accumulators[k].get() : totals[k];
-        totals[k] = kernels[k]->postProcess(sum);
-    }
     return totals;
 }
 

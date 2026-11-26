@@ -39,6 +39,9 @@ namespace assembly {
 class MeshAccess final : public IMeshAccess {
 public:
     explicit MeshAccess(const svmp::Mesh& mesh);
+#if FE_HAS_MPI && defined(MESH_HAS_MPI)
+    [[nodiscard]] MPI_Comm communicator() const noexcept { return mesh_.mpi_comm(); }
+#endif
     MeshAccess(const svmp::Mesh& mesh, svmp::Configuration cfg_override);
 
     [[nodiscard]] GlobalIndex numCells() const override;

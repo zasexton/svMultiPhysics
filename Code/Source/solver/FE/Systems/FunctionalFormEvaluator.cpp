@@ -195,7 +195,7 @@ void appendIntegralTerms(const std::shared_ptr<forms::FormExprNode>& node,
 [[nodiscard]] bool knowsMarker(const assembly::CutIntegrationContext& context,
                                const IntegralTerm& term)
 {
-    if (context.hasFreeSurfaceGeometrySnapshotForMarker(term.marker) ||
+    if (context.hasLevelSetGeometrySnapshotForMarker(term.marker) ||
         context.hasGeneratedLevelSetInterfaceMarker(term.marker)) {
         return true;
     }
@@ -325,16 +325,16 @@ void evaluateTermLocally(assembly::FunctionalAssembler& assembler,
     ExactTermKernel kernel(interpretedIntegrand(term), term.negated, value, absolute_mass);
     switch (term.measure) {
     case Measure::Cell:
-        (void)assembler.assembleScalar(kernel);
+        (void)assembler.assembleScalar(kernel, assembly::FunctionalReduction::LocalRaw);
         break;
     case Measure::Boundary:
-        (void)assembler.assembleBoundaryScalar(kernel, term.marker);
+        (void)assembler.assembleBoundaryScalar(kernel, term.marker, assembly::FunctionalReduction::LocalRaw);
         break;
     case Measure::CutVolume:
-        (void)assembler.assembleCutVolumeScalar(kernel, *cut_context, term.marker, term.side);
+        (void)assembler.assembleCutVolumeScalar(kernel, *cut_context, term.marker, term.side, assembly::FunctionalReduction::LocalRaw);
         break;
     case Measure::Interface:
-        (void)assembler.assembleGeneratedInterfaceScalar(kernel, *cut_context, term.marker);
+        (void)assembler.assembleGeneratedInterfaceScalar(kernel, *cut_context, term.marker, assembly::FunctionalReduction::LocalRaw);
         break;
     }
     const auto& result = assembler.getLastResult();
