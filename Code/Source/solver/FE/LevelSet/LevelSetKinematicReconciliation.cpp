@@ -3,6 +3,7 @@
 #include "Assembly/CutIntegrationContext.h"
 #include "Basis/NodeOrderingConventions.h"
 #include "Dofs/EntityDofMap.h"
+#include "Elements/ReferenceElement.h"
 #include "LevelSet/LevelSetVolume.h"
 #include "Quadrature/QuadratureFactory.h"
 #include "Spaces/FunctionSpace.h"
@@ -16,10 +17,13 @@
 #include <cmath>
 #include <exception>
 #include <limits>
+#include <map>
+#include <optional>
 #include <sstream>
 #include <stdexcept>
 #include <string>
 #include <type_traits>
+#include <unordered_map>
 #include <utility>
 #include <vector>
 
@@ -157,6 +161,7 @@ struct CellTrace {
 };
 
 struct SimplexCell {
+    GlobalIndex id{};
     int corners{0};
     std::array<Point, 4> x{};
     std::array<Point, 4> xi{};
@@ -563,6 +568,523 @@ void maxInPlace(const Collective& context, std::vector<Real>& values)
     return 0;
 }
 
+// Gather every rank's values in rank order on every rank.
+[[nodiscard]] std::vector<Real> gatherAll(const Collective& context, const std::vector<Real>& local)
+{
+#if FE_HAS_MPI
+    if (context.active) {
+        int size = 1;
+        MPI_Comm_size(context.communicator, &size);
+        const bool fits = local.size() <= static_cast<std::size_t>(std::numeric_limits<int>::max());
+        int count = fits ? static_cast<int>(local.size()) : -1;
+        std::vector<int> counts(static_cast<std::size_t>(size));
+        MPI_Allgather(&count, 1, MPI_INT, counts.data(), 1, MPI_INT, context.communicator);
+        std::vector<int> displacements(counts.size());
+        long long total = 0;
+        for (std::size_t r = 0; r < counts.size(); ++r) {
+            if (counts[r] < 0 || total > std::numeric_limits<int>::max() - counts[r]) {
+                throw std::overflow_error("level-set kinematic reconciliation exceeds the MPI count range");
+            }
+            displacements[r] = static_cast<int>(total);
+            total += counts[r];
+        }
+        std::vector<Real> all(static_cast<std::size_t>(total));
+        MPI_Allgatherv(local.data(), count, realType(), all.data(), counts.data(),
+                       displacements.data(), realType(), context.communicator);
+        return all;
+    }
+#else
+    (void)context;
+#endif
+    return local;
+}
+
+// ---- wall-trace kinematics ---------------------------------------------------
+// On an impermeable boundary facet (w . n = 0 at both time levels) the trace of
+// phi obeys phi_t + w . grad_Gamma phi = 0 by itself, so the roots of a cut wall
+// facet travel along the wall characteristic (s' = w_parallel on a 2D wall)
+// independently of the interior interface.  Every vertex of a cut wall facet
+// takes the previous level set at the foot of its backward wall characteristic
+// over the step, followed exactly enough for the step-mean tangential velocity
+// that a steady linear velocity reproduces its own characteristic.  One positive
+// factor per connected wall trace, the ratio of the transported to the
+// characteristic slopes across its roots, keeps the transported representation
+// scale without moving a root.  These vertices then keep that value, and their share
+// of the interior correction goes to the interior trace nodes.
+
+// Linear pieces of the impermeable walls near the interface: per corner the
+// position, the previous level set and the step-mean tangential velocity.
+constexpr std::size_t kWallPieceValues = 7u;
+
+struct WallPieces {
+    int corners{0};
+    std::vector<Real> data;
+
+    [[nodiscard]] std::size_t size() const noexcept
+    {
+        return corners > 0 ? data.size() / (kWallPieceValues * static_cast<std::size_t>(corners)) : 0u;
+    }
+    [[nodiscard]] const Real* corner(std::size_t piece, int k) const noexcept
+    {
+        return &data[(piece * static_cast<std::size_t>(corners) + static_cast<std::size_t>(k)) * kWallPieceValues];
+    }
+    [[nodiscard]] Point position(std::size_t piece, int k) const noexcept
+    {
+        const Real* v = corner(piece, k);
+        return {{v[0], v[1], v[2]}};
+    }
+    [[nodiscard]] Real diameter(std::size_t piece) const noexcept
+    {
+        Real d = 0;
+        for (int a = 0; a < corners; ++a) {
+            for (int b = a + 1; b < corners; ++b) {
+                d = std::max(d, norm(sub(position(piece, a), position(piece, b))));
+            }
+        }
+        return d;
+    }
+};
+
+// Barycentric coordinates of the projection of p onto a piece; returns the
+// distance by which p misses the piece.
+[[nodiscard]] Real wallCoordinates(const WallPieces& wall, std::size_t piece, const Point& p,
+                                   std::array<Real, 3>& lambda) noexcept
+{
+    const auto x0 = wall.position(piece, 0);
+    const auto e1 = sub(wall.position(piece, 1), x0);
+    const auto r = sub(p, x0);
+    Point projection = x0;
+    if (wall.corners == 2) {
+        const Real t = dot(r, e1) / dot(e1, e1);
+        lambda = {{Real{1} - t, t, Real{0}}};
+        for (std::size_t k = 0; k < 3u; ++k) projection[k] += t * e1[k];
+    } else {
+        const auto e2 = sub(wall.position(piece, 2), x0);
+        const Real a11 = dot(e1, e1);
+        const Real a12 = dot(e1, e2);
+        const Real a22 = dot(e2, e2);
+        const Real det = a11 * a22 - a12 * a12;
+        const Real l1 = (dot(r, e1) * a22 - dot(r, e2) * a12) / det;
+        const Real l2 = (a11 * dot(r, e2) - a12 * dot(r, e1)) / det;
+        lambda = {{Real{1} - l1 - l2, l1, l2}};
+        for (std::size_t k = 0; k < 3u; ++k) projection[k] += l1 * e1[k] + l2 * e2[k];
+    }
+    Real outside = 0;
+    for (int k = 0; k < wall.corners; ++k) outside = std::max(outside, -lambda[static_cast<std::size_t>(k)]);
+    return outside * wall.diameter(piece) + norm(sub(p, projection));
+}
+
+// Previous level set at the foot of the backward wall characteristic through
+// p, or nothing if the characteristic leaves the sampled impermeable wall.
+[[nodiscard]] std::optional<Real> previousValueAtWallFoot(const WallPieces& wall,
+                                                          std::span<const std::size_t> candidates,
+                                                          Point p, Real dt, int substeps, Real reach)
+{
+    std::size_t piece = 0;
+    std::array<Real, 3> lambda{};
+    const auto locate = [&](const Point& q) {
+        Real best = std::numeric_limits<Real>::infinity();
+        for (const auto c : candidates) {
+            std::array<Real, 3> l{};
+            const Real miss = wallCoordinates(wall, c, q, l);
+            if (miss < best) {
+                best = miss;
+                piece = c;
+                lambda = l;
+            }
+        }
+        return best <= reach;
+    };
+    const auto blend = [&](std::size_t offset) {
+        Point v{};
+        for (int k = 0; k < wall.corners; ++k) {
+            const Real* c = wall.corner(piece, k);
+            for (std::size_t d = 0; d < 3u; ++d) v[d] += lambda[static_cast<std::size_t>(k)] * c[offset + d];
+        }
+        return v;
+    };
+    const auto velocity = [&](const Point& q, Point& v) {
+        if (!locate(q)) return false;
+        v = blend(4u);
+        return true;
+    };
+    const auto shifted = [](const Point& q, Real scale, const Point& v) {
+        return Point{{q[0] - scale * v[0], q[1] - scale * v[1], q[2] - scale * v[2]}};
+    };
+    const Real h = substeps > 0 ? dt / static_cast<Real>(substeps) : Real{0};
+    for (int step = 0; step < substeps; ++step) {
+        Point k1{}, k2{}, k3{}, k4{};
+        if (!velocity(p, k1) || !velocity(shifted(p, Real{0.5} * h, k1), k2) ||
+            !velocity(shifted(p, Real{0.5} * h, k2), k3) || !velocity(shifted(p, h, k3), k4)) {
+            return std::nullopt;
+        }
+        Point mean{};
+        for (std::size_t d = 0; d < 3u; ++d) mean[d] = (k1[d] + Real{2} * (k2[d] + k3[d]) + k4[d]) / Real{6};
+        if (mean == Point{}) continue;
+        if (!locate(shifted(p, h, mean))) return std::nullopt;
+        p = blend(0u);  // stay on the wall
+    }
+    if (!locate(p)) return std::nullopt;
+    Real value = 0;
+    for (int k = 0; k < wall.corners; ++k) value += lambda[static_cast<std::size_t>(k)] * wall.corner(piece, k)[3];
+    return value;
+}
+
+struct WallTrace {
+    std::vector<char> node;   // the DOF is a vertex of a cut impermeable wall facet
+    std::vector<Real> delta;  // its wall-characteristic change from the transported value
+    std::size_t dofs{0u};
+    std::size_t unresolved{0u};
+};
+
+// Local part of the wall trace: the impermeable boundary facets of the owned
+// cells, sampled as linear pieces at the Lagrange points of the velocity
+// order, and the vertices of the facets cut by the transported level set.
+struct LocalWallTrace {
+    std::vector<Real> pieces;
+    std::vector<Real> vertices;  // dof, x, y, z per vertex of a cut facet
+    std::vector<Real> edges;     // dof, dof, length of every facet edge that changes sign
+    Real speed{0};
+    Real diameter{0};
+    std::array<Real, 6> box{{std::numeric_limits<Real>::infinity(), std::numeric_limits<Real>::infinity(),
+                             std::numeric_limits<Real>::infinity(), -std::numeric_limits<Real>::infinity(),
+                             -std::numeric_limits<Real>::infinity(), -std::numeric_limits<Real>::infinity()}};
+};
+
+void collectWallFacet(const SimplexCell& cell, const std::vector<LocalIndex>& face_nodes, int order,
+                      Real isovalue, Real velocity_tolerance, std::span<const Real> previous,
+                      std::span<const Real> transported, LocalWallTrace& local)
+{
+    const int m = cell.corners - 1;
+    if (face_nodes.size() != static_cast<std::size_t>(m)) {
+        throw std::invalid_argument("found a boundary face that is not a simplex facet");
+    }
+    std::array<std::size_t, 3> f{};
+    for (int k = 0; k < m; ++k) {
+        const auto local_node = face_nodes[static_cast<std::size_t>(k)];
+        if (local_node < 0 || local_node >= cell.corners) {
+            throw std::invalid_argument("found an invalid boundary face");
+        }
+        f[static_cast<std::size_t>(k)] = static_cast<std::size_t>(local_node);
+    }
+    const auto e1 = sub(cell.x[f[1]], cell.x[f[0]]);
+    Point normal = m == 2 ? Point{{-e1[1], e1[0], Real{0}}} : cross(e1, sub(cell.x[f[2]], cell.x[f[0]]));
+    const Real normal_length = norm(normal);
+    if (!(normal_length > Real{0}) || !std::isfinite(normal_length)) {
+        throw std::invalid_argument("found a degenerate boundary face");
+    }
+    for (auto& value : normal) value /= normal_length;
+
+    // Lattice of the velocity order on the facet and its linear pieces.
+    std::vector<std::array<Real, 3>> mu;
+    std::vector<std::array<std::size_t, 3>> pieces;
+    if (m == 2) {
+        for (int i = 0; i <= order; ++i) {
+            const Real t = static_cast<Real>(i) / order;
+            mu.push_back({{Real{1} - t, t, Real{0}}});
+            if (i < order) pieces.push_back({{static_cast<std::size_t>(i), static_cast<std::size_t>(i + 1), 0u}});
+        }
+    } else {
+        std::vector<std::vector<std::size_t>> index(static_cast<std::size_t>(order + 1));
+        for (int i = 0; i <= order; ++i) {
+            for (int j = 0; i + j <= order; ++j) {
+                index[static_cast<std::size_t>(i)].push_back(mu.size());
+                mu.push_back({{Real{1} - static_cast<Real>(i + j) / order, static_cast<Real>(i) / order,
+                               static_cast<Real>(j) / order}});
+            }
+        }
+        const auto at = [&](int i, int j) { return index[static_cast<std::size_t>(i)][static_cast<std::size_t>(j)]; };
+        for (int i = 0; i < order; ++i) {
+            for (int j = 0; i + j < order; ++j) {
+                pieces.push_back({{at(i, j), at(i + 1, j), at(i, j + 1)}});
+                if (i + j + 1 < order) pieces.push_back({{at(i + 1, j), at(i + 1, j + 1), at(i, j + 1)}});
+            }
+        }
+    }
+    std::vector<std::array<Real, kWallPieceValues>> samples(mu.size());
+    for (std::size_t q = 0; q < mu.size(); ++q) {
+        Point position{}, reference{}, w_previous{}, w_transported{};
+        Real phi = 0;
+        for (int k = 0; k < m; ++k) {
+            const Real weight = mu[q][static_cast<std::size_t>(k)];
+            const auto corner = f[static_cast<std::size_t>(k)];
+            phi += weight * previous[cell.dof[corner]];
+            for (std::size_t d = 0; d < 3u; ++d) {
+                position[d] += weight * cell.x[corner][d];
+                reference[d] += weight * cell.xi[corner][d];
+                w_previous[d] += weight * cell.previous_velocity[corner][d];
+                w_transported[d] += weight * cell.transported_velocity[corner][d];
+            }
+        }
+        if (cell.higher_order_velocity != nullptr) {
+            const spaces::FunctionSpace::Value xi{reference[0], reference[1], reference[2]};
+            const auto a = cell.higher_order_velocity->evaluate(xi, cell.previous_coefficients);
+            const auto b = cell.higher_order_velocity->evaluate(xi, cell.transported_coefficients);
+            w_previous = {{a[0], a[1], cell.corners == 4 ? a[2] : Real{0}}};
+            w_transported = {{b[0], b[1], cell.corners == 4 ? b[2] : Real{0}}};
+        }
+        if (std::abs(dot(w_previous, normal)) > velocity_tolerance ||
+            std::abs(dot(w_transported, normal)) > velocity_tolerance) {
+            return;  // a permeable facet carries no wall characteristic
+        }
+        Point mean{};
+        for (std::size_t d = 0; d < 3u; ++d) mean[d] = Real{0.5} * (w_previous[d] + w_transported[d]);
+        const Real normal_part = dot(mean, normal);
+        for (std::size_t d = 0; d < 3u; ++d) mean[d] -= normal_part * normal[d];
+        local.speed = std::max(local.speed, norm(mean));
+        samples[q] = {{position[0], position[1], position[2], phi, mean[0], mean[1], mean[2]}};
+    }
+    for (const auto& piece : pieces) {
+        for (int k = 0; k < m; ++k) {
+            const auto& sample = samples[piece[static_cast<std::size_t>(k)]];
+            local.pieces.insert(local.pieces.end(), sample.begin(), sample.end());
+        }
+    }
+    bool negative = false;
+    bool other = false;
+    for (int k = 0; k < m; ++k) {
+        const auto corner = f[static_cast<std::size_t>(k)];
+        (transported[cell.dof[corner]] - isovalue < Real{0} ? negative : other) = true;
+        for (int l = k + 1; l < m; ++l) {
+            local.diameter = std::max(local.diameter, norm(sub(cell.x[corner], cell.x[f[static_cast<std::size_t>(l)]])));
+        }
+    }
+    if (!(negative && other)) {
+        return;
+    }
+    for (int k = 0; k < m; ++k) {
+        const auto corner = f[static_cast<std::size_t>(k)];
+        const auto& x = cell.x[corner];
+        local.vertices.insert(local.vertices.end(),
+                              {static_cast<Real>(cell.dof[corner]), x[0], x[1], x[2]});
+        for (std::size_t d = 0; d < 3u; ++d) {
+            local.box[d] = std::min(local.box[d], x[d]);
+            local.box[d + 3u] = std::max(local.box[d + 3u], x[d]);
+        }
+        for (int l = k + 1; l < m; ++l) {
+            const auto other = f[static_cast<std::size_t>(l)];
+            if ((transported[cell.dof[corner]] - isovalue < Real{0}) !=
+                (transported[cell.dof[other]] - isovalue < Real{0})) {
+                local.edges.insert(local.edges.end(), {static_cast<Real>(cell.dof[corner]),
+                                                       static_cast<Real>(cell.dof[other]),
+                                                       norm(sub(x, cell.x[other]))});
+            }
+        }
+    }
+}
+
+// Replicated union-find over DOF numbers.
+struct DofSets {
+    std::map<std::size_t, std::size_t> parent;
+    std::size_t find(std::size_t a)
+    {
+        auto [it, inserted] = parent.try_emplace(a, a);
+        while (it->second != a) {
+            a = it->second;
+            it = parent.find(a);
+        }
+        return a;
+    }
+    void unite(std::size_t a, std::size_t b)
+    {
+        a = find(a);
+        b = find(b);
+        if (a != b) parent[std::max(a, b)] = std::min(a, b);
+    }
+};
+
+// Collective: the wall-characteristic values of every vertex of a cut
+// impermeable facet, identical on every rank.
+[[nodiscard]] WallTrace wallTraceKinematics(const Collective& context, const LocalWallTrace& local, int corners,
+                                            std::size_t n, Real isovalue, Real tolerance, Real dt,
+                                            std::span<const Real> previous, std::span<const Real> transported)
+{
+    std::vector<Real> extremes{local.speed, local.diameter, -local.box[0], -local.box[1], -local.box[2],
+                               local.box[3], local.box[4], local.box[5]};
+    maxInPlace(context, extremes);
+    const Real speed = extremes[0];
+    const Real diameter = extremes[1];
+    const Real radius = Real{1.5} * speed * dt + diameter;
+    const std::size_t stride = kWallPieceValues * static_cast<std::size_t>(corners);
+    const auto bounds = [&](const Real* piece, std::array<Real, 6>& box) {
+        box = {{piece[0], piece[1], piece[2], piece[0], piece[1], piece[2]}};
+        for (int k = 1; k < corners; ++k) {
+            for (std::size_t d = 0; d < 3u; ++d) {
+                box[d] = std::min(box[d], piece[static_cast<std::size_t>(k) * kWallPieceValues + d]);
+                box[d + 3u] = std::max(box[d + 3u], piece[static_cast<std::size_t>(k) * kWallPieceValues + d]);
+            }
+        }
+    };
+    std::vector<Real> near_pieces;
+    for (std::size_t p = 0; p + stride <= local.pieces.size(); p += stride) {
+        std::array<Real, 6> box{};
+        bounds(&local.pieces[p], box);
+        bool meets = true;
+        for (std::size_t d = 0; d < 3u; ++d) {
+            meets = meets && box[d] <= extremes[d + 5u] + radius && box[d + 3u] >= -extremes[d + 2u] - radius;
+        }
+        if (meets) near_pieces.insert(near_pieces.end(), &local.pieces[p], &local.pieces[p] + stride);
+    }
+    const WallPieces wall{corners, gatherAll(context, near_pieces)};
+    const auto vertices = gatherAll(context, local.vertices);
+    const auto edges = gatherAll(context, local.edges);
+
+    WallTrace trace;
+    trace.node.assign(n, 0);
+    trace.delta.assign(n, 0);
+    std::map<std::size_t, Point> position;
+    for (std::size_t v = 0; v + 4u <= vertices.size(); v += 4u) {
+        position.try_emplace(static_cast<std::size_t>(vertices[v]),
+                             Point{{vertices[v + 1u], vertices[v + 2u], vertices[v + 3u]}});
+    }
+    if (position.empty()) {
+        return trace;
+    }
+    std::vector<std::array<Real, 6>> boxes(wall.size());
+    Real smallest = std::numeric_limits<Real>::infinity();
+    Real gradient = 0;
+    for (std::size_t p = 0; p < wall.size(); ++p) {
+        bounds(wall.corner(p, 0), boxes[p]);
+        smallest = std::min(smallest, wall.diameter(p));
+        for (int a = 0; a < corners; ++a) {
+            for (int b = a + 1; b < corners; ++b) {
+                Point dv{};
+                for (std::size_t d = 0; d < 3u; ++d) dv[d] = wall.corner(p, a)[4u + d] - wall.corner(p, b)[4u + d];
+                gradient = std::max(gradient, norm(dv) / norm(sub(wall.position(p, a), wall.position(p, b))));
+            }
+        }
+    }
+    // Classical Runge-Kutta substeps of at most 1/16 cell whose truncation
+    // error, (dt |grad w| / N)^5 N / 120, stays at roundoff: a steady linear
+    // velocity then reproduces its own characteristic.
+    const Real truncation = std::pow(dt * gradient, Real{1.25}) /
+                            std::pow(Real{120} * std::numeric_limits<Real>::epsilon(), Real{0.25});
+    const int substeps = !(speed > Real{0}) ? 0
+        : static_cast<int>(std::clamp(std::ceil(std::max(Real{16} * speed * dt / smallest, truncation)),
+                                      Real{1}, Real{4096}));
+    const Real reach = Real{1.0e-2} * diameter;
+    std::map<std::size_t, Real> target;
+    for (const auto& [dof, x] : position) {
+        trace.node[dof] = 1;
+        ++trace.dofs;
+        if (signClass(transported[dof], isovalue, tolerance) == 0) {
+            continue;  // a pinned interface vertex keeps its value
+        }
+        std::vector<std::size_t> candidates;
+        for (std::size_t p = 0; p < wall.size(); ++p) {
+            bool meets = true;
+            for (std::size_t d = 0; d < 3u; ++d) {
+                meets = meets && boxes[p][d] <= x[d] + radius && boxes[p][d + 3u] >= x[d] - radius;
+            }
+            if (meets) candidates.push_back(p);
+        }
+        const auto value = previousValueAtWallFoot(wall, candidates, x, dt, substeps, reach);
+        if (value && std::isfinite(*value)) {
+            target.emplace(dof, *value - isovalue);
+        } else {
+            ++trace.unresolved;
+        }
+    }
+    // One factor per connected wall trace leaves its roots in place.  It is the
+    // ratio of the transported to the characteristic slopes across the roots,
+    // so a shifted trace keeps its values and a rescaled one its scale.
+    DofSets sets;
+    for (std::size_t e = 0; e + 3u <= edges.size(); e += 3u) {
+        sets.unite(static_cast<std::size_t>(edges[e]), static_cast<std::size_t>(edges[e + 1u]));
+    }
+    std::map<std::size_t, std::array<Real, 2>> slopes;
+    for (std::size_t e = 0; e + 3u <= edges.size(); e += 3u) {
+        const auto a = static_cast<std::size_t>(edges[e]);
+        const auto b = static_cast<std::size_t>(edges[e + 1u]);
+        const auto ta = target.find(a);
+        const auto tb = target.find(b);
+        if (ta == target.end() || tb == target.end()) continue;
+        auto& sums = slopes[sets.find(a)];
+        sums[0] += std::abs(transported[a] - transported[b]) / edges[e + 2u];
+        sums[1] += std::abs(ta->second - tb->second) / edges[e + 2u];
+    }
+    for (const auto& [dof, s] : target) {
+        const auto found = slopes.find(sets.find(dof));
+        const Real scale = found != slopes.end() ? found->second[0] / found->second[1] : Real{1};
+        const Real factor = scale > Real{0} && std::isfinite(scale) ? scale : Real{1};
+        trace.delta[dof] = factor * s - (transported[dof] - isovalue);
+    }
+    return trace;
+}
+
+// Connected interface components: the edges of a supported cell that change
+// sign in either state belong together, and so do all cells around a node
+// that the interface swept over during the step (its sign changed).  Every
+// DOF on such an edge gets the smallest label of its edges.  Labels are
+// identical on every rank.
+[[nodiscard]] std::vector<long long> interfaceComponents(const Collective& context,
+                                                         const std::vector<SimplexCell>& cells,
+                                                         std::span<const Real> previous,
+                                                         std::span<const Real> transported,
+                                                         Real isovalue, std::size_t n)
+{
+    std::vector<Real> local;
+    for (const auto& cell : cells) {
+        std::vector<std::size_t> edges;
+        for (int a = 0; a < cell.corners; ++a) {
+            for (int b = a + 1; b < cell.corners; ++b) {
+                const auto i = cell.dof[static_cast<std::size_t>(a)];
+                const auto j = cell.dof[static_cast<std::size_t>(b)];
+                const bool cut = ((previous[i] - isovalue < 0) != (previous[j] - isovalue < 0)) ||
+                                 ((transported[i] - isovalue < 0) != (transported[j] - isovalue < 0));
+                if (cut) {
+                    edges.push_back(std::min(i, j));
+                    edges.push_back(std::max(i, j));
+                }
+            }
+        }
+        for (int a = 0; a < cell.corners && !edges.empty(); ++a) {
+            const auto i = cell.dof[static_cast<std::size_t>(a)];
+            if ((previous[i] - isovalue < 0) != (transported[i] - isovalue < 0)) {
+                edges.push_back(i);
+                edges.push_back(i);
+            }
+        }
+        if (!edges.empty()) {
+            local.push_back(static_cast<Real>(edges.size() / 2u));
+            for (const auto dof : edges) local.push_back(static_cast<Real>(dof));
+        }
+    }
+    const auto all = gatherAll(context, local);
+    // An edge is the pair (i, j); unite the edges of each cell through their
+    // first endpoint pairs encoded as one key.
+    std::map<std::pair<std::size_t, std::size_t>, std::size_t> edge_id;
+    std::vector<std::size_t> parent;
+    const auto find = [&](std::size_t e) {
+        while (parent[e] != e) e = parent[e] = parent[parent[e]];
+        return e;
+    };
+    for (std::size_t r = 0; r < all.size();) {
+        const auto count = static_cast<std::size_t>(all[r++]);
+        std::size_t first = 0;
+        for (std::size_t e = 0; e < count; ++e, r += 2u) {
+            const auto key = std::make_pair(static_cast<std::size_t>(all[r]), static_cast<std::size_t>(all[r + 1u]));
+            const auto [it, inserted] = edge_id.try_emplace(key, parent.size());
+            if (inserted) parent.push_back(parent.size());
+            if (e == 0) {
+                first = it->second;
+            } else {
+                const auto a = find(first);
+                const auto b = find(it->second);
+                if (a != b) parent[std::max(a, b)] = std::min(a, b);
+            }
+        }
+    }
+    std::vector<long long> label(n, -1);
+    for (const auto& [key, id] : edge_id) {
+        const auto root = static_cast<long long>(find(id));
+        for (const auto dof : {key.first, key.second}) {
+            label[dof] = label[dof] < 0 ? root : std::min(label[dof], root);
+        }
+    }
+    return label;
+}
+
 // A read-only endpoint measurement stops after the first trace integration.
 LevelSetKinematicReconciliationResult integrateKinematicStep(
     const assembly::IMeshAccess& mesh,
@@ -639,6 +1161,7 @@ LevelSetKinematicReconciliationResult integrateKinematicStep(
                     throw std::invalid_argument("found incomplete cell geometry");
                 }
                 SimplexCell cell;
+                cell.id = cell_id;
                 cell.corners = corners;
                 const auto phi_cell = level_set_dofs.getDofMap().getCellDofs(cell_id);
                 if (phi_cell.size() != static_cast<std::size_t>(corners)) {
@@ -776,6 +1299,43 @@ LevelSetKinematicReconciliationResult integrateKinematicStep(
         return result;
     }
 
+    // ---- wall-trace kinematics (collective) ----------------------------------
+    LocalWallTrace local_wall;
+    try {
+        Real velocity_scale = 0;
+        for (const auto value : previous_velocity) velocity_scale = std::max(velocity_scale, std::abs(value));
+        for (const auto value : transported_velocity) velocity_scale = std::max(velocity_scale, std::abs(value));
+        const Real velocity_tolerance = std::sqrt(std::numeric_limits<Real>::epsilon()) * velocity_scale;
+        std::unordered_map<GlobalIndex, std::size_t> owned;
+        for (std::size_t c = 0; c < cells.size(); ++c) owned.emplace(cells[c].id, c);
+        const auto& reference = elements::ReferenceElement::shared(
+            dimension == 2 ? ElementType::Triangle3 : ElementType::Tetra4);
+        mesh.forEachBoundaryFace(-1, [&](GlobalIndex face, GlobalIndex cell_id) {
+            const auto found = owned.find(cell_id);
+            if (found == owned.end()) return;
+            const auto& cell = cells[found->second];
+            const auto local_face = mesh.getLocalFaceIndex(face, cell_id);
+            if (local_face < 0 || static_cast<std::size_t>(local_face) >= reference.num_faces()) {
+                throw std::invalid_argument("found a boundary face outside its cell");
+            }
+            const int order = cell.higher_order_velocity ? std::max(1, velocity_space->polynomial_order(cell_id)) : 1;
+            collectWallFacet(cell, reference.face_nodes(static_cast<std::size_t>(local_face)), order, isovalue,
+                             velocity_tolerance, previous_level_set, transported_level_set, local_wall);
+        });
+    } catch (const std::exception& error) {
+        local_failure = error.what();
+    }
+    if (!allTrue(context, local_failure.empty())) {
+        result.diagnostic = local_failure.empty() ? "another rank failed to sample the impermeable walls"
+                                                  : "level-set kinematic reconciliation " + local_failure;
+        return result;
+    }
+    const auto wall = wallTraceKinematics(context, local_wall, dimension, n, isovalue, tolerance, dt,
+                                          previous_level_set, transported_level_set);
+    const auto component = interfaceComponents(context, cells, previous_level_set, transported_level_set, isovalue, n);
+    result.wall_trace_dofs = wall.dofs;
+    result.wall_trace_unresolved_dofs = wall.unresolved;
+
     // ---- fixed point on the reconciled endpoint geometry --------------------
     std::vector<Real> iterate(transported_level_set.begin(), transported_level_set.end());
     std::vector<Real> candidate(n, 0.0);
@@ -849,9 +1409,50 @@ LevelSetKinematicReconciliationResult integrateKinematicStep(
 
         return true;
     };
+    // A node may not change its sign class and may not move toward the
+    // isovalue by more than half of its transported distance: the cut points
+    // of its edges then keep their order and stay away from the vertex, so
+    // neither the cut topology nor its degeneracy class changes.
+    const auto admissible = [&](std::size_t i, Real proposed) {
+        const Real distance = transported_level_set[i] - isovalue;
+        const Real moved = distance + proposed;
+        if (std::isfinite(moved) &&
+            signClass(transported_level_set[i] + proposed, isovalue, tolerance) == transported_class[i] &&
+            std::abs(moved) >= Real{0.5} * std::abs(distance)) {
+            return proposed;
+        }
+        const Real halfway = Real{-0.5} * distance;
+        return signClass(transported_level_set[i] + halfway, isovalue, tolerance) ==
+                       transported_class[i]
+                   ? halfway
+                   : Real{0.0};
+    };
+    // A wall-trace node takes its wall-characteristic value within the same limits.
+    std::vector<char> wall_node = wall.node;
+    std::vector<Real> wall_delta(n, 0);
+    for (std::size_t i = 0; i < n; ++i) {
+        if (wall_node[i] && transported_class[i] != 0) {
+            wall_delta[i] = admissible(i, wall.delta[i]);
+            result.wall_trace_limited_dofs += wall_delta[i] != wall.delta[i] ? 1u : 0u;
+        }
+    }
+    const auto previous_volume = computeLevelSetCutCellVolume(
+        mesh, level_set_dofs, volume_options, previous_level_set);
+    Real previous_flux = 0.0;
+    for (const auto value : previous.f) {
+        previous_flux += value;
+    }
+    const auto solver_tolerance = [&](Real reconciled_volume, Real correction_volume) {
+        const Real volume_scale = std::abs(previous_volume.negative_volume) + std::abs(reconciled_volume)
+                                + dt * (std::abs(previous_flux) + std::abs(current_flux)) + correction_volume;
+        return kGeometryRelativeTolerance * correction_volume
+             + Real{128} * std::numeric_limits<Real>::epsilon() * volume_scale;
+    };
     Real prior_change = std::numeric_limits<Real>::infinity();
     Real correction_volume = 0;
     Real unplaced_volume = 0;
+    std::map<long long, Real> unplaced_by_interface;
+    std::vector<char> limited(n, 0);
     for (int iteration = 0; iteration < kMaxGeometryIterations; ++iteration) {
         InterfaceSums current(n);
         if (!evaluate_endpoint(iterate, current)) {
@@ -861,26 +1462,8 @@ LevelSetKinematicReconciliationResult integrateKinematicStep(
             result.transported_interface_flux = current_flux;
         }
         // Lumped correction of every node that carries interface measure.
-        // A node may not change its sign class and may not move toward the
-        // isovalue by more than half of its transported distance: the cut
-        // points of its edges then keep their order and stay away from the
-        // vertex, so neither the cut topology nor its degeneracy class
-        // changes.  The limited part of its correction is moved to the
-        // available tests on its connected cut-cell patch.
-        const auto admissible = [&](std::size_t i, Real proposed) {
-            const Real distance = transported_level_set[i] - isovalue;
-            const Real moved = distance + proposed;
-            if (std::isfinite(moved) &&
-                signClass(transported_level_set[i] + proposed, isovalue, tolerance) == transported_class[i] &&
-                std::abs(moved) >= Real{0.5} * std::abs(distance)) {
-                return proposed;
-            }
-            const Real halfway = Real{-0.5} * distance;
-            return signClass(transported_level_set[i] + halfway, isovalue, tolerance) ==
-                           transported_class[i]
-                       ? halfway
-                       : Real{0.0};
-        };
+        // The limited part of its correction is moved to the available tests
+        // on its connected cut-cell patch.
         unplaced_volume = 0;
         skipped = 0u;
         redistributed = 0u;
@@ -891,6 +1474,7 @@ LevelSetKinematicReconciliationResult integrateKinematicStep(
         bool any_limited = false;
         for (std::size_t i = 0; i < n; ++i) {
             gbar[i] = Real{0.5} * (previous.g[i] + current.g[i]);
+            delta[i] = wall_delta[i];
             if (!(gbar[i] > Real{0.0})) {
                 continue;
             }
@@ -902,17 +1486,22 @@ LevelSetKinematicReconciliationResult integrateKinematicStep(
                 ++skipped;
                 continue;
             }
-            if (transported_class[i] == 0) {
-                // A pinned interface vertex carries flux even though its
-                // coefficient cannot move. Its other trace nodes inherit it.
-                deficit[i] = gbar[i] * step;
+            if (transported_class[i] == 0 || wall_node[i]) {
+                // A pinned interface vertex or a wall-trace node carries flux
+                // even though its coefficient follows another law. Its other
+                // trace nodes inherit the rest of its share.
+                deficit[i] = gbar[i] * (step - delta[i]);
                 any_limited = any_limited || deficit[i] != 0;
                 continue;
             }
+            // A node once limited stops receiving shares, so that its
+            // change stays continuous in the geometry and the iteration
+            // cannot cycle between two active sets.
             delta[i] = admissible(i, step);
-            if (delta[i] == step) {
+            if (delta[i] == step && !limited[i]) {
                 eligible[i] = 1;
             } else {
+                limited[i] = 1;
                 deficit[i] = gbar[i] * (step - delta[i]);
                 any_limited = true;
             }
@@ -1015,7 +1604,10 @@ LevelSetKinematicReconciliationResult integrateKinematicStep(
         // A frozen sliver can surround one of its vertices with other frozen
         // vertices. Carry its unplaced volume outward, one cut-cell ring at a
         // time, until it reaches an admissible trace. Never cross an uncut cell
-        // or change the existing correction of a frozen node.
+        // or change the existing correction of a frozen node. What remains is
+        // summed over its connected interface: opposite parts of one interface
+        // cancel, those of separate interfaces cannot.
+        unplaced_by_interface.clear();
         for (std::size_t source = 0; source < n; ++source) {
             Real remaining = unplaced[source];
             if (remaining == 0) continue;
@@ -1057,10 +1649,12 @@ LevelSetKinematicReconciliationResult integrateKinematicStep(
                 protect_cut_classes(delta, added, [&](auto, Real rejected) { remaining += rejected; });
                 for (std::size_t i = 0; i < n; ++i) delta[i] += added[i];
             }
-            unplaced_volume += std::abs(remaining);
+            unplaced_by_interface[component[source] >= 0 ? component[source]
+                                                          : -1 - static_cast<long long>(source)] += remaining;
             if (remaining == 0) ++redistributed;
             else ++skipped;
         }
+        for (const auto& [label, remaining] : unplaced_by_interface) unplaced_volume += std::abs(remaining);
         result.degeneracy_frozen_dof_indices.clear();
         for (std::size_t i = 0; i < n; ++i) {
             if (frozen_flag[i] > Real{0.0}) {
@@ -1098,8 +1692,27 @@ LevelSetKinematicReconciliationResult integrateKinematicStep(
         iterate.swap(candidate);
         result.iterations = iteration + 1;
         if (change <= std::max(kGeometryRelativeTolerance * correction, rounding_floor)) {
-            result.converged = true;
-            break;
+            // The volume budget takes precedence: wall-trace nodes of a connected
+            // interface that cannot otherwise meet it join the interior correction.
+            const auto measured = computeLevelSetCutCellVolume(
+                mesh, level_set_dofs, volume_options, std::span<const Real>(iterate.data(), iterate.size()));
+            const Real limit = solver_tolerance(measured.negative_volume, correction_volume);
+            bool released = false;
+            for (std::size_t i = 0; i < n; ++i) {
+                const auto found = component[i] >= 0 ? unplaced_by_interface.find(component[i])
+                                                     : unplaced_by_interface.end();
+                if (wall_node[i] && found != unplaced_by_interface.end() && !(std::abs(found->second) <= limit)) {
+                    wall_node[i] = 0;
+                    wall_delta[i] = 0;
+                    ++result.wall_trace_released_dofs;
+                    released = true;
+                }
+            }
+            if (!released) {
+                result.converged = true;
+                break;
+            }
+            prior_change = std::numeric_limits<Real>::infinity();
         }
     }
     InterfaceSums final_sums(n);
@@ -1111,10 +1724,6 @@ LevelSetKinematicReconciliationResult integrateKinematicStep(
     result.sign_preserving_redistributed_dofs = redistributed;
     result.degeneracy_frozen_dofs = frozen;
 
-    Real previous_flux = 0.0;
-    for (const auto value : previous.f) {
-        previous_flux += value;
-    }
     result.previous_interface_flux = previous_flux;
     result.current_interface_flux = current_flux;
     result.kinematic_volume_change = Real{0.5} * dt * (previous_flux + current_flux);
@@ -1128,8 +1737,6 @@ LevelSetKinematicReconciliationResult integrateKinematicStep(
     }
 
     // ---- exact sharp volumes for the report ---------------------------------
-    const auto previous_volume = computeLevelSetCutCellVolume(
-        mesh, level_set_dofs, volume_options, previous_level_set);
     const auto transported_volume = computeLevelSetCutCellVolume(
         mesh, level_set_dofs, volume_options, transported_level_set);
     const auto reconciled_volume = computeLevelSetCutCellVolume(
@@ -1150,10 +1757,7 @@ LevelSetKinematicReconciliationResult integrateKinematicStep(
         (reconciled_volume.negative_volume - previous_volume.negative_volume) -
         result.kinematic_volume_change;
 
-    const Real volume_scale = std::abs(previous_volume.negative_volume) + std::abs(reconciled_volume.negative_volume)
-                            + dt * (std::abs(previous_flux) + std::abs(current_flux)) + correction_volume;
-    const Real solver_volume_tolerance = kGeometryRelativeTolerance * correction_volume
-                                       + Real{128} * std::numeric_limits<Real>::epsilon() * volume_scale;
+    const Real solver_volume_tolerance = solver_tolerance(reconciled_volume.negative_volume, correction_volume);
     result.volume_tolerance = std::abs(temporal_volume_remainder) + solver_volume_tolerance;
     if (!std::isfinite(result.reconciled_volume_error) || !std::isfinite(result.volume_tolerance) ||
         !std::isfinite(unplaced_volume)) {

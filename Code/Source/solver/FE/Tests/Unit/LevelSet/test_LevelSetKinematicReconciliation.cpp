@@ -848,6 +848,141 @@ TEST(LevelSetKinematicReconciliation, FreezingDoesNotSpreadThroughRedistribution
     }
 }
 
+namespace {
+
+// Root of the P1 trace on the wall where coordinate `axis` is zero, measured
+// along the other coordinate `along` of a 2D mesh.
+FE::Real wallRoot(const SimplexSystem& s, const std::vector<FE::Real>& values, int axis, int along)
+{
+    const auto* map = s.phiDofs().getEntityDofMap();
+    std::vector<std::pair<FE::Real, FE::Real>> trace;
+    for (FE::GlobalIndex v = 0; v < map->numVertices(); ++v) {
+        const auto x = s.system.meshAccess().getNodeCoordinates(v);
+        if (x[static_cast<std::size_t>(axis)] == 0.0) {
+            trace.emplace_back(x[static_cast<std::size_t>(along)],
+                               values[static_cast<std::size_t>(map->getVertexDofs(v).front())]);
+        }
+    }
+    std::sort(trace.begin(), trace.end());
+    for (std::size_t k = 0; k + 1 < trace.size(); ++k) {
+        const auto [a, fa] = trace[k];
+        const auto [b, fb] = trace[k + 1];
+        if ((fa < 0.0) != (fb < 0.0)) {
+            return a + (b - a) * fa / (fa - fb);
+        }
+    }
+    ADD_FAILURE() << "no root on the wall";
+    return 0.0;
+}
+
+} // namespace
+
+TEST(LevelSetKinematicReconciliation, KeepsAnExactlyTransportedWallRoot)
+{
+    // At rest the transported field tilts only off the floor: its floor trace
+    // is exact.  Restoring the off-floor coefficient recovers both the area and
+    // the wall trace; the floor root must not move to 0.2528 or 0.2472.
+    SimplexSystem s(buildUnitTriangle(), 2);
+    const auto previous = s.scalar([](const Point& x) { return x[0] - 0.25; });
+    const auto zero = s.vector([](const Point&) { return Point{}; });
+    for (const FE::Real epsilon : {0.01, -0.01}) {
+        const auto transported = s.scalar([&](const Point& x) { return x[0] - 0.25 + epsilon * x[1]; });
+        std::vector<FE::Real> endpoint;
+        const auto result = s.reconcile(1.0, previous, transported, zero, zero, endpoint);
+        ASSERT_TRUE(result.success) << result.diagnostic;
+        EXPECT_EQ(result.wall_trace_dofs, 3u);
+        EXPECT_NEAR(wallRoot(s, endpoint, 1, 0), 0.25, 1.0e-14);
+        EXPECT_NEAR(s.negativeVolume(endpoint), 0.21875, 1.0e-14);
+    }
+}
+
+TEST(LevelSetKinematicReconciliation, FollowsTheWallCharacteristicOfAStrainField)
+{
+    // u = (x, -y) is tangential on x = 0 and y = 0 and carries x + y - 1/4
+    // exactly into exp(-t) x + exp(t) y - 1/4, so the wall roots obey s' = s
+    // and s' = -s.  An exact endpoint must keep both.
+    SimplexSystem s(buildUnitTriangle(), 2);
+    const FE::Real dt = 0.25;
+    const auto previous = s.scalar([](const Point& x) { return x[0] + x[1] - 0.25; });
+    const auto transported = s.scalar([&](const Point& x) {
+        return std::exp(-dt) * x[0] + std::exp(dt) * x[1] - 0.25;
+    });
+    const auto strain = s.vector([](const Point& x) { return Point{x[0], -x[1], 0.0}; });
+    std::vector<FE::Real> endpoint;
+    const auto result = s.reconcile(dt, previous, transported, strain, strain, endpoint);
+    ASSERT_TRUE(result.success) << result.diagnostic;
+    EXPECT_NEAR(wallRoot(s, endpoint, 1, 0), 0.25 * std::exp(dt), 1.0e-12);
+    EXPECT_NEAR(wallRoot(s, endpoint, 0, 1), 0.25 * std::exp(-dt), 1.0e-12);
+}
+
+TEST(LevelSetKinematicReconciliation, KeepsTheWallCharacteristicUnderAnInteriorTransportError)
+{
+    // The same strain field on a mesh with interior trace nodes.  An interior
+    // transport error that vanishes on both walls is removed by the interior
+    // nodes alone; the wall roots stay on their characteristics.
+    SimplexSystem s(buildStructuredTriangleMesh(8), 2);
+    const FE::Real dt = 0.05;
+    const auto exact = [](FE::Real t) {
+        return [t](const Point& x) { return std::exp(-t) * x[0] + std::exp(t) * x[1] - 0.5; };
+    };
+    const auto previous = s.scalar(exact(0.0));
+    const auto transported = s.scalar([&](const Point& x) { return exact(dt)(x) + 0.02 * x[0] * x[1]; });
+    const auto strain = s.vector([](const Point& x) { return Point{x[0], -x[1], 0.0}; });
+    std::vector<FE::Real> endpoint;
+    const auto result = s.reconcile(dt, previous, transported, strain, strain, endpoint);
+    ASSERT_TRUE(result.success) << result.diagnostic;
+    EXPECT_GT(std::abs(result.transported_volume_error), 1.0e-6);
+    EXPECT_LE(std::abs(result.reconciled_volume_error), result.volume_tolerance);
+    EXPECT_NEAR(wallRoot(s, endpoint, 1, 0), 0.5 * std::exp(dt), 1.0e-12);
+    EXPECT_NEAR(wallRoot(s, endpoint, 0, 1), 0.5 * std::exp(-dt), 1.0e-12);
+}
+
+TEST(LevelSetKinematicReconciliation, KeepsAnExactWallTraceOnTetrahedra)
+{
+    // At rest an interior transport error that vanishes on the cube surface
+    // leaves every wall trace exact.  The interior nodes alone restore the
+    // volume; every root on a boundary edge stays.
+    SimplexSystem s(buildStructuredTetraMesh(4), 3);
+    const auto plane = [](const Point& x) { return 0.48 * x[0] + 0.6 * x[1] + 0.64 * x[2] - 0.8713; };
+    const auto previous = s.scalar(plane);
+    const auto transported = s.scalar([&](const Point& x) {
+        return plane(x) + 0.8 * x[0] * (1 - x[0]) * x[1] * (1 - x[1]) * x[2] * (1 - x[2]);
+    });
+    const auto zero = s.vector([](const Point&) { return Point{}; });
+    std::vector<FE::Real> endpoint;
+    const auto result = s.reconcile(1.0, previous, transported, zero, zero, endpoint);
+    ASSERT_TRUE(result.success) << result.diagnostic;
+    EXPECT_GT(result.wall_trace_dofs, 0u);
+    EXPECT_EQ(result.wall_trace_unresolved_dofs, 0u);
+    EXPECT_GT(std::abs(result.transported_volume_error), 1.0e-5);
+    EXPECT_NEAR(s.negativeVolume(endpoint), s.negativeVolume(previous), result.volume_tolerance);
+    // Edges lying in a face of the cube.
+    const auto& mesh = s.system.meshAccess();
+    const auto* map = s.phiDofs().getEntityDofMap();
+    std::size_t roots = 0u;
+    std::vector<FE::GlobalIndex> nodes;
+    mesh.forEachOwnedCell([&](FE::GlobalIndex cell) {
+        mesh.getCellNodes(cell, nodes);
+        for (std::size_t a = 0; a < 4u; ++a) {
+            for (std::size_t b = a + 1; b < 4u; ++b) {
+                const auto xa = mesh.getNodeCoordinates(nodes[a]);
+                const auto xb = mesh.getNodeCoordinates(nodes[b]);
+                bool on_face = false;
+                for (std::size_t d = 0; d < 3u; ++d) {
+                    on_face = on_face || (xa[d] == xb[d] && (xa[d] == 0.0 || xa[d] == 1.0));
+                }
+                const auto i = static_cast<std::size_t>(map->getVertexDofs(nodes[a]).front());
+                const auto j = static_cast<std::size_t>(map->getVertexDofs(nodes[b]).front());
+                if (!on_face || (transported[i] < 0.0) == (transported[j] < 0.0)) continue;
+                ++roots;
+                EXPECT_NEAR(endpoint[i] / (endpoint[i] - endpoint[j]),
+                            transported[i] / (transported[i] - transported[j]), 1.0e-14);
+            }
+        }
+    });
+    EXPECT_GT(roots, 0u);
+}
+
 TEST(LevelSetKinematicReconciliation, RejectsNonSimplexCellsAndBadInput)
 {
     // Quadrilateral background mesh.

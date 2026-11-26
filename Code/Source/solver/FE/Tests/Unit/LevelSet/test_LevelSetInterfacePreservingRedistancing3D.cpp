@@ -424,8 +424,11 @@ TEST(LevelSetInterfacePreservingRedistancing3D,
             EXPECT_LT(restored_change.max_crossing_shift, 0.2 * h) << degrees << " n=" << n;
             // The contact line and the discrete contact angle of the wall
             // cells stay put: the surface is continued across the wall at its
-            // open edges, and the restoration takes back the crossings.
-            EXPECT_LT(restored_change.max_open_end_shift, 0.05 * h) << degrees << " n=" << n;
+            // open edges, and the restoration takes back the crossings.  At
+            // rest the wall trace keeps its roots exactly, unless a frozen
+            // cell was reverted to its input value on part of the wall.
+            EXPECT_LT(restored_change.max_open_end_shift, reverted == 0u ? 1.0e-12 * h : 0.05 * h)
+                << degrees << " n=" << n;
             const auto angle_before = meanWallCellAngle(s, distorted);
             const auto angle_after = meanWallCellAngle(s, restored);
             std::cout << "[ redistancing 3D ] theta=" << degrees << " n=" << n

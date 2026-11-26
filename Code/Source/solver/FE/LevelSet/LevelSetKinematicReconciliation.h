@@ -56,6 +56,16 @@ struct LevelSetKinematicReconciliationResult {
     // The frozen DOFs themselves (ascending field DOF numbers, identical on
     // every rank).
     std::vector<std::size_t> degeneracy_frozen_dof_indices{};
+    // Vertices of impermeable boundary facets cut by the transported level
+    // set, which follow the wall characteristic; those whose characteristic
+    // left the sampled impermeable wall (they keep their transported value);
+    // and those whose wall value was limited like any other node.
+    // Wall-trace nodes of a connected interface whose volume budget cannot
+    // be met otherwise take part in the interior correction instead.
+    std::size_t wall_trace_dofs{0u};
+    std::size_t wall_trace_unresolved_dofs{0u};
+    std::size_t wall_trace_limited_dofs{0u};
+    std::size_t wall_trace_released_dofs{0u};
     Real previous_negative_volume{0.0};
     Real transported_negative_volume{0.0};
     Real reconciled_negative_volume{0.0};
@@ -137,7 +147,22 @@ struct LevelSetKinematicEndpoint {
  * would change. If those nodes are blocked, the unused share follows successive
  * connected cut-cell rings to available trace nodes. Pinned interface vertices
  * retain their coefficients and contribute their complete flux in this allocation.
+ * Volume that no node can take is summed over its connected interface.
  * The cut topology of the accepted state is preserved.
+ *
+ * On a boundary facet where w . n vanishes at both time levels the trace of
+ * phi is transported by the tangential velocity alone, so a root on that wall
+ * moves along the wall characteristic (s' = w_parallel on a 2D wall), whatever
+ * the interior interface does.  Every vertex of such a facet cut by the
+ * transported level set takes the previous level set at the foot of its
+ * backward wall characteristic over the step (step-mean tangential velocity,
+ * sampled at the Lagrange points of the velocity order), scaled by one positive
+ * factor per connected wall trace (the ratio of the transported to the
+ * characteristic slopes across its roots), which leaves every root in place.  These vertices keep that value; the rest of their
+ * share goes to the other trace nodes.  A vertex whose characteristic leaves
+ * the sampled impermeable wall keeps its transported value.  The volume budget
+ * takes precedence: if a connected interface cannot meet it with its wall
+ * traces held, its wall-trace nodes join the interior correction.
  *
  * Supported cells are affine Triangle3 (2D) and Tetra4 (3D) with one scalar
  * level-set DOF per vertex and no other level-set DOFs. Corner-only linear
