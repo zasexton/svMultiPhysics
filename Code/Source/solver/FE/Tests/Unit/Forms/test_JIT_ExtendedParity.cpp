@@ -662,7 +662,7 @@ TEST(JITExtendedParityTest, LowerDimensionalCurvedPiolaVectorBasisGradientsFailC
         CurvedSingleCellMeshAccess mesh(c.geometry_type, c.name);
 
         {
-            spaces::HDivSpace space(c.space_type, /*order=*/0, BasisType::RaviartThomas);
+            spaces::HDivSpace space(c.space_type, /*order=*/0, BasisType::RaviartThomas, /*ambient_dimension=*/3);
             auto dof_map = createSingleTetraDofMap(static_cast<LocalIndex>(space.dofs_per_element()));
             const auto u = TrialFunction(space, "u");
             const auto v = TestFunction(space, "v");
@@ -677,7 +677,7 @@ TEST(JITExtendedParityTest, LowerDimensionalCurvedPiolaVectorBasisGradientsFailC
         }
 
         {
-            spaces::HCurlSpace space(c.space_type, /*order=*/0, BasisType::Nedelec);
+            spaces::HCurlSpace space(c.space_type, /*order=*/0, BasisType::Nedelec, /*ambient_dimension=*/3);
             auto dof_map = createSingleTetraDofMap(static_cast<LocalIndex>(space.dofs_per_element()));
             const auto u = TrialFunction(space, "u");
             const auto v = TestFunction(space, "v");
