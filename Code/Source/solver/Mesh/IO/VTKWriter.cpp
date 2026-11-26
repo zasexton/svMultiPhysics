@@ -59,6 +59,7 @@
 #include <vtkDataSetAttributes.h>
 
 #include <algorithm>
+#include <array>
 #include <cstdint>
 #include <functional>
 #include <iomanip>
@@ -1496,6 +1497,16 @@ static std::vector<vtkIdType> reorder_high_order_to_vtk(const MeshBase& mesh,
     }
   }
 
+  if (shape.family == CellFamily::Hex && face_mids.size() == 6u) {
+    // face_mids follow the mesh faces z-, z+, y-, x+, y+, x-; VTK numbers
+    // the face centers x-, x+, y-, y+, z-, z+.
+    const std::vector<vtkIdType> mesh_order = face_mids;
+    constexpr std::array<std::size_t, 6> kMeshFaceOfVtkSlot{5, 3, 2, 4, 0, 1};
+    for (std::size_t k = 0; k < 6u; ++k) {
+      face_mids[k] = mesh_order[kMeshFaceOfVtkSlot[k]];
+    }
+  }
+
   std::vector<vtkIdType> out; out.reserve(n_vertices);
   out.insert(out.end(), corners.begin(), corners.end());
   out.insert(out.end(), edge_mids.begin(), edge_mids.end());
@@ -1831,6 +1842,12 @@ void VTKWriter::create_vtk_cells(const MeshBase& mesh, vtkDataSet* dataset) {
       if (should_use_geometric_reorder_for_vtk_quadratic(mesh, static_cast<index_t>(c), vertices_ptr, n_vertices, shape)) {
         auto reordered = reorder_high_order_to_vtk(mesh, static_cast<index_t>(c), vertices_ptr, n_vertices, shape);
         for (auto vid : reordered) cell_vertices->InsertNextId(vid);
+      } else if (vtk_type == VTK_TRIQUADRATIC_HEXAHEDRON && n_vertices == 27u) {
+        // Mesh face centers z-, z+, y-, x+, y+, x- go to VTK slots x-, x+, y-, y+, z-, z+.
+        constexpr std::array<std::size_t, 6> kMeshSlotOfVtkFaceCenter{25, 23, 22, 24, 20, 21};
+        for (size_t i = 0; i < 20u; ++i) cell_vertices->InsertNextId(vertices_ptr[i]);
+        for (const auto slot : kMeshSlotOfVtkFaceCenter) cell_vertices->InsertNextId(vertices_ptr[slot]);
+        cell_vertices->InsertNextId(vertices_ptr[26]);
       } else {
         for (size_t i = 0; i < n_vertices; ++i) cell_vertices->InsertNextId(vertices_ptr[i]);
       }

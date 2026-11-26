@@ -8,6 +8,7 @@
 #include "tinyxml2.h"
 
 #ifdef MESH_HAS_VTK
+#include "Mesh/IO/VTKReader.h"
 #include "Mesh/IO/VTKWriter.h"
 #endif
 
@@ -15,7 +16,9 @@
 #include <mpi.h>
 #endif
 
+#include <array>
 #include <cstdlib>
+#include <fstream>
 #include <chrono>
 #include <filesystem>
 #include <memory>
@@ -1018,3 +1021,76 @@ TEST(MeshPartitionWeighting, CellWeightsRejectMissingOrNonScalarFields)
   svmp::MeshBase empty;
   EXPECT_TRUE(svmp::startup_partition_cell_weights(empty, weights).empty());
 }
+
+#ifdef MESH_HAS_VTK
+TEST(MeshVTKIO, TriquadraticHexahedronFaceCentersFollowTheMeshOrder)
+{
+  // VTK numbers the face centers of a triquadratic hexahedron x-, x+, y-, y+,
+  // z-, z+ (slots 20-25); the mesh and FE Hex27 order is z-, z+, y-, x+, y+, x-.
+  using Point = std::array<svmp::real_t, 3>;
+  const std::array<Point, 27> mesh_order{{
+      {-1, -1, -1}, {1, -1, -1}, {1, 1, -1}, {-1, 1, -1},
+      {-1, -1, 1},  {1, -1, 1},  {1, 1, 1},  {-1, 1, 1},
+      {0, -1, -1},  {1, 0, -1},  {0, 1, -1}, {-1, 0, -1},
+      {0, -1, 1},   {1, 0, 1},   {0, 1, 1},  {-1, 0, 1},
+      {-1, -1, 0},  {1, -1, 0},  {1, 1, 0},  {-1, 1, 0},
+      {0, 0, -1},   {0, 0, 1},   {0, -1, 0}, {1, 0, 0}, {0, 1, 0}, {-1, 0, 0},
+      {0, 0, 0}}};
+  const auto expect_mesh_order = [](const svmp::MeshBase& mesh, const std::array<Point, 27>& expected) {
+    ASSERT_EQ(mesh.n_cells(), 1u);
+    const auto vertices = mesh.cell_vertices(0);
+    ASSERT_EQ(vertices.size(), 27u);
+    for (std::size_t k = 0; k < 27u; ++k) {
+      for (std::size_t d = 0; d < 3u; ++d) {
+        EXPECT_EQ(mesh.X_ref()[3u * static_cast<std::size_t>(vertices[k]) + d], expected[k][d])
+            << "node " << k << " component " << d;
+      }
+    }
+  };
+
+  for (const bool curved : {false, true}) {
+    SCOPED_TRACE(curved ? "curved" : "straight");
+    auto expected = mesh_order;
+    if (curved) {
+      expected[21][2] = 1.25;  // the z+ face center bulges, so no geometric reordering applies
+    }
+    // A file in VTK order.
+    const std::array<std::size_t, 27> vtk_slot_to_mesh{
+        0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 25, 23, 22, 24, 20, 21, 26};
+    const auto path = std::filesystem::temp_directory_path() /
+                      ("hex27_vtk_order_" + std::to_string(curved) + "_" +
+                       std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()) + ".vtu");
+    {
+      std::ofstream out(path);
+      out << "<?xml version=\"1.0\"?>\n"
+          << "<VTKFile type=\"UnstructuredGrid\" version=\"0.1\" byte_order=\"LittleEndian\">\n"
+          << "<UnstructuredGrid><Piece NumberOfPoints=\"27\" NumberOfCells=\"1\">\n"
+          << "<Points><DataArray type=\"Float64\" NumberOfComponents=\"3\" format=\"ascii\">\n";
+      for (const auto slot : vtk_slot_to_mesh) {
+        out << expected[slot][0] << ' ' << expected[slot][1] << ' ' << expected[slot][2] << '\n';
+      }
+      out << "</DataArray></Points>\n<Cells>\n"
+          << "<DataArray type=\"Int64\" Name=\"connectivity\" format=\"ascii\">";
+      for (int i = 0; i < 27; ++i) out << ' ' << i;
+      out << "</DataArray>\n"
+          << "<DataArray type=\"Int64\" Name=\"offsets\" format=\"ascii\">27</DataArray>\n"
+          << "<DataArray type=\"UInt8\" Name=\"types\" format=\"ascii\">29</DataArray>\n"
+          << "</Cells></Piece></UnstructuredGrid></VTKFile>\n";
+    }
+    const auto read = svmp::VTKReader::read_vtu(path.string());
+    expect_mesh_order(read, expected);
+
+    // The writer emits VTK order again, so the file reads back unchanged.
+    const auto written = std::filesystem::path(path).replace_extension(".written.vtu");
+    svmp::MeshIOOptions opts{};
+    opts.format = "vtu";
+    opts.path = written.string();
+    opts.kv["codim1_topology"] = "none";
+    opts.kv["edge_topology"] = "false";
+    svmp::VTKWriter::write(read, opts);
+    expect_mesh_order(svmp::VTKReader::read_vtu(written.string()), expected);
+    std::filesystem::remove(path);
+    std::filesystem::remove(written);
+  }
+}
+#endif

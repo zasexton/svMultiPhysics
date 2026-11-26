@@ -58,6 +58,7 @@
 #include "../Topology/CellTopology.h"
 
 #include <algorithm>
+#include <array>
 #include <cctype>
 #include <cmath>
 #include <iostream>
@@ -663,8 +664,20 @@ void VTKReader::extract_topology(
     cell_shapes.push_back(shape);
 
     // Get cell vertices
+    const auto first_vertex = cell2vertex.size();
     for (vtkIdType i = 0; i < n_pts; ++i) {
       cell2vertex.push_back(static_cast<index_t>(cell->GetPointId(i)));
+    }
+    if (vtk_type == VTK_TRIQUADRATIC_HEXAHEDRON && n_pts == 27) {
+      // VTK numbers the face centers x-, x+, y-, y+, z-, z+ (slots 20-25);
+      // the mesh Hex27 order is z-, z+, y-, x+, y+, x-.
+      constexpr std::array<std::size_t, 6> kVtkFaceCenterSlot{24, 25, 22, 21, 23, 20};
+      std::array<index_t, 6> vtk_face_centers{};
+      std::copy_n(cell2vertex.begin() + static_cast<std::ptrdiff_t>(first_vertex + 20), 6,
+                  vtk_face_centers.begin());
+      for (std::size_t k = 0; k < 6; ++k) {
+        cell2vertex[first_vertex + 20 + k] = vtk_face_centers[kVtkFaceCenterSlot[k] - 20];
+      }
     }
     cell2vertex_offsets.push_back(static_cast<offset_t>(cell2vertex.size()));
 
