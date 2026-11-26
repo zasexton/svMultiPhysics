@@ -20,12 +20,14 @@ HCurlSpace::HCurlSpace(ElementType element_type,
 HCurlSpace::HCurlSpace(ElementType element_type,
                        int order,
                        BasisType basis_type)
+    : HCurlSpace(element_type, order, basis_type, 0) {}
+
+HCurlSpace::HCurlSpace(ElementType element_type, int order, BasisType basis_type, int ambient_dimension)
     : element_type_(element_type),
       order_(order) {
     FE_CHECK_ARG(order_ >= 0, "HCurlSpace requires non-negative polynomial order");
 
-    dimension_ = element_dimension(element_type_);
-    FE_CHECK_ARG(dimension_ > 0, "HCurlSpace: invalid element dimension");
+    value_dimension_ = piolaValueDimension(element_type_, ambient_dimension);
 
     if (basis_type == BasisType::Lagrange || basis_type == BasisType::Nedelec) {
         element_ = std::make_shared<elements::VectorElement>(
@@ -41,7 +43,10 @@ HCurlSpace::HCurlSpace(ElementType element_type,
     }
 }
 
-HCurlSpace::HCurlSpace(const elements::ElementRequest& request) {
+HCurlSpace::HCurlSpace(const elements::ElementRequest& request)
+    : HCurlSpace(request, 0) {}
+
+HCurlSpace::HCurlSpace(const elements::ElementRequest& request, int ambient_dimension) {
     FE_CHECK_ARG(request.field_type == FieldType::Vector,
                  "HCurlSpace request requires FieldType::Vector");
     FE_CHECK_ARG(request.continuity == Continuity::H_curl || request.continuity == Continuity::C0,
@@ -56,8 +61,7 @@ HCurlSpace::HCurlSpace(const elements::ElementRequest& request) {
 
     element_type_ = element_->element_type();
     order_ = element_->polynomial_order();
-    dimension_ = element_dimension(element_type_);
-    FE_CHECK_ARG(dimension_ > 0, "HCurlSpace: invalid request element dimension");
+    value_dimension_ = piolaValueDimension(element_type_, ambient_dimension);
 }
 
 std::vector<HCurlSpace::Vec3> HCurlSpace::tangential_trace(

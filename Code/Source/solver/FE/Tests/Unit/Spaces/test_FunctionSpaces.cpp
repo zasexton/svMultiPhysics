@@ -539,7 +539,20 @@ TEST(FunctionSpaces, FunctionSpaceAndVectorSpaceHelpersCreateExpectedSpaces) {
     EXPECT_EQ(Hdiv->field_type(), FieldType::Vector);
     EXPECT_EQ(Hdiv->value_dimension(), 2);
 
-    EXPECT_THROW(Space(SpaceType::HCurl, ElementType::Quad4, 0, 3),
+    auto embedded = Space(SpaceType::HCurl, ElementType::Quad4, 0, 3);
+    EXPECT_EQ(embedded->topological_dimension(), 2);
+    EXPECT_EQ(embedded->value_dimension(), 3);
+    SpaceRequest request;
+    request.space_type = SpaceType::HDiv;
+    request.element.element_type = ElementType::Quad4;
+    request.element.field_type = FieldType::Vector;
+    request.element.continuity = Continuity::H_div;
+    request.element.order = 0;
+    request.ambient_dimension = 3;
+    const auto requested = SpaceFactory::create(request);
+    EXPECT_EQ(requested->value_dimension(), 3);
+    EXPECT_EQ(requested->dofs_per_element(), Hdiv->dofs_per_element());
+    EXPECT_THROW(Space(SpaceType::HCurl, ElementType::Quad4, 0, 4),
                  svmp::FE::FEException);
 }
 

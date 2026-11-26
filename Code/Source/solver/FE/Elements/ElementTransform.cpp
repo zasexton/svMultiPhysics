@@ -9,6 +9,7 @@
 #include "Elements/ElementTransform.h"
 #include "Elements/ReferenceElement.h"
 #include "Basis/NodeOrderingConventions.h"
+#include "Geometry/GeometryFrameUtils.h"
 
 #include <array>
 #include <atomic>
@@ -188,12 +189,11 @@ namespace {
 
 // Helper: normalize a vector and return its length
 Real normalize(math::Vector<Real, 3>& v) {
-    Real len = std::sqrt(v[0]*v[0] + v[1]*v[1] + v[2]*v[2]);
-    if (len > Real(1e-14)) {
-        v[0] /= len;
-        v[1] /= len;
-        v[2] /= len;
-    }
+    const Real len = geometry::detail::stable_vector_norm(v);
+    FE_THROW_IF(!std::isfinite(len) || len <= Real(0), FEException, "Degenerate facet direction");
+    v[0] /= len;
+    v[1] /= len;
+    v[2] /= len;
     return len;
 }
 
@@ -228,34 +228,13 @@ FacetFrame ElementTransform::compute_facet_frame(const geometry::GeometryMapping
     auto J = mapping.jacobian(xi);
 
     if (dim == 2) {
-        // For 2D elements, facet is an edge
-        // Tangent is perpendicular to normal in reference space
-        frame.tangent1 = math::Vector<Real, 3>{-ref_normal[1], ref_normal[0], Real(0)};
-
-        // Map tangent to physical space: t_phys = J * t_ref
-        math::Vector<Real, 3> t_phys{};
-        for (std::size_t i = 0; i < 2; ++i) {
-            for (std::size_t j = 0; j < 2; ++j) {
-                t_phys[i] += J(i, j) * frame.tangent1[j];
-            }
-        }
-        frame.jacobian_det = normalize(t_phys);
-        frame.tangent1 = t_phys;
-
-        // Normal is 90-degree rotation of tangent in 2D
-        frame.normal = math::Vector<Real, 3>{-frame.tangent1[1], frame.tangent1[0], Real(0)};
-
-        // Ensure outward orientation by checking against reference normal mapped through J
-        math::Vector<Real, 3> mapped_ref_normal{};
-        for (std::size_t i = 0; i < 2; ++i) {
-            for (std::size_t j = 0; j < 2; ++j) {
-                mapped_ref_normal[i] += J(i, j) * ref_normal[j];
-            }
-        }
-        if (dot(frame.normal, mapped_ref_normal) < Real(0)) {
-            frame.normal[0] = -frame.normal[0];
-            frame.normal[1] = -frame.normal[1];
-        }
+        // The outward conormal belongs to the physical surface tangent plane.
+        // J maps the oriented reference edge tangent, and J^{-T} maps its conormal.
+        const math::Vector<Real, 3> tangent{-ref_normal[1], ref_normal[0], Real(0)};
+        frame.tangent1 = J * tangent;
+        frame.jacobian_det = normalize(frame.tangent1);
+        frame.normal = geometry::scaleConditionedJacobianInverse(J).transpose() * ref_normal;
+        normalize(frame.normal);
     } else if (dim == 3) {
         // For 3D elements, facet is a face
         // Get two tangent directions on the face (from reference face parameterization)

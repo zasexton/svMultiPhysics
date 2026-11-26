@@ -73,7 +73,7 @@ struct DeformationFrame {
     math::Matrix<Real, 3, 3> J{};
     math::Matrix<Real, 3, 3> Jinv{};
     Real detJ{1.0};
-    int dim{3};
+    int dim{3}; ///< Intrinsic reference dimension. Physical vectors always have three ambient components.
 
     [[nodiscard]] static DeformationFrame fromJacobian(const math::Matrix<Real, 3, 3>& jacobian,
                                                        int dimension = 3);

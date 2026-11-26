@@ -27,6 +27,7 @@
 #include "Geometry/MappingFactory.h"
 #include "Geometry/GeometryMapping.h"
 #include "Geometry/GeometryFrameUtils.h"
+#include "Geometry/FrameAwareTransform.h"
 #include "Geometry/PushForward.h"
 #include "Basis/BasisFunction.h"
 #include "Basis/BasisCache.h"
@@ -917,6 +918,35 @@ void bindCutStabilizationScaleConstants(AssemblyContext& context,
         }
     }
     return M;
+}
+
+[[nodiscard]] geometry::DeformationFrame vectorBasisFrame(
+    ElementType cell_type, const AssemblyContext::Matrix3x3& jacobian,
+    const AssemblyContext::Matrix3x3& inverse, Real determinant, int value_dimension)
+{
+    const int intrinsic = element_dimension(cell_type);
+    if (value_dimension < 3) {
+        for (int c = 0; c < intrinsic; ++c) {
+            const Real scale = std::max({std::abs(jacobian[0][c]), std::abs(jacobian[1][c]),
+                                         std::abs(jacobian[2][c])});
+            for (int r = value_dimension; r < 3; ++r) {
+                FE_THROW_IF(std::abs(jacobian[r][c]) > 64 * std::numeric_limits<Real>::epsilon() * scale,
+                            FEException, "Piola basis leaves its declared ambient dimension; "
+                                         "set the space's ambient dimension to the physical component count");
+            }
+        }
+    }
+    return {toMathMatrix(jacobian), toMathMatrix(inverse), determinant, intrinsic};
+}
+
+[[nodiscard]] AssemblyContext::Vector3D physicalVectorBasisValue(
+    Continuity continuity, const math::Vector<Real, 3>& reference,
+    const geometry::DeformationFrame& frame)
+{
+    const auto value = continuity == Continuity::H_curl
+        ? geometry::FrameAwareTransform::hcurlPushForward(reference, frame)
+        : geometry::FrameAwareTransform::hdivPushForward(reference, frame);
+    return {value[0], value[1], value[2]};
 }
 
 [[nodiscard]] AssemblyContext::Matrix3x3 toContextMatrix(const math::Matrix<Real, 3, 3>& M)
@@ -8491,6 +8521,12 @@ void StandardAssembler::prepareBasis(
         const auto& J_inv = ctx_inv_jacs_r[q];
         const Real det_J = ctx_jac_dets_r[q];
 
+        std::optional<geometry::DeformationFrame> vector_frame;
+        if (test_is_vector_basis || trial_is_vector_basis) {
+            const int value_dimension = std::min(test_is_vector_basis ? test_space.value_dimension() : 3,
+                                                 trial_is_vector_basis ? trial_space.value_dimension() : 3);
+            vector_frame = vectorBasisFrame(cell_type, J, J_inv, det_J, value_dimension);
+        }
         const bool need_curved_piola_geometry =
             !cached_mapping_affine_ &&
             ((need_test_vector_jacobians && test_is_vector_basis) ||
@@ -8507,10 +8543,10 @@ void StandardAssembler::prepareBasis(
         std::optional<geometry::PushForward::PiolaVectorGradientGeometryData> piola_geometry;
         if (need_curved_piola_geometry) {
             piola_geometry.emplace(geometry::PushForward::piola_vector_gradient_geometry_data(
-                dim,
-                toMathMatrix(J),
-                toMathMatrix(J_inv),
-                det_J,
+                vector_frame->dim,
+                vector_frame->J,
+                vector_frame->Jinv,
+                vector_frame->detJ,
                 mapping_hessian_at_q(),
                 cached_mapping_affine_));
         }
@@ -8575,25 +8611,7 @@ void StandardAssembler::prepareBasis(
                     const auto vref = test_vector_bcache
                         ? test_vector_bcache->vectorValue(static_cast<std::size_t>(i), qsz)
                         : (*test_vec_values)[static_cast<std::size_t>(i)];
-                    AssemblyContext::Vector3D vphys{0.0, 0.0, 0.0};
-                    if (cont == Continuity::H_curl) {
-                        for (int r = 0; r < dim; ++r) {
-                            for (int c = 0; c < dim; ++c) {
-                                vphys[static_cast<std::size_t>(r)] += J_inv[static_cast<std::size_t>(c)][static_cast<std::size_t>(r)] *
-                                                                      vref[static_cast<std::size_t>(c)];
-                            }
-                        }
-                    } else { // H_div
-                        const Real inv_det = Real(1) / det_J;
-                        for (int r = 0; r < 3; ++r) {
-                            Real sum = 0.0;
-                            for (int c = 0; c < 3; ++c) {
-                                sum += J[static_cast<std::size_t>(r)][static_cast<std::size_t>(c)] *
-                                       vref[static_cast<std::size_t>(c)];
-                            }
-                            vphys[static_cast<std::size_t>(r)] = inv_det * sum;
-                        }
-                    }
+                    const auto vphys = physicalVectorBasisValue(cont, vref, *vector_frame);
                     scratch_basis_vector_values_[idx] = vphys;
                 }
 
@@ -8749,25 +8767,7 @@ void StandardAssembler::prepareBasis(
                         const auto vref = trial_vector_bcache
                             ? trial_vector_bcache->vectorValue(static_cast<std::size_t>(j), qsz)
                             : (*trial_vec_values)[static_cast<std::size_t>(j)];
-                        AssemblyContext::Vector3D vphys{0.0, 0.0, 0.0};
-                        if (cont == Continuity::H_curl) {
-                            for (int r = 0; r < dim; ++r) {
-                                for (int c = 0; c < dim; ++c) {
-                                    vphys[static_cast<std::size_t>(r)] += J_inv[static_cast<std::size_t>(c)][static_cast<std::size_t>(r)] *
-                                                                          vref[static_cast<std::size_t>(c)];
-                                }
-                            }
-                        } else { // H_div
-                            const Real inv_det = Real(1) / det_J;
-                            for (int r = 0; r < 3; ++r) {
-                                Real sum = 0.0;
-                                for (int c = 0; c < 3; ++c) {
-                                    sum += J[static_cast<std::size_t>(r)][static_cast<std::size_t>(c)] *
-                                           vref[static_cast<std::size_t>(c)];
-                                }
-                                vphys[static_cast<std::size_t>(r)] = inv_det * sum;
-                            }
-                        }
+                        const auto vphys = physicalVectorBasisValue(cont, vref, *vector_frame);
                         trial_basis_vector_values[idx] = vphys;
                     }
 
@@ -17875,6 +17875,12 @@ void StandardAssembler::prepareContextFace(
         const auto& J_inv = scratch_inv_jacobians_[q];
         const Real det_J = scratch_jac_dets_[q];
 
+        std::optional<geometry::DeformationFrame> vector_frame;
+        if (test_is_vector_basis || trial_is_vector_basis) {
+            const int value_dimension = std::min(test_is_vector_basis ? test_space.value_dimension() : 3,
+                                                 trial_is_vector_basis ? trial_space.value_dimension() : 3);
+            vector_frame = vectorBasisFrame(cell_type, J, J_inv, det_J, value_dimension);
+        }
         const bool need_curved_piola_geometry =
             !face_mapping_affine &&
             ((need_test_vector_jacobians && test_is_vector_basis) ||
@@ -17891,10 +17897,10 @@ void StandardAssembler::prepareContextFace(
         std::optional<geometry::PushForward::PiolaVectorGradientGeometryData> piola_geometry;
         if (need_curved_piola_geometry) {
             piola_geometry.emplace(geometry::PushForward::piola_vector_gradient_geometry_data(
-                dim,
-                toMathMatrix(J),
-                toMathMatrix(J_inv),
-                det_J,
+                vector_frame->dim,
+                vector_frame->J,
+                vector_frame->Jinv,
+                vector_frame->detJ,
                 mapping_hessian_at_q(),
                 face_mapping_affine));
         }
@@ -17930,26 +17936,7 @@ void StandardAssembler::prepareContextFace(
                     const auto vref = test_vector_bcache
                         ? test_vector_bcache->vectorValue(static_cast<std::size_t>(i), qsz)
                         : vec_values_at_pt[static_cast<std::size_t>(i)];
-                    AssemblyContext::Vector3D vphys{0.0, 0.0, 0.0};
-                    if (cont == Continuity::H_curl) {
-                        for (int r = 0; r < dim; ++r) {
-                            for (int c = 0; c < dim; ++c) {
-                                vphys[static_cast<std::size_t>(r)] +=
-                                    J_inv[static_cast<std::size_t>(c)][static_cast<std::size_t>(r)] *
-                                    vref[static_cast<std::size_t>(c)];
-                            }
-                        }
-                    } else { // H_div
-                        const Real inv_det = Real(1) / det_J;
-                        for (int r = 0; r < 3; ++r) {
-                            Real sum = 0.0;
-                            for (int c = 0; c < 3; ++c) {
-                                sum += J[static_cast<std::size_t>(r)][static_cast<std::size_t>(c)] *
-                                       vref[static_cast<std::size_t>(c)];
-                            }
-                            vphys[static_cast<std::size_t>(r)] = inv_det * sum;
-                        }
-                    }
+                    const auto vphys = physicalVectorBasisValue(cont, vref, *vector_frame);
                     scratch_basis_vector_values_[idx] = vphys;
                 }
 
@@ -18074,26 +18061,7 @@ void StandardAssembler::prepareContextFace(
                         const auto vref = trial_vector_bcache
                             ? trial_vector_bcache->vectorValue(static_cast<std::size_t>(j), qsz)
                             : vec_values_at_pt[static_cast<std::size_t>(j)];
-                        AssemblyContext::Vector3D vphys{0.0, 0.0, 0.0};
-                        if (cont == Continuity::H_curl) {
-                            for (int r = 0; r < dim; ++r) {
-                                for (int c = 0; c < dim; ++c) {
-                                    vphys[static_cast<std::size_t>(r)] +=
-                                        J_inv[static_cast<std::size_t>(c)][static_cast<std::size_t>(r)] *
-                                        vref[static_cast<std::size_t>(c)];
-                                }
-                            }
-                        } else { // H_div
-                            const Real inv_det = Real(1) / det_J;
-                            for (int r = 0; r < 3; ++r) {
-                                Real sum = 0.0;
-                                for (int c = 0; c < 3; ++c) {
-                                    sum += J[static_cast<std::size_t>(r)][static_cast<std::size_t>(c)] *
-                                           vref[static_cast<std::size_t>(c)];
-                                }
-                                vphys[static_cast<std::size_t>(r)] = inv_det * sum;
-                            }
-                        }
+                        const auto vphys = physicalVectorBasisValue(cont, vref, *vector_frame);
                         trial_basis_vector_values[idx] = vphys;
                     }
 
@@ -19642,13 +19610,14 @@ void StandardAssembler::populateFieldSolutionData(
                     const auto J = context.jacobian(q);
                     const auto J_inv = context.inverseJacobian(q);
                     const Real det_J = context.jacobianDet(q);
+                    const auto vector_frame = vectorBasisFrame(cell_type, J, J_inv, det_J, vd);
                     std::optional<geometry::PushForward::PiolaVectorGradientGeometryData> piola_geometry;
                     if (need_gradients && !vector_gradient_affine) {
                         piola_geometry.emplace(geometry::PushForward::piola_vector_gradient_geometry_data(
-                            dim,
-                            toMathMatrix(J),
-                            toMathMatrix(J_inv),
-                            det_J,
+                            vector_frame.dim,
+                            vector_frame.J,
+                            vector_frame.Jinv,
+                            vector_frame.detJ,
                             piola_mapping->mapping_hessian(xi),
                             vector_gradient_affine));
                     }
@@ -19661,26 +19630,7 @@ void StandardAssembler::populateFieldSolutionData(
                             ? field_vector_bcache->vectorValue(static_cast<std::size_t>(j),
                                                                static_cast<std::size_t>(q))
                             : vec_values_at_pt[static_cast<std::size_t>(j)];
-                        AssemblyContext::Vector3D vphys{0.0, 0.0, 0.0};
-                        if (cont == Continuity::H_curl) {
-                            for (int r = 0; r < dim; ++r) {
-                                for (int c = 0; c < dim; ++c) {
-                                    vphys[static_cast<std::size_t>(r)] +=
-                                        J_inv[static_cast<std::size_t>(c)][static_cast<std::size_t>(r)] *
-                                        vref[static_cast<std::size_t>(c)];
-                                }
-                            }
-                        } else { // H_div
-                            const Real inv_det = Real(1) / det_J;
-                            for (int r = 0; r < dim; ++r) {
-                                Real sum = 0.0;
-                                for (int c = 0; c < dim; ++c) {
-                                    sum += J[static_cast<std::size_t>(r)][static_cast<std::size_t>(c)] *
-                                           vref[static_cast<std::size_t>(c)];
-                                }
-                                vphys[static_cast<std::size_t>(r)] = inv_det * sum;
-                            }
-                        }
+                        const auto vphys = physicalVectorBasisValue(cont, vref, vector_frame);
 
                         u[0] += coef * vphys[0];
                         u[1] += coef * vphys[1];
@@ -19752,6 +19702,7 @@ void StandardAssembler::populateFieldSolutionData(
                             const auto J = context.jacobian(q);
                             const auto J_inv = context.inverseJacobian(q);
                             const Real det_J = context.jacobianDet(q);
+                            const auto vector_frame = vectorBasisFrame(cell_type, J, J_inv, det_J, vd);
 
                             AssemblyContext::Vector3D u{0.0, 0.0, 0.0};
                             for (LocalIndex j = 0; j < n_dofs; ++j) {
@@ -19760,26 +19711,7 @@ void StandardAssembler::populateFieldSolutionData(
                                     ? field_vector_bcache->vectorValue(static_cast<std::size_t>(j),
                                                                        static_cast<std::size_t>(q))
                                     : vec_values_at_pt[static_cast<std::size_t>(j)];
-                                AssemblyContext::Vector3D vphys{0.0, 0.0, 0.0};
-                                if (cont == Continuity::H_curl) {
-                                    for (int r = 0; r < dim; ++r) {
-                                        for (int c = 0; c < dim; ++c) {
-                                            vphys[static_cast<std::size_t>(r)] +=
-                                                J_inv[static_cast<std::size_t>(c)][static_cast<std::size_t>(r)] *
-                                                vref[static_cast<std::size_t>(c)];
-                                        }
-                                    }
-                                } else { // H_div
-                                    const Real inv_det = Real(1) / det_J;
-                                    for (int r = 0; r < dim; ++r) {
-                                        Real sum = 0.0;
-                                        for (int c = 0; c < dim; ++c) {
-                                            sum += J[static_cast<std::size_t>(r)][static_cast<std::size_t>(c)] *
-                                                   vref[static_cast<std::size_t>(c)];
-                                        }
-                                        vphys[static_cast<std::size_t>(r)] = inv_det * sum;
-                                    }
-                                }
+                                const auto vphys = physicalVectorBasisValue(cont, vref, vector_frame);
 
                                 u[0] += coef * vphys[0];
                                 u[1] += coef * vphys[1];
@@ -20615,13 +20547,14 @@ void StandardAssembler::populateFieldSolutionData(
                     const auto J = context.jacobian(q);
                     const auto J_inv = context.inverseJacobian(q);
                     const Real det_J = context.jacobianDet(q);
+                    const auto vector_frame = vectorBasisFrame(cell_type, J, J_inv, det_J, vd);
                     std::optional<geometry::PushForward::PiolaVectorGradientGeometryData> piola_geometry;
                     if (need_gradients && !vector_gradient_affine) {
                         piola_geometry.emplace(geometry::PushForward::piola_vector_gradient_geometry_data(
-                            dim,
-                            toMathMatrix(J),
-                            toMathMatrix(J_inv),
-                            det_J,
+                            vector_frame.dim,
+                            vector_frame.J,
+                            vector_frame.Jinv,
+                            vector_frame.detJ,
                             piola_mapping->mapping_hessian(xi),
                             vector_gradient_affine));
                     }
@@ -20634,26 +20567,7 @@ void StandardAssembler::populateFieldSolutionData(
                             ? field_vector_bcache->vectorValue(static_cast<std::size_t>(j),
                                                                static_cast<std::size_t>(q))
                             : vec_values_at_pt[static_cast<std::size_t>(j)];
-                        AssemblyContext::Vector3D vphys{0.0, 0.0, 0.0};
-                        if (cont == Continuity::H_curl) {
-                            for (int r = 0; r < dim; ++r) {
-                                for (int c = 0; c < dim; ++c) {
-                                    vphys[static_cast<std::size_t>(r)] +=
-                                        J_inv[static_cast<std::size_t>(c)][static_cast<std::size_t>(r)] *
-                                        vref[static_cast<std::size_t>(c)];
-                                }
-                            }
-                        } else { // H_div
-                            const Real inv_det = Real(1) / det_J;
-                            for (int r = 0; r < dim; ++r) {
-                                Real sum = 0.0;
-                                for (int c = 0; c < dim; ++c) {
-                                    sum += J[static_cast<std::size_t>(r)][static_cast<std::size_t>(c)] *
-                                           vref[static_cast<std::size_t>(c)];
-                                }
-                                vphys[static_cast<std::size_t>(r)] = inv_det * sum;
-                            }
-                        }
+                        const auto vphys = physicalVectorBasisValue(cont, vref, vector_frame);
 
                         u[0] += coef * vphys[0];
                         u[1] += coef * vphys[1];
@@ -20725,6 +20639,7 @@ void StandardAssembler::populateFieldSolutionData(
                             const auto J = context.jacobian(q);
                             const auto J_inv = context.inverseJacobian(q);
                             const Real det_J = context.jacobianDet(q);
+                            const auto vector_frame = vectorBasisFrame(cell_type, J, J_inv, det_J, vd);
 
                             AssemblyContext::Vector3D u{0.0, 0.0, 0.0};
                             for (LocalIndex j = 0; j < n_dofs; ++j) {
@@ -20733,26 +20648,7 @@ void StandardAssembler::populateFieldSolutionData(
                                     ? field_vector_bcache->vectorValue(static_cast<std::size_t>(j),
                                                                        static_cast<std::size_t>(q))
                                     : vec_values_at_pt[static_cast<std::size_t>(j)];
-                                AssemblyContext::Vector3D vphys{0.0, 0.0, 0.0};
-                                if (cont == Continuity::H_curl) {
-                                    for (int r = 0; r < dim; ++r) {
-                                        for (int c = 0; c < dim; ++c) {
-                                            vphys[static_cast<std::size_t>(r)] +=
-                                                J_inv[static_cast<std::size_t>(c)][static_cast<std::size_t>(r)] *
-                                                vref[static_cast<std::size_t>(c)];
-                                        }
-                                    }
-                                } else { // H_div
-                                    const Real inv_det = Real(1) / det_J;
-                                    for (int r = 0; r < dim; ++r) {
-                                        Real sum = 0.0;
-                                        for (int c = 0; c < dim; ++c) {
-                                            sum += J[static_cast<std::size_t>(r)][static_cast<std::size_t>(c)] *
-                                                   vref[static_cast<std::size_t>(c)];
-                                        }
-                                        vphys[static_cast<std::size_t>(r)] = inv_det * sum;
-                                    }
-                                }
+                                const auto vphys = physicalVectorBasisValue(cont, vref, vector_frame);
 
                                 u[0] += coef * vphys[0];
                                 u[1] += coef * vphys[1];

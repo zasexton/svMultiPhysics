@@ -83,6 +83,15 @@ inline void solve_dense_system(std::vector<Real>& A,
 
 } // namespace
 
+int FunctionSpace::piolaValueDimension(ElementType cell, int ambient_dimension)
+{
+    const int intrinsic = element_dimension(cell);
+    const int physical = ambient_dimension == 0 ? intrinsic : ambient_dimension;
+    FE_CHECK_ARG(intrinsic > 0 && physical >= intrinsic && physical <= 3,
+                 "Piola value dimension must be between the topological dimension and three");
+    return physical;
+}
+
 void FunctionSpace::interpolate(const ValueFunction& function,
                                 std::vector<Real>& coefficients) const {
     const auto elem_ptr = element_ptr();

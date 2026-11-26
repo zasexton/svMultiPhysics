@@ -40,6 +40,7 @@ namespace spaces {
 struct SpaceRequest {
     SpaceType space_type{SpaceType::H1};
     elements::ElementRequest element{};
+    int ambient_dimension{0};  ///< Physical Piola components; zero selects the element dimension.
 };
 
 class SpaceFactory {
@@ -71,14 +72,16 @@ public:
 
     static std::shared_ptr<HCurlSpace> create_hcurl(ElementType element_type,
                                                     int order,
-                                                    BasisType basis_type = BasisType::Lagrange) {
-        return std::make_shared<HCurlSpace>(element_type, order, basis_type);
+                                                    BasisType basis_type = BasisType::Lagrange,
+                                                    int ambient_dimension = 0) {
+        return std::make_shared<HCurlSpace>(element_type, order, basis_type, ambient_dimension);
     }
 
     static std::shared_ptr<HDivSpace> create_hdiv(ElementType element_type,
                                                   int order,
-                                                  BasisType basis_type = BasisType::Lagrange) {
-        return std::make_shared<HDivSpace>(element_type, order, basis_type);
+                                                  BasisType basis_type = BasisType::Lagrange,
+                                                  int ambient_dimension = 0) {
+        return std::make_shared<HDivSpace>(element_type, order, basis_type, ambient_dimension);
     }
 
     /// Convenience: vector-valued H¹ space as product of scalar H¹
@@ -110,8 +113,8 @@ public:
  * If @p components > 1 and the selected space type is scalar-valued (e.g., H1/L2/C1),
  * this returns a `ProductSpace` with @p components copies of the scalar base space.
  *
- * For intrinsically vector-valued spaces (e.g., H(div)/H(curl)), @p components is
- * treated as a consistency check when > 1 (must match `value_dimension()`).
+ * For H(div) and H(curl), @p components > 1 selects the physical vector dimension.
+ * Other vector-valued spaces require the declared component count to match `value_dimension()`.
  *
  * @note We intentionally avoid naming this helper `FunctionSpace(...)` because
  *       it would collide with the existing `spaces::FunctionSpace` type name and
@@ -125,6 +128,12 @@ inline std::shared_ptr<FunctionSpace> Space(SpaceType type,
     FE_THROW_IF(components < 1, InvalidArgumentException,
                 "Space(SpaceType,...): components must be >= 1");
 
+    if (components > 1 && type == SpaceType::HDiv) {
+        return SpaceFactory::create_hdiv(element_type, order, BasisType::Lagrange, components);
+    }
+    if (components > 1 && type == SpaceType::HCurl) {
+        return SpaceFactory::create_hcurl(element_type, order, BasisType::Lagrange, components);
+    }
     auto base = SpaceFactory::create(type, element_type, order);
     FE_CHECK_NOT_NULL(base.get(), "Space(SpaceType,...): base space");
 
@@ -175,14 +184,14 @@ inline std::shared_ptr<FunctionSpace> VectorSpace(SpaceType type,
  */
 ElementType inferUniformElementType(const assembly::IMeshAccess& mesh, int domain_id = -1);
 
-/// Overload: infer element type from a uniform mesh.
+/// Infer the cell type and default Piola value dimension from a uniform mesh.
 std::shared_ptr<FunctionSpace> Space(SpaceType type,
                                      const assembly::IMeshAccess& mesh,
                                      int order,
                                      int components = 1,
                                      int domain_id = -1);
 
-/// Overload: infer element type from a uniform mesh.
+/// Infer the cell type and default Piola value dimension from a uniform mesh.
 std::shared_ptr<FunctionSpace> Space(SpaceType type,
                                      const std::shared_ptr<const assembly::IMeshAccess>& mesh,
                                      int order,

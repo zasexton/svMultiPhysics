@@ -8,6 +8,8 @@
 #include "Geometry/FrameAwareTransform.h"
 
 #include "Core/FEException.h"
+#include "Geometry/GeometryFrameUtils.h"
+#include "Geometry/GeometryMapping.h"
 
 #include <algorithm>
 #include <cmath>
@@ -30,8 +32,8 @@ constexpr Real kTransformTol = Real(1e-14);
 
 [[nodiscard]] math::Vector<Real, 3> unitOrZero(const math::Vector<Real, 3>& v) noexcept
 {
-    const Real n = v.norm();
-    if (n <= kTransformTol) {
+    const Real n = detail::stable_vector_norm(v);
+    if (!std::isfinite(n) || n <= Real(0)) {
         return math::Vector<Real, 3>{};
     }
     return v / n;
@@ -42,33 +44,13 @@ constexpr Real kTransformTol = Real(1e-14);
     return v.norm() > kTransformTol;
 }
 
-[[nodiscard]] math::Vector<Real, 3> vectorTransform(
-    const math::Matrix<Real, 3, 3>& A,
-    const math::Vector<Real, 3>& v,
-    int dim)
+// The first dim components are coordinates in the reference tangent space.
+[[nodiscard]] math::Vector<Real, 3> intrinsicComponents(math::Vector<Real, 3> value, int dim)
 {
-    math::Vector<Real, 3> out{};
-    const auto n = static_cast<std::size_t>(dim);
-    for (std::size_t i = 0; i < n; ++i) {
-        for (std::size_t j = 0; j < n; ++j) {
-            out[i] += A(i, j) * v[j];
-        }
+    for (int i = dim; i < 3; ++i) {
+        value[i] = Real(0);
     }
-    return out;
-}
-
-[[nodiscard]] math::Matrix<Real, 3, 3> scaledIdentityOrInverse(
-    const math::Matrix<Real, 3, 3>& J,
-    int dim)
-{
-    math::Matrix<Real, 3, 3> effective = identityMatrix();
-    const auto n = static_cast<std::size_t>(dim);
-    for (std::size_t i = 0; i < n; ++i) {
-        for (std::size_t j = 0; j < n; ++j) {
-            effective(i, j) = J(i, j);
-        }
-    }
-    return effective.inverse();
+    return value;
 }
 
 } // namespace
@@ -80,18 +62,20 @@ DeformationFrame DeformationFrame::fromJacobian(const math::Matrix<Real, 3, 3>& 
                 "DeformationFrame::fromJacobian requires dimension 1, 2, or 3");
 
     DeformationFrame frame;
-    frame.J = identityMatrix();
+    frame.J = jacobian;
     frame.dim = dimension;
-    const auto n = static_cast<std::size_t>(dimension);
-    for (std::size_t i = 0; i < n; ++i) {
-        for (std::size_t j = 0; j < n; ++j) {
-            frame.J(i, j) = jacobian(i, j);
-        }
+    if (dimension == 1) {
+        math::Vector<Real, 3> first_normal, second_normal;
+        detail::complete_curve_frame(jacobian.column(0), first_normal, second_normal);
+        frame.J.set_column(1, first_normal);
+        frame.J.set_column(2, second_normal);
+    } else if (dimension == 2) {
+        math::Vector<Real, 3> normal;
+        FE_THROW_IF(!detail::complete_surface_frame(jacobian.column(0), jacobian.column(1), normal),
+                    FEException, "DeformationFrame: singular surface geometry");
+        frame.J.set_column(2, normal);
     }
-    frame.detJ = frame.J.determinant();
-    FE_THROW_IF(std::abs(frame.detJ) <= kTransformTol, FEException,
-                "DeformationFrame::fromJacobian encountered a singular geometry transform");
-    frame.Jinv = scaledIdentityOrInverse(frame.J, dimension);
+    frame.detJ = checkedJacobianDeterminant(frame.J, &frame.Jinv);
     return frame;
 }
 
@@ -205,7 +189,7 @@ math::Vector<Real, 3> FrameAwareTransform::pullBackValue(
         case FEFieldTransformFamily::HCurl:
             return hcurlPullBack(value_current, frame);
         case FEFieldTransformFamily::ShellDirector:
-            return unitOrZero(vectorTransform(frame.Jinv, value_current, frame.dim));
+            return unitOrZero(frame.Jinv * value_current);
         case FEFieldTransformFamily::H1Scalar:
         case FEFieldTransformFamily::L2Scalar:
         case FEFieldTransformFamily::Rank2Tensor:
@@ -222,30 +206,30 @@ math::Vector<Real, 3> FrameAwareTransform::hdivPushForward(
     const math::Vector<Real, 3>& value_reference,
     const DeformationFrame& frame)
 {
-    FE_THROW_IF(std::abs(frame.detJ) <= kTransformTol, FEException,
+    FE_THROW_IF(!std::isfinite(frame.detJ) || frame.detJ == Real(0), FEException,
                 "H(div) Piola transform requires nonzero determinant");
-    return vectorTransform(frame.J, value_reference, frame.dim) * (Real(1) / frame.detJ);
+    return (frame.J * intrinsicComponents(value_reference, frame.dim)) * (Real(1) / frame.detJ);
 }
 
 math::Vector<Real, 3> FrameAwareTransform::hdivPullBack(
     const math::Vector<Real, 3>& value_current,
     const DeformationFrame& frame)
 {
-    return vectorTransform(frame.Jinv, value_current, frame.dim) * frame.detJ;
+    return intrinsicComponents(frame.Jinv * value_current, frame.dim) * frame.detJ;
 }
 
 math::Vector<Real, 3> FrameAwareTransform::hcurlPushForward(
     const math::Vector<Real, 3>& value_reference,
     const DeformationFrame& frame)
 {
-    return vectorTransform(frame.Jinv.transpose(), value_reference, frame.dim);
+    return frame.Jinv.transpose() * intrinsicComponents(value_reference, frame.dim);
 }
 
 math::Vector<Real, 3> FrameAwareTransform::hcurlPullBack(
     const math::Vector<Real, 3>& value_current,
     const DeformationFrame& frame)
 {
-    return vectorTransform(frame.J.transpose(), value_current, frame.dim);
+    return intrinsicComponents(frame.J.transpose() * value_current, frame.dim);
 }
 
 math::Matrix<Real, 3, 3> FrameAwareTransform::pushForwardTensor(
@@ -261,7 +245,7 @@ math::Matrix<Real, 3, 3> FrameAwareTransform::pushForwardTensor(
         case TensorFrameTransform::Contravariant:
             return frame.J * tensor_reference * frame.J.transpose();
         case TensorFrameTransform::Piola:
-            FE_THROW_IF(std::abs(frame.detJ) <= kTransformTol, FEException,
+            FE_THROW_IF(!std::isfinite(frame.detJ) || frame.detJ == Real(0), FEException,
                         "Piola tensor transform requires nonzero determinant");
             return (frame.J * tensor_reference * frame.J.transpose()) * (Real(1) / frame.detJ);
         case TensorFrameTransform::InversePiola:
@@ -285,7 +269,7 @@ math::Matrix<Real, 3, 3> FrameAwareTransform::pullBackTensor(
         case TensorFrameTransform::Piola:
             return (frame.Jinv * tensor_current * frame.Jinv.transpose()) * frame.detJ;
         case TensorFrameTransform::InversePiola:
-            FE_THROW_IF(std::abs(frame.detJ) <= kTransformTol, FEException,
+            FE_THROW_IF(!std::isfinite(frame.detJ) || frame.detJ == Real(0), FEException,
                         "Inverse-Piola tensor pullback requires nonzero determinant");
             return (frame.J * tensor_current * frame.J.transpose()) * (Real(1) / frame.detJ);
     }
@@ -298,13 +282,13 @@ SurfaceMeasureTransform FrameAwareTransform::nansonSurfaceTransform(
     const DeformationFrame& frame)
 {
     const math::Vector<Real, 3> measure_vector =
-        vectorTransform(frame.Jinv.transpose(), reference_normal, frame.dim) *
+        (frame.Jinv.transpose() * intrinsicComponents(reference_normal, frame.dim)) *
         (frame.detJ * reference_measure);
-    const Real measure = measure_vector.norm();
+    const Real measure = detail::stable_vector_norm(measure_vector);
     SurfaceMeasureTransform out;
     out.oriented_measure_vector = measure_vector;
     out.measure = measure;
-    out.normal = (measure > kTransformTol) ? measure_vector / measure : math::Vector<Real, 3>{};
+    out.normal = unitOrZero(measure_vector);
     return out;
 }
 
@@ -312,7 +296,7 @@ math::Vector<Real, 3> FrameAwareTransform::pushForwardShellDirector(
     const math::Vector<Real, 3>& reference_director,
     const DeformationFrame& frame)
 {
-    return unitOrZero(vectorTransform(frame.J, reference_director, frame.dim));
+    return unitOrZero(frame.J * reference_director);
 }
 
 OrthonormalFrame FrameAwareTransform::surfaceFrame(
@@ -427,7 +411,7 @@ DirectionalTransform FrameAwareTransform::transformDirectionalComponent(
         case DirectionalComponent::SurfaceTangent0:
         case DirectionalComponent::SurfaceTangent1: {
             const auto nanson = nansonSurfaceTransform(reference_direction, Real(1), frame);
-            const auto surface = surfaceFrame(nanson.normal, vectorTransform(frame.J, tangent_hint, frame.dim));
+            const auto surface = surfaceFrame(nanson.normal, frame.J * intrinsicComponents(tangent_hint, frame.dim));
             out.direction = (component == DirectionalComponent::SurfaceTangent0)
                                 ? surface.tangent0
                                 : surface.tangent1;

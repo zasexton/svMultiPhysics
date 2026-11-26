@@ -9,6 +9,8 @@
 #include "FE/Geometry/SurfaceGeometry.h"
 #include "FE/Geometry/CurveGeometry.h"
 #include "FE/Geometry/PushForward.h"
+#include "FE/Geometry/FrameAwareTransform.h"
+#include "FE/Elements/ElementTransform.h"
 #include "FE/Geometry/LinearMapping.h"
 #include "FE/Basis/LagrangeBasis.h"
 #include <cmath>
@@ -594,4 +596,107 @@ TEST(PushForward, PyramidIdentityMappingConsistency) {
     EXPECT_NEAR(v_hcurl[0], v_ref[0], 1e-9);
     EXPECT_NEAR(v_hcurl[1], v_ref[1], 1e-9);
     EXPECT_NEAR(v_hcurl[2], v_ref[2], 1e-9);
+}
+
+TEST(PushForward, RotatedEmbeddedTrianglePreservesFluxCirculationAndAmbientGradients)
+{
+    using Vec = math::Vector<Real, 3>;
+    using Mat = math::Matrix<Real, 3, 3>;
+    const Vec origin{}, ex{1., 0., 0.}, ey{0., 1., 0.}, ez{0., 0., 1.};
+    const std::array<std::array<Vec, 2>, 3> rotations{{{ex, ey}, {ex, ez}, {ey, {.6, 0., .8}}}};
+    for (const auto& axes : rotations) {
+        const auto& u = axes[0];
+        const auto& v = axes[1];
+        const Vec normal = u.cross(v);
+        const LinearMapping mapping(ElementType::Triangle3, {origin, 2. * u, 3. * v});
+        const Vec xi{.2, .3, 0.};
+        const auto jacobian = mapping.jacobian(xi);
+        const auto frame = DeformationFrame::fromJacobian(jacobian, 2);
+        EXPECT_NEAR(frame.detJ, 6., 1.e-13);
+
+        const Vec reference{.4, -.7, 0.};
+        const Vec flux = PushForward::hdiv_vector(mapping, reference, xi);
+        const Vec circulation = PushForward::hcurl_vector(mapping, reference, xi);
+        const Vec expected_flux = (2. * reference[0] * u + 3. * reference[1] * v) / 6.;
+        const Vec expected_circulation = (.5 * reference[0]) * u + (reference[1] / 3.) * v;
+        EXPECT_LT(math::norm(flux - expected_flux), 1.e-13);
+        EXPECT_LT(math::norm(circulation - expected_circulation), 1.e-13);
+        EXPECT_LT(math::norm(FrameAwareTransform::hdivPullBack(flux, frame) - reference), 1.e-13);
+        EXPECT_LT(math::norm(FrameAwareTransform::hcurlPullBack(circulation, frame) - reference), 1.e-13);
+
+        Mat reference_jacobian{};
+        reference_jacobian(0, 1) = 1.;
+        const auto gradient = PushForward::vector_jacobian(mapping, reference_jacobian, xi);
+        for (int direction = 0; direction < 3; ++direction) {
+            EXPECT_NEAR(gradient(0, direction), v[direction] / 3., 1.e-13);
+        }
+        Mat radial{}, swirl{};
+        radial(0, 0) = radial(1, 1) = 1.;
+        swirl(0, 1) = -1.;
+        swirl(1, 0) = 1.;
+        const auto div_gradient = PushForward::hdiv_vector_jacobian(mapping, radial, xi);
+        const auto curl_gradient = PushForward::hcurl_vector_jacobian(mapping, swirl, xi);
+        const Vec curl{curl_gradient(2, 1) - curl_gradient(1, 2),
+                       curl_gradient(0, 2) - curl_gradient(2, 0),
+                       curl_gradient(1, 0) - curl_gradient(0, 1)};
+        EXPECT_NEAR(div_gradient.trace(), 2. / 6., 1.e-13);
+        EXPECT_NEAR(curl.dot(normal), 2. / 6., 1.e-13);
+
+        double boundary_flux = 0., boundary_circulation = 0.;
+        for (int edge = 0; edge < 3; ++edge) {
+            const auto type = ElementType::Triangle3;
+            const Vec midpoint = elements::ElementTransform::facet_to_reference(type, edge, {.5, 0., 0.});
+            const auto edge_frame = elements::ElementTransform::compute_facet_frame(mapping, midpoint, edge, type);
+            const auto vertices = elements::ElementTransform::facet_vertices(type, edge).second;
+            const Real length = math::norm(vertices[1] - vertices[0]) * edge_frame.jacobian_det;
+            const Vec mapped_radial = PushForward::hdiv_vector(mapping, midpoint, midpoint);
+            const Vec mapped_swirl = PushForward::hcurl_vector(mapping, {-midpoint[1], midpoint[0], 0.}, midpoint);
+            boundary_flux += length * mapped_radial.dot(edge_frame.normal);
+            boundary_circulation += length * mapped_swirl.dot(edge_frame.tangent1);
+            EXPECT_NEAR(edge_frame.tangent1.dot(normal), 0., 1.e-13);
+            EXPECT_NEAR(edge_frame.normal.dot(normal), 0., 1.e-13);
+            EXPECT_NEAR(edge_frame.normal.norm(), 1., 1.e-13);
+        }
+        EXPECT_NEAR(boundary_flux, 1., 1.e-13);
+        EXPECT_NEAR(boundary_circulation, 1., 1.e-13);
+    }
+}
+
+TEST(PushForward, CurvedEmbeddedTriangleValuesAndOrdinaryVectorGradientUseTheTangentPlane)
+{
+    using Vec = math::Vector<Real, 3>;
+    const auto basis = std::make_shared<basis::LagrangeBasis>(ElementType::Triangle6, 2);
+    auto nodes = basis->nodes();
+    for (auto& point : nodes) {
+        point = {point[0], .8 * point[0] * point[1], point[1]};
+    }
+    const IsoparametricMapping mapping(basis, nodes);
+    const Vec xi{.2, .3, 0.};
+    const Vec tangent_r{1., .8 * xi[1], 0.}, tangent_s{0., .8 * xi[0], 1.};
+    const Vec area_vector = tangent_r.cross(tangent_s);
+    const Vec normal = area_vector / area_vector.norm();
+    const Vec reference{.25, -.5, 0.};
+    const auto flux = PushForward::hdiv_vector(mapping, reference, xi);
+    const auto circulation = PushForward::hcurl_vector(mapping, reference, xi);
+    EXPECT_LT(math::norm(area_vector.norm() * flux - reference[0] * tangent_r - reference[1] * tangent_s), 1.e-13);
+    EXPECT_NEAR(circulation.dot(tangent_r), reference[0], 1.e-13);
+    EXPECT_NEAR(circulation.dot(tangent_s), reference[1], 1.e-13);
+    EXPECT_NEAR(circulation.dot(normal), 0., 1.e-13);
+
+    math::Matrix<Real, 3, 3> reference_jacobian{};
+    reference_jacobian.set_column(0, {0., 2., 1.});
+    reference_jacobian.set_column(1, {1., 0., -1.});
+    const auto gradient = PushForward::vector_jacobian(mapping, reference_jacobian, xi);
+    EXPECT_LT(math::norm(gradient * tangent_r - reference_jacobian.column(0)), 1.e-13);
+    EXPECT_LT(math::norm(gradient * tangent_s - reference_jacobian.column(1)), 1.e-13);
+    EXPECT_LT((gradient * normal).norm(), 1.e-13);
+
+    for (auto& node : nodes) {
+        node = node * std::scalbn(Real(1), -80);
+    }
+    const IsoparametricMapping small(basis, nodes);
+    ASSERT_FALSE(small.isAffine());
+    expectFEExceptionContains(
+        [&] { (void)PushForward::hdiv_vector_jacobian(small, reference, reference_jacobian, xi); },
+        {"lower-dimensional curved mappings"});
 }

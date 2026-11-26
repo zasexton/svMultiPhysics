@@ -239,6 +239,10 @@ public:
                          const std::vector<Real>& coefficients) const {
         return evaluate(xi, coefficients)[0];
     }
+
+protected:
+    /// Physical component count for a Piola image of an intrinsic vector basis.
+    static int piolaValueDimension(ElementType cell, int ambient_dimension);
 };
 
 } // namespace spaces

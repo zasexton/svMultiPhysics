@@ -33,6 +33,7 @@
 #include "Forms/FormCompiler.h"
 #include "Forms/FormKernels.h"
 #include "Forms/JIT/JITCompiler.h"
+#include "Forms/JIT/JITKernelWrapper.h"
 #include "Forms/MixedBlockKernelSet.h"
 #include "Forms/MonolithicCellKernel.h"
 #include "Forms/Vocabulary.h"
@@ -40,6 +41,7 @@
 #include "Interfaces/LevelSetInterfaceBuilder.h"
 #include "Interfaces/LevelSetInterfaceDomain.h"
 #include "Spaces/FunctionSpace.h"
+#include "Spaces/SpaceFactory.h"
 #include "Spaces/HDivSpace.h"
 #include "Spaces/AdaptiveSpace.h"
 #include "Spaces/H1Space.h"
@@ -2832,13 +2834,15 @@ public:
  */
 class SingleTriangleBoundaryMeshAccess : public IMeshAccess {
 public:
-    explicit SingleTriangleBoundaryMeshAccess(LocalIndex local_face_id)
-        : local_face_id_(local_face_id)
+    explicit SingleTriangleBoundaryMeshAccess(LocalIndex local_face_id,
+                                               std::array<Real, 3> third_node = {0, 1, 0},
+                                               int spatial_dimension = 2)
+        : local_face_id_(local_face_id), spatial_dimension_(spatial_dimension)
     {
         nodes_ = {
             {0.0, 0.0, 0.0}, // 0
             {1.0, 0.0, 0.0}, // 1
-            {0.0, 1.0, 0.0}  // 2
+            third_node
         };
         cell_nodes_ = {0, 1, 2};
     }
@@ -2847,7 +2851,7 @@ public:
     [[nodiscard]] GlobalIndex numOwnedCells() const override { return 1; }
     [[nodiscard]] GlobalIndex numBoundaryFaces() const override { return 1; }
     [[nodiscard]] GlobalIndex numInteriorFaces() const override { return 0; }
-    [[nodiscard]] int dimension() const override { return 2; }
+    [[nodiscard]] int dimension() const override { return spatial_dimension_; }
 
     [[nodiscard]] bool isOwnedCell(GlobalIndex cell_id) const override { return cell_id == 0; }
     [[nodiscard]] ElementType getCellType(GlobalIndex /*cell_id*/) const override { return ElementType::Triangle3; }
@@ -2897,6 +2901,7 @@ public:
 
 private:
     LocalIndex local_face_id_{0};
+    int spatial_dimension_;
     std::vector<std::array<Real, 3>> nodes_{};
     std::vector<GlobalIndex> cell_nodes_{};
 };
@@ -3339,6 +3344,71 @@ TEST(StandardAssemblerFaces, Triangle2D_BoundaryEdge0MeasureMatchesPhysicalLengt
     EXPECT_NEAR(rhs.getVectorEntry(0), 1.0, 1e-12);
     EXPECT_NEAR(rhs.getVectorEntry(1), 0.0, 1e-12);
     EXPECT_NEAR(rhs.getVectorEntry(2), 0.0, 1e-12);
+}
+
+TEST(StandardAssemblerFaces, EmbeddedPiolaCellAndEdgeMassAreInvariantUnderRotation)
+{
+    const SingleTriangleBoundaryMeshAccess xy(1), xz(1, {0, 0, 1}, 3);
+    for (const auto family : {spaces::SpaceType::HDiv, spaces::SpaceType::HCurl}) {
+        const auto space = spaces::Space(family, xz, 0);
+        ASSERT_EQ(space->topological_dimension(), 2);
+        ASSERT_EQ(space->value_dimension(), 3);
+        SCOPED_TRACE(space->continuity() == Continuity::H_div ? "H(div)" : "H(curl)");
+        const auto u = forms::FormExpr::trialFunction(*space, "u");
+        const auto v = forms::FormExpr::testFunction(*space, "v");
+        const auto mass = inner(u, v);
+        const auto n = space->dofs_per_element();
+        auto dofs = createSingleCellDofMap(n);
+        const auto flat = spaces::Space(family, ElementType::Triangle3, 0);
+        forms::FormCompiler planar_compiler;
+        forms::FormKernel planar_kernel(planar_compiler.compileBilinear(
+            inner(forms::FormExpr::trialFunction(*flat), forms::FormExpr::testFunction(*flat)).dx()));
+        StandardAssembler planar_assembler;
+        planar_assembler.setDofMap(dofs);
+        DenseMatrixView invalid(n);
+        EXPECT_THROW((void)planar_assembler.assembleMatrix(xz, *flat, *flat, planar_kernel, invalid), FEException);
+        for (bool boundary : {false, true}) {
+            SCOPED_TRACE(boundary ? "edge" : "cell");
+            forms::FormCompiler compiler;
+            auto kernel = std::make_shared<forms::FormKernel>(
+                compiler.compileBilinear(boundary ? mass.ds(1) : mass.dx()));
+            auto assemble = [&](const IMeshAccess& mesh, AssemblyKernel& evaluator) {
+                StandardAssembler assembler;
+                assembler.setDofMap(dofs);
+                DenseMatrixView matrix(n);
+                const auto result = boundary
+                    ? assembler.assembleBoundaryFaces(mesh, 1, *space, evaluator, &matrix, nullptr)
+                    : assembler.assembleMatrix(mesh, *space, *space, evaluator, matrix);
+                EXPECT_TRUE(result.success);
+                return matrix;
+            };
+            const auto planar = assemble(xy, *kernel);
+            const auto rotated = assemble(xz, *kernel);
+#if SVMP_FE_ENABLE_LLVM_JIT
+            forms::JITOptions options;
+            options.enable = true;
+            const auto code = forms::jit::JITCompiler::getOrCreate(options)->compile(kernel->ir());
+            ASSERT_TRUE(code.ok) << code.message;
+            ASSERT_EQ(code.kernels.size(), 1u);
+            EXPECT_EQ(code.kernels.front().domain,
+                      boundary ? forms::IntegralDomain::Boundary : forms::IntegralDomain::Cell);
+            EXPECT_NE(code.kernels.front().address, 0u);
+            forms::jit::JITKernelWrapper compiled(kernel, options);
+            compiled.ensureCompiled();
+            ASSERT_TRUE(compiled.isJITReady());
+            const auto rotated_jit = assemble(xz, compiled);
+#endif
+            for (LocalIndex i = 0; i < n; ++i) {
+                EXPECT_GT(planar.getMatrixEntry(i, i), 0);
+                for (LocalIndex j = 0; j < n; ++j) {
+                    EXPECT_NEAR(rotated.getMatrixEntry(i, j), planar.getMatrixEntry(i, j), 1e-12);
+#if SVMP_FE_ENABLE_LLVM_JIT
+                    EXPECT_NEAR(rotated_jit.getMatrixEntry(i, j), planar.getMatrixEntry(i, j), 1e-12);
+#endif
+                }
+            }
+        }
+    }
 }
 
 TEST(StandardAssemblerFaces, Triangle2D_BoundaryEdge1MeasureMatchesPhysicalLength) {

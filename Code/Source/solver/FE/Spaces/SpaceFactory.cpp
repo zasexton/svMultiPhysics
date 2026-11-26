@@ -75,9 +75,9 @@ std::shared_ptr<FunctionSpace> SpaceFactory::create(const SpaceRequest& req) {
         case SpaceType::L2:
             return std::make_shared<L2Space>(req.element);
         case SpaceType::HCurl:
-            return std::make_shared<HCurlSpace>(req.element);
+            return std::make_shared<HCurlSpace>(req.element, req.ambient_dimension);
         case SpaceType::HDiv:
-            return std::make_shared<HDivSpace>(req.element);
+            return std::make_shared<HDivSpace>(req.element, req.ambient_dimension);
         case SpaceType::GenericBasis: {
             auto element = elements::ElementFactory::create(req.element);
             return std::make_shared<GenericBasisSpace>(std::move(element));
@@ -157,6 +157,9 @@ std::shared_ptr<FunctionSpace> Space(SpaceType type,
                                      int domain_id)
 {
     const ElementType element_type = inferUniformElementType(mesh, domain_id);
+    if (components == 1 && (type == SpaceType::HDiv || type == SpaceType::HCurl)) {
+        components = mesh.dimension();
+    }
     return Space(type, element_type, order, components);
 }
 

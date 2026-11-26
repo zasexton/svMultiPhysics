@@ -51,14 +51,18 @@ public:
                int order,
                BasisType basis_type);
 
+    /// An explicit ambient dimension represents tangential fields on embedded cells.
+    HCurlSpace(ElementType element_type, int order, BasisType basis_type, int ambient_dimension);
+
     explicit HCurlSpace(const elements::ElementRequest& request);
+    HCurlSpace(const elements::ElementRequest& request, int ambient_dimension);
 
     SpaceType space_type() const noexcept override { return SpaceType::HCurl; }
     FieldType field_type() const noexcept override { return FieldType::Vector; }
     Continuity continuity() const noexcept override { return Continuity::H_curl; }
 
-    int value_dimension() const noexcept override { return dimension_; }
-    int topological_dimension() const noexcept override { return dimension_; }
+    int value_dimension() const noexcept override { return value_dimension_; }
+    int topological_dimension() const noexcept override { return element_dimension(element_type_); }
     int polynomial_order() const noexcept override { return order_; }
     ElementType element_type() const noexcept override { return element_type_; }
 
@@ -115,7 +119,7 @@ public:
 private:
     ElementType element_type_;
     int order_;
-    int dimension_;
+    int value_dimension_;
     std::shared_ptr<elements::Element> element_;
 };
 

@@ -19,12 +19,10 @@ namespace {
 
 [[nodiscard]] bool hessian_is_zero(const GeometryMapping::MappingHessian& H, int dim)
 {
-    constexpr Real tol = Real(1e-14);
     for (std::size_t r = 0; r < 3; ++r) {
         for (int a = 0; a < dim; ++a) {
             for (int b = 0; b < dim; ++b) {
-                if (std::abs(H[r](static_cast<std::size_t>(a),
-                                  static_cast<std::size_t>(b))) > tol) {
+                if (H[r](static_cast<std::size_t>(a), static_cast<std::size_t>(b)) != Real(0)) {
                     return false;
                 }
             }
@@ -59,7 +57,7 @@ math::Vector<Real, 3> PushForward::hdiv_vector(const GeometryMapping& mapping,
                                                const math::Vector<Real, 3>& v_ref,
                                                const math::Vector<Real, 3>& xi) {
     auto J = mapping.jacobian(xi);
-    const Real det = J.determinant();
+    const Real det = checkedJacobianDeterminant(J);
     return hdiv_vector(mapping, v_ref, J, det);
 }
 
@@ -105,7 +103,7 @@ math::Matrix<Real, 3, 3> PushForward::vector_jacobian(
     const std::size_t dim = static_cast<std::size_t>(mapping.dimension());
     math::Matrix<Real, 3, 3> out{};
     for (std::size_t r = 0; r < 3; ++r) {
-        for (std::size_t c = 0; c < dim; ++c) {
+        for (std::size_t c = 0; c < 3; ++c) {
             Real sum = Real(0);
             for (std::size_t a = 0; a < dim; ++a) {
                 sum += jac_ref(r, a) * jacobian_inverse(a, c);
@@ -121,10 +119,12 @@ PushForward::piola_vector_gradient_geometry_data(const GeometryMapping& mapping,
                                                  const math::Vector<Real, 3>& xi)
 {
     const auto J = mapping.jacobian(xi);
+    math::Matrix<Real, 3, 3> inverse;
+    const Real determinant = checkedJacobianDeterminant(J, &inverse);
     return piola_vector_gradient_geometry_data(mapping.dimension(),
                                                J,
-                                               J.inverse(),
-                                               J.determinant(),
+                                               inverse,
+                                               determinant,
                                                mapping.mapping_hessian(xi),
                                                mapping.isAffine());
 }
