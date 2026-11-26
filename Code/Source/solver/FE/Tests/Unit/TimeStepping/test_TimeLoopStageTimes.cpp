@@ -458,6 +458,74 @@ TEST(TimeLoopStageTimes, PreviousSolutionOfAnInjectedHistorySlotIsRefused)
     EXPECT_NE(refused_alpha_2.find("GeneralizedAlpha(2ndOrder)"), std::string::npos) << refused_alpha_2;
 }
 
+// historyWeightedSum and historyConvolution read slot k for their k-th weight.
+// Under first-order generalized-alpha the weights (1, 1) summed the previous
+// solution 0.5 and the injected rate instead of two previous solutions.
+TEST(TimeLoopStageTimes, WeightedHistoryOfAnInjectedHistorySlotIsRefused)
+{
+    namespace forms = svmp::FE::forms;
+    namespace systems = svmp::FE::systems;
+    namespace ts = svmp::FE::timestepping;
+    // The message of the refusal, empty when the residual assembles.
+    const auto assembleWith = [](const std::function<forms::FormExpr(std::vector<forms::FormExpr>)>& history_sum,
+                                 std::size_t n_weights,
+                                 std::shared_ptr<const systems::TimeIntegrator> integrator) {
+        auto mesh = std::make_shared<svmp::FE::forms::test::SingleTetraMeshAccess>();
+        auto space = std::make_shared<svmp::FE::spaces::H1Space>(ElementType::Tetra4, 1);
+        systems::FESystem sys(mesh);
+        const auto u_id = sys.addField(systems::FieldSpec{.name = "u", .space = space, .components = 1});
+        sys.addOperator("op");
+        const auto u = forms::FormExpr::stateField(u_id, *space, "u");
+        const auto v = forms::FormExpr::testFunction(u_id, *space, "v");
+        const std::vector<forms::FormExpr> weights(n_weights, forms::FormExpr::constant(1.0));
+        const auto residual = ((forms::dt(u) + u - history_sum(weights)) * v).dx();
+        (void)systems::installFormulation(sys, "op", {u_id}, residual);
+        systems::SetupInputs inputs;
+        inputs.topology_override = ts_test::singleTetraTopology();
+        sys.setup({}, inputs);
+
+        const auto n = static_cast<std::size_t>(sys.dofHandler().getNumDofs());
+        const std::vector<Real> values(n, 1.0), previous(n, 0.5), rate(n, 0.25), older(n, 0.125);
+        const std::array<std::span<const Real>, 3> history{previous, rate, older};
+        systems::SystemStateView state;
+        state.dt = 0.1;
+        state.dt_prev = 0.1;
+        state.u = values;
+        state.u_prev = previous;
+        state.u_prev2 = rate;
+        state.u_history = history;
+        systems::TransientSystem transient(sys, std::move(integrator));
+        systems::AssemblyRequest req;
+        req.op = "op";
+        req.want_vector = true;
+        svmp::FE::assembly::DenseVectorView R(static_cast<GlobalIndex>(n));
+        try {
+            (void)transient.assemble(req, state, nullptr, &R);
+        } catch (const std::exception& error) {
+            return std::string(error.what());
+        }
+        return std::string{};
+    };
+
+    const auto generalized_alpha = std::make_shared<ts::GeneralizedAlphaFirstOrderIntegrator>(
+        ts::GeneralizedAlphaFirstOrderIntegratorOptions{
+            .alpha_m = 5.0 / 6.0, .alpha_f = 2.0 / 3.0, .gamma = 2.0 / 3.0, .history_rate_order = 0});
+    const auto bdf = std::make_shared<systems::BackwardDifferenceIntegrator>();
+    for (const auto& sum : {std::function<forms::FormExpr(std::vector<forms::FormExpr>)>(
+                                &forms::FormExpr::historyWeightedSum),
+                            std::function<forms::FormExpr(std::vector<forms::FormExpr>)>(
+                                &forms::FormExpr::historyConvolution)}) {
+        EXPECT_EQ(assembleWith(sum, 1, generalized_alpha), "");
+        const auto refused = assembleWith(sum, 2, generalized_alpha);
+        EXPECT_NE(refused.find("history slot 2"), std::string::npos) << refused;
+        EXPECT_NE(refused.find("GeneralizedAlpha(1stOrder)"), std::string::npos) << refused;
+        EXPECT_EQ(assembleWith(sum, 2, bdf), "");
+        // Weights supplied at assembly can reach every stored slot.
+        const auto refused_runtime = assembleWith(sum, 0, generalized_alpha);
+        EXPECT_NE(refused_runtime.find("assembly-time weights"), std::string::npos) << refused_runtime;
+    }
+}
+
 // ---------------------------------------------------------------------------
 // The generated-state schedule compiled from declarations drives TimeLoop as
 // the transcribed selection does (design note 12, level 3): backward Euler

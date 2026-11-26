@@ -22,8 +22,14 @@ namespace systems {
 
 namespace {
 
-/// The history slots k read by previousSolution(k) in the residuals installed
-/// on @p system, in increasing order.
+/// Marks a history operator whose weights are supplied at assembly: it reads
+/// as many slots as there are weights.
+constexpr int kEveryHistorySlot = 0;
+
+/// The history slots k read by previousSolution(k), historyWeightedSum and
+/// historyConvolution (slot k for the k-th weight) in the residuals installed
+/// on @p system, in increasing order; kEveryHistorySlot for an operator
+/// without weights.
 std::vector<int> previousSolutionSlots(const FESystem& system)
 {
     std::set<int> slots;
@@ -38,10 +44,21 @@ std::vector<int> previousSolutionSlots(const FESystem& system)
         if (node == nullptr || !visited.insert(node).second) {
             continue;
         }
+        const auto children = node->children();
         if (node->type() == forms::FormExprType::PreviousSolutionRef) {
             slots.insert(node->historyIndex().value_or(1));
+        } else if (node->type() == forms::FormExprType::HistoryWeightedSum ||
+                   node->type() == forms::FormExprType::HistoryConvolution) {
+            if (children.empty()) {
+                slots.insert(kEveryHistorySlot);
+            }
+            for (std::size_t k = 0; k < children.size(); ++k) {
+                if (children[k] != nullptr) {
+                    slots.insert(static_cast<int>(k + 1u));
+                }
+            }
         }
-        for (const auto* child : node->children()) {
+        for (const auto* child : children) {
             pending.push_back(child);
         }
     }
@@ -143,11 +160,21 @@ assembly::AssemblyResult TransientSystem::assemble(
     if (!previous_solution_slots_.has_value()) {
         previous_solution_slots_ = previousSolutionSlots(system_);
     }
-    for (const int slot : *previous_solution_slots_) {
+    const auto require_solution_slot = [this](int slot, const std::string& reader) {
         FE_THROW_IF(!integrator().historySlotIsSolution(slot), InvalidArgumentException,
-                    "TransientSystem: previousSolution(" + std::to_string(slot) + ") reads history slot " +
-                        std::to_string(slot) + ", which integrator '" + integrator().name() +
+                    "TransientSystem: " + reader + " reads history slot " + std::to_string(slot) +
+                        ", which integrator '" + integrator().name() +
                         "' fills with a rate or a scheme constant during the solve, not with a previous solution");
+    };
+    for (const int slot : *previous_solution_slots_) {
+        if (slot != kEveryHistorySlot) {
+            require_solution_slot(slot, "previousSolution(" + std::to_string(slot) + ") or a history sum");
+            continue;
+        }
+        const int stored = std::max<int>(2, static_cast<int>(state.u_history.size()));
+        for (int k = 1; k <= stored; ++k) {
+            require_solution_slot(k, "a history sum with assembly-time weights");
+        }
     }
 
     ctx_ = integrator().buildContext(max_order, state);

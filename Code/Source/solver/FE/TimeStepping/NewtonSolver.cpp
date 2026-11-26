@@ -11933,8 +11933,9 @@ NewtonReport NewtonSolver::solveStepFrozenExternalState(
 
     // When line search is disabled, we do not evaluate the residual norm after applying the
     // last Newton update (we normally do it at the start of the next iteration). If we
-    // exit due to reaching `max_it`, capture the final residual norm for reporting, but do
-    // not override the explicit iteration limit with a late convergence declaration.
+    // exit due to reaching `max_it`, evaluate it now: the iterate of the last update is
+    // converged exactly when the check at the start of another iteration would accept it,
+    // as the line-search path checks after its update.  Otherwise it is reported.
     if (!have_residual) {
         current_newton_iteration = max_it;
         syncHistoryState();
@@ -11945,6 +11946,14 @@ NewtonReport NewtonSolver::solveStepFrozenExternalState(
             StateSyncPoint::FinalResidualAssembly);
         have_residual = true;
         updateResidualReport();
+        if (std::isfinite(current_residual_norm) &&
+            minIterationsSatisfied(max_it) &&
+            tolerancesSatisfied(/*pre_first_update=*/false)) {
+            report.iterations = max_it;
+            report.converged = acceptCandidate(max_it, "final_update_convergence");
+            printNewtonProfile(max_it);
+            return finishInitializerTransaction(std::move(report));
+        }
     }
 
     report.converged = false;

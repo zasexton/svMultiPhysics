@@ -6921,6 +6921,42 @@ TEST(NewtonSolver, ReusesJacobianWhenRebuildPeriodGreaterThanOne)
 
 }
 
+// Without line search the residual after the last update is evaluated only
+// for the report; at the exact solution of a linear problem it must also
+// declare convergence (it reported a failure at max_iterations).
+TEST(NewtonSolver, ConvergesAtTheLastUpdateWithoutLineSearch)
+{
+#if !defined(FE_HAS_EIGEN) || !FE_HAS_EIGEN
+    GTEST_SKIP() << "NewtonSolver tests require the Eigen backend (enable FE_ENABLE_EIGEN)";
+#endif
+    auto problem = makeScalarProblem(
+        [](const svmp::FE::forms::FormExpr& u, const svmp::FE::forms::FormExpr& v) {
+            return ((u - svmp::FE::forms::FormExpr::constant(0.5)) * v).dx();
+        },
+        /*dt=*/0.1,
+        /*u0=*/{1.5});
+
+    svmp::FE::timestepping::NewtonOptions nopt;
+    nopt.residual_op = "op";
+    nopt.jacobian_op = "op";
+    nopt.max_iterations = 1;
+    nopt.abs_tolerance = 1e-12;
+    nopt.rel_tolerance = 0.0;
+    nopt.use_line_search = false;
+
+    svmp::FE::timestepping::NewtonSolver newton(nopt);
+    svmp::FE::timestepping::NewtonWorkspace ws;
+    newton.allocateWorkspace(*problem.sys, *problem.factory, ws);
+    problem.history.repack(*problem.factory);
+
+    const auto rep = newton.solveStep(
+        *problem.transient, *problem.linear, /*solve_time=*/problem.history.dt(), problem.history, ws);
+    EXPECT_NEAR(scalarFromDofVector(problem.history.u()), 0.5, 1e-13);
+    EXPECT_TRUE(rep.converged);
+    EXPECT_EQ(rep.iterations, 1);
+    EXPECT_LE(rep.residual_norm, 1e-12);
+}
+
 TEST(NewtonSolver, ReusesStateIndependentJacobianWhenRebuildPeriodIsOne)
 {
 #if !defined(FE_HAS_EIGEN) || !FE_HAS_EIGEN
@@ -9797,6 +9833,8 @@ TEST(NewtonSolver,
     options.use_line_search = false;
     const auto certificate = installTestCertificate(options, *problem.sys, {.max_range_distance = 1.0e-10, .initialize_constraint_field = true});
     ASSERT_NE(certificate, nullptr);
+    // The one allowed update converges; requiring two makes the solve fail.
+    options.min_iterations = 2;
     svmp::FE::timestepping::NewtonSolver one_iteration_newton(options);
     svmp::FE::timestepping::NewtonWorkspace workspace;
     one_iteration_newton.allocateWorkspace(
@@ -9828,6 +9866,7 @@ TEST(NewtonSolver,
               entry_previous2);
 
     options.max_iterations = 2;
+    options.min_iterations = 0;
     svmp::FE::timestepping::NewtonSolver retry_newton(options);
     const auto retry_report = retry_newton.solveStep(
         *problem.transient,

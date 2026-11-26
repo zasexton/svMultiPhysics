@@ -9,7 +9,7 @@
  * @file test_TimeLoopAcceptedState.cpp
  * @brief The accepted state under first-order generalized-alpha: time levels
  *        of essential data (stage and endpoint values, restart, startup
- *        rates) and rollback of rejected candidates.
+ *        rates), rollback of rejected candidates, and the initial rate.
  *
  * The system is M du/dt = 0 on the single tetrahedron with u_1 = g(t) and
  * u_2 = u_3 = 0.  The free row of u_0 is the consistent-mass row
@@ -18,6 +18,7 @@
 
 #include <gtest/gtest.h>
 
+#include "Backends/Interfaces/LinearSolver.h"
 #include "Constraints/AffineConstraints.h"
 #include "Constraints/SystemConstraint.h"
 #include "Forms/FormCompiler.h"
@@ -37,6 +38,7 @@
 #include <functional>
 #include <memory>
 #include <optional>
+#include <stdexcept>
 #include <vector>
 
 namespace {
@@ -300,6 +302,118 @@ TEST(TimeLoopAcceptedState, RejectedCandidateRestoresStoredSolutionsAndRatesBefo
     for (std::size_t i = 0; i < 4u; ++i) {
         EXPECT_DOUBLE_EQ(retried->u[i], reference->u[i]) << "dof=" << i;
         EXPECT_DOUBLE_EQ(retried->u_dot[i], reference->u_dot[i]) << "dof=" << i;
+    }
+}
+
+/// Writes garbage into the solution and throws on its first solve, then
+/// delegates.
+class ThrowingFirstSolve final : public svmp::FE::backends::LinearSolver {
+public:
+    explicit ThrowingFirstSolve(svmp::FE::backends::LinearSolver& inner) : inner_(inner) {}
+    [[nodiscard]] svmp::FE::backends::BackendKind backendKind() const noexcept override
+    {
+        return inner_.backendKind();
+    }
+    void setOptions(const svmp::FE::backends::SolverOptions& options) override { inner_.setOptions(options); }
+    [[nodiscard]] const svmp::FE::backends::SolverOptions& getOptions() const noexcept override
+    {
+        return inner_.getOptions();
+    }
+    [[nodiscard]] svmp::FE::backends::SolverReport solve(const svmp::FE::backends::GenericMatrix& A,
+                                                         svmp::FE::backends::GenericVector& x,
+                                                         const svmp::FE::backends::GenericVector& b) override
+    {
+        if (solves_++ == 0) {
+            for (auto& value : x.localSpan()) {
+                value = 7.0;
+            }
+            throw std::runtime_error("linear solve failed");
+        }
+        return inner_.solve(A, x, b);
+    }
+
+private:
+    svmp::FE::backends::LinearSolver& inner_;
+    int solves_{0};
+};
+
+/// One generalized-alpha step of du/dt = 1 from u = 0, with the initial rate
+/// from the rate solve or from the solution history.
+std::optional<std::vector<Real>> runUnitSourceStep(bool rate_from_pde, bool throw_first_solve)
+{
+    auto mesh = std::make_shared<svmp::FE::forms::test::SingleTetraMeshAccess>();
+    auto space = std::make_shared<svmp::FE::spaces::H1Space>(svmp::FE::ElementType::Tetra4, 1);
+    svmp::FE::systems::FESystem sys(mesh);
+    const auto u_field = sys.addField(
+        svmp::FE::systems::FieldSpec{.name = "u", .space = space, .components = 1});
+    sys.addOperator("op");
+    const auto u = svmp::FE::forms::FormExpr::trialFunction(*space, "u");
+    const auto v = svmp::FE::forms::FormExpr::testFunction(*space, "v");
+    svmp::FE::forms::FormCompiler compiler;
+    sys.addCellKernel("op", u_field, u_field,
+                      std::make_shared<svmp::FE::forms::NonlinearFormKernel>(
+                          compiler.compileResidual((svmp::FE::forms::dt(u) * v).dx() -
+                                                   (svmp::FE::forms::FormExpr::constant(1.0) * v).dx()),
+                          svmp::FE::forms::ADMode::Forward));
+    svmp::FE::systems::SetupInputs inputs;
+    inputs.topology_override = ts_test::singleTetraTopology();
+    sys.setup({}, inputs);
+
+    svmp::FE::systems::TransientSystem transient(
+        sys, std::make_shared<svmp::FE::systems::BackwardDifferenceIntegrator>());
+    auto factory = ts_test::createTestFactory();
+    if (!factory) {
+        ADD_FAILURE() << "Eigen backend not available";
+        return std::nullopt;
+    }
+    auto direct = factory->createLinearSolver(ts_test::directSolve());
+    ThrowingFirstSolve throwing(*direct);
+    svmp::FE::backends::LinearSolver& linear = throw_first_solve
+                                                   ? static_cast<svmp::FE::backends::LinearSolver&>(throwing)
+                                                   : *direct;
+    auto history = ts::TimeHistory::allocate(*factory, 4, 2);
+    for (int k = 1; k <= history.historyDepth(); ++k) {
+        ts_test::setVectorByDof(history.uPrevK(k), {0.0, 0.0, 0.0, 0.0});
+    }
+    history.resetCurrentToPrevious();
+    history.setPrevDt(0.1);
+
+    ts::TimeLoopOptions opts;
+    opts.t0 = 0.0;
+    opts.t_end = 0.1;
+    opts.dt = 0.1;
+    opts.max_steps = 10;
+    opts.scheme = ts::SchemeKind::GeneralizedAlpha;
+    opts.generalized_alpha_rho_inf = 0.5;
+    opts.initialize_first_order_rate_from_pde = rate_from_pde;
+    opts.newton.residual_op = "op";
+    opts.newton.jacobian_op = "op";
+    opts.newton.max_iterations = 8;
+    opts.newton.abs_tolerance = 1e-14;
+    opts.newton.rel_tolerance = 0.0;
+    ts::TimeLoop loop(opts);
+    const auto report = loop.run(transient, *factory, linear, history, {});
+    if (!report.success) {
+        ADD_FAILURE() << "TimeLoop failed: " << report.message;
+        return std::nullopt;
+    }
+    return ts_test::getVectorByDof(history.u());
+}
+
+TEST(TimeLoopAcceptedState, InitialRateSolveThatThrowsIsNotAccepted)
+{
+    // The rate solve gives u_dot = 1 and the increment 0.1.  When it throws,
+    // the start falls back to the history rate 0 (increment 0.08); the thrown
+    // solve's zero residual norms used to accept its partial rate 7
+    // (increment 0.22).
+    const auto exact_start = runUnitSourceStep(/*rate_from_pde=*/true, /*throw_first_solve=*/false);
+    const auto history_start = runUnitSourceStep(/*rate_from_pde=*/false, /*throw_first_solve=*/false);
+    const auto failed_solve = runUnitSourceStep(/*rate_from_pde=*/true, /*throw_first_solve=*/true);
+    ASSERT_TRUE(exact_start.has_value() && history_start.has_value() && failed_solve.has_value());
+    for (std::size_t i = 0; i < 4u; ++i) {
+        EXPECT_NEAR((*exact_start)[i], 0.1, 1e-12);
+        EXPECT_NEAR((*history_start)[i], 0.08, 1e-12);
+        EXPECT_DOUBLE_EQ((*failed_solve)[i], (*history_start)[i]) << "dof=" << i;
     }
 }
 

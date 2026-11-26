@@ -3112,6 +3112,10 @@ TimeLoopReport TimeLoop::run(systems::TransientSystem& transient,
                                     }
 
                                     backends::SolverReport rep{};
+                                    // A solve that threw left no residual
+                                    // history: its zero norms must not pass
+                                    // the inexact-acceptance targets below.
+                                    bool solve_failed = false;
                                     try {
                                         logInitializationSolveDiagnostics(
                                             "u_dot", constraints, init_dirichlet_dofs, A, b);
@@ -3119,14 +3123,16 @@ TimeLoopReport TimeLoop::run(systems::TransientSystem& transient,
                                     } catch (const std::exception&) {
                                         rep.converged = false;
                                         rep.message = "linear_solve_exception";
+                                        solve_failed = true;
                                     }
+                                    solve_failed = solve_failed || rep.numerical_breakdown;
 
                                     const Real solved_rate_norm = history.uDot().norm();
                                     bool accept_udot_init_solve =
-                                        rep.converged &&
+                                        !solve_failed && rep.converged &&
                                         std::isfinite(
                                             static_cast<double>(solved_rate_norm));
-                                    if (!accept_udot_init_solve &&
+                                    if (!accept_udot_init_solve && !solve_failed &&
                                         std::isfinite(rep.initial_residual_norm) &&
                                         std::isfinite(rep.final_residual_norm)) {
                                         const Real rhs_norm = std::max<Real>(

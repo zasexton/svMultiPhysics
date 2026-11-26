@@ -301,7 +301,10 @@ TEST(TimeLoopAdaptiveStep, ReturnsFailureInsteadOfThrowWhenControllerStops)
     opts.scheme = svmp::FE::timestepping::SchemeKind::BackwardEuler;
     opts.newton.residual_op = "op";
     opts.newton.jacobian_op = "op";
-    opts.newton.max_iterations = 1; // Force failure even on linear problems.
+    // Force failure even on linear problems: the one allowed update is below
+    // the required two.
+    opts.newton.max_iterations = 1;
+    opts.newton.min_iterations = 2;
     opts.newton.abs_tolerance = 1e-12;
     opts.newton.rel_tolerance = 0.0;
     opts.newton.use_line_search = false;
@@ -770,7 +773,9 @@ TEST(TimeLoopCallbacks, FixedStepDoesNotAcceptNonconvergedStep)
     opts.scheme = svmp::FE::timestepping::SchemeKind::BackwardEuler;
     opts.newton.residual_op = "op";
     opts.newton.jacobian_op = "op";
+    // The one allowed update is below the required two, so the step cannot converge.
     opts.newton.max_iterations = 1;
+    opts.newton.min_iterations = 2;
     opts.newton.abs_tolerance = 1e-12;
     opts.newton.rel_tolerance = 0.0;
     opts.newton.use_line_search = false;
