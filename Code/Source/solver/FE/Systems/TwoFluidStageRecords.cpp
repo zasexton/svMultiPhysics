@@ -13,6 +13,7 @@
 #include "Core/FEException.h"
 #include "Core/Logger.h"
 #include "Systems/MeshBoundaryRecordSupport.h"
+#include "Systems/OperatorStageMetadata.h"
 
 #include <algorithm>
 #include <array>
@@ -1384,8 +1385,7 @@ void TwoFluidStageRecords::stageTwoFluidAcceptedStageDiagnostics(
                       !(*state.transient_penalty_effective_dt > Real{0.0}) ||
                       !near(
                           *state.transient_penalty_effective_dt,
-                          metadata.state_time -
-                              metadata.step_start_time))) ||
+                          operatorStageRateStencilTime(metadata)))) ||
                     !bounded_moment(
                         state.normal_flux_jump * state.normal_flux_jump,
                         state.interface_measure *

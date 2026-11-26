@@ -98,6 +98,24 @@ struct OperatorStageMeasurementMetadata {
         const OperatorStageMeasurementMetadata&) = default;
 };
 
+/**
+ * @brief Time 1/|a_0| of the rate stencil at the sampled stage.
+ *
+ * This is the effective time step of dt(u) in the operator: the step for an
+ * endpoint scheme and gamma alpha_f dt / alpha_m for first-order
+ * generalized-alpha, whose gamma = 1/2 + alpha_m - alpha_f.
+ */
+[[nodiscard]] inline Real operatorStageRateStencilTime(
+    const OperatorStageMeasurementMetadata& metadata) noexcept
+{
+    if (!metadata.generalized_alpha.has_value()) {
+        return metadata.state_time - metadata.step_start_time;
+    }
+    const auto& alpha = *metadata.generalized_alpha;
+    return (Real{0.5} + alpha.alpha_m - alpha.alpha_f) * alpha.alpha_f *
+           metadata.dt / alpha.alpha_m;
+}
+
 } // namespace systems
 } // namespace FE
 } // namespace svmp

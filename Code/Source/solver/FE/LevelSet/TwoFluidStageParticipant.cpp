@@ -8,6 +8,7 @@
 
 #include "LevelSet/TwoFluidStageParticipant.h"
 
+#include "Systems/OperatorStageMetadata.h"
 #include "Systems/SystemCollectives.h"
 #include "Systems/TwoFluidStageRecords.h"
 
@@ -196,11 +197,13 @@ void TwoFluidStageParticipant::onCandidateStage(
       local_preparation_failure,
       active_comm,
       "two_fluid_operator_stage_preparation");
+  // The transient interface penalty of the operator uses the effective time
+  // step of the stage rate, gamma alpha_f dt / alpha_m for generalized-alpha.
   auto states = evaluateCurrentTwoFluidStageDiagnostics(
       sim,
       two_fluid_stage_declarations,
       stage_solution,
-      observation.state_time - observation.step_start_time,
+      svmp::FE::systems::operatorStageRateStencilTime(*stage_metadata),
       active_comm);
   svmp::FE::systems::twoFluidStageRecords(*sim.fe_system).stageTwoFluidAcceptedStageDiagnostics(
       std::move(*stage_metadata), states);

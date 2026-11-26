@@ -2187,6 +2187,96 @@ TEST(IncompressibleTwoFluidModule,
       makeTwoFluidStageMetadata(), states));
 }
 
+// The transient interface penalty uses the effective time step of the stage
+// rate, 1/|a_0| = gamma alpha_f dt / alpha_m under generalized-alpha.  At
+// rho_inf = 0.5 the stage offset alpha_f dt is 25% larger, which recorded the
+// transient Nitsche work 20% low.
+TEST(IncompressibleTwoFluidModule,
+     AcceptedStageTransientPenaltyUsesTheStageRateStencilTime) {
+  constexpr FE::Real dt = FE::Real{0.1};
+  constexpr FE::Real alpha_f = FE::Real{2.0} / FE::Real{3.0};
+  constexpr FE::Real alpha_m = FE::Real{5.0} / FE::Real{6.0};
+  constexpr FE::Real gamma = FE::Real{0.5} + alpha_m - alpha_f;
+  auto metadata = makeTwoFluidStageMetadata();
+  metadata.scheme_name = "GeneralizedAlphaFirstOrder";
+  metadata.state_time = alpha_f * dt;
+  metadata.rate_time = alpha_m * dt;
+  metadata.generalized_alpha =
+      FE::systems::OperatorStageGeneralizedAlphaMetadata{
+          .alpha_f = alpha_f, .alpha_m = alpha_m};
+  EXPECT_NEAR(FE::systems::operatorStageRateStencilTime(metadata),
+              gamma * alpha_f * dt / alpha_m, 1.0e-15);
+  EXPECT_NEAR(FE::systems::operatorStageRateStencilTime(
+                  makeTwoFluidStageMetadata()),
+              dt, 1.0e-15);
+
+  const auto stage_with = [&](FE::Real effective_dt) {
+    TwoFluidRegistrationFixture fixture;
+    auto module = fixture.makeModule({});
+    module.registerOn(fixture.system);
+    fixture.system.setup({});
+    const auto declarations =
+        svmp::FE::systems::twoFluidStageRecords(fixture.system)
+            .twoFluidAcceptedStageDiagnosticDeclarations();
+    EXPECT_EQ(declarations.size(), 1u);
+    EXPECT_TRUE(declarations.front().parameters.include_transient_penalty);
+    auto state = makeAcceptedTwoFluidDiagnosticState(declarations.front());
+    state.diagnostics.transient_penalty_effective_dt = effective_dt;
+    const std::array states{state};
+    try {
+      svmp::FE::systems::twoFluidStageRecords(fixture.system)
+          .stageTwoFluidAcceptedStageDiagnostics(metadata, states);
+    } catch (const FE::InvalidArgumentException&) {
+      return false;
+    }
+    return true;
+  };
+  EXPECT_TRUE(stage_with(gamma * alpha_f * dt / alpha_m));
+  EXPECT_FALSE(stage_with(alpha_f * dt));
+}
+
+// The prescribed-pressure-jump identity compares the directly accumulated
+// residual with its expansion int dp^2 - 2 J int dp + J^2 |Gamma|, which
+// cancels terms of size J^2.  A uniform jump 1024 + 2^-18 Pa against
+// J = 1024 Pa has the residual 2^-36, and the expansion rounds to zero.
+TEST(IncompressibleTwoFluidDiagnostics,
+     AcceptsPrescribedPressureJumpIdentityWithinOperandScaledRoundoff) {
+  constexpr FE::Real target = FE::Real{1024.0};
+  const FE::Real jump = target + std::ldexp(FE::Real{1.0}, -18);
+  FE::interfaces::IncompressibleTwoFluidDiagnosticParameters parameters{
+      .dimension = 2,
+      .interface_marker = 71,
+      .negative_density = FE::Real{1000.0},
+      .positive_density = FE::Real{1.0},
+      .negative_viscosity = FE::Real{0.01},
+      .positive_viscosity = FE::Real{0.001},
+      .nitsche_gamma = FE::Real{24.0},
+      .surface_tension = FE::Real{0.0},
+      .include_transient_penalty = false,
+      .prescribed_pressure_jump = target,
+  };
+  FE::interfaces::IncompressibleTwoFluidDiagnosticAccumulator accumulator;
+  accumulator.snapshot_revision_key = 1u;
+  accumulator.owned_interface_quadrature_point_count = 1u;
+  accumulator.interface_measure = FE::Real{1.0};
+  accumulator.negative_phase.owned_quadrature_point_count = 1u;
+  accumulator.negative_phase.volume = FE::Real{0.5};
+  accumulator.positive_phase.owned_quadrature_point_count = 1u;
+  accumulator.positive_phase.volume = FE::Real{0.5};
+  accumulator.pressure_jump_integral = jump;
+  accumulator.pressure_jump_squared = jump * jump;
+  accumulator.prescribed_pressure_jump_error_squared =
+      (jump - target) * (jump - target);
+  // Zero traction against the prescribed stress jump -J n.
+  accumulator.prescribed_stress_jump_residual_squared = target * target;
+
+  EXPECT_EQ(*accumulator.prescribed_pressure_jump_error_squared,
+            std::ldexp(FE::Real{1.0}, -36));
+  EXPECT_NO_THROW(
+      (void)FE::interfaces::finalizeIncompressibleTwoFluidDiagnostics(
+          accumulator, parameters));
+}
+
 TEST(IncompressibleTwoFluidModule,
      AcceptedStageRejectsMalformedPhasePressureAndHydrostaticMoments) {
   const auto expect_rejected = [](const auto& mutate) {

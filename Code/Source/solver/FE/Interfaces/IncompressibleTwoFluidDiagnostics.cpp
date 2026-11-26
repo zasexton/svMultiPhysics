@@ -9,6 +9,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <initializer_list>
 #include <limits>
 #include <stdexcept>
 
@@ -835,6 +836,16 @@ finalizeIncompressibleTwoFluidDiagnostics(
         throw std::invalid_argument(
             "incompressible two-fluid diagnostics phase velocity, pressure, or hydrostatic moment identity failed");
     }
+    // A direct residual compared with its expansion: the expansion cancels
+    // terms of the size of its operands, so the round-off scales with them
+    // and not with the (possibly tiny) residual.
+    const auto expansion_tolerance = [](std::initializer_list<Real> operands) {
+        Real scale{1.0};
+        for (const Real operand : operands) {
+            scale = std::max(scale, std::abs(operand));
+        }
+        return Real{2048.0} * std::numeric_limits<Real>::epsilon() * scale;
+    };
     if (parameters.prescribed_pressure_jump.has_value()) {
         const Real target = *parameters.prescribed_pressure_jump;
         const Real expected_pressure_error =
@@ -844,9 +855,11 @@ finalizeIncompressibleTwoFluidDiagnostics(
         if (std::abs(
                 *accumulator.prescribed_pressure_jump_error_squared -
                 expected_pressure_error) >
-                moment_tolerance(
-                    *accumulator.prescribed_pressure_jump_error_squared,
-                    expected_pressure_error)) {
+                expansion_tolerance(
+                    {*accumulator.prescribed_pressure_jump_error_squared,
+                     accumulator.pressure_jump_squared,
+                     Real{2.0} * target * accumulator.pressure_jump_integral,
+                     target * target * accumulator.interface_measure})) {
             throw std::invalid_argument(
                 "incompressible two-fluid diagnostics prescribed-pressure-jump moment identity failed");
         }
@@ -861,9 +874,12 @@ finalizeIncompressibleTwoFluidDiagnostics(
         if (std::abs(
                 *accumulator.prescribed_viscous_traction_jump_error_squared -
                 expected_viscous_error) >
-            moment_tolerance(
-                *accumulator.prescribed_viscous_traction_jump_error_squared,
-                expected_viscous_error)) {
+            expansion_tolerance(
+                {*accumulator.prescribed_viscous_traction_jump_error_squared,
+                 accumulator.viscous_traction_jump_squared,
+                 Real{2.0} *
+                     dot(target, accumulator.viscous_traction_jump_integral),
+                 dot(target, target) * accumulator.interface_measure})) {
             throw std::invalid_argument(
                 "incompressible two-fluid diagnostics prescribed-viscous-traction-jump moment identity failed");
         }
@@ -888,9 +904,20 @@ finalizeIncompressibleTwoFluidDiagnostics(
         if (std::abs(
                 *accumulator.prescribed_stress_jump_residual_squared -
                 expected_stress_error) >
-            moment_tolerance(
-                *accumulator.prescribed_stress_jump_residual_squared,
-                expected_stress_error)) {
+            expansion_tolerance(
+                {*accumulator.prescribed_stress_jump_residual_squared,
+                 accumulator.traction_jump_squared,
+                 dot(viscous_target, viscous_target) *
+                     accumulator.interface_measure,
+                 pressure_target * pressure_target *
+                     accumulator.interface_measure,
+                 Real{2.0} *
+                     dot(viscous_target, accumulator.traction_jump_integral),
+                 Real{2.0} * pressure_target *
+                     accumulator.traction_jump_normal_integral,
+                 Real{2.0} * pressure_target *
+                     dot(viscous_target,
+                         accumulator.interface_normal_integral)})) {
             throw std::invalid_argument(
                 "incompressible two-fluid diagnostics composed-stress-jump moment identity failed");
         }
