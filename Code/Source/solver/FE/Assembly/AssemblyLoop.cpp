@@ -784,8 +784,8 @@ void AssemblyLoop::buildBoundaryFaceWorkItems(
     mesh_->forEachBoundaryFace(marker,
         [this, marker, &items](GlobalIndex face_id, GlobalIndex cell_id) {
             ElementType cell_type = mesh_->getCellType(cell_id);
-            // Note: local_face_id would need mesh support - using 0 as placeholder
-            items.emplace_back(face_id, cell_id, 0, marker, cell_type);
+            items.emplace_back(face_id, cell_id, mesh_->getLocalFaceIndex(face_id, cell_id),
+                               marker, cell_type);
         }
     );
 }
@@ -797,8 +797,10 @@ void AssemblyLoop::buildInteriorFaceWorkItems(std::vector<InteriorFaceWorkItem>&
         [this, &items](GlobalIndex face_id, GlobalIndex minus_id, GlobalIndex plus_id) {
             ElementType minus_type = mesh_->getCellType(minus_id);
             ElementType plus_type = mesh_->getCellType(plus_id);
-            // Note: local face IDs would need mesh support
-            items.emplace_back(face_id, minus_id, plus_id, 0, 0, minus_type, plus_type);
+            items.emplace_back(face_id, minus_id, plus_id,
+                               mesh_->getLocalFaceIndex(face_id, minus_id),
+                               mesh_->getLocalFaceIndex(face_id, plus_id),
+                               minus_type, plus_type);
         }
     );
 }

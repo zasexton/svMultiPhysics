@@ -715,6 +715,74 @@ TEST_F(AssemblyLoopTest, PrefetchHintGenerationInSequentialLoop) {
     EXPECT_GT(stats.prefetch_hints, 0u);
 }
 
+// ============================================================================
+// Local face indices
+// ============================================================================
+
+namespace {
+
+// The unit triangle with its hypotenuse (local face 1) as the only boundary face.
+class HypotenuseBoundaryTriangle final : public IMeshAccess {
+public:
+    GlobalIndex numCells() const override { return 1; }
+    GlobalIndex numOwnedCells() const override { return 1; }
+    GlobalIndex numBoundaryFaces() const override { return 1; }
+    GlobalIndex numInteriorFaces() const override { return 0; }
+    int dimension() const override { return 2; }
+    bool isOwnedCell(GlobalIndex) const override { return true; }
+    ElementType getCellType(GlobalIndex) const override { return ElementType::Triangle3; }
+    void getCellNodes(GlobalIndex, std::vector<GlobalIndex>& nodes) const override { nodes = {0, 1, 2}; }
+    [[nodiscard]] std::array<Real, 3> getNodeCoordinates(GlobalIndex node) const override {
+        return coordinates_.at(static_cast<std::size_t>(node));
+    }
+    void getCellCoordinates(GlobalIndex, std::vector<std::array<Real, 3>>& coords) const override {
+        coords.assign(coordinates_.begin(), coordinates_.end());
+    }
+    [[nodiscard]] LocalIndex getLocalFaceIndex(GlobalIndex, GlobalIndex) const override { return 1; }
+    int getBoundaryFaceMarker(GlobalIndex) const override { return 1; }
+    std::pair<GlobalIndex, GlobalIndex> getInteriorFaceCells(GlobalIndex) const override { return {-1, -1}; }
+    void forEachCell(std::function<void(GlobalIndex)> callback) const override { callback(0); }
+    void forEachOwnedCell(std::function<void(GlobalIndex)> callback) const override { callback(0); }
+    void forEachBoundaryFace(int marker, std::function<void(GlobalIndex, GlobalIndex)> callback) const override {
+        if (marker == 1) callback(0, 0);
+    }
+    void forEachInteriorFace(std::function<void(GlobalIndex, GlobalIndex, GlobalIndex)>) const override {}
+
+private:
+    std::array<std::array<Real, 3>, 3> coordinates_{{{0, 0, 0}, {1, 0, 0}, {0, 1, 0}}};
+};
+
+} // namespace
+
+TEST(AssemblyLoopLocalFaces, FaceWorkItemsUseTheMeshLocalFaceIndex) {
+    // The only boundary face is the hypotenuse, local face 1; the face
+    // context must be configured on it, not on local face 0.
+    HypotenuseBoundaryTriangle mesh;
+    dofs::DofMap dof_map(1, 3, 3);
+    const std::array<GlobalIndex, 3> cell_dofs{0, 1, 2};
+    dof_map.setCellDofs(0, cell_dofs);
+    dof_map.setNumDofs(3);
+    dof_map.setNumLocalDofs(3);
+    dof_map.finalize();
+    spaces::H1Space space(ElementType::Triangle3, 1);
+
+    AssemblyLoop loop;
+    loop.setMesh(mesh);
+    loop.setDofMap(dof_map);
+    std::vector<std::pair<LocalIndex, LocalIndex>> seen;
+    (void)loop.boundaryLoop(
+        1, space, RequiredData::None,
+        [&](const BoundaryFaceWorkItem& face, AssemblyContext& context, KernelOutput& output) {
+            seen.emplace_back(face.local_face_id, context.localFaceId());
+            output.clear();
+        },
+        [](const CellWorkItem&, const KernelOutput&, std::span<const GlobalIndex>,
+           std::span<const GlobalIndex>) {});
+    ASSERT_EQ(seen.size(), 1u);
+    EXPECT_EQ(seen.front().first, 1);
+    EXPECT_EQ(seen.front().second, 1);
+}
+
 } // namespace testing
 } // namespace assembly
 } // namespace FE
