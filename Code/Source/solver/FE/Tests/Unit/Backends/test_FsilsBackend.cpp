@@ -785,7 +785,7 @@ TEST(FsilsBackendLegacyKernels, EffectiveTimeStepStageScalingPreservesExternalBl
     BlockLayout layout;
     layout.blocks.push_back({"u", 0, 2, BlockRole::PrimaryField});
     layout.blocks.push_back({"p", 2, 1, BlockRole::ConstraintField});
-    layout.momentum_block = 0;
+    layout.primary_block = 0;
     layout.constraint_block = 1;
     opts.block_layout = layout;
 
@@ -2146,7 +2146,7 @@ TEST(FsilsBackend, CreateLinearSolverNormalizesMetadataDrivenBlockSchurOptions)
     BlockLayout field_layout{};
     field_layout.blocks.push_back({"velocity", 0, 2, BlockRole::PrimaryField});
     field_layout.blocks.push_back({"pressure", 2, 1, BlockRole::ConstraintField});
-    field_layout.momentum_block = 0;
+    field_layout.primary_block = 0;
     field_layout.constraint_block = 1;
     opts.block_layout = field_layout;
 
@@ -2343,7 +2343,7 @@ TEST(FsilsBackend, SolveBlockSchurDof3SingleNode)
     BlockLayout layout;
     layout.blocks.push_back({"u", 0, 2, BlockRole::PrimaryField});
     layout.blocks.push_back({"p", 2, 1, BlockRole::ConstraintField});
-    layout.momentum_block = 0;
+    layout.primary_block = 0;
     layout.constraint_block = 1;
     opts.block_layout = layout;
 
@@ -2423,7 +2423,7 @@ TEST(FsilsBackend,
         {"velocity", 0, 2, BlockRole::PrimaryField});
     layout.blocks.push_back(
         {"pressure", 2, 1, BlockRole::ConstraintField});
-    layout.momentum_block = 0;
+    layout.primary_block = 0;
     layout.constraint_block = 1;
     opts.block_layout = layout;
 
@@ -2494,7 +2494,7 @@ TEST(FsilsBackend,
         {"velocity", 0, 2, BlockRole::PrimaryField});
     layout.blocks.push_back(
         {"pressure", 2, 1, BlockRole::ConstraintField});
-    layout.momentum_block = 0;
+    layout.primary_block = 0;
     layout.constraint_block = 1;
     opts.block_layout = layout;
 
@@ -2610,7 +2610,7 @@ TEST(FsilsBackend,
                              BlockRole::PrimaryField});
     layout.blocks.push_back({"Pressure", 7, 1,
                              BlockRole::ConstraintField});
-    layout.momentum_block = 0;
+    layout.primary_block = 0;
     layout.constraint_block = 1;
     opts.block_layout = layout;
 
@@ -2677,7 +2677,7 @@ TEST(FsilsBackend, BlockSchurRejectsNonFinalPressureWithoutAuxiliaryGrouping)
                                 BlockRole::AuxiliaryField});
     malformed.blocks.push_back({"LevelSetAdvectionVelocity", 5, 3,
                                 BlockRole::AuxiliaryField});
-    malformed.momentum_block = 0;
+    malformed.primary_block = 0;
     malformed.constraint_block = 1;
     opts.block_layout = malformed;
 
@@ -2691,7 +2691,7 @@ TEST(FsilsBackend, BlockSchurRejectsNonFinalPressureWithoutAuxiliaryGrouping)
                                   BlockRole::PrimaryField});
     overlapping.blocks.push_back({"Pressure", 6, 1,
                                   BlockRole::ConstraintField});
-    overlapping.momentum_block = 0;
+    overlapping.primary_block = 0;
     overlapping.constraint_block = 1;
     opts.block_layout = overlapping;
     auto overlapping_solver = factory.createLinearSolver(opts);
@@ -2760,7 +2760,7 @@ TEST(FsilsBackend, RankOneUpdateSolversConverge)
             BlockLayout layout;
             layout.blocks.push_back({"u", 0, 2, BlockRole::PrimaryField});
             layout.blocks.push_back({"p", 2, 1, BlockRole::ConstraintField});
-            layout.momentum_block = 0;
+            layout.primary_block = 0;
             layout.constraint_block = 1;
             opts.block_layout = layout;
         } else {
@@ -3032,7 +3032,7 @@ TEST(FsilsBackend, RankOneUpdateSolversConverge4DOF)
             BlockLayout layout;
             layout.blocks.push_back({"u", 0, 3, BlockRole::PrimaryField});
             layout.blocks.push_back({"p", 3, 1, BlockRole::ConstraintField});
-            layout.momentum_block = 0;
+            layout.primary_block = 0;
             layout.constraint_block = 1;
             opts.block_layout = layout;
         } else {
@@ -3121,7 +3121,7 @@ TEST(FsilsBackend, ReducedFieldUpdateSolversConverge)
             BlockLayout layout;
             layout.blocks.push_back({"u", 0, 2, BlockRole::PrimaryField});
             layout.blocks.push_back({"p", 2, 1, BlockRole::ConstraintField});
-            layout.momentum_block = 0;
+            layout.primary_block = 0;
             layout.constraint_block = 1;
             opts.block_layout = layout;
         } else {
@@ -3204,7 +3204,7 @@ TEST(FsilsBackend, ReducedFieldUpdateEmptyActiveComponentsMeansAllComponents)
     BlockLayout layout;
     layout.blocks.push_back({"u", 0, 2, BlockRole::PrimaryField});
     layout.blocks.push_back({"p", 2, 1, BlockRole::ConstraintField});
-    layout.momentum_block = 0;
+    layout.primary_block = 0;
     layout.constraint_block = 1;
     opts.block_layout = layout;
 
@@ -3287,7 +3287,7 @@ TEST(FsilsBackend, ReducedFieldUpdateFaceCacheAddBcMulMatchesSparse)
     BlockLayout layout;
     layout.blocks.push_back({"u", 0, 2, BlockRole::PrimaryField});
     layout.blocks.push_back({"p", 2, 1, BlockRole::ConstraintField});
-    layout.momentum_block = 0;
+    layout.primary_block = 0;
     layout.constraint_block = 1;
     opts.block_layout = layout;
 
@@ -3429,7 +3429,7 @@ TEST(FsilsBackend, ReducedFieldUpdateDistributedShapeConverges)
     BlockLayout layout;
     layout.blocks.push_back({"u", 0, 2, BlockRole::PrimaryField});
     layout.blocks.push_back({"p", 2, 1, BlockRole::ConstraintField});
-    layout.momentum_block = 0;
+    layout.primary_block = 0;
     layout.constraint_block = 1;
     opts.block_layout = layout;
 
@@ -3618,7 +3618,7 @@ TEST(FsilsBackend, ReducedFieldUpdateGroupedWoodburySolversConverge)
             BlockLayout layout;
             layout.blocks.push_back({"u", 0, 2, BlockRole::PrimaryField});
             layout.blocks.push_back({"p", 2, 1, BlockRole::ConstraintField});
-            layout.momentum_block = 0;
+            layout.primary_block = 0;
             layout.constraint_block = 1;
             opts.block_layout = layout;
         } else {
@@ -3760,7 +3760,7 @@ TEST(FsilsBackend, GroupedBorderedFieldCouplingSolversConverge)
             BlockLayout layout;
             layout.blocks.push_back({"u", 0, 2, BlockRole::PrimaryField});
             layout.blocks.push_back({"p", 2, 1, BlockRole::ConstraintField});
-            layout.momentum_block = 0;
+            layout.primary_block = 0;
             layout.constraint_block = 1;
             opts.block_layout = layout;
         } else {
@@ -3871,7 +3871,7 @@ TEST(FsilsBackend, GroupedBorderedFieldCouplingAsmMomentumConverges)
     BlockLayout layout;
     layout.blocks.push_back({"u", 0, 2, BlockRole::PrimaryField});
     layout.blocks.push_back({"p", 2, 1, BlockRole::ConstraintField});
-    layout.momentum_block = 0;
+    layout.primary_block = 0;
     layout.constraint_block = 1;
     opts.block_layout = layout;
 
@@ -3969,7 +3969,7 @@ TEST(FsilsBackend, GroupedBorderedFieldCouplingReusesSchurSetupAcrossRepeatedSol
     BlockLayout layout;
     layout.blocks.push_back({"u", 0, 2, BlockRole::PrimaryField});
     layout.blocks.push_back({"p", 2, 1, BlockRole::ConstraintField});
-    layout.momentum_block = 0;
+    layout.primary_block = 0;
     layout.constraint_block = 1;
     opts.block_layout = layout;
 
@@ -4113,7 +4113,7 @@ TEST(FsilsBackend, GroupedBorderedCrossBlockCouplingConverges)
             BlockLayout layout;
             layout.blocks.push_back({"u", 0, 2, BlockRole::PrimaryField});
             layout.blocks.push_back({"p", 2, 2, BlockRole::ConstraintField});
-            layout.momentum_block = 0;
+            layout.primary_block = 0;
             layout.constraint_block = 1;
             opts.block_layout = layout;
         } else {

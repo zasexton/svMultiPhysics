@@ -32,7 +32,7 @@ namespace analysis {
 
 enum class ConstitutiveLawRole : std::uint8_t {
     Unknown,
-    DynamicViscosity,
+    SymmetricGradientCoefficient,
 };
 
 enum class ConstitutiveLawInputMeasure : std::uint8_t {
@@ -88,20 +88,20 @@ inline void addConstitutiveLawIfAbsent(
     laws.push_back(std::move(law));
 }
 
-[[nodiscard]] inline ConstitutiveLawMetadata dynamicViscosityMetadata(
-    FieldId velocity_field,
-    Real constant_viscosity,
+[[nodiscard]] inline ConstitutiveLawMetadata symmetricGradientCoefficientMetadata(
+    FieldId primary_field,
+    Real constant_coefficient,
     std::shared_ptr<const forms::ConstitutiveModel> model = {},
-    std::string name = "dynamic_viscosity")
+    std::string name = "symmetric_gradient_coefficient")
 {
     return ConstitutiveLawMetadata{
         .name = std::move(name),
-        .role = ConstitutiveLawRole::DynamicViscosity,
+        .role = ConstitutiveLawRole::SymmetricGradientCoefficient,
         .input_measure =
             ConstitutiveLawInputMeasure::SymmetricGradientSecondInvariant,
-        .primary_field = velocity_field,
+        .primary_field = primary_field,
         .constant_value_available = model == nullptr,
-        .constant_value = constant_viscosity,
+        .constant_value = constant_coefficient,
         .model = std::move(model),
     };
 }

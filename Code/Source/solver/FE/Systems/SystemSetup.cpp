@@ -8796,15 +8796,15 @@ backends::BlockLayout deriveBlockLayout(const FESystem& system, const BlockLayou
         backends::BlockLayout grouped{};
         grouped.blocks.push_back(merged(0, split, BlockRole::PrimaryField));
         grouped.blocks.push_back(merged(split, members.size(), BlockRole::ConstraintField));
-        grouped.momentum_block = 0;
+        grouped.primary_block = 0;
         grouped.constraint_block = 1;
         return grouped;
     }
 
     if (request.name_saddle_pair) {
         for (std::size_t i = 0; i < members.size(); ++i) {
-            if (!members[i].constraint && !layout.momentum_block) {
-                layout.momentum_block = static_cast<int>(i);
+            if (!members[i].constraint && !layout.primary_block) {
+                layout.primary_block = static_cast<int>(i);
             } else if (members[i].constraint && !layout.constraint_block) {
                 layout.constraint_block = static_cast<int>(i);
             }

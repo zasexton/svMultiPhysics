@@ -458,14 +458,13 @@ inline FormExpr tangentialProjector(const FormExpr& n, int dim)
 /**
  * @brief Unit conormal of a contact line
  *
- * The direction of n in the plane of a wall with unit normal n_w:
- * safeNormalize(n - (n . n_w) n_w).  With n the outward normal of the liquid
- * and n_w pointing from the fluid into the wall, it points out of the wetted
- * footprint, along the wall.
+ * The tangent-plane projection of n on a boundary with unit normal n_b:
+ * safeNormalize(n - (n . n_b) n_b). For the outward interface normal of the
+ * active side, the conormal points out of its boundary subset.
  */
-inline FormExpr conormal(const FormExpr& n, const FormExpr& wall_normal, Real eps = Real(1e-12))
+inline FormExpr conormal(const FormExpr& n, const FormExpr& boundary_normal, Real eps = Real(1e-12))
 {
-    return safeNormalize(n - dot(n, wall_normal) * wall_normal, eps);
+    return safeNormalize(n - dot(n, boundary_normal) * boundary_normal, eps);
 }
 
 inline FormExpr surfaceGradient(const FormExpr& f, const FormExpr& n)

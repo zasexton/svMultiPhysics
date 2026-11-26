@@ -48,7 +48,7 @@ struct BlockLayoutRequest {
  * One block per field of fieldMap(), in DOF order, named by the field, with
  * no role.  With split_by_role, a merged block of several fields takes the
  * first FieldSpec::solver_block its fields state, or else their names joined
- * by '+', and the role PrimaryField or ConstraintField; momentum_block and
+ * by '+', and the role PrimaryField or ConstraintField; primary_block and
  * constraint_block are 0 and 1.  A layout whose constraint fields do not
  * follow all its primary fields is not merged.  A field that states no
  * solver role is primary.

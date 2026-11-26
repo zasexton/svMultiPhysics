@@ -1622,9 +1622,9 @@ TEST(OpenVesselExamples,
     EXPECT_EQ(layout.blocks[1].n_components, 1);
     EXPECT_EQ(layout.blocks[1].role,
               svmp::FE::backends::BlockRole::ConstraintField);
-    ASSERT_TRUE(layout.momentum_block.has_value());
+    ASSERT_TRUE(layout.primary_block.has_value());
     ASSERT_TRUE(layout.constraint_block.has_value());
-    EXPECT_EQ(*layout.momentum_block, 0);
+    EXPECT_EQ(*layout.primary_block, 0);
     EXPECT_EQ(*layout.constraint_block, 1);
   }
 
@@ -1765,7 +1765,7 @@ TEST(OpenVesselExamples,
                              svmp::FE::backends::BlockRole::PrimaryField});
     layout.blocks.push_back({"TwoFluidPressureConstraints", 6, 2,
                              svmp::FE::backends::BlockRole::ConstraintField});
-    layout.momentum_block = 0;
+    layout.primary_block = 0;
     layout.constraint_block = 1;
     EXPECT_NO_THROW(
         application::core::detail::
@@ -2005,9 +2005,9 @@ TEST(OpenVesselExamples,
   EXPECT_EQ(layout.blocks[1].n_components, 2);
   EXPECT_EQ(layout.blocks[1].role,
             svmp::FE::backends::BlockRole::ConstraintField);
-  ASSERT_TRUE(layout.momentum_block.has_value());
+  ASSERT_TRUE(layout.primary_block.has_value());
   ASSERT_TRUE(layout.constraint_block.has_value());
-  EXPECT_EQ(*layout.momentum_block, 0);
+  EXPECT_EQ(*layout.primary_block, 0);
   EXPECT_EQ(*layout.constraint_block, 1);
   EXPECT_TRUE(components.time_history);
   ASSERT_TRUE(components.primary_mesh);
@@ -2221,7 +2221,7 @@ TEST(OpenVesselExamples,
   EXPECT_EQ(layout.blocks.front().name, "unrelated");
   EXPECT_EQ(layout.blocks.front().start_component, 0);
   EXPECT_EQ(layout.blocks.front().n_components, 1);
-  EXPECT_FALSE(layout.momentum_block.has_value());
+  EXPECT_FALSE(layout.primary_block.has_value());
   EXPECT_FALSE(layout.constraint_block.has_value());
 #endif
 }

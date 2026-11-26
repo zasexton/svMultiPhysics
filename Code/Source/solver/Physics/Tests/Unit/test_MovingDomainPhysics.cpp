@@ -11405,7 +11405,7 @@ TEST(MovingDomainPhysics,
     ASSERT_NE(production_policy, policies.end());
     ASSERT_NE(work_policy, policies.end());
     EXPECT_EQ(production_policy->op, "equations");
-    EXPECT_EQ(work_policy->velocity_field, velocity);
+    EXPECT_EQ(work_policy->trace_field, velocity);
     EXPECT_EQ(
         work_policy->physical_boundary_marker,
         left_marker);
@@ -11414,7 +11414,7 @@ TEST(MovingDomainPhysics,
         interface_marker);
     EXPECT_NE(work_policy->form_binding_digest, 0u);
     EXPECT_EQ(
-        production_policy->velocity_field,
+        production_policy->trace_field,
         velocity);
     EXPECT_EQ(
         production_policy->physical_boundary_marker,
@@ -11444,24 +11444,24 @@ TEST(MovingDomainPhysics,
         production_policy->penalty_polynomial_order,
         1);
     EXPECT_EQ(
-        production_policy->velocity_space_signature.space_type,
+        production_policy->trace_space_signature.space_type,
         velocity_space->space_type());
     EXPECT_EQ(
-        production_policy->velocity_space_signature.field_type,
+        production_policy->trace_space_signature.field_type,
         velocity_space->field_type());
     EXPECT_EQ(
-        production_policy->velocity_space_signature.continuity,
+        production_policy->trace_space_signature.continuity,
         velocity_space->continuity());
     EXPECT_EQ(
-        production_policy->velocity_space_signature.value_dimension,
+        production_policy->trace_space_signature.value_dimension,
         velocity_space->value_dimension());
     EXPECT_EQ(
         production_policy
-            ->velocity_space_signature
+            ->trace_space_signature
             .topological_dimension,
         velocity_space->topological_dimension());
     EXPECT_EQ(
-        production_policy->velocity_space_signature.element_type,
+        production_policy->trace_space_signature.element_type,
         velocity_space->element_type());
     EXPECT_EQ(
         production_policy->effective_penalty_multiplier,
@@ -12111,7 +12111,7 @@ TEST(MovingDomainPhysics, PreparedWeakVelocityNitscheKeepsTreesAndBindsActualFie
             EXPECT_EQ(prepared[0].target, bc::Boundary(ExteriorBoundaryMeasure::fullPhysical(21)));
             EXPECT_EQ(prepared[1].target, bc::Boundary(ExteriorBoundaryMeasure::generatedActiveSubset(22, 122)));
             ASSERT_EQ(preflight_bindings.size(), 1u);
-            EXPECT_EQ(preflight_bindings[0].velocityField(), 0u);
+            EXPECT_EQ(preflight_bindings[0].traceField(), 0u);
 
             // Stated with the registered fields.
             const FE::systems::BoundUnknown U{17, StateField(17, *vector, "u"), TestField(17, *vector, "v")};
@@ -12125,7 +12125,7 @@ TEST(MovingDomainPhysics, PreparedWeakVelocityNitscheKeepsTreesAndBindsActualFie
             EXPECT_EQ(resolved, (std::vector<int>{21, 22}));
             EXPECT_EQ(samples, 0);
             ASSERT_EQ(bindings.size(), 1u);
-            EXPECT_EQ(bindings[0].velocityField(), 17u);
+            EXPECT_EQ(bindings[0].traceField(), 17u);
             EXPECT_EQ(bindings[0].physicalBoundaryMarker(), 22);
             EXPECT_EQ(bindings[0].generatedActiveBoundaryMarker(), 122);
             EXPECT_NE(bindings[0].routeAnchor().node(), preflight_bindings[0].routeAnchor().node());
@@ -12257,7 +12257,7 @@ TEST(MovingDomainPhysics, PreparedNitscheContributionsUseOwnedFieldsAndOptionalO
                         }
                         ASSERT_EQ(bindings.size(), certify ? 1u : 0u);
                         if (certify) {
-                            EXPECT_EQ(bindings[0].velocityField(), U.id);
+                            EXPECT_EQ(bindings[0].traceField(), U.id);
                             EXPECT_EQ(bindings[0].physicalBoundaryMarker(), 22);
                             EXPECT_EQ(bindings[0].generatedActiveBoundaryMarker(), 122);
                             const auto count_anchor = [&](const auto& self, const FormExprNode& node) -> int {

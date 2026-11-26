@@ -259,7 +259,7 @@ TEST(PetscBackend, CreateLinearSolverNormalizesAutoFieldSplitKindFromSaddlePoint
     auto solver = factory.createLinearSolver(opts);
     const auto& stored = solver->getOptions();
     EXPECT_EQ(stored.fieldsplit.kind, FieldSplitKind::Schur);
-    EXPECT_EQ(stored.momentum_block_name, "velocity");
+    EXPECT_EQ(stored.primary_block_name, "velocity");
     EXPECT_EQ(stored.constraint_block_name, "pressure");
 #endif
 }

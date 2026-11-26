@@ -285,10 +285,10 @@ void addMetadataRoleMappings(SolverOptions& options)
         }
     }
 
-    if (options.momentum_block_name.empty()) {
+    if (options.primary_block_name.empty()) {
         const auto name = options.resolveBlockNameForRole(BlockRole::PrimaryField);
         if (!name.empty()) {
-            options.momentum_block_name = std::string(name);
+            options.primary_block_name = std::string(name);
         }
     }
 

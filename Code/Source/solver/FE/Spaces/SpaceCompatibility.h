@@ -32,9 +32,9 @@ public:
     static Result check_conformity(const FunctionSpace& a,
                                    const FunctionSpace& b);
 
-    /// Heuristic inf-sup stability check for mixed pairs (e.g., velocity-pressure)
-    static Result check_inf_sup(const FunctionSpace& velocity_space,
-                                const FunctionSpace& pressure_space);
+    /// Heuristic inf-sup stability check for vector-field/multiplier pairs
+    static Result check_inf_sup(const FunctionSpace& vector_field_space,
+                                const FunctionSpace& multiplier_space);
 };
 
 } // namespace spaces

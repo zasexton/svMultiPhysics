@@ -1299,7 +1299,7 @@ TEST_P(LinearSolverConformance, BlockSchurSaddlePointMapping)
     BlockLayout layout;
     layout.blocks.push_back({"u", 0, 2, BlockRole::PrimaryField});
     layout.blocks.push_back({"p", 2, 1, BlockRole::ConstraintField});
-    layout.momentum_block = 0;
+    layout.primary_block = 0;
     layout.constraint_block = 1;
     opts.block_layout = layout;
     if (kind == BackendKind::FSILS) {

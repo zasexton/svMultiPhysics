@@ -1017,7 +1017,7 @@ backends::SolverOptions fsilsBlockSchurOptions(
     backends::BlockLayout layout;
     layout.blocks.push_back({"u", 0, 2, backends::BlockRole::PrimaryField});
     layout.blocks.push_back({"p", 2, 1, backends::BlockRole::ConstraintField});
-    layout.momentum_block = 0;
+    layout.primary_block = 0;
     layout.constraint_block = 1;
     o.block_layout = std::move(layout);
     return o;

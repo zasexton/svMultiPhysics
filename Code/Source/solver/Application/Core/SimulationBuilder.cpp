@@ -1109,7 +1109,7 @@ bool isTwoBlockPartition(const svmp::FE::backends::BlockLayout& layout,
          layout.blocks[1].start_component == primary_components &&
          layout.blocks[1].n_components == constraint_components &&
          layout.blocks[1].role == BlockRole::ConstraintField &&
-         layout.momentum_block == 0 && layout.constraint_block == 1;
+         layout.primary_block == 0 && layout.constraint_block == 1;
 }
 
 } // namespace
@@ -1755,7 +1755,7 @@ void SimulationBuilder::createSolvers()
     }
     oopCout() << "]";
     if (solver_options.block_layout->hasSaddlePoint()) {
-      oopCout() << " saddle_point=(" << *solver_options.block_layout->momentum_block
+      oopCout() << " saddle_point=(" << *solver_options.block_layout->primary_block
                 << "," << *solver_options.block_layout->constraint_block << ")";
     }
   }

@@ -4080,7 +4080,7 @@ makeFormBoundGeneratedBoundaryNitscheTracePolicies(
     const auto same_route = [](const auto& lhs,
                                const auto& rhs) noexcept {
         return lhs.op == rhs.op &&
-               lhs.velocity_field == rhs.velocity_field &&
+               lhs.trace_field == rhs.trace_field &&
                lhs.volume_interface_marker ==
                    rhs.volume_interface_marker &&
                lhs.generated_active_boundary_marker ==
@@ -4114,7 +4114,7 @@ makeFormBoundGeneratedBoundaryNitscheTracePolicies(
             std::find(
                 fields.begin(),
                 fields.end(),
-                binding.velocityField()) == fields.end(),
+                binding.traceField()) == fields.end(),
             InvalidArgumentException,
             "installFormulation: generated-boundary Nitsche "
             "binding velocity field is not installed by this "
@@ -4142,9 +4142,9 @@ makeFormBoundGeneratedBoundaryNitscheTracePolicies(
 
         GeneratedBoundaryNitscheTracePolicy policy{
             .op = op,
-            .velocity_field = binding.velocityField(),
-            .velocity_space_signature =
-                binding.velocitySpaceSignature(),
+            .trace_field = binding.traceField(),
+            .trace_space_signature =
+                binding.traceSpaceSignature(),
             .physical_boundary_marker =
                 binding.physicalBoundaryMarker(),
             .volume_interface_marker =

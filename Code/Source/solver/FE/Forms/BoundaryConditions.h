@@ -645,9 +645,9 @@ struct StrongDirichlet {
     /// precedences must agree.
     int precedence{0};
 
-    /// When >= 0, the generated active subset of boundary_marker (the wetted
+    /// When >= 0, the generated active subset of boundary_marker (the active
     /// part of a cut boundary): only the degrees of freedom whose basis
-    /// function has a nonzero trace on a face of positive wetted measure take
+    /// function has a nonzero trace on a face of positive active measure take
     /// the value (StrongDirichletConstraint).
     int active_boundary_marker{-1};
 
@@ -752,14 +752,14 @@ public:
     GeneratedBoundaryNitscheTraceFormBinding&
     operator=(GeneratedBoundaryNitscheTraceFormBinding&&) noexcept = default;
 
-    [[nodiscard]] FieldId velocityField() const noexcept
+    [[nodiscard]] FieldId traceField() const noexcept
     {
-        return velocity_field_;
+        return trace_field_;
     }
     [[nodiscard]] const SpaceSignature&
-    velocitySpaceSignature() const noexcept
+    traceSpaceSignature() const noexcept
     {
-        return velocity_space_signature_;
+        return trace_space_signature_;
     }
     [[nodiscard]] int physicalBoundaryMarker() const noexcept
     {
@@ -808,8 +808,8 @@ public:
 
 private:
     GeneratedBoundaryNitscheTraceFormBinding(
-        FieldId velocity_field,
-        SpaceSignature velocity_space_signature,
+        FieldId trace_field,
+        SpaceSignature trace_space_signature,
         int physical_boundary_marker,
         int generated_active_boundary_marker,
         NitscheTraceBilinearForm bilinear_form,
@@ -821,9 +821,9 @@ private:
         bool symmetric,
         std::uint64_t metadata_digest,
         FormExpr route_anchor)
-        : velocity_field_(velocity_field)
-        , velocity_space_signature_(
-              std::move(velocity_space_signature))
+        : trace_field_(trace_field)
+        , trace_space_signature_(
+              std::move(trace_space_signature))
         , physical_boundary_marker_(physical_boundary_marker)
         , generated_active_boundary_marker_(
               generated_active_boundary_marker)
@@ -850,8 +850,8 @@ private:
         int,
         const Nitsche&);
 
-    FieldId velocity_field_{INVALID_FIELD_ID};
-    SpaceSignature velocity_space_signature_{};
+    FieldId trace_field_{INVALID_FIELD_ID};
+    SpaceSignature trace_space_signature_{};
     int physical_boundary_marker_{-1};
     int generated_active_boundary_marker_{-1};
     NitscheTraceBilinearForm bilinear_form_{

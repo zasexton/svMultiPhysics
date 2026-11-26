@@ -60,7 +60,7 @@ struct AuxiliaryOutputConsumerRecord {
  * downstream analysis passes without re-walking the FormExpr DAG.
  */
 struct FormulationRecord {
-    /// Operator tag (e.g. "equations", "NavierStokesVMS")
+    /// Operator tag (e.g. "equations", "constraints")
     std::string operator_tag;
 
     /// False for diagnostic or measurement-only operators that retain this
@@ -146,7 +146,7 @@ struct FormulationRecord {
 
     /// Field names from the mixed expression, keyed by FieldId.
     /// Populated by installFormulation() for multi-field formulations.
-    /// Used by diagnostics to produce messages like "block (velocity, pressure)"
+    /// Used by diagnostics to produce messages like "block (primary, multiplier)"
     /// instead of "block (FieldId=0, FieldId=1)".
     std::vector<std::pair<FieldId, std::string>> field_names;
 

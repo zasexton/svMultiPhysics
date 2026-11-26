@@ -61,7 +61,7 @@ TEST(BlockLayout, NavierStokes2D)
     BlockLayout layout{};
     layout.blocks.push_back({"velocity", 0, 2});
     layout.blocks.push_back({"pressure", 2, 1});
-    layout.momentum_block = 0;
+    layout.primary_block = 0;
     layout.constraint_block = 1;
 
     EXPECT_EQ(layout.totalComponents(), 3);
@@ -86,13 +86,13 @@ TEST(BlockLayout, NavierStokes3D)
     BlockLayout layout{};
     layout.blocks.push_back({"velocity", 0, 3});
     layout.blocks.push_back({"pressure", 3, 1});
-    layout.momentum_block = 0;
+    layout.primary_block = 0;
     layout.constraint_block = 1;
 
     EXPECT_EQ(layout.totalComponents(), 4);
     EXPECT_TRUE(layout.hasSaddlePoint());
 
-    EXPECT_EQ(layout.blocks[static_cast<std::size_t>(*layout.momentum_block)].n_components, 3);
+    EXPECT_EQ(layout.blocks[static_cast<std::size_t>(*layout.primary_block)].n_components, 3);
     EXPECT_EQ(layout.blocks[static_cast<std::size_t>(*layout.constraint_block)].n_components, 1);
 }
 
@@ -104,13 +104,13 @@ TEST(BlockLayout, FSI)
     layout.blocks.push_back({"displacement", 0, 3});
     layout.blocks.push_back({"velocity", 3, 3});
     layout.blocks.push_back({"pressure", 6, 1});
-    layout.momentum_block = 1;
+    layout.primary_block = 1;
     layout.constraint_block = 2;
 
     EXPECT_EQ(layout.totalComponents(), 7);
     EXPECT_TRUE(layout.hasSaddlePoint());
 
-    const auto& mb = layout.blocks[static_cast<std::size_t>(*layout.momentum_block)];
+    const auto& mb = layout.blocks[static_cast<std::size_t>(*layout.primary_block)];
     EXPECT_EQ(mb.name, "velocity");
     EXPECT_EQ(mb.start_component, 3);
     EXPECT_EQ(mb.n_components, 3);
@@ -154,17 +154,17 @@ TEST(BlockLayout, InvalidSaddlePointIndices)
     layout.blocks.push_back({"pressure", 3, 1});
 
     // Out-of-range indices.
-    layout.momentum_block = 5;
+    layout.primary_block = 5;
     layout.constraint_block = 1;
     EXPECT_FALSE(layout.hasSaddlePoint());
 
     // Negative index.
-    layout.momentum_block = -1;
+    layout.primary_block = -1;
     layout.constraint_block = 1;
     EXPECT_FALSE(layout.hasSaddlePoint());
 
     // Only one set.
-    layout.momentum_block = 0;
+    layout.primary_block = 0;
     layout.constraint_block = std::nullopt;
     EXPECT_FALSE(layout.hasSaddlePoint());
 }
@@ -177,7 +177,7 @@ TEST(BlockLayout, SolverOptionsBlockLayout)
     BlockLayout layout{};
     layout.blocks.push_back({"velocity", 0, 3});
     layout.blocks.push_back({"pressure", 3, 1});
-    layout.momentum_block = 0;
+    layout.primary_block = 0;
     layout.constraint_block = 1;
     opts.block_layout = layout;
 
@@ -243,11 +243,11 @@ TEST(BlockLayout, PrimaryFieldBlockWithRoleAnnotation)
 
 TEST(BlockLayout, PrimaryFieldBlockFallsBackToMomentumBlock)
 {
-    // No BlockRole annotation, uses legacy momentum_block/constraint_block indices
+    // No BlockRole annotation, uses legacy primary_block/constraint_block indices
     BlockLayout layout{};
     layout.blocks.push_back({"velocity", 0, 3});
     layout.blocks.push_back({"pressure", 3, 1});
-    layout.momentum_block = 0;
+    layout.primary_block = 0;
     layout.constraint_block = 1;
 
     const auto* primary = layout.primaryFieldBlock();
@@ -448,7 +448,7 @@ TEST(SolverOptions, BlockRoleNamesPopulated)
 TEST(SolverOptions, ResolveBlockNameForRoleUsesExplicitMappingFirst)
 {
     SolverOptions opts{};
-    opts.momentum_block_name = "u_from_legacy_name";
+    opts.primary_block_name = "u_from_legacy_name";
     opts.block_role_names.emplace_back(BlockRole::PrimaryField, "u_from_role_map");
 
     EXPECT_EQ(opts.resolveBlockNameForRole(BlockRole::PrimaryField), "u_from_role_map");
@@ -477,7 +477,7 @@ TEST(SolverOptions, NormalizeFsilsBlockSchurPolicyFromAuxiliaryMetadata)
     BlockLayout field_layout{};
     field_layout.blocks.push_back({"velocity", 0, 2, BlockRole::PrimaryField});
     field_layout.blocks.push_back({"pressure", 2, 1, BlockRole::ConstraintField});
-    field_layout.momentum_block = 0;
+    field_layout.primary_block = 0;
     field_layout.constraint_block = 1;
     opts.block_layout = field_layout;
 
@@ -566,7 +566,7 @@ TEST(SolverOptions, NormalizePetscFieldSplitKindUsesSchurForSaddlePointMetadata)
         opts, BackendKind::PETSc, /*block_operator_available=*/true);
 
     EXPECT_EQ(normalized.fieldsplit.kind, FieldSplitKind::Schur);
-    EXPECT_EQ(normalized.momentum_block_name, "velocity");
+    EXPECT_EQ(normalized.primary_block_name, "velocity");
     EXPECT_EQ(normalized.constraint_block_name, "pressure");
 }
 

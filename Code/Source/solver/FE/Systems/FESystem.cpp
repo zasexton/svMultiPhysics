@@ -1606,9 +1606,9 @@ void mixGeneratedBoundaryNitscheTracePolicy(
         static_cast<std::uint64_t>(policy.id));
     mixGeneratedBoundaryTraceString(digest, policy.op);
     mixGeneratedBoundaryTraceHash(
-        digest, static_cast<std::uint64_t>(policy.velocity_field));
+        digest, static_cast<std::uint64_t>(policy.trace_field));
     const auto& signature =
-        policy.velocity_space_signature;
+        policy.trace_space_signature;
     mixGeneratedBoundaryTraceHash(
         digest,
         static_cast<std::uint64_t>(
@@ -1699,14 +1699,14 @@ void mixGeneratedBoundaryNitscheTracePolicy(
 {
     return std::tuple{
         policy.op,
-        policy.velocity_field,
-        policy.velocity_space_signature.space_type,
-        policy.velocity_space_signature.field_type,
-        policy.velocity_space_signature.continuity,
-        policy.velocity_space_signature.value_dimension,
-        policy.velocity_space_signature.topological_dimension,
-        policy.velocity_space_signature.polynomial_order,
-        policy.velocity_space_signature.element_type,
+        policy.trace_field,
+        policy.trace_space_signature.space_type,
+        policy.trace_space_signature.field_type,
+        policy.trace_space_signature.continuity,
+        policy.trace_space_signature.value_dimension,
+        policy.trace_space_signature.topological_dimension,
+        policy.trace_space_signature.polynomial_order,
+        policy.trace_space_signature.element_type,
         policy.physical_boundary_marker,
         policy.volume_interface_marker,
         policy.generated_active_boundary_marker,
@@ -5267,7 +5267,7 @@ private:
         }
     }
 
-    if (!options.momentum_block_name.empty() && options.momentum_block_name == field_name) {
+    if (!options.primary_block_name.empty() && options.primary_block_name == field_name) {
         return backends::BlockRole::PrimaryField;
     }
     if (!options.constraint_block_name.empty() && options.constraint_block_name == field_name) {
@@ -13347,7 +13347,7 @@ void FESystem::prepareFormBoundGeneratedBoundaryNitscheTracePolicies(
     const auto same_route = [](const auto& lhs,
                                const auto& rhs) noexcept {
         return lhs.op == rhs.op &&
-               lhs.velocity_field == rhs.velocity_field &&
+               lhs.trace_field == rhs.trace_field &&
                lhs.volume_interface_marker ==
                    rhs.volume_interface_marker &&
                lhs.generated_active_boundary_marker ==
@@ -13360,7 +13360,7 @@ void FESystem::prepareFormBoundGeneratedBoundaryNitscheTracePolicies(
         if (policy.id !=
                 INVALID_GENERATED_BOUNDARY_NITSCHE_TRACE_POLICY_ID ||
             policy.op.empty() ||
-            !field_registry_.has(policy.velocity_field) ||
+            !field_registry_.has(policy.trace_field) ||
             policy.physical_boundary_marker < 0 ||
             policy.volume_interface_marker < 0 ||
             policy.generated_active_boundary_marker < 0 ||
@@ -13393,11 +13393,11 @@ void FESystem::prepareFormBoundGeneratedBoundaryNitscheTracePolicies(
                 "form-bound policy fields are invalid");
         }
         const auto& field =
-            field_registry_.get(policy.velocity_field);
+            field_registry_.get(policy.trace_field);
         if (!field.space ||
             !generatedBoundaryNitscheTraceSpaceMatches(
                 *field.space,
-                policy.velocity_space_signature) ||
+                policy.trace_space_signature) ||
             field.space->polynomial_order() !=
                 policy.penalty_polynomial_order) {
             throw std::invalid_argument(
@@ -13502,14 +13502,14 @@ void FESystem::refreshGeneratedBoundaryNitscheTraceCertificates(
                     INVALID_GENERATED_BOUNDARY_NITSCHE_TRACE_POLICY_ID ||
                 !policy_ids.insert(policy.id).second ||
                 !operator_registry_.has(policy.op) ||
-                !field_registry_.has(policy.velocity_field)) {
+                !field_registry_.has(policy.trace_field)) {
                 throw std::runtime_error(
                     "FESystem: generated-boundary Nitsche trace policy "
                     "has an invalid ID or references an unknown "
                     "operator or field");
             }
             const auto& field =
-                field_registry_.get(policy.velocity_field);
+                field_registry_.get(policy.trace_field);
             if (!field.space) {
                 throw std::runtime_error(
                     "FESystem: generated-boundary Nitsche trace policy "
@@ -13544,11 +13544,11 @@ void FESystem::refreshGeneratedBoundaryNitscheTraceCertificates(
                 std::find(
                     source.active_fields.begin(),
                     source.active_fields.end(),
-                    policy.velocity_field) ==
+                    policy.trace_field) ==
                     source.active_fields.end() ||
                 !generatedBoundaryNitscheTraceSpaceMatches(
                     *field.space,
-                    policy.velocity_space_signature) ||
+                    policy.trace_space_signature) ||
                 field.space->polynomial_order() !=
                     policy.penalty_polynomial_order) {
                 throw std::runtime_error(
@@ -13731,7 +13731,7 @@ void FESystem::refreshGeneratedBoundaryNitscheTraceCertificates(
                 *this,
                 analysis::
                     GeneratedBoundaryAggregateTraceCertificationOptions{
-                        .field = policy->velocity_field,
+                        .field = policy->trace_field,
                         .physical_boundary_marker =
                             policy->physical_boundary_marker,
                         .volume_interface_marker =
@@ -13754,7 +13754,7 @@ void FESystem::refreshGeneratedBoundaryNitscheTraceCertificates(
                 source_report;
             for (const auto& report : aggregation_reports) {
                 if (!report ||
-                    report->field != policy->velocity_field ||
+                    report->field != policy->trace_field ||
                     report->interface_marker !=
                         policy->volume_interface_marker ||
                     report->canonical_content_digest !=
@@ -13776,7 +13776,7 @@ void FESystem::refreshGeneratedBoundaryNitscheTraceCertificates(
             }
 
             const auto& field =
-                field_registry_.get(policy->velocity_field);
+                field_registry_.get(policy->trace_field);
             const int polynomial_order =
                 field.space->polynomial_order();
             const Real effective_penalty =
@@ -14006,18 +14006,18 @@ void FESystem::requireCurrentGeneratedBoundaryNitscheTraceCertificates(
                         .source_formulation_record_index];
             const auto& field =
                 field_registry_.get(
-                    record->policy.velocity_field);
+                    record->policy.trace_field);
             if (source.operator_tag != record->policy.op ||
                 std::find(
                     source.active_fields.begin(),
                     source.active_fields.end(),
-                    record->policy.velocity_field) ==
+                    record->policy.trace_field) ==
                     source.active_fields.end() ||
                 !field.space ||
                 !generatedBoundaryNitscheTraceSpaceMatches(
                     *field.space,
                     record->policy
-                        .velocity_space_signature) ||
+                        .trace_space_signature) ||
                 record->policy.form_binding_digest == 0u) {
                 throw std::runtime_error(
                     "FESystem: generated-boundary Nitsche trace "
@@ -14038,7 +14038,7 @@ void FESystem::requireCurrentGeneratedBoundaryNitscheTraceCertificates(
                         .affine_constraint_layout_revision !=
                     affine_constraints_.constraintLayoutRevision() ||
                 record->certificate.field !=
-                    record->policy.velocity_field ||
+                    record->policy.trace_field ||
                 record->certificate.physical_boundary_marker !=
                     record->policy.physical_boundary_marker ||
                 record->certificate.volume_interface_marker !=

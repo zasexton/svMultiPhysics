@@ -553,11 +553,10 @@ inline constexpr GeneratedBoundaryNitscheTracePolicyId
     INVALID_GENERATED_BOUNDARY_NITSCHE_TRACE_POLICY_ID{0u};
 
 /**
- * Immutable setup-time requirement for one generated-boundary velocity
- * Nitsche route.
+ * Immutable setup-time requirement for one generated-boundary Nitsche trace route.
  *
  * The policy is derived from an opaque form binding that seals the canonical
- * state/test roles and complete velocity-space signature and whose exact
+ * state/test roles and complete trace-space signature and whose exact
  * route anchor was verified once as an unscaled top-level additive summand in
  * the residual installed for its source formulation. Certification consumes
  * the effective penalty sealed by that binding; it does not mutate or select
@@ -575,8 +574,8 @@ struct GeneratedBoundaryNitscheTracePolicy {
     GeneratedBoundaryNitscheTracePolicyId id{
         INVALID_GENERATED_BOUNDARY_NITSCHE_TRACE_POLICY_ID};
     OperatorTag op{};
-    FieldId velocity_field{INVALID_FIELD_ID};
-    forms::SpaceSignature velocity_space_signature{};
+    FieldId trace_field{INVALID_FIELD_ID};
+    forms::SpaceSignature trace_space_signature{};
     int physical_boundary_marker{-1};
     int volume_interface_marker{-1};
     int generated_active_boundary_marker{-1};

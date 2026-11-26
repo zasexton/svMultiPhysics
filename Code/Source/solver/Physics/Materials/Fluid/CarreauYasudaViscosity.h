@@ -51,7 +51,7 @@ public:
         }
         return FE::analysis::ConstitutiveLawMetadata{
             .name = "dynamic_viscosity",
-            .role = FE::analysis::ConstitutiveLawRole::DynamicViscosity,
+            .role = FE::analysis::ConstitutiveLawRole::SymmetricGradientCoefficient,
             .input_measure =
                 FE::analysis::ConstitutiveLawInputMeasure::
                     SymmetricGradientSecondInvariant,

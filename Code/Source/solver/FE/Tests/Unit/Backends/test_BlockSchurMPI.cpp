@@ -89,7 +89,7 @@ SolverOptions makeFsilsBlockSchurOptions(int dof_per_node,
     BlockLayout layout;
     layout.blocks.push_back({"u", 0, primary_components, BlockRole::PrimaryField});
     layout.blocks.push_back({"p", primary_components, constraint_components, BlockRole::ConstraintField});
-    layout.momentum_block = 0;
+    layout.primary_block = 0;
     layout.constraint_block = 1;
     opts.block_layout = std::move(layout);
     return opts;

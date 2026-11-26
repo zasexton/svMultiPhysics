@@ -137,9 +137,9 @@ struct BlockLayout {
 
     /// Optional: indices into blocks[] identifying the saddle-point pair.
     /// Only meaningful for BlockSchur / Schur-complement solvers.
-    /// momentum_block: field-A (e.g., velocity) — rows scaled, Schur complement field-A solve
-    /// constraint_block: field-B (e.g., pressure) — cols scaled, Schur complement field-B solve
-    std::optional<int> momentum_block{};
+    /// primary_block: primary-field block for row scaling and the primary solve
+    /// constraint_block: multiplier block for column scaling and the Schur complement
+    std::optional<int> primary_block{};
     std::optional<int> constraint_block{};
 
     /// Convenience: total DOF per node implied by blocks.
@@ -175,11 +175,11 @@ struct BlockLayout {
         return nullptr;
     }
 
-    /// Find the primary field block (saddle-point field-A). Falls back to momentum_block.
+    /// Find the primary field block (saddle-point field-A). Falls back to primary_block.
     [[nodiscard]] const BlockDescriptor* primaryFieldBlock() const noexcept {
         if (auto* p = findBlockByRole(BlockRole::PrimaryField)) return p;
-        if (momentum_block && *momentum_block >= 0 && *momentum_block < static_cast<int>(blocks.size()))
-            return &blocks[static_cast<std::size_t>(*momentum_block)];
+        if (primary_block && *primary_block >= 0 && *primary_block < static_cast<int>(blocks.size()))
+            return &blocks[static_cast<std::size_t>(*primary_block)];
         return nullptr;
     }
 
@@ -193,8 +193,8 @@ struct BlockLayout {
 
     /// Check if saddle-point annotation is present and valid.
     [[nodiscard]] bool hasSaddlePoint() const noexcept {
-        return momentum_block.has_value() && constraint_block.has_value()
-            && *momentum_block >= 0 && *momentum_block < static_cast<int>(blocks.size())
+        return primary_block.has_value() && constraint_block.has_value()
+            && *primary_block >= 0 && *primary_block < static_cast<int>(blocks.size())
             && *constraint_block >= 0 && *constraint_block < static_cast<int>(blocks.size());
     }
 };
@@ -494,7 +494,7 @@ struct SolverOptions {
     /// Explicit saddle-point block names (optional). If set, used to identify momentum/constraint
     /// blocks by name instead of the auto-detection heuristic (first multi-component = momentum,
     /// first single-component = constraint). Set from solver XML configuration.
-    std::string momentum_block_name{};    ///< e.g., "velocity" or "displacement"
+    std::string primary_block_name{};    ///< formulation-declared primary field
     std::string constraint_block_name{};  ///< e.g., "pressure"
 
     /// Generic role-to-name mapping (takes precedence over momentum/constraint names when set).
@@ -508,8 +508,8 @@ struct SolverOptions {
             }
         }
 
-        if (role == BlockRole::PrimaryField && !momentum_block_name.empty()) {
-            return momentum_block_name;
+        if (role == BlockRole::PrimaryField && !primary_block_name.empty()) {
+            return primary_block_name;
         }
         if (role == BlockRole::ConstraintField && !constraint_block_name.empty()) {
             return constraint_block_name;

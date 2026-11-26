@@ -258,13 +258,13 @@ TEST(FormLawTest, CallsExpandToTheBodyTree)
     const auto body = [](const FormExpr& s, int) {
         return FormExpr::constant(1.0) + s * s / (FormExpr::constant(1.0) + s);
     };
-    const auto metadata = analysis::dynamicViscosityMetadata(INVALID_FIELD_ID, 1.0);
+    const auto metadata = analysis::symmetricGradientCoefficientMetadata(INVALID_FIELD_ID, 1.0);
     using Kind = forms::ConstitutiveModel::ValueKind;
     const auto mu = forms::law("test::quadratic_ratio", Kind::Scalar, Kind::Scalar, body, metadata);
     EXPECT_EQ(mu.model()->kindId(), forms::InlinableConstitutiveModel::fnv1a64("test::quadratic_ratio"));
     EXPECT_NE(mu.model()->inlinable(), nullptr);
     ASSERT_TRUE(mu.model()->constitutiveLawMetadata(0u).has_value());
-    EXPECT_EQ(mu.model()->constitutiveLawMetadata(0u)->role, analysis::ConstitutiveLawRole::DynamicViscosity);
+    EXPECT_EQ(mu.model()->constitutiveLawMetadata(0u)->role, analysis::ConstitutiveLawRole::SymmetricGradientCoefficient);
     forms::Value<Real> in;
     in.kind = forms::Value<Real>::Kind::Scalar;
     in.s = 2.0;

@@ -33,7 +33,7 @@ TEST(NewtonianViscosity, ExpandsToTheConstantAndPublishesItsMetadata)
     EXPECT_EQ(expansion.outputs.front().toString(), FE::forms::FormExpr::constant(0.01).toString());
     const auto metadata = law.model()->constitutiveLawMetadata(0u);
     ASSERT_TRUE(metadata.has_value());
-    EXPECT_EQ(metadata->role, FE::analysis::ConstitutiveLawRole::DynamicViscosity);
+    EXPECT_EQ(metadata->role, FE::analysis::ConstitutiveLawRole::SymmetricGradientCoefficient);
     EXPECT_TRUE(metadata->constant_value_available);
     EXPECT_EQ(metadata->constant_value, 0.01);
     EXPECT_THROW((void)materials::fluid::newtonianViscosity(0.0), std::invalid_argument);
@@ -45,7 +45,7 @@ TEST(CarreauYasudaViscosity, LawWrittenAsFormsMatchesTheClass)
     const materials::fluid::CarreauYasudaViscosity model(0.056, 0.0035, 3.313, 0.3568, 2.0);
     const auto law = materials::fluid::carreauYasudaViscosityLaw(0.056, 0.0035, 3.313, 0.3568, 2.0);
     ASSERT_TRUE(law.model()->constitutiveLawMetadata(0u).has_value());
-    EXPECT_EQ(law.model()->constitutiveLawMetadata(0u)->role, FE::analysis::ConstitutiveLawRole::DynamicViscosity);
+    EXPECT_EQ(law.model()->constitutiveLawMetadata(0u)->role, FE::analysis::ConstitutiveLawRole::SymmetricGradientCoefficient);
     for (const FE::Real gamma : {0.0, 0.5, 12.5, 400.0}) {
         SCOPED_TRACE(gamma);
         const std::vector<FE::forms::FormExpr> inputs{FE::forms::FormExpr::constant(gamma)};

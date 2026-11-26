@@ -959,7 +959,7 @@ std::string describe(const svmp::FE::backends::BlockLayout& layout)
                 std::to_string(block.n_components) + ":" +
                 std::to_string(static_cast<int>(block.role)) + ") ";
     }
-    text += "pair=" + (layout.momentum_block ? std::to_string(*layout.momentum_block) : std::string("-")) +
+    text += "pair=" + (layout.primary_block ? std::to_string(*layout.primary_block) : std::string("-")) +
             "/" + (layout.constraint_block ? std::to_string(*layout.constraint_block) : std::string("-"));
     return text;
 }

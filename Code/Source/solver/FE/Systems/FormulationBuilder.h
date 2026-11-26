@@ -23,7 +23,7 @@
  *   FormulationBuilder F(system, "equations", base);
  *   F.symbolicTangent();
  *   F.installGroup({d}, mesh_rows, {.ale = &ale});              // copy of the options so far
- *   F.recordConstitutiveLaw(analysis::dynamicViscosityMetadata(u, mu)).configure(ale);
+ *   F.recordConstitutiveLaw(analysis::symmetricGradientCoefficientMetadata(u, mu)).configure(ale);
  *   F.install({u, p}, M + C);                                    // the options themselves
  *   F.installGroup({p}, pspg, {.source_component_tag = "pspg", .extra_trial_fields = {u}});
  *

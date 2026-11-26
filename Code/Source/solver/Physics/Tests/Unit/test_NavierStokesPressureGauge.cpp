@@ -1662,7 +1662,7 @@ TEST(NavierStokesPressureGauge, PublishesDynamicViscosityConstitutiveMetadata)
     ASSERT_EQ(record.constitutive_laws.size(), 1u);
     const auto& law = record.constitutive_laws.front();
     EXPECT_EQ(law.name, "dynamic_viscosity");
-    EXPECT_EQ(law.role, FE::analysis::ConstitutiveLawRole::DynamicViscosity);
+    EXPECT_EQ(law.role, FE::analysis::ConstitutiveLawRole::SymmetricGradientCoefficient);
     EXPECT_EQ(law.input_measure,
               FE::analysis::ConstitutiveLawInputMeasure::
                   SymmetricGradientSecondInvariant);
@@ -1715,7 +1715,7 @@ TEST(NavierStokesPressureGauge, PublishesVariableDynamicViscosityFromResidualExp
     ASSERT_EQ(record.constitutive_laws.size(), 1u);
     const auto& law = record.constitutive_laws.front();
     EXPECT_EQ(law.name, "dynamic_viscosity");
-    EXPECT_EQ(law.role, FE::analysis::ConstitutiveLawRole::DynamicViscosity);
+    EXPECT_EQ(law.role, FE::analysis::ConstitutiveLawRole::SymmetricGradientCoefficient);
     EXPECT_EQ(law.input_measure,
               FE::analysis::ConstitutiveLawInputMeasure::
                   SymmetricGradientSecondInvariant);

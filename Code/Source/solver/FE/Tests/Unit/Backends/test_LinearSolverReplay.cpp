@@ -174,7 +174,7 @@ BlockLayout groupedSaddleLayout(const FsilsSystemSnapshot& s)
     }
     layout.blocks.push_back({"Primary", 0, s.dof - 1, BlockRole::PrimaryField});
     layout.blocks.push_back({"Pressure", s.dof - 1, 1, BlockRole::ConstraintField});
-    layout.momentum_block = 0;
+    layout.primary_block = 0;
     layout.constraint_block = 1;
     return layout;
 }
@@ -186,7 +186,7 @@ BlockLayout snapshotLayout(const FsilsSystemSnapshot& s)
     for (std::size_t i = 0; i < layout.blocks.size(); ++i) {
         if (layout.blocks[i].name == "Velocity") {
             layout.blocks[i].role = BlockRole::PrimaryField;
-            layout.momentum_block = static_cast<int>(i);
+            layout.primary_block = static_cast<int>(i);
         } else if (layout.blocks[i].name == "Pressure") {
             layout.blocks[i].role = BlockRole::ConstraintField;
             layout.constraint_block = static_cast<int>(i);

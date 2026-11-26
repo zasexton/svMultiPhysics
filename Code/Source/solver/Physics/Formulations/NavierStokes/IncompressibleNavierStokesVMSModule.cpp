@@ -252,7 +252,7 @@ namespace {
     }
     auto model = FE::constitutive::withConstitutiveLawMetadata(
         o.viscosity_model, 0u,
-        FE::analysis::dynamicViscosityMetadata(FE::INVALID_FIELD_ID, o.viscosity, o.viscosity_model));
+        FE::analysis::symmetricGradientCoefficientMetadata(FE::INVALID_FIELD_ID, o.viscosity, o.viscosity_model, "dynamic_viscosity"));
     return constitutive(std::move(model), shear_rate).out(0);
 }
 
@@ -566,7 +566,7 @@ void IncompressibleNavierStokesVMSModule::registerOn(fs::FESystem& system) const
 
     // Install: the residual, the residual-work channels, then the PSPG pressure-gradient group.
     if (!o.viscosity_model) {
-        F.recordConstitutiveLaw(FE::analysis::dynamicViscosityMetadata(u_id, o.viscosity));
+        F.recordConstitutiveLaw(FE::analysis::symmetricGradientCoefficientMetadata(u_id, o.viscosity, {}, "dynamic_viscosity"));
     }
     if (aggregated) {
         F.certifyGeneratedBoundaryNitscheTraces(nitsche_traces, liquid->interface_marker,
@@ -855,9 +855,9 @@ void IncompressibleNavierStokesVMSModule::registerTwoFluidOn(fs::FESystem& syste
     install.compiler_options.use_symbolic_tangent = true;
     install.source_component_tag =
         o.operator_tag + "_two_fluid_material_interface";
-    install.recordConstitutiveLaw(FE::analysis::dynamicViscosityMetadata(
+    install.recordConstitutiveLaw(FE::analysis::symmetricGradientCoefficientMetadata(
         u_negative, o.negative_phase.viscosity, {}, "negative_dynamic_viscosity"));
-    install.recordConstitutiveLaw(FE::analysis::dynamicViscosityMetadata(
+    install.recordConstitutiveLaw(FE::analysis::symmetricGradientCoefficientMetadata(
         u_positive, o.positive_phase.viscosity, {}, "positive_dynamic_viscosity"));
     const std::array<FE::FieldId, 4> fields{
         u_negative, p_negative, u_positive, p_positive};

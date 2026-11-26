@@ -1752,7 +1752,7 @@ TEST(FormulationBuilder, SpanGroupsInheritCurrentOptionsAndKeepDiagnosticsIsolat
     systems::FormInstallOptions late_options;
     late_options.compiler_options.use_symbolic_tangent = true;
     late_options.source_component_tag = "late_base";
-    late_options.recordConstitutiveLaw(svmp::FE::analysis::dynamicViscosityMetadata(p_field, 0.5));
+    late_options.recordConstitutiveLaw(svmp::FE::analysis::symmetricGradientCoefficientMetadata(p_field, 0.5));
     F.options() = late_options;
     const systems::ALEBinding ale{
         .enabled = true,
@@ -1822,7 +1822,7 @@ TEST(FormulationBuilder, ComposesOptionsInCallOrderAndInstallsGroups)
     svmp::FE::systems::FormulationBuilder F(sys, "op", svmp::FE::systems::FormInstallOptions{});
     EXPECT_TRUE(sys.hasOperator("op"));
     EXPECT_EQ(F.operatorTag(), "op");
-    F.symbolicTangent().recordConstitutiveLaw(svmp::FE::analysis::dynamicViscosityMetadata(u_field, 0.5));
+    F.symbolicTangent().recordConstitutiveLaw(svmp::FE::analysis::symmetricGradientCoefficientMetadata(u_field, 0.5));
     EXPECT_TRUE(F.options().compiler_options.use_symbolic_tangent);
     EXPECT_EQ(F.options().constitutive_laws.size(), 1u);
 

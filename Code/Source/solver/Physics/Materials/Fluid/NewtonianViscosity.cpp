@@ -23,7 +23,7 @@ FE::forms::Law newtonianViscosity(FE::Real mu)
     return FE::forms::law(
         "Physics::materials::fluid::NewtonianViscosity", Kind::Scalar, Kind::Scalar,
         [mu](const FE::forms::FormExpr& /*gamma*/, int /*dim*/) { return FE::forms::FormExpr::constant(mu); },
-        FE::analysis::dynamicViscosityMetadata(FE::INVALID_FIELD_ID, mu));
+        FE::analysis::symmetricGradientCoefficientMetadata(FE::INVALID_FIELD_ID, mu, {}, "dynamic_viscosity"));
 }
 
 } // namespace fluid

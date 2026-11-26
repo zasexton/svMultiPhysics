@@ -524,7 +524,7 @@ svmp::FE::backends::SolverOptions resistiveOutletBlockSchurOptions(Real outer_re
     svmp::FE::backends::BlockLayout layout;
     layout.blocks.push_back({"Velocity", 0, 3, svmp::FE::backends::BlockRole::PrimaryField});
     layout.blocks.push_back({"Pressure", 3, 1, svmp::FE::backends::BlockRole::ConstraintField});
-    layout.momentum_block = 0;
+    layout.primary_block = 0;
     layout.constraint_block = 1;
     opts.block_layout = std::move(layout);
     return opts;
