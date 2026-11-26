@@ -26,7 +26,8 @@ MaintainedFieldPostAcceptPublicationView
 makeCommonRepresentationMaintainedFieldPublication(
     svmp::FE::FieldId field,
     std::size_t field_offset,
-    std::span<const svmp::FE::Real> delta)
+    std::span<const svmp::FE::Real> delta,
+    std::optional<std::span<const svmp::FE::Real>> representation_slope)
 {
   return MaintainedFieldPostAcceptPublicationView{
       .field = field,
@@ -35,6 +36,7 @@ makeCommonRepresentationMaintainedFieldPublication(
       .u_prev_delta = delta,
       .u_prev2_and_deeper_delta = delta,
       .u_dot_delta = std::nullopt,
+      .representation_slope = representation_slope,
       .maintained_first_order_u_ddot_unchanged = true,
   };
 }
@@ -78,7 +80,9 @@ void stageMaintainedFieldPostAcceptPublication(
       publication.u_prev_delta.size() == field_count &&
       publication.u_prev2_and_deeper_delta.size() == field_count &&
       (!publication.u_dot_delta.has_value() ||
-       publication.u_dot_delta->size() == field_count);
+       publication.u_dot_delta->size() == field_count) &&
+      (!publication.representation_slope.has_value() ||
+       publication.representation_slope->size() == field_count);
   const bool field_slice_fits =
       publication.field_offset <= staged.current.size() &&
       field_count <= staged.current.size() - publication.field_offset;
@@ -117,22 +121,34 @@ void stageMaintainedFieldPostAcceptPublication(
       !finite(publication.u_prev_delta) ||
       !finite(publication.u_prev2_and_deeper_delta) ||
       (publication.u_dot_delta.has_value() &&
-       !finite(*publication.u_dot_delta))) {
+       !finite(*publication.u_dot_delta)) ||
+      (publication.representation_slope.has_value() &&
+       !finite(*publication.representation_slope))) {
     throw std::invalid_argument(
         "Postaccept maintained-field publication deltas must be finite.");
   }
 
   // Validation is complete before any staged coefficient is changed.
+  const bool scales_rate =
+      publication.representation_slope.has_value() && staged.u_dot.has_value();
   for (std::size_t i = 0u; i < field_count; ++i) {
     const auto index = publication.field_offset + i;
+    const auto slope = publication.representation_slope.has_value()
+                           ? (*publication.representation_slope)[i]
+                           : svmp::FE::Real{1};
+    const auto current = staged.current[index];
     staged.current[index] += publication.u_delta[i];
-    staged.history.front()[index] += publication.u_prev_delta[i];
-    for (std::size_t level = 1u; level < staged.history.size(); ++level) {
-      staged.history[level][index] +=
-          publication.u_prev2_and_deeper_delta[i];
+    for (std::size_t level = 0u; level < staged.history.size(); ++level) {
+      auto& value = staged.history[level][index];
+      value += (level == 0u ? publication.u_prev_delta[i]
+                            : publication.u_prev2_and_deeper_delta[i]) +
+               (svmp::FE::Real{1} - slope) * (current - value);
     }
-    if (publication.u_dot_delta.has_value()) {
-      (*staged.u_dot)[index] += (*publication.u_dot_delta)[i];
+    if (staged.u_dot.has_value()) {
+      auto& rate = (*staged.u_dot)[index];
+      rate = slope * rate + (publication.u_dot_delta.has_value()
+                                 ? (*publication.u_dot_delta)[i]
+                                 : svmp::FE::Real{0});
     }
   }
   staged.schedule.push_back(
@@ -140,7 +156,7 @@ void stageMaintainedFieldPostAcceptPublication(
           .field = publication.field,
           .field_offset = publication.field_offset,
           .field_count = field_count,
-          .publishes_u_dot = publication.u_dot_delta.has_value(),
+          .publishes_u_dot = publication.u_dot_delta.has_value() || scales_rate,
       });
 }
 

@@ -471,6 +471,7 @@ void redistanceMaintainedLevelSet(
     std::vector<svmp::FE::Real>& fe_solution,
     bool& changed,
     std::set<svmp::FE::FieldId>& modified_level_set_fields,
+    std::map<svmp::FE::FieldId, std::vector<svmp::FE::Real>>& representation_slopes,
     std::vector<svmp::FE::LogRecord>& staged_commit_logs)
 {
   // Interface-preserving redistancing (opt-in): after the transport has
@@ -655,6 +656,9 @@ void redistanceMaintainedLevelSet(
       return;
     }
     if (applied) {
+      // The stored increments and rate follow the change of representation.
+      representation_slopes[field] = svmp::FE::level_set::levelSetRepresentationSlope(
+          mesh_access, phi_dofs, input, restored);
       std::copy(restored.begin(), restored.end(),
                 fe_solution.begin() + static_cast<std::ptrdiff_t>(offset));
       changed = true;
@@ -712,11 +716,15 @@ void publishMaintainedLevelSetChanges(
     const std::vector<svmp::FE::Real>& fe_solution,
     const std::vector<svmp::FE::Real>& accepted_solution_before_maintenance,
     const std::set<svmp::FE::FieldId>& modified_level_set_fields,
+    const std::map<svmp::FE::FieldId, std::vector<svmp::FE::Real>>& representation_slopes,
     std::vector<svmp::FE::LogRecord>& staged_commit_logs,
     bool* rate_publication_started)
 {
-  // Publish each representation change through one explicit field mapping:
-  // a common delta on every stored state, with the rate unchanged.
+  // Publish each maintained field through one explicit field mapping: a
+  // common delta on every stored state.  An additive correction keeps the
+  // increments and the rate.  A redistanced field changes representation,
+  // phi -> psi(phi): its increments and its rate are scaled by psi'(phi), so
+  // the next stage continues the same motion in the new representation.
   const auto comm = activeFESystemCommunicator(*host.fe_system);
   std::optional<StagedPostacceptMaintenanceHistoryPublication>
       staged_history_publication;
@@ -764,13 +772,19 @@ void publishMaintainedLevelSetChanges(
         *publication_targets[static_cast<std::size_t>(k)], comm);
     synchronized_history[static_cast<std::size_t>(k - 1)].swap(captured);
   }
+  const bool transforms_rate = !representation_slopes.empty() && history.hasUDotState();
+  std::optional<std::vector<svmp::FE::Real>> current_rate;
+  if (transforms_rate) {
+    current_rate = capturePostacceptMaintenanceVectorCollectively(history.uDot(), comm);
+  }
 
   local_staging_failure = nullptr;
   try {
     staged_history_publication.emplace(
         makeStagedPostacceptMaintenanceHistoryPublication(
             std::move(current_solution),
-            std::move(synchronized_history)));
+            std::move(synchronized_history),
+            std::move(current_rate)));
 
     for (const auto field : modified_level_set_fields) {
       const auto raw_offset = host.fe_system->fieldDofOffset(field);
@@ -798,9 +812,18 @@ void publishMaintainedLevelSetChanges(
             fe_solution[index] -
             accepted_solution_before_maintenance[index];
       }
+      const auto slope = representation_slopes.find(field);
+      if (slope != representation_slopes.end() && slope->second.size() != count) {
+        throw std::runtime_error(
+            "[svMultiPhysics::Application] Level-set maintenance found a "
+            "representation slope outside the maintained field slice.");
+      }
       stageMaintainedFieldPostAcceptPublication(
           makeCommonRepresentationMaintainedFieldPublication(
-              field, offset, representation_delta),
+              field, offset, representation_delta,
+              slope == representation_slopes.end()
+                  ? std::nullopt
+                  : std::optional<std::span<const svmp::FE::Real>>(slope->second)),
           *staged_history_publication);
       synchronized_dofs += count;
     }
@@ -830,9 +853,12 @@ void publishMaintainedLevelSetChanges(
       .rootOnly()
       .value("step", history.stepIndex())
       .text("representation_delta", "all_history_levels")
-      .text("temporal_increments", "preserved")
-      .text("rate_state", "unchanged_consistently")
-      .integer("rate_synchronized_fields", 0)
+      .text("temporal_increments",
+            representation_slopes.empty() ? "preserved" : "scaled_with_representation")
+      .text("rate_state",
+            transforms_rate ? "scaled_with_representation" : "unchanged_consistently")
+      .integer("rate_synchronized_fields",
+               transforms_rate ? static_cast<long long>(representation_slopes.size()) : 0)
       .value("synchronized_fields", modified_level_set_fields.size())
       .value("synchronized_dofs", synchronized_dofs)
       .value("current_previous_max_abs_delta", current_previous_delta)
@@ -847,8 +873,8 @@ void publishMaintainedLevelSetChanges(
       *staged_history_publication,
       comm,
       rate_publication_started);
-  // uDot and uDDot are not staged, so they retain both their values and
-  // their backend content revisions.
+  // Unless a representation change staged uDot, uDot and uDDot retain both
+  // their values and their backend content revisions.
 }
 
 } // namespace
@@ -895,6 +921,7 @@ bool applyLevelSetMaintenance(
   // request succeeds and the common FE history update is complete.
   auto staged_requests = requests;
   std::vector<svmp::FE::LogRecord> staged_commit_logs;
+  std::map<svmp::FE::FieldId, std::vector<svmp::FE::Real>> representation_slopes;
   bool changed = false;
   const auto comm = activeFESystemCommunicator(*host.fe_system);
   auto fe_solution = gatherFeOrderedSolution(history.u(), comm);
@@ -995,7 +1022,7 @@ bool applyLevelSetMaintenance(
     if (do_redistancing) {
       redistanceMaintainedLevelSet(
           host, history, request, field, completed_step, permits_representation, observe_stage,
-          fe_solution, changed, modified_level_set_fields,
+          fe_solution, changed, modified_level_set_fields, representation_slopes,
           staged_commit_logs);
     }
   }
@@ -1011,6 +1038,7 @@ bool applyLevelSetMaintenance(
         fe_solution,
         accepted_solution_before_maintenance,
         modified_level_set_fields,
+        representation_slopes,
         staged_commit_logs,
         rate_publication_started);
   }

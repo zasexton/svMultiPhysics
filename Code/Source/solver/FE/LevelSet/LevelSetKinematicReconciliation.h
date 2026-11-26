@@ -98,6 +98,22 @@ struct LevelSetKinematicEndpoint {
     std::string diagnostic;
 };
 
+/**
+ * @brief Local slope psi'(phi) of a change of representation before -> after
+ *        that keeps the interface, at every level-set DOF.
+ *
+ * The cell-measure-weighted mean, over the affine simplices around the DOF
+ * that the change touched, of |grad after| / |grad before|; 1 where no such
+ * cell has a nonzero gradient.  A plane rescaled by s has slope s
+ * everywhere, a redistanced field 1 / |grad before| near its interface.
+ * Collective on the level-set DOF communicator; identical on every rank.
+ */
+[[nodiscard]] std::vector<Real> levelSetRepresentationSlope(
+    const assembly::IMeshAccess& mesh,
+    const dofs::DofHandler& level_set_dofs,
+    std::span<const Real> before,
+    std::span<const Real> after);
+
 [[nodiscard]] LevelSetKinematicEndpoint measureLevelSetKinematicEndpoint(
     const assembly::IMeshAccess& mesh,
     const dofs::DofHandler& level_set_dofs,

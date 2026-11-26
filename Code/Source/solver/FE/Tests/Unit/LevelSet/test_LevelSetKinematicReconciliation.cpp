@@ -10,6 +10,8 @@
 #include "Spaces/H1Space.h"
 #include "Spaces/SpaceFactory.h"
 #include "Systems/FESystem.h"
+#include "TimeStepping/GeneralizedAlpha.h"
+#include "TimeStepping/TimeSteppingUtils.h"
 
 #include "Mesh/Core/MeshBase.h"
 #include "Mesh/Mesh.h"
@@ -495,6 +497,72 @@ TEST(LevelSetKinematicReconciliation, RedistancingCannotPublishAChangeToThePhysi
     EXPECT_EQ(requests.front().runtime.redistancing_calls, 0u);
     EXPECT_GT(requests.front().runtime.redistancing_accumulated_displacement, 1.);
     EXPECT_EQ(ts::test::getVectorByDof(history.u()), physical_endpoint);
+}
+#endif
+
+#if FE_HAS_EIGEN
+TEST(LevelSetKinematicReconciliation, RedistancingCarriesTheRateIntoItsRepresentation)
+{
+    namespace ts = FE::timestepping;
+    // phi = 2 (x - x0 - c t) moves at speed c with rate -2c.  Redistancing
+    // publishes x - x0 - c t, whose rate is -c.  Kept at -2c, the next
+    // generalized-alpha step (rho_inf = 0.5) advances the plane by 1.2 c dt.
+    SimplexSystem s(buildStructuredTriangleMesh(12), 2);
+    const FE::Real c = 0.3;
+    const FE::Real dt = 0.01;
+    const FE::Real x0 = 0.4173;
+    const auto doubled = s.scalar([&](const Point& x) { return 2.0 * (x[0] - x0); });
+    const auto velocity = s.vector([&](const Point&) { return Point{c, 0.0, 0.0}; });
+    const auto n = static_cast<std::size_t>(s.system.dofHandler().getNumDofs());
+    const auto phi = static_cast<std::size_t>(s.system.fieldDofOffset(s.phi));
+    const auto w = static_cast<std::size_t>(s.system.fieldDofOffset(s.velocity));
+    std::vector<FE::Real> state(n, 0.0), previous(n, 0.0), rate(n, 0.0);
+    for (std::size_t i = 0; i < doubled.size(); ++i) {
+        state[phi + i] = doubled[i];
+        previous[phi + i] = doubled[i] + 2.0 * c * dt;
+        rate[phi + i] = -2.0 * c;
+    }
+    for (std::size_t i = 0; i < velocity.size(); ++i) state[w + i] = previous[w + i] = velocity[i];
+    const auto factory = ts::test::createTestFactory();
+    auto history = ts::TimeHistory::allocate(*factory, s.system.dofHandler().getNumDofs(), 1, true);
+    ts::test::setVectorByDof(history.u(), state);
+    ts::test::setVectorByDof(history.uPrev(), previous);
+    ts::test::setVectorByDof(history.uDot(), rate);
+    history.setStepIndex(1);
+    history.setTime(dt);
+    history.setDt(dt);
+    auto config = std::make_shared<level_set::LevelSetMaintenanceConfiguration>();
+    config->transport.level_set.field_name = "phi";
+    config->transport.velocity.field_name = "w";
+    config->transport.interface_preserving_redistancing.enabled = true;
+    std::vector<level_set::LevelSetMaintenanceRequest> requests{{.configuration = config}};
+    requests.front().runtime.redistancing_accumulated_displacement = 1.;
+    ASSERT_TRUE(level_set::applyLevelSetMaintenance({.fe_system = &s.system}, history, requests));
+    ASSERT_EQ(requests.front().runtime.redistancing_calls, 1u);
+    const auto u = ts::test::getVectorByDof(history.u());
+    const auto u_dot = ts::test::getVectorByDof(history.uDot());
+    const auto u_prev = ts::test::getVectorByDof(history.uPrev());
+
+    // The stage stencil of the injected-rate first-order generalized-alpha
+    // scheme, a0 u_stage + a1 u_n + a2 u_dot_n, and the transport residual
+    // c d(phi)/dx = c of the redistanced plane.
+    const auto p = ts::utils::generalizedAlphaFirstOrderFromRhoInf(0.5);
+    const ts::GeneralizedAlphaFirstOrderIntegrator integrator(ts::GeneralizedAlphaFirstOrderIntegratorOptions{
+        .alpha_m = p.alpha_m, .alpha_f = p.alpha_f, .gamma = p.gamma, .history_rate_order = 0});
+    FE::systems::SystemStateView view;
+    view.dt = dt;
+    const std::array<std::span<const FE::Real>, 2> slots{};
+    view.u_history = slots;
+    const auto stencil = integrator.buildContext(1, view).dt1->a;
+    for (std::size_t i = phi; i < phi + doubled.size(); ++i) {
+        const FE::Real x = doubled[i - phi] / 2.0 + x0;
+        EXPECT_NEAR(u[i], x - x0, 1.0e-14);
+        EXPECT_NEAR(u_dot[i], -c, 1.0e-12);
+        EXPECT_NEAR(u[i] - u_prev[i], -c * dt, 1.0e-14);
+        const FE::Real stage = -(stencil[1] * u[i] + stencil[2] * u_dot[i] + c) / stencil[0];
+        EXPECT_NEAR((stage - u[i]) / p.alpha_f, -c * dt, 1.0e-12 * c * dt);
+    }
+    for (std::size_t i = w; i < w + velocity.size(); ++i) EXPECT_EQ(u_dot[i], 0.0);
 }
 #endif
 

@@ -57,6 +57,25 @@ TEST(FieldRepairPublication, StagingAppliesFieldSlicesInFieldOrder)
                  std::invalid_argument);
 }
 
+TEST(FieldRepairPublication, RepresentationSlopeScalesIncrementsAndRate)
+{
+    // phi -> psi(phi) with local slope s: phi_n + delta, every stored level
+    // keeps its increment to the current state scaled by s, rate s u_dot.
+    auto staged = ts::makeStagedPostacceptMaintenanceHistoryPublication(
+        {4.0, 2.0, 7.0}, {std::vector<Real>{5.0, 3.0, 7.0}, std::vector<Real>{6.0, 4.0, 7.0}},
+        std::vector<Real>{-10.0, -10.0, 1.0});
+    const std::vector<Real> delta = {-2.0, -1.0};
+    const std::vector<Real> slope = {0.5, 0.5};
+    ts::stageMaintainedFieldPostAcceptPublication(
+        ts::makeCommonRepresentationMaintainedFieldPublication(0, 0, delta, slope), staged);
+    EXPECT_EQ(staged.current, (std::vector<Real>{2.0, 1.0, 7.0}));
+    EXPECT_EQ(staged.history[0], (std::vector<Real>{2.5, 1.5, 7.0}));
+    EXPECT_EQ(staged.history[1], (std::vector<Real>{3.0, 2.0, 7.0}));
+    EXPECT_EQ(*staged.u_dot, (std::vector<Real>{-5.0, -5.0, 1.0}));
+    ASSERT_EQ(staged.schedule.size(), 1u);
+    EXPECT_TRUE(staged.schedule[0].publishes_u_dot);
+}
+
 TEST(FieldRepairPublication, PublishesStagedStateHistoryAndRateOnOneRank)
 {
 #if !defined(FE_HAS_EIGEN) || !FE_HAS_EIGEN

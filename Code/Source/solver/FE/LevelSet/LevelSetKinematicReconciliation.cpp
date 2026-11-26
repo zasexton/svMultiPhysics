@@ -1937,6 +1937,71 @@ LevelSetKinematicReconciliationResult reconcileLevelSetWithKinematicFlux(
         &reconciled_level_set, velocity_space);
 }
 
+std::vector<Real> levelSetRepresentationSlope(const assembly::IMeshAccess& mesh,
+                                              const dofs::DofHandler& level_set_dofs,
+                                              std::span<const Real> before,
+                                              std::span<const Real> after)
+{
+    const auto context = collectiveFor(level_set_dofs);
+    const auto n = static_cast<std::size_t>(level_set_dofs.getNumDofs());
+    std::vector<Real> sums(2u * n, 0);
+    std::string local_failure;
+    try {
+        const auto* map = level_set_dofs.getEntityDofMap();
+        const int dimension = mesh.dimension();
+        if (before.size() != n || after.size() != n || map == nullptr || (dimension != 2 && dimension != 3)) {
+            throw std::invalid_argument("requires vertex-nodal level-set slices on a 2D or 3D mesh");
+        }
+        std::vector<GlobalIndex> nodes;
+        std::vector<std::array<Real, 3>> coordinates;
+        mesh.forEachOwnedCell([&](GlobalIndex cell_id) {
+            SimplexCell cell;
+            cell.corners = dimension + 1;
+            mesh.getCellNodes(cell_id, nodes);
+            mesh.getCellCoordinates(cell_id, coordinates);
+            if (mesh.getCellType(cell_id) != (dimension == 2 ? ElementType::Triangle3 : ElementType::Tetra4) ||
+                nodes.size() < static_cast<std::size_t>(cell.corners) ||
+                coordinates.size() < static_cast<std::size_t>(cell.corners)) {
+                throw std::invalid_argument("supports only Triangle3 (2D) and Tetra4 (3D) cells");
+            }
+            std::array<Real, 4> a{}, b{};
+            bool changed = false;
+            for (std::size_t k = 0; k < static_cast<std::size_t>(cell.corners); ++k) {
+                cell.x[k] = coordinates[k];
+                cell.dof[k] = static_cast<std::size_t>(map->getVertexDofs(nodes[k]).front());
+                a[k] = before[cell.dof[k]];
+                b[k] = after[cell.dof[k]];
+                changed = changed || a[k] != b[k];
+            }
+            Point ga{}, gb{};
+            if (!changed || !simplexGradient(cell, a, ga) || !simplexGradient(cell, b, gb) || !(norm(ga) > 0)) {
+                return;
+            }
+            const auto e1 = sub(cell.x[1], cell.x[0]);
+            const auto e2 = sub(cell.x[2], cell.x[0]);
+            const Real measure = dimension == 2 ? norm(cross(e1, e2))
+                                               : std::abs(dot(cross(e1, e2), sub(cell.x[3], cell.x[0])));
+            for (std::size_t k = 0; k < static_cast<std::size_t>(cell.corners); ++k) {
+                sums[cell.dof[k]] += measure * norm(gb) / norm(ga);
+                sums[n + cell.dof[k]] += measure;
+            }
+        });
+    } catch (const std::exception& error) {
+        local_failure = error.what();
+    }
+    if (!allTrue(context, local_failure.empty())) {
+        throw std::runtime_error(local_failure.empty()
+                                     ? "another rank failed to measure the level-set representation slope"
+                                     : "level-set representation slope " + local_failure);
+    }
+    sumInPlace(context, sums);
+    std::vector<Real> slope(n, 1);
+    for (std::size_t i = 0; i < n; ++i) {
+        if (sums[n + i] > 0) slope[i] = sums[i] / sums[n + i];
+    }
+    return slope;
+}
+
 LevelSetKinematicEndpoint measureLevelSetKinematicEndpoint(
     const assembly::IMeshAccess& mesh, const dofs::DofHandler& level_set_dofs,
     const dofs::DofHandler& velocity_dofs, const spaces::FunctionSpace& velocity_space,

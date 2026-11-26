@@ -49,6 +49,10 @@ struct MaintainedFieldPostAcceptPublicationView {
   std::span<const svmp::FE::Real> u_prev_delta{};
   std::span<const svmp::FE::Real> u_prev2_and_deeper_delta{};
   std::optional<std::span<const svmp::FE::Real>> u_dot_delta{};
+  // Local slope s of a change of representation phi -> psi(phi).  After the
+  // deltas, every stored level keeps its increment to the current state
+  // scaled by s, and a staged rate becomes s u_dot (psi'(phi) phi_t).
+  std::optional<std::span<const svmp::FE::Real>> representation_slope{};
   bool maintained_first_order_u_ddot_unchanged{true};
 };
 
@@ -66,12 +70,15 @@ struct StagedPostacceptMaintenanceHistoryPublication {
   std::vector<MaintainedFieldPostAcceptPublicationScheduleEntry> schedule{};
 };
 
-/// The same delta on every stored state and no rate change (endpoint schemes).
+/// The same delta on every stored state.  Without a representation slope the
+/// rate is unchanged (an additive correction); with one, the increments and
+/// the staged rate follow the change of representation.
 MaintainedFieldPostAcceptPublicationView
 makeCommonRepresentationMaintainedFieldPublication(
     svmp::FE::FieldId field,
     std::size_t field_offset,
-    std::span<const svmp::FE::Real> delta);
+    std::span<const svmp::FE::Real> delta,
+    std::optional<std::span<const svmp::FE::Real>> representation_slope = std::nullopt);
 
 /// Replicated copies of the accepted state, history and rate to stage into.
 StagedPostacceptMaintenanceHistoryPublication
