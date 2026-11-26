@@ -53,7 +53,6 @@ bool ge(const int nV, const int N, const Array<double>& A, Vector<double>& B)
 
   Vector<double> W(N);
   double tol = std::numeric_limits<double>::denorm_min();
-  double eps = std::numeric_limits<double>::epsilon();
 
   // Symmetric diagonal scaling keeps the tiny dense solve well-conditioned
   // while the rank-revealing solve handles dependent GCR basis vectors.
@@ -64,23 +63,21 @@ bool ge(const int nV, const int N, const Array<double>& A, Vector<double>& B)
 
   Eigen::MatrixXd M = Eigen::MatrixXd::Zero(N, N);
   Eigen::VectorXd rhs = Eigen::VectorXd::Zero(N);
-  double max_abs = 0.0;
   for (int i = 0; i < N; ++i) {
     rhs(i) = W(i) * B(i);
-    max_abs = std::max(max_abs, std::abs(rhs(i)));
     for (int j = 0; j < N; ++j) {
-      M(i, j) = W(i) * W(j) * A(i, j);
-      max_abs = std::max(max_abs, std::abs(M(i, j)));
+      M(i, j) = W(i) * A(i, j) * W(j);
     }
   }
 
-  if (!(max_abs > 0.0) || !std::isfinite(max_abs)) {
+  if (!M.allFinite() || !rhs.allFinite()) {
     B = 0.0;
     return false;
   }
 
-  Eigen::CompleteOrthogonalDecomposition<Eigen::MatrixXd> cod(M);
-  cod.setThreshold(std::sqrt(eps) * max_abs);
+  Eigen::CompleteOrthogonalDecomposition<Eigen::MatrixXd> cod;
+  cod.setThreshold(std::sqrt(std::numeric_limits<double>::epsilon()));
+  cod.compute(M);
   const int rank = cod.rank();
   if (rank <= 0) {
     B = 0.0;
@@ -99,8 +96,8 @@ bool ge(const int nV, const int N, const Array<double>& A, Vector<double>& B)
     return false;
   }
 
-  const double rhs_norm = rhs.norm();
-  const double residual_norm = residual.norm();
+  const double rhs_norm = rhs.stableNorm();
+  const double residual_norm = residual.stableNorm();
   if (rhs_norm > 0.0 && residual_norm > 1e6 * rhs_norm) {
     B = 0.0;
     return false;

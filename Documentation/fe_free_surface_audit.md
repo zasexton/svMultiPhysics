@@ -78,6 +78,16 @@ The solver’s FSILS assembly path with precomputed entry locations had similar 
 
 **A26 · Fitted ALE mesh velocity in VTK.** At accepted output times, the application writes the endpoint displacement rate. Generalized-alpha supplies its stored endpoint derivative and backward Euler uses the displacement increment over the accepted time step. On the fitted capillary wave the peak saved mesh speed was 0.001286450741. Across four outputs on one and two ranks, the maximum discrepancy from a displacement-history reconstruction was 8.1 × 10⁻¹⁸. Shared vertices agreed exactly between output pieces. A prescribed nonlinear displacement independently distinguishes the endpoint derivative from the step-average velocity. [Application writer](../Code/Source/solver/Application/Core/ApplicationDriver.cpp) · [On-disk output regression](../Code/Source/solver/Application/Tests/Support/ale_mesh_velocity_output.py)
 
+## Further resolutions from the later audit
+
+**A71 · Eigen matrix assembly and missing couplings.** The serial Eigen backend rejects any nonzero coefficient outside its pattern or index range. A dense element block is validated before insertion, and an OpenMP worker reports a missing entry at finalization. After activating the constraint u₁ = ½u₂, the old pattern now rejects assembly. With the added master couplings, every coefficient agrees with the hand-condensed matrix, including 2.5 and 3 in the off-diagonal entries. All 16 Eigen backend tests passed. [Eigen assembly](../Code/Source/solver/FE/Backends/Eigen/EigenMatrix.cpp) · [Backend regressions](../Code/Source/solver/FE/Tests/Unit/Backends/test_EigenBackend.cpp)
+
+**A73 · FSILS Galerkin rank tolerance.** The dense GCR solve sets its relative pivot threshold before factoring the symmetrically scaled matrix. Scaling the right-hand side by 10⁸ previously made the same full-rank problem report failure. The recovered coefficient pair (2, −1) now scales with the right-hand side at factors 10⁻¹², 1 and 10⁸. All 15 native legacy-kernel tests passed. [Galerkin solve](../Code/Source/solver/FE/Backends/FSILS/liner_solver/ge.cpp) · [Scale regression](../Code/Source/solver/FE/Tests/Unit/Backends/test_FsilsBackend.cpp)
+
+**A77 · Lax–Friedrichs flux orientation.** Both supplied fluxes use the outward normal of the plus element. With this convention the dissipative term is +½λ(u⁺ − u⁻). Linear advection now gives the upstream flux for both signs of the normal speed and zero flux at zero speed. All 21 DG operator tests passed. [Flux convention](../Code/Source/solver/FE/Spaces/DGOperators.h) · [Advection tests](../Code/Source/solver/FE/Tests/Unit/Spaces/test_DGOperators.cpp)
+
+**A83 · Linear action for affine constraints.** The reduced operator lifts directions with P and evaluates PᵀAP. Solution expansion includes the offset c, and the reduced right-hand side subtracts PᵀAc once. For u₀ = u₁ + 5 and A = diag(1,2,3), the zero direction maps to zero, the reduced operator is diag(3,3), and the expanded solution satisfies the affine constraint. All 11 transform tests passed. [Constraint transform](../Code/Source/solver/FE/Constraints/ConstraintTransform.cpp) · [Operator regression](../Code/Source/solver/FE/Tests/Unit/Constraints/test_ConstraintTransform.cpp)
+
 ## Index of the original findings
 
 | Problem or observable | What the evidence establishes | First discriminating check |

@@ -321,10 +321,10 @@ std::vector<Real> DGOperators::lax_friedrichs_flux(
     const Real half_lambda = Real(0.5) * max_wave_speed;
 
     for (std::size_t i = 0; i < values_plus.size(); ++i) {
-        // F_LF = {F} - ½·λ·[u] = ½(F⁺ + F⁻) - ½·λ·(u⁺ - u⁻)
+        // Both normal fluxes use the outward normal of the plus side.
         const Real flux_avg = Real(0.5) * (flux_plus[i] + flux_minus[i]);
         const Real jump_val = values_plus[i] - values_minus[i];
-        result[i] = flux_avg - half_lambda * jump_val;
+        result[i] = flux_avg + half_lambda * jump_val;
     }
 
     return result;

@@ -265,7 +265,7 @@ public:
      * @brief Compute interior penalty parameter
      *
      * For SIPG/IPDG methods, the penalty parameter is typically:
-     *   η = C · p² / h
+     *   η = C · (p + 1)² / h
      * where C is a constant, p is polynomial order, h is mesh size.
      *
      * @param polynomial_order Polynomial order p
@@ -318,13 +318,13 @@ public:
      * @brief Lax-Friedrichs numerical flux
      *
      * Computes the Lax-Friedrichs flux:
-     *   F_LF = {F(u)} - ½·λ·[u]
+     *   F_LF = ½ (F⁺ + F⁻) + ½ λ (u⁺ − u⁻)
      * where λ is the maximum wave speed.
      *
      * @param values_plus Values from plus element
      * @param values_minus Values from minus element
-     * @param flux_plus Flux evaluated at plus values
-     * @param flux_minus Flux evaluated at minus values
+     * @param flux_plus Plus-state flux dotted with the outward normal of the plus side
+     * @param flux_minus Minus-state flux dotted with the same normal
      * @param max_wave_speed Maximum wave speed λ
      * @return Lax-Friedrichs flux
      */

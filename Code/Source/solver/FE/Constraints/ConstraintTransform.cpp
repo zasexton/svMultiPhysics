@@ -151,6 +151,12 @@ ReductionStats ConstraintTransform::getStats() const
 void ConstraintTransform::applyProjection(std::span<const double> z_reduced,
                                            std::span<double> u_full) const
 {
+    project(z_reduced, u_full, true);
+}
+
+void ConstraintTransform::project(std::span<const double> z_reduced, std::span<double> u_full,
+                                  bool include_inhomogeneity) const
+{
     if (!initialized_) {
         CONSTRAINT_THROW("ConstraintTransform not initialized");
     }
@@ -162,10 +168,9 @@ void ConstraintTransform::applyProjection(std::span<const double> z_reduced,
         CONSTRAINT_THROW("Full vector too small");
     }
 
-    // u = P * z + c
     for (GlobalIndex i = 0; i < n_full_; ++i) {
         const auto& row = projection_rows_[static_cast<std::size_t>(i)];
-        double val = row.inhomogeneity;
+        double val = include_inhomogeneity ? row.inhomogeneity : 0.0;
 
         for (std::size_t j = 0; j < row.reduced_indices.size(); ++j) {
             val += row.weights[j] * z_reduced[static_cast<std::size_t>(row.reduced_indices[j])];
@@ -258,7 +263,7 @@ void ConstraintTransform::applyReducedOperator(
     // g = P^T A P z
 
     // Step 1: u = P z (expand to full)
-    applyProjection(z_reduced, work_full_);
+    project(z_reduced, work_full_, false);
 
     // Step 2: v = A u (apply full operator)
     A_full(work_full_, work_full2_);

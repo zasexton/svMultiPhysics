@@ -11,6 +11,7 @@
 #include "Backends/Interfaces/GenericMatrix.h"
 
 #if defined(FE_HAS_EIGEN)
+#include "Backends/Interfaces/MatrixAssemblyError.h"
 #include <Eigen/Sparse>
 #endif
 
@@ -52,11 +53,16 @@ public:
     void addValue(GlobalIndex row, GlobalIndex col, Real value, assembly::AddMode mode);
 
 private:
+    friend class EigenMatrixView;
+
+    bool resolveAssemblySlot(GlobalIndex row, GlobalIndex col, Real value, StorageIndex& slot);
+    void writeAssemblySlot(StorageIndex slot, Real value, assembly::AddMode mode);
     void initializeFromPattern(const sparsity::SparsityPattern& pattern);
 
     GlobalIndex n_rows_{0};
     GlobalIndex n_cols_{0};
     SparseMat mat_;
+    MatrixAssemblyError assembly_error_;
 };
 
 #endif // FE_HAS_EIGEN

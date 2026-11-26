@@ -196,37 +196,33 @@ TEST(ConstraintTransformTest, ExpandAndRestrict) {
 // Reduced operator tests
 // ============================================================================
 
-TEST(ConstraintTransformTest, ReducedOperator) {
+TEST(ConstraintTransformTest, ReducedOperatorUsesHomogeneousLiftForAffineConstraint) {
     AffineConstraints constraints;
-    // u_0 = u_1 (simple equality)
     constraints.addLine(0);
     constraints.addEntry(0, 1, 1.0);
+    constraints.setInhomogeneity(0, 5.0);
     constraints.close();
 
-    GlobalIndex n_dofs = 3;
-    ConstraintTransform transform(constraints, n_dofs);
-
-    // Define a simple diagonal operator A = diag(1, 2, 3)
-    auto A_apply = [](std::span<const double> x, std::span<double> y) {
-        y[0] = 1.0 * x[0];
-        y[1] = 2.0 * x[1];
-        y[2] = 3.0 * x[2];
+    ConstraintTransform transform(constraints, 3);
+    const auto A = [](std::span<const double> x, std::span<double> y) {
+        y[0] = x[0];
+        y[1] = 2 * x[1];
+        y[2] = 3 * x[2];
     };
-
-    std::vector<double> z_in = {1.0, 1.0};  // Reduced input
-    std::vector<double> g_out(2);
-
-    transform.applyReducedOperator(A_apply, z_in, g_out);
-
-    // P = [1  0]
-    //     [1  0]
-    //     [0  1]
-    // A_red = P^T A P = [[1,0][1,0][0,1]] * diag(1,2,3) * [[1,1,0],[0,0,1]]
-    //       = [[1,0][2,0][0,3]] * [[1,1,0],[0,0,1]]
-    //       = [1, 1, 0] * [1,1,0]^T row-wise...
-    // This is getting complex - just verify it runs and produces reasonable output
-    EXPECT_TRUE(std::isfinite(g_out[0]));
-    EXPECT_TRUE(std::isfinite(g_out[1]));
+    const auto action = transform.createReducedOperator(A);
+    std::vector<double> output(2);
+    // P(z0,z1) = (z0,z0,z1), c = (5,0,0), so P^T A P = diag(3,3).
+    for (const auto& z : {std::vector<double>{0,0}, {1,1}, {-2,4}}) {
+        action(z, output);
+        EXPECT_DOUBLE_EQ(output[0], 3 * z[0]);
+        EXPECT_DOUBLE_EQ(output[1], 3 * z[1]);
+    }
+    const std::vector<double> rhs{4, 4, 6};
+    transform.computeReducedRhs(A, rhs, output);
+    EXPECT_DOUBLE_EQ(output[0], 3);
+    EXPECT_DOUBLE_EQ(output[1], 6);
+    EXPECT_EQ(transform.expandSolution(std::vector<double>{1,2}),
+              (std::vector<double>{6,1,2}));
 }
 
 TEST(ConstraintTransformTest, ComputeReducedRhs) {

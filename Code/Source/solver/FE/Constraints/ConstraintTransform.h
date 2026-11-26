@@ -352,6 +352,9 @@ private:
     mutable std::vector<double> work_full_;
     mutable std::vector<double> work_full2_;
 
+    void project(std::span<const double> z_reduced, std::span<double> u_full,
+                 bool include_inhomogeneity) const;
+
     // Build projection from constraints
     void buildProjection(const AffineConstraints& constraints);
 };

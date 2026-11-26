@@ -15,7 +15,7 @@
 #include <algorithm>
 #include <atomic>
 #include <cstdio>
-#include <cstdlib>
+#include <vector>
 #include <limits>
 
 namespace svmp {
@@ -23,8 +23,6 @@ namespace FE {
 namespace backends {
 
 #if defined(FE_HAS_EIGEN)
-
-namespace {
 
 class EigenMatrixView final : public assembly::GlobalSystemView {
 public:
@@ -50,17 +48,16 @@ public:
             FE_THROW(InvalidArgumentException, "EigenMatrixView::addMatrixEntries: local_matrix size mismatch");
         }
 
-        for (GlobalIndex i = 0; i < n_rows; ++i) {
-            const GlobalIndex row = row_dofs[static_cast<std::size_t>(i)];
-            if (row < 0 || row >= matrix_->numRows()) continue;
-
-            for (GlobalIndex j = 0; j < n_cols; ++j) {
-                const GlobalIndex col = col_dofs[static_cast<std::size_t>(j)];
-                if (col < 0 || col >= matrix_->numCols()) continue;
-
-                const auto local_idx = static_cast<std::size_t>(i * n_cols + j);
-                matrix_->addValue(row, col, local_matrix[local_idx], mode);
+        std::vector<EigenMatrix::StorageIndex> slots(local_matrix.size());
+        std::size_t k = 0;
+        for (const auto row : row_dofs) {
+            for (const auto col : col_dofs) {
+                if (!matrix_->resolveAssemblySlot(row, col, local_matrix[k], slots[k])) return;
+                ++k;
             }
+        }
+        for (std::size_t i = 0; i < slots.size(); ++i) {
+            matrix_->writeAssemblySlot(slots[i], local_matrix[i], mode);
         }
     }
 
@@ -76,8 +73,12 @@ public:
         if (dofs.size() != values.size()) {
             FE_THROW(InvalidArgumentException, "EigenMatrixView::setDiagonal: size mismatch");
         }
+        std::vector<EigenMatrix::StorageIndex> slots(dofs.size());
         for (std::size_t i = 0; i < dofs.size(); ++i) {
-            setDiagonal(dofs[i], values[i]);
+            if (!matrix_->resolveAssemblySlot(dofs[i], dofs[i], values[i], slots[i])) return;
+        }
+        for (std::size_t i = 0; i < slots.size(); ++i) {
+            matrix_->writeAssemblySlot(slots[i], values[i], assembly::AddMode::Insert);
         }
     }
 
@@ -89,7 +90,17 @@ public:
     void zeroRows(std::span<const GlobalIndex> rows, bool set_diagonal) override
     {
         FE_CHECK_NOT_NULL(matrix_, "EigenMatrixView::matrix");
-        for (const GlobalIndex row_g : rows) {
+        std::vector<EigenMatrix::StorageIndex> diagonals;
+        if (set_diagonal) {
+            diagonals.resize(rows.size(), -1);
+            for (std::size_t i = 0; i < rows.size(); ++i) {
+                // A rectangular row beyond the column range has no diagonal.
+                if (rows[i] >= 0 && rows[i] < matrix_->numRows() && rows[i] >= matrix_->numCols()) continue;
+                if (!matrix_->resolveAssemblySlot(rows[i], rows[i], 1.0, diagonals[i])) return;
+            }
+        }
+        for (std::size_t i = 0; i < rows.size(); ++i) {
+            const auto row_g = rows[i];
             if (row_g < 0 || row_g >= matrix_->numRows()) continue;
             const auto row = static_cast<EigenMatrix::StorageIndex>(row_g);
             auto& A = matrix_->eigen();
@@ -100,9 +111,7 @@ public:
             for (auto k = start; k < end; ++k) {
                 values[k] = 0.0;
             }
-            if (set_diagonal && row_g < matrix_->numCols()) {
-                matrix_->addValue(row_g, row_g, 1.0, assembly::AddMode::Insert);
-            }
+            if (set_diagonal) matrix_->writeAssemblySlot(diagonals[i], 1.0, assembly::AddMode::Insert);
         }
     }
 
@@ -114,7 +123,11 @@ public:
 
     void beginAssemblyPhase() override { phase_ = assembly::AssemblyPhase::Building; }
     void endAssemblyPhase() override { phase_ = assembly::AssemblyPhase::Flushing; }
-    void finalizeAssembly() override { phase_ = assembly::AssemblyPhase::Finalized; }
+    void finalizeAssembly() override
+    {
+        matrix_->finalizeAssembly();
+        phase_ = assembly::AssemblyPhase::Finalized;
+    }
     [[nodiscard]] assembly::AssemblyPhase getPhase() const noexcept override { return phase_; }
 
     [[nodiscard]] bool hasMatrix() const noexcept override { return true; }
@@ -139,8 +152,6 @@ private:
     EigenMatrix* matrix_{nullptr};
     assembly::AssemblyPhase phase_{assembly::AssemblyPhase::NotStarted};
 };
-
-} // namespace
 
 EigenMatrix::EigenMatrix(const sparsity::SparsityPattern& pattern)
 {
@@ -198,17 +209,19 @@ void EigenMatrix::initializeFromPattern(const sparsity::SparsityPattern& pattern
 
     mat_.setFromTriplets(triplets.begin(), triplets.end());
     mat_.makeCompressed();
+    assembly_error_.reset();
     FE_THROW_IF(!mat_.isCompressed(), FEException, "EigenMatrix: failed to compress sparse matrix");
 }
 
 void EigenMatrix::zero()
 {
-    std::fill(mat_.valuePtr(), mat_.valuePtr() + mat_.nonZeros(), 0.0);
+    assembly_error_.reset();
+    if (mat_.nonZeros()) std::fill_n(mat_.valuePtr(), mat_.nonZeros(), Real(0));
 }
 
 void EigenMatrix::finalizeAssembly()
 {
-    // Eigen matrix is assembled in-place and stays compressed; nothing to do.
+    assembly_error_.check("Eigen");
 }
 
 void EigenMatrix::mult(const GenericVector& x, GenericVector& y) const
@@ -250,78 +263,55 @@ Real EigenMatrix::getEntry(GlobalIndex row, GlobalIndex col) const
 
 void EigenMatrix::addValue(GlobalIndex row_g, GlobalIndex col_g, Real value, assembly::AddMode mode)
 {
-    if (row_g < 0 || row_g >= n_rows_ || col_g < 0 || col_g >= n_cols_) {
-        return;
+    StorageIndex slot;
+    if (resolveAssemblySlot(row_g, col_g, value, slot)) writeAssemblySlot(slot, value, mode);
+}
+
+bool EigenMatrix::resolveAssemblySlot(GlobalIndex row, GlobalIndex col, Real value, StorageIndex& slot)
+{
+    slot = -1;
+    if (row >= 0 && row < n_rows_ && col >= 0 && col < n_cols_) {
+        const auto* outer = mat_.outerIndexPtr();
+        const auto start = outer[row];
+        const auto end = outer[row + 1];
+        if (start != end) {
+            const auto* inner = mat_.innerIndexPtr();
+            const auto* found = std::lower_bound(inner + start, inner + end, static_cast<StorageIndex>(col));
+            if (found != inner + end && *found == col) {
+                slot = static_cast<StorageIndex>(found - inner);
+                return true;
+            }
+        }
     }
 
-    const auto row = static_cast<StorageIndex>(row_g);
-    const auto col = static_cast<StorageIndex>(col_g);
+    static const bool strict_pattern = [] {
+        const char* setting = environment::value("SVMP_EIGEN_STRICT_PATTERN");
+        return setting && *setting && *setting != '0';
+    }();
+    if (value != Real(0) || strict_pattern) {
+        // Eigen owns one serial matrix. Defer OpenMP failures until its workers join.
+        assembly_error_.reject("Eigen", row, col, value, false);
+        return false;
+    }
+    static const bool trace_zeros = [] {
+        const char* setting = environment::value("SVMP_EIGEN_COUNT_DROPPED");
+        return setting && *setting && *setting != '0';
+    }();
+    if (trace_zeros) {
+        static std::atomic<long> count{0};
+        const auto n = ++count;
+        if (n <= 32 || n % 100000 == 0) {
+            std::fprintf(stderr, "[EigenMatrix] skipped structural zero #%ld (row=%lld col=%lld)\n",
+                         n, static_cast<long long>(row), static_cast<long long>(col));
+        }
+    }
+    return true;
+}
 
-    const auto* outer = mat_.outerIndexPtr();
-    const auto* inner = mat_.innerIndexPtr();
+void EigenMatrix::writeAssemblySlot(StorageIndex idx, Real value, assembly::AddMode mode)
+{
+    if (idx < 0) return;
     auto* values = mat_.valuePtr();
-
-    const StorageIndex start = outer[row];
-    const StorageIndex end = outer[row + 1];
-
-    const auto* begin = inner + start;
-    const auto* finish = inner + end;
-    const auto it = std::lower_bound(begin, finish, col);
-    if (it == finish || *it != col) {
-        // Out-of-pattern write: correct only when the sparsity pattern covers
-        // every assembly write. Constraint condensation requires elimination
-        // fill in the pattern; constraints introduced after setup (e.g.,
-        // cut-context-dependent aggregation) can otherwise lose master
-        // couplings here, producing a Jacobian inconsistent with the residual.
-        // A dropped write is therefore always a defect signal: warn once by
-        // default, log samples with SVMP_EIGEN_COUNT_DROPPED=1, and throw
-        // with SVMP_EIGEN_STRICT_PATTERN=1.
-        static const bool strict_pattern = [] {
-            const char* env = environment::value("SVMP_EIGEN_STRICT_PATTERN");
-            return env != nullptr && env[0] != '\0' && env[0] != '0';
-        }();
-        static const bool count_dropped = [] {
-            const char* env = environment::value("SVMP_EIGEN_COUNT_DROPPED");
-            return env != nullptr && env[0] != '\0' && env[0] != '0';
-        }();
-        static std::atomic<long> dropped{0};
-        const long n = ++dropped;
-        if (strict_pattern) {
-            FE_THROW(FEException,
-                     "EigenMatrix::addValue: out-of-pattern write (row=" +
-                         std::to_string(row_g) + " col=" + std::to_string(col_g) +
-                         " value=" + std::to_string(value) +
-                         "); the sparsity pattern is stale (SVMP_EIGEN_STRICT_PATTERN=1)");
-        }
-        if (n == 1 || (count_dropped && (n <= 32 || n % 100000 == 0))) {
-            std::fprintf(stderr,
-                         "[EigenMatrix] %s out-of-pattern write #%ld (row=%lld col=%lld value=%.6g)%s\n",
-                         "dropped", n, static_cast<long long>(row_g),
-                         static_cast<long long>(col_g),
-                         static_cast<double>(value),
-                         n == 1 ? " — stale sparsity pattern? (set SVMP_EIGEN_COUNT_DROPPED=1 for samples,"
-                                  " SVMP_EIGEN_STRICT_PATTERN=1 to fail fast)"
-                                : "");
-        }
-        // A dropped zero changes no entry.  The first dropped nonzero is the
-        // write that makes the matrix differ from the assembled operator, so
-        // name it even when zeros came first.
-        static std::atomic<long> dropped_nonzero{0};
-        if (value != Real{0} && ++dropped_nonzero == 1 && n != 1) {
-            std::fprintf(stderr,
-                         "[EigenMatrix] dropped the first nonzero out-of-pattern write"
-                         " (#%ld, row=%lld col=%lld value=%.6g): the matrix misses an"
-                         " assembled coupling, so a Jacobian built in it no longer"
-                         " matches its residual\n",
-                         n, static_cast<long long>(row_g),
-                         static_cast<long long>(col_g),
-                         static_cast<double>(value));
-        }
-        return;
-    }
-
-    const auto idx = static_cast<StorageIndex>(it - inner);
-
     switch (mode) {
         case assembly::AddMode::Add:
             values[idx] += value;

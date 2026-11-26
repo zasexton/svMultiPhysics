@@ -252,17 +252,18 @@ TEST_F(DGOperatorsTest, UpwindParallelVelocity) {
     EXPECT_NEAR(result[0], 8.0, tol);  // Average when parallel
 }
 
-TEST_F(DGOperatorsTest, LaxFriedrichsFlux) {
-    std::vector<Real> u_plus = {2.0};
-    std::vector<Real> u_minus = {1.0};
-    std::vector<Real> f_plus = {4.0};   // Assume F(u) = 2u
-    std::vector<Real> f_minus = {2.0};
-    Real lambda = 2.0;
-
-    auto result = DGOperators::lax_friedrichs_flux(
-        u_plus, u_minus, f_plus, f_minus, lambda);
-
-    // F_LF = {F} - 0.5 * λ * [u] = (4+2)/2 - 0.5 * 2 * (2-1) = 3 - 1 = 2
-    ASSERT_EQ(result.size(), 1u);
-    EXPECT_NEAR(result[0], 2.0, tol);
+TEST_F(DGOperatorsTest, LaxFriedrichsFluxIsUpwindForLinearAdvection) {
+    const std::vector<Real> plus = {2.0, -3.0};
+    const std::vector<Real> minus = {1.0, 4.0};
+    for (const Real normal_speed : {Real(2), Real(-2), Real(0)}) {
+        const std::vector<Real> flux_plus = {normal_speed * plus[0], normal_speed * plus[1]};
+        const std::vector<Real> flux_minus = {normal_speed * minus[0], normal_speed * minus[1]};
+        const auto result = DGOperators::lax_friedrichs_flux(
+            plus, minus, flux_plus, flux_minus, std::abs(normal_speed));
+        ASSERT_EQ(result.size(), plus.size());
+        for (std::size_t i = 0; i < result.size(); ++i) {
+            const Real upstream = normal_speed > 0 ? plus[i] : minus[i];
+            EXPECT_DOUBLE_EQ(result[i], normal_speed * upstream);
+        }
+    }
 }

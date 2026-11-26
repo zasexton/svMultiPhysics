@@ -27,6 +27,7 @@
 #include "Backends/FSILS/liner_solver/bcast.h"
 #include "Backends/FSILS/liner_solver/block_schur_strategy_selector.h"
 #include "Backends/FSILS/liner_solver/dot.h"
+#include "Backends/FSILS/liner_solver/ge.h"
 #include "Backends/FSILS/liner_solver/gmres.h"
 #include "Backends/FSILS/liner_solver/norm.h"
 #include "Backends/FSILS/liner_solver/ns_solver.h"
@@ -688,6 +689,22 @@ public:
 private:
     int saved_{1};
 };
+
+TEST(FsilsBackendLegacyKernels, GalerkinCoefficientsScaleWithTheResidual)
+{
+    // Gram matrix of (2,0) and (1,1), with known solution (2,-1)*scale.
+    Array<double> gram(2, 2);
+    gram(0, 0) = 4;
+    gram(0, 1) = gram(1, 0) = gram(1, 1) = 2;
+    for (const double scale : {1.0, 1e8, 1e-12}) {
+        Vector<double> rhs(2);
+        rhs(0) = 6 * scale;
+        rhs(1) = 2 * scale;
+        ASSERT_TRUE(ge::ge(2, 2, gram, rhs)) << scale;
+        EXPECT_NEAR(rhs(0) / scale, 2, 1e-13);
+        EXPECT_NEAR(rhs(1) / scale, -1, 1e-13);
+    }
+}
 
 TEST(FsilsBackendLegacyKernels, EffectiveTimeStepStoresPositiveFiniteValuesAndFallsBack)
 {

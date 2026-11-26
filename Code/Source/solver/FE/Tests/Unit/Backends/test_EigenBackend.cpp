@@ -8,11 +8,14 @@
 #include <gtest/gtest.h>
 
 #include "Assembly/GlobalSystemView.h"
+#include "Assembly/AssemblyConstraintDistributor.h"
+#include "Constraints/AffineConstraints.h"
 #include "Backends/Interfaces/BackendFactory.h"
 #include "Backends/Utils/BackendOptions.h"
 #include "Core/FEException.h"
 #include "Sparsity/SparsityPattern.h"
 
+#include <array>
 #include <cmath>
 
 #if defined(FE_HAS_EIGEN)
@@ -539,30 +542,89 @@ TEST(EigenBackend, SolveBiCGSTABILU2x2NonSym)
 #endif
 }
 
-TEST(EigenBackend, StructurePreservingIgnoresMissingEntry)
+#if defined(FE_HAS_EIGEN)
+TEST(EigenBackend, RejectsMissingNonzerosBeforeApplyingAnElementBlock)
 {
-#if !defined(FE_HAS_EIGEN)
-    GTEST_SKIP() << "FE_HAS_EIGEN not enabled";
-#else
     EigenFactory factory;
-    const auto pattern = make_diag_2x2_pattern();
-    auto A = factory.createMatrix(pattern);
-    auto view = A->createAssemblyView();
-
-    view->beginAssemblyPhase();
-    const GlobalIndex dofs[2] = {0, 1};
-    const Real Ke[4] = {1.0, 2.0,
-                        3.0, 4.0};
-    view->addMatrixEntries(dofs, Ke, assembly::AddMode::Add);
-    view->finalizeAssembly();
-    A->finalizeAssembly();
-
-    EXPECT_DOUBLE_EQ(view->getMatrixEntry(0, 0), 1.0);
-    EXPECT_DOUBLE_EQ(view->getMatrixEntry(1, 1), 4.0);
-    EXPECT_DOUBLE_EQ(view->getMatrixEntry(0, 1), 0.0);
-    EXPECT_DOUBLE_EQ(view->getMatrixEntry(1, 0), 0.0);
-#endif
+    auto matrix = factory.createMatrix(make_diag_2x2_pattern());
+    auto view = matrix->createAssemblyView();
+    const std::array<GlobalIndex, 2> dofs{0, 1};
+    const std::array<Real, 4> unsupported{1, 2, 0, 4};
+    for (const auto mode : {assembly::AddMode::Add, assembly::AddMode::Insert,
+                            assembly::AddMode::Max, assembly::AddMode::Min}) {
+        EXPECT_THROW(view->addMatrixEntries(dofs, unsupported, mode), FEException);
+        EXPECT_THROW(view->addMatrixEntry(-1, 0, 7, mode), FEException);
+        EXPECT_THROW(view->addMatrixEntry(1, 2, -3, mode), FEException);
+        EXPECT_DOUBLE_EQ(matrix->getEntry(0, 0), 0);
+        EXPECT_DOUBLE_EQ(matrix->getEntry(1, 1), 0);
+        EXPECT_NO_THROW(view->addMatrixEntry(0, 1, 0, mode));
+    }
+    view->addMatrixEntries(dofs, std::array<Real, 4>{1, 0, -0.0, 4});
+    EXPECT_DOUBLE_EQ(matrix->getEntry(0, 0), 1);
+    EXPECT_DOUBLE_EQ(matrix->getEntry(1, 1), 4);
 }
+
+TEST(EigenBackend, ConstraintActivatedAfterSetupNeedsMasterCouplings)
+{
+    EigenFactory factory;
+    sparsity::SparsityPattern original(3, 3);
+    original.ensureDiagonal();
+    original.addEntry(0, 1);
+    original.addEntry(1, 0);
+    original.finalize();
+    auto matrix = factory.createMatrix(original);
+    auto view = matrix->createAssemblyView();
+
+    constraints::AffineConstraints constraints;
+    constraints.addLine(1);
+    constraints.addEntry(1, 2, 0.5);
+    constraints.close();
+    assembly::AssemblyConstraintOptions options;
+    options.symmetric_elimination = true;
+    assembly::AssemblyConstraintDistributor distribute(constraints, options);
+    const std::array<GlobalIndex, 2> cell{0, 1};
+    const std::array<Real, 4> stiffness{4, 5, 6, 8};
+    EXPECT_THROW(distribute.distributeMatrixToGlobal(stiffness, cell, *view), FEException);
+
+    sparsity::SparsityPattern filled(3, 3);
+    filled.ensureDiagonal();
+    filled.addEntry(0, 2);
+    filled.addEntry(2, 0);
+    filled.finalize();
+    ASSERT_TRUE(matrix->reinitFromPattern(filled));
+    distribute.distributeMatrixToGlobal(stiffness, cell, *view);
+    // The free block is P^T A P. The distributor inserts a unit diagonal on slave 1.
+    const std::array<Real, 9> condensed{4, 0, 2.5, 0, 1, 0, 3, 0, 2};
+    for (GlobalIndex i = 0; i < 3; ++i) {
+        for (GlobalIndex j = 0; j < 3; ++j) {
+            EXPECT_DOUBLE_EQ(matrix->getEntry(i, j), condensed[3 * i + j]);
+        }
+    }
+}
+
+#ifdef _OPENMP
+TEST(EigenBackend, ReportsParallelErrorsAtFinalizationAndRecoversOnZero)
+{
+    EigenFactory factory;
+    auto matrix = factory.createMatrix(make_diag_2x2_pattern());
+    auto view = matrix->createAssemblyView();
+    int worker_exceptions = 0;
+#pragma omp parallel num_threads(2) reduction(+:worker_exceptions)
+    {
+        try {
+            view->addMatrixEntry(0, 1, 3);
+        } catch (const FEException&) {
+            ++worker_exceptions;
+        }
+    }
+    EXPECT_EQ(worker_exceptions, 0);
+    EXPECT_THROW(view->finalizeAssembly(), FEException);
+    EXPECT_THROW(matrix->finalizeAssembly(), FEException);
+    matrix->zero();
+    EXPECT_NO_THROW(view->finalizeAssembly());
+}
+#endif
+#endif
 
 TEST(EigenBackend, ZeroRowsSetsDiagonal)
 {
