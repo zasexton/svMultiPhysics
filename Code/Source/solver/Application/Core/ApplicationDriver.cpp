@@ -3655,6 +3655,55 @@ bool updateLevelSetAdvectionVelocities(
   return updateLevelSetAdvectionVelocitiesFromState(sim, state, requests, true);
 }
 
+// Accepted states that the kinematic reconciliation and the sign-definite
+// patch bounds of the next step compare against.  Conservative-phase requests
+// skip accepted-step maintenance, so the patch bounds need no baseline there.
+bool levelSetKinematicBaselineNeeded(const LevelSetMaintenanceRequest& request)
+{
+  const auto& transport = request.configuration->transport;
+  return transport.kinematic_reconciliation.enabled ||
+         (transport.sign_definite_patch_bounds.enabled &&
+          !transport.conservative_phase.enabled);
+}
+
+std::vector<LevelSetKinematicBaseline> captureLevelSetKinematicBaselines(
+    const application::core::SimulationComponents& sim,
+    svmp::FE::timestepping::TimeHistory& history,
+    std::span<const LevelSetMaintenanceRequest> maintenance)
+{
+  std::vector<LevelSetKinematicBaseline> baselines;
+  if (std::none_of(maintenance.begin(), maintenance.end(),
+                   levelSetKinematicBaselineNeeded)) {
+    return baselines;
+  }
+  const auto solution = gatherFeOrderedSolution(
+      history.u(), activeFESystemCommunicator(*sim.fe_system));
+  for (const auto& request : maintenance) {
+    if (levelSetKinematicBaselineNeeded(request)) {
+      baselines.push_back(makeLevelSetKinematicBaseline(
+          *sim.fe_system, request, solution, history.stepIndex()));
+    }
+  }
+  return baselines;
+}
+
+// The baselines of the first step.  Until the first step entry refreshes it,
+// the velocity extension holds its initial value; refresh it from the initial
+// state first, so a moving start compares against the extension of its
+// initial velocity, as every later step does.
+std::vector<LevelSetKinematicBaseline> initialLevelSetKinematicBaselines(
+    application::core::SimulationComponents& sim,
+    svmp::FE::timestepping::TimeHistory& history,
+    std::span<const LevelSetMaintenanceRequest> maintenance,
+    const std::vector<LevelSetAdvectionVelocityRequest>& advection_velocity)
+{
+  if (std::any_of(maintenance.begin(), maintenance.end(),
+                  levelSetKinematicBaselineNeeded)) {
+    (void)updateLevelSetAdvectionVelocities(sim, history, advection_velocity);
+  }
+  return captureLevelSetKinematicBaselines(sim, history, maintenance);
+}
+
 // FNV-1a fingerprint of a name that enters the extension revision.
 std::uint64_t velocityExtensionNameFingerprint(std::string_view key) noexcept
 {
@@ -7825,30 +7874,8 @@ void ApplicationDriver::runTransient(SimulationComponents& sim, const Parameters
   std::vector<LevelSetKinematicBaseline> kinematic_baselines;
   const auto capture_kinematic_baselines =
       [&](svmp::FE::timestepping::TimeHistory& history) {
-        kinematic_baselines.clear();
-        // Conservative-phase requests skip accepted-step maintenance, so the
-        // patch bounds need no baseline for them.
-        const auto needs_baseline = [](const auto& request) {
-          const auto& transport = request.configuration->transport;
-          return transport.kinematic_reconciliation.enabled ||
-                 (transport.sign_definite_patch_bounds.enabled &&
-                  !transport.conservative_phase.enabled);
-        };
-        const bool any_enabled = std::any_of(
-            level_set_maintenance.begin(),
-            level_set_maintenance.end(),
-            needs_baseline);
-        if (!any_enabled) {
-          return;
-        }
-        const auto solution = gatherFeOrderedSolution(
-            history.u(), activeFESystemCommunicator(*sim.fe_system));
-        for (const auto& request : level_set_maintenance) {
-          if (needs_baseline(request)) {
-            kinematic_baselines.push_back(makeLevelSetKinematicBaseline(
-                *sim.fe_system, request, solution, history.stepIndex()));
-          }
-        }
+        kinematic_baselines = captureLevelSetKinematicBaselines(
+            sim, history, level_set_maintenance);
       };
   callbacks.on_step_start = [&](const svmp::FE::timestepping::TimeHistory& h) {
     energy.requireNoResidualWorkStageAtStepStart();
@@ -10077,7 +10104,9 @@ void ApplicationDriver::runTransient(SimulationComponents& sim, const Parameters
     callbacks = scalar_history_participants.callbacks(std::move(callbacks));
   }
 
-  capture_kinematic_baselines(*sim.time_history);
+  kinematic_baselines = initialLevelSetKinematicBaselines(
+      sim, *sim.time_history, level_set_maintenance,
+      level_set_advection_velocity);
   svmp::FE::timestepping::TimeLoop loop(opts);
   oopCout() << "[svMultiPhysics::Application] TimeLoop: entering loop.run()" << std::endl;
   auto loop_start = std::chrono::steady_clock::now();

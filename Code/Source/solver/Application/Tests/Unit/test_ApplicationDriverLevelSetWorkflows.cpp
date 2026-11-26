@@ -15873,6 +15873,147 @@ TEST_F(ApplicationDriverConservativePhaseCandidatesTest,
 }
 
 TEST(ApplicationDriverLevelSetVolumeCorrection,
+     FirstKinematicBaselineCarriesTheExtendedInitialVelocity)
+{
+  // A unit-height interface x = 1.5 translating at 1 m/s, dt = 0.1.  Before
+  // the first step the velocity extension still holds its initial value.  A
+  // baseline captured then integrates the first step's flux with a zero
+  // previous velocity and targets dt/2 = 0.05 instead of dt = 0.1.
+#if !(defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH)
+  GTEST_SKIP() << "Requires FE built with Mesh integration.";
+#else
+  constexpr int kInterfaceMarker = 811;
+  constexpr svmp::FE::Real dt = 0.1;
+  auto mesh = makeWorkflowThreeQuadStripTriangleMesh();
+  (void)svmp::MeshFields::attach_field(
+      mesh->local_mesh(), svmp::EntityKind::Vertex, "phi",
+      svmp::FieldScalarType::Float64, 1);
+  auto scalar_space = std::make_shared<svmp::FE::spaces::H1Space>(
+      svmp::FE::ElementType::Triangle3, /*order=*/1);
+  auto vector_space =
+      std::make_shared<svmp::FE::spaces::ProductSpace>(scalar_space, 2);
+  auto system = std::make_unique<svmp::FE::systems::FESystem>(mesh);
+  const auto phi = system->addField(svmp::FE::systems::FieldSpec{
+      .name = "phi", .space = scalar_space, .components = 1});
+  const auto source_velocity = system->addField(svmp::FE::systems::FieldSpec{
+      .name = "Velocity", .space = vector_space, .components = 2});
+  const auto target_velocity = system->addField(svmp::FE::systems::FieldSpec{
+      .name = "LevelSetAdvectionVelocity",
+      .space = vector_space,
+      .components = 2,
+      .source_kind = svmp::FE::systems::FieldSourceKind::PrescribedData});
+  ASSERT_NO_THROW(system->setup({}));
+
+  std::vector<svmp::FE::Real> phi_values(mesh->n_vertices());
+  std::vector<svmp::FE::Real> transported_values(mesh->n_vertices());
+  std::vector<svmp::FE::Real> velocity_values(2u * mesh->n_vertices(), 0.0);
+  for (std::size_t vertex = 0; vertex < mesh->n_vertices(); ++vertex) {
+    const auto x = workflowVertexPoint(*mesh, vertex)[0];
+    phi_values[vertex] = x - 1.5;
+    transported_values[vertex] = x - 1.5 - dt;
+    velocity_values[2u * vertex] = 1.0;
+  }
+  const auto phi_coefficients = projectWorkflowVertexValues(
+      *system, phi, phi_values, 1u, "first baseline phi");
+  const auto transported = projectWorkflowVertexValues(
+      *system, phi, transported_values, 1u, "first baseline transported phi");
+  const auto velocity_coefficients = projectWorkflowVertexValues(
+      *system, source_velocity, velocity_values, 2u, "first baseline velocity");
+  std::vector<svmp::FE::Real> solution(
+      static_cast<std::size_t>(system->dofHandler().getNumDofs()), 0.0);
+  writeWorkflowFieldSlice(*system, phi, phi_coefficients, solution);
+  writeWorkflowFieldSlice(*system, source_velocity, velocity_coefficients, solution);
+  // The extension field starts at rest.
+  const std::vector<svmp::FE::Real> at_rest(
+      static_cast<std::size_t>(system->fieldDofHandler(target_velocity).getNumDofs()), 0.0);
+  system->setPrescribedFieldCoefficients(target_velocity, at_rest);
+
+  std::unique_ptr<svmp::FE::backends::BackendFactory> factory;
+  try {
+    factory = svmp::FE::backends::BackendFactory::create(
+        svmp::FE::backends::BackendKind::FSILS);
+  } catch (const std::exception&) {
+    GTEST_SKIP() << "Requires an available FE vector backend.";
+  }
+  auto history = svmp::FE::timestepping::TimeHistory::allocate(
+      *factory, system->dofHandler().getNumDofs(), /*history_depth=*/2);
+  scatterFeOrderedSolution(history.u(), solution);
+  scatterFeOrderedSolution(history.uPrev(), solution);
+  scatterFeOrderedSolution(history.uPrev2(), solution);
+  history.setStepIndex(0);
+  history.setDt(dt);
+
+  application::core::SimulationComponents sim;
+  sim.primary_mesh = mesh;
+  sim.fe_system = std::move(system);
+  auto params = parseWorkflowParametersXml(R"xml(
+<svMultiPhysicsFile>
+  <Add_equation type="fluid">
+    <Add_BC name="free_surface">
+      <Type>Free_surface</Type>
+      <Implementation>UnfittedLevelSet</Implementation>
+      <Level_set_field_name>phi</Level_set_field_name>
+      <Generated_interface_domain_id>first_baseline_interface</Generated_interface_domain_id>
+      <Interface_marker>811</Interface_marker>
+      <Allow_corner_linearized_cut_geometry>true</Allow_corner_linearized_cut_geometry>
+      <Active_domain>LevelSetNegative</Active_domain>
+    </Add_BC>
+  </Add_equation>
+</svMultiPhysicsFile>
+)xml");
+  svmp::FE::level_set::LevelSetGeneratedInterfaceLifecycle lifecycle;
+  ASSERT_TRUE(refreshActiveCutIntegrationContextFromSolution(
+                  sim, *params,
+                  std::span<const svmp::FE::Real>(solution.data(), solution.size()),
+                  lifecycle, "first-kinematic-baseline-test")
+                  .refreshed);
+
+  LevelSetAdvectionVelocityRequest extension{};
+  extension.level_set_field_name = "phi";
+  extension.source_velocity_field_name = "Velocity";
+  extension.target_velocity_field_name = "LevelSetAdvectionVelocity";
+  extension.extension_method = "pde_harmonic";
+  extension.enforce_wall_impermeability = false;
+  extension.active_side = application::core::LevelSetActiveSide::Negative;
+  extension.isovalue = 0.0;
+  extension.requested_interface_marker = kInterfaceMarker;
+  extension.active_cut_request_index = 0u;
+
+  application::core::ResolvedLevelSetMaintenanceCompatibilityConfiguration configuration;
+  configuration.transport.level_set.field_name = "phi";
+  configuration.transport.velocity.field_name = "LevelSetAdvectionVelocity";
+  configuration.transport.kinematic_reconciliation.enabled = true;
+  const std::vector<LevelSetMaintenanceRequest> requests{
+      freezeMaintenanceConfiguration(std::move(configuration))};
+
+  const auto target = [&](const LevelSetKinematicBaseline& baseline) {
+    const auto& w_dofs = sim.fe_system->fieldDofHandler(target_velocity);
+    std::vector<svmp::FE::Real> reconciled;
+    const auto result = svmp::FE::level_set::reconcileLevelSetWithKinematicFlux(
+        sim.fe_system->meshAccess(), sim.fe_system->fieldDofHandler(phi), w_dofs,
+        0.0, 1.0e-12, dt, baseline.level_set, transported, baseline.velocity,
+        std::vector<svmp::FE::Real>(velocity_coefficients.begin(), velocity_coefficients.end()),
+        reconciled, sim.fe_system->fieldRecord(target_velocity).space.get());
+    EXPECT_TRUE(result.success) << result.diagnostic;
+    return result.kinematic_volume_change;
+  };
+  // Captured before the extension is refreshed (the former first baseline).
+  const auto stale = captureLevelSetKinematicBaselines(sim, history, requests);
+  ASSERT_EQ(stale.size(), 1u);
+  EXPECT_NEAR(target(stale.front()), 0.5 * dt, 1.0e-12);
+
+  const auto baselines = initialLevelSetKinematicBaselines(
+      sim, history, requests, {extension});
+  ASSERT_EQ(baselines.size(), 1u);
+  ASSERT_EQ(baselines.front().velocity.size(), velocity_coefficients.size());
+  for (std::size_t i = 0; i < velocity_coefficients.size(); ++i) {
+    EXPECT_NEAR(baselines.front().velocity[i], velocity_coefficients[i], 1.0e-12) << "dof " << i;
+  }
+  EXPECT_NEAR(target(baselines.front()), dt, 1.0e-12);
+#endif
+}
+
+TEST(ApplicationDriverLevelSetVolumeCorrection,
      CandidateGeometryFailureRestoresCompleteMaintenanceTransaction)
 {
   // The frozen WP-8 matrix records this name.  Decision D47 retired the
