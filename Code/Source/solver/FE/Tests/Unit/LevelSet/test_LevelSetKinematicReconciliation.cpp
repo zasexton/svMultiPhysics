@@ -983,6 +983,55 @@ TEST(LevelSetKinematicReconciliation, KeepsAnExactWallTraceOnTetrahedra)
     EXPECT_GT(roots, 0u);
 }
 
+TEST(LevelSetKinematicReconciliation, KeepsTheVolumeOfEachDisconnectedRegion)
+{
+    // A diamond of four triangles around its centre holds two liquid tips that
+    // share the centre, north and south coefficients; a ring of gas cells
+    // keeps both away from the walls.  At rest, perturbing only the east tip
+    // must restore it and leave the west tip alone.  Through the shared nodes
+    // the west tip used to gain area while the exact-trace remainder of the
+    // changed cells widened the accepted volume error.
+    auto mesh = std::make_shared<svmp::MeshBase>();
+    const svmp::CellShape triangle{svmp::CellFamily::Triangle, 3, 1};
+    const std::vector<svmp::real_t> x{0., 0., 1., 0., 0., 1., -1., 0., 0., -1., 2., 0., 2., 2.,
+                                      0., 2., -2., 2., -2., 0., -2., -2., 0., -2., 2., -2.};
+    const std::vector<svmp::index_t> cells{0, 1, 2, 0, 2, 3, 0, 3, 4, 0, 4, 1,
+                                           1, 5, 6, 1, 6, 2, 2, 6, 7, 2, 7, 8, 2, 8, 3, 3, 8, 9,
+                                           3, 9, 10, 3, 10, 4, 4, 10, 11, 4, 11, 12, 4, 12, 1, 1, 12, 5};
+    std::vector<svmp::offset_t> offsets;
+    for (std::size_t c = 0; c <= cells.size() / 3u; ++c) offsets.push_back(static_cast<svmp::offset_t>(3u * c));
+    mesh->build_from_arrays(2, x, offsets, cells, std::vector<svmp::CellShape>(cells.size() / 3u, triangle));
+    mesh->finalize();
+    SimplexSystem s(svmp::create_mesh(std::move(mesh)), 2);
+    const auto tip_node = [](const Point& p) { return std::abs(p[0]) == 1.0 && p[1] == 0.0; };
+    const auto previous = s.scalar([&](const Point& p) { return tip_node(p) ? -1.0 : 1.0; });
+    const auto transported = s.scalar([&](const Point& p) {
+        return tip_node(p) ? (p[0] > 0.0 ? -0.9 : -1.0) : 1.0;
+    });
+    const auto zero = s.vector([](const Point&) { return Point{}; });
+    // The area of one tip: the other tip's node is moved to the positive side.
+    const auto tip = [&](const std::vector<FE::Real>& phi, FE::Real side) {
+        auto alone = phi;
+        const auto* map = s.phiDofs().getEntityDofMap();
+        for (FE::GlobalIndex v = 0; v < map->numVertices(); ++v) {
+            const auto p = s.system.meshAccess().getNodeCoordinates(v);
+            if (tip_node(p) && p[0] == -side) {
+                alone[static_cast<std::size_t>(map->getVertexDofs(v).front())] = 1.0;
+            }
+        }
+        return s.negativeVolume(alone);
+    };
+    const FE::Real area = tip(previous, 1.0);
+    ASSERT_NEAR(tip(previous, -1.0), area, 1.0e-15);
+    std::vector<FE::Real> endpoint;
+    const auto result = s.reconcile(1.0, previous, transported, zero, zero, endpoint);
+    ASSERT_TRUE(result.success) << result.diagnostic;
+    EXPECT_EQ(result.wall_trace_dofs, 0u);
+    EXPECT_NEAR(tip(endpoint, 1.0), area, 1.0e-12);
+    EXPECT_NEAR(tip(endpoint, -1.0), area, 1.0e-12);
+    EXPECT_LT(result.volume_tolerance, 1.0e-10);
+}
+
 TEST(LevelSetKinematicReconciliation, RejectsNonSimplexCellsAndBadInput)
 {
     // Quadrilateral background mesh.

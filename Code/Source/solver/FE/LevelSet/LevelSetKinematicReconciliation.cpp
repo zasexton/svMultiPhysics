@@ -19,6 +19,7 @@
 #include <limits>
 #include <map>
 #include <optional>
+#include <set>
 #include <sstream>
 #include <stdexcept>
 #include <string>
@@ -157,6 +158,8 @@ void sumInPlace(const Collective& context, std::vector<Real>& values)
 // coordinates, in which the generated-interface builder cuts the cell.
 struct CellTrace {
     std::array<Real, 4> g{};
+    std::array<Real, 4> f{};
+    std::array<Real, 4> m{};
     bool kinematically_exact{true};
 };
 
@@ -323,6 +326,8 @@ bool accumulateCell(const SimplexCell& cell,
             const auto li = lambda[static_cast<std::size_t>(i)];
             const auto dof = cell.dof[static_cast<std::size_t>(i)];
             trace.g[static_cast<std::size_t>(i)] += scaled * li;
+            trace.f[static_cast<std::size_t>(i)] += scaled * li * advective;
+            trace.m[static_cast<std::size_t>(i)] += scaled * li * rate_value;
             sums.g[dof] += scaled * li;
             sums.f[dof] += scaled * li * advective;
             sums.m[dof] += scaled * li * rate_value;
@@ -1014,45 +1019,54 @@ struct DofSets {
 
 // Connected interface components: the edges of a supported cell that change
 // sign in either state belong together, and so do all cells around a node
-// that the interface swept over during the step (its sign changed).  Every
-// DOF on such an edge gets the smallest label of its edges.  Labels are
+// that the interface swept over during the step (its sign changed).  A node
+// on cut edges of two components is shared by them.  Labels are dense and
 // identical on every rank.
-[[nodiscard]] std::vector<long long> interfaceComponents(const Collective& context,
-                                                         const std::vector<SimplexCell>& cells,
-                                                         std::span<const Real> previous,
-                                                         std::span<const Real> transported,
-                                                         Real isovalue, std::size_t n)
+struct InterfaceComponents {
+    std::vector<long long> node;   // component of each DOF (the smallest if shared), -1 if none
+    std::vector<char> shared;      // the DOF lies on cut edges of two or more components
+    std::vector<long long> cell;   // component of each owned cell, -1 without a cut edge
+    std::map<std::pair<std::size_t, long long>, std::size_t> splits;  // (shared DOF, component) -> index
+    std::size_t count{0};
+};
+
+[[nodiscard]] InterfaceComponents interfaceComponents(const Collective& context,
+                                                      const std::vector<SimplexCell>& cells,
+                                                      std::span<const Real> previous,
+                                                      std::span<const Real> transported,
+                                                      Real isovalue, std::size_t n)
 {
+    const auto negative = [&](std::span<const Real> phi, std::size_t i) { return phi[i] - isovalue < 0; };
     std::vector<Real> local;
-    for (const auto& cell : cells) {
+    std::vector<std::pair<std::size_t, std::size_t>> first_edge(cells.size(), {n, n});
+    for (std::size_t c = 0; c < cells.size(); ++c) {
+        const auto& cell = cells[c];
         std::vector<std::size_t> edges;
         for (int a = 0; a < cell.corners; ++a) {
             for (int b = a + 1; b < cell.corners; ++b) {
                 const auto i = cell.dof[static_cast<std::size_t>(a)];
                 const auto j = cell.dof[static_cast<std::size_t>(b)];
-                const bool cut = ((previous[i] - isovalue < 0) != (previous[j] - isovalue < 0)) ||
-                                 ((transported[i] - isovalue < 0) != (transported[j] - isovalue < 0));
-                if (cut) {
+                if (negative(previous, i) != negative(previous, j) ||
+                    negative(transported, i) != negative(transported, j)) {
                     edges.push_back(std::min(i, j));
                     edges.push_back(std::max(i, j));
                 }
             }
         }
-        for (int a = 0; a < cell.corners && !edges.empty(); ++a) {
+        if (edges.empty()) continue;
+        first_edge[c] = {edges[0], edges[1]};
+        for (int a = 0; a < cell.corners; ++a) {
             const auto i = cell.dof[static_cast<std::size_t>(a)];
-            if ((previous[i] - isovalue < 0) != (transported[i] - isovalue < 0)) {
+            if (negative(previous, i) != negative(transported, i)) {
                 edges.push_back(i);
                 edges.push_back(i);
             }
         }
-        if (!edges.empty()) {
-            local.push_back(static_cast<Real>(edges.size() / 2u));
-            for (const auto dof : edges) local.push_back(static_cast<Real>(dof));
-        }
+        local.push_back(static_cast<Real>(edges.size() / 2u));
+        for (const auto dof : edges) local.push_back(static_cast<Real>(dof));
     }
     const auto all = gatherAll(context, local);
-    // An edge is the pair (i, j); unite the edges of each cell through their
-    // first endpoint pairs encoded as one key.
+    // Union-find over edges; a swept node is the pseudo-edge (i, i).
     std::map<std::pair<std::size_t, std::size_t>, std::size_t> edge_id;
     std::vector<std::size_t> parent;
     const auto find = [&](std::size_t e) {
@@ -1075,14 +1089,32 @@ struct DofSets {
             }
         }
     }
-    std::vector<long long> label(n, -1);
+    InterfaceComponents components;
+    std::map<std::size_t, long long> dense;
+    for (const auto& [key, id] : edge_id) dense.emplace(find(id), 0);
+    for (auto& [root, label] : dense) label = static_cast<long long>(components.count++);
+    components.node.assign(n, -1);
+    components.shared.assign(n, 0);
+    std::set<std::pair<std::size_t, long long>> memberships;
     for (const auto& [key, id] : edge_id) {
-        const auto root = static_cast<long long>(find(id));
+        const auto label = dense[find(id)];
         for (const auto dof : {key.first, key.second}) {
-            label[dof] = label[dof] < 0 ? root : std::min(label[dof], root);
+            memberships.emplace(dof, label);
+            auto& node = components.node[dof];
+            if (node >= 0 && node != label) components.shared[dof] = 1;
+            node = node < 0 ? label : std::min(node, label);
         }
     }
-    return label;
+    for (const auto& membership : memberships) {
+        if (components.shared[membership.first]) {
+            components.splits.emplace(membership, components.splits.size());
+        }
+    }
+    components.cell.assign(cells.size(), -1);
+    for (std::size_t c = 0; c < cells.size(); ++c) {
+        if (first_edge[c].first < n) components.cell[c] = dense[find(edge_id.at(first_edge[c]))];
+    }
+    return components;
 }
 
 // A read-only endpoint measurement stops after the first trace integration.
@@ -1358,13 +1390,22 @@ LevelSetKinematicReconciliationResult integrateKinematicStep(
     // For each simplex, account locally for the difference between its exact
     // swept volume and the trapezoidal shape derivative. Distribute the scalar
     // defect to the same nodal interface tests by their integrated weights.
-    // Exactly advected traces keep their original coefficients and their
-    // legitimate temporal quadrature remainder.
+    // An uncorrected, exactly advected trace keeps its legitimate temporal
+    // quadrature remainder. A node shared by two interface components gets
+    // its residual and weight separately for each (the splits), and the final
+    // evaluation sums the budget of every component.
     std::vector<bool> supported_cell(cells.size());
     Real temporal_volume_remainder = 0;
-    auto evaluate_endpoint = [&](std::span<const Real> endpoint, InterfaceSums& current) {
+    const std::size_t splits = component.splits.size();
+    std::vector<Real> split_g(splits, 0), split_r(splits, 0);
+    // Per component: volume change, previous and current flux, exact remainder, volume scale.
+    constexpr std::size_t kBudgetTerms = 5u;
+    std::vector<Real> budget;
+    auto evaluate_endpoint = [&](std::span<const Real> endpoint, InterfaceSums& current, bool with_budget) {
         unsigned long long local_cut_cells = 0;
         std::vector<Real> remainder(1, 0);
+        std::vector<Real> split_terms(2u * splits, 0);
+        budget.assign(with_budget ? kBudgetTerms * component.count : 0u, 0);
         try {
             for (std::size_t c = 0; c < cells.size(); ++c) {
                 const auto& cell = cells[c];
@@ -1376,18 +1417,44 @@ LevelSetKinematicReconciliationResult integrateKinematicStep(
                 (void)cutClass(cell, endpoint, isovalue, tolerance, minimum_fraction, &fraction);
                 Real defect = cell.measure * (fraction - cell.previous_fraction);
                 Real weight = 0;
+                bool corrected = false;
                 for (int j = 0; j < cell.corners; ++j) {
                     const Real g = Real{0.5} * (cell.previous_trace.g[j] + trace.g[j]);
                     defect += g * (endpoint[cell.dof[j]] - previous_level_set[cell.dof[j]]);
                     weight += g;
+                    corrected = corrected ||
+                                std::abs(endpoint[cell.dof[j]] - transported_level_set[cell.dof[j]]) > rounding_floor;
                 }
                 supported_cell[c] = weight > 0;
-                if (trace.kinematically_exact && cell.previous_trace.kinematically_exact && weight > 0) {
+                const bool exact = !corrected && trace.kinematically_exact &&
+                                   cell.previous_trace.kinematically_exact;
+                if (exact && weight > 0) {
                     remainder[0] += defect;
                 } else if (weight > 0) {
                     for (int j = 0; j < cell.corners; ++j) {
-                        current.m[cell.dof[j]] -= defect * (cell.previous_trace.g[j] + trace.g[j]) / (dt * weight);
+                        const Real share = defect * (cell.previous_trace.g[j] + trace.g[j]) / (dt * weight);
+                        current.m[cell.dof[j]] -= share;
+                        trace.m[j] -= share;
                     }
+                }
+                const auto label = component.cell[c];
+                if (label < 0) continue;
+                for (int j = 0; j < cell.corners; ++j) {
+                    if (!component.shared[cell.dof[j]]) continue;
+                    const auto k = component.splits.at({cell.dof[j], label});
+                    split_terms[k] += Real{0.5} * (cell.previous_trace.g[j] + trace.g[j]);
+                    split_terms[splits + k] += Real{0.5} * (cell.previous_trace.m[j] + trace.m[j] +
+                                                            cell.previous_trace.f[j] + trace.f[j]);
+                }
+                if (with_budget) {
+                    Real* terms = &budget[kBudgetTerms * static_cast<std::size_t>(label)];
+                    terms[0] += cell.measure * (fraction - cell.previous_fraction);
+                    for (int j = 0; j < cell.corners; ++j) {
+                        terms[1] += cell.previous_trace.f[j];
+                        terms[2] += trace.f[j];
+                    }
+                    terms[3] += exact && weight > 0 ? defect : Real{0};
+                    terms[4] += cell.measure * (fraction + cell.previous_fraction);
                 }
             }
         } catch (const std::exception& error) {
@@ -1400,6 +1467,10 @@ LevelSetKinematicReconciliationResult integrateKinematicStep(
         }
         sumInPlace(context, remainder);
         temporal_volume_remainder = remainder.front();
+        sumInPlace(context, split_terms);
+        std::copy(split_terms.begin(), split_terms.begin() + static_cast<std::ptrdiff_t>(splits), split_g.begin());
+        std::copy(split_terms.begin() + static_cast<std::ptrdiff_t>(splits), split_terms.end(), split_r.begin());
+        sumInPlace(context, budget);
         current.reduce(context);
         current_cut_cells = sumCount(context, local_cut_cells);
         current_flux = 0.0;
@@ -1455,7 +1526,7 @@ LevelSetKinematicReconciliationResult integrateKinematicStep(
     std::vector<char> limited(n, 0);
     for (int iteration = 0; iteration < kMaxGeometryIterations; ++iteration) {
         InterfaceSums current(n);
-        if (!evaluate_endpoint(iterate, current)) {
+        if (!evaluate_endpoint(iterate, current, false)) {
             return result;
         }
         if (iteration == 0) {
@@ -1486,6 +1557,9 @@ LevelSetKinematicReconciliationResult integrateKinematicStep(
                 ++skipped;
                 continue;
             }
+            if (component.shared[i]) {
+                continue;  // its share is split by component below
+            }
             if (transported_class[i] == 0 || wall_node[i]) {
                 // A pinned interface vertex or a wall-trace node carries flux
                 // even though its coefficient follows another law. Its other
@@ -1506,12 +1580,22 @@ LevelSetKinematicReconciliationResult integrateKinematicStep(
                 any_limited = true;
             }
         }
+        // A node shared by interface components keeps its value (or its wall
+        // value); the part of its share that belongs to each component stays
+        // in that component, so no correction moves volume between them.
+        std::vector<Real> split_deficit(splits, 0), split_dropped(splits, 0);
+        for (const auto& [key, k] : component.splits) {
+            if (!(gbar[key.first] > Real{0.0})) continue;
+            split_deficit[k] = -dt * split_r[k] - split_g[k] * delta[key.first];
+            any_limited = any_limited || split_deficit[k] != 0;
+        }
         // Scatter a blocked test's signed volume to the other active tests
         // on its cut cells. Count shared cells as in the lumped one-ring
         // projection. A share with no local recipient is retained for the
         // wider connected patch below.
         std::vector<Real> frozen_flag(n, 0);
         std::vector<Real> unplaced(n, 0);
+        std::map<long long, Real> split_unplaced;
         const auto scatter = [&](const std::vector<Real>& shares) {
             std::vector<Real> patch(n, 0), added(n, 0);
             const auto visit_receivers = [&](const auto& add) {
@@ -1539,6 +1623,37 @@ LevelSetKinematicReconciliationResult integrateKinematicStep(
             }
             return added;
         };
+        // The same for each component's part of a shared node, on its cells only.
+        const auto scatter_split = [&](const std::vector<Real>& shares, std::vector<Real>& added) {
+            if (splits == 0) return;
+            std::vector<Real> patch(splits, 0), extra(n, 0);
+            const auto visit_receivers = [&](const auto& add) {
+                for (std::size_t c = 0; c < cells.size(); ++c) {
+                    const auto label = component.cell[c];
+                    if (!supported_cell[c] || label < 0) continue;
+                    const auto& cell = cells[c];
+                    for (int a = 0; a < cell.corners; ++a) {
+                        if (!component.shared[cell.dof[a]]) continue;
+                        const auto k = component.splits.at({cell.dof[a], label});
+                        if (shares[k] == 0) continue;
+                        for (int b = 0; b < cell.corners; ++b) {
+                            const auto j = cell.dof[b];
+                            if (eligible[j] && !frozen_flag[j]) add(k, j);
+                        }
+                    }
+                }
+            };
+            visit_receivers([&](std::size_t k, std::size_t j) { patch[k] += gbar[j]; });
+            sumInPlace(context, patch);
+            visit_receivers([&](std::size_t k, std::size_t j) { extra[j] += shares[k] / patch[k]; });
+            sumInPlace(context, extra);
+            for (const auto& [key, k] : component.splits) {
+                if (shares[k] == 0) continue;
+                if (patch[k] > 0) ++redistributed;
+                else split_unplaced[key.second] += shares[k];
+            }
+            for (std::size_t j = 0; j < n; ++j) added[j] += extra[j];
+        };
         const auto limit_addition = [&](std::vector<Real>& added) {
             for (std::size_t i = 0; i < n; ++i) {
                 if (added[i] == 0) continue;
@@ -1552,6 +1667,7 @@ LevelSetKinematicReconciliationResult integrateKinematicStep(
         };
         if (any_limited) {
             auto added = scatter(deficit);
+            scatter_split(split_deficit, added);
             limit_addition(added);
             for (std::size_t i = 0; i < n; ++i) delta[i] += added[i];
         }
@@ -1590,12 +1706,20 @@ LevelSetKinematicReconciliationResult integrateKinematicStep(
         const std::vector<Real> zero(n, 0);
         bool any_frozen = false;
         protect_cut_classes(zero, delta, [&](auto i, Real share) {
-            dropped[i] += share;
+            if (component.shared[i]) {
+                for (auto it = component.splits.lower_bound({i, -1}); it != component.splits.end() &&
+                                                                       it->first.first == i; ++it) {
+                    split_dropped[it->second] += share * split_g[it->second] / gbar[i];
+                }
+            } else {
+                dropped[i] += share;
+            }
             frozen_flag[i] = 1;
             any_frozen = true;
         });
         if (any_frozen) {
             auto added = scatter(dropped);
+            scatter_split(split_dropped, added);
             limit_addition(added);
             protect_cut_classes(delta, added, [&](auto i, Real share) { unplaced[i] += share; });
             for (std::size_t i = 0; i < n; ++i) delta[i] += added[i];
@@ -1616,7 +1740,7 @@ LevelSetKinematicReconciliationResult integrateKinematicStep(
             while (remaining != 0) {
                 std::vector<Real> next(n, 0);
                 for (std::size_t c = 0; c < cells.size(); ++c) {
-                    if (!supported_cell[c]) continue;
+                    if (!supported_cell[c] || component.cell[c] != component.node[source]) continue;
                     const auto& cell = cells[c];
                     bool touches = false;
                     for (int a = 0; a < cell.corners; ++a) touches = touches || front[cell.dof[a]] != 0;
@@ -1649,11 +1773,12 @@ LevelSetKinematicReconciliationResult integrateKinematicStep(
                 protect_cut_classes(delta, added, [&](auto, Real rejected) { remaining += rejected; });
                 for (std::size_t i = 0; i < n; ++i) delta[i] += added[i];
             }
-            unplaced_by_interface[component[source] >= 0 ? component[source]
-                                                          : -1 - static_cast<long long>(source)] += remaining;
+            unplaced_by_interface[component.node[source] >= 0 ? component.node[source]
+                                                               : -1 - static_cast<long long>(source)] += remaining;
             if (remaining == 0) ++redistributed;
             else ++skipped;
         }
+        for (const auto& [label, remaining] : split_unplaced) unplaced_by_interface[label] += remaining;
         for (const auto& [label, remaining] : unplaced_by_interface) unplaced_volume += std::abs(remaining);
         result.degeneracy_frozen_dof_indices.clear();
         for (std::size_t i = 0; i < n; ++i) {
@@ -1699,8 +1824,8 @@ LevelSetKinematicReconciliationResult integrateKinematicStep(
             const Real limit = solver_tolerance(measured.negative_volume, correction_volume);
             bool released = false;
             for (std::size_t i = 0; i < n; ++i) {
-                const auto found = component[i] >= 0 ? unplaced_by_interface.find(component[i])
-                                                     : unplaced_by_interface.end();
+                const auto found = component.node[i] >= 0 ? unplaced_by_interface.find(component.node[i])
+                                                          : unplaced_by_interface.end();
                 if (wall_node[i] && found != unplaced_by_interface.end() && !(std::abs(found->second) <= limit)) {
                     wall_node[i] = 0;
                     wall_delta[i] = 0;
@@ -1716,7 +1841,7 @@ LevelSetKinematicReconciliationResult integrateKinematicStep(
         }
     }
     InterfaceSums final_sums(n);
-    if (!evaluate_endpoint(iterate, final_sums)) {
+    if (!evaluate_endpoint(iterate, final_sums, true)) {
         return result;
     }
     result.current_interface_cells = static_cast<std::size_t>(current_cut_cells);
@@ -1765,9 +1890,19 @@ LevelSetKinematicReconciliationResult integrateKinematicStep(
         return result;
     }
     // Opposite infeasible fluxes on separate interfaces can sum to zero.
-    // Their unsatisfied local volume constraints cannot cancel one another.
+    // Their unsatisfied local volume constraints cannot cancel one another,
+    // so every connected interface also meets its own budget.
+    Real worst_component = 0;
+    for (std::size_t c = 0; c < component.count; ++c) {
+        const Real* terms = &budget[kBudgetTerms * c];
+        const Real error = terms[0] - Real{0.5} * dt * (terms[1] + terms[2]);
+        const Real allowed = std::abs(terms[3]) + kGeometryRelativeTolerance * correction_volume +
+                             Real{128} * std::numeric_limits<Real>::epsilon() *
+                                 (terms[4] + dt * (std::abs(terms[1]) + std::abs(terms[2])));
+        if (!(std::abs(error) <= allowed)) worst_component = std::max(worst_component, std::abs(error));
+    }
     result.volume_balance_satisfied = std::abs(result.reconciled_volume_error) <= result.volume_tolerance &&
-                                      unplaced_volume <= solver_volume_tolerance;
+                                      unplaced_volume <= solver_volume_tolerance && worst_component == 0;
     if (!result.converged || !result.volume_balance_satisfied) {
         result.retryable_failure = true;
         std::ostringstream message;
@@ -1776,7 +1911,8 @@ LevelSetKinematicReconciliationResult integrateKinematicStep(
                                     : "kinematic fixed-point iteration limit")
                 << ", sharp volume defect=" << result.reconciled_volume_error
                 << ", tolerance=" << result.volume_tolerance
-                << ", unplaced constrained volume=" << unplaced_volume;
+                << ", unplaced constrained volume=" << unplaced_volume
+                << ", largest connected-interface defect=" << worst_component;
         result.diagnostic = message.str();
         return result;
     }

@@ -133,9 +133,10 @@ struct LevelSetKinematicEndpoint {
  * gbar_i (phi_i - phi_t,i) = -dt r_i + sum_K E_K gbar_K,i / sum_j gbar_K,j.
  * Summing these equations gives the physical trapezoidal normal flux for
  * the exact sharp-volume change, including flow through an open domain.
- * On a trace which already satisfies d + w.grad(phi) = 0 pointwise, use the
- * unmodified kinematics and retain its temporal quadrature remainder in the
- * attainable volume tolerance. This preserves an exactly transported plane.
+ * On an uncorrected cell whose trace already satisfies d + w.grad(phi) = 0
+ * pointwise, use the unmodified kinematics and retain its temporal quadrature
+ * remainder in the attainable volume tolerance. This preserves an exactly
+ * transported plane.
  * No node changes its sign class or moves toward the isovalue by more than
  * half of its transported distance. The limited part of a nodal share is
  * moved to the other nodes of its cells using their lumped weights. Nodes of
@@ -147,6 +148,11 @@ struct LevelSetKinematicEndpoint {
  * would change. If those nodes are blocked, the unused share follows successive
  * connected cut-cell rings to available trace nodes. Pinned interface vertices
  * retain their coefficients and contribute their complete flux in this allocation.
+ * Interface components are connected through the cut edges of their cells and
+ * through the nodes the interface swept over. A node on the cut edges of two
+ * components keeps its value; each component's part of its share goes to that
+ * component's other trace nodes, and every component meets its own budget, so
+ * no correction moves volume between disconnected regions.
  * Volume that no node can take is summed over its connected interface.
  * The cut topology of the accepted state is preserved.
  *
