@@ -10,6 +10,7 @@
 #include "Basis/NodeOrderingConventions.h"
 #include "Dofs/DofHandler.h"
 #include "Dofs/EntityDofMap.h"
+#include "Geometry/CutQuadratureMapping.h"
 #include "Geometry/FrameGeometry.h"
 #include "Geometry/MappingFactory.h"
 #include "Interfaces/LevelSetGeometrySnapshot.h"
@@ -142,7 +143,7 @@ private:
 
 class SingleTetra10GeometryMeshAccess final : public FE::assembly::IMeshAccess {
 public:
-    SingleTetra10GeometryMeshAccess()
+    explicit SingleTetra10GeometryMeshAccess(FE::Real curvature = 0)
         : nodes_{
               std::array<FE::Real, 3>{0.0, 0.0, 0.0},
               std::array<FE::Real, 3>{1.0, 0.0, 0.0},
@@ -156,6 +157,11 @@ public:
               std::array<FE::Real, 3>{0.0, 0.5, 0.5},
           }
     {
+        for (auto& node : nodes_) {
+            for (auto& coordinate : node) {
+                coordinate += curvature * coordinate * coordinate;
+            }
+        }
     }
 
     [[nodiscard]] FE::GlobalIndex numCells() const override { return 1; }
@@ -8567,6 +8573,65 @@ TEST(LevelSetInterfaceLifecycle, ClosedQualifiedCurveRetainsItsAreaAndCentroidUn
         EXPECT_NEAR(area, expected_area, 2.0e-10);
         EXPECT_NEAR(first_x, x_center * expected_area, 2.0e-10);
         EXPECT_NEAR(first_y, y_center * expected_area, 2.0e-10);
+    }
+}
+
+TEST(LevelSetInterfaceLifecycle, CurvedTetrahedronVolumeRulesIntegrateTheCubicPhysicalJacobian)
+{
+    // X_i=xi_i+xi_i^2/2 on the reference tetrahedron.
+    const auto mesh = std::make_shared<SingleTetra10GeometryMeshAccess>(0.5);
+    FE::systems::FESystem system(mesh);
+    const auto phi = system.addField({
+        .name = "phi", .space = FE::spaces::Space(FE::spaces::SpaceType::H1, mesh, 2, 1), .components = 1});
+    system.setup({}, makeSingleTetraSetupInputs());
+    // Integral over r+s+t<c of r^p(1+r)(1+s)(1+t). Each generated
+    // weight must integrate the physical metric, also when testing r or r^2.
+    const auto moment = [](FE::Real c, int p) {
+        FE::Real result = 0;
+        for (int i = 0; i <= 1; ++i) {
+            for (int j = 0; j <= 1; ++j) {
+                for (int k = 0; k <= 1; ++k) {
+                    const int degree = p + i + j + k + 3;
+                    result += std::tgamma(p + i + 1) * std::pow(c, degree) / std::tgamma(degree + 1);
+                }
+            }
+        }
+        return result;
+    };
+    for (const FE::Real cut_position : {0.75, 1.25}) {
+        SCOPED_TRACE(cut_position);
+        std::vector<FE::Real> solution(static_cast<std::size_t>(system.dofHandler().getNumDofs()));
+        const auto cell_dofs = system.fieldDofHandler(phi).getCellDofs(0);
+        ASSERT_EQ(cell_dofs.size(), 10u);
+        for (std::size_t i = 0; i < cell_dofs.size(); ++i) {
+            const auto xi = FE::basis::ReferenceNodeLayout::get_node_coords(FE::ElementType::Tetra10, i);
+            solution.at(static_cast<std::size_t>(cell_dofs[i])) = xi[0] + xi[1] + xi[2] - cut_position;
+        }
+        level_set::LevelSetGeneratedInterfaceOptions options;
+        options.level_set_field_name = "phi";
+        options.requested_interface_marker = 925;
+        options.geometry_mode = level_set::GeneratedInterfaceGeometryMode::LinearCorner;
+        options.allow_corner_linearized_geometry = true;
+        options.volume_quadrature_order = 2;
+        options.interface_quadrature_order = 2;
+        level_set::LevelSetGeneratedInterfaceLifecycle lifecycle;
+        const auto generated = lifecycle.build(system, options, solution);
+        ASSERT_TRUE(generated.success) << generated.diagnostic;
+
+        std::array<FE::Real, 3> negative{}, positive{};
+        for (const auto& rule : generated.domain.volumeQuadratureRules()) {
+            const auto mapped = FE::geometry::mapCutQuadratureRuleToPhysical(*mesh, rule);
+            auto& integral = rule.side == FE::geometry::CutIntegrationSide::Negative ? negative : positive;
+            for (const auto& q : mapped.points) {
+                for (int p = 0; p <= 2; ++p) {
+                    integral[p] += q.physical_weight * std::pow(q.reference_point[0], p);
+                }
+            }
+        }
+        for (int p = 0; p <= 2; ++p) {
+            EXPECT_NEAR(negative[p], moment(std::min(cut_position, 1.0), p), 2.0e-13);
+            EXPECT_NEAR(positive[p], moment(1.0, p) - moment(std::min(cut_position, 1.0), p), 2.0e-13);
+        }
     }
 }
 

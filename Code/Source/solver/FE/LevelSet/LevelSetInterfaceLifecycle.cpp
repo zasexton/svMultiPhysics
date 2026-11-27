@@ -4,6 +4,9 @@
 
 #include "Basis/NodeOrderingConventions.h"
 #include "Dofs/EntityDofMap.h"
+#include "Geometry/CutQuadratureMapping.h"
+#include "Geometry/GeometryMapping.h"
+#include "Quadrature/QuadratureFactory.h"
 #include "Interfaces/LevelSetInterfaceBuilder.h"
 #include "LevelSet/LevelSetCellEvaluator.h"
 #include "LevelSet/LevelSetImplicitCutQuadratureBackend.h"
@@ -912,6 +915,60 @@ void populateLinearCornerDifferentiatedSensitivityRecords(
     return strictly_negative || strictly_positive;
 }
 
+// A Pp tetrahedral map has a Jacobian determinant of degree 3*(p-1).
+// Integrate that metric as well as the advertised reference monomials on
+// the retained source tetrahedra. Affine parents use the original rule.
+void integrateCurvedTetrahedronMetric(
+    const assembly::IMeshAccess& mesh, GlobalIndex cell,
+    std::vector<interfaces::CutInterfaceVolumeRegion>& regions,
+    std::size_t& point_count)
+{
+    const auto type = mesh.getCellType(cell);
+    const int geometry_order = mesh.getCellGeometryOrder(cell);
+    if (regions.empty() || geometry_order <= 1 ||
+        (type != ElementType::Tetra4 && type != ElementType::Tetra10) ||
+        geometry::makeCutCellGeometryMapping(mesh, cell)->isAffine()) {
+        return;
+    }
+
+    point_count = 0;
+    for (auto& region : regions) {
+        const auto order = std::max(0, region.achieved_quadrature_order) +
+                           3 * (geometry_order - 1);
+        const auto rule = quadrature::QuadratureFactory::create_pinned(ElementType::Tetra4, order);
+        constexpr interfaces::CutInterfaceReferenceSimplex whole{
+            .vertex_count = 4, .vertices = {{{0, 0, 0}, {1, 0, 0}, {0, 1, 0}, {0, 0, 1}}}};
+        const auto subcells = region.full_cell_equivalent
+            ? std::span(&whole, 1) : std::span<const interfaces::CutInterfaceReferenceSimplex>(region.reference_subcells);
+        if (subcells.empty()) {
+            throw std::invalid_argument("a curved tetrahedron cut volume requires its retained source tetrahedra");
+        }
+        std::vector<geometry::CutQuadraturePoint> points;
+        points.reserve(subcells.size() * rule->num_points());
+        for (const auto& subcell : subcells) {
+            if (subcell.vertex_count != 4) {
+                throw std::invalid_argument("a tetrahedral cut has an invalid source tetrahedron");
+            }
+            const auto& a = subcell.vertices[0];
+            math::Matrix<Real, 3, 3> jacobian;
+            for (std::size_t d = 0; d < 3; ++d) {
+                for (std::size_t edge = 0; edge < 3; ++edge) {
+                    jacobian(d, edge) = subcell.vertices[edge + 1][d] - a[d];
+                }
+            }
+            const auto scale = std::abs(jacobian.determinant()) * subcell.measure_scale;
+            for (std::size_t q = 0; q < rule->num_points(); ++q) {
+                const math::Vector<Real, 3> offset = jacobian * rule->point(q);
+                const std::array<Real, 3> parent{a[0] + offset[0], a[1] + offset[1], a[2] + offset[2]};
+                points.push_back({.point = parent, .normal = region.normal, .weight = scale * rule->weight(q),
+                                  .parent_coordinate = parent, .reference_measure_factor = scale});
+            }
+        }
+        point_count += points.size();
+        region.quadrature_points = std::move(points);
+    }
+}
+
 // The regions a full LinearCorner cell adds to the domain, in order.
 [[nodiscard]] std::optional<GeneratedInterfaceCellDiagnostics>
 computeLinearFullCellFastPath(
@@ -1234,6 +1291,8 @@ struct GeneratedInterfaceCellOutput {
                                          cell_nodes.size(),
                                          count,
                                          backend.kind())) {
+        integrateCurvedTetrahedronMetric(mesh, cell_id, output.volume_regions,
+                                         full_cell_fast_path->volume_quadrature_point_count);
         return *full_cell_fast_path;
     }
 
@@ -1327,6 +1386,8 @@ struct GeneratedInterfaceCellOutput {
             same_sign_high_order_component_diagnostic = *diagnostic;
         }
     }
+    integrateCurvedTetrahedronMetric(mesh, cell_id, backend_result.cut.volume_regions,
+                                     backend_result.volume_quadrature_point_count);
     stampSelectedImplicitBackend(
         backend_result.cut,
         backend_result.selected_backend);
