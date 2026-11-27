@@ -19,13 +19,21 @@
 #include "Forms/PointEvaluator.h"
 
 #include "Geometry/MappingFactory.h"
-#include "Spaces/FaceRestriction.h"
+#include "Constraints/BoundaryFieldTrace.h"
+#include "Spaces/AdaptiveSpace.h"
+#include "Elements/ElementFactory.h"
+#include "Basis/BernsteinBasis.h"
+#include "Math/DenseLinearAlgebra.h"
+#include "Systems/SystemCollectives.h"
 #include "Core/EnvironmentNames.h"
 
 #include <algorithm>
 #include <cstdint>
 #include <cstdlib>
 #include <limits>
+#include <map>
+#include <numeric>
+#include <tuple>
 #include <optional>
 #include <span>
 #include <sstream>
@@ -48,12 +56,39 @@ using systems::InvalidStateException;
 
 namespace {
 
+using TraceKey = std::tuple<ElementType, BasisType, int, int>;
+
+struct BernsteinTrace {
+    TraceKey key;
+    std::vector<GlobalIndex> dofs;
+};
+
 struct BoundaryDofsWithCoords {
     std::vector<GlobalIndex> dofs;
     std::vector<std::array<Real, 3>> coords;
+    std::map<TraceKey, math::DenseLUSolver> interpolation;
+    std::vector<BernsteinTrace> bernstein_faces;
     std::vector<int> sample_components;  ///< per sampled field
     std::vector<Real> samples;           ///< the sampled field values, DOF by DOF
 };
+
+/// Report a failed rank-local interpolation before another rank starts exchanging point data.
+template<class Operation>
+void prepareTrace(const FESystem& system, bool distributed_interpolation, std::string_view phase, Operation operation)
+{
+    if (!distributed_interpolation) {
+        operation();
+        return;
+    }
+    std::exception_ptr failure;
+    try { operation(); } catch (...) { failure = std::current_exception(); }
+#if FE_HAS_MPI
+    const systems::CollectiveCommunicator comm(system.dofHandler().mpiComm());
+#else
+    const systems::CollectiveCommunicator comm;
+#endif
+    systems::requireCollectivePhasePreparation(failure, comm, phase);
+}
 
 /// A prescribed field a strong value reads, sampled at the constrained nodes.
 struct SampledField {
@@ -61,6 +96,7 @@ struct SampledField {
     const dofs::DofMap* dof_map{nullptr};
     std::span<const Real> coefficients{};
     int components{1};
+    const spaces::FunctionSpace* space{nullptr};
 };
 
 /// The parameter names and field ids of @p node, each once in tree order,
@@ -166,26 +202,6 @@ void traceStrongDirichletEvent(const std::string& phase,
     FE_LOG_INFO(oss.str());
 }
 
-/// The face DOF table of @p space on a cell of @p cell_type: the field's own
-/// element on a cell of its family (P1 on a Triangle6 cell has three DOFs,
-/// complete P2 on a Wedge15 cell keeps its face-center node), else the
-/// field's order on the cell type.
-[[nodiscard]] spaces::FaceRestriction& getFaceRestriction(
-    std::unordered_map<int, spaces::FaceRestriction>& cache,
-    ElementType cell_type,
-    const spaces::FunctionSpace& space)
-{
-    const int key = static_cast<int>(cell_type);
-    auto it = cache.find(key);
-    if (it != cache.end()) {
-        return it->second;
-    }
-    auto restriction = to_mesh_family(space.element_type()) == to_mesh_family(cell_type)
-                           ? spaces::FaceRestriction(space)
-                           : spaces::FaceRestriction(cell_type, space.polynomial_order(), space.continuity());
-    return cache.emplace(key, std::move(restriction)).first->second;
-}
-
 /// The single boundary normal at a constrained node; refuses a node where
 /// the marker's facets meet beyond the feature angle (an edge or corner).
 std::array<Real, 3> boundaryNormalAt(
@@ -229,7 +245,7 @@ void completeOwnedDofsWithCoords(const FESystem& system,
                                  BoundaryDofsWithCoords& out,
                                  const std::string& context)
 {
-    const std::size_t n_samples = out.dofs.empty() ? 0u : out.samples.size() / out.dofs.size();
+    const auto n_samples = std::accumulate(out.sample_components.begin(), out.sample_components.end(), std::size_t{});
     const std::size_t stride = 3u + n_samples;
     std::vector<Real> payload;
     payload.reserve(out.coords.size() * stride);
@@ -259,7 +275,8 @@ void completeOwnedDofsWithCoords(const FESystem& system,
     int component,
     std::span<const FieldId> sampled_field_ids = {},
     bool require_coefficients = true,
-    const std::unordered_set<GlobalIndex>* active_faces = nullptr)
+    const std::unordered_set<GlobalIndex>* active_faces = nullptr,
+    bool interpolate_bernstein = false)
 {
     BoundaryDofsWithCoords out;
 
@@ -301,6 +318,7 @@ void completeOwnedDofsWithCoords(const FESystem& system,
                         "' in a strong value must share the scalar element of field '" + rec.name + "'");
         SampledField f;
         f.name = sampled_rec.name;
+        f.space = &detail::scalarBoundarySpace(*sampled_rec.space);
         f.dof_map = &system.fieldDofHandler(id).getDofMap();
         f.coefficients = system.prescribedFieldCoefficients(id);
         f.components = std::max(1, sampled_rec.space->value_dimension());
@@ -320,21 +338,24 @@ void completeOwnedDofsWithCoords(const FESystem& system,
 
     std::unordered_map<GlobalIndex, std::array<Real, 3>> coord_by_dof;
     std::unordered_map<GlobalIndex, std::vector<Real>> samples_by_dof;
-    std::unordered_map<int, spaces::FaceRestriction> face_restriction_cache;
 
     std::vector<std::array<Real, 3>> cell_coords;
     std::vector<math::Vector<Real, 3>> geom_nodes;
 
-    mesh.forEachBoundaryFace(boundary_marker, [&](GlobalIndex face_id, GlobalIndex cell_id) {
+    detail::BoundaryFieldTraces traces;
+    std::map<std::pair<const spaces::FunctionSpace*, ElementType>, std::shared_ptr<elements::Element>> mixed_sources;
+    const auto& scalar = detail::scalarBoundarySpace(*rec.space);
+    const auto collect_face = [&](GlobalIndex face_id, GlobalIndex cell_id) {
         if (active_faces != nullptr && !active_faces->contains(face_id)) {
             return;
         }
         const ElementType cell_type = mesh.getCellType(cell_id);
 
-        auto& face_restriction = getFaceRestriction(face_restriction_cache, cell_type, *rec.space);
-
+        const auto& space = scalar.element_space(cell_id);
+        const auto& basis = space.element().basis();
+        const auto& restriction = traces.get(space, cell_type);
         const auto face_local = static_cast<int>(mesh.getLocalFaceIndex(face_id, cell_id));
-        const auto local_face_dofs = face_restriction.face_dofs(face_local);
+        const auto local_face_dofs = restriction.face_dofs(face_local);
 
         const auto cell_dofs = dof_map.getCellDofs(cell_id);
         FE_THROW_IF(cell_dofs.empty(), InvalidStateException,
@@ -364,9 +385,9 @@ void completeOwnedDofsWithCoords(const FESystem& system,
         auto mapping = geometry::MappingFactory::create(req, geom_nodes);
         FE_CHECK_NOT_NULL(mapping.get(), "StrongDirichletConstraint: mapping");
 
-        const auto& dof_nodes = face_restriction.dof_nodes();
-
-        for (int ldof : local_face_dofs) {
+        const auto& dof_nodes = restriction.dof_nodes();
+        if (local_face_dofs.empty()) return;
+        for (const int ldof : local_face_dofs) {
             FE_THROW_IF(ldof < 0, InvalidArgumentException,
                         "StrongDirichletConstraint: negative local DOF index");
             const auto ldof_u = static_cast<std::size_t>(ldof);
@@ -374,6 +395,31 @@ void completeOwnedDofsWithCoords(const FESystem& system,
                         "StrongDirichletConstraint: local DOF index out of range for cell DOF list");
             FE_THROW_IF(ldof_u >= dof_nodes.size(), InvalidArgumentException,
                         "StrongDirichletConstraint: local DOF index out of range for dof_nodes");
+        }
+        if (interpolate_bernstein) {
+            const TraceKey key{cell_type, basis.basis_type(), space.polynomial_order(), face_local};
+            if (basis.basis_type() == BasisType::Bernstein && space.polynomial_order() > 1 &&
+                !out.interpolation.contains(key)) {
+                const auto n = local_face_dofs.size();
+                std::vector<Real> matrix(n * n), values;
+                const basis::BernsteinBasis cell_basis(cell_type, space.polynomial_order());
+                for (std::size_t i = 0; i < n; ++i) {
+                    cell_basis.evaluate_values(dof_nodes.at(local_face_dofs[i]), values);
+                    for (std::size_t j = 0; j < n; ++j)
+                        matrix[i * n + j] = values.at(local_face_dofs[j]);
+                }
+                out.interpolation.emplace(key, math::factor_dense_matrix(std::move(matrix), n, "Bernstein boundary trace"));
+            }
+            for (int c = component < 0 ? 0 : component; c < (component < 0 ? n_components : component + 1); ++c) {
+                BernsteinTrace trace{key, {}};
+                for (int local : local_face_dofs)
+                    trace.dofs.push_back(offset + cell_dofs[c * dofs_per_component + static_cast<std::size_t>(local)]);
+                out.bernstein_faces.push_back(std::move(trace));
+            }
+        }
+
+        for (int ldof : local_face_dofs) {
+            const auto ldof_u = static_cast<std::size_t>(ldof);
 
             const auto x = mapping->map_to_physical(dof_nodes[ldof_u]);
 
@@ -401,16 +447,45 @@ void completeOwnedDofsWithCoords(const FESystem& system,
                     FE_THROW_IF(sampled_per_component != dofs_per_component, InvalidStateException,
                                 "StrongDirichletConstraint: field '" + f.name +
                                     "' has another number of DOFs per component on a cell of the constrained field");
+                    // A coefficient at a Bernstein control point is generally different from
+                    // the value of the prescribed field there. Sample its actual scalar basis.
+                    const auto& source = f.space->element_space(cell_id);
+                    const auto& source_basis = source.element().basis();
+                    std::vector<Real> weights;
+                    if (!f.coefficients.empty() && (interpolate_bernstein || source_basis.basis_type() == BasisType::Bernstein
+                                                     || source_basis.basis_type() != basis.basis_type())) {
+                        if (to_mesh_family(source.element_type()) == to_mesh_family(cell_type)) {
+                            source_basis.evaluate_values(dof_nodes[ldof_u], weights);
+                        } else {
+                            auto& element = mixed_sources[{&source, cell_type}];
+                            if (!element) {
+                                elements::ElementRequest request;
+                                request.element_type = cell_type;
+                                request.basis_type = source_basis.basis_type();
+                                request.order = source.polynomial_order();
+                                element = elements::ElementFactory::create(request);
+                            }
+                            element->basis().evaluate_values(dof_nodes[ldof_u], weights);
+                        }
+                        FE_THROW_IF(weights.size() != sampled_per_component, InvalidStateException,
+                                    "StrongDirichletConstraint: prescribed basis differs from its cell coefficient layout");
+                    }
                     for (int c = 0; c < f.components; ++c) {
-                        const auto sampled_dof =
-                            sampled_dofs[static_cast<std::size_t>(c) * sampled_per_component + ldof_u];
-                        values.push_back(f.coefficients.empty()
-                                             ? Real{0.0}
-                                             : f.coefficients[static_cast<std::size_t>(sampled_dof)]);
+                        const auto begin = static_cast<std::size_t>(c) * sampled_per_component;
+                        Real value = 0;
+                        if (!f.coefficients.empty()) {
+                            if (weights.empty()) value = f.coefficients[sampled_dofs[begin + ldof_u]];
+                            else for (std::size_t j = 0; j < weights.size(); ++j)
+                                value += weights[j] * f.coefficients[sampled_dofs[begin + j]];
+                        }
+                        values.push_back(value);
                     }
                 }
             }
         }
+    };
+    prepareTrace(system, interpolate_bernstein, "boundary trace interpolation geometry", [&] {
+        mesh.forEachBoundaryFace(boundary_marker, collect_face);
     });
 
     out.dofs.reserve(coord_by_dof.size());
@@ -506,182 +581,118 @@ std::vector<Real> StrongDirichletConstraint::parameterValues(const FESystem& sys
     return values;
 }
 
-void StrongDirichletConstraint::apply(const FESystem& system, constraints::AffineConstraints& constraints)
+void StrongDirichletConstraint::apply(const FESystem& system, AffineConstraints& constraints)
 {
-    if (value_.hasTest() || value_.hasTrial()) {
-        throw std::invalid_argument("StrongDirichletConstraint: value expression must not contain test/trial functions");
-    }
-
-    const auto active_faces = activeBoundaryFaces(system, boundary_marker_, active_boundary_marker_);
-    auto extracted = boundaryDofsWithCoordsByMarker(system, field_, boundary_marker_, component_, sampled_fields_,
-                                                    /*require_coefficients=*/false, active_faces ? &*active_faces : nullptr);
-    dropYieldedPoints(system, extracted.dofs, extracted.coords, extracted.samples);
-    dofs_ = std::move(extracted.dofs);
-    coords_ = std::move(extracted.coords);
-    sample_components_ = std::move(extracted.sample_components);
-    samples_ = std::move(extracted.samples);
-
-    FE_THROW_IF(dofs_.size() != coords_.size(), InvalidStateException,
-                "StrongDirichletConstraint: DOF/coordinate size mismatch");
-
-    const auto& owned = system.dofHandler().getPartition().locallyOwned();
-
-    forms::PointEvalContext pctx;
-    pctx.time = 0.0;
-    pctx.dt = 0.0;
-    const auto parameters = parameterValues(system, 0.0);
-    pctx.jit_constants = parameters;
-    const auto normals = pointNormals(system);
-    std::vector<FieldValueEntry> field_values(sampled_fields_.size());
-    const std::size_t n_samples = dofs_.empty() ? 0u : samples_.size() / dofs_.size();
-
-    std::size_t owned_dofs = 0;
-    std::size_t constrained_dofs = 0;
-    double min_value = std::numeric_limits<double>::infinity();
-    double max_value = -std::numeric_limits<double>::infinity();
-    std::ostringstream sample;
-    int sample_count = 0;
-
-    for (std::size_t i = 0; i < dofs_.size(); ++i) {
-        const auto dof = dofs_[i];
-        if (!owned.contains(dof)) {
-            continue;
-        }
-        ++owned_dofs;
-        pctx.x = coords_[i];
-        if (!field_values.empty()) {
-            fillFieldValues(sampled_fields_, sample_components_, samples_, i * n_samples, field_values);
-            pctx.field_values = field_values;
-        }
-        if (reads_normal_) {
-            pctx.normal = boundaryNormalAt(normals, dof, coords_[i], boundary_marker_);
-        }
-        const Real v = forms::evaluateScalarAt(point_value_, pctx);
-        constraints.addDirichlet(dof, v);
-        ++constrained_dofs;
-        min_value = std::min(min_value, static_cast<double>(v));
-        max_value = std::max(max_value, static_cast<double>(v));
-        if (sample_count < 4) {
-            if (sample_count > 0) {
-                sample << "; ";
-            }
-            sample << "{dof=" << dof
-                   << ",x=(" << coords_[i][0] << "," << coords_[i][1] << "," << coords_[i][2] << ")"
-                   << ",v=" << v << "}";
-            ++sample_count;
-        }
-    }
-
-    if (owned_dofs == 0) {
-        min_value = 0.0;
-        max_value = 0.0;
-    }
-
-    traceStrongDirichletEvent("apply",
-                              boundary_marker_,
-                              component_,
-                              dofs_.size(),
-                              owned_dofs,
-                              constrained_dofs,
-                              /*missing_constraints=*/0,
-                              /*time=*/0.0,
-                              /*dt=*/0.0,
-                              min_value,
-                              max_value,
-                              sample.str());
+    assignValues(system, constraints, 0, 0, false);
 }
 
-bool StrongDirichletConstraint::updateValues(const FESystem& system,
-                                             constraints::AffineConstraints& constraints,
-                                             double time,
-                                             double dt)
+bool StrongDirichletConstraint::updateValues(const FESystem& system, AffineConstraints& constraints,
+                                            double time, double dt)
 {
+    assignValues(system, constraints, time, dt, true);
+    return true;
+}
+
+void StrongDirichletConstraint::assignValues(const FESystem& system, AffineConstraints& constraints,
+                                            double time, double dt, bool updating)
+{
+    if (value_.hasTest() || value_.hasTrial())
+        throw std::invalid_argument("StrongDirichletConstraint: value expression must not contain test/trial functions");
     const auto active_faces = activeBoundaryFaces(system, boundary_marker_, active_boundary_marker_);
+    const auto& space = detail::scalarBoundarySpace(*system.fieldRecord(field_).space);
+    const auto* adaptive = dynamic_cast<const spaces::AdaptiveSpace*>(&space);
+    const bool has_bernstein = adaptive ? adaptive->has_basis_type(BasisType::Bernstein)
+                                        : space.element().basis().basis_type() == BasisType::Bernstein;
+    const bool bernstein = has_bernstein && !point_value_.node()->constantValue().has_value();
     auto extracted = boundaryDofsWithCoordsByMarker(system, field_, boundary_marker_, component_, sampled_fields_,
-                                                    /*require_coefficients=*/true, active_faces ? &*active_faces : nullptr);
-    dropYieldedPoints(system, extracted.dofs, extracted.coords, extracted.samples);
-    FE_THROW_IF(extracted.dofs.size() != dofs_.size(), InvalidStateException,
-                "StrongDirichletConstraint::updateValues: geometry-dependent update changed constrained DOF count; rebuild constraints instead");
-    dofs_ = std::move(extracted.dofs);
-    coords_ = std::move(extracted.coords);
-    sample_components_ = std::move(extracted.sample_components);
-    samples_ = std::move(extracted.samples);
-
-    forms::PointEvalContext pctx;
-    pctx.time = static_cast<Real>(time);
-    pctx.dt = static_cast<Real>(dt);
-    const auto parameters = parameterValues(system, time);
-    pctx.jit_constants = parameters;
-    const auto normals = pointNormals(system);
-    std::vector<FieldValueEntry> field_values(sampled_fields_.size());
-    const std::size_t n_samples = dofs_.empty() ? 0u : samples_.size() / dofs_.size();
-
+                                                    updating, active_faces ? &*active_faces : nullptr, bernstein);
+    if (!bernstein) dropYieldedPoints(system, extracted.dofs, extracted.coords, extracted.samples);
     const auto& owned = system.dofHandler().getPartition().locallyOwned();
-    std::size_t owned_dofs = 0;
-    std::size_t constrained_dofs = 0;
-    std::size_t missing_constraints = 0;
-    double min_value = std::numeric_limits<double>::infinity();
-    double max_value = -std::numeric_limits<double>::infinity();
-    std::ostringstream sample;
-    int sample_count = 0;
+    const auto parameters = parameterValues(system, time);
+    const auto normals = pointNormals(system);
+    forms::PointEvalContext pctx;
+    pctx.time = time;
+    pctx.dt = dt;
+    pctx.jit_constants = parameters;
+    std::vector<FieldValueEntry> field_values(sampled_fields_.size());
+    const auto n_samples = std::accumulate(extracted.sample_components.begin(), extracted.sample_components.end(), std::size_t{});
+    std::vector<Real> values(extracted.dofs.size());
+    const auto evaluate = [&] {
+        for (std::size_t i = 0; i < extracted.dofs.size(); ++i) {
+            const auto dof = extracted.dofs[i];
+            if (!owned.contains(dof)) continue;
+            pctx.x = extracted.coords[i];
+            if (!field_values.empty()) {
+                fillFieldValues(sampled_fields_, extracted.sample_components, extracted.samples, i * n_samples, field_values);
+                pctx.field_values = field_values;
+            }
+            if (reads_normal_) pctx.normal = boundaryNormalAt(normals, dof, pctx.x, boundary_marker_);
+            values[i] = forms::evaluateScalarAt(point_value_, pctx);
+        }
+    };
+    prepareTrace(system, bernstein, "Bernstein boundary point values", evaluate);
+    if (bernstein) {
+        // A face can use samples owned by another rank, including a yielded
+        // endpoint needed to interpolate the retained interior controls.
+        copyOwnedBoundaryPointValues(system, extracted.dofs, values);
+        std::map<GlobalIndex, Real> coefficients;
+        prepareTrace(system, true, "Bernstein boundary coefficients", [&] {
+            for (const auto& face : extracted.bernstein_faces) {
+                std::vector<Real> local;
+                local.reserve(face.dofs.size());
+                for (const auto dof : face.dofs) {
+                    const auto i = std::lower_bound(extracted.dofs.begin(), extracted.dofs.end(), dof) - extracted.dofs.begin();
+                    local.push_back(values.at(i));
+                }
+                const auto factor = extracted.interpolation.find(face.key);
+                if (factor != extracted.interpolation.end() &&
+                    !std::all_of(local.begin() + 1, local.end(), [&](Real value) { return value == local.front(); })) {
+                    factor->second.solve_in_place(local);
+                }
+                for (std::size_t i = 0; i < face.dofs.size(); ++i) coefficients.try_emplace(face.dofs[i], local[i]);
+            }
+        });
+        std::vector<GlobalIndex> dofs;
+        values.clear();
+        for (const auto& [dof, value] : coefficients) {
+            dofs.push_back(dof);
+            values.push_back(value);
+        }
+        completeOwnedBoundaryDofs(system, dofs, values, 1u, {});
+        FE_THROW_IF(dofs != extracted.dofs, InvalidStateException, "StrongDirichletConstraint: incomplete Bernstein trace");
+        dropYieldedPoints(system, extracted.dofs, extracted.coords, values);
+    }
+    FE_THROW_IF(updating && dofs_ != extracted.dofs, InvalidStateException,
+                "StrongDirichletConstraint::updateValues: geometry-dependent update changed constrained DOFs; rebuild constraints instead");
+    dofs_ = std::move(extracted.dofs);
 
+    std::size_t count = 0, missing = 0;
+    Real min_value = std::numeric_limits<Real>::infinity(), max_value = -min_value;
+    std::ostringstream sample;
     for (std::size_t i = 0; i < dofs_.size(); ++i) {
         const auto dof = dofs_[i];
-        const bool is_owned = owned.contains(dof);
-        if (!is_owned) {
-            continue;
-        }
-        ++owned_dofs;
-        pctx.x = coords_[i];
-        if (!field_values.empty()) {
-            fillFieldValues(sampled_fields_, sample_components_, samples_, i * n_samples, field_values);
-            pctx.field_values = field_values;
-        }
-        if (reads_normal_) {
-            pctx.normal = boundaryNormalAt(normals, dof, coords_[i], boundary_marker_);
-        }
-        const Real v = forms::evaluateScalarAt(point_value_, pctx);
-        const bool constrained = constraints.isConstrained(dof);
-        if (!constrained) {
-            ++missing_constraints;
+        if (!owned.contains(dof)) continue;
+        const Real v = values[i];
+        const bool constrained = !updating || constraints.isConstrained(dof);
+        if (updating) {
+            if (!constrained) ++missing;
+            constraints.updateInhomogeneity(dof, v);
         } else {
-            ++constrained_dofs;
+            constraints.addDirichlet(dof, v);
         }
-        min_value = std::min(min_value, static_cast<double>(v));
-        max_value = std::max(max_value, static_cast<double>(v));
-        if (sample_count < 6) {
-            if (sample_count > 0) {
-                sample << "; ";
-            }
-            sample << "{dof=" << dof
-                   << ",owned=1"
-                   << ",constrained=" << (constrained ? 1 : 0)
-                   << ",x=(" << coords_[i][0] << "," << coords_[i][1] << "," << coords_[i][2] << ")"
-                   << ",v=" << v << "}";
-            ++sample_count;
+        ++count;
+        min_value = std::min(min_value, v);
+        max_value = std::max(max_value, v);
+        if (strongDirichletTraceEnabled() && count <= (updating ? 6 : 4)) {
+            if (count > 1) sample << "; ";
+            const auto& x = extracted.coords[i];
+            sample << "{dof=" << dof;
+            if (updating) sample << ",owned=1,constrained=" << (constrained ? 1 : 0);
+            sample << ",x=(" << x[0] << "," << x[1] << "," << x[2] << "),v=" << v << "}";
         }
-        constraints.updateInhomogeneity(dof, v);
     }
-
-    if (owned_dofs == 0) {
-        min_value = 0.0;
-        max_value = 0.0;
-    }
-
-    traceStrongDirichletEvent("update",
-                              boundary_marker_,
-                              component_,
-                              dofs_.size(),
-                              owned_dofs,
-                              constrained_dofs,
-                              missing_constraints,
-                              time,
-                              dt,
-                              min_value,
-                              max_value,
-                              sample.str());
-
-    return true;
+    traceStrongDirichletEvent(updating ? "update" : "apply", boundary_marker_, component_, dofs_.size(), count,
+                              count - missing, missing, time, dt, count ? min_value : 0, count ? max_value : 0, sample.str());
 }
 
 ConstraintDependencyDeclaration StrongDirichletConstraint::dependencyDeclaration() const
@@ -715,7 +726,7 @@ void StrongDirichletConstraint::dropYieldedPoints(const FESystem& system,
                                                   std::vector<std::array<Real, 3>>& coords,
                                                   std::vector<Real>& samples) const
 {
-    if (yields_.empty() || dofs.empty()) {
+    if (yields_.empty()) {
         return;
     }
     std::unordered_set<GlobalIndex> held;
@@ -728,7 +739,7 @@ void StrongDirichletConstraint::dropYieldedPoints(const FESystem& system,
             held.insert(dof);
         }
     }
-    const std::size_t n_samples = samples.size() / dofs.size();
+    const std::size_t n_samples = dofs.empty() ? 0 : samples.size() / dofs.size();
     std::size_t kept = 0;
     for (std::size_t i = 0; i < dofs.size(); ++i) {
         if (held.contains(dofs[i])) {

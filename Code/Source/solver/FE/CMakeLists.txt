@@ -666,6 +666,7 @@ set(FE_CONSTRAINTS_HEADERS
     Constraints/HDivNormalConstraint.h
     Constraints/NormalComponentConstraint.h
     Constraints/BoundaryDofOwnerCompletion.h
+    Constraints/BoundaryFieldTrace.h
 )
 
 set(FE_CONSTRAINTS_SOURCES

@@ -9,6 +9,7 @@
 #include "Assembly/Assembler.h"
 #include "Constraints/AffineConstraints.h"
 #include "Constraints/StrongDirichletConstraint.h"
+#include "Basis/BernsteinBasis.h"
 #include "Core/FEException.h"
 #include "Forms/FormExpr.h"
 #include "Spaces/H1Space.h"
@@ -46,6 +47,8 @@ public:
     [[nodiscard]] GlobalIndex numBoundaryFaces() const override { return 2; }
     [[nodiscard]] GlobalIndex numInteriorFaces() const override { return 0; }
     [[nodiscard]] int dimension() const override { return 2; }
+    [[nodiscard]] bool globalEntityIdsAvailable() const override { return true; }
+    [[nodiscard]] GlobalIndex getBoundaryFaceGlobalId(GlobalIndex face) const override { return 100 + face; }
 
     [[nodiscard]] bool isOwnedCell(GlobalIndex cell_id) const override
     {
@@ -247,6 +250,65 @@ TEST(BoundaryDofOwnerCompletionMPITest, StrongDirichletReachesOwnersOfGhostFaceD
     // The configuration must exercise a DOF owned by the rank that holds the
     // face's cell only as a ghost; otherwise the test proves nothing.
     EXPECT_TRUE(some_owner_lacks_the_face_cell);
+}
+
+TEST(BoundaryDofOwnerCompletionMPITest, BernsteinTracesReachOwnersWithTheirControlValues)
+{
+    const MPI_Comm comm = MPI_COMM_WORLD;
+    int rank = 0, size = 0;
+    MPI_Comm_rank(comm, &rank);
+    MPI_Comm_size(comm, &size);
+    if (size != 2) GTEST_SKIP() << "Requires two ranks";
+    constexpr std::array<int, 2> markers{21, 22};
+    auto mesh = std::make_shared<TwoCellBottomFacesMeshAccess>(markers, rank);
+    auto space = std::make_shared<spaces::H1Space>(ElementType::Quad4, 2, BasisType::Bernstein);
+    systems::FESystem system(mesh);
+    const auto u = system.addField(systems::FieldSpec{.name = "u", .space = space, .components = 1});
+    systems::FieldSpec source{.name = "w", .space = space, .components = 1};
+    source.source_kind = systems::FieldSourceKind::PrescribedData;
+    const auto w = system.addField(source);
+    systems::SetupOptions options;
+    options.dof_options.my_rank = rank;
+    options.dof_options.world_size = size;
+    options.dof_options.mpi_comm = comm;
+    systems::SetupInputs inputs;
+    inputs.topology_override = twoCellTopology(rank, size);
+    system.setup(options, inputs);
+
+    system.setPrescribedFieldCoefficients(w, std::vector<Real>(system.fieldDofHandler(w).getNumDofs(), 2.0));
+    const auto w_value = forms::FormExpr::discreteField(w, *space, "w");
+    const auto points = basis::BernsteinBasis(ElementType::Quad4, 2).control_layout().points;
+    const auto& map = system.fieldDofHandler(u).getDofMap();
+    const auto& owned = system.dofHandler().getPartition().locallyOwned();
+    // Both adjacent edges meet at the shared lower vertex. Visit them under separate markers
+    // so that one of those vertex values must be completed on the other rank.
+    for (int face = 0; face < 2; ++face) {
+        const auto local_x = forms::FormExpr::coordinate().component(0) - static_cast<Real>(face);
+        // No rank sees both markers. An owner with no local face still receives
+        // the prescribed samples and the resulting coefficient on that marker.
+        const auto normal_y = forms::FormExpr::normal().component(1); // bottom faces point down
+        const auto base = 2.0 + normal_y + 4.0 * local_x * (1.0 - local_x);
+        StrongDirichletConstraint constraint(u, markers[face], face == 0 ? base : base + w_value * w_value);
+        AffineConstraints constraints;
+        constraint.apply(system, constraints);
+        constraints.close();
+        const auto dofs = map.getCellDofs(face);
+        ASSERT_EQ(points.size(), dofs.size());
+        std::vector<GlobalIndex> expected;
+        for (std::size_t i = 0; i < points.size(); ++i) {
+            if (points[i][1] != -1.0) continue;
+            const auto dof = dofs[i] + system.fieldDofOffset(u);
+            expected.push_back(dof);
+            if (!owned.contains(dof)) continue;
+            EXPECT_TRUE(constraints.isConstrained(dof));
+            if (constraints.isConstrained(dof)) {
+                EXPECT_NEAR(constraints.getInhomogeneity(dof), (points[i][0] == 0.0 ? 3.0 : 1.0) + 4.0 * face, 2e-13);
+            }
+        }
+        std::sort(expected.begin(), expected.end());
+        const auto actual = constraints.getConstrainedDofs();
+        EXPECT_EQ(allGatherSorted({actual.begin(), actual.end()}, comm), expected);
+    }
 }
 
 } // namespace test

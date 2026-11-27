@@ -47,7 +47,6 @@ private:
     std::string instance_name_{};
     systems::AuxiliaryConstraintBinding binding_{};
     std::vector<GlobalIndex> dofs_{};
-    std::vector<std::array<Real, 3>> coords_{};
 };
 
 } // namespace constraints

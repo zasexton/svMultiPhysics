@@ -53,6 +53,11 @@ std::size_t completeOwnedBoundaryDofs(const systems::FESystem& system,
                                       std::size_t stride,
                                       std::string_view context);
 
+/// Copy the owners' values back to the local faces that need them. All ranks
+/// pass their own completed, sorted DOF lists and values in the same order.
+void copyOwnedBoundaryPointValues(const systems::FESystem& system, std::vector<GlobalIndex>& dofs,
+                                  std::vector<Real>& values);
+
 } // namespace constraints
 } // namespace FE
 } // namespace svmp

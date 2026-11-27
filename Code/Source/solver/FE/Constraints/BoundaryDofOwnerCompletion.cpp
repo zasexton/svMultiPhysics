@@ -72,13 +72,12 @@ void reportCompletion(MPI_Comm comm, int rank, int size, std::string_view contex
 }
 #endif
 
-} // namespace
-
-std::size_t completeOwnedBoundaryDofs(const systems::FESystem& system,
+std::size_t exchangeBoundaryDofs(const systems::FESystem& system,
                                       std::vector<GlobalIndex>& dofs,
                                       std::vector<Real>& payload,
                                       std::size_t stride,
-                                      std::string_view context)
+                                      std::string_view context,
+                                      bool read_from_owners)
 {
     FE_THROW_IF(payload.size() != dofs.size() * stride, InvalidArgumentException,
                 "completeOwnedBoundaryDofs: payload size does not match DOFs x stride");
@@ -176,6 +175,30 @@ std::size_t completeOwnedBoundaryDofs(const systems::FESystem& system,
             send_displs_p[static_cast<std::size_t>(r)] *= s;
             recv_displs_p[static_cast<std::size_t>(r)] *= s;
         }
+        if (read_from_owners) {
+            // The request was already completed at each owner. Return only the
+            // samples needed on this rank's faces, in the original request order.
+            const auto payload_offset = [&](std::int64_t dof) {
+                const auto it = std::lower_bound(dofs.begin(), dofs.end(), dof);
+                return it != dofs.end() && *it == dof ? static_cast<std::size_t>(it - dofs.begin()) * stride
+                                                       : payload.size();
+            };
+            int missing = 0;
+            for (std::size_t i = 0; i < recv_dofs.size(); ++i) {
+                const auto offset = payload_offset(recv_dofs[i]);
+                if (offset == payload.size()) missing = 1;
+                else std::copy_n(payload.begin() + offset, stride, recv_payload.begin() + i * stride);
+            }
+            int any_missing = 0;
+            MPI_Allreduce(&missing, &any_missing, 1, MPI_INT, MPI_MAX, comm);
+            FE_THROW_IF(any_missing, systems::InvalidStateException,
+                        "boundary point value requested before its DOF was completed");
+            MPI_Alltoallv(recv_payload.data(), recv_counts_p.data(), recv_displs_p.data(), MPI_DOUBLE,
+                          flat_send_payload.data(), send_counts_p.data(), send_displs_p.data(), MPI_DOUBLE, comm);
+            for (std::size_t i = 0; i < flat_send_dofs.size(); ++i)
+                std::copy_n(flat_send_payload.begin() + i * stride, stride, payload.begin() + payload_offset(flat_send_dofs[i]));
+            return 0;
+        }
         MPI_Alltoallv(flat_send_payload.data(), send_counts_p.data(), send_displs_p.data(), MPI_DOUBLE,
                       recv_payload.data(), recv_counts_p.data(), recv_displs_p.data(), MPI_DOUBLE, comm);
     }
@@ -231,8 +254,23 @@ std::size_t completeOwnedBoundaryDofs(const systems::FESystem& system,
     (void)payload;
     (void)stride;
     (void)context;
+    (void)read_from_owners;
     return 0;
 #endif
+}
+
+} // namespace
+
+std::size_t completeOwnedBoundaryDofs(const systems::FESystem& system, std::vector<GlobalIndex>& dofs,
+                                      std::vector<Real>& payload, std::size_t stride, std::string_view context)
+{
+    return exchangeBoundaryDofs(system, dofs, payload, stride, context, false);
+}
+
+void copyOwnedBoundaryPointValues(const systems::FESystem& system, std::vector<GlobalIndex>& dofs,
+                                  std::vector<Real>& values)
+{
+    exchangeBoundaryDofs(system, dofs, values, 1u, {}, true);
 }
 
 } // namespace constraints

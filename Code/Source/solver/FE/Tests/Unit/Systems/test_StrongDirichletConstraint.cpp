@@ -23,6 +23,7 @@
 #include "Forms/StandardBCs.h"
 #include "Forms/Vocabulary.h"
 #include "Interfaces/GeneratedActiveBoundaryDomain.h"
+#include "Basis/BernsteinBasis.h"
 #include "Spaces/H1Space.h"
 #include "Spaces/SpaceFactory.h"
 #include "Systems/BoundaryConditionManager.h"
@@ -35,6 +36,7 @@
 #include <array>
 #include <functional>
 #include <memory>
+#include <numeric>
 #include <optional>
 #include <span>
 #include <string>
@@ -108,7 +110,7 @@ std::shared_ptr<Mesh> build_single_quad_mesh_with_left_edge_marker(int marker, d
     return svmp::create_mesh(std::move(base));
 }
 
-std::shared_ptr<Mesh> build_single_quad9_mesh_with_boundary_only_left_edge_marker(int marker)
+std::shared_ptr<Mesh> build_single_quad9_mesh_with_boundary_only_left_edge_marker(int marker, double left_mid_x = 0.0)
 {
     auto base = std::make_shared<MeshBase>();
 
@@ -120,7 +122,7 @@ std::shared_ptr<Mesh> build_single_quad9_mesh_with_boundary_only_left_edge_marke
         0.5, 0.0,
         1.0, 0.5,
         0.5, 1.0,
-        0.0, 0.5,
+        left_mid_x, 0.5,
         0.5, 0.5
     };
     const std::vector<svmp::offset_t> cell2vertex_offsets = {0, 9};
@@ -491,6 +493,149 @@ TEST(StrongDirichletConstraint, RebuildConstraintStatePreservesLastTimeDependent
     sys.rebuildConstraintState();
     for (auto dof : constrained) {
         EXPECT_NEAR(sys.constraints().getInhomogeneity(dof), 2.5, 1e-15);
+    }
+}
+
+TEST(StrongDirichletConstraint, BernsteinTraceReproducesTheQuadraticDatumAtSetupAndUpdate)
+{
+    constexpr int marker = 17;
+    auto mesh = build_single_quad_mesh_with_left_edge_marker(marker);
+    for (int degree : {2, 3}) {
+        auto space = std::make_shared<H1Space>(ElementType::Quad4, degree, svmp::FE::BasisType::Bernstein);
+        FESystem system(mesh);
+        const auto u = system.addField(FieldSpec{.name = "u", .space = space, .components = 1});
+        const auto y = FormExpr::coordinate().component(1);
+        const auto data = 4.0 * y * (1.0 - y) + t();
+        const auto bc = strongDirichlet(u, marker, data, "u");
+        svmp::FE::systems::installStrongDirichlet(system, std::span(&bc, 1));
+        system.setup();
+        const auto dofs = system.fieldDofHandler(u).getDofMap().getCellDofs(0);
+        const svmp::FE::basis::BernsteinBasis basis(ElementType::Quad4, degree);
+        const auto points = basis.control_layout().points;
+        ASSERT_EQ(dofs.size(), points.size());
+        for (const double time : {0.0, 0.375}) {
+            if (time != 0.0) system.updateConstraints(time, 0.1);
+            std::vector<double> coefficients(dofs.size(), 0.0);
+            for (std::size_t i = 0; i < dofs.size(); ++i) {
+                const auto dof = dofs[i] + system.fieldDofOffset(u);
+                const bool on_left = points[i][0] == -1.0;
+                EXPECT_EQ(system.constraints().isConstrained(dof), on_left);
+                if (!on_left) continue;
+                coefficients[i] = system.constraints().getInhomogeneity(dof);
+                const double k = (points[i][1] + 1.0) * degree / 2.0;
+                EXPECT_NEAR(coefficients[i], 4.0 * k * (degree-k) / (degree*(degree-1)) + time, 2e-13);
+            }
+            for (const double s : {0.23, 0.5, 0.81}) {
+                std::vector<double> row;
+                basis.evaluate_values({-1.0, 2.0*s-1.0, 0.0}, row);
+                EXPECT_NEAR(std::inner_product(row.begin(), row.end(), coefficients.begin(), 0.0),
+                            4.0*s*(1.0-s) + time, 2e-13);
+            }
+        }
+    }
+}
+
+TEST(StrongDirichletConstraint, BernsteinControlsUseTheCurvedPhysicalBoundary)
+{
+    constexpr int marker = 17;
+    auto mesh = build_single_quad9_mesh_with_boundary_only_left_edge_marker(marker, -0.125);
+    auto space = std::make_shared<H1Space>(ElementType::Quad4, 2, svmp::FE::BasisType::Bernstein);
+    FESystem system(mesh);
+    const auto u = system.addField(FieldSpec{.name = "u", .space = space, .components = 1});
+    const auto bc = strongDirichlet(u, marker, FormExpr::coordinate().component(0), "u");
+    svmp::FE::systems::installStrongDirichlet(system, std::span(&bc, 1));
+    system.setup();
+    const auto dofs = system.fieldDofHandler(u).getDofMap().getCellDofs(0);
+    const auto points = svmp::FE::basis::BernsteinBasis(ElementType::Quad4, 2).control_layout().points;
+    for (std::size_t i = 0; i < points.size(); ++i) {
+        if (points[i][0] != -1.0) continue;
+        EXPECT_NEAR(system.constraints().getInhomogeneity(dofs[i] + system.fieldDofOffset(u)),
+                    points[i][1] == 0.0 ? -0.25 : 0.0, 2e-13);
+    }
+}
+
+TEST(StrongDirichletConstraint, BernsteinTriangularFaceReproducesACubicBubble)
+{
+    constexpr int marker = 19;
+    auto mesh = build_single_tetra10_mesh_with_boundary_only_face_marker(marker);
+    auto space = std::make_shared<H1Space>(ElementType::Tetra4, 3, svmp::FE::BasisType::Bernstein);
+    FESystem system(mesh);
+    const auto u = system.addField(FieldSpec{.name = "u", .space = space, .components = 1});
+    const auto x = FormExpr::coordinate().component(0), y = FormExpr::coordinate().component(1);
+    const auto bc = strongDirichlet(u, marker, 27.0*x*y*(1.0-x-y), "u");
+    svmp::FE::systems::installStrongDirichlet(system, std::span(&bc, 1));
+    system.setup();
+    const svmp::FE::basis::BernsteinBasis basis(ElementType::Tetra4, 3);
+    const auto points = basis.control_layout().points;
+    const auto dofs = system.fieldDofHandler(u).getDofMap().getCellDofs(0);
+    std::vector<double> coefficients(dofs.size(), 0.0);
+    ASSERT_EQ(points.size(), dofs.size());
+    int face_controls = 0;
+    for (std::size_t i = 0; i < dofs.size(); ++i) {
+        const auto dof = dofs[i] + system.fieldDofOffset(u);
+        EXPECT_EQ(system.constraints().isConstrained(dof), points[i][2] == 0);
+        if (points[i][2] != 0) continue;
+        ++face_controls;
+        coefficients[i] = system.constraints().getInhomogeneity(dof);
+        const bool interior = points[i][0] > 0 && points[i][1] > 0 && points[i][0] + points[i][1] < 0.9;
+        EXPECT_NEAR(coefficients[i], interior ? 4.5 : 0.0, 6e-13);
+    }
+    EXPECT_EQ(face_controls, 10);
+    std::vector<double> values;
+    basis.evaluate_values({0.2, 0.4, 0.0}, values);
+    EXPECT_NEAR(std::inner_product(values.begin(), values.end(), coefficients.begin(), 0.0), 0.864, 3e-13);
+}
+
+TEST(StrongDirichletConstraint, NonlinearValueReadsBernsteinFieldAtTheInterpolationPoints)
+{
+    constexpr int marker = 23;
+    auto mesh = build_single_quad_mesh_with_left_edge_marker(marker);
+    auto space = std::make_shared<H1Space>(ElementType::Quad4, 2, svmp::FE::BasisType::Bernstein);
+    FESystem system(mesh);
+    const auto u = system.addField(FieldSpec{.name = "u", .space = space, .components = 1});
+    FieldSpec source{.name = "w", .space = space, .components = 1};
+    source.source_kind = svmp::FE::systems::FieldSourceKind::PrescribedData;
+    const auto w = system.addField(source);
+    const auto value = FormExpr::discreteField(w, *space, "w");
+    const auto bc = strongDirichlet(u, marker, value*value + 2.0*value, "u");
+    svmp::FE::systems::installStrongDirichlet(system, std::span(&bc, 1));
+    system.setup();
+    const auto points = svmp::FE::basis::BernsteinBasis(ElementType::Quad4, 2).control_layout().points;
+    const auto source_dofs = system.fieldDofHandler(w).getDofMap().getCellDofs(0);
+    const auto target_dofs = system.fieldDofHandler(u).getDofMap().getCellDofs(0);
+    std::vector<double> coefficients(system.fieldDofHandler(w).getNumDofs());
+    for (std::size_t i = 0; i < points.size(); ++i)
+        coefficients.at(source_dofs[i]) = points[i][1] == 0 ? 1.0 : 0.0;
+    system.setPrescribedFieldCoefficients(w, coefficients);
+    system.updateConstraints(0.0, 0.1);
+    for (std::size_t i = 0; i < points.size(); ++i) {
+        if (points[i][0] != -1.0) continue;
+        // w = 1/2 at the midpoint; w² + 2w = 1.25 there, so its middle control is 2.5.
+        EXPECT_NEAR(system.constraints().getInhomogeneity(target_dofs[i] + system.fieldDofOffset(u)),
+                    points[i][1] == 0 ? 2.5 : 0.0, 2e-13);
+    }
+}
+
+TEST(StrongDirichletConstraint, AuxiliaryConstantSelectsExactlyTheBernsteinTraceControls)
+{
+    constexpr int marker = 17;
+    auto mesh = build_single_quad_mesh_with_left_edge_marker(marker);
+    auto space = std::make_shared<H1Space>(ElementType::Quad4, 2, svmp::FE::BasisType::Bernstein);
+    FESystem system(mesh);
+    const auto u = system.addField(FieldSpec{.name = "u", .space = space, .components = 1});
+    auto model = AuxiliaryModelBuilder("driver").state("x").ode("x", FormExpr::constant(0.0)).build();
+    system.deployAuxiliaryModel(use(model).name("driver").global().partitioned("ForwardEuler").initialize({1.25})
+                                .drivesStrongDirichlet(u, marker, "x", -1, AuxiliaryConstraintValueSource::State));
+    system.finalizeAuxiliaryLayout();
+    system.setup();
+    const auto dofs = system.fieldDofHandler(u).getDofMap().getCellDofs(0);
+    const auto points = svmp::FE::basis::BernsteinBasis(ElementType::Quad4, 2).control_layout().points;
+    ASSERT_EQ(dofs.size(), points.size());
+    for (std::size_t i = 0; i < dofs.size(); ++i) {
+        const auto dof = dofs[i] + system.fieldDofOffset(u);
+        const bool on_left = points[i][0] == -1.0;
+        EXPECT_EQ(system.constraints().isConstrained(dof), on_left) << "control " << i;
+        if (on_left && system.constraints().isConstrained(dof)) EXPECT_DOUBLE_EQ(system.constraints().getInhomogeneity(dof), 1.25);
     }
 }
 

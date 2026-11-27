@@ -9,11 +9,14 @@
  * and may read the position, the time and the time step, the time-function
  * parameters of the system (systems::timeFunction, evaluated at the update
  * time), prescribed fields that share the constrained field's scalar
- * element (their coefficients at the node; zeros at setup when they are not
+ * element (their field values at the point, initially zero when they are not
  * set yet, and required at every update), and FormExpr::normal(): the
  * marker's averaged facet normal at the node (boundaryPointNormals, the same
  * at any rank count), refused at a node where the facets meet at an edge or
  * corner.  It must not read an unknown.
+ *
+ * Positive-order Bernstein boundary values are interpolated on the selected facet's control lattice.
+ * The coefficients solve the trace interpolation system, including on curved geometry.
  *
  * For a boundary subset identified by its generated marker in the installed
  * cut context, only the faces of positive active measure hold nodes. A degree of
@@ -101,9 +104,8 @@ private:
     bool is_time_dependent_{false};
 
     std::vector<GlobalIndex> dofs_{};
-    std::vector<std::array<Real, 3>> coords_{};
-    std::vector<int> sample_components_{};      ///< per sampled field
-    std::vector<Real> samples_{};               ///< the sampled field values, DOF by DOF
+    void assignValues(const systems::FESystem& system, AffineConstraints& constraints,
+                      double time, double dt, bool updating);
 };
 
 } // namespace constraints
