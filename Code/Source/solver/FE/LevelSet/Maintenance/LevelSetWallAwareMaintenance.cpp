@@ -61,16 +61,6 @@ std::size_t globalSumSize(
   return svmp::FE::systems::collectiveSumSize(local, comm);
 }
 
-[[nodiscard]] bool sameAcceptedWallConstraint(
-    const svmp::FE::level_set::LevelSetWallContactConstraint& left,
-    const svmp::FE::level_set::LevelSetWallContactConstraint& right) noexcept
-{
-  return left.interface_marker == right.interface_marker &&
-         left.boundary_marker == right.boundary_marker &&
-         left.parent_cell_global_id == right.parent_cell_global_id &&
-         left.geometry_revision == right.geometry_revision;
-}
-
 /// FNV-1a signature of the rank-independent members of @p input.
 std::uint64_t wallAwareInputSignature(
     const LevelSetWallAwareMaintenanceInput& input) noexcept
@@ -153,22 +143,23 @@ canonicalizeAcceptedWallConstraints(
   unique.reserve(constraints.size());
   bool local_conflict = false;
   for (const auto& constraint : constraints) {
-    if (!unique.empty() &&
-        unique.back().parent_cell_global_id ==
-            constraint.parent_cell_global_id) {
-      if (sameAcceptedWallConstraint(unique.back(), constraint)) {
-        continue;
+    if (!unique.empty()) {
+      const auto& previous = unique.back();
+      if (previous.parent_cell_global_id == constraint.parent_cell_global_id &&
+          previous.interface_marker == constraint.interface_marker) {
+        if (previous.geometry_revision != constraint.geometry_revision) {
+          local_conflict = true;
+        } else if (previous.boundary_marker == constraint.boundary_marker) {
+          continue;
+        }
       }
-      local_conflict = true;
-      continue;
     }
     unique.push_back(constraint);
   }
   if (globalMinDouble(local_conflict ? 0.0 : 1.0, comm) != 1.0) {
     throw std::runtime_error(
         "[svMultiPhysics::Application] " + std::string(source) +
-        " assigns distinct accepted wall-contact constraints to one parent "
-        "cell.");
+        " assigns inconsistent geometry revisions to one interface on a contact cell.");
   }
   return unique;
 }

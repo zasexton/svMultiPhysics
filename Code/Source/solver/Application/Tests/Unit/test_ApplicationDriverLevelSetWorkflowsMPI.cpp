@@ -1689,12 +1689,19 @@ TEST(ApplicationDriverLevelSetWorkflowsMPI,
         local_max_difference);
   }
 
-  auto conflict = constraint;
-  conflict.boundary_marker += 1;
+  auto second_wall = constraint;
+  second_wall.boundary_marker += 1;
   std::vector<svmp::FE::level_set::LevelSetWallContactConstraint>
       rank_local_constraints{constraint};
   if (rank == 0) {
-    rank_local_constraints.push_back(conflict);
+    rank_local_constraints.push_back(second_wall);
+  }
+  const auto two_walls = canonicalizeAcceptedWallConstraints(
+      rank_local_constraints, feCollectiveCommunicator(svmp::MeshComm(MPI_COMM_WORLD)),
+      "MPI two-wall contact test");
+  EXPECT_EQ(two_walls.size(), rank == 0 ? 2u : 1u);
+  if (rank == 0) {
+    rank_local_constraints.back().geometry_revision += 1;
   }
   EXPECT_THROW(
       (void)canonicalizeAcceptedWallConstraints(

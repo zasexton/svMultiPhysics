@@ -128,8 +128,9 @@ resolveLevelSetWallContactConstraints(
  *        with duplicates removed.
  *
  * Throws std::runtime_error (naming @p source) on every rank when a rank
- * holds two different constraints for one parent cell.  Collective over
- * @p comm.
+ * holds inconsistent geometry revisions for one interface on a parent cell.
+ * Distinct marked walls on that cell retain their individual identities.
+ * Collective over @p comm.
  */
 [[nodiscard]] std::vector<LevelSetWallContactConstraint>
 canonicalizeAcceptedWallConstraints(

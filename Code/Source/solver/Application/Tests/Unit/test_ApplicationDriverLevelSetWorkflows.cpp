@@ -9699,8 +9699,7 @@ TEST(ApplicationDriverLevelSetWorkflows,
 
 // Decision D4: an accepted wall-contact constraint is the identity of the
 // accepted contact cell, with no angle or physical frame.  It fails closed
-// on incomplete or stale provenance, and two identities for one parent cell
-// conflict.
+// on incomplete or stale provenance. A cell may meet two marked walls.
 TEST(ApplicationDriverLevelSetWorkflows,
      AcceptedSnapshotWallConstraintIsAnIdentityAndFailsClosed)
 {
@@ -9738,8 +9737,17 @@ TEST(ApplicationDriverLevelSetWorkflows,
       feCollectiveCommunicator(svmp::MeshComm::world()),
       "Application wall-constraint test");
   ASSERT_EQ(canonical.size(), 1u);
+  auto second_wall = constraint;
+  second_wall.boundary_marker += 1;
+  const auto two_walls = canonicalizeAcceptedWallConstraints(
+      std::vector{second_wall, constraint, second_wall},
+      feCollectiveCommunicator(svmp::MeshComm::world()),
+      "Application two-wall contact test");
+  ASSERT_EQ(two_walls.size(), 2u);
+  EXPECT_EQ(two_walls[0].boundary_marker, wall_marker);
+  EXPECT_EQ(two_walls[1].boundary_marker, second_wall.boundary_marker);
   auto conflict = constraint;
-  conflict.boundary_marker += 1;
+  conflict.geometry_revision += 1;
   EXPECT_THROW(
       (void)canonicalizeAcceptedWallConstraints(
           std::vector{constraint, conflict},
