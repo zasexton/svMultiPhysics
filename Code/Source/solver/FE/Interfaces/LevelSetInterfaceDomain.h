@@ -58,6 +58,8 @@ enum class CutInterfaceSideTag : std::uint8_t {
 enum class CutInterfaceDegeneracy : std::uint8_t {
     None,
     NoCut,
+    /// All classified corners equal the isovalue. The closed negative phase
+    /// owns the full cell and there is no codimension-one interface.
     FullZeroCell,
     VertexTouch,
     EdgeTouch,

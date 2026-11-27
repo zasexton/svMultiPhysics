@@ -1841,12 +1841,6 @@ LevelSetCellCutResult cutLinearLevelSetCell2D(const CutInterfaceDomainRequest& r
             result.diagnostic = reason;
         };
 
-    if (zero_count == count) {
-        result.degeneracy = CutInterfaceDegeneracy::FullZeroCell;
-        result.diagnostic = "all corner level-set values are on the requested isovalue";
-        observation.stamp(result);
-        return result;
-    }
     if (positive_count == 0u && !publish_aligned_zero_edge) {
         const auto full_quadrature =
             cutSideQuadrature2D(observation, input.node_coordinates,
@@ -1871,9 +1865,15 @@ LevelSetCellCutResult cutLinearLevelSetCell2D(const CutInterfaceDomainRequest& r
                              full_quadrature,
                              true,
                              planar_volume_order));
-        result.degeneracy = classifyZeroContact2D(signed_values,
-                                                  count,
-                                                  coefficient_band);
+        if (zero_count == count) {
+            result.degeneracy = CutInterfaceDegeneracy::FullZeroCell;
+            result.diagnostic = "all corner level-set values are on the requested isovalue; "
+                                "the closed negative phase occupies the full cell";
+        } else {
+            result.degeneracy = classifyZeroContact2D(signed_values,
+                                                      count,
+                                                      coefficient_band);
+        }
         observation.stamp(result);
         return result;
     }
@@ -2270,12 +2270,6 @@ LevelSetCellCutResult cutLinearLevelSetCell3DImpl(const CutInterfaceDomainReques
             result.diagnostic = reason;
         };
 
-    if (zero_count == count) {
-        result.degeneracy = CutInterfaceDegeneracy::FullZeroCell;
-        result.diagnostic = "all tetrahedron corner level-set values are on the requested isovalue";
-        observation.stamp(result);
-        return result;
-    }
     if (positive_count == 0u && !publish_aligned_zero_face) {
         const auto full_faces =
             tetrahedronSideFaces(observation, input.node_coordinates,
@@ -2300,8 +2294,14 @@ LevelSetCellCutResult cutLinearLevelSetCell3DImpl(const CutInterfaceDomainReques
                              "full-negative-volume",
                              full_quadrature,
                              true));
-        result.degeneracy =
-            classifyZeroContactTetrahedron(signed_values, coefficient_band);
+        if (zero_count == count) {
+            result.degeneracy = CutInterfaceDegeneracy::FullZeroCell;
+            result.diagnostic = "all corner level-set values are on the requested isovalue; "
+                                "the closed negative phase occupies the full cell";
+        } else {
+            result.degeneracy =
+                classifyZeroContactTetrahedron(signed_values, coefficient_band);
+        }
         observation.stamp(result);
         return result;
     }

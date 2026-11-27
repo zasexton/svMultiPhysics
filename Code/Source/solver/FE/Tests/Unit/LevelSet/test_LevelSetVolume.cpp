@@ -780,6 +780,42 @@ TEST(LevelSetVolume, RejectedQuadrilateralSaddlePreservesTheInstalledPhysicalSna
 #endif
 }
 
+TEST(LevelSetVolume, FullZeroParentBelongsToTheClosedNegativePhase)
+{
+#if defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH
+    auto base = std::make_shared<svmp::MeshBase>();
+    svmp::CellShape triangle{};
+    triangle.family = svmp::CellFamily::Triangle;
+    triangle.num_corners = 3;
+    triangle.order = 1;
+    base->build_from_arrays(2, {0, 0, 1, 0, 1, 1, 0, 1}, {0, 3, 6},
+                            {0, 1, 2, 0, 2, 3}, {triangle, triangle});
+    base->finalize();
+    FE::systems::FESystem system(svmp::create_mesh(std::move(base)));
+    const auto field = system.addField({.name = "phi",
+        .space = std::make_shared<FE::spaces::H1Space>(FE::ElementType::Triangle3, 1),
+        .components = 1});
+    system.setup();
+    constexpr FE::Real iso = 0.25;
+    const std::array<FE::Real, 4> vertices{iso, iso, iso, 1.0};
+    std::vector<FE::Real> values(system.fieldDofHandler(field).getNumDofs());
+    system.projectMeshVertexValuesToFieldCoefficients(field, vertices, 1, values);
+    for (const bool generated : {false, true}) {
+        SCOPED_TRACE(generated);
+        level_set::LevelSetVolumeOptions options;
+        options.isovalue = iso;
+        options.use_generated_interface_quadrature = generated;
+        const auto measured = level_set::computeLevelSetCutCellVolume(system, field, options, values);
+        ASSERT_TRUE(measured.success) << measured.diagnostic;
+        EXPECT_DOUBLE_EQ(measured.total_volume, 1.0);
+        EXPECT_DOUBLE_EQ(measured.negative_volume, 0.5);
+        EXPECT_DOUBLE_EQ(measured.positive_volume, 0.5);
+        EXPECT_EQ(measured.full_negative_cells, 1u);
+        EXPECT_EQ(measured.full_positive_cells, 1u);
+    }
+#endif
+}
+
 TEST(LevelSetVolume, MergedRootsTakeTheCollapsedPhase)
 {
 #if defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH

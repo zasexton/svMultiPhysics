@@ -1284,6 +1284,11 @@ TEST(LevelSetInterfaceBuilder, ClassifiesCutEdgeCases)
     EXPECT_FALSE(full_zero.hasActiveFragments());
     EXPECT_EQ(full_zero.degeneracy, CutInterfaceDegeneracy::FullZeroCell);
     EXPECT_FALSE(full_zero.diagnostic.empty());
+    ASSERT_EQ(full_zero.volume_regions.size(), 1u);
+    const auto& region = full_zero.volume_regions.front();
+    EXPECT_EQ(region.side, geometry::CutIntegrationSide::Negative);
+    EXPECT_TRUE(region.full_cell_equivalent);
+    EXPECT_DOUBLE_EQ(region.measure, 1.0 / 6.0);
 
     const LevelSetCellCutInput vertex_touch{
         .parent_cell = 2,
