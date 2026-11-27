@@ -1201,6 +1201,8 @@ TEST(LevelSetInterfaceDomain, ConfigurableQuadratureOrderIsRecordedAndValidated)
     EXPECT_EQ(constant_rules.front().exact_polynomial_order, 0);
     EXPECT_EQ(constant_rules.front().policy.polynomial_order, 0);
     EXPECT_EQ(constant_rules.front().policy.name, "constant-level-set-interface");
+    EXPECT_EQ(constant_rules.front().provenance.construction,
+              CutQuadratureConstructionKind::PrescribedInterfaceSamples);
 
     CutInterfaceDomainRequest linear_request = request;
     linear_request.quadrature_order = 1;
@@ -1208,6 +1210,7 @@ TEST(LevelSetInterfaceDomain, ConfigurableQuadratureOrderIsRecordedAndValidated)
     EXPECT_EQ(linear_rule.exact_polynomial_order, 1);
     EXPECT_EQ(linear_rule.policy.polynomial_order, 1);
     EXPECT_EQ(linear_rule.policy.name, "linear-level-set-interface");
+    EXPECT_EQ(linear_rule.policy.kind, CutQuadratureConstructionKind::PrescribedInterfaceSamples);
 
     CutInterfaceDomainRequest high_order_request = request;
     high_order_request.quadrature_order = 2;

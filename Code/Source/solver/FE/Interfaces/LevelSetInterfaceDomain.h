@@ -772,7 +772,6 @@ struct CutInterfaceFragment {
             kind != CutInterfaceFragmentKind::CurvedPatch && implicit_quadrature_backend.empty() &&
             request.implicit_geometry_mode.empty() && request.implicit_quadrature_backend.empty()) {
             rule.policy.kind = geometry::CutQuadratureConstructionKind::PrescribedInterfaceSamples;
-            rule.policy.name = "prescribed-interface-samples";
         }
         rule.provenance.embedded_geometry_id = request.source.identifier();
         rule.provenance.cut_topology_id = topology_id;
