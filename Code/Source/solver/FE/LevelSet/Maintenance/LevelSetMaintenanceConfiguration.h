@@ -66,10 +66,12 @@ struct LevelSetMaintenanceConfiguration {
  */
 struct LevelSetMaintenanceRuntime {
     /// Interface-preserving redistancing trigger: the interface displacement
-    /// bound accumulated since the last redistancing, and the number of
-    /// redistancing calls.
+    /// bound accumulated since the last completed trigger.
     Real redistancing_accumulated_displacement{0.0};
     std::size_t redistancing_calls{0};
+    /// Rejected representations on accepted steps, including failed restorations.
+    std::size_t redistancing_skips{0};
+    std::size_t redistancing_restoration_failures{0};
 };
 
 } // namespace level_set

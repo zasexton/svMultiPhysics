@@ -733,7 +733,8 @@ void redistanceMaintainedLevelSet(
         .value("open_ends_after", change.open_ends_second)
         .value("negative_volume_before", volume_before.negative_volume)
         .value("negative_volume_after", volume_after.negative_volume)
-        .value("trigger_call", request.runtime.redistancing_calls + 1)
+        .value("trigger_call", request.runtime.redistancing_calls +
+                               request.runtime.redistancing_skips + 1)
         .value("accumulated_displacement_over_h", accumulated / motion.min_edge)
         .value("trigger_cells", trigger_cells)
         .value("time", history.time())
@@ -741,6 +742,10 @@ void redistanceMaintainedLevelSet(
         .quoted("restoration_status", restoration.diagnostic);
     staged_commit_logs.push_back(std::move(record));
     if ((representation_changed && !applied) || restoration_failed) {
+      ++request.runtime.redistancing_skips;
+      if (restoration_failed) {
+        ++request.runtime.redistancing_restoration_failures;
+      }
       return;  // keep the accumulated motion for the next try
     }
     accumulated = svmp::FE::Real{0.0};

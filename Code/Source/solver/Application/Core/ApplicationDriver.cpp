@@ -1002,6 +1002,21 @@ struct LevelSetMaintenanceRequest {
   LevelSetMaintenanceRuntimeState runtime{};
 };
 
+void logAcceptedRedistancingSummary(std::span<const LevelSetMaintenanceRequest> requests)
+{
+  for (const auto& request : requests) {
+    if (request.configuration->transport.interface_preserving_redistancing.enabled) {
+      svmp::FE::logRecord(svmp::FE::LogRecord("ApplicationDriver", "redistancing summary")
+          .diagnostic("accepted_level_set_redistancing")
+          .rootOnly()
+          .quoted("field", request.configuration->transport.level_set.field_name)
+          .value("completed_triggers", request.runtime.redistancing_calls)
+          .value("skipped_triggers", request.runtime.redistancing_skips)
+          .value("failed_restorations", request.runtime.redistancing_restoration_failures));
+    }
+  }
+}
+
 std::vector<LevelSetMaintenanceRequest> makeLevelSetMaintenanceRequests(
     std::span<const LevelSetMaintenanceConfigurationHandle> configurations)
 {
@@ -10152,7 +10167,13 @@ void ApplicationDriver::runTransient(SimulationComponents& sim, const Parameters
   svmp::FE::timestepping::TimeLoop loop(opts);
   oopCout() << "[svMultiPhysics::Application] TimeLoop: entering loop.run()" << std::endl;
   auto loop_start = std::chrono::steady_clock::now();
-  const auto rep = loop.run(transient, *sim.backend, *sim.linear_solver, *sim.time_history, callbacks);
+  svmp::FE::timestepping::TimeLoopReport rep;
+  try {
+    rep = loop.run(transient, *sim.backend, *sim.linear_solver, *sim.time_history, callbacks);
+  } catch (...) {
+    logAcceptedRedistancingSummary(level_set_maintenance);
+    throw;
+  }
   double loop_total = std::chrono::duration<double>(std::chrono::steady_clock::now() - loop_start).count();
   oopCout() << "[svMultiPhysics::Application] TimeLoop: loop.run() returned success=" << rep.success
             << " steps_taken=" << rep.steps_taken << " final_time=" << rep.final_time
@@ -10183,6 +10204,7 @@ void ApplicationDriver::runTransient(SimulationComponents& sim, const Parameters
     oopCout() << "[svMultiPhysics::Application] Halo correctness "
               << svmp::FE::diagnostics::haloCorrectnessSummary() << std::endl;
   }
+  logAcceptedRedistancingSummary(level_set_maintenance);
   for (const auto& [key, history] : island_pin_history) {
     const auto& [field, marker, side] = key;
     svmp::FE::logRecord(svmp::FE::LogRecord("ApplicationDriver", "rootless island pins")

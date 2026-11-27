@@ -723,11 +723,29 @@ TEST(LevelSetKinematicReconciliation, RedistancingKeepsTheAcceptedFieldWhenItsRe
                 ++published_redistancings;
             }
         };
-    std::vector<FE::LogRecord> logs;
-    EXPECT_FALSE(level_set::applyLevelSetMaintenance({.fe_system = &s.system}, history, requests, {},
-                                                     observe, &logs));
+    for (int step : {1, 2}) {
+        history.setStepIndex(step);
+        std::vector<FE::LogRecord> logs;
+        EXPECT_FALSE(level_set::applyLevelSetMaintenance(
+            {.fe_system = &s.system}, history, requests, {}, observe, &logs));
+        ASSERT_EQ(logs.size(), 1u);
+        EXPECT_NE(logs.front().str().find(" restoration_failed=true "), std::string::npos);
+        EXPECT_NE(logs.front().str().find(" trigger_call=" + std::to_string(step) + " "),
+                  std::string::npos);
+    }
+    // A failed later field rolls back the first field's staged third skip.
+    auto missing = std::make_shared<level_set::LevelSetMaintenanceConfiguration>(*config);
+    missing->transport.level_set.field_name = "missing";
+    requests.push_back({.configuration = missing});
+    history.setStepIndex(3);
+    std::vector<FE::LogRecord> failed_logs;
+    EXPECT_THROW(level_set::applyLevelSetMaintenance(
+        {.fe_system = &s.system}, history, requests, {}, observe, &failed_logs), std::runtime_error);
+    EXPECT_TRUE(failed_logs.empty());
     EXPECT_EQ(published_redistancings, 0);
     EXPECT_EQ(requests.front().runtime.redistancing_calls, 0u);
+    EXPECT_EQ(requests.front().runtime.redistancing_skips, 2u);
+    EXPECT_EQ(requests.front().runtime.redistancing_restoration_failures, 2u);
     EXPECT_EQ(requests.front().runtime.redistancing_accumulated_displacement, 1.);
     EXPECT_EQ(ts::test::getVectorByDof(history.u()), state);
 }
@@ -772,6 +790,8 @@ TEST(LevelSetKinematicReconciliation, RedistancingCarriesTheRateIntoItsRepresent
     requests.front().runtime.redistancing_accumulated_displacement = 1.;
     ASSERT_TRUE(level_set::applyLevelSetMaintenance({.fe_system = &s.system}, history, requests));
     ASSERT_EQ(requests.front().runtime.redistancing_calls, 1u);
+    EXPECT_EQ(requests.front().runtime.redistancing_skips, 0u);
+    EXPECT_EQ(requests.front().runtime.redistancing_restoration_failures, 0u);
     const auto u = ts::test::getVectorByDof(history.u());
     const auto u_dot = ts::test::getVectorByDof(history.uDot());
     const auto u_prev = ts::test::getVectorByDof(history.uPrev());

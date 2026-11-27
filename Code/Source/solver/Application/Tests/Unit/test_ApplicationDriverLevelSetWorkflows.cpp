@@ -4191,6 +4191,30 @@ TEST(ApplicationDriverLevelSetWorkflows,
       std::invalid_argument);
 }
 
+TEST(ApplicationDriverLevelSetWorkflows, RedistancingSummaryReportsAcceptedCountsPerField)
+{
+  using Configuration = application::core::ResolvedLevelSetMaintenanceCompatibilityConfiguration;
+  std::vector<LevelSetMaintenanceRequest> requests;
+  for (const std::string_view name : {"phi", "psi", "inactive"}) {
+    auto config = std::make_shared<Configuration>();
+    config->transport.level_set.field_name = name;
+    config->transport.interface_preserving_redistancing.enabled = name != "inactive";
+    requests.emplace_back(config);
+  }
+  requests[0].runtime.redistancing_calls = 3;
+  requests[0].runtime.redistancing_skips = 2;
+  requests[0].runtime.redistancing_restoration_failures = 1;
+
+  testing::internal::CaptureStdout();
+  logAcceptedRedistancingSummary(requests);
+  const auto output = testing::internal::GetCapturedStdout();
+  EXPECT_NE(output.find("field='phi' completed_triggers=3 skipped_triggers=2 failed_restorations=1"),
+            std::string::npos);
+  EXPECT_NE(output.find("field='psi' completed_triggers=0 skipped_triggers=0 failed_restorations=0"),
+            std::string::npos);
+  EXPECT_EQ(output.find("field='inactive'"), std::string::npos);
+}
+
 TEST(ApplicationDriverLevelSetWorkflows,
      ParsesAndCanonicalizesStaticCapillaryInitializationControls)
 {
