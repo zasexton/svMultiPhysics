@@ -17,6 +17,8 @@
  * The Navier–Stokes formulation declares these records and publishes them on step acceptance.
  */
 
+#include "Physics/Formulations/NavierStokes/FreeSurface/SnapshotFunctionals.h"
+
 #include "FE/Core/Types.h"
 #include "FE/Interfaces/LevelSetGeometrySnapshot.h"
 #include "FE/Systems/OperatorRegistry.h"
@@ -131,8 +133,8 @@ struct FreeSurfaceDiscreteFunctionalDeclaration {
     FE::FieldId level_set_field{FE::INVALID_FIELD_ID};
     FE::FieldId velocity_field{FE::INVALID_FIELD_ID};
     std::string geometry_domain_id{};
-    FE::interfaces::FreeSurfaceDiscreteFunctionalParameters parameters{};
-    std::optional<FE::interfaces::FreeSurfaceActiveVolumeEnergyParameters>
+    FreeSurfaceDiscreteFunctionalParameters parameters{};
+    std::optional<FreeSurfaceActiveVolumeEnergyParameters>
         active_volume_energy_parameters{};
     /**
      * The active-volume gravitational acceleration is the complete
@@ -142,10 +144,10 @@ struct FreeSurfaceDiscreteFunctionalDeclaration {
      */
     bool static_conservative_body_force_complete{false};
     std::optional<
-        FE::interfaces::FreeSurfaceActiveVolumeDissipationParameters>
+        FreeSurfaceActiveVolumeDissipationParameters>
         active_volume_dissipation_parameters{};
     std::optional<
-        FE::interfaces::FreeSurfaceExternalPressurePowerParameters>
+        FreeSurfaceExternalPressurePowerParameters>
         external_pressure_power_parameters{};
     bool endpoint_functional_power_enabled{false};
     FreeSurfaceCapillaryBalanceMethod capillary_balance_method{
@@ -185,7 +187,7 @@ struct FreeSurfaceAcceptedContactStageState {
     // snapshot, stage time/parameters, and stage solution.
     std::uint64_t stage_state_revision{0};
     FE::interfaces::LevelSetGeometryRevision geometry_revision{};
-    FE::interfaces::FreeSurfaceDynamicContactState state{};
+    FreeSurfaceDynamicContactState state{};
     // The absolute mass sums |w f| of the declared wall functionals evaluated
     // on the stage (name, mass), for the record's absolute-mass line.
     std::vector<std::pair<std::string, FE::Real>> declared_functional_masses{};
@@ -226,20 +228,20 @@ struct AcceptedFreeSurfaceDiscreteFunctionalState {
     // Communicator-wide truth value for any pruning in the authoritative
     // snapshot. False is the proof required to mark pruning work inapplicable.
     bool geometry_pruning_occurred{false};
-    FE::interfaces::FreeSurfaceDiscreteFunctionalState state{};
+    FreeSurfaceDiscreteFunctionalState state{};
     std::optional<
-        FE::interfaces::FreeSurfaceDiscreteFunctionalVariationState>
+        FreeSurfaceDiscreteFunctionalVariationState>
         endpoint_functional_power{};
-    std::optional<FE::interfaces::FreeSurfaceActiveVolumeEnergyState>
+    std::optional<FreeSurfaceActiveVolumeEnergyState>
         active_volume_energy{};
     std::optional<
-        FE::interfaces::FreeSurfaceActiveVolumeDissipationState>
+        FreeSurfaceActiveVolumeDissipationState>
         active_volume_dissipation{};
     std::optional<
-        FE::interfaces::FreeSurfaceExternalPressurePowerState>
+        FreeSurfaceExternalPressurePowerState>
         external_pressure_power{};
     std::optional<
-        FE::interfaces::FreeSurfaceBackwardEulerKineticWorkState>
+        FreeSurfaceBackwardEulerKineticWorkState>
         backward_euler_kinetic_work{};
     std::optional<FreeSurfaceAcceptedContactStageState> contact_stage{};
     std::vector<FreeSurfaceAcceptedContactLineKinematics>
@@ -258,20 +260,20 @@ struct FreeSurfaceDiscreteFunctionalHistoryRecord {
     FE::interfaces::LevelSetGeometryRevision geometry_revision{};
     std::uint64_t cut_topology_revision{0};
     bool geometry_pruning_occurred{false};
-    FE::interfaces::FreeSurfaceDiscreteFunctionalState state{};
+    FreeSurfaceDiscreteFunctionalState state{};
     std::optional<
-        FE::interfaces::FreeSurfaceDiscreteFunctionalVariationState>
+        FreeSurfaceDiscreteFunctionalVariationState>
         endpoint_functional_power{};
-    std::optional<FE::interfaces::FreeSurfaceActiveVolumeEnergyState>
+    std::optional<FreeSurfaceActiveVolumeEnergyState>
         active_volume_energy{};
     std::optional<
-        FE::interfaces::FreeSurfaceActiveVolumeDissipationState>
+        FreeSurfaceActiveVolumeDissipationState>
         active_volume_dissipation{};
     std::optional<
-        FE::interfaces::FreeSurfaceExternalPressurePowerState>
+        FreeSurfaceExternalPressurePowerState>
         external_pressure_power{};
     std::optional<
-        FE::interfaces::FreeSurfaceBackwardEulerKineticWorkState>
+        FreeSurfaceBackwardEulerKineticWorkState>
         backward_euler_kinetic_work{};
     std::optional<FreeSurfaceAcceptedContactStageState> contact_stage{};
     std::vector<FreeSurfaceAcceptedContactLineKinematics>

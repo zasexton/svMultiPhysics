@@ -24,6 +24,8 @@
  * (FE/LevelSet/Maintenance/LevelSetMaintenanceWorkLedger.h).
  */
 
+#include "Physics/Formulations/NavierStokes/FreeSurface/SnapshotFunctionals.h"
+
 #include "Physics/Formulations/NavierStokes/FreeSurface/FunctionalRecords.h"
 #include "FE/Constraints/SmallCutAggregationConstraint.h"
 #include "FE/Core/Types.h"
@@ -154,8 +156,7 @@ struct FreeSurfaceAcceptedEnergyGroup {
   std::optional<double> surface_wall_potential_power{};
   std::optional<double> bulk_viscous_dissipation_rate{};
   std::optional<double> external_pressure_power{};
-  std::optional<svmp::FE::interfaces::
-                    FreeSurfaceBackwardEulerKineticWorkState>
+  std::optional<FreeSurfaceBackwardEulerKineticWorkState>
       backward_euler_kinetic_work{};
   bool contact_dissipation_applicable{false};
   std::optional<double> navier_slip_dissipation_rate{};

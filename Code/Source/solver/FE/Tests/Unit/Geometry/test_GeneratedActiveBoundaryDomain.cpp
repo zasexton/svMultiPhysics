@@ -1,3 +1,4 @@
+#include "Tests/Support/QuadCutSnapshotFixture.h"
 #include "Assembly/CutDomainAssembler.h"
 #include "Assembly/CutIntegrationContext.h"
 #include "Assembly/StandardAssembler.h"
@@ -35,26 +36,63 @@ namespace {
 
 namespace FE = svmp::FE;
 namespace interfaces = svmp::FE::interfaces;
+using namespace FE::testing::quad_cut;
 
 /// The physical measure of the snapshot's retained, rank-owned rules of
 /// @p role (on one physical boundary when @p boundary_marker is set): the
 /// geometry the declared measures integrate (D49 E4 retired the pointwise
 /// functional evaluators that summed it).
-FE::Real ownedRuleMeasure(const interfaces::LevelSetGeometrySnapshot& snapshot,
-                          interfaces::LevelSetGeometryRuleRole role,
-                          int boundary_marker = -1)
+
+struct ShapeWeights {
+    FE::geometry::CutIntegrationSide active_side{FE::geometry::CutIntegrationSide::Negative};
+    FE::Real interface_weight{0};
+    std::vector<std::pair<int, FE::Real>> boundary_angles;
+    FE::Real volume_weight{0};
+};
+
+struct ShapeBoundaryValue {
+    int boundary_marker{-1};
+    std::optional<FE::Real> angle{};
+    FE::Real active_boundary_measure{0};
+    FE::Real contact_measure{0};
+    FE::Real weighted_boundary_measure{0};
+};
+
+struct ShapeMeasures {
+    std::uint64_t snapshot_revision_key{};
+    FE::geometry::CutIntegrationSide active_side{};
+    FE::Real interface_weight{};
+    FE::Real volume_weight{};
+    std::vector<ShapeBoundaryValue> walls;
+    FE::Real active_volume{};
+    FE::Real interface_measure{};
+    FE::Real active_boundary_measure{};
+    FE::Real contact_measure{};
+    FE::Real weighted_interface_measure{};
+    FE::Real weighted_boundary_measure{};
+    FE::Real weighted_volume{};
+    FE::Real weighted_sum{};
+};
+
+ShapeMeasures shapeLayout(const interfaces::LevelSetGeometrySnapshot& snapshot,
+                          const ShapeWeights& weights)
 {
-    FE::Real measure{0.0};
-    for (const auto& record : snapshot.rules()) {
-        if (!record.locally_owned ||
-            record.retention != interfaces::LevelSetGeometryRetention::Retained ||
-            record.role != role ||
-            (boundary_marker >= 0 && record.physical_boundary_marker != boundary_marker)) {
-            continue;
-        }
-        measure += record.physical_rule.physical_measure;
+    ShapeMeasures result{snapshot.revision().snapshot_revision_key, weights.active_side,
+                         weights.interface_weight, weights.volume_weight};
+    std::map<int, std::optional<FE::Real>> angles;
+    for (const auto& [marker, angle] : weights.boundary_angles) {
+        angles.emplace(marker, angle);
     }
-    return measure;
+    for (const auto& contact : snapshot.contactDomains()) {
+        angles.try_emplace(contact.boundaryMarker());
+    }
+    for (const auto& part : snapshot.activeBoundaryDomains()) {
+        angles.try_emplace(part.request().boundary_marker);
+    }
+    for (const auto& [marker, angle] : angles) {
+        result.walls.push_back({marker, angle});
+    }
+    return result;
 }
 
 // Test references of the capillary functional and of the interface part of
@@ -66,11 +104,11 @@ FE::Real ownedRuleMeasure(const interfaces::LevelSetGeometrySnapshot& snapshot,
 // evidence, with the arithmetic of the retired evaluators, the wetted-wall
 // part included (the outward wetted-footprint flux on the contact rules,
 // which the formulation now declares as its wall functionals).
-interfaces::FreeSurfaceDiscreteFunctionalState referenceDiscreteFunctional(
+ShapeMeasures referenceDiscreteFunctional(
     const interfaces::LevelSetGeometrySnapshot& snapshot,
-    const interfaces::FreeSurfaceDiscreteFunctionalParameters& parameters)
+    const ShapeWeights& parameters)
 {
-    auto state = interfaces::freeSurfaceDiscreteFunctionalLayout(snapshot, parameters);
+    auto state = shapeLayout(snapshot, parameters);
     const auto volume_role =
         parameters.active_side == FE::geometry::CutIntegrationSide::Negative
             ? interfaces::LevelSetGeometryRuleRole::NegativeVolume
@@ -79,7 +117,7 @@ interfaces::FreeSurfaceDiscreteFunctionalState referenceDiscreteFunctional(
         parameters.active_side == FE::geometry::CutIntegrationSide::Negative
             ? interfaces::LevelSetGeometryRuleRole::NegativeExteriorBoundary
             : interfaces::LevelSetGeometryRuleRole::PositiveExteriorBoundary;
-    const auto wall_of = [&state](int boundary_marker) -> interfaces::FreeSurfaceDiscreteWallFunctionalState& {
+    const auto wall_of = [&state](int boundary_marker) -> ShapeBoundaryValue& {
         for (auto& wall : state.walls) {
             if (wall.boundary_marker == boundary_marker) {
                 return wall;
@@ -94,38 +132,38 @@ interfaces::FreeSurfaceDiscreteFunctionalState referenceDiscreteFunctional(
         }
         const FE::Real measure = record.physical_rule.physical_measure;
         if (record.role == volume_role) {
-            state.owned_liquid_volume += measure;
+            state.active_volume += measure;
         } else if (record.role == interfaces::LevelSetGeometryRuleRole::Interface) {
-            state.owned_liquid_gas_area += measure;
+            state.interface_measure += measure;
         } else if (record.role == wall_role) {
-            state.owned_wetted_wall_area += measure;
-            wall_of(record.physical_boundary_marker).owned_wetted_wall_area += measure;
+            state.active_boundary_measure += measure;
+            wall_of(record.physical_boundary_marker).active_boundary_measure += measure;
         } else if (record.role == interfaces::LevelSetGeometryRuleRole::Contact) {
-            state.owned_contact_measure += measure;
-            wall_of(record.physical_boundary_marker).owned_contact_measure += measure;
+            state.contact_measure += measure;
+            wall_of(record.physical_boundary_marker).contact_measure += measure;
         }
     }
-    state.liquid_gas_surface_energy = parameters.surface_tension * state.owned_liquid_gas_area;
+    state.weighted_interface_measure = parameters.interface_weight * state.interface_measure;
     for (auto& wall : state.walls) {
-        if (wall.equilibrium_contact_angle_radians.has_value()) {
-            wall.young_wall_energy = -parameters.surface_tension *
-                                     std::cos(*wall.equilibrium_contact_angle_radians) *
-                                     wall.owned_wetted_wall_area;
-            state.young_wall_energy += wall.young_wall_energy;
+        if (wall.angle.has_value()) {
+            wall.weighted_boundary_measure = -parameters.interface_weight *
+                                     std::cos(*wall.angle) *
+                                     wall.active_boundary_measure;
+            state.weighted_boundary_measure += wall.weighted_boundary_measure;
         }
     }
-    state.volume_constraint_potential = parameters.volume_multiplier * state.owned_liquid_volume;
-    state.total_potential =
-        state.liquid_gas_surface_energy + state.young_wall_energy + state.volume_constraint_potential;
+    state.weighted_volume = parameters.volume_weight * state.active_volume;
+    state.weighted_sum =
+        state.weighted_interface_measure + state.weighted_boundary_measure + state.weighted_volume;
     return state;
 }
 
-interfaces::FreeSurfaceDiscreteFunctionalVariationState referenceWallAreaVariation(
+ShapeMeasures referenceWallAreaVariation(
     const interfaces::LevelSetGeometrySnapshot& snapshot,
-    const interfaces::FreeSurfaceDiscreteFunctionalParameters& parameters,
+    const ShapeWeights& parameters,
     const interfaces::SnapshotVectorEvaluator& deformation)
 {
-    auto state = interfaces::freeSurfaceDiscreteFunctionalVariationLayout(snapshot, parameters);
+    auto state = shapeLayout(snapshot, parameters);
     const auto dot = [](const std::array<FE::Real, 3>& a, const std::array<FE::Real, 3>& b) {
         return a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
     };
@@ -140,7 +178,7 @@ interfaces::FreeSurfaceDiscreteFunctionalVariationState referenceWallAreaVariati
         return direction;
     };
     const auto wall_of = [&state](int boundary_marker)
-        -> interfaces::FreeSurfaceDiscreteWallFunctionalVariationState& {
+        -> ShapeBoundaryValue& {
         for (auto& wall : state.walls) {
             if (wall.boundary_marker == boundary_marker) {
                 return wall;
@@ -178,25 +216,25 @@ interfaces::FreeSurfaceDiscreteFunctionalVariationState referenceWallAreaVariati
             }
             footprint_direction = unit_direction(footprint_direction);
             const FE::Real wall_area_variation = dot(value, footprint_direction) * physical.physical_weight;
-            state.owned_wetted_wall_area_variation += wall_area_variation;
-            wall.owned_wetted_wall_area_variation += wall_area_variation;
+            state.active_boundary_measure += wall_area_variation;
+            wall.active_boundary_measure += wall_area_variation;
         }
     }
     for (auto& wall : state.walls) {
-        if (!wall.equilibrium_contact_angle_radians.has_value()) {
+        if (!wall.angle.has_value()) {
             continue;
         }
-        wall.young_wall_energy_variation = -parameters.surface_tension *
-                                           std::cos(*wall.equilibrium_contact_angle_radians) *
-                                           wall.owned_wetted_wall_area_variation;
-        state.young_wall_energy_variation += wall.young_wall_energy_variation;
+        wall.weighted_boundary_measure = -parameters.interface_weight *
+                                           std::cos(*wall.angle) *
+                                           wall.active_boundary_measure;
+        state.weighted_boundary_measure += wall.weighted_boundary_measure;
     }
     return state;
 }
 
-interfaces::FreeSurfaceDiscreteFunctionalVariationState referenceFirstVariation(
+ShapeMeasures referenceFirstVariation(
     const interfaces::LevelSetGeometrySnapshot& snapshot,
-    const interfaces::FreeSurfaceDiscreteFunctionalParameters& parameters,
+    const ShapeWeights& parameters,
     const interfaces::SnapshotVectorEvaluator& deformation)
 {
     auto state = referenceWallAreaVariation(snapshot, parameters, deformation);
@@ -237,16 +275,16 @@ interfaces::FreeSurfaceDiscreteFunctionalVariationState referenceFirstVariation(
                     surface_divergence -= liquid_normal[ui] * gradient[ui][uj] * liquid_normal[uj];
                 }
             }
-            state.owned_liquid_gas_area_variation += surface_divergence * weight;
-            state.owned_liquid_volume_variation +=
+            state.interface_measure += surface_divergence * weight;
+            state.active_volume +=
                 (value[0] * liquid_normal[0] + value[1] * liquid_normal[1] + value[2] * liquid_normal[2]) * weight;
         }
     }
-    state.liquid_gas_surface_energy_variation = parameters.surface_tension * state.owned_liquid_gas_area_variation;
-    state.volume_constraint_potential_variation = parameters.volume_multiplier * state.owned_liquid_volume_variation;
-    state.total_potential_variation = state.liquid_gas_surface_energy_variation +
-                                      state.young_wall_energy_variation +
-                                      state.volume_constraint_potential_variation;
+    state.weighted_interface_measure = parameters.interface_weight * state.interface_measure;
+    state.weighted_volume = parameters.volume_weight * state.active_volume;
+    state.weighted_sum = state.weighted_interface_measure +
+                                      state.weighted_boundary_measure +
+                                      state.weighted_volume;
     return state;
 }
 
@@ -320,192 +358,6 @@ void record_boundary_domain(
     ASSERT_TRUE(output.good());
 }
 
-class SingleQuadBoundaryMesh final : public FE::assembly::IMeshAccess {
-public:
-    explicit SingleQuadBoundaryMesh(int marker = 7,
-                                    int rank = 0,
-                                    int size = 1,
-                                    int owner_rank = 0,
-                                    bool owned = true,
-                                    FE::ElementType type = FE::ElementType::Quad4,
-                                    std::vector<std::array<FE::Real, 3>>
-                                        coordinates = {},
-                                    bool expose_opposite_face = false,
-                                    int geometry_order = 0)
-        : marker_(marker)
-        , rank_(rank)
-        , size_(size)
-        , owner_rank_(owner_rank)
-        , owned_(owned)
-        , type_(type)
-        , coordinates_(std::move(coordinates))
-        , expose_opposite_face_(expose_opposite_face)
-        , geometry_order_(geometry_order > 0
-                              ? geometry_order
-                              : (type == FE::ElementType::Quad8 ||
-                                         type == FE::ElementType::Quad9
-                                     ? 2
-                                     : 1))
-    {
-        if (coordinates_.empty()) {
-            coordinates_ = {
-                {{0.0, 0.0, 0.0}},
-                {{1.0, 0.0, 0.0}},
-                {{1.0, 1.0, 0.0}},
-                {{0.0, 1.0, 0.0}},
-            };
-        }
-    }
-
-    void enableRevisionTracking(std::uint64_t geometry_revision = 11u,
-                                std::uint64_t topology_revision = 12u,
-                                std::uint64_t ownership_revision = 13u,
-                                std::uint64_t numbering_revision = 0u)
-    {
-        track_revisions_ = true;
-        geometry_revision_ = geometry_revision;
-        topology_revision_ = topology_revision;
-        ownership_revision_ = ownership_revision;
-        numbering_revision_ = numbering_revision;
-    }
-
-    [[nodiscard]] bool revisionTrackingAvailable() const override {
-        return track_revisions_;
-    }
-    [[nodiscard]] std::uint64_t geometryRevision() const override {
-        return geometry_revision_;
-    }
-    [[nodiscard]] std::uint64_t topologyRevision() const override {
-        return topology_revision_;
-    }
-    [[nodiscard]] std::uint64_t ownershipRevision() const override {
-        return ownership_revision_;
-    }
-    [[nodiscard]] std::uint64_t numberingRevision() const override {
-        return numbering_revision_;
-    }
-
-    [[nodiscard]] FE::GlobalIndex numCells() const override { return 1; }
-    [[nodiscard]] FE::GlobalIndex numOwnedCells() const override {
-        return owned_ ? 1 : 0;
-    }
-    [[nodiscard]] FE::GlobalIndex numBoundaryFaces() const override {
-        return expose_opposite_face_ ? 2 : 1;
-    }
-    [[nodiscard]] FE::GlobalIndex numInteriorFaces() const override { return 0; }
-    [[nodiscard]] int dimension() const override { return 2; }
-    [[nodiscard]] bool globalEntityIdsAvailable() const override {
-        return size_ > 1;
-    }
-    [[nodiscard]] FE::GlobalIndex getCellGlobalId(
-        FE::GlobalIndex cell) const override {
-        return cell == 0 ? FE::GlobalIndex{7001} : FE::INVALID_GLOBAL_INDEX;
-    }
-    [[nodiscard]] FE::GlobalIndex getBoundaryFaceGlobalId(
-        FE::GlobalIndex face) const override {
-        if (face == 0) {
-            return FE::GlobalIndex{9001};
-        }
-        return expose_opposite_face_ && face == 1
-                   ? FE::GlobalIndex{9002}
-                   : FE::INVALID_GLOBAL_INDEX;
-    }
-    [[nodiscard]] int parallelRank() const override { return rank_; }
-    [[nodiscard]] int parallelSize() const override { return size_; }
-    [[nodiscard]] int getCellOwnerRank(FE::GlobalIndex) const override {
-        return owner_rank_;
-    }
-    [[nodiscard]] int getBoundaryFaceOwnerRank(
-        FE::GlobalIndex, FE::GlobalIndex) const override {
-        return owner_rank_;
-    }
-    [[nodiscard]] bool isOwnedCell(FE::GlobalIndex cell) const override {
-        return owned_ && cell == 0;
-    }
-    [[nodiscard]] FE::ElementType getCellType(FE::GlobalIndex) const override {
-        return type_;
-    }
-    [[nodiscard]] int getCellGeometryOrder(FE::GlobalIndex) const override {
-        return geometry_order_;
-    }
-    void getCellNodes(FE::GlobalIndex,
-                      std::vector<FE::GlobalIndex>& nodes) const override {
-        nodes.resize(coordinates_.size());
-        for (std::size_t i = 0; i < nodes.size(); ++i) {
-            nodes[i] = static_cast<FE::GlobalIndex>(i);
-        }
-    }
-    [[nodiscard]] std::array<FE::Real, 3> getNodeCoordinates(
-        FE::GlobalIndex node) const override {
-        return coordinates_.at(static_cast<std::size_t>(node));
-    }
-    void getCellCoordinates(
-        FE::GlobalIndex,
-        std::vector<std::array<FE::Real, 3>>& coordinates) const override {
-        coordinates = coordinates_;
-    }
-    [[nodiscard]] FE::LocalIndex getLocalFaceIndex(
-        FE::GlobalIndex face,
-        FE::GlobalIndex) const override {
-        if (face == 0) {
-            return FE::LocalIndex{0};
-        }
-        return expose_opposite_face_ && face == 1
-                   ? FE::LocalIndex{2}
-                   : FE::INVALID_LOCAL_INDEX;
-    }
-    [[nodiscard]] int getBoundaryFaceMarker(FE::GlobalIndex face) const override {
-        return face == 0 || (expose_opposite_face_ && face == 1)
-                   ? marker_
-                   : -1;
-    }
-    [[nodiscard]] std::pair<FE::GlobalIndex, FE::GlobalIndex>
-    getInteriorFaceCells(FE::GlobalIndex) const override {
-        return {-1, -1};
-    }
-    void forEachCell(
-        std::function<void(FE::GlobalIndex)> callback) const override {
-        callback(0);
-    }
-    void forEachOwnedCell(
-        std::function<void(FE::GlobalIndex)> callback) const override {
-        if (owned_) {
-            callback(0);
-        }
-    }
-    void forEachBoundaryFace(
-        int marker,
-        std::function<void(FE::GlobalIndex, FE::GlobalIndex)> callback)
-        const override {
-        if (marker < 0 || marker == marker_) {
-            callback(0, 0);
-            if (expose_opposite_face_) {
-                callback(1, 0);
-            }
-        }
-    }
-    void forEachInteriorFace(
-        std::function<void(FE::GlobalIndex,
-                           FE::GlobalIndex,
-                           FE::GlobalIndex)>) const override {
-    }
-
-private:
-    int marker_{7};
-    int rank_{0};
-    int size_{1};
-    int owner_rank_{0};
-    bool owned_{true};
-    FE::ElementType type_{FE::ElementType::Quad4};
-    std::vector<std::array<FE::Real, 3>> coordinates_{};
-    bool expose_opposite_face_{false};
-    int geometry_order_{1};
-    bool track_revisions_{false};
-    std::uint64_t geometry_revision_{0u};
-    std::uint64_t topology_revision_{0u};
-    std::uint64_t ownership_revision_{0u};
-    std::uint64_t numbering_revision_{0u};
-};
 
 class SingleHexBoundaryMesh final : public FE::assembly::IMeshAccess {
 public:
@@ -672,67 +524,7 @@ private:
     std::vector<std::array<FE::Real, 3>> coordinates_{};
 };
 
-interfaces::CutInterfaceDomainRequest interfaceRequest(int marker)
-{
-    interfaces::CutInterfaceDomainRequest request;
-    request.source = interfaces::LevelSetInterfaceSource::fromField(
-        /*field_id=*/4, /*layout_revision=*/3, /*value_revision=*/9);
-    request.interface_marker = marker;
-    request.quadrature_order = 2;
-    request.interface_quadrature_order = 2;
-    request.volume_quadrature_order = 2;
-    request.implicit_geometry_mode = "LinearCorner";
-    request.implicit_quadrature_backend = "LinearCorner";
-    request.implicit_fallback_status = "None";
-    request.mesh_geometry_revision = 11;
-    request.mesh_topology_revision = 12;
-    request.ownership_revision = 13;
-    request.quadrature_policy_key = 14;
-    return request;
-}
 
-interfaces::LevelSetInterfaceDomain verticalInterface(
-    int marker,
-    FE::Real represented_root_residual = 0.0)
-{
-    interfaces::LevelSetInterfaceDomain domain(interfaceRequest(marker));
-    interfaces::CutInterfaceFragment fragment;
-    fragment.parent_cell = 0;
-    fragment.kind = interfaces::CutInterfaceFragmentKind::Segment;
-    fragment.measure = 2.0;
-    fragment.normal = {{1.0, 0.0, 0.0}};
-    fragment.min_gradient_norm = 1.0;
-    fragment.vertices = {
-        interfaces::CutInterfaceVertex{
-            .point = {{0.0, -1.0, 0.0}},
-            .parent_coordinate = {{0.0, -1.0, 0.0}}},
-        interfaces::CutInterfaceVertex{
-            .point = {{0.0, 1.0, 0.0}},
-            .parent_coordinate = {{0.0, 1.0, 0.0}}},
-    };
-    constexpr FE::Real gauss_offset =
-        FE::Real{0.57735026918962576451};
-    fragment.quadrature_points = {
-        interfaces::CutInterfaceQuadraturePoint{
-            .point = {{0.0, -gauss_offset, 0.0}},
-            .parent_coordinate = {{0.0, -gauss_offset, 0.0}},
-            .normal = fragment.normal,
-            .weight = 1.0,
-            .reference_measure_factor = 2.0,
-            .level_set_residual = represented_root_residual,
-            .gradient_norm = 1.0},
-        interfaces::CutInterfaceQuadraturePoint{
-            .point = {{0.0, gauss_offset, 0.0}},
-            .parent_coordinate = {{0.0, gauss_offset, 0.0}},
-            .normal = fragment.normal,
-            .weight = 1.0,
-            .reference_measure_factor = 2.0,
-            .level_set_residual = represented_root_residual,
-            .gradient_norm = 1.0},
-    };
-    domain.addFragment(std::move(fragment));
-    return domain;
-}
 
 interfaces::LevelSetInterfaceDomain verticalInterfaceAtX(
     int marker,
@@ -808,63 +600,6 @@ interfaces::LevelSetInterfaceDomain diagonalHexInterface(int marker)
     return domain;
 }
 
-void addVerticalHalfVolumes(
-    interfaces::LevelSetInterfaceDomain& domain,
-    FE::Real negative_point_x = -0.5,
-    FE::Real negative_weight = 2.0,
-    int negative_achieved_order = 1,
-    FE::Real positive_point_x = 0.5)
-{
-    const auto add_volume = [&domain,
-                             negative_point_x,
-                             negative_weight,
-                             negative_achieved_order,
-                             positive_point_x](
-                                FE::geometry::CutIntegrationSide side,
-                                FE::Real x,
-                                FE::LocalIndex local_index) {
-        if (side == FE::geometry::CutIntegrationSide::Negative) {
-            x = negative_point_x;
-        } else {
-            x = positive_point_x;
-        }
-        interfaces::CutInterfaceVolumeRegion region;
-        region.parent_cell = 0;
-        region.local_region_index = local_index;
-        region.side = side;
-        region.centroid = {{x, 0.0, 0.0}};
-        region.normal = side == FE::geometry::CutIntegrationSide::Negative
-                            ? std::array<FE::Real, 3>{{1.0, 0.0, 0.0}}
-                            : std::array<FE::Real, 3>{{-1.0, 0.0, 0.0}};
-        region.measure = 2.0;
-        region.parent_measure = 4.0;
-        region.volume_fraction = 0.5;
-        region.min_level_set_value =
-            side == FE::geometry::CutIntegrationSide::Negative ? -1.0 : 0.0;
-        region.max_level_set_value =
-            side == FE::geometry::CutIntegrationSide::Negative ? 0.0 : 1.0;
-        region.topology_id =
-            side == FE::geometry::CutIntegrationSide::Negative
-                ? "negative-half"
-                : "positive-half";
-        region.achieved_quadrature_order =
-            side == FE::geometry::CutIntegrationSide::Negative
-                ? negative_achieved_order
-                : 1;
-        region.quadrature_points = {
-            FE::geometry::CutQuadraturePoint{
-                .point = {{x, 0.0, 0.0}},
-                .normal = region.normal,
-                .weight = side == FE::geometry::CutIntegrationSide::Negative
-                              ? negative_weight
-                              : 2.0,
-                .parent_coordinate = {{x, 0.0, 0.0}},
-                .reference_measure_factor = 2.0}};
-        domain.addVolumeRegion(std::move(region));
-    };
-    add_volume(FE::geometry::CutIntegrationSide::Negative, -0.5, 0u);
-    add_volume(FE::geometry::CutIntegrationSide::Positive, 0.5, 1u);
-}
 
 interfaces::LevelSetInterfaceDomain verticalInterfaceSegment(
     int marker,
@@ -919,21 +654,6 @@ interfaces::LevelSetInterfaceDomain verticalInterfaceSegment(
     return domain;
 }
 
-interfaces::LevelSetInterfaceDomain verticalInterfaceWithVolumes(
-    int marker,
-    FE::Real negative_point_x = -0.5,
-    FE::Real negative_weight = 2.0,
-    int negative_achieved_order = 1,
-    FE::Real positive_point_x = 0.5)
-{
-    auto domain = verticalInterface(marker);
-    addVerticalHalfVolumes(domain,
-                           negative_point_x,
-                           negative_weight,
-                           negative_achieved_order,
-                           positive_point_x);
-    return domain;
-}
 
 interfaces::LevelSetInterfaceDomain distributedVerticalInterfaceWithVolumes(
     int marker,
@@ -1394,45 +1114,7 @@ interfaces::LevelSetGeometryScalarEvaluator verticalScalar(
     return scalar;
 }
 
-interfaces::GeneratedInterfaceBoundaryIntersectionRequest contactRequest(
-    int interface_marker,
-    int wall_marker)
-{
-    interfaces::GeneratedInterfaceBoundaryIntersectionRequest request;
-    request.source = interfaces::LevelSetInterfaceSource::fromField(
-        /*field_id=*/4, /*layout_revision=*/3, /*value_revision=*/9);
-    request.generated_domain_id = "sharp_boundary_test";
-    request.interface_marker = interface_marker;
-    request.boundary_marker = wall_marker;
-    request.quadrature_order = 2;
-    request.mesh_geometry_revision = 11;
-    request.mesh_topology_revision = 12;
-    request.ownership_revision = 13;
-    request.quadrature_policy_key = 14;
-    request.source_value_revision = 9;
-    return request;
-}
 
-interfaces::GeneratedActiveBoundaryRequest activeRequest(
-    int interface_marker,
-    int wall_marker,
-    FE::geometry::CutIntegrationSide side)
-{
-    interfaces::GeneratedActiveBoundaryRequest request;
-    request.source = interfaces::LevelSetInterfaceSource::fromField(
-        /*field_id=*/4, /*layout_revision=*/3, /*value_revision=*/9);
-    request.generated_domain_id = "sharp_boundary_test";
-    request.interface_marker = interface_marker;
-    request.boundary_marker = wall_marker;
-    request.side = side;
-    request.quadrature_order = 3;
-    request.mesh_geometry_revision = 11;
-    request.mesh_topology_revision = 12;
-    request.ownership_revision = 13;
-    request.quadrature_policy_key = 14;
-    request.source_value_revision = 9;
-    return request;
-}
 
 TEST(GeneratedActiveBoundaryDomain,
      RejectsNonfiniteRequestScalars)
@@ -3133,54 +2815,7 @@ TEST(FreeSurfaceGeometrySnapshot,
     constexpr int interface_marker = 104;
     constexpr int wall_marker = 10;
     const SingleQuadBoundaryMesh mesh(wall_marker);
-    auto interface_domain = verticalInterfaceWithVolumes(interface_marker);
-    auto contact_domain =
-        interfaces::buildGeneratedInterfaceBoundaryIntersectionDomain(
-            contactRequest(interface_marker, wall_marker),
-            interface_domain,
-            mesh);
-    const std::array<FE::Real, 4> values{{-1.0, 1.0, 1.0, -1.0}};
-    interfaces::GeneratedActiveBoundaryScalarField nodal_field;
-    nodal_field.value_at_node = [&values](FE::GlobalIndex node) {
-        return values.at(static_cast<std::size_t>(node));
-    };
-    auto negative = interfaces::buildGeneratedActiveBoundaryDomain(
-        activeRequest(interface_marker,
-                      wall_marker,
-                      FE::geometry::CutIntegrationSide::Negative),
-        interface_domain,
-        contact_domain,
-        mesh,
-        nodal_field);
-    auto positive = interfaces::buildGeneratedActiveBoundaryDomain(
-        activeRequest(interface_marker,
-                      wall_marker,
-                      FE::geometry::CutIntegrationSide::Positive),
-        interface_domain,
-        contact_domain,
-        mesh,
-        nodal_field);
-
-    interfaces::LevelSetGeometryScalarEvaluator scalar;
-    scalar.value = [](FE::GlobalIndex,
-                      const std::array<FE::Real, 3>& xi,
-                      const FE::geometry::CutQuadratureProvenance&) {
-        return xi[0];
-    };
-    scalar.reference_gradient =
-        [](FE::GlobalIndex,
-           const std::array<FE::Real, 3>&,
-           const FE::geometry::CutQuadratureProvenance&) {
-            return std::array<FE::Real, 3>{{1.0, 0.0, 0.0}};
-        };
-    const auto snapshot = interfaces::buildLevelSetGeometrySnapshot(
-        std::move(interface_domain),
-        {std::move(contact_domain)},
-        {std::move(negative), std::move(positive)},
-        mesh,
-        {},
-        std::move(scalar),
-        "sharp_boundary_test");
+    const auto snapshot = verticalCutSnapshot(mesh, interface_marker, wall_marker);
 
     ASSERT_TRUE(snapshot);
     EXPECT_TRUE(snapshot->revision().complete());
@@ -3291,240 +2926,8 @@ TEST(FreeSurfaceGeometrySnapshot,
         }
     }
 
-    interfaces::FreeSurfaceDiscreteFunctionalParameters functional_parameters;
-    functional_parameters.active_side =
-        FE::geometry::CutIntegrationSide::Negative;
-    functional_parameters.surface_tension = 2.0;
-    functional_parameters.young_wall_coefficients.push_back(
-        {10, std::acos(FE::Real{0.5})});
-    functional_parameters.dynamic_contact_coefficients.push_back(
-        {.boundary_marker = 10,
-         .equilibrium_contact_angle_radians =
-             std::acos(FE::Real{0.5}),
-         .mobility = FE::Real{0.5},
-         .slip_length = FE::Real{0.2},
-         .dynamic_viscosity = FE::Real{0.4}});
-    functional_parameters.volume_multiplier = 3.0;
-    // The layout of the record and the owned rules the declared measures
-    // integrate (D49 E4: the values are declared measured 0-forms).
-    const auto functional =
-        interfaces::freeSurfaceDiscreteFunctionalLayout(
-            *snapshot, functional_parameters);
-    EXPECT_EQ(functional.snapshot_revision_key,
-              snapshot->revision().snapshot_revision_key);
-    EXPECT_NEAR(ownedRuleMeasure(
-                    *snapshot,
-                    interfaces::LevelSetGeometryRuleRole::NegativeVolume),
-                snapshot->ledger().owned_retained_negative_physical_volume,
-                1.0e-14);
-    EXPECT_NEAR(ownedRuleMeasure(
-                    *snapshot,
-                    interfaces::LevelSetGeometryRuleRole::Interface),
-                snapshot->ledger().interface_physical_measure,
-                1.0e-14);
-    EXPECT_NEAR(ownedRuleMeasure(
-                    *snapshot,
-                    interfaces::LevelSetGeometryRuleRole::NegativeExteriorBoundary,
-                    10),
-                expected_negative_wall_area,
-                1.0e-14);
-    EXPECT_NEAR(ownedRuleMeasure(
-                    *snapshot,
-                    interfaces::LevelSetGeometryRuleRole::Contact,
-                    10),
-                expected_contact_measure,
-                1.0e-14);
-    ASSERT_EQ(functional.walls.size(), 1u);
-    EXPECT_EQ(functional.walls.front().boundary_marker, 10);
-    ASSERT_TRUE(functional.walls.front()
-                    .equilibrium_contact_angle_radians.has_value());
-    EXPECT_NEAR(*functional.walls.front()
-                     .equilibrium_contact_angle_radians,
-                std::acos(FE::Real{0.5}),
-                1.0e-14);
-    EXPECT_EQ(functional.walls.front().owned_wetted_wall_area, 0.0);
-    EXPECT_EQ(functional.owned_liquid_volume, 0.0);
-    EXPECT_DOUBLE_EQ(functional.surface_tension, 2.0);
-    EXPECT_DOUBLE_EQ(functional.volume_multiplier, 3.0);
-
-    interfaces::SnapshotVectorEvaluator velocity;
-    velocity.value = [](FE::GlobalIndex,
-                        const std::array<FE::Real, 3>&,
-                        const FE::geometry::CutQuadratureProvenance&) {
-        return std::array<FE::Real, 3>{{0.25, 0.0, 0.0}};
-    };
-    const auto dynamic_contact =
-        interfaces::evaluateFreeSurfaceDynamicContactState(
-            *snapshot, functional_parameters, velocity);
-    EXPECT_EQ(dynamic_contact.snapshot_revision_key,
-              snapshot->revision().snapshot_revision_key);
-    ASSERT_EQ(dynamic_contact.walls.size(), 1u);
-    const auto& contact = dynamic_contact.walls.front();
-    EXPECT_EQ(contact.boundary_marker, wall_marker);
-    EXPECT_EQ(contact.owned_quadrature_point_count, 1u);
-    EXPECT_EQ(contact.owned_advancing_point_count, 1u);
-    EXPECT_EQ(contact.owned_receding_point_count, 0u);
-    EXPECT_EQ(contact.motion,
-              interfaces::FreeSurfaceContactMotion::Advancing);
-    EXPECT_NEAR(contact.owned_contact_measure,
-                expected_contact_measure,
-                1.0e-14);
-    ASSERT_TRUE(contact.mean_dynamic_angle_radians.has_value());
-    ASSERT_TRUE(contact.mean_dynamic_cosine.has_value());
-    ASSERT_TRUE(contact.mean_contact_speed.has_value());
-    ASSERT_TRUE(contact.mean_constitutive_residual.has_value());
-    ASSERT_TRUE(contact.mean_absolute_constitutive_residual.has_value());
-    EXPECT_NEAR(*contact.mean_dynamic_angle_radians,
-                std::numbers::pi_v<FE::Real> / FE::Real{2.0},
-                1.0e-14);
-    EXPECT_NEAR(*contact.mean_dynamic_cosine, 0.0, 1.0e-14);
-    EXPECT_NEAR(*contact.mean_contact_speed, 0.25, 1.0e-14);
-    EXPECT_NEAR(contact.contact_speed_squared_integral,
-                FE::Real{0.0625} * expected_contact_measure,
-                1.0e-14);
-    EXPECT_NEAR(*contact.mean_constitutive_residual, -0.5, 1.0e-14);
-    EXPECT_NEAR(*contact.mean_absolute_constitutive_residual,
-                0.5,
-                1.0e-14);
-    EXPECT_NEAR(contact.line_friction_dissipation,
-                FE::Real{0.125} * expected_contact_measure,
-                1.0e-14);
-    EXPECT_EQ(contact.owned_wetted_wall_quadrature_point_count, 2u);
-    EXPECT_NEAR(contact.owned_wetted_wall_measure,
-                expected_negative_wall_area,
-                1.0e-14);
-    EXPECT_NEAR(contact.wall_slip_speed_squared_integral,
-                FE::Real{0.0625} * expected_negative_wall_area,
-                1.0e-14);
-    EXPECT_NEAR(contact.wall_slip_dissipation,
-                FE::Real{0.125} * expected_negative_wall_area,
-                1.0e-14);
-    ASSERT_TRUE(contact.mean_wall_slip_speed.has_value());
-    EXPECT_NEAR(*contact.mean_wall_slip_speed, 0.25, 1.0e-14);
-    EXPECT_NEAR(contact.mean_wall_tangential_velocity[0],
-                0.25,
-                1.0e-14);
-    EXPECT_NEAR(contact.mean_wall_tangential_velocity[1],
-                0.0,
-                1.0e-14);
-    EXPECT_NEAR(contact.mean_wall_normal[0], 0.0, 1.0e-14);
-    EXPECT_NEAR(contact.mean_wall_normal[1], -1.0, 1.0e-14);
-    EXPECT_NEAR(contact.mean_contact_position[0], 0.5, 1.0e-14);
-    EXPECT_NEAR(contact.mean_contact_position[1], 0.0, 1.0e-14);
-    EXPECT_NEAR(contact.mean_footprint_direction[0], 1.0, 1.0e-14);
-    EXPECT_NEAR(contact.mean_footprint_direction[1], 0.0, 1.0e-14);
-    EXPECT_NEAR(contact.contact_line_tangent_integral[2],
-                expected_contact_measure,
-                1.0e-14);
-    EXPECT_NEAR(contact.mean_contact_line_tangent[0], 0.0, 1.0e-14);
-    EXPECT_NEAR(contact.mean_contact_line_tangent[1], 0.0, 1.0e-14);
-    EXPECT_NEAR(contact.mean_contact_line_tangent[2], 1.0, 1.0e-14);
-    EXPECT_NEAR(dynamic_contact.owned_contact_measure,
-                contact.owned_contact_measure,
-                1.0e-14);
-    EXPECT_NEAR(dynamic_contact.line_friction_dissipation,
-                contact.line_friction_dissipation,
-                1.0e-14);
-    EXPECT_NEAR(dynamic_contact.owned_wetted_wall_measure,
-                contact.owned_wetted_wall_measure,
-                1.0e-14);
-    EXPECT_NEAR(dynamic_contact.wall_slip_dissipation,
-                contact.wall_slip_dissipation,
-                1.0e-14);
-    EXPECT_NEAR(dynamic_contact.total_dissipation,
-                contact.line_friction_dissipation +
-                    contact.wall_slip_dissipation,
-                1.0e-14);
-
-    auto prescribed_slip_parameters = functional_parameters;
-    auto& prescribed_slip_coefficient =
-        prescribed_slip_parameters.dynamic_contact_coefficients.front();
-    prescribed_slip_coefficient.law =
-        interfaces::FreeSurfaceContactLaw::PrescribedAngle;
-    prescribed_slip_coefficient.mobility = 0.0;
-    const auto prescribed_slip =
-        interfaces::evaluateFreeSurfaceDynamicContactState(
-            *snapshot, prescribed_slip_parameters, velocity);
-    ASSERT_EQ(prescribed_slip.walls.size(), 1u);
-    const auto& prescribed_wall = prescribed_slip.walls.front();
-    EXPECT_EQ(prescribed_wall.law,
-              interfaces::FreeSurfaceContactLaw::PrescribedAngle);
-    EXPECT_DOUBLE_EQ(prescribed_wall.mobility, 0.0);
-    EXPECT_NEAR(prescribed_wall.wall_slip_dissipation,
-                contact.wall_slip_dissipation,
-                1.0e-14);
-    EXPECT_DOUBLE_EQ(prescribed_wall.line_friction_dissipation, 0.0);
-    EXPECT_DOUBLE_EQ(prescribed_slip.line_friction_dissipation, 0.0);
-    ASSERT_TRUE(
-        prescribed_wall.mean_constitutive_residual.has_value());
-    EXPECT_NEAR(*prescribed_wall.mean_constitutive_residual,
-                -functional_parameters.surface_tension * 0.5,
-                1.0e-14);
-    EXPECT_NEAR(prescribed_slip.total_dissipation,
-                prescribed_wall.wall_slip_dissipation,
-                1.0e-14);
-
-    EXPECT_THROW(
-        (void)interfaces::evaluateFreeSurfaceDynamicContactState(
-            *snapshot, functional_parameters, {}),
-        std::invalid_argument);
-    auto invalid_contact_parameters = functional_parameters;
-    invalid_contact_parameters.dynamic_contact_coefficients.front()
-        .slip_length = 0.0;
-    EXPECT_THROW(
-        (void)interfaces::evaluateFreeSurfaceDynamicContactState(
-            *snapshot, invalid_contact_parameters, velocity),
-        std::invalid_argument);
-    invalid_contact_parameters = functional_parameters;
-    invalid_contact_parameters.dynamic_contact_coefficients.front()
-        .dynamic_viscosity = 0.0;
-    EXPECT_THROW(
-        (void)interfaces::evaluateFreeSurfaceDynamicContactState(
-            *snapshot, invalid_contact_parameters, velocity),
-        std::invalid_argument);
-    invalid_contact_parameters = prescribed_slip_parameters;
-    invalid_contact_parameters.dynamic_contact_coefficients.front()
-        .mobility = 0.5;
-    EXPECT_THROW(
-        (void)interfaces::evaluateFreeSurfaceDynamicContactState(
-            *snapshot, invalid_contact_parameters, velocity),
-        std::invalid_argument);
-
-    auto positive_parameters = functional_parameters;
-    positive_parameters.active_side =
-        FE::geometry::CutIntegrationSide::Positive;
-    const auto positive_contact =
-        interfaces::evaluateFreeSurfaceDynamicContactState(
-            *snapshot, positive_parameters, velocity);
-    ASSERT_EQ(positive_contact.walls.size(), 1u);
-    ASSERT_TRUE(
-        positive_contact.walls.front().mean_contact_speed.has_value());
-    EXPECT_NEAR(*positive_contact.walls.front().mean_contact_speed,
-                -0.25,
-                1.0e-14);
-    EXPECT_EQ(positive_contact.walls.front().motion,
-              interfaces::FreeSurfaceContactMotion::Receding);
-
-    auto invalid_parameters = functional_parameters;
-    invalid_parameters.surface_tension = -1.0;
-    EXPECT_THROW(
-        (void)interfaces::freeSurfaceDiscreteFunctionalLayout(
-            *snapshot, invalid_parameters),
-        std::invalid_argument);
-    invalid_parameters = functional_parameters;
-    invalid_parameters.young_wall_coefficients.front()
-        .equilibrium_contact_angle_radians = 0.0;
-    EXPECT_THROW(
-        (void)interfaces::freeSurfaceDiscreteFunctionalLayout(
-            *snapshot, invalid_parameters),
-        std::invalid_argument);
-    invalid_parameters = functional_parameters;
-    invalid_parameters.young_wall_coefficients.push_back(
-        invalid_parameters.young_wall_coefficients.front());
-    EXPECT_THROW(
-        (void)interfaces::freeSurfaceDiscreteFunctionalLayout(
-            *snapshot, invalid_parameters),
-        std::invalid_argument);
+    EXPECT_NEAR(expected_negative_wall_area, 0.5, 1.0e-14);
+    EXPECT_NEAR(expected_contact_measure, 1.0, 1.0e-14);
 
     FE::assembly::CutIntegrationContext context;
     context.addLevelSetGeometrySnapshot(snapshot);
@@ -5092,12 +4495,12 @@ TEST(FreeSurfaceGeometrySnapshot,
              FE::geometry::CutIntegrationSide::Negative,
              FE::geometry::CutIntegrationSide::Positive}) {
         SCOPED_TRACE(static_cast<int>(active_side));
-        interfaces::FreeSurfaceDiscreteFunctionalParameters parameters;
+        ShapeWeights parameters;
         parameters.active_side = active_side;
-        parameters.surface_tension = FE::Real{1.7};
-        parameters.young_wall_coefficients.push_back(
+        parameters.interface_weight = FE::Real{1.7};
+        parameters.boundary_angles.push_back(
             {wall_marker, std::numbers::pi_v<FE::Real> / FE::Real{3.0}});
-        parameters.volume_multiplier = FE::Real{-0.8};
+        parameters.volume_weight = FE::Real{-0.8};
 
         const auto base =
             referenceDiscreteFunctional(
@@ -5115,75 +4518,75 @@ TEST(FreeSurfaceGeometrySnapshot,
         EXPECT_EQ(variation.snapshot_revision_key,
                   base.snapshot_revision_key);
         EXPECT_EQ(variation.active_side, active_side);
-        EXPECT_DOUBLE_EQ(variation.surface_tension,
-                         parameters.surface_tension);
-        EXPECT_DOUBLE_EQ(variation.volume_multiplier,
-                         parameters.volume_multiplier);
+        EXPECT_DOUBLE_EQ(variation.interface_weight,
+                         parameters.interface_weight);
+        EXPECT_DOUBLE_EQ(variation.volume_weight,
+                         parameters.volume_weight);
         ASSERT_EQ(base.walls.size(), 1u);
         ASSERT_EQ(plus.walls.size(), 1u);
         ASSERT_EQ(minus.walls.size(), 1u);
         ASSERT_EQ(variation.walls.size(), 1u);
         EXPECT_EQ(variation.walls.front().boundary_marker, wall_marker);
         EXPECT_EQ(variation.walls.front()
-                      .equilibrium_contact_angle_radians,
-                  base.walls.front().equilibrium_contact_angle_radians);
+                      .angle,
+                  base.walls.front().angle);
 
         const FE::Real surface_area_fd = central_difference(
-            plus.owned_liquid_gas_area,
-            minus.owned_liquid_gas_area);
+            plus.interface_measure,
+            minus.interface_measure);
         const FE::Real surface_energy_fd = central_difference(
-            plus.liquid_gas_surface_energy,
-            minus.liquid_gas_surface_energy);
+            plus.weighted_interface_measure,
+            minus.weighted_interface_measure);
         const FE::Real wall_area_fd = central_difference(
-            plus.owned_wetted_wall_area,
-            minus.owned_wetted_wall_area);
+            plus.active_boundary_measure,
+            minus.active_boundary_measure);
         const FE::Real young_wall_fd = central_difference(
-            plus.young_wall_energy,
-            minus.young_wall_energy);
+            plus.weighted_boundary_measure,
+            minus.weighted_boundary_measure);
         const FE::Real volume_fd = central_difference(
-            plus.owned_liquid_volume,
-            minus.owned_liquid_volume);
+            plus.active_volume,
+            minus.active_volume);
         const FE::Real volume_potential_fd = central_difference(
-            plus.volume_constraint_potential,
-            minus.volume_constraint_potential);
+            plus.weighted_volume,
+            minus.weighted_volume);
         const FE::Real total_fd = central_difference(
-            plus.total_potential,
-            minus.total_potential);
+            plus.weighted_sum,
+            minus.weighted_sum);
 
         EXPECT_NEAR(
-            variation.walls.front().owned_wetted_wall_area_variation,
+            variation.walls.front().active_boundary_measure,
             wall_area_fd,
             1.0e-10);
-        EXPECT_NEAR(variation.walls.front().young_wall_energy_variation,
+        EXPECT_NEAR(variation.walls.front().weighted_boundary_measure,
                     young_wall_fd,
                     1.0e-10);
         EXPECT_DOUBLE_EQ(
-            variation.walls.front().owned_wetted_wall_area_variation,
-            variation.owned_wetted_wall_area_variation);
+            variation.walls.front().active_boundary_measure,
+            variation.active_boundary_measure);
         EXPECT_DOUBLE_EQ(
-            variation.walls.front().young_wall_energy_variation,
-            variation.young_wall_energy_variation);
+            variation.walls.front().weighted_boundary_measure,
+            variation.weighted_boundary_measure);
 
         const FE::Real surface_area_error = relative_error(
-            variation.owned_liquid_gas_area_variation,
+            variation.interface_measure,
             surface_area_fd);
         const FE::Real surface_energy_error = relative_error(
-            variation.liquid_gas_surface_energy_variation,
+            variation.weighted_interface_measure,
             surface_energy_fd);
         const FE::Real wall_area_error = relative_error(
-            variation.owned_wetted_wall_area_variation,
+            variation.active_boundary_measure,
             wall_area_fd);
         const FE::Real young_wall_error = relative_error(
-            variation.young_wall_energy_variation,
+            variation.weighted_boundary_measure,
             young_wall_fd);
         const FE::Real volume_error = relative_error(
-            variation.owned_liquid_volume_variation,
+            variation.active_volume,
             volume_fd);
         const FE::Real volume_potential_error = relative_error(
-            variation.volume_constraint_potential_variation,
+            variation.weighted_volume,
             volume_potential_fd);
         const FE::Real total_error = relative_error(
-            variation.total_potential_variation,
+            variation.weighted_sum,
             total_fd);
 
         EXPECT_LT(surface_area_error, 2.0e-7);
@@ -5193,26 +4596,26 @@ TEST(FreeSurfaceGeometrySnapshot,
         EXPECT_LT(volume_error, 2.0e-7);
         EXPECT_LT(volume_potential_error, 2.0e-7);
         EXPECT_LT(total_error, 2.0e-7);
-        EXPECT_NE(variation.owned_liquid_volume_variation, 0.0);
-        EXPECT_NE(variation.owned_liquid_gas_area_variation, 0.0);
-        EXPECT_NE(variation.owned_wetted_wall_area_variation, 0.0);
-        EXPECT_NE(variation.total_potential_variation, 0.0);
+        EXPECT_NE(variation.active_volume, 0.0);
+        EXPECT_NE(variation.interface_measure, 0.0);
+        EXPECT_NE(variation.active_boundary_measure, 0.0);
+        EXPECT_NE(variation.weighted_sum, 0.0);
 
         EXPECT_NEAR(
-            variation.liquid_gas_surface_energy_variation,
-            parameters.surface_tension *
-                variation.owned_liquid_gas_area_variation,
+            variation.weighted_interface_measure,
+            parameters.interface_weight *
+                variation.interface_measure,
             1.0e-14);
         EXPECT_NEAR(
-            variation.volume_constraint_potential_variation,
-            parameters.volume_multiplier *
-                variation.owned_liquid_volume_variation,
+            variation.weighted_volume,
+            parameters.volume_weight *
+                variation.active_volume,
             1.0e-14);
         EXPECT_NEAR(
-            variation.total_potential_variation,
-            variation.liquid_gas_surface_energy_variation +
-                variation.young_wall_energy_variation +
-                variation.volume_constraint_potential_variation,
+            variation.weighted_sum,
+            variation.weighted_interface_measure +
+                variation.weighted_boundary_measure +
+                variation.weighted_volume,
             1.0e-14);
 
         maximum_surface_area_error =
@@ -5669,12 +5072,12 @@ TEST(FreeSurfaceGeometrySnapshot,
              FE::geometry::CutIntegrationSide::Negative,
              FE::geometry::CutIntegrationSide::Positive}) {
         SCOPED_TRACE(static_cast<int>(active_side));
-        interfaces::FreeSurfaceDiscreteFunctionalParameters parameters;
+        ShapeWeights parameters;
         parameters.active_side = active_side;
-        parameters.surface_tension = FE::Real{1.6};
-        parameters.young_wall_coefficients.push_back(
+        parameters.interface_weight = FE::Real{1.6};
+        parameters.boundary_angles.push_back(
             {wall_marker, std::numbers::pi_v<FE::Real> / FE::Real{4.0}});
-        parameters.volume_multiplier = FE::Real{-0.7};
+        parameters.volume_weight = FE::Real{-0.7};
 
         const auto base =
             referenceDiscreteFunctional(
@@ -5713,56 +5116,56 @@ TEST(FreeSurfaceGeometrySnapshot,
                     std::max(maximum_relative_error, error);
             };
         check_central_difference(
-            variation.owned_liquid_gas_area_variation,
-            plus.owned_liquid_gas_area,
-            minus.owned_liquid_gas_area,
+            variation.interface_measure,
+            plus.interface_measure,
+            minus.interface_measure,
             "liquid-gas area");
         check_central_difference(
-            variation.liquid_gas_surface_energy_variation,
-            plus.liquid_gas_surface_energy,
-            minus.liquid_gas_surface_energy,
+            variation.weighted_interface_measure,
+            plus.weighted_interface_measure,
+            minus.weighted_interface_measure,
             "liquid-gas surface energy");
         check_central_difference(
-            variation.owned_wetted_wall_area_variation,
-            plus.owned_wetted_wall_area,
-            minus.owned_wetted_wall_area,
+            variation.active_boundary_measure,
+            plus.active_boundary_measure,
+            minus.active_boundary_measure,
             "wetted-wall area");
         check_central_difference(
-            variation.young_wall_energy_variation,
-            plus.young_wall_energy,
-            minus.young_wall_energy,
+            variation.weighted_boundary_measure,
+            plus.weighted_boundary_measure,
+            minus.weighted_boundary_measure,
             "Young wall energy");
         check_central_difference(
-            variation.owned_liquid_volume_variation,
-            plus.owned_liquid_volume,
-            minus.owned_liquid_volume,
+            variation.active_volume,
+            plus.active_volume,
+            minus.active_volume,
             "liquid volume");
         check_central_difference(
-            variation.volume_constraint_potential_variation,
-            plus.volume_constraint_potential,
-            minus.volume_constraint_potential,
+            variation.weighted_volume,
+            plus.weighted_volume,
+            minus.weighted_volume,
             "volume constraint potential");
         check_central_difference(
-            variation.total_potential_variation,
-            plus.total_potential,
-            minus.total_potential,
+            variation.weighted_sum,
+            plus.weighted_sum,
+            minus.weighted_sum,
             "total potential");
 
         EXPECT_DOUBLE_EQ(
-            variation.walls.front().owned_wetted_wall_area_variation,
-            variation.owned_wetted_wall_area_variation);
+            variation.walls.front().active_boundary_measure,
+            variation.active_boundary_measure);
         EXPECT_DOUBLE_EQ(
-            variation.walls.front().young_wall_energy_variation,
-            variation.young_wall_energy_variation);
-        EXPECT_NE(variation.owned_liquid_volume_variation, 0.0);
-        EXPECT_NE(variation.owned_liquid_gas_area_variation, 0.0);
-        EXPECT_NE(variation.owned_wetted_wall_area_variation, 0.0);
-        EXPECT_NE(variation.total_potential_variation, 0.0);
+            variation.walls.front().weighted_boundary_measure,
+            variation.weighted_boundary_measure);
+        EXPECT_NE(variation.active_volume, 0.0);
+        EXPECT_NE(variation.interface_measure, 0.0);
+        EXPECT_NE(variation.active_boundary_measure, 0.0);
+        EXPECT_NE(variation.weighted_sum, 0.0);
         EXPECT_NEAR(
-            variation.total_potential_variation,
-            variation.liquid_gas_surface_energy_variation +
-                variation.young_wall_energy_variation +
-                variation.volume_constraint_potential_variation,
+            variation.weighted_sum,
+            variation.weighted_interface_measure +
+                variation.weighted_boundary_measure +
+                variation.weighted_volume,
             1.0e-14);
         ++case_count;
     }
@@ -5812,9 +5215,9 @@ TEST(FreeSurfaceGeometrySnapshot,
             std::move(owner_collective));
     ASSERT_FALSE(owned_identities.empty());
 
-    interfaces::FreeSurfaceDiscreteFunctionalParameters parameters;
-    parameters.surface_tension = 2.0;
-    parameters.volume_multiplier = 3.0;
+    ShapeWeights parameters;
+    parameters.interface_weight = 2.0;
+    parameters.volume_weight = 3.0;
     interfaces::SnapshotVectorEvaluator
         deformation;
     deformation.value =
@@ -5836,14 +5239,14 @@ TEST(FreeSurfaceGeometrySnapshot,
     // The values are declared measured 0-forms (D49 E4); the snapshot
     // supplies the owned rules they integrate, the layout and the counts.
     const auto owner_layout =
-        interfaces::freeSurfaceDiscreteFunctionalLayout(
+        shapeLayout(
             *owner_snapshot, parameters);
     const auto owner_variation =
         referenceWallAreaVariation(
             *owner_snapshot, parameters, deformation);
     EXPECT_EQ(owner_layout.snapshot_revision_key,
               owner_snapshot->revision().snapshot_revision_key);
-    EXPECT_EQ(owner_layout.owned_liquid_volume, 0.0);
+    EXPECT_EQ(owner_layout.active_volume, 0.0);
     EXPECT_GT(ownedRuleMeasure(
                   *owner_snapshot,
                   interfaces::LevelSetGeometryRuleRole::NegativeVolume),
@@ -5852,17 +5255,17 @@ TEST(FreeSurfaceGeometrySnapshot,
                   *owner_snapshot,
                   interfaces::LevelSetGeometryRuleRole::Interface),
               0.0);
-    EXPECT_GT(interfaces::freeSurfaceOwnedRulePointCount(
+    EXPECT_GT(interfaces::ownedSnapshotRulePointCount(
                   *owner_snapshot,
                   interfaces::LevelSetGeometryRuleRole::NegativeVolume),
               0u);
-    EXPECT_GT(interfaces::freeSurfaceOwnedRulePointCount(
+    EXPECT_GT(interfaces::ownedSnapshotRulePointCount(
                   *owner_snapshot,
                   interfaces::LevelSetGeometryRuleRole::Interface),
               0u);
-    EXPECT_EQ(owner_variation.owned_wetted_wall_area_variation, 0.0);
-    EXPECT_EQ(owner_variation.owned_liquid_volume_variation, 0.0);
-    EXPECT_EQ(owner_variation.owned_liquid_gas_area_variation, 0.0);
+    EXPECT_EQ(owner_variation.active_boundary_measure, 0.0);
+    EXPECT_EQ(owner_variation.active_volume, 0.0);
+    EXPECT_EQ(owner_variation.interface_measure, 0.0);
 
     const SingleQuadBoundaryMesh ghost_mesh(
         /*marker=*/7,
@@ -5895,7 +5298,7 @@ TEST(FreeSurfaceGeometrySnapshot,
             "functional_owner",
             std::move(ghost_collective));
     const auto ghost_layout =
-        interfaces::freeSurfaceDiscreteFunctionalLayout(
+        shapeLayout(
             *ghost_snapshot, parameters);
     const auto ghost_variation =
         referenceWallAreaVariation(
@@ -5911,16 +5314,16 @@ TEST(FreeSurfaceGeometrySnapshot,
                   *ghost_snapshot,
                   interfaces::LevelSetGeometryRuleRole::Interface),
               0.0);
-    EXPECT_EQ(interfaces::freeSurfaceOwnedRulePointCount(
+    EXPECT_EQ(interfaces::ownedSnapshotRulePointCount(
                   *ghost_snapshot,
                   interfaces::LevelSetGeometryRuleRole::NegativeVolume),
               0u);
-    EXPECT_EQ(interfaces::freeSurfaceOwnedRulePointCount(
+    EXPECT_EQ(interfaces::ownedSnapshotRulePointCount(
                   *ghost_snapshot,
                   interfaces::LevelSetGeometryRuleRole::Interface),
               0u);
-    EXPECT_EQ(ghost_variation.owned_wetted_wall_area_variation, 0.0);
-    EXPECT_EQ(ghost_variation.young_wall_energy_variation, 0.0);
+    EXPECT_EQ(ghost_variation.active_boundary_measure, 0.0);
+    EXPECT_EQ(ghost_variation.weighted_boundary_measure, 0.0);
     RecordProperty("functional_first_variation_ghost_contribution_count", 0);
 }
 

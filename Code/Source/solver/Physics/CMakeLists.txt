@@ -301,6 +301,7 @@ if(PHYSICS_BUILD_TESTS)
         Tests/Unit/test_IncompressibleTwoFluidInterface.cpp
         Tests/Unit/test_TwoFluidStageRecords.cpp
         Tests/Unit/test_FunctionalRecords.cpp
+        Tests/Unit/test_FreeSurfaceSnapshotFunctionals.cpp
         Tests/Unit/test_OperatorStageCapture.cpp
         Tests/Unit/test_MovingDomainPhysics.cpp
         Tests/Unit/test_FittedFreeSurfaceALE.cpp

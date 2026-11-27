@@ -14,9 +14,8 @@
  *
  * The evaluators return the value (and the physical or reference gradient)
  * of one FE field at a reference point of a parent cell, from a solution
- * vector in FE order: the callbacks that the free-surface geometry snapshot
- * functionals and the accepted-stage diagnostics take
- * (LevelSetGeometrySnapshot.h).  What they read of the field is a
+ * vector in FE order: the callbacks for evaluating fields on level-set
+ * geometry snapshots (LevelSetGeometrySnapshot.h).  What they read of the field is a
  * SnapshotFieldAccess, which systems::snapshotFieldAccess builds from an FE
  * system.
  */

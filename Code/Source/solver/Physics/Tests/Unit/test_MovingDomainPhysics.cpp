@@ -5,6 +5,8 @@
  * See Copyright-SimVascular.txt for additional details.
  */
 
+#include "Physics/Formulations/NavierStokes/FreeSurface/SnapshotFunctionals.h"
+
 #include <gtest/gtest.h>
 
 #include "Physics/Core/EquationModuleInput.h"
@@ -5209,7 +5211,7 @@ TEST(MovingDomainPhysics,
     first.velocity_field = velocity;
     first.geometry_domain_id = "first_bulk_owner_domain";
     first.active_volume_energy_parameters =
-        FE::interfaces::FreeSurfaceActiveVolumeEnergyParameters{
+        svmp::Physics::formulations::navier_stokes::free_surface::FreeSurfaceActiveVolumeEnergyParameters{
             .active_side =
                 FE::geometry::CutIntegrationSide::Negative,
             .density = FE::Real{1.0},
@@ -5227,7 +5229,7 @@ TEST(MovingDomainPhysics,
     duplicate.velocity_field = velocity;
     duplicate.geometry_domain_id = "second_bulk_owner_domain";
     duplicate.active_volume_dissipation_parameters =
-        FE::interfaces::FreeSurfaceActiveVolumeDissipationParameters{
+        svmp::Physics::formulations::navier_stokes::free_surface::FreeSurfaceActiveVolumeDissipationParameters{
             .active_side =
                 FE::geometry::CutIntegrationSide::Negative,
             .dynamic_viscosity = FE::Real{0.01},
@@ -5304,12 +5306,12 @@ TEST(MovingDomainPhysics,
         .source = "Transient scalar owner for functional history fixture",
     });
 
-    FE::interfaces::FreeSurfaceDiscreteFunctionalParameters parameters;
+    svmp::Physics::formulations::navier_stokes::free_surface::FreeSurfaceDiscreteFunctionalParameters parameters;
     parameters.active_side =
         FE::geometry::CutIntegrationSide::Negative;
     parameters.surface_tension = gamma;
     parameters.young_wall_coefficients.push_back(
-        FE::interfaces::FreeSurfaceYoungWallCoefficient{
+        svmp::Physics::formulations::navier_stokes::free_surface::FreeSurfaceYoungWallCoefficient{
             .boundary_marker = wall_marker,
             .equilibrium_contact_angle_radians = theta,
         });
@@ -5368,13 +5370,13 @@ TEST(MovingDomainPhysics,
         .quadrature_policy_key = 8u,
         .snapshot_revision_key = 101u,
     };
-    FE::interfaces::FreeSurfaceDiscreteFunctionalState functional_state{
+    svmp::Physics::formulations::navier_stokes::free_surface::FreeSurfaceDiscreteFunctionalState functional_state{
         .snapshot_revision_key = 101u,
         .active_side = FE::geometry::CutIntegrationSide::Negative,
         .surface_tension = gamma,
         .volume_multiplier = FE::Real{0.0},
         .walls = {
-            FE::interfaces::FreeSurfaceDiscreteWallFunctionalState{
+            svmp::Physics::formulations::navier_stokes::free_surface::FreeSurfaceDiscreteWallFunctionalState{
                 .boundary_marker = wall_marker,
                 .equilibrium_contact_angle_radians = theta,
                 .owned_wetted_wall_area = wetted_wall_area,
@@ -5544,17 +5546,17 @@ TEST(MovingDomainPhysics,
             FE::forms::inner(FE::forms::dt(velocity_state), velocity_test)
                 .dx());
 
-    FE::interfaces::FreeSurfaceDiscreteFunctionalParameters parameters;
+    svmp::Physics::formulations::navier_stokes::free_surface::FreeSurfaceDiscreteFunctionalParameters parameters;
     parameters.active_side =
         FE::geometry::CutIntegrationSide::Negative;
     parameters.surface_tension = gamma;
     parameters.young_wall_coefficients.push_back(
-        FE::interfaces::FreeSurfaceYoungWallCoefficient{
+        svmp::Physics::formulations::navier_stokes::free_surface::FreeSurfaceYoungWallCoefficient{
             .boundary_marker = wall_marker,
             .equilibrium_contact_angle_radians = theta,
         });
     parameters.dynamic_contact_coefficients.push_back(
-        FE::interfaces::FreeSurfaceDynamicContactCoefficient{
+        svmp::Physics::formulations::navier_stokes::free_surface::FreeSurfaceDynamicContactCoefficient{
             .boundary_marker = wall_marker,
             .equilibrium_contact_angle_radians = theta,
             .mobility = mobility,
@@ -5614,12 +5616,12 @@ TEST(MovingDomainPhysics,
         .quadrature_policy_key = 8u,
         .snapshot_revision_key = 102u,
     };
-    FE::interfaces::FreeSurfaceDiscreteFunctionalState functional_state{
+    svmp::Physics::formulations::navier_stokes::free_surface::FreeSurfaceDiscreteFunctionalState functional_state{
         .snapshot_revision_key = 102u,
         .active_side = FE::geometry::CutIntegrationSide::Negative,
         .surface_tension = gamma,
         .volume_multiplier = FE::Real{0.0},
-        .walls = {FE::interfaces::FreeSurfaceDiscreteWallFunctionalState{
+        .walls = {svmp::Physics::formulations::navier_stokes::free_surface::FreeSurfaceDiscreteWallFunctionalState{
             .boundary_marker = wall_marker,
             .equilibrium_contact_angle_radians = theta,
             .owned_wetted_wall_area = FE::Real{0.3},
@@ -5638,13 +5640,13 @@ TEST(MovingDomainPhysics,
         .total_potential = gamma * FE::Real{0.4} -
                            gamma * std::cos(theta) * FE::Real{0.3},
     };
-    FE::interfaces::FreeSurfaceDynamicContactState contact_state;
+    svmp::Physics::formulations::navier_stokes::free_surface::FreeSurfaceDynamicContactState contact_state;
     contact_state.snapshot_revision_key = 102u;
     contact_state.active_side =
         FE::geometry::CutIntegrationSide::Negative;
     contact_state.surface_tension = gamma;
     contact_state.walls.push_back(
-        FE::interfaces::FreeSurfaceDynamicContactWallState{
+        svmp::Physics::formulations::navier_stokes::free_surface::FreeSurfaceDynamicContactWallState{
             .boundary_marker = wall_marker,
             .equilibrium_contact_angle_radians = theta,
             .mobility = mobility,
@@ -5675,7 +5677,7 @@ TEST(MovingDomainPhysics,
             .footprint_direction_integral = {{0.1, 0.0, 0.0}},
             .contact_line_tangent_integral = {{0.0, -0.1, 0.0}},
         });
-    FE::interfaces::finalizeFreeSurfaceDynamicContactState(contact_state);
+    svmp::Physics::formulations::navier_stokes::free_surface::finalizeFreeSurfaceDynamicContactState(contact_state);
 
     std::vector<svmp::Physics::formulations::navier_stokes::free_surface::AcceptedFreeSurfaceDiscreteFunctionalState>
         accepted_states{
@@ -5738,7 +5740,7 @@ TEST(MovingDomainPhysics,
         theta,
         1.0e-14);
     EXPECT_EQ(stage.state.walls.front().motion,
-              FE::interfaces::FreeSurfaceContactMotion::Stationary);
+              svmp::Physics::formulations::navier_stokes::free_surface::FreeSurfaceContactMotion::Stationary);
     ASSERT_TRUE(stage.state.walls.front().mean_wall_slip_speed.has_value());
     EXPECT_NEAR(*stage.state.walls.front().mean_wall_slip_speed,
                 FE::Real{0.2},
@@ -8440,7 +8442,7 @@ TEST(MovingDomainPhysics,
         1u);
     EXPECT_EQ(
         declarations.front().parameters.dynamic_contact_coefficients.front().law,
-        FE::interfaces::FreeSurfaceContactLaw::PrescribedAngle);
+        svmp::Physics::formulations::navier_stokes::free_surface::FreeSurfaceContactLaw::PrescribedAngle);
     EXPECT_TRUE(system.hasOperator("equations"));
     EXPECT_FALSE(system.hasOperator("level_set"));
     EXPECT_TRUE(
@@ -8520,10 +8522,10 @@ TEST(MovingDomainPhysics,
         {phi},
         (phi_state * eta).dx());
 
-    FE::interfaces::FreeSurfaceDiscreteFunctionalParameters parameters;
+    svmp::Physics::formulations::navier_stokes::free_surface::FreeSurfaceDiscreteFunctionalParameters parameters;
     parameters.active_side = FE::geometry::CutIntegrationSide::Negative;
     parameters.young_wall_coefficients.push_back(
-        FE::interfaces::FreeSurfaceYoungWallCoefficient{
+        svmp::Physics::formulations::navier_stokes::free_surface::FreeSurfaceYoungWallCoefficient{
             .boundary_marker = wall_marker,
             .equilibrium_contact_angle_radians = angle,
         });

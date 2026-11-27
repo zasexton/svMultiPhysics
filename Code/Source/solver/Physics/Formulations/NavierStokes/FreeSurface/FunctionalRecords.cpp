@@ -5,6 +5,8 @@
  * See Copyright-SimVascular.txt for additional details.
  */
 
+#include "Physics/Formulations/NavierStokes/FreeSurface/SnapshotFunctionals.h"
+
 #include "Physics/Formulations/NavierStokes/FreeSurface/FunctionalRecords.h"
 
 #include "FE/Core/FEException.h"
@@ -62,8 +64,8 @@ bool sameLevelSetGeometryRevision(
 }
 
 bool sameFreeSurfaceFunctionalParameters(
-    const interfaces::FreeSurfaceDiscreteFunctionalParameters& lhs,
-    const interfaces::FreeSurfaceDiscreteFunctionalParameters& rhs) noexcept
+    const FreeSurfaceDiscreteFunctionalParameters& lhs,
+    const FreeSurfaceDiscreteFunctionalParameters& rhs) noexcept
 {
     if (lhs.active_side != rhs.active_side ||
         lhs.surface_tension != rhs.surface_tension ||
@@ -101,8 +103,8 @@ bool sameFreeSurfaceFunctionalParameters(
 }
 
 bool sameFreeSurfaceActiveVolumeEnergyParameters(
-    const interfaces::FreeSurfaceActiveVolumeEnergyParameters& lhs,
-    const interfaces::FreeSurfaceActiveVolumeEnergyParameters& rhs) noexcept
+    const FreeSurfaceActiveVolumeEnergyParameters& lhs,
+    const FreeSurfaceActiveVolumeEnergyParameters& rhs) noexcept
 {
     return lhs.active_side == rhs.active_side &&
            lhs.density == rhs.density &&
@@ -113,8 +115,8 @@ bool sameFreeSurfaceActiveVolumeEnergyParameters(
 }
 
 bool sameFreeSurfaceActiveVolumeEnergyState(
-    const interfaces::FreeSurfaceActiveVolumeEnergyState& lhs,
-    const interfaces::FreeSurfaceActiveVolumeEnergyState& rhs) noexcept
+    const FreeSurfaceActiveVolumeEnergyState& lhs,
+    const FreeSurfaceActiveVolumeEnergyState& rhs) noexcept
 {
     return lhs.snapshot_revision_key == rhs.snapshot_revision_key &&
            lhs.active_side == rhs.active_side &&
@@ -134,8 +136,8 @@ bool sameFreeSurfaceActiveVolumeEnergyState(
 }
 
 bool sameFreeSurfaceActiveVolumeDissipationParameters(
-    const interfaces::FreeSurfaceActiveVolumeDissipationParameters& lhs,
-    const interfaces::FreeSurfaceActiveVolumeDissipationParameters& rhs)
+    const FreeSurfaceActiveVolumeDissipationParameters& lhs,
+    const FreeSurfaceActiveVolumeDissipationParameters& rhs)
     noexcept
 {
     return lhs.active_side == rhs.active_side &&
@@ -143,8 +145,8 @@ bool sameFreeSurfaceActiveVolumeDissipationParameters(
 }
 
 bool sameFreeSurfaceActiveVolumeDissipationState(
-    const interfaces::FreeSurfaceActiveVolumeDissipationState& lhs,
-    const interfaces::FreeSurfaceActiveVolumeDissipationState& rhs) noexcept
+    const FreeSurfaceActiveVolumeDissipationState& lhs,
+    const FreeSurfaceActiveVolumeDissipationState& rhs) noexcept
 {
     return lhs.snapshot_revision_key == rhs.snapshot_revision_key &&
            lhs.active_side == rhs.active_side &&
@@ -157,8 +159,8 @@ bool sameFreeSurfaceActiveVolumeDissipationState(
 }
 
 bool sameFreeSurfaceExternalPressurePowerParameters(
-    const interfaces::FreeSurfaceExternalPressurePowerParameters& lhs,
-    const interfaces::FreeSurfaceExternalPressurePowerParameters& rhs)
+    const FreeSurfaceExternalPressurePowerParameters& lhs,
+    const FreeSurfaceExternalPressurePowerParameters& rhs)
     noexcept
 {
     return lhs.active_side == rhs.active_side &&
@@ -206,8 +208,8 @@ bool sameFreeSurfaceDiscreteFunctionalDeclaration(
 }
 
 bool sameFreeSurfaceExternalPressurePowerState(
-    const interfaces::FreeSurfaceExternalPressurePowerState& lhs,
-    const interfaces::FreeSurfaceExternalPressurePowerState& rhs) noexcept
+    const FreeSurfaceExternalPressurePowerState& lhs,
+    const FreeSurfaceExternalPressurePowerState& rhs) noexcept
 {
     return lhs.snapshot_revision_key == rhs.snapshot_revision_key &&
            lhs.active_side == rhs.active_side &&
@@ -223,8 +225,8 @@ bool sameFreeSurfaceExternalPressurePowerState(
 }
 
 bool sameFreeSurfaceBackwardEulerKineticWorkState(
-    const interfaces::FreeSurfaceBackwardEulerKineticWorkState& lhs,
-    const interfaces::FreeSurfaceBackwardEulerKineticWorkState& rhs) noexcept
+    const FreeSurfaceBackwardEulerKineticWorkState& lhs,
+    const FreeSurfaceBackwardEulerKineticWorkState& rhs) noexcept
 {
     return lhs.snapshot_revision_key == rhs.snapshot_revision_key &&
            lhs.previous_velocity_revision ==
@@ -249,8 +251,8 @@ bool sameFreeSurfaceBackwardEulerKineticWorkState(
 }
 
 bool sameFreeSurfaceFunctionalState(
-    const interfaces::FreeSurfaceDiscreteFunctionalState& lhs,
-    const interfaces::FreeSurfaceDiscreteFunctionalState& rhs) noexcept
+    const FreeSurfaceDiscreteFunctionalState& lhs,
+    const FreeSurfaceDiscreteFunctionalState& rhs) noexcept
 {
     if (lhs.snapshot_revision_key != rhs.snapshot_revision_key ||
         lhs.active_side != rhs.active_side ||
@@ -285,8 +287,8 @@ bool sameFreeSurfaceFunctionalState(
 }
 
 bool sameFreeSurfaceFunctionalVariationState(
-    const interfaces::FreeSurfaceDiscreteFunctionalVariationState& lhs,
-    const interfaces::FreeSurfaceDiscreteFunctionalVariationState& rhs)
+    const FreeSurfaceDiscreteFunctionalVariationState& lhs,
+    const FreeSurfaceDiscreteFunctionalVariationState& rhs)
     noexcept
 {
     if (lhs.snapshot_revision_key != rhs.snapshot_revision_key ||
@@ -327,8 +329,8 @@ bool sameFreeSurfaceFunctionalVariationState(
 }
 
 bool sameFreeSurfaceDynamicContactWallState(
-    const interfaces::FreeSurfaceDynamicContactWallState& lhs,
-    const interfaces::FreeSurfaceDynamicContactWallState& rhs) noexcept
+    const FreeSurfaceDynamicContactWallState& lhs,
+    const FreeSurfaceDynamicContactWallState& rhs) noexcept
 {
     return lhs.boundary_marker == rhs.boundary_marker &&
            lhs.equilibrium_contact_angle_radians ==
@@ -1000,10 +1002,10 @@ void FunctionalRecords::declareFunctional(
             parameters.dynamic_contact_coefficients[i];
         const bool prescribed_angle =
             coefficient.law ==
-            interfaces::FreeSurfaceContactLaw::PrescribedAngle;
+            FreeSurfaceContactLaw::PrescribedAngle;
         const bool dynamic_ren_e =
             coefficient.law ==
-            interfaces::FreeSurfaceContactLaw::DynamicRenE;
+            FreeSurfaceContactLaw::DynamicRenE;
         FE_THROW_IF(
             coefficient.boundary_marker < 0 ||
                 !std::isfinite(
@@ -1182,7 +1184,7 @@ void FunctionalRecords::declareFunctional(
         log_line.child("free_surface_contact_stage_wall_declaration", {"interface_marker"})
             .value("contact_stage_marker", contact.boundary_marker)
             .text("contact_stage_law",
-                  contact.law == interfaces::FreeSurfaceContactLaw::DynamicRenE ? "DynamicRenE" : "PrescribedAngle")
+                  contact.law == FreeSurfaceContactLaw::DynamicRenE ? "DynamicRenE" : "PrescribedAngle")
             .value("contact_stage_equilibrium_angle_radians", contact.equilibrium_contact_angle_radians)
             .value("contact_stage_mobility", contact.mobility)
             .value("contact_stage_slip_length", contact.slip_length)
@@ -1980,7 +1982,7 @@ void FunctionalRecords::recordAcceptedFunctionals(
                     "contact-stage integral bounds are inconsistent");
                 const bool dynamic_ren_e =
                     wall.law ==
-                    interfaces::FreeSurfaceContactLaw::DynamicRenE;
+                    FreeSurfaceContactLaw::DynamicRenE;
                 const Real line_friction_residual = dynamic_ren_e
                     ? wall.contact_speed_integral / wall.mobility
                     : Real{0.0};
@@ -2130,21 +2132,20 @@ void FunctionalRecords::recordAcceptedFunctionals(
                     }
                 }
                 auto expected_motion =
-                    interfaces::FreeSurfaceContactMotion::Absent;
+                    FreeSurfaceContactMotion::Absent;
                 if (has_measure) {
                     if (wall.owned_advancing_point_count != 0u &&
                         wall.owned_receding_point_count != 0u) {
                         expected_motion =
-                            interfaces::FreeSurfaceContactMotion::Mixed;
+                            FreeSurfaceContactMotion::Mixed;
                     } else if (wall.owned_advancing_point_count != 0u) {
                         expected_motion =
-                            interfaces::FreeSurfaceContactMotion::Advancing;
+                            FreeSurfaceContactMotion::Advancing;
                     } else if (wall.owned_receding_point_count != 0u) {
                         expected_motion =
-                            interfaces::FreeSurfaceContactMotion::Receding;
+                            FreeSurfaceContactMotion::Receding;
                     } else {
-                        expected_motion = interfaces::
-                            FreeSurfaceContactMotion::Stationary;
+                        expected_motion = FreeSurfaceContactMotion::Stationary;
                     }
                 }
                 FE_THROW_IF(
@@ -2698,18 +2699,18 @@ void FunctionalRecords::recordAcceptedFunctionals(
             for (const auto& contact : contact_stage.state.walls) {
                 const char* motion = "Absent";
                 switch (contact.motion) {
-                case interfaces::FreeSurfaceContactMotion::Absent:
+                case FreeSurfaceContactMotion::Absent:
                     break;
-                case interfaces::FreeSurfaceContactMotion::Stationary:
+                case FreeSurfaceContactMotion::Stationary:
                     motion = "Stationary";
                     break;
-                case interfaces::FreeSurfaceContactMotion::Advancing:
+                case FreeSurfaceContactMotion::Advancing:
                     motion = "Advancing";
                     break;
-                case interfaces::FreeSurfaceContactMotion::Receding:
+                case FreeSurfaceContactMotion::Receding:
                     motion = "Receding";
                     break;
-                case interfaces::FreeSurfaceContactMotion::Mixed:
+                case FreeSurfaceContactMotion::Mixed:
                     motion = "Mixed";
                     break;
                 }
@@ -2717,7 +2718,7 @@ void FunctionalRecords::recordAcceptedFunctionals(
                     log_line.child("free_surface_contact_stage_wall_history", {"accepted_step", "interface_marker"});
                 wall_line.value("contact_wall_marker", contact.boundary_marker)
                     .text("contact_law",
-                          contact.law == interfaces::FreeSurfaceContactLaw::DynamicRenE ? "DynamicRenE"
+                          contact.law == FreeSurfaceContactLaw::DynamicRenE ? "DynamicRenE"
                                                                                        : "PrescribedAngle")
                     .value("contact_equilibrium_angle_radians", contact.equilibrium_contact_angle_radians)
                     .value("contact_mobility", contact.mobility)

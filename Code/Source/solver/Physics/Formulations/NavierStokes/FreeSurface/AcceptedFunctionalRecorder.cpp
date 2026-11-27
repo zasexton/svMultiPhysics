@@ -5,6 +5,8 @@
  * See Copyright-SimVascular.txt for additional details.
  */
 
+#include "Physics/Formulations/NavierStokes/FreeSurface/SnapshotFunctionals.h"
+
 #include "Physics/Formulations/NavierStokes/FreeSurface/AcceptedFunctionalRecorder.h"
 
 #include "FE/Assembly/Assembler.h"
@@ -321,7 +323,7 @@ currentAcceptedFunctionalLayouts(
             snapshot.ledger().pruned_rule_count != 0u ? 1.0 : 0.0,
             comm) == 1.0;
     auto global_state =
-        svmp::FE::interfaces::freeSurfaceDiscreteFunctionalLayout(
+        freeSurfaceDiscreteFunctionalLayout(
             snapshot, declaration.parameters);
 
     const auto wall_count = static_cast<double>(global_state.walls.size());
@@ -450,14 +452,14 @@ void attachAcceptedFreeSurfaceEndpointFunctionalPowers(
           std::to_string(declaration.interface_marker) + ".");
     }
     std::optional<
-        svmp::FE::interfaces::FreeSurfaceDiscreteFunctionalVariationState>
+        FreeSurfaceDiscreteFunctionalVariationState>
         local_power;
     std::exception_ptr local_failure;
     try {
       // The record's structure (its walls); every rate is a declared
       // functional (applyDeclaredFunctionalForms).
       local_power =
-          svmp::FE::interfaces::freeSurfaceDiscreteFunctionalVariationLayout(
+          freeSurfaceDiscreteFunctionalVariationLayout(
               **found, declaration.parameters);
     } catch (...) {
       local_failure = std::current_exception();
@@ -601,18 +603,18 @@ void attachAcceptedActiveVolumeEnergies(
     // The record's structure; the values are the declared functionals
     // (applyDeclaredFunctionalForms), the point count the snapshot's.
     std::optional<
-        svmp::FE::interfaces::FreeSurfaceActiveVolumeEnergyState>
+        FreeSurfaceActiveVolumeEnergyState>
         local_energy;
     std::exception_ptr local_failure;
     try {
-      svmp::FE::interfaces::FreeSurfaceActiveVolumeEnergyState energy;
+      FreeSurfaceActiveVolumeEnergyState energy;
       energy.snapshot_revision_key = (*found)->revision().snapshot_revision_key;
       energy.active_side = parameters.active_side;
       energy.density = parameters.density;
       energy.gravitational_acceleration = parameters.gravitational_acceleration;
       energy.gravitational_reference_point = parameters.gravitational_reference_point;
       energy.owned_quadrature_point_count =
-          svmp::FE::interfaces::freeSurfaceOwnedRulePointCount(
+          svmp::FE::interfaces::ownedSnapshotRulePointCount(
               **found, liquidVolumeRole(parameters.active_side), &sim.fe_system->meshAccess());
       local_energy = std::move(energy);
     } catch (...) {
@@ -700,18 +702,18 @@ void attachAcceptedFreeSurfaceActiveVolumeDissipation(
           std::to_string(declaration.interface_marker) + ".");
     }
     std::optional<
-        svmp::FE::interfaces::FreeSurfaceActiveVolumeDissipationState>
+        FreeSurfaceActiveVolumeDissipationState>
         local_dissipation;
     std::exception_ptr local_failure;
     try {
       // The record's structure; the values are the declared functionals.
       const auto& parameters = *declaration.active_volume_dissipation_parameters;
-      svmp::FE::interfaces::FreeSurfaceActiveVolumeDissipationState dissipation;
+      FreeSurfaceActiveVolumeDissipationState dissipation;
       dissipation.snapshot_revision_key = (*found)->revision().snapshot_revision_key;
       dissipation.active_side = parameters.active_side;
       dissipation.dynamic_viscosity = parameters.dynamic_viscosity;
       dissipation.owned_quadrature_point_count =
-          svmp::FE::interfaces::freeSurfaceOwnedRulePointCount(
+          svmp::FE::interfaces::ownedSnapshotRulePointCount(
               **found, liquidVolumeRole(parameters.active_side), &sim.fe_system->meshAccess());
       local_dissipation = std::move(dissipation);
     } catch (...) {
@@ -802,18 +804,18 @@ void attachAcceptedFreeSurfaceExternalPressurePowers(
           std::to_string(declaration.interface_marker) + ".");
     }
     std::optional<
-        svmp::FE::interfaces::FreeSurfaceExternalPressurePowerState>
+        FreeSurfaceExternalPressurePowerState>
         local_power;
     std::exception_ptr local_failure;
     try {
       // The record's structure; the values are the declared functionals.
       const auto& parameters = *declaration.external_pressure_power_parameters;
-      svmp::FE::interfaces::FreeSurfaceExternalPressurePowerState power;
+      FreeSurfaceExternalPressurePowerState power;
       power.snapshot_revision_key = (*found)->revision().snapshot_revision_key;
       power.active_side = parameters.active_side;
       power.external_pressure = parameters.external_pressure;
       power.owned_quadrature_point_count =
-          svmp::FE::interfaces::freeSurfaceOwnedRulePointCount(
+          svmp::FE::interfaces::ownedSnapshotRulePointCount(
               **found, svmp::FE::interfaces::LevelSetGeometryRuleRole::Interface);
       local_power = std::move(power);
     } catch (...) {
@@ -976,7 +978,7 @@ void attachAcceptedFreeSurfaceBackwardEulerKineticWork(
     }
 
     std::optional<
-        svmp::FE::interfaces::FreeSurfaceBackwardEulerKineticWorkState>
+        FreeSurfaceBackwardEulerKineticWorkState>
         local_work;
     std::exception_ptr local_failure;
     try {
@@ -985,14 +987,14 @@ void attachAcceptedFreeSurfaceBackwardEulerKineticWork(
       // (applyDeclaredFunctionalForms).
       const auto& parameters =
           *declaration.active_volume_energy_parameters;
-      svmp::FE::interfaces::FreeSurfaceBackwardEulerKineticWorkState work;
+      FreeSurfaceBackwardEulerKineticWorkState work;
       work.snapshot_revision_key = (*found)->revision().snapshot_revision_key;
       work.previous_velocity_revision = previous_velocity_revision;
       work.endpoint_velocity_revision = endpoint_velocity_revision;
       work.active_side = parameters.active_side;
       work.density = parameters.density;
       work.owned_quadrature_point_count =
-          svmp::FE::interfaces::freeSurfaceOwnedRulePointCount(
+          svmp::FE::interfaces::ownedSnapshotRulePointCount(
               **found, liquidVolumeRole(parameters.active_side), &sim.fe_system->meshAccess());
       local_work = std::move(work);
     } catch (...) {

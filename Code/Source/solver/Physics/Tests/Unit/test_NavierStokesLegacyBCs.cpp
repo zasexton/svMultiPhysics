@@ -5,6 +5,8 @@
  * See Copyright-SimVascular.txt for additional details.
  */
 
+#include "Physics/Formulations/NavierStokes/FreeSurface/SnapshotFunctionals.h"
+
 #include <gtest/gtest.h>
 
 #include "Physics/Core/EquationModuleInput.h"
@@ -3307,7 +3309,7 @@ TEST(NavierStokesLegacyBCs,
     const auto& coefficient =
         declarations.front().parameters.dynamic_contact_coefficients.front();
     EXPECT_EQ(coefficient.law,
-              svmp::FE::interfaces::FreeSurfaceContactLaw::PrescribedAngle);
+              svmp::Physics::formulations::navier_stokes::free_surface::FreeSurfaceContactLaw::PrescribedAngle);
     EXPECT_DOUBLE_EQ(coefficient.mobility, 0.0);
     EXPECT_DOUBLE_EQ(coefficient.slip_length, 0.2);
     EXPECT_DOUBLE_EQ(coefficient.dynamic_viscosity, 0.01);

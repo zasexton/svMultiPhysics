@@ -624,21 +624,9 @@ TEST(LevelSetSnapshotCompactRecords, ConsumersGetIdenticalAnswers)
     ASSERT_NE(full, nullptr);
     ASSERT_NE(compact, nullptr);
 
-    // The record layout and the measures of every role, both liquid sides
-    // (the values of the records are declared measured 0-forms, D49 E4).
-    for (const auto liquid : {geometry::CutIntegrationSide::Negative,
-                              geometry::CutIntegrationSide::Positive}) {
-        interfaces::FreeSurfaceDiscreteFunctionalParameters parameters;
-        parameters.active_side = liquid;
-        parameters.surface_tension = FE::Real{0.7};
-        parameters.volume_multiplier = FE::Real{-1.3};
-        const auto a =
-            interfaces::freeSurfaceDiscreteFunctionalLayout(*full, parameters);
-        const auto b = interfaces::freeSurfaceDiscreteFunctionalLayout(
-            *compact, parameters);
-        EXPECT_EQ(a.snapshot_revision_key, b.snapshot_revision_key);
-        EXPECT_EQ(a.walls.size(), b.walls.size());
-    }
+    EXPECT_EQ(full->revision().snapshot_revision_key, compact->revision().snapshot_revision_key);
+    EXPECT_EQ(full->contactDomains().size(), compact->contactDomains().size());
+    EXPECT_EQ(full->activeBoundaryDomains().size(), compact->activeBoundaryDomains().size());
     for (const auto role : {interfaces::LevelSetGeometryRuleRole::NegativeVolume,
                             interfaces::LevelSetGeometryRuleRole::PositiveVolume,
                             interfaces::LevelSetGeometryRuleRole::Interface}) {
@@ -647,9 +635,9 @@ TEST(LevelSetSnapshotCompactRecords, ConsumersGetIdenticalAnswers)
 
     // Wet-side point counts and point integrals are unchanged.
     const auto velocity = testVelocity(FE::Real{0.4});
-    EXPECT_EQ(interfaces::freeSurfaceOwnedRulePointCount(
+    EXPECT_EQ(interfaces::ownedSnapshotRulePointCount(
                   *full, interfaces::LevelSetGeometryRuleRole::NegativeVolume),
-              interfaces::freeSurfaceOwnedRulePointCount(
+              interfaces::ownedSnapshotRulePointCount(
                   *compact, interfaces::LevelSetGeometryRuleRole::NegativeVolume));
     EXPECT_TRUE(sameBits(
         ownedRulePointIntegral(*full, interfaces::LevelSetGeometryRuleRole::NegativeVolume, velocity, nullptr),
@@ -657,9 +645,9 @@ TEST(LevelSetSnapshotCompactRecords, ConsumersGetIdenticalAnswers)
                                nullptr)));
 
     // A dry-side point count fails closed instead of skipping volume.
-    EXPECT_NO_THROW((void)interfaces::freeSurfaceOwnedRulePointCount(
+    EXPECT_NO_THROW((void)interfaces::ownedSnapshotRulePointCount(
         *full, interfaces::LevelSetGeometryRuleRole::PositiveVolume));
-    EXPECT_THROW((void)interfaces::freeSurfaceOwnedRulePointCount(
+    EXPECT_THROW((void)interfaces::ownedSnapshotRulePointCount(
                      *compact, interfaces::LevelSetGeometryRuleRole::PositiveVolume),
                  std::invalid_argument);
 
@@ -722,12 +710,12 @@ TEST(LevelSetSnapshotCompactRecords,
     const auto velocity = testVelocity(FE::Real{0.4});
     for (const auto role : {interfaces::LevelSetGeometryRuleRole::NegativeVolume,
                             interfaces::LevelSetGeometryRuleRole::PositiveVolume}) {
-        EXPECT_EQ(interfaces::freeSurfaceOwnedRulePointCount(*full, role),
-                  interfaces::freeSurfaceOwnedRulePointCount(*compact, role, mesh));
+        EXPECT_EQ(interfaces::ownedSnapshotRulePointCount(*full, role),
+                  interfaces::ownedSnapshotRulePointCount(*compact, role, mesh));
         EXPECT_TRUE(sameBits(ownedRulePointIntegral(*full, role, velocity, nullptr),
                              ownedRulePointIntegral(*compact, role, velocity, mesh)));
         // Without the mesh the count fails closed.
-        EXPECT_THROW((void)interfaces::freeSurfaceOwnedRulePointCount(*compact, role),
+        EXPECT_THROW((void)interfaces::ownedSnapshotRulePointCount(*compact, role),
                      std::invalid_argument);
     }
 }

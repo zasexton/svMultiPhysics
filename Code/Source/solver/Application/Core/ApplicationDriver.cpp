@@ -1,3 +1,5 @@
+#include "Physics/Formulations/NavierStokes/FreeSurface/SnapshotFunctionals.h"
+
 #include "Application/Core/ApplicationDriver.h"
 #include "FE/Core/LogRecord.h"
 
@@ -3202,7 +3204,7 @@ resolveLevelSetWallAwareMaintenanceContext(
     for (const auto& coefficient :
          declaration.parameters.dynamic_contact_coefficients) {
       if (coefficient.law !=
-          svmp::FE::interfaces::FreeSurfaceContactLaw::DynamicRenE) {
+          svmp::Physics::formulations::navier_stokes::free_surface::FreeSurfaceContactLaw::DynamicRenE) {
         continue;
       }
       // A dynamic law supersedes the equilibrium Young datum on the same
@@ -3223,7 +3225,7 @@ resolveLevelSetWallAwareMaintenanceContext(
         declaration.parameters.dynamic_contact_coefficients.end(),
         [](const auto& coefficient) {
           return coefficient.law ==
-                 svmp::FE::interfaces::FreeSurfaceContactLaw::DynamicRenE;
+                 svmp::Physics::formulations::navier_stokes::free_surface::FreeSurfaceContactLaw::DynamicRenE;
         });
     if (has_dynamic_contact_law) {
       const auto stage_it =

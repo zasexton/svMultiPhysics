@@ -9,6 +9,8 @@
 // Free-surface record tests that were FE system tests before the records
 // moved to the Navier-Stokes free-surface physics.
 
+#include "Physics/Formulations/NavierStokes/FreeSurface/SnapshotFunctionals.h"
+
 #include <gtest/gtest.h>
 
 #include "Physics/Formulations/NavierStokes/FreeSurface/FunctionalRecords.h"
@@ -154,7 +156,7 @@ TEST(FunctionalRecords,
         .velocity_field = velocity,
         .geometry_domain_id = "static_body_force_contract",
         .parameters =
-            svmp::FE::interfaces::FreeSurfaceDiscreteFunctionalParameters{
+            svmp::Physics::formulations::navier_stokes::free_surface::FreeSurfaceDiscreteFunctionalParameters{
                 .active_side =
                     svmp::FE::geometry::CutIntegrationSide::Negative,
                 .surface_tension = 1.0,
@@ -169,7 +171,7 @@ TEST(FunctionalRecords,
     EXPECT_TRUE(functionalRecords(sys).functionalDeclarations().empty());
 
     declaration.active_volume_energy_parameters =
-        svmp::FE::interfaces::FreeSurfaceActiveVolumeEnergyParameters{
+        svmp::Physics::formulations::navier_stokes::free_surface::FreeSurfaceActiveVolumeEnergyParameters{
             .active_side =
                 svmp::FE::geometry::CutIntegrationSide::Negative,
             .density = 1.0,
@@ -206,12 +208,12 @@ TEST(FunctionalRecords,
             .velocity_field = velocity,
             .geometry_domain_id = "rounding_bound",
             .parameters =
-                interfaces::FreeSurfaceDiscreteFunctionalParameters{
+                svmp::Physics::formulations::navier_stokes::free_surface::FreeSurfaceDiscreteFunctionalParameters{
                     .active_side = CutIntegrationSide::Negative,
                     .surface_tension = 1.0,
                 },
             .active_volume_energy_parameters =
-                interfaces::FreeSurfaceActiveVolumeEnergyParameters{
+                svmp::Physics::formulations::navier_stokes::free_surface::FreeSurfaceActiveVolumeEnergyParameters{
                     .active_side = CutIntegrationSide::Negative,
                     .density = 1.0,
                 },
@@ -253,7 +255,7 @@ TEST(FunctionalRecords,
     };
     const Real liquid_gas_area = 0.4;
     const auto make_states = [&](Real energy_volume) {
-        interfaces::FreeSurfaceDiscreteFunctionalState state{
+        svmp::Physics::formulations::navier_stokes::free_surface::FreeSurfaceDiscreteFunctionalState state{
             .snapshot_revision_key = 101u,
             .active_side = CutIntegrationSide::Negative,
             .surface_tension = 1.0,
@@ -266,7 +268,7 @@ TEST(FunctionalRecords,
         state.total_potential = state.liquid_gas_surface_energy +
                                 state.young_wall_energy +
                                 state.volume_constraint_potential;
-        interfaces::FreeSurfaceActiveVolumeEnergyState energy{
+        svmp::Physics::formulations::navier_stokes::free_surface::FreeSurfaceActiveVolumeEnergyState energy{
             .snapshot_revision_key = 101u,
             .active_side = CutIntegrationSide::Negative,
             .density = 1.0,

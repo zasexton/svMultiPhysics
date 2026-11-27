@@ -1,3 +1,5 @@
+#include "Physics/Formulations/NavierStokes/FreeSurface/SnapshotFunctionals.h"
+
 #include <gtest/gtest.h>
 
 #include "Application/Translators/EquationTranslator.h"
@@ -1754,7 +1756,7 @@ TEST(ApplicationDriverLevelSetWorkflowsMPI,
           .space = scalar_space,
           .components = 1});
 
-  svmp::FE::interfaces::FreeSurfaceDiscreteFunctionalParameters
+  svmp::Physics::formulations::navier_stokes::free_surface::FreeSurfaceDiscreteFunctionalParameters
       functional_parameters;
   functional_parameters.active_side =
       svmp::FE::geometry::CutIntegrationSide::Negative;
@@ -1768,8 +1770,7 @@ TEST(ApplicationDriverLevelSetWorkflowsMPI,
           .geometry_domain_id = "mpi_static_capillary_publication",
           .parameters = functional_parameters,
           .active_volume_energy_parameters =
-              svmp::FE::interfaces::
-                  FreeSurfaceActiveVolumeEnergyParameters{
+              svmp::Physics::formulations::navier_stokes::free_surface::FreeSurfaceActiveVolumeEnergyParameters{
                       .active_side =
                           svmp::FE::geometry::
                               CutIntegrationSide::Negative,
@@ -4818,7 +4819,7 @@ TEST(ApplicationDriverLevelSetWorkflowsMPI,
       .name = "phase", .space = scalar_space, .components = 1});
   const auto velocity = system->addField(svmp::FE::systems::FieldSpec{
       .name = "velocity", .space = velocity_space, .components = 2});
-  svmp::FE::interfaces::FreeSurfaceDiscreteFunctionalParameters
+  svmp::Physics::formulations::navier_stokes::free_surface::FreeSurfaceDiscreteFunctionalParameters
       functional_parameters;
   functional_parameters.active_side =
       svmp::FE::geometry::CutIntegrationSide::Negative;
@@ -4828,12 +4829,12 @@ TEST(ApplicationDriverLevelSetWorkflowsMPI,
   for (const int marker : {static_cast<int>(kLeftOnlyWall),
                            static_cast<int>(kRightOnlyWall)}) {
     functional_parameters.young_wall_coefficients.push_back(
-        svmp::FE::interfaces::FreeSurfaceYoungWallCoefficient{
+        svmp::Physics::formulations::navier_stokes::free_surface::FreeSurfaceYoungWallCoefficient{
             .boundary_marker = marker,
             .equilibrium_contact_angle_radians = equilibrium_angle,
         });
     functional_parameters.dynamic_contact_coefficients.push_back(
-        svmp::FE::interfaces::FreeSurfaceDynamicContactCoefficient{
+        svmp::Physics::formulations::navier_stokes::free_surface::FreeSurfaceDynamicContactCoefficient{
             .boundary_marker = marker,
             .equilibrium_contact_angle_radians = equilibrium_angle,
             .mobility = svmp::FE::Real{0.5},
@@ -5476,7 +5477,7 @@ TEST(ApplicationDriverLevelSetWorkflowsMPI,
   for (const auto& wall : contact_stage.state.walls) {
     contact_qpoints += wall.owned_quadrature_point_count;
     EXPECT_EQ(wall.motion,
-              svmp::FE::interfaces::FreeSurfaceContactMotion::Advancing);
+              svmp::Physics::formulations::navier_stokes::free_surface::FreeSurfaceContactMotion::Advancing);
     ASSERT_TRUE(wall.mean_contact_speed.has_value());
     ASSERT_TRUE(wall.mean_constitutive_residual.has_value());
     EXPECT_NEAR(*wall.mean_contact_speed, 0.25, 1.0e-12);
@@ -6539,8 +6540,7 @@ TEST(ApplicationDriverLevelSetWorkflowsMPI,
   if (rank == 0) {
     inconsistent_declaration.parameters.dynamic_contact_coefficients
         .push_back(
-            svmp::FE::interfaces::
-                FreeSurfaceDynamicContactCoefficient{});
+            svmp::Physics::formulations::navier_stokes::free_surface::FreeSurfaceDynamicContactCoefficient{});
   }
   const std::array<
       svmp::Physics::formulations::navier_stokes::free_surface::FreeSurfaceDiscreteFunctionalDeclaration,

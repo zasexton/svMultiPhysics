@@ -1,3 +1,5 @@
+#include "Physics/Formulations/NavierStokes/FreeSurface/SnapshotFunctionals.h"
+
 #include <gtest/gtest.h>
 
 #include "Application/Translators/EquationTranslator.h"
@@ -5844,7 +5846,7 @@ TEST(ApplicationDriverLevelSetWorkflows,
           .name = "Velocity",
           .space = velocity_space,
           .components = 2});
-  svmp::FE::interfaces::FreeSurfaceDiscreteFunctionalParameters parameters;
+  svmp::Physics::formulations::navier_stokes::free_surface::FreeSurfaceDiscreteFunctionalParameters parameters;
   parameters.active_side =
       svmp::FE::geometry::CutIntegrationSide::Negative;
   parameters.surface_tension = gamma;
@@ -5856,8 +5858,7 @@ TEST(ApplicationDriverLevelSetWorkflows,
           .geometry_domain_id = "functional_interface",
           .parameters = parameters,
           .active_volume_energy_parameters =
-              svmp::FE::interfaces::
-                  FreeSurfaceActiveVolumeEnergyParameters{
+              svmp::Physics::formulations::navier_stokes::free_surface::FreeSurfaceActiveVolumeEnergyParameters{
                       .active_side =
                           svmp::FE::geometry::CutIntegrationSide::Negative,
                       .density = svmp::FE::Real{2.0},
@@ -5871,15 +5872,13 @@ TEST(ApplicationDriverLevelSetWorkflows,
                             svmp::FE::Real{0.0}}},
                   },
           .active_volume_dissipation_parameters =
-              svmp::FE::interfaces::
-                  FreeSurfaceActiveVolumeDissipationParameters{
+              svmp::Physics::formulations::navier_stokes::free_surface::FreeSurfaceActiveVolumeDissipationParameters{
                       .active_side =
                           svmp::FE::geometry::CutIntegrationSide::Negative,
                       .dynamic_viscosity = svmp::FE::Real{0.5},
                   },
           .external_pressure_power_parameters =
-              svmp::FE::interfaces::
-                  FreeSurfaceExternalPressurePowerParameters{
+              svmp::Physics::formulations::navier_stokes::free_surface::FreeSurfaceExternalPressurePowerParameters{
                       .active_side =
                           svmp::FE::geometry::CutIntegrationSide::Negative,
                       .external_pressure = svmp::FE::Real{2.5},
@@ -6072,7 +6071,7 @@ TEST(ApplicationDriverLevelSetWorkflows,
           .name = "Velocity",
           .space = velocity_space,
           .components = 2});
-  svmp::FE::interfaces::FreeSurfaceDiscreteFunctionalParameters parameters;
+  svmp::Physics::formulations::navier_stokes::free_surface::FreeSurfaceDiscreteFunctionalParameters parameters;
   parameters.active_side =
       svmp::FE::geometry::CutIntegrationSide::Negative;
   parameters.surface_tension = gamma;
@@ -6084,8 +6083,7 @@ TEST(ApplicationDriverLevelSetWorkflows,
           .geometry_domain_id = "functional_interface",
           .parameters = parameters,
           .active_volume_energy_parameters =
-              svmp::FE::interfaces::
-                  FreeSurfaceActiveVolumeEnergyParameters{
+              svmp::Physics::formulations::navier_stokes::free_surface::FreeSurfaceActiveVolumeEnergyParameters{
                       .active_side =
                           svmp::FE::geometry::CutIntegrationSide::Negative,
                       .density = svmp::FE::Real{2.0},
@@ -6099,15 +6097,13 @@ TEST(ApplicationDriverLevelSetWorkflows,
                             svmp::FE::Real{0.0}}},
                   },
           .active_volume_dissipation_parameters =
-              svmp::FE::interfaces::
-                  FreeSurfaceActiveVolumeDissipationParameters{
+              svmp::Physics::formulations::navier_stokes::free_surface::FreeSurfaceActiveVolumeDissipationParameters{
                       .active_side =
                           svmp::FE::geometry::CutIntegrationSide::Negative,
                       .dynamic_viscosity = svmp::FE::Real{0.5},
                   },
           .external_pressure_power_parameters =
-              svmp::FE::interfaces::
-                  FreeSurfaceExternalPressurePowerParameters{
+              svmp::Physics::formulations::navier_stokes::free_surface::FreeSurfaceExternalPressurePowerParameters{
                       .active_side =
                           svmp::FE::geometry::CutIntegrationSide::Negative,
                       .external_pressure = svmp::FE::Real{2.5},
@@ -6902,7 +6898,7 @@ TEST(ApplicationDriverLevelSetWorkflows,
           .name = "synthetic_velocity",
           .space = velocity_space,
           .components = 2});
-  svmp::FE::interfaces::FreeSurfaceDiscreteFunctionalParameters
+  svmp::Physics::formulations::navier_stokes::free_surface::FreeSurfaceDiscreteFunctionalParameters
       functional_parameters;
   functional_parameters.active_side =
       svmp::FE::geometry::CutIntegrationSide::Negative;
@@ -6916,8 +6912,7 @@ TEST(ApplicationDriverLevelSetWorkflows,
           .geometry_domain_id = "static_capillary_rollback",
           .parameters = functional_parameters,
           .active_volume_energy_parameters =
-              svmp::FE::interfaces::
-                  FreeSurfaceActiveVolumeEnergyParameters{
+              svmp::Physics::formulations::navier_stokes::free_surface::FreeSurfaceActiveVolumeEnergyParameters{
                       .active_side =
                           svmp::FE::geometry::CutIntegrationSide::Negative,
                       .density = svmp::FE::Real{1.0},
@@ -7356,7 +7351,7 @@ TEST(ApplicationDriverLevelSetWorkflows,
           .space = scalar_space,
           .components = 1});
 
-  svmp::FE::interfaces::FreeSurfaceDiscreteFunctionalParameters
+  svmp::Physics::formulations::navier_stokes::free_surface::FreeSurfaceDiscreteFunctionalParameters
       functional_parameters;
   functional_parameters.active_side =
       svmp::FE::geometry::CutIntegrationSide::Negative;
@@ -7370,8 +7365,7 @@ TEST(ApplicationDriverLevelSetWorkflows,
           .geometry_domain_id = "static_capillary_publication",
           .parameters = functional_parameters,
           .active_volume_energy_parameters =
-              svmp::FE::interfaces::
-                  FreeSurfaceActiveVolumeEnergyParameters{
+              svmp::Physics::formulations::navier_stokes::free_surface::FreeSurfaceActiveVolumeEnergyParameters{
                       .active_side =
                           svmp::FE::geometry::CutIntegrationSide::Negative,
                       .density = svmp::FE::Real{1.0},
@@ -8936,19 +8930,19 @@ TEST(ApplicationDriverLevelSetWorkflows,
   const auto velocity = system->addField(svmp::FE::systems::FieldSpec{
       .name = "velocity", .space = velocity_space, .components = 2 });
 
-  svmp::FE::interfaces::FreeSurfaceDiscreteFunctionalParameters
+  svmp::Physics::formulations::navier_stokes::free_surface::FreeSurfaceDiscreteFunctionalParameters
       functional_parameters;
   functional_parameters.active_side =
       svmp::FE::geometry::CutIntegrationSide::Negative;
   functional_parameters.surface_tension = svmp::FE::Real{ 0.8 };
   functional_parameters.young_wall_coefficients.push_back(
-      svmp::FE::interfaces::FreeSurfaceYoungWallCoefficient{
+      svmp::Physics::formulations::navier_stokes::free_surface::FreeSurfaceYoungWallCoefficient{
           .boundary_marker = wall_marker,
           .equilibrium_contact_angle_radians =
               svmp::FE::Real{ 1.04719755119659774615421446109316763 },
       });
   functional_parameters.dynamic_contact_coefficients.push_back(
-      svmp::FE::interfaces::FreeSurfaceDynamicContactCoefficient{
+      svmp::Physics::formulations::navier_stokes::free_surface::FreeSurfaceDynamicContactCoefficient{
           .boundary_marker = wall_marker,
           .equilibrium_contact_angle_radians =
               svmp::FE::Real{ 1.04719755119659774615421446109316763 },
@@ -9783,12 +9777,12 @@ TEST(ApplicationDriverLevelSetWorkflows,
       .name = "phi",
       .space = scalar_space,
       .components = 1});
-  svmp::FE::interfaces::FreeSurfaceDiscreteFunctionalParameters parameters;
+  svmp::Physics::formulations::navier_stokes::free_surface::FreeSurfaceDiscreteFunctionalParameters parameters;
   parameters.active_side =
       svmp::FE::geometry::CutIntegrationSide::Negative;
   parameters.surface_tension = svmp::FE::Real{1.0};
   parameters.young_wall_coefficients.push_back(
-      svmp::FE::interfaces::FreeSurfaceYoungWallCoefficient{
+      svmp::Physics::formulations::navier_stokes::free_surface::FreeSurfaceYoungWallCoefficient{
           .boundary_marker = wall_marker,
           .equilibrium_contact_angle_radians =
               svmp::FE::Real{1.57079632679489661923132169163975144},
@@ -12099,8 +12093,7 @@ makeCompleteEnergyEndpoint(bool endpoint)
       .bulk_viscous_dissipation_rate = 0.4,
       .external_pressure_power = 0.6,
       .backward_euler_kinetic_work =
-          svmp::FE::interfaces::
-              FreeSurfaceBackwardEulerKineticWorkState{
+          svmp::Physics::formulations::navier_stokes::free_surface::FreeSurfaceBackwardEulerKineticWorkState{
                   .snapshot_revision_key = endpoint ? 902u : 901u,
                   .previous_velocity_revision = 1001u,
                   .endpoint_velocity_revision =

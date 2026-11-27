@@ -19,6 +19,8 @@
  * factories collect the groups while they state the terms and pass them in.
  */
 
+#include "Physics/Formulations/NavierStokes/FreeSurface/SnapshotFunctionals.h"
+
 #include "Physics/Formulations/NavierStokes/IncompressibleNavierStokesVMSModule.h"
 #include "Physics/Options/NavierStokesOptionRules.h"
 
@@ -186,7 +188,7 @@ inline void declareFreeSurfaceDiscreteFunctionals(
         if (!shouldDeclareFreeSurfaceDiscreteFunctional(bc)) {
             continue;
         }
-        FE::interfaces::FreeSurfaceDiscreteFunctionalParameters parameters;
+        svmp::Physics::formulations::navier_stokes::free_surface::FreeSurfaceDiscreteFunctionalParameters parameters;
         parameters.active_side =
             bc.active_domain == FreeSurfaceActiveDomain::LevelSetPositive
                 ? FE::geometry::CutIntegrationSide::Positive
@@ -205,7 +207,7 @@ inline void declareFreeSurfaceDiscreteFunctionals(
                 continue;
             }
             parameters.young_wall_coefficients.push_back(
-                FE::interfaces::FreeSurfaceYoungWallCoefficient{
+                svmp::Physics::formulations::navier_stokes::free_surface::FreeSurfaceYoungWallCoefficient{
                     .boundary_marker =
                         contactLineWallBoundaryMarker(contact_line),
                     .equilibrium_contact_angle_radians =
@@ -219,7 +221,7 @@ inline void declareFreeSurfaceDiscreteFunctionals(
                 const bool dynamic_law =
                     kind == ContactLineKind::DynamicRenE;
                 parameters.dynamic_contact_coefficients.push_back(
-                    FE::interfaces::FreeSurfaceDynamicContactCoefficient{
+                    svmp::Physics::formulations::navier_stokes::free_surface::FreeSurfaceDynamicContactCoefficient{
                         .boundary_marker =
                             contactLineWallBoundaryMarker(contact_line),
                         .equilibrium_contact_angle_radians =
@@ -228,9 +230,9 @@ inline void declareFreeSurfaceDiscreteFunctionals(
                                 "free-surface discrete-functional dynamic "
                                 "contact equilibrium angle"),
                         .law = dynamic_law
-                            ? FE::interfaces::FreeSurfaceContactLaw::
+                            ? svmp::Physics::formulations::navier_stokes::free_surface::FreeSurfaceContactLaw::
                                   DynamicRenE
-                            : FE::interfaces::FreeSurfaceContactLaw::
+                            : svmp::Physics::formulations::navier_stokes::free_surface::FreeSurfaceContactLaw::
                                   PrescribedAngle,
                         .mobility = dynamic_law
                             ? constantScalarValueOrThrow(
@@ -247,25 +249,23 @@ inline void declareFreeSurfaceDiscreteFunctionals(
             }
         }
         std::optional<
-            FE::interfaces::FreeSurfaceActiveVolumeDissipationParameters>
+            svmp::Physics::formulations::navier_stokes::free_surface::FreeSurfaceActiveVolumeDissipationParameters>
             active_volume_dissipation_parameters;
         if (has_constant_dynamic_viscosity) {
             active_volume_dissipation_parameters =
-                FE::interfaces::
-                    FreeSurfaceActiveVolumeDissipationParameters{
+                svmp::Physics::formulations::navier_stokes::free_surface::FreeSurfaceActiveVolumeDissipationParameters{
                         .active_side = parameters.active_side,
                         .dynamic_viscosity = dynamic_viscosity,
                     };
         }
         std::optional<
-            FE::interfaces::FreeSurfaceExternalPressurePowerParameters>
+            svmp::Physics::formulations::navier_stokes::free_surface::FreeSurfaceExternalPressurePowerParameters>
             external_pressure_power_parameters;
         if (const auto* external_pressure =
                 std::get_if<FE::Real>(&bc.external_pressure);
             external_pressure != nullptr) {
             external_pressure_power_parameters =
-                FE::interfaces::
-                    FreeSurfaceExternalPressurePowerParameters{
+                svmp::Physics::formulations::navier_stokes::free_surface::FreeSurfaceExternalPressurePowerParameters{
                         .active_side = parameters.active_side,
                         .external_pressure = *external_pressure,
                     };
@@ -278,8 +278,7 @@ inline void declareFreeSurfaceDiscreteFunctionals(
                 .geometry_domain_id = bc.generated_interface_domain_id,
                 .parameters = std::move(parameters),
                 .active_volume_energy_parameters =
-                    FE::interfaces::
-                        FreeSurfaceActiveVolumeEnergyParameters{
+                    svmp::Physics::formulations::navier_stokes::free_surface::FreeSurfaceActiveVolumeEnergyParameters{
                             .active_side =
                                 bc.active_domain ==
                                         FreeSurfaceActiveDomain::
@@ -971,7 +970,7 @@ struct FreeSurfaceContactWallStatement {
 /// line friction of a Ren-E law and the Navier-slip friction of their
 /// dynamic-contact coefficient.
 [[nodiscard]] inline std::vector<FreeSurfaceContactWallStatement> freeSurfaceContactWallStatements(
-    const FE::interfaces::FreeSurfaceDiscreteFunctionalParameters& parameters)
+    const svmp::Physics::formulations::navier_stokes::free_surface::FreeSurfaceDiscreteFunctionalParameters& parameters)
 {
     std::vector<FreeSurfaceContactWallStatement> walls;
     for (const auto& young : parameters.young_wall_coefficients) {
@@ -982,7 +981,7 @@ struct FreeSurfaceContactWallStatement {
             if (dynamic.boundary_marker != young.boundary_marker) {
                 continue;
             }
-            if (dynamic.law == FE::interfaces::FreeSurfaceContactLaw::DynamicRenE) {
+            if (dynamic.law == svmp::Physics::formulations::navier_stokes::free_surface::FreeSurfaceContactLaw::DynamicRenE) {
                 wall.line_friction = FE::Real{1.0} / dynamic.mobility;
             }
             wall.slip_friction = dynamic.dynamic_viscosity / dynamic.slip_length;

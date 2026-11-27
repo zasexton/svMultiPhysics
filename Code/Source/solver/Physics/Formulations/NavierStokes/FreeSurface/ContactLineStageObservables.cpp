@@ -5,6 +5,8 @@
  * See Copyright-SimVascular.txt for additional details.
  */
 
+#include "Physics/Formulations/NavierStokes/FreeSurface/SnapshotFunctionals.h"
+
 #include "Physics/Formulations/NavierStokes/FreeSurface/ContactLineStageObservables.h"
 #include "FE/LevelSet/Maintenance/LevelSetWallAwareMaintenance.h"
 #include <map>
@@ -386,7 +388,7 @@ evaluateAcceptedFreeSurfaceContactStages(
     }
     const auto& snapshot = **found;
     std::optional<
-        svmp::FE::interfaces::FreeSurfaceDynamicContactState>
+        FreeSurfaceDynamicContactState>
         local_state;
     try {
       const auto velocity = makeSnapshotVectorFieldEvaluator(
@@ -394,7 +396,7 @@ evaluateAcceptedFreeSurfaceContactStages(
           stage_solution,
           "Accepted contact-stage");
       local_state =
-          svmp::FE::interfaces::evaluateFreeSurfaceDynamicContactState(
+          evaluateFreeSurfaceDynamicContactState(
               snapshot, declaration.parameters, velocity);
     } catch (const std::exception&) {
       local_state.reset();
@@ -469,7 +471,7 @@ evaluateAcceptedFreeSurfaceContactStages(
     }
     std::exception_ptr local_completion_failure;
     try {
-      svmp::FE::interfaces::finalizeFreeSurfaceDynamicContactState(state);
+      finalizeFreeSurfaceDynamicContactState(state);
       stages.push_back(
           FreeSurfaceAcceptedContactStageState{
               .stage_time = stage_time,
@@ -613,7 +615,7 @@ captureAcceptedContactStageWallConstraints(
         declaration.parameters.dynamic_contact_coefficients.end(),
         [](const auto& coefficient) {
           return coefficient.law ==
-                 svmp::FE::interfaces::FreeSurfaceContactLaw::DynamicRenE;
+                 FreeSurfaceContactLaw::DynamicRenE;
         });
     if (!has_dynamic_contact_law) {
       continue;
@@ -654,7 +656,7 @@ captureAcceptedContactStageWallConstraints(
     for (const auto& coefficient :
          declaration.parameters.dynamic_contact_coefficients) {
       if (coefficient.law !=
-          svmp::FE::interfaces::FreeSurfaceContactLaw::DynamicRenE) {
+          FreeSurfaceContactLaw::DynamicRenE) {
         continue;
       }
       dynamic_contact_walls.insert(coefficient.boundary_marker);
