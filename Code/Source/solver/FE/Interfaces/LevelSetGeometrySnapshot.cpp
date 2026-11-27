@@ -1001,13 +1001,7 @@ void addRule(std::vector<LevelSetGeometryRuleRecord>& records,
             "free-surface rule has invalid physical-boundary provenance");
     }
     record.physical_boundary_marker = physical_boundary_marker;
-    record.retention = retention_override.value_or(
-        volumeRole(record.role) && !rule.full_cell_equivalent &&
-                std::isfinite(rule.volume_fraction) &&
-                rule.volume_fraction > Real{0.0} &&
-                rule.volume_fraction < policy.minimum_retained_volume_fraction
-            ? LevelSetGeometryRetention::PrunedSmallVolume
-            : LevelSetGeometryRetention::Retained);
+    record.retention = retention_override.value_or(LevelSetGeometryRetention::Retained);
     record.locally_owned =
         rule.provenance.owner_rank == mesh.parallelRank();
     record.source_fragment_stable_ids = std::move(source_ids);
@@ -4510,6 +4504,12 @@ buildLevelSetGeometrySnapshot(
     std::vector<snapshot_reuse_detail::FullCellRecordReplay> record_replay;
     std::vector<unsigned char> record_reused;
     FullCellReferencePoints full_cell_reference_points;
+    const auto pruned_phases = interface_domain.prunedVolumePhases(
+        policy.minimum_retained_volume_fraction);
+    const auto retention_for = [&](MeshIndex parent, geometry::CutIntegrationSide side) {
+        return pruned_phases.contains({parent, side})
+            ? LevelSetGeometryRetention::PrunedSmallVolume : LevelSetGeometryRetention::Retained;
+    };
     auto volume_rules = reuse ? snapshotVolumeRules(interface_domain)
                               : interface_domain.volumeQuadratureRules();
     auto interface_rules = interface_domain.interfaceQuadratureRules();
@@ -4672,7 +4672,9 @@ buildLevelSetGeometrySnapshot(
                 policy,
                 std::move(moment_certificate),
                 volumeSourceTopologyKey(*region),
-                region->construction_observation);
+                region->construction_observation,
+                /*physical_boundary_marker=*/-1, /*source_ids=*/{}, /*component_id=*/-1,
+                retention_for(region->parent_cell, region->side));
         auto& record = outcome.record.back();
         if (reuse && full_cell_volume_rule) {
             outcome.replay.point_count = record.reference_rule.points.size();
@@ -4786,39 +4788,11 @@ buildLevelSetGeometrySnapshot(
             }
         }
     }
-    // Parent cells whose interface_retention_side volume is pruned as a
-    // small volume (and has no retained rule): their interface and contact
-    // rules are pruned with that phase.
-    std::unordered_set<MeshIndex> pruned_phase_parents;
-    if (policy.interface_retention_side.has_value()) {
-        const auto phase_role =
-            *policy.interface_retention_side ==
-                    geometry::CutIntegrationSide::Negative
-                ? LevelSetGeometryRuleRole::NegativeVolume
-                : LevelSetGeometryRuleRole::PositiveVolume;
-        std::unordered_set<MeshIndex> retained_phase_parents;
-        for (const auto& record : records) {
-            if (record.role != phase_role) {
-                continue;
-            }
-            const auto parent = record.reference_rule.provenance.parent_entity;
-            if (record.retention == LevelSetGeometryRetention::Retained) {
-                retained_phase_parents.insert(parent);
-            } else {
-                pruned_phase_parents.insert(parent);
-            }
-        }
-        std::erase_if(pruned_phase_parents, [&](MeshIndex parent) {
-            return retained_phase_parents.contains(parent);
-        });
-    }
-    const auto phase_retention =
-        [&pruned_phase_parents](const geometry::CutQuadratureRule& rule) {
-            return pruned_phase_parents.contains(
-                       rule.provenance.parent_entity)
-                       ? LevelSetGeometryRetention::PrunedSmallVolume
-                       : LevelSetGeometryRetention::Retained;
-        };
+    const auto phase_retention = [&](const geometry::CutQuadratureRule& rule) {
+        return policy.interface_retention_side
+            ? retention_for(rule.provenance.parent_entity, *policy.interface_retention_side)
+            : LevelSetGeometryRetention::Retained;
+    };
     const auto fragment_by_stable_id =
         firstSourceByStableId(interface_domain.fragments());
     struct InterfaceRuleOutcome {

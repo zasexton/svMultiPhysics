@@ -24,6 +24,8 @@
 #include <iomanip>
 #include <limits>
 #include <locale>
+#include <map>
+#include <set>
 #include <sstream>
 #include <stdexcept>
 #include <string>
@@ -1107,6 +1109,39 @@ public:
 
     [[nodiscard]] const std::vector<CutInterfaceVolumeRegion>& volumeRegions() const noexcept {
         return volume_regions_.values();
+    }
+
+    using ParentPhase = std::pair<MeshIndex, geometry::CutIntegrationSide>;
+
+    /** Apply a volume-fraction threshold to each entire phase of a parent.
+     * Subdivision may split that phase into many small integration regions.
+     */
+    [[nodiscard]] std::set<ParentPhase> prunedVolumePhases(Real minimum_fraction) const {
+        std::map<ParentPhase, long double> candidate_fractions;
+        for (const auto& region : volumeRegions()) {
+            if (region.active() && !region.full_cell_equivalent &&
+                region.volume_fraction > 0 && region.volume_fraction < minimum_fraction) {
+                candidate_fractions.try_emplace({region.parent_cell, region.side}, 0);
+            }
+        }
+        if (candidate_fractions.empty()) {
+            return {};
+        }
+        for (const auto& region : volumeRegions()) {
+            if (region.active()) {
+                const auto candidate = candidate_fractions.find({region.parent_cell, region.side});
+                if (candidate != candidate_fractions.end()) {
+                    candidate->second += region.volume_fraction;
+                }
+            }
+        }
+        std::set<ParentPhase> pruned;
+        for (const auto& [phase, fraction] : candidate_fractions) {
+            if (fraction < minimum_fraction) {
+                pruned.insert(phase);
+            }
+        }
+        return pruned;
     }
 
     [[nodiscard]] const std::vector<GeneratedInterfaceSensitivityRecord>&

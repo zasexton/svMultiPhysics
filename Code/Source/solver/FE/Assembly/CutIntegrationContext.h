@@ -507,6 +507,15 @@ public:
     void addGeneratedVolumeRule(int marker,
                                 CutCellAssemblyMetadata metadata,
                                 geometry::CutQuadratureRule rule) {
+        const bool prune = shouldPruneGeneratedVolumeRule(rule);
+        storeGeneratedVolumeRule(marker, std::move(metadata), std::move(rule), prune);
+    }
+
+private:
+    void storeGeneratedVolumeRule(int marker,
+                                  CutCellAssemblyMetadata metadata,
+                                  geometry::CutQuadratureRule rule,
+                                  bool prune) {
         if (marker < 0) {
             return;
         }
@@ -583,7 +592,7 @@ public:
                 rule,
                 hasGeneratedLevelSetInterfaceMarker(marker));
         }
-        if (shouldPruneGeneratedVolumeRule(rule)) {
+        if (prune) {
             ++generated_pruned_volume_rule_count_;
             if (std::isfinite(rule.measure) && rule.measure > Real{0.0}) {
                 generated_pruned_volume_measure_ += rule.measure;
@@ -723,6 +732,7 @@ public:
         }
     }
 
+public:
     /**
      * Import a generated level-set domain.  When
      * classification_only_full_cell_side is set, the imported full-cell
@@ -1005,6 +1015,7 @@ public:
                            classification_only_region_by_stable_id.end() &&
                        source->second == &region;
             };
+        const auto pruned_phases = domain.prunedVolumePhases(minGeneratedCutVolumeFraction());
         auto volume_rules =
             classification_only_full_cell_side.has_value()
                 ? domain.volumeQuadratureRules(imported_without_points)
@@ -1073,7 +1084,8 @@ public:
             metadata.source_value_revision = domain.request().source.value_revision;
             metadata.level_set_snapshot_revision_key =
                 rule.provenance.level_set_snapshot_revision_key;
-            addGeneratedVolumeRule(marker, std::move(metadata), std::move(rule));
+            const bool prune = pruned_phases.contains({rule.provenance.parent_entity, rule.side});
+            storeGeneratedVolumeRule(marker, std::move(metadata), std::move(rule), prune);
             if (pointless_source != nullptr &&
                 volume_rules_.size() == stored_rule_index + 1u) {
                 registerClassificationOnlyVolumeRule(

@@ -2200,7 +2200,8 @@ level_set::LevelSetGeneratedInterfaceResult buildSingleQuadSayeCut(
     int volume_order,
     int interface_marker,
     level_set::ImplicitCutFallbackPolicy fallback_policy =
-        level_set::ImplicitCutFallbackPolicy::Fail)
+        level_set::ImplicitCutFallbackPolicy::Fail,
+    bool require_production_qualified = false)
 {
     const auto mesh = std::make_shared<SingleQuadMeshAccess>(FE::ElementType::Quad9);
     auto scalar_space =
@@ -2233,6 +2234,7 @@ level_set::LevelSetGeneratedInterfaceResult buildSingleQuadSayeCut(
         level_set::GeneratedInterfaceGeometryMode::HighOrderImplicit;
     options.implicit_cut_quadrature_backend =
         level_set::ImplicitCutQuadratureBackend::SayeHyperrectangle;
+    options.require_production_qualified_implicit_cut_backend = require_production_qualified;
     options.implicit_cut_max_subdivision_depth = subdivision_depth;
     options.interface_quadrature_order = interface_order;
     options.volume_quadrature_order = volume_order;
@@ -8395,6 +8397,70 @@ TEST(LevelSetInterfaceLifecycle, HighOrderSubcellTriangleVertexAndEdgeTouchesAre
               std::string::npos);
     EXPECT_NE(edge_touch.diagnostic.find("fallback_used=false"),
               std::string::npos);
+}
+
+TEST(LevelSetInterfaceLifecycle, SubdivisionRetainsTheWholeParentPhaseAboveThePruningThreshold)
+{
+    using Context = FE::assembly::CutIntegrationContext;
+    using Side = FE::geometry::CutIntegrationSide;
+    constexpr int marker = 917;
+    const auto threshold = Context::minGeneratedCutVolumeFraction();
+    const auto boundary = -1.0 + 4.0 * threshold;
+    const auto field = [boundary](const std::array<FE::Real, 3>& x) {
+        return x[0] - boundary;
+    };
+    const auto cut = buildSingleQuadSayeCut(
+        field, 0, 2, 2, marker, level_set::ImplicitCutFallbackPolicy::Fail, true);
+    ASSERT_TRUE(cut.success) << cut.diagnostic;
+
+    // The narrow phase on [-1,1]^2 occupies twice the pruning threshold
+    // overall, but each individual quadrature region falls below it.
+    std::size_t leaves = 0;
+    for (const auto& region : cut.domain.volumeRegions()) {
+        if (region.side == Side::Negative) {
+            EXPECT_LT(region.volume_fraction, threshold);
+            ++leaves;
+        }
+    }
+    ASSERT_GT(leaves, 2u);
+    const FE::Real expected_area = 2.0 * (1.0 + boundary);
+    EXPECT_NEAR(cut.summary.negative_volume_measure, expected_area, 2.0e-12);
+
+    FE::interfaces::LevelSetGeometryScalarEvaluator scalar;
+    scalar.value = [field](FE::GlobalIndex, const auto& x, const auto&) {
+        return field(x);
+    };
+    scalar.reference_gradient = [](FE::GlobalIndex, const auto&, const auto&) {
+        return std::array<FE::Real, 3>{1.0, 0.0, 0.0};
+    };
+    FE::interfaces::LevelSetGeometrySnapshotPolicy policy;
+    policy.minimum_retained_volume_fraction = threshold;
+    policy.require_complete_exterior_boundary_partition = false;
+    policy.interface_retention_side = Side::Negative;
+    const SingleQuadMeshAccess mesh(FE::ElementType::Quad9);
+    const auto snapshot = FE::interfaces::buildLevelSetGeometrySnapshot(
+        cut.domain, {}, {}, mesh, policy, scalar, "subdivided-strip");
+    ASSERT_TRUE(snapshot);
+    EXPECT_EQ(snapshot->ledger().pruned_rule_count, 0u);
+    EXPECT_NEAR(snapshot->ledger().retained_negative_physical_volume, expected_area, 2.0e-12);
+
+    for (bool import_snapshot : {false, true}) {
+        SCOPED_TRACE(import_snapshot);
+        Context context;
+        if (import_snapshot) {
+            context.addLevelSetGeometrySnapshot(snapshot, Side::Negative);
+        } else {
+            context.addGeneratedInterfaceDomain(cut.domain, Side::Negative);
+        }
+        EXPECT_EQ(context.generatedPrunedVolumeRuleCount(), 0u);
+        EXPECT_EQ(context.volumeRules().size(), leaves);
+        FE::Real area = 0;
+        for (const auto& rule : context.volumeRules()) {
+            area += rule.measure;
+        }
+        EXPECT_NEAR(area, expected_area, 2.0e-12);
+        EXPECT_FALSE(context.interfaceRulesForMarker(marker).empty());
+    }
 }
 
 TEST(LevelSetInterfaceLifecycle, BackendIndependentValidationFixturesCheckRuleInvariants)
