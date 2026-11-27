@@ -5210,7 +5210,7 @@ TEST(MovingDomainPhysics,
     first.geometry_domain_id = "first_bulk_owner_domain";
     first.active_volume_energy_parameters =
         FE::interfaces::FreeSurfaceActiveVolumeEnergyParameters{
-            .liquid_side =
+            .active_side =
                 FE::geometry::CutIntegrationSide::Negative,
             .density = FE::Real{1.0},
         };
@@ -5228,7 +5228,7 @@ TEST(MovingDomainPhysics,
     duplicate.geometry_domain_id = "second_bulk_owner_domain";
     duplicate.active_volume_dissipation_parameters =
         FE::interfaces::FreeSurfaceActiveVolumeDissipationParameters{
-            .liquid_side =
+            .active_side =
                 FE::geometry::CutIntegrationSide::Negative,
             .dynamic_viscosity = FE::Real{0.01},
         };
@@ -5305,7 +5305,7 @@ TEST(MovingDomainPhysics,
     });
 
     FE::interfaces::FreeSurfaceDiscreteFunctionalParameters parameters;
-    parameters.liquid_side =
+    parameters.active_side =
         FE::geometry::CutIntegrationSide::Negative;
     parameters.surface_tension = gamma;
     parameters.young_wall_coefficients.push_back(
@@ -5346,7 +5346,7 @@ TEST(MovingDomainPhysics,
     ASSERT_NO_THROW(svmp::FE::systems::functionalRecords(system).declareFunctional(declaration));
     ASSERT_NO_THROW(system.setup({}, makeSingleTetraSetupInputs()));
 
-    constexpr FE::Real liquid_volume = FE::Real{0.25};
+    constexpr FE::Real active_measure = FE::Real{0.25};
     constexpr FE::Real liquid_gas_area = FE::Real{0.4};
     constexpr FE::Real wetted_wall_area = FE::Real{0.3};
     constexpr FE::Real contact_measure = FE::Real{0.1};
@@ -5370,7 +5370,7 @@ TEST(MovingDomainPhysics,
     };
     FE::interfaces::FreeSurfaceDiscreteFunctionalState functional_state{
         .snapshot_revision_key = 101u,
-        .liquid_side = FE::geometry::CutIntegrationSide::Negative,
+        .active_side = FE::geometry::CutIntegrationSide::Negative,
         .surface_tension = gamma,
         .volume_multiplier = FE::Real{0.0},
         .walls = {
@@ -5381,7 +5381,7 @@ TEST(MovingDomainPhysics,
                 .owned_contact_measure = contact_measure,
                 .young_wall_energy = wall_energy,
             }},
-        .owned_liquid_volume = liquid_volume,
+        .owned_liquid_volume = active_measure,
         .owned_liquid_gas_area = liquid_gas_area,
         .owned_wetted_wall_area = wetted_wall_area,
         .owned_contact_measure = contact_measure,
@@ -5545,7 +5545,7 @@ TEST(MovingDomainPhysics,
                 .dx());
 
     FE::interfaces::FreeSurfaceDiscreteFunctionalParameters parameters;
-    parameters.liquid_side =
+    parameters.active_side =
         FE::geometry::CutIntegrationSide::Negative;
     parameters.surface_tension = gamma;
     parameters.young_wall_coefficients.push_back(
@@ -5616,7 +5616,7 @@ TEST(MovingDomainPhysics,
     };
     FE::interfaces::FreeSurfaceDiscreteFunctionalState functional_state{
         .snapshot_revision_key = 102u,
-        .liquid_side = FE::geometry::CutIntegrationSide::Negative,
+        .active_side = FE::geometry::CutIntegrationSide::Negative,
         .surface_tension = gamma,
         .volume_multiplier = FE::Real{0.0},
         .walls = {FE::interfaces::FreeSurfaceDiscreteWallFunctionalState{
@@ -5640,7 +5640,7 @@ TEST(MovingDomainPhysics,
     };
     FE::interfaces::FreeSurfaceDynamicContactState contact_state;
     contact_state.snapshot_revision_key = 102u;
-    contact_state.liquid_side =
+    contact_state.active_side =
         FE::geometry::CutIntegrationSide::Negative;
     contact_state.surface_tension = gamma;
     contact_state.walls.push_back(
@@ -8529,7 +8529,7 @@ TEST(MovingDomainPhysics,
         (phi_state * eta).dx());
 
     FE::interfaces::FreeSurfaceDiscreteFunctionalParameters parameters;
-    parameters.liquid_side = FE::geometry::CutIntegrationSide::Negative;
+    parameters.active_side = FE::geometry::CutIntegrationSide::Negative;
     parameters.young_wall_coefficients.push_back(
         FE::interfaces::FreeSurfaceYoungWallCoefficient{
             .boundary_marker = wall_marker,
@@ -9562,7 +9562,7 @@ TEST(MovingDomainPhysics,
         EXPECT_EQ(declaration.velocity_field, result.velocity_field);
         EXPECT_EQ(declaration.geometry_domain_id, "free_surface");
         EXPECT_EQ(
-            declaration.parameters.liquid_side,
+            declaration.parameters.active_side,
             active_domain == ns::FreeSurfaceActiveDomain::LevelSetNegative
                 ? FE::geometry::CutIntegrationSide::Negative
                 : FE::geometry::CutIntegrationSide::Positive);

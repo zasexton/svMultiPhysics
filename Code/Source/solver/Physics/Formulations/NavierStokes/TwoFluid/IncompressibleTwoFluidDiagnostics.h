@@ -47,7 +47,7 @@ struct IncompressibleTwoFluidDiagnosticParameters {
 
 /** Point evaluators for one phase field pair on the shared background cell. */
 struct IncompressibleTwoFluidPhaseEvaluators {
-    FE::interfaces::FreeSurfaceDiscreteFunctionalVectorEvaluator velocity{};
+    FE::interfaces::SnapshotVectorEvaluator velocity{};
     FE::interfaces::LevelSetGeometryScalarEvaluator pressure{};
 };
 

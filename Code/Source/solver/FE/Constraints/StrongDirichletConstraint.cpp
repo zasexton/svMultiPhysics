@@ -512,7 +512,7 @@ void StrongDirichletConstraint::apply(const FESystem& system, constraints::Affin
         throw std::invalid_argument("StrongDirichletConstraint: value expression must not contain test/trial functions");
     }
 
-    const auto wetted = wettedBoundaryFaces(system, boundary_marker_, active_boundary_marker_);
+    const auto wetted = activeBoundaryFaces(system, boundary_marker_, active_boundary_marker_);
     auto extracted = boundaryDofsWithCoordsByMarker(system, field_, boundary_marker_, component_, sampled_fields_,
                                                     /*require_coefficients=*/false, wetted ? &*wetted : nullptr);
     dropYieldedPoints(system, extracted.dofs, extracted.coords, extracted.samples);
@@ -596,7 +596,7 @@ bool StrongDirichletConstraint::updateValues(const FESystem& system,
                                              double time,
                                              double dt)
 {
-    const auto wetted = wettedBoundaryFaces(system, boundary_marker_, active_boundary_marker_);
+    const auto wetted = activeBoundaryFaces(system, boundary_marker_, active_boundary_marker_);
     auto extracted = boundaryDofsWithCoordsByMarker(system, field_, boundary_marker_, component_, sampled_fields_,
                                                     /*require_coefficients=*/true, wetted ? &*wetted : nullptr);
     dropYieldedPoints(system, extracted.dofs, extracted.coords, extracted.samples);
@@ -720,7 +720,7 @@ void StrongDirichletConstraint::dropYieldedPoints(const FESystem& system,
     }
     std::unordered_set<GlobalIndex> held;
     for (const auto& yield : yields_) {
-        const auto wetted = wettedBoundaryFaces(system, yield.boundary_marker, yield.active_boundary_marker);
+        const auto wetted = activeBoundaryFaces(system, yield.boundary_marker, yield.active_boundary_marker);
         for (const auto dof : boundaryDofsWithCoordsByMarker(system, field_, yield.boundary_marker, yield.component,
                                                              {}, /*require_coefficients=*/false,
                                                              wetted ? &*wetted : nullptr)

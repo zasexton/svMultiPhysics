@@ -5,9 +5,8 @@
  * @brief Transactional fixed-volume minimization of a level-set energy.
  *
  * The minimizer changes level-set coefficients c to minimize an energy E(c),
- * the sum of named components, subject to a prescribed volume V(c) = V0, for
- * example the surface, wall and gravitational energy of a discrete static
- * cap.  A caller-supplied evaluator measures one candidate.  What a converged
+ * the sum of named components, subject to a prescribed volume V(c) = V0, where
+ * the caller supplies the energy and measure of each candidate.  What a converged
  * candidate must also satisfy is data: named acceptance certificates with
  * their limits and diagnostics (LevelSetVolumeConstrainedProblem), measured
  * by the evaluator.
@@ -27,11 +26,11 @@ namespace svmp::FE::level_set {
 
 /**
  * Options for piecewise-smooth minimization of the energy at a prescribed
- * liquid volume.  The limits of the acceptance certificates are part of the
+ * active-side measure.  The limits of the acceptance certificates are part of the
  * problem (LevelSetVolumeConstrainedAcceptanceCheck).
  */
 struct LevelSetVolumeConstrainedMinimizerOptions {
-    Real target_liquid_volume{0.0};
+    Real target_active_measure{0.0};
     Real volume_tolerance{1.0e-10};
     Real projected_gradient_tolerance{1.0e-8};
 
@@ -128,13 +127,13 @@ struct LevelSetVolumeConstrainedEvaluation {
     std::uint64_t constraint_semantics_key{0u};
     // The problem's energy components, in its order.
     std::vector<Real> energy_components{};
-    Real liquid_volume{std::numeric_limits<Real>::quiet_NaN()};
+    Real active_measure{std::numeric_limits<Real>::quiet_NaN()};
     // Optional exact derivatives in the evaluator's coefficient order. When
     // present, both arrays must cover every supplied coefficient; the
     // minimizer then avoids finite-difference trial geometry entirely.
     bool functional_derivatives_available{false};
     std::vector<Real> energy_derivative{};
-    std::vector<Real> liquid_volume_derivative{};
+    std::vector<Real> active_measure_derivative{};
     // The problem's acceptance certificates, in its order.
     std::vector<LevelSetVolumeConstrainedCheckValue> checks{};
     // Trial evaluation must never obtain the energy's equilibrium by a
@@ -275,9 +274,9 @@ struct LevelSetVolumeConstrainedMinimizerResult {
     std::vector<Real> final_energy_components{};
     Real initial_energy{std::numeric_limits<Real>::quiet_NaN()};
     Real final_energy{std::numeric_limits<Real>::quiet_NaN()};
-    Real initial_liquid_volume{
+    Real initial_active_measure{
         std::numeric_limits<Real>::quiet_NaN()};
-    Real final_liquid_volume{
+    Real final_active_measure{
         std::numeric_limits<Real>::quiet_NaN()};
     Real final_volume_error{
         std::numeric_limits<Real>::quiet_NaN()};

@@ -290,16 +290,16 @@ bool appendLevelSetMaintenanceConfigurationScheduleWords(
       words, configuration.transport.conservative_phase.enabled);
   appendMaintenanceScheduleString(
       words,
-      configuration.transport.conservative_phase.liquid_indicator.field_name);
+      configuration.transport.conservative_phase.phase_indicator.field_name);
   appendMaintenanceScheduleEnum(
       words,
-      configuration.transport.conservative_phase.liquid_indicator.source);
+      configuration.transport.conservative_phase.phase_indicator.source);
   appendMaintenanceScheduleBool(
       words,
-      configuration.transport.conservative_phase.liquid_indicator
+      configuration.transport.conservative_phase.phase_indicator
           .auto_register_field);
   appendMaintenanceScheduleEnum(
-      words, configuration.transport.conservative_phase.liquid_side);
+      words, configuration.transport.conservative_phase.active_side);
   appendMaintenanceScheduleReal(
       words, configuration.transport.conservative_phase.invariant_tolerance);
   appendMaintenanceScheduleReal(

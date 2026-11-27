@@ -30,13 +30,13 @@ TEST(LevelSetOptions, DefaultsAreNeutral)
     EXPECT_TRUE(options.boundaries.inflow.empty());
     EXPECT_TRUE(options.boundaries.outflow.empty());
     EXPECT_FALSE(options.conservative_phase.enabled);
-    EXPECT_EQ(options.conservative_phase.liquid_indicator.field_name,
-              "liquid_indicator");
-    EXPECT_EQ(options.conservative_phase.liquid_indicator.source,
+    EXPECT_EQ(options.conservative_phase.phase_indicator.field_name,
+              "phase_indicator");
+    EXPECT_EQ(options.conservative_phase.phase_indicator.source,
               level_set::LevelSetFieldSource::Unknown);
     EXPECT_TRUE(
-        options.conservative_phase.liquid_indicator.auto_register_field);
-    EXPECT_EQ(options.conservative_phase.liquid_side,
+        options.conservative_phase.phase_indicator.auto_register_field);
+    EXPECT_EQ(options.conservative_phase.active_side,
               level_set::LevelSetPhaseSide::Negative);
     EXPECT_DOUBLE_EQ(options.conservative_phase.invariant_tolerance, 1.0e-12);
     EXPECT_DOUBLE_EQ(

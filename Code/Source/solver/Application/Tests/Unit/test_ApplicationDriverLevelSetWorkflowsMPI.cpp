@@ -1756,7 +1756,7 @@ TEST(ApplicationDriverLevelSetWorkflowsMPI,
 
   svmp::FE::interfaces::FreeSurfaceDiscreteFunctionalParameters
       functional_parameters;
-  functional_parameters.liquid_side =
+  functional_parameters.active_side =
       svmp::FE::geometry::CutIntegrationSide::Negative;
   functional_parameters.surface_tension = 1.0;
   application_test::declared_free_surface_functionals::declareFreeSurfaceFunctionalWithForms(
@@ -1770,7 +1770,7 @@ TEST(ApplicationDriverLevelSetWorkflowsMPI,
           .active_volume_energy_parameters =
               svmp::FE::interfaces::
                   FreeSurfaceActiveVolumeEnergyParameters{
-                      .liquid_side =
+                      .active_side =
                           svmp::FE::geometry::
                               CutIntegrationSide::Negative,
                       .density = 1.0,
@@ -2079,7 +2079,7 @@ TEST(ApplicationDriverLevelSetWorkflowsMPI,
       requests.front().runtime.static_capillary_equilibrium_initialized);
   EXPECT_NEAR(
       effectiveStaticCapillaryEquilibriumOptions(requests.front())
-          .target_liquid_volume,
+          .target_active_measure,
       4.0,
       1.0e-12);
   EXPECT_FALSE(
@@ -4822,7 +4822,7 @@ TEST(ApplicationDriverLevelSetWorkflowsMPI,
       .name = "velocity", .space = velocity_space, .components = 2});
   svmp::FE::interfaces::FreeSurfaceDiscreteFunctionalParameters
       functional_parameters;
-  functional_parameters.liquid_side =
+  functional_parameters.active_side =
       svmp::FE::geometry::CutIntegrationSide::Negative;
   functional_parameters.surface_tension = svmp::FE::Real{0.75};
   const svmp::FE::Real equilibrium_angle =
@@ -5033,7 +5033,7 @@ TEST(ApplicationDriverLevelSetWorkflowsMPI,
   geometry_request_configuration.volume_cut_request =
       active_cut_requests.front();
   geometry_request_configuration.transport.conservative_phase.enabled = true;
-  geometry_request_configuration.transport.conservative_phase.liquid_indicator.field_name =
+  geometry_request_configuration.transport.conservative_phase.phase_indicator.field_name =
       "phase";
   auto geometry_request = freezeMaintenanceConfiguration(
       std::move(geometry_request_configuration));
@@ -5322,7 +5322,7 @@ TEST(ApplicationDriverLevelSetWorkflowsMPI,
           svmp::FE::systems::functionalRecords(*sim.fe_system).functionalDeclarations(),
           contact_stages);
   application::core::ResolvedLevelSetMaintenanceCompatibilityConfiguration contact_protection_request_configuration;
-  contact_protection_request_configuration.transport.conservative_phase.liquid_indicator.field_name =
+  contact_protection_request_configuration.transport.conservative_phase.phase_indicator.field_name =
       "phi";
   auto contact_protection_request = freezeMaintenanceConfiguration(
       std::move(contact_protection_request_configuration));
@@ -5745,7 +5745,7 @@ TEST(ApplicationDriverLevelSetWorkflowsMPI,
   request_configuration.transport.conservative_phase.enabled = true;
   request_configuration.transport.conservative_phase.write_flux_artifacts = true;
   request_configuration.transport.conservative_phase.flux_artifact_cadence_steps = 1;
-  request_configuration.transport.conservative_phase.liquid_indicator.field_name = "phase";
+  request_configuration.transport.conservative_phase.phase_indicator.field_name = "phase";
   request_configuration.volume_cut_request = ActiveCutVolumeRequest{};
   request_configuration.volume_cut_request->domain_id = "mpi_phase_interface";
   std::vector<LevelSetMaintenanceRequest> requests{
@@ -5784,9 +5784,9 @@ TEST(ApplicationDriverLevelSetWorkflowsMPI,
       applyLevelSetConservativePhaseFluxCorrection(
           svmp::FE::level_set::LevelSetPhaseFluxStageView{
               .lumped_control_volume = volumes,
-              .previous_liquid_indicator = previous,
-              .lower_liquid_indicator = lower,
-              .upper_liquid_indicator = upper,
+              .previous_phase_indicator = previous,
+              .lower_phase_indicator = lower,
+              .upper_phase_indicator = upper,
               .interior_edges = flux_edges,
           });
   ASSERT_TRUE(correction.success) << correction.diagnostic;
@@ -5978,7 +5978,7 @@ TEST(ApplicationDriverLevelSetWorkflowsMPI,
         .snapshot_revision = snapshot,
         .mesh_topology_revision = 44u,
         .cut_topology_revision = 45u,
-        .liquid_volume = 1.5,
+        .active_measure = 1.5,
         .liquid_gas_area = 2.25,
         .wetted_wall_area = 0.625,
         .contact_measure = 0.25,
@@ -7040,7 +7040,7 @@ TEST(ApplicationDriverLevelSetWorkflowsMPI,
   first_configuration.transport.velocity.source =
       svmp::FE::level_set::LevelSetVelocitySource::ConstantVector;
   first_configuration.static_capillary_equilibrium_enabled = true;
-  first_configuration.static_capillary_equilibrium.target_liquid_volume = 1.25;
+  first_configuration.static_capillary_equilibrium.target_active_measure = 1.25;
   auto first = freezeMaintenanceConfiguration(
       std::move(first_configuration));
   svmp::FE::level_set::LevelSetP1PhaseTransportGraph first_graph;
@@ -7101,7 +7101,7 @@ TEST(ApplicationDriverLevelSetWorkflowsMPI,
        [](auto& requests) {
          requests[0].runtime.measured_static_capillary_target =
              effectiveStaticCapillaryEquilibriumOptions(requests[0])
-                 .target_liquid_volume + 0.5;
+                 .target_active_measure + 0.5;
        }},
       {"kinematic_reconciliation",
        [](auto& requests) {

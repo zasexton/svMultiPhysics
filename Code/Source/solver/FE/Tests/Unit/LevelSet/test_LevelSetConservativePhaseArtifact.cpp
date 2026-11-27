@@ -31,9 +31,9 @@ TEST(LevelSetConservativePhaseArtifact,
         level_set::applyLevelSetConservativePhaseFluxCorrection(
             level_set::LevelSetPhaseFluxStageView{
                 .lumped_control_volume = volumes,
-                .previous_liquid_indicator = previous,
-                .lower_liquid_indicator = lower,
-                .upper_liquid_indicator = upper,
+                .previous_phase_indicator = previous,
+                .lower_phase_indicator = lower,
+                .upper_phase_indicator = upper,
                 .interior_edges = edges,
                 .physical_boundary_mass_transfer = boundary_transfer,
             });
@@ -88,15 +88,15 @@ TEST(LevelSetConservativePhaseArtifact,
             "discrete_q_flux_not_pointwise_velocity_normal",
         .geometry_validated_before_commit = true,
         .raw_post_transport_phase_measure =
-            stage.correction.total_raw_target_liquid_measure,
+            stage.correction.total_raw_target_active_measure,
         .post_limit_phase_measure =
-            stage.correction.total_limited_liquid_measure,
+            stage.correction.total_limited_active_measure,
         .raw_post_transport_geometry_measure = 1.0,
         .post_reinitialization_phase_measure =
-            stage.correction.total_limited_liquid_measure,
+            stage.correction.total_limited_active_measure,
         .post_reinitialization_geometry_measure = 1.0,
         .post_correction_phase_measure =
-            stage.correction.total_limited_liquid_measure,
+            stage.correction.total_limited_active_measure,
         .post_correction_geometry_measure = 1.0,
         .retained_assembly_geometry_measure = 1.0,
     };
@@ -243,9 +243,9 @@ TEST(LevelSetConservativePhaseArtifact,
         level_set::applyLevelSetConservativePhaseFluxCorrection(
             level_set::LevelSetPhaseFluxStageView{
                 .lumped_control_volume = volumes,
-                .previous_liquid_indicator = previous,
-                .lower_liquid_indicator = lower,
-                .upper_liquid_indicator = upper,
+                .previous_phase_indicator = previous,
+                .lower_phase_indicator = lower,
+                .upper_phase_indicator = upper,
                 .interior_edges = edges,
                 .physical_boundary_mass_transfer =
                     balanced_boundary_transfer,
@@ -266,13 +266,13 @@ TEST(LevelSetConservativePhaseArtifact,
     balanced_context.boundary_flux_scope =
         "globally_balanced_discrete_q_flux_not_pointwise_velocity_normal";
     balanced_context.raw_post_transport_phase_measure =
-        balanced_stage.correction.total_raw_target_liquid_measure;
+        balanced_stage.correction.total_raw_target_active_measure;
     balanced_context.post_limit_phase_measure =
-        balanced_stage.correction.total_limited_liquid_measure;
+        balanced_stage.correction.total_limited_active_measure;
     balanced_context.post_reinitialization_phase_measure =
-        balanced_stage.correction.total_limited_liquid_measure;
+        balanced_stage.correction.total_limited_active_measure;
     balanced_context.post_correction_phase_measure =
-        balanced_stage.correction.total_limited_liquid_measure;
+        balanced_stage.correction.total_limited_active_measure;
     balanced_context.region_ledger =
         level_set::buildLevelSetPhaseRegionLedgers(
             balanced_stage.correction, regions);
@@ -351,7 +351,7 @@ TEST(LevelSetConservativePhaseArtifact,
 
     auto non_one_ring_stage = stage;
     non_one_ring_stage.correction.nodes.front()
-        .lower_liquid_indicator = 0.0;
+        .lower_phase_indicator = 0.0;
     auto non_one_ring_context = context;
     non_one_ring_context.accepted_step = 17u;
     non_one_ring_context.split_stage_provenance->prospective_step = 17u;

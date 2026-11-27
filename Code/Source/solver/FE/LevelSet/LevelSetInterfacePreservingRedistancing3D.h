@@ -28,7 +28,7 @@ namespace svmp::FE::level_set {
  * orientation of increasing DOF number, and a root on a vertex is that vertex
  * exactly, so neighbouring cells share their crossings bitwise; triangles
  * with two coincident corners are dropped.  A surface edge used by a single
- * triangle lies on the mesh boundary (a contact line on a wall, or the
+ * triangle lies on the mesh boundary (a contact line on a boundary, or the
  * intersection with a symmetry or open boundary).  There the triangle is
  * continued beyond the edge by a half-strip in its own plane, perpendicular
  * to the edge, so that near a contact line the new field is the distance to

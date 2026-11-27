@@ -24,7 +24,7 @@ namespace svmp::FE::level_set {
 
 struct LevelSetP1PhaseProjectionOptions {
     int interface_marker{-1};
-    geometry::CutIntegrationSide liquid_side{
+    geometry::CutIntegrationSide active_side{
         geometry::CutIntegrationSide::Negative};
     /// Zero selects the same geometry-aware full-cell rule as the graph.
     int quadrature_order{0};
@@ -46,23 +46,23 @@ struct LevelSetP1PhaseProjectionResult {
     bool global_measure_closure_satisfied{false};
     bool complement_bounds_satisfied{false};
     int interface_marker{-1};
-    geometry::CutIntegrationSide liquid_side{
+    geometry::CutIntegrationSide active_side{
         geometry::CutIntegrationSide::Negative};
     std::size_t nodes{0u};
     std::size_t owned_rules{0u};
     std::size_t quadrature_points{0u};
     std::uint64_t cut_context_revision{0u};
     std::uint64_t source_value_revision{0u};
-    Real retained_liquid_measure{0.0};
-    Real projected_liquid_measure{0.0};
+    Real retained_active_measure{0.0};
+    Real projected_active_measure{0.0};
     Real measure_closure_residual{0.0};
     Real maximum_rule_moment_closure_residual{0.0};
-    Real minimum_liquid_indicator{0.0};
-    Real maximum_liquid_indicator{0.0};
+    Real minimum_phase_indicator{0.0};
+    Real maximum_phase_indicator{0.0};
     Real maximum_lower_bound_violation{0.0};
     Real maximum_upper_bound_violation{0.0};
     std::vector<Real> liquid_phase_mass{};
-    std::vector<Real> liquid_indicator{};
+    std::vector<Real> phase_indicator{};
     std::string diagnostic{};
 };
 
@@ -78,7 +78,7 @@ struct LevelSetP1PhaseProjectionResult {
 [[nodiscard]] LevelSetP1PhaseProjectionResult
 projectLevelSetP1PhaseIndicatorFromCutContext(
     const systems::FESystem& system,
-    FieldId liquid_indicator_field,
+    FieldId phase_indicator_field,
     const LevelSetP1PhaseTransportGraph& graph,
     const LevelSetP1PhaseProjectionOptions& options);
 
@@ -133,7 +133,7 @@ struct LevelSetP1PhaseGeometrySensitivityResult {
 buildLevelSetP1PhaseGeometrySensitivity(
     const systems::FESystem& system,
     FieldId level_set_field,
-    FieldId liquid_indicator_field,
+    FieldId phase_indicator_field,
     const LevelSetP1PhaseTransportGraph& graph,
     const LevelSetP1PhaseProjectionOptions& options,
     std::span<const Real> solution);
@@ -176,7 +176,7 @@ struct LevelSetP1PhaseGeometryCorrectionResult {
 [[nodiscard]] LevelSetP1PhaseGeometryCorrectionResult
 solveLevelSetP1PhaseGeometryCorrection(
     const LevelSetP1PhaseGeometrySensitivityResult& sensitivity,
-    geometry::CutIntegrationSide liquid_side,
+    geometry::CutIntegrationSide active_side,
     std::span<const Real> current_level_set,
     std::span<const Real> current_liquid_phase_mass,
     std::span<const Real> target_liquid_phase_mass,

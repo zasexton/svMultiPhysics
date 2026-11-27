@@ -946,7 +946,7 @@ template <typename Fixture>
         }
         for (std::size_t node = 0u; node < fixture.graph.nodes; ++node) {
             run.final_phase[node] =
-                stage.correction.nodes[node].limited_liquid_indicator;
+                stage.correction.nodes[node].limited_phase_indicator;
         }
         const FE::Real measure = phaseMeasure(
             fixture.graph, run.final_phase);
@@ -966,10 +966,10 @@ template <typename Fixture>
             std::abs(measure - accounted_measure));
         run.minimum_indicator = std::min(
             run.minimum_indicator,
-            stage.correction.minimum_limited_liquid_indicator);
+            stage.correction.minimum_limited_phase_indicator);
         run.maximum_indicator = std::max(
             run.maximum_indicator,
-            stage.correction.maximum_limited_liquid_indicator);
+            stage.correction.maximum_limited_phase_indicator);
         run.maximum_courant = std::max(
             run.maximum_courant, stage.maximum_courant);
         run.maximum_local_balance_residual = std::max(
@@ -986,13 +986,13 @@ template <typename Fixture>
             .step = step + 1,
             .time = static_cast<FE::Real>(step + 1) * dt,
             .previous_measure =
-                stage.correction.total_previous_liquid_measure,
+                stage.correction.total_previous_active_measure,
             .low_order_measure =
-                stage.correction.total_low_order_liquid_measure,
+                stage.correction.total_low_order_active_measure,
             .raw_target_measure =
-                stage.correction.total_raw_target_liquid_measure,
+                stage.correction.total_raw_target_active_measure,
             .limited_measure =
-                stage.correction.total_limited_liquid_measure,
+                stage.correction.total_limited_active_measure,
             .cumulative_boundary_transfer =
                 static_cast<FE::Real>(cumulative_boundary_transfer),
             .cumulative_divergence_source =
@@ -1001,9 +1001,9 @@ template <typename Fixture>
             .raw_measure_error = measure - run.initial_measure,
             .accounted_balance_error = measure - accounted_measure,
             .minimum_indicator =
-                stage.correction.minimum_limited_liquid_indicator,
+                stage.correction.minimum_limited_phase_indicator,
             .maximum_indicator =
-                stage.correction.maximum_limited_liquid_indicator,
+                stage.correction.maximum_limited_phase_indicator,
             .maximum_courant = stage.maximum_courant,
             .maximum_local_balance_residual =
                 stage.correction.maximum_local_mass_balance_residual,
@@ -1419,10 +1419,10 @@ void writeFinalTransportDetails(
                        << coordinate[0] << ',' << coordinate[1] << ','
                        << coordinate[2] << ','
                        << node.lumped_control_volume << ','
-                       << node.previous_liquid_indicator << ','
-                       << node.low_order_liquid_indicator << ','
-                       << node.raw_target_liquid_indicator << ','
-                       << node.limited_liquid_indicator << ','
+                       << node.previous_phase_indicator << ','
+                       << node.low_order_phase_indicator << ','
+                       << node.raw_target_phase_indicator << ','
+                       << node.limited_phase_indicator << ','
                        << node.physical_boundary_mass_transfer << ','
                        << node.discrete_divergence_mass_source << ','
                        << node.low_order_interior_mass_transfer << ','
@@ -1470,10 +1470,10 @@ void writeFinalTransportDetails(
                 const level_set::LevelSetPhaseFluxComponentLedger& component) {
                 output << classification << ',' << component.component_id
                        << ',' << component.nodes << ','
-                       << component.previous_liquid_measure << ','
-                       << component.low_order_liquid_measure << ','
-                       << component.raw_target_liquid_measure << ','
-                       << component.limited_liquid_measure << ','
+                       << component.previous_active_measure << ','
+                       << component.low_order_active_measure << ','
+                       << component.raw_target_active_measure << ','
+                       << component.limited_active_measure << ','
                        << component.physical_boundary_mass_transfer << ','
                        << component.discrete_divergence_mass_source << ','
                        << component.low_order_interior_mass_transfer << ','

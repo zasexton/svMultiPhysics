@@ -393,16 +393,16 @@ make_level_set_effective_configuration(const ls::LevelSetTransportOptions& optio
       << json_bool(options.conservative_phase.enabled)
       << ",\"field\":"
       << json_string(
-             options.conservative_phase.liquid_indicator.field_name)
+             options.conservative_phase.phase_indicator.field_name)
       << ",\"source\":"
       << json_string(level_set_field_source_name(
-             options.conservative_phase.liquid_indicator.source))
+             options.conservative_phase.phase_indicator.source))
       << ",\"auto_register\":"
       << json_bool(
-             options.conservative_phase.liquid_indicator.auto_register_field)
+             options.conservative_phase.phase_indicator.auto_register_field)
       << ",\"liquid_side\":"
       << json_string(level_set_phase_side_name(
-             options.conservative_phase.liquid_side))
+             options.conservative_phase.active_side))
       << ",\"invariant_tolerance\":"
       << json_real(options.conservative_phase.invariant_tolerance)
       << ",\"component_activity_tolerance\":"
@@ -1198,7 +1198,7 @@ materialInterfaceTransportDependency(
   }
   if (!configuration.source_mesh || options.operator_tag.empty() ||
       options.level_set.field_name.empty() ||
-      options.conservative_phase.liquid_indicator.field_name.empty()) {
+      options.conservative_phase.phase_indicator.field_name.empty()) {
     throw std::invalid_argument(
         "[svMultiPhysics::Application] incomplete material-interface transport dependency");
   }
@@ -1209,7 +1209,7 @@ materialInterfaceTransportDependency(
       .interface_marker = options.velocity.material_interface_marker,
       .level_set_field_name = options.level_set.field_name,
       .conservative_phase_field_name =
-          options.conservative_phase.liquid_indicator.field_name,
+          options.conservative_phase.phase_indicator.field_name,
       .operator_tag = options.operator_tag,
   };
 }
@@ -1226,7 +1226,7 @@ void preRegisterMaterialInterfaceTransportFields(
         "preRegisterMaterialInterfaceTransportFields requires material-interface phase-pair velocity");
   }
   if (options.level_set.field_name ==
-      options.conservative_phase.liquid_indicator.field_name) {
+      options.conservative_phase.phase_indicator.field_name) {
     throw std::invalid_argument(
         "[svMultiPhysics::Application] material-interface level-set and phase field names must be distinct");
   }
@@ -1238,7 +1238,7 @@ void preRegisterMaterialInterfaceTransportFields(
       "level-set");
   preflightScalarTransportField(
       system,
-      options.conservative_phase.liquid_indicator,
+      options.conservative_phase.phase_indicator,
       configuration.level_set_space,
       "conservative-phase");
 
@@ -1246,7 +1246,7 @@ void preRegisterMaterialInterfaceTransportFields(
       system, options.level_set, configuration.level_set_space);
   (void)ensureScalarTransportField(
       system,
-      options.conservative_phase.liquid_indicator,
+      options.conservative_phase.phase_indicator,
       configuration.level_set_space);
 }
 

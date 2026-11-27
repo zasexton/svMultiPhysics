@@ -1527,7 +1527,7 @@ TEST(LevelSetEquationTranslator, TranslatesConservativePhaseControls)
   ASSERT_TRUE(resolved);
   auto configuration = *resolved;
   auto& phase_options = configuration.options.conservative_phase;
-  phase_options.liquid_side = svmp::FE::level_set::LevelSetPhaseSide::Positive;
+  phase_options.active_side = svmp::FE::level_set::LevelSetPhaseSide::Positive;
   phase_options.invariant_tolerance = 3.0e-11;
   phase_options.component_activity_tolerance = 4.0e-7;
   phase_options.maximum_courant = 0.45;

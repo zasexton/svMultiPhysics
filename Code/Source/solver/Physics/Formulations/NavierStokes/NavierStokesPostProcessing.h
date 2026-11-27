@@ -187,7 +187,7 @@ inline void declareFreeSurfaceDiscreteFunctionals(
             continue;
         }
         FE::interfaces::FreeSurfaceDiscreteFunctionalParameters parameters;
-        parameters.liquid_side =
+        parameters.active_side =
             bc.active_domain == FreeSurfaceActiveDomain::LevelSetPositive
                 ? FE::geometry::CutIntegrationSide::Positive
                 : FE::geometry::CutIntegrationSide::Negative;
@@ -253,7 +253,7 @@ inline void declareFreeSurfaceDiscreteFunctionals(
             active_volume_dissipation_parameters =
                 FE::interfaces::
                     FreeSurfaceActiveVolumeDissipationParameters{
-                        .liquid_side = parameters.liquid_side,
+                        .active_side = parameters.active_side,
                         .dynamic_viscosity = dynamic_viscosity,
                     };
         }
@@ -266,7 +266,7 @@ inline void declareFreeSurfaceDiscreteFunctionals(
             external_pressure_power_parameters =
                 FE::interfaces::
                     FreeSurfaceExternalPressurePowerParameters{
-                        .liquid_side = parameters.liquid_side,
+                        .active_side = parameters.active_side,
                         .external_pressure = *external_pressure,
                     };
         }
@@ -280,7 +280,7 @@ inline void declareFreeSurfaceDiscreteFunctionals(
                 .active_volume_energy_parameters =
                     FE::interfaces::
                         FreeSurfaceActiveVolumeEnergyParameters{
-                            .liquid_side =
+                            .active_side =
                                 bc.active_domain ==
                                         FreeSurfaceActiveDomain::
                                             LevelSetPositive
@@ -815,7 +815,7 @@ inline void installDiagnosticOperators(FE::systems::FormulationBuilder& F,
 // read their values (E1's evaluator, exact reduction) instead of the
 // pointwise sums; the static-capillary minimizer keeps the pointwise path
 // until E4.  The record's other copies come from the same forms:
-// active_liquid_volume = liquid_volume, and the backward-Euler kinetic work
+// active_liquid_volume = active_measure, and the backward-Euler kinetic work
 // evaluates kinetic_energy on the accepted, the previous and the difference
 // states (kinetic_energy_after, kinetic_energy_before_on_endpoint_domain,
 // time_discretization_loss).  The per-wall quantities (wetted wall area,
@@ -838,7 +838,7 @@ inline void installDiagnosticOperators(FE::systems::FormulationBuilder& F,
 /// data of its FreeSurfaceDiscreteFunctionalDeclaration).
 struct FreeSurfaceEnergyStatement {
     int interface_marker{-1};
-    FE::forms::CutVolumeSide liquid_side{FE::forms::CutVolumeSide::Negative};
+    FE::forms::CutVolumeSide active_side{FE::forms::CutVolumeSide::Negative};
     FE::FieldId velocity_field{FE::INVALID_FIELD_ID};
     const FE::spaces::FunctionSpace* velocity_space{nullptr};
     int dimension{0};
@@ -858,7 +858,7 @@ struct FreeSurfaceEnergyStatement {
 }
 
 /// The energy functionals of one free surface, in this order:
-///   liquid_volume                  Measure          int_L 1
+///   active_measure                  Measure          int_L 1
 ///   liquid_gas_area                Measure          int_Gamma 1
 ///   liquid_gas_surface_energy      Stored           int_Gamma gamma
 ///   kinetic_energy                 Stored           int_L rho/2 u.u
@@ -878,7 +878,7 @@ struct FreeSurfaceEnergyStatement {
     using Kind = FE::systems::FunctionalKind;
     const std::string owner = "IncompressibleNavierStokesVMSModule.FreeSurfaceBoundary";
     const int m = statement.interface_marker;
-    const auto side = statement.liquid_side;
+    const auto side = statement.active_side;
     const FE::Real orientation = side == CutVolumeSide::Negative ? FE::Real{1.0} : FE::Real{-1.0};
     const auto one = FormExpr::constant(1.0);
     const auto n = FormExpr::normal();
@@ -941,7 +941,7 @@ struct FreeSurfaceEnergyStatement {
 {
     FreeSurfaceEnergyStatement statement;
     statement.interface_marker = declaration.interface_marker;
-    statement.liquid_side = declaration.parameters.liquid_side == FE::geometry::CutIntegrationSide::Positive
+    statement.active_side = declaration.parameters.active_side == FE::geometry::CutIntegrationSide::Positive
                                 ? FE::forms::CutVolumeSide::Positive
                                 : FE::forms::CutVolumeSide::Negative;
     statement.velocity_field = declaration.velocity_field;
@@ -1024,7 +1024,7 @@ struct FreeSurfaceContactWallStatement {
     const std::string owner = "IncompressibleNavierStokesVMSModule.FreeSurfaceBoundary";
     const std::string prefix = freeSurfaceFunctionalName(statement.interface_marker, "");
     const FE::Real orientation =
-        statement.liquid_side == CutVolumeSide::Negative ? FE::Real{1.0} : FE::Real{-1.0};
+        statement.active_side == CutVolumeSide::Negative ? FE::Real{1.0} : FE::Real{-1.0};
     const auto u = FormExpr::discreteField(statement.velocity_field, *statement.velocity_space, "u");
     const auto n_wall = FormExpr::boundaryNormal();
     const auto footprint = conormal(FormExpr::constant(orientation) * FormExpr::normal(), n_wall);

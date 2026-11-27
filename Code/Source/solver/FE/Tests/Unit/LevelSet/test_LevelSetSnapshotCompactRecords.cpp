@@ -449,10 +449,10 @@ struct SphereSnapshotFixture {
 };
 
 // Smooth reference-coordinate velocity that differs between cells.
-[[nodiscard]] interfaces::FreeSurfaceDiscreteFunctionalVectorEvaluator
+[[nodiscard]] interfaces::SnapshotVectorEvaluator
 testVelocity(FE::Real scale)
 {
-    interfaces::FreeSurfaceDiscreteFunctionalVectorEvaluator velocity;
+    interfaces::SnapshotVectorEvaluator velocity;
     velocity.value = [scale](FE::GlobalIndex cell,
                              const Point& xi,
                              const geometry::CutQuadratureProvenance&) {
@@ -465,7 +465,7 @@ testVelocity(FE::Real scale)
                 const Point& xi,
                 const geometry::CutQuadratureProvenance&) {
             const FE::Real c = FE::Real{1.0e-3} * static_cast<FE::Real>(cell);
-            interfaces::FreeSurfaceDiscreteFunctionalPhysicalGradient g{};
+            interfaces::SnapshotVectorGradient g{};
             g[0] = {{scale, c, FE::Real{0.0}}};
             g[1] = {{FE::Real{0.0}, scale * xi[2], scale * xi[1]}};
             g[2] = {{-scale * xi[1], -scale * xi[0], c}};
@@ -497,7 +497,7 @@ testVelocity(FE::Real scale)
 [[nodiscard]] FE::Real ownedRulePointIntegral(
     const interfaces::LevelSetGeometrySnapshot& snapshot,
     interfaces::LevelSetGeometryRuleRole role,
-    const interfaces::FreeSurfaceDiscreteFunctionalVectorEvaluator& velocity,
+    const interfaces::SnapshotVectorEvaluator& velocity,
     const FE::assembly::IMeshAccess* mesh)
 {
     FE::Real integral{0.0};
@@ -629,7 +629,7 @@ TEST(LevelSetSnapshotCompactRecords, ConsumersGetIdenticalAnswers)
     for (const auto liquid : {geometry::CutIntegrationSide::Negative,
                               geometry::CutIntegrationSide::Positive}) {
         interfaces::FreeSurfaceDiscreteFunctionalParameters parameters;
-        parameters.liquid_side = liquid;
+        parameters.active_side = liquid;
         parameters.surface_tension = FE::Real{0.7};
         parameters.volume_multiplier = FE::Real{-1.3};
         const auto a =

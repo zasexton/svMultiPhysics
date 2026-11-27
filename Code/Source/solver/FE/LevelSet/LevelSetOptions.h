@@ -60,7 +60,7 @@ struct LevelSetVelocityOptions {
     // Required only for MaterialInterfacePhasePair. The matching declaration
     // owns both phase fields, the level-set source, and the trace weights.
     int material_interface_marker{-1};
-    // Non-empty only for the monolithic wet-side extension path.  field_name
+    // Non-empty only for the monolithic active-side extension path.  field_name
     // is then an algebraic extension unknown E, while this names the physical
     // velocity u used by the frozen sparse extension constraints E=P(phi)u.
     // A state-dependent extension must use this algebraic path; treating E as
@@ -89,7 +89,7 @@ struct LevelSetInterfaceKinematicOptions {
  *
  * A Galerkin transport step moves the discrete zero set consistently with the
  * velocity only in an L2(Omega) sense; where the velocity varies on the mesh
- * scale (a moving contact line) the sharp liquid measure drifts.  When enabled,
+ * scale (a moving contact line) the sharp active-side measure drifts.  When enabled,
  * every accepted step applies the local, parameter-free correction described
  * in LevelSetKinematicReconciliation.h: the trapezoidal volume change of the
  * step equals the trapezoidal interface flux of the transport velocity.  It is
@@ -106,7 +106,7 @@ struct LevelSetKinematicReconciliationOptions {
  * whose whole patch lies in one phase into the range of the previous values
  * over its patch (LevelSetSignDefinitePatchBounds.h), the local maximum
  * principle of exact transport.  Nodes of cut cells are never changed, so the
- * interface and the liquid measure are untouched; a node away from the
+ * interface and the active-side measure are untouched; a node away from the
  * interface cannot cross the isovalue.  There is no numerical parameter.
  */
 struct LevelSetSignDefinitePatchBoundsOptions {
@@ -231,12 +231,12 @@ levelSetConservativePhaseBoundaryFluxSatisfied(
  */
 struct LevelSetConservativePhaseOptions {
     bool enabled{false};
-    LevelSetFieldOptions liquid_indicator{
-        .field_name = "liquid_indicator",
+    LevelSetFieldOptions phase_indicator{
+        .field_name = "phase_indicator",
         .source = LevelSetFieldSource::Unknown,
         .auto_register_field = true,
     };
-    LevelSetPhaseSide liquid_side{LevelSetPhaseSide::Negative};
+    LevelSetPhaseSide active_side{LevelSetPhaseSide::Negative};
     Real invariant_tolerance{1.0e-12};
     Real component_activity_tolerance{1.0e-8};
     Real maximum_courant{1.0};

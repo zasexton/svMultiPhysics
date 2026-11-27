@@ -41,7 +41,7 @@ namespace {
 
 using svmp::FE::level_set::PdeVelocityExtensionOperator;
 using svmp::FE::level_set::PdeVelocityExtensionOptions;
-using svmp::FE::level_set::WallVelocityExtensionConstraint;
+using svmp::FE::level_set::BoundaryVelocityExtensionConstraint;
 using svmp::FE::level_set::extendVelocityByPde;
 using svmp::FE::level_set::pdeVelocityExtensionOperatorFromToken;
 
@@ -197,7 +197,7 @@ bool isSourceRow(const svmp::FE::level_set::VelocityExtensionConstraintRow& row)
 
 std::vector<double> run(const svmp::Mesh& mesh, const Setup& s,
                         PdeVelocityExtensionOperator op,
-                        const std::vector<WallVelocityExtensionConstraint>& walls,
+                        const std::vector<BoundaryVelocityExtensionConstraint>& walls,
                         svmp::FE::level_set::PdeVelocityExtensionReport* report = nullptr,
                         int band_layers = 0)
 {
@@ -208,7 +208,7 @@ std::vector<double> run(const svmp::Mesh& mesh, const Setup& s,
   options.enforce_wall_impermeability = !walls.empty();
   const auto r = extendVelocityByPde(
       mesh, svmp::MeshComm::self(), s.phi, s.source, 2u, s.known, 2u,
-      std::span<const WallVelocityExtensionConstraint>(walls), options, out);
+      std::span<const BoundaryVelocityExtensionConstraint>(walls), options, out);
   if (report != nullptr) {
     *report = r;
   }
@@ -493,7 +493,7 @@ TEST(LevelSetVelocityExtensionRefresh, PrescribedFieldMatchesTheDirectExtension)
 // ratio of 1.4e12 against the guard 16 for phi = x + y - 0.99, u = (x, -y)).
 TEST(LevelSetVelocityExtensionRefresh, AmplificationGuardCountsTheTraceSeedsAsData)
 {
-  using svmp::FE::level_set::kVelocityExtensionMaxWetToDryAmplification;
+  using svmp::FE::level_set::kVelocityExtensionMaxActiveToInactiveAmplification;
   using svmp::FE::level_set::velocityExtensionSpeeds;
   const auto mesh = makeSquareTriangleMesh(1);
   const auto s = makeSetup(
@@ -505,7 +505,7 @@ TEST(LevelSetVelocityExtensionRefresh, AmplificationGuardCountsTheTraceSeedsAsDa
   const auto speeds = velocityExtensionSpeeds(s.source, 2u, 2u, s.known);
   EXPECT_NEAR(speeds.known, std::sqrt(2.0), 1e-15);
   EXPECT_EQ(speeds.extended, 0.0);
-  EXPECT_LE(speeds.extended / std::max(speeds.known, floor), kVelocityExtensionMaxWetToDryAmplification);
+  EXPECT_LE(speeds.extended / std::max(speeds.known, floor), kVelocityExtensionMaxActiveToInactiveAmplification);
 
   std::vector<std::uint8_t> wet(s.phi.size(), 0u);
   for (std::size_t v = 0; v < wet.size(); ++v) {
@@ -622,7 +622,7 @@ TEST(LevelSetPdeVelocityExtension, WallsHoldOnlyTheConstrainedComponentAgainstIn
         return std::array<double, 2>{0.4 + x * (1 - x) + 0.2 * y, 1.0 + 0.3 * x};
       });
   // Free slip on the side walls (x component), no condition on the top.
-  const std::vector<WallVelocityExtensionConstraint> walls{
+  const std::vector<BoundaryVelocityExtensionConstraint> walls{
       {.boundary_label = kSideWall, .constrained_components = {true, false, false}},
       {.boundary_label = kBottomWall, .constrained_components = {false, true, false}}};
   for (const auto op : {PdeVelocityExtensionOperator::Harmonic,
@@ -668,7 +668,7 @@ TEST(LevelSetPdeVelocityExtension, WallsHoldOnlyTheConstrainedComponentAgainstIn
 TEST(LevelSetPdeVelocityExtension, DryWallVerticesKeepTheApproachAndHoldOnlyInflow)
 {
   const auto mesh = makeSquareTriangleMesh(8);
-  const std::vector<WallVelocityExtensionConstraint> walls{
+  const std::vector<BoundaryVelocityExtensionConstraint> walls{
       {.boundary_label = kSideWall, .constrained_components = {true, false, false}},
       {.boundary_label = kBottomWall, .constrained_components = {false, true, false}}};
   for (const double U : {1.0, -1.0}) {
@@ -684,7 +684,7 @@ TEST(LevelSetPdeVelocityExtension, DryWallVerticesKeepTheApproachAndHoldOnlyInfl
       options.op = op;
       const auto report = extendVelocityByPde(
           *mesh, svmp::MeshComm::self(), s.phi, s.source, 2u, s.known, 2u,
-          std::span<const WallVelocityExtensionConstraint>(walls), options, w, &rows);
+          std::span<const BoundaryVelocityExtensionConstraint>(walls), options, w, &rows);
       EXPECT_LT(maxRowResidual(rows, w, s.source, 2u), 1e-12);
       std::size_t right_wall = 0u;
       for (std::size_t v = 0; v < mesh->n_vertices(); ++v) {
@@ -715,7 +715,7 @@ TEST(LevelSetPdeVelocityExtension, PrescribedWallsAreKnownData)
         return std::array<double, 2>{0.4 + x * (1 - x) + 0.2 * y, 1.0 + 0.3 * x};
       });
   // Side walls moving in their normal direction; the bottom wall is wet.
-  const std::vector<WallVelocityExtensionConstraint> walls{
+  const std::vector<BoundaryVelocityExtensionConstraint> walls{
       {.boundary_label = kSideWall,
        .constrained_components = {true, false, false},
        .prescribed_velocity = true},
@@ -731,7 +731,7 @@ TEST(LevelSetPdeVelocityExtension, PrescribedWallsAreKnownData)
     options.op = op;
     const auto report = extendVelocityByPde(
         *mesh, svmp::MeshComm::self(), s.phi, s.source, 2u, s.known, 2u,
-        std::span<const WallVelocityExtensionConstraint>(walls), options, w,
+        std::span<const BoundaryVelocityExtensionConstraint>(walls), options, w,
         &rows);
     EXPECT_GT(report.wall_fixed[0], 0u);
     EXPECT_EQ(report.wall_fixed[1], 0u);
@@ -768,7 +768,7 @@ TEST(LevelSetPdeVelocityExtension, HarmonicReproducesLinearFieldWithPrescribedWa
         return std::array<double, 2>{0.3 + 1.7 * x - 0.4 * y,
                                      -0.2 + 0.5 * x + 2.1 * y};
       });
-  std::vector<WallVelocityExtensionConstraint> walls;
+  std::vector<BoundaryVelocityExtensionConstraint> walls;
   for (const auto label : {kSideWall, kBottomWall, kTopWall}) {
     walls.push_back({.boundary_label = label,
                      .constrained_components = {true, true, true},
@@ -815,13 +815,13 @@ TEST(LevelSetPdeVelocityExtension, ZeroPrescribedWallMatchesTheHomogeneousWall)
         rows;
     std::array<svmp::FE::level_set::PdeVelocityExtensionReport, 2> report;
     for (const std::size_t k : {0u, 1u}) {
-      const std::vector<WallVelocityExtensionConstraint> walls{
+      const std::vector<BoundaryVelocityExtensionConstraint> walls{
           {.boundary_label = kSideWall,
            .constrained_components = {true, false, false},
            .prescribed_velocity = k == 1u}};
       report[k] = extendVelocityByPde(
           *mesh, svmp::MeshComm::self(), s.phi, s.source, 2u, s.known, 2u,
-          std::span<const WallVelocityExtensionConstraint>(walls), options,
+          std::span<const BoundaryVelocityExtensionConstraint>(walls), options,
           w[k], &rows[k]);
     }
     ASSERT_EQ(w[0].size(), w[1].size());
@@ -887,21 +887,21 @@ TEST(LevelSetPdeVelocityExtension, RejectsInvalidInput)
   EXPECT_THROW((void)extendVelocityByPde(*mesh, svmp::MeshComm::self(), s.phi,
                                          s.source, 2u, s.known, 2u, {}, options, out),
                std::invalid_argument);
-  const std::vector<WallVelocityExtensionConstraint> projected{
+  const std::vector<BoundaryVelocityExtensionConstraint> projected{
       {.boundary_label = kSideWall,
        .constrained_components = {true, false, false},
        .project_boundary_normal = true}};
   EXPECT_THROW((void)extendVelocityByPde(
                    *mesh, svmp::MeshComm::self(), s.phi, s.source, 2u, s.known,
-                   2u, std::span<const WallVelocityExtensionConstraint>(projected),
+                   2u, std::span<const BoundaryVelocityExtensionConstraint>(projected),
                    options, out),
                std::invalid_argument);
   // A mask that does not constrain the wall normal is not impermeable.
-  const std::vector<WallVelocityExtensionConstraint> tangential{
+  const std::vector<BoundaryVelocityExtensionConstraint> tangential{
       {.boundary_label = kSideWall, .constrained_components = {false, true, false}}};
   EXPECT_THROW((void)extendVelocityByPde(
                    *mesh, svmp::MeshComm::self(), s.phi, s.source, 2u, s.known,
-                   2u, std::span<const WallVelocityExtensionConstraint>(tangential),
+                   2u, std::span<const BoundaryVelocityExtensionConstraint>(tangential),
                    options, out),
                std::runtime_error);
   // The normal is undefined where the level set is flat.
@@ -1147,7 +1147,7 @@ std::vector<double> runCells(const svmp::Mesh& mesh, const CellSetup& s,
   options.enforce_wall_impermeability = false;
   const auto r = extendVelocityByPde(
       mesh, svmp::MeshComm::self(), s.phi, s.source, s.components, s.known,
-      s.components, std::span<const WallVelocityExtensionConstraint>{}, options,
+      s.components, std::span<const BoundaryVelocityExtensionConstraint>{}, options,
       out);
   if (report != nullptr) {
     *report = r;
@@ -1584,7 +1584,7 @@ TEST(LevelSetPdeVelocityExtensionHighOrderCells, AlgebraicRowsAreSatisfiedAndInf
           return std::array<double, 2>{std::sin(2 * x) * std::cosh(y),
                                        std::cos(2 * x) * std::sinh(y)};
         });
-    const std::vector<WallVelocityExtensionConstraint> walls{
+    const std::vector<BoundaryVelocityExtensionConstraint> walls{
         {.boundary_label = kSideWall,
          .constrained_components = {true, false, false}},
         {.boundary_label = kBottomWall,
@@ -1597,7 +1597,7 @@ TEST(LevelSetPdeVelocityExtensionHighOrderCells, AlgebraicRowsAreSatisfiedAndInf
       options.op = op;
       (void)extendVelocityByPde(
           *mesh, svmp::MeshComm::self(), s.phi, s.source, 2u, s.known, 2u,
-          std::span<const WallVelocityExtensionConstraint>(walls), options, w,
+          std::span<const BoundaryVelocityExtensionConstraint>(walls), options, w,
           &rows);
       ASSERT_EQ(rows.size(), 2u * mesh->n_vertices());
       double max_residual = 0.0;
@@ -1675,7 +1675,7 @@ TEST(LevelSetPdeVelocityExtensionHighOrderCells, PrescribedWallNodesKeepTheSourc
               p[0] * p[0] - p[2] * p[2] + p[0] * p[1] - 0.7};
         },
         /*boundary_known=*/false);
-    std::vector<WallVelocityExtensionConstraint> walls;
+    std::vector<BoundaryVelocityExtensionConstraint> walls;
     for (const auto label : {kSideWall, kBottomWall, kTopWall}) {
       walls.push_back({.boundary_label = label,
                        .constrained_components = {true, true, true},
@@ -1687,7 +1687,7 @@ TEST(LevelSetPdeVelocityExtensionHighOrderCells, PrescribedWallNodesKeepTheSourc
     std::vector<svmp::FE::level_set::VelocityExtensionConstraintRow> rows;
     const auto report = extendVelocityByPde(
         *mesh, svmp::MeshComm::self(), s.phi, s.source, s.components, s.known,
-        s.components, std::span<const WallVelocityExtensionConstraint>(walls),
+        s.components, std::span<const BoundaryVelocityExtensionConstraint>(walls),
         options, w, &rows);
     EXPECT_GT(report.extension_vertices, 0u);
     EXPECT_GT(report.wall_fixed[0], 0u);
@@ -1844,7 +1844,7 @@ TEST(LevelSetVelocityExtensionRefresh, PrescribedWallVelocityIsTakenFromTheSourc
           return std::array<double, 2>{0.6 + 0.4 * y + x * (1 - x),
                                        0.5 - 2.0 * y * y};
         });
-    const std::vector<WallVelocityExtensionConstraint> walls{
+    const std::vector<BoundaryVelocityExtensionConstraint> walls{
         {.boundary_label = kSideWall,
          .constrained_components = {true, false, false},
          .prescribed_velocity = true}};
@@ -1985,7 +1985,7 @@ TEST(LevelSetVelocityExtensionConstraint, QuadraticCellRowsResolveEveryNodeDof)
           return std::array<double, 2>{std::sin(2 * x) * std::cosh(y),
                                        std::cos(2 * x) * std::sinh(y)};
         });
-    const std::vector<WallVelocityExtensionConstraint> walls{
+    const std::vector<BoundaryVelocityExtensionConstraint> walls{
         {.boundary_label = kSideWall,
          .constrained_components = {true, false, false}},
         {.boundary_label = kBottomWall,
@@ -1994,7 +1994,7 @@ TEST(LevelSetVelocityExtensionConstraint, QuadraticCellRowsResolveEveryNodeDof)
     std::vector<svmp::FE::level_set::VelocityExtensionConstraintRow> rows;
     (void)extendVelocityByPde(
         *mesh, svmp::MeshComm::self(), s.phi, s.source, 2u, s.known, 2u,
-        std::span<const WallVelocityExtensionConstraint>(walls),
+        std::span<const BoundaryVelocityExtensionConstraint>(walls),
         PdeVelocityExtensionOptions{}, w, &rows);
 
     const auto scalar_space = quadraticScalarSpace(family);
@@ -2115,7 +2115,7 @@ TEST(LevelSetPdeVelocityExtension, AlgebraicRowsAreSatisfiedByTheSolvedExtension
         return std::array<double, 2>{std::sin(2 * x) * std::cosh(y),
                                      std::cos(2 * x) * std::sinh(y)};
       });
-  const std::vector<WallVelocityExtensionConstraint> walls{
+  const std::vector<BoundaryVelocityExtensionConstraint> walls{
       {.boundary_label = kSideWall, .constrained_components = {true, false, false}},
       {.boundary_label = kBottomWall, .constrained_components = {false, true, false}}};
   for (const auto op : {PdeVelocityExtensionOperator::Harmonic,
@@ -2126,7 +2126,7 @@ TEST(LevelSetPdeVelocityExtension, AlgebraicRowsAreSatisfiedByTheSolvedExtension
     options.op = op;
     (void)extendVelocityByPde(*mesh, svmp::MeshComm::self(), s.phi, s.source, 2u,
                               s.known, 2u,
-                              std::span<const WallVelocityExtensionConstraint>(walls),
+                              std::span<const BoundaryVelocityExtensionConstraint>(walls),
                               options, w, &rows);
     ASSERT_EQ(rows.size(), 2u * mesh->n_vertices());
     double max_residual = 0.0;
@@ -2177,7 +2177,7 @@ struct CachedRun {
 
 CachedRun runCached(const svmp::Mesh& mesh, const Setup& s,
                     PdeVelocityExtensionOperator op,
-                    const std::vector<WallVelocityExtensionConstraint>& walls,
+                    const std::vector<BoundaryVelocityExtensionConstraint>& walls,
                     PdeVelocityExtensionCache* cache,
                     const PdeVelocityExtensionMeshRevisions& revisions = {},
                     bool with_rows = true, int band_layers = 0)
@@ -2189,7 +2189,7 @@ CachedRun runCached(const svmp::Mesh& mesh, const Setup& s,
   options.enforce_wall_impermeability = !walls.empty();
   out.report = extendVelocityByPde(
       mesh, svmp::MeshComm::self(), s.phi, s.source, 2u, s.known, 2u,
-      std::span<const WallVelocityExtensionConstraint>(walls), options,
+      std::span<const BoundaryVelocityExtensionConstraint>(walls), options,
       out.extended, with_rows ? &out.rows : nullptr, cache, revisions);
   return out;
 }
@@ -2230,9 +2230,9 @@ void expectBitwiseEqual(const CachedRun& a, const CachedRun& b)
   EXPECT_EQ(a.report.extension_cells, b.report.extension_cells);
 }
 
-const std::vector<WallVelocityExtensionConstraint>& cacheTestWalls()
+const std::vector<BoundaryVelocityExtensionConstraint>& cacheTestWalls()
 {
-  static const std::vector<WallVelocityExtensionConstraint> walls{
+  static const std::vector<BoundaryVelocityExtensionConstraint> walls{
       {.boundary_label = kSideWall, .constrained_components = {true, false, false}},
       {.boundary_label = kBottomWall, .constrained_components = {false, true, false}}};
   return walls;
@@ -2308,7 +2308,7 @@ TEST(LevelSetPdeVelocityExtensionCache, RefactorsWhenTheKnownSetWallsOrMeshChang
 
   const auto expect_miss_matching_reference =
       [&](const svmp::Mesh& m, const auto& s,
-          const std::vector<WallVelocityExtensionConstraint>& w,
+          const std::vector<BoundaryVelocityExtensionConstraint>& w,
           const PdeVelocityExtensionMeshRevisions& revisions,
           const char* what) {
         SCOPED_TRACE(what);
@@ -2354,7 +2354,7 @@ TEST(LevelSetPdeVelocityExtensionCache, RefactorsWhenTheKnownSetWallsOrMeshChang
 
   // Walls: the side walls alone, then no wall condition, then the same
   // masks with a prescribed velocity (same matrix, other rows and data).
-  const std::vector<WallVelocityExtensionConstraint> side_only{walls.front()};
+  const std::vector<BoundaryVelocityExtensionConstraint> side_only{walls.front()};
   expect_miss_matching_reference(*mesh, base, side_only, {}, "walls");
   expect_miss_matching_reference(*mesh, base, {}, {}, "no walls");
   auto prescribed_walls = walls;
@@ -2391,7 +2391,7 @@ TEST(LevelSetPdeVelocityExtensionCache, RefactorsWhenTheKnownSetWallsOrMeshChang
 TEST(LevelSetPdeVelocityExtensionCache, PrescribedWallVelocityChangesReuseTheFactorization)
 {
   const auto mesh = makeSquareTriangleMesh(10);
-  std::vector<WallVelocityExtensionConstraint> walls;
+  std::vector<BoundaryVelocityExtensionConstraint> walls;
   for (const auto label : {kSideWall, kBottomWall}) {
     walls.push_back({.boundary_label = label,
                      .constrained_components = {true, true, true},
@@ -2476,7 +2476,7 @@ TEST(LevelSetPdeVelocityExtensionCache, CachedAndUncachedResultsAreBitwiseIdenti
   const auto mesh = makeSquareTriangleMesh(12);
   const auto first = makeSetup(*mesh, wavyPhi, firstVelocity);
   const auto second = makeSetup(*mesh, wavyPhi, secondVelocity);
-  const std::vector<WallVelocityExtensionConstraint> no_walls;
+  const std::vector<BoundaryVelocityExtensionConstraint> no_walls;
   for (const auto op : {PdeVelocityExtensionOperator::Harmonic,
                         PdeVelocityExtensionOperator::LeastSquaresNormal}) {
     for (const auto* walls : {&cacheTestWalls(), &no_walls}) {
@@ -2554,7 +2554,7 @@ TEST(LevelSetPdeVelocityExtensionCache, AFailedCallLeavesTheCacheEmpty)
   expectBitwiseEqual(rebuilt, runCached(*mesh, good, op, walls, nullptr));
 
   // A failure on the build path leaves no entry either.
-  const std::vector<WallVelocityExtensionConstraint> tangential{
+  const std::vector<BoundaryVelocityExtensionConstraint> tangential{
       {.boundary_label = kSideWall, .constrained_components = {false, true, false}}};
   EXPECT_THROW((void)runCached(*mesh, good, op, tangential, &cache),
                std::runtime_error);
@@ -2605,7 +2605,7 @@ Setup patchedSetup(const svmp::Mesh& mesh, double x0, double x1)
 
 CachedRun runWithFactorization(
     const svmp::Mesh& mesh, const Setup& s, PdeVelocityExtensionOperator op,
-    const std::vector<WallVelocityExtensionConstraint>& walls,
+    const std::vector<BoundaryVelocityExtensionConstraint>& walls,
     PdeVelocityExtensionCache* cache,
     svmp::FE::level_set::PdeVelocityExtensionFactorization factorization)
 {
@@ -2616,7 +2616,7 @@ CachedRun runWithFactorization(
   options.factorization = factorization;
   out.report = extendVelocityByPde(
       mesh, svmp::MeshComm::self(), s.phi, s.source, 2u, s.known, 2u,
-      std::span<const WallVelocityExtensionConstraint>(walls), options,
+      std::span<const BoundaryVelocityExtensionConstraint>(walls), options,
       out.extended, &out.rows, cache, {});
   return out;
 }
@@ -2701,7 +2701,7 @@ TEST(LevelSetPdeVelocityExtensionCache, AFailureDropsEveryEntry)
   (void)runCached(*mesh, a, op, walls, &cache);
   (void)runCached(*mesh, b, op, walls, &cache);
   ASSERT_EQ(cache.size(), 2u);
-  const std::vector<WallVelocityExtensionConstraint> tangential{
+  const std::vector<BoundaryVelocityExtensionConstraint> tangential{
       {.boundary_label = kSideWall, .constrained_components = {false, true, false}}};
   EXPECT_THROW((void)runCached(*mesh, a, op, tangential, &cache),
                std::runtime_error);

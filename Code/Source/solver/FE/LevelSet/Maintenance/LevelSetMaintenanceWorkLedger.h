@@ -72,7 +72,7 @@ struct LevelSetAuthoritativeFunctionalValue {
   // interface-topology provenance value cannot masquerade as an initial mesh.
   std::uint64_t mesh_topology_revision{0};
   std::uint64_t cut_topology_revision{0};
-  double liquid_volume{0.0};
+  double active_measure{0.0};
   double liquid_gas_area{0.0};
   double wetted_wall_area{0.0};
   double contact_measure{0.0};

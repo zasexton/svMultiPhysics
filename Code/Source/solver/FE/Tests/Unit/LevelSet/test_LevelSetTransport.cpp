@@ -1269,7 +1269,7 @@ TEST(LevelSetTransport,
     options.velocity.source =
         level_set::LevelSetVelocitySource::ConstantVector;
     options.conservative_phase.enabled = true;
-    options.conservative_phase.liquid_indicator.field_name = "phase";
+    options.conservative_phase.phase_indicator.field_name = "phase";
 
     const auto kernels = level_set::installLevelSetTransport(
         system, phi_space, options);
@@ -1373,7 +1373,7 @@ TEST(LevelSetTransport,
         level_set::LevelSetVelocitySource::MaterialInterfacePhasePair;
     options.velocity.material_interface_marker = 17;
     options.conservative_phase.enabled = true;
-    options.conservative_phase.liquid_indicator.field_name = "phase";
+    options.conservative_phase.phase_indicator.field_name = "phase";
     options.interface_kinematic.enabled = true;
     options.interface_kinematic.interface_marker = 17;
     options.supg.enabled = true;
@@ -1417,7 +1417,7 @@ TEST(LevelSetTransport,
         level_set::LevelSetVelocitySource::MaterialInterfacePhasePair;
     options.velocity.material_interface_marker = 17;
     options.conservative_phase.enabled = true;
-    options.conservative_phase.liquid_indicator.field_name = "phase";
+    options.conservative_phase.phase_indicator.field_name = "phase";
     options.interface_kinematic.enabled = true;
     options.interface_kinematic.interface_marker = 17;
 
@@ -1449,7 +1449,7 @@ TEST(LevelSetTransport,
             level_set::LevelSetVelocitySource::MaterialInterfacePhasePair;
         options.velocity.material_interface_marker = 17;
         options.conservative_phase.enabled = true;
-        options.conservative_phase.liquid_indicator.field_name = "phase";
+        options.conservative_phase.phase_indicator.field_name = "phase";
         options.interface_kinematic.enabled = true;
         options.interface_kinematic.interface_marker = 17;
         configure(options);
@@ -1492,7 +1492,7 @@ TEST(LevelSetTransport,
     options.velocity.source =
         level_set::LevelSetVelocitySource::ConstantVector;
     options.conservative_phase.enabled = true;
-    options.conservative_phase.liquid_indicator.field_name = "phase";
+    options.conservative_phase.phase_indicator.field_name = "phase";
     (void)level_set::installLevelSetTransport(system, phi_space, options);
     ASSERT_NO_THROW(system.setup({}, makeSingleTetraSetupInputs()));
 
@@ -1563,7 +1563,7 @@ TEST(LevelSetTransport,
     };
 
     expect_rejected_without_fields([](auto& options) {
-        options.conservative_phase.liquid_indicator.field_name = "phi";
+        options.conservative_phase.phase_indicator.field_name = "phi";
     });
     expect_rejected_without_fields([](auto& options) {
         options.boundaries.outflow.push_back(

@@ -81,7 +81,7 @@ void applyDeclaredStageWallSlipDissipation(
   const std::string prefix =
       "free_surface." + std::to_string(declaration.interface_marker) + ".";
   const auto declared = declaredWallFunctionalForms(
-      system, prefix, snapshot, walls, declaration.parameters.liquid_side,
+      system, prefix, snapshot, walls, declaration.parameters.active_side,
       std::span<const std::string_view>(&kWallSlip, 1u));
   const auto [minimum_count, maximum_count] = collectiveMinMaxUint64(
       static_cast<std::uint64_t>(declared.size()), comm);
@@ -128,7 +128,7 @@ std::vector<DeclaredWallFunctionalForm> declaredWallFunctionalForms(
     std::string_view prefix,
     const LevelSetGeometrySnapshot& snapshot,
     std::span<const int> walls,
-    geometry::CutIntegrationSide liquid_side,
+    geometry::CutIntegrationSide active_side,
     std::span<const std::string_view> quantities)
 {
   std::vector<DeclaredWallFunctionalForm> out;
@@ -146,7 +146,7 @@ std::vector<DeclaredWallFunctionalForm> declaredWallFunctionalForms(
     std::vector<svmp::FE::forms::BoundaryDomain> wetted_parts;
     for (const auto& domain : snapshot.activeBoundaryDomains()) {
       if (domain.request().boundary_marker == wall &&
-          domain.request().side == liquid_side) {
+          domain.request().side == active_side) {
         wetted_parts.push_back(
             svmp::FE::forms::BoundaryDomain::generatedActiveSubset(wall, domain.marker()));
       }

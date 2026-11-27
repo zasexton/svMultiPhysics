@@ -103,7 +103,7 @@ struct DeclaredWallFunctionalForm {
  * under @p prefix whose quantity is one of @p quantities, as measured
  * 0-forms of each wall of @p walls over its domains in @p snapshot: the
  * interface's contact lines with the wall and the wall's parts on
- * @p liquid_side.  Named "<prefix>wall.<b>.<quantity>", by wall in the order
+ * @p active_side.  Named "<prefix>wall.<b>.<quantity>", by wall in the order
  * of @p walls and then in declaration order; a wall without an integrand or
  * without a domain of that kind has none.  Not collective: the snapshot
  * lists the same wall domains on every rank.
@@ -113,7 +113,7 @@ struct DeclaredWallFunctionalForm {
     std::string_view prefix,
     const LevelSetGeometrySnapshot& snapshot,
     std::span<const int> walls,
-    geometry::CutIntegrationSide liquid_side,
+    geometry::CutIntegrationSide active_side,
     std::span<const std::string_view> quantities);
 
 /// Binds @p stages to the accepted endpoint @p endpoint_state_revision:

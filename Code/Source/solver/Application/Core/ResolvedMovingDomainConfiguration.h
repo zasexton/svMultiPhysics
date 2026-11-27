@@ -42,12 +42,20 @@ enum class LevelSetVelocityExtensionCoupling : std::uint8_t {
   Prescribed,
 };
 
+// The application supplies the field name used by existing level-set decks.
+inline svmp::FE::level_set::LevelSetTransportOptions defaultLevelSetTransportOptions()
+{
+  svmp::FE::level_set::LevelSetTransportOptions options;
+  options.conservative_phase.phase_indicator.field_name = "liquid_indicator";
+  return options;
+}
+
 // The keys of a level-set equation as one value, as levelSetEquationSchema()
 // (Application/Translators/LevelSetConfigurationParsing.h) resolves them
 // (decision D47, step P3): the transport options and the keys that select a
 // transport value without being one.
 struct LevelSetEquationKeys {
-  svmp::FE::level_set::LevelSetTransportOptions transport{};
+  svmp::FE::level_set::LevelSetTransportOptions transport{defaultLevelSetTransportOptions()};
   // Coupled: the transport joins the monolithic operator ("equations").
   bool coupled{false};
   // The interface of the maintained field and of the extension; a C++
@@ -76,7 +84,7 @@ struct ResolvedLevelSetEquationConfiguration {
   std::shared_ptr<svmp::MeshBase> source_mesh{};
   std::string source_mesh_name{};
   std::shared_ptr<const svmp::FE::spaces::FunctionSpace> level_set_space{};
-  svmp::FE::level_set::LevelSetTransportOptions options{};
+  svmp::FE::level_set::LevelSetTransportOptions options{defaultLevelSetTransportOptions()};
   svmp::FE::systems::FormInstallOptions install_options{};
   // The keys of the equation element alone, before its domain elements and
   // the extension: what the maintenance of the field reads.

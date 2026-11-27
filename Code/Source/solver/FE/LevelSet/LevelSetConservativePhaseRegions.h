@@ -78,10 +78,10 @@ struct LevelSetPhaseRegionLedger {
     std::vector<GlobalIndex> member_nodes{};
     std::size_t internal_edges{0u};
     std::vector<LevelSetPhaseRegionCrossingEdgeLedger> crossing_edges{};
-    Real previous_liquid_measure{0.0};
-    Real low_order_liquid_measure{0.0};
-    Real raw_target_liquid_measure{0.0};
-    Real limited_liquid_measure{0.0};
+    Real previous_active_measure{0.0};
+    Real low_order_active_measure{0.0};
+    Real raw_target_active_measure{0.0};
+    Real limited_active_measure{0.0};
     Real physical_boundary_mass_transfer{0.0};
     Real discrete_divergence_mass_source{0.0};
     Real low_order_nodal_interior_mass_transfer{0.0};

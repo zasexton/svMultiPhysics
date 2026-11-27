@@ -483,8 +483,8 @@ bool refreshLevelSetVelocityExtensions(
     //
     //     E_h|_K = u_h|_K  =>  E_h|_(Gamma cap K) = u_h|_(Gamma cap K).
     //
-    // The older sign-only seed marked wet vertices but graph-extrapolated
-    // the dry vertices of cut cells, so E_h and u_h differed on Gamma even
+    // The older sign-only seed marked active vertices but graph-extrapolated
+    // the inactive vertices of cut cells, so E_h and u_h differed on Gamma even
     // though all wet nodal values agreed.  Prefer the generated cut context
     // (the geometry used by assembly), with a nodal crossing search only
     // when no authoritative generated-interface context exists anywhere on
@@ -715,7 +715,7 @@ bool refreshLevelSetVelocityExtensions(
           "[svMultiPhysics::Application] The level-set velocity extension resolved interface geometry but no trace-support vertices.");
     }
 
-    std::vector<WallVelocityExtensionConstraint> wall_constraints;
+    std::vector<BoundaryVelocityExtensionConstraint> wall_constraints;
     wall_constraints.reserve(request.wall_constraints.size());
     if (request.enforce_wall_impermeability) {
       if (request.wall_constraints.empty()) {
@@ -734,7 +734,7 @@ bool refreshLevelSetVelocityExtensions(
               "[svMultiPhysics::Application] Wet-extension wall face '" +
               wall.face_name + "' is not registered on the active mesh.");
         }
-        wall_constraints.push_back(WallVelocityExtensionConstraint{
+        wall_constraints.push_back(BoundaryVelocityExtensionConstraint{
             .boundary_label = label,
             .constrained_components = strongZeroVelocityComponentMask(
                 wall.effective_direction, mesh_dim),
@@ -795,7 +795,7 @@ bool refreshLevelSetVelocityExtensions(
         std::span<const std::uint8_t>(trace_seed.data(),
                                       trace_seed.size()),
         target_components,
-        std::span<const WallVelocityExtensionConstraint>(
+        std::span<const BoundaryVelocityExtensionConstraint>(
             wall_constraints),
         PdeVelocityExtensionOptions{
             .op = *pde_operator,
@@ -880,8 +880,8 @@ bool refreshLevelSetVelocityExtensions(
         }
       }
     }
-    // The trace seeds, the dry vertices of the retained cut cells included,
-    // carry the physical velocity: data of the extension like the wet side.
+    // The trace seeds, the inactive vertices of the retained cut cells included,
+    // carry the physical velocity: data of the extension like the active side.
     const auto speeds = velocityExtensionSpeeds(
         std::span<const double>(extended.data(), extended.size()), target_components, copy_components,
         std::span<const std::uint8_t>(trace_seed.data(), trace_seed.size()));
@@ -898,7 +898,7 @@ bool refreshLevelSetVelocityExtensions(
                  velocity_scale_floor);
     if (algebraic_extension &&
         wet_to_dry_amplification >
-            kVelocityExtensionMaxWetToDryAmplification) {
+            kVelocityExtensionMaxActiveToInactiveAmplification) {
       std::ostringstream message;
       message
           << "[svMultiPhysics::Application] The monolithic velocity "
@@ -907,7 +907,7 @@ bool refreshLevelSetVelocityExtensions(
           << max_known_speed
           << " max_dry_extended_speed=" << max_dry_extended_speed
           << " amplification=" << wet_to_dry_amplification
-          << " guard=" << kVelocityExtensionMaxWetToDryAmplification;
+          << " guard=" << kVelocityExtensionMaxActiveToInactiveAmplification;
       throw std::runtime_error(message.str());
     }
 
@@ -1062,7 +1062,7 @@ bool refreshLevelSetVelocityExtensions(
               .value("max_known_speed", max_known_speed)
               .value("max_dry_extended_speed", max_dry_extended_speed)
               .value("wet_to_dry_amplification", wet_to_dry_amplification)
-              .value("wet_to_dry_amplification_guard", kVelocityExtensionMaxWetToDryAmplification)
+              .value("wet_to_dry_amplification_guard", kVelocityExtensionMaxActiveToInactiveAmplification)
               .text("target_value_semantics", algebraic_extension ? "generalized_alpha_stage_unknown" : "prescribed_current_coefficients")
               .text("computed_extension_semantics", "current_state_constraint_preview")
               .value("unassigned_dofs", unassigned));

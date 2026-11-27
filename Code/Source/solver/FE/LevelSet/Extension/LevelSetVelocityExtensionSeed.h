@@ -10,11 +10,11 @@
 /**
  * @file LevelSetVelocityExtensionSeed.h
  * @ingroup fe_level_set
- * @brief The known set of a velocity extension into the dry part of an
+ * @brief The known set of a velocity extension into the inactive part of an
  *        unfitted level-set mesh, and the revision of its frozen rows.
  *
  * The known set of the PDE velocity extension
- * (LevelSetPdeVelocityExtension.h) is the wet vertices plus every vertex of
+ * (LevelSetPdeVelocityExtension.h) is the active vertices plus every vertex of
  * the retained interface cells, so that the extension equals the physical
  * velocity on the interface.  These functions find the interface cells from
  * nodal level-set values (when no generated cut context is authoritative),

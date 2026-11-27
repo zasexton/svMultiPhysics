@@ -161,13 +161,13 @@ quadraticCapillaryEvaluation(
         constraint_barrier && x < FE::Real{0.9} ? 44u : 33u;
     evaluation.energy_components[kSurfaceWallEnergy] =
         energy_x * energy_x + energy_y * energy_y;
-    evaluation.liquid_volume = x + y;
+    evaluation.active_measure = x + y;
     evaluation.functional_derivatives_available =
         provide_functional_derivatives;
     if (provide_functional_derivatives) {
         evaluation.energy_derivative = {
             gradient_x, gradient_y};
-        evaluation.liquid_volume_derivative = {
+        evaluation.active_measure_derivative = {
             FE::Real{1.0}, FE::Real{1.0}};
     }
     evaluation.checks[kPressureRepresentability].available =
@@ -205,7 +205,7 @@ CapillaryOptions
 quadraticOptions()
 {
     CapillaryOptions options;
-    options.target_liquid_volume = 3.0;
+    options.target_active_measure = 3.0;
     options.volume_tolerance = 1.0e-10;
     options.projected_gradient_tolerance = 1.0e-7;
     options.pressure_representability_max_residual_norm = 1.0e-7;
@@ -251,14 +251,14 @@ piecewiseTransitionEvaluation(
         x <= FE::Real{0.0}
             ? FE::Real{1.0} - x
             : FE::Real{1.0} + positive_energy_slope * epsilon * x;
-    evaluation.liquid_volume = x + y;
+    evaluation.active_measure = x + y;
     evaluation.functional_derivatives_available = true;
     evaluation.energy_derivative = {
         x <= FE::Real{0.0}
             ? FE::Real{-1.0}
             : positive_energy_slope * epsilon,
         FE::Real{0.0}};
-    evaluation.liquid_volume_derivative = {
+    evaluation.active_measure_derivative = {
         FE::Real{1.0}, FE::Real{1.0}};
     evaluation.diagnostic = "available";
     return evaluation;
@@ -301,10 +301,10 @@ TEST(LevelSetVolumeConstrainedMinimizer, TakesAPureFeasibilityStepAtAStationaryE
         e.cut_topology_key = 11u;
         e.constraint_semantics_key = 33u;
         e.energy_components[kSurfaceWallEnergy] = 0.5 * ge[0] * ge[0];
-        e.liquid_volume = 2.0 + y + 0.1 * x * x;
+        e.active_measure = 2.0 + y + 0.1 * x * x;
         e.functional_derivatives_available = true;
         e.energy_derivative = {ge[0], ge[1]};
-        e.liquid_volume_derivative = {gv[0], gv[1]};
+        e.active_measure_derivative = {gv[0], gv[1]};
         const bool certify = purpose == EvaluationPurpose::AcceptanceCertificate;
         e.checks[kPressureRepresentability].available = certify;
         e.checks[kPressureRepresentability].converged = certify;
@@ -316,7 +316,7 @@ TEST(LevelSetVolumeConstrainedMinimizer, TakesAPureFeasibilityStepAtAStationaryE
         return e;
     };
     auto options = quadraticOptions();
-    options.target_liquid_volume = 2.0;
+    options.target_active_measure = 2.0;
     const std::vector<FE::Real> input{1.0, 0.0};
     const std::array<std::size_t, 2> active{0u, 1u};
     std::vector<FE::Real> accepted;
@@ -342,14 +342,14 @@ TEST(LevelSetVolumeConstrainedMinimizer,
         const std::array<FE::Real, 2> compact{c[1], c[4]};
         auto e = piecewiseTransitionEvaluation(compact, FE::Real{1.0});
         const auto ge = e.energy_derivative;
-        const auto gv = e.liquid_volume_derivative;
+        const auto gv = e.active_measure_derivative;
         e.snapshot_revision_key = coefficientRevision(c);
         e.energy_derivative.assign(c.size(), FE::Real{0.0});
-        e.liquid_volume_derivative.assign(c.size(), FE::Real{0.0});
+        e.active_measure_derivative.assign(c.size(), FE::Real{0.0});
         e.energy_derivative[1] = ge[0];
         e.energy_derivative[4] = ge[1];
-        e.liquid_volume_derivative[1] = gv[0];
-        e.liquid_volume_derivative[4] = gv[1];
+        e.active_measure_derivative[1] = gv[0];
+        e.active_measure_derivative[4] = gv[1];
         return e;
     };
 
@@ -431,14 +431,14 @@ TEST(LevelSetVolumeConstrainedMinimizer,
         const std::array<FE::Real, 2> compact{c[1], c.back()};
         auto e = piecewiseTransitionEvaluation(compact, FE::Real{1.0});
         const auto ge = e.energy_derivative;
-        const auto gv = e.liquid_volume_derivative;
+        const auto gv = e.active_measure_derivative;
         e.snapshot_revision_key = coefficientRevision(c);
         e.energy_derivative.assign(c.size(), FE::Real{0.0});
-        e.liquid_volume_derivative.assign(c.size(), FE::Real{0.0});
+        e.active_measure_derivative.assign(c.size(), FE::Real{0.0});
         e.energy_derivative[1] = ge[0];
         e.energy_derivative.back() = ge[1];
-        e.liquid_volume_derivative[1] = gv[0];
-        e.liquid_volume_derivative.back() = gv[1];
+        e.active_measure_derivative[1] = gv[0];
+        e.active_measure_derivative.back() = gv[1];
         return e;
     };
 
@@ -881,13 +881,13 @@ TEST(LevelSetVolumeConstrainedMinimizer,
                 evaluation.constraint_semantics_key = 402u;
                 evaluation.energy_components[kSurfaceWallEnergy] =
                     initial ? FE::Real{1.0} : FE::Real{0.5};
-                evaluation.liquid_volume =
+                evaluation.active_measure =
                     coefficients[0] + coefficients[1];
                 evaluation.functional_derivatives_available = true;
                 evaluation.energy_derivative = {
                     initial ? FE::Real{-1.0e-100} : FE::Real{1.0e100},
                     FE::Real{0.0}};
-                evaluation.liquid_volume_derivative = {
+                evaluation.active_measure_derivative = {
                     FE::Real{1.0}, FE::Real{1.0}};
                 evaluation.diagnostic = "available";
                 return evaluation;
@@ -933,7 +933,7 @@ TEST(LevelSetVolumeConstrainedMinimizer,
     EXPECT_NEAR(accepted[1], 2.0, 1.0e-7);
     EXPECT_DOUBLE_EQ(input[0], 2.5);
     EXPECT_DOUBLE_EQ(input[1], 0.5);
-    EXPECT_NEAR(result.final_liquid_volume, 3.0, 1.0e-10);
+    EXPECT_NEAR(result.final_active_measure, 3.0, 1.0e-10);
     EXPECT_NEAR(result.final_energy_components[kSurfaceWallEnergy], 0.0, 1.0e-13);
     EXPECT_LE(result.final_projected_gradient_norm, 1.0e-7);
     EXPECT_TRUE(result.final_checks[kConstantPressureKkt].available);
@@ -1142,7 +1142,7 @@ TEST(LevelSetVolumeConstrainedMinimizer,
                     /*topology_barrier=*/false,
                     /*constraint_barrier=*/false,
                     /*provide_functional_derivatives=*/true);
-                evaluation.liquid_volume_derivative.pop_back();
+                evaluation.active_measure_derivative.pop_back();
                 return evaluation;
             },
             accepted);
@@ -1742,7 +1742,7 @@ TEST(LevelSetVolumeConstrainedMinimizer,
     EXPECT_EQ(accepted, sentinel);
 
     auto zero_volume_options = quadraticOptions();
-    zero_volume_options.target_liquid_volume = 0.0;
+    zero_volume_options.target_active_measure = 0.0;
     const std::array<std::size_t, 2> valid_active{0u, 1u};
     EXPECT_THROW(
         (void)minimizeCapillary(
@@ -1804,10 +1804,10 @@ TEST(LevelSetVolumeConstrainedMinimizer,
             const FE::Real dx = c[0] - FE::Real{1.0};
             const FE::Real dy = c[1] - FE::Real{2.0};
             e.energy_components = {dx * dx, dy * dy, FE::Real{0.5}};
-            e.liquid_volume = c[0] + c[1];
+            e.active_measure = c[0] + c[1];
             e.functional_derivatives_available = true;
             e.energy_derivative = {FE::Real{2.0} * dx, FE::Real{2.0} * dy};
-            e.liquid_volume_derivative = {FE::Real{1.0}, FE::Real{1.0}};
+            e.active_measure_derivative = {FE::Real{1.0}, FE::Real{1.0}};
             level_set::LevelSetVolumeConstrainedCheckValue check;
             check.available = certificate_available;
             check.values = {std::abs(FE::Real{2.0} * dx - FE::Real{2.0} * dy)};

@@ -41,7 +41,7 @@ struct LevelSetZeroPolygonRedistancingResult {
  * segment per cut triangle, edge crossings computed in a canonical edge
  * orientation so that neighbouring cells share them bitwise).  An end point
  * that belongs to a single segment lies on the mesh boundary (a contact point
- * on a wall, or an interface leaving through an open boundary); there the
+ * on a boundary, or an interface leaving through an open boundary); there the
  * end segment is continued by a ray beyond the boundary, so that near a
  * contact point the new field is the distance to the continued interface
  * line and its gradient keeps the discrete contact angle.  Each value is

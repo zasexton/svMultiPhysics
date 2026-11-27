@@ -69,7 +69,7 @@ struct LevelSetSignDefinitePatchBoundsResult {
  * Because the bounds of a sign-definite node lie in one strict sign class and
  * its neighbours keep that class, no cell around a changed node is cut before
  * or after the change, except when the candidate value had itself crossed the
- * isovalue: the interface, the contact line, the liquid measure and every
+ * isovalue: the interface, the contact line, the active-side measure and every
  * cut cell are untouched.  There is no numerical parameter.  The bound is
  * exact for one-ring Courant numbers up to one wherever the characteristic
  * starts inside the mesh, i.e. away from inflow boundaries, so it must not

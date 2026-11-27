@@ -35,7 +35,7 @@ namespace {
 
 using svmp::FE::level_set::PdeVelocityExtensionOperator;
 using svmp::FE::level_set::PdeVelocityExtensionOptions;
-using svmp::FE::level_set::WallVelocityExtensionConstraint;
+using svmp::FE::level_set::BoundaryVelocityExtensionConstraint;
 
 constexpr svmp::label_t kPdeSideWall = 21;
 constexpr int kPdeCells = 12;
@@ -143,7 +143,7 @@ std::map<std::pair<long long, long long>, std::array<double, 2>> extend(
   }
   // A ghost vertex may miss a cut cell of its star; the extension takes the
   // union of the known mask over the communicator.
-  const std::vector<WallVelocityExtensionConstraint> walls{
+  const std::vector<BoundaryVelocityExtensionConstraint> walls{
       {.boundary_label = kPdeSideWall,
        .constrained_components = {true, false, false}}};
   PdeVelocityExtensionOptions options;
@@ -152,7 +152,7 @@ std::map<std::pair<long long, long long>, std::array<double, 2>> extend(
   std::vector<double> out;
   (void)svmp::FE::level_set::extendVelocityByPde(
       mesh, comm, phi, source, 2u, known, 2u,
-      std::span<const WallVelocityExtensionConstraint>(walls), options, out);
+      std::span<const BoundaryVelocityExtensionConstraint>(walls), options, out);
   std::map<std::pair<long long, long long>, std::array<double, 2>> result;
   for (std::size_t v = 0; v < n; ++v) {
     const auto key = std::make_pair(std::llround(X[2 * v] * kPdeCells),
@@ -303,7 +303,7 @@ KeyedExtension extendQuadratic(const svmp::Mesh& mesh,
       }
     }
   }
-  const std::vector<WallVelocityExtensionConstraint> walls{
+  const std::vector<BoundaryVelocityExtensionConstraint> walls{
       {.boundary_label = kPdeSideWall,
        .constrained_components = {true, false, false},
        .prescribed_velocity = prescribed_walls}};
@@ -313,7 +313,7 @@ KeyedExtension extendQuadratic(const svmp::Mesh& mesh,
   std::vector<svmp::FE::level_set::VelocityExtensionConstraintRow> rows;
   (void)svmp::FE::level_set::extendVelocityByPde(
       mesh, comm, phi, source, 2u, known, 2u,
-      std::span<const WallVelocityExtensionConstraint>(walls), options, out,
+      std::span<const BoundaryVelocityExtensionConstraint>(walls), options, out,
       &rows);
   KeyedExtension result;
   for (std::size_t v = 0; v < n; ++v) {
@@ -531,7 +531,7 @@ PdeCachedRun extendCached(const svmp::Mesh& mesh, const svmp::MeshComm& comm,
   }
   // The side walls constrain the wall-normal component (x), or every
   // component (then all components have the same unknowns).
-  const std::vector<WallVelocityExtensionConstraint> walls{
+  const std::vector<BoundaryVelocityExtensionConstraint> walls{
       {.boundary_label = kPdeSideWall,
        .constrained_components = {true, all_components_on_walls,
                                   all_components_on_walls}}};
@@ -541,7 +541,7 @@ PdeCachedRun extendCached(const svmp::Mesh& mesh, const svmp::MeshComm& comm,
   PdeCachedRun out;
   const auto report = svmp::FE::level_set::extendVelocityByPde(
       mesh, comm, phi, source, 2u, known, 2u,
-      std::span<const WallVelocityExtensionConstraint>(walls), options,
+      std::span<const BoundaryVelocityExtensionConstraint>(walls), options,
       out.extended, &out.rows, cache,
       svmp::FE::level_set::PdeVelocityExtensionMeshRevisions{
           .geometry = 1u, .topology = 1u, .ownership = 1u, .numbering = 1u});

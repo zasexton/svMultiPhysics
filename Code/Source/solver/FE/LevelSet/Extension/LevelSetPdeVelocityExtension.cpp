@@ -500,7 +500,7 @@ static_assert(std::is_trivially_copyable_v<HighOrderCellRecord> &&
                       29u * sizeof(std::int64_t) + 729u * sizeof(double),
               "HighOrderCellRecord must be padding-free for bitwise comparison");
 
-// The gathered dry-region cells in canonical order (the narrow records by
+// The gathered inactive-region cells in canonical order (the narrow records by
 // cell ID, then the wide records by cell ID, then the high-order records by
 // cell ID) with the canonical index of every cell vertex.
 struct GatheredCells {
@@ -544,7 +544,7 @@ struct GatheredCells {
   }
 };
 
-// This rank's exact contribution to the dry-region systems and rows.
+// This rank's exact contribution to the inactive-region systems and rows.
 // prescribed_wall_masks (kWallVertexBit << c where a wall with a prescribed
 // velocity fixes component c) is empty when no wall has one.
 struct LocalSignature {
@@ -856,7 +856,7 @@ using ColumnMajorMatrix =
     Eigen::SparseMatrix<svmp::FE::Real, Eigen::ColMajor,
                         svmp::FE::backends::EigenMatrix::StorageIndex>;
 
-// A dry-region factorization kept between calls.
+// A inactive-region factorization kept between calls.
 class DryRegionFactorization {
 public:
   virtual ~DryRegionFactorization() = default;
@@ -1446,7 +1446,7 @@ std::uint64_t communicatorCombinedRevision(std::uint64_t local_key,
 namespace {
 
 /// One solve of the extension in which a homogeneous wall holds component c
-/// of a dry vertex v only where held_walls[3 v + c] is set (a prescribed
+/// of an inactive vertex v only where held_walls[3 v + c] is set (a prescribed
 /// wall always holds its components).
 PdeVelocityExtensionReport extendVelocityByPdePass(
     const svmp::Mesh& mesh,
@@ -1456,7 +1456,7 @@ PdeVelocityExtensionReport extendVelocityByPdePass(
     std::size_t source_components,
     std::span<const std::uint8_t> known,
     std::size_t target_components,
-    std::span<const WallVelocityExtensionConstraint> walls,
+    std::span<const BoundaryVelocityExtensionConstraint> walls,
     const PdeVelocityExtensionOptions& options,
     std::vector<double>& extended,
     std::vector<svmp::FE::level_set::VelocityExtensionConstraintRow>* rows,
@@ -1529,7 +1529,7 @@ PdeVelocityExtensionReport extendVelocityByPdePass(
   }
 
   // ---- wall component masks ------------------------------------------------
-  // wall_mask: the component is fixed on a wall; prescribed_mask: a wall with
+  // wall_mask: the component is fixed on a boundary; prescribed_mask: a wall with
   // a prescribed velocity fixes it to the source value (it wins over a
   // homogeneous wall at a shared vertex, where the source carries the strong
   // value its own constraints chose).
@@ -1628,7 +1628,7 @@ PdeVelocityExtensionReport extendVelocityByPdePass(
   const auto prescribed = [&](std::size_t c, std::size_t v) {
     return prescribed_walls && prescribed_mask[c][v] != 0u;
   };
-  // On the dry vertices, a homogeneous wall holds only the components the
+  // On the inactive vertices, a homogeneous wall holds only the components the
   // inflow test selected.
   for (std::size_t c = 0; c < 3u; ++c) {
     for (std::size_t v = 0; v < n_vertices; ++v) {
@@ -2146,7 +2146,7 @@ PdeVelocityExtensionReport extendVelocityByPdePass(
   std::array<PdeVelocityExtensionCache::Entry::Component, 3> built{};
   bool built_complete = store_factorization && !reuse;
 
-  // Unknown numbering of every component (dry vertices that are not
+  // Unknown numbering of every component (inactive vertices that are not
   // wall-fixed, in canonical vertex order).
   std::array<std::vector<svmp::FE::GlobalIndex>, 3> unknowns_by_component;
   std::array<svmp::FE::GlobalIndex, 3> n_unknowns{0, 0, 0};
@@ -2690,7 +2690,7 @@ PdeVelocityExtensionReport extendVelocityByPdePass(
   report.max_wall_normal_velocity = globalMax(max_wall_normal, comm);
 
   if (report.max_extended_speed >
-      kVelocityExtensionMaxWetToDryAmplification *
+      kVelocityExtensionMaxActiveToInactiveAmplification *
           std::max(report.max_known_speed, 1.0e-12)) {
     throw std::runtime_error(
         "PDE velocity extension amplified the known speed beyond the fixed "
@@ -2798,7 +2798,7 @@ PdeVelocityExtensionReport extendVelocityByPde(
     std::size_t source_components,
     std::span<const std::uint8_t> known,
     std::size_t target_components,
-    std::span<const WallVelocityExtensionConstraint> walls,
+    std::span<const BoundaryVelocityExtensionConstraint> walls,
     const PdeVelocityExtensionOptions& options,
     std::vector<double>& extended,
     std::vector<svmp::FE::level_set::VelocityExtensionConstraintRow>* rows,

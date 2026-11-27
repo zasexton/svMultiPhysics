@@ -10,22 +10,16 @@
 
 /**
  * @file ContactPointVelocityConstraint.h
- * @brief Essential condition on the wall-tangential velocity at the contact
+ * @brief Essential condition on the boundary-tangential velocity at the contact
  *        points of a P1 level set on a planar wall (2D).
  *
- * A contact point is the zero crossing x_c of the vertex level set on a wall
- * edge [w, d] (w on the liquid side, d on the other side).  With
- * s = (phi_w - c) / (phi_w - phi_d) the interpolated wall-tangential velocity
- * along the outward footprint direction t_f (from w towards d) is
- *     t_f . u(x_c) = (1 - s) t_f . u_w + s t_f . u_d,
- * and this constraint sets it to V(cos theta_cell), where theta_cell is the
- * through-liquid angle of the P1 level set in the wall cell
- * (cos theta = -n . n_wall, n the unit normal out of the liquid) and V is
- * supplied by the caller (for the Ren-E law V = M gamma (cos theta_e -
- * cos theta)).  The liquid is the side phi < isovalue or, for a positive
- * liquid side, phi > isovalue: the law reads the level set oriented by the
- * liquid side, so reversing both the level set and the side keeps the
- * contact velocity.
+ * Let x_c be the crossing of a marked boundary edge [a,b], with a on the
+ * active side. For s = (phi_a - c)/(phi_a - phi_b), the trace along the
+ * unit direction t from a to b is (1-s) t.u_a + s t.u_b. The constraint
+ * sets this value to the supplied speed V(cos theta). For the interior
+ * angle theta of the active region, cos theta = -n.n_boundary, where n
+ * points out of the active side. Reversing the level-set sign and the
+ * selected side preserves the orientation and speed.
  *
  * An isolated zero at a vertex is a contact point if its two marked wall
  * neighbors have opposite signs. Its angle comes from the unique P1 interface
@@ -36,7 +30,7 @@
  * transversal crossing. Branched contours have no unique contact angle.
  *
  * The constraint is applied after every other constraint of the field.  The
- * DOFs of the functional that are already constrained (typically the dry
+ * DOFs of the functional that are already constrained (typically the inactive
  * vertex, an aggregation slave) are expanded through their closed lines, so
  * the new line is written for an unconstrained DOF of the expanded functional
  * (the one with the largest coefficient; ties by DOF number) and never forms
@@ -69,12 +63,12 @@ struct ContactPointVelocityLaw {
     std::array<Real, 3> wall_normal{{0.0, -1.0, 0.0}};
     std::string level_set_field_name{};
     Real isovalue{0.0};
-    // The side of the level set the liquid occupies.
-    LevelSetConstraintSide liquid_side{LevelSetConstraintSide::Negative};
+    // The active side of the level set.
+    LevelSetConstraintSide active_side{LevelSetConstraintSide::Negative};
     // Optional source of the vertex level-set values (mesh vertex index ->
     // value); when empty the vertex mesh field level_set_field_name is read.
     std::function<Real(GlobalIndex)> level_set_vertex_value{};
-    // Outward wall-tangential contact-point speed as a function of
+    // Outward boundary-tangential contact-point speed as a function of
     // cos(theta_cell); positive values advance the contact point.
     std::function<Real(Real)> contact_speed{};
     std::string name{"contact_point_velocity"};

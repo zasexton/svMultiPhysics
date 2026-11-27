@@ -144,10 +144,10 @@ template <typename... Values>
     for (const auto& region : result.regions) {
         if (region.name.empty() || !region.balance_satisfied ||
             !finiteValues(
-                region.previous_liquid_measure,
-                region.low_order_liquid_measure,
-                region.raw_target_liquid_measure,
-                region.limited_liquid_measure,
+                region.previous_active_measure,
+                region.low_order_active_measure,
+                region.raw_target_active_measure,
+                region.limited_active_measure,
                 region.physical_boundary_mass_transfer,
                 region.discrete_divergence_mass_source,
                 region.low_order_nodal_interior_mass_transfer,
@@ -237,10 +237,10 @@ template <typename... Values>
 [[nodiscard]] bool finiteComponent(
     const LevelSetPhaseFluxComponentLedger& component) noexcept
 {
-    return finiteValues(component.previous_liquid_measure,
-                        component.low_order_liquid_measure,
-                        component.raw_target_liquid_measure,
-                        component.limited_liquid_measure,
+    return finiteValues(component.previous_active_measure,
+                        component.low_order_active_measure,
+                        component.raw_target_active_measure,
+                        component.limited_active_measure,
                         component.physical_boundary_mass_transfer,
                         component.discrete_divergence_mass_source,
                         component.low_order_interior_mass_transfer,
@@ -293,10 +293,10 @@ template <typename... Values>
                       stage.maximum_courant,
                       stage.minimum_low_order_coefficient,
                       stage.maximum_strong_form_decomposition_residual,
-                      correction.total_previous_liquid_measure,
-                      correction.total_low_order_liquid_measure,
-                      correction.total_raw_target_liquid_measure,
-                      correction.total_limited_liquid_measure,
+                      correction.total_previous_active_measure,
+                      correction.total_low_order_active_measure,
+                      correction.total_raw_target_active_measure,
+                      correction.total_limited_active_measure,
                       correction.total_physical_boundary_mass_transfer,
                       correction.total_discrete_divergence_mass_source,
                       correction.low_order_nodal_cancellation_residual,
@@ -321,12 +321,12 @@ template <typename... Values>
                       correction.raw_target_global_mass_balance_residual,
                       correction.global_mass_balance_residual,
                       correction.maximum_constant_preservation_error,
-                      correction.minimum_low_order_liquid_indicator,
-                      correction.maximum_low_order_liquid_indicator,
-                      correction.minimum_raw_target_liquid_indicator,
-                      correction.maximum_raw_target_liquid_indicator,
-                      correction.minimum_limited_liquid_indicator,
-                      correction.maximum_limited_liquid_indicator)) {
+                      correction.minimum_low_order_phase_indicator,
+                      correction.maximum_low_order_phase_indicator,
+                      correction.minimum_raw_target_phase_indicator,
+                      correction.maximum_raw_target_phase_indicator,
+                      correction.minimum_limited_phase_indicator,
+                      correction.maximum_limited_phase_indicator)) {
         return false;
     }
     if (!(stage.time_step > Real{0.0}) ||
@@ -349,9 +349,9 @@ template <typename... Values>
                 stage.physical_boundary_mass_transfer[index],
                 stage.discrete_divergence_mass_source[index],
                 node.lumped_control_volume,
-                node.previous_liquid_indicator,
-                node.lower_liquid_indicator,
-                node.upper_liquid_indicator,
+                node.previous_phase_indicator,
+                node.lower_phase_indicator,
+                node.upper_phase_indicator,
                 node.physical_boundary_mass_transfer,
                 node.discrete_divergence_mass_source,
                 node.low_order_interior_mass_transfer,
@@ -361,9 +361,9 @@ template <typename... Values>
                 node.negative_raw_antidiffusive_mass,
                 node.positive_correction_factor,
                 node.negative_correction_factor,
-                node.low_order_liquid_indicator,
-                node.raw_target_liquid_indicator,
-                node.limited_liquid_indicator,
+                node.low_order_phase_indicator,
+                node.raw_target_phase_indicator,
+                node.limited_phase_indicator,
                 node.low_order_local_mass_balance_residual,
                 node.raw_target_local_mass_balance_residual,
                 node.local_mass_balance_residual) ||
@@ -493,10 +493,10 @@ template <typename... Values>
     previous_q.reserve(stage.correction.nodes.size());
     one_ring_bounds.reserve(stage.correction.nodes.size());
     for (const auto& node : stage.correction.nodes) {
-        previous_q.push_back(node.previous_liquid_indicator);
+        previous_q.push_back(node.previous_phase_indicator);
         one_ring_bounds.push_back({
-            node.previous_liquid_indicator,
-            node.previous_liquid_indicator});
+            node.previous_phase_indicator,
+            node.previous_phase_indicator});
     }
     for (const auto& edge : stage.flux_edges) {
         if (edge.first_node < 0 || edge.second_node < 0 ||
@@ -522,10 +522,10 @@ template <typename... Values>
         const Real expected_upper = std::clamp(
             one_ring_bounds[node][1], Real{0.0}, Real{1.0});
         if (!sameArtifactRealBits(
-                stage.correction.nodes[node].lower_liquid_indicator,
+                stage.correction.nodes[node].lower_phase_indicator,
                 expected_lower) ||
             !sameArtifactRealBits(
-                stage.correction.nodes[node].upper_liquid_indicator,
+                stage.correction.nodes[node].upper_phase_indicator,
                 expected_upper)) {
             return false;
         }
@@ -620,13 +620,13 @@ void writeComponent(std::ostream& output,
     output << ",\"component_id\":" << component.component_id
            << ",\"nodes\":" << component.nodes
            << ",\"previous_liquid_measure\":"
-           << component.previous_liquid_measure
+           << component.previous_active_measure
            << ",\"low_order_liquid_measure\":"
-           << component.low_order_liquid_measure
+           << component.low_order_active_measure
            << ",\"raw_target_liquid_measure\":"
-           << component.raw_target_liquid_measure
+           << component.raw_target_active_measure
            << ",\"limited_liquid_measure\":"
-           << component.limited_liquid_measure
+           << component.limited_active_measure
            << ",\"physical_boundary_mass_transfer\":"
            << component.physical_boundary_mass_transfer
            << ",\"discrete_divergence_mass_source\":"
@@ -682,13 +682,13 @@ void writeRegion(std::ostream& output,
     }
     output << "]"
            << ",\"previous_liquid_measure\":"
-           << region.previous_liquid_measure
+           << region.previous_active_measure
            << ",\"low_order_liquid_measure\":"
-           << region.low_order_liquid_measure
+           << region.low_order_active_measure
            << ",\"raw_target_liquid_measure\":"
-           << region.raw_target_liquid_measure
+           << region.raw_target_active_measure
            << ",\"limited_liquid_measure\":"
-           << region.limited_liquid_measure
+           << region.limited_active_measure
            << ",\"physical_boundary_mass_transfer\":"
            << region.physical_boundary_mass_transfer
            << ",\"discrete_divergence_mass_source\":"
@@ -877,13 +877,13 @@ void writeArtifact(
            << ",\"component_activity_tolerance\":"
            << correction.component_activity_tolerance
            << ",\"total_previous_liquid_measure\":"
-           << correction.total_previous_liquid_measure
+           << correction.total_previous_active_measure
            << ",\"total_low_order_liquid_measure\":"
-           << correction.total_low_order_liquid_measure
+           << correction.total_low_order_active_measure
            << ",\"total_raw_target_liquid_measure\":"
-           << correction.total_raw_target_liquid_measure
+           << correction.total_raw_target_active_measure
            << ",\"total_limited_liquid_measure\":"
-           << correction.total_limited_liquid_measure
+           << correction.total_limited_active_measure
            << ",\"total_physical_boundary_mass_transfer\":"
            << correction.total_physical_boundary_mass_transfer
            << ",\"total_discrete_divergence_mass_source\":"
@@ -931,17 +931,17 @@ void writeArtifact(
            << ",\"maximum_constant_preservation_error\":"
            << correction.maximum_constant_preservation_error
            << ",\"minimum_low_order_liquid_indicator\":"
-           << correction.minimum_low_order_liquid_indicator
+           << correction.minimum_low_order_phase_indicator
            << ",\"maximum_low_order_liquid_indicator\":"
-           << correction.maximum_low_order_liquid_indicator
+           << correction.maximum_low_order_phase_indicator
            << ",\"minimum_raw_target_liquid_indicator\":"
-           << correction.minimum_raw_target_liquid_indicator
+           << correction.minimum_raw_target_phase_indicator
            << ",\"maximum_raw_target_liquid_indicator\":"
-           << correction.maximum_raw_target_liquid_indicator
+           << correction.maximum_raw_target_phase_indicator
            << ",\"minimum_limited_liquid_indicator\":"
-           << correction.minimum_limited_liquid_indicator
+           << correction.minimum_limited_phase_indicator
            << ",\"maximum_limited_liquid_indicator\":"
-           << correction.maximum_limited_liquid_indicator
+           << correction.maximum_limited_phase_indicator
            << ",\"nodes\":" << correction.nodes.size()
            << ",\"edges\":" << correction.edges.size()
            << ",\"resolved_components\":"
@@ -1073,11 +1073,11 @@ void writeArtifact(
                << ",\"lumped_control_volume\":"
                << node.lumped_control_volume
                << ",\"previous_liquid_indicator\":"
-               << node.previous_liquid_indicator
+               << node.previous_phase_indicator
                << ",\"lower_liquid_indicator\":"
-               << node.lower_liquid_indicator
+               << node.lower_phase_indicator
                << ",\"upper_liquid_indicator\":"
-               << node.upper_liquid_indicator
+               << node.upper_phase_indicator
                << ",\"physical_boundary_mass_transfer\":"
                << node.physical_boundary_mass_transfer
                << ",\"discrete_divergence_mass_source\":"
@@ -1097,11 +1097,11 @@ void writeArtifact(
                << ",\"negative_correction_factor\":"
                << node.negative_correction_factor
                << ",\"low_order_liquid_indicator\":"
-               << node.low_order_liquid_indicator
+               << node.low_order_phase_indicator
                << ",\"raw_target_liquid_indicator\":"
-               << node.raw_target_liquid_indicator
+               << node.raw_target_phase_indicator
                << ",\"limited_liquid_indicator\":"
-               << node.limited_liquid_indicator
+               << node.limited_phase_indicator
                << ",\"low_order_local_mass_balance_residual\":"
                << node.low_order_local_mass_balance_residual
                << ",\"raw_target_local_mass_balance_residual\":"

@@ -304,38 +304,38 @@ TEST(LevelSetConservativePhaseState,
     EXPECT_GT(negative.quadrature_points, 0u);
     EXPECT_GT(negative.cut_context_revision, 0u);
     EXPECT_GT(negative.source_value_revision, 0u);
-    EXPECT_NEAR(negative.retained_liquid_measure, 1.0 / 32.0,
+    EXPECT_NEAR(negative.retained_active_measure, 1.0 / 32.0,
                 2.0e-14);
-    EXPECT_NEAR(negative.projected_liquid_measure, 1.0 / 32.0,
+    EXPECT_NEAR(negative.projected_active_measure, 1.0 / 32.0,
                 2.0e-14);
-    ASSERT_EQ(negative.liquid_indicator.size(), 3u);
-    EXPECT_NEAR(negative.liquid_indicator[0], 5.0 / 32.0,
+    ASSERT_EQ(negative.phase_indicator.size(), 3u);
+    EXPECT_NEAR(negative.phase_indicator[0], 5.0 / 32.0,
                 2.0e-14);
-    EXPECT_NEAR(negative.liquid_indicator[1], 1.0 / 64.0,
+    EXPECT_NEAR(negative.phase_indicator[1], 1.0 / 64.0,
                 2.0e-14);
-    EXPECT_NEAR(negative.liquid_indicator[2], 1.0 / 64.0,
+    EXPECT_NEAR(negative.phase_indicator[2], 1.0 / 64.0,
                 2.0e-14);
 
     auto positive_options = negative_options;
-    positive_options.liquid_side =
+    positive_options.active_side =
         FE::geometry::CutIntegrationSide::Positive;
     const auto positive =
         level_set::projectLevelSetP1PhaseIndicatorFromCutContext(
             fixture.system, fixture.indicator, graph, positive_options);
     ASSERT_TRUE(positive.success) << positive.diagnostic;
-    EXPECT_NEAR(positive.retained_liquid_measure, 15.0 / 32.0,
+    EXPECT_NEAR(positive.retained_active_measure, 15.0 / 32.0,
                 2.0e-14);
-    ASSERT_EQ(positive.liquid_indicator.size(), 3u);
-    for (std::size_t i = 0; i < negative.liquid_indicator.size(); ++i) {
-        EXPECT_NEAR(negative.liquid_indicator[i] +
-                        positive.liquid_indicator[i],
+    ASSERT_EQ(positive.phase_indicator.size(), 3u);
+    for (std::size_t i = 0; i < negative.phase_indicator.size(); ++i) {
+        EXPECT_NEAR(negative.phase_indicator[i] +
+                        positive.phase_indicator[i],
                     1.0, 3.0e-14);
         EXPECT_NEAR(negative.liquid_phase_mass[i] +
                         positive.liquid_phase_mass[i],
                     graph.lumped_control_volume[i], 3.0e-14);
     }
-    EXPECT_NEAR(negative.retained_liquid_measure +
-                    positive.retained_liquid_measure,
+    EXPECT_NEAR(negative.retained_active_measure +
+                    positive.retained_active_measure,
                 graph.physical_measure, 3.0e-14);
 }
 
@@ -386,24 +386,24 @@ TEST(LevelSetConservativePhaseState,
         level_set::projectLevelSetP1PhaseIndicatorFromCutContext(
             fixture.system, fixture.indicator, graph, options);
     ASSERT_TRUE(negative.success) << negative.diagnostic;
-    options.liquid_side = FE::geometry::CutIntegrationSide::Positive;
+    options.active_side = FE::geometry::CutIntegrationSide::Positive;
     const auto positive =
         level_set::projectLevelSetP1PhaseIndicatorFromCutContext(
             fixture.system, fixture.indicator, graph, options);
     ASSERT_TRUE(positive.success) << positive.diagnostic;
 
-    EXPECT_GT(negative.retained_liquid_measure, 0.0);
-    EXPECT_GT(positive.retained_liquid_measure, 0.0);
-    EXPECT_NEAR(negative.retained_liquid_measure +
-                    positive.retained_liquid_measure,
+    EXPECT_GT(negative.retained_active_measure, 0.0);
+    EXPECT_GT(positive.retained_active_measure, 0.0);
+    EXPECT_NEAR(negative.retained_active_measure +
+                    positive.retained_active_measure,
                 graph.physical_measure, 2.0e-13);
-    ASSERT_EQ(negative.liquid_indicator.size(), graph.nodes);
-    ASSERT_EQ(positive.liquid_indicator.size(), graph.nodes);
+    ASSERT_EQ(negative.phase_indicator.size(), graph.nodes);
+    ASSERT_EQ(positive.phase_indicator.size(), graph.nodes);
     for (std::size_t i = 0; i < graph.nodes; ++i) {
-        EXPECT_GE(negative.liquid_indicator[i], 0.0);
-        EXPECT_LE(negative.liquid_indicator[i], 1.0);
-        EXPECT_NEAR(negative.liquid_indicator[i] +
-                        positive.liquid_indicator[i],
+        EXPECT_GE(negative.phase_indicator[i], 0.0);
+        EXPECT_LE(negative.phase_indicator[i], 1.0);
+        EXPECT_NEAR(negative.phase_indicator[i] +
+                        positive.phase_indicator[i],
                     1.0, 2.0e-13);
         EXPECT_NEAR(negative.liquid_phase_mass[i] +
                         positive.liquid_phase_mass[i],
@@ -617,7 +617,7 @@ TEST(LevelSetConservativePhaseState,
     EXPECT_LT(correction.maximum_predicted_mass_residual, 2.0e-12);
 
     auto positive_options = options;
-    positive_options.liquid_side =
+    positive_options.active_side =
         FE::geometry::CutIntegrationSide::Positive;
     const auto positive_projection =
         level_set::projectLevelSetP1PhaseIndicatorFromCutContext(

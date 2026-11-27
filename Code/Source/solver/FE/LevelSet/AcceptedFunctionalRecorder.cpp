@@ -86,7 +86,7 @@ std::uint64_t acceptedFunctionalDeclarationContentKey(
   mix_signed(declaration.level_set_field);
   mix_signed(declaration.velocity_field);
   mixCutContextHash(key, declaration.geometry_domain_id);
-  mix_signed(declaration.parameters.liquid_side);
+  mix_signed(declaration.parameters.active_side);
   mix_real(declaration.parameters.surface_tension);
   mix_real(declaration.parameters.volume_multiplier);
   mixCutContextHash(
@@ -116,7 +116,7 @@ std::uint64_t acceptedFunctionalDeclarationContentKey(
       declaration.active_volume_energy_parameters;
   mixCutContextHash(key, energy.has_value() ? 1u : 0u);
   if (energy.has_value()) {
-    mix_signed(energy->liquid_side);
+    mix_signed(energy->active_side);
     mix_real(energy->density);
     for (const auto value : energy->gravitational_acceleration) {
       mix_real(value);
@@ -132,14 +132,14 @@ std::uint64_t acceptedFunctionalDeclarationContentKey(
       declaration.active_volume_dissipation_parameters;
   mixCutContextHash(key, dissipation.has_value() ? 1u : 0u);
   if (dissipation.has_value()) {
-    mix_signed(dissipation->liquid_side);
+    mix_signed(dissipation->active_side);
     mix_real(dissipation->dynamic_viscosity);
   }
   const auto& pressure =
       declaration.external_pressure_power_parameters;
   mixCutContextHash(key, pressure.has_value() ? 1u : 0u);
   if (pressure.has_value()) {
-    mix_signed(pressure->liquid_side);
+    mix_signed(pressure->active_side);
     mix_real(pressure->external_pressure);
   }
   mixCutContextHash(
@@ -198,7 +198,7 @@ currentAcceptedFunctionalLayouts(
         static_cast<double>(declaration.interface_marker),
         static_cast<double>(declaration.level_set_field),
         static_cast<double>(declaration.velocity_field),
-        static_cast<double>(declaration.parameters.liquid_side),
+        static_cast<double>(declaration.parameters.active_side),
         static_cast<double>(declaration.parameters.surface_tension),
         static_cast<double>(declaration.parameters.volume_multiplier),
         active_energy.has_value() ? 1.0 : 0.0,
@@ -371,7 +371,7 @@ currentAcceptedFunctionalLayouts(
 
 namespace {
 
-/// The snapshot rule role of the liquid volume on @p side.
+/// The snapshot rule role of the active-side measure on @p side.
 [[nodiscard]] svmp::FE::interfaces::LevelSetGeometryRuleRole liquidVolumeRole(
     svmp::FE::geometry::CutIntegrationSide side) noexcept
 {
@@ -550,7 +550,7 @@ void attachAcceptedActiveVolumeEnergies(
     const std::array<double, 10> metadata{
         static_cast<double>(declaration.interface_marker),
         static_cast<double>(declaration.velocity_field),
-        static_cast<double>(parameters.liquid_side),
+        static_cast<double>(parameters.active_side),
         static_cast<double>(parameters.density),
         static_cast<double>(parameters.gravitational_acceleration[0]),
         static_cast<double>(parameters.gravitational_acceleration[1]),
@@ -605,13 +605,13 @@ void attachAcceptedActiveVolumeEnergies(
     try {
       svmp::FE::interfaces::FreeSurfaceActiveVolumeEnergyState energy;
       energy.snapshot_revision_key = (*found)->revision().snapshot_revision_key;
-      energy.liquid_side = parameters.liquid_side;
+      energy.active_side = parameters.active_side;
       energy.density = parameters.density;
       energy.gravitational_acceleration = parameters.gravitational_acceleration;
       energy.gravitational_reference_point = parameters.gravitational_reference_point;
       energy.owned_quadrature_point_count =
           svmp::FE::interfaces::freeSurfaceOwnedRulePointCount(
-              **found, liquidVolumeRole(parameters.liquid_side), &sim.fe_system->meshAccess());
+              **found, liquidVolumeRole(parameters.active_side), &sim.fe_system->meshAccess());
       local_energy = std::move(energy);
     } catch (...) {
       local_failure = std::current_exception();
@@ -706,11 +706,11 @@ void attachAcceptedFreeSurfaceActiveVolumeDissipation(
       const auto& parameters = *declaration.active_volume_dissipation_parameters;
       svmp::FE::interfaces::FreeSurfaceActiveVolumeDissipationState dissipation;
       dissipation.snapshot_revision_key = (*found)->revision().snapshot_revision_key;
-      dissipation.liquid_side = parameters.liquid_side;
+      dissipation.active_side = parameters.active_side;
       dissipation.dynamic_viscosity = parameters.dynamic_viscosity;
       dissipation.owned_quadrature_point_count =
           svmp::FE::interfaces::freeSurfaceOwnedRulePointCount(
-              **found, liquidVolumeRole(parameters.liquid_side), &sim.fe_system->meshAccess());
+              **found, liquidVolumeRole(parameters.active_side), &sim.fe_system->meshAccess());
       local_dissipation = std::move(dissipation);
     } catch (...) {
       local_failure = std::current_exception();
@@ -808,7 +808,7 @@ void attachAcceptedFreeSurfaceExternalPressurePowers(
       const auto& parameters = *declaration.external_pressure_power_parameters;
       svmp::FE::interfaces::FreeSurfaceExternalPressurePowerState power;
       power.snapshot_revision_key = (*found)->revision().snapshot_revision_key;
-      power.liquid_side = parameters.liquid_side;
+      power.active_side = parameters.active_side;
       power.external_pressure = parameters.external_pressure;
       power.owned_quadrature_point_count =
           svmp::FE::interfaces::freeSurfaceOwnedRulePointCount(
@@ -987,11 +987,11 @@ void attachAcceptedFreeSurfaceBackwardEulerKineticWork(
       work.snapshot_revision_key = (*found)->revision().snapshot_revision_key;
       work.previous_velocity_revision = previous_velocity_revision;
       work.endpoint_velocity_revision = endpoint_velocity_revision;
-      work.liquid_side = parameters.liquid_side;
+      work.active_side = parameters.active_side;
       work.density = parameters.density;
       work.owned_quadrature_point_count =
           svmp::FE::interfaces::freeSurfaceOwnedRulePointCount(
-              **found, liquidVolumeRole(parameters.liquid_side), &sim.fe_system->meshAccess());
+              **found, liquidVolumeRole(parameters.active_side), &sim.fe_system->meshAccess());
       local_work = std::move(work);
     } catch (...) {
       local_failure = std::current_exception();
@@ -1199,7 +1199,7 @@ template <class Walls>
 
 /// The wall quantities of one wall as forms on the snapshot's generated
 /// domains, with the coefficients of the discrete-functional declaration:
-/// the wetted area (1 over the wall's liquid-side active-boundary domains),
+/// the wetted area (1 over the wall's active-side active-boundary domains),
 /// the Young energy (-gamma cos(theta_b) over the same domains, when the
 /// wall has an angle) and the contact measure (1 over the wall's contact-line
 /// domains).  A quantity without a domain on this snapshot is empty.
@@ -1216,7 +1216,7 @@ struct WallFunctionalForms {
     std::optional<svmp::FE::Real> equilibrium_contact_angle_radians)
 {
   using svmp::FE::forms::FormExpr;
-  const auto liquid = declaration.parameters.liquid_side;
+  const auto liquid = declaration.parameters.active_side;
   const auto gamma = declaration.parameters.surface_tension;
   const auto one = FormExpr::constant(1.0);
   const auto sum_of = [](std::vector<FormExpr> terms) {
@@ -1603,14 +1603,14 @@ std::vector<DeclaredFunctionalMasses> applyDeclaredFunctionalForms(
         }
         constexpr std::array<std::string_view, 2> wall_rates{"wetted_area_rate", "young_energy_rate"};
         for (auto& declared_wall : interfaces::declaredWallFunctionalForms(
-                 system, prefix, *snapshot, power_walls, record_declaration->parameters.liquid_side,
+                 system, prefix, *snapshot, power_walls, record_declaration->parameters.active_side,
                  wall_rates)) {
           names.push_back(std::move(declared_wall.name));
           forms.push_back(std::move(declared_wall.form));
         }
         // There is no pointwise wetted-wall rate: every wall of the power
         // that has contact lines on this snapshot needs its declared rates
-        // (the Young-energy rate on a wall with an angle).
+        // (the Young-energy rate on a boundary with an angle).
         for (const auto& wall : accepted.endpoint_functional_power->walls) {
           const auto& contact_domains = snapshot->contactDomains();
           const bool has_contact_lines =
@@ -1974,7 +1974,7 @@ levelSetMaintenanceFunctionalValues(
             .cut_topology_revision =
                 levelSetMaintenanceCutTopologyRevision(
                     **found, comm),
-            .liquid_volume = state.state.owned_liquid_volume,
+            .active_measure = state.state.owned_liquid_volume,
             .liquid_gas_area = state.state.owned_liquid_gas_area,
             .wetted_wall_area = state.state.owned_wetted_wall_area,
             .contact_measure = state.state.owned_contact_measure,

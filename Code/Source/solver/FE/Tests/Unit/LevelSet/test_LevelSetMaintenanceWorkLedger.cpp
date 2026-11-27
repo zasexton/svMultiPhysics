@@ -41,7 +41,7 @@ LevelSetAuthoritativeFunctionalValue functionalValue(
     value.snapshot_revision = snapshot_revision;
     value.mesh_topology_revision = 19u;
     value.cut_topology_revision = 23u;
-    value.liquid_volume = 1.25;
+    value.active_measure = 1.25;
     value.liquid_gas_area = 2.5;
     value.wetted_wall_area = 0.75;
     value.contact_measure = 0.5;
@@ -174,7 +174,7 @@ TEST(LevelSetMaintenanceWorkLedger, RowsMustChainAndValuesMustCloseTheirIdentiti
     EXPECT_EQ(ledger.trialRows().size(), 1u);
 
     auto negative_measure = functionalValue(3.25, 703u);
-    negative_measure.liquid_volume = -0.25;
+    negative_measure.active_measure = -0.25;
     EXPECT_THROW(ledger.stageRow(Substage::GlobalCorrection, 3002u, 3003u,
                                  {functionalValue(3.5, 702u)},
                                  {negative_measure}),

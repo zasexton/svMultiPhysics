@@ -80,7 +80,7 @@ std::shared_ptr<svmp::FE::geometry::GeometryMapping> createCellGeometryMapping(
 
 } // namespace
 
-svmp::FE::interfaces::FreeSurfaceDiscreteFunctionalVectorEvaluator
+svmp::FE::interfaces::SnapshotVectorEvaluator
 makeSnapshotVectorFieldEvaluator(
     const SnapshotFieldAccess& velocity_record,
     std::span<const svmp::FE::Real> solution,
@@ -192,7 +192,7 @@ makeSnapshotVectorFieldEvaluator(
     }
   }
 
-  svmp::FE::interfaces::FreeSurfaceDiscreteFunctionalVectorEvaluator
+  svmp::FE::interfaces::SnapshotVectorEvaluator
       velocity;
   velocity.value =
       [velocity_space,
@@ -320,7 +320,7 @@ makeSnapshotVectorFieldEvaluator(
             ? state.affine_inverse
             : state.mapping->jacobian_inverse(xi);
         svmp::FE::interfaces::
-            FreeSurfaceDiscreteFunctionalPhysicalGradient
+            SnapshotVectorGradient
                 physical_gradient{};
         for (std::size_t component = 0u; component < 3u;
              ++component) {

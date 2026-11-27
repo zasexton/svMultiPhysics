@@ -7,11 +7,11 @@
 
 #pragma once
 
-// PDE-based extension of the physical velocity into the dry part of an
+// PDE-based extension of the physical velocity into the inactive part of an
 // unfitted level-set mesh.  The result is the advection velocity w of the
-// level-set transport: w = u on every "known" vertex (the wet vertices and all
+// level-set transport: w = u on every "known" vertex (the active vertices and all
 // vertices of the retained interface cells, so that w_h = u_h on the
-// interface), and on the remaining (dry) vertices w solves a parameter-free
+// interface), and on the remaining (inactive) vertices w solves a parameter-free
 // linear problem with that Dirichlet data:
 //
 //   Harmonic:            find w with  (grad w, grad v)_D = 0          for all v,
@@ -20,15 +20,15 @@
 //                        minimizer of ||(n.grad) w||^2 (w constant along the
 //                        level-set normals).
 //
-// D is the union of the cells that contain a dry vertex.  The outer boundary
+// D is the union of the cells that contain an inactive vertex.  The outer boundary
 // of D carries the natural (zero-flux) condition.  Velocity components that a
-// strong wall Dirichlet condition constrains are known data on dry wall
+// strong wall Dirichlet condition constrains are known data on inactive boundary
 // vertices for a wall whose velocity is prescribed (any value; the source
 // carries the prescribed value there).  A homogeneous condition holds them
 // at zero only against inflow: where the solve without them gives
 // w . n < 0 through a wall face of the vertex, and the solve is repeated
 // until that set no longer grows.  The level-set equation needs data only on
-// its inflow boundary, and holding the normal velocity of dry wall vertices
+// its inflow boundary, and holding the normal velocity of inactive boundary vertices
 // would slow a front that approaches the wall.  The other components keep
 // the natural condition.  Components are independent because every supported
 // wall mask is axis-aligned.
@@ -44,11 +44,11 @@
 // simplices use their constant P1 gradients and cell normal; the other cells
 // use the FE Lagrange element of their type and geometry order (basis,
 // stiffness quadrature, isoparametric map) and, for LeastSquaresNormal, the
-// normal of grad(phi_h) at every quadrature point.  Other dry cells fail on
-// every rank with a message that names them.  The wet-to-dry guard and the
-// convergence assume shape-regular dry cells next to the known set.
+// normal of grad(phi_h) at every quadrature point.  Other inactive cells fail on
+// every rank with a message that names them.  The active-to-inactive guard and the
+// convergence assume shape-regular inactive cells next to the known set.
 //
-// The system is small (dry vertices only).  Each rank contributes the element
+// The system is small (inactive vertices only).  Each rank contributes the element
 // matrices of its owned cells; every rank assembles the same global system in
 // a canonical order (sorted global IDs; a high-order node has its own global
 // vertex ID like a corner) and solves it with the FE Eigen backend's direct
@@ -95,7 +95,7 @@ enum class PdeVelocityExtensionOperator : std::uint8_t {
 [[nodiscard]] std::optional<PdeVelocityExtensionOperator>
 pdeVelocityExtensionOperatorFromToken(std::string_view token);
 
-// Sparse direct factorization of the dry-region systems.
+// Sparse direct factorization of the inactive-region systems.
 //   LuColamd (default): Eigen::SparseLU with COLAMD ordering, the FE Eigen
 //     backend's direct solve.
 //   LdltAmd (opt-in): Eigen::SimplicialLDLT with AMD ordering.  Valid for the
@@ -164,11 +164,11 @@ struct PdeVelocityExtensionReport {
   double max_relative_residual{0.0};
   // Largest |w| of a component held by a homogeneous wall.
   double max_wall_normal_velocity{0.0};
-  // Largest speed of the prescribed wall components of the dry vertices
+  // Largest speed of the prescribed wall components of the inactive vertices
   // (zero without a wall with a prescribed velocity).  max_known_speed
   // includes it.
   double max_prescribed_wall_speed{0.0};
-  // True when every solve of the call reused a cached dry-region
+  // True when every solve of the call reused a cached inactive-region
   // factorization (and rows).
   bool reused_factorization{false};
   // True when the components were factorized and solved on one rank each.
@@ -185,7 +185,7 @@ struct PdeVelocityExtensionReport {
   // Entries held by the cache after the call and the capacity it applied.
   std::size_t cache_entries{0u};
   std::size_t cache_capacity{0u};
-  // Content hash of the dry-region solution in canonical (global vertex ID)
+  // Content hash of the inactive-region solution in canonical (global vertex ID)
   // order; the same on every rank.
   std::uint64_t solution_hash{0u};
   // Wall time of the call on this rank and of this rank's component solves
@@ -195,7 +195,7 @@ struct PdeVelocityExtensionReport {
 };
 
 // Mesh revisions that, together with the exact system content, key a cached
-// dry-region factorization (see PdeVelocityExtensionCache).
+// inactive-region factorization (see PdeVelocityExtensionCache).
 struct PdeVelocityExtensionMeshRevisions {
   std::uint64_t geometry{0u};
   std::uint64_t topology{0u};
@@ -203,10 +203,10 @@ struct PdeVelocityExtensionMeshRevisions {
   std::uint64_t numbering{0u};
 };
 
-// Reuse of the dry-region systems between calls of extendVelocityByPde.
+// Reuse of the inactive-region systems between calls of extendVelocityByPde.
 //
-// The dry-region matrix does not depend on the velocity.  For the harmonic
-// operator it depends only on the mesh geometry, the known set, the dry cells
+// The inactive-region matrix does not depend on the velocity.  For the harmonic
+// operator it depends only on the mesh geometry, the known set, the inactive cells
 // and the wall masks; for the least-squares normal operator it also depends on
 // the level-set normal of every dry cell.  The cache keeps the gathered
 // system, the sparse LU factorization of every velocity component and the
@@ -214,7 +214,7 @@ struct PdeVelocityExtensionMeshRevisions {
 //   - the mesh geometry, topology, ownership and numbering revisions, and
 //   - the exact content of each rank's contribution: local vertex IDs,
 //     vertex ownership, known set, extension domain, wall masks and the
-//     element matrices of the owned dry cells, compared bitwise (the element
+//     element matrices of the owned inactive cells, compared bitwise (the element
 //     matrices carry the level-set normals of the least-squares operator),
 // combined over the communicator.  The ranks agree on reuse collectively: a
 // change on any rank refactors on every rank.  A reused call applies the same
@@ -225,7 +225,7 @@ struct PdeVelocityExtensionMeshRevisions {
 //
 // The cache keeps several entries (most recently used first): the known set
 // of successive outer passes can return to an earlier state, whose entry is
-// then reused, and a call whose homogeneous walls hold dry vertices against
+// then reused, and a call whose homogeneous walls hold inactive vertices against
 // inflow solves twice (without and with the held components), so the
 // replicated default keeps both systems.  An entry is reused only if it matches on every rank; entries
 // are added and evicted by collective decisions, so every rank holds the
@@ -282,7 +282,7 @@ private:
 };
 
 // Diagnostics: SVMP_PDE_EXTENSION_DUMP=<prefix> makes rank 0 write the
-// canonical dry-region solution of the first SVMP_PDE_EXTENSION_DUMP_CALLS
+// canonical inactive-region solution of the first SVMP_PDE_EXTENSION_DUMP_CALLS
 // (default 2) calls of the process to <prefix>.<call>.bin (uint64 vertex
 // count, then per vertex its int64 global ID and three doubles).
 //
@@ -290,18 +290,18 @@ private:
 // source: source_components values per local vertex.
 // known: mask of the known vertices (made communicator-consistent inside).
 // extended: resized to n_vertices * target_components on return; it holds
-// the solution of the dry-region system.
+// the solution of the inactive-region system.
 // rows (optional): the same discrete problem as owner-local algebraic rows
 // for the monolithic coupling, one per owned vertex and component:
 //   known vertex:          w_c = u_c                       (source dependency),
 //   dry vertex:            w_{i,c} = sum_j (-A_ij / A_ii) w_{j,c}
-//                          over the vertices j sharing a dry-region cell
+//                          over the vertices j sharing a inactive-region cell
 //                          with i (extension dependencies),
 //   fixed by a wall with a prescribed velocity:  w_c = u_c,
 //   held by a homogeneous wall (inflow) or outside the band:  w_c = 0.
 // Together with the physical velocity these rows determine exactly the
 // extension returned in `extended`.
-// cache (optional): reuse of the dry-region factorization and rows between
+// cache (optional): reuse of the inactive-region factorization and rows between
 // calls, keyed on `revisions` and the exact system content.  It must be
 // either non-null on every rank of the communicator or null on every rank.
 PdeVelocityExtensionReport extendVelocityByPde(
@@ -312,7 +312,7 @@ PdeVelocityExtensionReport extendVelocityByPde(
     std::size_t source_components,
     std::span<const std::uint8_t> known,
     std::size_t target_components,
-    std::span<const WallVelocityExtensionConstraint> walls,
+    std::span<const BoundaryVelocityExtensionConstraint> walls,
     const PdeVelocityExtensionOptions& options,
     std::vector<double>& extended,
     std::vector<svmp::FE::level_set::VelocityExtensionConstraintRow>* rows =

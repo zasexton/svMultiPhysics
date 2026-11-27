@@ -66,7 +66,7 @@ struct SnapshotFieldAccess {
  * evaluator keeps the coefficients and geometry mapping of the last cell, so
  * it is single-threaded.  @p diagnostic_context starts its error messages.
  */
-[[nodiscard]] FreeSurfaceDiscreteFunctionalVectorEvaluator makeSnapshotVectorFieldEvaluator(
+[[nodiscard]] SnapshotVectorEvaluator makeSnapshotVectorFieldEvaluator(
     const SnapshotFieldAccess& field,
     std::span<const Real> solution,
     std::string_view diagnostic_context,

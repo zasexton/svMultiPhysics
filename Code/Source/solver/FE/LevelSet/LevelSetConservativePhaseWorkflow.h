@@ -10,7 +10,7 @@
 
 /**
  * @file LevelSetConservativePhaseWorkflow.h
- * @brief Accepted-step workflow of the conservative liquid-phase indicator q.
+ * @brief Accepted-step workflow of the conservative selected-phase indicator q.
  *
  * For every level-set equation with a conservative phase indicator the
  * workflow

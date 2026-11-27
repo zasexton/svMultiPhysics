@@ -41,7 +41,7 @@ bool sameFreeSurfaceFunctionalParameters(
     const interfaces::FreeSurfaceDiscreteFunctionalParameters& lhs,
     const interfaces::FreeSurfaceDiscreteFunctionalParameters& rhs) noexcept
 {
-    if (lhs.liquid_side != rhs.liquid_side ||
+    if (lhs.active_side != rhs.active_side ||
         lhs.surface_tension != rhs.surface_tension ||
         lhs.volume_multiplier != rhs.volume_multiplier ||
         lhs.young_wall_coefficients.size() !=
@@ -80,7 +80,7 @@ bool sameFreeSurfaceActiveVolumeEnergyParameters(
     const interfaces::FreeSurfaceActiveVolumeEnergyParameters& lhs,
     const interfaces::FreeSurfaceActiveVolumeEnergyParameters& rhs) noexcept
 {
-    return lhs.liquid_side == rhs.liquid_side &&
+    return lhs.active_side == rhs.active_side &&
            lhs.density == rhs.density &&
            lhs.gravitational_acceleration ==
                rhs.gravitational_acceleration &&
@@ -93,7 +93,7 @@ bool sameFreeSurfaceActiveVolumeEnergyState(
     const interfaces::FreeSurfaceActiveVolumeEnergyState& rhs) noexcept
 {
     return lhs.snapshot_revision_key == rhs.snapshot_revision_key &&
-           lhs.liquid_side == rhs.liquid_side &&
+           lhs.active_side == rhs.active_side &&
            lhs.density == rhs.density &&
            lhs.gravitational_acceleration ==
                rhs.gravitational_acceleration &&
@@ -114,7 +114,7 @@ bool sameFreeSurfaceActiveVolumeDissipationParameters(
     const interfaces::FreeSurfaceActiveVolumeDissipationParameters& rhs)
     noexcept
 {
-    return lhs.liquid_side == rhs.liquid_side &&
+    return lhs.active_side == rhs.active_side &&
            lhs.dynamic_viscosity == rhs.dynamic_viscosity;
 }
 
@@ -123,7 +123,7 @@ bool sameFreeSurfaceActiveVolumeDissipationState(
     const interfaces::FreeSurfaceActiveVolumeDissipationState& rhs) noexcept
 {
     return lhs.snapshot_revision_key == rhs.snapshot_revision_key &&
-           lhs.liquid_side == rhs.liquid_side &&
+           lhs.active_side == rhs.active_side &&
            lhs.dynamic_viscosity == rhs.dynamic_viscosity &&
            lhs.owned_quadrature_point_count ==
                rhs.owned_quadrature_point_count &&
@@ -137,7 +137,7 @@ bool sameFreeSurfaceExternalPressurePowerParameters(
     const interfaces::FreeSurfaceExternalPressurePowerParameters& rhs)
     noexcept
 {
-    return lhs.liquid_side == rhs.liquid_side &&
+    return lhs.active_side == rhs.active_side &&
            lhs.external_pressure == rhs.external_pressure;
 }
 
@@ -186,7 +186,7 @@ bool sameFreeSurfaceExternalPressurePowerState(
     const interfaces::FreeSurfaceExternalPressurePowerState& rhs) noexcept
 {
     return lhs.snapshot_revision_key == rhs.snapshot_revision_key &&
-           lhs.liquid_side == rhs.liquid_side &&
+           lhs.active_side == rhs.active_side &&
            lhs.external_pressure == rhs.external_pressure &&
            lhs.owned_quadrature_point_count ==
                rhs.owned_quadrature_point_count &&
@@ -207,7 +207,7 @@ bool sameFreeSurfaceBackwardEulerKineticWorkState(
                rhs.previous_velocity_revision &&
            lhs.endpoint_velocity_revision ==
                rhs.endpoint_velocity_revision &&
-           lhs.liquid_side == rhs.liquid_side &&
+           lhs.active_side == rhs.active_side &&
            lhs.density == rhs.density &&
            lhs.owned_quadrature_point_count ==
                rhs.owned_quadrature_point_count &&
@@ -229,7 +229,7 @@ bool sameFreeSurfaceFunctionalState(
     const interfaces::FreeSurfaceDiscreteFunctionalState& rhs) noexcept
 {
     if (lhs.snapshot_revision_key != rhs.snapshot_revision_key ||
-        lhs.liquid_side != rhs.liquid_side ||
+        lhs.active_side != rhs.active_side ||
         lhs.surface_tension != rhs.surface_tension ||
         lhs.volume_multiplier != rhs.volume_multiplier ||
         lhs.owned_liquid_volume != rhs.owned_liquid_volume ||
@@ -266,7 +266,7 @@ bool sameFreeSurfaceFunctionalVariationState(
     noexcept
 {
     if (lhs.snapshot_revision_key != rhs.snapshot_revision_key ||
-        lhs.liquid_side != rhs.liquid_side ||
+        lhs.active_side != rhs.active_side ||
         lhs.surface_tension != rhs.surface_tension ||
         lhs.volume_multiplier != rhs.volume_multiplier ||
         lhs.owned_liquid_volume_variation !=
@@ -416,7 +416,7 @@ bool sameFreeSurfaceAcceptedContactStageState(
                                          rhs.geometry_revision) ||
         lhs.state.snapshot_revision_key !=
             rhs.state.snapshot_revision_key ||
-        lhs.state.liquid_side != rhs.state.liquid_side ||
+        lhs.state.active_side != rhs.state.active_side ||
         lhs.state.surface_tension != rhs.state.surface_tension ||
         lhs.state.owned_contact_measure !=
             rhs.state.owned_contact_measure ||
@@ -869,8 +869,8 @@ void FunctionalRecords::declareFunctional(
         "functional power requires the discrete-energy capillary method");
     auto& parameters = declaration.parameters;
     FE_THROW_IF(
-        parameters.liquid_side != geometry::CutIntegrationSide::Negative &&
-            parameters.liquid_side != geometry::CutIntegrationSide::Positive,
+        parameters.active_side != geometry::CutIntegrationSide::Negative &&
+            parameters.active_side != geometry::CutIntegrationSide::Positive,
         InvalidArgumentException,
         "FESystem::declareFreeSurfaceDiscreteFunctional: liquid side must "
         "be Negative or Positive");
@@ -895,7 +895,7 @@ void FunctionalRecords::declareFunctional(
                 });
         };
         FE_THROW_IF(
-            energy.liquid_side != parameters.liquid_side ||
+            energy.active_side != parameters.active_side ||
                 !std::isfinite(energy.density) ||
                 !(energy.density > Real{0.0}) ||
                 !finite_vector(energy.gravitational_acceleration) ||
@@ -916,7 +916,7 @@ void FunctionalRecords::declareFunctional(
         const auto& dissipation =
             *declaration.active_volume_dissipation_parameters;
         FE_THROW_IF(
-            dissipation.liquid_side != parameters.liquid_side ||
+            dissipation.active_side != parameters.active_side ||
                 !std::isfinite(dissipation.dynamic_viscosity) ||
                 !(dissipation.dynamic_viscosity > Real{0.0}),
             InvalidArgumentException,
@@ -928,7 +928,7 @@ void FunctionalRecords::declareFunctional(
         const auto& pressure =
             *declaration.external_pressure_power_parameters;
         FE_THROW_IF(
-            pressure.liquid_side != parameters.liquid_side ||
+            pressure.active_side != parameters.active_side ||
                 !std::isfinite(pressure.external_pressure),
             InvalidArgumentException,
             "FESystem::declareFreeSurfaceDiscreteFunctional: exterior-"
@@ -1119,7 +1119,7 @@ void FunctionalRecords::declareFunctional(
         .value("velocity_field", stored.velocity_field)
         .quoted("geometry_domain_id", stored.geometry_domain_id)
         .text("liquid_side",
-              stored.parameters.liquid_side == geometry::CutIntegrationSide::Negative ? "Negative" : "Positive")
+              stored.parameters.active_side == geometry::CutIntegrationSide::Negative ? "Negative" : "Positive")
         .value("surface_tension", stored.parameters.surface_tension)
         .value("volume_multiplier", stored.parameters.volume_multiplier)
         .value("young_wall_count", stored.parameters.young_wall_coefficients.size())
@@ -1262,7 +1262,7 @@ void FunctionalRecords::recordAcceptedFunctionals(
             "FESystem::recordAcceptedFreeSurfaceDiscreteFunctionals: "
             "geometry provenance does not match the declaration and state");
         FE_THROW_IF(
-            state.liquid_side != declaration.parameters.liquid_side ||
+            state.active_side != declaration.parameters.active_side ||
                 state.surface_tension !=
                     declaration.parameters.surface_tension ||
                 state.volume_multiplier !=
@@ -1387,7 +1387,7 @@ void FunctionalRecords::recordAcceptedFunctionals(
             FE_THROW_IF(
                 power.snapshot_revision_key !=
                         revision.snapshot_revision_key ||
-                    power.liquid_side != state.liquid_side ||
+                    power.active_side != state.active_side ||
                     power.surface_tension != state.surface_tension ||
                     power.volume_multiplier != state.volume_multiplier ||
                     power.walls.size() != state.walls.size() ||
@@ -1475,7 +1475,7 @@ void FunctionalRecords::recordAcceptedFunctionals(
             FE_THROW_IF(
                 energy.snapshot_revision_key !=
                         revision.snapshot_revision_key ||
-                    energy.liquid_side != energy_parameters.liquid_side ||
+                    energy.active_side != energy_parameters.active_side ||
                     energy.density != energy_parameters.density ||
                     energy.gravitational_acceleration !=
                         energy_parameters.gravitational_acceleration ||
@@ -1523,8 +1523,8 @@ void FunctionalRecords::recordAcceptedFunctionals(
             FE_THROW_IF(
                 dissipation.snapshot_revision_key !=
                         revision.snapshot_revision_key ||
-                    dissipation.liquid_side !=
-                        dissipation_parameters.liquid_side ||
+                    dissipation.active_side !=
+                        dissipation_parameters.active_side ||
                     dissipation.dynamic_viscosity !=
                         dissipation_parameters.dynamic_viscosity ||
                     !finite_nonnegative(
@@ -1576,8 +1576,8 @@ void FunctionalRecords::recordAcceptedFunctionals(
             FE_THROW_IF(
                 pressure.snapshot_revision_key !=
                         revision.snapshot_revision_key ||
-                    pressure.liquid_side !=
-                        pressure_parameters.liquid_side ||
+                    pressure.active_side !=
+                        pressure_parameters.active_side ||
                     pressure.external_pressure !=
                         pressure_parameters.external_pressure ||
                     !finite_nonnegative(
@@ -1622,7 +1622,7 @@ void FunctionalRecords::recordAcceptedFunctionals(
                         revision.snapshot_revision_key ||
                     work.previous_velocity_revision == 0u ||
                     work.endpoint_velocity_revision == 0u ||
-                    work.liquid_side != energy_parameters.liquid_side ||
+                    work.active_side != energy_parameters.active_side ||
                     work.density != energy_parameters.density ||
                     work.owned_quadrature_point_count !=
                         energy.owned_quadrature_point_count ||
@@ -1775,8 +1775,8 @@ void FunctionalRecords::recordAcceptedFunctionals(
                 "contact-stage geometry provenance does not match the "
                 "declaration and state");
             FE_THROW_IF(
-                contact_state.liquid_side !=
-                        declaration.parameters.liquid_side ||
+                contact_state.active_side !=
+                        declaration.parameters.active_side ||
                     contact_state.surface_tension !=
                         declaration.parameters.surface_tension ||
                     !finite_nonnegative(
@@ -2581,7 +2581,7 @@ void FunctionalRecords::recordAcceptedFunctionals(
             .value("snapshot_revision", revision.snapshot_revision_key)
             .value("cut_topology_revision", accepted.cut_topology_revision)
             .boolean("geometry_pruning_occurred", accepted.geometry_pruning_occurred)
-            .text("liquid_side", state.liquid_side == geometry::CutIntegrationSide::Negative ? "Negative" : "Positive")
+            .text("liquid_side", state.active_side == geometry::CutIntegrationSide::Negative ? "Negative" : "Positive")
             .value("surface_tension", state.surface_tension)
             .value("volume_multiplier", state.volume_multiplier)
             .value("liquid_volume", state.owned_liquid_volume)

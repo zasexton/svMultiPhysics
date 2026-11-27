@@ -48,7 +48,7 @@
  *
  * Under-aggregation policy: candidates without a reachable full-active root
  * are isolated cut ISLANDS — a routine geometric condition in breaking
- * free-surface flows (the 312-step d18 gate sees up to ~48 per refresh once
+ * moving-interface problems (the 312-step d18 gate sees up to ~48 per refresh once
  * the surface fragments) — and are pinned homogeneously (their content is
  * sub-resolution and an isolated region's pressure level is locally
  * indeterminate), never fatal. Mapping-inversion failures and (defensively)
@@ -56,7 +56,7 @@
  * and throw at apply time instead of leaving unstabilized small-cut DOFs in
  * the system. In MPI, cut/full-support and boundary-exclusion facts are
  * combined by global field DOF before candidates are selected; ownership-
- * filtered cut rules and owner-only wall labels therefore cannot create
+ * filtered cut rules and owner-only boundary labels therefore cannot create
  * different slave sets. The distributed band graph is reconstructed from
  * exactly-one-owner declarations of every classified cell's sorted corner
  * field-DOF face signatures; this removes any mutual-cell-halo requirement
@@ -216,7 +216,7 @@ struct SmallCutAggregationGuardOptions {
     /// beyond the root-path guard, or whose every root proposal fails the
     /// guards, stops the run by default.  With the fallback it receives the
     /// rootless-island policy (homogeneous pin), which degrades results
-    /// inside connected liquid; every case is logged and counted in the
+    /// inside connected the active region; every case is logged and counted in the
     /// run summary so that such results are flagged.
     bool rootless_fallback{false};
 };
@@ -433,7 +433,7 @@ struct SmallCutAggregationTopologyTransitionReport {
  * physical volume is selected from one validated canonical declaration per
  * physical cell and is repeated in each field-specific report. It is retained
  * geometry affected by the homogeneous support-removal policy, not a claim
- * that liquid volume was conservatively transferred or geometrically deleted.
+ * that active-side measure was conservatively transferred or geometrically deleted.
  * Guard maxima describe provider-visible proposal or bounded traversal
  * attempts. Root search is restricted to the configured path neighborhood;
  * roots outside that envelope are never row candidates. A root-path rejection

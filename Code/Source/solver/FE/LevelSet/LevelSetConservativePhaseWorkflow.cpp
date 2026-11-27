@@ -122,7 +122,7 @@ namespace {
 svmp::FE::geometry::CutIntegrationSide conservativePhaseSide(
     const svmp::FE::level_set::LevelSetConservativePhaseOptions& options)
 {
-  return options.liquid_side ==
+  return options.active_side ==
                  svmp::FE::level_set::LevelSetPhaseSide::Negative
              ? svmp::FE::geometry::CutIntegrationSide::Negative
              : svmp::FE::geometry::CutIntegrationSide::Positive;
@@ -164,11 +164,11 @@ requireCurrentConservativePhaseGraph(
     bool allow_graph_rebuild)
 {
   const auto phase_field = system.findFieldByName(
-      request.configuration->transport.conservative_phase.liquid_indicator.field_name);
+      request.configuration->transport.conservative_phase.phase_indicator.field_name);
   if (phase_field == svmp::FE::INVALID_FIELD_ID) {
     throw std::runtime_error(
         "[svMultiPhysics::Application] Conservative phase transport could not find field '" +
-        request.configuration->transport.conservative_phase.liquid_indicator.field_name + "'.");
+        request.configuration->transport.conservative_phase.phase_indicator.field_name + "'.");
   }
   const auto& mesh = system.meshAccess();
   const auto& dofs = system.fieldDofHandler(phase_field);
@@ -203,7 +203,7 @@ requireCurrentConservativePhaseGraph(
     if (!graph.success) {
       throw std::runtime_error(
           "[svMultiPhysics::Application] Conservative phase graph assembly failed for field '" +
-          request.configuration->transport.conservative_phase.liquid_indicator.field_name +
+          request.configuration->transport.conservative_phase.phase_indicator.field_name +
           "': " + graph.diagnostic);
     }
     request.runtime.conservative_phase_graph = std::move(graph);
@@ -224,7 +224,7 @@ conservativePhaseProjectionOptions(
   }
   svmp::FE::level_set::LevelSetP1PhaseProjectionOptions options;
   options.interface_marker = *marker;
-  options.liquid_side = conservativePhaseSide(
+  options.active_side = conservativePhaseSide(
       request.configuration->transport.conservative_phase);
   options.invariant_tolerance =
       request.configuration->transport.conservative_phase.invariant_tolerance;
@@ -241,7 +241,7 @@ projectCurrentConservativePhaseGeometry(
   auto& graph = requireCurrentConservativePhaseGraph(
       system, request, allow_graph_rebuild);
   const auto phase_field = system.findFieldByName(
-      request.configuration->transport.conservative_phase.liquid_indicator.field_name);
+      request.configuration->transport.conservative_phase.phase_indicator.field_name);
   const auto projection_options = conservativePhaseProjectionOptions(
       system, request);
   return svmp::FE::level_set::
@@ -312,14 +312,14 @@ void initializeConservativePhaseStates(
     if (!projection.success) {
       throw std::runtime_error(
           "[svMultiPhysics::Application] Initial conservative phase projection failed for field '" +
-          request.configuration->transport.conservative_phase.liquid_indicator.field_name +
+          request.configuration->transport.conservative_phase.phase_indicator.field_name +
           "': " + projection.diagnostic);
     }
     const auto phase_field = system.findFieldByName(
-        request.configuration->transport.conservative_phase.liquid_indicator.field_name);
+        request.configuration->transport.conservative_phase.phase_indicator.field_name);
     auto current = gatherFeOrderedSolution(history.u(), comm);
     assignConservativePhaseSlice(
-        system, phase_field, projection.liquid_indicator, current);
+        system, phase_field, projection.phase_indicator, current);
     std::vector<std::vector<svmp::FE::Real>> initialized_history;
     initialized_history.reserve(
         static_cast<std::size_t>(history.historyDepth()));
@@ -327,7 +327,7 @@ void initializeConservativePhaseStates(
       auto previous =
           gatherFeOrderedSolution(history.uPrevK(k), comm);
       assignConservativePhaseSlice(
-          system, phase_field, projection.liquid_indicator, previous);
+          system, phase_field, projection.phase_indicator, previous);
       initialized_history.push_back(std::move(previous));
     }
     scatterFeOrderedSolution(history.u(), current);
@@ -348,11 +348,11 @@ void initializeConservativePhaseStates(
         svmp::FE::LogRecord("LevelSetConservativePhase", "initialized")
             .diagnostic("conservative_phase_initialization")
             .rootOnly()
-            .quoted("field", request.configuration->transport.conservative_phase.liquid_indicator.field_name)
+            .quoted("field", request.configuration->transport.conservative_phase.phase_indicator.field_name)
             .quoted("level_set_field", request.configuration->transport.level_set.field_name)
-            .text("liquid_side", request.configuration->transport.conservative_phase.liquid_side == svmp::FE::level_set::LevelSetPhaseSide::Negative ? "negative" : "positive")
-            .value("retained_measure", projection.retained_liquid_measure)
-            .value("projected_measure", projection.projected_liquid_measure)
+            .text("liquid_side", request.configuration->transport.conservative_phase.active_side == svmp::FE::level_set::LevelSetPhaseSide::Negative ? "negative" : "positive")
+            .value("retained_measure", projection.retained_active_measure)
+            .value("projected_measure", projection.projected_active_measure)
             .value("cut_context_revision", projection.cut_context_revision)
             .value("source_value_revision", projection.source_value_revision)
             .value("graph_nodes", projection.nodes));
@@ -465,7 +465,7 @@ sampleConservativePhaseVelocity(
     accumulated.assign(
         graph.nodes * 4u, svmp::FE::Real{0.0});
     const auto phase_field = system.findFieldByName(
-        request.configuration->transport.conservative_phase.liquid_indicator.field_name);
+        request.configuration->transport.conservative_phase.phase_indicator.field_name);
     if (phase_field == svmp::FE::INVALID_FIELD_ID) {
       throw std::runtime_error(
           "[svMultiPhysics::Application] Conservative phase velocity sampling could not resolve its phase field.");
@@ -762,7 +762,7 @@ std::vector<std::uint8_t> conservativePhaseContactProtectedNodes(
   std::exception_ptr local_phase_layout_failure;
   try {
     phase_field = system.findFieldByName(
-        request.configuration->transport.conservative_phase.liquid_indicator.field_name);
+        request.configuration->transport.conservative_phase.phase_indicator.field_name);
     if (phase_field == svmp::FE::INVALID_FIELD_ID) {
       throw std::runtime_error(
           "[svMultiPhysics::Application] Conservative phase contact protection could not resolve the phase field.");
@@ -1081,7 +1081,7 @@ captureConservativePhaseFixedGraphBindings(
       auto& binding = bindings[index];
       binding.enabled = request.configuration->transport.conservative_phase.enabled;
       binding.phase_field_name =
-          request.configuration->transport.conservative_phase.liquid_indicator.field_name;
+          request.configuration->transport.conservative_phase.phase_indicator.field_name;
       if (!binding.enabled) {
         continue;
       }
@@ -1152,7 +1152,7 @@ void requireConservativePhaseFixedGraphBindingsCurrent(
         const auto& binding = bindings[index];
         if (binding.enabled != request.configuration->transport.conservative_phase.enabled ||
             binding.phase_field_name !=
-                request.configuration->transport.conservative_phase.liquid_indicator.field_name) {
+                request.configuration->transport.conservative_phase.phase_indicator.field_name) {
           local_current = false;
           break;
         }
@@ -1330,7 +1330,7 @@ buildConservativePhaseCandidateStageSnapshot(
     try {
       staged_request.enabled = request.configuration->transport.conservative_phase.enabled;
       staged_request.phase_field_name =
-          request.configuration->transport.conservative_phase.liquid_indicator.field_name;
+          request.configuration->transport.conservative_phase.phase_indicator.field_name;
       staged_request.velocity_field_name = request.configuration->transport.velocity.field_name;
       staged_request.velocity_source = request.configuration->transport.velocity.source;
       staged_request.material_interface_marker =
@@ -1410,7 +1410,7 @@ std::uint64_t conservativePhaseArtifactFingerprint(
       fingerprint, request.configuration->transport.level_set.field_name);
   mixConservativePhaseArtifactFingerprint(
       fingerprint,
-      request.configuration->transport.conservative_phase.liquid_indicator.field_name);
+      request.configuration->transport.conservative_phase.phase_indicator.field_name);
   mixConservativePhaseArtifactFingerprint(
       fingerprint,
       request.configuration->volume_cut_request.has_value()
@@ -1638,13 +1638,13 @@ std::uint64_t conservativePhaseArtifactFingerprint(
           edge.limited_antidiffusive_mass_transfer_into_region);
     }
     mixConservativePhaseArtifactFingerprint(
-        fingerprint, region.previous_liquid_measure);
+        fingerprint, region.previous_active_measure);
     mixConservativePhaseArtifactFingerprint(
-        fingerprint, region.low_order_liquid_measure);
+        fingerprint, region.low_order_active_measure);
     mixConservativePhaseArtifactFingerprint(
-        fingerprint, region.raw_target_liquid_measure);
+        fingerprint, region.raw_target_active_measure);
     mixConservativePhaseArtifactFingerprint(
-        fingerprint, region.limited_liquid_measure);
+        fingerprint, region.limited_active_measure);
     mixConservativePhaseArtifactFingerprint(
         fingerprint, region.physical_boundary_mass_transfer);
     mixConservativePhaseArtifactFingerprint(
@@ -1974,7 +1974,7 @@ void writeAcceptedConservativePhaseArtifacts(
         svmp::FE::level_set::LevelSetConservativePhaseArtifactContext
             context;
         context.phase_field_name =
-            request.configuration->transport.conservative_phase.liquid_indicator.field_name;
+            request.configuration->transport.conservative_phase.phase_indicator.field_name;
         context.level_set_field_name = request.configuration->transport.level_set.field_name;
         context.geometry_domain_id = request.configuration->volume_cut_request->domain_id;
         context.accepted_step = accepted_step;
@@ -2075,7 +2075,7 @@ void writeAcceptedConservativePhaseArtifacts(
           published_artifacts.push_back(
               PublishedConservativePhaseArtifact{
                   .phase_field_name =
-                      request.configuration->transport.conservative_phase.liquid_indicator
+                      request.configuration->transport.conservative_phase.phase_indicator
                           .field_name,
                   .result = artifact,
               });
@@ -2121,7 +2121,7 @@ void writeAcceptedConservativePhaseArtifacts(
             svmp::FE::LogRecord("LevelSetConservativePhase", "flux artifact")
                 .diagnostic("conservative_phase_flux_artifact")
                 .rootOnly()
-                .quoted("field", request.configuration->transport.conservative_phase.liquid_indicator.field_name)
+                .quoted("field", request.configuration->transport.conservative_phase.phase_indicator.field_name)
                 .value("step", accepted_step)
                 .text("outcome", "failed")
                 .text("batch_rollback", "complete")
@@ -2241,7 +2241,7 @@ ConservativePhaseCandidateResult applyConservativePhaseCandidates(
       const auto& staged_request = temporal_stage.requests[index];
       if (staged_request.enabled != request.configuration->transport.conservative_phase.enabled ||
           staged_request.phase_field_name !=
-              request.configuration->transport.conservative_phase.liquid_indicator.field_name ||
+              request.configuration->transport.conservative_phase.phase_indicator.field_name ||
           staged_request.velocity_field_name != request.configuration->transport.velocity.field_name ||
           staged_request.velocity_source != request.configuration->transport.velocity.source ||
           staged_request.material_interface_marker !=
@@ -2344,7 +2344,7 @@ ConservativePhaseCandidateResult applyConservativePhaseCandidates(
       }
       graph_ptr = &*request.runtime.conservative_phase_graph;
       phase_field = system.findFieldByName(
-          request.configuration->transport.conservative_phase.liquid_indicator.field_name);
+          request.configuration->transport.conservative_phase.phase_indicator.field_name);
       if (phase_field == svmp::FE::INVALID_FIELD_ID) {
         throw std::runtime_error(
             "[svMultiPhysics::Application] Conservative phase candidate could not resolve its liquid-indicator field.");
@@ -2443,7 +2443,7 @@ ConservativePhaseCandidateResult applyConservativePhaseCandidates(
             svmp::FE::LogRecord("LevelSetConservativePhase", "candidate rejected")
                 .diagnostic("conservative_phase_candidate_rejection")
                 .rootOnly()
-                .quoted("field", request.configuration->transport.conservative_phase.liquid_indicator.field_name)
+                .quoted("field", request.configuration->transport.conservative_phase.phase_indicator.field_name)
                 .text("reason", "courant_contract")
                 .value("courant", stage.maximum_courant)
                 .value("maximum_courant", request.configuration->transport.conservative_phase.maximum_courant)
@@ -2453,7 +2453,7 @@ ConservativePhaseCandidateResult applyConservativePhaseCandidates(
       }
       throw std::runtime_error(
           "[svMultiPhysics::Application] Conservative phase graph stage failed for field '" +
-          request.configuration->transport.conservative_phase.liquid_indicator.field_name +
+          request.configuration->transport.conservative_phase.phase_indicator.field_name +
           "': " + stage.diagnostic);
     }
     svmp::FE::Real maximum_nodal_boundary_mass_transfer{0.0};
@@ -2472,7 +2472,7 @@ ConservativePhaseCandidateResult applyConservativePhaseCandidates(
         request.configuration->transport.conservative_phase.invariant_tolerance *
         std::max(
             svmp::FE::Real{1.0},
-            std::abs(stage.correction.total_previous_liquid_measure));
+            std::abs(stage.correction.total_previous_active_measure));
     const bool local_boundary_flux_satisfied =
         local_nodal_boundary_flux_finite &&
         svmp::FE::level_set::
@@ -2494,7 +2494,7 @@ ConservativePhaseCandidateResult applyConservativePhaseCandidates(
                ? "closed-domain policy rejected discrete q boundary flux above its invariant tolerance"
                : "globally balanced policy rejected non-finite or nonzero net discrete q boundary flux above its invariant tolerance") +
           " for field '" +
-          request.configuration->transport.conservative_phase.liquid_indicator.field_name +
+          request.configuration->transport.conservative_phase.phase_indicator.field_name +
           "'; this is a phase-mass-flux gate, not a pointwise velocity-normal test.");
     }
     const svmp::FE::level_set::LevelSetP1PhaseSplitStageProvenance
@@ -2553,7 +2553,7 @@ ConservativePhaseCandidateResult applyConservativePhaseCandidates(
     if (any_split_stage_invalid) {
       throw std::runtime_error(
           "[svMultiPhysics::Application] Conservative phase Backward Euler split-stage provenance validation failed for field '" +
-          request.configuration->transport.conservative_phase.liquid_indicator.field_name +
+          request.configuration->transport.conservative_phase.phase_indicator.field_name +
           "': " + split_stage_validation.diagnostic);
     }
     svmp::FE::Real phase_measure{0.0};
@@ -2567,15 +2567,15 @@ ConservativePhaseCandidateResult applyConservativePhaseCandidates(
       }
       for (std::size_t node = 0u; node < graph.nodes; ++node) {
         raw_phase[node] =
-            stage.correction.nodes[node].raw_target_liquid_indicator;
+            stage.correction.nodes[node].raw_target_phase_indicator;
         limited_phase[node] =
-            stage.correction.nodes[node].limited_liquid_indicator;
+            stage.correction.nodes[node].limited_phase_indicator;
       }
       assignConservativePhaseSlice(
           system, phase_field, raw_phase, raw_transport_candidate);
       assignConservativePhaseSlice(
           system, phase_field, limited_phase, candidate);
-      phase_measure = stage.correction.total_limited_liquid_measure;
+      phase_measure = stage.correction.total_limited_active_measure;
       const auto measure_tolerance =
           request.configuration->transport.conservative_phase.geometry_measure_tolerance *
           std::max({svmp::FE::Real{1.0}, graph.physical_measure,
@@ -2596,7 +2596,7 @@ ConservativePhaseCandidateResult applyConservativePhaseCandidates(
       maintenance_ledger.boundary_flux_policy =
           request.configuration->transport.conservative_phase.boundary_flux_policy;
       maintenance_ledger.raw_post_transport_phase_measure =
-          stage.correction.total_raw_target_liquid_measure;
+          stage.correction.total_raw_target_active_measure;
       maintenance_ledger.post_limit_phase_measure = phase_measure;
       for (std::size_t node = 0u; node < graph.nodes; ++node) {
         accepted_phase_masses[request_index][node] =
@@ -2643,7 +2643,7 @@ ConservativePhaseCandidateResult applyConservativePhaseCandidates(
       if (!maintenance_ledger.region_ledger.success) {
         throw std::runtime_error(
             "[svMultiPhysics::Application] Conservative phase fixed region ledger failed for field '" +
-            request.configuration->transport.conservative_phase.liquid_indicator.field_name +
+            request.configuration->transport.conservative_phase.phase_indicator.field_name +
             "': " + maintenance_ledger.region_ledger.diagnostic);
       }
 
@@ -2651,9 +2651,9 @@ ConservativePhaseCandidateResult applyConservativePhaseCandidates(
           svmp::FE::LogRecord("LevelSetConservativePhase", "Conservative phase staged")
               .diagnostic("conservative_phase_stage")
               .rootOnly()
-              .quoted("field", request.configuration->transport.conservative_phase.liquid_indicator.field_name)
+              .quoted("field", request.configuration->transport.conservative_phase.phase_indicator.field_name)
               .value("step", history.stepIndex() + 1)
-              .value("previous_measure", stage.correction.total_previous_liquid_measure)
+              .value("previous_measure", stage.correction.total_previous_active_measure)
               .value("accepted_measure", phase_measure)
               .value("boundary_transfer", stage.correction.total_physical_boundary_mass_transfer)
               .value("maximum_nodal_boundary_mass_transfer", maximum_nodal_boundary_mass_transfer)
@@ -2667,7 +2667,7 @@ ConservativePhaseCandidateResult applyConservativePhaseCandidates(
               .value("phase_components", stage.correction.components.size())
               .value("component_activity_tolerance", stage.correction.component_activity_tolerance)
               .boolean("subthreshold_component_present", stage.correction.subthreshold_component_present)
-              .value("subthreshold_limited_measure", stage.correction.subthreshold_component.limited_liquid_measure)
+              .value("subthreshold_limited_measure", stage.correction.subthreshold_component.limited_active_measure)
               .value("max_component_balance_residual", stage.correction.maximum_component_balance_residual)
               .value("tracked_regions", maintenance_ledger.region_ledger.regions.size())
               .value("max_region_balance_residual", maintenance_ledger.region_ledger.maximum_balance_residual)
@@ -2737,12 +2737,12 @@ ConservativePhaseCandidateResult applyConservativePhaseCandidates(
       if (!projection.success) {
         throw std::runtime_error(
             "[svMultiPhysics::Application] Conservative phase raw post-transport geometry projection failed for field '" +
-            request.configuration->transport.conservative_phase.liquid_indicator.field_name +
+            request.configuration->transport.conservative_phase.phase_indicator.field_name +
             "': " + projection.diagnostic);
       }
       result.maintenance_ledgers[request_index]
           .raw_post_transport_geometry_measure =
-          projection.retained_liquid_measure;
+          projection.retained_active_measure;
     }
 
     if (contact_stage_builder) {
@@ -2797,13 +2797,13 @@ ConservativePhaseCandidateResult applyConservativePhaseCandidates(
       if (!projection.success) {
         throw std::runtime_error(
             "[svMultiPhysics::Application] Conservative phase post-reinitialization geometry projection failed for field '" +
-            request.configuration->transport.conservative_phase.liquid_indicator.field_name +
+            request.configuration->transport.conservative_phase.phase_indicator.field_name +
             "': " + projection.diagnostic);
       }
       auto& maintenance_ledger =
           result.maintenance_ledgers[request_index];
       maintenance_ledger.post_reinitialization_geometry_measure =
-          projection.retained_liquid_measure;
+          projection.retained_active_measure;
       maintenance_ledger.post_reinitialization_mismatch =
           conservativePhaseMomentMismatch(
               projection.liquid_phase_mass,
@@ -2827,14 +2827,14 @@ ConservativePhaseCandidateResult applyConservativePhaseCandidates(
       if (!projection.success) {
         throw std::runtime_error(
             "[svMultiPhysics::Application] Conservative phase stationary-equilibrium projection failed for field '" +
-            request.configuration->transport.conservative_phase.liquid_indicator.field_name +
+            request.configuration->transport.conservative_phase.phase_indicator.field_name +
             "': " + projection.diagnostic);
       }
       const auto& transport_nodes =
           maintenance_ledger.transport_stage.correction.nodes;
       if (transport_nodes.size() != graph.nodes ||
           projection.liquid_phase_mass.size() != graph.nodes ||
-          projection.liquid_indicator.size() != graph.nodes) {
+          projection.phase_indicator.size() != graph.nodes) {
         throw std::runtime_error(
             "[svMultiPhysics::Application] Conservative phase stationary-equilibrium reconciliation found incompatible transport and geometry layouts.");
       }
@@ -2844,13 +2844,13 @@ ConservativePhaseCandidateResult applyConservativePhaseCandidates(
         if (transport_nodes[node].node !=
                 static_cast<svmp::FE::GlobalIndex>(node) ||
             !std::isfinite(
-                transport_nodes[node].previous_liquid_indicator)) {
+                transport_nodes[node].previous_phase_indicator)) {
           throw std::runtime_error(
               "[svMultiPhysics::Application] Conservative phase stationary-equilibrium reconciliation found a malformed previous-phase ledger.");
         }
         previous_phase_masses[node] =
             graph.lumped_control_volume[node] *
-            transport_nodes[node].previous_liquid_indicator;
+            transport_nodes[node].previous_phase_indicator;
       }
       const auto stationary_geometry_mismatch =
           conservativePhaseMomentMismatch(
@@ -2863,10 +2863,10 @@ ConservativePhaseCandidateResult applyConservativePhaseCandidates(
           request.configuration->transport.conservative_phase.geometry_measure_tolerance *
           std::max(
               {svmp::FE::Real{1.0}, graph.physical_measure,
-               std::abs(projection.retained_liquid_measure),
+               std::abs(projection.retained_active_measure),
                std::abs(accepted_phase_measures[request_index]),
                std::abs(maintenance_ledger.transport_stage.correction
-                            .total_previous_liquid_measure)});
+                            .total_previous_active_measure)});
       const bool stationary_geometry =
           stationary_geometry_mismatch.maximum_nodal_residual <=
               equilibrium_tolerance &&
@@ -2875,7 +2875,7 @@ ConservativePhaseCandidateResult applyConservativePhaseCandidates(
       const bool transported_total_compatible =
           std::abs(transported_geometry_mismatch.total_residual) <=
               equilibrium_tolerance &&
-          std::abs(projection.retained_liquid_measure -
+          std::abs(projection.retained_active_measure -
                    accepted_phase_measures[request_index]) <=
               equilibrium_tolerance;
       const bool phase_projection_needed =
@@ -2892,17 +2892,17 @@ ConservativePhaseCandidateResult applyConservativePhaseCandidates(
       if (stationary_geometry && transported_total_compatible &&
           phase_projection_needed) {
         const auto phase_field = system.findFieldByName(
-            request.configuration->transport.conservative_phase.liquid_indicator.field_name);
+            request.configuration->transport.conservative_phase.phase_indicator.field_name);
         if (phase_field == svmp::FE::INVALID_FIELD_ID) {
           throw std::runtime_error(
               "[svMultiPhysics::Application] Conservative phase stationary-equilibrium reconciliation could not resolve its phase field.");
         }
         assignConservativePhaseSlice(
-            system, phase_field, projection.liquid_indicator, candidate);
+            system, phase_field, projection.phase_indicator, candidate);
         accepted_phase_masses[request_index] =
             projection.liquid_phase_mass;
         accepted_phase_measures[request_index] =
-            projection.retained_liquid_measure;
+            projection.retained_active_measure;
         reconciliation.success = true;
         reconciliation.target_reached = true;
         reconciliation.initial_residual_norm =
@@ -2917,7 +2917,7 @@ ConservativePhaseCandidateResult applyConservativePhaseCandidates(
             svmp::FE::LogRecord("LevelSetConservativePhase", "stationary geometry equilibrium preserved")
                 .diagnostic("stationary_geometry_equilibrium_projection")
                 .rootOnly()
-                .quoted("field", request.configuration->transport.conservative_phase.liquid_indicator.field_name)
+                .quoted("field", request.configuration->transport.conservative_phase.phase_indicator.field_name)
                 .value("initial_local_residual_norm", transported_geometry_mismatch.residual_norm)
                 .value("maximum_initial_nodal_residual", transported_geometry_mismatch.maximum_nodal_residual)
                 .value("initial_total_residual", transported_geometry_mismatch.total_residual)
@@ -2940,7 +2940,7 @@ ConservativePhaseCandidateResult applyConservativePhaseCandidates(
             svmp::FE::LogRecord("LevelSetConservativePhase", "candidate rejected")
                 .diagnostic("conservative_phase_candidate_rejection")
                 .rootOnly()
-                .quoted("field", request.configuration->transport.conservative_phase.liquid_indicator.field_name)
+                .quoted("field", request.configuration->transport.conservative_phase.phase_indicator.field_name)
                 .text("reason", "local_geometry_reconciliation_contract")
                 .value("iterations", reconciliation.iterations)
                 .value("line_search_evaluations", reconciliation.line_search_evaluations)
@@ -2982,16 +2982,16 @@ ConservativePhaseCandidateResult applyConservativePhaseCandidates(
       if (!projection.success) {
         throw std::runtime_error(
             "[svMultiPhysics::Application] Conservative phase authoritative geometry projection failed for field '" +
-            request.configuration->transport.conservative_phase.liquid_indicator.field_name +
+            request.configuration->transport.conservative_phase.phase_indicator.field_name +
             "': " + projection.diagnostic);
       }
       const auto phase_measure = accepted_phase_measures[request_index];
       const auto mismatch = std::abs(
-          projection.retained_liquid_measure - phase_measure);
+          projection.retained_active_measure - phase_measure);
       const auto tolerance =
           request.configuration->transport.conservative_phase.geometry_measure_tolerance *
           std::max({svmp::FE::Real{1.0},
-                    std::abs(projection.retained_liquid_measure),
+                    std::abs(projection.retained_active_measure),
                     std::abs(phase_measure)});
       const auto local_mismatch = conservativePhaseMomentMismatch(
           projection.liquid_phase_mass,
@@ -3000,7 +3000,7 @@ ConservativePhaseCandidateResult applyConservativePhaseCandidates(
           result.maintenance_ledgers[request_index];
       maintenance_ledger.post_correction_phase_measure = phase_measure;
       maintenance_ledger.post_correction_geometry_measure =
-          projection.retained_liquid_measure;
+          projection.retained_active_measure;
       maintenance_ledger.post_correction_mismatch = local_mismatch;
       if (request.configuration->transport.conservative_phase.reconcile_geometry &&
           (mismatch > tolerance ||
@@ -3008,7 +3008,7 @@ ConservativePhaseCandidateResult applyConservativePhaseCandidates(
            std::abs(local_mismatch.total_residual) > tolerance)) {
         throw std::runtime_error(
             "[svMultiPhysics::Application] Conservative phase local geometry reconciliation did not match the transported nodal moments for field '" +
-            request.configuration->transport.conservative_phase.liquid_indicator.field_name +
+            request.configuration->transport.conservative_phase.phase_indicator.field_name +
             "'.");
       }
       const auto& reconciliation =
@@ -3017,10 +3017,10 @@ ConservativePhaseCandidateResult applyConservativePhaseCandidates(
           svmp::FE::LogRecord("LevelSetConservativePhase", "Conservative phase geometry validated")
               .diagnostic("conservative_phase_geometry_validation")
               .rootOnly()
-              .quoted("field", request.configuration->transport.conservative_phase.liquid_indicator.field_name)
+              .quoted("field", request.configuration->transport.conservative_phase.phase_indicator.field_name)
               .value("step", history.stepIndex() + 1)
               .value("phase_measure", phase_measure)
-              .value("retained_geometry_measure", projection.retained_liquid_measure)
+              .value("retained_geometry_measure", projection.retained_active_measure)
               .value("measure_mismatch", mismatch)
               .value("max_nodal_moment_mismatch", local_mismatch.maximum_nodal_residual)
               .value("nodal_moment_residual_norm", local_mismatch.residual_norm)
@@ -3062,7 +3062,7 @@ ConservativePhaseCandidateResult applyConservativePhaseCandidates(
           svmp::FE::LogRecord("LevelSetConservativePhase", "maintenance ledger")
               .diagnostic("conservative_phase_maintenance_ledger")
               .rootOnly()
-              .quoted("field", request.configuration->transport.conservative_phase.liquid_indicator.field_name)
+              .quoted("field", request.configuration->transport.conservative_phase.phase_indicator.field_name)
               .value("step", history.stepIndex() + 1)
               .value("raw_post_transport_phase_measure", maintenance_ledger.raw_post_transport_phase_measure)
               .value("post_limit_phase_measure", maintenance_ledger.post_limit_phase_measure)
@@ -3073,7 +3073,7 @@ ConservativePhaseCandidateResult applyConservativePhaseCandidates(
               .value("post_correction_phase_measure", maintenance_ledger.post_correction_phase_measure)
               .value("post_correction_geometry_measure", maintenance_ledger.post_correction_geometry_measure)
               .value("post_correction_max_nodal_mismatch", maintenance_ledger.post_correction_mismatch.maximum_nodal_residual)
-              .value("retained_assembly_measure", projection.retained_liquid_measure)
+              .value("retained_assembly_measure", projection.retained_active_measure)
               .value("temporal_split_scheme", svmp::FE::level_set::levelSetP1PhaseSplitSchemeName(split_stage.scheme))
               .value("temporal_order", split_stage.temporal_order)
               .value("prospective_step", split_stage.prospective_step)
@@ -3104,7 +3104,7 @@ ConservativePhaseCandidateResult applyConservativePhaseCandidates(
               .value("transport_component_activity_tolerance", transport.correction.component_activity_tolerance)
               .boolean("transport_subthreshold_component_present", transport.correction.subthreshold_component_present)
               .value("transport_subthreshold_nodes", transport.correction.subthreshold_component.nodes)
-              .value("transport_subthreshold_limited_measure", transport.correction.subthreshold_component.limited_liquid_measure)
+              .value("transport_subthreshold_limited_measure", transport.correction.subthreshold_component.limited_active_measure)
               .boolean("transport_component_balance_satisfied", transport.correction.component_balance_satisfied)
               .boolean("transport_component_measure_closure_satisfied", transport.correction.component_measure_closure_satisfied)
               .value("transport_max_component_balance_residual", transport.correction.maximum_component_balance_residual)
@@ -3125,15 +3125,15 @@ ConservativePhaseCandidateResult applyConservativePhaseCandidates(
             svmp::FE::LogRecord("LevelSetConservativePhase", "component ledger")
                 .diagnostic("conservative_phase_component_ledger")
                 .rootOnly()
-                .quoted("field", request.configuration->transport.conservative_phase.liquid_indicator.field_name)
+                .quoted("field", request.configuration->transport.conservative_phase.phase_indicator.field_name)
                 .value("step", history.stepIndex() + 1)
                 .value("classification", classification)
                 .value("component_id", component.component_id)
                 .value("nodes", component.nodes)
-                .value("previous_liquid_measure", component.previous_liquid_measure)
-                .value("low_order_liquid_measure", component.low_order_liquid_measure)
-                .value("raw_target_liquid_measure", component.raw_target_liquid_measure)
-                .value("limited_liquid_measure", component.limited_liquid_measure)
+                .value("previous_liquid_measure", component.previous_active_measure)
+                .value("low_order_liquid_measure", component.low_order_active_measure)
+                .value("raw_target_liquid_measure", component.raw_target_active_measure)
+                .value("limited_liquid_measure", component.limited_active_measure)
                 .value("physical_boundary_mass_transfer", component.physical_boundary_mass_transfer)
                 .value("discrete_divergence_mass_source", component.discrete_divergence_mass_source)
                 .value("low_order_interior_mass_transfer", component.low_order_interior_mass_transfer)
@@ -3158,17 +3158,17 @@ ConservativePhaseCandidateResult applyConservativePhaseCandidates(
             svmp::FE::LogRecord("LevelSetConservativePhase", "region ledger")
                 .diagnostic("conservative_phase_region_ledger")
                 .rootOnly()
-                .quoted("field", request.configuration->transport.conservative_phase.liquid_indicator.field_name)
+                .quoted("field", request.configuration->transport.conservative_phase.phase_indicator.field_name)
                 .value("step", history.stepIndex() + 1)
                 .quoted("region", region.name)
                 .value("kind", svmp::FE::level_set::levelSetPhaseRegionKindName(region.kind))
                 .value("nodes", region.member_nodes.size())
                 .value("internal_edges", region.internal_edges)
                 .value("crossing_edges", region.crossing_edges.size())
-                .value("previous_liquid_measure", region.previous_liquid_measure)
-                .value("low_order_liquid_measure", region.low_order_liquid_measure)
-                .value("raw_target_liquid_measure", region.raw_target_liquid_measure)
-                .value("limited_liquid_measure", region.limited_liquid_measure)
+                .value("previous_liquid_measure", region.previous_active_measure)
+                .value("low_order_liquid_measure", region.low_order_active_measure)
+                .value("raw_target_liquid_measure", region.raw_target_active_measure)
+                .value("limited_liquid_measure", region.limited_active_measure)
                 .value("physical_boundary_mass_transfer", region.physical_boundary_mass_transfer)
                 .value("discrete_divergence_mass_source", region.discrete_divergence_mass_source)
                 .value("low_order_crossing_mass_transfer", region.low_order_crossing_mass_transfer)

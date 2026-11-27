@@ -128,7 +128,7 @@ std::vector<FacetContribution> collectContributions(const FESystem& system,
 
     for (const auto& boundary : boundaries) {
         const int marker = boundary.physicalBoundaryMarker();
-        const auto wetted = wettedBoundaryFaces(system, marker, boundary.generatedActiveBoundaryMarker());
+        const auto wetted = activeBoundaryFaces(system, marker, boundary.generatedActiveBoundaryMarker());
         mesh.forEachBoundaryFace(marker, [&](GlobalIndex face_id, GlobalIndex cell_id) {
             if (wetted && !wetted->contains(face_id)) {
                 return;
@@ -520,7 +520,7 @@ std::vector<forms::ExteriorBoundaryMeasure> fullBoundaries(std::span<const int> 
 } // namespace
 
 std::optional<std::unordered_set<GlobalIndex>>
-wettedBoundaryFaces(const FESystem& system, int boundary_marker, int active_boundary_marker)
+activeBoundaryFaces(const FESystem& system, int boundary_marker, int active_boundary_marker)
 {
     if (active_boundary_marker < 0) {
         return std::nullopt;
@@ -694,7 +694,7 @@ ConstraintDependencyDeclaration NormalComponentConstraint::dependencyDeclaration
     merge_into(out.structural, ConstraintDependencyMask::meshGeometry());
     if (std::any_of(boundaries_.begin(), boundaries_.end(),
                     [](const auto& boundary) { return boundary.isGeneratedActiveSubset(); })) {
-        // The wetted faces come from the installed cut-integration context; a
+        // The active faces come from the installed cut-integration context; a
         // new context rebuilds the constraint state.
         out.structural.fe_constraint_layout = true;
         out.structural.mesh_field_layout = true;

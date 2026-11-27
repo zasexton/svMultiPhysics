@@ -20,7 +20,7 @@ using namespace svmp::FE::interfaces;
 namespace {
 
 using Vector = std::array<Real, 3>;
-using Matrix = FreeSurfaceDiscreteFunctionalPhysicalGradient;
+using Matrix = SnapshotVectorGradient;
 
 [[nodiscard]] bool finiteVector(const Vector& value) noexcept
 {

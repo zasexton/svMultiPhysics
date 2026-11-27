@@ -467,7 +467,7 @@ TEST(ConstraintPlan, ContactPointVelocityFromALiquidSideBuildsTheSameLaw)
         law.wall_normal = {0.0, -1.0, 0.0};
         law.level_set_field_name = "phi";
         law.isovalue = 0.5;
-        law.liquid_side = side == forms::CutVolumeSide::Positive ? LevelSetConstraintSide::Positive
+        law.active_side = side == forms::CutVolumeSide::Positive ? LevelSetConstraintSide::Positive
                                                                  : LevelSetConstraintSide::Negative;
         law.contact_speed = speed;
         law.name = "ren_e_contact_point:2";

@@ -310,11 +310,11 @@ void validateConservativePhaseOptions(
     if (!phase.enabled) {
         return;
     }
-    if (phase.liquid_indicator.field_name.empty()) {
+    if (phase.phase_indicator.field_name.empty()) {
         throw std::invalid_argument(
             "installLevelSetTransport: conservative phase field name must be non-empty");
     }
-    if (phase.liquid_indicator.source != LevelSetFieldSource::Unknown) {
+    if (phase.phase_indicator.source != LevelSetFieldSource::Unknown) {
         throw std::invalid_argument(
             "installLevelSetTransport: conservative phase field must be an unknown state");
     }
@@ -522,7 +522,7 @@ systems::CoupledResidualKernels installLevelSetTransport(
             "installLevelSetTransport: level-set and velocity fields must be distinct");
     }
     if (options.conservative_phase.enabled &&
-        options.conservative_phase.liquid_indicator.field_name ==
+        options.conservative_phase.phase_indicator.field_name ==
             options.level_set.field_name) {
         throw std::invalid_argument(
             "installLevelSetTransport: level-set and conservative phase fields must be distinct");
@@ -530,7 +530,7 @@ systems::CoupledResidualKernels installLevelSetTransport(
     if (options.conservative_phase.enabled &&
         options.velocity.source != LevelSetVelocitySource::ConstantVector &&
         !material_interface_velocity &&
-        options.conservative_phase.liquid_indicator.field_name ==
+        options.conservative_phase.phase_indicator.field_name ==
             options.velocity.field_name) {
         throw std::invalid_argument(
             "installLevelSetTransport: conservative phase and velocity fields must be distinct");
@@ -570,7 +570,7 @@ systems::CoupledResidualKernels installLevelSetTransport(
     if (options.conservative_phase.enabled) {
         pending_phase = preflightLevelSetField(
             system,
-            options.conservative_phase.liquid_indicator,
+            options.conservative_phase.phase_indicator,
             pending_phi.space);
         if (!isFixedP1ScalarH1(pending_phi) ||
             !isFixedP1ScalarH1(*pending_phase) ||
@@ -614,7 +614,7 @@ systems::CoupledResidualKernels installLevelSetTransport(
         }
         if (options.conservative_phase.enabled &&
             options.velocity.algebraic_extension_source_field_name ==
-                options.conservative_phase.liquid_indicator.field_name) {
+                options.conservative_phase.phase_indicator.field_name) {
             throw std::invalid_argument(
                 "installLevelSetTransport: conservative phase and physical velocity fields must be distinct");
         }
@@ -663,7 +663,7 @@ systems::CoupledResidualKernels installLevelSetTransport(
     if (options.conservative_phase.enabled) {
         phase_id = ensureLevelSetField(
             system,
-            options.conservative_phase.liquid_indicator,
+            options.conservative_phase.phase_indicator,
             pending_phase->space);
     }
 
@@ -812,7 +812,7 @@ systems::CoupledResidualKernels installLevelSetTransport(
         const auto phase = StateField(
             phase_id,
             *phase_record.space,
-            options.conservative_phase.liquid_indicator.field_name);
+            options.conservative_phase.phase_indicator.field_name);
         const auto phase_test = TestField(
             phase_id, *phase_record.space, "phase_test");
         // The conservative stage is an explicit accepted-candidate operation.

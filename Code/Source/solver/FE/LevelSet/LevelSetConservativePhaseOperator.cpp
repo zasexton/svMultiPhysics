@@ -493,9 +493,9 @@ template <typename ValueAt>
 
 [[nodiscard]] bool replicatedStageInputsMatch(
     const PhaseGraphCollectiveContext& context,
-    std::span<const Real> previous_liquid_indicator,
-    std::span<const Real> lower_liquid_indicator,
-    std::span<const Real> upper_liquid_indicator,
+    std::span<const Real> previous_phase_indicator,
+    std::span<const Real> lower_phase_indicator,
+    std::span<const Real> upper_phase_indicator,
     std::span<const std::array<Real, 3>> nodal_velocity,
     Real time_step,
     const LevelSetP1PhaseStageOptions& options,
@@ -503,9 +503,9 @@ template <typename ValueAt>
 {
     const std::array<std::pair<std::string_view, std::size_t>, 4>
         replicated_sizes{{
-            {"previous liquid indicator", previous_liquid_indicator.size()},
-            {"lower liquid-indicator bound", lower_liquid_indicator.size()},
-            {"upper liquid-indicator bound", upper_liquid_indicator.size()},
+            {"previous liquid indicator", previous_phase_indicator.size()},
+            {"lower liquid-indicator bound", lower_phase_indicator.size()},
+            {"upper liquid-indicator bound", upper_phase_indicator.size()},
             {"nodal velocity", nodal_velocity.size()},
         }};
     for (const auto& [name, size] : replicated_sizes) {
@@ -539,11 +539,11 @@ template <typename ValueAt>
                 mismatch);
             return false;
         };
-    if (!require_nodal_values(previous_liquid_indicator,
+    if (!require_nodal_values(previous_phase_indicator,
                               "previous liquid indicator") ||
-        !require_nodal_values(lower_liquid_indicator,
+        !require_nodal_values(lower_phase_indicator,
                               "lower liquid-indicator bound") ||
-        !require_nodal_values(upper_liquid_indicator,
+        !require_nodal_values(upper_phase_indicator,
                               "upper liquid-indicator bound")) {
         return false;
     }
@@ -920,10 +920,10 @@ void mixPhaseFluxComponentLedger(
 {
     mixPhaseStageHashSigned(hash, component.component_id);
     mixPhaseStageHashSize(hash, component.nodes);
-    mixPhaseStageHashReal(hash, component.previous_liquid_measure);
-    mixPhaseStageHashReal(hash, component.low_order_liquid_measure);
-    mixPhaseStageHashReal(hash, component.raw_target_liquid_measure);
-    mixPhaseStageHashReal(hash, component.limited_liquid_measure);
+    mixPhaseStageHashReal(hash, component.previous_active_measure);
+    mixPhaseStageHashReal(hash, component.low_order_active_measure);
+    mixPhaseStageHashReal(hash, component.raw_target_active_measure);
+    mixPhaseStageHashReal(hash, component.limited_active_measure);
     mixPhaseStageHashReal(hash, component.physical_boundary_mass_transfer);
     mixPhaseStageHashReal(hash, component.discrete_divergence_mass_source);
     mixPhaseStageHashReal(hash, component.low_order_interior_mass_transfer);
@@ -940,9 +940,9 @@ void mixPhaseFluxNodeLedger(
 {
     mixPhaseStageHashSigned(hash, node.node);
     mixPhaseStageHashReal(hash, node.lumped_control_volume);
-    mixPhaseStageHashReal(hash, node.previous_liquid_indicator);
-    mixPhaseStageHashReal(hash, node.lower_liquid_indicator);
-    mixPhaseStageHashReal(hash, node.upper_liquid_indicator);
+    mixPhaseStageHashReal(hash, node.previous_phase_indicator);
+    mixPhaseStageHashReal(hash, node.lower_phase_indicator);
+    mixPhaseStageHashReal(hash, node.upper_phase_indicator);
     mixPhaseStageHashReal(hash, node.physical_boundary_mass_transfer);
     mixPhaseStageHashReal(hash, node.discrete_divergence_mass_source);
     mixPhaseStageHashReal(hash, node.low_order_interior_mass_transfer);
@@ -952,9 +952,9 @@ void mixPhaseFluxNodeLedger(
     mixPhaseStageHashReal(hash, node.negative_raw_antidiffusive_mass);
     mixPhaseStageHashReal(hash, node.positive_correction_factor);
     mixPhaseStageHashReal(hash, node.negative_correction_factor);
-    mixPhaseStageHashReal(hash, node.low_order_liquid_indicator);
-    mixPhaseStageHashReal(hash, node.raw_target_liquid_indicator);
-    mixPhaseStageHashReal(hash, node.limited_liquid_indicator);
+    mixPhaseStageHashReal(hash, node.low_order_phase_indicator);
+    mixPhaseStageHashReal(hash, node.raw_target_phase_indicator);
+    mixPhaseStageHashReal(hash, node.limited_phase_indicator);
     mixPhaseStageHashReal(hash, node.low_order_local_mass_balance_residual);
     mixPhaseStageHashReal(hash, node.raw_target_local_mass_balance_residual);
     mixPhaseStageHashReal(hash, node.local_mass_balance_residual);
@@ -979,10 +979,10 @@ void mixPhaseFluxEdgeLedger(
     const LevelSetPhaseFluxComponentLedger& component) noexcept
 {
     const std::array<Real, 12> values{{
-        component.previous_liquid_measure,
-        component.low_order_liquid_measure,
-        component.raw_target_liquid_measure,
-        component.limited_liquid_measure,
+        component.previous_active_measure,
+        component.low_order_active_measure,
+        component.raw_target_active_measure,
+        component.limited_active_measure,
         component.physical_boundary_mass_transfer,
         component.discrete_divergence_mass_source,
         component.low_order_interior_mass_transfer,
@@ -999,7 +999,7 @@ void mixPhaseFluxEdgeLedger(
 
 [[nodiscard]] bool completePhaseFluxLedger(
     const LevelSetP1PhaseTransportGraph& graph,
-    std::span<const Real> previous_liquid_indicator,
+    std::span<const Real> previous_phase_indicator,
     const LevelSetP1PhaseTransportStageResult& stage,
     std::string& diagnostic)
 {
@@ -1044,7 +1044,7 @@ void mixPhaseFluxEdgeLedger(
         graph.lumped_control_volume.size() != graph.nodes ||
         graph.diagonal_gradient.size() != graph.nodes ||
         graph.boundary_column_sum.size() != graph.nodes ||
-        previous_liquid_indicator.size() != graph.nodes ||
+        previous_phase_indicator.size() != graph.nodes ||
         stage.sampled_nodal_velocity.size() != graph.nodes ||
         stage.nodal_courant.size() != graph.nodes ||
         stage.physical_boundary_mass_transfer.size() != graph.nodes ||
@@ -1060,10 +1060,10 @@ void mixPhaseFluxEdgeLedger(
         stage.maximum_courant,
         stage.minimum_low_order_coefficient,
         stage.maximum_strong_form_decomposition_residual,
-        correction.total_previous_liquid_measure,
-        correction.total_low_order_liquid_measure,
-        correction.total_raw_target_liquid_measure,
-        correction.total_limited_liquid_measure,
+        correction.total_previous_active_measure,
+        correction.total_low_order_active_measure,
+        correction.total_raw_target_active_measure,
+        correction.total_limited_active_measure,
         correction.total_physical_boundary_mass_transfer,
         correction.total_discrete_divergence_mass_source,
         correction.low_order_nodal_cancellation_residual,
@@ -1088,24 +1088,24 @@ void mixPhaseFluxEdgeLedger(
         correction.raw_target_global_mass_balance_residual,
         correction.global_mass_balance_residual,
         correction.maximum_constant_preservation_error,
-        correction.minimum_low_order_liquid_indicator,
-        correction.maximum_low_order_liquid_indicator,
-        correction.minimum_raw_target_liquid_indicator,
-        correction.maximum_raw_target_liquid_indicator,
-        correction.minimum_limited_liquid_indicator,
+        correction.minimum_low_order_phase_indicator,
+        correction.maximum_low_order_phase_indicator,
+        correction.minimum_raw_target_phase_indicator,
+        correction.maximum_raw_target_phase_indicator,
+        correction.minimum_limited_phase_indicator,
     }};
     if (!std::all_of(
             summary_values.begin(), summary_values.end(), [](Real value) {
                 return std::isfinite(value);
             }) ||
-        !std::isfinite(correction.maximum_limited_liquid_indicator) ||
+        !std::isfinite(correction.maximum_limited_phase_indicator) ||
         !(stage.time_step > Real{0.0})) {
         return fail("requires finite stage and correction summary values");
     }
     for (std::size_t index = 0u; index < graph.nodes; ++index) {
         const auto& node = correction.nodes[index];
         const std::array<Real, 26> values{{
-            previous_liquid_indicator[index],
+            previous_phase_indicator[index],
             stage.sampled_nodal_velocity[index][0],
             stage.sampled_nodal_velocity[index][1],
             stage.sampled_nodal_velocity[index][2],
@@ -1113,9 +1113,9 @@ void mixPhaseFluxEdgeLedger(
             stage.physical_boundary_mass_transfer[index],
             stage.discrete_divergence_mass_source[index],
             node.lumped_control_volume,
-            node.previous_liquid_indicator,
-            node.lower_liquid_indicator,
-            node.upper_liquid_indicator,
+            node.previous_phase_indicator,
+            node.lower_phase_indicator,
+            node.upper_phase_indicator,
             node.physical_boundary_mass_transfer,
             node.discrete_divergence_mass_source,
             node.low_order_interior_mass_transfer,
@@ -1125,9 +1125,9 @@ void mixPhaseFluxEdgeLedger(
             node.negative_raw_antidiffusive_mass,
             node.positive_correction_factor,
             node.negative_correction_factor,
-            node.low_order_liquid_indicator,
-            node.raw_target_liquid_indicator,
-            node.limited_liquid_indicator,
+            node.low_order_phase_indicator,
+            node.raw_target_phase_indicator,
+            node.limited_phase_indicator,
             node.low_order_local_mass_balance_residual,
             node.raw_target_local_mass_balance_residual,
             node.local_mass_balance_residual,
@@ -1137,8 +1137,8 @@ void mixPhaseFluxEdgeLedger(
                 return std::isfinite(value);
             }) ||
             !exactPhaseStageRealEqual(
-                previous_liquid_indicator[index],
-                node.previous_liquid_indicator) ||
+                previous_phase_indicator[index],
+                node.previous_phase_indicator) ||
             !exactPhaseStageRealEqual(
                 graph.lumped_control_volume[index],
                 node.lumped_control_volume) ||
@@ -1355,17 +1355,17 @@ struct PhaseStageVerificationNode {
     return left.component_id == right.component_id &&
            left.nodes == right.nodes &&
            exactPhaseStageRealEqual(
-               left.previous_liquid_measure,
-               right.previous_liquid_measure) &&
+               left.previous_active_measure,
+               right.previous_active_measure) &&
            exactPhaseStageRealEqual(
-               left.low_order_liquid_measure,
-               right.low_order_liquid_measure) &&
+               left.low_order_active_measure,
+               right.low_order_active_measure) &&
            exactPhaseStageRealEqual(
-               left.raw_target_liquid_measure,
-               right.raw_target_liquid_measure) &&
+               left.raw_target_active_measure,
+               right.raw_target_active_measure) &&
            exactPhaseStageRealEqual(
-               left.limited_liquid_measure,
-               right.limited_liquid_measure) &&
+               left.limited_active_measure,
+               right.limited_active_measure) &&
            exactPhaseStageRealEqual(
                left.physical_boundary_mass_transfer,
                right.physical_boundary_mass_transfer) &&
@@ -1399,7 +1399,7 @@ struct PhaseStageVerificationNode {
  */
 [[nodiscard]] bool verifyPhaseStageLedgerEquations(
     const LevelSetP1PhaseTransportGraph& graph,
-    std::span<const Real> previous_liquid_indicator,
+    std::span<const Real> previous_phase_indicator,
     const LevelSetP1PhaseTransportStageResult& stage,
     std::span<PhaseStageVerificationNode> scratch,
     std::string& diagnostic)
@@ -1426,14 +1426,14 @@ struct PhaseStageVerificationNode {
         values.positive_factor = Real{1.0};
         values.negative_factor = Real{1.0};
         values.parent = node;
-        values.expected_lower = previous_liquid_indicator[node];
-        values.expected_upper = previous_liquid_indicator[node];
+        values.expected_lower = previous_phase_indicator[node];
+        values.expected_upper = previous_phase_indicator[node];
         const Real diagonal_velocity = dot(
             graph.diagonal_gradient[node],
             stage.sampled_nodal_velocity[node], graph.dimension);
         values.row_divergence = diagonal_velocity;
         values.direct_strong_rate =
-            -diagonal_velocity * previous_liquid_indicator[node];
+            -diagonal_velocity * previous_phase_indicator[node];
     }
 
     Real minimum_low_order_coefficient =
@@ -1478,8 +1478,8 @@ struct PhaseStageVerificationNode {
             stage.time_step * std::max(Real{0.0}, second_coefficient) /
             graph.lumped_control_volume[second];
 
-        const Real first_indicator = previous_liquid_indicator[first];
-        const Real second_indicator = previous_liquid_indicator[second];
+        const Real first_indicator = previous_phase_indicator[first];
+        const Real second_indicator = previous_phase_indicator[second];
         const Real central_rate =
             second_to_first_speed * first_indicator -
             first_to_second_speed * second_indicator;
@@ -1553,7 +1553,7 @@ struct PhaseStageVerificationNode {
     Real maximum_strong_form_decomposition_residual{0.0};
     for (std::size_t node = 0u; node < node_count; ++node) {
         auto& values = scratch[node];
-        const Real indicator = previous_liquid_indicator[node];
+        const Real indicator = previous_phase_indicator[node];
         const Real boundary_rate =
             -indicator * dot(
                 graph.boundary_column_sum[node],
@@ -1616,22 +1616,22 @@ struct PhaseStageVerificationNode {
     }
 
     bool low_order_bounds_satisfied = true;
-    Real minimum_low_order_liquid_indicator =
+    Real minimum_low_order_phase_indicator =
         std::numeric_limits<Real>::infinity();
-    Real maximum_low_order_liquid_indicator =
+    Real maximum_low_order_phase_indicator =
         -std::numeric_limits<Real>::infinity();
-    Real minimum_raw_target_liquid_indicator =
+    Real minimum_raw_target_phase_indicator =
         std::numeric_limits<Real>::infinity();
-    Real maximum_raw_target_liquid_indicator =
+    Real maximum_raw_target_phase_indicator =
         -std::numeric_limits<Real>::infinity();
     Real previous_minimum = std::numeric_limits<Real>::infinity();
     Real previous_maximum = -std::numeric_limits<Real>::infinity();
     for (std::size_t node = 0u; node < node_count; ++node) {
         auto& values = scratch[node];
         const auto& ledger = correction.nodes[node];
-        const Real previous = previous_liquid_indicator[node];
-        const Real lower = ledger.lower_liquid_indicator;
-        const Real upper = ledger.upper_liquid_indicator;
+        const Real previous = previous_phase_indicator[node];
+        const Real lower = ledger.lower_phase_indicator;
+        const Real upper = ledger.upper_phase_indicator;
         const Real expected_lower = std::clamp(
             values.expected_lower, Real{0.0}, Real{1.0});
         const Real expected_upper = std::clamp(
@@ -1671,10 +1671,10 @@ struct PhaseStageVerificationNode {
                 ledger.negative_raw_antidiffusive_mass,
                 values.negative_raw) ||
             !same_real(
-                ledger.low_order_liquid_indicator,
+                ledger.low_order_phase_indicator,
                 low_order_indicator) ||
             !same_real(
-                ledger.raw_target_liquid_indicator,
+                ledger.raw_target_phase_indicator,
                 raw_target_indicator)) {
             return fail("found a nodal predictor equation mismatch");
         }
@@ -1682,14 +1682,14 @@ struct PhaseStageVerificationNode {
             low_order_bounds_satisfied && insidePhaseStageBounds(
                 low_order_indicator, lower, upper,
                 options.invariant_tolerance);
-        minimum_low_order_liquid_indicator = std::min(
-            minimum_low_order_liquid_indicator, low_order_indicator);
-        maximum_low_order_liquid_indicator = std::max(
-            maximum_low_order_liquid_indicator, low_order_indicator);
-        minimum_raw_target_liquid_indicator = std::min(
-            minimum_raw_target_liquid_indicator, raw_target_indicator);
-        maximum_raw_target_liquid_indicator = std::max(
-            maximum_raw_target_liquid_indicator, raw_target_indicator);
+        minimum_low_order_phase_indicator = std::min(
+            minimum_low_order_phase_indicator, low_order_indicator);
+        maximum_low_order_phase_indicator = std::max(
+            maximum_low_order_phase_indicator, low_order_indicator);
+        minimum_raw_target_phase_indicator = std::min(
+            minimum_raw_target_phase_indicator, raw_target_indicator);
+        maximum_raw_target_phase_indicator = std::max(
+            maximum_raw_target_phase_indicator, raw_target_indicator);
         previous_minimum = std::min(previous_minimum, previous);
         previous_maximum = std::max(previous_maximum, previous);
 
@@ -1721,17 +1721,17 @@ struct PhaseStageVerificationNode {
     if (correction.low_order_bounds_satisfied !=
             low_order_bounds_satisfied ||
         !same_real(
-            correction.minimum_low_order_liquid_indicator,
-            minimum_low_order_liquid_indicator) ||
+            correction.minimum_low_order_phase_indicator,
+            minimum_low_order_phase_indicator) ||
         !same_real(
-            correction.maximum_low_order_liquid_indicator,
-            maximum_low_order_liquid_indicator) ||
+            correction.maximum_low_order_phase_indicator,
+            maximum_low_order_phase_indicator) ||
         !same_real(
-            correction.minimum_raw_target_liquid_indicator,
-            minimum_raw_target_liquid_indicator) ||
+            correction.minimum_raw_target_phase_indicator,
+            minimum_raw_target_phase_indicator) ||
         !same_real(
-            correction.maximum_raw_target_liquid_indicator,
-            maximum_raw_target_liquid_indicator)) {
+            correction.maximum_raw_target_phase_indicator,
+            maximum_raw_target_phase_indicator)) {
         return fail("found a predictor summary mismatch");
     }
 
@@ -1789,9 +1789,9 @@ struct PhaseStageVerificationNode {
 
     bool limited_bounds_satisfied = true;
     bool local_balance_satisfied = true;
-    Real minimum_limited_liquid_indicator =
+    Real minimum_limited_phase_indicator =
         std::numeric_limits<Real>::infinity();
-    Real maximum_limited_liquid_indicator =
+    Real maximum_limited_phase_indicator =
         -std::numeric_limits<Real>::infinity();
     Real maximum_low_order_local_mass_balance_residual{0.0};
     Real maximum_raw_target_local_mass_balance_residual{0.0};
@@ -1809,25 +1809,25 @@ struct PhaseStageVerificationNode {
         const auto& values = scratch[node];
         const auto& ledger = correction.nodes[node];
         const Real limited_indicator =
-            ledger.low_order_liquid_indicator +
+            ledger.low_order_phase_indicator +
             values.limited_internal / ledger.lumped_control_volume;
         const Real low_order_residual =
             ledger.lumped_control_volume *
-                (ledger.low_order_liquid_indicator -
-                 ledger.previous_liquid_indicator) -
+                (ledger.low_order_phase_indicator -
+                 ledger.previous_phase_indicator) -
             (ledger.physical_boundary_mass_transfer +
              ledger.discrete_divergence_mass_source +
              values.low_order_internal);
         const Real raw_target_residual =
             ledger.lumped_control_volume *
-                (ledger.raw_target_liquid_indicator -
-                 ledger.previous_liquid_indicator) -
+                (ledger.raw_target_phase_indicator -
+                 ledger.previous_phase_indicator) -
             (ledger.physical_boundary_mass_transfer +
              ledger.discrete_divergence_mass_source +
              values.low_order_internal + values.raw_internal);
         const Real limited_residual =
             ledger.lumped_control_volume *
-                (limited_indicator - ledger.previous_liquid_indicator) -
+                (limited_indicator - ledger.previous_phase_indicator) -
             (ledger.physical_boundary_mass_transfer +
              ledger.discrete_divergence_mass_source +
              values.low_order_internal + values.limited_internal);
@@ -1835,7 +1835,7 @@ struct PhaseStageVerificationNode {
                 ledger.limited_antidiffusive_mass_transfer,
                 values.limited_internal) ||
             !same_real(
-                ledger.limited_liquid_indicator,
+                ledger.limited_phase_indicator,
                 limited_indicator) ||
             !same_real(
                 ledger.low_order_local_mass_balance_residual,
@@ -1851,17 +1851,17 @@ struct PhaseStageVerificationNode {
         limited_bounds_satisfied = limited_bounds_satisfied &&
             insidePhaseStageBounds(
                 limited_indicator,
-                ledger.lower_liquid_indicator,
-                ledger.upper_liquid_indicator,
+                ledger.lower_phase_indicator,
+                ledger.upper_phase_indicator,
                 options.invariant_tolerance);
         const Real local_tolerance = scaledTolerance(
             options.invariant_tolerance,
             {ledger.lumped_control_volume *
-                 ledger.previous_liquid_indicator,
+                 ledger.previous_phase_indicator,
              ledger.lumped_control_volume *
-                 ledger.low_order_liquid_indicator,
+                 ledger.low_order_phase_indicator,
              ledger.lumped_control_volume *
-                 ledger.raw_target_liquid_indicator,
+                 ledger.raw_target_phase_indicator,
              ledger.lumped_control_volume * limited_indicator,
              ledger.physical_boundary_mass_transfer,
              ledger.discrete_divergence_mass_source,
@@ -1881,20 +1881,20 @@ struct PhaseStageVerificationNode {
         maximum_local_mass_balance_residual = std::max(
             maximum_local_mass_balance_residual,
             std::abs(limited_residual));
-        minimum_limited_liquid_indicator = std::min(
-            minimum_limited_liquid_indicator, limited_indicator);
-        maximum_limited_liquid_indicator = std::max(
-            maximum_limited_liquid_indicator, limited_indicator);
+        minimum_limited_phase_indicator = std::min(
+            minimum_limited_phase_indicator, limited_indicator);
+        maximum_limited_phase_indicator = std::max(
+            maximum_limited_phase_indicator, limited_indicator);
 
         total_previous += static_cast<long double>(
             ledger.lumped_control_volume *
-            ledger.previous_liquid_indicator);
+            ledger.previous_phase_indicator);
         total_low_order += static_cast<long double>(
             ledger.lumped_control_volume *
-            ledger.low_order_liquid_indicator);
+            ledger.low_order_phase_indicator);
         total_raw_target += static_cast<long double>(
             ledger.lumped_control_volume *
-            ledger.raw_target_liquid_indicator);
+            ledger.raw_target_phase_indicator);
         total_limited += static_cast<long double>(
             ledger.lumped_control_volume * limited_indicator);
         total_boundary += static_cast<long double>(
@@ -1973,11 +1973,11 @@ struct PhaseStageVerificationNode {
             correction.maximum_local_mass_balance_residual,
             maximum_local_mass_balance_residual) ||
         !same_real(
-            correction.minimum_limited_liquid_indicator,
-            minimum_limited_liquid_indicator) ||
+            correction.minimum_limited_phase_indicator,
+            minimum_limited_phase_indicator) ||
         !same_real(
-            correction.maximum_limited_liquid_indicator,
-            maximum_limited_liquid_indicator) ||
+            correction.maximum_limited_phase_indicator,
+            maximum_limited_phase_indicator) ||
         !same_real(
             correction.low_order_nodal_cancellation_residual,
             low_order_cancellation_value) ||
@@ -1988,16 +1988,16 @@ struct PhaseStageVerificationNode {
             correction.limited_nodal_cancellation_residual,
             limited_cancellation_value) ||
         !same_real(
-            correction.total_previous_liquid_measure,
+            correction.total_previous_active_measure,
             total_previous_value) ||
         !same_real(
-            correction.total_low_order_liquid_measure,
+            correction.total_low_order_active_measure,
             total_low_order_value) ||
         !same_real(
-            correction.total_raw_target_liquid_measure,
+            correction.total_raw_target_active_measure,
             total_raw_target_value) ||
         !same_real(
-            correction.total_limited_liquid_measure,
+            correction.total_limited_active_measure,
             total_limited_value) ||
         !same_real(
             correction.total_physical_boundary_mass_transfer,
@@ -2026,30 +2026,30 @@ struct PhaseStageVerificationNode {
     if (constant_state_input) {
         for (const auto& ledger : correction.nodes) {
             const Real error = std::max(
-                std::abs(ledger.low_order_liquid_indicator -
-                         ledger.previous_liquid_indicator),
-                std::abs(ledger.limited_liquid_indicator -
-                         ledger.previous_liquid_indicator));
+                std::abs(ledger.low_order_phase_indicator -
+                         ledger.previous_phase_indicator),
+                std::abs(ledger.limited_phase_indicator -
+                         ledger.previous_phase_indicator));
             maximum_constant_preservation_error = std::max(
                 maximum_constant_preservation_error, error);
             const Real tolerance = scaledTolerance(
                 options.invariant_tolerance,
-                {ledger.previous_liquid_indicator,
-                 ledger.low_order_liquid_indicator,
-                 ledger.limited_liquid_indicator});
+                {ledger.previous_phase_indicator,
+                 ledger.low_order_phase_indicator,
+                 ledger.limited_phase_indicator});
             constant_preservation_satisfied =
                 constant_preservation_satisfied && error <= tolerance;
         }
         for (const auto& ledger : correction.nodes) {
             const Real error = std::abs(
-                ledger.raw_target_liquid_indicator -
-                ledger.previous_liquid_indicator);
+                ledger.raw_target_phase_indicator -
+                ledger.previous_phase_indicator);
             maximum_constant_preservation_error = std::max(
                 maximum_constant_preservation_error, error);
             const Real tolerance = scaledTolerance(
                 options.invariant_tolerance,
-                {ledger.previous_liquid_indicator,
-                 ledger.raw_target_liquid_indicator});
+                {ledger.previous_phase_indicator,
+                 ledger.raw_target_phase_indicator});
             constant_preservation_satisfied =
                 constant_preservation_satisfied && error <= tolerance;
         }
@@ -2069,10 +2069,10 @@ struct PhaseStageVerificationNode {
         auto& values = scratch[node];
         const auto& ledger = correction.nodes[node];
         const Real activity_scale = std::max(
-            {std::abs(ledger.previous_liquid_indicator),
-             std::abs(ledger.low_order_liquid_indicator),
-             std::abs(ledger.raw_target_liquid_indicator),
-             std::abs(ledger.limited_liquid_indicator),
+            {std::abs(ledger.previous_phase_indicator),
+             std::abs(ledger.low_order_phase_indicator),
+             std::abs(ledger.raw_target_phase_indicator),
+             std::abs(ledger.limited_phase_indicator),
              std::abs(ledger.physical_boundary_mass_transfer) /
                  ledger.lumped_control_volume,
              std::abs(ledger.discrete_divergence_mass_source) /
@@ -2129,18 +2129,18 @@ struct PhaseStageVerificationNode {
         LevelSetPhaseFluxComponentLedger& component,
         const LevelSetPhaseFluxNodeLedger& ledger) {
         ++component.nodes;
-        component.previous_liquid_measure +=
+        component.previous_active_measure +=
             ledger.lumped_control_volume *
-            ledger.previous_liquid_indicator;
-        component.low_order_liquid_measure +=
+            ledger.previous_phase_indicator;
+        component.low_order_active_measure +=
             ledger.lumped_control_volume *
-            ledger.low_order_liquid_indicator;
-        component.raw_target_liquid_measure +=
+            ledger.low_order_phase_indicator;
+        component.raw_target_active_measure +=
             ledger.lumped_control_volume *
-            ledger.raw_target_liquid_indicator;
-        component.limited_liquid_measure +=
+            ledger.raw_target_phase_indicator;
+        component.limited_active_measure +=
             ledger.lumped_control_volume *
-            ledger.limited_liquid_indicator;
+            ledger.limited_phase_indicator;
         component.physical_boundary_mass_transfer +=
             ledger.physical_boundary_mass_transfer;
         component.discrete_divergence_mass_source +=
@@ -2158,16 +2158,16 @@ struct PhaseStageVerificationNode {
         ++component.component_nodes;
         component.row_divergence +=
             ledger.lumped_control_volume *
-            ledger.previous_liquid_indicator;
+            ledger.previous_phase_indicator;
         component.direct_strong_rate +=
             ledger.lumped_control_volume *
-            ledger.low_order_liquid_indicator;
+            ledger.low_order_phase_indicator;
         component.decomposed_strong_rate +=
             ledger.lumped_control_volume *
-            ledger.raw_target_liquid_indicator;
+            ledger.raw_target_phase_indicator;
         component.nodal_courant +=
             ledger.lumped_control_volume *
-            ledger.limited_liquid_indicator;
+            ledger.limited_phase_indicator;
         component.low_order_internal +=
             ledger.physical_boundary_mass_transfer;
         component.raw_internal +=
@@ -2210,31 +2210,31 @@ struct PhaseStageVerificationNode {
     std::array<long double, 5> component_absolute_sums{};
     const auto finalize_component = [&](auto& component) {
         component.low_order_balance_residual =
-            component.low_order_liquid_measure -
-            component.previous_liquid_measure -
+            component.low_order_active_measure -
+            component.previous_active_measure -
             component.physical_boundary_mass_transfer -
             component.discrete_divergence_mass_source -
             component.low_order_interior_mass_transfer;
         component.raw_target_balance_residual =
-            component.raw_target_liquid_measure -
-            component.previous_liquid_measure -
+            component.raw_target_active_measure -
+            component.previous_active_measure -
             component.physical_boundary_mass_transfer -
             component.discrete_divergence_mass_source -
             component.low_order_interior_mass_transfer -
             component.raw_antidiffusive_mass_transfer;
         component.limited_balance_residual =
-            component.limited_liquid_measure -
-            component.previous_liquid_measure -
+            component.limited_active_measure -
+            component.previous_active_measure -
             component.physical_boundary_mass_transfer -
             component.discrete_divergence_mass_source -
             component.low_order_interior_mass_transfer -
             component.limited_antidiffusive_mass_transfer;
         const Real tolerance = scaledTolerance(
             options.invariant_tolerance,
-            {component.previous_liquid_measure,
-             component.low_order_liquid_measure,
-             component.raw_target_liquid_measure,
-             component.limited_liquid_measure,
+            {component.previous_active_measure,
+             component.low_order_active_measure,
+             component.raw_target_active_measure,
+             component.limited_active_measure,
              component.physical_boundary_mass_transfer,
              component.discrete_divergence_mass_source,
              component.low_order_interior_mass_transfer,
@@ -2250,10 +2250,10 @@ struct PhaseStageVerificationNode {
             component_balance_satisfied &&
             maximum_residual <= tolerance;
         const std::array<Real, 9> values{{
-            component.previous_liquid_measure,
-            component.low_order_liquid_measure,
-            component.raw_target_liquid_measure,
-            component.limited_liquid_measure,
+            component.previous_active_measure,
+            component.low_order_active_measure,
+            component.raw_target_active_measure,
+            component.limited_active_measure,
             component.physical_boundary_mass_transfer,
             component.discrete_divergence_mass_source,
             component.low_order_interior_mass_transfer,
@@ -2279,10 +2279,10 @@ struct PhaseStageVerificationNode {
         LevelSetPhaseFluxComponentLedger expected{
             .component_id = static_cast<GlobalIndex>(root),
             .nodes = values.component_nodes,
-            .previous_liquid_measure = values.row_divergence,
-            .low_order_liquid_measure = values.direct_strong_rate,
-            .raw_target_liquid_measure = values.decomposed_strong_rate,
-            .limited_liquid_measure = values.nodal_courant,
+            .previous_active_measure = values.row_divergence,
+            .low_order_active_measure = values.direct_strong_rate,
+            .raw_target_active_measure = values.decomposed_strong_rate,
+            .limited_active_measure = values.nodal_courant,
             .physical_boundary_mass_transfer =
                 values.low_order_internal,
             .discrete_divergence_mass_source = values.raw_internal,
@@ -2649,10 +2649,10 @@ std::uint64_t levelSetP1PhaseFluxLedgerDigest(
     mixPhaseStageHashBool(hash, correction.constant_preservation_required);
     mixPhaseStageHashBool(hash, correction.constant_preservation_satisfied);
     mixPhaseStageHashSize(hash, correction.limited_edges);
-    mixPhaseStageHashReal(hash, correction.total_previous_liquid_measure);
-    mixPhaseStageHashReal(hash, correction.total_low_order_liquid_measure);
-    mixPhaseStageHashReal(hash, correction.total_raw_target_liquid_measure);
-    mixPhaseStageHashReal(hash, correction.total_limited_liquid_measure);
+    mixPhaseStageHashReal(hash, correction.total_previous_active_measure);
+    mixPhaseStageHashReal(hash, correction.total_low_order_active_measure);
+    mixPhaseStageHashReal(hash, correction.total_raw_target_active_measure);
+    mixPhaseStageHashReal(hash, correction.total_limited_active_measure);
     mixPhaseStageHashReal(
         hash, correction.total_physical_boundary_mass_transfer);
     mixPhaseStageHashReal(
@@ -2699,17 +2699,17 @@ std::uint64_t levelSetP1PhaseFluxLedgerDigest(
     mixPhaseStageHashReal(
         hash, correction.maximum_constant_preservation_error);
     mixPhaseStageHashReal(
-        hash, correction.minimum_low_order_liquid_indicator);
+        hash, correction.minimum_low_order_phase_indicator);
     mixPhaseStageHashReal(
-        hash, correction.maximum_low_order_liquid_indicator);
+        hash, correction.maximum_low_order_phase_indicator);
     mixPhaseStageHashReal(
-        hash, correction.minimum_raw_target_liquid_indicator);
+        hash, correction.minimum_raw_target_phase_indicator);
     mixPhaseStageHashReal(
-        hash, correction.maximum_raw_target_liquid_indicator);
+        hash, correction.maximum_raw_target_phase_indicator);
     mixPhaseStageHashReal(
-        hash, correction.minimum_limited_liquid_indicator);
+        hash, correction.minimum_limited_phase_indicator);
     mixPhaseStageHashReal(
-        hash, correction.maximum_limited_liquid_indicator);
+        hash, correction.maximum_limited_phase_indicator);
     mixPhaseStageHashSize(hash, correction.nodes.size());
     for (const auto& node : correction.nodes) {
         mixPhaseFluxNodeLedger(hash, node);
@@ -2732,12 +2732,12 @@ std::uint64_t levelSetP1PhaseFluxLedgerDigest(
 
 LevelSetP1PhaseTransportGraph buildLevelSetP1PhaseTransportGraph(
     const systems::FESystem& system,
-    FieldId liquid_indicator_field,
+    FieldId phase_indicator_field,
     const LevelSetP1PhaseGraphOptions& options)
 {
     LevelSetP1PhaseTransportGraph result;
     try {
-        if (liquid_indicator_field == INVALID_FIELD_ID) {
+        if (phase_indicator_field == INVALID_FIELD_ID) {
             result.diagnostic =
                 "P1 conservative phase graph received an invalid field";
             return result;
@@ -2745,8 +2745,8 @@ LevelSetP1PhaseTransportGraph buildLevelSetP1PhaseTransportGraph(
 
         const auto& mesh = system.meshAccess();
         result.dimension = mesh.dimension();
-        const auto& record = system.fieldRecord(liquid_indicator_field);
-        const auto& dofs = system.fieldDofHandler(liquid_indicator_field);
+        const auto& record = system.fieldRecord(phase_indicator_field);
+        const auto& dofs = system.fieldDofHandler(phase_indicator_field);
         const auto collective = phaseGraphCollectiveContext(mesh, dofs);
         result.parallel_rank = collective.rank;
         result.parallel_size = collective.size;
@@ -2832,7 +2832,7 @@ LevelSetP1PhaseTransportGraph buildLevelSetP1PhaseTransportGraph(
                     "P1 conservative phase graph requires a fixed-order scalar P1 H1 field");
             }
             if (!system.fieldParticipatesInUnknownVector(
-                    liquid_indicator_field)) {
+                    phase_indicator_field)) {
                 reject_preflight(
                     "P1 conservative phase graph requires a transported unknown field");
             }
@@ -2911,7 +2911,7 @@ LevelSetP1PhaseTransportGraph buildLevelSetP1PhaseTransportGraph(
             result.boundary_column_sum.assign(
                 result.nodes, Vector3{});
             const GlobalIndex field_offset =
-                system.fieldDofOffset(liquid_indicator_field);
+                system.fieldDofOffset(phase_indicator_field);
             for (std::size_t i = 0; i < result.nodes; ++i) {
                 if (system.constraints().isConstrained(
                         field_offset + static_cast<GlobalIndex>(i))) {
@@ -3362,9 +3362,9 @@ LevelSetP1PhaseTransportGraph buildLevelSetP1PhaseTransportGraph(
 LevelSetP1PhaseTransportStageResult
 advanceLevelSetP1ConservativePhaseStage(
     const LevelSetP1PhaseTransportGraph& graph,
-    std::span<const Real> previous_liquid_indicator,
-    std::span<const Real> lower_liquid_indicator,
-    std::span<const Real> upper_liquid_indicator,
+    std::span<const Real> previous_phase_indicator,
+    std::span<const Real> lower_phase_indicator,
+    std::span<const Real> upper_phase_indicator,
     std::span<const std::array<Real, 3>> nodal_velocity,
     Real time_step,
     const LevelSetP1PhaseStageOptions& options)
@@ -3398,9 +3398,9 @@ advanceLevelSetP1ConservativePhaseStage(
             graph.lumped_control_volume.size() != node_count ||
             graph.diagonal_gradient.size() != node_count ||
             graph.boundary_column_sum.size() != node_count ||
-            previous_liquid_indicator.size() != node_count ||
-            lower_liquid_indicator.size() != node_count ||
-            upper_liquid_indicator.size() != node_count ||
+            previous_phase_indicator.size() != node_count ||
+            lower_phase_indicator.size() != node_count ||
+            upper_phase_indicator.size() != node_count ||
             nodal_velocity.size() != node_count) {
             reject_preflight(
                 "P1 conservative phase stage received inconsistent nodal spans");
@@ -3421,9 +3421,9 @@ advanceLevelSetP1ConservativePhaseStage(
             for (std::size_t node = 0u; node < node_count; ++node) {
                 if (!std::isfinite(graph.lumped_control_volume[node]) ||
                     !(graph.lumped_control_volume[node] > Real{0.0}) ||
-                    !std::isfinite(previous_liquid_indicator[node]) ||
-                    !std::isfinite(lower_liquid_indicator[node]) ||
-                    !std::isfinite(upper_liquid_indicator[node])) {
+                    !std::isfinite(previous_phase_indicator[node]) ||
+                    !std::isfinite(lower_phase_indicator[node]) ||
+                    !std::isfinite(upper_phase_indicator[node])) {
                     reject_preflight(
                         "P1 conservative phase stage requires finite nodal inputs and positive control volumes");
                     break;
@@ -3446,8 +3446,8 @@ advanceLevelSetP1ConservativePhaseStage(
             return result;
         }
         if (!replicatedStageInputsMatch(
-                collective, previous_liquid_indicator,
-                lower_liquid_indicator, upper_liquid_indicator,
+                collective, previous_phase_indicator,
+                lower_phase_indicator, upper_phase_indicator,
                 nodal_velocity, time_step, options,
                 result.diagnostic)) {
             return result;
@@ -3493,7 +3493,7 @@ advanceLevelSetP1ConservativePhaseStage(
                 graph.diagonal_gradient[node], velocity, graph.dimension);
             row_divergence[node] = diagonal_velocity;
             direct_strong_rate[node] =
-                -diagonal_velocity * previous_liquid_indicator[node];
+                -diagonal_velocity * previous_phase_indicator[node];
         }
 
         for (const auto& edge : graph.edges) {
@@ -3538,8 +3538,8 @@ advanceLevelSetP1ConservativePhaseStage(
                 time_step * std::max(Real{0.0}, second_coefficient) /
                 graph.lumped_control_volume[second];
 
-            const Real first_indicator = previous_liquid_indicator[first];
-            const Real second_indicator = previous_liquid_indicator[second];
+            const Real first_indicator = previous_phase_indicator[first];
+            const Real second_indicator = previous_phase_indicator[second];
             const Real central_rate =
                 second_to_first_speed * first_indicator -
                 first_to_second_speed * second_indicator;
@@ -3583,7 +3583,7 @@ advanceLevelSetP1ConservativePhaseStage(
             }
             result.maximum_courant = std::max(
                 result.maximum_courant, result.nodal_courant[node]);
-            const Real indicator = previous_liquid_indicator[node];
+            const Real indicator = previous_phase_indicator[node];
             const Real boundary_rate =
                 -indicator * dot(graph.boundary_column_sum[node],
                                  nodal_velocity[node], graph.dimension);
@@ -3638,10 +3638,10 @@ advanceLevelSetP1ConservativePhaseStage(
             applyLevelSetConservativePhaseFluxCorrection(
                 LevelSetPhaseFluxStageView{
                     .lumped_control_volume = graph.lumped_control_volume,
-                    .previous_liquid_indicator =
-                        previous_liquid_indicator,
-                    .lower_liquid_indicator = lower_liquid_indicator,
-                    .upper_liquid_indicator = upper_liquid_indicator,
+                    .previous_phase_indicator =
+                        previous_phase_indicator,
+                    .lower_phase_indicator = lower_phase_indicator,
+                    .upper_phase_indicator = upper_phase_indicator,
                     .interior_edges = result.flux_edges,
                     .physical_boundary_mass_transfer =
                         result.physical_boundary_mass_transfer,
@@ -3658,8 +3658,8 @@ advanceLevelSetP1ConservativePhaseStage(
             result.correction.nodes.size() == node_count) {
             for (const auto& node : result.correction.nodes) {
                 const Real error = std::abs(
-                    node.raw_target_liquid_indicator -
-                    node.previous_liquid_indicator);
+                    node.raw_target_phase_indicator -
+                    node.previous_phase_indicator);
                 result.correction.maximum_constant_preservation_error =
                     std::max(
                         result.correction
@@ -3667,8 +3667,8 @@ advanceLevelSetP1ConservativePhaseStage(
                         error);
                 const Real tolerance = scaledTolerance(
                     options.invariant_tolerance,
-                    {node.previous_liquid_indicator,
-                     node.raw_target_liquid_indicator});
+                    {node.previous_phase_indicator,
+                     node.raw_target_phase_indicator});
                 raw_target_constant_preservation_satisfied =
                     raw_target_constant_preservation_satisfied &&
                     error <= tolerance;
@@ -3700,7 +3700,7 @@ advanceLevelSetP1ConservativePhaseStage(
 LevelSetP1PhaseSplitStageValidationResult
 validateLevelSetP1PhaseSplitStage(
     const LevelSetP1PhaseTransportGraph& graph,
-    std::span<const Real> previous_liquid_indicator,
+    std::span<const Real> previous_phase_indicator,
     const LevelSetP1PhaseTransportStageResult& stage,
     const LevelSetP1PhaseSplitStageProvenance& provenance)
 {
@@ -3716,7 +3716,7 @@ validateLevelSetP1PhaseSplitStage(
                 levelSetP1PhaseGraphIdentity(graph);
             result.computed_previous_q_revision =
                 levelSetP1PhaseScalarContentRevision(
-                    previous_liquid_indicator);
+                    previous_phase_indicator);
             result.computed_nodal_velocity_revision =
                 levelSetP1PhaseVelocityContentRevision(
                     stage.sampled_nodal_velocity);
@@ -3837,7 +3837,7 @@ validateLevelSetP1PhaseSplitStage(
         }
             std::string ledger_diagnostic;
             if (!completePhaseFluxLedger(
-                    graph, previous_liquid_indicator, stage,
+                    graph, previous_phase_indicator, stage,
                     ledger_diagnostic)) {
                 reject(std::move(ledger_diagnostic));
             }
@@ -3849,7 +3849,7 @@ validateLevelSetP1PhaseSplitStage(
                 verification_scratch.resize(graph.nodes);
                 std::string verification_diagnostic;
                 if (!verifyPhaseStageLedgerEquations(
-                        graph, previous_liquid_indicator, stage,
+                        graph, previous_phase_indicator, stage,
                         verification_scratch,
                         verification_diagnostic)) {
                     reject(std::move(verification_diagnostic));

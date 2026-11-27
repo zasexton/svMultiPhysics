@@ -63,7 +63,7 @@ void appendFunctional(
   appendWord(words, value.snapshot_revision);
   appendWord(words, value.mesh_topology_revision);
   appendWord(words, value.cut_topology_revision);
-  appendDouble(words, value.liquid_volume);
+  appendDouble(words, value.active_measure);
   appendDouble(words, value.liquid_gas_area);
   appendDouble(words, value.wetted_wall_area);
   appendDouble(words, value.contact_measure);

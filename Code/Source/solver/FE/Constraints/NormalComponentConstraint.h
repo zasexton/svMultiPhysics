@@ -12,7 +12,7 @@
  * @file NormalComponentConstraint.h
  * @brief u . n = g strongly on a boundary, for a vector Lagrange field
  *
- * The free-slip (no-penetration) condition, and its nonzero form, as affine
+ * The zero normal component (no-penetration) condition, and its nonzero form, as affine
  * constraint lines after deal.II's compute_nonzero_normal_flux_constraints.
  * At each support point of the field on the boundary:
  *
@@ -21,7 +21,7 @@
  *  - normals that differ by less than the feature angle are one direction
  *    (a smooth or faceted curved wall); the direction is the normalized
  *    weighted sum of its normals;
- *  - with k directions n_1..n_k at the point (k = 1 on a wall, 2 on a 3D
+ *  - with k directions n_1..n_k at the point (k = 1 on a boundary, 2 on a 3D
  *    edge, dim at a corner) the constraint is n_j . u = g for each j: when
  *    k < dim the k components whose submatrix of N = [n_1; ...; n_k] has the
  *    largest |determinant| are slaves of the others,
@@ -42,9 +42,9 @@
  * normals follow the active mesh: the lines are rebuilt when the geometry
  * changes.
  *
- * A boundary may be the generated active subset of a marker (the wetted part
- * of a cut boundary): only its faces of positive wetted measure hold points
- * and give normals (wettedBoundaryFaces), so a point on dry faces only is
+ * A boundary condition may select the generated active subset of a marker.
+ * Only faces with positive active measure hold points
+ * and give normals (activeBoundaryFaces), so a point on inactive faces only is
  * left to the constraints of the active side; the lines are rebuilt with
  * each new cut-integration context.
  */
@@ -79,7 +79,7 @@ public:
                               NormalComponentOptions options = {});
 
     /// u . n = @p value on @p boundaries: each the faces of a whole marker
-    /// or the wetted faces of its generated active subset; one boundary per
+    /// or the active faces of its generated active subset; one boundary per
     /// marker.
     NormalComponentConstraint(FieldId field,
                               std::vector<forms::ExteriorBoundaryMeasure> boundaries,
@@ -140,7 +140,7 @@ boundaryPointNormals(const systems::FESystem& system,
 
 /**
  * @brief The faces of @p boundary_marker that its generated active subset
- *        @p active_boundary_marker wets
+ *        @p active_boundary_marker covers
  *
  * The boundary faces (IMeshAccess::forEachBoundaryFace ids) that carry a rule
  * of positive measure of the subset in the installed cut-integration context:
@@ -148,10 +148,10 @@ boundaryPointNormals(const systems::FESystem& system,
  * when @p active_boundary_marker is negative or the context has no such
  * subset (the whole marker then holds); a subset of another marker throws.
  * A strong condition restricted to these faces acts on the degrees of freedom
- * whose basis function has a nonzero trace on the wetted part of the marker.
+ * whose basis function has a nonzero trace on the active subset of the marker.
  */
 [[nodiscard]] std::optional<std::unordered_set<GlobalIndex>>
-wettedBoundaryFaces(const systems::FESystem& system, int boundary_marker, int active_boundary_marker);
+activeBoundaryFaces(const systems::FESystem& system, int boundary_marker, int active_boundary_marker);
 
 } // namespace constraints
 } // namespace FE

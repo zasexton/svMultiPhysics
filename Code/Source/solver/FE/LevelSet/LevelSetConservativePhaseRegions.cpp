@@ -20,10 +20,10 @@ namespace {
 {
     const Real scale = std::max(
         {Real{1.0},
-         std::abs(region.previous_liquid_measure),
-         std::abs(region.low_order_liquid_measure),
-         std::abs(region.raw_target_liquid_measure),
-         std::abs(region.limited_liquid_measure),
+         std::abs(region.previous_active_measure),
+         std::abs(region.low_order_active_measure),
+         std::abs(region.raw_target_active_measure),
+         std::abs(region.limited_active_measure),
          std::abs(region.physical_boundary_mass_transfer),
          std::abs(region.discrete_divergence_mass_source),
          std::abs(region.low_order_nodal_interior_mass_transfer),
@@ -324,18 +324,18 @@ LevelSetPhaseRegionLedgerResult buildLevelSetPhaseRegionLedgers(
                 }
                 const auto& ledger = correction.nodes[node];
                 region.member_nodes.push_back(ledger.node);
-                region.previous_liquid_measure +=
+                region.previous_active_measure +=
                     ledger.lumped_control_volume *
-                    ledger.previous_liquid_indicator;
-                region.low_order_liquid_measure +=
+                    ledger.previous_phase_indicator;
+                region.low_order_active_measure +=
                     ledger.lumped_control_volume *
-                    ledger.low_order_liquid_indicator;
-                region.raw_target_liquid_measure +=
+                    ledger.low_order_phase_indicator;
+                region.raw_target_active_measure +=
                     ledger.lumped_control_volume *
-                    ledger.raw_target_liquid_indicator;
-                region.limited_liquid_measure +=
+                    ledger.raw_target_phase_indicator;
+                region.limited_active_measure +=
                     ledger.lumped_control_volume *
-                    ledger.limited_liquid_indicator;
+                    ledger.limited_phase_indicator;
                 region.physical_boundary_mass_transfer +=
                     ledger.physical_boundary_mass_transfer;
                 region.discrete_divergence_mass_source +=
@@ -401,21 +401,21 @@ LevelSetPhaseRegionLedgerResult buildLevelSetPhaseRegionLedgers(
                 region.limited_nodal_antidiffusive_mass_transfer -
                 region.limited_crossing_antidiffusive_mass_transfer;
             region.low_order_balance_residual =
-                region.low_order_liquid_measure -
-                region.previous_liquid_measure -
+                region.low_order_active_measure -
+                region.previous_active_measure -
                 region.physical_boundary_mass_transfer -
                 region.discrete_divergence_mass_source -
                 region.low_order_crossing_mass_transfer;
             region.raw_target_balance_residual =
-                region.raw_target_liquid_measure -
-                region.previous_liquid_measure -
+                region.raw_target_active_measure -
+                region.previous_active_measure -
                 region.physical_boundary_mass_transfer -
                 region.discrete_divergence_mass_source -
                 region.low_order_crossing_mass_transfer -
                 region.raw_crossing_antidiffusive_mass_transfer;
             region.limited_balance_residual =
-                region.limited_liquid_measure -
-                region.previous_liquid_measure -
+                region.limited_active_measure -
+                region.previous_active_measure -
                 region.physical_boundary_mass_transfer -
                 region.discrete_divergence_mass_source -
                 region.low_order_crossing_mass_transfer -
@@ -468,10 +468,10 @@ makeNonprimaryComponentSatelliteRegions(
     const auto primary = std::max_element(
         correction.components.begin(), correction.components.end(),
         [](const auto& lhs, const auto& rhs) {
-            if (lhs.limited_liquid_measure !=
-                rhs.limited_liquid_measure) {
-                return lhs.limited_liquid_measure <
-                       rhs.limited_liquid_measure;
+            if (lhs.limited_active_measure !=
+                rhs.limited_active_measure) {
+                return lhs.limited_active_measure <
+                       rhs.limited_active_measure;
             }
             return lhs.component_id > rhs.component_id;
         });

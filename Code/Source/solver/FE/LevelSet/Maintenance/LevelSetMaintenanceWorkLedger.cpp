@@ -78,7 +78,7 @@ void validateMaintenanceFunctionalValues(
   std::size_t active_volume_owner_count = 0u;
   for (const auto& value : values) {
     const std::array<double, 8> scalars{
-        value.liquid_volume,
+        value.active_measure,
         value.liquid_gas_area,
         value.wetted_wall_area,
         value.contact_measure,
@@ -90,7 +90,7 @@ void validateMaintenanceFunctionalValues(
         value.interface_marker <= previous_marker ||
         value.snapshot_revision == 0u ||
         value.cut_topology_revision == 0u ||
-        value.liquid_volume < 0.0 ||
+        value.active_measure < 0.0 ||
         value.liquid_gas_area < 0.0 ||
         value.wetted_wall_area < 0.0 ||
         value.contact_measure < 0.0 ||
@@ -1344,8 +1344,8 @@ LogRecord levelSetMaintenanceWorkRowRecord(const LevelSetMaintenanceWorkRow& row
         .value("after_mesh_topology_revision", after.mesh_topology_revision)
         .value("before_cut_topology_revision", before.cut_topology_revision)
         .value("after_cut_topology_revision", after.cut_topology_revision)
-        .value("before_liquid_volume", before.liquid_volume)
-        .value("after_liquid_volume", after.liquid_volume)
+        .value("before_liquid_volume", before.active_measure)
+        .value("after_liquid_volume", after.active_measure)
         .value("before_liquid_gas_area", before.liquid_gas_area)
         .value("after_liquid_gas_area", after.liquid_gas_area)
         .value("before_wetted_wall_area", before.wetted_wall_area)

@@ -86,7 +86,7 @@ struct ConstrainedStrip {
     explicit ConstrainedStrip(std::function<Real(const std::array<Real, 3>&)> phi,
                               std::array<GlobalIndex, 3> extrapolation = {2, 1, 0},
                               std::vector<int> wall_markers = {kWallMarker},
-                              LevelSetConstraintSide liquid_side = LevelSetConstraintSide::Negative)
+                              LevelSetConstraintSide active_side = LevelSetConstraintSide::Negative)
     {
         auto space = spaces::VectorSpace(spaces::SpaceType::H1, ElementType::Triangle3, 1, 2);
         u = system.addField(systems::FieldSpec{
@@ -100,7 +100,7 @@ struct ConstrainedStrip {
             return phi(mesh->getNodeCoordinates(v));
         };
         contact.contact_speed = law;
-        contact.liquid_side = liquid_side;
+        contact.active_side = active_side;
         auto owned = std::make_unique<ContactPointVelocityConstraint>(u, std::move(contact));
         constraint = owned.get();
         system.addSystemConstraint(std::move(owned));

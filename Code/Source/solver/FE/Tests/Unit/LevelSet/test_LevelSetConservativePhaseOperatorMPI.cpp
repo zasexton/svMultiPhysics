@@ -319,8 +319,8 @@ TEST(LevelSetConservativePhaseOperatorMPI,
     ASSERT_TRUE(projection.success) << projection.diagnostic;
     EXPECT_TRUE(projection.phase_bounds_satisfied);
     EXPECT_TRUE(projection.global_measure_closure_satisfied);
-    EXPECT_NEAR(projection.retained_liquid_measure, 0.75, 3.0e-14);
-    EXPECT_NEAR(projection.projected_liquid_measure, 0.75, 3.0e-14);
+    EXPECT_NEAR(projection.retained_active_measure, 0.75, 3.0e-14);
+    EXPECT_NEAR(projection.projected_active_measure, 0.75, 3.0e-14);
 
     const auto sensitivity =
         level_set::buildLevelSetP1PhaseGeometrySensitivity(
@@ -427,7 +427,7 @@ TEST(LevelSetConservativePhaseOperatorMPI,
     EXPECT_EQ(minimum_increment, maximum_increment);
 
     const auto& dofs = system.fieldDofHandler(indicator_field);
-    std::vector<FE::Real> indicator = projection.liquid_indicator;
+    std::vector<FE::Real> indicator = projection.phase_indicator;
     std::vector<FE::Real> lower = indicator;
     std::vector<FE::Real> upper = indicator;
     for (const auto& edge : graph.edges) {
@@ -516,8 +516,8 @@ TEST(LevelSetConservativePhaseOperatorMPI,
     EXPECT_TRUE(stage.correction.global_balance_satisfied);
     EXPECT_TRUE(stage.correction.component_balance_satisfied);
     EXPECT_TRUE(stage.correction.component_measure_closure_satisfied);
-    EXPECT_GE(stage.correction.minimum_limited_liquid_indicator, 0.0);
-    EXPECT_LE(stage.correction.maximum_limited_liquid_indicator, 1.0);
+    EXPECT_GE(stage.correction.minimum_limited_phase_indicator, 0.0);
+    EXPECT_LE(stage.correction.maximum_limited_phase_indicator, 1.0);
     EXPECT_EQ(stage.correction.maximum_edge_pair_cancellation_residual, 0.0);
     ASSERT_EQ(stage.correction.node_component_ids.size(), graph.nodes);
     ASSERT_FALSE(stage.correction.components.empty());
@@ -708,7 +708,7 @@ TEST(LevelSetConservativePhaseOperatorMPI,
 
     std::vector<FE::Real> limited(graph.nodes, 0.0);
     for (std::size_t i = 0; i < graph.nodes; ++i) {
-        limited[i] = stage.correction.nodes[i].limited_liquid_indicator;
+        limited[i] = stage.correction.nodes[i].limited_phase_indicator;
     }
     std::vector<FE::Real> minimum_limited(graph.nodes, 0.0);
     std::vector<FE::Real> maximum_limited(graph.nodes, 0.0);
@@ -740,7 +740,7 @@ TEST(LevelSetConservativePhaseOperatorMPI,
     EXPECT_EQ(constant_stage.correction.components.front().nodes,
               graph.nodes);
     for (const auto& node : constant_stage.correction.nodes) {
-        EXPECT_NEAR(node.limited_liquid_indicator, 0.4, 2.0e-14);
+        EXPECT_NEAR(node.limited_phase_indicator, 0.4, 2.0e-14);
     }
 }
 

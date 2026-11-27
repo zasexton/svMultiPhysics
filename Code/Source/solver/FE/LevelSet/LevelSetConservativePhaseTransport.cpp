@@ -76,10 +76,10 @@ void buildComponentLedger(LevelSetPhaseFluxCorrectionResult& result,
         parent[node] = node;
         const auto& ledger = result.nodes[node];
         const Real activity_scale = std::max(
-            {std::abs(ledger.previous_liquid_indicator),
-             std::abs(ledger.low_order_liquid_indicator),
-             std::abs(ledger.raw_target_liquid_indicator),
-             std::abs(ledger.limited_liquid_indicator),
+            {std::abs(ledger.previous_phase_indicator),
+             std::abs(ledger.low_order_phase_indicator),
+             std::abs(ledger.raw_target_phase_indicator),
+             std::abs(ledger.limited_phase_indicator),
              std::abs(ledger.physical_boundary_mass_transfer) /
                  ledger.lumped_control_volume,
              std::abs(ledger.discrete_divergence_mass_source) /
@@ -123,18 +123,18 @@ void buildComponentLedger(LevelSetPhaseFluxCorrectionResult& result,
     const auto accumulate_node = [](LevelSetPhaseFluxComponentLedger& component,
                                     const LevelSetPhaseFluxNodeLedger& ledger) {
         ++component.nodes;
-        component.previous_liquid_measure +=
+        component.previous_active_measure +=
             ledger.lumped_control_volume *
-            ledger.previous_liquid_indicator;
-        component.low_order_liquid_measure +=
+            ledger.previous_phase_indicator;
+        component.low_order_active_measure +=
             ledger.lumped_control_volume *
-            ledger.low_order_liquid_indicator;
-        component.raw_target_liquid_measure +=
+            ledger.low_order_phase_indicator;
+        component.raw_target_active_measure +=
             ledger.lumped_control_volume *
-            ledger.raw_target_liquid_indicator;
-        component.limited_liquid_measure +=
+            ledger.raw_target_phase_indicator;
+        component.limited_active_measure +=
             ledger.lumped_control_volume *
-            ledger.limited_liquid_indicator;
+            ledger.limited_phase_indicator;
         component.physical_boundary_mass_transfer +=
             ledger.physical_boundary_mass_transfer;
         component.discrete_divergence_mass_source +=
@@ -176,31 +176,31 @@ void buildComponentLedger(LevelSetPhaseFluxCorrectionResult& result,
         [&result, invariant_tolerance](
             LevelSetPhaseFluxComponentLedger& component) {
         component.low_order_balance_residual =
-            component.low_order_liquid_measure -
-            component.previous_liquid_measure -
+            component.low_order_active_measure -
+            component.previous_active_measure -
             component.physical_boundary_mass_transfer -
             component.discrete_divergence_mass_source -
             component.low_order_interior_mass_transfer;
         component.raw_target_balance_residual =
-            component.raw_target_liquid_measure -
-            component.previous_liquid_measure -
+            component.raw_target_active_measure -
+            component.previous_active_measure -
             component.physical_boundary_mass_transfer -
             component.discrete_divergence_mass_source -
             component.low_order_interior_mass_transfer -
             component.raw_antidiffusive_mass_transfer;
         component.limited_balance_residual =
-            component.limited_liquid_measure -
-            component.previous_liquid_measure -
+            component.limited_active_measure -
+            component.previous_active_measure -
             component.physical_boundary_mass_transfer -
             component.discrete_divergence_mass_source -
             component.low_order_interior_mass_transfer -
             component.limited_antidiffusive_mass_transfer;
         const Real component_tolerance = scaledTolerance(
             invariant_tolerance,
-            {component.previous_liquid_measure,
-             component.low_order_liquid_measure,
-             component.raw_target_liquid_measure,
-             component.limited_liquid_measure,
+            {component.previous_active_measure,
+             component.low_order_active_measure,
+             component.raw_target_active_measure,
+             component.limited_active_measure,
              component.physical_boundary_mass_transfer,
              component.discrete_divergence_mass_source,
              component.low_order_interior_mass_transfer,
@@ -248,20 +248,20 @@ void buildComponentLedger(LevelSetPhaseFluxCorrectionResult& result,
     };
     result.previous_component_measure_closure_residual =
         component_sum([](const auto& component) {
-            return component.previous_liquid_measure;
-        }) - result.total_previous_liquid_measure;
+            return component.previous_active_measure;
+        }) - result.total_previous_active_measure;
     result.low_order_component_measure_closure_residual =
         component_sum([](const auto& component) {
-            return component.low_order_liquid_measure;
-        }) - result.total_low_order_liquid_measure;
+            return component.low_order_active_measure;
+        }) - result.total_low_order_active_measure;
     result.raw_target_component_measure_closure_residual =
         component_sum([](const auto& component) {
-            return component.raw_target_liquid_measure;
-        }) - result.total_raw_target_liquid_measure;
+            return component.raw_target_active_measure;
+        }) - result.total_raw_target_active_measure;
     result.limited_component_measure_closure_residual =
         component_sum([](const auto& component) {
-            return component.limited_liquid_measure;
-        }) - result.total_limited_liquid_measure;
+            return component.limited_active_measure;
+        }) - result.total_limited_active_measure;
     result.boundary_component_transfer_closure_residual =
         component_sum([](const auto& component) {
             return component.physical_boundary_mass_transfer;
@@ -284,10 +284,10 @@ void buildComponentLedger(LevelSetPhaseFluxCorrectionResult& result,
         });
     const Real closure_tolerance = scaledTolerance(
         invariant_tolerance,
-        {result.total_previous_liquid_measure,
-         result.total_low_order_liquid_measure,
-         result.total_raw_target_liquid_measure,
-         result.total_limited_liquid_measure,
+        {result.total_previous_active_measure,
+         result.total_low_order_active_measure,
+         result.total_raw_target_active_measure,
+         result.total_limited_active_measure,
          result.total_physical_boundary_mass_transfer,
          result.total_discrete_divergence_mass_source,
          component_absolute_sum([](const auto& component) {
@@ -342,9 +342,9 @@ applyLevelSetConservativePhaseFluxCorrection(
                 "conservative phase-flux correction requires at least one node";
             return result;
         }
-        if (stage.previous_liquid_indicator.size() != node_count ||
-            stage.lower_liquid_indicator.size() != node_count ||
-            stage.upper_liquid_indicator.size() != node_count) {
+        if (stage.previous_phase_indicator.size() != node_count ||
+            stage.lower_phase_indicator.size() != node_count ||
+            stage.upper_phase_indicator.size() != node_count) {
             result.diagnostic =
                 "conservative phase-flux correction received inconsistent nodal spans";
             return result;
@@ -382,9 +382,9 @@ applyLevelSetConservativePhaseFluxCorrection(
 
         for (std::size_t i = 0; i < node_count; ++i) {
             const Real volume = stage.lumped_control_volume[i];
-            const Real previous = stage.previous_liquid_indicator[i];
-            const Real lower = stage.lower_liquid_indicator[i];
-            const Real upper = stage.upper_liquid_indicator[i];
+            const Real previous = stage.previous_phase_indicator[i];
+            const Real lower = stage.lower_phase_indicator[i];
+            const Real upper = stage.upper_phase_indicator[i];
             const Real boundary =
                 optionalNodeValue(stage.physical_boundary_mass_transfer, i);
             const Real divergence =
@@ -415,9 +415,9 @@ applyLevelSetConservativePhaseFluxCorrection(
             auto& ledger = result.nodes[i];
             ledger.node = static_cast<GlobalIndex>(i);
             ledger.lumped_control_volume = volume;
-            ledger.previous_liquid_indicator = previous;
-            ledger.lower_liquid_indicator = lower;
-            ledger.upper_liquid_indicator = upper;
+            ledger.previous_phase_indicator = previous;
+            ledger.lower_phase_indicator = lower;
+            ledger.upper_phase_indicator = upper;
             ledger.physical_boundary_mass_transfer = boundary;
             ledger.discrete_divergence_mass_source = divergence;
         }
@@ -477,13 +477,13 @@ applyLevelSetConservativePhaseFluxCorrection(
         }
 
         result.low_order_bounds_satisfied = true;
-        result.minimum_low_order_liquid_indicator =
+        result.minimum_low_order_phase_indicator =
             std::numeric_limits<Real>::infinity();
-        result.maximum_low_order_liquid_indicator =
+        result.maximum_low_order_phase_indicator =
             -std::numeric_limits<Real>::infinity();
-        result.minimum_raw_target_liquid_indicator =
+        result.minimum_raw_target_phase_indicator =
             std::numeric_limits<Real>::infinity();
-        result.maximum_raw_target_liquid_indicator =
+        result.maximum_raw_target_phase_indicator =
             -std::numeric_limits<Real>::infinity();
         Real previous_minimum = std::numeric_limits<Real>::infinity();
         Real previous_maximum = -std::numeric_limits<Real>::infinity();
@@ -503,46 +503,46 @@ applyLevelSetConservativePhaseFluxCorrection(
             ledger.negative_raw_antidiffusive_mass = negative_raw[i];
             const Real low_order_mass =
                 ledger.lumped_control_volume *
-                    ledger.previous_liquid_indicator +
+                    ledger.previous_phase_indicator +
                 ledger.physical_boundary_mass_transfer +
                 ledger.discrete_divergence_mass_source +
                 ledger.low_order_interior_mass_transfer;
-            ledger.low_order_liquid_indicator =
+            ledger.low_order_phase_indicator =
                 low_order_mass / ledger.lumped_control_volume;
-            ledger.raw_target_liquid_indicator =
-                ledger.low_order_liquid_indicator +
+            ledger.raw_target_phase_indicator =
+                ledger.low_order_phase_indicator +
                 ledger.raw_antidiffusive_mass_transfer /
                     ledger.lumped_control_volume;
-            if (!std::isfinite(ledger.low_order_liquid_indicator) ||
-                !std::isfinite(ledger.raw_target_liquid_indicator)) {
+            if (!std::isfinite(ledger.low_order_phase_indicator) ||
+                !std::isfinite(ledger.raw_target_phase_indicator)) {
                 result.diagnostic =
                     "conservative phase-flux correction produced a non-finite predictor";
                 return result;
             }
             result.low_order_bounds_satisfied =
                 result.low_order_bounds_satisfied &&
-                insideBounds(ledger.low_order_liquid_indicator,
-                             ledger.lower_liquid_indicator,
-                             ledger.upper_liquid_indicator,
+                insideBounds(ledger.low_order_phase_indicator,
+                             ledger.lower_phase_indicator,
+                             ledger.upper_phase_indicator,
                              stage.invariant_tolerance);
-            result.minimum_low_order_liquid_indicator = std::min(
-                result.minimum_low_order_liquid_indicator,
-                ledger.low_order_liquid_indicator);
-            result.maximum_low_order_liquid_indicator = std::max(
-                result.maximum_low_order_liquid_indicator,
-                ledger.low_order_liquid_indicator);
-            result.minimum_raw_target_liquid_indicator = std::min(
-                result.minimum_raw_target_liquid_indicator,
-                ledger.raw_target_liquid_indicator);
-            result.maximum_raw_target_liquid_indicator = std::max(
-                result.maximum_raw_target_liquid_indicator,
-                ledger.raw_target_liquid_indicator);
+            result.minimum_low_order_phase_indicator = std::min(
+                result.minimum_low_order_phase_indicator,
+                ledger.low_order_phase_indicator);
+            result.maximum_low_order_phase_indicator = std::max(
+                result.maximum_low_order_phase_indicator,
+                ledger.low_order_phase_indicator);
+            result.minimum_raw_target_phase_indicator = std::min(
+                result.minimum_raw_target_phase_indicator,
+                ledger.raw_target_phase_indicator);
+            result.maximum_raw_target_phase_indicator = std::max(
+                result.maximum_raw_target_phase_indicator,
+                ledger.raw_target_phase_indicator);
             previous_minimum =
                 std::min(previous_minimum,
-                         ledger.previous_liquid_indicator);
+                         ledger.previous_phase_indicator);
             previous_maximum =
                 std::max(previous_maximum,
-                         ledger.previous_liquid_indicator);
+                         ledger.previous_phase_indicator);
         }
         if (!result.low_order_bounds_satisfied) {
             result.diagnostic =
@@ -555,13 +555,13 @@ applyLevelSetConservativePhaseFluxCorrection(
             const Real positive_allowance = std::max(
                 Real{0.0},
                 ledger.lumped_control_volume *
-                    (ledger.upper_liquid_indicator -
-                     ledger.low_order_liquid_indicator));
+                    (ledger.upper_phase_indicator -
+                     ledger.low_order_phase_indicator));
             const Real negative_allowance = std::min(
                 Real{0.0},
                 ledger.lumped_control_volume *
-                    (ledger.lower_liquid_indicator -
-                     ledger.low_order_liquid_indicator));
+                    (ledger.lower_phase_indicator -
+                     ledger.low_order_phase_indicator));
             if (positive_raw[i] > Real{0.0}) {
                 positive_factor[i] = std::clamp(
                     positive_allowance / positive_raw[i],
@@ -620,42 +620,42 @@ applyLevelSetConservativePhaseFluxCorrection(
 
         result.limited_bounds_satisfied = true;
         result.local_balance_satisfied = true;
-        result.minimum_limited_liquid_indicator =
+        result.minimum_limited_phase_indicator =
             std::numeric_limits<Real>::infinity();
-        result.maximum_limited_liquid_indicator =
+        result.maximum_limited_phase_indicator =
             -std::numeric_limits<Real>::infinity();
         for (std::size_t i = 0; i < node_count; ++i) {
             auto& ledger = result.nodes[i];
             ledger.limited_antidiffusive_mass_transfer =
                 limited_internal[i];
-            ledger.limited_liquid_indicator =
-                ledger.low_order_liquid_indicator +
+            ledger.limited_phase_indicator =
+                ledger.low_order_phase_indicator +
                 ledger.limited_antidiffusive_mass_transfer /
                     ledger.lumped_control_volume;
             ledger.low_order_local_mass_balance_residual =
                 ledger.lumped_control_volume *
-                    (ledger.low_order_liquid_indicator -
-                     ledger.previous_liquid_indicator) -
+                    (ledger.low_order_phase_indicator -
+                     ledger.previous_phase_indicator) -
                 (ledger.physical_boundary_mass_transfer +
                  ledger.discrete_divergence_mass_source +
                  ledger.low_order_interior_mass_transfer);
             ledger.raw_target_local_mass_balance_residual =
                 ledger.lumped_control_volume *
-                    (ledger.raw_target_liquid_indicator -
-                     ledger.previous_liquid_indicator) -
+                    (ledger.raw_target_phase_indicator -
+                     ledger.previous_phase_indicator) -
                 (ledger.physical_boundary_mass_transfer +
                  ledger.discrete_divergence_mass_source +
                  ledger.low_order_interior_mass_transfer +
                  ledger.raw_antidiffusive_mass_transfer);
             ledger.local_mass_balance_residual =
                 ledger.lumped_control_volume *
-                    (ledger.limited_liquid_indicator -
-                     ledger.previous_liquid_indicator) -
+                    (ledger.limited_phase_indicator -
+                     ledger.previous_phase_indicator) -
                 (ledger.physical_boundary_mass_transfer +
                  ledger.discrete_divergence_mass_source +
                  ledger.low_order_interior_mass_transfer +
                  ledger.limited_antidiffusive_mass_transfer);
-            if (!std::isfinite(ledger.limited_liquid_indicator) ||
+            if (!std::isfinite(ledger.limited_phase_indicator) ||
                 !std::isfinite(
                     ledger.low_order_local_mass_balance_residual) ||
                 !std::isfinite(
@@ -667,20 +667,20 @@ applyLevelSetConservativePhaseFluxCorrection(
             }
             result.limited_bounds_satisfied =
                 result.limited_bounds_satisfied &&
-                insideBounds(ledger.limited_liquid_indicator,
-                             ledger.lower_liquid_indicator,
-                             ledger.upper_liquid_indicator,
+                insideBounds(ledger.limited_phase_indicator,
+                             ledger.lower_phase_indicator,
+                             ledger.upper_phase_indicator,
                              stage.invariant_tolerance);
             const Real local_tolerance = scaledTolerance(
                 stage.invariant_tolerance,
                 {ledger.lumped_control_volume *
-                     ledger.previous_liquid_indicator,
+                     ledger.previous_phase_indicator,
                  ledger.lumped_control_volume *
-                     ledger.low_order_liquid_indicator,
+                     ledger.low_order_phase_indicator,
                  ledger.lumped_control_volume *
-                     ledger.raw_target_liquid_indicator,
+                     ledger.raw_target_phase_indicator,
                  ledger.lumped_control_volume *
-                     ledger.limited_liquid_indicator,
+                     ledger.limited_phase_indicator,
                  ledger.physical_boundary_mass_transfer,
                  ledger.discrete_divergence_mass_source,
                  ledger.low_order_interior_mass_transfer,
@@ -703,12 +703,12 @@ applyLevelSetConservativePhaseFluxCorrection(
             result.maximum_local_mass_balance_residual = std::max(
                 result.maximum_local_mass_balance_residual,
                 std::abs(ledger.local_mass_balance_residual));
-            result.minimum_limited_liquid_indicator = std::min(
-                result.minimum_limited_liquid_indicator,
-                ledger.limited_liquid_indicator);
-            result.maximum_limited_liquid_indicator = std::max(
-                result.maximum_limited_liquid_indicator,
-                ledger.limited_liquid_indicator);
+            result.minimum_limited_phase_indicator = std::min(
+                result.minimum_limited_phase_indicator,
+                ledger.limited_phase_indicator);
+            result.maximum_limited_phase_indicator = std::max(
+                result.maximum_limited_phase_indicator,
+                ledger.limited_phase_indicator);
         }
 
         result.low_order_nodal_cancellation_residual =
@@ -740,25 +740,25 @@ applyLevelSetConservativePhaseFluxCorrection(
             std::abs(result.limited_nodal_cancellation_residual) <=
                 interior_tolerance;
 
-        result.total_previous_liquid_measure = longDoubleNodeSum(
+        result.total_previous_active_measure = longDoubleNodeSum(
             result.nodes, [](const auto& node) {
                 return node.lumped_control_volume *
-                       node.previous_liquid_indicator;
+                       node.previous_phase_indicator;
             });
-        result.total_low_order_liquid_measure = longDoubleNodeSum(
+        result.total_low_order_active_measure = longDoubleNodeSum(
             result.nodes, [](const auto& node) {
                 return node.lumped_control_volume *
-                       node.low_order_liquid_indicator;
+                       node.low_order_phase_indicator;
             });
-        result.total_raw_target_liquid_measure = longDoubleNodeSum(
+        result.total_raw_target_active_measure = longDoubleNodeSum(
             result.nodes, [](const auto& node) {
                 return node.lumped_control_volume *
-                       node.raw_target_liquid_indicator;
+                       node.raw_target_phase_indicator;
             });
-        result.total_limited_liquid_measure = longDoubleNodeSum(
+        result.total_limited_active_measure = longDoubleNodeSum(
             result.nodes, [](const auto& node) {
                 return node.lumped_control_volume *
-                       node.limited_liquid_indicator;
+                       node.limited_phase_indicator;
             });
         result.total_physical_boundary_mass_transfer = longDoubleNodeSum(
             result.nodes, [](const auto& node) {
@@ -769,26 +769,26 @@ applyLevelSetConservativePhaseFluxCorrection(
                 return node.discrete_divergence_mass_source;
             });
         result.low_order_global_mass_balance_residual =
-            result.total_low_order_liquid_measure -
-            result.total_previous_liquid_measure -
+            result.total_low_order_active_measure -
+            result.total_previous_active_measure -
             result.total_physical_boundary_mass_transfer -
             result.total_discrete_divergence_mass_source;
         result.raw_target_global_mass_balance_residual =
-            result.total_raw_target_liquid_measure -
-            result.total_previous_liquid_measure -
+            result.total_raw_target_active_measure -
+            result.total_previous_active_measure -
             result.total_physical_boundary_mass_transfer -
             result.total_discrete_divergence_mass_source;
         result.global_mass_balance_residual =
-            result.total_limited_liquid_measure -
-            result.total_previous_liquid_measure -
+            result.total_limited_active_measure -
+            result.total_previous_active_measure -
             result.total_physical_boundary_mass_transfer -
             result.total_discrete_divergence_mass_source;
         const Real global_tolerance = scaledTolerance(
             stage.invariant_tolerance,
-            {result.total_previous_liquid_measure,
-             result.total_low_order_liquid_measure,
-             result.total_raw_target_liquid_measure,
-             result.total_limited_liquid_measure,
+            {result.total_previous_active_measure,
+             result.total_low_order_active_measure,
+             result.total_raw_target_active_measure,
+             result.total_limited_active_measure,
              result.total_physical_boundary_mass_transfer,
              result.total_discrete_divergence_mass_source});
         result.global_balance_satisfied =
@@ -810,18 +810,18 @@ applyLevelSetConservativePhaseFluxCorrection(
         if (result.constant_state_input) {
             for (const auto& node : result.nodes) {
                 const Real error = std::max(
-                    std::abs(node.low_order_liquid_indicator -
-                             node.previous_liquid_indicator),
-                    std::abs(node.limited_liquid_indicator -
-                             node.previous_liquid_indicator));
+                    std::abs(node.low_order_phase_indicator -
+                             node.previous_phase_indicator),
+                    std::abs(node.limited_phase_indicator -
+                             node.previous_phase_indicator));
                 result.maximum_constant_preservation_error =
                     std::max(result.maximum_constant_preservation_error,
                              error);
                 const Real constant_tolerance = scaledTolerance(
                     stage.invariant_tolerance,
-                    {node.previous_liquid_indicator,
-                     node.low_order_liquid_indicator,
-                     node.limited_liquid_indicator});
+                    {node.previous_phase_indicator,
+                     node.low_order_phase_indicator,
+                     node.limited_phase_indicator});
                 result.constant_preservation_satisfied =
                     result.constant_preservation_satisfied &&
                     error <= constant_tolerance;

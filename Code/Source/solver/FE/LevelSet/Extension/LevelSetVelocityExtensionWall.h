@@ -10,9 +10,9 @@
 /**
  * @file LevelSetVelocityExtensionWall.h
  * @ingroup fe_level_set
- * @brief The wall data of a velocity extension into the dry part of an
+ * @brief The wall data of a velocity extension into the inactive part of an
  *        unfitted level-set mesh: the strong wall conditions the extension
- *        keeps on dry wall vertices, and the largest admitted wet-to-dry
+ *        keeps on inactive boundary vertices, and the largest admitted active-to-inactive
  *        speed amplification.
  *
  * Moved from Application/Core/LevelSetVelocityExtensionMap.h.
@@ -26,16 +26,16 @@ namespace svmp {
 namespace FE {
 namespace level_set {
 
-inline constexpr double kVelocityExtensionMaxWetToDryAmplification = 16.0;
+inline constexpr double kVelocityExtensionMaxActiveToInactiveAmplification = 16.0;
 
 // The velocity components a strong Dirichlet condition constrains on one
-// wall.  On the dry vertices of the wall the extension holds them at zero
+// wall.  On the inactive vertices of the wall the extension holds them at zero
 // for a homogeneous condition where it would otherwise flow in through the
 // wall (extendVelocityByPde), and, for a wall whose velocity is prescribed
 // (any value: a moving wall, the exact velocity of a manufactured solution),
 // keeps them as the source velocity, which carries the prescribed value
 // there.
-struct WallVelocityExtensionConstraint {
+struct BoundaryVelocityExtensionConstraint {
   svmp::label_t boundary_label{svmp::INVALID_LABEL};
   std::array<bool, 3> constrained_components{false, false, false};
   bool project_boundary_normal{false};

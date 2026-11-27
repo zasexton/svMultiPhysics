@@ -27,9 +27,9 @@ fourNodeCorrection()
     return level_set::applyLevelSetConservativePhaseFluxCorrection(
         level_set::LevelSetPhaseFluxStageView{
             .lumped_control_volume = volumes,
-            .previous_liquid_indicator = previous,
-            .lower_liquid_indicator = lower,
-            .upper_liquid_indicator = upper,
+            .previous_phase_indicator = previous,
+            .lower_phase_indicator = lower,
+            .upper_phase_indicator = upper,
             .interior_edges = edges,
         });
 }
@@ -241,9 +241,9 @@ TEST(LevelSetConservativePhaseRegions,
         level_set::applyLevelSetConservativePhaseFluxCorrection(
             level_set::LevelSetPhaseFluxStageView{
                 .lumped_control_volume = volumes,
-                .previous_liquid_indicator = previous,
-                .lower_liquid_indicator = lower,
-                .upper_liquid_indicator = upper,
+                .previous_phase_indicator = previous,
+                .lower_phase_indicator = lower,
+                .upper_phase_indicator = upper,
                 .interior_edges = edges,
             });
     ASSERT_TRUE(correction.success) << correction.diagnostic;
@@ -262,7 +262,7 @@ TEST(LevelSetConservativePhaseRegions,
         correction, satellites);
     ASSERT_TRUE(result.success) << result.diagnostic;
     ASSERT_EQ(result.regions.size(), 1u);
-    EXPECT_NEAR(result.regions.front().limited_liquid_measure,
+    EXPECT_NEAR(result.regions.front().limited_active_measure,
                 0.4,
                 1.0e-14);
     EXPECT_TRUE(result.regions.front().crossing_edges.empty());

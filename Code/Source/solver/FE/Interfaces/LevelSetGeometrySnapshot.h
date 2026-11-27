@@ -298,7 +298,7 @@ struct FreeSurfaceDynamicContactCoefficient {
 };
 
 struct FreeSurfaceDiscreteFunctionalParameters {
-    geometry::CutIntegrationSide liquid_side{
+    geometry::CutIntegrationSide active_side{
         geometry::CutIntegrationSide::Negative};
     Real surface_tension{0.0};
     std::vector<FreeSurfaceYoungWallCoefficient> young_wall_coefficients{};
@@ -325,7 +325,7 @@ struct FreeSurfaceDiscreteWallFunctionalState {
  */
 struct FreeSurfaceDiscreteFunctionalState {
     std::uint64_t snapshot_revision_key{0};
-    geometry::CutIntegrationSide liquid_side{
+    geometry::CutIntegrationSide active_side{
         geometry::CutIntegrationSide::Negative};
     Real surface_tension{0.0};
     Real volume_multiplier{0.0};
@@ -340,7 +340,7 @@ struct FreeSurfaceDiscreteFunctionalState {
     Real total_potential{0.0};
 };
 
-using FreeSurfaceDiscreteFunctionalPhysicalGradient =
+using SnapshotVectorGradient =
     std::array<std::array<Real, 3>, 3>;
 
 struct FreeSurfaceDiscreteWallFunctionalVariationState {
@@ -362,7 +362,7 @@ struct FreeSurfaceDiscreteWallFunctionalVariationState {
  */
 struct FreeSurfaceDiscreteFunctionalVariationState {
     std::uint64_t snapshot_revision_key{0};
-    geometry::CutIntegrationSide liquid_side{
+    geometry::CutIntegrationSide active_side{
         geometry::CutIntegrationSide::Negative};
     Real surface_tension{0.0};
     Real volume_multiplier{0.0};
@@ -441,7 +441,7 @@ struct FreeSurfaceDynamicContactWallState {
 
 struct FreeSurfaceDynamicContactState {
     std::uint64_t snapshot_revision_key{0};
-    geometry::CutIntegrationSide liquid_side{
+    geometry::CutIntegrationSide active_side{
         geometry::CutIntegrationSide::Negative};
     Real surface_tension{0.0};
     std::vector<FreeSurfaceDynamicContactWallState> walls{};
@@ -452,13 +452,13 @@ struct FreeSurfaceDynamicContactState {
     Real total_dissipation{0.0};
 };
 
-struct FreeSurfaceDiscreteFunctionalVectorEvaluator {
+struct SnapshotVectorEvaluator {
     std::function<std::array<Real, 3>(
         GlobalIndex,
         const std::array<Real, 3>&,
         const geometry::CutQuadratureProvenance&)>
         value{};
-    std::function<FreeSurfaceDiscreteFunctionalPhysicalGradient(
+    std::function<SnapshotVectorGradient(
         GlobalIndex,
         const std::array<Real, 3>&,
         const geometry::CutQuadratureProvenance&)>
@@ -473,7 +473,7 @@ struct FreeSurfaceDiscreteFunctionalVectorEvaluator {
 };
 
 struct FreeSurfaceActiveVolumeEnergyParameters {
-    geometry::CutIntegrationSide liquid_side{
+    geometry::CutIntegrationSide active_side{
         geometry::CutIntegrationSide::Negative};
     Real density{0.0};
     std::array<Real, 3> gravitational_acceleration{{0.0, 0.0, 0.0}};
@@ -498,7 +498,7 @@ struct FreeSurfaceActiveVolumeEnergyParameters {
  */
 struct FreeSurfaceActiveVolumeEnergyState {
     std::uint64_t snapshot_revision_key{0};
-    geometry::CutIntegrationSide liquid_side{
+    geometry::CutIntegrationSide active_side{
         geometry::CutIntegrationSide::Negative};
     Real density{0.0};
     std::array<Real, 3> gravitational_acceleration{{0.0, 0.0, 0.0}};
@@ -512,7 +512,7 @@ struct FreeSurfaceActiveVolumeEnergyState {
 };
 
 struct FreeSurfaceActiveVolumeDissipationParameters {
-    geometry::CutIntegrationSide liquid_side{
+    geometry::CutIntegrationSide active_side{
         geometry::CutIntegrationSide::Negative};
     Real dynamic_viscosity{0.0};
 };
@@ -530,7 +530,7 @@ struct FreeSurfaceActiveVolumeDissipationParameters {
  */
 struct FreeSurfaceActiveVolumeDissipationState {
     std::uint64_t snapshot_revision_key{0};
-    geometry::CutIntegrationSide liquid_side{
+    geometry::CutIntegrationSide active_side{
         geometry::CutIntegrationSide::Negative};
     Real dynamic_viscosity{0.0};
     std::size_t owned_quadrature_point_count{0u};
@@ -539,7 +539,7 @@ struct FreeSurfaceActiveVolumeDissipationState {
 };
 
 struct FreeSurfaceExternalPressurePowerParameters {
-    geometry::CutIntegrationSide liquid_side{
+    geometry::CutIntegrationSide active_side{
         geometry::CutIntegrationSide::Negative};
     Real external_pressure{0.0};
 };
@@ -555,7 +555,7 @@ struct FreeSurfaceExternalPressurePowerParameters {
  */
 struct FreeSurfaceExternalPressurePowerState {
     std::uint64_t snapshot_revision_key{0};
-    geometry::CutIntegrationSide liquid_side{
+    geometry::CutIntegrationSide active_side{
         geometry::CutIntegrationSide::Negative};
     Real external_pressure{0.0};
     std::size_t owned_quadrature_point_count{0u};
@@ -585,7 +585,7 @@ struct FreeSurfaceBackwardEulerKineticWorkState {
     std::uint64_t snapshot_revision_key{0};
     std::uint64_t previous_velocity_revision{0};
     std::uint64_t endpoint_velocity_revision{0};
-    geometry::CutIntegrationSide liquid_side{
+    geometry::CutIntegrationSide active_side{
         geometry::CutIntegrationSide::Negative};
     Real density{0.0};
     std::size_t owned_quadrature_point_count{0u};
@@ -606,7 +606,7 @@ void finalizeFreeSurfaceDynamicContactState(
 evaluateFreeSurfaceDynamicContactState(
     const LevelSetGeometrySnapshot& snapshot,
     const FreeSurfaceDiscreteFunctionalParameters& parameters,
-    const FreeSurfaceDiscreteFunctionalVectorEvaluator& velocity);
+    const SnapshotVectorEvaluator& velocity);
 
 /**
  * Reuse of full-cell volume records from one snapshot build to the next.

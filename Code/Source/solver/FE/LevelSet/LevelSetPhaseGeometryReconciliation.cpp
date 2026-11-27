@@ -94,7 +94,7 @@ reconcileConservativePhaseGeometry(
       contact_protected_nodes.end(),
       [](std::uint8_t value) { return value != 0u; }));
   const auto phase_field = system.findFieldByName(
-      request.configuration->transport.conservative_phase.liquid_indicator.field_name);
+      request.configuration->transport.conservative_phase.phase_indicator.field_name);
   const auto level_set_field = system.findFieldByName(
       request.configuration->transport.level_set.field_name);
   if (phase_field == svmp::FE::INVALID_FIELD_ID ||
@@ -207,7 +207,7 @@ reconcileConservativePhaseGeometry(
     auto correction =
         svmp::FE::level_set::solveLevelSetP1PhaseGeometryCorrection(
             sensitivity,
-            projection_options.liquid_side,
+            projection_options.active_side,
             current_level_set,
             projection.liquid_phase_mass,
             target_liquid_phase_mass,

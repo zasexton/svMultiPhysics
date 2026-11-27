@@ -62,7 +62,7 @@ void validateOptions(
                                    return finiteNonnegative(limit);
                                });
         });
-    if (!finitePositive(options.target_liquid_volume) ||
+    if (!finitePositive(options.target_active_measure) ||
         !finitePositive(options.volume_tolerance) ||
         !finiteNonnegative(options.projected_gradient_tolerance) ||
         !check_limits_valid ||
@@ -241,7 +241,7 @@ minimizeLevelSetVolumeConstrained(
                     evaluation.energy_components.end(),
                     [](Real value) { return std::isfinite(value); }) ||
                 !std::isfinite(totalEnergy(evaluation)) ||
-                !finiteNonnegative(evaluation.liquid_volume)) {
+                !finiteNonnegative(evaluation.active_measure)) {
                 last_evaluation_diagnostic =
                     "candidate_evaluator_returned_invalid_functional_state";
                 return false;
@@ -249,15 +249,15 @@ minimizeLevelSetVolumeConstrained(
             if (evaluation.functional_derivatives_available &&
                 (evaluation.energy_derivative.size() !=
                      candidate.size() ||
-                 evaluation.liquid_volume_derivative.size() !=
+                 evaluation.active_measure_derivative.size() !=
                      candidate.size() ||
                  !std::all_of(
                      evaluation.energy_derivative.begin(),
                      evaluation.energy_derivative.end(),
                      [](Real value) { return std::isfinite(value); }) ||
                  !std::all_of(
-                     evaluation.liquid_volume_derivative.begin(),
-                     evaluation.liquid_volume_derivative.end(),
+                     evaluation.active_measure_derivative.begin(),
+                     evaluation.active_measure_derivative.end(),
                      [](Real value) { return std::isfinite(value); }))) {
                 last_evaluation_diagnostic =
                     "candidate_evaluator_returned_invalid_functional_derivatives";
@@ -320,8 +320,8 @@ minimizeLevelSetVolumeConstrained(
     result.final_energy_components = current.energy_components;
     result.initial_energy = totalEnergy(current);
     result.final_energy = totalEnergy(current);
-    result.initial_liquid_volume = current.liquid_volume;
-    result.final_liquid_volume = current.liquid_volume;
+    result.initial_active_measure = current.active_measure;
+    result.final_active_measure = current.active_measure;
 
     struct LimitedMemoryCorrection {
         std::vector<Real> parameter_step{};
@@ -352,7 +352,7 @@ minimizeLevelSetVolumeConstrained(
                 energy[local] =
                     evaluation.energy_derivative[index];
                 volume[local] =
-                    evaluation.liquid_volume_derivative[index];
+                    evaluation.active_measure_derivative[index];
             }
             const Real volume_squared = dot(volume, volume);
             if (!finitePositive(volume_squared)) {
@@ -379,10 +379,10 @@ minimizeLevelSetVolumeConstrained(
             result.final_energy_components =
                 evaluation.energy_components;
             result.final_energy = totalEnergy(evaluation);
-            result.final_liquid_volume = evaluation.liquid_volume;
+            result.final_active_measure = evaluation.active_measure;
             result.final_volume_error =
-                evaluation.liquid_volume -
-                options.target_liquid_volume;
+                evaluation.active_measure -
+                options.target_active_measure;
             result.final_checks = evaluation.checks;
         };
     updateFinalEvaluation(current);
@@ -398,7 +398,7 @@ minimizeLevelSetVolumeConstrained(
                 energy_gradient[local] =
                     current.energy_derivative[index];
                 volume_gradient[local] =
-                    current.liquid_volume_derivative[index];
+                    current.active_measure_derivative[index];
             }
             ++result.analytic_derivative_evaluations;
         } else {
@@ -467,8 +467,8 @@ minimizeLevelSetVolumeConstrained(
                              totalEnergy(states[2]),
                              totalEnergy(states[3])}};
                         const std::array<Real, 4> volumes{
-                            {states[0].liquid_volume, states[1].liquid_volume,
-                             states[2].liquid_volume, states[3].liquid_volume}};
+                            {states[0].active_measure, states[1].active_measure,
+                             states[2].active_measure, states[3].active_measure}};
                         const auto fourth_order_derivative =
                             [&](const std::array<Real, 4>& values) {
                                 return (values[0] - Real{8.0} * values[1] +
@@ -674,8 +674,8 @@ minimizeLevelSetVolumeConstrained(
         result.final_projected_gradient_norm =
             projected_gradient_norm;
         const Real volume_error =
-            current.liquid_volume -
-            options.target_liquid_volume;
+            current.active_measure -
+            options.target_active_measure;
         const bool volume_converged =
             std::abs(volume_error) <= options.volume_tolerance;
         const bool parameter_gradient_converged =
@@ -713,8 +713,8 @@ minimizeLevelSetVolumeConstrained(
             }
             if (certificate.energy_components !=
                     current.energy_components ||
-                certificate.liquid_volume !=
-                    current.liquid_volume) {
+                certificate.active_measure !=
+                    current.active_measure) {
                 result.diagnostic =
                     "acceptance_certificate_functionals_not_reproducible";
                 return result;
@@ -727,8 +727,8 @@ minimizeLevelSetVolumeConstrained(
                 projected_gradient_norm;
             const bool certified_volume_converged =
                 std::abs(
-                    current.liquid_volume -
-                    options.target_liquid_volume) <=
+                    current.active_measure -
+                    options.target_active_measure) <=
                 options.volume_tolerance;
             if (!certified_volume_converged) {
                 result.diagnostic =
@@ -1076,8 +1076,8 @@ minimizeLevelSetVolumeConstrained(
             }
             if (trial_available) {
                 const Real trial_volume_error =
-                    trial_state.liquid_volume -
-                    options.target_liquid_volume;
+                    trial_state.active_measure -
+                    options.target_active_measure;
                 const Real trial_merit =
                     totalEnergy(trial_state) +
                     merit_penalty *
@@ -1267,8 +1267,8 @@ minimizeLevelSetVolumeConstrained(
                 const auto& deferred_state =
                     deferred_topology_transition->evaluation;
                 const Real reproduced_volume_error =
-                    reproduced_state.liquid_volume -
-                    options.target_liquid_volume;
+                    reproduced_state.active_measure -
+                    options.target_active_measure;
                 const Real reproduced_merit =
                     totalEnergy(reproduced_state) +
                     merit_penalty *
@@ -1299,8 +1299,8 @@ minimizeLevelSetVolumeConstrained(
                         deferred_state.constraint_semantics_key &&
                     reproduced_state.energy_components ==
                         deferred_state.energy_components &&
-                    reproduced_state.liquid_volume ==
-                        deferred_state.liquid_volume &&
+                    reproduced_state.active_measure ==
+                        deferred_state.active_measure &&
                     std::isfinite(reproduced_merit) &&
                     reproduced_merit <= reproduced_armijo_bound;
                 reproduction_record.disposition =

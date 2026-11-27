@@ -1149,7 +1149,7 @@ TEST(IncompressibleTwoFluidDiagnostics,
          const std::array<FE::Real, 3>&,
          const FE::geometry::CutQuadratureProvenance&) {
         return FE::interfaces::
-            FreeSurfaceDiscreteFunctionalPhysicalGradient{{
+            SnapshotVectorGradient{{
                 {{1.0, 2.0, 0.0}},
                 {{3.0, 4.0, 0.0}},
                 {{0.0, 0.0, 0.0}},
@@ -1180,7 +1180,7 @@ TEST(IncompressibleTwoFluidDiagnostics,
          const std::array<FE::Real, 3>&,
          const FE::geometry::CutQuadratureProvenance&) {
         return FE::interfaces::
-            FreeSurfaceDiscreteFunctionalPhysicalGradient{{
+            SnapshotVectorGradient{{
                 {{-1.0, 1.0, 0.0}},
                 {{2.0, 0.0, 0.0}},
                 {{0.0, 0.0, 0.0}},

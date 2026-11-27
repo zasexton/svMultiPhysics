@@ -29,9 +29,9 @@ TEST(LevelSetConservativePhaseTransport,
         level_set::applyLevelSetConservativePhaseFluxCorrection(
             level_set::LevelSetPhaseFluxStageView{
                 .lumped_control_volume = volumes,
-                .previous_liquid_indicator = previous,
-                .lower_liquid_indicator = lower,
-                .upper_liquid_indicator = upper,
+                .previous_phase_indicator = previous,
+                .lower_phase_indicator = lower,
+                .upper_phase_indicator = upper,
                 .interior_edges = edges,
             });
 
@@ -57,8 +57,8 @@ TEST(LevelSetConservativePhaseTransport,
     EXPECT_EQ(result.components.front().nodes, previous.size());
     EXPECT_EQ(result.maximum_component_balance_residual, 0.0);
     for (const auto& node : result.nodes) {
-        EXPECT_EQ(node.low_order_liquid_indicator, 0.4);
-        EXPECT_EQ(node.limited_liquid_indicator, 0.4);
+        EXPECT_EQ(node.low_order_phase_indicator, 0.4);
+        EXPECT_EQ(node.limited_phase_indicator, 0.4);
         EXPECT_EQ(node.low_order_local_mass_balance_residual, 0.0);
         EXPECT_EQ(node.raw_target_local_mass_balance_residual, 0.0);
         EXPECT_EQ(node.local_mass_balance_residual, 0.0);
@@ -80,9 +80,9 @@ TEST(LevelSetConservativePhaseTransport,
         level_set::applyLevelSetConservativePhaseFluxCorrection(
             level_set::LevelSetPhaseFluxStageView{
                 .lumped_control_volume = volumes,
-                .previous_liquid_indicator = previous,
-                .lower_liquid_indicator = lower,
-                .upper_liquid_indicator = upper,
+                .previous_phase_indicator = previous,
+                .lower_phase_indicator = lower,
+                .upper_phase_indicator = upper,
                 .interior_edges = edges,
             });
 
@@ -93,13 +93,13 @@ TEST(LevelSetConservativePhaseTransport,
     EXPECT_NEAR(result.edges[0].correction_factor, 0.8, 1.0e-14);
     EXPECT_NEAR(result.edges[0].limited_antidiffusive_mass_transfer,
                 0.8, 1.0e-14);
-    EXPECT_NEAR(result.minimum_raw_target_liquid_indicator, -0.2, 1.0e-14);
-    EXPECT_NEAR(result.maximum_raw_target_liquid_indicator, 1.2, 1.0e-14);
+    EXPECT_NEAR(result.minimum_raw_target_phase_indicator, -0.2, 1.0e-14);
+    EXPECT_NEAR(result.maximum_raw_target_phase_indicator, 1.2, 1.0e-14);
     ASSERT_EQ(result.nodes.size(), 2u);
-    EXPECT_NEAR(result.nodes[0].limited_liquid_indicator, 1.0, 1.0e-14);
-    EXPECT_NEAR(result.nodes[1].limited_liquid_indicator, 0.0, 1.0e-14);
-    EXPECT_NEAR(result.total_previous_liquid_measure, 1.0, 1.0e-14);
-    EXPECT_NEAR(result.total_limited_liquid_measure, 1.0, 1.0e-14);
+    EXPECT_NEAR(result.nodes[0].limited_phase_indicator, 1.0, 1.0e-14);
+    EXPECT_NEAR(result.nodes[1].limited_phase_indicator, 0.0, 1.0e-14);
+    EXPECT_NEAR(result.total_previous_active_measure, 1.0, 1.0e-14);
+    EXPECT_NEAR(result.total_limited_active_measure, 1.0, 1.0e-14);
     EXPECT_EQ(result.maximum_edge_pair_cancellation_residual, 0.0);
     EXPECT_NEAR(result.low_order_global_mass_balance_residual, 0.0, 1.0e-14);
     EXPECT_NEAR(result.raw_target_global_mass_balance_residual, 0.0,
@@ -123,9 +123,9 @@ TEST(LevelSetConservativePhaseTransport,
         level_set::applyLevelSetConservativePhaseFluxCorrection(
             level_set::LevelSetPhaseFluxStageView{
                 .lumped_control_volume = volumes,
-                .previous_liquid_indicator = previous,
-                .lower_liquid_indicator = lower,
-                .upper_liquid_indicator = upper,
+                .previous_phase_indicator = previous,
+                .lower_phase_indicator = lower,
+                .upper_phase_indicator = upper,
                 .interior_edges = edges,
             });
 
@@ -136,11 +136,11 @@ TEST(LevelSetConservativePhaseTransport,
     EXPECT_NEAR(result.edges[0].correction_factor, 2.0 / 3.0, 1.0e-14);
     EXPECT_NEAR(result.edges[1].correction_factor, 2.0 / 3.0, 1.0e-14);
     ASSERT_EQ(result.nodes.size(), 3u);
-    EXPECT_NEAR(result.nodes[0].limited_liquid_indicator, 0.4, 1.0e-14);
-    EXPECT_NEAR(result.nodes[1].limited_liquid_indicator, 1.0, 1.0e-14);
-    EXPECT_NEAR(result.nodes[2].limited_liquid_indicator, 0.4, 1.0e-14);
-    EXPECT_NEAR(result.total_previous_liquid_measure, 1.8, 1.0e-14);
-    EXPECT_NEAR(result.total_limited_liquid_measure, 1.8, 1.0e-14);
+    EXPECT_NEAR(result.nodes[0].limited_phase_indicator, 0.4, 1.0e-14);
+    EXPECT_NEAR(result.nodes[1].limited_phase_indicator, 1.0, 1.0e-14);
+    EXPECT_NEAR(result.nodes[2].limited_phase_indicator, 0.4, 1.0e-14);
+    EXPECT_NEAR(result.total_previous_active_measure, 1.8, 1.0e-14);
+    EXPECT_NEAR(result.total_limited_active_measure, 1.8, 1.0e-14);
     EXPECT_NEAR(result.global_mass_balance_residual, 0.0, 1.0e-14);
 }
 
@@ -159,9 +159,9 @@ TEST(LevelSetConservativePhaseTransport,
         level_set::applyLevelSetConservativePhaseFluxCorrection(
             level_set::LevelSetPhaseFluxStageView{
                 .lumped_control_volume = volumes,
-                .previous_liquid_indicator = previous,
-                .lower_liquid_indicator = lower,
-                .upper_liquid_indicator = upper,
+                .previous_phase_indicator = previous,
+                .lower_phase_indicator = lower,
+                .upper_phase_indicator = upper,
                 .interior_edges = edges,
             });
 
@@ -169,10 +169,10 @@ TEST(LevelSetConservativePhaseTransport,
     ASSERT_EQ(result.edges.size(), 1u);
     EXPECT_NEAR(result.edges[0].correction_factor, 0.1, 1.0e-14);
     ASSERT_EQ(result.nodes.size(), 2u);
-    EXPECT_NEAR(result.nodes[0].limited_liquid_indicator, 0.4, 1.0e-14);
-    EXPECT_NEAR(result.nodes[1].limited_liquid_indicator, 0.6, 1.0e-14);
-    EXPECT_NEAR(result.total_previous_liquid_measure, 1.0, 1.0e-14);
-    EXPECT_NEAR(result.total_limited_liquid_measure, 1.0, 1.0e-14);
+    EXPECT_NEAR(result.nodes[0].limited_phase_indicator, 0.4, 1.0e-14);
+    EXPECT_NEAR(result.nodes[1].limited_phase_indicator, 0.6, 1.0e-14);
+    EXPECT_NEAR(result.total_previous_active_measure, 1.0, 1.0e-14);
+    EXPECT_NEAR(result.total_limited_active_measure, 1.0, 1.0e-14);
 }
 
 TEST(LevelSetConservativePhaseTransport,
@@ -194,9 +194,9 @@ TEST(LevelSetConservativePhaseTransport,
         level_set::applyLevelSetConservativePhaseFluxCorrection(
             level_set::LevelSetPhaseFluxStageView{
                 .lumped_control_volume = volumes,
-                .previous_liquid_indicator = previous,
-                .lower_liquid_indicator = lower,
-                .upper_liquid_indicator = upper,
+                .previous_phase_indicator = previous,
+                .lower_phase_indicator = lower,
+                .upper_phase_indicator = upper,
                 .interior_edges = edges,
                 .physical_boundary_mass_transfer = boundary,
                 .discrete_divergence_mass_source = divergence,
@@ -207,10 +207,10 @@ TEST(LevelSetConservativePhaseTransport,
     EXPECT_TRUE(result.local_balance_satisfied);
     EXPECT_TRUE(result.global_balance_satisfied);
     EXPECT_TRUE(result.interior_cancellation_satisfied);
-    EXPECT_NEAR(result.total_previous_liquid_measure, 3.25, 1.0e-14);
+    EXPECT_NEAR(result.total_previous_active_measure, 3.25, 1.0e-14);
     EXPECT_NEAR(result.total_physical_boundary_mass_transfer, 0.05, 1.0e-14);
     EXPECT_NEAR(result.total_discrete_divergence_mass_source, 0.0, 1.0e-14);
-    EXPECT_NEAR(result.total_limited_liquid_measure, 3.30, 1.0e-14);
+    EXPECT_NEAR(result.total_limited_active_measure, 3.30, 1.0e-14);
     EXPECT_NEAR(result.low_order_global_mass_balance_residual, 0.0, 1.0e-14);
     EXPECT_NEAR(result.raw_target_global_mass_balance_residual, 0.0,
                 1.0e-14);
@@ -219,10 +219,10 @@ TEST(LevelSetConservativePhaseTransport,
     EXPECT_LE(result.maximum_raw_target_local_mass_balance_residual, 4.0e-16);
     EXPECT_LE(result.maximum_local_mass_balance_residual, 4.0e-16);
     ASSERT_EQ(result.nodes.size(), 3u);
-    EXPECT_NEAR(result.nodes[0].limited_liquid_indicator, 1.0, 1.0e-14);
+    EXPECT_NEAR(result.nodes[0].limited_phase_indicator, 1.0, 1.0e-14);
     for (const auto& node : result.nodes) {
-        EXPECT_GE(node.limited_liquid_indicator, 0.0);
-        EXPECT_LE(node.limited_liquid_indicator, 1.0);
+        EXPECT_GE(node.limited_phase_indicator, 0.0);
+        EXPECT_LE(node.limited_phase_indicator, 1.0);
     }
 }
 
@@ -240,9 +240,9 @@ TEST(LevelSetConservativePhaseTransport,
     auto result = level_set::applyLevelSetConservativePhaseFluxCorrection(
         level_set::LevelSetPhaseFluxStageView{
             .lumped_control_volume = volumes,
-            .previous_liquid_indicator = previous,
-            .lower_liquid_indicator = lower,
-            .upper_liquid_indicator = upper,
+            .previous_phase_indicator = previous,
+            .lower_phase_indicator = lower,
+            .upper_phase_indicator = upper,
             .interior_edges = duplicates,
         });
     EXPECT_FALSE(result.success);
@@ -254,9 +254,9 @@ TEST(LevelSetConservativePhaseTransport,
     result = level_set::applyLevelSetConservativePhaseFluxCorrection(
         level_set::LevelSetPhaseFluxStageView{
             .lumped_control_volume = volumes,
-            .previous_liquid_indicator = previous,
-            .lower_liquid_indicator = lower,
-            .upper_liquid_indicator = upper,
+            .previous_phase_indicator = previous,
+            .lower_phase_indicator = lower,
+            .upper_phase_indicator = upper,
             .interior_edges = reversed,
         });
     EXPECT_FALSE(result.success);
@@ -268,9 +268,9 @@ TEST(LevelSetConservativePhaseTransport,
     result = level_set::applyLevelSetConservativePhaseFluxCorrection(
         level_set::LevelSetPhaseFluxStageView{
             .lumped_control_volume = volumes,
-            .previous_liquid_indicator = previous,
-            .lower_liquid_indicator = lower,
-            .upper_liquid_indicator = upper,
+            .previous_phase_indicator = previous,
+            .lower_phase_indicator = lower,
+            .upper_phase_indicator = upper,
             .interior_edges = unbounded_low_order,
         });
     EXPECT_FALSE(result.success);
@@ -290,9 +290,9 @@ TEST(LevelSetConservativePhaseTransport,
     auto result = level_set::applyLevelSetConservativePhaseFluxCorrection(
         level_set::LevelSetPhaseFluxStageView{
             .lumped_control_volume = volumes,
-            .previous_liquid_indicator = previous,
-            .lower_liquid_indicator = lower,
-            .upper_liquid_indicator = upper,
+            .previous_phase_indicator = previous,
+            .lower_phase_indicator = lower,
+            .upper_phase_indicator = upper,
             .physical_boundary_mass_transfer = boundary,
         });
     EXPECT_FALSE(result.success);
@@ -304,9 +304,9 @@ TEST(LevelSetConservativePhaseTransport,
     result = level_set::applyLevelSetConservativePhaseFluxCorrection(
         level_set::LevelSetPhaseFluxStageView{
             .lumped_control_volume = volumes,
-            .previous_liquid_indicator = previous,
-            .lower_liquid_indicator = lower,
-            .upper_liquid_indicator = upper,
+            .previous_phase_indicator = previous,
+            .lower_phase_indicator = lower,
+            .upper_phase_indicator = upper,
             .physical_boundary_mass_transfer = boundary,
             .require_constant_preservation = false,
         });
@@ -314,7 +314,7 @@ TEST(LevelSetConservativePhaseTransport,
     EXPECT_FALSE(result.constant_preservation_required);
     EXPECT_FALSE(result.constant_preservation_satisfied);
     EXPECT_TRUE(result.global_balance_satisfied);
-    EXPECT_NEAR(result.total_limited_liquid_measure, 0.1, 1.0e-14);
+    EXPECT_NEAR(result.total_limited_active_measure, 0.1, 1.0e-14);
     EXPECT_NEAR(result.global_mass_balance_residual, 0.0, 1.0e-14);
 }
 
@@ -343,9 +343,9 @@ TEST(LevelSetConservativePhaseTransport,
         level_set::applyLevelSetConservativePhaseFluxCorrection(
             level_set::LevelSetPhaseFluxStageView{
                 .lumped_control_volume = volumes,
-                .previous_liquid_indicator = previous,
-                .lower_liquid_indicator = lower,
-                .upper_liquid_indicator = upper,
+                .previous_phase_indicator = previous,
+                .lower_phase_indicator = lower,
+                .upper_phase_indicator = upper,
                 .interior_edges = edges,
                 .physical_boundary_mass_transfer = boundary,
                 .component_activity_tolerance = 1.0e-8,
@@ -367,17 +367,17 @@ TEST(LevelSetConservativePhaseTransport,
     EXPECT_EQ(result.node_component_ids[5], 4);
     ASSERT_EQ(result.components.size(), 2u);
     EXPECT_EQ(result.subthreshold_component.nodes, 2u);
-    EXPECT_NEAR(result.subthreshold_component.previous_liquid_measure,
+    EXPECT_NEAR(result.subthreshold_component.previous_active_measure,
                 2.0e-10, 1.0e-20);
-    EXPECT_NEAR(result.subthreshold_component.limited_liquid_measure,
+    EXPECT_NEAR(result.subthreshold_component.limited_active_measure,
                 2.0e-10, 1.0e-20);
     EXPECT_NEAR(result.subthreshold_component.limited_balance_residual,
                 0.0, 1.0e-20);
     EXPECT_EQ(result.components[0].component_id, 0);
     EXPECT_EQ(result.components[0].nodes, 2u);
-    EXPECT_NEAR(result.components[0].previous_liquid_measure,
+    EXPECT_NEAR(result.components[0].previous_active_measure,
                 1.0, 1.0e-14);
-    EXPECT_NEAR(result.components[0].limited_liquid_measure,
+    EXPECT_NEAR(result.components[0].limited_active_measure,
                 1.02, 1.0e-14);
     EXPECT_NEAR(result.components[0].physical_boundary_mass_transfer,
                 0.02, 1.0e-14);
@@ -385,9 +385,9 @@ TEST(LevelSetConservativePhaseTransport,
                 0.0, 1.0e-14);
     EXPECT_EQ(result.components[1].component_id, 4);
     EXPECT_EQ(result.components[1].nodes, 2u);
-    EXPECT_NEAR(result.components[1].previous_liquid_measure,
+    EXPECT_NEAR(result.components[1].previous_active_measure,
                 1.0, 1.0e-14);
-    EXPECT_NEAR(result.components[1].limited_liquid_measure,
+    EXPECT_NEAR(result.components[1].limited_active_measure,
                 0.98, 1.0e-14);
     EXPECT_NEAR(result.components[1].physical_boundary_mass_transfer,
                 -0.02, 1.0e-14);
@@ -418,9 +418,9 @@ TEST(LevelSetConservativePhaseTransport, RejectsInvalidNodalStageData)
     auto result = level_set::applyLevelSetConservativePhaseFluxCorrection(
         level_set::LevelSetPhaseFluxStageView{
             .lumped_control_volume = volumes,
-            .previous_liquid_indicator = previous,
-            .lower_liquid_indicator = lower,
-            .upper_liquid_indicator = upper,
+            .previous_phase_indicator = previous,
+            .lower_phase_indicator = lower,
+            .upper_phase_indicator = upper,
         });
     EXPECT_FALSE(result.success);
     EXPECT_NE(result.diagnostic.find("positive"), std::string::npos);
@@ -430,9 +430,9 @@ TEST(LevelSetConservativePhaseTransport, RejectsInvalidNodalStageData)
     result = level_set::applyLevelSetConservativePhaseFluxCorrection(
         level_set::LevelSetPhaseFluxStageView{
             .lumped_control_volume = positive_volumes,
-            .previous_liquid_indicator = previous,
-            .lower_liquid_indicator = lower,
-            .upper_liquid_indicator = invalid_upper,
+            .previous_phase_indicator = previous,
+            .lower_phase_indicator = lower,
+            .upper_phase_indicator = invalid_upper,
         });
     EXPECT_FALSE(result.success);
     EXPECT_NE(result.diagnostic.find("unit-interval"), std::string::npos);
@@ -441,9 +441,9 @@ TEST(LevelSetConservativePhaseTransport, RejectsInvalidNodalStageData)
     result = level_set::applyLevelSetConservativePhaseFluxCorrection(
         level_set::LevelSetPhaseFluxStageView{
             .lumped_control_volume = positive_volumes,
-            .previous_liquid_indicator = previous,
-            .lower_liquid_indicator = lower,
-            .upper_liquid_indicator = upper,
+            .previous_phase_indicator = previous,
+            .lower_phase_indicator = lower,
+            .upper_phase_indicator = upper,
             .physical_boundary_mass_transfer = incomplete_boundary,
         });
     EXPECT_FALSE(result.success);
@@ -454,9 +454,9 @@ TEST(LevelSetConservativePhaseTransport, RejectsInvalidNodalStageData)
     result = level_set::applyLevelSetConservativePhaseFluxCorrection(
         level_set::LevelSetPhaseFluxStageView{
             .lumped_control_volume = positive_volumes,
-            .previous_liquid_indicator = nonfinite_previous,
-            .lower_liquid_indicator = lower,
-            .upper_liquid_indicator = upper,
+            .previous_phase_indicator = nonfinite_previous,
+            .lower_phase_indicator = lower,
+            .upper_phase_indicator = upper,
         });
     EXPECT_FALSE(result.success);
     EXPECT_NE(result.diagnostic.find("non-finite"), std::string::npos);
@@ -464,9 +464,9 @@ TEST(LevelSetConservativePhaseTransport, RejectsInvalidNodalStageData)
     result = level_set::applyLevelSetConservativePhaseFluxCorrection(
         level_set::LevelSetPhaseFluxStageView{
             .lumped_control_volume = positive_volumes,
-            .previous_liquid_indicator = previous,
-            .lower_liquid_indicator = lower,
-            .upper_liquid_indicator = upper,
+            .previous_phase_indicator = previous,
+            .lower_phase_indicator = lower,
+            .upper_phase_indicator = upper,
             .component_activity_tolerance = 0.0,
         });
     EXPECT_FALSE(result.success);

@@ -11,7 +11,7 @@
  * @file LevelSetVelocityExtensionRefresh.h
  * @ingroup fe_level_set
  * @brief Refresh of a level-set advection velocity by the PDE extension of a
- *        physical velocity field into the dry part of an unfitted mesh.
+ *        physical velocity field into the inactive part of an unfitted mesh.
  *
  * For every request, refreshLevelSetVelocityExtensions():
  *  - checks that the level set, the physical (source) velocity and the
@@ -28,7 +28,7 @@
  *    walls whose prescribed velocity the source carries);
  *  - solves the PDE extension (LevelSetPdeVelocityExtension.h) and checks
  *    that it equals the source on every known interface vertex and, for the
- *    monolithic coupling, that it does not amplify the wet speeds beyond the
+ *    monolithic coupling, that it does not amplify the active-side speeds beyond the
  *    fixed guard;
  *  - writes the prescribed advection field, or, for the monolithic coupling
  *    (an algebraic extension unknown with a registered constraint kernel),
@@ -80,8 +80,8 @@ struct LevelSetVelocityExtensionRequest {
     std::vector<int> effective_direction{};
     // The strong Dirichlet condition prescribes a velocity of any value
     // (time- or space-varying, from a file): the extension takes the source
-    // velocity on the constrained components of the dry wall vertices
-    // instead of zero (WallVelocityExtensionConstraint).
+    // velocity on the constrained components of the inactive boundary vertices
+    // instead of zero (BoundaryVelocityExtensionConstraint).
     bool prescribed_velocity{false};
   };
 
@@ -101,7 +101,7 @@ struct LevelSetVelocityExtensionRequest {
   LevelSetActiveSide active_side{LevelSetActiveSide::Negative};
 };
 
-/// The dry-region factorization caches of the PDE extension, one per target
+/// The inactive-region factorization caches of the PDE extension, one per target
 /// field (see PdeVelocityExtensionCache).
 using PdeVelocityExtensionCaches =
     std::map<std::string, PdeVelocityExtensionCache>;
@@ -124,10 +124,10 @@ struct LevelSetVelocityExtensionRefreshOptions {
     std::span<const int> effective_direction,
     int dimension);
 
-/// The speeds the wet-to-dry amplification guard of an extension compares
+/// The speeds the active-to-inactive amplification guard of an extension compares
 /// on this rank: the largest over its data (the @p known vertices: the
 /// retained side and every trace seed, whose values are the physical
-/// velocity, the dry vertices of the retained cut cells included) and the
+/// velocity, the inactive vertices of the retained cut cells included) and the
 /// largest over the other, extended vertices.  @p values holds @p components
 /// values per vertex, of which the first @p speed_components form the speed.
 struct VelocityExtensionSpeeds {
@@ -174,7 +174,7 @@ struct VelocityExtensionSpeeds {
     const LevelSetVelocityExtensionRequest& request);
 
 /// Refreshes the advection velocity of every request from @p state; returns
-/// true when a request was refreshed.  @p caches holds the dry-region
+/// true when a request was refreshed.  @p caches holds the inactive-region
 /// factorizations between calls.  Collective.
 bool refreshLevelSetVelocityExtensions(
     systems::FESystem& system,

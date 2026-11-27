@@ -44,7 +44,7 @@ inline void declareFreeSurfaceFunctionalWithForms(
         using svmp::FE::forms::FormExpr;
         using Kind = svmp::FE::systems::FunctionalKind;
         const int m = declaration.interface_marker;
-        const auto side = declaration.parameters.liquid_side == svmp::FE::geometry::CutIntegrationSide::Positive
+        const auto side = declaration.parameters.active_side == svmp::FE::geometry::CutIntegrationSide::Positive
                               ? svmp::FE::forms::CutVolumeSide::Positive
                               : svmp::FE::forms::CutVolumeSide::Negative;
         const auto gamma = declaration.parameters.surface_tension;
@@ -64,8 +64,8 @@ inline void declareFreeSurfaceFunctionalWithForms(
     }
     post::FreeSurfaceEnergyStatement statement;
     statement.interface_marker = declaration.interface_marker;
-    statement.liquid_side =
-        declaration.parameters.liquid_side == svmp::FE::geometry::CutIntegrationSide::Positive
+    statement.active_side =
+        declaration.parameters.active_side == svmp::FE::geometry::CutIntegrationSide::Positive
             ? svmp::FE::forms::CutVolumeSide::Positive
             : svmp::FE::forms::CutVolumeSide::Negative;
     statement.velocity_field = declaration.velocity_field;

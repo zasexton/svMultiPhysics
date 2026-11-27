@@ -317,8 +317,8 @@ TEST(LevelSetConservativePhaseOperator,
     EXPECT_LE(stage.maximum_strong_form_decomposition_residual, 2.0e-17);
     ASSERT_EQ(stage.correction.nodes.size(), indicator.size());
     for (const auto& node : stage.correction.nodes) {
-        EXPECT_NEAR(node.low_order_liquid_indicator, 0.37, 2.0e-14);
-        EXPECT_NEAR(node.limited_liquid_indicator, 0.37, 2.0e-14);
+        EXPECT_NEAR(node.low_order_phase_indicator, 0.37, 2.0e-14);
+        EXPECT_NEAR(node.limited_phase_indicator, 0.37, 2.0e-14);
     }
     FE::Real boundary_total{0.0};
     FE::Real divergence_total{0.0};
@@ -374,10 +374,10 @@ TEST(LevelSetConservativePhaseOperator,
     ASSERT_EQ(stage.correction.nodes.size(), indicator.size());
     for (std::size_t node = 0u; node < indicator.size(); ++node) {
         EXPECT_EQ(
-            stage.correction.nodes[node].low_order_liquid_indicator,
+            stage.correction.nodes[node].low_order_phase_indicator,
             indicator[node]);
         EXPECT_EQ(
-            stage.correction.nodes[node].limited_liquid_indicator,
+            stage.correction.nodes[node].limited_phase_indicator,
             indicator[node]);
     }
 }
@@ -407,13 +407,13 @@ TEST(LevelSetConservativePhaseOperator,
     EXPECT_TRUE(stage.correction.interior_cancellation_satisfied);
     EXPECT_TRUE(stage.correction.local_balance_satisfied);
     EXPECT_TRUE(stage.correction.global_balance_satisfied);
-    EXPECT_LE(stage.correction.minimum_limited_liquid_indicator, 1.0);
-    EXPECT_GE(stage.correction.minimum_limited_liquid_indicator, 0.0);
-    EXPECT_LE(stage.correction.maximum_limited_liquid_indicator, 1.0);
+    EXPECT_LE(stage.correction.minimum_limited_phase_indicator, 1.0);
+    EXPECT_GE(stage.correction.minimum_limited_phase_indicator, 0.0);
+    EXPECT_LE(stage.correction.maximum_limited_phase_indicator, 1.0);
     EXPECT_EQ(stage.correction.maximum_edge_pair_cancellation_residual, 0.0);
     EXPECT_NEAR(
-        stage.correction.total_limited_liquid_measure -
-            stage.correction.total_previous_liquid_measure,
+        stage.correction.total_limited_active_measure -
+            stage.correction.total_previous_active_measure,
         stage.correction.total_physical_boundary_mass_transfer +
             stage.correction.total_discrete_divergence_mass_source,
                 2.0e-14);
@@ -775,9 +775,9 @@ TEST(LevelSetConservativePhaseOperator,
             FE::Real{0.125};
     });
     expect_equation_rejection([](auto& changed) {
-        changed.correction.nodes[1].upper_liquid_indicator =
+        changed.correction.nodes[1].upper_phase_indicator =
             std::nextafter(
-                changed.correction.nodes[1].upper_liquid_indicator,
+                changed.correction.nodes[1].upper_phase_indicator,
                 FE::Real{0.0});
     });
     expect_digest_change([](auto& changed) {

@@ -72,11 +72,11 @@ interfaces::FreeSurfaceDiscreteFunctionalState referenceDiscreteFunctional(
 {
     auto state = interfaces::freeSurfaceDiscreteFunctionalLayout(snapshot, parameters);
     const auto volume_role =
-        parameters.liquid_side == FE::geometry::CutIntegrationSide::Negative
+        parameters.active_side == FE::geometry::CutIntegrationSide::Negative
             ? interfaces::LevelSetGeometryRuleRole::NegativeVolume
             : interfaces::LevelSetGeometryRuleRole::PositiveVolume;
     const auto wall_role =
-        parameters.liquid_side == FE::geometry::CutIntegrationSide::Negative
+        parameters.active_side == FE::geometry::CutIntegrationSide::Negative
             ? interfaces::LevelSetGeometryRuleRole::NegativeExteriorBoundary
             : interfaces::LevelSetGeometryRuleRole::PositiveExteriorBoundary;
     const auto wall_of = [&state](int boundary_marker) -> interfaces::FreeSurfaceDiscreteWallFunctionalState& {
@@ -123,7 +123,7 @@ interfaces::FreeSurfaceDiscreteFunctionalState referenceDiscreteFunctional(
 interfaces::FreeSurfaceDiscreteFunctionalVariationState referenceWallAreaVariation(
     const interfaces::LevelSetGeometrySnapshot& snapshot,
     const interfaces::FreeSurfaceDiscreteFunctionalParameters& parameters,
-    const interfaces::FreeSurfaceDiscreteFunctionalVectorEvaluator& deformation)
+    const interfaces::SnapshotVectorEvaluator& deformation)
 {
     auto state = interfaces::freeSurfaceDiscreteFunctionalVariationLayout(snapshot, parameters);
     const auto dot = [](const std::array<FE::Real, 3>& a, const std::array<FE::Real, 3>& b) {
@@ -148,7 +148,7 @@ interfaces::FreeSurfaceDiscreteFunctionalVariationState referenceWallAreaVariati
         }
         throw std::logic_error("reference wall variation: wall outside the layout");
     };
-    const bool positive_liquid = parameters.liquid_side == FE::geometry::CutIntegrationSide::Positive;
+    const bool positive_liquid = parameters.active_side == FE::geometry::CutIntegrationSide::Positive;
     for (const auto& record : snapshot.rules()) {
         if (!record.locally_owned ||
             record.retention != interfaces::LevelSetGeometryRetention::Retained ||
@@ -197,10 +197,10 @@ interfaces::FreeSurfaceDiscreteFunctionalVariationState referenceWallAreaVariati
 interfaces::FreeSurfaceDiscreteFunctionalVariationState referenceFirstVariation(
     const interfaces::LevelSetGeometrySnapshot& snapshot,
     const interfaces::FreeSurfaceDiscreteFunctionalParameters& parameters,
-    const interfaces::FreeSurfaceDiscreteFunctionalVectorEvaluator& deformation)
+    const interfaces::SnapshotVectorEvaluator& deformation)
 {
     auto state = referenceWallAreaVariation(snapshot, parameters, deformation);
-    const bool positive_liquid = parameters.liquid_side == FE::geometry::CutIntegrationSide::Positive;
+    const bool positive_liquid = parameters.active_side == FE::geometry::CutIntegrationSide::Positive;
     for (const auto& record : snapshot.rules()) {
         if (!record.locally_owned ||
             record.retention != interfaces::LevelSetGeometryRetention::Retained ||
@@ -3292,7 +3292,7 @@ TEST(FreeSurfaceGeometrySnapshot,
     }
 
     interfaces::FreeSurfaceDiscreteFunctionalParameters functional_parameters;
-    functional_parameters.liquid_side =
+    functional_parameters.active_side =
         FE::geometry::CutIntegrationSide::Negative;
     functional_parameters.surface_tension = 2.0;
     functional_parameters.young_wall_coefficients.push_back(
@@ -3347,7 +3347,7 @@ TEST(FreeSurfaceGeometrySnapshot,
     EXPECT_DOUBLE_EQ(functional.surface_tension, 2.0);
     EXPECT_DOUBLE_EQ(functional.volume_multiplier, 3.0);
 
-    interfaces::FreeSurfaceDiscreteFunctionalVectorEvaluator velocity;
+    interfaces::SnapshotVectorEvaluator velocity;
     velocity.value = [](FE::GlobalIndex,
                         const std::array<FE::Real, 3>&,
                         const FE::geometry::CutQuadratureProvenance&) {
@@ -3491,7 +3491,7 @@ TEST(FreeSurfaceGeometrySnapshot,
         std::invalid_argument);
 
     auto positive_parameters = functional_parameters;
-    positive_parameters.liquid_side =
+    positive_parameters.active_side =
         FE::geometry::CutIntegrationSide::Positive;
     const auto positive_contact =
         interfaces::evaluateFreeSurfaceDynamicContactState(
@@ -5044,7 +5044,7 @@ TEST(FreeSurfaceGeometrySnapshot,
     const auto minus_snapshot =
         build_snapshot(-epsilon, "functional_fd_minus");
 
-    interfaces::FreeSurfaceDiscreteFunctionalVectorEvaluator
+    interfaces::SnapshotVectorEvaluator
         deformation;
     deformation.value =
         [](FE::GlobalIndex,
@@ -5063,7 +5063,7 @@ TEST(FreeSurfaceGeometrySnapshot,
         [](FE::GlobalIndex,
            const std::array<FE::Real, 3>&,
            const FE::geometry::CutQuadratureProvenance&) {
-            return interfaces::FreeSurfaceDiscreteFunctionalPhysicalGradient{{
+            return interfaces::SnapshotVectorGradient{{
                 {{deformation_x_gradient, deformation_y_gradient, 0.0}},
                 {{0.0, 0.0, 0.0}},
                 {{0.0, 0.0, 0.0}},
@@ -5088,12 +5088,12 @@ TEST(FreeSurfaceGeometrySnapshot,
     FE::Real maximum_total_error{0.0};
     std::size_t case_count{0u};
 
-    for (const auto liquid_side : {
+    for (const auto active_side : {
              FE::geometry::CutIntegrationSide::Negative,
              FE::geometry::CutIntegrationSide::Positive}) {
-        SCOPED_TRACE(static_cast<int>(liquid_side));
+        SCOPED_TRACE(static_cast<int>(active_side));
         interfaces::FreeSurfaceDiscreteFunctionalParameters parameters;
-        parameters.liquid_side = liquid_side;
+        parameters.active_side = active_side;
         parameters.surface_tension = FE::Real{1.7};
         parameters.young_wall_coefficients.push_back(
             {wall_marker, std::numbers::pi_v<FE::Real> / FE::Real{3.0}});
@@ -5114,7 +5114,7 @@ TEST(FreeSurfaceGeometrySnapshot,
 
         EXPECT_EQ(variation.snapshot_revision_key,
                   base.snapshot_revision_key);
-        EXPECT_EQ(variation.liquid_side, liquid_side);
+        EXPECT_EQ(variation.active_side, active_side);
         EXPECT_DOUBLE_EQ(variation.surface_tension,
                          parameters.surface_tension);
         EXPECT_DOUBLE_EQ(variation.volume_multiplier,
@@ -5446,16 +5446,16 @@ TEST(FreeSurfaceGeometrySnapshot,
 
     FE::Real maximum_relative_error{0.0};
     std::size_t case_count{0u};
-    for (const auto liquid_side : {
+    for (const auto active_side : {
              FE::geometry::CutIntegrationSide::Negative,
              FE::geometry::CutIntegrationSide::Positive}) {
-        SCOPED_TRACE(static_cast<int>(liquid_side));
+        SCOPED_TRACE(static_cast<int>(active_side));
         const FE::Real domain_variation =
-            (integrate_owned_pressure(*plus_snapshot, liquid_side) -
-             integrate_owned_pressure(*minus_snapshot, liquid_side)) /
+            (integrate_owned_pressure(*plus_snapshot, active_side) -
+             integrate_owned_pressure(*minus_snapshot, active_side)) /
             (FE::Real{2.0} * epsilon);
         const FE::Real pressure_divergence =
-            integrate_owned_pressure_divergence(liquid_side);
+            integrate_owned_pressure_divergence(active_side);
         const FE::Real scale =
             std::max({FE::Real{1.0e-12},
                       std::abs(domain_variation),
@@ -5626,7 +5626,7 @@ TEST(FreeSurfaceGeometrySnapshot,
     const auto minus_snapshot =
         build_snapshot(-epsilon, "functional_fd_3d_minus");
 
-    interfaces::FreeSurfaceDiscreteFunctionalVectorEvaluator
+    interfaces::SnapshotVectorEvaluator
         deformation;
     deformation.value =
         [](FE::GlobalIndex,
@@ -5644,7 +5644,7 @@ TEST(FreeSurfaceGeometrySnapshot,
         [](FE::GlobalIndex,
            const std::array<FE::Real, 3>&,
            const FE::geometry::CutQuadratureProvenance&) {
-            return interfaces::FreeSurfaceDiscreteFunctionalPhysicalGradient{{
+            return interfaces::SnapshotVectorGradient{{
                 {{deformation_x_gradient,
                   deformation_y_gradient,
                   deformation_z_gradient}},
@@ -5665,12 +5665,12 @@ TEST(FreeSurfaceGeometrySnapshot,
     FE::Real maximum_relative_error{0.0};
     std::size_t case_count{0u};
 
-    for (const auto liquid_side : {
+    for (const auto active_side : {
              FE::geometry::CutIntegrationSide::Negative,
              FE::geometry::CutIntegrationSide::Positive}) {
-        SCOPED_TRACE(static_cast<int>(liquid_side));
+        SCOPED_TRACE(static_cast<int>(active_side));
         interfaces::FreeSurfaceDiscreteFunctionalParameters parameters;
-        parameters.liquid_side = liquid_side;
+        parameters.active_side = active_side;
         parameters.surface_tension = FE::Real{1.6};
         parameters.young_wall_coefficients.push_back(
             {wall_marker, std::numbers::pi_v<FE::Real> / FE::Real{4.0}});
@@ -5691,7 +5691,7 @@ TEST(FreeSurfaceGeometrySnapshot,
 
         EXPECT_EQ(variation.snapshot_revision_key,
                   base.snapshot_revision_key);
-        EXPECT_EQ(variation.liquid_side, liquid_side);
+        EXPECT_EQ(variation.active_side, active_side);
         ASSERT_EQ(base.walls.size(), 1u);
         ASSERT_EQ(plus.walls.size(), 1u);
         ASSERT_EQ(minus.walls.size(), 1u);
@@ -5815,7 +5815,7 @@ TEST(FreeSurfaceGeometrySnapshot,
     interfaces::FreeSurfaceDiscreteFunctionalParameters parameters;
     parameters.surface_tension = 2.0;
     parameters.volume_multiplier = 3.0;
-    interfaces::FreeSurfaceDiscreteFunctionalVectorEvaluator
+    interfaces::SnapshotVectorEvaluator
         deformation;
     deformation.value =
         [](FE::GlobalIndex,
@@ -5827,7 +5827,7 @@ TEST(FreeSurfaceGeometrySnapshot,
         [](FE::GlobalIndex,
            const std::array<FE::Real, 3>&,
            const FE::geometry::CutQuadratureProvenance&) {
-            return interfaces::FreeSurfaceDiscreteFunctionalPhysicalGradient{{
+            return interfaces::SnapshotVectorGradient{{
                 {{0.0, 0.0, 0.0}},
                 {{0.0, 0.2, 0.0}},
                 {{0.0, 0.0, 0.0}},

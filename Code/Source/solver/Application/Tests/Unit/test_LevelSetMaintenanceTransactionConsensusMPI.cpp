@@ -49,7 +49,7 @@ LevelSetAuthoritativeFunctionalValue makeFunctional(
       .snapshot_revision = snapshot_revision,
       .mesh_topology_revision = mesh_topology_revision,
       .cut_topology_revision = cut_topology_revision,
-      .liquid_volume = 1.25,
+      .active_measure = 1.25,
       .liquid_gas_area = 2.5,
       .wetted_wall_area = 0.75,
       .contact_measure = 0.5,
@@ -163,7 +163,7 @@ void beginCandidateTransaction(
       case TransactionDrift::None:
         break;
       case TransactionDrift::FunctionalContent:
-        after.liquid_volume += 0.125;
+        after.active_measure += 0.125;
         break;
       case TransactionDrift::ModeledEnergyContent:
         *after.kinetic_energy += 0.25;

@@ -3880,7 +3880,7 @@ TEST(NavierStokesPostProcessing, StatesTheFreeSurfaceEnergiesAsMeasured0Forms)
     auto vector = std::make_shared<svmp::FE::spaces::ProductSpace>(scalar, 3);
     post::FreeSurfaceEnergyStatement statement{
         .interface_marker = 7,
-        .liquid_side = CutVolumeSide::Positive,
+        .active_side = CutVolumeSide::Positive,
         .velocity_field = 0,
         .velocity_space = vector.get(),
         .dimension = 3,
@@ -3945,7 +3945,7 @@ TEST(NavierStokesPostProcessing, StatesTheContactLineChannelsWithTheRuleWallNorm
     FreeSurfaceDiscreteFunctionalDeclaration declaration;
     declaration.interface_marker = 7;
     declaration.velocity_field = 0;
-    declaration.parameters.liquid_side = svmp::FE::geometry::CutIntegrationSide::Positive;
+    declaration.parameters.active_side = svmp::FE::geometry::CutIntegrationSide::Positive;
     declaration.parameters.surface_tension = 0.07;
     declaration.parameters.young_wall_coefficients = {{.boundary_marker = 9, .equilibrium_contact_angle_radians = 1.5},
                                                       {.boundary_marker = 3, .equilibrium_contact_angle_radians = 1.0},
@@ -3957,7 +3957,7 @@ TEST(NavierStokesPostProcessing, StatesTheContactLineChannelsWithTheRuleWallNorm
          .law = fs::FreeSurfaceContactLaw::PrescribedAngle, .mobility = 0.0, .slip_length = 0.2,
          .dynamic_viscosity = 1.0e-3}};
     declaration.active_volume_energy_parameters = fs::FreeSurfaceActiveVolumeEnergyParameters{
-        .liquid_side = svmp::FE::geometry::CutIntegrationSide::Positive,
+        .active_side = svmp::FE::geometry::CutIntegrationSide::Positive,
         .density = 1000.0,
         .gravitational_acceleration = {{0.0, 0.0, -9.81}},
         .gravitational_reference_point = post::kGravitationalReferencePoint};
@@ -3965,7 +3965,7 @@ TEST(NavierStokesPostProcessing, StatesTheContactLineChannelsWithTheRuleWallNorm
     // The statement of the record declaration.
     const auto statement = post::freeSurfaceEnergyStatement(declaration, *vector, 3);
     EXPECT_EQ(statement.interface_marker, 7);
-    EXPECT_EQ(statement.liquid_side, CutVolumeSide::Positive);
+    EXPECT_EQ(statement.active_side, CutVolumeSide::Positive);
     EXPECT_EQ(statement.velocity_space, vector.get());
     EXPECT_EQ(statement.surface_tension, 0.07);
     EXPECT_EQ(statement.density, 1000.0);
@@ -4062,17 +4062,17 @@ TEST(NavierStokesPostProcessing, DeclaresSelectedEnergiesFromRegisteredFunctiona
         record.velocity_field = velocity;
         record.geometry_domain_id = "energy_authority";
         record.owner_component = "energy_authority_test";
-        record.parameters.liquid_side = side;
+        record.parameters.active_side = side;
         record.parameters.surface_tension = 0.25;
         if (optional_channels) {
             // The registry permits one owner of the bulk energy/dissipation.
             record.active_volume_energy_parameters = fs::FreeSurfaceActiveVolumeEnergyParameters{
-                .liquid_side = side, .density = 2.5,
+                .active_side = side, .density = 2.5,
                 .gravitational_acceleration = gravity, .gravitational_reference_point = reference};
             record.active_volume_dissipation_parameters = fs::FreeSurfaceActiveVolumeDissipationParameters{
-                .liquid_side = side, .dynamic_viscosity = 0.125};
+                .active_side = side, .dynamic_viscosity = 0.125};
             record.external_pressure_power_parameters = fs::FreeSurfaceExternalPressurePowerParameters{
-                .liquid_side = side, .external_pressure = 3.0};
+                .active_side = side, .external_pressure = 3.0};
             record.endpoint_functional_power_enabled = true;
             record.capillary_balance_method = FreeSurfaceCapillaryBalanceMethod::DiscreteEnergyVolumeStationarity;
             record.capillary_balance_qualification = FreeSurfaceCapillaryBalanceQualification::PrerequisiteOnly;
@@ -4104,7 +4104,7 @@ TEST(NavierStokesPostProcessing, DeclaresSelectedEnergiesFromRegisteredFunctiona
         const bool optional_channels = marker == 9;
         post::FreeSurfaceEnergyStatement expected{
             .interface_marker = marker,
-            .liquid_side = optional_channels ? CutVolumeSide::Positive : CutVolumeSide::Negative,
+            .active_side = optional_channels ? CutVolumeSide::Positive : CutVolumeSide::Negative,
             .velocity_field = velocity, .velocity_space = vector.get(), .dimension = 3,
             .surface_tension = 0.25,
             .density = optional_channels ? 2.5 : 0.0,

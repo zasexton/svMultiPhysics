@@ -128,7 +128,7 @@ struct LevelSetKinematicEndpoint {
  * @brief Reconcile a transported P1 level set with the kinematic interface
  *        flux of its transport velocity.
  *
- * For a P1 level set phi on simplices the liquid measure
+ * For a P1 level set phi on simplices the negative-side measure
  * V(phi) = |{phi < c}| has the exact nodal derivative dV/dphi_i = -g_i,
  *     g_i(phi) = int_{Gamma(phi)} N_i / |grad phi| ds,
  * and the kinematic interface flux of a velocity w splits into nodal parts

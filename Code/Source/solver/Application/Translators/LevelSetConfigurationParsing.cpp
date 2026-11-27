@@ -134,13 +134,13 @@ opt::OptionSchema<Keys> makeLevelSetEquationSchema() {
                    "level set"))
       .key("Conservative_phase_field_name",
            [](Keys &keys) -> auto & {
-             return keys.transport.conservative_phase.liquid_indicator
+             return keys.transport.conservative_phase.phase_indicator
                  .field_name;
            },
            opt::StringCodec{}, setting("name of the liquid-indicator field"))
       .key("Auto_register_conservative_phase_field",
            [](Keys &keys) -> auto & {
-             return keys.transport.conservative_phase.liquid_indicator
+             return keys.transport.conservative_phase.phase_indicator
                  .auto_register_field;
            },
            relaxedBool(), setting("register the liquid-indicator field if missing"))

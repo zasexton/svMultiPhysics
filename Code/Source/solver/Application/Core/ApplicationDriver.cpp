@@ -1013,7 +1013,7 @@ effectiveStaticCapillaryEquilibriumOptions(
 {
   auto options = request.configuration->static_capillary_equilibrium;
   if (request.runtime.measured_static_capillary_target.has_value()) {
-    options.target_liquid_volume =
+    options.target_active_measure =
         *request.runtime.measured_static_capillary_target;
   }
   return options;
@@ -1101,7 +1101,7 @@ canonicalLevelSetMaintenanceRequestSchedule(
         words, request.configuration->static_capillary_equilibrium_enabled);
     appendMaintenanceScheduleReal(
         words,
-        capillary_options.target_liquid_volume);
+        capillary_options.target_active_measure);
     appendMaintenanceScheduleReal(
         words,
         capillary_options.volume_tolerance);
@@ -3105,7 +3105,7 @@ resolveLevelSetWallAwareMaintenanceContext(
     mix_declaration_value(static_cast<std::uint64_t>(
         static_cast<std::int64_t>(declaration.interface_marker)));
     mix_declaration_value(static_cast<std::uint64_t>(
-        declaration.parameters.liquid_side));
+        declaration.parameters.active_side));
     mix_declaration_value(static_cast<std::uint64_t>(
         declaration.capillary_balance_method));
     mix_declaration_value(static_cast<std::uint64_t>(
@@ -5554,7 +5554,7 @@ evaluateStaticCapillaryFunctionalCandidate(
   evaluation.cut_topology_key = refresh_report.topology_key;
   evaluation.constraint_semantics_key = constraint_key;
   evaluation.energy_components = {energy, gravitational_energy};
-  evaluation.liquid_volume = volume;
+  evaluation.active_measure = volume;
   // Difference gradients: the functional supplies no derivatives (the
   // kinematic-area-gradient producer of exact derivatives was retired with
   // decision D48).
@@ -5745,7 +5745,7 @@ bool initializeDiscreteStaticCapillaryEquilibrium(
       declarations.front().level_set_field == level_set_field &&
       declarations.front().geometry_domain_id ==
           request.configuration->volume_cut_request->domain_id &&
-      declarations.front().parameters.liquid_side ==
+      declarations.front().parameters.active_side ==
           cutIntegrationSide(
               request.configuration->volume_cut_request->active_side) &&
       declarations.front().parameters.surface_tension >
@@ -6468,7 +6468,7 @@ bool initializeDiscreteStaticCapillaryEquilibrium(
       << " marker=" << *marker
       << " active_coefficients=" << active_parameters.size()
       << " target_liquid_volume="
-      << capillary_options.target_liquid_volume
+      << capillary_options.target_active_measure
       << " initial_surface_wall_energy="
       << staticCapillaryEnergy(result.initial_energy_components,
                                kStaticCapillarySurfaceWallEnergy)

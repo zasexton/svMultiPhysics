@@ -3,7 +3,7 @@
 /**
  * @file
  * @ingroup fe_level_set
- * @brief Algebraic rows for a frozen-topology wet-side velocity extension.
+ * @brief Algebraic rows for a frozen-topology active-side velocity extension.
  *
  * The transported level set must not consume a state-dependent prescribed
  * coefficient in a monolithic solve: doing so drops the velocity-to-level-set

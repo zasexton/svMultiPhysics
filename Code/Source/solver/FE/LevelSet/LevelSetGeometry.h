@@ -296,7 +296,7 @@ public:
     /// BoundaryDomain::generatedActiveSubset(marker, stable generated marker).
     [[nodiscard]] forms::BoundaryDomain boundary(int physical_boundary_marker) const;
 
-    /// The wetted part of a wall; the same domain as boundary(wall).
+    /// The active subset of a wall; the same domain as boundary(wall).
     [[nodiscard]] forms::BoundaryDomain wetted(int wall_boundary_marker) const
     {
         return boundary(wall_boundary_marker);

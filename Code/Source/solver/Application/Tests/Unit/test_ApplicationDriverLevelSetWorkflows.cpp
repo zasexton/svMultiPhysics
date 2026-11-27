@@ -158,8 +158,8 @@ void expectMaintenanceCompatibilityFieldsEqual(
             expected_transport.velocity.constant_value);
   EXPECT_EQ(actual_transport.conservative_phase.enabled,
             expected_transport.conservative_phase.enabled);
-  EXPECT_EQ(actual_transport.conservative_phase.liquid_side,
-            expected_transport.conservative_phase.liquid_side);
+  EXPECT_EQ(actual_transport.conservative_phase.active_side,
+            expected_transport.conservative_phase.active_side);
   EXPECT_EQ(actual.isovalue, expected.isovalue);
   ASSERT_EQ(actual.open_boundaries.size(), expected.open_boundaries.size());
   for (std::size_t index = 0u; index < expected.open_boundaries.size(); ++index) {
@@ -193,8 +193,8 @@ void expectMaintenanceConfigurationUnchanged(
     const MaintenanceConfiguration& before)
 {
   expectMaintenanceCompatibilityFieldsEqual(*request.configuration, before);
-  EXPECT_EQ(request.configuration->static_capillary_equilibrium.target_liquid_volume,
-            before.static_capillary_equilibrium.target_liquid_volume);
+  EXPECT_EQ(request.configuration->static_capillary_equilibrium.target_active_measure,
+            before.static_capillary_equilibrium.target_active_measure);
 }
 
 std::vector<LevelSetMaintenanceRequest> legacyMaintenanceRequestsForTest(
@@ -5770,7 +5770,7 @@ TEST(ApplicationDriverLevelSetWorkflows,
         mapped_xi[1] = reference_point[1];
         mapped_xi[2] = reference_point[2];
         const auto inverse_jacobian = mapping->jacobian_inverse(mapped_xi);
-        svmp::FE::interfaces::FreeSurfaceDiscreteFunctionalPhysicalGradient
+        svmp::FE::interfaces::SnapshotVectorGradient
             expected_gradient{};
         for (std::size_t component = 0u; component < 3u; ++component) {
           for (std::size_t physical = 0u; physical < 3u; ++physical) {
@@ -5846,7 +5846,7 @@ TEST(ApplicationDriverLevelSetWorkflows,
           .space = velocity_space,
           .components = 2});
   svmp::FE::interfaces::FreeSurfaceDiscreteFunctionalParameters parameters;
-  parameters.liquid_side =
+  parameters.active_side =
       svmp::FE::geometry::CutIntegrationSide::Negative;
   parameters.surface_tension = gamma;
   svmp::FE::systems::functionalRecords(*system).declareFunctional(
@@ -5859,7 +5859,7 @@ TEST(ApplicationDriverLevelSetWorkflows,
           .active_volume_energy_parameters =
               svmp::FE::interfaces::
                   FreeSurfaceActiveVolumeEnergyParameters{
-                      .liquid_side =
+                      .active_side =
                           svmp::FE::geometry::CutIntegrationSide::Negative,
                       .density = svmp::FE::Real{2.0},
                       .gravitational_acceleration =
@@ -5874,14 +5874,14 @@ TEST(ApplicationDriverLevelSetWorkflows,
           .active_volume_dissipation_parameters =
               svmp::FE::interfaces::
                   FreeSurfaceActiveVolumeDissipationParameters{
-                      .liquid_side =
+                      .active_side =
                           svmp::FE::geometry::CutIntegrationSide::Negative,
                       .dynamic_viscosity = svmp::FE::Real{0.5},
                   },
           .external_pressure_power_parameters =
               svmp::FE::interfaces::
                   FreeSurfaceExternalPressurePowerParameters{
-                      .liquid_side =
+                      .active_side =
                           svmp::FE::geometry::CutIntegrationSide::Negative,
                       .external_pressure = svmp::FE::Real{2.5},
                   },
@@ -5903,7 +5903,7 @@ TEST(ApplicationDriverLevelSetWorkflows,
     namespace post = svmp::Physics::formulations::navier_stokes::post;
     post::FreeSurfaceEnergyStatement statement;
     statement.interface_marker = interface_marker;
-    statement.liquid_side = svmp::FE::forms::CutVolumeSide::Negative;
+    statement.active_side = svmp::FE::forms::CutVolumeSide::Negative;
     statement.velocity_field = velocity;
     statement.velocity_space = velocity_space.get();
     statement.dimension = 2;
@@ -6076,7 +6076,7 @@ TEST(ApplicationDriverLevelSetWorkflows,
           .space = velocity_space,
           .components = 2});
   svmp::FE::interfaces::FreeSurfaceDiscreteFunctionalParameters parameters;
-  parameters.liquid_side =
+  parameters.active_side =
       svmp::FE::geometry::CutIntegrationSide::Negative;
   parameters.surface_tension = gamma;
   svmp::FE::systems::functionalRecords(*system).declareFunctional(
@@ -6089,7 +6089,7 @@ TEST(ApplicationDriverLevelSetWorkflows,
           .active_volume_energy_parameters =
               svmp::FE::interfaces::
                   FreeSurfaceActiveVolumeEnergyParameters{
-                      .liquid_side =
+                      .active_side =
                           svmp::FE::geometry::CutIntegrationSide::Negative,
                       .density = svmp::FE::Real{2.0},
                       .gravitational_acceleration =
@@ -6104,14 +6104,14 @@ TEST(ApplicationDriverLevelSetWorkflows,
           .active_volume_dissipation_parameters =
               svmp::FE::interfaces::
                   FreeSurfaceActiveVolumeDissipationParameters{
-                      .liquid_side =
+                      .active_side =
                           svmp::FE::geometry::CutIntegrationSide::Negative,
                       .dynamic_viscosity = svmp::FE::Real{0.5},
                   },
           .external_pressure_power_parameters =
               svmp::FE::interfaces::
                   FreeSurfaceExternalPressurePowerParameters{
-                      .liquid_side =
+                      .active_side =
                           svmp::FE::geometry::CutIntegrationSide::Negative,
                       .external_pressure = svmp::FE::Real{2.5},
                   },
@@ -6133,7 +6133,7 @@ TEST(ApplicationDriverLevelSetWorkflows,
     namespace post = svmp::Physics::formulations::navier_stokes::post;
     post::FreeSurfaceEnergyStatement statement;
     statement.interface_marker = interface_marker;
-    statement.liquid_side = svmp::FE::forms::CutVolumeSide::Negative;
+    statement.active_side = svmp::FE::forms::CutVolumeSide::Negative;
     statement.velocity_field = velocity;
     statement.velocity_space = velocity_space.get();
     statement.dimension = 2;
@@ -6264,13 +6264,13 @@ TEST(ApplicationDriverLevelSetWorkflows,
   EXPECT_NEAR(
       *maintenance_functionals.front().kinetic_energy,
       svmp::FE::Real{5.0} *
-          maintenance_functionals.front().liquid_volume,
+          maintenance_functionals.front().active_measure,
       1.0e-13);
   EXPECT_NEAR(
       *maintenance_functionals.front()
            .gravitational_potential_power,
       svmp::FE::Real{-2.0} *
-          maintenance_functionals.front().liquid_volume,
+          maintenance_functionals.front().active_measure,
       1.0e-13);
   EXPECT_NEAR(
       *maintenance_functionals.front().modeled_stored_energy,
@@ -6909,7 +6909,7 @@ TEST(ApplicationDriverLevelSetWorkflows,
           .components = 2});
   svmp::FE::interfaces::FreeSurfaceDiscreteFunctionalParameters
       functional_parameters;
-  functional_parameters.liquid_side =
+  functional_parameters.active_side =
       svmp::FE::geometry::CutIntegrationSide::Negative;
   functional_parameters.surface_tension = 1.0;
   application_test::declared_free_surface_functionals::declareFreeSurfaceFunctionalWithForms(
@@ -6923,7 +6923,7 @@ TEST(ApplicationDriverLevelSetWorkflows,
           .active_volume_energy_parameters =
               svmp::FE::interfaces::
                   FreeSurfaceActiveVolumeEnergyParameters{
-                      .liquid_side =
+                      .active_side =
                           svmp::FE::geometry::CutIntegrationSide::Negative,
                       .density = svmp::FE::Real{1.0},
                       .gravitational_acceleration =
@@ -7109,7 +7109,7 @@ TEST(ApplicationDriverLevelSetWorkflows,
   ASSERT_TRUE(saved_body_force_contract);
   mutable_declaration.static_conservative_body_force_complete = false;
   const auto target_volume_before_body_force_rejection =
-      effectiveStaticCapillaryEquilibriumOptions(requests.front()).target_liquid_volume;
+      effectiveStaticCapillaryEquilibriumOptions(requests.front()).target_active_measure;
   const auto functional_history_size_before_body_force_rejection =
       svmp::FE::systems::functionalRecords(*sim.fe_system).acceptedFunctionalHistory().size();
   std::string body_force_failure;
@@ -7131,7 +7131,7 @@ TEST(ApplicationDriverLevelSetWorkflows,
   EXPECT_FALSE(
       requests.front().runtime.static_capillary_equilibrium_initialized);
   EXPECT_DOUBLE_EQ(
-      effectiveStaticCapillaryEquilibriumOptions(requests.front()).target_liquid_volume,
+      effectiveStaticCapillaryEquilibriumOptions(requests.front()).target_active_measure,
       target_volume_before_body_force_rejection);
   EXPECT_EQ(
       svmp::FE::systems::functionalRecords(*sim.fe_system).acceptedFunctionalHistory().size(),
@@ -7179,7 +7179,7 @@ TEST(ApplicationDriverLevelSetWorkflows,
             requests.front().runtime.static_capillary_equilibrium_initialized);
         EXPECT_DOUBLE_EQ(
             effectiveStaticCapillaryEquilibriumOptions(requests.front())
-                .target_liquid_volume,
+                .target_active_measure,
             target_volume_before_body_force_rejection);
         EXPECT_EQ(
             svmp::FE::systems::functionalRecords(*sim.fe_system).acceptedFunctionalHistory().size(),
@@ -7243,10 +7243,10 @@ TEST(ApplicationDriverLevelSetWorkflows,
   EXPECT_FALSE(
       requests.front().runtime.static_capillary_equilibrium_initialized);
   EXPECT_NE(
-      effectiveStaticCapillaryEquilibriumOptions(requests.front()).target_liquid_volume,
+      effectiveStaticCapillaryEquilibriumOptions(requests.front()).target_active_measure,
       target_volume_before_body_force_rejection);
   EXPECT_GT(
-      effectiveStaticCapillaryEquilibriumOptions(requests.front()).target_liquid_volume,
+      effectiveStaticCapillaryEquilibriumOptions(requests.front()).target_active_measure,
       0.0);
   const auto failed_return =
       canonicalLevelSetMaintenanceRequestSchedule(
@@ -7258,13 +7258,13 @@ TEST(ApplicationDriverLevelSetWorkflows,
       "r1_static_failed_initialization_catch",
       failed_return,
       static_cast<double>(effectiveStaticCapillaryEquilibriumOptions(requests.front())
-                              .target_liquid_volume),
+                              .target_active_measure),
       requests.front().runtime.static_capillary_equilibrium_initialized);
   expectMaintenanceConfigurationUnchanged(
       requests.front(), configured_before_initialization);
   ASSERT_TRUE(requests.front().runtime.measured_static_capillary_target.has_value());
   EXPECT_EQ(effectiveStaticCapillaryEquilibriumOptions(requests.front())
-                .target_liquid_volume,
+                .target_active_measure,
             *requests.front().runtime.measured_static_capillary_target);
   EXPECT_EQ(
       gatherFeOrderedSolution(sim.time_history->u()),
@@ -7365,7 +7365,7 @@ TEST(ApplicationDriverLevelSetWorkflows,
 
   svmp::FE::interfaces::FreeSurfaceDiscreteFunctionalParameters
       functional_parameters;
-  functional_parameters.liquid_side =
+  functional_parameters.active_side =
       svmp::FE::geometry::CutIntegrationSide::Negative;
   functional_parameters.surface_tension = 1.0;
   application_test::declared_free_surface_functionals::declareFreeSurfaceFunctionalWithForms(
@@ -7379,7 +7379,7 @@ TEST(ApplicationDriverLevelSetWorkflows,
           .active_volume_energy_parameters =
               svmp::FE::interfaces::
                   FreeSurfaceActiveVolumeEnergyParameters{
-                      .liquid_side =
+                      .active_side =
                           svmp::FE::geometry::CutIntegrationSide::Negative,
                       .density = svmp::FE::Real{1.0},
                       .gravitational_acceleration =
@@ -7569,7 +7569,7 @@ TEST(ApplicationDriverLevelSetWorkflows,
   const auto topology_key_before_velocity_rejection =
       refresh_cache.topology_key;
   const auto target_volume_before_velocity_rejection =
-      effectiveStaticCapillaryEquilibriumOptions(requests.front()).target_liquid_volume;
+      effectiveStaticCapillaryEquilibriumOptions(requests.front()).target_active_measure;
   const auto functional_history_size_before_velocity_rejection =
       svmp::FE::systems::functionalRecords(*sim.fe_system).acceptedFunctionalHistory().size();
   std::string velocity_failure;
@@ -7591,7 +7591,7 @@ TEST(ApplicationDriverLevelSetWorkflows,
   EXPECT_FALSE(
       requests.front().runtime.static_capillary_equilibrium_initialized);
   EXPECT_DOUBLE_EQ(
-      effectiveStaticCapillaryEquilibriumOptions(requests.front()).target_liquid_volume,
+      effectiveStaticCapillaryEquilibriumOptions(requests.front()).target_active_measure,
       target_volume_before_velocity_rejection);
   EXPECT_EQ(
       svmp::FE::systems::functionalRecords(*sim.fe_system).acceptedFunctionalHistory().size(),
@@ -7679,7 +7679,7 @@ TEST(ApplicationDriverLevelSetWorkflows,
       requests.front().runtime.static_capillary_equilibrium_initialized);
   EXPECT_GT(
       effectiveStaticCapillaryEquilibriumOptions(requests.front())
-          .target_liquid_volume,
+          .target_active_measure,
       0.0);
   const auto successful_return =
       canonicalLevelSetMaintenanceRequestSchedule(
@@ -7691,13 +7691,13 @@ TEST(ApplicationDriverLevelSetWorkflows,
       "r1_static_successful_initialization_return",
       successful_return,
       static_cast<double>(effectiveStaticCapillaryEquilibriumOptions(requests.front())
-                              .target_liquid_volume),
+                              .target_active_measure),
       requests.front().runtime.static_capillary_equilibrium_initialized);
   expectMaintenanceConfigurationUnchanged(
       requests.front(), configured_before_initialization);
   ASSERT_TRUE(requests.front().runtime.measured_static_capillary_target.has_value());
   EXPECT_EQ(effectiveStaticCapillaryEquilibriumOptions(requests.front())
-                .target_liquid_volume,
+                .target_active_measure,
             *requests.front().runtime.measured_static_capillary_target);
   EXPECT_FALSE(
       sim.fe_system->cutIntegrationContextTransactionActive());
@@ -8947,7 +8947,7 @@ TEST(ApplicationDriverLevelSetWorkflows,
 
   svmp::FE::interfaces::FreeSurfaceDiscreteFunctionalParameters
       functional_parameters;
-  functional_parameters.liquid_side =
+  functional_parameters.active_side =
       svmp::FE::geometry::CutIntegrationSide::Negative;
   functional_parameters.surface_tension = svmp::FE::Real{ 0.8 };
   functional_parameters.young_wall_coefficients.push_back(
@@ -9794,7 +9794,7 @@ TEST(ApplicationDriverLevelSetWorkflows,
       .space = scalar_space,
       .components = 1});
   svmp::FE::interfaces::FreeSurfaceDiscreteFunctionalParameters parameters;
-  parameters.liquid_side =
+  parameters.active_side =
       svmp::FE::geometry::CutIntegrationSide::Negative;
   parameters.surface_tension = svmp::FE::Real{1.0};
   parameters.young_wall_coefficients.push_back(
@@ -10986,7 +10986,7 @@ TEST(ApplicationDriverLevelSetWorkflows,
   const double unguarded_amplification =
       unguarded_dry_velocity / kPhysicalVelocityScale;
   ASSERT_GT(unguarded_amplification,
-            svmp::FE::level_set::kVelocityExtensionMaxWetToDryAmplification);
+            svmp::FE::level_set::kVelocityExtensionMaxActiveToInactiveAmplification);
   auto d38 = make_fixture(d38_mesh, d38_phi, d38_source);
   ASSERT_TRUE(d38.kernel);
   std::vector<svmp::FE::level_set::VelocityExtensionConstraintRow> stale_rows;
@@ -11470,7 +11470,7 @@ makeMaintenanceFunctionalValue(
       .snapshot_revision = snapshot_revision,
       .mesh_topology_revision = mesh_topology_revision,
       .cut_topology_revision = cut_topology_revision,
-      .liquid_volume = 1.25,
+      .active_measure = 1.25,
       .liquid_gas_area = 2.5,
       .wetted_wall_area = 0.75,
       .contact_measure = 0.5,
@@ -12115,7 +12115,7 @@ makeCompleteEnergyEndpoint(bool endpoint)
                   .previous_velocity_revision = 1001u,
                   .endpoint_velocity_revision =
                       endpoint ? 1002u : 1001u,
-                  .liquid_side = svmp::FE::geometry::
+                  .active_side = svmp::FE::geometry::
                       CutIntegrationSide::Negative,
                   .density = 1.0,
                   .owned_quadrature_point_count = 8u,
@@ -12923,7 +12923,7 @@ TEST(ApplicationDriverLevelSetWorkflows,
 
   auto negative_measure =
       makeMaintenanceFunctionalValue(7.0, 1001u);
-  negative_measure.liquid_volume = -0.25;
+  negative_measure.active_measure = -0.25;
   EXPECT_THROW(
       ledger.stageRow(
           application::core::LevelSetMaintenanceWorkSubstage::
@@ -13395,7 +13395,7 @@ TEST(ApplicationDriverLevelSetMaintenance,
       svmp::FE::level_set::LevelSetVelocitySource::CoupledField;
   second_configuration.transport.velocity.field_name = "velocity_beta";
   second_configuration.transport.conservative_phase.enabled = true;
-  second_configuration.transport.conservative_phase.liquid_indicator.field_name = "phase_beta";
+  second_configuration.transport.conservative_phase.phase_indicator.field_name = "phase_beta";
   second_configuration.transport.conservative_phase.write_flux_artifacts = true;
   second_configuration.transport.conservative_phase.flux_artifact_cadence_steps = 2;
   second_configuration.transport.conservative_phase.reconcile_geometry = true;
@@ -13610,7 +13610,7 @@ TEST(ApplicationDriverConservativePhaseVelocity,
   sim.fe_system = std::move(system);
   application::core::ResolvedLevelSetMaintenanceCompatibilityConfiguration request_configuration;
   request_configuration.transport.level_set.field_name = "phi";
-  request_configuration.transport.conservative_phase.liquid_indicator.field_name = "phase";
+  request_configuration.transport.conservative_phase.phase_indicator.field_name = "phase";
   request_configuration.transport.velocity.source =
       svmp::FE::level_set::LevelSetVelocitySource::
           MaterialInterfacePhasePair;
@@ -13928,7 +13928,7 @@ TEST_F(ApplicationDriverConservativePhaseCandidatesTest,
       accepted_graph.ownership_revision,
       accepted_graph.numbering_revision}};
   const auto accepted_static_target =
-      effectiveStaticCapillaryEquilibriumOptions(requests_.front()).target_liquid_volume;
+      effectiveStaticCapillaryEquilibriumOptions(requests_.front()).target_active_measure;
   const auto accepted_before =
       canonicalLevelSetMaintenanceRequestSchedule(
           requests_,
@@ -13984,7 +13984,7 @@ TEST_F(ApplicationDriverConservativePhaseCandidatesTest,
           requests_.front().runtime.conservative_phase_graph->numbering_revision}}),
       accepted_rank_local_stamps);
   EXPECT_DOUBLE_EQ(
-      effectiveStaticCapillaryEquilibriumOptions(requests_.front()).target_liquid_volume,
+      effectiveStaticCapillaryEquilibriumOptions(requests_.front()).target_active_measure,
       accepted_static_target);
   trial.front().runtime.conservative_phase_graph.reset();
   EXPECT_TRUE(requests_.front().runtime.conservative_phase_graph.has_value());
@@ -14780,7 +14780,7 @@ TEST_F(ApplicationDriverConservativePhaseCandidatesTest,
   for (std::size_t i = 0u; i < graph.nodes; ++i) {
     accepted_measure += graph.lumped_control_volume[i] * accepted_phase[i];
   }
-  EXPECT_NEAR(projection.retained_liquid_measure,
+  EXPECT_NEAR(projection.retained_active_measure,
               accepted_measure,
               1.0e-10);
 }
@@ -15760,7 +15760,7 @@ TEST_F(ApplicationDriverConservativePhaseCandidatesTest,
             })},
             {"request_policy", lifecycle_capture::jsonObject({
                 {"level_set_field_name", lifecycle_capture::jsonString(requests_.front().configuration->transport.level_set.field_name)},
-                {"phase_field_name", lifecycle_capture::jsonString(requests_.front().configuration->transport.conservative_phase.liquid_indicator.field_name)},
+                {"phase_field_name", lifecycle_capture::jsonString(requests_.front().configuration->transport.conservative_phase.phase_indicator.field_name)},
                 {"reconcile_geometry", lifecycle_capture::jsonBool(requests_.front().configuration->transport.conservative_phase.reconcile_geometry)},
             })},
             {"candidate_stage", prepared_stage},

@@ -155,7 +155,7 @@ TEST(FunctionalRecords,
         .geometry_domain_id = "static_body_force_contract",
         .parameters =
             svmp::FE::interfaces::FreeSurfaceDiscreteFunctionalParameters{
-                .liquid_side =
+                .active_side =
                     svmp::FE::geometry::CutIntegrationSide::Negative,
                 .surface_tension = 1.0,
             },
@@ -170,7 +170,7 @@ TEST(FunctionalRecords,
 
     declaration.active_volume_energy_parameters =
         svmp::FE::interfaces::FreeSurfaceActiveVolumeEnergyParameters{
-            .liquid_side =
+            .active_side =
                 svmp::FE::geometry::CutIntegrationSide::Negative,
             .density = 1.0,
         };
@@ -207,12 +207,12 @@ TEST(FunctionalRecords,
             .geometry_domain_id = "rounding_bound",
             .parameters =
                 interfaces::FreeSurfaceDiscreteFunctionalParameters{
-                    .liquid_side = CutIntegrationSide::Negative,
+                    .active_side = CutIntegrationSide::Negative,
                     .surface_tension = 1.0,
                 },
             .active_volume_energy_parameters =
                 interfaces::FreeSurfaceActiveVolumeEnergyParameters{
-                    .liquid_side = CutIntegrationSide::Negative,
+                    .active_side = CutIntegrationSide::Negative,
                     .density = 1.0,
                 },
             .owner_component = "FreeSurfaceFunctionalRounding.Record",
@@ -255,7 +255,7 @@ TEST(FunctionalRecords,
     const auto make_states = [&](Real energy_volume) {
         interfaces::FreeSurfaceDiscreteFunctionalState state{
             .snapshot_revision_key = 101u,
-            .liquid_side = CutIntegrationSide::Negative,
+            .active_side = CutIntegrationSide::Negative,
             .surface_tension = 1.0,
             .volume_multiplier = 0.0,
             .owned_liquid_volume = rulewise_volume,
@@ -268,7 +268,7 @@ TEST(FunctionalRecords,
                                 state.volume_constraint_potential;
         interfaces::FreeSurfaceActiveVolumeEnergyState energy{
             .snapshot_revision_key = 101u,
-            .liquid_side = CutIntegrationSide::Negative,
+            .active_side = CutIntegrationSide::Negative,
             .density = 1.0,
             .owned_quadrature_point_count = point_count,
             .owned_liquid_volume = energy_volume,

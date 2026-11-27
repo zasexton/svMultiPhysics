@@ -336,21 +336,21 @@ void allReduceRealBufferSum(const ProjectionCollectiveContext& context,
 LevelSetP1PhaseProjectionResult
 projectLevelSetP1PhaseIndicatorFromCutContext(
     const systems::FESystem& system,
-    FieldId liquid_indicator_field,
+    FieldId phase_indicator_field,
     const LevelSetP1PhaseTransportGraph& graph,
     const LevelSetP1PhaseProjectionOptions& options)
 {
     LevelSetP1PhaseProjectionResult result;
     result.interface_marker = options.interface_marker;
-    result.liquid_side = options.liquid_side;
+    result.active_side = options.active_side;
     try {
-        if (!graph.success || liquid_indicator_field == INVALID_FIELD_ID) {
+        if (!graph.success || phase_indicator_field == INVALID_FIELD_ID) {
             result.diagnostic =
                 "P1 phase projection requires a valid phase graph and field";
             return result;
         }
         if (options.interface_marker < 0 ||
-            options.liquid_side == geometry::CutIntegrationSide::Interface ||
+            options.active_side == geometry::CutIntegrationSide::Interface ||
             options.quadrature_order < 0 ||
             !std::isfinite(options.invariant_tolerance) ||
             options.invariant_tolerance < Real{0.0}) {
@@ -360,8 +360,8 @@ projectLevelSetP1PhaseIndicatorFromCutContext(
         }
 
         const auto& mesh = system.meshAccess();
-        const auto& record = system.fieldRecord(liquid_indicator_field);
-        const auto& dofs = system.fieldDofHandler(liquid_indicator_field);
+        const auto& record = system.fieldRecord(phase_indicator_field);
+        const auto& dofs = system.fieldDofHandler(phase_indicator_field);
         const auto collective = projectionCollectiveContext(mesh, dofs);
         bool local_preflight_success = true;
         std::string local_preflight_diagnostic;
@@ -378,7 +378,7 @@ projectLevelSetP1PhaseIndicatorFromCutContext(
             record.space->value_dimension() != 1 ||
             record.space->is_variable_order() ||
             record.space->polynomial_order() != 1 ||
-            !system.fieldParticipatesInUnknownVector(liquid_indicator_field)) {
+            !system.fieldParticipatesInUnknownVector(phase_indicator_field)) {
             reject_preflight(
                 "P1 phase projection requires a transported scalar P1 H1 field");
         }
@@ -438,7 +438,7 @@ projectLevelSetP1PhaseIndicatorFromCutContext(
         try {
             cut_context->assertAllLevelSetGeometrySnapshotsCurrent(mesh);
             rules = cut_context->generatedVolumeRulesForMarkerAndSide(
-                options.interface_marker, options.liquid_side);
+                options.interface_marker, options.active_side);
         } catch (const std::exception& exception) {
             local_rule_snapshot_success = false;
             local_rule_snapshot_diagnostic = exception.what();
@@ -462,7 +462,7 @@ projectLevelSetP1PhaseIndicatorFromCutContext(
             for (const auto* rule : rules) {
                 if (rule == nullptr ||
                     rule->kind != geometry::CutQuadratureKind::Volume ||
-                    rule->side != options.liquid_side ||
+                    rule->side != options.active_side ||
                     rule->provenance.marker != options.interface_marker ||
                     rule->provenance.source_value_revision !=
                         result.source_value_revision) {
@@ -650,7 +650,7 @@ projectLevelSetP1PhaseIndicatorFromCutContext(
         }
 
         allReduceRealBufferSum(collective, result.liquid_phase_mass);
-        result.retained_liquid_measure =
+        result.retained_active_measure =
             allReduceRealSum(collective, local_measure);
         result.maximum_rule_moment_closure_residual =
             allReduceRealMax(collective, local_maximum_rule_closure);
@@ -659,11 +659,11 @@ projectLevelSetP1PhaseIndicatorFromCutContext(
         result.quadrature_points = static_cast<std::size_t>(
             allReduceUnsigned64Sum(collective, local_quadrature_points));
 
-        result.minimum_liquid_indicator =
+        result.minimum_phase_indicator =
             std::numeric_limits<Real>::infinity();
-        result.maximum_liquid_indicator =
+        result.maximum_phase_indicator =
             -std::numeric_limits<Real>::infinity();
-        result.liquid_indicator.assign(result.nodes, Real{0.0});
+        result.phase_indicator.assign(result.nodes, Real{0.0});
         result.phase_bounds_satisfied = true;
         result.complement_bounds_satisfied = true;
         for (std::size_t node = 0; node < result.nodes; ++node) {
@@ -692,21 +692,21 @@ projectLevelSetP1PhaseIndicatorFromCutContext(
                 mass - phase_mass >= -bound_tolerance;
             const Real indicator = std::clamp(
                 phase_mass / mass, Real{0.0}, Real{1.0});
-            result.liquid_indicator[node] = indicator;
-            result.minimum_liquid_indicator = std::min(
-                result.minimum_liquid_indicator, indicator);
-            result.maximum_liquid_indicator = std::max(
-                result.maximum_liquid_indicator, indicator);
-            result.projected_liquid_measure += mass * indicator;
+            result.phase_indicator[node] = indicator;
+            result.minimum_phase_indicator = std::min(
+                result.minimum_phase_indicator, indicator);
+            result.maximum_phase_indicator = std::max(
+                result.maximum_phase_indicator, indicator);
+            result.projected_active_measure += mass * indicator;
         }
         result.measure_closure_residual =
-            result.projected_liquid_measure -
-            result.retained_liquid_measure;
+            result.projected_active_measure -
+            result.retained_active_measure;
         const Real measure_tolerance = scaledTolerance(
             options.invariant_tolerance,
             {graph.physical_measure,
-             result.retained_liquid_measure,
-             result.projected_liquid_measure});
+             result.retained_active_measure,
+             result.projected_active_measure});
         result.rule_moment_closure_satisfied =
             result.maximum_rule_moment_closure_residual <=
             measure_tolerance;
@@ -717,8 +717,8 @@ projectLevelSetP1PhaseIndicatorFromCutContext(
             !result.complement_bounds_satisfied ||
             !result.rule_moment_closure_satisfied ||
             !result.global_measure_closure_satisfied ||
-            result.retained_liquid_measure < -measure_tolerance ||
-            result.retained_liquid_measure >
+            result.retained_active_measure < -measure_tolerance ||
+            result.retained_active_measure >
                 graph.physical_measure + measure_tolerance) {
             result.diagnostic =
                 "P1 phase projection failed a bound or retained-measure identity";
@@ -738,7 +738,7 @@ LevelSetP1PhaseGeometrySensitivityResult
 buildLevelSetP1PhaseGeometrySensitivity(
     const systems::FESystem& system,
     FieldId level_set_field,
-    FieldId liquid_indicator_field,
+    FieldId phase_indicator_field,
     const LevelSetP1PhaseTransportGraph& graph,
     const LevelSetP1PhaseProjectionOptions& options,
     std::span<const Real> solution)
@@ -747,14 +747,14 @@ buildLevelSetP1PhaseGeometrySensitivity(
     result.interface_marker = options.interface_marker;
     try {
         if (!graph.success || level_set_field == INVALID_FIELD_ID ||
-            liquid_indicator_field == INVALID_FIELD_ID ||
-            level_set_field == liquid_indicator_field) {
+            phase_indicator_field == INVALID_FIELD_ID ||
+            level_set_field == phase_indicator_field) {
             result.diagnostic =
                 "P1 phase geometry sensitivity requires distinct valid fields and a current phase graph";
             return result;
         }
         if (options.interface_marker < 0 ||
-            options.liquid_side == geometry::CutIntegrationSide::Interface ||
+            options.active_side == geometry::CutIntegrationSide::Interface ||
             !std::isfinite(options.invariant_tolerance) ||
             options.invariant_tolerance < Real{0.0}) {
             result.diagnostic =
@@ -763,10 +763,10 @@ buildLevelSetP1PhaseGeometrySensitivity(
         }
 
         const auto& mesh = system.meshAccess();
-        const auto& phase_record = system.fieldRecord(liquid_indicator_field);
+        const auto& phase_record = system.fieldRecord(phase_indicator_field);
         const auto& level_set_record = system.fieldRecord(level_set_field);
         const auto& phase_dofs =
-            system.fieldDofHandler(liquid_indicator_field);
+            system.fieldDofHandler(phase_indicator_field);
         const auto& level_set_dofs = system.fieldDofHandler(level_set_field);
         const auto collective = projectionCollectiveContext(mesh, phase_dofs);
         result.dimension = mesh.dimension();
@@ -1210,7 +1210,7 @@ buildLevelSetP1PhaseGeometrySensitivity(
 LevelSetP1PhaseGeometryCorrectionResult
 solveLevelSetP1PhaseGeometryCorrection(
     const LevelSetP1PhaseGeometrySensitivityResult& sensitivity,
-    geometry::CutIntegrationSide liquid_side,
+    geometry::CutIntegrationSide active_side,
     std::span<const Real> current_level_set,
     std::span<const Real> current_liquid_phase_mass,
     std::span<const Real> target_liquid_phase_mass,
@@ -1224,7 +1224,7 @@ solveLevelSetP1PhaseGeometryCorrection(
             current_level_set.size() != nodes ||
             current_liquid_phase_mass.size() != nodes ||
             target_liquid_phase_mass.size() != nodes ||
-            liquid_side == geometry::CutIntegrationSide::Interface) {
+            active_side == geometry::CutIntegrationSide::Interface) {
             result.diagnostic =
                 "P1 phase geometry correction received incompatible sensitivity, side, or state spans";
             return result;
@@ -1392,7 +1392,7 @@ solveLevelSetP1PhaseGeometryCorrection(
         };
 
         const Real side_derivative =
-            liquid_side == geometry::CutIntegrationSide::Negative
+            active_side == geometry::CutIntegrationSide::Negative
                 ? Real{-1.0}
                 : Real{1.0};
         std::vector<Real> right_hand_side(nodes, Real{0.0});

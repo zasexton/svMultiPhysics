@@ -48,8 +48,8 @@ namespace {
 
 struct WallCrossing {
     GlobalIndex cell;
-    GlobalIndex wet;
-    GlobalIndex dry;
+    GlobalIndex active_vertex;
+    GlobalIndex inactive_vertex;
     Real fraction;
     // A strict interior root needs no confirmation from another wall edge.
     GlobalIndex vertex_dof{INVALID_GLOBAL_INDEX};
@@ -92,8 +92,8 @@ Real cellCosTheta(const assembly::IMeshAccess& mesh, const std::vector<GlobalInd
 std::map<GlobalIndex, Real> uniqueVertexAngles(const std::vector<GlobalIndex>& rays)
 {
     struct EdgeSides {
-        bool dry{};
-        std::optional<Real> wet_angle;
+        bool has_inactive_side{};
+        std::optional<Real> active_angle;
     };
     std::map<std::pair<GlobalIndex, GlobalIndex>, EdgeSides> edges;
     std::map<GlobalIndex, Real> angles;
@@ -111,15 +111,15 @@ std::map<GlobalIndex, Real> uniqueVertexAngles(const std::vector<GlobalIndex>& r
         } else {
             auto& sides = edges[{vertex, edge_endpoint}];
             if (rays[i + 2u] < 0) {
-                sides.wet_angle = angle;
+                sides.active_angle = angle;
             } else {
-                sides.dry = true;
+                sides.has_inactive_side = true;
             }
         }
     }
     for (const auto& [edge, sides] : edges) {
-        if (sides.wet_angle && sides.dry) {
-            add(edge.first, *sides.wet_angle);
+        if (sides.active_angle && sides.has_inactive_side) {
+            add(edge.first, *sides.active_angle);
         }
     }
     return angles;
@@ -307,8 +307,8 @@ void ContactPointVelocityConstraint::apply(const systems::FESystem& system,
         if (mesh.dimension() != 2) {
             throw std::invalid_argument("supports only 2D meshes");
         }
-        // The level set oriented by the liquid side: negative in the liquid.
-        const Real orientation = law_.liquid_side == LevelSetConstraintSide::Positive ? Real{-1.0} : Real{1.0};
+        // The level set oriented by the active side: negative in the liquid.
+        const Real orientation = law_.active_side == LevelSetConstraintSide::Positive ? Real{-1.0} : Real{1.0};
         if (law_.level_set_vertex_value) {
             phi_at = [&, orientation](GlobalIndex vertex) {
                 return orientation * (law_.level_set_vertex_value(vertex) - law_.isovalue);
@@ -368,21 +368,21 @@ void ContactPointVelocityConstraint::apply(const systems::FESystem& system,
                 const auto vb = cell_nodes[static_cast<std::size_t>(face_nodes[1])];
                 const Real fa = phi_at(va);
                 const Real fb = phi_at(vb);
-                const bool a_wet = fa < fb;
-                const Real fw = a_wet ? fa : fb;
-                const Real fd = a_wet ? fb : fa;
+                const bool a_active = fa < fb;
+                const Real fw = a_active ? fa : fb;
+                const Real fd = a_active ? fb : fa;
                 if (!(fw <= 0.0 && fd >= 0.0 && fw < fd)) {
                     return;  // Same sign or an entire edge at the isovalue.
                 }
                 if (law_.wall_boundary_markers.size() > 1u && !selected_faces.insert(face).second) {
                     return;  // Overlapping marker selections describe the same edge.
                 }
-                const auto wet = a_wet ? va : vb;
-                const auto dry = a_wet ? vb : va;
+                const auto active_vertex = a_active ? va : vb;
+                const auto inactive_vertex = a_active ? vb : va;
                 GlobalIndex vertex_dof = INVALID_GLOBAL_INDEX;
                 if (fw == 0.0 || fd == 0.0) {
-                    const auto vertex = fw == 0.0 ? wet : dry;
-                    const auto neighbor = fw == 0.0 ? dry : wet;
+                    const auto vertex = fw == 0.0 ? active_vertex : inactive_vertex;
+                    const auto neighbor = fw == 0.0 ? inactive_vertex : active_vertex;
                     vertex_dof = tangential_dof(vertex);
                     const auto x = mesh.getNodeCoordinates(vertex)[tangential_axis_];
                     const auto xn = mesh.getNodeCoordinates(neighbor)[tangential_axis_];
@@ -396,7 +396,7 @@ void ContactPointVelocityConstraint::apply(const systems::FESystem& system,
                     }
                 }
                 const Real s = fw == 0.0 ? 0.0 : fw / (fw - fd);
-                crossings.push_back({cell, wet, dry, s, vertex_dof});
+                crossings.push_back({cell, active_vertex, inactive_vertex, s, vertex_dof});
             });
         }
     });
@@ -409,7 +409,7 @@ void ContactPointVelocityConstraint::apply(const systems::FESystem& system,
     }
     std::erase_if(wall_sides, [](const auto& entry) {
         const auto& sides = entry.second;
-        return sides[0] * sides[1] != -1;  // Need one wet and one dry neighbor.
+        return sides[0] * sides[1] != -1;  // Need one active and one inactive neighbor.
     });
     std::map<GlobalIndex, Real> vertex_angles;
     if (!wall_sides.empty()) {
@@ -496,12 +496,12 @@ void ContactPointVelocityConstraint::apply(const systems::FESystem& system,
         };
 
         std::vector<GlobalIndex> cell_nodes;
-        for (const auto& [cell, wet, dry, s, vertex_dof] : crossings) {
+        for (const auto& [cell, active_vertex, inactive_vertex, s, vertex_dof] : crossings) {
             if (vertex_dof != INVALID_GLOBAL_INDEX && !vertex_angles.contains(vertex_dof)) {
                 continue;
             }
-            const auto xw = mesh.getNodeCoordinates(wet);
-            const auto xd = mesh.getNodeCoordinates(dry);
+            const auto xw = mesh.getNodeCoordinates(active_vertex);
+            const auto xd = mesh.getNodeCoordinates(inactive_vertex);
             mesh.getCellNodes(cell, cell_nodes);
             const Real cos_theta = vertex_dof == INVALID_GLOBAL_INDEX
                 ? cellCosTheta(mesh, cell_nodes, phi_at, law_.wall_normal)
@@ -518,8 +518,8 @@ void ContactPointVelocityConstraint::apply(const systems::FESystem& system,
             // sign * ((1 - s) u_w + s u_d) = target, expanded.
             std::map<GlobalIndex, double> coefficients;
             double constant = 0.0;
-            expand(wet, sign * (1.0 - s), coefficients, constant);
-            expand(dry, sign * s, coefficients, constant);
+            expand(active_vertex, sign * (1.0 - s), coefficients, constant);
+            expand(inactive_vertex, sign * s, coefficients, constant);
             GlobalIndex slave = INVALID_GLOBAL_INDEX;
             double pivot = 0.0;
             for (const auto& [dof, coefficient] : coefficients) {
@@ -664,7 +664,7 @@ std::string ContactPointVelocityConstraint::manifestDescription() const
         << law_.wall_normal[2]
         << " level_set='" << law_.level_set_field_name << "'"
         << " isovalue=" << law_.isovalue
-        << " liquid_side=" << (law_.liquid_side == LevelSetConstraintSide::Positive ? "positive" : "negative")
+        << " liquid_side=" << (law_.active_side == LevelSetConstraintSide::Positive ? "positive" : "negative")
         << " vertex_value_source=" << (law_.level_set_vertex_value ? "callback" : "mesh_field");
     // The contact-speed law is a closure; sample it so that the manifest
     // compares its values exactly.

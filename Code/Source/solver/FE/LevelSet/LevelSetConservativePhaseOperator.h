@@ -3,7 +3,7 @@
 /**
  * @file
  * @ingroup fe_level_set
- * @brief Geometry-aware P1 graph operator for conservative liquid-indicator
+ * @brief Geometry-aware P1 graph operator for conservative phase-indicator
  * transport.
  */
 
@@ -148,7 +148,7 @@ levelSetP1PhaseGraphIdentity(
 [[nodiscard]] LevelSetP1PhaseTransportGraph
 buildLevelSetP1PhaseTransportGraph(
     const systems::FESystem& system,
-    FieldId liquid_indicator_field,
+    FieldId phase_indicator_field,
     const LevelSetP1PhaseGraphOptions& options = {});
 
 struct LevelSetP1PhaseStageOptions {
@@ -285,9 +285,9 @@ struct LevelSetP1PhaseSplitStageValidationResult {
 [[nodiscard]] LevelSetP1PhaseTransportStageResult
 advanceLevelSetP1ConservativePhaseStage(
     const LevelSetP1PhaseTransportGraph& graph,
-    std::span<const Real> previous_liquid_indicator,
-    std::span<const Real> lower_liquid_indicator,
-    std::span<const Real> upper_liquid_indicator,
+    std::span<const Real> previous_phase_indicator,
+    std::span<const Real> lower_phase_indicator,
+    std::span<const Real> upper_phase_indicator,
     std::span<const std::array<Real, 3>> nodal_velocity,
     Real time_step,
     const LevelSetP1PhaseStageOptions& options = {});
@@ -311,7 +311,7 @@ advanceLevelSetP1ConservativePhaseStage(
 [[nodiscard]] LevelSetP1PhaseSplitStageValidationResult
 validateLevelSetP1PhaseSplitStage(
     const LevelSetP1PhaseTransportGraph& graph,
-    std::span<const Real> previous_liquid_indicator,
+    std::span<const Real> previous_phase_indicator,
     const LevelSetP1PhaseTransportStageResult& stage,
     const LevelSetP1PhaseSplitStageProvenance& provenance);
 

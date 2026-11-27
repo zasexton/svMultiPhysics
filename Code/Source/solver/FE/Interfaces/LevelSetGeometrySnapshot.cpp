@@ -4251,14 +4251,14 @@ FreeSurfaceDiscreteFunctionalState freeSurfaceDiscreteFunctionalLayout(
     }
 
     const auto wall_role =
-        parameters.liquid_side == geometry::CutIntegrationSide::Negative
+        parameters.active_side == geometry::CutIntegrationSide::Negative
             ? LevelSetGeometryRuleRole::NegativeExteriorBoundary
             : LevelSetGeometryRuleRole::PositiveExteriorBoundary;
 
     FreeSurfaceDiscreteFunctionalState state;
     state.snapshot_revision_key =
         snapshot.revision().snapshot_revision_key;
-    state.liquid_side = parameters.liquid_side;
+    state.active_side = parameters.active_side;
     state.surface_tension = parameters.surface_tension;
     state.volume_multiplier = parameters.volume_multiplier;
 
@@ -4321,8 +4321,8 @@ freeSurfaceDiscreteFunctionalVariationLayout(
     const LevelSetGeometrySnapshot& snapshot,
     const FreeSurfaceDiscreteFunctionalParameters& parameters)
 {
-    if (parameters.liquid_side != geometry::CutIntegrationSide::Negative &&
-        parameters.liquid_side != geometry::CutIntegrationSide::Positive) {
+    if (parameters.active_side != geometry::CutIntegrationSide::Negative &&
+        parameters.active_side != geometry::CutIntegrationSide::Positive) {
         throw std::invalid_argument(
             "free-surface functional first variation requires a physical liquid side");
     }
@@ -4333,7 +4333,7 @@ freeSurfaceDiscreteFunctionalVariationLayout(
 
     FreeSurfaceDiscreteFunctionalVariationState state;
     state.snapshot_revision_key = layout.snapshot_revision_key;
-    state.liquid_side = layout.liquid_side;
+    state.active_side = layout.active_side;
     state.surface_tension = layout.surface_tension;
     state.volume_multiplier = layout.volume_multiplier;
     state.walls.reserve(layout.walls.size());
@@ -4532,14 +4532,14 @@ void finalizeFreeSurfaceDynamicContactState(
 FreeSurfaceDynamicContactState evaluateFreeSurfaceDynamicContactState(
     const LevelSetGeometrySnapshot& snapshot,
     const FreeSurfaceDiscreteFunctionalParameters& parameters,
-    const FreeSurfaceDiscreteFunctionalVectorEvaluator& velocity)
+    const SnapshotVectorEvaluator& velocity)
 {
     if (!snapshot.revision().complete()) {
         throw std::invalid_argument(
             "free-surface dynamic-contact evaluation requires a revision-complete snapshot");
     }
-    if (parameters.liquid_side != geometry::CutIntegrationSide::Negative &&
-        parameters.liquid_side != geometry::CutIntegrationSide::Positive) {
+    if (parameters.active_side != geometry::CutIntegrationSide::Negative &&
+        parameters.active_side != geometry::CutIntegrationSide::Positive) {
         throw std::invalid_argument(
             "free-surface dynamic-contact evaluation requires a physical liquid side");
     }
@@ -4608,10 +4608,10 @@ FreeSurfaceDynamicContactState evaluateFreeSurfaceDynamicContactState(
     FreeSurfaceDynamicContactState state;
     state.snapshot_revision_key =
         snapshot.revision().snapshot_revision_key;
-    state.liquid_side = parameters.liquid_side;
+    state.active_side = parameters.active_side;
     state.surface_tension = parameters.surface_tension;
     const auto wall_role =
-        parameters.liquid_side == geometry::CutIntegrationSide::Negative
+        parameters.active_side == geometry::CutIntegrationSide::Negative
             ? LevelSetGeometryRuleRole::NegativeExteriorBoundary
             : LevelSetGeometryRuleRole::PositiveExteriorBoundary;
     for (const auto& record : snapshot.rules()) {
@@ -4720,7 +4720,7 @@ FreeSurfaceDynamicContactState evaluateFreeSurfaceDynamicContactState(
                     "free-surface dynamic-contact rule has invalid physical geometry");
             }
             auto liquid_normal = physical.normal;
-            if (parameters.liquid_side ==
+            if (parameters.active_side ==
                 geometry::CutIntegrationSide::Positive) {
                 for (auto& component : liquid_normal) {
                     component = -component;

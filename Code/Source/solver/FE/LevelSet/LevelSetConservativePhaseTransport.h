@@ -3,7 +3,7 @@
 /**
  * @file
  * @ingroup fe_level_set
- * @brief Conservative algebraic-edge correction for a liquid indicator.
+ * @brief Conservative algebraic-edge correction for a phase indicator.
  */
 
 #include "Core/Types.h"
@@ -20,7 +20,7 @@ namespace svmp::FE::level_set {
  *
  * An edge is stored exactly once with `first_node < second_node`.  A positive
  * transfer is mass delivered to `first_node` and removed from `second_node`.
- * Both transfers have units of liquid-indicator measure integrated over the
+ * Both transfers have units of phase-indicator measure integrated over the
  * complete time stage.
  */
 struct LevelSetPhaseFluxEdge {
@@ -33,8 +33,8 @@ struct LevelSetPhaseFluxEdge {
 /**
  * @brief Inputs for one fully discrete conservative correction stage.
  *
- * The transported unknown is the nodal liquid indicator q, with q=1 in the
- * liquid and q=0 outside it.  Its declared discrete phase measure is
+ * The transported unknown is the nodal phase indicator q, with q=1 in the
+ * the active region and q=0 outside it.  Its declared discrete phase measure is
  * `sum_i lumped_control_volume[i] * q[i]`.  Per-node lower and upper bounds
  * must lie in [0, 1].  Empty boundary/source spans mean identically zero.
  *
@@ -46,9 +46,9 @@ struct LevelSetPhaseFluxEdge {
  */
 struct LevelSetPhaseFluxStageView {
     std::span<const Real> lumped_control_volume{};
-    std::span<const Real> previous_liquid_indicator{};
-    std::span<const Real> lower_liquid_indicator{};
-    std::span<const Real> upper_liquid_indicator{};
+    std::span<const Real> previous_phase_indicator{};
+    std::span<const Real> lower_phase_indicator{};
+    std::span<const Real> upper_phase_indicator{};
     std::span<const LevelSetPhaseFluxEdge> interior_edges{};
     std::span<const Real> physical_boundary_mass_transfer{};
     std::span<const Real> discrete_divergence_mass_source{};
@@ -72,9 +72,9 @@ struct LevelSetPhaseFluxEdgeLedger {
 struct LevelSetPhaseFluxNodeLedger {
     GlobalIndex node{-1};
     Real lumped_control_volume{0.0};
-    Real previous_liquid_indicator{0.0};
-    Real lower_liquid_indicator{0.0};
-    Real upper_liquid_indicator{0.0};
+    Real previous_phase_indicator{0.0};
+    Real lower_phase_indicator{0.0};
+    Real upper_phase_indicator{0.0};
     Real physical_boundary_mass_transfer{0.0};
     Real discrete_divergence_mass_source{0.0};
     Real low_order_interior_mass_transfer{0.0};
@@ -84,9 +84,9 @@ struct LevelSetPhaseFluxNodeLedger {
     Real negative_raw_antidiffusive_mass{0.0};
     Real positive_correction_factor{1.0};
     Real negative_correction_factor{1.0};
-    Real low_order_liquid_indicator{0.0};
-    Real raw_target_liquid_indicator{0.0};
-    Real limited_liquid_indicator{0.0};
+    Real low_order_phase_indicator{0.0};
+    Real raw_target_phase_indicator{0.0};
+    Real limited_phase_indicator{0.0};
     Real low_order_local_mass_balance_residual{0.0};
     Real raw_target_local_mass_balance_residual{0.0};
     Real local_mass_balance_residual{0.0};
@@ -106,10 +106,10 @@ struct LevelSetPhaseFluxNodeLedger {
 struct LevelSetPhaseFluxComponentLedger {
     GlobalIndex component_id{INVALID_GLOBAL_INDEX};
     std::size_t nodes{0u};
-    Real previous_liquid_measure{0.0};
-    Real low_order_liquid_measure{0.0};
-    Real raw_target_liquid_measure{0.0};
-    Real limited_liquid_measure{0.0};
+    Real previous_active_measure{0.0};
+    Real low_order_active_measure{0.0};
+    Real raw_target_active_measure{0.0};
+    Real limited_active_measure{0.0};
     Real physical_boundary_mass_transfer{0.0};
     Real discrete_divergence_mass_source{0.0};
     Real low_order_interior_mass_transfer{0.0};
@@ -135,10 +135,10 @@ struct LevelSetPhaseFluxCorrectionResult {
     bool constant_preservation_required{true};
     bool constant_preservation_satisfied{false};
     std::size_t limited_edges{0u};
-    Real total_previous_liquid_measure{0.0};
-    Real total_low_order_liquid_measure{0.0};
-    Real total_raw_target_liquid_measure{0.0};
-    Real total_limited_liquid_measure{0.0};
+    Real total_previous_active_measure{0.0};
+    Real total_low_order_active_measure{0.0};
+    Real total_raw_target_active_measure{0.0};
+    Real total_limited_active_measure{0.0};
     Real total_physical_boundary_mass_transfer{0.0};
     Real total_discrete_divergence_mass_source{0.0};
     Real low_order_nodal_cancellation_residual{0.0};
@@ -163,12 +163,12 @@ struct LevelSetPhaseFluxCorrectionResult {
     Real raw_target_global_mass_balance_residual{0.0};
     Real global_mass_balance_residual{0.0};
     Real maximum_constant_preservation_error{0.0};
-    Real minimum_low_order_liquid_indicator{0.0};
-    Real maximum_low_order_liquid_indicator{0.0};
-    Real minimum_raw_target_liquid_indicator{0.0};
-    Real maximum_raw_target_liquid_indicator{0.0};
-    Real minimum_limited_liquid_indicator{0.0};
-    Real maximum_limited_liquid_indicator{0.0};
+    Real minimum_low_order_phase_indicator{0.0};
+    Real maximum_low_order_phase_indicator{0.0};
+    Real minimum_raw_target_phase_indicator{0.0};
+    Real maximum_raw_target_phase_indicator{0.0};
+    Real minimum_limited_phase_indicator{0.0};
+    Real maximum_limited_phase_indicator{0.0};
     std::vector<LevelSetPhaseFluxNodeLedger> nodes{};
     std::vector<LevelSetPhaseFluxEdgeLedger> edges{};
     std::vector<GlobalIndex> node_component_ids{};
