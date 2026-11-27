@@ -210,6 +210,8 @@ bool ray_sphere_intersect(const Ray& ray,
 
 // ---- Distance computations ----
 
+using ProjectionJacobian = std::array<std::array<real_t, 3>, 3>;
+
 /**
  * @brief Distance from point to line segment
  * @param p Query point
@@ -221,6 +223,13 @@ real_t point_segment_distance(const std::array<real_t,3>& p,
                              const std::array<real_t,3>& a,
                              const std::array<real_t,3>& b,
                              std::array<real_t,3>* closest = nullptr);
+
+/// Also return the spatial derivative of the selected closest point.
+real_t point_segment_distance(const std::array<real_t,3>& p,
+                              const std::array<real_t,3>& a,
+                              const std::array<real_t,3>& b,
+                              std::array<real_t,3>* closest,
+                              ProjectionJacobian* derivative);
 
 /**
  * @brief Distance from point to triangle
@@ -234,6 +243,14 @@ real_t point_triangle_distance(const std::array<real_t,3>& p,
                               const std::array<real_t,3>& b,
                               const std::array<real_t,3>& c,
                               std::array<real_t,3>* closest = nullptr);
+
+/// The active face, edge or vertex determines the differential at a switch.
+real_t point_triangle_distance(const std::array<real_t,3>& p,
+                               const std::array<real_t,3>& a,
+                               const std::array<real_t,3>& b,
+                               const std::array<real_t,3>& c,
+                               std::array<real_t,3>* closest,
+                               ProjectionJacobian* derivative);
 
 /**
  * @brief Distance from point to AABB

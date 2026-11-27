@@ -108,6 +108,27 @@ std::shared_ptr<ProductSpace> build_displacement_space()
     return std::make_shared<ProductSpace>(scalar, /*components=*/2);
 }
 
+// Exercise the contract for an external search adapter that provides points only.
+class PointOnlyMarkerSearch final : public svmp::FE::systems::ISearchAccess {
+public:
+    explicit PointOnlyMarkerSearch(const Mesh& mesh) : native_(mesh) {}
+    int dimension() const noexcept override { return native_.dimension(); }
+    void build() const override { native_.build(); }
+    std::vector<GlobalIndex> verticesInRadius(const std::array<Real, 3>& x, Real r) const override
+    {
+        return native_.verticesInRadius(x, r);
+    }
+    ClosestBoundaryPoint closestBoundaryPointOnMarker(
+        int marker, const std::array<Real, 3>& point, Real radius) const override
+    {
+        auto hit = native_.closestBoundaryPointOnMarker(marker, point, radius);
+        hit.projection_jacobian.reset();
+        return hit;
+    }
+private:
+    MeshSearchAccess native_;
+};
+
 } // namespace
 
 TEST(SearchAccess, ClosestBoundaryPointOnMarkerFiltersCorrectly)
@@ -217,7 +238,7 @@ TEST(SurfaceContactKernel, AssemblesOppositeForces)
     EXPECT_NEAR(total_fx, 0.0, tol);
 }
 
-TEST(SurfaceContactKernel, ConstantPenaltyTractionHasThePhysicalFaceMeasure)
+TEST(SurfaceContactKernel, PhysicalFaceTractionAndMovingProjectionTangent)
 {
     namespace fe = svmp::FE;
     using Point = std::array<Real, 3>;
@@ -320,10 +341,36 @@ TEST(SurfaceContactKernel, ConstantPenaltyTractionHasThePhysicalFaceMeasure)
                 EXPECT_NEAR(force[d], (side ? 1. : -1.) * area * normal[d], 2e-12);
             }
         }
+
+        std::vector<Real> direction(dofs);
+        for (GlobalIndex i = 0; i < dofs; ++i) {
+            direction[i] = std::sin(Real(i + 1));
+            state[i] = 0.004 * std::cos(Real(i + 1));
+        }
+        DenseMatrixView matrix(dofs);
+        request.want_matrix = true;
+        request.want_vector = false;
+        ASSERT_TRUE(system.assemble(request, SystemStateView{.u = state}, &matrix, nullptr).success);
+        constexpr Real h = 0x1p-20;
+        auto plus = state, minus = state;
+        for (GlobalIndex i = 0; i < dofs; ++i) {
+            plus[i] += h * direction[i];
+            minus[i] -= h * direction[i];
+        }
+        DenseVectorView rp(dofs), rm(dofs);
+        request.want_matrix = false;
+        request.want_vector = true;
+        ASSERT_TRUE(system.assemble(request, SystemStateView{.u = plus}, nullptr, &rp).success);
+        ASSERT_TRUE(system.assemble(request, SystemStateView{.u = minus}, nullptr, &rm).success);
+        for (GlobalIndex row = 0; row < dofs; ++row) {
+            Real action = 0.;
+            for (GlobalIndex col = 0; col < dofs; ++col) action += matrix(row, col) * direction[col];
+            EXPECT_NEAR(action, (rp.getVectorEntry(row) - rm.getVectorEntry(row)) / (2. * h), 3e-8);
+        }
     }
 }
 
-TEST(SurfaceContactKernel, AssemblesSymmetricJacobian)
+TEST(SurfaceContactKernel, NormalJacobianMatchesTheEdgeMassMatrix)
 {
     const int slave_marker = 10;
     const int master_marker = 20;
@@ -363,7 +410,6 @@ TEST(SurfaceContactKernel, AssemblesSymmetricJacobian)
     DenseMatrixView jac(sys.dofHandler().getNumDofs());
     const auto rep = sys.assemble(req, state, &jac, nullptr);
     EXPECT_TRUE(rep.success);
-    EXPECT_TRUE(jac.isSymmetric(1e-12));
 
     const auto& dh = sys.fieldDofHandler(u);
     const auto* entity = dh.getEntityDofMap();
@@ -396,6 +442,69 @@ TEST(SurfaceContactKernel, AssemblesSymmetricJacobian)
     EXPECT_NEAR(jac(v1x, v2x), -k * M01, tol);
     EXPECT_NEAR(jac(v1x, v4x), +k * M00, tol);
     EXPECT_NEAR(jac(v1x, v7x), +k * M01, tol);
+
+    // Sliding the entire slave edge along its tangent changes only the
+    // distribution of the opposite normal force between the master nodes.
+    const auto v1y = offset + v1[1];
+    const auto v2y = offset + v2[1];
+    EXPECT_NEAR(jac(v1y, v1y) + jac(v1y, v2y), 0., tol);
+    EXPECT_NEAR(jac(v4x, v1y) + jac(v4x, v2y), -1., tol);
+    EXPECT_NEAR(jac(v7x, v1y) + jac(v7x, v2y), 1., tol);
+}
+
+TEST(SurfaceContactKernel, MovingProjectionTangentMatchesIndependentResidualColumns)
+{
+    auto mesh = build_two_quad_gap_mesh(0.1, 10, 20);
+    FESystem system(mesh);
+    const auto field = system.addField(FieldSpec{
+        .name = "u", .space = build_displacement_space(), .components = 2});
+    system.addOperator("contact");
+    PenaltySurfaceContactConfig config;
+    config.field = field;
+    config.slave_marker = 10;
+    config.master_marker = 20;
+    config.search_radius = 1.;
+    config.activation_distance = 0.4;
+    config.penalty = 10.;
+    config.quadrature_order = 2;
+    system.addGlobalKernel("contact", std::make_shared<PenaltySurfaceContactKernel>(config));
+    system.setup();
+    const auto count = system.dofHandler().getNumDofs();
+    const auto* nodes = system.fieldDofHandler(field).getEntityDofMap();
+    ASSERT_NE(nodes, nullptr);
+    // Vary the master displacement along its edge. In the second case one
+    // slave quadrature point projects past the upper endpoint of that edge.
+    for (const Real slide : {0.02, 0.28, -0.26}) {
+        if (slide < 0.) system.setSearchAccess(std::make_shared<PointOnlyMarkerSearch>(*mesh));
+        std::vector<Real> values(count, 0.);
+        for (const auto node : {1, 2}) values[nodes->getVertexDofs(node)[1]] = slide;
+        values[nodes->getVertexDofs(4)[0]] = -0.01;
+        values[nodes->getVertexDofs(7)[0]] = 0.04;
+        values[nodes->getVertexDofs(7)[1]] = 0.03;
+        DenseMatrixView jacobian(count);
+        AssemblyRequest request;
+        request.op = "contact";
+        request.want_matrix = true;
+        ASSERT_TRUE(system.assemble(request, SystemStateView{.u = values}, &jacobian, nullptr).success);
+
+        request.want_matrix = false;
+        request.want_vector = true;
+        constexpr Real h = 0x1p-20;
+        for (GlobalIndex col = 0; col < count; ++col) {
+            auto plus = values;
+            auto minus = values;
+            plus[col] += h;
+            minus[col] -= h;
+            DenseVectorView rp(count), rm(count);
+            ASSERT_TRUE(system.assemble(request, SystemStateView{.u = plus}, nullptr, &rp).success);
+            ASSERT_TRUE(system.assemble(request, SystemStateView{.u = minus}, nullptr, &rm).success);
+            for (GlobalIndex row = 0; row < count; ++row) {
+                const Real fd = (rp.getVectorEntry(row) - rm.getVectorEntry(row)) / (2. * h);
+                EXPECT_NEAR(jacobian(row, col), fd, 2e-8)
+                    << "slide=" << slide << " row=" << row << " col=" << col;
+            }
+        }
+    }
 }
 
 TEST(SurfaceContactKernel, ContactCountStatePersistsAcrossTimeSteps)

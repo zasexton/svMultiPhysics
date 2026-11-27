@@ -142,7 +142,7 @@ public:
 
         Real best = max_distance;
         std::array<Real, 3> best_pt{0.0, 0.0, 0.0};
-        GlobalIndex best_face = INVALID_GLOBAL_INDEX;
+        const MarkerTriangle* best_primitive = nullptr;
 
         std::vector<int> stack;
         stack.push_back(root_);
@@ -171,7 +171,7 @@ public:
                     if (d < best) {
                         best = d;
                         best_pt = cp;
-                        best_face = tri.face_id;
+                        best_primitive = &tri;
                     }
                 }
             } else {
@@ -180,11 +180,18 @@ public:
             }
         }
 
-        if (best_face != INVALID_GLOBAL_INDEX && std::isfinite(best)) {
+        if (best_primitive && std::isfinite(best)) {
             out.found = true;
-            out.face_id = best_face;
+            out.face_id = best_primitive->face_id;
             out.closest_point = best_pt;
             out.distance = best;
+            auto& derivative = out.projection_jacobian.emplace();
+            const auto& tri = *best_primitive;
+            if (tri.is_segment) {
+                svmp::search::point_segment_distance(point, tri.a, tri.b, nullptr, &derivative);
+            } else {
+                svmp::search::point_triangle_distance(point, tri.a, tri.b, tri.c, nullptr, &derivative);
+            }
         }
 
         return out;

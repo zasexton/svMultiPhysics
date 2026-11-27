@@ -428,6 +428,34 @@ TEST(SearchAccess, MeshSearchAccess_ClosestBoundaryPointOnMarker_RebuildsAfterGe
     EXPECT_NEAR(cp_cur.distance, 0.1, 1e-12);
 }
 
+TEST(SearchAccess, MarkerTriangleProjectionDifferentiatesItsActiveFaceEdgeOrVertex)
+{
+    auto mesh = build_single_tetra_mesh();
+    auto& base = mesh->local_mesh();
+    constexpr int marker = 76;
+    for (svmp::index_t f = 0; f < static_cast<svmp::index_t>(base.n_faces()); ++f) {
+        const auto vertices = base.face_vertices(f);
+        if (std::find(vertices.begin(), vertices.end(), 3) == vertices.end())
+            base.set_boundary_label(f, marker);
+    }
+    const MeshSearchAccess search(*mesh);
+    using Point = std::array<Real, 3>;
+    using Matrix = ISearchAccess::ProjectionJacobian;
+    struct Case { Point query; Matrix derivative; };
+    const Case cases[] = {
+        {{0.25, 0.25, 0.1}, {{{1.,0.,0.}, {0.,1.,0.}, {0.,0.,0.}}}},
+        // The hypotenuse x+y=1 has unit tangent (1,-1,0)/sqrt(2).
+        {{0.75, 0.75, 0.1}, {{{0.5,-0.5,0.}, {-0.5,0.5,0.}, {0.,0.,0.}}}},
+        {{-0.25,-0.25,0.1}, {}}
+    };
+    for (const auto& test : cases) {
+        const auto hit = search.closestBoundaryPointOnMarker(marker, test.query);
+        ASSERT_TRUE(hit.found);
+        ASSERT_TRUE(hit.projection_jacobian);
+        EXPECT_EQ(*hit.projection_jacobian, test.derivative);
+    }
+}
+
 TEST(SearchAccess, MeshSearchAccess_CurrentMotionLeavesReferenceMarkerQueryOnReferenceGeometry)
 {
     const int marker = 79;

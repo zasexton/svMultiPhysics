@@ -53,11 +53,15 @@ public:
         Real distance{std::numeric_limits<Real>::infinity()};
     };
 
+    using ProjectionJacobian = std::array<std::array<Real, 3>, 3>;
+
     struct ClosestBoundaryPoint {
         bool found{false};
         GlobalIndex face_id{INVALID_GLOBAL_INDEX};
         std::array<Real, 3> closest_point{0.0, 0.0, 0.0};
         Real distance{std::numeric_limits<Real>::infinity()};
+        /// d closest_point[i] / d query_point[j] on the selected feature.
+        std::optional<ProjectionJacobian> projection_jacobian{};
     };
 
     virtual ~ISearchAccess() = default;

@@ -350,11 +350,27 @@ real_t point_segment_distance(const std::array<real_t,3>& p,
                              const std::array<real_t,3>& a,
                              const std::array<real_t,3>& b,
                              std::array<real_t,3>* closest) {
+  return point_segment_distance(p, a, b, closest, nullptr);
+}
+
+real_t point_segment_distance(const std::array<real_t,3>& p,
+                              const std::array<real_t,3>& a,
+                              const std::array<real_t,3>& b,
+                              std::array<real_t,3>* closest,
+                              ProjectionJacobian* derivative) {
   auto ab = sub3(b, a);
   auto ap = sub3(p, a);
 
-  real_t t = dot3(ap, ab) / dot3(ab, ab);
-  t = std::max(0.0, std::min(1.0, t));
+  const real_t length_squared = dot3(ab, ab);
+  const real_t t = length_squared > 0 ? std::clamp(dot3(ap, ab) / length_squared, 0., 1.) : 0.;
+  if (derivative) {
+    *derivative = {};
+    if (t > 0. && t < 1.) {
+      for (int i = 0; i < 3; ++i)
+        for (int j = 0; j < 3; ++j)
+          (*derivative)[i][j] = ab[i] * ab[j] / length_squared;
+    }
+  }
 
   auto closest_point = add3(a, scale3(ab, t));
   if (closest) {
@@ -370,6 +386,15 @@ real_t point_triangle_distance(const std::array<real_t,3>& p,
                               const std::array<real_t,3>& b,
                               const std::array<real_t,3>& c,
                               std::array<real_t,3>* closest) {
+  return point_triangle_distance(p, a, b, c, closest, nullptr);
+}
+
+real_t point_triangle_distance(const std::array<real_t,3>& p,
+                               const std::array<real_t,3>& a,
+                               const std::array<real_t,3>& b,
+                               const std::array<real_t,3>& c,
+                               std::array<real_t,3>* closest,
+                               ProjectionJacobian* derivative) {
   // Project point onto triangle plane
   auto normal = normalize3(triangle_normal(a, b, c));
   auto ap = sub3(p, a);
@@ -381,24 +406,33 @@ real_t point_triangle_distance(const std::array<real_t,3>& p,
     if (closest) {
       *closest = proj_p;
     }
+    if (derivative) {
+      for (int i = 0; i < 3; ++i)
+        for (int j = 0; j < 3; ++j)
+          (*derivative)[i][j] = (i == j ? 1. : 0.) - normal[i] * normal[j];
+    }
     return std::abs(dist_to_plane);
   }
 
   // Find closest point on triangle edges
   std::array<real_t,3> closest_edge;
-  real_t min_dist = point_segment_distance(p, a, b, &closest_edge);
+  real_t min_dist = point_segment_distance(p, a, b, &closest_edge, derivative);
 
   std::array<real_t,3> temp_closest;
-  real_t dist = point_segment_distance(p, b, c, &temp_closest);
+  ProjectionJacobian edge_derivative;
+  auto* trial_derivative = derivative ? &edge_derivative : nullptr;
+  real_t dist = point_segment_distance(p, b, c, &temp_closest, trial_derivative);
   if (dist < min_dist) {
     min_dist = dist;
     closest_edge = temp_closest;
+    if (derivative) *derivative = edge_derivative;
   }
 
-  dist = point_segment_distance(p, c, a, &temp_closest);
+  dist = point_segment_distance(p, c, a, &temp_closest, trial_derivative);
   if (dist < min_dist) {
     min_dist = dist;
     closest_edge = temp_closest;
+    if (derivative) *derivative = edge_derivative;
   }
 
   if (closest) {

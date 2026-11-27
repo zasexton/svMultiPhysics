@@ -169,7 +169,8 @@ ContactKinematics computePenaltyForceAndJacobian(const std::array<Real, 3>& r,
     ContactKinematics out;
     const Real eps = Real(1e-14);
 
-    const Real d = std::max(normN(r, dim), eps);
+    const Real separation = normN(r, dim);
+    const Real d = std::max(separation, eps);
     if (d >= activation_distance) {
         return out;
     }
@@ -180,7 +181,7 @@ ContactKinematics computePenaltyForceAndJacobian(const std::array<Real, 3>& r,
     }
 
     const Real a = penalty * (activation_distance / d - Real(1));
-    const Real b = penalty * activation_distance / (d * d * d);
+    const Real b = separation > eps ? penalty * activation_distance / (d * d * d) : 0.;
 
     for (int i = 0; i < dim; ++i) {
         for (int j = 0; j < dim; ++j) {
@@ -192,6 +193,85 @@ ContactKinematics computePenaltyForceAndJacobian(const std::array<Real, 3>& r,
 
     out.active = true;
     return out;
+}
+
+// An adapter can supply the active feature's derivative with its hit. For a
+// point-only adapter, differentiate its own projection on the selected face.
+ISearchAccess::ProjectionJacobian projectionDerivative(
+    const ISearchAccess& search, int marker, Real radius, const std::array<Real, 3>& x,
+    const ISearchAccess::ClosestBoundaryPoint& hit, const CellCache& master,
+    const math::Vector<Real, 3>& xi, int dim)
+{
+    if (hit.projection_jacobian) return *hit.projection_jacobian;
+    const auto jacobian = master.mapping->jacobian(xi);
+    Real length = 0.;
+    for (int i = 0; i < dim; ++i)
+        for (int j = 0; j < dim; ++j)
+            length = std::max(length, std::abs(jacobian(i, j)));
+    const Real step = std::cbrt(std::numeric_limits<Real>::epsilon()) * length;
+    ISearchAccess::ProjectionJacobian result{};
+    for (int d = 0; d < dim; ++d) {
+        auto plus = x, minus = x;
+        Real h = step;
+        for (int attempt = 0; ; ++attempt) {
+            plus[d] = std::max(x[d] + h, std::nextafter(x[d], std::numeric_limits<Real>::infinity()));
+            minus[d] = std::min(x[d] - h, std::nextafter(x[d], -std::numeric_limits<Real>::infinity()));
+            const auto right = search.closestBoundaryPointOnMarker(marker, plus, radius);
+            const auto left = search.closestBoundaryPointOnMarker(marker, minus, radius);
+            const bool use_right = right.found && right.face_id == hit.face_id;
+            const bool use_left = left.found && left.face_id == hit.face_id;
+            if (use_right || use_left) {
+                const auto& a = use_left ? left.closest_point : hit.closest_point;
+                const auto& b = use_right ? right.closest_point : hit.closest_point;
+                const Real delta = (use_right ? plus[d] : x[d]) - (use_left ? minus[d] : x[d]);
+                for (int i = 0; i < dim; ++i) result[i][d] = (b[i] - a[i]) / delta;
+                break;
+            }
+            FE_THROW_IF(h == 0., InvalidStateException,
+                        "The contact search adapter must provide a derivative at an isolated projection.");
+            // A narrow face may require a smaller perturbation. Finish at the
+            // two representable neighbors if every wider query changed face.
+            h = attempt < std::numeric_limits<Real>::digits ? 0.5 * h : 0.;
+        }
+    }
+    return result;
+}
+
+struct ContactTraceDerivative {
+    ISearchAccess::ProjectionJacobian force_by_slave{};
+    std::vector<std::array<Real, 3>> master_basis_by_slave{};
+};
+
+ContactTraceDerivative differentiateContactTrace(
+    const ContactKinematics& kin, const ISearchAccess::ProjectionJacobian& projection,
+    const basis::BasisFunction& basis, const CellCache& master, const math::Vector<Real, 3>& xi,
+    int dim)
+{
+    std::vector<math::Vector<Real, 3>> gradients;
+    basis.evaluate_gradients(xi, gradients);
+    const auto inverse = master.mapping->jacobian_inverse(xi);
+    ContactTraceDerivative result;
+    const auto n = gradients.size();
+    FE_THROW_IF(master.u_local.size() != n * static_cast<std::size_t>(dim), FEException,
+                "PenaltySurfaceContactKernel: unexpected master basis gradient count");
+    result.master_basis_by_slave.resize(n);
+    for (std::size_t i = 0; i < n; ++i) {
+        const auto gradient = master.mapping->transform_gradient(gradients[i], inverse);
+        for (int d = 0; d < dim; ++d)
+            for (int k = 0; k < dim; ++k)
+                result.master_basis_by_slave[i][d] += gradient[k] * projection[k][d];
+    }
+    // r = x_s - projection(x_s) - u_m(projection(x_s)).
+    for (int d = 0; d < dim; ++d) {
+        for (int k = 0; k < dim; ++k) {
+            Real dr = (k == d ? 1. : 0.) - projection[k][d];
+            for (std::size_t i = 0; i < n; ++i)
+                dr -= master.u_local[k * n + i] * result.master_basis_by_slave[i][d];
+            for (int beta = 0; beta < dim; ++beta)
+                result.force_by_slave[beta][d] += kin.dFdr[beta][k] * dr;
+        }
+    }
+    return result;
 }
 
 struct PairContribution {
@@ -208,6 +288,7 @@ void accumulateContribution(PairContribution& c,
                             std::span<const Real> N_slave,
                             std::span<const Real> N_master,
                             const ContactKinematics& kin,
+                            const ContactTraceDerivative& trace,
                             Real weight,
                             bool want_matrix,
                             bool want_vector)
@@ -258,13 +339,18 @@ void accumulateContribution(PairContribution& c,
 
                     for (const auto& col_side : sides) {
                         for (int alpha = 0; alpha < dim; ++alpha) {
-                            const Real J = kin.dFdr[static_cast<std::size_t>(beta)][static_cast<std::size_t>(alpha)] * weight;
-                            if (J == Real(0)) continue;
+                            const bool slave_column = col_side.sign > 0;
+                            const Real force_derivative = slave_column ? trace.force_by_slave[beta][alpha]
+                                                                       : -kin.dFdr[beta][alpha];
+                            Real entry = row_fac * force_derivative;
+                            if (slave_column && row_side.sign < 0) {
+                                entry -= trace.master_basis_by_slave[i][alpha] * kin.force[beta];
+                            }
+                            if (entry == 0.) continue;
                             for (std::size_t j = 0; j < col_side.n_base; ++j) {
                                 const std::size_t col =
                                     col_side.offset + static_cast<std::size_t>(alpha) * col_side.n_base + j;
-                                const Real col_fac = static_cast<Real>(col_side.sign) * col_side.N[j];
-                                at(row, col) += row_fac * col_fac * J;
+                                at(row, col) += weight * col_side.N[j] * entry;
                             }
                         }
                     }
@@ -547,11 +633,19 @@ assembly::AssemblyResult PenaltySurfaceContactKernel::assemble(const FESystem& s
                 }
             }
 
+            ContactTraceDerivative trace;
+            if (request.want_matrix && matrix_out) {
+                const auto projection = projectionDerivative(*search, cfg_.master_marker, cfg_.search_radius,
+                                                             x_slave, cp, master_cc, xi_master, dim);
+                trace = differentiateContactTrace(kin, projection, field.space->element().basis(),
+                                                  master_cc, xi_master, dim);
+            }
             accumulateContribution(pair,
                                    dim,
                                    N_slave,
                                    N_master,
                                    kin,
+                                   trace,
                                    w,
                                    request.want_matrix && matrix_out != nullptr,
                                    request.want_vector && vector_out != nullptr);
