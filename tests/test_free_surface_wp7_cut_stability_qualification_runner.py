@@ -3,6 +3,7 @@ import importlib.util
 import json
 from pathlib import Path
 import re
+import shlex
 import subprocess
 import sys
 
@@ -101,46 +102,34 @@ def test_physics_ctest_registers_frozen_mpi_filters_and_timeouts():
         _repository() / "Code" / "Source" / "solver" / "Physics" / "CMakeLists.txt"
     ).read_text(encoding="utf-8")
 
-    assert "NAME Physics_FreeSurfaceSharpBoundary_MPI_2" in cmake
-    assert (
-        "GeneratedActiveBoundaryDomainMPI."
-        "WetFractionSweepIsOwnershipUniqueAndPartitionIndependent"
-    ) in cmake
-    assert (
-        "FreeSurfaceSharpBoundaryOperatorsMPI.OperatorWorkIsPartitionIndependent"
-    ) in cmake
-    assert (
-        "FreeSurfaceSharpBoundaryOperatorsMPI."
-        "StructuredChannelWorkIsInvariantUnderActualRepartition"
-    ) in cmake
-    assert "--gtest_filter=FreeSurfaceCutStabilityMPI.*" not in cmake
-    assert (
-        "--gtest_filter="
-        "FreeSurfaceCutStabilityMPI."
-        "PhysicalWetBlocksAndDisconnectedIslandsAreInvariantAcrossDryMPIData:"
-        "FreeSurfaceCutStabilityMPI."
-        "DistributedMovingCutRemainsStableAcrossBlockAndMetisPartitions:"
-        "FreeSurfaceCutStabilityMPI."
-        "LimitedMetisHaloFailsClosedOnIncompleteAggregationSupport:"
-        "FreeSurfaceCutStabilityMPI."
-        "TwoRankFractionOrientationRegimeMatrixMatchesSerial"
-    ) in cmake
-    assert "NAME Physics_FreeSurfaceCutStability_MPI_4" in cmake
-    assert (
-        "--gtest_filter="
-        "FreeSurfaceCutStabilityMPI."
-        "FourRankFixedCutIsInvariantAcrossBlockAndMetisPartitions:"
-        "FreeSurfaceCutStabilityMPI."
-        "FourRankFractionOrientationRegimeMatrixMatchesSerial"
-    ) in cmake
-    assert (
-        "set_tests_properties(Physics_FreeSurfaceCutStability_MPI_2 "
-        "PROPERTIES\n            TIMEOUT 43200"
-    ) in cmake
-    assert (
-        "set_tests_properties(Physics_FreeSurfaceCutStability_MPI_4 "
-        "PROPERTIES\n            TIMEOUT 43200"
-    ) in cmake
+    registry = _load_runner().load_registry(_registry_path())
+    groups = {group["id"]: group for group in registry["groups"]}
+    sharp_tests = [
+        "GeneratedActiveBoundaryDomainMPI.WetFractionSweepIsOwnershipUniqueAndPartitionIndependent",
+        "FreeSurfaceSharpBoundaryOperatorsMPI.OperatorWorkIsPartitionIndependent",
+        "FreeSurfaceSharpBoundaryOperatorsMPI.StructuredChannelWorkIsInvariantUnderActualRepartition",
+    ]
+    entries = [("Physics_FreeSurfaceSharpBoundary_MPI_2", 2, 1800, sharp_tests)]
+    for ranks in (2, 4):
+        group = groups[f"wp7_partition_mpi_{ranks}"]
+        expected = list(group["tests"])
+        if ranks == 2:
+            expected.extend([
+                "FreeSurfaceCutStabilityMPI.PhysicalWetBlocksAndDisconnectedIslandsAreInvariantAcrossDryMPIData",
+                "FreeSurfaceCutStabilityMPI.TwoFluidPhaseIdentityIsInvariantAcrossSideAndPartitionChanges",
+            ])
+        entries.append((f"Physics_FreeSurfaceCutStability_MPI_{ranks}", ranks,
+                        group["execution"]["wall_time_seconds"], expected))
+
+    for name, ranks, timeout, expected in entries:
+        blocks = re.findall(rf"^\s*svmp_add_gtest\({name}\s+([^)]*)\)", cmake, re.MULTILINE)
+        assert len(blocks) == 1, name
+        args = shlex.split(blocks[0])
+        assert args[args.index("TARGET") + 1] == "test_physics"
+        assert int(args[args.index("MPI_RANKS") + 1]) == ranks
+        assert int(args[args.index("TIMEOUT") + 1]) == timeout
+        filters = args[args.index("FILTER") + 1].split(":")
+        assert sorted(filters) == sorted(expected), name
 
 
 def test_wp7_real_properties_are_serialized_without_integer_truncation():
@@ -158,22 +147,20 @@ def test_wp7_real_properties_are_serialized_without_integer_truncation():
     registry = runner.load_registry(_registry_path())
 
     assert "std::numeric_limits<FE::Real>::max_digits10" in source
-    # The frozen registry still names the manufactured CurvatureTraction
-    # balance, which was deleted with that route (decision D47 Q2).
+    # The frozen registry includes the retired CurvatureTraction balance (D47 Q2)
+    # and the removed cut-metadata scale cap. Their measurements are unavailable.
     retired_tests = {
         "FreeSurfaceCutStability."
         "ManufacturedAffineQ1YoungLaplaceAndContactAngleBalanceToRoundoff",
     }
     for gate in registry["quantitative_evidence"]:
-        if gate["type"] != "real" or gate["test"] in retired_tests:
+        if gate["type"] != "real":
             continue
-        pattern = re.compile(
-            r"RecordProperty\(\s*"
-            + re.escape(f'"{gate["property"]}"')
-            + r"\s*,\s*realPropertyValue\(",
-            re.MULTILINE,
-        )
-        assert pattern.search(source), gate["property"]
+        record = r"RecordProperty\(\s*" + re.escape(f'"{gate["property"]}"') + r"\s*,"
+        if gate["test"] in retired_tests or gate["property"] == "wp7_selected_cut_metadata_scale_cap":
+            assert re.search(record, source) is None, gate["property"]
+            continue
+        assert re.search(record + r"\s*realPropertyValue\(", source), gate["property"]
 
 
 def test_wp7_matrix_is_frozen_and_explicitly_blocked():
