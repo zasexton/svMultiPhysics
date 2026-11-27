@@ -148,6 +148,72 @@ static void mpi_allgather_fixed_bytes_no_collectives(MPI_Comm comm,
     }
 }
 
+// Renumbering can split one rank's owned rows across several disjoint ranges.
+// Only their starts need to be shared: the next start ends the previous range.
+static std::function<int(GlobalIndex)> renumbered_owner_lookup(
+    const IndexSet& owned, GlobalIndex n_dofs, MPI_Comm comm, int rank, int size,
+    bool no_global_collectives)
+{
+    std::vector<GlobalIndex> starts;
+    GlobalIndex previous = -2;
+    for (const auto row : owned) {
+        if (row != previous + 1) starts.push_back(row);
+        previous = row;
+    }
+    using RunInfo = std::array<GlobalIndex, 2>;
+    const RunInfo local{static_cast<GlobalIndex>(starts.size()), starts.empty() ? -1 : starts.front()};
+    std::vector<RunInfo> ranks(size);
+    if (no_global_collectives) {
+        mpi_allgather_fixed_bytes_no_collectives(comm, rank, size, &local, sizeof(local), ranks.data(), 43920);
+    } else {
+        fe_mpi_check(MPI_Allgather(local.data(), 2, MPI_INT64_T, ranks.data(), 2, MPI_INT64_T, comm),
+                     "MPI_Allgather (owned ranges) in DofHandler::renumberDofs");
+    }
+
+    auto directory = std::make_shared<std::vector<std::pair<GlobalIndex, int>>>();
+    GlobalIndex most_runs = 0;
+    for (int r = 0; r < size; ++r) {
+        if (ranks[r][0] > 0) directory->emplace_back(ranks[r][1], r);
+        most_runs = std::max(most_runs, ranks[r][0]);
+    }
+    // A single range per rank needs only the metadata exchange above.
+    const GlobalIndex group = std::numeric_limits<int>::max() / size;
+    for (GlobalIndex offset = 1; offset < most_runs; offset += group) {
+        std::vector<int> counts(size), displs(size);
+        int total = 0;
+        for (int r = 0; r < size; ++r) {
+            counts[r] = static_cast<int>(std::clamp(ranks[r][0] - offset, GlobalIndex{0}, group));
+            displs[r] = total;
+            total += counts[r];
+        }
+        std::vector<GlobalIndex> gathered(total);
+        const auto* send = counts[rank] ? starts.data() + offset : nullptr;
+        if (no_global_collectives) {
+            for (int step = 0; step < size; ++step) {
+                const int src = (rank - step + size) % size, dest = (rank + step) % size;
+                fe_mpi_check(MPI_Sendrecv(send, counts[rank], MPI_INT64_T, dest, 43921,
+                                          gathered.data() + displs[src], counts[src], MPI_INT64_T,
+                                          src, 43921, comm, MPI_STATUS_IGNORE),
+                             "MPI_Sendrecv (owned ranges) in DofHandler::renumberDofs");
+            }
+        } else {
+            fe_mpi_check(MPI_Allgatherv(send, counts[rank], MPI_INT64_T, gathered.data(),
+                                        counts.data(), displs.data(), MPI_INT64_T, comm),
+                         "MPI_Allgatherv (owned ranges) in DofHandler::renumberDofs");
+        }
+        for (int r = 0; r < size; ++r) {
+            for (int i = 0; i < counts[r]; ++i) directory->emplace_back(gathered[displs[r] + i], r);
+        }
+    }
+    std::sort(directory->begin(), directory->end());
+    return [directory, n_dofs](GlobalIndex row) {
+        if (row < 0 || row >= n_dofs) return -1;
+        const auto next = std::upper_bound(directory->begin(), directory->end(), row,
+            [](GlobalIndex value, const auto& run) { return value < run.first; });
+        return next == directory->begin() ? -1 : std::prev(next)->second;
+    };
+}
+
 static std::vector<int> compute_stable_rank_order(MPI_Comm comm,
                                                   int my_rank,
                                                   int world_size,
@@ -10563,6 +10629,20 @@ void DofHandler::renumberDofs(DofNumberingStrategy strategy) {
             break;
         }
     }
+#if FE_HAS_MPI
+    // A rank with an unchanged local numbering must still participate when
+    // another rank reorders its rows or halo in an owner-contiguous layout.
+    if (world_size_ > 1 && global_numbering_ == GlobalNumberingMode::OwnerContiguous) {
+        std::uint8_t changed = !identity;
+        if (no_global_collectives_) {
+            mpi_allreduce_max_u8_no_collectives(mpi_comm_, my_rank_, world_size_, &changed, 1, 43919);
+        } else {
+            fe_mpi_check(MPI_Allreduce(MPI_IN_PLACE, &changed, 1, MPI_UNSIGNED_CHAR, MPI_MAX, mpi_comm_),
+                         "MPI_Allreduce (renumbered rows) in DofHandler::renumberDofs");
+        }
+        identity = changed == 0;
+    }
+#endif
     if (identity) {
         ghost_cache_valid_ = false;
         return;
@@ -10640,41 +10720,13 @@ void DofHandler::renumberDofs(DofNumberingStrategy strategy) {
         partition_ = DofPartition(IndexSet(std::move(new_owned)), IndexSet(new_ghost));
         partition_.setGlobalSize(n_dofs);
 
-        // Rebuild ownership lookup.
-        // For OwnerContiguous global numbering we can recover owner rank for any global DOF
-        // from the per-rank owned-range prefix sums, which keeps ownership queries valid even
-        // for DOFs that are not locally relevant on this rank.
-        if (global_numbering_ == GlobalNumberingMode::OwnerContiguous) {
-            std::vector<std::int64_t> owned_counts(static_cast<std::size_t>(world_size_), 0);
-            const auto owned_count_local = static_cast<std::int64_t>(partition_.localOwnedSize());
 #if FE_HAS_MPI
-            fe_mpi_check(MPI_Allgather(&owned_count_local, 1, MPI_INT64_T,
-                                       owned_counts.data(), 1, MPI_INT64_T,
-                                       mpi_comm_),
-                         "MPI_Allgather (owned counts) in DofHandler::renumberDofs ownership rebuild");
-#else
-            owned_counts[0] = owned_count_local;
+        if (global_numbering_ == GlobalNumberingMode::OwnerContiguous) {
+            dof_map_.setDofOwnership(renumbered_owner_lookup(
+                partition_.locallyOwned(), n_dofs, mpi_comm_, my_rank_, world_size_, no_global_collectives_));
+        } else
 #endif
-
-            auto owned_prefix = std::make_shared<std::vector<GlobalIndex>>(
-                static_cast<std::size_t>(world_size_) + 1u, GlobalIndex{0});
-            for (int r = 0; r < world_size_; ++r) {
-                FE_THROW_IF(owned_counts[static_cast<std::size_t>(r)] < 0,
-                            FEException,
-                            "DofHandler::renumberDofs: negative owned count gathered while rebuilding ownership");
-                (*owned_prefix)[static_cast<std::size_t>(r) + 1u] =
-                    (*owned_prefix)[static_cast<std::size_t>(r)] +
-                    static_cast<GlobalIndex>(owned_counts[static_cast<std::size_t>(r)]);
-            }
-
-            dof_map_.setDofOwnership([owned_prefix](GlobalIndex dof) -> int {
-                if (dof < 0 || dof >= owned_prefix->back()) {
-                    return -1;
-                }
-                const auto it = std::upper_bound(owned_prefix->begin() + 1, owned_prefix->end(), dof);
-                return static_cast<int>((it - owned_prefix->begin()) - 1);
-            });
-        } else {
+        {
             // Fallback to locally relevant ownership info when no global owner-contiguous
             // ranges are available.
             auto owner_map_ptr = std::make_shared<std::unordered_map<GlobalIndex, int>>(std::move(owner_by_new_dof));

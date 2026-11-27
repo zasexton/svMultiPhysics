@@ -1839,10 +1839,6 @@ constexpr std::uint64_t kSfcMaxCoord = (1ULL << kSfcBits) - 1ULL;
 
     const auto& part = dof_handler.getPartition();
     const auto owned_size = part.localOwnedSize();
-    if (owned_size < 0) {
-        return fail("owned_size<0");
-    }
-
     // Representative field/component used to identify node ownership. Prefer the field with the
     // fewest components so mixed systems can use a scalar nodal field (e.g. pressure) instead of a
     // block-numbered vector field whose components may be partitioned separately.
@@ -1925,75 +1921,42 @@ constexpr std::uint64_t kSfcMaxCoord = (1ULL << kSfcBits) - 1ULL;
         if (n_per_component <= 0) {
             return std::nullopt;
         }
-        const auto c = static_cast<LocalIndex>(local_dof / n_per_component);
-	        const auto node = local_dof % n_per_component;
-	        return std::make_pair(node, c);
-	    };
+        const auto component = static_cast<LocalIndex>(local_dof / n_per_component);
+        return std::make_pair(local_dof % n_per_component, component);
+    };
 
-	    // Derive locally relevant nodes across all fields/components. Node ownership comes from the
-	    // representative component above so that block-numbered vector fields can still build a nodal
-	    // backend map even when different components of the same physical node are owned by different
-	    // FE ranks.
-	    std::vector<GlobalIndex> relevant_nodes_fe;
-	    {
-	        const auto relevant_dofs = part.locallyRelevant().toVector();
-	        relevant_nodes_fe.reserve(relevant_dofs.size() /
-	                                      static_cast<std::size_t>(std::max<GlobalIndex>(1, dof_per_node)) +
-	                                  8u);
-
-	        for (const auto fe : relevant_dofs) {
-            const auto fld = field_map.globalToField(fe);
-            if (!fld.has_value()) {
-                continue;
-            }
-	            const auto& field = field_map.getField(static_cast<std::size_t>(fld->first));
-            const auto decoded = decode_node_comp(field, fld->second);
-            if (!decoded.has_value()) {
-                return fail("decode_node_comp failed");
-            }
-            const auto node = decoded->first;
-            if (node < 0 || node >= n_nodes) {
-                return fail("decoded node outside [0,n_nodes)");
-            }
-
-	            relevant_nodes_fe.push_back(node);
-	        }
-	    }
-
+    // Ownership comes from the representative component. Different components
+    // of a physical node need not have the same FE owner.
+    std::string local_failure;
+    const auto relevant_dofs = part.locallyRelevant().toVector();
+    std::vector<GlobalIndex> relevant_nodes_fe;
+    relevant_nodes_fe.reserve(relevant_dofs.size());
+    for (const auto fe : relevant_dofs) {
+        const auto fld = field_map.globalToField(fe);
+        if (!fld) continue;
+        const auto& field = field_map.getField(static_cast<std::size_t>(fld->first));
+        const auto decoded = decode_node_comp(field, fld->second);
+        if (!decoded || decoded->first < 0 || decoded->first >= n_nodes) {
+            local_failure = "locally relevant DOF does not identify a field node";
+            break;
+        }
+        relevant_nodes_fe.push_back(decoded->first);
+    }
     std::sort(relevant_nodes_fe.begin(), relevant_nodes_fe.end());
     relevant_nodes_fe.erase(std::unique(relevant_nodes_fe.begin(), relevant_nodes_fe.end()), relevant_nodes_fe.end());
 
-    FE_THROW_IF(owned_size % static_cast<GlobalIndex>(dof_per_node) != 0,
-	                InvalidArgumentException,
-	                "FESystem::setup: nodal interleaved distributed sparsity requires owned DOFs to be a multiple of dof_per_node");
-	    const GlobalIndex expected_owned_nodes = owned_size / static_cast<GlobalIndex>(dof_per_node);
-
-	    std::vector<GlobalIndex> owned_nodes_fe;
-	    std::vector<GlobalIndex> ghost_nodes_fe;
-	    owned_nodes_fe.reserve(static_cast<std::size_t>(expected_owned_nodes) + 8u);
-	    ghost_nodes_fe.reserve(relevant_nodes_fe.size());
-	    for (const auto node : relevant_nodes_fe) {
-	        const int owner = node_owner[static_cast<std::size_t>(node)];
-	        if (owner < 0 || owner >= world_size) {
-	            return fail("owned/ghost node missing valid owner entry");
-	        }
-	        if (owner == my_rank) {
-	            owned_nodes_fe.push_back(node);
-	        } else {
-	            ghost_nodes_fe.push_back(node);
-	        }
-	    }
-
-	    if (static_cast<GlobalIndex>(owned_nodes_fe.size()) != expected_owned_nodes) {
-	        std::ostringstream oss;
-	        oss << "owned_nodes_fe.size()!=expected_owned_nodes"
-	            << " owned_nodes_fe=" << owned_nodes_fe.size()
-	            << " expected=" << expected_owned_nodes
-	            << " relevant_nodes_fe=" << relevant_nodes_fe.size()
-	            << " owned_size=" << owned_size
-	            << " dof_per_node=" << dof_per_node;
-	        return fail(oss.str());
-	    }
+    std::vector<GlobalIndex> owned_nodes_fe;
+    std::vector<GlobalIndex> ghost_nodes_fe;
+    for (const auto node : relevant_nodes_fe) {
+        if (node_owner[static_cast<std::size_t>(node)] == my_rank) {
+            owned_nodes_fe.push_back(node);
+        } else {
+            ghost_nodes_fe.push_back(node);
+        }
+    }
+    if (owned_size != static_cast<GlobalIndex>(owned_nodes_fe.size()) * dof_per_node) {
+        local_failure = "owned FE row count does not match the representative nodes";
+    }
 
     // Compute a spatial (Morton/Hilbert) ordering for owned nodes within this rank's owner block.
     struct OwnedNodeRec {
@@ -2017,7 +1980,8 @@ constexpr std::uint64_t kSfcMaxCoord = (1ULL << kSfcBits) - 1ULL;
     for (const auto node : owned_nodes_fe) {
         const GlobalIndex fe0 = field_map.componentToGlobal(0, 0, node);
         if (fe0 < 0 || fe0 >= total_dofs) {
-            return fail("componentToGlobal(0,0,node) out of range");
+            local_failure = "componentToGlobal(0,0,node) out of range";
+            break;
         }
 
         std::array<double, 3> xyz{static_cast<double>(node), static_cast<double>(node), static_cast<double>(node)};
@@ -2066,10 +2030,16 @@ constexpr std::uint64_t kSfcMaxCoord = (1ULL << kSfcBits) - 1ULL;
         return a.node < b.node;
     });
 
-    const std::int64_t owned_count_local = static_cast<std::int64_t>(owned_recs.size());
+    // The nodal layout is optional, but every rank must make the same
+    // decision before any rank enters the following node exchange.
+    const std::int64_t owned_count_local =
+        local_failure.empty() ? static_cast<std::int64_t>(owned_recs.size()) : -1;
     std::vector<std::int64_t> owned_counts(static_cast<std::size_t>(world_size), 0);
     MPI_Allgather(&owned_count_local, 1, MPI_INT64_T,
                   owned_counts.data(), 1, MPI_INT64_T, dof_options.mpi_comm);
+    if (std::find(owned_counts.begin(), owned_counts.end(), -1) != owned_counts.end()) {
+        return fail(local_failure.empty() ? "incompatible nodal partition on another rank" : local_failure);
+    }
 
     std::vector<std::int64_t> node_offsets(static_cast<std::size_t>(world_size) + 1u, 0);
     std::int64_t node_total = 0;
@@ -2139,83 +2109,11 @@ constexpr std::uint64_t kSfcMaxCoord = (1ULL << kSfcBits) - 1ULL;
         }
     }
 
-	    // Resolve backend node ids for ghost nodes by querying their owner ranks.
-	    std::vector<std::vector<GlobalIndex>> requests(static_cast<std::size_t>(world_size));
-	    for (const auto node : ghost_nodes_fe) {
-	        const int owner = node_owner[static_cast<std::size_t>(node)];
-	        if (owner < 0 || owner >= world_size) {
-	            return fail("ghost node owner outside [0,world_size)");
-	        }
-	        if (owner == my_rank) {
-            continue;
-        }
-        requests[static_cast<std::size_t>(owner)].push_back(node);
-    }
-    for (auto& v : requests) {
-        std::sort(v.begin(), v.end());
-        v.erase(std::unique(v.begin(), v.end()), v.end());
-    }
-
-    std::vector<int> send_counts(static_cast<std::size_t>(world_size), 0);
-    std::vector<int> recv_counts(static_cast<std::size_t>(world_size), 0);
-    std::vector<int> send_displs(static_cast<std::size_t>(world_size), 0);
-    std::vector<int> recv_displs(static_cast<std::size_t>(world_size), 0);
-
-    std::vector<GlobalIndex> send_nodes;
-    send_nodes.reserve(ghost_nodes_fe.size());
-    for (int r = 0; r < world_size; ++r) {
-        const auto& v = requests[static_cast<std::size_t>(r)];
-        send_counts[static_cast<std::size_t>(r)] = static_cast<int>(v.size());
-    }
-    int total_send = 0;
-    for (int r = 0; r < world_size; ++r) {
-        send_displs[static_cast<std::size_t>(r)] = total_send;
-        total_send += send_counts[static_cast<std::size_t>(r)];
-    }
-    send_nodes.resize(static_cast<std::size_t>(total_send));
-    for (int r = 0; r < world_size; ++r) {
-        const auto& v = requests[static_cast<std::size_t>(r)];
-        std::copy(v.begin(), v.end(), send_nodes.begin() + send_displs[static_cast<std::size_t>(r)]);
-    }
-
-    MPI_Alltoall(send_counts.data(), 1, MPI_INT,
-                 recv_counts.data(), 1, MPI_INT, dof_options.mpi_comm);
-    int total_recv = 0;
-    for (int r = 0; r < world_size; ++r) {
-        recv_displs[static_cast<std::size_t>(r)] = total_recv;
-        total_recv += recv_counts[static_cast<std::size_t>(r)];
-    }
-
-    std::vector<GlobalIndex> recv_nodes(static_cast<std::size_t>(total_recv));
-    MPI_Alltoallv(send_nodes.data(), send_counts.data(), send_displs.data(), MPI_INT64_T,
-                  recv_nodes.data(), recv_counts.data(), recv_displs.data(), MPI_INT64_T,
-                  dof_options.mpi_comm);
-
-    std::vector<GlobalIndex> send_backends(static_cast<std::size_t>(total_recv), INVALID_GLOBAL_INDEX);
-    for (std::size_t i = 0; i < recv_nodes.size(); ++i) {
-        const auto node = recv_nodes[i];
-        const auto it = fe_node_to_backend.find(node);
-        if (it == fe_node_to_backend.end()) {
-            return fail("owner did not resolve requested ghost node backend id");
-        }
-        send_backends[i] = it->second;
-    }
-
-    std::vector<GlobalIndex> recv_backends(static_cast<std::size_t>(total_send), INVALID_GLOBAL_INDEX);
-    MPI_Alltoallv(send_backends.data(), recv_counts.data(), recv_displs.data(), MPI_INT64_T,
-                  recv_backends.data(), send_counts.data(), send_displs.data(), MPI_INT64_T,
-                  dof_options.mpi_comm);
-
+    // The gathered owner lists already contain the global FE-to-backend map.
     std::vector<int> ghost_nodes_backend;
     ghost_nodes_backend.reserve(ghost_nodes_fe.size());
-    for (std::size_t i = 0; i < send_nodes.size(); ++i) {
-        const auto node = send_nodes[i];
-        const auto backend = recv_backends[i];
-        if (backend < 0 || backend >= n_nodes) {
-            return fail("received ghost backend id outside [0,n_nodes)");
-        }
-        fe_node_to_backend.emplace(node, backend);
-        ghost_nodes_backend.push_back(static_cast<int>(backend));
+    for (const auto node : ghost_nodes_fe) {
+        ghost_nodes_backend.push_back(static_cast<int>(fe_node_to_backend.at(node)));
     }
 
     std::sort(ghost_nodes_backend.begin(), ghost_nodes_backend.end());

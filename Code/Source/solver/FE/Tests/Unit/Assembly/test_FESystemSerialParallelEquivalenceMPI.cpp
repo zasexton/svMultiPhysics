@@ -14,6 +14,8 @@
 #include "Assembly/GlobalSystemView.h"
 #include "Backends/FSILS/FsilsFactory.h"
 #include "Backends/FSILS/FsilsMatrix.h"
+#include "Backends/Interfaces/DofPermutation.h"
+#include "Basis/LagrangeBasis.h"
 #include "Constraints/DirichletBC.h"
 #include "Forms/Vocabulary.h"
 #include "Mesh/Mesh.h"
@@ -33,6 +35,7 @@
 #include <cstddef>
 #include <functional>
 #include <memory>
+#include <optional>
 #include <span>
 #include <vector>
 
@@ -507,7 +510,51 @@ TEST(FESystemSerialParallelEquivalenceMPI, CoupledNavierStokesLikeAssemblyMatche
     }
 }
 
-static void checkNaturalRigidGauges(bool full_halo)
+// Check the candidate layout against the native ownership of the representative
+// x component, independently of any nullspace constraints or distributed graph.
+static void checkQuadraticVectorLayout(const systems::FESystem& system, MPI_Comm comm)
+{
+    const auto& part = system.dofHandler().getPartition();
+    const auto n = system.dofHandler().getNumDofs();
+    const int rank = mpiRank(comm);
+    std::vector<Real> owners(n, 0.);
+    for (const auto row : part.locallyOwned()) owners[row] = rank + 1;
+    owners = allreduceSum(owners, comm);
+    GlobalIndex owned_nodes = 0;
+    for (GlobalIndex node = 0; node < n / 3; ++node) {
+        const auto representative = system.fieldMap().componentToGlobal(0, 0, node);
+        if (part.isOwned(representative)) ++owned_nodes;
+    }
+    int eligibility[2]{3 * owned_nodes == part.localOwnedSize(),
+                       part.locallyOwned().contiguousRange().has_value()};
+    MPI_Allreduce(MPI_IN_PLACE, eligibility, 2, MPI_INT, MPI_MIN, comm);
+    const auto perm = system.dofPermutation();
+    EXPECT_EQ(static_cast<bool>(perm), eligibility[0] != 0);
+    const auto* graph = system.distributedSparsityIfAvailable("op");
+    const bool distributed = mpiSize(comm) > 1 && (eligibility[0] || eligibility[1]);
+    EXPECT_EQ(graph != nullptr, distributed);
+    std::vector<Real> membership(n, 0.);
+    for (GlobalIndex node = 0; node < n / 3; ++node) {
+        for (int c = 0; c < 3; ++c) {
+            const auto fe = system.fieldMap().componentToGlobal(0, c, node);
+            EXPECT_EQ(system.dofHandler().getDofMap().getDofOwner(fe) + 1, owners[fe]) << fe;
+            auto row = fe;
+            bool owned = part.isOwned(fe);
+            if (perm) {
+                row = perm->forward.at(fe);
+                EXPECT_EQ(perm->inverse.at(row), fe);
+                const auto representative = system.fieldMap().componentToGlobal(0, 0, node);
+                EXPECT_EQ(perm->owner_rank.at(row) + 1, owners[representative]);
+                owned = perm->owner_rank.at(row) == rank;
+            }
+            membership[fe] = owned;
+            if (graph) EXPECT_EQ(graph->ownedRows().contains(row), owned);
+        }
+    }
+    for (auto count : allreduceSum(membership, comm)) EXPECT_EQ(count, 1.);
+}
+
+static void checkNaturalRigidGauges(bool full_halo, int order = 1)
 {
     MPI_Comm comm = MPI_COMM_WORLD;
     const int rank = mpiRank(comm);
@@ -550,34 +597,73 @@ static void checkNaturalRigidGauges(bool full_halo)
             owner == rank ? svmp::Ownership::Owned : svmp::Ownership::Ghost, owner);
     }
     for (auto numbering : {dofs::DofNumberingStrategy::Block, dofs::DofNumberingStrategy::Interleaved}) {
-        systems::FESystem system(std::make_shared<MeshAccess>(*mesh));
-        auto space = spaces::VectorSpace(spaces::SpaceType::H1, ElementType::Tetra4, 1, 3);
-        const auto field = system.addField({.name="u", .space=space, .components=3});
-        system.addOperator("op");
-        const auto u = forms::FormExpr::stateField(field, *space, "u");
-        const auto v = forms::TestFunction(*space, "v");
-        systems::installFormulation(system, "op", {field}, forms::inner(forms::sym(forms::grad(u)), forms::sym(forms::grad(v))).dx());
+        auto space = spaces::VectorSpace(spaces::SpaceType::H1, ElementType::Tetra4, order, 3);
         systems::SetupOptions options;
         options.dof_options.mpi_comm = comm;
         options.dof_options.world_size = size;
         options.dof_options.my_rank = rank;
         options.dof_options.numbering = numbering;
-        options.dof_options.global_numbering = dofs::GlobalNumberingMode::GlobalIds;
+        options.dof_options.no_global_collectives = order == 2 && full_halo;
+        options.dof_options.global_numbering = order == 1 ? dofs::GlobalNumberingMode::GlobalIds
+                                                        : dofs::GlobalNumberingMode::OwnerContiguous;
         systems::SetupInputs inputs;
         inputs.topology_override = topo;
-        ASSERT_NO_THROW(system.setup(options, inputs));
+        SCOPED_TRACE(::testing::Message() << "halo=" << full_halo << " order=" << order
+                                          << " numbering=" << static_cast<int>(numbering));
+        const auto make = [&](bool rigid, std::optional<GlobalIndex> pin) {
+            auto sys = std::make_unique<systems::FESystem>(std::make_shared<MeshAccess>(*mesh));
+            const auto field = sys->addField({.name="u", .space=space, .components=3});
+            sys->addOperator("op");
+            const auto u = forms::FormExpr::stateField(field, *space, "u"), v = forms::TestFunction(*space, "v");
+            const auto integrand = rigid ? forms::inner(forms::sym(forms::grad(u)), forms::sym(forms::grad(v)))
+                                         : forms::inner(u, v);
+            systems::installFormulation(*sys, "op", {field}, integrand.dx());
+            if (order == 2) {
+                std::vector<GlobalIndex> local_pins;
+                if (pin) local_pins.push_back(*pin);
+                sys->addConstraint(std::make_unique<constraints::DirichletBC>(local_pins, 2.0));
+            }
+            auto setup = options;
+            setup.use_backend_row_ownership_for_assembly = !rigid;
+            sys->setup(setup, inputs);
+            return sys;
+        };
+        auto target = make(order == 1, {});
+        if (order == 2) {
+            EXPECT_TRUE(target->constraints().empty());
+            checkQuadraticVectorLayout(*target, comm);
+            // Only rank zero prescribes the first edge's x component.
+            std::optional<GlobalIndex> pin;
+            if (rank == 0) pin = target->fieldDofHandler(0).getCellDofs(0)[4];
+            target = make(true, pin);
+            if (pin) {
+                const auto pinned = target->constraints().getConstraint(*pin);
+                ASSERT_TRUE(pinned);
+                EXPECT_DOUBLE_EQ(pinned->inhomogeneity, 2.0);
+            }
+        }
+        const auto& system = *target;
         const auto& handler = system.dofHandler();
         const auto n = static_cast<std::size_t>(handler.getNumDofs());
-        ASSERT_EQ(n, 3u * (size + 3));
+        ASSERT_EQ(n, 3u * (order == 1 ? size + 3 : 4*size + 6));
+        const auto& nodes = dynamic_cast<const basis::LagrangeBasis&>(space->element().basis()).nodes();
         std::vector<Real> modes(n * 6, Real(0));
         for (int cell = 0; cell < cells; ++cell) {
             const auto cell_dofs = handler.getCellDofs(cell);
-            ASSERT_EQ(cell_dofs.size(), 12u);
+            ASSERT_EQ(cell_dofs.size(), 3*nodes.size());
             for (int c = 0; c < 3; ++c) {
-                for (int i = 0; i < 4; ++i) {
-                    const auto d = cell_dofs[4*c + i];
+                for (std::size_t i = 0; i < nodes.size(); ++i) {
+                    const auto d = cell_dofs[nodes.size()*c + i];
                     if (!handler.getPartition().isOwned(d)) continue;
-                    const Real x = first + cell + i, y = x*x, z = x*y;
+                    const auto& xi = nodes[i];
+                    const std::array<Real,4> weights{1-xi[0]-xi[1]-xi[2], xi[0], xi[1], xi[2]};
+                    Real x = 0., y = 0., z = 0.;
+                    for (int j = 0; j < 4; ++j) {
+                        const Real t = first + cell + j;
+                        x += weights[j]*t;
+                        y += weights[j]*t*t;
+                        z += weights[j]*t*t*t;
+                    }
                     auto* row = modes.data() + 6*d;
                     row[c] = 1.;
                     row[3] = (c == 0 ? -y : (c == 1 ? x : 0.));
@@ -605,7 +691,7 @@ static void checkNaturalRigidGauges(bool full_halo)
         int counts[2]{local_lines, local_means};
         MPI_Allreduce(MPI_IN_PLACE, counts, 2, MPI_INT, MPI_SUM, comm);
         EXPECT_EQ(counts[0], 6);
-        EXPECT_EQ(counts[1], full_halo || size == 1 ? 3 : 0);
+        EXPECT_EQ(counts[1], order == 1 && (full_halo || size == 1) ? 3 : 0);
         constrained = allreduceSum(constrained, comm);
         for (auto d : handler.getCellDofs(rank - first)) {
             if (constrained[d] != 0.) EXPECT_TRUE(system.constraints().isConstrained(d)) << d;
@@ -617,6 +703,12 @@ TEST(FESystemSerialParallelEquivalenceMPI, NaturalSymmetricGradientRemovesSixRig
 {
     checkNaturalRigidGauges(false);
     checkNaturalRigidGauges(true);
+}
+
+TEST(FESystemSerialParallelEquivalenceMPI, QuadraticEdgePinParticipatesInGlobalRigidRank)
+{
+    checkNaturalRigidGauges(false, 2);
+    checkNaturalRigidGauges(true, 2);
 }
 
 TEST(FESystemSerialParallelEquivalenceMPI,
