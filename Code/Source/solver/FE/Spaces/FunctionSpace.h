@@ -240,6 +240,11 @@ public:
         return evaluate(xi, coefficients)[0];
     }
 
+    /// Evaluation space for the given cell, including its local polynomial order.
+    virtual const FunctionSpace& element_space(GlobalIndex /*cell_id*/) const noexcept {
+        return *this;
+    }
+
 protected:
     /// Physical component count for a Piola image of an intrinsic vector basis.
     static int piolaValueDimension(ElementType cell, int ambient_dimension);

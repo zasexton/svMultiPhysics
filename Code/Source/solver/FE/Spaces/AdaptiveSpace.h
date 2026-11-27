@@ -75,7 +75,7 @@ public:
     bool has_element_order(GlobalIndex cell_id) const noexcept;
 
     /// Access the space used for one element/cell
-    const FunctionSpace& element_space(GlobalIndex cell_id) const noexcept;
+    const FunctionSpace& element_space(GlobalIndex cell_id) const noexcept override;
 
     /// Access the owning space pointer used for one element/cell
     std::shared_ptr<FunctionSpace> element_space_ptr(GlobalIndex cell_id) const noexcept;

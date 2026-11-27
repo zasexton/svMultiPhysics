@@ -230,7 +230,7 @@ makeSnapshotVectorFieldEvaluator(
           return result;
         }
         const auto value =
-            velocity_space->evaluate(reference_value, coefficients);
+            velocity_space->element_space(cell).evaluate(reference_value, coefficients);
         return std::array<svmp::FE::Real, 3>{
             value[0], value[1], value[2]};
       };
@@ -275,7 +275,7 @@ makeSnapshotVectorFieldEvaluator(
             reference_jacobian[component] = row;
           }
         } else {
-          const auto jacobian = velocity_space->evaluate_jacobian(
+          const auto jacobian = velocity_space->element_space(cell).evaluate_jacobian(
               reference_value, coefficients);
           for (std::size_t row = 0u; row < 3u; ++row) {
             for (std::size_t column = 0u; column < 3u; ++column) {
@@ -391,7 +391,7 @@ makeSnapshotScalarFieldEvaluator(
         const auto coefficients = coefficients_for_cell(cell);
         const svmp::FE::spaces::FunctionSpace::Value point{
             reference_point[0], reference_point[1], reference_point[2]};
-        const auto value = space->evaluate(point, coefficients);
+        const auto value = space->element_space(cell).evaluate(point, coefficients);
         return value[0];
       };
   evaluator.reference_gradient =
@@ -402,7 +402,7 @@ makeSnapshotScalarFieldEvaluator(
         const auto coefficients = coefficients_for_cell(cell);
         const svmp::FE::spaces::FunctionSpace::Value point{
             reference_point[0], reference_point[1], reference_point[2]};
-        const auto gradient = space->evaluate_gradient(point, coefficients);
+        const auto gradient = space->element_space(cell).evaluate_gradient(point, coefficients);
         return std::array<svmp::FE::Real, 3>{
             gradient[0], gradient[1], gradient[2]};
       };

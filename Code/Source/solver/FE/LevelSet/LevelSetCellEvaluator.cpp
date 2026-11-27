@@ -163,10 +163,11 @@ LevelSetCellEvaluation LevelSetCellEvaluator::evaluate(
     try {
         const auto& coefficients = cachedCellCoefficients(cell_id);
         const auto point = toSpacePoint(parent_coordinate);
-        const auto gradient = space_->evaluate_gradient(point, coefficients);
+        const auto& space = space_->element_space(cell_id);
+        const auto gradient = space.evaluate_gradient(point, coefficients);
 
         LevelSetCellEvaluation evaluation;
-        evaluation.value = space_->evaluate_scalar(point, coefficients);
+        evaluation.value = space.evaluate_scalar(point, coefficients);
         evaluation.reference_gradient = {{gradient[0], gradient[1], gradient[2]}};
         evaluation.interpolation_order = interpolationOrder(cell_id);
         evaluation.implicit_geometry_order = evaluation.interpolation_order;

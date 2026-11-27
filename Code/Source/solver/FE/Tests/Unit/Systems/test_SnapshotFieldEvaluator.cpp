@@ -8,6 +8,9 @@
 #include <gtest/gtest.h>
 
 #include "Interfaces/SnapshotFieldEvaluator.h"
+#include "Basis/LagrangeBasis.h"
+#include "LevelSet/LevelSetCellEvaluator.h"
+#include "Spaces/AdaptiveSpace.h"
 #include "Spaces/H1Space.h"
 #include "Spaces/ProductSpace.h"
 #include "Systems/FESystem.h"
@@ -184,6 +187,67 @@ TEST(SnapshotFieldEvaluator, ScalarFieldValuesAndReferenceGradients)
         const auto gradient = pressure.reference_gradient(0, point, provenance);
         for (std::size_t j = 0; j < 3; ++j) {
             EXPECT_NEAR(gradient[j], kSlope[0][j], 1e-13);
+        }
+    }
+}
+
+TEST(SnapshotFieldEvaluator, UsesTheParentCellOrderForScalarAndVectorTraces)
+{
+    using namespace svmp::FE;
+    auto p1 = std::make_shared<H1Space>(ElementType::Tetra4, 1);
+    auto p2 = std::make_shared<H1Space>(ElementType::Tetra4, 2);
+    auto scalar_space = std::make_shared<spaces::AdaptiveSpace>();
+    auto vector_space = std::make_shared<spaces::AdaptiveSpace>();
+    scalar_space->add_level(1, p1);
+    scalar_space->add_level(2, p2);
+    vector_space->add_level(1, std::make_shared<ProductSpace>(p1, 3));
+    vector_space->add_level(2, std::make_shared<ProductSpace>(p2, 3));
+    for (const auto& space : {scalar_space, vector_space}) {
+        space->resize_element_orders(2, 1);
+        space->set_element_order(0, 2);
+    }
+    FESystem system(std::make_shared<forms::test::TwoTetraSharedFaceMeshAccess>());
+    const auto scalar_id = system.addField({.name = "scalar", .space = scalar_space});
+    const auto vector_id = system.addField({.name = "vector", .space = vector_space, .components = 3});
+    system.setup();
+    std::vector<Real> solution(system.dofHandler().getNumDofs(), 0.0);
+    const auto& nodes = dynamic_cast<const basis::LagrangeBasis&>(p2->element().basis()).nodes();
+    const auto scalar_rows = system.fieldDofHandler(scalar_id).getCellDofs(0);
+    const auto vector_rows = system.fieldDofHandler(vector_id).getCellDofs(0);
+    ASSERT_EQ(scalar_rows.size(), nodes.size());
+    ASSERT_EQ(vector_rows.size(), 3 * nodes.size());
+    // x(1-x-y-z) vanishes on the shared face. The P1 neighbor stays zero.
+    for (std::size_t i = 0; i < nodes.size(); ++i) {
+        const auto& x = nodes[i];
+        const Real value = x[0] * (1 - x[0] - x[1] - x[2]);
+        solution[system.fieldDofOffset(scalar_id) + scalar_rows[i]] = value;
+        for (int c = 0; c < 3; ++c) {
+            solution[system.fieldDofOffset(vector_id) + vector_rows[c * nodes.size() + i]] = (c + 1) * value;
+        }
+    }
+    const auto cell_field = level_set::makeLevelSetCellEvaluator(system, scalar_id, solution);
+    const auto scalar = interfaces::makeSnapshotScalarFieldEvaluator(
+        systems::snapshotFieldAccess(system, scalar_id), solution, "mixed-order test");
+    const auto vector = interfaces::makeSnapshotVectorFieldEvaluator(
+        systems::snapshotFieldAccess(system, vector_id), solution, "mixed-order test");
+    constexpr std::array<Real, 3> point{0.25, 0.25, 0.125};
+    const geometry::CutQuadratureProvenance provenance{};
+    for (int cell : {0, 1, 0}) {
+        SCOPED_TRACE(cell);
+        const Real value = cell == 0 ? 3.0 / 32 : 0;
+        const std::array<Real, 3> gradient = cell == 0 ? std::array<Real, 3>{0.125, -0.25, -0.25}
+                                                       : std::array<Real, 3>{};
+        const auto result = cell_field.evaluate(cell, point);
+        EXPECT_EQ(result.interpolation_order, cell == 0 ? 2 : 1);
+        EXPECT_DOUBLE_EQ(result.value, value);
+        EXPECT_EQ(result.reference_gradient, gradient);
+        EXPECT_DOUBLE_EQ(scalar.value(cell, point, provenance), value);
+        EXPECT_EQ(scalar.reference_gradient(cell, point, provenance), gradient);
+        const auto v = vector.value(cell, point, provenance);
+        const auto grad_v = vector.physical_gradient(cell, point, provenance);
+        for (int c = 0; c < 3; ++c) {
+            EXPECT_DOUBLE_EQ(v[c], (c + 1) * value);
+            for (int d = 0; d < 3; ++d) EXPECT_DOUBLE_EQ(grad_v[c][d], (c + 1) * gradient[d]);
         }
     }
 }

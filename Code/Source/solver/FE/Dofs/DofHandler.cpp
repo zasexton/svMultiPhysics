@@ -4926,6 +4926,13 @@ void DofHandler::distributeVariableOrderDofs(const MeshTopologyView& topology,
         }
     }
 
+    // A low-order neighbor contributes zero to a shared entity's minimum.
+    // When no cell uses that entity dimension there is no connectivity to visit.
+    for (auto& layout : cell_layouts) {
+        if (!need_edges) layout.edge_counts.clear();
+        if (!need_faces) layout.face_counts.clear();
+    }
+
     const auto n_vertices = static_cast<std::size_t>(std::max<GlobalIndex>(topo->n_vertices, 0));
     const auto n_edges = static_cast<std::size_t>(std::max<GlobalIndex>(topo->n_edges, 0));
     const auto n_faces = static_cast<std::size_t>(std::max<GlobalIndex>(topo->n_faces, 0));
