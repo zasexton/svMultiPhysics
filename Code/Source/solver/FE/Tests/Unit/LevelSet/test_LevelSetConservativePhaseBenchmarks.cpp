@@ -829,6 +829,8 @@ struct TransportRun {
     bool success{false};
     std::string diagnostic{};
     std::vector<FE::Real> initial_phase{};
+    std::vector<FE::Real> midpoint_phase{};
+    FE::Real midpoint_time{0.0};
     std::vector<FE::Real> final_phase{};
     FE::Real initial_measure{0.0};
     FE::Real final_measure{0.0};
@@ -947,6 +949,10 @@ template <typename Fixture>
         for (std::size_t node = 0u; node < fixture.graph.nodes; ++node) {
             run.final_phase[node] =
                 stage.correction.nodes[node].limited_phase_indicator;
+        }
+        if (step + 1 == (steps + 1) / 2) {
+            run.midpoint_phase = run.final_phase;
+            run.midpoint_time = (step + 1) * dt;
         }
         const FE::Real measure = phaseMeasure(
             fixture.graph, run.final_phase);
@@ -1111,6 +1117,52 @@ template <typename Fixture>
         static_cast<FE::Real>(first_moment[1] / measure),
         static_cast<FE::Real>(first_moment[2] / measure),
     };
+}
+
+// In a divergence-free flow, the initial nodal masses travel along
+// characteristics. Integrate their positions independently of the flux scheme.
+template <typename Fixture>
+void expectMidcycleTransport(const Fixture& fixture, const TransportRun& run,
+                             const VelocityField& velocity, FE::Real maximum_relative_error)
+{
+    ASSERT_EQ(run.midpoint_phase.size(), fixture.graph.nodes);
+    constexpr int substeps = 128;
+    const FE::Real dt = run.midpoint_time / substeps;
+    std::array<FE::Real, 3> expected{};
+    for (std::size_t node = 0; node < fixture.graph.nodes; ++node) {
+        const auto mass = fixture.graph.lumped_control_volume[node] * run.initial_phase[node];
+        if (mass == 0) {
+            continue;
+        }
+        auto position = fixture.node_coordinates[node];
+        for (int step = 0; step < substeps; ++step) {
+            const auto start_velocity = velocity(step * dt, position);
+            auto half_step = position;
+            for (int d = 0; d < 3; ++d) {
+                half_step[d] += 0.5 * dt * start_velocity[d];
+            }
+            const auto middle_velocity = velocity((step + 0.5) * dt, half_step);
+            for (int d = 0; d < 3; ++d) {
+                position[d] += dt * middle_velocity[d];
+            }
+        }
+        for (int d = 0; d < 3; ++d) {
+            expected[d] += mass * position[d];
+        }
+    }
+    for (auto& x : expected) {
+        x /= run.initial_measure;
+    }
+    const auto distance = [&](const auto& centroid) {
+        return std::hypot(centroid[0] - expected[0], centroid[1] - expected[1],
+                          centroid[2] - expected[2]);
+    };
+    const auto excursion = distance(phaseCentroid(fixture, run.initial_phase));
+    const auto error = distance(phaseCentroid(fixture, run.midpoint_phase));
+    ::testing::Test::RecordProperty("midcycle_reference_excursion", serializeReal(excursion));
+    ::testing::Test::RecordProperty("midcycle_centroid_error", serializeReal(error));
+    ASSERT_GT(excursion, 0);
+    EXPECT_LT(error, maximum_relative_error * excursion);
 }
 
 [[nodiscard]] PhaseInitializer disk(
@@ -1748,7 +1800,8 @@ TEST(LevelSetConservativePhaseBenchmarks,
         fixture, run.final_phase, initial);
     EXPECT_LE(run.maximum_measure_error, 1.0e-4);
     EXPECT_LE(run.maximum_accounted_balance_error, 2.0e-11);
-    EXPECT_LT(l1_error, 0.12);
+    EXPECT_LT(l1_error, 0.013);
+    expectMidcycleTransport(fixture, run, velocity, 0.30);
     EXPECT_EQ(run.minimum_components, 1u);
     EXPECT_EQ(run.maximum_components, 1u);
     RecordProperty("three_dimensional_smoke_l1",
@@ -1924,7 +1977,7 @@ TEST(LevelSetConservativePhaseQualification,
         EXPECT_EQ(run.maximum_components, 1u);
         const FE::Real l1_error = weightedL1Error(
             fixture, run.final_phase, exact);
-        EXPECT_LT(l1_error, 0.12);
+        EXPECT_LT(l1_error, 0.011);
         ASSERT_NO_THROW(writeTransportHistory(
             *requested_history, run));
         ASSERT_NO_THROW(writeFinalTransportDetails(
@@ -1989,7 +2042,8 @@ TEST(LevelSetConservativePhaseQualification,
     EXPECT_LE(run.maximum_accounted_balance_error, 2.0e-11);
     const FE::Real l1_error = weightedL1Error(
         fixture, run.final_phase, initial);
-    EXPECT_LT(l1_error, 0.35);
+    EXPECT_LT(l1_error, 0.020);
+    expectMidcycleTransport(fixture, run, velocity, 0.30);
     ASSERT_NO_THROW(writeTransportHistory(
         *requested_history, run));
     ASSERT_NO_THROW(writeFinalTransportDetails(
@@ -2055,7 +2109,14 @@ TEST(LevelSetConservativePhaseBenchmarks,
                    std::to_string(run.minimum_components));
     RecordProperty("zalesak_maximum_components",
                    std::to_string(run.maximum_components));
-    EXPECT_LT(l1_error, 0.12);
+    EXPECT_LT(l1_error, 0.050);
+    const PhaseInitializer half_turn = [&](const std::array<FE::Real, 3>& x) {
+        return slotted_disk({1.0 - x[0], 1.0 - x[1], x[2]});
+    };
+    ASSERT_EQ(run.midpoint_phase.size(), fixture.graph.nodes);
+    const auto mid_error = weightedL1Error(fixture, run.midpoint_phase, half_turn);
+    RecordProperty("zalesak_half_turn_l1", serializeReal(mid_error));
+    EXPECT_LT(mid_error, 0.050);
 }
 
 TEST(LevelSetConservativePhaseBenchmarks,
@@ -2065,24 +2126,20 @@ TEST(LevelSetConservativePhaseBenchmarks,
     ASSERT_TRUE(fixture.graph.success) << fixture.graph.diagnostic;
     const auto initial = disk(0.35, 0.50, 0.15);
     constexpr FE::Real final_time = 1.0;
-    const auto run = runTransport(
-        fixture,
-        initial,
-        [](FE::Real time, const std::array<FE::Real, 3>& point) {
-            const FE::Real pi = std::numbers::pi_v<FE::Real>;
-            const FE::Real amplitude = std::cos(pi * time);
-            const FE::Real sin_x = std::sin(pi * point[0]);
-            const FE::Real sin_y = std::sin(pi * point[1]);
-            return std::array<FE::Real, 3>{
-                amplitude * sin_x * sin_x *
-                    std::sin(FE::Real{2.0} * pi * point[1]),
-                -amplitude * sin_y * sin_y *
-                    std::sin(FE::Real{2.0} * pi * point[0]),
-                FE::Real{0.0},
-            };
-        },
-        final_time,
-        512);
+    const VelocityField velocity = [](FE::Real time, const std::array<FE::Real, 3>& point) {
+        const FE::Real pi = std::numbers::pi_v<FE::Real>;
+        const FE::Real amplitude = std::cos(pi * time);
+        const FE::Real sin_x = std::sin(pi * point[0]);
+        const FE::Real sin_y = std::sin(pi * point[1]);
+        return std::array<FE::Real, 3>{
+            amplitude * sin_x * sin_x *
+                std::sin(FE::Real{2.0} * pi * point[1]),
+            -amplitude * sin_y * sin_y *
+                std::sin(FE::Real{2.0} * pi * point[0]),
+            FE::Real{0.0},
+        };
+    };
+    const auto run = runTransport(fixture, initial, velocity, final_time, 512);
     expectConservativeRun(run);
     EXPECT_LE(run.maximum_measure_error, 1.0e-8);
     EXPECT_EQ(run.minimum_components, 1u);
@@ -2094,7 +2151,8 @@ TEST(LevelSetConservativePhaseBenchmarks,
                    serializeReal(run.maximum_measure_error));
     RecordProperty("deformation_accounted_balance_error",
                    serializeReal(run.maximum_accounted_balance_error));
-    EXPECT_LT(l1_error, 0.10);
+    EXPECT_LT(l1_error, 0.030);
+    expectMidcycleTransport(fixture, run, velocity, 0.03);
 }
 
 TEST(LevelSetConservativePhaseBenchmarks,
@@ -2134,7 +2192,7 @@ TEST(LevelSetConservativePhaseBenchmarks,
     EXPECT_EQ(run.maximum_components, 1u);
     const FE::Real l1_error = weightedL1Error(
         fixture, run.final_phase, exact);
-    EXPECT_LT(l1_error, 0.06);
+    EXPECT_LT(l1_error, 0.006);
     const auto initial_centroid = phaseCentroid(
         fixture, run.initial_phase);
     const auto final_centroid = phaseCentroid(

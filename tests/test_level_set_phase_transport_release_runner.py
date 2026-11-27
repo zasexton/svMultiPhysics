@@ -128,6 +128,8 @@ def test_point_gate_requires_metrics_and_nonempty_flux_artifacts(tmp_path):
 
     assert checks
     assert all(check["passed"] for check in checks)
+    # A uniform field with the mass of the translated disk has L1 error about 0.093.
+    properties["interface_l1"] = "0.093"
     properties["maximum_indicator"] = "1.1"
     failed = runner.evaluate_point(
         properties,
@@ -141,4 +143,7 @@ def test_point_gate_requires_metrics_and_nonempty_flux_artifacts(tmp_path):
     )
     assert not next(
         check for check in failed if check["metric"] == "maximum_indicator"
+    )["passed"]
+    assert not next(
+        check for check in failed if check["metric"] == "interface_l1"
     )["passed"]

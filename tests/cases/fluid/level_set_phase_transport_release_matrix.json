@@ -24,7 +24,7 @@
       "fixed_resolution_for_time_study": 256,
       "gates": {
         "maximum_raw_measure_error": 1e-8,
-        "maximum_interface_l1": 0.12,
+        "maximum_interface_l1": 0.011,
         "minimum_finest_spatial_order": 0.8,
         "minimum_finest_temporal_order": 0.5
       },
@@ -41,7 +41,7 @@
       "fixed_resolution_for_time_study": 128,
       "gates": {
         "maximum_raw_measure_error": 0.0005,
-        "maximum_interface_l1": 0.35,
+        "maximum_interface_l1": 0.020,
         "minimum_finest_spatial_order": 0.8,
         "minimum_finest_temporal_order": 0.5
       },
