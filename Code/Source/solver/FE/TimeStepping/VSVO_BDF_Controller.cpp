@@ -125,13 +125,13 @@ StepDecision VSVO_BDF_Controller::onAccepted(const StepAttemptInfo& info)
         }
         const bool have_prev = (info.step_index > 0) &&
             (prev_error_norm_ > 0.0 && std::isfinite(prev_error_norm_) && prev_order_ == q);
-        const double prev_err = have_prev ? prev_error_norm_ : err_q;
         const double inv_q1 = 1.0 / static_cast<double>(q + 1);
-        const double k_i = options_.pi_alpha * inv_q1;
-        const double k_p = options_.pi_beta * inv_q1;
+        const double inverse_error = 1.0 / std::max(err_q, 1e-16);
+        // With no same-order history retain the current-error startup rule.
+        const double history_factor = have_prev ? std::max(prev_error_norm_, 1e-16) : inverse_error;
         const double fac = options_.safety *
-            std::pow(1.0 / std::max(err_q, 1e-16), k_i) *
-            std::pow(1.0 / std::max(prev_err, 1e-16), k_p);
+            std::pow(inverse_error, options_.pi_alpha * inv_q1) *
+            std::pow(history_factor, options_.pi_beta * inv_q1);
         return std::min(options_.max_factor, std::max(options_.min_factor, fac));
     };
 

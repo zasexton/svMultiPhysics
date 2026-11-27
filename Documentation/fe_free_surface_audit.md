@@ -96,6 +96,8 @@ The solver’s FSILS assembly path with precomputed entry locations had similar 
 
 **A83 · Linear action for affine constraints.** The reduced operator lifts directions with P and evaluates PᵀAP. Solution expansion includes the offset c, and the reduced right-hand side subtracts PᵀAc once. For u₀ = u₁ + 5 and A = diag(1,2,3), the zero direction maps to zero, the reduced operator is diag(3,3), and the expanded solution satisfies the affine constraint. All 11 transform tests passed. [Constraint transform](../Code/Source/solver/FE/Constraints/ConstraintTransform.cpp) · [Operator regression](../Code/Source/solver/FE/Tests/Unit/Constraints/test_ConstraintTransform.cpp)
 
+**A89 · BDF step-size history.** The accepted-step PI controller uses a positive exponent on the previous same-order error. For BDF2 with a normalized error dropping from ½ to ¼, the step factor is 1.133928944905386. A backward Euler integration of y′ = −100y reproduced the independently computed sequence of one rejected trial and six accepted steps. Startup and rejection retain their existing current-error rule. All 16 step-controller tests passed. [Controller](../Code/Source/solver/FE/TimeStepping/VSVO_BDF_Controller.cpp) · [Step sequence regression](../Code/Source/solver/FE/Tests/Unit/TimeStepping/test_StepControllers.cpp) · [PI stepsize control](https://portal.research.lu.se/en/publications/a-pi-stepsize-control-for-the-numerical-solution-of-ordinary-diff/)
+
 ## Index of the original findings
 
 | Problem or observable | What the evidence establishes | First discriminating check |

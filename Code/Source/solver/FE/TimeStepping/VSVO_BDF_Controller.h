@@ -32,7 +32,8 @@ struct VSVO_BDF_ControllerOptions {
     double min_dt{0.0}; // 0 disables clamping
     double max_dt{0.0}; // 0 disables clamping
 
-    // PI controller (applied as: fac = safety * err^{-pi_alpha/(p+1)} * prev_err^{-pi_beta/(p+1)}).
+    // With same-order accepted history, the step factor is
+    // safety * err^(-pi_alpha/(p+1)) * prev_err^(pi_beta/(p+1)).
     double pi_alpha{0.7};
     double pi_beta{0.4};
 

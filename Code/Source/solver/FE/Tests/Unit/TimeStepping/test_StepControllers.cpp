@@ -383,15 +383,42 @@ TEST(VSVO_BDF_Controller, UsesPreviousAcceptedErrorForPiControlWhenAvailable)
     EXPECT_FALSE(d.retry);
     EXPECT_EQ(d.next_order, 2);
 
-    const double inv_p1 = 1.0 / 3.0;
-    const double k_i = o.pi_alpha * inv_p1;
-    const double k_p = o.pi_beta * inv_p1;
-    const double expected_fac =
-        o.safety *
-        std::pow(1.0 / info.error_norm, k_i) *
-        std::pow(1.0 / 0.5, k_p);
-    const double expected_fac_clamped = std::min(o.max_factor, std::max(o.min_factor, expected_fac));
-    EXPECT_NEAR(d.next_dt, info.dt * expected_fac_clamped, 1e-12);
+    // Gustafsson's accepted-step factor for order 2 and the history 1/2, 1/4.
+    EXPECT_NEAR(d.next_dt, 1.13392894490538585, 1e-14);
+}
+
+TEST(VSVO_BDF_Controller, ReproducesBackwardEulerStepsOnStiffDecay)
+{
+    using namespace svmp::FE::timestepping;
+    VSVO_BDF_ControllerOptions options;
+    options.min_order = options.max_order = options.initial_order = 1;
+    VSVO_BDF_Controller controller(options);
+    StepAttemptInfo info;
+    info.scheme_order = 1;
+    info.dt = 0.001;
+    double value = 1.0;
+    // Computed in 48-digit arithmetic for y'=-100y, one rejected trial and a
+    // BDF1 local error tolerance of 0.004. The local flow is known exactly.
+    const double steps[] = {0.001, 0.0008700925829713038, 0.0008724062796576393,
+                            0.0008311608672737389, 0.0008284744985175926,
+                            0.0008218972500114216, 0.0008284354201310609};
+    for (std::size_t i = 0; i < std::size(steps); ++i) {
+        SCOPED_TRACE(i);
+        EXPECT_NEAR(info.dt, steps[i], 2e-16);
+        const double next = value / (1.0 + 100.0 * info.dt);
+        info.error_norm = std::abs(next - value * std::exp(-100.0 * info.dt)) / 0.004;
+        const auto decision = controller.onAccepted(info);
+        ASSERT_EQ(decision.accept, i > 0);
+        info.dt = decision.next_dt;
+        if (decision.accept) {
+            value = next;
+            ++info.step_index;
+            info.attempt_index = 0;
+        } else {
+            ASSERT_TRUE(decision.retry);
+            ++info.attempt_index;
+        }
+    }
 }
 
 TEST(VSVO_BDF_Controller, RejectedNonlinearFailureUsesNonlinearDecreaseFactor)
