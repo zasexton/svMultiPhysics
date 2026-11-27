@@ -32,9 +32,8 @@ struct LevelSetRecordLabels {
     const char* snapshot{"level-set snapshot"};
     const char* snapshot_validation{"level_set_snapshot_validation"};
     const char* aggregation_rootless_hint{
-        "the candidate's cut feature has full cells only beyond the aggregation guards; "
         "SmallCutAggregationGuardOptions::rootless_fallback permits a homogeneous pin for "
-        "each such candidate; every case is logged and counted in the run summary"};
+        "each candidate without an admissible root. The constraint report records these pins"};
 };
 
 inline constexpr LevelSetRecordLabels defaultLevelSetRecordLabels{};

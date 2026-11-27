@@ -5977,8 +5977,8 @@ ConditionedRoots resolveGuardedSimplexRoots(const AggregationCellGraph& graph,
         }
         return false;
     };
-    // A detached component has its own constraint and pressure treatment. A
-    // background face connection to a full cell alone cannot change it.
+    // An extension to a full cell needs a connected path through the retained
+    // material on the shared faces of the background cells.
     std::vector<bool> reaches_full_cell(graph.cells.size(), false);
     std::vector<std::size_t> connected;
     for (std::size_t cell = 0; cell < graph.cells.size(); ++cell) {

@@ -2328,12 +2328,14 @@ TEST(SmallCutAggregationConstraint,
 {
     SVMP_AGG_TEST_BODY
 #if defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH
-    const auto run_rejection = [](SmallCutAggregationGuardOptions guards) {
+    const auto run_rejection = [](SmallCutAggregationGuardOptions guards, const char* hint = nullptr) {
         auto mesh = buildQuadStrip(2);
         auto space = std::make_shared<spaces::H1Space>(
             ElementType::Quad4, /*order=*/1);
         systems::FESystem system(mesh);
-        system.attachment<level_set::LevelSetRecordLabels>().aggregation_rootless_hint = "configured guard hint";
+        if (hint) {
+            system.attachment<level_set::LevelSetRecordLabels>().aggregation_rootless_hint = hint;
+        }
         const auto pressure = system.addField(systems::FieldSpec{
             .name = "p", .space = space, .components = 1});
         system.addOperator("pressure");
@@ -2365,7 +2367,10 @@ TEST(SmallCutAggregationConstraint,
             EXPECT_EQ(message.find("incomplete_distributed_aggregation_halo"),
                       std::string::npos)
                 << message;
-            EXPECT_NE(message.find("configured guard hint"),
+            // Cell 1 is a full neighbor. A rejected interpolation row cannot establish
+            // that the nearest full cell lies beyond the search radius.
+            EXPECT_EQ(message.find("full cells only beyond"), std::string::npos) << message;
+            EXPECT_NE(message.find(hint ? hint : "SmallCutAggregationGuardOptions::rootless_fallback"),
                       std::string::npos);
         }
         EXPECT_EQ(system.constraints().numConstraints(), 0u);
@@ -2373,7 +2378,7 @@ TEST(SmallCutAggregationConstraint,
 
     auto extrapolation_guards = SmallCutAggregationGuardOptions{};
     extrapolation_guards.maximum_reference_extrapolation_distance = 1.0;
-    run_rejection(extrapolation_guards);
+    run_rejection(extrapolation_guards, "configured guard hint");
 
     auto coefficient_guards = SmallCutAggregationGuardOptions{};
     coefficient_guards.maximum_absolute_coefficient = 1.5;

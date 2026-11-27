@@ -33,13 +33,11 @@ inline constexpr FE::level_set::LevelSetRecordLabels levelSetRecordLabels{
     .snapshot = "free-surface snapshot",
     .snapshot_validation = "free_surface_snapshot_validation",
     .aggregation_rootless_hint =
-        "the candidate's cut feature has full cells only beyond the aggregation "
-        "guards (for example a wetting film or wedge at a wall); set "
+        "setting "
         "<Small_cut_aggregation_rootless_fallback>true</Small_cut_aggregation_rootless_fallback> "
-        "on the free-surface boundary condition to continue with the "
-        "rootless-island policy (opt-in: it pins velocity and pressure of those "
-        "candidates, which degrades results inside connected liquid; every case "
-        "is logged and counted in the run summary)"};
+        "on the free-surface boundary condition enables the rootless-island policy. "
+        "It pins velocity and pressure at the affected candidates, which degrades the "
+        "solution in connected liquid. The run summary records accepted pins"};
 
 inline constexpr FE::level_set::LevelSetMinimizerRecordLabels staticCapillaryMinimizerRecords{
     .method = "static capillary equilibrium minimization",
