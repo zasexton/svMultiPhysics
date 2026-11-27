@@ -17,6 +17,7 @@
 #include "Geometry/CutQuadrature.h"
 #include "Interfaces/LevelSetInterfaceDomain.h"
 
+#include <memory>
 #include <array>
 #include <cstddef>
 #include <cstdint>
@@ -31,6 +32,7 @@ namespace FE {
 namespace assembly {
 class IMeshAccess;
 }
+namespace systems { class CollectiveCommunicator; }
 namespace interfaces {
 
 enum class GeneratedInterfaceBoundaryIntersectionKind : std::uint8_t {
@@ -69,6 +71,15 @@ struct GeneratedInterfaceBoundaryIntersectionMarkerKey {
     const GeneratedInterfaceBoundaryIntersectionMarkerKey& key,
     int marker_base = 2000000,
     int marker_range = 1000000);
+
+struct GeneratedContactVertexTopology;
+
+/// Global node identities and the matching communicator for a distributed
+/// IMeshAccess adapter. The native MeshAccess supplies both automatically.
+struct GeneratedContactVertexExchange {
+    const systems::CollectiveCommunicator& communicator;
+    std::function<GlobalIndex(GlobalIndex)> global_vertex;
+};
 
 struct GeneratedInterfaceBoundaryIntersectionRequest {
     LevelSetInterfaceSource source{};
@@ -150,6 +161,9 @@ struct GeneratedInterfaceBoundaryIntersectionFragment {
     GeneratedInterfaceBoundaryIntersectionDegeneracy degeneracy{
         GeneratedInterfaceBoundaryIntersectionDegeneracy::None};
     Real measure{0.0};
+    // Physical measure of the marked edge for a vertex whose source cell
+    // and wall-edge parent differ.
+    Real incident_wall_measure{0.0};
     std::array<Real, 3> interface_normal{{1.0, 0.0, 0.0}};
     std::array<Real, 3> boundary_normal{{0.0, 1.0, 0.0}};
     std::array<Real, 3> tangent{{1.0, 0.0, 0.0}};
@@ -209,8 +223,14 @@ struct GeneratedInterfaceBoundaryProvenanceSummary {
 class GeneratedInterfaceBoundaryIntersectionDomain {
 public:
     GeneratedInterfaceBoundaryIntersectionDomain() = default;
-    explicit GeneratedInterfaceBoundaryIntersectionDomain(
-        GeneratedInterfaceBoundaryIntersectionRequest request);
+    explicit GeneratedInterfaceBoundaryIntersectionDomain(GeneratedInterfaceBoundaryIntersectionRequest request);
+    GeneratedInterfaceBoundaryIntersectionDomain(
+        GeneratedInterfaceBoundaryIntersectionRequest request,
+        std::shared_ptr<const GeneratedContactVertexTopology> vertex_topology);
+    [[nodiscard]] std::size_t vertexTopologyBytes() const noexcept;
+    /// Rebuild the authoritative local trace, reusing the resolved distributed wall incidence.
+    [[nodiscard]] GeneratedInterfaceBoundaryIntersectionDomain replayTrace(
+        const LevelSetInterfaceDomain& interface_domain, const assembly::IMeshAccess& mesh) const;
 
     [[nodiscard]] const GeneratedInterfaceBoundaryIntersectionRequest&
     request() const noexcept;
@@ -231,8 +251,11 @@ public:
 private:
     GeneratedInterfaceBoundaryIntersectionRequest request_{};
     std::vector<GeneratedInterfaceBoundaryIntersectionFragment> fragments_{};
+    std::shared_ptr<const GeneratedContactVertexTopology> vertex_topology_;
 };
 
+/// On a native distributed 2D mesh every rank enters the builder for the same
+/// wall marker. It exchanges only the active mesh-vertex incidence.
 [[nodiscard]] GeneratedInterfaceBoundaryIntersectionDomain
 buildGeneratedInterfaceBoundaryIntersectionDomain(
     GeneratedInterfaceBoundaryIntersectionRequest request,
@@ -245,6 +268,15 @@ buildGeneratedInterfaceBoundaryIntersectionDomain(
     const LevelSetInterfaceDomain& interface_domain,
     const assembly::IMeshAccess& mesh,
     const GeneratedInterfaceBoundaryIntersectionScalarField& scalar_field);
+
+/// Use this overload for custom distributed adapters whose wall and surface
+/// do not necessarily share a local vertex star. The exchange is used only
+/// while building the domain. Its local snapshot replay needs no communicator.
+[[nodiscard]] GeneratedInterfaceBoundaryIntersectionDomain
+buildGeneratedInterfaceBoundaryIntersectionDomain(
+    GeneratedInterfaceBoundaryIntersectionRequest request, const LevelSetInterfaceDomain& interface_domain,
+    const assembly::IMeshAccess& mesh, const GeneratedContactVertexExchange& exchange,
+    const GeneratedInterfaceBoundaryIntersectionScalarField* scalar_field = nullptr);
 
 [[nodiscard]] GeneratedInterfaceBoundaryProvenanceSummary
 validateGeneratedInterfaceBoundaryProvenance(

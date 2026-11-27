@@ -62,6 +62,7 @@ public:
     [[nodiscard]] std::uint64_t coordinateConfigurationKey() const override;
     [[nodiscard]] bool cellIdsAreDense() const override { return true; }
     [[nodiscard]] bool globalEntityIdsAvailable() const override;
+    [[nodiscard]] GlobalIndex vertexGlobalId(GlobalIndex vertex) const;
     [[nodiscard]] GlobalIndex getCellGlobalId(GlobalIndex cell_id) const override;
     [[nodiscard]] GlobalIndex getBoundaryFaceGlobalId(GlobalIndex face_id) const override;
     [[nodiscard]] int parallelRank() const override;

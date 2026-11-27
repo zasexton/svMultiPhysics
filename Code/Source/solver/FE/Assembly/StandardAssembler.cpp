@@ -9704,7 +9704,8 @@ void StandardAssembler::prepareFrameExplicitGeometry(
         std::vector<AssemblyContext::Vector3D> boundary_normals;
         mapCutFacetFrame(*cut_facet, mesh.dimension(), context.jacobians(), context.inverseJacobians(),
                          context.jacobianDets(), active.surface_measures, active.normals,
-                         cut_facet->provenance.parent_boundary_entity >= 0 ? &boundary_normals : nullptr,
+                         (cut_facet->provenance.parent_boundary_entity >= 0 || cut_facet->hasNonincidentContactEdge())
+                             ? &boundary_normals : nullptr,
                          need_surface_jacobians && !need_current && !need_reference ? &active.surface_jacobians : nullptr);
         auto weights = context.integrationWeightsWritable();
         for (std::size_t q = 0; q < weights.size(); ++q) {
@@ -11638,8 +11639,9 @@ void StandardAssembler::assembleCutInterfaceItem(const CutInterfaceLoop& loop,
             } else {
                 parent_measures.physical_cell_measure = geometry::physicalCellMeasureFromMapping(mesh, cell_id);
             }
-            parent_measures.physical_parent_face_measure =
-                std::accumulate(
+            parent_measures.physical_parent_face_measure = rule.hasNonincidentContactEdge()
+                ? rule.parent_measure
+                : std::accumulate(
                     context_.integrationWeights().begin(),
                     context_.integrationWeights().end(),
                     Real{0.0});

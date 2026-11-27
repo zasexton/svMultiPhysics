@@ -8,9 +8,21 @@
 #include "Interfaces/GeneratedInterfaceBoundaryIntersectionDomain.h"
 
 #include "Assembly/Assembler.h"
+#include "Assembly/BackgroundEntityMeasures.h"
+#include "Geometry/CutQuadratureMapping.h"
+#include "Geometry/GeometryMapping.h"
+#if defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH
+#include "Assembly/MeshAccess.h"
+#endif
+#include "Systems/SystemCollectives.h"
 #include "Basis/NodeOrderingConventions.h"
 
 #include <algorithm>
+#include <bit>
+#include <map>
+#include <optional>
+#include <set>
+#include <tuple>
 #include <cmath>
 #include <iomanip>
 #include <limits>
@@ -25,6 +37,33 @@
 namespace svmp {
 namespace FE {
 namespace interfaces {
+
+// All data are from owned source fragments or owned wall edges. Their global
+// identifiers make the same incidence available even with no ghost cells.
+struct GeneratedContactVertexTopology {
+    using Point = std::array<Real, 3>;
+    struct Ray {
+        std::int64_t vertex;
+        std::uint64_t source_id;
+        Point direction;
+        Point normal;
+    };
+    struct Wall {
+        std::int64_t vertex;
+        std::int64_t face;
+        Point normal;
+        Point tangent;
+        Real orientation;
+        Real measure;
+    };
+    struct Contact {
+        GlobalIndex local_vertex;
+        std::uint64_t source_id;
+        Wall wall;
+    };
+    std::vector<Contact> contacts; // Owned source vertices, ordered by local node ID for replay.
+};
+
 namespace {
 
 constexpr Real kTiny = Real{1.0e-30};
@@ -313,6 +352,7 @@ void addUniquePoint(std::vector<std::array<Real, 3>>& points,
     geometry::CutQuadratureRule rule;
     rule.kind = geometry::CutQuadratureKind::Interface;
     rule.side = geometry::CutIntegrationSide::Interface;
+    rule.parent_measure = fragment.incident_wall_measure;
     rule.geometric_dimension =
         fragment.kind == GeneratedInterfaceBoundaryIntersectionKind::Point ? 0 : 1;
     rule.measure = fragment.measure;
@@ -387,6 +427,9 @@ void addUniquePoint(std::vector<std::array<Real, 3>>& points,
 }
 
 struct BoundaryFaceInfo {
+    GlobalIndex global_id{INVALID_GLOBAL_INDEX};
+    std::optional<std::array<Real, 3>> contact_vertex;
+    Real incident_wall_measure{0.0};
     MeshIndex face_id{static_cast<MeshIndex>(-1)};
     LocalIndex local_face{INVALID_LOCAL_INDEX};
     int marker{-1};
@@ -416,6 +459,8 @@ collectBoundaryFaces(const assembly::IMeshAccess& mesh, int boundary_marker)
             const auto type = mesh.getCellType(cell_id);
             BoundaryFaceInfo info;
             info.face_id = static_cast<MeshIndex>(face_id);
+            info.global_id = mesh.globalEntityIdsAvailable()
+                ? mesh.getBoundaryFaceGlobalId(face_id) : face_id;
             info.local_face = mesh.getLocalFaceIndex(face_id, cell_id);
             info.marker = mesh.getBoundaryFaceMarker(face_id);
             info.cell_corners = cornerIndices(type);
@@ -445,6 +490,239 @@ collectBoundaryFaces(const assembly::IMeshAccess& mesh, int boundary_marker)
             faces_by_cell[static_cast<MeshIndex>(cell_id)].push_back(std::move(info));
         });
     return faces_by_cell;
+}
+
+using Point = std::array<Real, 3>;
+using VertexTopology = GeneratedContactVertexTopology;
+
+[[nodiscard]] math::Vector<Real, 3> vectorOf(const Point& p)
+{
+    return {p[0], p[1], p[2]};
+}
+
+[[nodiscard]] Point pointOf(const math::Vector<Real, 3>& p)
+{
+    return {p[0], p[1], p[2]};
+}
+
+[[nodiscard]] GlobalIndex vertexId(const assembly::IMeshAccess& mesh, GlobalIndex vertex)
+{
+#if defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH
+    if (const auto* native = dynamic_cast<const assembly::MeshAccess*>(&mesh)) {
+        return native->vertexGlobalId(vertex);
+    }
+#endif
+    return vertex;
+}
+
+struct FragmentCorner {
+    GlobalIndex id;
+    std::size_t index;
+    Point xi;
+};
+
+[[nodiscard]] std::vector<FragmentCorner> fragmentCorners(
+    const assembly::IMeshAccess& mesh, const CutInterfaceFragment& fragment, Real tolerance)
+{
+    const auto type = mesh.getCellType(fragment.parent_cell);
+    std::vector<GlobalIndex> nodes;
+    std::vector<FragmentCorner> corners;
+    for (auto c : cornerIndices(type)) {
+        const auto ref = basis::ReferenceNodeLayout::get_node_coords(type, c);
+        const Point xi{ref[0], ref[1], ref[2]};
+        for (std::size_t i = 0; i < fragment.vertices.size(); ++i) {
+            if (samePoint(fragment.vertices[i].parent_coordinate, xi, tolerance)) {
+                if (nodes.empty()) mesh.getCellNodes(fragment.parent_cell, nodes);
+                corners.push_back({nodes.at(c), i, xi});
+            }
+        }
+    }
+    return corners;
+}
+
+template<class T>
+std::vector<T> gatherVertexRecords(const std::vector<T>& local,
+                                  const systems::CollectiveCommunicator& comm)
+{
+    if (!comm.isParallel()) return local;
+    static_assert(std::is_trivially_copyable_v<T> && sizeof(T) % sizeof(std::uint64_t) == 0);
+    using Words = std::array<std::uint64_t, sizeof(T) / sizeof(std::uint64_t)>;
+    std::vector<std::uint64_t> packed;
+    packed.reserve(local.size() * Words{}.size());
+    for (const auto& record : local) {
+        const auto words = std::bit_cast<Words>(record);
+        packed.insert(packed.end(), words.begin(), words.end());
+    }
+    const auto gathered = systems::collectiveGatherWords(packed, comm, "generated contact vertex incidence");
+    std::vector<T> records;
+    for (std::size_t i = 0; i < gathered.size(); i += Words{}.size()) {
+        Words words;
+        std::copy_n(gathered.begin() + i, words.size(), words.begin());
+        records.push_back(std::bit_cast<T>(words));
+    }
+    return records;
+}
+
+[[nodiscard]] std::shared_ptr<const VertexTopology> buildVertexTopology(
+    const LevelSetInterfaceDomain& surface, const assembly::IMeshAccess& mesh,
+    const std::unordered_map<MeshIndex, std::vector<BoundaryFaceInfo>>& faces, Real tolerance,
+    const systems::CollectiveCommunicator& comm,
+    const GeneratedInterfaceBoundaryIntersectionScalarField* scalar_field,
+    const GeneratedContactVertexExchange* exchange)
+{
+    const auto global_vertex = [&](GlobalIndex local) {
+        const auto id = exchange ? exchange->global_vertex(local) : vertexId(mesh, local);
+        if (id == INVALID_GLOBAL_INDEX) {
+            throw std::invalid_argument("contact geometry requires a global ID for the mesh vertex");
+        }
+        return id;
+    };
+    auto topology = std::make_shared<VertexTopology>();
+    std::map<GlobalIndex, GlobalIndex> local_vertex;
+    std::vector<VertexTopology::Ray> local_rays;
+    std::exception_ptr failure;
+    try {
+        for (const auto& fragment : surface.fragments()) {
+            if (!fragment.active() || !mesh.isOwnedCell(fragment.parent_cell)) continue;
+            const auto corners = fragmentCorners(mesh, fragment, tolerance);
+            if (corners.empty()) continue;
+            const auto mapping = geometry::makeCutCellGeometryMapping(mesh, fragment.parent_cell);
+            for (const auto& [local, index, xi] : corners) {
+                const auto id = global_vertex(local);
+                const auto [position_it, inserted] = local_vertex.emplace(id, local);
+                if (!inserted && position_it->second != local) {
+                    throw std::invalid_argument("distinct local contact vertices share a global node ID");
+                }
+                const auto position = mapping->map_to_physical(vectorOf(xi));
+                auto reference_normal = fragment.normal;
+                if (fragment.kind == CutInterfaceFragmentKind::CurvedPatch && scalar_field &&
+                    scalar_field->reference_gradient_in_cell) {
+                    reference_normal = unitOrDefault(
+                        scalar_field->reference_gradient_in_cell(fragment.parent_cell, xi), reference_normal);
+                }
+                const auto normal = unitOrDefault(pointOf(mapping->jacobian_inverse(vectorOf(xi)).transpose() *
+                                                          vectorOf(reference_normal)), {});
+                const auto add_ray = [&](std::size_t neighbor) {
+                    const auto x = mapping->map_to_physical(vectorOf(fragment.vertices[neighbor].parent_coordinate));
+                    const auto direction = pointOf(x - position);
+                    const Real length = norm(direction);
+                    if (length > 0) local_rays.push_back({id, fragment.stable_id, scale(direction, 1 / length), normal});
+                };
+                if (index > 0) add_ray(index - 1);
+                if (index + 1 < fragment.vertices.size()) add_ray(index + 1);
+            }
+        }
+    } catch (...) {
+        failure = std::current_exception();
+    }
+    systems::requireCollectivePhasePreparation(failure, comm, "contact_vertex_source_rays");
+    const auto rays = gatherVertexRecords(local_rays, comm);
+    if (rays.empty()) return topology;
+    // One inward ray makes a crossing. Two different rays returning to the same
+    // wall vertex form a touch or a branch. A ray along an interior edge can be
+    // represented by both of its parents; retain one stable source identity.
+    std::map<GlobalIndex, VertexTopology::Ray> unique_rays;
+    std::set<GlobalIndex> multiple;
+    const Real direction_tolerance = std::max(tolerance, Real{64} * std::numeric_limits<Real>::epsilon());
+    for (const auto& ray : rays) {
+        auto [it, inserted] = unique_rays.try_emplace(ray.vertex, ray);
+        if (!inserted) {
+            if (norm(sub(it->second.direction, ray.direction)) > direction_tolerance) {
+                multiple.insert(ray.vertex);
+            }
+            if (ray.source_id < it->second.source_id) it->second = ray;
+        }
+    }
+    for (const auto id : multiple) unique_rays.erase(id);
+    std::vector<VertexTopology::Wall> local_walls;
+    try {
+        for (const auto& [parent, cell_faces] : faces) {
+            for (const auto& face : cell_faces) {
+                for (const auto c : face.face_corners) {
+                    const auto id = global_vertex(face.cell_nodes.at(c));
+                    if (!unique_rays.contains(id)) continue;
+                    const auto mapping = geometry::makeCutCellGeometryMapping(mesh, parent);
+                    const auto xi = vectorOf(face.cell_reference_points[c]);
+                    const auto n = unitOrDefault(pointOf(mapping->jacobian_inverse(xi).transpose() *
+                                                          vectorOf(face.normal)), {});
+                    const auto t = unitOrDefault(pointOf(mapping->jacobian(xi) * vectorOf(face.tangent)), {});
+                    const int order = mesh.getCellGeometryOrder(parent);
+                    const auto measures = assembly::computeBackgroundEntityMeasures(
+                        mesh, parent, face.face_id, order, order);
+                    local_walls.push_back({id, face.global_id, n, t,
+                                           c == face.face_corners.front() ? Real{1} : Real{-1},
+                                           measures.physical_parent_face_measure});
+                }
+            }
+        }
+    } catch (...) {
+        failure = std::current_exception();
+    }
+    systems::requireCollectivePhasePreparation(failure, comm, "contact_vertex_wall_edges");
+    std::map<GlobalIndex, VertexTopology::Contact> selected;
+    std::set<GlobalIndex> tangent_vertices;
+    for (const auto& wall : gatherVertexRecords(local_walls, comm)) {
+        const auto& ray = unique_rays.at(wall.vertex);
+        if (std::abs(dot(ray.normal, wall.tangent)) <= direction_tolerance) {
+            tangent_vertices.insert(wall.vertex);
+            continue;
+        }
+        // At a corner the two wall directions can differ. Use the edge
+        // bounding the negative subdomain, then global ID for an exact tie.
+        const auto priority = [&](const auto& edge) {
+            return std::pair{dot(ray.normal, edge.tangent) * edge.orientation >= 0, edge.face};
+        };
+        auto [it, inserted] = selected.try_emplace(
+            wall.vertex, VertexTopology::Contact{INVALID_GLOBAL_INDEX, ray.source_id, wall});
+        if (!inserted && priority(wall) < priority(it->second.wall)) it->second.wall = wall;
+    }
+    std::set<std::pair<GlobalIndex, std::uint64_t>> local_sources;
+    for (const auto& ray : local_rays) local_sources.emplace(ray.vertex, ray.source_id);
+    for (auto& [id, contact] : selected) {
+        if (!tangent_vertices.contains(id) && local_sources.contains({id, contact.source_id})) {
+            contact.local_vertex = local_vertex.at(id);
+            topology->contacts.push_back(contact);
+        }
+    }
+    std::sort(topology->contacts.begin(), topology->contacts.end(),
+              [](const auto& a, const auto& b) { return a.local_vertex < b.local_vertex; });
+    return topology;
+}
+
+[[nodiscard]] std::vector<BoundaryFaceInfo> contactFacesAtVertices(
+    const VertexTopology* topology, const GeneratedInterfaceBoundaryIntersectionRequest& req,
+    const assembly::IMeshAccess& mesh, const CutInterfaceFragment& fragment,
+    const std::vector<const BoundaryFaceInfo*>& direct_faces)
+{
+    std::vector<BoundaryFaceInfo> out;
+    if (!topology || topology->contacts.empty() ||
+        !mesh.isOwnedCell(fragment.parent_cell)) return out;
+    for (const auto& corner : fragmentCorners(mesh, fragment, req.tolerance)) {
+        const auto it = std::lower_bound(topology->contacts.begin(), topology->contacts.end(), corner.id,
+                                         [](const auto& c, GlobalIndex id) { return c.local_vertex < id; });
+        if (it == topology->contacts.end() || it->local_vertex != corner.id ||
+            it->source_id != fragment.stable_id) continue;
+        const auto& wall = it->wall;
+        BoundaryFaceInfo face;
+        face.face_id = -1;
+        face.global_id = wall.face;
+        face.contact_vertex = corner.xi;
+        const auto local = std::find_if(direct_faces.begin(), direct_faces.end(),
+                                        [&](auto* f) { return f->global_id == wall.face; });
+        if (local != direct_faces.end()) {
+            face.face_id = (*local)->face_id;
+            face.normal = (*local)->normal;
+            face.tangent = (*local)->tangent;
+        } else {
+            const auto mapping = geometry::makeCutCellGeometryMapping(mesh, fragment.parent_cell);
+            const auto xi = vectorOf(corner.xi);
+            face.normal = unitOrDefault(pointOf(mapping->jacobian(xi).transpose() * vectorOf(wall.normal)), {});
+            face.tangent = unitOrDefault(pointOf(mapping->jacobian_inverse(xi) * vectorOf(wall.tangent)), {});
+            face.incident_wall_measure = wall.measure;
+        }
+        out.push_back(std::move(face));
+    }
+    return out;
 }
 
 [[nodiscard]] GeneratedInterfaceBoundaryIntersectionFragment skippedFragment(
@@ -575,17 +853,25 @@ bool GeneratedInterfaceBoundaryIntersectionFragment::active() const noexcept
 {
     return intersection_marker >= 0 && interface_marker >= 0 &&
            boundary_marker >= 0 && parent_cell >= static_cast<MeshIndex>(0) &&
-           parent_face >= static_cast<MeshIndex>(0) && measure > Real{0.0} &&
+           (parent_face >= 0 || (parent_face_global_id != INVALID_GLOBAL_INDEX && incident_wall_measure > 0)) &&
+           measure > Real{0.0} &&
            !quadrature_points.empty() &&
            (degeneracy == GeneratedInterfaceBoundaryIntersectionDegeneracy::None ||
             degeneracy ==
                 GeneratedInterfaceBoundaryIntersectionDegeneracy::FallbackRule);
 }
 
+GeneratedInterfaceBoundaryIntersectionDomain::GeneratedInterfaceBoundaryIntersectionDomain(
+    GeneratedInterfaceBoundaryIntersectionRequest request)
+    : GeneratedInterfaceBoundaryIntersectionDomain(std::move(request), nullptr)
+{
+}
+
 GeneratedInterfaceBoundaryIntersectionDomain::
     GeneratedInterfaceBoundaryIntersectionDomain(
-        GeneratedInterfaceBoundaryIntersectionRequest request)
-    : request_(std::move(request))
+        GeneratedInterfaceBoundaryIntersectionRequest request,
+        std::shared_ptr<const GeneratedContactVertexTopology> vertex_topology)
+    : request_(std::move(request)), vertex_topology_(std::move(vertex_topology))
 {
 }
 
@@ -744,7 +1030,9 @@ GeneratedInterfaceBoundaryIntersectionDomain buildIntersections(
     GeneratedInterfaceBoundaryIntersectionRequest request,
     const LevelSetInterfaceDomain& interface_domain,
     const assembly::IMeshAccess& mesh,
-    const GeneratedInterfaceBoundaryIntersectionScalarField* scalar_field)
+    const GeneratedInterfaceBoundaryIntersectionScalarField* scalar_field,
+    std::shared_ptr<const VertexTopology> topology = {}, bool local_replay = false,
+    const GeneratedContactVertexExchange* exchange = nullptr)
 {
     if (!request.valid()) {
         throw std::invalid_argument(
@@ -758,14 +1046,36 @@ GeneratedInterfaceBoundaryIntersectionDomain buildIntersections(
         throw std::invalid_argument(
             "generated contact geometry and source interface do not share one coefficient-classification policy");
     }
-    GeneratedInterfaceBoundaryIntersectionDomain domain(std::move(request));
-    const auto& req = domain.request();
     if (mesh.parallelSize() > 1 && !mesh.globalEntityIdsAvailable()) {
         throw std::invalid_argument(
             "distributed contact geometry requires globally unique cell and face ids");
     }
-    const auto faces_by_cell = collectBoundaryFaces(mesh, req.boundary_marker);
-    if (faces_by_cell.empty()) {
+    systems::CollectiveCommunicator comm = exchange ? exchange->communicator : systems::CollectiveCommunicator{};
+#if defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH && FE_HAS_MPI && defined(MESH_HAS_MPI)
+    if (!exchange && !local_replay && mesh.dimension() == 2) {
+        if (const auto* native = dynamic_cast<const assembly::MeshAccess*>(&mesh)) {
+            comm = systems::CollectiveCommunicator(native->communicator());
+        }
+    }
+#endif
+    std::unordered_map<MeshIndex, std::vector<BoundaryFaceInfo>> faces_by_cell;
+    std::exception_ptr face_failure;
+    try {
+        if (exchange && (!exchange->global_vertex || comm.rank() != mesh.parallelRank() ||
+                         comm.size() != mesh.parallelSize())) {
+            throw std::invalid_argument("contact vertex exchange requires global node IDs and the mesh communicator");
+        }
+        faces_by_cell = collectBoundaryFaces(mesh, request.boundary_marker);
+    } catch (...) {
+        face_failure = std::current_exception();
+    }
+    systems::requireCollectivePhasePreparation(face_failure, comm, "contact_boundary_face_incidence");
+    if (mesh.dimension() == 2 && !topology) {
+        topology = buildVertexTopology(interface_domain, mesh, faces_by_cell, request.tolerance, comm, scalar_field, exchange);
+    }
+    GeneratedInterfaceBoundaryIntersectionDomain domain(std::move(request), topology);
+    const auto& req = domain.request();
+    if (faces_by_cell.empty() && (!topology || topology->contacts.empty())) {
         return domain;
     }
 
@@ -774,11 +1084,15 @@ GeneratedInterfaceBoundaryIntersectionDomain buildIntersections(
             continue;
         }
         const auto faces_it = faces_by_cell.find(fragment.parent_cell);
-        if (faces_it == faces_by_cell.end()) {
-            continue;
+        std::vector<const BoundaryFaceInfo*> candidate_faces;
+        if (faces_it != faces_by_cell.end()) {
+            for (const auto& face : faces_it->second) candidate_faces.push_back(&face);
         }
-        for (const auto& face : faces_it->second) {
-            if (face.face_corners.size() < 2u) {
+        const auto vertex_faces = contactFacesAtVertices(topology.get(), req, mesh, fragment, candidate_faces);
+        for (const auto& face : vertex_faces) candidate_faces.push_back(&face);
+        for (const auto* candidate : candidate_faces) {
+            const auto& face = *candidate;
+            if (!face.contact_vertex && face.face_corners.size() < 2u) {
                 auto skipped = skippedFragment(
                     req,
                     fragment.parent_cell,
@@ -801,7 +1115,9 @@ GeneratedInterfaceBoundaryIntersectionDomain buildIntersections(
             }
 
             std::vector<std::array<Real, 3>> points_on_face;
-            if (mesh.dimension() == 2) {
+            if (face.contact_vertex) {
+                points_on_face.push_back(*face.contact_vertex);
+            } else if (mesh.dimension() == 2) {
                 const auto& a =
                     face.cell_reference_points[face.face_corners[0]];
                 const auto& b =
@@ -833,6 +1149,12 @@ GeneratedInterfaceBoundaryIntersectionDomain buildIntersections(
             if (points_on_face.empty()) {
                 continue;
             }
+            if (mesh.dimension() == 2 && !face.contact_vertex && points_on_face.size() == 1u &&
+                std::any_of(face.face_corners.begin(), face.face_corners.end(), [&](auto c) {
+                    return samePoint(points_on_face.front(), face.cell_reference_points[c], req.tolerance);
+                })) {
+                continue; // The entire wall/fragment star makes this decision once.
+            }
 
             GeneratedInterfaceBoundaryIntersectionFragment out;
             out.interface_marker = req.interface_marker;
@@ -844,12 +1166,9 @@ GeneratedInterfaceBoundaryIntersectionDomain buildIntersections(
                 mesh.globalEntityIdsAvailable()
                     ? mesh.getCellGlobalId(fragment.parent_cell)
                     : static_cast<GlobalIndex>(fragment.parent_cell);
-            out.parent_face_global_id =
-                mesh.globalEntityIdsAvailable()
-                    ? mesh.getBoundaryFaceGlobalId(face.face_id)
-                    : static_cast<GlobalIndex>(face.face_id);
-            out.owner_rank = mesh.getBoundaryFaceOwnerRank(
-                face.face_id, fragment.parent_cell);
+            out.parent_face_global_id = face.global_id;
+            out.owner_rank = mesh.getCellOwnerRank(fragment.parent_cell);
+            out.incident_wall_measure = face.incident_wall_measure;
             if (fragment.parent_cell_global_id != INVALID_GLOBAL_INDEX &&
                 fragment.parent_cell_global_id != out.parent_cell_global_id) {
                 throw std::invalid_argument(
@@ -1003,6 +1322,18 @@ GeneratedInterfaceBoundaryIntersectionDomain buildIntersections(
 
 } // namespace
 
+std::size_t GeneratedInterfaceBoundaryIntersectionDomain::vertexTopologyBytes() const noexcept
+{
+    return vertex_topology_ ? sizeof(VertexTopology) +
+                              vertex_topology_->contacts.capacity() * sizeof(VertexTopology::Contact) : 0u;
+}
+
+GeneratedInterfaceBoundaryIntersectionDomain GeneratedInterfaceBoundaryIntersectionDomain::replayTrace(
+    const LevelSetInterfaceDomain& interface_domain, const assembly::IMeshAccess& mesh) const
+{
+    return buildIntersections(request_, interface_domain, mesh, nullptr, vertex_topology_, true);
+}
+
 GeneratedInterfaceBoundaryIntersectionDomain
 buildGeneratedInterfaceBoundaryIntersectionDomain(
     GeneratedInterfaceBoundaryIntersectionRequest request,
@@ -1025,6 +1356,14 @@ buildGeneratedInterfaceBoundaryIntersectionDomain(
     // authoritative fragment-trace construction; the scalar field gives only
     // the pointwise normal of a curved fragment.
     return buildIntersections(std::move(request), interface_domain, mesh, &scalar_field);
+}
+
+GeneratedInterfaceBoundaryIntersectionDomain buildGeneratedInterfaceBoundaryIntersectionDomain(
+    GeneratedInterfaceBoundaryIntersectionRequest request, const LevelSetInterfaceDomain& interface_domain,
+    const assembly::IMeshAccess& mesh, const GeneratedContactVertexExchange& exchange,
+    const GeneratedInterfaceBoundaryIntersectionScalarField* scalar_field)
+{
+    return buildIntersections(std::move(request), interface_domain, mesh, scalar_field, nullptr, false, &exchange);
 }
 
 GeneratedInterfaceBoundaryProvenanceSummary

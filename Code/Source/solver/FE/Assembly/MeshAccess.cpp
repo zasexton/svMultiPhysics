@@ -387,6 +387,19 @@ bool MeshAccess::globalEntityIdsAvailable() const {
     return available;
 }
 
+GlobalIndex MeshAccess::vertexGlobalId(GlobalIndex vertex) const {
+    if (vertex < 0 || vertex >= numVertices()) {
+        throw std::out_of_range("MeshAccess vertex is out of range");
+    }
+    const auto& ids = mesh_.vertex_gids();
+    if (static_cast<std::size_t>(vertex) < ids.size() &&
+        ids[static_cast<std::size_t>(vertex)] != svmp::INVALID_GID) {
+        return static_cast<GlobalIndex>(ids[static_cast<std::size_t>(vertex)]);
+    }
+    if (parallelSize() == 1) return vertex;
+    throw std::invalid_argument("distributed contact geometry requires global vertex identifiers");
+}
+
 GlobalIndex MeshAccess::getCellGlobalId(GlobalIndex cell_id) const {
     if (cell_id < 0 || cell_id >= numCells()) {
         throw FEException("MeshAccess: cell_id out of range",

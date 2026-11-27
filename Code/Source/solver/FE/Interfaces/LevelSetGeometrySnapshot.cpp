@@ -742,9 +742,7 @@ void validateCompleteContactTrace(
             static_cast<std::uint8_t>(fragment.kind)};
     };
 
-    const auto expected =
-        buildGeneratedInterfaceBoundaryIntersectionDomain(
-            contact.request(), interface_domain, mesh);
+    const auto expected = contact.replayTrace(interface_domain, mesh);
     std::map<TraceIdentity, std::ptrdiff_t> trace_balance;
     for (const auto& fragment : expected.fragments()) {
         if (fragment.active()) {
@@ -903,8 +901,8 @@ void completeAndValidateRuleIdentity(
         has_boundary_parent
             ? rule.provenance.parent_boundary_entity_global_id !=
                   expected_boundary_id
-            : rule.provenance.parent_boundary_entity_global_id !=
-                  INVALID_GLOBAL_INDEX;
+            : rule.provenance.parent_boundary_entity_global_id != INVALID_GLOBAL_INDEX &&
+              !rule.hasNonincidentContactEdge();
     if (rule.provenance.parent_entity_global_id != expected_cell_id ||
         invalid_boundary || invalid_owner ||
         (mesh.isOwnedCell(local_cell) !=
@@ -4359,6 +4357,7 @@ std::size_t LevelSetGeometrySnapshot::residentBytes() const noexcept
     bytes += contact_domains_.capacity() *
              sizeof(GeneratedInterfaceBoundaryIntersectionDomain);
     for (const auto& domain : contact_domains_) {
+        bytes += domain.vertexTopologyBytes();
         add_source(domain.request().source);
         bytes += domain.request().generated_domain_id.capacity();
         bytes += domain.fragments().capacity() *

@@ -13,7 +13,13 @@
 // summation order of the assembly.
 
 #include <gtest/gtest.h>
-
+#include "Assembly/CutIntegrationContext.h"
+#include "Assembly/MeshAccess.h"
+#include "Basis/NodeOrderingConventions.h"
+#include "Geometry/CutQuadratureMapping.h"
+#include "Interfaces/GeneratedInterfaceBoundaryIntersectionDomain.h"
+#include "Interfaces/LevelSetGeometrySnapshot.h"
+#include "Interfaces/LevelSetInterfaceBuilder.h"
 #include "Assembly/GlobalSystemView.h"
 #include "Constraints/AffineConstraints.h"
 #include "Constraints/ConstraintPlan.h"
@@ -34,6 +40,7 @@
 
 #include <mpi.h>
 
+#include <algorithm>
 #include <array>
 #include <cmath>
 #include <cstring>
@@ -393,3 +400,192 @@ TEST(CutGeometryMPI, FourRankCutPoissonGivesTheOneRankResults)
 }
 
 } // namespace svmp::FE::level_set::test
+
+#if defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH
+TEST(CutGeometryMPI, TransverseWallVertexUsesItsSourceCellAcrossPartitions)
+{
+    namespace FE = svmp::FE;
+    namespace I = FE::interfaces;
+    const svmp::MeshComm world(MPI_COMM_WORLD);
+    ASSERT_EQ(world.size(), 2);
+    constexpr int wall = 37, interface = 101;
+    const std::vector<svmp::real_t> coordinates{-2,0, 0,0, 1,0, 1,1, -1,1};
+    const std::vector<svmp::offset_t> offsets{0,3,6,9};
+    // The source triangle (1,3,4) meets the bottom wall only at node 1.
+    const std::vector<svmp::index_t> vertices{1,2,3, 1,4,0, 1,3,4};
+    const svmp::CellShape triangle{.family = svmp::CellFamily::Triangle,
+                                   .num_corners = 3, .order = 1};
+    const std::vector<svmp::CellShape> shapes(3, triangle);
+    for (const auto& comm : {svmp::MeshComm::self(), world}) {
+        std::shared_ptr<svmp::Mesh> grid;
+        if (comm.is_parallel()) {
+            grid = std::make_shared<svmp::Mesh>(comm);
+            grid->build_from_arrays_global_and_partition(
+                2, coordinates, offsets, vertices, shapes, svmp::PartitionHint::Cells,
+                /*ghost_layers=*/0, {{"partition_method", "block"}});
+        } else {
+            auto base = std::make_shared<svmp::MeshBase>();
+            base->build_from_arrays(2, coordinates, offsets, vertices, shapes);
+            base->finalize();
+            grid = svmp::create_mesh(std::move(base), comm);
+        }
+        auto& mesh = *grid;
+        for (const auto face : mesh.local_mesh().boundary_faces()) {
+            if (std::abs(mesh.local_mesh().face_center(face)[1]) < 1.e-12) {
+                mesh.set_boundary_label(face, wall);
+            }
+        }
+        FE::assembly::MeshAccess access(mesh);
+        I::CutInterfaceDomainRequest request;
+        request.source = I::LevelSetInterfaceSource::fromField(0, 1, 1);
+        request.interface_marker = interface;
+        request.generated_domain_id = "wall_vertex";
+        request.mesh_geometry_revision = access.geometryRevision();
+        request.mesh_topology_revision = access.topologyRevision();
+        request.ownership_revision = access.ownershipRevision();
+        request.implicit_geometry_mode = request.implicit_quadrature_backend = "LinearCorner";
+        request.implicit_fallback_status = "None";
+        for (const int phase_sign : {-1, 0, 1}) {
+            const bool transverse = phase_sign != 0;
+            I::LevelSetInterfaceDomain surface(request);
+            access.forEachOwnedCell([&](FE::GlobalIndex id) {
+                I::LevelSetCellCutInput cell;
+                cell.parent_cell = id;
+                cell.element_type = FE::ElementType::Triangle3;
+                std::vector<FE::GlobalIndex> nodes;
+                access.getCellNodes(id, nodes);
+                for (std::size_t i = 0; i < nodes.size(); ++i) {
+                    const auto xi = FE::basis::ReferenceNodeLayout::get_node_coords(cell.element_type, i);
+                    cell.node_coordinates.push_back({xi[0], xi[1], xi[2]});
+                    const auto x = access.getNodeCoordinates(nodes[i]);
+                    // Two distinct inward rays end at the same node in the tangent case.
+                    cell.level_set_values.push_back(transverse ? phase_sign * (x[0] + 0.5 * x[1])
+                                                             : std::abs(x[0]) - 2.0 * x[1]);
+                }
+                auto cut = I::cutLinearLevelSetCell2D(request, cell);
+                for (auto& region : cut.volume_regions) {
+                    region.parent_cell_global_id = access.getCellGlobalId(id);
+                    region.owner_rank = access.getCellOwnerRank(id);
+                    surface.addVolumeRegion(std::move(region));
+                }
+                for (auto& fragment : cut.fragments) {
+                    fragment.parent_cell_global_id = access.getCellGlobalId(id);
+                    fragment.stable_id = 1u + static_cast<std::uint64_t>(fragment.parent_cell_global_id);
+                    fragment.owner_rank = access.getCellOwnerRank(id);
+                    surface.addFragment(std::move(fragment));
+                }
+            });
+            I::GeneratedInterfaceBoundaryIntersectionRequest contact;
+            contact.source = request.source;
+            contact.generated_domain_id = request.generated_domain_id;
+            contact.mesh_geometry_revision = request.mesh_geometry_revision;
+            contact.mesh_topology_revision = request.mesh_topology_revision;
+            contact.ownership_revision = request.ownership_revision;
+            contact.source_value_revision = 1;
+            contact.interface_marker = interface;
+            contact.boundary_marker = wall;
+            const FE::systems::CollectiveCommunicator collective(comm);
+            const I::GeneratedContactVertexExchange exchange{
+                collective, [&](FE::GlobalIndex v) { return 13 + 2 * access.vertexGlobalId(v); }};
+            const auto domain = phase_sign < 0
+                ? I::buildGeneratedInterfaceBoundaryIntersectionDomain(contact, surface, access, exchange)
+                : I::buildGeneratedInterfaceBoundaryIntersectionDomain(contact, surface, access);
+            EXPECT_NO_THROW((void)I::validateGeneratedInterfaceBoundaryProvenance(domain, surface));
+            EXPECT_EQ(domain.replayTrace(surface, access).summary().active_fragment_count,
+                      domain.summary().active_fragment_count);
+            if (transverse) {
+                I::LevelSetGeometryScalarEvaluator scalar;
+                const auto coefficients = [&](FE::GlobalIndex id) {
+                    std::vector<std::array<FE::Real, 3>> x;
+                    access.getCellCoordinates(id, x);
+                    std::array<FE::Real, 3> c;
+                    std::transform(x.begin(), x.end(), c.begin(), [&](const auto& point) {
+                        return phase_sign * (point[0] + 0.5 * point[1]);
+                    });
+                    return c;
+                };
+                scalar.value = [&](auto cell, const auto& xi, const auto&) {
+                    const auto c = coefficients(cell);
+                    return c[0] + (c[1]-c[0])*xi[0] + (c[2]-c[0])*xi[1];
+                };
+                scalar.reference_gradient = [&](auto cell, const auto&, const auto&) {
+                    const auto c = coefficients(cell);
+                    return std::array<FE::Real, 3>{c[1]-c[0], c[2]-c[0], 0};
+                };
+                I::GeneratedActiveBoundaryRequest active_request;
+                active_request.source = request.source;
+                active_request.generated_domain_id = request.generated_domain_id;
+                active_request.source_value_revision = request.source.value_revision;
+                active_request.interface_marker = interface;
+                active_request.boundary_marker = wall;
+                active_request.mesh_geometry_revision = access.geometryRevision();
+                active_request.mesh_topology_revision = access.topologyRevision();
+                active_request.ownership_revision = access.ownershipRevision();
+                I::GeneratedActiveBoundaryScalarField nodal;
+                nodal.value_at_node = [&](auto node) {
+                    const auto x = access.getNodeCoordinates(node);
+                    return phase_sign * (x[0] + 0.5 * x[1]);
+                };
+                const auto active = I::buildGeneratedActiveBoundaryDomain(
+                    active_request, surface, domain, access, nodal);
+                double local_length = 0.0, wall_length = 0.0;
+                for (const auto& rule : active.boundaryQuadratureRules()) {
+                    local_length += FE::geometry::physicalCutQuadratureMeasure(access, rule);
+                }
+                MPI_Allreduce(&local_length, &wall_length, 1, MPI_DOUBLE, MPI_SUM, comm.native());
+                EXPECT_NEAR(wall_length, phase_sign > 0 ? 2.0 : 1.0, 1.e-12);
+
+                I::LevelSetGeometrySnapshotPolicy policy;
+                policy.require_complete_exterior_boundary_partition = false;
+                const auto snapshot = I::buildLevelSetGeometrySnapshot(
+                    surface, {domain}, {active}, access, policy, scalar, "wall_vertex",
+                    FE::systems::ownershipCollective(comm));
+                EXPECT_EQ(snapshot->ledger().missing_contact_fragment_count, 0u);
+                EXPECT_EQ(snapshot->ledger().invalid_global_identity_count, 0u);
+                FE::systems::FESystem system(grid);
+                const auto space = std::make_shared<FE::spaces::H1Space>(FE::ElementType::Triangle3, 1);
+                system.addField({.name="phi", .space=space});
+                auto context = std::make_shared<FE::assembly::CutIntegrationContext>();
+                context->addLevelSetGeometrySnapshot(snapshot);
+                system.setCutIntegrationContext(context);
+                system.setup();
+                const std::vector<FE::Real> state(system.dofHandler().getNumDofs(), 0.0);
+                FE::systems::SystemStateView view;
+                view.u = state;
+                using Expr = FE::forms::FormExpr;
+                const int marker = contact.resolvedIntersectionMarker();
+                const auto normal = Expr::normal();
+                const auto wall_normal = Expr::boundaryNormal();
+                const auto cosine = dot(normal, wall_normal);
+                const auto tangent = normal - cosine * wall_normal;
+                // Virtual unit wall velocity, equilibrium Young coefficient -1/2.
+                const auto young_work = -0.5 * tangent.component(0) / sqrt(dot(tangent, tangent));
+                const std::vector<Expr> forms{
+                    Expr::constant(1.0).dI(marker), cosine.dI(marker), young_work.dI(marker)};
+                const auto values = FE::systems::evaluateFunctionalForms(system, forms, view, comm);
+                EXPECT_NEAR(values[0].value, 1.0, 1.e-12);
+                EXPECT_NEAR(values[1].value, -phase_sign / std::sqrt(5.0), 1.e-12);
+                EXPECT_NEAR(values[2].value, -0.5 * phase_sign, 1.e-12);
+            }
+            double local_measure = 0.0, total_measure = 0.0;
+            for (const auto& rule : domain.intersectionQuadratureRules()) {
+                if (!access.isOwnedCell(rule.provenance.parent_entity)) continue;
+                EXPECT_TRUE(rule.hasNonincidentContactEdge());
+                EXPECT_NEAR(rule.parent_measure, phase_sign > 0 ? 2.0 : 1.0, 1.e-12);
+                const auto p = FE::geometry::mapCutQuadratureRuleToPhysical(access, rule);
+                for (const auto& q : p.points) {
+                    EXPECT_NEAR(q.physical_point[0], 0.0, 1.e-12);
+                    EXPECT_NEAR(q.physical_point[1], 0.0, 1.e-12);
+                    EXPECT_NEAR(q.normal[0], phase_sign * 2.0 / std::sqrt(5.0), 1.e-12);
+                    EXPECT_NEAR(q.normal[1], phase_sign / std::sqrt(5.0), 1.e-12);
+                    EXPECT_NEAR(q.boundary_normal[0], 0.0, 1.e-12);
+                    EXPECT_NEAR(q.boundary_normal[1], -1.0, 1.e-12);
+                    local_measure += q.physical_weight;
+                }
+            }
+            MPI_Allreduce(&local_measure, &total_measure, 1, MPI_DOUBLE, MPI_SUM, comm.native());
+            EXPECT_DOUBLE_EQ(total_measure, transverse ? 1.0 : 0.0);
+        }
+    }
+}
+#endif

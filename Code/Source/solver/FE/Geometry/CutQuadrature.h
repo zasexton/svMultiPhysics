@@ -15,6 +15,7 @@
 
 #include "Core/Types.h"
 
+#include <cmath>
 #include <array>
 #include <cstddef>
 #include <cstdint>
@@ -160,6 +161,15 @@ struct CutQuadratureRule {
      */
     std::uint32_t released_point_count{0};
     std::optional<LinearCornerSurfaceSource> linear_corner_surface{};
+
+    // A marked edge meeting a 2D source cell only at a vertex can be remote.
+    // Its global identity, physical measure, and directions travel with the rule.
+    [[nodiscard]] bool hasNonincidentContactEdge() const noexcept {
+        return kind == CutQuadratureKind::Interface && geometric_dimension == 0 &&
+               provenance.parent_boundary_entity < 0 &&
+               provenance.parent_boundary_entity_global_id != INVALID_GLOBAL_INDEX &&
+               parent_measure > 0 && std::isfinite(parent_measure);
+    }
 
 };
 
