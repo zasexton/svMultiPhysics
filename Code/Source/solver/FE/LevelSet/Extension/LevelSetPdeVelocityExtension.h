@@ -61,6 +61,7 @@
 // bodies, messages and environment names unchanged.
 
 #include "Core/Types.h"
+#include "LevelSet/LevelSetRecordLabels.h"
 #include "LevelSet/Extension/LevelSetVelocityExtensionWall.h"
 #include "LevelSet/LevelSetVelocityExtensionConstraint.h"
 #include "Mesh/Core/MeshComm.h"
@@ -150,6 +151,7 @@ struct PdeVelocityExtensionOptions {
   bool enforce_wall_impermeability{true};
   PdeVelocityExtensionFactorization factorization{
       PdeVelocityExtensionFactorization::LuColamd};
+  const char* factorization_log_source{defaultLevelSetRecordLabels.extension_factorization_source};
 };
 
 struct PdeVelocityExtensionReport {

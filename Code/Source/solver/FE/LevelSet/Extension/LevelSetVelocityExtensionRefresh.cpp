@@ -805,7 +805,8 @@ bool refreshLevelSetVelocityExtensions(
             .band_layers = 0,
             .enforce_wall_impermeability =
                 request.enforce_wall_impermeability,
-            .factorization = options.factorization},
+            .factorization = options.factorization,
+            .factorization_log_source = records.extension_factorization_source},
         extended,
         pde_algebraic ? &algebraic_rows : nullptr,
         &pde_extension_cache,

@@ -127,6 +127,14 @@ TEST(LevelSetGeometryService, SerialCollectivesReturnTheLocalValue)
   EXPECT_EQ(timing.max, 1.25);
 }
 
+TEST(LevelSetGeometryService, NamesTheSupportAndFactorizationByTheirGeometry)
+{
+    const auto& records = svmp::FE::level_set::defaultLevelSetRecordLabels;
+    EXPECT_STREQ(records.support_refresh_diagnostic, "active_support_constraint_refresh");
+    EXPECT_STREQ(records.support_refresh_heading, "active support constraint refresh");
+    EXPECT_STREQ(records.extension_factorization_source, "InactiveRegionMumps");
+}
+
 TEST(LevelSetGeometryService, ActiveSideNames)
 {
   EXPECT_STREQ(ls::activeSideName(ls::LevelSetActiveSide::Negative),

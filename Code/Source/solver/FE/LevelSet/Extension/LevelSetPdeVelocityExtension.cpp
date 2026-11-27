@@ -857,9 +857,9 @@ using ColumnMajorMatrix =
                         svmp::FE::backends::EigenMatrix::StorageIndex>;
 
 // A inactive-region factorization kept between calls.
-class DryRegionFactorization {
+class InactiveRegionFactorization {
 public:
-  virtual ~DryRegionFactorization() = default;
+  virtual ~InactiveRegionFactorization() = default;
   // x = A^{-1} b with the stored factors; false if Eigen reports a failure.
   [[nodiscard]] virtual bool solveInto(const Eigen::VectorXd& b,
                                        Eigen::VectorXd& x) const = 0;
@@ -869,7 +869,7 @@ public:
 
 // The Eigen::SparseLU instantiation of the FE Eigen backend's direct solve
 // (solve_direct in EigenLinearSolver.cpp).
-class DryRegionLu final : public DryRegionFactorization,
+class InactiveRegionLu final : public InactiveRegionFactorization,
                           public Eigen::SparseLU<ColumnMajorMatrix> {
 public:
   [[nodiscard]] bool solveInto(const Eigen::VectorXd& b,
@@ -907,8 +907,8 @@ public:
 
 // Opt-in LDLT^T factorization with AMD ordering of the symmetric operator
 // (lower triangle).
-class DryRegionLdlt final
-    : public DryRegionFactorization,
+class InactiveRegionLdlt final
+    : public InactiveRegionFactorization,
       public Eigen::SimplicialLDLT<
           ColumnMajorMatrix, Eigen::Lower,
           Eigen::AMDOrdering<
@@ -945,10 +945,10 @@ public:
 // assembled matrix, passes the lower triangle of its share of the rows and
 // takes part in the factorization and in every solve.  Every rank receives
 // the full solution.
-class DryRegionMumps final : public DryRegionFactorization {
+class InactiveRegionMumps final : public InactiveRegionFactorization {
 public:
   // `log`: this rank prints the factorization diagnostics (when requested).
-  DryRegionMumps(const svmp::MeshComm& comm, PdeVelocityExtensionOperator op,
+  InactiveRegionMumps(const svmp::MeshComm& comm, PdeVelocityExtensionOperator op,
                  bool log)
       : log_(log), solver_(comm.native(),
                 op == PdeVelocityExtensionOperator::Harmonic
@@ -961,7 +961,8 @@ public:
 
   // Collective.  False on every rank if MUMPS reports a failure.
   [[nodiscard]] bool factorize(const svmp::FE::backends::EigenMatrix& matrix,
-                               const svmp::MeshComm& comm)
+                               const svmp::MeshComm& comm,
+                               const char* log_source)
   {
     const auto& A = matrix.eigen();
     using Matrix = std::decay_t<decltype(A)>;
@@ -990,7 +991,7 @@ public:
         (environmentFlag("SVMP_PDE_EXTENSION_MUMPS_DIAGNOSTICS") ||
          environmentFlag("SVMP_TRACE_LEVEL_SET_ADVECTION"))) {
       const auto& s = solver_.statistics();
-      svmp::FE::LogRecord record("DryRegionMumps", "factorization");
+      svmp::FE::LogRecord record(log_source, "factorization");
       record.diagnostic("pde_extension_mumps")
           .boolean("ok", ok)
           .value("ranks", comm.size())
@@ -1040,12 +1041,13 @@ private:
 // The factorization step of solve_direct (or the opt-in LDLT or MUMPS).
 // Returns null if the factorization reports a failure (collectively for
 // MUMPS).
-[[nodiscard]] std::unique_ptr<DryRegionFactorization> factorizeDryRegion(
+[[nodiscard]] std::unique_ptr<InactiveRegionFactorization> factorizeInactiveRegion(
     const svmp::FE::backends::GenericMatrix& matrix,
-    PdeVelocityExtensionFactorization kind,
-    PdeVelocityExtensionOperator op,
+    const PdeVelocityExtensionOptions& options,
     const svmp::MeshComm& comm)
 {
+  const auto kind = options.factorization;
+  const auto op = options.op;
   const auto* A =
       dynamic_cast<const svmp::FE::backends::EigenMatrix*>(&matrix);
   if (A == nullptr) {
@@ -1061,8 +1063,8 @@ private:
     const auto& factor_comm =
         kind == PdeVelocityExtensionFactorization::Mumps ? comm : self;
     auto factorization =
-        std::make_unique<DryRegionMumps>(factor_comm, op, comm.rank() == 0);
-    if (!factorization->factorize(*A, factor_comm)) {
+        std::make_unique<InactiveRegionMumps>(factor_comm, op, comm.rank() == 0);
+    if (!factorization->factorize(*A, factor_comm, options.factorization_log_source)) {
       return nullptr;
     }
     return factorization;
@@ -1078,7 +1080,7 @@ private:
   (void)comm;
   const ColumnMajorMatrix Acol = A->eigen();
   if (kind == PdeVelocityExtensionFactorization::LdltAmd) {
-    auto factorization = std::make_unique<DryRegionLdlt>();
+    auto factorization = std::make_unique<InactiveRegionLdlt>();
     factorization->analyzePattern(Acol);
     factorization->factorize(Acol);
     if (factorization->info() != Eigen::Success) {
@@ -1086,7 +1088,7 @@ private:
     }
     return factorization;
   }
-  auto factorization = std::make_unique<DryRegionLu>();
+  auto factorization = std::make_unique<InactiveRegionLu>();
   factorization->analyzePattern(Acol);
   factorization->factorize(Acol);
   if (factorization->info() != Eigen::Success) {
@@ -1099,7 +1101,7 @@ private:
 // residual metrics and the same convergence test (check_convergence).
 // Returns false if Eigen reports a failure.
 [[nodiscard]] bool solveWithFactorization(
-    const DryRegionFactorization& factorization,
+    const InactiveRegionFactorization& factorization,
     const svmp::FE::backends::GenericMatrix& matrix,
     svmp::FE::backends::GenericVector& solution,
     const svmp::FE::backends::GenericVector& rhs,
@@ -1137,22 +1139,21 @@ private:
 #else
 constexpr bool kFactorizationReuseAvailable = false;
 
-class DryRegionFactorization {
+class InactiveRegionFactorization {
 public:
   [[nodiscard]] std::size_t bytes() const noexcept { return 0u; }
 };
 
-[[nodiscard]] std::unique_ptr<DryRegionFactorization> factorizeDryRegion(
+[[nodiscard]] std::unique_ptr<InactiveRegionFactorization> factorizeInactiveRegion(
     const svmp::FE::backends::GenericMatrix&,
-    PdeVelocityExtensionFactorization,
-    PdeVelocityExtensionOperator,
+    const PdeVelocityExtensionOptions&,
     const svmp::MeshComm&)
 {
   return nullptr;
 }
 
 [[nodiscard]] bool solveWithFactorization(
-    const DryRegionFactorization&,
+    const InactiveRegionFactorization&,
     const svmp::FE::backends::GenericMatrix&,
     svmp::FE::backends::GenericVector&,
     const svmp::FE::backends::GenericVector&,
@@ -1186,7 +1187,7 @@ struct PdeVelocityExtensionCache::Entry {
     // Components with the same unknowns (same wall masks) have the same
     // matrix; with MUMPS they share one matrix and factorization.
     std::shared_ptr<svmp::FE::backends::GenericMatrix> matrix;
-    std::shared_ptr<DryRegionFactorization> factorization;
+    std::shared_ptr<InactiveRegionFactorization> factorization;
   };
 
   std::uint64_t key{0u};
@@ -2216,9 +2217,9 @@ PdeVelocityExtensionReport extendVelocityByPdePass(
     }
     ComponentSolve out;
     std::shared_ptr<svmp::FE::backends::GenericMatrix> assembled;
-    const DryRegionFactorization* factorization = nullptr;
+    const InactiveRegionFactorization* factorization = nullptr;
     // Factorization of an identical component of this call (MUMPS only).
-    std::shared_ptr<DryRegionFactorization> shared_factorization;
+    std::shared_ptr<InactiveRegionFactorization> shared_factorization;
     const int same_as = same_system_as[component];
     if (reuse) {
       const auto& stored = cached->components[component];
@@ -2336,7 +2337,7 @@ PdeVelocityExtensionReport extendVelocityByPdePass(
     }
 
     svmp::FE::backends::SolverReport solve_report;
-    std::unique_ptr<DryRegionFactorization> new_factorization;
+    std::unique_ptr<InactiveRegionFactorization> new_factorization;
     try {
       bool solved = false;
       if (factorization != nullptr) {
@@ -2349,7 +2350,7 @@ PdeVelocityExtensionReport extendVelocityByPdePass(
                  options.factorization !=
                      PdeVelocityExtensionFactorization::LuColamd) {
         new_factorization =
-            factorizeDryRegion(A, options.factorization, options.op, comm);
+            factorizeInactiveRegion(A, options, comm);
         solved = new_factorization != nullptr &&
                  solveWithFactorization(*new_factorization, A, *x, *b,
                                         solver_options, solve_report);
@@ -2387,9 +2388,9 @@ PdeVelocityExtensionReport extendVelocityByPdePass(
     out.converged = solve_report.converged;
     const auto xs = x->localSpan();
     out.x.assign(xs.begin(), xs.end());
-    std::shared_ptr<DryRegionFactorization> kept =
+    std::shared_ptr<InactiveRegionFactorization> kept =
         new_factorization
-            ? std::shared_ptr<DryRegionFactorization>(std::move(new_factorization))
+            ? std::shared_ptr<InactiveRegionFactorization>(std::move(new_factorization))
             : std::move(shared_factorization);
     if (kept && shared_later[component]) {
       call_systems[component].unknowns = n_unknown;

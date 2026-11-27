@@ -26,6 +26,9 @@ struct LevelSetRecordLabels {
     const char* active_volume{"active_volume"};
     const char* cut_cell_active_volume{"cut_cell_active_volume"};
     const char* full_cell_active_volume{"full_cell_active_volume"};
+    const char* support_refresh_heading{"active support constraint refresh"};
+    const char* support_refresh_diagnostic{"active_support_constraint_refresh"};
+    const char* extension_factorization_source{"InactiveRegionMumps"};
     const char* snapshot{"level-set snapshot"};
     const char* snapshot_validation{"level_set_snapshot_validation"};
     const char* aggregation_rootless_hint{

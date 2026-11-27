@@ -541,7 +541,7 @@ std::span<const NameDeclaration> solverCatalogue() noexcept
          "keeps the attempt-entry cut context for a rollback to reinstall"},
         {"SVMP_PDE_EXTENSION_CACHE_ENTRIES", Performance, kLevelSetExtension, Integer,
          "1, or 3 for distributed component solves and multi-rank MUMPS", Reference,
-         "cached dry-region factorizations of the PDE velocity extension (1 to 8)"},
+         "cached inactive-region factorizations of the PDE velocity extension (1 to 8)"},
         {"SVMP_PDE_EXTENSION_DUMP", Diagnostic, kLevelSetExtension, Text, "off", Reference,
          "writes the extension solution of the first calls under this prefix"},
         {"SVMP_PDE_EXTENSION_DUMP_CALLS", Diagnostic, kLevelSetExtension, Integer, "2", Reference,

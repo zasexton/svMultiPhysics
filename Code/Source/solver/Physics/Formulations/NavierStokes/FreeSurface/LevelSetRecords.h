@@ -25,6 +25,9 @@ inline constexpr FE::level_set::LevelSetRecordLabels levelSetRecordLabels{
     .active_volume = "active_wet_volume",
     .cut_cell_active_volume = "cut_cell_active_wet_volume",
     .full_cell_active_volume = "full_cell_active_wet_volume",
+    .support_refresh_heading = "active pressure support constraint refresh",
+    .support_refresh_diagnostic = "active_pressure_constraint_refresh",
+    .extension_factorization_source = "DryRegionMumps",
     .snapshot = "free-surface snapshot",
     .snapshot_validation = "free_surface_snapshot_validation",
     .aggregation_rootless_hint =

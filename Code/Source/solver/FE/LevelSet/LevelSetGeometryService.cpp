@@ -2844,8 +2844,8 @@ ActiveCutContextRefreshReport refreshActiveCutIntegrationContextFromSolution(
   sim.fe_system->rebuildConstraintState();
   logCutGeometryMemory("after_constraint_rebuild");
   svmp::FE::logRecord(
-      svmp::FE::LogRecord("LevelSetGeometryService", "active pressure support constraint refresh")
-          .diagnostic("active_pressure_constraint_refresh")
+      svmp::FE::LogRecord("LevelSetGeometryService", sim.record_labels.support_refresh_heading)
+          .diagnostic(sim.record_labels.support_refresh_diagnostic)
           .value("provenance", (provenance != nullptr ? provenance : "unknown"))
           .value("solution_source", (solution_source != nullptr ? solution_source : "unknown"))
           .value("synchronized_level_set_fields", synchronized_level_set_fields)
@@ -3421,8 +3421,8 @@ reinstallActiveCutContextCandidate(
   sim.fe_system->setCutIntegrationContext(reinstalled.context);
   sim.fe_system->rebuildConstraintState();
   svmp::FE::logRecord(
-      svmp::FE::LogRecord("LevelSetGeometryService", "active pressure support constraint refresh")
-          .diagnostic("active_pressure_constraint_refresh")
+      svmp::FE::LogRecord("LevelSetGeometryService", sim.record_labels.support_refresh_heading)
+          .diagnostic(sim.record_labels.support_refresh_diagnostic)
           .value("provenance", (provenance != nullptr ? provenance : "unknown"))
           .value("solution_source", (solution_source != nullptr ? solution_source : "unknown"))
           .value("synchronized_level_set_fields", synchronized_level_set_fields)
@@ -3531,8 +3531,8 @@ resyncInstalledActiveCutContext(
   sim.fe_system->setCutIntegrationContext(context);
   sim.fe_system->rebuildConstraintState();
   svmp::FE::logRecord(
-      svmp::FE::LogRecord("LevelSetGeometryService", "active pressure support constraint refresh")
-          .diagnostic("active_pressure_constraint_refresh")
+      svmp::FE::LogRecord("LevelSetGeometryService", sim.record_labels.support_refresh_heading)
+          .diagnostic(sim.record_labels.support_refresh_diagnostic)
           .value("provenance", (provenance != nullptr ? provenance : "unknown"))
           .value("solution_source", (solution_source != nullptr ? solution_source : "unknown"))
           .value("synchronized_level_set_fields", synchronized_level_set_fields)
@@ -4125,8 +4125,8 @@ reinstallRetainedActiveCutContextForRestoredState(
       state.u_vector != nullptr ? "state_vector_fe_ordered"
                                 : "state_span_assumed_fe_ordered";
   svmp::FE::logRecord(
-      svmp::FE::LogRecord("LevelSetGeometryService", "active pressure support constraint refresh")
-          .diagnostic("active_pressure_constraint_refresh")
+      svmp::FE::LogRecord("LevelSetGeometryService", sim.record_labels.support_refresh_heading)
+          .diagnostic(sim.record_labels.support_refresh_diagnostic)
           .value("provenance", (provenance != nullptr ? provenance : "unknown"))
           .value("solution_source", solution_source)
           .value("synchronized_level_set_fields", synchronized_level_set_fields)

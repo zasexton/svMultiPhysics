@@ -242,7 +242,7 @@ inline void accumulateCutKernelOutput(KernelOutput& dst, const KernelOutput& src
                 if (context.hasLevelSetGeometrySnapshotForMarker(
                         active_marker)) {
                     throw std::invalid_argument(
-                        "CutDomainAssembler: free-surface interface rule must declare its generated marker");
+                        "CutDomainAssembler: level-set interface rule must declare its generated marker");
                 }
                 context.assertGeneratedInterfaceRulesCurrentForMarker(
                     active_marker);

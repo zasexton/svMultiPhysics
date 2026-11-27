@@ -1998,7 +1998,7 @@ validateGeneratedActiveBoundaryPartition(
                                    std::max(Real{1.0}, measures[2]);
             if (error > tolerance) {
                 throw std::invalid_argument(
-                    "generated active-boundary wet/dry measures do not partition the parent face");
+                    "generated active-boundary side measures do not partition the parent face");
             }
         });
     return summary;
