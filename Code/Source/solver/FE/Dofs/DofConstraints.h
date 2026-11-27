@@ -122,6 +122,12 @@ public:
      * @brief Get number of rows
      */
     [[nodiscard]] virtual GlobalIndex numRows() const = 0;
+
+    /// Replace the outputs with the column IDs and values of a sparse row,
+    /// including prior updates. Required by joint post-assembly elimination.
+    virtual void getRow(GlobalIndex, std::vector<GlobalIndex>&, std::vector<double>&) const {
+        throw FEException("DofConstraints::applyConstraints requires readable matrix rows");
+    }
 };
 
 /**
@@ -298,7 +304,11 @@ public:
     /**
      * @brief Apply constraints to assembled matrix and RHS
      *
-     * Uses symmetric elimination: modifies both matrix and RHS.
+     * For x = P y + g, embeds P^T A P and P^T (b - A g) on the free DOFs.
+     * The full-size system has identity slave rows and zero slave columns off
+     * the diagonal. Call applySolutionConstraints after solving to recover x.
+     * Close chained constraints first. The matrix must support fill between
+     * free masters introduced by the projection.
      *
      * @param matrix System matrix (modified)
      * @param rhs Right-hand side vector (modified)

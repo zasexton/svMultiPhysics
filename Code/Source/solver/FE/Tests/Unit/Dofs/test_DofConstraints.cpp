@@ -9,6 +9,7 @@
 #include "FE/Core/FEException.h"
 
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <vector>
 
@@ -58,6 +59,17 @@ public:
     }
 
     [[nodiscard]] GlobalIndex numRows() const override { return n_; }
+
+    void getRow(GlobalIndex row, std::vector<GlobalIndex>& columns, std::vector<double>& values) const override {
+        columns.clear();
+        values.clear();
+        for (GlobalIndex col = 0; col < n_; ++col) {
+            if (const double value = (*this)(row, col); value != 0.0) {
+                columns.push_back(col);
+                values.push_back(value);
+            }
+        }
+    }
 
     [[nodiscard]] double operator()(GlobalIndex r, GlobalIndex c) const {
         return a_[static_cast<std::size_t>(r) * static_cast<std::size_t>(n_) + static_cast<std::size_t>(c)];
@@ -186,6 +198,84 @@ TEST(DofConstraints, ApplySolutionConstraints) {
 
     EXPECT_NEAR(sol[0], 7.0, 1e-14);
     EXPECT_NEAR(sol[2], 5.0, 1e-14);
+}
+
+TEST(DofConstraints, AssembledPeriodicEquationIncludesSlaveVirtualWork) {
+    DofConstraints constraints;
+    constraints.addPeriodicBC(/*master=*/0, /*slave=*/1);
+    DenseTestMatrix matrix(2);
+    DenseTestVector load(2);
+    const std::array<GlobalIndex, 2> dofs{0, 1};
+    matrix.addValues(dofs, dofs, std::array{1.0, 0.0, 0.0, 1.0});
+    load[1] = 2.0;
+
+    constraints.applyConstraints(matrix, load);
+    EXPECT_DOUBLE_EQ(matrix(0, 0), 2.0);
+    EXPECT_DOUBLE_EQ(matrix(0, 1), 0.0);
+    EXPECT_DOUBLE_EQ(matrix(1, 0), 0.0);
+    EXPECT_DOUBLE_EQ(matrix(1, 1), 1.0);
+    EXPECT_DOUBLE_EQ(load[0], 2.0);
+    DenseTestVector solution(2);
+    solution[0] = load[0] / matrix(0, 0);
+    constraints.applySolutionConstraints(solution);
+    EXPECT_DOUBLE_EQ(solution[0], 1.0);
+    EXPECT_DOUBLE_EQ(solution[1], 1.0);
+}
+
+TEST(DofConstraints, AssembledAffineSystemMatchesGalerkinOnBothAxes) {
+    // Rows of P are (1,0), (-1/2,2), (0,1), (0,0), (1,-4).
+    // The lift g is (0,3,0,4,-5).
+    DofConstraints constraints;
+    constraints.addLinearConstraint(1, std::array<GlobalIndex, 2>{0, 2}, std::array{-0.5, 2.0}, 3.0);
+    constraints.addDirichletBC(3, 4.0);
+    constraints.addLinearConstraint(4, std::array<GlobalIndex, 1>{1}, std::array{-2.0}, 1.0);
+    constraints.close();
+
+    const std::array<GlobalIndex, 5> dofs{0, 1, 2, 3, 4};
+    const std::array<double, 25> a{10, 2, 0, 1, 4,
+                                   -1, 9, 3, 0, 2,
+                                   4, 2, 8, -3, 1,
+                                   0, 1, -1, 7, 2,
+                                   3, -1, 0, 4, 6};
+    const std::array<double, 5> b{5, 9, -3, 6, 2};
+    DenseTestMatrix matrix(5);
+    DenseTestVector load(5);
+    matrix.addValues(dofs, dofs, a);
+    load.setValues(dofs, b);
+    constraints.applyConstraints(matrix, load);
+
+    const std::array<double, 25> expected_matrix{24.25, 0, -44.5, 0, 0,
+                                                  0, 1, 0, 0, 0,
+                                                  -41, 0, 138, 0, 0,
+                                                  0, 0, 0, 1, 0,
+                                                  0, 0, 0, 0, 1};
+    const std::array<double, 5> expected_load{38, 3, -84, 4, -5};
+    for (const auto row : dofs) {
+        EXPECT_DOUBLE_EQ(load[row], expected_load[row]);
+        for (const auto col : dofs) {
+            EXPECT_DOUBLE_EQ(matrix(row, col), expected_matrix[5 * row + col]) << row << ", " << col;
+        }
+    }
+}
+
+TEST(DofConstraints, OpenChainRequiresClosureBeforeChangingTheSystem) {
+    DofConstraints constraints;
+    constraints.addPeriodicBC(0, 1);
+    constraints.addPeriodicBC(1, 2);
+    DenseTestMatrix matrix(3);
+    DenseTestVector load(3);
+    const std::array<GlobalIndex, 3> ids{0, 1, 2};
+    matrix.addValues(ids, ids, std::array{1., 0., 0., 0., 2., 0., 0., 0., 3.});
+    load.setValues(ids, std::array{4., 5., 6.});
+    EXPECT_THROW(constraints.applyConstraints(matrix, load), FEException);
+    for (const auto i : ids) {
+        EXPECT_DOUBLE_EQ(matrix(i, i), 1. + i);
+        EXPECT_DOUBLE_EQ(load[i], 4. + i);
+    }
+    constraints.close();
+    constraints.applyConstraints(matrix, load);
+    EXPECT_DOUBLE_EQ(matrix(0, 0), 6.);
+    EXPECT_DOUBLE_EQ(load[0], 15.);
 }
 
 TEST(DofConstraints, BuildConstraintMatrixHasIdentityRowsForUnconstrained) {

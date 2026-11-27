@@ -190,49 +190,60 @@ std::optional<double> DofConstraints::getDirichletValue(GlobalIndex dof) const {
 // =============================================================================
 
 void DofConstraints::applyConstraints(AbstractMatrix& matrix, AbstractVector& rhs) const {
-    // Apply constraints using symmetric elimination
-    // For each constrained DOF i with constraint u_i = c_j * u_j + b:
-    // 1. Modify RHS: rhs_k -= A_ki * b for all k
-    // 2. Modify matrix: A_kj += A_ki * c_j for all k, j
-    // 3. Zero row i and set A_ii = 1
-    // 4. Set rhs_i = b
-
-    for (const auto& [dof, constraint] : constraints_) {
-        if (constraint.isDirichlet()) {
-            // Simple Dirichlet: set row to identity, set RHS to value
-            matrix.setRowToIdentity(dof);
-            GlobalIndex indices[1] = {dof};
-            double values[1] = {constraint.inhomogeneity};
-            rhs.setValues(std::span<const GlobalIndex>(indices, 1),
-                          std::span<const double>(values, 1));
-        } else {
-            // Linear constraint: more complex elimination
-            // For now, use simple row zeroing (not fully symmetric)
-            matrix.zeroRow(dof);
-
-            // Set diagonal to 1
-            GlobalIndex rows[1] = {dof};
-            GlobalIndex cols[1] = {dof};
-            double vals[1] = {1.0};
-            matrix.addValues(std::span<const GlobalIndex>(rows, 1),
-                            std::span<const GlobalIndex>(cols, 1),
-                            std::span<const double>(vals, 1));
-
-            // Add contributions from master DOFs
-            for (const auto& entry : constraint.entries) {
-                GlobalIndex mcols[1] = {entry.dof};
-                double mvals[1] = {-entry.coefficient};
-                matrix.addValues(std::span<const GlobalIndex>(rows, 1),
-                                std::span<const GlobalIndex>(mcols, 1),
-                                std::span<const double>(mvals, 1));
-            }
-
-            // Set RHS to inhomogeneity
-            GlobalIndex rhs_idx[1] = {dof};
-            double rhs_val[1] = {constraint.inhomogeneity};
-            rhs.setValues(std::span<const GlobalIndex>(rhs_idx, 1),
-                          std::span<const double>(rhs_val, 1));
+    if (constraints_.empty()) return;
+    const auto n = matrix.numRows();
+    FE_CHECK_ARG(rhs.size() == n, "DofConstraints::applyConstraints: incompatible matrix and RHS sizes");
+    for (const auto& [slave, line] : constraints_) {
+        FE_CHECK_ARG(slave >= 0 && slave < n, "DofConstraints::applyConstraints: invalid slave index");
+        for (const auto& master : line.entries) {
+            FE_CHECK_ARG(master.dof >= 0 && master.dof < n, "DofConstraints::applyConstraints: invalid master index");
+            FE_CHECK_ARG(!isConstrained(master.dof),
+                         "DofConstraints::applyConstraints: call close() before applying chained constraints");
         }
+    }
+
+    std::vector<GlobalIndex> columns;
+    std::vector<double> values, weighted;
+    // Restrict equilibrium to the admissible test space: (P^T A, P^T b).
+    // Only free rows receive contributions, so every slave row is still original.
+    for (const auto& [slave, line] : constraints_) {
+        if (line.entries.empty()) continue;
+        matrix.getRow(slave, columns, values);
+        const double load = rhs.getValue(slave);
+        weighted.resize(values.size());
+        for (const auto& master : line.entries) {
+            std::transform(values.begin(), values.end(), weighted.begin(),
+                           [&](double value) { return master.coefficient * value; });
+            matrix.addValues({&master.dof, 1}, columns, weighted);
+            const double contribution = master.coefficient * load;
+            rhs.addValues({&master.dof, 1}, {&contribution, 1});
+        }
+    }
+
+    // Substitute x = P y + g in the resulting free rows. Read each sparse
+    // row before changing it, including fill from restriction above.
+    for (GlobalIndex row = 0; row < n; ++row) {
+        if (isConstrained(row)) continue;
+        matrix.getRow(row, columns, values);
+        double load = rhs.getValue(row);
+        for (std::size_t j = 0; j < columns.size(); ++j) {
+            const auto it = constraints_.find(columns[j]);
+            if (it == constraints_.end() || values[j] == 0.0) continue;
+            const auto& trial = it->second;
+            const double remove = -values[j];
+            matrix.addValues({&row, 1}, {&columns[j], 1}, {&remove, 1});
+            load -= values[j] * trial.inhomogeneity;
+            for (const auto& master : trial.entries) {
+                const double entry = values[j] * master.coefficient;
+                matrix.addValues({&row, 1}, {&master.dof, 1}, {&entry, 1});
+            }
+        }
+        rhs.setValues({&row, 1}, {&load, 1});
+    }
+
+    for (const auto& [slave, line] : constraints_) {
+        matrix.setRowToIdentity(slave);
+        rhs.setValues({&slave, 1}, {&line.inhomogeneity, 1});
     }
 }
 
