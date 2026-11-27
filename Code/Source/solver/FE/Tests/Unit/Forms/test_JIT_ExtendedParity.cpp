@@ -28,6 +28,7 @@
 #include "Spaces/H1Space.h"
 #include "Spaces/SpaceFactory.h"
 #include "Tests/Unit/Forms/FormsTestHelpers.h"
+#include "Tests/Unit/Forms/JITTestHelpers.h"
 
 #include <array>
 #include <memory>
@@ -80,7 +81,6 @@ struct CompareOptions {
     Real time_step{0.0};
     std::optional<std::vector<Real>> prev_solution{};
     std::optional<std::vector<Real>> prev_solution2{};
-    bool require_jit{false};
 };
 
 [[nodiscard]] dofs::DofMap createSingleTetraDofMap(LocalIndex n_dofs)
@@ -156,9 +156,7 @@ void expectJitMatchesInterpreterCell(const assembly::IMeshAccess& mesh,
     R_jit.zero();
     (void)assembler.assembleBoth(mesh, space, space, jit_kernel, J_jit, R_jit);
 
-    if (options.require_jit) {
-        ASSERT_TRUE(jit_kernel.isJITReady());
-    }
+    expectCompiledExecution(jit_kernel, *jit_fallback);
     expectDenseNear(R_jit, R_interp, vec_tol);
     expectDenseNear(J_jit, J_interp, mat_tol);
 }
@@ -202,6 +200,7 @@ void expectJitMatchesInterpreterLinearFieldCell(const assembly::IMeshAccess& mes
     assembly::DenseVectorView R_jit(n);
     R_jit.zero();
     (void)assembler.assembleVector(mesh, space, jit_kernel, R_jit);
+    expectCompiledExecution(jit_kernel, *jit_fallback);
 
     expectDenseNear(R_jit, R_interp, vec_tol);
 }
@@ -282,6 +281,7 @@ void expectJitMatchesInterpreterBoundary(const assembly::IMeshAccess& mesh,
     J_jit.zero();
     R_jit.zero();
     (void)assembler.assembleBoundaryFaces(mesh, boundary_marker, space, jit_kernel, &J_jit, &R_jit);
+    expectCompiledExecution(jit_kernel, *jit_fallback);
 
     expectDenseNear(R_jit, R_interp, vec_tol);
     expectDenseNear(J_jit, J_interp, mat_tol);
@@ -315,6 +315,7 @@ void expectJitMatchesInterpreterInteriorFacesBilinear(const assembly::IMeshAcces
     assembly::DenseMatrixView A_jit(n);
     A_jit.zero();
     (void)assembler.assembleInteriorFaces(mesh, test_space, trial_space, jit_kernel, A_jit, nullptr);
+    expectCompiledExecution(jit_kernel, *jit_fallback);
 
     expectDenseNear(A_jit, A_interp, mat_tol);
 }
@@ -331,7 +332,6 @@ void expectJitMatchesInterpreterInteriorFacesResidual(
     Real mat_tol,
     geometry::CutIntegrationSide side =
         geometry::CutIntegrationSide::Interface,
-    bool require_jit = false,
     const dofs::DofHandler* handler = nullptr)
 {
     FormCompiler compiler;
@@ -369,15 +369,13 @@ void expectJitMatchesInterpreterInteriorFacesResidual(
     (void)assembler.assembleInteriorFaces(
         mesh, space, space, jit_kernel, J_jit, &R_jit, marker, side);
 
-    if (require_jit) {
-        ASSERT_TRUE(jit_kernel.isJITReady());
-        if (side == geometry::CutIntegrationSide::Interface) {
-            ASSERT_TRUE(jit_kernel.hasCompiledTangentDispatch(IntegralDomain::InteriorFace, marker));
-        } else {
-            const auto form_side = side == geometry::CutIntegrationSide::Negative
-                ? CutVolumeSide::Negative : CutVolumeSide::Positive;
-            ASSERT_TRUE(jit_kernel.hasCompiledInteriorFaceTangentDispatch(marker, form_side));
-        }
+    expectCompiledExecution(jit_kernel, *jit_fallback);
+    if (side == geometry::CutIntegrationSide::Interface) {
+        ASSERT_TRUE(jit_kernel.hasCompiledTangentDispatch(IntegralDomain::InteriorFace, marker));
+    } else {
+        const auto form_side = side == geometry::CutIntegrationSide::Negative
+            ? CutVolumeSide::Negative : CutVolumeSide::Positive;
+        ASSERT_TRUE(jit_kernel.hasCompiledInteriorFaceTangentDispatch(marker, form_side));
     }
 
     expectDenseNear(R_jit, R_interp, vec_tol);
@@ -456,9 +454,7 @@ TEST(JITExtendedParityTest, CachedCurrentStateCurlUsesTheOrientedBasisCurls)
     const auto trial = TrialFunction(space, "trial");
     const auto residual = (inner(curl(state), curl(test)) + inner(trial, test)).dx();
     const std::vector<Real> coefficients{0.12, -0.08, 0.15, -0.03, 0.21, -0.11};
-    CompareOptions options;
-    options.require_jit = true;
-    expectJitMatchesInterpreterCell(mesh, dof_map, space, residual, coefficients, 1e-12, 1e-12, options);
+    expectJitMatchesInterpreterCell(mesh, dof_map, space, residual, coefficients, 1e-12, 1e-12);
 }
 
 TEST(JITExtendedParityTest, CachedCurrentStateCurlUsesScalarFactorGradientsForNodalVectors)
@@ -472,9 +468,7 @@ TEST(JITExtendedParityTest, CachedCurrentStateCurlUsesScalarFactorGradientsForNo
     const auto residual = (inner(curl(state), curl(test)) + inner(trial, test)).dx();
     const std::vector<Real> coefficients{0.4, 0.1, -0.3, 0.6, 0.7, -0.2,
                                          0.1, -0.8, 0.3, 0.9, -0.1, -0.5};
-    CompareOptions options;
-    options.require_jit = true;
-    expectJitMatchesInterpreterCell(mesh, dof_map, *space, residual, coefficients, 1e-12, 1e-12, options);
+    expectJitMatchesInterpreterCell(mesh, dof_map, *space, residual, coefficients, 1e-12, 1e-12);
 }
 
 TEST(JITExtendedParityTest, CachedCurrentStateCurlUsesBothInteriorFaceTraces)
@@ -501,7 +495,7 @@ TEST(JITExtendedParityTest, CachedCurrentStateCurlUsesBothInteriorFaceTraces)
     const std::vector<Real> coefficients{0.4, 0.1, -0.3, 0.6, 0.7, -0.2, 0.1, -0.8, 0.3};
     ASSERT_EQ(dofs.getDofMap().getNumDofs(), coefficients.size());
     expectJitMatchesInterpreterInteriorFacesResidual(mesh, dofs.getDofMap(), space, residual, coefficients,
-        -1, nullptr, 1e-12, 1e-12, geometry::CutIntegrationSide::Interface, true, &dofs);
+        -1, nullptr, 1e-12, 1e-12, geometry::CutIntegrationSide::Interface, &dofs);
 }
 
 TEST(JITExtendedParityTest, IntrinsicVectorBasisGradientMatchesInterpreter)
@@ -878,8 +872,7 @@ TEST(JITExtendedParityTest, SideSelectedCutAdjacentTermsMatchInterpreter)
         &cut_context,
         /*vec_tol=*/1e-12,
         /*mat_tol=*/1e-12,
-        geometry::CutIntegrationSide::Negative,
-        /*require_jit=*/true);
+        geometry::CutIntegrationSide::Negative);
     expectJitMatchesInterpreterInteriorFacesResidual(
         mesh,
         dof_map,
@@ -890,8 +883,7 @@ TEST(JITExtendedParityTest, SideSelectedCutAdjacentTermsMatchInterpreter)
         &cut_context,
         /*vec_tol=*/1e-12,
         /*mat_tol=*/1e-12,
-        geometry::CutIntegrationSide::Positive,
-        /*require_jit=*/true);
+        geometry::CutIntegrationSide::Positive);
 }
 
 TEST(JITExtendedParityTest, NitscheBoundaryMatchesInterpreter)

@@ -5,212 +5,63 @@
  * See Copyright-SimVascular.txt for additional details.
  */
 
-#include <gtest/gtest.h>
+#include "Tests/Unit/Forms/RuntimeScalarFunctionalTest.h"
 
-#include "Assembly/FunctionalAssembler.h"
-#include "Forms/FormExpr.h"
-#include "Forms/JIT/JITFunctionalKernelWrapper.h"
-#include "Spaces/H1Space.h"
-#include "Tests/Unit/Forms/FormsTestHelpers.h"
-#include "Tests/Unit/Forms/JITTestHelpers.h"
+namespace svmp::FE::forms::test {
 
-namespace svmp {
-namespace FE {
-namespace forms {
-namespace test {
-namespace {
+class LLVMGenScalarOps : public RuntimeScalarFunctionalTest {};
 
-struct CellEnv {
-    SingleTetraMeshAccess mesh{};
-    dofs::DofMap dof_map{createSingleTetraDofMap()};
-    spaces::H1Space space{ElementType::Tetra4, 1};
-    assembly::FunctionalAssembler assembler{};
-    Real volume{0.0};
-
-    CellEnv()
-    {
-        assembler.setMesh(mesh);
-        assembler.setDofMap(dof_map);
-        assembler.setSpace(space);
-
-        const auto one = FormExpr::constant(Real(1.0));
-        auto one_kernel = makeFunctionalFormKernel(one, FunctionalFormKernel::Domain::Cell);
-        volume = assembler.assembleScalar(*one_kernel);
-    }
-};
-
-Real assembleJIT(const FormExpr& integrand, CellEnv& env)
+TEST_F(LLVMGenScalarOps, PowerComputesExponentiation)
 {
-    auto throw_fallback = makeThrowingTotalKernelFor(integrand, /*has_cell=*/true, /*has_boundary=*/false);
-    jit::JITFunctionalKernelWrapper jit_kernel(
-        throw_fallback, integrand, jit::JITFunctionalKernelWrapper::Domain::Cell, makeUnitTestJITOptions());
-    return env.assembler.assembleScalar(jit_kernel);
+    expectSamples(a.pow(b), {{{2, 3}, 8}, {{4, 0.5}, 2}, {{2, -3}, 0.125}});
 }
 
-Real assembleInterp(const FormExpr& integrand, CellEnv& env)
+TEST_F(LLVMGenScalarOps, MinimumSelectsSmaller)
 {
-    auto interp = makeFunctionalFormKernel(integrand, FunctionalFormKernel::Domain::Cell);
-    return env.assembler.assembleScalar(*interp);
+    expectSamples(a.min(b), {{{-1, 2}, -1}, {{4, -3}, -3}, {{2, 2}, 2}});
 }
 
-} // namespace
-
-TEST(LLVMGenScalarOps, PowerComputesExponentiation)
+TEST_F(LLVMGenScalarOps, MaximumSelectsLarger)
 {
-    requireLLVMJITOrSkip();
-    CellEnv env;
-    ASSERT_GT(env.volume, Real(0.0));
-
-    const auto integrand = FormExpr::constant(Real(2.0)).pow(FormExpr::constant(Real(3.0)));
-
-    const Real ref = assembleInterp(integrand, env);
-    const Real jit = assembleJIT(integrand, env);
-    EXPECT_NEAR(jit, ref, 1e-12);
-    EXPECT_NEAR(jit / env.volume, Real(8.0), 1e-12);
+    expectSamples(a.max(b), {{{-1, 2}, 2}, {{4, -3}, 4}, {{2, 2}, 2}});
 }
 
-TEST(LLVMGenScalarOps, MinimumSelectsSmaller)
+TEST_F(LLVMGenScalarOps, ConditionalSelectsCorrectBranch)
 {
-    requireLLVMJITOrSkip();
-    CellEnv env;
-    ASSERT_GT(env.volume, Real(0.0));
-
-    const auto integrand = FormExpr::constant(Real(-1.0)).min(FormExpr::constant(Real(2.0)));
-
-    const Real ref = assembleInterp(integrand, env);
-    const Real jit = assembleJIT(integrand, env);
-    EXPECT_NEAR(jit, ref, 1e-12);
-    EXPECT_NEAR(jit / env.volume, Real(-1.0), 1e-12);
+    expectSamples(a.lt(b).conditional(a + b, a - b), {{{1, 2}, 3}, {{3, 1}, 2}, {{2, 2}, 0}});
 }
 
-TEST(LLVMGenScalarOps, MaximumSelectsLarger)
+TEST_F(LLVMGenScalarOps, AbsoluteValueMatchesInterpreter)
 {
-    requireLLVMJITOrSkip();
-    CellEnv env;
-    ASSERT_GT(env.volume, Real(0.0));
-
-    const auto integrand = FormExpr::constant(Real(-1.0)).max(FormExpr::constant(Real(2.0)));
-
-    const Real ref = assembleInterp(integrand, env);
-    const Real jit = assembleJIT(integrand, env);
-    EXPECT_NEAR(jit, ref, 1e-12);
-    EXPECT_NEAR(jit / env.volume, Real(2.0), 1e-12);
+    expectSamples(a.abs(), {{{-2, 0}, 2}, {{1.5, 0}, 1.5}, {{0, 0}, 0}});
 }
 
-TEST(LLVMGenScalarOps, ConditionalSelectsCorrectBranch)
+TEST_F(LLVMGenScalarOps, SignMatchesInterpreter)
 {
-    requireLLVMJITOrSkip();
-    CellEnv env;
-    ASSERT_GT(env.volume, Real(0.0));
-
-    const auto cond = FormExpr::constant(Real(1.0)).lt(FormExpr::constant(Real(2.0)));
-    const auto integrand = cond.conditional(FormExpr::constant(Real(3.0)), FormExpr::constant(Real(4.0)));
-
-    const Real ref = assembleInterp(integrand, env);
-    const Real jit = assembleJIT(integrand, env);
-    EXPECT_NEAR(jit, ref, 1e-12);
-    EXPECT_NEAR(jit / env.volume, Real(3.0), 1e-12);
+    expectSamples(a.sign(), {{{-2, 0}, -1}, {{1.5, 0}, 1}, {{0, 0}, 0}});
 }
 
-TEST(LLVMGenScalarOps, ComparisonOperatorsReturnCorrectValues)
+TEST_F(LLVMGenScalarOps, SqrtMatchesInterpreter)
 {
-    requireLLVMJITOrSkip();
-    CellEnv env;
-    ASSERT_GT(env.volume, Real(0.0));
-
-    const auto lt = FormExpr::constant(Real(1.0)).lt(FormExpr::constant(Real(2.0)));
-    const auto le = FormExpr::constant(Real(2.0)).le(FormExpr::constant(Real(2.0)));
-    const auto gt = FormExpr::constant(Real(2.0)).gt(FormExpr::constant(Real(1.0)));
-    const auto ge = FormExpr::constant(Real(2.0)).ge(FormExpr::constant(Real(2.0)));
-    const auto eq = FormExpr::constant(Real(3.0)).eq(FormExpr::constant(Real(3.0)));
-    const auto ne = FormExpr::constant(Real(3.0)).ne(FormExpr::constant(Real(4.0)));
-
-    const auto false_lt = FormExpr::constant(Real(2.0)).lt(FormExpr::constant(Real(1.0)));
-    const auto false_eq = FormExpr::constant(Real(1.0)).eq(FormExpr::constant(Real(2.0)));
-
-    const auto integrand =
-        lt + le + gt + ge + eq + ne +
-        false_lt + false_eq;
-
-    const Real ref = assembleInterp(integrand, env);
-    const Real jit = assembleJIT(integrand, env);
-    EXPECT_NEAR(jit, ref, 1e-12);
-
-    // All true comparisons should contribute 1 and false ones 0.
-    EXPECT_NEAR(jit / env.volume, Real(6.0), 1e-12);
+    expectSamples(a.sqrt(), {{{0, 0}, 0}, {{4, 0}, 2}, {{2, 0}, std::sqrt(2.0)}});
 }
 
-TEST(LLVMGenScalarOps, AbsoluteValueMatchesInterpreter)
+TEST_F(LLVMGenScalarOps, ExpMatchesInterpreter)
 {
-    requireLLVMJITOrSkip();
-    CellEnv env;
-    ASSERT_GT(env.volume, Real(0.0));
-
-    const auto integrand = FormExpr::constant(Real(-2.0)).abs();
-
-    const Real ref = assembleInterp(integrand, env);
-    const Real jit = assembleJIT(integrand, env);
-    EXPECT_NEAR(jit, ref, 1e-12);
-    EXPECT_NEAR(jit / env.volume, Real(2.0), 1e-12);
+    expectSamples(a.exp(), {{{-0.5, 0}, std::exp(-0.5)}, {{2, 0}, std::exp(2.0)}});
 }
 
-TEST(LLVMGenScalarOps, SignMatchesInterpreter)
+TEST_F(LLVMGenScalarOps, LogMatchesInterpreter)
 {
-    requireLLVMJITOrSkip();
-    CellEnv env;
-    ASSERT_GT(env.volume, Real(0.0));
-
-    const auto integrand = FormExpr::constant(Real(-2.0)).sign();
-
-    const Real ref = assembleInterp(integrand, env);
-    const Real jit = assembleJIT(integrand, env);
-    EXPECT_NEAR(jit, ref, 1e-12);
-    EXPECT_NEAR(jit / env.volume, Real(-1.0), 1e-12);
+    expectSamples(a.log(), {{{0.5, 0}, std::log(0.5)}, {{1, 0}, 0}, {{2, 0}, std::log(2.0)}});
 }
 
-TEST(LLVMGenScalarOps, SqrtMatchesInterpreter)
+TEST_F(LLVMGenScalarOps, ComparisonOperatorsReturnCorrectValues)
 {
-    requireLLVMJITOrSkip();
-    CellEnv env;
-    ASSERT_GT(env.volume, Real(0.0));
-
-    const auto integrand = FormExpr::constant(Real(4.0)).sqrt();
-
-    const Real ref = assembleInterp(integrand, env);
-    const Real jit = assembleJIT(integrand, env);
-    EXPECT_NEAR(jit, ref, 1e-12);
-    EXPECT_NEAR(jit / env.volume, Real(2.0), 1e-12);
+    // A distinct bit for every predicate detects swapped or canceled comparisons.
+    const auto mask = a.lt(b) + 2 * a.le(b) + 4 * a.gt(b) +
+                      8 * a.ge(b) + 16 * a.eq(b) + 32 * a.ne(b);
+    expectSamples(mask, {{{1, 2}, 35}, {{2, 2}, 26}, {{3, 2}, 44}});
 }
 
-TEST(LLVMGenScalarOps, ExpMatchesInterpreter)
-{
-    requireLLVMJITOrSkip();
-    CellEnv env;
-    ASSERT_GT(env.volume, Real(0.0));
-
-    const auto integrand = FormExpr::constant(Real(0.0)).exp();
-
-    const Real ref = assembleInterp(integrand, env);
-    const Real jit = assembleJIT(integrand, env);
-    EXPECT_NEAR(jit, ref, 1e-12);
-    EXPECT_NEAR(jit / env.volume, Real(1.0), 1e-12);
-}
-
-TEST(LLVMGenScalarOps, LogMatchesInterpreter)
-{
-    requireLLVMJITOrSkip();
-    CellEnv env;
-    ASSERT_GT(env.volume, Real(0.0));
-
-    const auto integrand = FormExpr::constant(Real(1.0)).log();
-
-    const Real ref = assembleInterp(integrand, env);
-    const Real jit = assembleJIT(integrand, env);
-    EXPECT_NEAR(jit, ref, 1e-12);
-    EXPECT_NEAR(jit / env.volume, Real(0.0), 1e-12);
-}
-
-} // namespace test
-} // namespace forms
-} // namespace FE
-} // namespace svmp
+} // namespace svmp::FE::forms::test

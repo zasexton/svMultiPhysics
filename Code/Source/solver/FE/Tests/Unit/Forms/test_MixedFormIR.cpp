@@ -708,17 +708,18 @@ TEST(MixedFormIR, AllFieldRequirementsMergesFlags)
     const auto p = FormExpr::trialFunction(Q, "p");
     const auto q = FormExpr::testFunction(Q, "q");
 
-    mir.setBlock(0, 0, compiler.compileBilinear((u * v).dx()));
-    mir.setBlock(1, 1, compiler.compileBilinear((p * q).dx()));
+    const auto diffusivity = FormExpr::discreteField(7, V, "k");
+    const auto mass = FormExpr::discreteField(3, Q, "m");
+    mir.setBlock(0, 0, compiler.compileBilinear((inner(grad(diffusivity), grad(u)) * v).dx()));
+    mir.setBlock(1, 1, compiler.compileBilinear(((mass + diffusivity) * p * q).dx()));
 
-    // Just verify we can call it without error and get a non-empty result
-    // (field requirement details depend on compilation internals)
-    const auto reqs = mir.allFieldRequirements();
-    // Each block may or may not produce field requirements depending on compilation details
-    // The key invariant is: no crash, and if present they're sorted by FieldId
-    for (std::size_t i = 1; i < reqs.size(); ++i) {
-        EXPECT_LT(reqs[i - 1].field, reqs[i].field);
-    }
+    const auto requirements = mir.allFieldRequirements();
+    using assembly::RequiredData;
+    ASSERT_EQ(requirements.size(), 2u);
+    EXPECT_EQ(requirements[0].field, FieldId{3});
+    EXPECT_EQ(requirements[0].required, RequiredData::SolutionValues);
+    EXPECT_EQ(requirements[1].field, FieldId{7});
+    EXPECT_EQ(requirements[1].required, RequiredData::SolutionValues | RequiredData::SolutionGradients);
 }
 
 // ============================================================================

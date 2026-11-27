@@ -3,9 +3,11 @@
 
 #include <gtest/gtest.h>
 
+#include "Assembly/ConcurrentCompute.h"
 #include "Assembly/FunctionalAssembler.h"
 #include "Forms/FormCompiler.h"
 #include "Forms/FormKernels.h"
+#include "Forms/JIT/JITKernelWrapper.h"
 
 #include <stdexcept>
 
@@ -35,6 +37,17 @@ namespace test {
     do {                       \
     } while (0)
 #endif
+
+// An interpreter kernel prepares its IR on its first compute in any domain.
+// After genuine compiled assembly its first call still requests serial preparation.
+inline void expectCompiledExecution(const jit::JITKernelWrapper& wrapper,
+                                    assembly::AssemblyKernel& interpreter)
+{
+    ASSERT_TRUE(wrapper.isJITReady());
+    const assembly::ConcurrentComputeScope no_lazy_preparation;
+    EXPECT_THROW(interpreter.computeCellBatch({}, {}), assembly::DeferredSerialWork)
+        << "the underlying interpreter was used during compiled assembly";
+}
 
 class ThrowingTotalKernel final : public assembly::FunctionalKernel {
 public:

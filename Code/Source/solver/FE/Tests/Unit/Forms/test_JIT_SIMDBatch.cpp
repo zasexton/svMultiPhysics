@@ -7,21 +7,10 @@
 
 /**
  * @file test_JIT_SIMDBatch.cpp
- * @brief SIMD batch vectorization parity tests.
+ * @brief Compare compiled cell batches with independently interpreted element assembly.
  *
- * Compiles JIT kernels with simd_batch=true and simd_batch=false, runs both
- * on the same mesh/solution data via full assembly, and verifies that the
- * resulting global matrices and vectors match to machine epsilon.
- *
- * The SIMD batch path processes multiple elements simultaneously using LLVM
- * vector types (e.g., <2 x double> on SSE2).  These tests ensure the
- * vectorized path produces bit-identical results to the scalar batch path.
- *
- * Test cases:
- *   1. ScalarLaplacian        -- inner(grad(u), grad(v)), simplest bilinear form
- *   2. NonlinearReaction      -- inner(grad(u), grad(v)) + u*u*v, nonlinear in u
- *   3. StokesVMS_VV           -- velocity-velocity VMS block (Triangle3 + ProductSpace + field_solutions)
- *   4. MovingFrame            -- mesh velocity, its divergence and current/reference geometry, batched vs cell by cell
+ * Bilinear forms run through the scalar and SIMD batch backends. Nonlinear
+ * residuals and their tangents exercise the compiled backend's effective policy.
  */
 
 #include <gtest/gtest.h>
@@ -32,14 +21,20 @@
 #include "Forms/FormCompiler.h"
 #include "Forms/FormKernels.h"
 #include "Forms/JIT/JITKernelWrapper.h"
+#include "Forms/JIT/HardwareProfile.h"
 #include "Forms/Vocabulary.h"
 #include "Spaces/H1Space.h"
 #include "Spaces/ProductSpace.h"
 #include "Tests/Unit/Forms/FormsTestHelpers.h"
+#include "Tests/Unit/Forms/JITTestHelpers.h"
 
 #include <algorithm>
 #include <array>
+#include <chrono>
 #include <cmath>
+#include <cstdlib>
+#include <filesystem>
+#include <fstream>
 #include <cstddef>
 #include <memory>
 #include <optional>
@@ -293,169 +288,105 @@ struct SIMDBatchCompareOptions {
     std::span<const assembly::FieldSolutionAccess> field_access{};
 };
 
-void expectJITBatchOptionsMatch(const assembly::IMeshAccess& mesh,
-                                const dofs::DofMap& row_map,
-                                const dofs::DofMap& col_map,
-                                const spaces::FunctionSpace& test_space,
-                                const spaces::FunctionSpace& trial_space,
-                                const FormExpr& residual,
-                                const std::vector<Real>& U,
-                                const forms::JITOptions& lhs_options,
-                                const forms::JITOptions& rhs_options,
-                                Real vec_tol,
-                                Real mat_tol,
-                                const SIMDBatchCompareOptions& options = {})
+void expectCompiledResidualMatchesInterpreter(const assembly::IMeshAccess& mesh,
+                                              const dofs::DofMap& dofs,
+                                              const spaces::FunctionSpace& space,
+                                              const FormExpr& residual,
+                                              const std::vector<Real>& state,
+                                              const forms::JITOptions& jit_options,
+                                              Real tolerance,
+                                              const SIMDBatchCompareOptions& options = {})
 {
     FormCompiler compiler;
+    SymbolicNonlinearFormKernel interpreted(compiler.compileResidual(residual), NonlinearKernelOutput::Both);
+    interpreted.resolveInlinableConstitutives();
+    auto fallback = std::make_shared<SymbolicNonlinearFormKernel>(
+        compiler.compileResidual(residual), NonlinearKernelOutput::Both);
+    forms::jit::JITKernelWrapper compiled(fallback, jit_options);
+    compiled.resolveInlinableConstitutives();
 
-    auto lhs_ir = compiler.compileResidual(residual);
-    auto rhs_ir = compiler.compileResidual(residual);
-
-    auto lhs_fallback =
-        std::make_shared<SymbolicNonlinearFormKernel>(std::move(lhs_ir), NonlinearKernelOutput::Both);
-    forms::jit::JITKernelWrapper lhs_kernel(lhs_fallback, lhs_options);
-    lhs_kernel.resolveInlinableConstitutives();
-
-    auto rhs_fallback =
-        std::make_shared<SymbolicNonlinearFormKernel>(std::move(rhs_ir), NonlinearKernelOutput::Both);
-    forms::jit::JITKernelWrapper rhs_kernel(rhs_fallback, rhs_options);
-    rhs_kernel.resolveInlinableConstitutives();
-
-    auto runAssembly = [&](assembly::AssemblyKernel& kernel,
-                           assembly::DenseMatrixView& J,
-                           assembly::DenseVectorView& R) {
-        assembly::StandardAssembler assembler;
-        if (&row_map == &col_map) {
-            assembler.setDofMap(row_map);
-        } else {
-            assembler.setRowDofMap(row_map);
-            assembler.setColDofMap(col_map);
-        }
-        assembler.setCurrentSolution(U);
-        assembler.setTimeIntegrationContext(options.time_ctx);
-        assembler.setTimeStep(options.time_step);
-        if (options.prev_solution.has_value()) {
-            assembler.setPreviousSolution(*options.prev_solution);
-        }
-        if (!options.field_access.empty()) {
-            assembler.setFieldSolutionAccess(options.field_access);
-        }
-        J.zero();
-        R.zero();
-        auto result = assembler.assembleBoth(mesh, test_space, trial_space, kernel, J, R);
-        EXPECT_GT(result.elements_assembled, 0) << "No cells assembled";
-    };
-
-    const GlobalIndex n_rows = row_map.getNumDofs();
-    const GlobalIndex n_cols = col_map.getNumDofs();
-
-    assembly::DenseMatrixView J_lhs(n_rows, n_cols);
-    assembly::DenseVectorView R_lhs(n_rows);
-    runAssembly(lhs_kernel, J_lhs, R_lhs);
-
-    assembly::DenseMatrixView J_rhs(n_rows, n_cols);
-    assembly::DenseVectorView R_rhs(n_rows);
-    runAssembly(rhs_kernel, J_rhs, R_rhs);
-
-    expectDenseNear(R_lhs, R_rhs, vec_tol, "residual");
-    expectDenseNear(J_lhs, J_rhs, mat_tol, "tangent");
+    assembly::StandardAssembler assembler;
+    assembler.setDofMap(dofs);
+    assembler.setCurrentSolution(state);
+    assembler.setTimeIntegrationContext(options.time_ctx);
+    assembler.setTimeStep(options.time_step);
+    if (options.prev_solution) assembler.setPreviousSolution(*options.prev_solution);
+    assembler.setFieldSolutionAccess(options.field_access);
+    const auto n = dofs.getNumDofs();
+    assembly::DenseMatrixView J(n), J_ref(n);
+    assembly::DenseVectorView R(n), R_ref(n);
+    assembler.assembleBoth(mesh, space, space, interpreted, J_ref, R_ref);
+    const auto result = assembler.assembleBoth(mesh, space, space, compiled, J, R);
+    ASSERT_EQ(result.elements_assembled, mesh.numCells());
+    expectCompiledExecution(compiled, *fallback);
+    expectDenseNear(R, R_ref, tolerance, "residual");
+    expectDenseNear(J, J_ref, tolerance, "tangent");
 }
 
-/**
- * @brief Compare full assembly results between simd_batch=true and simd_batch=false.
- *
- * Both paths use JIT compilation; the only difference is whether the generated
- * kernel uses SIMD vector types for the batch loop.
- */
-void expectSIMDBatchMatchesScalar(const assembly::IMeshAccess& mesh,
-                                  const dofs::DofMap& row_map,
-                                  const dofs::DofMap& col_map,
-                                  const spaces::FunctionSpace& test_space,
-                                  const spaces::FunctionSpace& trial_space,
-                                  const FormExpr& residual,
-                                  const std::vector<Real>& U,
-                                  Real vec_tol,
-                                  Real mat_tol,
-                                  const SIMDBatchCompareOptions& options = {})
+// Look in the unoptimized IR so ordinary loop vectorization cannot satisfy the check.
+void expectTwoLaneArithmetic(const std::filesystem::path& directory, bool expected)
 {
-    FormCompiler compiler;
-
-    auto ir_simd = compiler.compileResidual(residual);
-    auto ir_scalar = compiler.compileResidual(residual);
-
-    auto fallback_simd =
-        std::make_shared<SymbolicNonlinearFormKernel>(std::move(ir_simd), NonlinearKernelOutput::Both);
-    forms::jit::JITKernelWrapper simd_kernel(fallback_simd, makeJITOptions(/*simd_batch=*/true));
-    simd_kernel.resolveInlinableConstitutives();
-
-    auto fallback_scalar =
-        std::make_shared<SymbolicNonlinearFormKernel>(std::move(ir_scalar), NonlinearKernelOutput::Both);
-    forms::jit::JITKernelWrapper scalar_kernel(fallback_scalar, makeJITOptions(/*simd_batch=*/false));
-    scalar_kernel.resolveInlinableConstitutives();
-
-    auto runAssembly = [&](assembly::AssemblyKernel& kernel,
-                           assembly::DenseMatrixView& J,
-                           assembly::DenseVectorView& R) {
-        assembly::StandardAssembler assembler;
-        if (&row_map == &col_map) {
-            assembler.setDofMap(row_map);
-        } else {
-            assembler.setRowDofMap(row_map);
-            assembler.setColDofMap(col_map);
-        }
-        assembler.setCurrentSolution(U);
-        assembler.setTimeIntegrationContext(options.time_ctx);
-        assembler.setTimeStep(options.time_step);
-        if (options.prev_solution.has_value()) {
-            assembler.setPreviousSolution(*options.prev_solution);
-        }
-        if (!options.field_access.empty()) {
-            assembler.setFieldSolutionAccess(options.field_access);
-        }
-        J.zero();
-        R.zero();
-        auto result = assembler.assembleBoth(mesh, test_space, trial_space, kernel, J, R);
-        EXPECT_GT(result.elements_assembled, 0) << "No cells assembled";
-    };
-
-    const GlobalIndex n_rows = row_map.getNumDofs();
-    const GlobalIndex n_cols = col_map.getNumDofs();
-
-    assembly::DenseMatrixView J_simd(n_rows, n_cols);
-    assembly::DenseVectorView R_simd(n_rows);
-    runAssembly(simd_kernel, J_simd, R_simd);
-
-    assembly::DenseMatrixView J_scalar(n_rows, n_cols);
-    assembly::DenseVectorView R_scalar(n_rows);
-    runAssembly(scalar_kernel, J_scalar, R_scalar);
-
-    // Verify parity: SIMD batch must match scalar batch exactly.
-    expectDenseNear(R_simd, R_scalar, vec_tol, "residual");
-    expectDenseNear(J_simd, J_scalar, mat_tol, "tangent");
-
-    // Sanity check: at least one non-zero matrix entry (avoid vacuous pass).
-    bool any_nonzero_simd = false, any_nonzero_scalar = false;
-    for (GlobalIndex i = 0; i < n_rows; ++i) {
-        for (GlobalIndex j = 0; j < n_cols; ++j) {
-            if (std::abs(J_simd.getMatrixEntry(i, j)) > 1e-15) any_nonzero_simd = true;
-            if (std::abs(J_scalar.getMatrixEntry(i, j)) > 1e-15) any_nonzero_scalar = true;
+    bool found_module = false;
+    bool found_vector_multiply = false;
+    for (const auto& file : std::filesystem::directory_iterator(directory)) {
+        if (!file.path().filename().string().ends_with("_before.ll")) continue;
+        found_module = true;
+        std::ifstream stream(file.path());
+        for (std::string line; std::getline(stream, line); ) {
+            if (line.find("fmul") != std::string::npos && line.find("<2 x double>") != std::string::npos) {
+                found_vector_multiply = true;
+            }
         }
     }
-    EXPECT_TRUE(any_nonzero_simd) << "SIMD assembled matrix is entirely zero";
-    EXPECT_TRUE(any_nonzero_scalar) << "Scalar assembled matrix is entirely zero";
+    EXPECT_TRUE(found_module);
+    EXPECT_EQ(found_vector_multiply, expected);
 }
 
-void expectSIMDBatchMatchesScalar(const assembly::IMeshAccess& mesh,
-                                  const dofs::DofMap& dof_map,
-                                  const spaces::FunctionSpace& space,
-                                  const FormExpr& residual,
-                                  const std::vector<Real>& U,
-                                  Real vec_tol,
-                                  Real mat_tol,
-                                  const SIMDBatchCompareOptions& options = {})
+void expectBilinearBatches(const assembly::IMeshAccess& mesh,
+                           const dofs::DofMap& row_map, const dofs::DofMap& col_map,
+                           const spaces::FunctionSpace& test_space, const spaces::FunctionSpace& trial_space,
+                           const FormExpr& form, std::optional<Real> diagonal = {}, bool inspect_ir = false)
 {
-    expectSIMDBatchMatchesScalar(mesh, dof_map, dof_map, space, space,
-                                residual, U, vec_tol, mat_tol, options);
+    FormCompiler compiler;
+    FormKernel interpreted(compiler.compileBilinear(form));
+    assembly::AssemblyOptions assembly_options;
+    assembly_options.use_batching = true;
+    assembly_options.batch_size = 2;
+    assembly::StandardAssembler assembler(assembly_options);
+    assembler.setRowDofMap(row_map);
+    assembler.setColDofMap(col_map);
+    assembly::DenseMatrixView reference(row_map.getNumDofs(), col_map.getNumDofs());
+    assembler.assembleMatrix(mesh, test_space, trial_space, interpreted, reference);
+    if (diagonal) EXPECT_NEAR(reference.getMatrixEntry(0, 0), *diagonal, 1e-14);
+
+    for (const bool simd : {false, true}) {
+        auto options = makeJITOptions(simd);
+        options.specialization.enable = false;
+        options.cache_kernels = false;
+        std::filesystem::path directory;
+        if (inspect_ir) {
+            const auto stamp = std::chrono::steady_clock::now().time_since_epoch().count();
+            directory = std::filesystem::temp_directory_path() / ("svmp_fe_simd_" + std::to_string(stamp));
+            ASSERT_TRUE(std::filesystem::create_directory(directory));
+            options.dump_llvm_ir = true;
+            options.dump_directory = directory.string();
+        }
+        auto source = std::make_shared<FormKernel>(compiler.compileBilinear(form));
+        forms::jit::JITKernelWrapper compiled(source, options);
+        assembly::DenseMatrixView actual(row_map.getNumDofs(), col_map.getNumDofs());
+        const auto result = assembler.assembleMatrix(mesh, test_space, trial_space, compiled, actual);
+        EXPECT_EQ(result.elements_assembled, mesh.numCells());
+        expectCompiledExecution(compiled, *source);
+        expectDenseNear(actual, reference, 1e-13, simd ? "SIMD batch" : "scalar batch");
+        if (inspect_ir) {
+            // The cross-cell packing currently supports two lanes. Wider builds
+            // and an explicit runtime disable use scalar arithmetic.
+            const char* policy = std::getenv("SVMP_SIMD_BATCH");
+            const bool enabled = !policy || std::string_view(policy) != "0";
+            expectTwoLaneArithmetic(directory, simd && enabled && jit::hardwareProfile().simdDoubles() == 2);
+            std::filesystem::remove_all(directory);
+        }
+    }
 }
 
 } // anonymous namespace
@@ -475,12 +406,9 @@ TEST(JITSIMDBatchParity, ScalarLaplacian_Tetra4)
 
     const auto u = TrialFunction(space, "u");
     const auto v = TestFunction(space, "v");
-    const auto residual = inner(grad(u), grad(v)).dx();
-
-    const std::vector<Real> U = {0.1, -0.2, 0.3, -0.1, 0.15};
-
-    expectSIMDBatchMatchesScalar(mesh, dof_map, space, residual, U,
-                                /*vec_tol=*/1e-14, /*mat_tol=*/1e-14);
+    const auto form = inner(grad(u), grad(v)).dx();
+    // Only the unit tetrahedron touches node zero and |grad N0|² = 3.
+    expectBilinearBatches(mesh, dof_map, dof_map, space, space, form, 0.5, true);
 }
 
 // ============================================================================
@@ -503,8 +431,7 @@ TEST(JITSIMDBatchParity, NonlinearReactionDiffusion_Tetra4)
 
     const std::vector<Real> U = {0.5, -0.3, 0.7, 0.1, -0.4};
 
-    expectSIMDBatchMatchesScalar(mesh, dof_map, space, residual, U,
-                                /*vec_tol=*/1e-14, /*mat_tol=*/1e-14);
+    expectCompiledResidualMatchesInterpreter(mesh, dof_map, space, residual, U, makeJITOptions(true), 1e-14);
 }
 
 TEST(JITSIMDBatchParity, SingleCellUnderfilledBatch_Tetra4)
@@ -515,12 +442,9 @@ TEST(JITSIMDBatchParity, SingleCellUnderfilledBatch_Tetra4)
 
     const auto u = TrialFunction(space, "u");
     const auto v = TestFunction(space, "v");
-    const auto residual = (inner(grad(u), grad(v)) + FormExpr::constant(0.5) * u * u * v).dx();
-
-    const std::vector<Real> U = {0.25, -0.5, 0.75, -0.1};
-
-    expectSIMDBatchMatchesScalar(mesh, dof_map, space, residual, U,
-                                /*vec_tol=*/1e-14, /*mat_tol=*/1e-14);
+    const auto form = (inner(grad(u), grad(v)) + 0.5 * u * v).dx();
+    // K00 = 1/2 and M00 = 1/60. A single cell leaves the second lane unused.
+    expectBilinearBatches(mesh, dof_map, dof_map, space, space, form, 61.0 / 120);
 }
 
 TEST(JITSIMDBatchParity, VectorizationDisabledBatchMatchesScalarPath_Tetra4)
@@ -535,12 +459,8 @@ TEST(JITSIMDBatchParity, VectorizationDisabledBatchMatchesScalarPath_Tetra4)
 
     const std::vector<Real> U = {0.4, -0.2, 0.6, 0.1, -0.3};
 
-    auto batch_no_vector = makeJITOptions(/*simd_batch=*/true, /*vectorize=*/false);
-    auto scalar_no_vector = makeJITOptions(/*simd_batch=*/false, /*vectorize=*/false);
-
-    expectJITBatchOptionsMatch(mesh, dof_map, dof_map, space, space, residual, U,
-                               batch_no_vector, scalar_no_vector,
-                               /*vec_tol=*/1e-14, /*mat_tol=*/1e-14);
+    expectCompiledResidualMatchesInterpreter(mesh, dof_map, space, residual, U,
+                                             makeJITOptions(true, false), 1e-14);
 }
 
 TEST(JITSIMDBatchParity, VectorTestScalarTrialCrossBlock_Triangle3)
@@ -557,13 +477,7 @@ TEST(JITSIMDBatchParity, VectorTestScalarTrialCrossBlock_Triangle3)
 
     const auto p = TrialFunction(pressure_space, "p");
     const auto v = TestFunction(vel_space, "v");
-    const auto residual = (p * div(v)).dx();
-
-    const std::vector<Real> U = {0.2, -0.1, 0.4, 0.05, -0.3};
-
-    expectSIMDBatchMatchesScalar(mesh, row_map, col_map, vel_space, pressure_space,
-                                residual, U,
-                                /*vec_tol=*/1e-13, /*mat_tol=*/1e-13);
+    expectBilinearBatches(mesh, row_map, col_map, vel_space, pressure_space, (p * div(v)).dx());
 }
 
 // ============================================================================
@@ -572,10 +486,8 @@ TEST(JITSIMDBatchParity, VectorTestScalarTrialCrossBlock_Triangle3)
 // Tests ProductSpace (vector-valued basis functions) and field_solutions
 // (pressure as a DiscreteField).  This is the most complex form tested.
 //
-// NOTE: While the has_field_solutions guard is active in LLVMGen, both the
-// simd_batch=true and simd_batch=false paths will fall through to the same
-// scalar batch codegen.  This test still verifies correctness and will become
-// a meaningful SIMD parity check once the guard is lifted.
+// The nonlinear compiled kernel uses its scalar ABI. The interpreter provides
+// an independent reference for the residual and the velocity tangent.
 // ============================================================================
 
 TEST(JITSIMDBatchParity, StokesVMS_VV_Triangle3)
@@ -666,9 +578,8 @@ TEST(JITSIMDBatchParity, StokesVMS_VV_Triangle3)
     opts.prev_solution = prev_U;
     opts.field_access = fields;
 
-    expectSIMDBatchMatchesScalar(mesh, dof_map_u, dof_map_u, vel_space, vel_space,
-                                residual, U,
-                                /*vec_tol=*/1e-12, /*mat_tol=*/1e-12, opts);
+    expectCompiledResidualMatchesInterpreter(mesh, dof_map_u, vel_space, residual, U,
+                                             makeJITOptions(true), 1e-12, opts);
 }
 
 // ============================================================================
@@ -735,7 +646,7 @@ TEST(JITSIMDBatchParity, BatchedCellsSeeTheirOwnMovingFrame_Triangle3)
     assembly::DenseMatrixView J_batched(n, n), J_cellwise(n, n), J_interpreted(n, n);
     assembly::DenseVectorView R_batched(n), R_cellwise(n), R_interpreted(n);
     assemble(jit_kernel, /*batched=*/true, J_batched, R_batched);
-    ASSERT_TRUE(jit_kernel.isJITReady()) << "the moving-frame form did not compile";
+    expectCompiledExecution(jit_kernel, *jit_fallback);
     assemble(jit_kernel, /*batched=*/false, J_cellwise, R_cellwise);
     assemble(interpreted, /*batched=*/false, J_interpreted, R_interpreted);
 

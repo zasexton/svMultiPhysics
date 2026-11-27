@@ -5,165 +5,47 @@
  * See Copyright-SimVascular.txt for additional details.
  */
 
-#include <gtest/gtest.h>
+#include "Tests/Unit/Forms/RuntimeScalarFunctionalTest.h"
 
-#include "Assembly/FunctionalAssembler.h"
-#include "Forms/FormExpr.h"
-#include "Forms/JIT/JITFunctionalKernelWrapper.h"
-#include "Spaces/H1Space.h"
-#include "Tests/Unit/Forms/FormsTestHelpers.h"
-#include "Tests/Unit/Forms/JITTestHelpers.h"
+namespace svmp::FE::forms::test {
 
-#include <cmath>
+class LLVMGenSmoothOps : public RuntimeScalarFunctionalTest {};
 
-namespace svmp {
-namespace FE {
-namespace forms {
-namespace test {
 namespace {
-
-struct CellEnv {
-    SingleTetraMeshAccess mesh{};
-    dofs::DofMap dof_map{createSingleTetraDofMap()};
-    spaces::H1Space space{ElementType::Tetra4, 1};
-    assembly::FunctionalAssembler assembler{};
-    Real volume{0.0};
-
-    CellEnv()
-    {
-        assembler.setMesh(mesh);
-        assembler.setDofMap(dof_map);
-        assembler.setSpace(space);
-
-        const auto one = FormExpr::constant(Real(1.0));
-        auto one_kernel = makeFunctionalFormKernel(one, FunctionalFormKernel::Domain::Cell);
-        volume = assembler.assembleScalar(*one_kernel);
-    }
-};
-
-Real assembleJIT(const FormExpr& integrand, CellEnv& env)
-{
-    auto throw_fallback = makeThrowingTotalKernelFor(integrand, /*has_cell=*/true, /*has_boundary=*/false);
-    jit::JITFunctionalKernelWrapper jit_kernel(
-        throw_fallback, integrand, jit::JITFunctionalKernelWrapper::Domain::Cell, makeUnitTestJITOptions());
-    return env.assembler.assembleScalar(jit_kernel);
+constexpr Real epsilon = 0.01;
 }
 
-Real assembleInterp(const FormExpr& integrand, CellEnv& env)
+TEST_F(LLVMGenSmoothOps, SmoothAbsoluteValueApproximatesAbs)
 {
-    auto interp = makeFunctionalFormKernel(integrand, FunctionalFormKernel::Domain::Cell);
-    return env.assembler.assembleScalar(*interp);
+    const auto radius = std::hypot(2.0, epsilon);
+    expectSamples(a.smoothAbs(b), {{{-2, epsilon}, radius}, {{0, epsilon}, epsilon}, {{2, epsilon}, radius}});
 }
 
-} // namespace
-
-TEST(LLVMGenSmoothOps, SmoothAbsoluteValueApproximatesAbs)
+TEST_F(LLVMGenSmoothOps, SmoothSignApproximatesSign)
 {
-    requireLLVMJITOrSkip();
-    CellEnv env;
-    ASSERT_GT(env.volume, Real(0.0));
-
-    const auto x = FormExpr::constant(Real(-2.0));
-    const auto eps = FormExpr::constant(Real(1e-2));
-    const auto integrand = x.smoothAbs(eps);
-
-    const Real ref = assembleInterp(integrand, env);
-    const Real jit = assembleJIT(integrand, env);
-    EXPECT_NEAR(jit, ref, 1e-12);
-
-    const Real v = jit / env.volume;
-    EXPECT_TRUE(std::isfinite(v));
-    EXPECT_GE(v, Real(2.0));
+    const Real sign = 2.0 / std::hypot(2.0, epsilon);
+    expectSamples(a.smoothSign(b), {{{-2, epsilon}, -sign}, {{0, epsilon}, 0}, {{2, epsilon}, sign}});
 }
 
-TEST(LLVMGenSmoothOps, SmoothSignApproximatesSign)
+TEST_F(LLVMGenSmoothOps, SmoothHeavisideApproximatesStep)
 {
-    requireLLVMJITOrSkip();
-    CellEnv env;
-    ASSERT_GT(env.volume, Real(0.0));
-
-    const auto eps = FormExpr::constant(Real(1e-2));
-
-    const auto pos = FormExpr::constant(Real(2.0)).smoothSign(eps);
-    const auto neg = FormExpr::constant(Real(-2.0)).smoothSign(eps);
-
-    const Real pos_ref = assembleInterp(pos, env);
-    const Real pos_jit = assembleJIT(pos, env);
-    EXPECT_NEAR(pos_jit, pos_ref, 1e-12);
-
-    const Real neg_ref = assembleInterp(neg, env);
-    const Real neg_jit = assembleJIT(neg, env);
-    EXPECT_NEAR(neg_jit, neg_ref, 1e-12);
-
-    EXPECT_GT(pos_jit / env.volume, Real(0.5));
-    EXPECT_LT(neg_jit / env.volume, Real(-0.5));
+    const Real sign = 2.0 / std::hypot(2.0, epsilon);
+    expectSamples(a.smoothHeaviside(b),
+                  {{{-2, epsilon}, (1 - sign) / 2}, {{0, epsilon}, 0.5}, {{2, epsilon}, (1 + sign) / 2}});
 }
 
-TEST(LLVMGenSmoothOps, SmoothHeavisideApproximatesStep)
+TEST_F(LLVMGenSmoothOps, SmoothMinApproximatesMinWithEpsilon)
 {
-    requireLLVMJITOrSkip();
-    CellEnv env;
-    ASSERT_GT(env.volume, Real(0.0));
-
-    const auto eps = FormExpr::constant(Real(1e-2));
-
-    const auto pos = FormExpr::constant(Real(2.0)).smoothHeaviside(eps);
-    const auto neg = FormExpr::constant(Real(-2.0)).smoothHeaviside(eps);
-
-    const Real pos_ref = assembleInterp(pos, env);
-    const Real pos_jit = assembleJIT(pos, env);
-    EXPECT_NEAR(pos_jit, pos_ref, 1e-12);
-
-    const Real neg_ref = assembleInterp(neg, env);
-    const Real neg_jit = assembleJIT(neg, env);
-    EXPECT_NEAR(neg_jit, neg_ref, 1e-12);
-
-    EXPECT_GT(pos_jit / env.volume, Real(0.5));
-    EXPECT_LT(neg_jit / env.volume, Real(0.5));
+    const Real expected = (3 - std::hypot(1.0, epsilon)) / 2;
+    expectSamples(a.smoothMin(b, FormExpr::constant(epsilon)),
+                  {{{1, 2}, expected}, {{2, 1}, expected}, {{1, 1}, 1 - epsilon / 2}});
 }
 
-TEST(LLVMGenSmoothOps, SmoothMinApproximatesMinWithEpsilon)
+TEST_F(LLVMGenSmoothOps, SmoothMaxApproximatesMaxWithEpsilon)
 {
-    requireLLVMJITOrSkip();
-    CellEnv env;
-    ASSERT_GT(env.volume, Real(0.0));
-
-    const auto a = FormExpr::constant(Real(1.0));
-    const auto b = FormExpr::constant(Real(2.0));
-    const auto eps = FormExpr::constant(Real(1e-2));
-    const auto integrand = a.smoothMin(b, eps);
-
-    const Real ref = assembleInterp(integrand, env);
-    const Real jit = assembleJIT(integrand, env);
-    EXPECT_NEAR(jit, ref, 1e-12);
-
-    const Real v = jit / env.volume;
-    EXPECT_TRUE(std::isfinite(v));
-    EXPECT_NEAR(v, Real(1.0), 1e-2);
+    const Real expected = (3 + std::hypot(1.0, epsilon)) / 2;
+    expectSamples(a.smoothMax(b, FormExpr::constant(epsilon)),
+                  {{{1, 2}, expected}, {{2, 1}, expected}, {{1, 1}, 1 + epsilon / 2}});
 }
 
-TEST(LLVMGenSmoothOps, SmoothMaxApproximatesMaxWithEpsilon)
-{
-    requireLLVMJITOrSkip();
-    CellEnv env;
-    ASSERT_GT(env.volume, Real(0.0));
-
-    const auto a = FormExpr::constant(Real(1.0));
-    const auto b = FormExpr::constant(Real(2.0));
-    const auto eps = FormExpr::constant(Real(1e-2));
-    const auto integrand = a.smoothMax(b, eps);
-
-    const Real ref = assembleInterp(integrand, env);
-    const Real jit = assembleJIT(integrand, env);
-    EXPECT_NEAR(jit, ref, 1e-12);
-
-    const Real v = jit / env.volume;
-    EXPECT_TRUE(std::isfinite(v));
-    EXPECT_NEAR(v, Real(2.0), 1e-2);
-}
-
-} // namespace test
-} // namespace forms
-} // namespace FE
-} // namespace svmp
-
+} // namespace svmp::FE::forms::test

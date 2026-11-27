@@ -37,6 +37,7 @@
 #include <stdexcept>
 #include <string>
 #include <string_view>
+#include <utility>
 #include <vector>
 
 namespace svmp {
@@ -514,17 +515,47 @@ TEST(SymbolicNonlinearFormKernelTest, PoissonJacobianMatchesAD)
 TEST(SymbolicNonlinearFormKernelTest, HessianJacobianMatchesAD)
 {
     SingleTetraMeshAccess mesh;
-    auto dof_map = createSingleTetraDofMap();
-    spaces::H1Space space(ElementType::Tetra4, 1);
-
+    constexpr std::size_t n = 10;
+    const auto dofs = makeSingleCellDofMap(n);
+    spaces::H1Space space(ElementType::Tetra4, 2);
     const auto u = FormExpr::trialFunction(space, "u");
     const auto v = FormExpr::testFunction(space, "v");
-
-    // R = inner(H(u), H(v))
     const auto residual = inner(u.hessian(), v.hessian()).dx();
 
-    const std::vector<Real> U = {0.3, -0.2, 0.1, -0.4};
-    compareADAndSymbolic(mesh, dof_map, space, space, residual, U);
+    std::vector<Real> state(n), xy(n);
+    for (std::size_t i = 0; i < n; ++i) {
+        const auto x = basis::ReferenceNodeLayout::get_node_coords(ElementType::Tetra10, i);
+        xy[i] = x[0] * x[1];
+        state[i] = x[0] * x[0] + 2 * xy[i] + 3 * x[2] * x[2];
+    }
+    FormCompiler compiler;
+    NonlinearFormKernel ad(compiler.compileResidual(residual), ADMode::Forward);
+    SymbolicNonlinearFormKernel symbolic(compiler.compileResidual(residual), NonlinearKernelOutput::Both);
+    symbolic.resolveInlinableConstitutives();
+    assembly::StandardAssembler assembler;
+    assembler.setDofMap(dofs);
+    assembler.setCurrentSolution(state);
+    assembly::DenseMatrixView J_ad(n), J_symbolic(n);
+    assembly::DenseVectorView R_ad(n), R_symbolic(n);
+    assembler.assembleBoth(mesh, space, space, ad, J_ad, R_ad);
+    assembler.assembleBoth(mesh, space, space, symbolic, J_symbolic, R_symbolic);
+    expectDenseNear(J_symbolic, J_ad, 1e-12);
+    expectDenseNear(R_symbolic, R_ad, 1e-12);
+
+    for (const auto [matrix, rhs] : {std::pair{&J_ad, &R_ad}, std::pair{&J_symbolic, &R_symbolic}}) {
+        // On the unit tetrahedron H(u):H(u) = 48 and H(xy):H(u) = 4.
+        Real energy = 0, mixed = 0, tangent = 0;
+        for (std::size_t i = 0; i < n; ++i) {
+            energy += state[i] * rhs->getVectorEntry(i);
+            mixed += xy[i] * rhs->getVectorEntry(i);
+            for (std::size_t j = 0; j < n; ++j) {
+                tangent += xy[i] * matrix->getMatrixEntry(i, j) * state[j];
+            }
+        }
+        EXPECT_NEAR(energy, 8.0, 1e-12);
+        EXPECT_NEAR(mixed, 2.0 / 3, 1e-12);
+        EXPECT_NEAR(tangent, 2.0 / 3, 1e-12);
+    }
 }
 
 TEST(SymbolicNonlinearFormKernelTest, NonlinearDiffusionJacobianMatchesAD)
