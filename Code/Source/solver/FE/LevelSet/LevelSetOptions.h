@@ -137,7 +137,7 @@ struct LevelSetInterfacePreservingRedistancingOptions {
 struct LevelSetInflowBoundary {
     // The transported level set is defined on the background space, so this
     // condition intentionally covers the complete physical inlet. It is not
-    // a liquid-only generated-active boundary condition.
+    // a generated boundary condition restricted to the active side.
     int boundary_marker{-1};
     ScalarValue value{0.0};
     /// The value given at the mesh vertices in time (a temporal and spatial

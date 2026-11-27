@@ -161,7 +161,7 @@ struct LevelSetGeometrySnapshotPolicy {
     // are pruned with it: in a parent cell where every volume rule of this
     // side is pruned as a small volume, its interface and contact rules are
     // pruned too, as its exterior-boundary rules are, so the retained
-    // geometry of this side stays closed. Set it to the liquid side of a
+    // geometry of this side stays closed. Use the active side for
     // a one-sided level-set domain. Unset keeps every interface and contact rule,
     // since a two-phase interface also bounds the other phase.
     std::optional<geometry::CutIntegrationSide> interface_retention_side{};

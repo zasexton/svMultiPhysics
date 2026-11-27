@@ -273,7 +273,7 @@ namespace {
                      static_cast<std::size_t>(vertex) *
                      values.field_components]
                : values.value(x))
-        : values.dry_value;
+        : values.unsupported_value;
 }
 
 } // namespace
@@ -437,7 +437,7 @@ SideVertexInitializationResult initializeVertexFieldOnLevelSetSide(
     } else {
         values.value = std::get<std::function<Real(const std::array<Real, 3>&)>>(declaration.source);
     }
-    values.dry_value = declaration.unsupported_value;
+    values.unsupported_value = declaration.unsupported_value;
     const auto& messages = declaration.messages;
     const auto entries = collectVertexFieldOnLevelSetSide(system, target.field, *target.vertex_dofs,
         values, messages.non_finite_prefix, messages.non_finite_suffix);

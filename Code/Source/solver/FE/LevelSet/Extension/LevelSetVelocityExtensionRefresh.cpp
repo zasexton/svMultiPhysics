@@ -16,6 +16,7 @@
 #include "Interfaces/LevelSetInterfaceDomain.h"
 #include "LevelSet/Extension/LevelSetVelocityExtensionSeed.h"
 #include "LevelSet/LevelSetGeometryService.h"
+#include "LevelSet/LevelSetRecordLabels.h"
 #include "LevelSet/LevelSetVelocityExtensionConstraint.h"
 #include "Mesh/Topology/CellTopology.h"
 #include "Systems/FESystem.h"
@@ -252,6 +253,7 @@ bool refreshLevelSetVelocityExtensions(
   const auto n_vertices = mesh.n_vertices();
   const int mesh_dim = mesh.dim();
   const bool trace_updates = options.trace;
+  const auto& records = levelSetRecordLabels(system);
   const auto activeSideContains =
       [](double phi, const LevelSetVelocityExtensionRequest& request) {
         return request.active_side == LevelSetActiveSide::Negative
@@ -261,7 +263,7 @@ bool refreshLevelSetVelocityExtensions(
 
   bool updated = false;
   for (const auto& request : requests) {
-    // The algebraic wall-compatible wet extension was retired (decisions D47
+    // The algebraic boundary-compatible active-side extension was retired (decisions D47
     // and D55); every request names a PDE method.
     const auto pde_operator =
         pdeVelocityExtensionOperatorFromToken(
@@ -272,7 +274,7 @@ bool refreshLevelSetVelocityExtensions(
           "extension method '" +
           request.extension_method +
           "' is not pde_harmonic or pde_normal; the algebraic "
-          "wall-compatible wet extension was retired (decisions D47 and "
+          "boundary-compatible active-side extension was retired (decisions D47 and "
           "D55).");
     }
     const auto phi_field = system.findFieldByName(request.level_set_field_name);
@@ -454,13 +456,13 @@ bool refreshLevelSetVelocityExtensions(
 
     std::vector<double> extended(n_vertices * target_components, 0.0);
     double max_known_speed = 0.0;
-    double max_dry_extended_speed = 0.0;
+    double max_inactive_extended_speed = 0.0;
     bool interface_sample_used_cut_context = false;
     std::size_t interface_sample_candidate_cell_count = 0u;
     std::size_t interface_sample_count = 0u;
     std::size_t interface_sample_context_rule_count = 0u;
     std::size_t trace_support_vertex_count = 0u;
-    std::size_t dry_trace_support_vertex_count = 0u;
+    std::size_t inactive_trace_support_vertex_count = 0u;
     std::size_t trace_seed_vertex_count = 0u;
     std::size_t wall_boundary_label_count = 0u;
     PdeVelocityExtensionReport pde_report{};
@@ -485,7 +487,7 @@ bool refreshLevelSetVelocityExtensions(
     //
     // The older sign-only seed marked active vertices but graph-extrapolated
     // the inactive vertices of cut cells, so E_h and u_h differed on Gamma even
-    // though all wet nodal values agreed.  Prefer the generated cut context
+    // though all active-side nodal values agreed.  Prefer the generated cut context
     // (the geometry used by assembly), with a nodal crossing search only
     // when no authoritative generated-interface context exists anywhere on
     // the active communicator (on a high-order cell the nodal search sees
@@ -527,18 +529,18 @@ bool refreshLevelSetVelocityExtensions(
         synchronizeVelocityExtensionTraceSupportMask(
             mesh, extension_comm, trace_support);
     std::vector<std::uint8_t> trace_seed(active);
-    std::vector<std::uint8_t> dry_trace_support(n_vertices, 0u);
+    std::vector<std::uint8_t> inactive_trace_support(n_vertices, 0u);
     for (std::size_t vertex = 0; vertex < n_vertices; ++vertex) {
       if (trace_support[vertex] != 0u) {
         trace_seed[vertex] = 1u;
         if (active[vertex] == 0u) {
-          dry_trace_support[vertex] = 1u;
+          inactive_trace_support[vertex] = 1u;
         }
       }
     }
-    dry_trace_support_vertex_count =
+    inactive_trace_support_vertex_count =
         globalOwnedVelocityExtensionMaskCount(
-            mesh, extension_comm, dry_trace_support);
+            mesh, extension_comm, inactive_trace_support);
     trace_seed_vertex_count = globalOwnedVelocityExtensionMaskCount(
         mesh, extension_comm, trace_seed);
 
@@ -731,7 +733,7 @@ bool refreshLevelSetVelocityExtensions(
         const auto label = mesh.label_from_name(wall.face_name);
         if (label == svmp::INVALID_LABEL) {
           throw std::runtime_error(
-              "[svMultiPhysics::Application] Wet-extension wall face '" +
+              "[svMultiPhysics::Application] Velocity extension boundary face '" +
               wall.face_name + "' is not registered on the active mesh.");
         }
         wall_constraints.push_back(BoundaryVelocityExtensionConstraint{
@@ -779,7 +781,7 @@ bool refreshLevelSetVelocityExtensions(
           extension_comm);
       pde_algebraic = true;
     }
-    // Dry-region factorizations are reused while their content key is
+    // Inactive-region factorizations are reused while their content key is
     // unchanged (one cache per target field; see
     // PdeVelocityExtensionCache).
     auto& pde_extension_cache = caches[request.target_velocity_field_name];
@@ -799,7 +801,7 @@ bool refreshLevelSetVelocityExtensions(
             wall_constraints),
         PdeVelocityExtensionOptions{
             .op = *pde_operator,
-            // Every dry vertex is extended (no band truncation).
+            // Every inactive vertex is extended (no band truncation).
             .band_layers = 0,
             .enforce_wall_impermeability =
                 request.enforce_wall_impermeability,
@@ -886,27 +888,27 @@ bool refreshLevelSetVelocityExtensions(
         std::span<const double>(extended.data(), extended.size()), target_components, copy_components,
         std::span<const std::uint8_t>(trace_seed.data(), trace_seed.size()));
     max_known_speed = systems::collectiveMaxDouble(speeds.known, extension_comm);
-    max_dry_extended_speed =
+    max_inactive_extended_speed =
         systems::collectiveMaxDouble(speeds.extended, extension_comm);
     const double velocity_scale_floor = 1.0e-12;
-    // The prescribed wall velocities are data of the extension like the wet
+    // The prescribed wall velocities are data of the extension like the active-side
     // velocities (zero without such walls).
-    const double wet_to_dry_amplification =
-        max_dry_extended_speed /
+    const double active_to_inactive_amplification =
+        max_inactive_extended_speed /
         std::max(std::max(max_known_speed,
                           pde_report.max_prescribed_wall_speed),
                  velocity_scale_floor);
     if (algebraic_extension &&
-        wet_to_dry_amplification >
+        active_to_inactive_amplification >
             kVelocityExtensionMaxActiveToInactiveAmplification) {
       std::ostringstream message;
       message
           << "[svMultiPhysics::Application] The monolithic velocity "
-             "extension refused to install a frozen map because the dry-region "
+             "extension refused to install a frozen map because the inactive-region "
              "amplification exceeded its fixed guard: max_known_speed="
           << max_known_speed
-          << " max_dry_extended_speed=" << max_dry_extended_speed
-          << " amplification=" << wet_to_dry_amplification
+          << ' ' << records.max_inactive_extended_speed << '=' << max_inactive_extended_speed
+          << " amplification=" << active_to_inactive_amplification
           << " guard=" << kVelocityExtensionMaxActiveToInactiveAmplification;
       throw std::runtime_error(message.str());
     }
@@ -1039,7 +1041,7 @@ bool refreshLevelSetVelocityExtensions(
               .value("extension_method", request.extension_method)
               .text("linearization", algebraic_extension ? "frozen_sparse_algebraic" : "prescribed")
               .value("active_vertices", active_vertices.size())
-              .value("dry_vertices", n_vertices - active_vertices.size())
+              .value(records.inactive_vertices, n_vertices - active_vertices.size())
               .value("interface_sample_candidates", interface_sample_candidate_cell_count)
               .value("interface_sample_context_rules", interface_sample_context_rule_count)
               .value("interface_samples", interface_sample_count)
@@ -1050,7 +1052,7 @@ bool refreshLevelSetVelocityExtensions(
               .text("interface_sample_source", interface_sample_used_cut_context ? "cut_context" : "all_cells")
               .text("trace_constraint_source", "cut_cell_p1_support")
               .value("trace_support_vertices", trace_support_vertex_count)
-              .value("dry_trace_support_vertices", dry_trace_support_vertex_count)
+              .value(records.inactive_trace_support_vertices, inactive_trace_support_vertex_count)
               .value("trace_seed_vertices", trace_seed_vertex_count)
               .value("extended_vertices", pde_report.extension_vertices)
               .value("vertices_outside_extension_band", pde_report.outside_vertices)
@@ -1060,9 +1062,9 @@ bool refreshLevelSetVelocityExtensions(
               .value("wall_boundary_labels", wall_boundary_label_count)
               .value("max_wall_normal_velocity", pde_report.max_wall_normal_velocity)
               .value("max_known_speed", max_known_speed)
-              .value("max_dry_extended_speed", max_dry_extended_speed)
-              .value("wet_to_dry_amplification", wet_to_dry_amplification)
-              .value("wet_to_dry_amplification_guard", kVelocityExtensionMaxActiveToInactiveAmplification)
+              .value(records.max_inactive_extended_speed, max_inactive_extended_speed)
+              .value(records.active_to_inactive_amplification, active_to_inactive_amplification)
+              .value(records.active_to_inactive_amplification_guard, kVelocityExtensionMaxActiveToInactiveAmplification)
               .text("target_value_semantics", algebraic_extension ? "generalized_alpha_stage_unknown" : "prescribed_current_coefficients")
               .text("computed_extension_semantics", "current_state_constraint_preview")
               .value("unassigned_dofs", unassigned));

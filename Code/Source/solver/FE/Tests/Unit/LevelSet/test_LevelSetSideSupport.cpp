@@ -317,7 +317,7 @@ TEST(LevelSetSideSupport, SideVertexValuesTakeTheSupportedOrTheDryValue)
     const std::array<Real, 3> x{0.25, 0.0, 0.0};
     LevelSetSideVertexValues values{};
     values.value = [](const std::array<Real, 3>& p) { return Real{10.0} + p[0]; };
-    values.dry_value = -1.0;
+    values.unsupported_value = -1.0;
 
     // Unrestricted: every vertex is supported.
     auto choice = levelSetSideVertexChoice(values, 3);
@@ -378,7 +378,7 @@ TEST(LevelSetSideSupport, VertexFieldIsCollectedOnOneSide)
         .side = LevelSetSupportSide::Negative,
         .support = std::vector<unsigned char>{1, 1, 0, 1}};
     values.value = [](const std::array<Real, 3>& x) { return Real{10.0} + x[1]; };
-    values.dry_value = -1.0;
+    values.unsupported_value = -1.0;
 
     const auto entries =
         collectVertexFieldOnLevelSetSide(system, p, map, values, "bad ", " here");

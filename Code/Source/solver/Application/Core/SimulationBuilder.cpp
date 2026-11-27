@@ -21,6 +21,7 @@
 #include "FE/Systems/SystemManifest.h"
 #include "FE/TimeStepping/TimeHistory.h"
 #include "Mesh/Mesh.h"
+#include "Physics/Formulations/NavierStokes/FreeSurface/LevelSetRecords.h"
 #include "Physics/Core/PhysicsModule.h"
 #include "Physics/Core/EquationModuleInput.h"
 #include "Physics/Options/NavierStokesOptionSchema.h"
@@ -1177,6 +1178,8 @@ SimulationComponents SimulationBuilder::build()
 
   oopCout() << "[svMultiPhysics::Application] SimulationBuilder: createFESystem()" << std::endl;
   createFESystem();
+  components_.fe_system->attachment<svmp::FE::level_set::LevelSetRecordLabels>() =
+      svmp::Physics::formulations::navier_stokes::free_surface::levelSetRecordLabels;
 
   oopCout() << "[svMultiPhysics::Application] SimulationBuilder: createPhysicsModules()" << std::endl;
   createPhysicsModules();

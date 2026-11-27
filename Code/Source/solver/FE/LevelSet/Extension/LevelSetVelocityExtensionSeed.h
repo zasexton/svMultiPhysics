@@ -20,11 +20,11 @@
  * nodal level-set values (when no generated cut context is authoritative),
  * mark their vertices, make the mask agree across the communicator and count
  * owned vertices once.  VelocityExtensionMapRevision keys the frozen rows of
- * a monolithic extension on the mesh, the free-surface geometry, the level
+ * a monolithic extension on the mesh, the level-set geometry, the level
  * set and the known set.
  *
  * Moved from Application/Core/LevelSetVelocityExtensionMap.{h,cpp} with the
- * bodies and messages unchanged when the algebraic wall-compatible wet
+ * bodies and messages unchanged when the algebraic boundary-compatible active-side
  * extension was retired (decisions D47 and D55).
  */
 
@@ -42,7 +42,7 @@ namespace FE {
 namespace level_set {
 
 /// The revision of a frozen extension map: the mesh revisions, the
-/// free-surface geometry revision, and hashes of the level-set values and of
+/// level-set geometry revision, and hashes of the level-set values and of
 /// the known set.  key() is rank-local; communicatorCombinedRevision()
 /// (LevelSetPdeVelocityExtension.h) makes it agree across ranks.
 struct VelocityExtensionMapRevision {

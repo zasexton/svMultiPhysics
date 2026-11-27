@@ -77,7 +77,7 @@ struct LevelSetSideSupportQuery {
  * Without a native mesh: the vertices on the side.  With one: the vertices
  * of every cell that has a generated cut-volume rule of the marker and side
  * (when requested and present), or else of every cell with a vertex strictly
- * on the side.  The system's free-surface geometry snapshots must be
+ * on the side.  The system's level-set geometry snapshots must be
  * current.  Throws std::runtime_error for a cell or vertex outside the mesh
  * or the level-set field.
  */
@@ -157,7 +157,7 @@ struct LevelSetSideVertexValues {
     std::size_t field_components{0};
     std::function<Real(const std::array<Real, 3>&)> value{};
     /// Unsupported vertices take this value.
-    Real dry_value{0.0};
+    Real unsupported_value{0.0};
 };
 
 /// Whether @p vertex takes the supported value, and whether it is on the side.

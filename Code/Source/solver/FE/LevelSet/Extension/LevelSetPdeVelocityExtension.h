@@ -143,7 +143,7 @@ pdeVelocityExtensionFactorizationFromToken(std::string_view token);
 
 struct PdeVelocityExtensionOptions {
   PdeVelocityExtensionOperator op{PdeVelocityExtensionOperator::Harmonic};
-  // <= 0: the extension domain is every dry vertex of the mesh (default).
+  // <= 0: the extension domain is every inactive vertex of the mesh (default).
   // > 0: diagnostic truncation to this many vertex rings beyond the known
   // set; vertices outside receive zero.
   int band_layers{0};
@@ -208,7 +208,7 @@ struct PdeVelocityExtensionMeshRevisions {
 // The inactive-region matrix does not depend on the velocity.  For the harmonic
 // operator it depends only on the mesh geometry, the known set, the inactive cells
 // and the wall masks; for the least-squares normal operator it also depends on
-// the level-set normal of every dry cell.  The cache keeps the gathered
+// the level-set normal of every inactive cell.  The cache keeps the gathered
 // system, the sparse LU factorization of every velocity component and the
 // owner-local algebraic rows.  Its key is
 //   - the mesh geometry, topology, ownership and numbering revisions, and
@@ -294,7 +294,7 @@ private:
 // rows (optional): the same discrete problem as owner-local algebraic rows
 // for the monolithic coupling, one per owned vertex and component:
 //   known vertex:          w_c = u_c                       (source dependency),
-//   dry vertex:            w_{i,c} = sum_j (-A_ij / A_ii) w_{j,c}
+//   inactive vertex:            w_{i,c} = sum_j (-A_ij / A_ii) w_{j,c}
 //                          over the vertices j sharing a inactive-region cell
 //                          with i (extension dependencies),
 //   fixed by a wall with a prescribed velocity:  w_c = u_c,

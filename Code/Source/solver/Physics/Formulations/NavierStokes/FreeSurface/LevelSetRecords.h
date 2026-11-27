@@ -15,7 +15,16 @@ inline constexpr FE::level_set::LevelSetRecordLabels levelSetRecordLabels{
     .nonempty_active_cells = "active_wet_cells",
     .full_active_cells = "active_full_wet_cells",
     .inactive_cells = "active_full_dry_cells",
-    .active_side = "liquid_side"};
+    .active_side = "liquid_side",
+    .inactive_vertices = "dry_vertices",
+    .inactive_trace_support_vertices = "dry_trace_support_vertices",
+    .max_inactive_extended_speed = "max_dry_extended_speed",
+    .active_to_inactive_amplification = "wet_to_dry_amplification",
+    .active_to_inactive_amplification_guard = "wet_to_dry_amplification_guard",
+    .snapshot_revision = "free_surface_snapshot_revision",
+    .active_volume = "active_wet_volume",
+    .cut_cell_active_volume = "cut_cell_active_wet_volume",
+    .full_cell_active_volume = "full_cell_active_wet_volume"};
 
 inline constexpr FE::level_set::ConservativePhaseRecordSchema conservativePhaseRecordSchema{
     .version = 3,

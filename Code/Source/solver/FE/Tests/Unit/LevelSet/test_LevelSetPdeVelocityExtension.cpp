@@ -9,6 +9,7 @@
 
 #include "Assembly/GlobalSystemView.h"
 #include "Basis/NodeOrderingConventions.h"
+#include "Core/Logger.h"
 #include "LevelSet/Extension/LevelSetPdeVelocityExtension.h"
 #include "LevelSet/Extension/LevelSetVelocityExtensionRefresh.h"
 #include "LevelSet/Extension/LevelSetVelocityExtensionSeed.h"
@@ -414,9 +415,21 @@ TEST(LevelSetVelocityExtensionRefresh, PrescribedFieldMatchesTheDirectExtension)
   request.enforce_wall_impermeability = false;
   PdeVelocityExtensionCaches caches;
   const std::vector<LevelSetVelocityExtensionRequest> requests{request};
-  EXPECT_TRUE(svmp::FE::level_set::refreshLevelSetVelocityExtensions(
+  auto& logger = svmp::FE::Logger::instance();
+  const auto saved_level = logger.get_level();
+  logger.set_level(svmp::FE::LogLevel::INFO);
+  testing::internal::CaptureStdout();
+  bool refreshed_data = false;
+  EXPECT_NO_THROW(refreshed_data = svmp::FE::level_set::refreshLevelSetVelocityExtensions(
       system, *mesh, svmp::FE::systems::SystemStateView{}, requests,
-      LevelSetVelocityExtensionRefreshOptions{}, caches));
+      LevelSetVelocityExtensionRefreshOptions{.trace = true}, caches));
+  const auto trace = testing::internal::GetCapturedStdout();
+  logger.set_level(saved_level);
+  EXPECT_TRUE(refreshed_data);
+  for (const auto* column : {" inactive_vertices=", " inactive_trace_support_vertices=",
+                             " max_inactive_extended_speed=", " active_to_inactive_amplification="}) {
+    EXPECT_NE(trace.find(column), std::string::npos) << column;
+  }
   EXPECT_EQ(caches.size(), 1u);
   const auto refreshed = svmp::FE::level_set::evaluateVertexField(
       system, *mesh, extension, svmp::FE::systems::SystemStateView{}, 2u,

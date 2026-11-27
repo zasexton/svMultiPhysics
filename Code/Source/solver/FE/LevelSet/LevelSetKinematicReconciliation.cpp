@@ -432,7 +432,7 @@ bool accumulateCell(const SimplexCell& cell,
 }
 
 // Classification of the P1 cut of one simplex as the generated-interface
-// builder and the free-surface geometry snapshot see it: the interface
+// builder and the level-set geometry snapshot see it: the interface
 // fragment is collapsed (measure <= tolerance), nearly tangent
 // (<= sqrt(tolerance)) or regular, and each side's volume rule is pruned when
 // its volume fraction is positive but below the minimum retained fraction.

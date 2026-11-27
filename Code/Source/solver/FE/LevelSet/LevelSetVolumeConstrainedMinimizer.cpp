@@ -586,7 +586,7 @@ minimizeLevelSetVolumeConstrained(
             dot(volume_gradient, volume_gradient);
         if (!std::isfinite(volume_gradient_squared) ||
             !(volume_gradient_squared > Real{0.0})) {
-            result.diagnostic = "liquid_volume_gradient_is_zero_or_nonfinite";
+            result.diagnostic = "active_volume_gradient_is_zero_or_nonfinite";
             return result;
         }
         const Real energy_volume_cross = dot(energy_gradient, volume_gradient);

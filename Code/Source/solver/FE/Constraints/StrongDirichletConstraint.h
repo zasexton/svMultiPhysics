@@ -18,9 +18,9 @@
  * With a generated active subset of the marker (the wetted part of a cut
  * boundary, by its generated marker in the installed cut-integration
  * context), only the faces of positive wetted measure hold nodes: a degree of
- * freedom whose basis function has a nonzero trace only on dry faces is left
- * to the constraints of the active side (a dry node of a cut cell would
- * otherwise shape the liquid velocity inside that cell).  A new cut context
+ * freedom whose basis function has a nonzero trace only on inactive faces is left
+ * to the constraints of the active side (an inactive node of a cut cell would
+ * otherwise shape the field inside that cell).  A new cut context
  * rebuilds the constraint state, so the set follows the cut; while the
  * installed context has no such subset, the whole marker counts.
  */

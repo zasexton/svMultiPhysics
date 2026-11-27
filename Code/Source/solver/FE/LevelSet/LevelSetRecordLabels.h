@@ -4,6 +4,8 @@
 
 #pragma once
 
+namespace svmp::FE::systems { class FESystem; }
+
 namespace svmp::FE::level_set {
 
 /// Labels of the generated geometry in logs and constraint manifests. Supply
@@ -15,8 +17,20 @@ struct LevelSetRecordLabels {
     const char* full_active_cells{"full_active_cells"};
     const char* inactive_cells{"inactive_cells"};
     const char* active_side{"active_side"};
+    const char* inactive_vertices{"inactive_vertices"};
+    const char* inactive_trace_support_vertices{"inactive_trace_support_vertices"};
+    const char* max_inactive_extended_speed{"max_inactive_extended_speed"};
+    const char* active_to_inactive_amplification{"active_to_inactive_amplification"};
+    const char* active_to_inactive_amplification_guard{"active_to_inactive_amplification_guard"};
+    const char* snapshot_revision{"level_set_snapshot_revision"};
+    const char* active_volume{"active_volume"};
+    const char* cut_cell_active_volume{"cut_cell_active_volume"};
+    const char* full_cell_active_volume{"full_cell_active_volume"};
 };
 
 inline constexpr LevelSetRecordLabels defaultLevelSetRecordLabels{};
+
+/// A formulation or application may attach its reporting labels to the system.
+[[nodiscard]] const LevelSetRecordLabels& levelSetRecordLabels(const systems::FESystem& system) noexcept;
 
 } // namespace svmp::FE::level_set

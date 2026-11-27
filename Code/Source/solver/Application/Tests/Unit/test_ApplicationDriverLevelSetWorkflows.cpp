@@ -11003,7 +11003,7 @@ TEST(ApplicationDriverLevelSetWorkflows,
         } catch (const std::runtime_error& error) {
           // The PDE extension's own wet-to-dry guard (max extended speed
           // over max known speed) refuses the map before the driver's.
-          EXPECT_NE(std::string(error.what()).find("fixed wet-to-dry guard"),
+          EXPECT_NE(std::string(error.what()).find("fixed active-to-inactive guard"),
                     std::string::npos)
               << error.what();
           throw;

@@ -6,6 +6,7 @@
  */
 
 #include "LevelSet/LevelSetGeometry.h"
+#include "LevelSet/LevelSetRecordLabels.h"
 
 #include "Spaces/FunctionSpace.h"
 #include "Systems/FESystem.h"
@@ -22,8 +23,11 @@ namespace svmp {
 namespace FE {
 namespace level_set {
 
-// The cut-volume request functions below were moved verbatim from
-// Application/Core/LevelSetCutConfiguration.cpp (free-surface refactor, C2a).
+const LevelSetRecordLabels& levelSetRecordLabels(const systems::FESystem& system) noexcept
+{
+  const auto* labels = system.findAttachment<LevelSetRecordLabels>();
+  return labels ? *labels : defaultLevelSetRecordLabels;
+}
 
 svmp::FE::geometry::CutIntegrationSide cutIntegrationSide(
     LevelSetActiveSide side) noexcept

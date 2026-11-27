@@ -33,6 +33,7 @@
 #include "Core/KernelTrace.h"
 #include "Core/Logger.h"
 #include "Core/LogRecord.h"
+#include "LevelSet/LevelSetRecordLabels.h"
 #include "Core/Alignment.h"
 #include "Core/AlignedAllocator.h"
 #include "Core/FEConfig.h"
@@ -924,6 +925,7 @@ private:
 }
 
 void logCutVolumeRowProvenanceDiagnostics(
+    const FESystem& system,
     const assembly::IMeshAccess& mesh,
     const assembly::CutIntegrationContext& cut_context,
     int marker,
@@ -942,6 +944,7 @@ void logCutVolumeRowProvenanceDiagnostics(
     if (!cutVolumeRowProvenanceDiagnosticEnabled()) {
         return;
     }
+    const auto& records = level_set::levelSetRecordLabels(system);
     const auto op_filter = cutVolumeRowProvenanceOperatorFilter();
     if (!cutVolumeRowProvenanceOperatorMatches(op, op_filter)) {
         return;
@@ -1019,7 +1022,7 @@ void logCutVolumeRowProvenanceDiagnostics(
             .value("parent_measure", rule.parent_measure)
             .value("quadrature_points", rule.points.size())
             .value("source_revision", (rule_metadata == nullptr ? 0u : rule_metadata->source_value_revision))
-            .value("free_surface_snapshot_revision", (rule_metadata == nullptr ? 0u : rule_metadata->level_set_snapshot_revision_key))
+            .value(records.snapshot_revision, (rule_metadata == nullptr ? 0u : rule_metadata->level_set_snapshot_revision_key))
             .value("cut_topology_revision", (rule_metadata == nullptr ? 0u : rule_metadata->cut_topology_revision))
             .value("quadrature_policy_key", (rule_metadata == nullptr ? 0u : rule_metadata->quadrature_policy_key))
             .value("row_dofs", joinDofsWithOffset(row_dofs, row_dof_offset))
@@ -1044,7 +1047,8 @@ void logCutVolumeRowProvenanceDiagnostics(
     svmp::FE::logRecord(summary);
 }
 
-void logCutVolumeAssemblyDiagnostics(const assembly::CutIntegrationContext& cut_context,
+void logCutVolumeAssemblyDiagnostics(const FESystem& system,
+                                     const assembly::CutIntegrationContext& cut_context,
                                      int marker,
                                      geometry::CutIntegrationSide side)
 {
@@ -1052,6 +1056,7 @@ void logCutVolumeAssemblyDiagnostics(const assembly::CutIntegrationContext& cut_
     if (Logger::instance().get_level() > LogLevel::INFO) {
         return;
     }
+    const auto& records = level_set::levelSetRecordLabels(system);
     const auto diagnostics =
         cut_context.generatedVolumeDiagnosticsForMarkerAndSide(marker, side);
 
@@ -1060,9 +1065,9 @@ void logCutVolumeAssemblyDiagnostics(const assembly::CutIntegrationContext& cut_
             .diagnostic("cut_volume_assembly")
             .value("marker", marker)
             .value("side", cutIntegrationSideName(side))
-            .value("active_wet_volume", diagnostics.active_volume)
-            .value("cut_cell_active_wet_volume", diagnostics.cut_cell_active_volume)
-            .value("full_cell_active_wet_volume", diagnostics.full_cell_active_volume)
+            .value(records.active_volume, diagnostics.active_volume)
+            .value(records.cut_cell_active_volume, diagnostics.cut_cell_active_volume)
+            .value(records.full_cell_active_volume, diagnostics.full_cell_active_volume)
             .value("rules", diagnostics.rule_count)
             .value("cut_cell_rules", diagnostics.cut_cell_rules)
             .value("full_cell_rules", diagnostics.full_cell_rules)
@@ -3102,7 +3107,7 @@ assembly::AssemblyResult assembleOperator(
                 std::to_string(first.marker) + ":" +
                 std::to_string(static_cast<int>(first.side));
             if (logged_cut_volume_diagnostics.insert(diagnostics_key).second) {
-                logCutVolumeAssemblyDiagnostics(*cut_context, first.marker, first.side);
+                logCutVolumeAssemblyDiagnostics(system, *cut_context, first.marker, first.side);
             }
 
             for (const auto idx : group) {
@@ -3112,6 +3117,7 @@ assembly::AssemblyResult assembleOperator(
                 const auto& provenance_trial_field =
                     system.field_registry_.get(entry.term->trial_field);
                 logCutVolumeRowProvenanceDiagnostics(
+                    system,
                     mesh,
                     *cut_context,
                     entry.term->marker,

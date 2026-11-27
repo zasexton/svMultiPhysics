@@ -50,7 +50,7 @@ struct LevelSetZeroPolygonRedistancingResult {
  *
  * Where the zero polygon is straight inside a cell, the new values keep its
  * edge crossings exactly; elsewhere the crossings move by second-order
- * amounts.  Callers that must keep the interface (for example the liquid
+ * amounts.  Callers that must keep the interface (for example the active-side
  * measure) correct the result locally afterwards, e.g. with
  * reconcileLevelSetWithKinematicFlux() and a zero velocity, which restores the
  * lumped interface position node by node and leaves pure rescalings

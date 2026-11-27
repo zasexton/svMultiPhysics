@@ -396,7 +396,7 @@ public:
           std::sqrt(gphi[0] * gphi[0] + gphi[1] * gphi[1] + gphi[2] * gphi[2]);
       if (!(gnorm > 0.0) || !std::isfinite(gnorm)) {
         throw std::runtime_error(
-            "PDE least-squares normal extension found a dry cell with a zero "
+            "PDE least-squares normal extension found a inactive cell with a zero "
             "level-set gradient; the normal is undefined");
       }
       std::array<double, N> ndg{};
@@ -1644,7 +1644,7 @@ PdeVelocityExtensionReport extendVelocityByPdePass(
   std::vector<HighOrderCellRecord> local_high_order_cells;
   const svmp::FE::assembly::MeshAccess mesh_access(mesh);
   LagrangeCellMatrices lagrange_matrices;
-  // The first unsupported dry cell of this rank; every rank fails together.
+  // The first unsupported inactive cell of this rank; every rank fails together.
   std::string unsupported_cell;
   for (std::size_t c = 0; c < n_cells; ++c) {
     const auto cell = static_cast<svmp::index_t>(c);
@@ -1693,7 +1693,7 @@ PdeVelocityExtensionReport extendVelocityByPdePass(
       if (!type.has_value()) {
         if (unsupported_cell.empty()) {
           unsupported_cell =
-              "; dry cell " + std::to_string(cell_gids[c]) + " is a " +
+              "; inactive cell " + std::to_string(cell_gids[c]) + " is a " +
               cellFamilyName(shape.family) + " cell with " +
               std::to_string(count) + " vertices (order " +
               std::to_string(shape.order) + ")";
@@ -1798,7 +1798,7 @@ PdeVelocityExtensionReport extendVelocityByPdePass(
                                      gphi[2] * gphi[2]);
       if (!(gnorm > 0.0) || !std::isfinite(gnorm)) {
         throw std::runtime_error(
-            "PDE least-squares normal extension found a dry cell with a zero "
+            "PDE least-squares normal extension found a inactive cell with a zero "
             "level-set gradient; the normal is undefined");
       }
       std::array<double, 4> ndg{0.0, 0.0, 0.0, 0.0};
@@ -1819,14 +1819,14 @@ PdeVelocityExtensionReport extendVelocityByPdePass(
   if (globalMax(unsupported_cell.empty() ? 0.0 : 1.0, comm) > 0.0) {
     throw std::runtime_error(
         "PDE velocity extension requires Lagrange cells with at most 27 "
-        "nodes in the dry region (first-order: Triangle3 or Quad4 in 2D; "
+        "nodes in the inactive region (first-order: Triangle3 or Quad4 in 2D; "
         "Tetra4, Hex8, Wedge6 or Pyramid5 in 3D; high-order: Triangle6, "
         "Quad9, Tetra10, Pyramid14, Wedge18, Hex27, ...)" +
         unsupported_cell + ".");
   }
 
   std::vector<VertexRecord> local_vertices;
-  // Over the known vertices and the prescribed wall components of the dry
+  // Over the known vertices and the prescribed wall components of the inactive
   // vertices: the data of the extension.
   double max_known_speed = 0.0;
   double max_prescribed_wall_speed = 0.0;
@@ -2367,7 +2367,7 @@ PdeVelocityExtensionReport extendVelocityByPdePass(
       throw std::runtime_error(
           std::string("PDE velocity extension (") +
           std::string(pdeVelocityExtensionOperatorName(options.op)) +
-          ") could not solve its dry-region system; the operator is "
+          ") could not solve its inactive-region system; the operator is "
           "singular for this level set and known set: " + error.what());
     }
     auto r = factory->createVector(n_unknown);
@@ -2417,7 +2417,7 @@ PdeVelocityExtensionReport extendVelocityByPdePass(
       throw std::runtime_error(
           std::string("PDE velocity extension (") +
           std::string(pdeVelocityExtensionOperatorName(options.op)) +
-          ") failed its dry-region solve (relative residual " +
+          ") failed its inactive-region solve (relative residual " +
           std::to_string(relative_residual) + ")");
     }
     const auto& unknown = unknowns_by_component[component];
@@ -2571,7 +2571,7 @@ PdeVelocityExtensionReport extendVelocityByPdePass(
     for (std::size_t v = 0; v < n_vertices; ++v) {
       local_by_gid.emplace(static_cast<std::int64_t>(vertex_gids[v]), v);
     }
-    // Operator row of every owned dry vertex, accumulated in the canonical
+    // Operator row of every owned inactive vertex, accumulated in the canonical
     // (sorted cell) order used for the solve.
     std::unordered_map<std::int64_t, std::map<std::int64_t, double>> row_entries;
     for (std::size_t v = 0; v < n_vertices; ++v) {
@@ -2620,7 +2620,7 @@ PdeVelocityExtensionReport extendVelocityByPdePass(
             throw std::runtime_error(
                 std::string("PDE velocity extension (") +
                 std::string(pdeVelocityExtensionOperatorName(options.op)) +
-                ") found a dry vertex with a non-positive operator diagonal; "
+                ") found a inactive vertex with a non-positive operator diagonal; "
                 "its algebraic row is undefined");
           }
           for (const auto& [neighbor_gid, value] : entries) {
@@ -2667,7 +2667,7 @@ PdeVelocityExtensionReport extendVelocityByPdePass(
         vertex_index.find(static_cast<std::int64_t>(vertex_gids[v]));
     if (found == vertex_index.end()) {
       throw std::runtime_error(
-          "PDE velocity extension lost a local dry vertex in the gathered "
+          "PDE velocity extension lost a local inactive vertex in the gathered "
           "system");
     }
     double speed2 = 0.0;
@@ -2694,7 +2694,7 @@ PdeVelocityExtensionReport extendVelocityByPdePass(
           std::max(report.max_known_speed, 1.0e-12)) {
     throw std::runtime_error(
         "PDE velocity extension amplified the known speed beyond the fixed "
-        "wet-to-dry guard (max_known_speed=" +
+        "active-to-inactive guard (max_known_speed=" +
         std::to_string(report.max_known_speed) + ", max_extended_speed=" +
         std::to_string(report.max_extended_speed) + ")");
   }
@@ -2805,9 +2805,9 @@ PdeVelocityExtensionReport extendVelocityByPde(
     PdeVelocityExtensionCache* cache,
     const PdeVelocityExtensionMeshRevisions& revisions)
 {
-  // A dry vertex of a homogeneous wall is held (u_c = 0) only against inflow
+  // A inactive vertex of a homogeneous wall is held (u_c = 0) only against inflow
   // (u . n < 0 through one of its wall faces): the level-set equation needs
-  // data only on its inflow boundary, and holding the normal velocity of dry
+  // data only on its inflow boundary, and holding the normal velocity of inactive
   // wall vertices would slow a front that approaches the wall.  The held set
   // grows from empty, one solve per change, and is the same on every rank.
   const auto n_vertices = mesh.n_vertices();
