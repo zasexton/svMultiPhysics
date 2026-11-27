@@ -272,7 +272,7 @@ std::string wallFunctionalName(const WallFunctionalFormDeclaration& declaration,
 forms::FormExpr wallFunctionalForm(const WallFunctionalFormDeclaration& declaration,
                                    int wall,
                                    std::span<const forms::ContactLineDomain> contact_lines,
-                                   std::span<const forms::BoundaryDomain> wetted_parts)
+                                   std::span<const forms::BoundaryDomain> active_boundary_subsets)
 {
     const auto listed = std::find_if(declaration.by_wall.begin(), declaration.by_wall.end(),
                                      [&](const auto& entry) { return entry.first == wall; });
@@ -287,7 +287,7 @@ forms::FormExpr wallFunctionalForm(const WallFunctionalFormDeclaration& declarat
             add(integrand.dL(line));
         }
     } else {
-        for (const auto& part : wetted_parts) {
+        for (const auto& part : active_boundary_subsets) {
             add(integrand.ds(part));
         }
     }

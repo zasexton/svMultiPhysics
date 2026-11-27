@@ -243,7 +243,7 @@ void appendUniqueRequest(std::vector<ActiveCutVolumeRequest>& requests,
     const auto is_free_surface_frozen =
         [](const ActiveCutVolumeRequest& candidate) {
           return candidate.origin ==
-                     ActiveCutVolumeRequestOrigin::FreeSurfaceBoundary &&
+                     ActiveCutVolumeRequestOrigin::InterfaceBoundary &&
                  candidate.geometry_tangent_policy ==
                      Policy::RefreshedFrozenQuadrature;
         };
@@ -296,6 +296,7 @@ std::optional<ActiveCutVolumeRequest> activeCutVolumeRequestFromParameters(
   }
 
   ActiveCutVolumeRequest request{};
+  request.domain_id = "free_surface";
   if (active_token == "levelsetnegative" ||
       active_token == "negative" ||
       active_token == "negativelevelset" ||
@@ -638,7 +639,7 @@ activeCutVolumeRequests(const EquationParameters& equation)
           "incompatible with incompressible two-fluid; both generated "
           "cut-volume sides are required.");
     }
-    request->origin = ActiveCutVolumeRequestOrigin::MaterialInterface;
+    request->origin = ActiveCutVolumeRequestOrigin::InternalInterface;
     request->equation_type = trimCopy(equation.type.value());
     request->active_side = LevelSetActiveSide::Negative;
     request->volume_retention =
@@ -717,7 +718,7 @@ activeCutVolumeRequests(const EquationParameters& equation)
             ActiveCutVolumeRetention::ActiveAndInactive;
       }
       free_surface_request.origin =
-          ActiveCutVolumeRequestOrigin::FreeSurfaceBoundary;
+          ActiveCutVolumeRequestOrigin::InterfaceBoundary;
       free_surface_request.equation_type = trimCopy(equation.type.value());
       appendUniqueRequest(requests, std::move(free_surface_request));
     }

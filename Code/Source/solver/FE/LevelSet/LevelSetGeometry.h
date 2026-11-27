@@ -31,7 +31,7 @@
  * | L.volume()                  | VolumeDomain::cut(marker, side)          -> dCutVolume      |
  * | G.interface(), L.interface() | InterfaceDomain(marker)                 -> dI               |
  * | G.contactLine(wall)         | ContactLineDomain(intersection marker)   -> dI (codim 2)    |
- * | L.boundary(b), L.wetted(w)  | BoundaryDomain::generatedActiveSubset(b, generated marker)   |
+ * | L.boundary(b)               | BoundaryDomain::generatedActiveSubset(b, generated marker)   |
  * | L.cutFacets()               | FacetDomain::cutAdjacent(marker, side)   -> dS              |
  * | G.cutFacets()               | FacetDomain::cutAdjacent(marker)         -> dS (both sides) |
  * | L.outwardNormal()           | the rule normal, pointing out of the side                   |
@@ -87,8 +87,8 @@ enum class LevelSetActiveSide {
 
 enum class ActiveCutVolumeRequestOrigin {
   Equation,
-  FreeSurfaceBoundary,
-  MaterialInterface,
+  InterfaceBoundary,
+  InternalInterface,
 };
 
 enum class ActiveCutVolumeRetention {
@@ -98,7 +98,7 @@ enum class ActiveCutVolumeRetention {
 
 struct ActiveCutVolumeRequest {
   std::string level_set_field_name{"level_set"};
-  std::string domain_id{"free_surface"};
+  std::string domain_id{"interface"};
   std::string equation_type{};
   ActiveCutVolumeRequestOrigin origin{ActiveCutVolumeRequestOrigin::Equation};
   int requested_interface_marker{-1};
@@ -296,12 +296,6 @@ public:
     /// BoundaryDomain::generatedActiveSubset(marker, stable generated marker).
     [[nodiscard]] forms::BoundaryDomain boundary(int physical_boundary_marker) const;
 
-    /// The active subset of a wall; the same domain as boundary(wall).
-    [[nodiscard]] forms::BoundaryDomain wetted(int wall_boundary_marker) const
-    {
-        return boundary(wall_boundary_marker);
-    }
-
     /// The interior facets adjacent to the cut, on this side.
     [[nodiscard]] forms::FacetDomain cutFacets() const;
 
@@ -359,10 +353,10 @@ private:
     std::string invalid_physical_marker_message);
 
 /**
- * @brief A wetted-boundary resolver: @p resolve, registering each generated
+ * @brief Wrap @p resolve and register each generated
  *        marker it returns as an embedded interface marker of @p system.
  */
-[[nodiscard]] std::function<std::optional<int>(int)> wettedBoundaryResolver(
+[[nodiscard]] std::function<std::optional<int>(int)> generatedActiveBoundaryResolver(
     systems::FESystem& system,
     std::function<std::optional<int>(int)> resolve);
 

@@ -415,7 +415,7 @@ void IncompressibleNavierStokesVMSModule::registerOn(fs::FESystem& system) const
                                               body_force.id == FE::INVALID_FIELD_ID,
                                           o.viscosity, o.viscosity_model == nullptr);
     // Exterior conditions act on the wetted part of a boundary when the liquid is a cut side.
-    const auto wetted = FE::level_set::wettedBoundaryResolver(system, preflight.generated_active_boundary_for);
+    const auto wetted = FE::level_set::generatedActiveBoundaryResolver(system, preflight.generated_active_boundary_for);
 
     // Constraints, in the plan's phase order: vertex values < essential < inactive side < aggregation
     // < contact-point law.  With a cut liquid L the traction on Gamma_h fixes the pressure constant, and u

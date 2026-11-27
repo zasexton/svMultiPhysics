@@ -1,11 +1,11 @@
 /**
- * @file test_FreeSurfaceFunctionalRounding.cpp
+ * @file test_SummationRounding.cpp
  * @brief Tests of the derived rounding bound for sums of the same terms.
  */
 
 #include <gtest/gtest.h>
 
-#include "Systems/FreeSurfaceFunctionalRounding.h"
+#include "Systems/SummationRounding.h"
 
 #include <algorithm>
 #include <cmath>
@@ -17,12 +17,12 @@
 #include <vector>
 
 using svmp::FE::Real;
-using svmp::FE::systems::freeSurfaceNonnegativeSummationAbsoluteBound;
-using svmp::FE::systems::freeSurfaceNonnegativeSummationsAgree;
-using svmp::FE::systems::freeSurfaceSummationErrorFactor;
-using svmp::FE::systems::freeSurfaceSummationsAgree;
-using svmp::FE::systems::freeSurfaceSummationTolerance;
-using svmp::FE::systems::kFreeSurfaceFunctionalUnitRoundoff;
+using svmp::FE::systems::nonnegativeSummationAbsoluteBound;
+using svmp::FE::systems::nonnegativeSummationsAgree;
+using svmp::FE::systems::summationErrorFactor;
+using svmp::FE::systems::summationsAgree;
+using svmp::FE::systems::summationTolerance;
+using svmp::FE::systems::kSummationUnitRoundoff;
 
 namespace {
 
@@ -135,32 +135,32 @@ bool fixedFiveHundredTwelveUlpNear(Real a, Real b)
 
 TEST(FreeSurfaceFunctionalRounding, ErrorFactorIsHighamGammaOfTheAdditionCount)
 {
-    const Real u = kFreeSurfaceFunctionalUnitRoundoff;
+    const Real u = kSummationUnitRoundoff;
     EXPECT_EQ(u, std::ldexp(Real{1.0}, -53));
-    EXPECT_EQ(freeSurfaceSummationErrorFactor(0u), Real{0.0});
-    EXPECT_EQ(freeSurfaceSummationErrorFactor(1u), Real{0.0});
-    EXPECT_EQ(freeSurfaceSummationErrorFactor(2u), u / (Real{1.0} - u));
+    EXPECT_EQ(summationErrorFactor(0u), Real{0.0});
+    EXPECT_EQ(summationErrorFactor(1u), Real{0.0});
+    EXPECT_EQ(summationErrorFactor(2u), u / (Real{1.0} - u));
     const Real k = Real{999999.0};
-    EXPECT_EQ(freeSurfaceSummationErrorFactor(1000000u),
+    EXPECT_EQ(summationErrorFactor(1000000u),
               k * u / (Real{1.0} - k * u));
-    EXPECT_LT(freeSurfaceSummationErrorFactor(1000u),
-              freeSurfaceSummationErrorFactor(1001u));
-    EXPECT_TRUE(std::isinf(freeSurfaceSummationErrorFactor(
+    EXPECT_LT(summationErrorFactor(1000u),
+              summationErrorFactor(1001u));
+    EXPECT_TRUE(std::isinf(summationErrorFactor(
         std::numeric_limits<std::uint64_t>::max())));
 }
 
 TEST(FreeSurfaceFunctionalRounding, AtMostOneTermRequiresExactAgreement)
 {
-    EXPECT_EQ(freeSurfaceSummationTolerance(1u, 1u, Real{3.0}), Real{0.0});
-    EXPECT_TRUE(freeSurfaceNonnegativeSummationsAgree(
+    EXPECT_EQ(summationTolerance(1u, 1u, Real{3.0}), Real{0.0});
+    EXPECT_TRUE(nonnegativeSummationsAgree(
         Real{0.25}, 1u, Real{0.25}, 1u));
-    EXPECT_FALSE(freeSurfaceNonnegativeSummationsAgree(
+    EXPECT_FALSE(nonnegativeSummationsAgree(
         Real{0.25}, 1u, std::nextafter(Real{0.25}, Real{1.0}), 1u));
     EXPECT_TRUE(
-        freeSurfaceNonnegativeSummationsAgree(Real{0.0}, 0u, Real{0.0}, 0u));
-    EXPECT_FALSE(freeSurfaceNonnegativeSummationsAgree(
+        nonnegativeSummationsAgree(Real{0.0}, 0u, Real{0.0}, 0u));
+    EXPECT_FALSE(nonnegativeSummationsAgree(
         std::numeric_limits<Real>::quiet_NaN(), 10u, Real{1.0}, 10u));
-    EXPECT_FALSE(freeSurfaceNonnegativeSummationsAgree(
+    EXPECT_FALSE(nonnegativeSummationsAgree(
         std::numeric_limits<Real>::infinity(),
         10u,
         std::numeric_limits<Real>::infinity(),
@@ -172,15 +172,15 @@ TEST(FreeSurfaceFunctionalRounding, ToleranceIsTheSumOfBothSidesBounds)
     const std::uint64_t a_terms = 300000u;
     const std::uint64_t b_terms = 4000u;
     const Real absolute_sum = Real{2.5};
-    EXPECT_EQ(freeSurfaceSummationTolerance(a_terms, b_terms, absolute_sum),
-              (freeSurfaceSummationErrorFactor(a_terms) +
-               freeSurfaceSummationErrorFactor(b_terms)) *
+    EXPECT_EQ(summationTolerance(a_terms, b_terms, absolute_sum),
+              (summationErrorFactor(a_terms) +
+               summationErrorFactor(b_terms)) *
                   absolute_sum);
     const Real a = Real{2.5};
     const Real bound =
-        freeSurfaceNonnegativeSummationAbsoluteBound(a, a_terms, a, b_terms);
+        nonnegativeSummationAbsoluteBound(a, a_terms, a, b_terms);
     EXPECT_EQ(bound,
-              a / (Real{1.0} - freeSurfaceSummationErrorFactor(a_terms)));
+              a / (Real{1.0} - summationErrorFactor(a_terms)));
 }
 
 TEST(FreeSurfaceFunctionalRounding,
@@ -203,7 +203,7 @@ TEST(FreeSurfaceFunctionalRounding,
                 rankReducedSum(permuted(terms, 43u), 64u),
             };
             for (const auto other : sums) {
-                EXPECT_TRUE(freeSurfaceNonnegativeSummationsAgree(
+                EXPECT_TRUE(nonnegativeSummationsAgree(
                     forward, n, other, n))
                     << "count=" << count
                     << " family=" << static_cast<int>(family)
@@ -231,13 +231,13 @@ TEST(FreeSurfaceFunctionalRounding,
             const Real forward = recursiveSum(terms);
             const Real grouped = ruleGroupedSum(permuted(terms, 61u), 67u);
             ASSERT_TRUE(
-                freeSurfaceNonnegativeSummationsAgree(forward, n, grouped, n));
+                nonnegativeSummationsAgree(forward, n, grouped, n));
             const Real relative = Real{1.0e-10};
-            EXPECT_FALSE(freeSurfaceNonnegativeSummationsAgree(
+            EXPECT_FALSE(nonnegativeSummationsAgree(
                 forward, n, grouped * (Real{1.0} + relative), n))
                 << "count=" << count
                 << " family=" << static_cast<int>(family);
-            EXPECT_FALSE(freeSurfaceNonnegativeSummationsAgree(
+            EXPECT_FALSE(nonnegativeSummationsAgree(
                 forward * (Real{1.0} - relative), n, grouped, n))
                 << "count=" << count
                 << " family=" << static_cast<int>(family);
@@ -245,7 +245,7 @@ TEST(FreeSurfaceFunctionalRounding,
             // One term missing from one side whose relative size is 1e-10.
             auto inconsistent = terms;
             inconsistent.push_back(relative * forward);
-            EXPECT_FALSE(freeSurfaceNonnegativeSummationsAgree(
+            EXPECT_FALSE(nonnegativeSummationsAgree(
                 forward, n, recursiveSum(permuted(inconsistent, 71u)), n + 1u))
                 << "count=" << count
                 << " family=" << static_cast<int>(family);
@@ -269,12 +269,12 @@ TEST(FreeSurfaceFunctionalRounding, SignedTermsUseTheirAbsoluteSum)
                    [](Real term) { return std::abs(term); });
     const auto n = static_cast<std::uint64_t>(count);
     const Real computed_absolute = recursiveSum(magnitudes);
-    const Real absolute_sum = freeSurfaceNonnegativeSummationAbsoluteBound(
+    const Real absolute_sum = nonnegativeSummationAbsoluteBound(
         computed_absolute, n, computed_absolute, n);
     const Real forward = recursiveSum(terms);
     const Real grouped = ruleGroupedSum(permuted(terms, 83u), 89u);
-    EXPECT_TRUE(freeSurfaceSummationsAgree(forward, n, grouped, n, absolute_sum));
-    EXPECT_FALSE(freeSurfaceSummationsAgree(
+    EXPECT_TRUE(summationsAgree(forward, n, grouped, n, absolute_sum));
+    EXPECT_FALSE(summationsAgree(
         forward, n, grouped + Real{1.0e-10} * absolute_sum, n, absolute_sum));
 }
 

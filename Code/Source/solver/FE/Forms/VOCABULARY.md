@@ -407,7 +407,7 @@ formulation never computes a marker by hand:
 | `G.side(CutVolumeSide::Negative \| Positive)` | `CutSide` L = {phi < c} or {phi > c} |
 | `L.volume()` | `VolumeDomain::cut(marker, side)` |
 | `L.outwardNormal()`, `outwardInterfaceNormal(side)` | The interface rule normal, negated on the positive side, so it points out of L |
-| `L.boundary(b)`, `L.wetted(w)` | `BoundaryDomain::generatedActiveSubset(b, generated marker)` |
+| `L.boundary(b)`, `L.boundary(w)` | `BoundaryDomain::generatedActiveSubset(b, generated marker)` |
 | `L.cutFacets()` | `FacetDomain::cutAdjacent(marker, side)` |
 | `G.cutFacets()` | `FacetDomain::cutAdjacent(marker)`: the facets next to the cut on both sides |
 | `G.contactLine(wall)`, `L.contactLine(wall)` | `ContactLineDomain` of Gamma intersected with a wall |

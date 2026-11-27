@@ -24,10 +24,10 @@
  *   dCutVolume(m, side)          the cut context's volume rules of (m, side);
  *   dI(m), dL(contact line),     the cut context's interface rules of marker
  *   generated-active-boundary ds   m: a level-set interface, a contact line
- *                                or a wetted (active) boundary;
+ *                                or a generated active boundary;
  *
  * the cut rules on locally owned parent cells.  dS, and dI and dCutVolume
- * without a marker, are rejected.  For a free surface the cut rules are those
+ * without a marker, are rejected.  For a generated interface the cut rules are those
  * of the authoritative geometry snapshot imported into the cut context; the
  * cut loops assert that every snapshot is current for the mesh.
  *

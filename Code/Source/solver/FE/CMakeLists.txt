@@ -1105,7 +1105,7 @@ set(FE_SYSTEMS_HEADERS
     Systems/FESystem.h
     Systems/FormsInstaller.h
     Systems/FormulationBuilder.h
-    Systems/FreeSurfaceFunctionalRounding.h
+    Systems/SummationRounding.h
     Systems/AcceptedStageRecords.h
     Systems/FunctionalForms.h
     Systems/FunctionalFormEvaluator.h
@@ -3018,7 +3018,7 @@ if(FE_BUILD_TESTS)
 		                Tests/Unit/Systems/test_MeshNormalConstraintStageMeasurements.cpp
 		                Tests/Unit/Systems/test_SnapshotFieldEvaluator.cpp
 		                Tests/Unit/Systems/test_FESystemMultiMesh.cpp
-		                Tests/Unit/Systems/test_FreeSurfaceFunctionalRounding.cpp
+		                Tests/Unit/Systems/test_SummationRounding.cpp
 		                Tests/Unit/Systems/test_AssemblerSelection.cpp
 		                Tests/Unit/Systems/test_MultiFieldRectangularAssembly.cpp
                 Tests/Unit/Systems/test_NavierStokesCoupled.cpp

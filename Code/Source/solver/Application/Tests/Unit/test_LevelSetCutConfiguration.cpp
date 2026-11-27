@@ -121,7 +121,7 @@ ActiveCutRequest makeCutOptionRequest(
   request.domain_id = std::move(domain_id);
   request.equation_type = "fluid";
   request.origin =
-      application::core::ActiveCutVolumeRequestOrigin::FreeSurfaceBoundary;
+      application::core::ActiveCutVolumeRequestOrigin::InterfaceBoundary;
   request.active_side = active_side;
   request.volume_retention =
       application::core::ActiveCutVolumeRetention::ActiveOnly;
@@ -379,6 +379,24 @@ std::shared_ptr<svmp::Mesh> buildSingleQuadMesh()
 }
 
 } // namespace
+
+TEST(LevelSetCutConfiguration, DeckDefaultKeepsTheFreeSurfaceDomain)
+{
+  auto parameters = parseParametersXml(R"xml(
+<svMultiPhysicsFile>
+  <Add_equation type="fluid">
+    <Add_BC name="free_surface">
+      <Type>Free_surface</Type>
+      <Implementation>UnfittedLevelSet</Implementation>
+      <Active_domain>LevelSetNegative</Active_domain>
+    </Add_BC>
+  </Add_equation>
+</svMultiPhysicsFile>
+)xml");
+  const auto requests = application::core::activeCutVolumeRequests(*parameters);
+  ASSERT_EQ(requests.size(), 1u);
+  EXPECT_EQ(requests.front().domain_id, "free_surface");
+}
 
 TEST(LevelSetCutConfiguration,
      GeneratedInterfaceOptionsMatchCapturedProjectionValues)
@@ -641,7 +659,7 @@ TEST(LevelSetCutConfiguration, DefaultsUseLinearCornerPath)
   EXPECT_EQ(request.level_set_field_name, "phi");
   EXPECT_EQ(request.domain_id, "water_air");
   EXPECT_EQ(request.origin,
-            application::core::ActiveCutVolumeRequestOrigin::FreeSurfaceBoundary);
+            application::core::ActiveCutVolumeRequestOrigin::InterfaceBoundary);
   EXPECT_EQ(request.equation_type, "fluid");
   EXPECT_EQ(request.geometry_mode,
             level_set::GeneratedInterfaceGeometryMode::LinearCorner);
@@ -690,7 +708,7 @@ TEST(LevelSetCutConfiguration,
     const auto requests = application::core::activeCutVolumeRequests(*params);
     ASSERT_EQ(requests.size(), 1u) << implementation;
     EXPECT_EQ(requests.front().origin,
-              application::core::ActiveCutVolumeRequestOrigin::FreeSurfaceBoundary)
+              application::core::ActiveCutVolumeRequestOrigin::InterfaceBoundary)
         << implementation;
     EXPECT_EQ(requests.front().volume_retention,
               application::core::ActiveCutVolumeRetention::ActiveAndInactive)
@@ -718,7 +736,7 @@ TEST(LevelSetCutConfiguration,
   const auto requests = application::core::activeCutVolumeRequests(*params);
   ASSERT_EQ(requests.size(), 1u);
   EXPECT_EQ(requests.front().origin,
-            application::core::ActiveCutVolumeRequestOrigin::FreeSurfaceBoundary);
+            application::core::ActiveCutVolumeRequestOrigin::InterfaceBoundary);
   EXPECT_EQ(requests.front().active_side,
             application::core::LevelSetActiveSide::Negative);
   EXPECT_EQ(requests.front().domain_id, "water_air");
@@ -761,7 +779,7 @@ TEST(LevelSetCutConfiguration,
     ASSERT_EQ(requests.size(), 1u);
     const auto& request = requests.front();
     EXPECT_EQ(request.origin,
-              application::core::ActiveCutVolumeRequestOrigin::MaterialInterface);
+              application::core::ActiveCutVolumeRequestOrigin::InternalInterface);
     EXPECT_EQ(request.equation_type, item.equation_type);
     EXPECT_EQ(request.level_set_field_name, "phi");
     EXPECT_EQ(request.domain_id, "material_interface");
@@ -1339,7 +1357,7 @@ TEST(LevelSetCutConfiguration,
   const auto requests = application::core::activeCutVolumeRequests(*params);
   ASSERT_EQ(requests.size(), 1u);
   EXPECT_EQ(requests.front().origin,
-            application::core::ActiveCutVolumeRequestOrigin::FreeSurfaceBoundary);
+            application::core::ActiveCutVolumeRequestOrigin::InterfaceBoundary);
   EXPECT_EQ(requests.front().volume_retention,
             application::core::ActiveCutVolumeRetention::ActiveAndInactive);
   EXPECT_EQ(requests.front().geometry_tangent_policy,

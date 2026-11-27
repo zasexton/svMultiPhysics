@@ -203,7 +203,7 @@ TEST(FunctionalFormEvaluator, EvaluatesTheDeclaredFunctionalsOfASystemInOrder)
     systems::declareWallFunctionalForm(sys, {.prefix = "t.",
                                              .quantity = "wetted_x",
                                              .kind = systems::FunctionalKind::Measure,
-                                             .measure = systems::WallMeasure::WettedPart,
+                                             .measure = systems::WallMeasure::ActiveBoundarySubset,
                                              .by_wall = {{fixture::kWallMarker, coordinateX()}},
                                              .owner = "t"});
     const auto rejects = [&](systems::WallFunctionalFormDeclaration declaration, const std::string& reason) {

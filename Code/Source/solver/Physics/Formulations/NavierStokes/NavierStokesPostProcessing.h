@@ -1059,7 +1059,7 @@ struct FreeSurfaceContactWallStatement {
     add("young_energy_rate", Kind::Power, Measure::ContactLines, FormExpr{}, std::move(young));
     add("contact_line_friction_dissipation", Kind::DissipationRate, Measure::ContactLines, FormExpr{},
         std::move(friction));
-    add("wall_slip_dissipation", Kind::DissipationRate, Measure::WettedPart, FormExpr{}, std::move(slip));
+    add("wall_slip_dissipation", Kind::DissipationRate, Measure::ActiveBoundarySubset, FormExpr{}, std::move(slip));
     return out;
 }
 

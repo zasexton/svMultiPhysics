@@ -86,7 +86,7 @@ struct LevelSetVelocityExtensionRequest {
   };
 
   std::string level_set_field_name{"level_set"};
-  std::string domain_id{"free_surface"};
+  std::string domain_id{"interface"};
   std::string source_velocity_field_name{"Velocity"};
   std::string target_velocity_field_name{"LevelSetAdvectionVelocity"};
   std::string operator_tag{"level_set"};

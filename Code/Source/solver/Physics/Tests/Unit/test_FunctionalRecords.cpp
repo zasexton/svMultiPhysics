@@ -19,7 +19,7 @@
 #include "FE/Spaces/H1Space.h"
 #include "FE/Spaces/ProductSpace.h"
 #include "FE/Systems/FESystem.h"
-#include "FE/Systems/FreeSurfaceFunctionalRounding.h"
+#include "FE/Systems/SummationRounding.h"
 #include "Mesh/Core/MeshBase.h"
 #include "Mesh/Mesh.h"
 #include "Mesh/Topology/CellShape.h"

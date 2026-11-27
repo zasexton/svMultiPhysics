@@ -1237,7 +1237,7 @@ void SimulationBuilder::loadMeshes()
     cut_volume_requests = application::core::activeCutVolumeRequests(params_);
     for (const auto& request : cut_volume_requests) {
       if (request.origin ==
-              application::core::ActiveCutVolumeRequestOrigin::FreeSurfaceBoundary &&
+              application::core::ActiveCutVolumeRequestOrigin::InterfaceBoundary &&
           request.volume_retention ==
               application::core::ActiveCutVolumeRetention::ActiveAndInactive) {
         minimum_ghost_layers = kAggregationGhostLayers;

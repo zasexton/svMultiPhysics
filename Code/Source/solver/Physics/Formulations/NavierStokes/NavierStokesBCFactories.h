@@ -1365,7 +1365,7 @@ inline void addUnfittedFreeSurface(FE::forms::FormExpr& M, FE::systems::FESystem
         }
         int wetted_marker = -1;
         if (c.slip_length.isValid()) {
-            const auto W = L.wetted(c.wall);
+            const auto W = L.boundary(c.wall);
             M = M + (mu / c.slip_length * dot(tangentialProjection(u, c.n_w), tangentialProjection(v, c.n_w))).ds(W);
             wetted_marker = W.generatedActiveBoundaryMarker();
         }

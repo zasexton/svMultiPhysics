@@ -3994,7 +3994,7 @@ TEST(NavierStokesPostProcessing, StatesTheContactLineChannelsWithTheRuleWallNorm
                                               "contact_line_friction_dissipation", "wall_slip_dissipation"};
     const std::vector<Kind> kinds{Kind::Power, Kind::Power, Kind::DissipationRate, Kind::DissipationRate};
     const std::vector<Measure> measures{Measure::ContactLines, Measure::ContactLines, Measure::ContactLines,
-                                        Measure::WettedPart};
+                                        Measure::ActiveBoundarySubset};
     const std::vector<std::vector<int>> listed{{}, {3, 5, 9}, {3}, {3, 5}};
     const std::function<int(const FormExprNode&, FormExprType)> count =
         [&count](const FormExprNode& node, FormExprType type) {

@@ -13,7 +13,7 @@
 #include "FE/Core/LogRecord.h"
 #include "FE/Core/Logger.h"
 #include "FE/Spaces/FunctionSpace.h"
-#include "FE/Systems/FreeSurfaceFunctionalRounding.h"
+#include "FE/Systems/SummationRounding.h"
 
 #include <algorithm>
 #include <array>
@@ -508,7 +508,7 @@ bool sameFreeSurfaceAcceptedContactLineKinematics(
 // Identities between a few scalar operations, and sums whose term count is
 // not carried by the accepted state (rule counts, MPI rank counts), keep this
 // fixed bound.  Sums of the same terms with known counts use the derived
-// bound of FreeSurfaceFunctionalRounding.h instead.
+// bound of SummationRounding.h instead.
 bool freeSurfaceFunctionalValueNear(Real actual, Real expected) noexcept
 {
     const auto scale = std::max(
@@ -1251,7 +1251,7 @@ void FunctionalRecords::recordAcceptedFunctionals(
                                             std::uint64_t expected_terms,
                                             std::string_view quantity) {
         FE_THROW_IF(
-            !freeSurfaceNonnegativeSummationsAgree(
+            !nonnegativeSummationsAgree(
                 actual, actual_terms, expected, expected_terms),
             InvalidArgumentException,
             "FESystem::recordAcceptedFreeSurfaceDiscreteFunctionals: " +

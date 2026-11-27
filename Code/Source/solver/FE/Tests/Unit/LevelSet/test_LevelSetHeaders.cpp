@@ -34,3 +34,13 @@ TEST(LevelSetHeaders, PublicHeadersCompile)
 {
     SUCCEED();
 }
+
+TEST(LevelSetHeaders, GeneratedInterfaceDefaultsShareTheNumericalDomain)
+{
+    namespace ls = svmp::FE::level_set;
+    EXPECT_EQ(ls::ActiveCutVolumeRequest{}.domain_id, "interface");
+    EXPECT_EQ(ls::LevelSetGeneratedInterfaceOptions{}.domain_id, "interface");
+#if defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH
+    EXPECT_EQ(ls::LevelSetVelocityExtensionRequest{}.domain_id, "interface");
+#endif
+}

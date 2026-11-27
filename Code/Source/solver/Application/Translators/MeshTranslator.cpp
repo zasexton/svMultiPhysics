@@ -551,7 +551,7 @@ std::optional<FreeSurfaceLevelSet> MeshTranslator::unfittedFreeSurfaceLevelSet(
     const std::vector<svmp::FE::level_set::ActiveCutVolumeRequest>& requests)
 {
   for (const auto& request : requests) {
-    if (request.origin == svmp::FE::level_set::ActiveCutVolumeRequestOrigin::FreeSurfaceBoundary) {
+    if (request.origin == svmp::FE::level_set::ActiveCutVolumeRequestOrigin::InterfaceBoundary) {
       FreeSurfaceLevelSet free_surface;
       free_surface.level_set_field = request.level_set_field_name;
       free_surface.isovalue = request.isovalue;

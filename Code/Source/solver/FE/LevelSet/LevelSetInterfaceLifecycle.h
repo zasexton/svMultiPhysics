@@ -86,7 +86,7 @@ geometryQuadratureSensitivitySupport(GeometryTangentPolicy policy);
 
 struct LevelSetGeneratedInterfaceOptions {
     std::string level_set_field_name{"level_set"};
-    std::string domain_id{"free_surface"};
+    std::string domain_id{"interface"};
     int requested_interface_marker{-1};
     Real isovalue{0.0};
     Real tolerance{1.0e-12};

@@ -1934,7 +1934,7 @@ TEST(OpenVesselExamples,
   ASSERT_EQ(cut_requests.size(), 1u);
   EXPECT_EQ(
       cut_requests.front().origin,
-      application::core::ActiveCutVolumeRequestOrigin::MaterialInterface);
+      application::core::ActiveCutVolumeRequestOrigin::InternalInterface);
   EXPECT_EQ(cut_requests.front().requested_interface_marker, 71);
   EXPECT_EQ(
       cut_requests.front().volume_retention,

@@ -99,7 +99,7 @@ the supplied text when owners exist; an empty owner list returns `std::nullopt`
 for every input, including negative markers.
 
 Resolution alone does not register a marker. The separate
-`wettedBoundaryResolver(system, resolve)` adapter registers each resolved marker
+`generatedActiveBoundaryResolver(system, resolve)` adapter registers each resolved marker
 when invoked and borrows the system, which must outlive that callable. Typed
 domains can instead be registered explicitly with
 `FormulationBuilder::registered()`. Keep registrations at their intended

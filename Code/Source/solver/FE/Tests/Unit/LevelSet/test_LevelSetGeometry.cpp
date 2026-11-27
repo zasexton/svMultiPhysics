@@ -170,9 +170,8 @@ TEST(LevelSetGeometry, WettedBoundaryIsTheGeneratedActiveSubsetOfTheSide)
         const auto expected = forms::BoundaryDomain::generatedActiveSubset(
             2, interfaces::stableGeneratedActiveBoundaryMarker(key));
         EXPECT_EQ(L.boundary(2), expected);
-        EXPECT_EQ(L.wetted(2), expected);
     }
-    EXPECT_NE(G.side(CutVolumeSide::Negative).wetted(2), G.side(CutVolumeSide::Positive).wetted(2));
+    EXPECT_NE(G.side(CutVolumeSide::Negative).boundary(2), G.side(CutVolumeSide::Positive).boundary(2));
 }
 
 TEST(LevelSetGeometry, DomainsGiveTheSameFormsAsMarkersWrittenByHand)
@@ -191,7 +190,7 @@ TEST(LevelSetGeometry, DomainsGiveTheSameFormsAsMarkersWrittenByHand)
     const auto CL = G.contactLine(4);
     EXPECT_EQ(systems::formExprTreeHash(integrand.dL(CL)),
               systems::formExprTreeHash(integrand.dI(CL.marker())));
-    const auto W = L.wetted(4);
+    const auto W = L.boundary(4);
     EXPECT_EQ(systems::formExprTreeHash(forms::inner(u, v).ds(W)),
               systems::formExprTreeHash(forms::inner(u, v).dExteriorBoundary(
                   forms::ExteriorBoundaryMeasure::generatedActiveSubset(4, W.generatedActiveBoundaryMarker()))));
@@ -203,7 +202,7 @@ TEST(LevelSetGeometry, CutVolumeRequestPolicyKeyIgnoresProvenance)
     a.level_set_field_name = "phi";
     a.domain_id = "drop";
     ActiveCutVolumeRequest b = a;
-    b.origin = ActiveCutVolumeRequestOrigin::FreeSurfaceBoundary;
+    b.origin = ActiveCutVolumeRequestOrigin::InterfaceBoundary;
     b.equation_type = "fluid";
     b.geometry_tangent_policy_explicit = true;
     EXPECT_EQ(activeCutVolumeRequestPolicyKey({a}), activeCutVolumeRequestPolicyKey({b}));
@@ -267,7 +266,7 @@ TEST(LevelSetGeometry, GeneratedActiveBoundaryMarkerMustAgreeOverItsOwners)
 TEST(LevelSetGeometry, WettedBoundaryResolverRegistersTheGeneratedMarkers)
 {
     GeometrySystem s;
-    const auto resolve = wettedBoundaryResolver(
+    const auto resolve = generatedActiveBoundaryResolver(
         *s.system, [](int marker) -> std::optional<int> {
             return marker == 1 ? std::optional<int>(3000007) : std::nullopt;
         });
@@ -301,7 +300,7 @@ TEST(LevelSetGeometry, ActiveBoundaryResolverOwnsItsInputsUntilExplicitRegistrat
     }
 
     GeometrySystem consumer;
-    const auto wetted = wettedBoundaryResolver(*consumer.system, std::move(moved));
+    const auto wetted = generatedActiveBoundaryResolver(*consumer.system, std::move(moved));
     EXPECT_FALSE(consumer.system->isGeneratedEmbeddedInterfaceMarkerRegistered(expected_marker));
     EXPECT_EQ(wetted(4), expected_marker);
     EXPECT_TRUE(consumer.system->isGeneratedEmbeddedInterfaceMarkerRegistered(expected_marker));
@@ -895,7 +894,7 @@ TEST(CutStructureKey, HighOrderActiveBoundaryRestrictsTheLevelSetToTheWall)
                                     triangles ? ImplicitCutQuadratureBackend::HighOrderSubcell
                                               : ImplicitCutQuadratureBackend::SayeHyperrectangle);
             const auto L = cut.geometry->side(CutVolumeSide::Negative);
-            const auto wetted = L.wetted(test_trace_multiplier::kLeft);
+            const auto wetted = L.boundary(test_trace_multiplier::kLeft);
             const auto contact = L.contactLine(test_trace_multiplier::kLeft);
             cut.system->registerGeneratedEmbeddedInterfaceMarker(wetted.generatedActiveBoundaryMarker());
             cut.system->registerGeneratedEmbeddedInterfaceMarker(contact.marker());

@@ -5,15 +5,15 @@
  * See Copyright-SimVascular.txt for additional details.
  */
 
-#ifndef SVMP_FE_SYSTEMS_FREESURFACEFUNCTIONALROUNDING_H
-#define SVMP_FE_SYSTEMS_FREESURFACEFUNCTIONALROUNDING_H
+#ifndef SVMP_FE_SYSTEMS_SUMMATIONROUNDING_H
+#define SVMP_FE_SYSTEMS_SUMMATIONROUNDING_H
 
 /**
- * @file FreeSurfaceFunctionalRounding.h
+ * @file SummationRounding.h
  * @brief Rounding bound for comparing two floating-point sums of the same terms.
  *
- * Accepted free-surface functional records hold some quantities summed in two
- * ways, for example the liquid volume summed per retained rule and summed over
+ * An integral can be summed in two
+ * ways, for example the active volume summed per retained rule and summed over
  * every quadrature weight of those rules.  The two sums agree in exact
  * arithmetic and differ in floating point by rounding that grows with the
  * number of terms, so a fixed number of units in the last place cannot
@@ -54,7 +54,7 @@ namespace FE {
 namespace systems {
 
 /// Unit roundoff u of round-to-nearest Real arithmetic (half the machine epsilon).
-inline constexpr Real kFreeSurfaceFunctionalUnitRoundoff =
+inline constexpr Real kSummationUnitRoundoff =
     std::numeric_limits<Real>::epsilon() / Real{2.0};
 
 /**
@@ -62,14 +62,14 @@ inline constexpr Real kFreeSurfaceFunctionalUnitRoundoff =
  * exact) and +infinity once (n - 1) u reaches one, where the model gives no
  * bound.
  */
-[[nodiscard]] inline Real freeSurfaceSummationErrorFactor(
+[[nodiscard]] inline Real summationErrorFactor(
     std::uint64_t term_count) noexcept
 {
     if (term_count <= 1u) {
         return Real{0.0};
     }
     const Real ku = static_cast<Real>(term_count - 1u) *
-                    kFreeSurfaceFunctionalUnitRoundoff;
+                    kSummationUnitRoundoff;
     if (!(ku < Real{1.0})) {
         return std::numeric_limits<Real>::infinity();
     }
@@ -80,7 +80,7 @@ inline constexpr Real kFreeSurfaceFunctionalUnitRoundoff =
  * Largest |a - b| that rounding allows when a sums a_terms terms and b sums
  * b_terms terms of the same values, given absolute_sum >= sum_i |x_i|.
  */
-[[nodiscard]] inline Real freeSurfaceSummationTolerance(
+[[nodiscard]] inline Real summationTolerance(
     std::uint64_t a_terms,
     std::uint64_t b_terms,
     Real absolute_sum) noexcept
@@ -88,13 +88,13 @@ inline constexpr Real kFreeSurfaceFunctionalUnitRoundoff =
     if (absolute_sum == Real{0.0}) {
         return Real{0.0};
     }
-    return (freeSurfaceSummationErrorFactor(a_terms) +
-            freeSurfaceSummationErrorFactor(b_terms)) *
+    return (summationErrorFactor(a_terms) +
+            summationErrorFactor(b_terms)) *
            absolute_sum;
 }
 
 /// True when two sums of the same terms agree within the rounding bound.
-[[nodiscard]] inline bool freeSurfaceSummationsAgree(
+[[nodiscard]] inline bool summationsAgree(
     Real a,
     std::uint64_t a_terms,
     Real b,
@@ -102,7 +102,7 @@ inline constexpr Real kFreeSurfaceFunctionalUnitRoundoff =
     Real absolute_sum) noexcept
 {
     return std::abs(a - b) <=
-           freeSurfaceSummationTolerance(a_terms, b_terms, absolute_sum);
+           summationTolerance(a_terms, b_terms, absolute_sum);
 }
 
 /**
@@ -110,14 +110,14 @@ inline constexpr Real kFreeSurfaceFunctionalUnitRoundoff =
  * each computed sum s of n terms gives S <= s / (1 - gamma_{n-1}); the larger
  * of the two bounds is returned.
  */
-[[nodiscard]] inline Real freeSurfaceNonnegativeSummationAbsoluteBound(
+[[nodiscard]] inline Real nonnegativeSummationAbsoluteBound(
     Real a,
     std::uint64_t a_terms,
     Real b,
     std::uint64_t b_terms) noexcept
 {
     const auto bound = [](Real sum, std::uint64_t terms) {
-        const Real factor = freeSurfaceSummationErrorFactor(terms);
+        const Real factor = summationErrorFactor(terms);
         if (!(factor < Real{1.0})) {
             return std::numeric_limits<Real>::infinity();
         }
@@ -127,18 +127,18 @@ inline constexpr Real kFreeSurfaceFunctionalUnitRoundoff =
 }
 
 /// True when two sums of the same nonnegative terms agree within the bound.
-[[nodiscard]] inline bool freeSurfaceNonnegativeSummationsAgree(
+[[nodiscard]] inline bool nonnegativeSummationsAgree(
     Real a,
     std::uint64_t a_terms,
     Real b,
     std::uint64_t b_terms) noexcept
 {
-    return freeSurfaceSummationsAgree(
+    return summationsAgree(
         a,
         a_terms,
         b,
         b_terms,
-        freeSurfaceNonnegativeSummationAbsoluteBound(
+        nonnegativeSummationAbsoluteBound(
             a, a_terms, b, b_terms));
 }
 
@@ -146,4 +146,4 @@ inline constexpr Real kFreeSurfaceFunctionalUnitRoundoff =
 } // namespace FE
 } // namespace svmp
 
-#endif // SVMP_FE_SYSTEMS_FREESURFACEFUNCTIONALROUNDING_H
+#endif // SVMP_FE_SYSTEMS_SUMMATIONROUNDING_H

@@ -149,14 +149,14 @@ private:
 
 /// The generated domains of a wall that a wall functional is integrated over.
 enum class WallMeasure : std::uint8_t {
-    ContactLines, ///< the contact lines of the interface with the wall (dL)
-    WettedPart    ///< the part of the wall on the liquid side of the interface (ds)
+    ContactLines,        ///< the intersection of the interface with the boundary (dL)
+    ActiveBoundarySubset ///< the part of the physical boundary on the chosen side (ds)
 };
 
 /**
  * @brief A functional of every wall an interface meets, stated by its integrand.
  *
- * Which walls an interface meets, and their contact lines and wetted parts,
+ * Which walls an interface meets, and their intersections and active boundary subsets,
  * follow the interface, so a formulation cannot name these domains when it
  * is set up.  It states the integrand instead (a scalar without a test or
  * trial function and without a measure) and which domains of a wall it is
@@ -165,7 +165,7 @@ enum class WallMeasure : std::uint8_t {
  * functional of wall b is named "<prefix>wall.<b>.<quantity>".
  */
 struct WallFunctionalFormDeclaration {
-    std::string prefix{};   ///< the name of the interface's functionals, e.g. "free_surface.<marker>."
+    std::string prefix{};   ///< the name of the interface's functionals, e.g. "interface.<marker>."
     std::string quantity{};
     FunctionalKind kind{FunctionalKind::Stored};
     WallMeasure measure{WallMeasure::ContactLines};
@@ -200,14 +200,14 @@ void declareWallFunctionalForm(FESystem& system, WallFunctionalFormDeclaration d
  * @brief The functional of one wall as a measured 0-form.
  *
  * The integrand of @p wall (its by_wall entry, else the integrand of every
- * wall) integrated over @p contact_lines (dL) or @p wetted_parts (ds), as the
+ * wall) integrated over @p contact_lines (dL) or @p active_boundary_subsets (ds), as the
  * declaration's measure says, summed in the order given.  Invalid when the
  * wall has no integrand or no domain of that kind.
  */
 [[nodiscard]] forms::FormExpr wallFunctionalForm(const WallFunctionalFormDeclaration& declaration,
                                                  int wall,
                                                  std::span<const forms::ContactLineDomain> contact_lines,
-                                                 std::span<const forms::BoundaryDomain> wetted_parts);
+                                                 std::span<const forms::BoundaryDomain> active_boundary_subsets);
 
 /// One declared wall functional of one wall as a measured 0-form.
 struct DeclaredWallFunctionalForm {

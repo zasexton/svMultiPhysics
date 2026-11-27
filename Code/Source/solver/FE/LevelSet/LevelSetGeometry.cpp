@@ -483,7 +483,7 @@ std::function<std::optional<int>(int)> generatedActiveBoundaryResolver(
     };
 }
 
-std::function<std::optional<int>(int)> wettedBoundaryResolver(
+std::function<std::optional<int>(int)> generatedActiveBoundaryResolver(
     systems::FESystem& system,
     std::function<std::optional<int>(int)> resolve)
 {

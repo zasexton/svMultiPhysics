@@ -259,7 +259,7 @@ void completeOwnedDofsWithCoords(const FESystem& system,
     int component,
     std::span<const FieldId> sampled_field_ids = {},
     bool require_coefficients = true,
-    const std::unordered_set<GlobalIndex>* wetted_faces = nullptr)
+    const std::unordered_set<GlobalIndex>* active_faces = nullptr)
 {
     BoundaryDofsWithCoords out;
 
@@ -326,7 +326,7 @@ void completeOwnedDofsWithCoords(const FESystem& system,
     std::vector<math::Vector<Real, 3>> geom_nodes;
 
     mesh.forEachBoundaryFace(boundary_marker, [&](GlobalIndex face_id, GlobalIndex cell_id) {
-        if (wetted_faces != nullptr && !wetted_faces->contains(face_id)) {
+        if (active_faces != nullptr && !active_faces->contains(face_id)) {
             return;
         }
         const ElementType cell_type = mesh.getCellType(cell_id);
