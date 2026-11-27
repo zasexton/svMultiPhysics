@@ -641,9 +641,7 @@ private:
     Domain domain_{Domain::Cell};
     assembly::RequiredData required_data_{assembly::RequiredData::None};
     std::vector<assembly::FieldRequirement> field_requirements_{};
-    std::unique_ptr<std::once_flag> indexed_lowering_once_{std::make_unique<std::once_flag>()};
-    /// Set once the lowering ran; threaded assembly defers to the serial loop until then.
-    bool indexed_lowering_done_{false};
+    std::once_flag indexed_lowering_once_;
 };
 
 /**

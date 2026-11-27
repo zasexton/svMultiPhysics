@@ -179,6 +179,38 @@ TEST(FunctionalFormEvaluator, SumsTheSignedTermsOfAFormExactly)
     EXPECT_NEAR(values[5].absolute_mass, Real{4.0}, Real{1.0e-12});
 }
 
+TEST(FunctionalFormEvaluator, ThreadedCellEvaluationPreservesTheExactValueAndAbsoluteMass)
+{
+    constexpr GlobalIndex cells = 256;
+    fixture::QuadStripMeshAccess mesh(0, 1, cells, static_cast<Real>(cells));
+    const auto dofs = fixture::quadStripDofMap(mesh);
+    svmp::FE::spaces::H1Space space(svmp::FE::ElementType::Quad4, 1);
+    const auto u = fixture::nodalValues(mesh, [](Real x, Real) { return 2.0 * x - cells; });
+    svmp::FE::assembly::FunctionalAssembler assembler;
+    fixture::configureQuadStripAssembler(assembler, mesh, dofs, space, u);
+    const std::vector<FormExpr> integrals{one().dx(), FormExpr::discreteField(fixture::kField, space, "u").dx()};
+    const auto evaluate = [&](int workers) {
+        auto options = assembler.getOptions();
+        options.num_threads = workers;
+        options.deterministic = true;
+        assembler.setOptions(options);
+        return systems::evaluateFunctionalForms(assembler, integrals, nullptr, systems::CollectiveCommunicator{});
+    };
+    const auto serial = evaluate(1);
+    ASSERT_EQ(serial.size(), 2u);
+    EXPECT_NEAR(serial[0].value, cells, 1e-11);
+    EXPECT_NEAR(serial[1].value, 0.0, 1e-10);
+    EXPECT_NEAR(serial[1].absolute_mass, cells * cells / 2.0, 1e-9);
+    for (int workers : {2, 4, 4}) {
+        const auto parallel = evaluate(workers);
+        ASSERT_EQ(parallel.size(), serial.size());
+        for (std::size_t i = 0; i < serial.size(); ++i) {
+            EXPECT_EQ(parallel[i].value, serial[i].value);
+            EXPECT_EQ(parallel[i].absolute_mass, serial[i].absolute_mass);
+        }
+    }
+}
+
 TEST(FunctionalFormEvaluator, EvaluatesTheDeclaredFunctionalsOfASystemInOrder)
 {
     auto mesh = std::make_shared<fixture::QuadStripMeshAccess>(0, 1, kCellCount, kExtent);

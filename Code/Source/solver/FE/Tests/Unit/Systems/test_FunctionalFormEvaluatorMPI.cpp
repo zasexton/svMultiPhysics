@@ -480,6 +480,10 @@ TEST(FunctionalFormEvaluatorMPI, ValuesAreTheSameAtEveryRankCount)
     // one-rank view of the same strip.
     CapView parallel(rank, size, worldCollective(rank, size));
     CapView serial(0, 1, {});
+    auto options = parallel.assembler.getOptions();
+    options.num_threads = 4;
+    options.deterministic = true;
+    parallel.assembler.setOptions(options);
 
     const auto negative = svmp::FE::geometry::CutIntegrationSide::Negative;
     const auto positive = svmp::FE::geometry::CutIntegrationSide::Positive;

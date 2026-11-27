@@ -18452,16 +18452,9 @@ FunctionalFormKernel::FunctionalFormKernel(
 
 void FunctionalFormKernel::ensureInterpreterLoweredIndexedAccess()
 {
-    if (!indexed_lowering_done_) {
-        // The lowering rewrites the IR that the JIT also reads; it runs in
-        // the serial order only (see Assembly/ConcurrentCompute.h).
+    std::call_once(indexed_lowering_once_, [&] {
+        // A deferred call can be retried on the serial assembly path.
         assembly::requireSerial("interpreter IR lowering");
-    }
-    if (!indexed_lowering_once_) {
-        indexed_lowering_once_ = std::make_unique<std::once_flag>();
-    }
-    std::call_once(*indexed_lowering_once_, [&] {
-        indexed_lowering_done_ = true;
         lowerIndexedAccessInExpr(integrand_);
     });
 }

@@ -36,6 +36,9 @@
 #include <optional>
 #include <string>
 #include <utility>
+#ifdef _OPENMP
+#include <omp.h>
+#endif
 
 namespace svmp {
 namespace FE {
@@ -231,13 +234,19 @@ class ExactTermKernel final : public assembly::FunctionalKernel {
 public:
     ExactTermKernel(std::shared_ptr<assembly::FunctionalKernel> integrand,
                     bool negated,
-                    ExactAccumulator& value,
-                    ExactAccumulator& absolute_mass)
+                    int workers)
         : integrand_(std::move(integrand))
         , negated_(negated)
-        , value_(value)
-        , absolute_mass_(absolute_mass)
+        , partials_(std::max(1, workers))
     {
+    }
+
+    void mergeInto(ExactAccumulator& value, ExactAccumulator& absolute_mass) const
+    {
+        for (const auto& part : partials_) {
+            value += part.value;
+            absolute_mass += part.absolute_mass;
+        }
     }
 
     [[nodiscard]] assembly::RequiredData getRequiredData() const noexcept override
@@ -263,8 +272,9 @@ public:
 
     [[nodiscard]] Real evaluateCellTotal(const assembly::AssemblyContext& ctx) override
     {
+        auto& sums = workerSums();
         for (LocalIndex q = 0; q < ctx.numQuadraturePoints(); ++q) {
-            add(integrand_->evaluateCell(ctx, q) * ctx.integrationWeight(q));
+            add(sums, integrand_->evaluateCell(ctx, q) * ctx.integrationWeight(q));
         }
         return Real{0.0};
     }
@@ -279,8 +289,9 @@ public:
     [[nodiscard]] Real evaluateBoundaryFaceTotal(const assembly::AssemblyContext& ctx,
                                                  int boundary_marker) override
     {
+        auto& sums = workerSums();
         for (LocalIndex q = 0; q < ctx.numQuadraturePoints(); ++q) {
-            add(integrand_->evaluateBoundaryFace(ctx, q, boundary_marker) *
+            add(sums, integrand_->evaluateBoundaryFace(ctx, q, boundary_marker) *
                 ctx.integrationWeight(q));
         }
         return Real{0.0};
@@ -289,16 +300,34 @@ public:
     [[nodiscard]] std::string name() const override { return "FunctionalFormTerm"; }
 
 private:
-    void add(Real term) noexcept
+    struct Sums {
+        ExactAccumulator value;
+        ExactAccumulator absolute_mass;
+    };
+
+    Sums& workerSums() noexcept
     {
-        value_.add(negated_ ? -term : term);
-        absolute_mass_.add(std::abs(term));
+#ifdef _OPENMP
+        // Serial measures can run inside the caller's own parallel region.
+        if (omp_get_level() > caller_level_) {
+            return partials_[static_cast<std::size_t>(omp_get_thread_num())];
+        }
+#endif
+        return partials_.front();
+    }
+
+    void add(Sums& sums, Real term) const noexcept
+    {
+        sums.value.add(negated_ ? -term : term);
+        sums.absolute_mass.add(std::abs(term));
     }
 
     std::shared_ptr<assembly::FunctionalKernel> integrand_;
     bool negated_{false};
-    ExactAccumulator& value_;
-    ExactAccumulator& absolute_mass_;
+    std::vector<Sums> partials_;
+#ifdef _OPENMP
+    int caller_level_{omp_get_level()};
+#endif
 };
 
 /// The interpreted kernel of a term's integrand (the JIT is off).
@@ -322,7 +351,7 @@ void evaluateTermLocally(assembly::FunctionalAssembler& assembler,
                          ExactAccumulator& value,
                          ExactAccumulator& absolute_mass)
 {
-    ExactTermKernel kernel(interpretedIntegrand(term), term.negated, value, absolute_mass);
+    ExactTermKernel kernel(interpretedIntegrand(term), term.negated, assembler.getOptions().num_threads);
     switch (term.measure) {
     case Measure::Cell:
         (void)assembler.assembleScalar(kernel, assembly::FunctionalReduction::LocalRaw);
@@ -340,6 +369,7 @@ void evaluateTermLocally(assembly::FunctionalAssembler& assembler,
     const auto& result = assembler.getLastResult();
     FE_THROW_IF(!result.success, InvalidStateException,
                 std::string(kWhere) + formLabel(term.form) + result.error_message);
+    kernel.mergeInto(value, absolute_mass);
 }
 
 } // namespace
