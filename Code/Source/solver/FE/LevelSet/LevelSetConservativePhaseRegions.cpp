@@ -94,30 +94,6 @@ namespace {
     return tokens;
 }
 
-[[nodiscard]] bool validRegionName(std::string_view name) noexcept
-{
-    return !name.empty() &&
-           std::all_of(name.begin(), name.end(), [](char character) {
-               const auto value =
-                   static_cast<unsigned char>(character);
-               return std::isalnum(value) != 0 || character == '_' ||
-                      character == '-' || character == '.';
-           });
-}
-
-[[nodiscard]] bool validRegionKind(LevelSetPhaseRegionKind kind) noexcept
-{
-    switch (kind) {
-    case LevelSetPhaseRegionKind::WallFilm:
-    case LevelSetPhaseRegionKind::Sheet:
-    case LevelSetPhaseRegionKind::Rim:
-    case LevelSetPhaseRegionKind::ResolvedSatellite:
-    case LevelSetPhaseRegionKind::Observer:
-        return true;
-    }
-    return false;
-}
-
 [[nodiscard]] Real parseCoordinate(
     std::string_view value,
     bool lower)
@@ -144,60 +120,17 @@ namespace {
 
 } // namespace
 
-const char* levelSetPhaseRegionKindName(
-    LevelSetPhaseRegionKind kind) noexcept
+bool isPhaseRegionIdentifier(std::string_view value) noexcept
 {
-    switch (kind) {
-    case LevelSetPhaseRegionKind::WallFilm:
-        return "wall_film";
-    case LevelSetPhaseRegionKind::Sheet:
-        return "sheet";
-    case LevelSetPhaseRegionKind::Rim:
-        return "rim";
-    case LevelSetPhaseRegionKind::ResolvedSatellite:
-        return "resolved_satellite";
-    case LevelSetPhaseRegionKind::Observer:
-        return "observer";
-    }
-    return "unknown";
-}
-
-LevelSetPhaseRegionKind parseLevelSetPhaseRegionKind(
-    std::string_view value)
-{
-    std::string normalized;
-    for (const char character : trimCopy(value)) {
-        const auto unsigned_character =
-            static_cast<unsigned char>(character);
-        if (character == '_' || character == '-' ||
-            std::isspace(unsigned_character) != 0) {
-            continue;
-        }
-        normalized.push_back(static_cast<char>(
-            std::tolower(unsigned_character)));
-    }
-    if (normalized == "wallfilm") {
-        return LevelSetPhaseRegionKind::WallFilm;
-    }
-    if (normalized == "sheet") {
-        return LevelSetPhaseRegionKind::Sheet;
-    }
-    if (normalized == "rim") {
-        return LevelSetPhaseRegionKind::Rim;
-    }
-    if (normalized == "resolvedsatellite" || normalized == "satellite") {
-        return LevelSetPhaseRegionKind::ResolvedSatellite;
-    }
-    if (normalized == "observer") {
-        return LevelSetPhaseRegionKind::Observer;
-    }
-    throw std::invalid_argument(
-        "unknown conservative phase region kind '" +
-        std::string(value) + "'");
+    return !value.empty() && std::all_of(value.begin(), value.end(), [](char c) {
+        return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
+               (c >= '0' && c <= '9') || c == '_' || c == '-' || c == '.';
+    });
 }
 
 std::vector<LevelSetPhaseRegionBox> parseLevelSetPhaseRegionBoxes(
-    std::string_view value)
+    std::string_view value,
+    std::string (*normalize_kind)(std::string_view))
 {
     std::vector<LevelSetPhaseRegionBox> boxes;
     std::set<std::string> names;
@@ -210,14 +143,17 @@ std::vector<LevelSetPhaseRegionBox> parseLevelSetPhaseRegionBoxes(
                 "conservative phase region list contains an empty entry");
         }
         const auto fields = split(entry, '|');
-        if (fields.size() != 8u || !validRegionName(fields[0]) ||
+        if (fields.size() != 8u || !isPhaseRegionIdentifier(fields[0]) ||
             !names.insert(fields[0]).second) {
             throw std::invalid_argument(
                 "each conservative phase region requires one unique valid name, kind, and six box coordinates");
         }
         LevelSetPhaseRegionBox box;
         box.name = fields[0];
-        box.kind = parseLevelSetPhaseRegionKind(fields[1]);
+        box.kind = normalize_kind ? normalize_kind(fields[1]) : fields[1];
+        if (!isPhaseRegionIdentifier(box.kind)) {
+            throw std::invalid_argument("phase region box requires a valid kind identifier");
+        }
         for (std::size_t dimension = 0u; dimension < 3u; ++dimension) {
             box.minimum[dimension] = parseCoordinate(
                 fields[2u + 2u * dimension], true);
@@ -242,7 +178,7 @@ makeAxisAlignedBoxPhaseRegions(
     definitions.reserve(boxes.size());
     std::set<std::string> names;
     for (const auto& box : boxes) {
-        if (!validRegionName(box.name) || !validRegionKind(box.kind) ||
+        if (!isPhaseRegionIdentifier(box.name) || !isPhaseRegionIdentifier(box.kind) ||
             !names.insert(box.name).second) {
             throw std::invalid_argument(
                 "phase region boxes require unique valid names and kinds");
@@ -300,8 +236,8 @@ LevelSetPhaseRegionLedgerResult buildLevelSetPhaseRegionLedgers(
         std::set<std::string> names;
         result.regions.reserve(definitions.size());
         for (const auto& definition : definitions) {
-            if (!validRegionName(definition.name) ||
-                !validRegionKind(definition.kind) ||
+            if (!isPhaseRegionIdentifier(definition.name) ||
+                !isPhaseRegionIdentifier(definition.kind) ||
                 !names.insert(definition.name).second ||
                 definition.node_membership.size() !=
                     correction.nodes.size() ||
@@ -457,9 +393,12 @@ LevelSetPhaseRegionLedgerResult buildLevelSetPhaseRegionLedgers(
 }
 
 std::vector<LevelSetPhaseRegionDefinition>
-makeNonprimaryComponentSatelliteRegions(
-    const LevelSetPhaseFluxCorrectionResult& correction)
+makeNonprimaryComponentRegions(
+    const LevelSetPhaseFluxCorrectionResult& correction, std::string_view kind)
 {
+    if (!isPhaseRegionIdentifier(kind)) {
+        throw std::invalid_argument("nonprimary component regions require a valid kind identifier");
+    }
     std::vector<LevelSetPhaseRegionDefinition> definitions;
     if (!validCorrectionShape(correction) ||
         correction.components.size() < 2u) {
@@ -480,9 +419,8 @@ makeNonprimaryComponentSatelliteRegions(
             continue;
         }
         LevelSetPhaseRegionDefinition definition;
-        definition.name = "resolved_satellite_" +
-                          std::to_string(component.component_id);
-        definition.kind = LevelSetPhaseRegionKind::ResolvedSatellite;
+        definition.kind = kind;
+        definition.name = definition.kind + "_" + std::to_string(component.component_id);
         definition.node_membership.assign(correction.nodes.size(), 0u);
         for (std::size_t node = 0u;
              node < correction.node_component_ids.size(); ++node) {

@@ -1,5 +1,8 @@
 #include <gtest/gtest.h>
 
+#include "Physics/Formulations/NavierStokes/FreeSurface/LevelSetRecords.h"
+#include "Physics/Formulations/NavierStokes/FreeSurface/PhaseRegionBoxes.h"
+
 #include "Application/Core/LevelSetEquationInputSnapshot.h"
 #include "Application/Core/LevelSetMaintenanceConfiguration.h"
 #include "Application/Translators/EquationTranslator.h"
@@ -308,6 +311,23 @@ std::shared_ptr<svmp::Mesh> makeRegistryBiquadraticQuadMesh()
 #endif
 
 } // namespace
+
+TEST(FreeSurfacePhaseRegionBoxes, CanonicalizesMorphologyAndRejectsUnknownKinds) {
+  namespace fs = svmp::Physics::formulations::navier_stokes::free_surface;
+  const auto boxes = fs::parsePhaseRegionBoxes(
+      "a|Wall Film|*|*|*|*|*|*;b|satellite|*|*|*|*|*|*;"
+      "c|Resolved-Satellite|*|*|*|*|*|*;d|SHEET|*|*|*|*|*|*;"
+      "e|Rim|*|*|*|*|*|*;f|Observer|*|*|*|*|*|*");
+  ASSERT_EQ(boxes.size(), 6u);
+  EXPECT_EQ(boxes[1].kind, fs::conservativePhaseRecordSchema.nonprimary_component);
+  EXPECT_EQ(boxes[0].kind, "wall_film");
+  EXPECT_EQ(boxes[1].kind, "resolved_satellite");
+  EXPECT_EQ(boxes[2].kind, "resolved_satellite");
+  EXPECT_EQ(boxes[3].kind, "sheet");
+  EXPECT_EQ(boxes[4].kind, "rim");
+  EXPECT_EQ(boxes[5].kind, "observer");
+  EXPECT_THROW(fs::parsePhaseRegionBoxes("a|not_a_kind|*|*|*|*|*|*"), std::invalid_argument);
+}
 
 TEST(LevelSetEquationTranslator, RecognizesLegacyEquationTypes)
 {
@@ -1533,9 +1553,9 @@ TEST(LevelSetEquationTranslator, TranslatesConservativePhaseControls)
   phase_options.maximum_courant = 0.45;
   phase_options.enforce_courant_limit = false;
   phase_options.require_constant_preservation = false;
-  phase_options.classify_nonprimary_components_as_satellites = true;
+  phase_options.track_nonprimary_components = true;
   phase_options.fixed_flux_regions =
-      svmp::FE::level_set::parseLevelSetPhaseRegionBoxes(
+      svmp::Physics::formulations::navier_stokes::free_surface::parsePhaseRegionBoxes(
           "film|wall_film|0|1|0|0.1|*|*;rim|rim|0.8|1|0.5|1|*|*");
   phase_options.geometry_measure_tolerance = 2.0e-9;
   phase_options.geometry_correction_max_iterations = 19;
@@ -1733,7 +1753,7 @@ TEST(LevelSetEquationTranslator,
   auto configuration = *resolved;
   svmp::FE::level_set::LevelSetPhaseRegionBox box{};
   box.name = "film";
-  box.kind = svmp::FE::level_set::LevelSetPhaseRegionKind::WallFilm;
+  box.kind = "wall_film";
   box.minimum = {1.0, 0.0, -1.0};
   box.maximum = {0.0, 0.1, 1.0};
   configuration.options.conservative_phase.fixed_flux_regions = {box};

@@ -1419,7 +1419,7 @@ std::uint64_t conservativePhaseArtifactFingerprint(
   mixConservativePhaseArtifactFingerprint(
       fingerprint,
       request.configuration->transport.conservative_phase
-          .classify_nonprimary_components_as_satellites);
+          .track_nonprimary_components);
   mixConservativePhaseArtifactFingerprint(
       fingerprint, request.runtime.conservative_phase_graph.has_value());
   if (request.runtime.conservative_phase_graph.has_value()) {
@@ -2628,13 +2628,13 @@ ConservativePhaseCandidateResult applyConservativePhaseCandidates(
                 region_coordinates);
       }
       if (request.configuration->transport.conservative_phase
-              .classify_nonprimary_components_as_satellites) {
-        auto satellites = svmp::FE::level_set::
-            makeNonprimaryComponentSatelliteRegions(stage.correction);
+              .track_nonprimary_components) {
+        auto components = svmp::FE::level_set::makeNonprimaryComponentRegions(
+            stage.correction, host.record_schema.get().nonprimary_component);
         region_definitions.insert(
             region_definitions.end(),
-            std::make_move_iterator(satellites.begin()),
-            std::make_move_iterator(satellites.end()));
+            std::make_move_iterator(components.begin()),
+            std::make_move_iterator(components.end()));
       }
       maintenance_ledger.region_ledger =
           svmp::FE::level_set::buildLevelSetPhaseRegionLedgers(
@@ -3159,7 +3159,7 @@ ConservativePhaseCandidateResult applyConservativePhaseCandidates(
                 .quoted("field", request.configuration->transport.conservative_phase.phase_indicator.field_name)
                 .value("step", history.stepIndex() + 1)
                 .quoted("region", region.name)
-                .value("kind", svmp::FE::level_set::levelSetPhaseRegionKindName(region.kind))
+                .value("kind", region.kind)
                 .value("nodes", region.member_nodes.size())
                 .value("internal_edges", region.internal_edges)
                 .value("crossing_edges", region.crossing_edges.size())

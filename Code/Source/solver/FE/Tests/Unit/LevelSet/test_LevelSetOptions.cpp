@@ -48,7 +48,7 @@ TEST(LevelSetOptions, DefaultsAreNeutral)
     EXPECT_FALSE(options.conservative_phase.write_flux_artifacts);
     EXPECT_EQ(options.conservative_phase.flux_artifact_cadence_steps, 1);
     EXPECT_FALSE(options.conservative_phase
-                     .classify_nonprimary_components_as_satellites);
+                     .track_nonprimary_components);
     EXPECT_TRUE(options.conservative_phase.fixed_flux_regions.empty());
     EXPECT_EQ(
         options.conservative_phase.boundary_flux_policy,

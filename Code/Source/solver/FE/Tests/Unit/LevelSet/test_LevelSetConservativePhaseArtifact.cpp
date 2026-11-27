@@ -142,7 +142,7 @@ TEST(LevelSetConservativePhaseArtifact,
     const std::vector<level_set::LevelSetPhaseRegionDefinition> regions{
         level_set::LevelSetPhaseRegionDefinition{
             .name = "film",
-            .kind = level_set::LevelSetPhaseRegionKind::WallFilm,
+            .kind = "wall_film",
             .node_membership = {1u, 0u},
         },
     };

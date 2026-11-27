@@ -30,6 +30,7 @@ inline constexpr FE::level_set::ConservativePhaseRecordSchema conservativePhaseR
     .version = 3,
     .active_side = "liquid_side",
     .measure = "liquid_measure",
-    .indicator = "liquid_indicator"};
+    .indicator = "liquid_indicator",
+    .nonprimary_component = "resolved_satellite"};
 
 } // namespace svmp::Physics::formulations::navier_stokes::free_surface

@@ -557,8 +557,7 @@ template <typename... Values>
                 duplicate_name ||
                 result->regions[preceding].name == region.name;
         }
-        if (std::string_view(levelSetPhaseRegionKindName(region.kind)) ==
-                "unknown" ||
+        if (!isPhaseRegionIdentifier(region.kind) ||
             duplicate_name ||
             !std::is_sorted(region.member_nodes.begin(),
                             region.member_nodes.end()) ||
@@ -667,7 +666,7 @@ void writeRegion(std::ostream& output,
     output << '{' << "\"name\":";
     writeJsonString(output, region.name);
     output << ",\"kind\":";
-    writeJsonString(output, levelSetPhaseRegionKindName(region.kind));
+    writeJsonString(output, region.kind);
     output << ",\"balance_satisfied\":";
     writeBool(output, region.balance_satisfied);
     output << ",\"member_nodes\":[";

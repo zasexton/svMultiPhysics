@@ -14,6 +14,7 @@ struct ConservativePhaseRecordSchema {
     const char* active_side{"active_side"};
     const char* measure{"active_measure"};
     const char* indicator{"phase_indicator"};
+    const char* nonprimary_component{"nonprimary_component"};
 };
 
 inline constexpr ConservativePhaseRecordSchema defaultConservativePhaseRecordSchema{};

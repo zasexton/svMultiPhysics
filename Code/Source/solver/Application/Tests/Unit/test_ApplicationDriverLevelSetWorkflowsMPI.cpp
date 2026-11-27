@@ -1,3 +1,4 @@
+#include "Physics/Formulations/NavierStokes/FreeSurface/PhaseRegionBoxes.h"
 #include "Physics/Formulations/NavierStokes/FreeSurface/SnapshotFunctionals.h"
 
 #include <gtest/gtest.h>
@@ -5885,7 +5886,7 @@ TEST(ApplicationDriverLevelSetWorkflowsMPI,
         inconsistent_region_requests.front(), [&](auto& configured) {
           configured.transport.conservative_phase
               .fixed_flux_regions =
-              svmp::FE::level_set::parseLevelSetPhaseRegionBoxes(
+              svmp::Physics::formulations::navier_stokes::free_surface::parsePhaseRegionBoxes(
               "rank_one_only|observer|*|*|*|*|*|*");
         });
   }
@@ -5900,6 +5901,23 @@ TEST(ApplicationDriverLevelSetWorkflowsMPI,
           17u,
           svmp::MeshComm::world()),
       std::runtime_error);
+  MPI_Barrier(MPI_COMM_WORLD);
+
+  auto different_kinds = requests;
+  different_kinds.front() = withMaintenanceConfiguration(
+      different_kinds.front(), [&](auto& configured) {
+        svmp::FE::level_set::LevelSetPhaseRegionBox box;
+        box.name = "probe";
+        box.kind = rank == 1 ? "rim" : "sheet";
+        configured.transport.conservative_phase.fixed_flux_regions = {box};
+      });
+  EXPECT_THROW(writeAcceptedConservativePhaseArtifacts(
+                   params, different_kinds, candidate, 12u, accepted_time,
+                   time_step, 17u, svmp::MeshComm::world()),
+               std::runtime_error);
+  if (rank == 0) {
+    EXPECT_FALSE(std::filesystem::exists(output_directory / "conservative_phase_flux"));
+  }
   MPI_Barrier(MPI_COMM_WORLD);
   if (rank == 0) {
     EXPECT_FALSE(std::filesystem::exists(output_directory));

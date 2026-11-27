@@ -19,23 +19,12 @@
 
 namespace svmp::FE::level_set {
 
-enum class LevelSetPhaseRegionKind {
-    WallFilm,
-    Sheet,
-    Rim,
-    ResolvedSatellite,
-    Observer
-};
-
-[[nodiscard]] const char* levelSetPhaseRegionKindName(
-    LevelSetPhaseRegionKind kind) noexcept;
-
-[[nodiscard]] LevelSetPhaseRegionKind parseLevelSetPhaseRegionKind(
-    std::string_view value);
+/// Names and caller-supplied region kinds use ASCII letters, digits, `_`, `-`, or `.`.
+[[nodiscard]] bool isPhaseRegionIdentifier(std::string_view value) noexcept;
 
 struct LevelSetPhaseRegionBox {
     std::string name{};
-    LevelSetPhaseRegionKind kind{LevelSetPhaseRegionKind::Observer};
+    std::string kind{"observer"};
     std::array<Real, 3> minimum{};
     std::array<Real, 3> maximum{};
 };
@@ -43,23 +32,24 @@ struct LevelSetPhaseRegionBox {
 /**
  * Parse semicolon-separated fixed Eulerian box observers. Each entry is
  * `name|kind|xmin|xmax|ymin|ymax|zmin|zmax`; `*` selects an unbounded lower
- * or upper coordinate. Region names may contain letters, digits, `_`, `-`,
- * and `.`.
+ * or upper coordinate. A formulation can normalize or validate its kind names
+ * before the common identifier check.
  */
 [[nodiscard]] std::vector<LevelSetPhaseRegionBox>
-parseLevelSetPhaseRegionBoxes(std::string_view value);
+parseLevelSetPhaseRegionBoxes(
+    std::string_view value,
+    std::string (*normalize_kind)(std::string_view) = nullptr);
 
 /**
  * @brief One fixed control-volume region for a complete transport stage.
  *
  * Membership is deliberately explicit. A benchmark or geometry classifier
- * may define a wall film, sheet, or rim, but the balance kernel never infers
- * morphology from component numbering. The same mask applies to the
+ * supplies the region kind and membership. The same mask applies to the
  * previous, low-order, raw-target, and limited states of one stage.
  */
 struct LevelSetPhaseRegionDefinition {
     std::string name{};
-    LevelSetPhaseRegionKind kind{LevelSetPhaseRegionKind::Observer};
+    std::string kind{"observer"};
     std::vector<std::uint8_t> node_membership{};
 };
 
@@ -73,7 +63,7 @@ struct LevelSetPhaseRegionCrossingEdgeLedger {
 
 struct LevelSetPhaseRegionLedger {
     std::string name{};
-    LevelSetPhaseRegionKind kind{LevelSetPhaseRegionKind::Observer};
+    std::string kind{"observer"};
     bool balance_satisfied{false};
     std::vector<GlobalIndex> member_nodes{};
     std::size_t internal_edges{0u};
@@ -129,13 +119,14 @@ buildLevelSetPhaseRegionLedgers(
 
 /**
  * @brief Explicit policy helper that marks every resolved component except
- * the largest limited-measure component as a separate satellite region.
+ * the largest limited-measure component as a separately named region.
  *
  * Calling this function is the opt-in policy decision. Equal-measure ties use
  * the smallest deterministic component identifier as the primary component.
  */
 [[nodiscard]] std::vector<LevelSetPhaseRegionDefinition>
-makeNonprimaryComponentSatelliteRegions(
-    const LevelSetPhaseFluxCorrectionResult& correction);
+makeNonprimaryComponentRegions(
+    const LevelSetPhaseFluxCorrectionResult& correction,
+    std::string_view kind = "nonprimary_component");
 
 } // namespace svmp::FE::level_set

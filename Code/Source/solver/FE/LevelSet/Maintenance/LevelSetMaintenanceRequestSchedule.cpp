@@ -325,7 +325,7 @@ bool appendLevelSetMaintenanceConfigurationScheduleWords(
   appendMaintenanceScheduleBool(
       words,
       configuration.transport.conservative_phase
-          .classify_nonprimary_components_as_satellites);
+          .track_nonprimary_components);
   appendMaintenanceScheduleEnum(
       words,
       configuration.transport.conservative_phase.boundary_flux_policy);
@@ -336,7 +336,7 @@ bool appendLevelSetMaintenanceConfigurationScheduleWords(
   for (const auto& region :
        configuration.transport.conservative_phase.fixed_flux_regions) {
     appendMaintenanceScheduleString(words, region.name);
-    appendMaintenanceScheduleEnum(words, region.kind);
+    appendMaintenanceScheduleString(words, region.kind);
     for (const auto value : region.minimum) {
       appendMaintenanceScheduleReal(words, value);
     }

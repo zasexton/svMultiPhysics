@@ -247,7 +247,7 @@ struct LevelSetConservativePhaseOptions {
     Real momentum_relative_tolerance{1.0e-10};
     bool write_flux_artifacts{false};
     int flux_artifact_cadence_steps{1};
-    bool classify_nonprimary_components_as_satellites{false};
+    bool track_nonprimary_components{false};
     std::vector<LevelSetPhaseRegionBox> fixed_flux_regions{};
     LevelSetConservativePhaseBoundaryFluxPolicy boundary_flux_policy{
         LevelSetConservativePhaseBoundaryFluxPolicy::

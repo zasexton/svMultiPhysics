@@ -291,7 +291,7 @@ std::string phase_region_boxes_json(
     const auto& box = boxes[index];
     out << "{\"name\":" << json_string(box.name)
         << ",\"kind\":"
-        << json_string(ls::levelSetPhaseRegionKindName(box.kind))
+        << json_string(box.kind)
         << ",\"minimum\":["
         << json_real(box.minimum[0]) << ','
         << json_real(box.minimum[1]) << ','
@@ -423,7 +423,7 @@ make_level_set_effective_configuration(const ls::LevelSetTransportOptions& optio
       << options.conservative_phase.flux_artifact_cadence_steps
       << ",\"classify_nonprimary_components_as_satellites\":"
       << json_bool(options.conservative_phase
-                       .classify_nonprimary_components_as_satellites)
+                       .track_nonprimary_components)
       << ",\"fixed_flux_regions\":"
       << phase_region_boxes_json(
              options.conservative_phase.fixed_flux_regions)

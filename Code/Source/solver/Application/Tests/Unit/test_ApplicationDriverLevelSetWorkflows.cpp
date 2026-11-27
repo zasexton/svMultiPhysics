@@ -1,3 +1,4 @@
+#include "Physics/Formulations/NavierStokes/FreeSurface/PhaseRegionBoxes.h"
 #include "Physics/Formulations/NavierStokes/FreeSurface/SnapshotFunctionals.h"
 
 #include <gtest/gtest.h>
@@ -15237,7 +15238,7 @@ TEST_F(ApplicationDriverConservativePhaseCandidatesTest,
         configured.transport.conservative_phase.write_flux_artifacts = true;
         configured.transport.conservative_phase.flux_artifact_cadence_steps = 2;
         configured.transport.conservative_phase.fixed_flux_regions =
-            svmp::FE::level_set::parseLevelSetPhaseRegionBoxes(
+            svmp::Physics::formulations::navier_stokes::free_surface::parsePhaseRegionBoxes(
             "test_film|wall_film|*|*|*|*|*|*");
       });
 

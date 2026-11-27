@@ -42,17 +42,17 @@ TEST(LevelSetConservativePhaseRegions,
     const std::vector<level_set::LevelSetPhaseRegionDefinition> definitions{
         level_set::LevelSetPhaseRegionDefinition{
             .name = "bottom_film",
-            .kind = level_set::LevelSetPhaseRegionKind::WallFilm,
+            .kind = "wall_film",
             .node_membership = {1u, 1u, 0u, 0u},
         },
         level_set::LevelSetPhaseRegionDefinition{
             .name = "crown_sheet",
-            .kind = level_set::LevelSetPhaseRegionKind::Sheet,
+            .kind = "sheet",
             .node_membership = {0u, 1u, 1u, 0u},
         },
         level_set::LevelSetPhaseRegionDefinition{
             .name = "crown_rim",
-            .kind = level_set::LevelSetPhaseRegionKind::Rim,
+            .kind = "rim",
             .node_membership = {0u, 0u, 1u, 0u},
         },
     };
@@ -65,8 +65,7 @@ TEST(LevelSetConservativePhaseRegions,
     EXPECT_LE(result.maximum_flux_reconstruction_residual, 1.0e-14);
 
     const auto& film = result.regions[0];
-    EXPECT_STREQ(level_set::levelSetPhaseRegionKindName(film.kind),
-                 "wall_film");
+    EXPECT_EQ(film.kind, "wall_film");
     EXPECT_EQ(film.member_nodes,
               (std::vector<FE::GlobalIndex>{0, 1}));
     EXPECT_EQ(film.internal_edges, 1u);
@@ -110,7 +109,7 @@ TEST(LevelSetConservativePhaseRegions,
     std::vector<level_set::LevelSetPhaseRegionDefinition> malformed{
         level_set::LevelSetPhaseRegionDefinition{
             .name = "film",
-            .kind = level_set::LevelSetPhaseRegionKind::WallFilm,
+            .kind = "wall_film",
             .node_membership = {1u, 2u, 0u, 0u},
         },
     };
@@ -130,7 +129,7 @@ TEST(LevelSetConservativePhaseRegions,
 
     malformed.resize(1u);
     malformed.front().kind =
-        static_cast<level_set::LevelSetPhaseRegionKind>(1000);
+        "invalid kind";
     result = level_set::buildLevelSetPhaseRegionLedgers(
         correction, malformed);
     EXPECT_FALSE(result.success);
@@ -155,7 +154,7 @@ TEST(LevelSetConservativePhaseRegions,
     for (unsigned int mask = 0u; mask < 16u; ++mask) {
         level_set::LevelSetPhaseRegionDefinition definition{
             .name = "subset",
-            .kind = level_set::LevelSetPhaseRegionKind::Observer,
+            .kind = "observer",
             .node_membership = std::vector<std::uint8_t>(4u, 0u),
         };
         for (std::size_t node = 0u; node < 4u; ++node) {
@@ -185,9 +184,9 @@ TEST(LevelSetConservativePhaseRegions,
         "rim.tip|rim|0.8|1|0.5|1|*|*");
     ASSERT_EQ(boxes.size(), 2u);
     EXPECT_EQ(boxes[0].kind,
-              level_set::LevelSetPhaseRegionKind::WallFilm);
+              "wall_film");
     EXPECT_EQ(boxes[1].kind,
-              level_set::LevelSetPhaseRegionKind::Rim);
+              "rim");
     const std::array<std::array<FE::Real, 3>, 4> coordinates{
         std::array<FE::Real, 3>{0.2, 0.05, 0.0},
         std::array<FE::Real, 3>{0.9, 0.05, 0.0},
@@ -208,7 +207,7 @@ TEST(LevelSetConservativePhaseRegions,
         std::invalid_argument);
     EXPECT_THROW(
         static_cast<void>(level_set::parseLevelSetPhaseRegionBoxes(
-            "film|unknown|0|1|0|1|*|*")),
+            "film|invalid kind|0|1|0|1|*|*")),
         std::invalid_argument);
     EXPECT_THROW(
         static_cast<void>(level_set::parseLevelSetPhaseRegionBoxes(
@@ -218,7 +217,7 @@ TEST(LevelSetConservativePhaseRegions,
 
     auto invalid_kind = boxes.front();
     invalid_kind.kind =
-        static_cast<level_set::LevelSetPhaseRegionKind>(1000);
+        "invalid kind";
     const std::array invalid_boxes{invalid_kind};
     EXPECT_THROW(
         static_cast<void>(level_set::makeAxisAlignedBoxPhaseRegions(
@@ -249,17 +248,19 @@ TEST(LevelSetConservativePhaseRegions,
     ASSERT_TRUE(correction.success) << correction.diagnostic;
     ASSERT_EQ(correction.components.size(), 2u);
 
-    const auto satellites =
-        level_set::makeNonprimaryComponentSatelliteRegions(correction);
-    ASSERT_EQ(satellites.size(), 1u);
-    EXPECT_EQ(satellites.front().name, "resolved_satellite_3");
-    EXPECT_EQ(satellites.front().kind,
-              level_set::LevelSetPhaseRegionKind::ResolvedSatellite);
-    EXPECT_EQ(satellites.front().node_membership,
+    const auto components = level_set::makeNonprimaryComponentRegions(correction, "resolved_satellite");
+    ASSERT_EQ(components.size(), 1u);
+    EXPECT_EQ(components.front().name, "resolved_satellite_3");
+    EXPECT_EQ(components.front().kind, "resolved_satellite");
+    const auto geometric = level_set::makeNonprimaryComponentRegions(correction);
+    ASSERT_EQ(geometric.size(), 1u);
+    EXPECT_EQ(geometric.front().name, "nonprimary_component_3");
+    EXPECT_EQ(geometric.front().node_membership, components.front().node_membership);
+    EXPECT_EQ(components.front().node_membership,
               (std::vector<std::uint8_t>{0u, 0u, 0u, 1u, 1u}));
 
     const auto result = level_set::buildLevelSetPhaseRegionLedgers(
-        correction, satellites);
+        correction, components);
     ASSERT_TRUE(result.success) << result.diagnostic;
     ASSERT_EQ(result.regions.size(), 1u);
     EXPECT_NEAR(result.regions.front().limited_active_measure,
@@ -267,6 +268,19 @@ TEST(LevelSetConservativePhaseRegions,
                 1.0e-14);
     EXPECT_TRUE(result.regions.front().crossing_edges.empty());
     EXPECT_TRUE(result.regions.front().balance_satisfied);
+}
+
+TEST(LevelSetConservativePhaseRegions, AcceptsCallerDefinedRegionKinds)
+{
+    const auto boxes = level_set::parseLevelSetPhaseRegionBoxes(
+        "near_origin|material_patch|0|1|*|*|*|*");
+    ASSERT_EQ(boxes.size(), 1u);
+    const std::array<std::array<FE::Real, 3>, 2> points{{{0, 0, 0}, {2, 0, 0}}};
+    const auto regions = level_set::makeAxisAlignedBoxPhaseRegions(boxes, points);
+    ASSERT_EQ(regions.size(), 1u);
+    EXPECT_EQ(regions.front().name, "near_origin");
+    EXPECT_EQ(regions.front().kind, "material_patch");
+    EXPECT_EQ(regions.front().node_membership, (std::vector<std::uint8_t>{1, 0}));
 }
 
 } // namespace
