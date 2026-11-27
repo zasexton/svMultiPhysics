@@ -2741,6 +2741,17 @@ makeVolumeRegionMomentCertificate(
         throw std::invalid_argument(
             "full-cell moment certificates require the parent reference element");
     }
+    if (!region.boundary_moments.empty()) {
+        if (rule.frame != geometry::CutGeometryFrame::Reference || !region.reference_subcells.empty()) {
+            throw std::invalid_argument("curved volume boundary moments require one reference geometry");
+        }
+        LevelSetGeometryMomentCertificate certificate;
+        certificate.polynomial_order = rule.exact_polynomial_order;
+        certificate.ambient_dimension = ambient_dimension;
+        certificate.source = LevelSetGeometryMomentCertificateSource::BackendReferenceQuadrature;
+        certificate.moments.assign(region.boundary_moments.begin(), region.boundary_moments.end());
+        return certificate;
+    }
     if (rule.frame == geometry::CutGeometryFrame::Reference &&
         !region.reference_subcells.empty()) {
         return makeReferenceSubcellMomentCertificate(
@@ -4322,6 +4333,7 @@ std::size_t LevelSetGeometrySnapshot::residentBytes() const noexcept
         bytes += region.topology_id.capacity();
         bytes += region.implicit_quadrature_backend.capacity();
         bytes += region.implicit_fallback_status.capacity();
+        bytes += region.boundary_moments.capacity() * sizeof(LevelSetGeometryMonomialMoment);
         bytes += region.reference_subcells.capacity() *
                  sizeof(CutInterfaceReferenceSimplex);
         bytes += region.quadrature_points.capacity() *

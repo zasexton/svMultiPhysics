@@ -2144,7 +2144,7 @@ static_assert(sizeof(interfaces::CutInterfaceQuadraturePoint) == 104u);
 static_assert(sizeof(interfaces::CutInterfaceReferenceSimplex) == 152u);
 static_assert(sizeof(geometry::CutQuadraturePoint) == 152u);
 static_assert(sizeof(interfaces::CutInterfaceFragment) == 432u);
-static_assert(sizeof(interfaces::CutInterfaceVolumeRegion) == 288u);
+static_assert(sizeof(interfaces::CutInterfaceVolumeRegion) == 304u);
 static_assert(sizeof(GeneratedInterfaceCellDiagnostics) == 144u);
 
 [[nodiscard]] bool sameVertex(const interfaces::CutInterfaceVertex& a,
@@ -2274,6 +2274,9 @@ template <typename T, typename Same>
            a.full_cell_equivalent == b.full_cell_equivalent &&
            a.achieved_quadrature_order == b.achieved_quadrature_order &&
            sameRange(a.reference_subcells, b.reference_subcells, sameSimplex) &&
+           sameRange(a.boundary_moments, b.boundary_moments, [](const auto& lhs, const auto& rhs) {
+               return lhs.exponents == rhs.exponents && sameBits(lhs.value, rhs.value);
+           }) &&
            sameRange(a.quadrature_points, b.quadrature_points, sameCutPoint);
 }
 

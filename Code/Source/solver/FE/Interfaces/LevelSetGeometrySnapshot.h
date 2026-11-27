@@ -59,11 +59,6 @@ enum class LevelSetGeometryMomentCertificateSource : std::uint8_t {
     StoredGeneratedGeometry
 };
 
-struct LevelSetGeometryMonomialMoment {
-    std::array<int, 3> exponents{{0, 0, 0}};
-    Real value{0.0};
-};
-
 struct LevelSetGeometryMomentCertificate {
     int polynomial_order{-1};
     int ambient_dimension{0};

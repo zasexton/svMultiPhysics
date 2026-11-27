@@ -8463,6 +8463,113 @@ TEST(LevelSetInterfaceLifecycle, SubdivisionRetainsTheWholeParentPhaseAboveThePr
     }
 }
 
+TEST(LevelSetInterfaceLifecycle, CurvedQualifiedPhaseVolumeAgreesWithFluxAndExactMoments)
+{
+    using Side = FE::geometry::CutIntegrationSide;
+    constexpr int marker = 923;
+    // x = (1 + y^2)/4. The exterior left face carries zero flux for
+    // F=(x+1,0); the remaining two exterior faces have zero x-normal.
+    const auto field = [](const std::array<FE::Real, 3>& p) {
+        return p[0] - (1.0 + p[1] * p[1]) / 4.0;
+    };
+    const auto cut = buildSingleQuadSayeCut(
+        field, 0, 2, 2, marker, level_set::ImplicitCutFallbackPolicy::Fail, true);
+    ASSERT_TRUE(cut.success) << cut.diagnostic;
+    FE::Real flux = 0;
+    for (const auto& fragment : cut.domain.fragments()) {
+        for (const auto& q : fragment.quadrature_points) {
+            flux += (1.0 + q.parent_coordinate[0]) * q.normal[0] * q.weight;
+        }
+    }
+    FE::Real x_moment = 0;
+    FE::Real y2_moment = 0;
+    for (const auto& rule : cut.domain.volumeQuadratureRules()) {
+        if (rule.side == Side::Negative) {
+            for (const auto& q : rule.points) {
+                x_moment += q.weight * q.parent_coordinate[0];
+                y2_moment += q.weight * q.parent_coordinate[1] * q.parent_coordinate[1];
+            }
+        }
+    }
+    EXPECT_NEAR(flux, 8.0 / 3.0, 1.0e-10);
+    EXPECT_NEAR(cut.summary.negative_volume_measure, flux, 1.0e-10);
+    EXPECT_NEAR(cut.summary.positive_volume_measure, 4.0 / 3.0, 1.0e-10);
+    EXPECT_NEAR(x_moment, -53.0 / 60.0, 1.0e-10);
+    EXPECT_NEAR(y2_moment, 14.0 / 15.0, 1.0e-10);
+
+    FE::interfaces::LevelSetGeometryScalarEvaluator scalar;
+    scalar.value = [field](FE::GlobalIndex, const auto& x, const auto&) { return field(x); };
+    scalar.reference_gradient = [](FE::GlobalIndex, const auto& x, const auto&) {
+        return std::array<FE::Real, 3>{1.0, -x[1] / 2.0, 0.0};
+    };
+    FE::interfaces::LevelSetGeometrySnapshotPolicy policy;
+    policy.require_complete_exterior_boundary_partition = false;
+    const SingleQuadMeshAccess mesh(FE::ElementType::Quad9);
+    const auto snapshot = FE::interfaces::buildLevelSetGeometrySnapshot(
+        cut.domain, {}, {}, mesh, policy, scalar, "curved-strip");
+    ASSERT_TRUE(snapshot);
+    EXPECT_NEAR(snapshot->ledger().retained_negative_physical_volume, 8.0 / 3.0, 1.0e-10);
+    // Preserve the measure and both phase signs while perturbing a first
+    // moment. The snapshot must check the independent boundary certificate.
+    FE::interfaces::LevelSetInterfaceDomain altered(cut.domain.request());
+    for (const auto& fragment : cut.domain.fragments()) {
+        altered.addFragment(fragment);
+    }
+    bool changed = false;
+    for (auto region : cut.domain.volumeRegions()) {
+        if (!changed && !region.boundary_moments.empty()) {
+            auto& points = region.quadrature_points.mutate();
+            ASSERT_GE(points.size(), 2u);
+            const auto delta = 0.25 * std::min(points[0].weight, points[1].weight);
+            points[0].weight += delta;
+            points[1].weight -= delta;
+            changed = true;
+        }
+        altered.addVolumeRegion(std::move(region));
+    }
+    ASSERT_TRUE(changed);
+    try {
+        (void)FE::interfaces::buildLevelSetGeometrySnapshot(
+            altered, {}, {}, mesh, policy, scalar, "altered-curved-strip");
+        FAIL() << "perturbed volume weights passed their moment certificate";
+    } catch (const std::invalid_argument& error) {
+        EXPECT_NE(std::string_view(error.what()).find("polynomial-moment certificate"),
+                  std::string_view::npos);
+    }
+
+}
+
+TEST(LevelSetInterfaceLifecycle, ClosedQualifiedCurveRetainsItsAreaAndCentroidUnderPhaseReversal)
+{
+    using Side = FE::geometry::CutIntegrationSide;
+    constexpr FE::Real x_center = 0.07, y_center = -0.11, radius = 0.4;
+    const FE::Real expected_area = std::acos(-1.0) * radius * radius;
+    for (const FE::Real sign : {-1.0, 1.0}) {
+        SCOPED_TRACE(sign);
+        const auto cut = buildSingleQuadSayeCut(
+            [=](const std::array<FE::Real, 3>& p) {
+                const auto dx = p[0] - x_center, dy = p[1] - y_center;
+                return sign * (dx * dx + dy * dy - radius * radius);
+            }, 1, 2, 2, 924, level_set::ImplicitCutFallbackPolicy::Fail, true);
+        ASSERT_TRUE(cut.success) << cut.diagnostic;
+        const auto side = sign > 0 ? Side::Negative : Side::Positive;
+        FE::Real area = 0, first_x = 0, first_y = 0;
+        for (const auto& rule : cut.domain.volumeQuadratureRules()) {
+            if (rule.side != side) {
+                continue;
+            }
+            for (const auto& q : rule.points) {
+                area += q.weight;
+                first_x += q.parent_coordinate[0] * q.weight;
+                first_y += q.parent_coordinate[1] * q.weight;
+            }
+        }
+        EXPECT_NEAR(area, expected_area, 2.0e-10);
+        EXPECT_NEAR(first_x, x_center * expected_area, 2.0e-10);
+        EXPECT_NEAR(first_y, y_center * expected_area, 2.0e-10);
+    }
+}
+
 TEST(LevelSetInterfaceLifecycle, BackendIndependentValidationFixturesCheckRuleInvariants)
 {
     const auto saye_circle =

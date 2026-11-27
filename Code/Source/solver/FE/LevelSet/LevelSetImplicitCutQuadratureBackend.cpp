@@ -9,6 +9,7 @@
 #include <iomanip>
 #include <iterator>
 #include <limits>
+#include <numeric>
 #include <optional>
 #include <sstream>
 #include <stdexcept>
@@ -104,6 +105,21 @@ namespace {
 {
     return std::max(request.implicit_cut_root_coordinate_tolerance,
                     Real{8.0} * std::numeric_limits<Real>::epsilon());
+}
+
+[[nodiscard]] interfaces::CutInterfaceDomainRequest strictRootPolishingRequest(
+    const interfaces::CutInterfaceDomainRequest& request)
+{
+    auto polishing_request = request;
+    polishing_request.tolerance =
+        std::min(polishing_request.tolerance, Real{1.0e-14});
+    polishing_request.implicit_cut_root_tolerance =
+        std::min(polishing_request.implicit_cut_root_tolerance,
+                 Real{1.0e-14});
+    polishing_request.implicit_cut_root_coordinate_tolerance =
+        std::min(polishing_request.implicit_cut_root_coordinate_tolerance,
+                 Real{1.0e-14});
+    return polishing_request;
 }
 
 [[nodiscard]] Real rootParametricCoordinateTolerance(
@@ -3664,9 +3680,11 @@ template <typename SampleBuilder>
     const interfaces::CutInterfaceDomainRequest& request,
     const ImplicitCutQuadratureBackendCellInput& input,
     const Rectangle2D& rect,
-    SayeHyperrectangleDiagnostics& diagnostics)
+    SayeHyperrectangleDiagnostics& diagnostics,
+    bool require_geometry_for_volume)
 {
-    if (!fragment.active() || request.resolvedInterfaceQuadratureOrder() <= 1) {
+    if (!fragment.active() ||
+        (!require_geometry_for_volume && request.resolvedInterfaceQuadratureOrder() <= 1)) {
         return false;
     }
 
@@ -3701,15 +3719,7 @@ template <typename SampleBuilder>
         return false;
     };
 
-    auto polishing_request = request;
-    polishing_request.tolerance =
-        std::min(polishing_request.tolerance, Real{1.0e-14});
-    polishing_request.implicit_cut_root_tolerance =
-        std::min(polishing_request.implicit_cut_root_tolerance,
-                 Real{1.0e-14});
-    polishing_request.implicit_cut_root_coordinate_tolerance =
-        std::min(polishing_request.implicit_cut_root_coordinate_tolerance,
-                 Real{1.0e-14});
+    const auto polishing_request = strictRootPolishingRequest(request);
     int local_iterations = 0;
     auto roots = rectangleEdgeRoots(input, polishing_request, rect, local_iterations);
     if (roots.size() != 2u) {
@@ -4044,15 +4054,7 @@ template <typename SampleBuilder>
         0.0,
     }};
     const std::array<Real, 3> transverse{{-tangent[1], tangent[0], 0.0}};
-    auto polishing_request = request;
-    polishing_request.tolerance =
-        std::min(polishing_request.tolerance, Real{1.0e-14});
-    polishing_request.implicit_cut_root_tolerance =
-        std::min(polishing_request.implicit_cut_root_tolerance,
-                 Real{1.0e-14});
-    polishing_request.implicit_cut_root_coordinate_tolerance =
-        std::min(polishing_request.implicit_cut_root_coordinate_tolerance,
-                 Real{1.0e-14});
+    const auto polishing_request = strictRootPolishingRequest(request);
     const auto build_sample =
         [&](Real t,
             interfaces::CutInterfaceQuadraturePoint& output,
@@ -5086,12 +5088,203 @@ void appendCertifiedAlignedRectangleFragment(
     ++diagnostics.curved_fragment_count;
 }
 
+struct GraphBaseInterval {
+    Real lower;
+    Real upper;
+    bool crosses_interface;
+    bool negative_at_upper_face;
+};
+
+using GraphPoint = std::array<Real, 3>;
+
+[[nodiscard]] long double powerIntegral(Real lower, Real upper, int exponent)
+{
+    // Factor out the width to retain accuracy on narrow strips.
+    long double sum = 0;
+    for (int k = 0; k <= exponent; ++k) {
+        sum += std::pow(static_cast<long double>(lower), k) *
+               std::pow(static_cast<long double>(upper), exponent - k);
+    }
+    return (static_cast<long double>(upper) - lower) * sum / (exponent + 1);
+}
+
+[[nodiscard]] std::array<std::vector<interfaces::LevelSetGeometryMonomialMoment>, 2>
+graphBoundaryMoments(const interfaces::CutInterfaceFragment& fragment,
+                     const GraphPoint& lower, const GraphPoint& upper,
+                     int height_axis, std::span<const GraphBaseInterval> intervals, int order)
+{
+    const int base_axis = 1 - height_axis;
+    std::array<std::vector<interfaces::LevelSetGeometryMonomialMoment>, 2> moments;
+    for (int degree = 0; degree <= order; ++degree) {
+        for (int px = 0; px <= degree; ++px) {
+            const std::array<int, 3> powers{px, degree - px, 0};
+            const int height_power = powers[height_axis];
+            const int base_power = powers[base_axis];
+            const auto full_height = powerIntegral(lower[height_axis], upper[height_axis], height_power);
+            const auto whole = full_height * powerIntegral(lower[base_axis], upper[base_axis], base_power);
+            // The height antiderivative vanishes on the lower rectangle face.
+            // Only the upper face and the oriented implicit surface contribute.
+            long double negative = 0;
+            for (const auto& interval : intervals) {
+                if (interval.negative_at_upper_face) {
+                    negative += full_height * powerIntegral(interval.lower, interval.upper, base_power);
+                }
+            }
+            for (const auto& q : fragment.moment_certificate_points) {
+                negative += static_cast<long double>(q.weight) * q.normal[height_axis] *
+                    std::pow(static_cast<long double>(q.parent_coordinate[base_axis]), base_power) *
+                    powerIntegral(lower[height_axis], q.parent_coordinate[height_axis], height_power);
+            }
+            moments[0].push_back({powers, static_cast<Real>(negative)});
+            moments[1].push_back({powers, static_cast<Real>(whole - negative)});
+        }
+    }
+    return moments;
+}
+
+[[nodiscard]] bool graphVolumeMomentsAgree(
+    std::span<const geometry::CutQuadraturePoint> points,
+    std::span<const interfaces::LevelSetGeometryMonomialMoment> moments,
+    int order, Real tolerance)
+{
+    std::size_t i = 0;
+    for (int degree = 0; degree <= order; ++degree) {
+        for (int px = 0; px <= degree; ++px, ++i) {
+            const std::array<int, 3> powers{px, degree - px, 0};
+            if (i >= moments.size() || moments[i].exponents != powers ||
+                !std::isfinite(moments[i].value)) {
+                return false;
+            }
+            long double integral = 0;
+            for (const auto& q : points) {
+                integral += static_cast<long double>(q.weight) *
+                    std::pow(static_cast<long double>(q.point[0]), px) *
+                    std::pow(static_cast<long double>(q.point[1]), degree - px);
+            }
+            if (!std::isfinite(integral) ||
+                std::abs(integral - moments[i].value) > measureTolerance(tolerance, moments[i].value)) {
+                return false;
+            }
+        }
+    }
+    return i == moments.size();
+}
+
+void makeGraphVolumeRules(const interfaces::CutInterfaceDomainRequest& request,
+                          const ImplicitCutQuadratureBackendCellInput& input,
+                          const Rectangle2D& rect, int height_axis,
+                          interfaces::CutInterfaceFragment& fragment,
+                          std::vector<interfaces::CutInterfaceVolumeRegion>& regions,
+                          SayeHyperrectangleDiagnostics& diagnostics)
+{
+    const int base_axis = 1 - height_axis;
+    const GraphPoint lower{rect.xmin, rect.ymin, 0};
+    const GraphPoint upper{rect.xmax, rect.ymax, 0};
+    const auto& a = fragment.vertices.at(0).parent_coordinate;
+    const auto& b = fragment.vertices.at(1).parent_coordinate;
+    const auto [start, end] = std::minmax(a[base_axis], b[base_axis]);
+    const std::array<Real, 4> endpoints{lower[base_axis], start, end, upper[base_axis]};
+    std::vector<GraphBaseInterval> intervals;
+    for (std::size_t i = 1; i < endpoints.size(); ++i) {
+        if (endpoints[i] > endpoints[i - 1]) {
+            auto point = upper;
+            point[base_axis] = std::midpoint(endpoints[i - 1], endpoints[i]);
+            intervals.push_back({endpoints[i - 1], endpoints[i], i == 2,
+                                 signedLevelSetValue(input, point) < 0});
+        }
+    }
+
+    const int order = interfaces::implementedPlanarLevelSetCutVolumeExactOrder(
+        request.resolvedVolumeQuadratureOrder());
+    const auto moments = graphBoundaryMoments(fragment, lower, upper, height_axis, intervals, order);
+    const auto root_request = strictRootPolishingRequest(request);
+    const auto height_rule = gaussLegendreUnitRule(std::max(1, order));
+
+    for (int count : {4, 8, 16, 32}) {
+        const auto base_rule = gaussLegendreUnitRulePointCount(count);
+        std::array<std::vector<geometry::CutQuadraturePoint>, 2> points;
+        for (const auto& interval : intervals) {
+            const Real width = interval.upper - interval.lower;
+            for (const auto& [s, ws] : base_rule) {
+                auto bottom = lower;
+                auto top = upper;
+                bottom[base_axis] = top[base_axis] = interval.lower + s * width;
+                const auto append_segment = [&](Real h0, Real h1, bool negative) {
+                    if (h1 <= h0) {
+                        return;
+                    }
+                    const Real jacobian = width * (h1 - h0);
+                    auto& side_points = points[negative ? 0 : 1];
+                    for (const auto& [t, wt] : height_rule) {
+                        auto point = bottom;
+                        point[height_axis] = h0 + t * (h1 - h0);
+                        side_points.push_back({.point = point, .weight = ws * wt * jacobian,
+                                               .parent_coordinate = point, .reference_measure_factor = jacobian});
+                    }
+                };
+                if (interval.crosses_interface) {
+                    GraphPoint root;
+                    if (!polishRootOnSegment(input, root_request, bottom, top, root,
+                                             diagnostics.root_finder_iteration_count)) {
+                        throw std::invalid_argument("certified rectangular graph volume could not bracket a height root");
+                    }
+                    append_segment(lower[height_axis], root[height_axis], !interval.negative_at_upper_face);
+                    append_segment(root[height_axis], upper[height_axis], interval.negative_at_upper_face);
+                } else {
+                    append_segment(lower[height_axis], upper[height_axis], interval.negative_at_upper_face);
+                }
+            }
+        }
+        if (!graphVolumeMomentsAgree(points[0], moments[0], order, request.tolerance) ||
+            !graphVolumeMomentsAgree(points[1], moments[1], order, request.tolerance)) {
+            continue;
+        }
+        for (auto& region : regions) {
+            const auto side = region.side == geometry::CutIntegrationSide::Negative ? 0u : 1u;
+            Real measure = 0;
+            GraphPoint first_moment{};
+            for (const auto& q : points[side]) {
+                measure += q.weight;
+                for (int d = 0; d < 2; ++d) {
+                    first_moment[d] += q.weight * q.parent_coordinate[d];
+                }
+            }
+            if (!(measure > 0)) {
+                throw std::invalid_argument("certified rectangular graph has an empty cut volume");
+            }
+            region.measure = measure;
+            region.volume_fraction = measure / region.parent_measure;
+            region.centroid = {first_moment[0] / measure, first_moment[1] / measure, 0};
+            region.normal = interfaceNormalAt(input, region.centroid);
+            if (side == 1) {
+                for (auto& component : region.normal) {
+                    component = -component;
+                }
+            }
+            for (auto& q : points[side]) {
+                q.normal = region.normal;
+            }
+            region.reference_subcells.clear();
+            region.boundary_moments = moments[side];
+            region.quadrature_points = std::move(points[side]);
+            region.achieved_quadrature_order = order;
+            if (side == 0) {
+                fragment.negative_volume_fraction = region.volume_fraction;
+            } else {
+                fragment.positive_volume_fraction = region.volume_fraction;
+            }
+        }
+        return;
+    }
+    throw std::invalid_argument("certified rectangular graph volume failed its independent boundary moments");
+}
+
 // A non-affine level-set polynomial can have a straight zero set. In that
 // case the polished chord, not interpolation of the corner values, bounds
 // the two phases. The field restricted to a line in a Qp leaf has degree at
 // most 2p. Check that restriction to the root accuracy before using the
 // existing polygon cutter and its independent simplex moment certificates.
-void usePolishedStraightBranchForVolumes(
+[[nodiscard]] bool usePolishedStraightBranchForVolumes(
     const interfaces::CutInterfaceDomainRequest& request,
     const ImplicitCutQuadratureBackendCellInput& input,
     const interfaces::LevelSetCellCutInput& leaf,
@@ -5103,7 +5296,7 @@ void usePolishedStraightBranchForVolumes(
     if (fragment.vertices.size() != 2u || regions.size() != 2u || order < 1 ||
         (!input.evaluator->usesCompleteTensorLagrangeBasis(cell) &&
          !input.evaluator->usesTensorSerendipityBasis(cell))) {
-        return;
+        return false;
     }
     const auto& a = fragment.vertices[0].parent_coordinate;
     const auto& b = fragment.vertices[1].parent_coordinate;
@@ -5125,7 +5318,7 @@ void usePolishedStraightBranchForVolumes(
         const Real residual = std::abs(sample.value - input.isovalue);
         if (!(slope > Real{0}) || !std::isfinite(residual) ||
             residual > coordinate_tolerance * slope) {
-            return;
+            return false;
         }
     }
 
@@ -5139,7 +5332,7 @@ void usePolishedStraightBranchForVolumes(
     plane_request.isovalue = 0;
     auto cut = interfaces::cutLinearLevelSetCell2D(plane_request, plane);
     if (!cut.supported || cut.fragments.size() != 1u || cut.volume_regions.size() != 2u) {
-        return;
+        return false;
     }
     const auto [minimum, maximum] =
         std::minmax_element(leaf.level_set_values.begin(), leaf.level_set_values.end());
@@ -5151,6 +5344,7 @@ void usePolishedStraightBranchForVolumes(
     fragment.negative_volume_fraction = cut.fragments.front().negative_volume_fraction;
     fragment.positive_volume_fraction = cut.fragments.front().positive_volume_fraction;
     regions = std::move(cut.volume_regions);
+    return true;
 }
 
 void appendLinearizedRectangleCut(
@@ -5160,7 +5354,8 @@ void appendLinearizedRectangleCut(
     const Rectangle2D& rect,
     Real parent_measure,
     SayeHyperrectangleDiagnostics& diagnostics,
-    bool retain_interface_fragments = true)
+    bool retain_interface_fragments = true,
+    int certified_height_axis = -1)
 {
     ++diagnostics.linearized_leaf_count;
 
@@ -5191,9 +5386,16 @@ void appendLinearizedRectangleCut(
             static_cast<int>(leaf_cut.fragments.size());
         for (auto& fragment : leaf_cut.fragments) {
             if (replaceWithRootPolishedRectangleFragment(
-                    fragment, request, input, rect, diagnostics)) {
-                usePolishedStraightBranchForVolumes(
+                    fragment, request, input, rect, diagnostics, certified_height_axis >= 0)) {
+                const bool straight = usePolishedStraightBranchForVolumes(
                     request, input, leaf, fragment, leaf_cut.volume_regions);
+                if (!straight && certified_height_axis >= 0 && leaf_cut.volume_regions.size() == 2u) {
+                    makeGraphVolumeRules(request, input, rect, certified_height_axis,
+                                         fragment, leaf_cut.volume_regions, diagnostics);
+                }
+            } else if (certified_height_axis >= 0 && leaf_cut.volume_regions.size() == 2u) {
+                throw std::invalid_argument(
+                    "certified rectangular graph lacks the polished interface required for its cut volumes");
             }
             fragment.parent_cell = input.linearized_input.parent_cell;
             fragment.interface_marker = request.interface_marker;
@@ -5209,10 +5411,10 @@ void appendLinearizedRectangleCut(
         region.volume_fraction =
             parent_measure > Real{0.0} ? region.measure / parent_measure : Real{0.0};
         region.full_cell_equivalent =
-            parent_measure > Real{0.0} &&
+            region.boundary_moments.empty() && parent_measure > Real{0.0} &&
             std::abs(region.measure - parent_measure) <=
                 measureTolerance(request.tolerance, parent_measure);
-        if (!region.full_cell_equivalent &&
+        if (region.boundary_moments.empty() && !region.full_cell_equivalent &&
             std::abs(region.measure - rectangleMeasure(rect)) <=
                 measureTolerance(request.tolerance, region.measure)) {
             region.quadrature_points = rectangleVolumeQuadraturePoints(
@@ -5777,7 +5979,7 @@ void appendAdaptiveRectangleCut(
                 rect,
                 parent_measure,
                 diagnostics,
-                retain_interface);
+                retain_interface, regular_graph->axis);
             if (retain_interface &&
                 cut.fragments.size() == first_fragment &&
                 (regular_graph->lower_face_zero ||
@@ -6689,6 +6891,12 @@ void recordRecursiveBackendDiagnostics(
     const Real abs_error = std::abs(total - parent_measure);
     if (abs_error <= validation_tolerance) {
         return {};
+    }
+
+    if (std::any_of(cut.volume_regions.begin(), cut.volume_regions.end(),
+                    [](const auto& region) { return !region.boundary_moments.empty(); })) {
+        throw std::invalid_argument(
+            "certified graph volumes do not close on their parent cell within tolerance");
     }
 
     const Real closure_tolerance =
@@ -7915,6 +8123,13 @@ validateImplicitCutQuadratureBackendCellResult(
                 "; volume_fraction=" + formatReal(region.volume_fraction) +
                 "; quadrature_points=" +
                     std::to_string(region.quadrature_points.size()));
+        }
+        if (!region.boundary_moments.empty() &&
+            (!region.reference_subcells.empty() ||
+             !graphVolumeMomentsAgree(region.quadrature_points.values(), region.boundary_moments.values(),
+                                      region.achieved_quadrature_order, request.tolerance))) {
+            return failedValidation(ImplicitCutQuadratureDiagnosticStatus::Failed,
+                "curved volume quadrature does not reproduce its independent boundary moments");
         }
         if (!region.reference_subcells.empty()) {
             const int dimension = element_dimension(linearized_input.element_type);

@@ -427,6 +427,11 @@ enum class LinearCornerStrictBranch : std::uint8_t {
     ModifiedOrUnresolved
 };
 
+struct LevelSetGeometryMonomialMoment {
+    std::array<int, 3> exponents{{0, 0, 0}};
+    Real value{0.0};
+};
+
 struct CutInterfaceVolumeRegion {
     LinearCornerStrictBranch construction_observation{LinearCornerStrictBranch::Unchecked};
     int interface_marker{-1};
@@ -455,6 +460,9 @@ struct CutInterfaceVolumeRegion {
     bool full_cell_equivalent{false};
     int achieved_quadrature_order{-1};
     std::vector<CutInterfaceReferenceSimplex> reference_subcells{};
+    // For a curved graph, these reference moments come from a flux integral
+    // over the independent surface rule and the clipped parent-face intervals.
+    CopyOnWriteVector<LevelSetGeometryMonomialMoment> boundary_moments{};
     // Shared by every copy of the region (lifecycle caches, returned domains,
     // snapshots) until one copy is modified through mutate().
     CopyOnWriteVector<geometry::CutQuadraturePoint> quadrature_points{};
