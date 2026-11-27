@@ -76,40 +76,52 @@ void validate_axis(int axis) {
     }
 }
 
-Real polygon_area_projected(const std::vector<std::array<Real, 3>>& points,
-                            const std::array<Real, 3>& normal) noexcept {
-    if (points.size() < 3u) {
-        return Real{0.0};
-    }
-    std::array<Real, 3> area_vec{{0.0, 0.0, 0.0}};
-    for (std::size_t i = 0; i < points.size(); ++i) {
-        area_vec = add(area_vec, cross(points[i], points[(i + 1u) % points.size()]));
-    }
-    return Real{0.5} * std::abs(dot(area_vec, unit_or_default(normal)));
-}
+struct InterfaceMoments {
+    Real measure{};
+    std::array<Real, 3> centroid{};
+};
 
-Real interface_measure(const std::vector<std::array<Real, 3>>& points,
-                       const std::array<Real, 3>& normal) noexcept {
-    if (points.empty()) {
-        return Real{0.0};
+InterfaceMoments polygonMoments(const std::vector<std::array<Real, 3>>& points,
+                                const std::array<Real, 3>& unit_normal) noexcept {
+    if (points.empty()) return {};
+    const auto& origin = points.front();
+    if (points.size() == 1u) return {1, origin};
+
+    // Signed triangles also give the correct first moment for a concave
+    // polygon. Offsetting each vertex avoids cancellation after translation.
+    long double twice_area = 0;
+    std::array<long double, 3> first_moment{};
+    for (std::size_t i = 1; i + 1 < points.size(); ++i) {
+        std::array<long double, 3> a{}, b{};
+        for (int d = 0; d < 3; ++d) {
+            a[d] = static_cast<long double>(points[i][d]) - origin[d];
+            b[d] = static_cast<long double>(points[i + 1][d]) - origin[d];
+        }
+        const long double area = (a[1]*b[2] - a[2]*b[1]) * unit_normal[0]
+                               + (a[2]*b[0] - a[0]*b[2]) * unit_normal[1]
+                               + (a[0]*b[1] - a[1]*b[0]) * unit_normal[2];
+        twice_area += area;
+        for (int d = 0; d < 3; ++d) first_moment[d] += area * (a[d] + b[d]) / 3;
     }
-    if (points.size() == 1u) {
-        return Real{1.0};
+    if (twice_area != 0) {
+        InterfaceMoments moments{static_cast<Real>(std::abs(twice_area) / 2), origin};
+        for (int d = 0; d < 3; ++d) {
+            moments.centroid[d] = static_cast<Real>(origin[d] + first_moment[d] / twice_area);
+        }
+        return moments;
     }
-    if (points.size() == 2u) {
-        return norm(sub(points[1], points[0]));
-    }
-    const Real area = polygon_area_projected(points, normal);
-    if (area > Real{1.0e-30}) {
-        return area;
-    }
-    Real length = Real{0.0};
+
+    InterfaceMoments segment;
     for (std::size_t i = 0; i < points.size(); ++i) {
-        for (std::size_t j = i + 1u; j < points.size(); ++j) {
-            length = std::max(length, norm(sub(points[j], points[i])));
+        for (std::size_t j = i + 1; j < points.size(); ++j) {
+            const auto offset = sub(points[j], points[i]);
+            const Real length = std::hypot(offset[0], offset[1], offset[2]);
+            if (length > segment.measure) {
+                segment = {length, add(points[i], scale(offset, 0.5))};
+            }
         }
     }
-    return length;
+    return segment;
 }
 
 std::array<Real, 3> centroid(const std::array<Real, 3>& a,
@@ -387,16 +399,18 @@ CutQuadratureRule makePolygonInterfaceQuadrature(
     rule.provenance.construction = CutQuadratureConstructionKind::PolygonInterface;
     rule.provenance_id = rule.provenance.embedded_geometry_id;
     rule.frame = rule.provenance.frame;
-    rule.measure = interface_measure(ordered_points, normal);
+    const auto unit_normal = unit_or_default(normal);
+    const auto moments = polygonMoments(ordered_points, unit_normal);
+    rule.measure = moments.measure;
     rule.parent_measure = rule.measure;
     rule.volume_fraction = Real{0.0};
     rule.exact_for_constants = true;
-    rule.exact_polynomial_order = std::max(0, policy.polynomial_order);
+    rule.exact_polynomial_order = std::clamp(policy.polynomial_order, 0, 1);
     if (rule.measure > Real{0.0}) {
         CutQuadraturePoint qp;
         qp.weight = rule.measure;
-        qp.point = centroid(ordered_points);
-        qp.normal = unit_or_default(normal);
+        qp.point = moments.centroid;
+        qp.normal = unit_normal;
         rule.points.push_back(qp);
     }
     return rule;
@@ -482,7 +496,7 @@ CutTopologyQuadratureRules makeClosedTopologyCutQuadrature(
         rule.side = side;
         rule.parent_measure = std::max(Real{0.0}, input.parent_measure);
         rule.exact_for_constants = true;
-        rule.exact_polynomial_order = std::max(0, policy.polynomial_order);
+        rule.exact_polynomial_order = std::clamp(policy.polynomial_order, 0, 1);
         rule.policy = policy;
         rule.provenance = provenance;
         rule.provenance_id = provenance.embedded_geometry_id;
@@ -498,6 +512,10 @@ CutTopologyQuadratureRules makeClosedTopologyCutQuadrature(
                                          std::isfinite(subcell.centroid[1]) &&
                                          std::isfinite(subcell.centroid[2]);
             qp.point = finite_centroid ? subcell.centroid : centroid(subcell.points);
+            if (!finite_centroid) {
+                // A vertex average need not reproduce a volume's first moment.
+                rule.exact_polynomial_order = 0;
+            }
             qp.normal = side == CutIntegrationSide::Negative
                             ? unit_or_default(input.interface_normal)
                             : scale(unit_or_default(input.interface_normal), Real{-1.0});
@@ -642,7 +660,8 @@ std::array<CutQuadratureRule, 2> makeConservativeSplitCutVolumeQuadrature(
         rule.volume_fraction = i == 0 ? negative_fraction : Real{1.0} - negative_fraction;
         rule.measure = rule.parent_measure * rule.volume_fraction;
         rule.exact_for_constants = true;
-        rule.exact_polynomial_order = std::max(0, policy.polynomial_order);
+        // One representative location is shared by both phase volumes.
+        rule.exact_polynomial_order = 0;
         rule.policy = policy;
         rule.policy.kind = CutQuadratureConstructionKind::ConservativeMomentFit;
         rule.provenance = provenance;

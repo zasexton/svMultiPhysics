@@ -18,6 +18,7 @@
 #include <array>
 #include <cstddef>
 #include <cstdint>
+#include <limits>
 #include <optional>
 #include <string>
 #include <vector>
@@ -244,7 +245,11 @@ struct CutTopologySubcellInput {
     std::string topology_id{};
     std::vector<std::array<Real, 3>> points{};
     Real measure{0.0};
-    std::array<Real, 3> centroid{{0.0, 0.0, 0.0}};
+    /// A supplied volume centroid certifies affine moments. Without it the
+    /// quadrature uses the vertex average and certifies the measure alone.
+    std::array<Real, 3> centroid{{std::numeric_limits<Real>::quiet_NaN(),
+                                  std::numeric_limits<Real>::quiet_NaN(),
+                                  std::numeric_limits<Real>::quiet_NaN()}};
     bool curved_geometry{false};
     bool measure_from_isoparametric_quadrature{false};
 };

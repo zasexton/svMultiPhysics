@@ -1,5 +1,6 @@
 #include "Geometry/CutQuadrature.h"
 
+#include <algorithm>
 #include <gtest/gtest.h>
 
 #include <array>
@@ -186,6 +187,65 @@ TEST(CutQuadrature, PolygonAndConservativeSplitRulesCarryPolicyAndProvenance)
     const auto conservation = checkCutVolumeConservation(split[0], split[1]);
     EXPECT_TRUE(conservation.ok);
     EXPECT_DOUBLE_EQ(conservation.residual, 0.0);
+}
+
+TEST(CutQuadrature, PolygonPointIntegratesAffineFieldsForBothVertexOrders)
+{
+    CutQuadratureConstructionPolicy policy;
+    policy.polynomial_order = 3;
+    std::vector<std::array<Real, 3>> polygon{{0, 0, 2}, {2, 0, 2}, {1, 1, 2}, {0, 1, 2}};
+    for (int winding = 0; winding < 2; ++winding) {
+        const auto rule = makePolygonInterfaceQuadrature(polygon, {0, 0, 1}, policy);
+        ASSERT_EQ(rule.points.size(), 1u);
+        const auto& qp = rule.points.front();
+        EXPECT_DOUBLE_EQ(qp.weight, 1.5);
+        EXPECT_NEAR(qp.weight * qp.point[0], 7.0 / 6, 1e-14);
+        EXPECT_NEAR(qp.weight * qp.point[1], 2.0 / 3, 1e-14);
+        EXPECT_DOUBLE_EQ(qp.point[2], 2);
+        EXPECT_EQ(rule.exact_polynomial_order, 1);
+        std::reverse(polygon.begin(), polygon.end());
+    }
+    // The first moment can underflow in double even with a representable area.
+    constexpr Real h = 0x1p-460;
+    for (auto& vertex : polygon) {
+        vertex[0] *= h;
+        vertex[1] *= h;
+    }
+    const auto small = makePolygonInterfaceQuadrature(polygon, {0, 0, 1}, policy);
+    ASSERT_EQ(small.points.size(), 1u);
+    EXPECT_DOUBLE_EQ(small.measure / (h * h), 1.5);
+    EXPECT_NEAR(small.points[0].point[0] / h, 7.0 / 9, 1e-14);
+    const auto line = makePolygonInterfaceQuadrature(
+        {{0, 0, 0}, {1, 0, 0}, {3, 0, 0}}, {0, 0, 1}, policy);
+    ASSERT_EQ(line.points.size(), 1u);
+    EXPECT_DOUBLE_EQ(line.measure, 3);
+    EXPECT_DOUBLE_EQ(line.points.front().point[0], 1.5);
+}
+
+TEST(CutQuadrature, VolumeRuleExactnessFollowsTheAvailableMoments)
+{
+    CutQuadratureConstructionPolicy policy;
+    policy.polynomial_order = 3;
+    const auto split = makeConservativeSplitCutVolumeQuadrature(
+        1, 0.25, {0.5, 0, 0}, {1, 0, 0}, policy);
+    for (const auto& side : split) {
+        EXPECT_EQ(side.policy.polynomial_order, 3);
+        EXPECT_EQ(side.exact_polynomial_order, 0);
+    }
+    CutClosedTopologyQuadratureInput input;
+    input.parent_measure = 1;
+    input.policy = policy;
+    input.negative_subcells.push_back({
+        .points = {{0, 0, 0}, {0.5, 0, 0}}, .measure = 0.5, .centroid = {0.25, 0, 0}});
+    input.positive_subcells.push_back({
+        .points = {{0.5, 0, 0}, {1, 0, 0}}, .measure = 0.5});
+    const auto rules = makeClosedTopologyCutQuadrature(input);
+    EXPECT_EQ(rules.negative_volume.exact_polynomial_order, 1);
+    EXPECT_EQ(rules.positive_volume.exact_polynomial_order, 0);
+    ASSERT_EQ(rules.negative_volume.points.size(), 1u);
+    ASSERT_EQ(rules.positive_volume.points.size(), 1u);
+    EXPECT_DOUBLE_EQ(rules.negative_volume.points[0].point[0], 0.25);
+    EXPECT_DOUBLE_EQ(rules.positive_volume.points[0].point[0], 0.75);
 }
 
 TEST(CutQuadrature, TopologyDerivedRulesConserveLinearCutMeasuresForAdvertisedFamilies)
