@@ -14,6 +14,30 @@
 using namespace svmp::FE;
 using namespace svmp::FE::spaces;
 
+TEST(SpaceInterpolation, ProjectsLinearSplinesAcrossNonmatchingKnotSpans) {
+    elements::ElementRequest req;
+    req.element_type = ElementType::Line2;
+    req.basis_type = BasisType::BSpline;
+    req.order = 1;
+    req.knot_vector = {-1, -1, -0.5, 0.25, 1, 1};
+    const H1Space fine(req);
+    req.knot_vector = {-1, -1, 0, 1, 1};
+    const H1Space coarse(req);
+    const L2Space constant(ElementType::Line2, 0);
+    const std::vector<Real> hat{0, 1, 0, 0};
+    std::vector<Real> projected;
+    SpaceInterpolation::l2_projection(fine, hat, constant, projected);
+    ASSERT_EQ(projected.size(), 1u);
+    EXPECT_NEAR(projected[0], 5.0 / 16, 2e-14);
+
+    // Integrating the two sets of hats gives the cross-mass column (76,103,1)/288.
+    SpaceInterpolation::l2_projection(fine, hat, coarse, projected);
+    ASSERT_EQ(projected.size(), 3u);
+    EXPECT_NEAR(projected[0], 109.0 / 192, 2e-14);
+    EXPECT_NEAR(projected[1], 43.0 / 96, 2e-14);
+    EXPECT_NEAR(projected[2], -41.0 / 192, 2e-14);
+}
+
 TEST(SpaceInterpolation, L2ProjectionSelfConsistency) {
     H1Space space(ElementType::Line2, 1);
 

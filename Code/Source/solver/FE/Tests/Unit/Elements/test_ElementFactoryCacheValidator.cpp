@@ -13,6 +13,7 @@
 #include "FE/Basis/BasisFactory.h"
 #include "FE/Geometry/IsoparametricMapping.h"
 #include "FE/Basis/LagrangeBasis.h"
+#include "FE/Quadrature/QuadratureFactory.h"
 #include <optional>
 
 using namespace svmp::FE;
@@ -140,6 +141,72 @@ TEST(ElementFactory, CreatesCompatibleVectorSplineAndNurbsElements) {
     EXPECT_EQ(hdiv->continuity(), Continuity::H_div);
     EXPECT_EQ(hdiv->basis().basis_type(), BasisType::NURBS);
     EXPECT_TRUE(std::dynamic_pointer_cast<GeneralBasisElement>(hdiv));
+}
+
+TEST(ElementFactory, MultispanSplineMassIntegratesEveryPairOfLinearHats) {
+    ElementRequest req;
+    req.element_type = ElementType::Line2;
+    req.basis_type = BasisType::BSpline;
+    req.order = 1;
+    req.knot_vector = {5, 5, 5.25, 5.75, 6.5, 7, 7};
+    const auto element = ElementFactory::create(req);
+    const std::array<Real, 4> widths{0.25, 0.5, 0.75, 0.5};
+    const auto n = widths.size() + 1;
+    ASSERT_EQ(element->basis().size(), n);
+    std::vector<Real> expected(n * n, 0);
+    for (std::size_t e = 0; e < widths.size(); ++e) {
+        // Integral of two linear hats over a reference span of width h.
+        expected[e * n + e] += widths[e] / 3;
+        expected[(e + 1) * n + e + 1] += widths[e] / 3;
+        expected[e * n + e + 1] += widths[e] / 6;
+        expected[(e + 1) * n + e] += widths[e] / 6;
+    }
+    for (const auto& rule : {element->quadrature(),
+             quadrature::QuadratureFactory::cell_rule(req.element_type, *element, 11)}) {
+        std::vector<Real> mass(n * n, 0), values;
+        for (std::size_t q = 0; q < rule->num_points(); ++q) {
+            element->basis().evaluate_values(rule->point(q), values);
+            for (std::size_t i = 0; i < n; ++i) {
+                for (std::size_t j = 0; j < n; ++j) {
+                    mass[i * n + j] += rule->weight(q) * values[i] * values[j];
+                }
+            }
+        }
+        for (std::size_t i = 0; i < mass.size(); ++i) {
+            EXPECT_NEAR(mass[i], expected[i], 2e-14) << "entry " << i << ", order " << rule->order();
+        }
+    }
+}
+
+TEST(ElementFactory, AnisotropicSplineRulesIntegrateEachKnotRectangle) {
+    ElementRequest req;
+    req.element_type = ElementType::Quad4;
+    req.order = 2;
+    req.axis_orders = {2, 1};
+    req.axis_knot_vectors = {{1, 1, 1, 1.25, 1.25, 2, 2, 2}, {-2, -2, -1.25, -1, -1}};
+    for (auto family : {BasisType::BSpline, BasisType::NURBS}) {
+        req.basis_type = family;
+        if (family == BasisType::NURBS) {
+            req.tensor_extents = {5, 3};
+            req.weights.assign(15, 1);
+            req.weights[6] = 1.5;
+        }
+        for (auto continuity : {Continuity::C0, Continuity::H_div, Continuity::H_curl}) {
+            req.continuity = continuity;
+            req.field_type = continuity == Continuity::C0 ? FieldType::Scalar : FieldType::Vector;
+            const auto element = ElementFactory::create(req);
+            const auto rule = element->quadrature();
+            std::array<Real, 4> areas{};
+            for (std::size_t q = 0; q < rule->num_points(); ++q) {
+                const auto p = rule->point(q);
+                areas[(p[0] > -0.5) + 2 * (p[1] > 0.5)] += rule->weight(q);
+            }
+            const std::array<Real, 4> expected{0.75, 2.25, 0.25, 0.75};
+            for (std::size_t i = 0; i < areas.size(); ++i) {
+                EXPECT_NEAR(areas[i], expected[i], 2e-13);
+            }
+        }
+    }
 }
 
 TEST(ElementFactory, CreatesGenericScalarBasisBackedElements) {

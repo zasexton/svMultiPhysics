@@ -15,6 +15,7 @@
 #include "Elements/GeneralBasisElement.h"
 #include "Elements/VectorElement.h"
 #include "Elements/SpectralElement.h"
+#include "Quadrature/CompositeQuadrature.h"
 #include "Quadrature/QuadratureFactory.h"
 
 #include <algorithm>
@@ -100,6 +101,36 @@ int vector_basis_quadrature_order(const basis::BasisFunction& basis) {
     }
 }
 
+std::shared_ptr<const quadrature::QuadratureRule> generic_element_quadrature(
+    const ElementRequest& req, int dimension, int order) {
+    auto rule = quadrature::QuadratureFactory::create(req.element_type, order);
+    if (req.basis_type != BasisType::BSpline && req.basis_type != BasisType::NURBS) {
+        return rule;
+    }
+
+    // BSplineBasis maps [-1,1] onto [U_p,U_n], with n control points.
+    quadrature::TensorPartitionQuadrature::AxisBreaks breaks(dimension);
+    bool has_internal_knot = false;
+    for (int d = 0; d < dimension; ++d) {
+        const auto& knots = req.axis_knot_vectors.empty() ? req.knot_vector : req.axis_knot_vectors[d];
+        const auto degree = req.axis_orders.empty() ? *req.order : req.axis_orders[d];
+        const auto last = knots.size() - degree - 1;
+        const Real left = knots[degree], right = knots[last];
+        auto& axis = breaks[d];
+        axis.push_back(-1);
+        for (std::size_t i = degree + 1; i < last; ++i) {
+            if (knots[i] > knots[i - 1] && knots[i] < right) {
+                const Real xi = 2 * ((knots[i] - left) / (right - left)) - 1;
+                if (xi > axis.back() && xi < 1) axis.push_back(xi);
+            }
+        }
+        axis.push_back(1);
+        has_internal_knot |= axis.size() > 2;
+    }
+    if (!has_internal_knot) return rule;
+    return std::make_shared<quadrature::TensorPartitionQuadrature>(*rule, std::move(breaks));
+}
+
 std::shared_ptr<Element> create_generic_scalar_element(const ElementRequest& req) {
     if (req.field_type != FieldType::Scalar) {
         throw FEException("ElementFactory: generic scalar basis elements require FieldType::Scalar",
@@ -129,8 +160,7 @@ std::shared_ptr<Element> create_generic_scalar_element(const ElementRequest& req
     }
 
     const int quad_order = scalar_basis_quadrature_order(*basis);
-    auto quad = quadrature::QuadratureFactory::create(
-        req.element_type, quad_order, QuadratureType::GaussLegendre, true);
+    auto quad = generic_element_quadrature(req, basis->dimension(), quad_order);
 
     return std::make_shared<GeneralBasisElement>(
         std::move(basis), std::move(quad), FieldType::Scalar, continuity);
@@ -164,8 +194,7 @@ std::shared_ptr<Element> create_generic_vector_element(const ElementRequest& req
     }
 
     const int quad_order = vector_basis_quadrature_order(*basis);
-    auto quad = quadrature::QuadratureFactory::create(
-        req.element_type, quad_order, QuadratureType::GaussLegendre, true);
+    auto quad = generic_element_quadrature(req, basis->dimension(), quad_order);
 
     return std::make_shared<GeneralBasisElement>(
         std::move(basis), std::move(quad), FieldType::Vector, continuity);

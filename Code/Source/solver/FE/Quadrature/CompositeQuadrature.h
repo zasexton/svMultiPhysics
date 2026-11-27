@@ -40,6 +40,19 @@ public:
                         const std::array<int, 3>& subdivisions);
 };
 
+/// Apply a tensor-cell rule on each box of an explicit reference partition.
+class TensorPartitionQuadrature : public QuadratureRule {
+public:
+    using AxisBreaks = std::vector<std::vector<Real>>;
+
+    /// Each active axis lists its increasing endpoints, including -1 and +1.
+    TensorPartitionQuadrature(const QuadratureRule& base_rule, AxisBreaks axis_breaks);
+    const AxisBreaks& axis_breaks() const noexcept { return axis_breaks_; }
+
+private:
+    AxisBreaks axis_breaks_;
+};
+
 } // namespace quadrature
 } // namespace FE
 } // namespace svmp

@@ -6,6 +6,7 @@
  */
 
 #include "QuadratureFactory.h"
+#include "CompositeQuadrature.h"
 #include "Elements/Element.h"
 #include "SymmetricTetrahedronQuadrature.h"
 #include "SymmetricTriangleQuadrature.h"
@@ -266,7 +267,11 @@ std::shared_ptr<const QuadratureRule> QuadratureFactory::cell_rule(
     if (rule && (minimum_order == 0 || rule->order() >= minimum_order)) {
         return rule;
     }
-    return create_pinned(type, std::max(minimum_order, recommended_order(order, false)));
+    auto upgraded = create_pinned(type, std::max(minimum_order, recommended_order(order, false)));
+    if (const auto* partition = dynamic_cast<const TensorPartitionQuadrature*>(rule.get())) {
+        return std::make_shared<TensorPartitionQuadrature>(*upgraded, partition->axis_breaks());
+    }
+    return upgraded;
 }
 
 int QuadratureFactory::recommended_order(int basis_order, bool is_mass_matrix) {

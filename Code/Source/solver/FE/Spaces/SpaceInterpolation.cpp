@@ -8,9 +8,11 @@
 
 #include "Spaces/SpaceInterpolation.h"
 #include "Math/DenseLinearAlgebra.h"
+#include "Quadrature/CompositeQuadrature.h"
 #include "Quadrature/QuadratureFactory.h"
 
 #include <algorithm>
+#include <iterator>
 #include <utility>
 
 namespace svmp {
@@ -36,6 +38,33 @@ void evaluate_space_basis(const FunctionSpace& space, const FunctionSpace::Value
         values[i] = space.evaluate(point, unit);
         unit[i] = 0.;
     }
+}
+
+std::shared_ptr<const quadrature::QuadratureRule> restriction_quadrature(
+    const FunctionSpace& fine, const FunctionSpace& coarse, bool shared_coordinates) {
+    const auto src = fine.element().quadrature();
+    const auto dst = coarse.element().quadrature();
+    const int order = std::max(fine.polynomial_order(), coarse.polynomial_order());
+    const int exactness = std::max({quadrature::QuadratureFactory::recommended_order(order, true),
+                                    src->order(), dst->order()});
+    auto base = quadrature::QuadratureFactory::create(coarse.element_type(), exactness);
+    using Partition = quadrature::TensorPartitionQuadrature;
+    const auto* dst_partition = dynamic_cast<const Partition*>(dst.get());
+    const auto* src_partition = shared_coordinates && src->cell_family() == dst->cell_family()
+        ? dynamic_cast<const Partition*>(src.get()) : nullptr;
+    if (!dst_partition && !src_partition) return base;
+
+    auto breaks = (dst_partition ? dst_partition : src_partition)->axis_breaks();
+    if (dst_partition && src_partition) {
+        for (std::size_t d = 0; d < breaks.size(); ++d) {
+            const auto& other = src_partition->axis_breaks()[d];
+            std::vector<Real> merged;
+            std::set_union(breaks[d].begin(), breaks[d].end(), other.begin(), other.end(),
+                           std::back_inserter(merged));
+            breaks[d] = std::move(merged);
+        }
+    }
+    return std::make_shared<Partition>(*base, std::move(breaks));
 }
 
 } // namespace
@@ -128,11 +157,7 @@ SpaceInterpolation::TransferOperator SpaceInterpolation::restriction_operator(
     TransferOperator cross_mass{rows, cols, std::vector<Real>(rows * cols, 0.)};
     if (!rows || !cols) return cross_mass;
 
-    const int order = std::max(fine_space.polynomial_order(), coarse_space.polynomial_order());
-    const int exactness = std::max({quadrature::QuadratureFactory::recommended_order(order, true),
-                                   fine_space.element().quadrature()->order(),
-                                   coarse_space.element().quadrature()->order()});
-    const auto rule = quadrature::QuadratureFactory::create(coarse_space.element_type(), exactness);
+    const auto rule = restriction_quadrature(fine_space, coarse_space, !point_map);
     std::vector<Real> mass(rows * rows, 0.), coarse_unit(rows, 0.), fine_unit(cols, 0.);
     std::vector<FunctionSpace::Value> coarse(rows), fine(cols);
     for (std::size_t q = 0; q < rule->num_points(); ++q) {

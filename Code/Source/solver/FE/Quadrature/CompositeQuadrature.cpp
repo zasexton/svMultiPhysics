@@ -25,48 +25,41 @@ void ensure_positive(std::array<int, 3>& s) {
     }
 }
 
-// Tensor-product subdivision for line/quad/hex
+// Map the base rule onto each interval, rectangle, or box.
 void build_tensor(const QuadratureRule& base,
-                  const std::array<int, 3>& sub,
-                  std::vector<QuadPoint>& out_pts,
-                  std::vector<Real>& out_wts) {
-    const int dim = base.dimension();
-    const Real h_x = Real(2) / Real(sub[0]);
-    const Real h_y = dim >= 2 ? Real(2) / Real(sub[1]) : Real(0);
-    const Real h_z = dim == 3 ? Real(2) / Real(sub[2]) : Real(0);
-
-    const auto& pts = base.points();
-    const auto& wts = base.weights();
-
-    auto map_coord = [](Real pt, Real origin, Real scale) {
-        return origin + scale * (pt + Real(1));
-    };
-
-    for (int ix = 0; ix < sub[0]; ++ix) {
-        const Real ox = Real(-1) + h_x * Real(ix);
-        const Real sx = h_x / Real(2);
-
-        for (int iy = 0; iy < (dim >= 2 ? sub[1] : 1); ++iy) {
-            const Real oy = dim >= 2 ? (Real(-1) + h_y * Real(iy)) : Real(0);
-            const Real sy = dim >= 2 ? (h_y / Real(2)) : Real(0);
-
-            for (int iz = 0; iz < (dim == 3 ? sub[2] : 1); ++iz) {
-                const Real oz = dim == 3 ? (Real(-1) + h_z * Real(iz)) : Real(0);
-                const Real sz = dim == 3 ? (h_z / Real(2)) : Real(0);
-
-                for (std::size_t p = 0; p < pts.size(); ++p) {
-                    Real x = map_coord(pts[p][0], ox, sx);
-                    Real y = dim >= 2 ? map_coord(pts[p][1], oy, sy) : Real(0);
-                    Real z = dim == 3 ? map_coord(pts[p][2], oz, sz) : Real(0);
-
-                    out_pts.push_back(QuadPoint{x, y, z});
-
-                    Real weight_scale = sx;
-                    if (dim >= 2) weight_scale *= sy;
-                    if (dim == 3) weight_scale *= sz;
-                    out_wts.push_back(wts[p] * weight_scale);
-                }
+                  const TensorPartitionQuadrature::AxisBreaks& breaks,
+                  std::vector<QuadPoint>& points,
+                  std::vector<Real>& weights) {
+    if (base.num_points() == 0) return;
+    std::size_t boxes = 1;
+    for (const auto& axis : breaks) {
+        const std::size_t spans = axis.size() - 1;
+        FE_CHECK_ARG(boxes <= points.max_size() / spans, "Tensor partition exceeds capacity");
+        boxes *= spans;
+    }
+    FE_CHECK_ARG(boxes <= points.max_size() / base.num_points(), "Tensor quadrature exceeds capacity");
+    points.reserve(boxes * base.num_points());
+    weights.reserve(boxes * base.num_points());
+    for (std::size_t box = 0; box < boxes; ++box) {
+        auto index = box;
+        QuadPoint lower{}, scale{};
+        Real jacobian = 1;
+        for (int d = base.dimension() - 1; d >= 0; --d) {
+            const auto& axis = breaks[d];
+            const auto span = index % (axis.size() - 1);
+            index /= axis.size() - 1;
+            lower[d] = axis[span];
+            scale[d] = (axis[span + 1] - axis[span]) / 2;
+            jacobian *= scale[d];
+        }
+        for (std::size_t q = 0; q < base.num_points(); ++q) {
+            QuadPoint mapped{};
+            const auto point = base.point(q);
+            for (int d = 0; d < base.dimension(); ++d) {
+                mapped[d] = lower[d] + scale[d] * (point[d] + 1);
             }
+            points.push_back(mapped);
+            weights.push_back(base.weight(q) * jacobian);
         }
     }
 }
@@ -277,9 +270,19 @@ CompositeQuadrature::CompositeQuadrature(const QuadratureRule& base_rule,
     switch (base_rule.cell_family()) {
         case svmp::CellFamily::Line:
         case svmp::CellFamily::Quad:
-        case svmp::CellFamily::Hex:
-            build_tensor(base_rule, sub, pts, wts);
+        case svmp::CellFamily::Hex: {
+            TensorPartitionQuadrature::AxisBreaks breaks(base_rule.dimension());
+            for (int d = 0; d < base_rule.dimension(); ++d) {
+                auto& axis = breaks[d];
+                const auto n = static_cast<std::size_t>(sub[d]);
+                axis.reserve(n + 1);
+                for (std::size_t i = 0; i <= n; ++i) {
+                    axis.push_back(Real(-1) + (Real(2) * i) / n);
+                }
+            }
+            build_tensor(base_rule, breaks, pts, wts);
             break;
+        }
         case svmp::CellFamily::Triangle:
             build_triangle(base_rule, sub[0], pts, wts);
             break;
@@ -301,6 +304,28 @@ CompositeQuadrature::CompositeQuadrature(const QuadratureRule& base_rule,
     }
 
     set_data(std::move(pts), std::move(wts));
+}
+
+TensorPartitionQuadrature::TensorPartitionQuadrature(const QuadratureRule& base_rule,
+                                                     AxisBreaks axis_breaks)
+    : QuadratureRule(base_rule.cell_family(), base_rule.dimension(), base_rule.order()),
+      axis_breaks_(std::move(axis_breaks)) {
+    const auto family = cell_family();
+    FE_CHECK_ARG(family == svmp::CellFamily::Line || family == svmp::CellFamily::Quad ||
+                 family == svmp::CellFamily::Hex, "Tensor partitions require a line, quad or hex");
+    FE_CHECK_ARG(axis_breaks_.size() == static_cast<std::size_t>(dimension()),
+                 "Tensor partition must describe every active axis");
+    for (const auto& axis : axis_breaks_) {
+        FE_CHECK_ARG(axis.size() >= 2 && axis.front() == -1 && axis.back() == 1,
+                     "Tensor partition must cover the full reference interval");
+        for (std::size_t i = 1; i < axis.size(); ++i) {
+            FE_CHECK_ARG(axis[i] > axis[i - 1], "Tensor partition endpoints must increase");
+        }
+    }
+    std::vector<QuadPoint> points;
+    std::vector<Real> weights;
+    build_tensor(base_rule, axis_breaks_, points, weights);
+    set_data(std::move(points), std::move(weights));
 }
 
 } // namespace quadrature
