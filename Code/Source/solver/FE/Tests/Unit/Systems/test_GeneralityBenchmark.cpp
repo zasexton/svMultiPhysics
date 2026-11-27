@@ -19,8 +19,7 @@
  * theoretical ones.  The problems are those of section 5 of the vocabulary
  * review of 2026-11-24 that the vocabulary expresses today: 1, 3, 4, 5, 6,
  * 7, 8, 10 and 11; test_GeneralityBenchmarkGaps.cpp holds those it expresses
- * only in part.  Disabled cases document their outstanding qualification in their
- * test bodies and can be run with --gtest_also_run_disabled_tests.
+ * only in part.
  */
 
 #include "Tests/Unit/Systems/GeneralityBenchmark.h"
@@ -1546,16 +1545,8 @@ TEST(GeneralityBenchmark, P11_ConjugateHeatExactPatchOnEveryFamily)
     }
 }
 
-TEST(GeneralityBenchmark, DISABLED_P11_TheDeclaredExchangeQuantityIsMeasured)
+TEST(GeneralityBenchmark, P11_TheDeclaredExchangeQuantityIsMeasured)
 {
-    // Missing: the measured-form evaluator takes dI only on a generated
-    // (cut) interface and one side at a time; the quantity
-    // F.quantity("heat_A_to_B", ..., dI(Gamma)) of a fitted interface (an
-    // InterfaceMesh from a face set) is refused ("a cut measure ... needs a
-    // cut integration context"), and the same two-sided integrand on a
-    // generated interface throws ("requested plus-side context in non-DG
-    // evaluation"), so an exchange cannot be recorded through its own
-    // quantity (problem 13 measures it through the rows instead).
     const SlabData d;
     BoxOptions options;
     options.region = [d](const Point& c) { return c[0] < d.s ? kSlabA : kSlabB; };

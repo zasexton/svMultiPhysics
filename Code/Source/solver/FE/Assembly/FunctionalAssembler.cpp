@@ -810,20 +810,21 @@ void prepareBoundaryFaceContext(AssemblyContext& context,
 }
 
 /**
- * The assembly kernel of a cut-rule loop of StandardAssembler: each rule adds
- * the functional kernel's cell total (cut-volume rules) or boundary-face total
- * (generated interface rules) to a compensated sum; nothing is inserted.
+ * Accumulates cell or facet quadrature on the same contexts as an assembled form.
+ * Interface kernels can read both traces. No algebraic entries are emitted.
  */
-class CutRuleFunctionalAdapter final : public AssemblyKernel {
+class RuleFunctionalAdapter final : public AssemblyKernel {
 public:
     enum class Rules : std::uint8_t {
         Volume,
-        Interface
+        GeneratedInterface,
+        FittedInterface
     };
 
-    CutRuleFunctionalAdapter(FunctionalKernel& kernel, Rules rules)
+    RuleFunctionalAdapter(FunctionalKernel& kernel, Rules rules)
         : kernel_(kernel)
         , rules_(rules)
+        , reads_plus_(rules != Rules::Volume && kernel.requiresTwoSidedInterfaceFace())
     {
     }
 
@@ -844,12 +845,18 @@ public:
     }
     [[nodiscard]] bool hasBoundaryFace() const noexcept override
     {
-        return rules_ == Rules::Interface;
+        return rules_ != Rules::Volume;
     }
     [[nodiscard]] bool hasSingleSidedInterfaceFace() const noexcept override
     {
-        return rules_ == Rules::Interface;
+        return rules_ != Rules::Volume;
     }
+
+    [[nodiscard]] bool hasInterfaceFace() const noexcept override
+    {
+        return rules_ == Rules::FittedInterface || reads_plus_;
+    }
+    [[nodiscard]] bool requiresTwoSidedInterfaceFace() const noexcept override { return reads_plus_; }
 
     void computeCell(const AssemblyContext& context,
                      KernelOutput& output) override
@@ -876,6 +883,13 @@ public:
                        false);
     }
 
+    void computeInterfaceFace(const AssemblyContext& minus, const AssemblyContext& plus, int marker,
+                              KernelOutput& mm, KernelOutput& pp, KernelOutput& mp, KernelOutput& pm) override
+    {
+        add(kernel_.evaluateInterfaceFaceTotal(minus, plus, marker));
+        for (auto* output : {&mm, &pp, &mp, &pm}) output->reserve(0, 0, false, false);
+    }
+
     [[nodiscard]] Real value() const noexcept { return sum_; }
 
 private:
@@ -888,7 +902,8 @@ private:
     }
 
     FunctionalKernel& kernel_;
-    Rules rules_{Rules::Interface};
+    Rules rules_;
+    bool reads_plus_;
     Real sum_{0.0};
     Real compensation_{0.0};
 };
@@ -1705,6 +1720,29 @@ Real FunctionalAssembler::assembleGeneratedInterfaceScalar(FunctionalKernel& ker
     });
 }
 
+#if defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH
+Real FunctionalAssembler::assembleFittedInterfaceScalar(FunctionalKernel& kernel, const svmp::InterfaceMesh& mesh,
+                                                       int marker, FunctionalReduction reduction)
+{
+    return scalarIntegral(kernel, reduction, [&](FunctionalResult& result) {
+        FE_CHECK_ARG(marker >= 0, "FunctionalAssembler: a fitted interface requires a nonnegative marker");
+        FE_CHECK_ARG(isConfigured() && kernel.hasBoundaryFace(),
+                     "FunctionalAssembler: fitted interface integration requires a configured boundary integrand");
+        RuleFunctionalAdapter adapter(kernel, RuleFunctionalAdapter::Rules::FittedInterface);
+        const auto assembly = runRuleBridge(nullptr, [&](StandardAssembler& bridge) {
+            // The functional adapter emits no matrix or vector entries.
+            DenseMatrixView unused(0);
+            return bridge.assembleInterfaceFaces(*mesh_, mesh, marker, *space_, *space_, adapter, unused, nullptr);
+        });
+        result.success = assembly.success;
+        result.error_message = assembly.error_message;
+        result.faces_processed = assembly.interface_faces_assembled;
+        result.elapsed_seconds = assembly.elapsed_time_seconds;
+        return adapter.value();
+    });
+}
+#endif
+
 Real FunctionalAssembler::localCutIntegral(FunctionalKernel& kernel, const CutIntegrationContext& cut_context,
                                           int marker, geometry::CutIntegrationSide side, FunctionalResult& result)
 {
@@ -1720,9 +1758,9 @@ Real FunctionalAssembler::localCutIntegral(FunctionalKernel& kernel, const CutIn
                                        : "Kernel does not support cell integration";
         return 0.;
     }
-    using Rules = CutRuleFunctionalAdapter::Rules;
-    CutRuleFunctionalAdapter adapter(kernel, surface ? Rules::Interface : Rules::Volume);
-    const auto assembly = runCutRuleBridge(cut_context, [&](StandardAssembler& bridge) {
+    using Rules = RuleFunctionalAdapter::Rules;
+    RuleFunctionalAdapter adapter(kernel, surface ? Rules::GeneratedInterface : Rules::Volume);
+    const auto assembly = runRuleBridge(&cut_context, [&](StandardAssembler& bridge) {
         if (surface) {
             return bridge.assembleCutInterfaces(*mesh_, cut_context, marker, *space_, *space_, adapter,
                                                 nullptr, nullptr, false, false);
@@ -1738,8 +1776,8 @@ Real FunctionalAssembler::localCutIntegral(FunctionalKernel& kernel, const CutIn
     return adapter.value();
 }
 
-AssemblyResult FunctionalAssembler::runCutRuleBridge(
-    const CutIntegrationContext& cut_context,
+AssemblyResult FunctionalAssembler::runRuleBridge(
+    const CutIntegrationContext* cut_context,
     const std::function<AssemblyResult(StandardAssembler&)>& loop)
 {
     AssemblyOptions bridge_options;
@@ -1805,7 +1843,7 @@ AssemblyResult FunctionalAssembler::runCutRuleBridge(
     bridge.setParameterGetter(get_param_);
     bridge.setUserData(user_data_);
     bridge.setSystemJITConstants(jit_constants_, jit_positional_aliases_);
-    bridge.setCutIntegrationContext(&cut_context);
+    bridge.setCutIntegrationContext(cut_context);
     bridge.setCoupledValues(coupled_integrals_, coupled_aux_state_);
     bridge.setAuxiliaryValues(auxiliary_inputs_,
                               auxiliary_state_,

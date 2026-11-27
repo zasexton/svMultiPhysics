@@ -94,7 +94,10 @@ struct FunctionalFormValue {
  * non-global one in DOF-map order gives the cell quadrature), as for the
  * system's boundary functionals.  The ghost values of the state's backend
  * vectors are refreshed first.  A null @p cut_context means the system's
- * published cut integration context.
+ * published cut integration context. A dI(marker) term visits the physical
+ * facets of a registered fitted InterfaceMesh and any generated rules on the
+ * same marker. Explicit plus/minus, average and jump expressions use the two
+ * aligned traces at each quadrature point.
  */
 [[nodiscard]] std::vector<FunctionalFormValue> evaluateFunctionalForms(
     const FESystem& system,

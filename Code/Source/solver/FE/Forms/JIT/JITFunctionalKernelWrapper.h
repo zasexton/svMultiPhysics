@@ -61,6 +61,16 @@ public:
     void evaluateCellTotalBatch(std::span<const assembly::AssemblyContext* const> contexts,
                                 std::span<Real> totals) override;
 
+    [[nodiscard]] bool requiresTwoSidedInterfaceFace() const noexcept override
+    {
+        return fallback_->requiresTwoSidedInterfaceFace();
+    }
+    [[nodiscard]] Real evaluateInterfaceFace(const assembly::AssemblyContext& minus, const assembly::AssemblyContext& plus,
+                                             LocalIndex q, int marker) override
+    {
+        return fallback_->evaluateInterfaceFace(minus, plus, q, marker);
+    }
+
     [[nodiscard]] Real evaluateBoundaryFace(const assembly::AssemblyContext& ctx,
                                             LocalIndex q,
                                             int boundary_marker) override;

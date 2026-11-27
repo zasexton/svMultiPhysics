@@ -16,6 +16,10 @@
 #include "Forms/BoundaryFunctional.h"
 #include "Forms/FormExpr.h"
 #include "Forms/IntegrationDomain.h"
+#if defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH
+#include "Mesh/Core/InterfaceMesh.h"
+#include "Mesh/Core/MeshBase.h"
+#endif
 #include "PostProcessing/ScalarHistory.h"
 #include "Spaces/H1Space.h"
 #include "Systems/BoundaryReductionService.h"
@@ -26,6 +30,7 @@
 #include "Tests/Unit/Systems/FunctionalFormEvaluatorFixtures.h"
 
 #include <algorithm>
+#include <array>
 #include <bit>
 #include <cmath>
 #include <cstddef>
@@ -278,7 +283,7 @@ struct StripSystem {
     std::vector<Real> u_values{};
 };
 
-[[nodiscard]] StripSystem stripSystem(MPI_Comm comm)
+[[nodiscard]] StripSystem stripSystem(MPI_Comm comm, int fitted_marker = -1)
 {
     int rank = 0;
     int size = 1;
@@ -319,6 +324,37 @@ struct StripSystem {
     options.dof_options.my_rank = rank;
     options.dof_options.world_size = size;
     options.dof_options.mpi_comm = comm;
+#if defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH
+    if (fitted_marker >= 0) {
+        svmp::MeshBase base;
+        std::vector<svmp::real_t> coordinates;
+        for (GlobalIndex v = 0; v < out.mesh->numVertices(); ++v) {
+            const auto p = out.mesh->getNodeCoordinates(v);
+            coordinates.insert(coordinates.end(), {p[0], p[1]});
+        }
+        svmp::CellShape quad{};
+        quad.family = svmp::CellFamily::Quad;
+        quad.num_corners = 4;
+        quad.order = 1;
+        base.build_from_arrays(2, coordinates,
+            std::vector<svmp::offset_t>(topology.cell2vertex_offsets.begin(), topology.cell2vertex_offsets.end()),
+            std::vector<svmp::index_t>(topology.cell2vertex_data.begin(), topology.cell2vertex_data.end()),
+            std::vector<svmp::CellShape>(kCellCount, quad));
+        base.finalize();
+        for (svmp::index_t face = 0; face < static_cast<svmp::index_t>(base.n_faces()); ++face) {
+            const auto vertices = base.face_vertices(face);
+            const auto p = out.mesh->getNodeCoordinates(vertices[0]);
+            const auto q = out.mesh->getNodeCoordinates(vertices[1]);
+            if (p[0] == q[0] && p[0] > 0. && p[0] < kExtent) {
+                base.add_to_set(svmp::EntityKind::Face, "interior", face);
+            }
+        }
+        sys.setInterfaceMesh(fitted_marker, std::make_shared<svmp::InterfaceMesh>(
+            svmp::InterfaceMesh::build_from_face_set(base, "interior")));
+    }
+#else
+    (void)fitted_marker;
+#endif
     systems::SetupInputs inputs;
     inputs.topology_override = topology;
     sys.setup(options, inputs);
@@ -338,6 +374,57 @@ struct StripSystem {
 
 
 } // namespace
+
+#if defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH
+TEST(FunctionalFormEvaluatorMPI, ASharedFittedInterfaceContributesOncePerPhysicalFace)
+{
+    constexpr int marker = fixture::kInterfaceMarker;
+    auto strip = stripSystem(MPI_COMM_WORLD, marker);
+    const auto u = FormExpr::discreteField(strip.u, *strip.system->fieldRecord(strip.u).space, "u");
+    const std::array<FormExpr, 2> quantities{FormExpr::constant(1.).dI(marker),
+                                             (2. * u.plus() - u.minus()).dI(marker)};
+    systems::SystemStateView state;
+    state.u = strip.u_values;
+    const auto values = systems::evaluateFunctionalForms(*strip.system, quantities, state,
+                                                         systems::CollectiveCommunicator(MPI_COMM_WORLD));
+    std::array<Real, 2> expected{};
+    for (GlobalIndex i = 1; i < kCellCount; ++i) {
+        const auto p = strip.mesh->getNodeCoordinates(i);
+        const Real length = 1. - p[1];
+        expected[0] += length;
+        // u=1+2x+(3+x)y is affine along each vertical facet.
+        expected[1] += length * (1. + 2.*p[0] + (3.+p[0])*(1.+p[1])/2.);
+    }
+    ASSERT_EQ(values.size(), expected.size());
+    for (std::size_t i = 0; i < values.size(); ++i) {
+        EXPECT_NEAR(values[i].value, expected[i], 1e-12);
+        EXPECT_NEAR(values[i].absolute_mass, expected[i], 1e-12);
+    }
+
+    // A marker can also carry a generated interface. Its independent contribution
+    // is integrated once, as for the assembled interface operator.
+    constexpr Real x = 1.13;
+    const auto context = fixture::quadStripCutContext(*strip.mesh, [](Real xx, Real) { return xx - x; },
+        worldCollective(strip.mesh->parallelRank(), strip.mesh->parallelSize()));
+    const auto combined = systems::evaluateFunctionalForms(*strip.system, quantities, state,
+        systems::CollectiveCommunicator(MPI_COMM_WORLD), context.get());
+    // The wall is piecewise linear on each cell. Interpolate the bottom ordinate at x.
+    const auto cell = static_cast<GlobalIndex>(x * kCellCount / kExtent);
+    const auto left = strip.mesh->getNodeCoordinates(cell);
+    const auto right = strip.mesh->getNodeCoordinates(cell + 1);
+    const Real bottom = left[1] + (x-left[0]) / (right[0]-left[0]) * (right[1]-left[1]);
+    const Real length = 1. - bottom;
+    EXPECT_NEAR(combined[0].value, expected[0] + length, 1e-12);
+    // The nodal Q1 data on the distorted strip interpolates xy on the top and bottom edges.
+    const Real fraction = (x-left[0]) / (right[0]-left[0]);
+    const auto field = [](Real px, Real py) { return 1. + 2.*px + (3.+px)*py; };
+    const Real lower_u = (1.-fraction)*field(left[0], left[1]) + fraction*field(right[0], right[1]);
+    const Real upper_u = field(x, 1.);
+    EXPECT_NEAR(combined[1].value, expected[1] + length * (lower_u + upper_u) / 2., 1e-12);
+
+}
+
+#endif
 
 TEST(FunctionalFormEvaluatorMPI, FunctionalNormAndBatchUseTheMeshCommunicator)
 {

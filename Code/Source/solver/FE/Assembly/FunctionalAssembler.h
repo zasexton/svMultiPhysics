@@ -312,6 +312,24 @@ public:
      * Linear functionals can use superposition for efficiency.
      */
     [[nodiscard]] virtual bool isLinear() const noexcept { return false; }
+
+    /// Whether the integrand reads the plus trace of a generated interface.
+    [[nodiscard]] virtual bool requiresTwoSidedInterfaceFace() const noexcept { return false; }
+
+    [[nodiscard]] virtual Real evaluateInterfaceFace(const AssemblyContext& minus, const AssemblyContext& /*plus*/,
+                                                    LocalIndex q, int marker) {
+        return evaluateBoundaryFace(minus, q, marker);
+    }
+
+    [[nodiscard]] virtual Real evaluateInterfaceFaceTotal(const AssemblyContext& minus, const AssemblyContext& plus,
+                                                         int marker) {
+        if (!requiresTwoSidedInterfaceFace()) return evaluateBoundaryFaceTotal(minus, marker);
+        Real sum = 0.;
+        for (LocalIndex q = 0; q < minus.numQuadraturePoints(); ++q) {
+            sum += evaluateInterfaceFace(minus, plus, q, marker) * minus.integrationWeight(q);
+        }
+        return sum;
+    }
 };
 
 // ============================================================================
@@ -844,6 +862,12 @@ public:
         int interface_marker,
         FunctionalReduction reduction = FunctionalReduction::Global);
 
+#if defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH
+    /// Integrate a scalar quantity on both aligned volume traces of a fitted interface.
+    [[nodiscard]] Real assembleFittedInterfaceScalar(FunctionalKernel& kernel,
+        const svmp::InterfaceMesh& mesh, int marker, FunctionalReduction reduction = FunctionalReduction::Global);
+#endif
+
     // =========================================================================
     // Multiple Functionals
     // =========================================================================
@@ -1004,8 +1028,8 @@ private:
      * @brief Run @p loop on a StandardAssembler that reads this assembler's
      * fields, state and parameters and @p cut_context, and inserts nothing.
      */
-    AssemblyResult runCutRuleBridge(
-        const CutIntegrationContext& cut_context,
+    AssemblyResult runRuleBridge(
+        const CutIntegrationContext* cut_context,
         const std::function<AssemblyResult(StandardAssembler&)>& loop);
 
     /**

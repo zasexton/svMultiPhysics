@@ -144,6 +144,21 @@ TEST(FunctionalFormEvaluator, IntegratesEveryMeasureOfAPlanarCutExactly)
     }
 }
 
+TEST(FunctionalFormEvaluator, IntegratesBothGeneratedTracesAtTheSamePhysicalPoint)
+{
+    PlanarCut cut;
+    const auto u = cut.u();
+    const auto n = FormExpr::normal().component(0);
+    const auto values = cut.evaluate({(u.minus() + 2.0 * u.plus()).dI(fixture::kInterfaceMarker),
+                                      (n.minus() - n.plus()).dI(fixture::kInterfaceMarker)});
+    ASSERT_EQ(values.size(), 2u);
+    const Real expected = 3.0 * (1.0 + 2.0*kInterfaceX + 1.5);
+    EXPECT_NEAR(values[0].value, expected, 1e-12);
+    EXPECT_NEAR(values[0].absolute_mass, expected, 1e-12);
+    EXPECT_NEAR(values[1].value, 2.0, 1e-12);
+    EXPECT_NEAR(values[1].absolute_mass, 2.0, 1e-12);
+}
+
 TEST(FunctionalFormEvaluator, SumsTheSignedTermsOfAFormExactly)
 {
     PlanarCut cut;

@@ -18536,54 +18536,32 @@ void FunctionalFormKernel::ensureInterpreterLoweredIndexedAccess()
     });
 }
 
-Real FunctionalFormKernel::evaluateCell(const assembly::AssemblyContext& ctx, LocalIndex q)
+bool FunctionalFormKernel::requiresTwoSidedInterfaceFace() const noexcept
 {
-    ensureInterpreterLoweredIndexedAccess();
-
-    if (domain_ != Domain::Cell) {
-        return 0.0;
-    }
-
-    EvalEnvReal env{
-        /*minus=*/ctx,
-        /*plus=*/nullptr,
-        /*kind=*/FormKind::Linear,
-        /*test_active=*/Side::Minus,
-        /*trial_active=*/Side::Minus,
-        /*i=*/0,
-        /*j=*/0,
-        /*constitutive_state=*/nullptr,
-        /*constitutive_cache=*/nullptr,
-    };
-
-    const auto v = evalReal(*integrand_.node(), env, Side::Minus, q);
-    FE_THROW_IF(v.kind != EvalValue<Real>::Kind::Scalar, InvalidArgumentException,
-                "Forms::FunctionalFormKernel: integrand did not evaluate to a scalar");
-    return v.s;
+    return domain_ == Domain::BoundaryFace && formExprRequiresTwoSidedInterfaceFace(integrand_.node());
 }
 
-Real FunctionalFormKernel::evaluateBoundaryFace(const assembly::AssemblyContext& ctx,
-                                                LocalIndex q,
-                                                int /*boundary_marker*/)
+Real FunctionalFormKernel::evaluateCell(const assembly::AssemblyContext& ctx, LocalIndex q)
+{
+    return domain_ == Domain::Cell ? evaluateAt(ctx, nullptr, q) : Real(0);
+}
+
+Real FunctionalFormKernel::evaluateBoundaryFace(const assembly::AssemblyContext& ctx, LocalIndex q, int)
+{
+    return domain_ == Domain::BoundaryFace ? evaluateAt(ctx, nullptr, q) : Real(0);
+}
+
+Real FunctionalFormKernel::evaluateInterfaceFace(const assembly::AssemblyContext& minus,
+                                                 const assembly::AssemblyContext& plus, LocalIndex q, int)
+{
+    return domain_ == Domain::BoundaryFace ? evaluateAt(minus, &plus, q) : Real(0);
+}
+
+Real FunctionalFormKernel::evaluateAt(const assembly::AssemblyContext& minus,
+                                      const assembly::AssemblyContext* plus, LocalIndex q)
 {
     ensureInterpreterLoweredIndexedAccess();
-
-    if (domain_ != Domain::BoundaryFace) {
-        return 0.0;
-    }
-
-    EvalEnvReal env{
-        /*minus=*/ctx,
-        /*plus=*/nullptr,
-        /*kind=*/FormKind::Linear,
-        /*test_active=*/Side::Minus,
-        /*trial_active=*/Side::Minus,
-        /*i=*/0,
-        /*j=*/0,
-        /*constitutive_state=*/nullptr,
-        /*constitutive_cache=*/nullptr,
-    };
-
+    EvalEnvReal env{minus, plus, FormKind::Linear, Side::Minus, Side::Minus, 0, 0, nullptr, nullptr};
     const auto v = evalReal(*integrand_.node(), env, Side::Minus, q);
     FE_THROW_IF(v.kind != EvalValue<Real>::Kind::Scalar, InvalidArgumentException,
                 "Forms::FunctionalFormKernel: integrand did not evaluate to a scalar");

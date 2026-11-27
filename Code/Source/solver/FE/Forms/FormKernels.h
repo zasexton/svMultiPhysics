@@ -641,7 +641,13 @@ public:
 
     [[nodiscard]] std::string name() const override { return "Forms::FunctionalFormKernel"; }
 
+    [[nodiscard]] bool requiresTwoSidedInterfaceFace() const noexcept override;
+    [[nodiscard]] Real evaluateInterfaceFace(const assembly::AssemblyContext& minus,
+                                             const assembly::AssemblyContext& plus, LocalIndex q, int marker) override;
+
 private:
+    [[nodiscard]] Real evaluateAt(const assembly::AssemblyContext& minus,
+                                  const assembly::AssemblyContext* plus, LocalIndex q);
     void ensureInterpreterLoweredIndexedAccess();
 
     FormExpr integrand_{};

@@ -41,6 +41,7 @@
 #endif
 
 namespace svmp {
+class InterfaceMesh;
 namespace FE {
 namespace systems {
 
@@ -63,6 +64,8 @@ struct IntegralTerm {
     int marker{-1};
     geometry::CutIntegrationSide side{geometry::CutIntegrationSide::Negative};
     forms::FormExpr integrand{};
+    const InterfaceMesh* fitted_interface{nullptr};
+    bool generated_interface{false};
 };
 
 [[nodiscard]] bool isIntegral(forms::FormExprType type) noexcept
@@ -265,6 +268,21 @@ public:
         return integrand_->hasBoundaryFace();
     }
 
+    [[nodiscard]] bool requiresTwoSidedInterfaceFace() const noexcept override
+    {
+        return integrand_->requiresTwoSidedInterfaceFace();
+    }
+
+    [[nodiscard]] Real evaluateInterfaceFaceTotal(const assembly::AssemblyContext& minus,
+                                                 const assembly::AssemblyContext& plus, int marker) override
+    {
+        auto& sums = workerSums();
+        for (LocalIndex q = 0; q < minus.numQuadraturePoints(); ++q) {
+            add(sums, integrand_->evaluateInterfaceFace(minus, plus, q, marker) * minus.integrationWeight(q));
+        }
+        return Real{0.0};
+    }
+
     [[nodiscard]] Real evaluateCell(const assembly::AssemblyContext& ctx, LocalIndex q) override
     {
         return integrand_->evaluateCell(ctx, q);
@@ -352,29 +370,38 @@ void evaluateTermLocally(assembly::FunctionalAssembler& assembler,
                          ExactAccumulator& absolute_mass)
 {
     ExactTermKernel kernel(interpretedIntegrand(term), term.negated, assembler.getOptions().num_threads);
+    const auto check = [&](Real) {
+        const auto& result = assembler.getLastResult();
+        FE_THROW_IF(!result.success, InvalidStateException,
+                    std::string(kWhere) + formLabel(term.form) + result.error_message);
+    };
+    constexpr auto local = assembly::FunctionalReduction::LocalRaw;
     switch (term.measure) {
     case Measure::Cell:
-        (void)assembler.assembleScalar(kernel, assembly::FunctionalReduction::LocalRaw);
+        check(assembler.assembleScalar(kernel, local));
         break;
     case Measure::Boundary:
-        (void)assembler.assembleBoundaryScalar(kernel, term.marker, assembly::FunctionalReduction::LocalRaw);
+        check(assembler.assembleBoundaryScalar(kernel, term.marker, local));
         break;
     case Measure::CutVolume:
-        (void)assembler.assembleCutVolumeScalar(kernel, *cut_context, term.marker, term.side, assembly::FunctionalReduction::LocalRaw);
+        check(assembler.assembleCutVolumeScalar(kernel, *cut_context, term.marker, term.side, local));
         break;
     case Measure::Interface:
-        (void)assembler.assembleGeneratedInterfaceScalar(kernel, *cut_context, term.marker, assembly::FunctionalReduction::LocalRaw);
+#if defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH
+        if (term.fitted_interface) {
+            check(assembler.assembleFittedInterfaceScalar(kernel, *term.fitted_interface, term.marker, local));
+        }
+#endif
+        if (term.generated_interface) {
+            check(assembler.assembleGeneratedInterfaceScalar(kernel, *cut_context, term.marker, local));
+        }
         break;
     }
-    const auto& result = assembler.getLastResult();
-    FE_THROW_IF(!result.success, InvalidStateException,
-                std::string(kWhere) + formLabel(term.form) + result.error_message);
     kernel.mergeInto(value, absolute_mass);
 }
 
-} // namespace
-
-std::vector<FunctionalFormValue> evaluateFunctionalForms(
+std::vector<FunctionalFormValue> evaluateMeasures(
+    [[maybe_unused]] const FESystem* system,
     assembly::FunctionalAssembler& assembler,
     std::span<const forms::FormExpr> forms,
     const assembly::CutIntegrationContext* cut_context,
@@ -382,29 +409,26 @@ std::vector<FunctionalFormValue> evaluateFunctionalForms(
 {
     // The forms are the same on every rank, so these checks throw on every
     // rank alike, before any collective.
-    const auto terms = integralTerms(forms);
-
-    const bool has_cut_terms = std::any_of(terms.begin(), terms.end(), [](const IntegralTerm& term) {
-        return isCutMeasure(term.measure);
-    });
-    if (has_cut_terms) {
-        FE_THROW_IF(collectiveAnyTrue(cut_context == nullptr, comm), InvalidArgumentException,
-                    std::string(kWhere) +
-                        "a cut measure (dCutVolume, dI, dL or a generated ds) needs a cut integration "
-                        "context on every rank");
-        for (const auto& term : terms) {
-            if (!isCutMeasure(term.measure)) {
-                continue;
-            }
-            FE_THROW_IF(!collectiveAnyTrue(knowsMarker(*cut_context, term), comm),
-                        InvalidArgumentException,
-                        std::string(kWhere) + formLabel(term.form) + "marker " +
-                            std::to_string(term.marker) +
-                            (term.measure == Measure::CutVolume
-                                 ? " has no cut-volume rules in the cut integration context"
-                                 : " is not an interface, contact-line or active-boundary marker of the "
-                                   "cut integration context"));
+    auto terms = integralTerms(forms);
+    for (auto& term : terms) {
+        if (!isCutMeasure(term.measure)) continue;
+        bool has_fitted = false;
+#if defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH
+        if (system && term.measure == Measure::Interface) {
+            if (system->hasInterfaceMesh(term.marker)) term.fitted_interface = &system->interfaceMesh(term.marker);
+            has_fitted = collectiveAnyTrue(term.fitted_interface != nullptr, comm);
         }
+#endif
+        const bool has_rules = collectiveAnyTrue(cut_context && knowsMarker(*cut_context, term), comm);
+        if (has_fitted && !has_rules) continue;
+        FE_THROW_IF(collectiveAnyTrue(cut_context == nullptr, comm), InvalidArgumentException,
+                    std::string(kWhere) + "a cut measure (dCutVolume, dI, dL or a generated ds) needs a cut integration "
+                                          "context on every rank");
+        FE_THROW_IF(!has_rules, InvalidArgumentException,
+                    std::string(kWhere) + formLabel(term.form) + "marker " + std::to_string(term.marker) +
+                    (term.measure == Measure::CutVolume ? " has no cut-volume rules in the cut integration context"
+                        : " is not an interface, contact-line or active-boundary marker of the cut integration context"));
+        term.generated_interface = term.measure == Measure::Interface;
     }
 
     // values[form] and then absolute masses[form], for one reduction.
@@ -434,8 +458,6 @@ std::vector<FunctionalFormValue> evaluateFunctionalForms(
     }
     return values;
 }
-
-namespace {
 
 std::vector<FunctionalFormValue> evaluateOnSystem(
     const FESystem& system,
@@ -631,13 +653,18 @@ std::vector<FunctionalFormValue> evaluateOnSystem(
             return std::nullopt;
         }));
     }
-    return evaluateFunctionalForms(assembler,
-                                   snapshot_forms,
-                                   cut_context != nullptr ? cut_context : system.cutIntegrationContext(),
-                                   comm);
+    return evaluateMeasures(&system, assembler, snapshot_forms,
+                            cut_context != nullptr ? cut_context : system.cutIntegrationContext(), comm);
 }
 
 } // namespace
+
+std::vector<FunctionalFormValue> evaluateFunctionalForms(
+    assembly::FunctionalAssembler& assembler, std::span<const forms::FormExpr> forms,
+    const assembly::CutIntegrationContext* cut_context, const CollectiveCommunicator& comm)
+{
+    return evaluateMeasures(nullptr, assembler, forms, cut_context, comm);
+}
 
 std::vector<FunctionalFormValue> evaluateFunctionalForms(
     const FESystem& system,
