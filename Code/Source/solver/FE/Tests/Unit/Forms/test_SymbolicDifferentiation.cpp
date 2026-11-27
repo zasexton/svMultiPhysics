@@ -17,6 +17,7 @@
 #include "Assembly/TimeIntegrationContext.h"
 #include "Forms/BoundaryConditions.h"
 #include "Forms/ConstitutiveModel.h"
+#include "Forms/AffineAnalysis.h"
 #include "Forms/FormCompiler.h"
 #include "Forms/FormKernels.h"
 #include "Forms/PointEvaluator.h"
@@ -270,6 +271,43 @@ TEST(SymbolicDifferentiationMeasureTest,
     EXPECT_EQ(
         raw_interface_tangent.node()->exteriorBoundaryMeasure(),
         nullptr);
+}
+
+TEST(SymbolicDifferentiationMeasureTest, FactoredInterfaceDerivativeKeepsSummandSides)
+{
+    spaces::H1Space space(ElementType::Tetra4, 1);
+    const auto u = FormExpr::trialFunction(space);
+    const auto b = FormExpr::discreteField(5, space);
+    const auto v = FormExpr::testFunction(space);
+    const auto integrand = (u - b.plus()) * v;
+    FormCompiler compiler;
+    for (const bool stated : {false, true}) {
+        auto form = integrand.dI(73);
+        if (stated) form = form.withTwoSidedTerms();
+        const auto tangent = compiler.compileBilinear(differentiateResidual(form));
+        ASSERT_EQ(tangent.terms().size(), 1u);
+        EXPECT_EQ(interfaceTermIsTwoSided(tangent.terms().front()), stated);
+        EXPECT_EQ(tangent.terms().front().interface_marker, 73);
+    }
+}
+
+TEST(SymbolicDifferentiationMeasureTest, AffineSplitRetainsExplicitInterfaceSides)
+{
+    spaces::H1Space space(ElementType::Tetra4, 1);
+    const auto u = FormExpr::trialFunction(space);
+    const auto v = FormExpr::testFunction(space);
+    AffineResidualOptions options;
+    options.allow_interface_face_terms = true;
+    std::string reason;
+    const auto split = trySplitAffineResidual(((u + 1.0) * v).dI(31).withTwoSidedTerms(), options, &reason);
+    ASSERT_TRUE(split.has_value()) << reason;
+    FormCompiler compiler;
+    const auto bilinear = compiler.compileBilinear(split->bilinear);
+    const auto linear = compiler.compileLinear(split->linear);
+    ASSERT_EQ(bilinear.terms().size(), 1u);
+    ASSERT_EQ(linear.terms().size(), 1u);
+    EXPECT_TRUE(interfaceTermIsTwoSided(bilinear.terms().front()));
+    EXPECT_TRUE(interfaceTermIsTwoSided(linear.terms().front()));
 }
 
 TEST(SymbolicDifferentiationMeasureTest,

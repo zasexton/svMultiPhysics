@@ -8,6 +8,7 @@
 #include "Forms/SymbolicDifferentiation.h"
 
 #include "Core/Types.h"
+#include "Forms/FormIR.h"
 #include "Forms/IndexExtent.h"
 #include "Forms/Tensor/TensorDifferentiation.h"
 #include <algorithm>
@@ -53,123 +54,33 @@ namespace {
         "wrapExteriorIntegral: node is not an exterior-boundary integral");
 }
 
-[[nodiscard]] bool holdsTwoSidedInterfaceOperator(const FormExprNode& node)
-{
-    switch (node.type()) {
-        case FormExprType::RestrictPlus:
-        case FormExprType::Jump:
-        case FormExprType::Average:
-            return true;
-        default:
-            break;
-    }
-    for (const auto* child : node.children()) {
-        if (child != nullptr && holdsTwoSidedInterfaceOperator(*child)) {
-            return true;
-        }
-    }
-    return false;
-}
-
-/// The signed summands of an integrand, split as FormCompiler splits it into
-/// terms (Add, Subtract, Negate).
-void collectSignedSummands(const std::shared_ptr<FormExprNode>& node,
-                           bool negated,
-                           std::vector<std::pair<std::shared_ptr<FormExprNode>, bool>>& out)
-{
-    const auto kids = node->childrenShared();
-    switch (node->type()) {
-        case FormExprType::Add:
-            if (kids.size() == 2u && kids[0] && kids[1]) {
-                collectSignedSummands(kids[0], negated, out);
-                collectSignedSummands(kids[1], negated, out);
-                return;
-            }
-            break;
-        case FormExprType::Subtract:
-            if (kids.size() == 2u && kids[0] && kids[1]) {
-                collectSignedSummands(kids[0], negated, out);
-                collectSignedSummands(kids[1], !negated, out);
-                return;
-            }
-            break;
-        case FormExprType::Negate:
-            if (kids.size() == 1u && kids[0]) {
-                collectSignedSummands(kids[0], !negated, out);
-                return;
-            }
-            break;
-        default:
-            break;
-    }
-    out.emplace_back(node, negated);
-}
-
 [[nodiscard]] bool isZeroLike(const FormExprNode& node);
 
-/// The derivative of an interface integral.  A term of a generated interface
-/// is one-sided unless it holds .plus(), jump() or avg() (D70), and a
-/// derivative can lose the plus operand of its source term; then the
-/// derivative of each two-sided summand is integrated by its own measure
-/// stating it two-sided.  Otherwise (no derivative summand of a two-sided
-/// summand without a two-sided operator, or a measure that states it
-/// already) the derivative is the one it was.
+/// A tangent inherits the side of its source summand, even when differentiating
+/// removes that summand's last explicit plus trace.
 template<class DerivativeOf>
 [[nodiscard]] FormExpr interfaceIntegralDerivative(const std::shared_ptr<FormExprNode>& integrand,
                                                    const FormExprNode& integral_node,
                                                    const FormExpr& whole_derivative,
                                                    const DerivativeOf& derivative_of)
 {
-    const auto wrap = [&](const FormExpr& d) {
-        auto out = wrapExteriorIntegral(d, integral_node);
-        if (integral_node.interfaceStatesTwoSided() && out.node() != nullptr &&
-            out.node()->type() == FormExprType::InterfaceIntegral) {
-            out = out.withTwoSidedTerms();
-        }
-        return out;
-    };
-    if (integral_node.interfaceStatesTwoSided() || integral_node.exteriorBoundaryMeasure() != nullptr ||
-        !holdsTwoSidedInterfaceOperator(*integrand)) {
-        return wrap(whole_derivative);
-    }
-    std::vector<std::pair<std::shared_ptr<FormExprNode>, bool>> summands;
-    collectSignedSummands(integrand, /*negated=*/false, summands);
-    const auto loses_plus_operand = [&](const std::shared_ptr<FormExprNode>& summand) {
-        if (!holdsTwoSidedInterfaceOperator(*summand)) {
-            return false;
-        }
-        const auto d = derivative_of(summand);
-        if (!d.isValid() || d.node() == nullptr) {
-            return false;
-        }
-        std::vector<std::pair<std::shared_ptr<FormExprNode>, bool>> d_summands;
-        collectSignedSummands(d.nodeShared(), /*negated=*/false, d_summands);
-        return std::any_of(d_summands.begin(), d_summands.end(), [](const auto& d_summand) {
-            return !isZeroLike(*d_summand.first) && !holdsTwoSidedInterfaceOperator(*d_summand.first);
-        });
-    };
-    if (std::none_of(summands.begin(), summands.end(),
-                     [&](const auto& summand) { return loses_plus_operand(summand.first); })) {
-        return wrap(whole_derivative);
-    }
-    FormExpr one_sided;
-    FormExpr out;
-    const auto add = [](FormExpr& sum, const FormExpr& e) { sum = sum.isValid() ? sum + e : e; };
-    for (const auto& [summand, negated] : summands) {
-        auto d = derivative_of(summand);
-        if (negated) {
-            d = -d;
-        }
-        if (holdsTwoSidedInterfaceOperator(*summand)) {
-            add(out, wrap(d).withTwoSidedTerms());
-        } else {
-            add(one_sided, d);
-        }
-    }
-    if (one_sided.isValid()) {
-        add(out, wrap(one_sided));
-    }
-    return out;
+    const auto measure = wrapExteriorIntegral(whole_derivative, integral_node);
+    if (integral_node.exteriorBoundaryMeasure()) return measure;
+    if (integral_node.interfaceStatesTwoSided()) return measure.withTwoSidedTerms();
+    const auto parts = splitInterfaceSummands(FormExpr(integrand));
+    if (!parts.two_sided.isValid()) return measure;
+
+    const auto d2 = parts.one_sided.isValid() ? derivative_of(parts.two_sided.nodeShared()) : whole_derivative;
+    // If no contribution from d2 lost its plus operand, the original tangent
+    // already carries all side information.
+    if (!d2.isValid() || isZeroLike(*d2.node())) return measure;
+    const auto unqualified = splitInterfaceSummands(d2).one_sided;
+    if (!unqualified.isValid() || isZeroLike(*unqualified.node())) return measure;
+
+    const auto both = wrapExteriorIntegral(d2, integral_node).withTwoSidedTerms();
+    if (!parts.one_sided.isValid()) return both;
+    const auto d1 = derivative_of(parts.one_sided.nodeShared());
+    return d1.isValid() && !isZeroLike(*d1.node()) ? wrapExteriorIntegral(d1, integral_node) + both : both;
 }
 
 [[nodiscard]] FormExpr wrapInteriorFaceIntegral(const FormExpr& integrand,

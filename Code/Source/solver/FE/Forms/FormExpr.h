@@ -1007,6 +1007,8 @@ public:
 
     using NodeTransform = std::function<std::optional<FormExpr>(const FormExprNode&)>;
     [[nodiscard]] FormExpr transformNodes(const NodeTransform& transform) const;
+    /// Rebuild this operator with new operands, preserving its node-specific metadata.
+    [[nodiscard]] FormExpr withChildren(std::vector<FormExpr> children) const;
 
 private:
     std::shared_ptr<FormExprNode> node_;

@@ -18,29 +18,6 @@ namespace forms {
 
 namespace {
 
-FormExpr wrapIntegral(const FormExpr& integrand, const IntegralTerm& term)
-{
-    if (term.exterior_boundary_measure.has_value()) {
-        return integrand.dExteriorBoundary(*term.exterior_boundary_measure);
-    }
-    switch (term.domain) {
-        case IntegralDomain::Cell:
-            return integrand.dx();
-        case IntegralDomain::Boundary:
-            return integrand.ds(term.boundary_marker);
-        case IntegralDomain::InteriorFace:
-            return term.interior_facet_side.has_value()
-                       ? integrand.dS(term.interface_marker,
-                                      *term.interior_facet_side)
-                       : integrand.dS(term.interface_marker);
-        case IntegralDomain::InterfaceFace:
-            return integrand.dI(term.interface_marker);
-        case IntegralDomain::CutVolume:
-            return integrand.dCutVolume(term.interface_marker, term.cut_volume_side);
-    }
-    return {};
-}
-
 struct Decomp {
     int degree{0}; // 0: no TrialFunction, 1: linear in TrialFunction, 2: nonlinear/unknown
     FormExpr constant{};
@@ -434,14 +411,14 @@ std::optional<AffineResidualSplit> trySplitAffineResidual(
 
         // Bilinear portion: must contain both test+trial functions.
         if (d.linear.isValid() && d.linear.hasTest() && d.linear.hasTrial()) {
-            const auto wrapped = wrapIntegral(d.linear, term);
+            const auto wrapped = wrapIntegralTermMeasure(d.linear, term);
             bilinear_sum = have_bilinear ? (bilinear_sum + wrapped) : wrapped;
             have_bilinear = true;
         }
 
         // Linear portion: test-only.
         if (d.constant.isValid() && d.constant.hasTest() && !d.constant.hasTrial()) {
-            const auto wrapped = wrapIntegral(d.constant, term);
+            const auto wrapped = wrapIntegralTermMeasure(d.constant, term);
             linear_sum = have_linear ? (linear_sum + wrapped) : wrapped;
             have_linear = true;
         }

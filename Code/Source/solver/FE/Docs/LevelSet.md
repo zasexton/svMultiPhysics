@@ -415,9 +415,12 @@ requires the two-sided binding. In a two-sided evaluation such a term fills
 the negative and positive rows and the four side blocks, and a term without
 them fills the negative row and the negative-negative block only, the values
 it has in a one-sided evaluation; so no term changes with the other terms of
-its kernel. The form compiler classifies each summand of the integrand as
-written, and a symbolic derivative keeps its source summand's sidedness
-(`dI(...).withTwoSidedTerms()`). A compiled kernel whose interface terms mix
+its kernel. The form compiler classifies additive summands through products,
+contractions and linear operations, so factoring a common coefficient or test
+function gives the same residual and tangent. An explicit plus trace, jump,
+average or nonlinear function of those traces applies to its whole operand.
+A symbolic derivative keeps its source summand's sidedness. Authors can state
+both sides for all summands with `dI(...).withTwoSidedTerms()`. A compiled kernel whose interface terms mix
 the two compiles them apart and sends the one-sided part's positive row and
 coupling blocks to scratch.
 

@@ -630,11 +630,12 @@ two-sided on a marker where a `dI` term of the kernel (on that marker or on
 every marker) holds `.plus()`, `jump()` or `avg()`; there each such term
 fills both rows and all four blocks, and every other term the minus row and
 the minus-minus block only, as it would one-sided. A term thus means the same
-whatever the other terms of its kernel (`test_FormsInstaller.cpp`). The
-sidedness of a term is classified from the integrand as written, each summand
-apart, and a derivative keeps its source term's even when it drops the plus
-operand (`k (a - b(+)) v` differentiates to `k da v`, still two-sided);
-`dI(...).withTwoSidedTerms()` states it. A fitted interface keeps every term
+whatever the other terms of its kernel (`test_FormsInstaller.cpp`). Products, contractions and linear operators distribute over additive terms
+when the compiler determines sidedness. For example, `(a - b.plus()) * v`
+has the same rows and tangent as `a*v - b.plus()*v`. A nonlinear function
+that reads a plus trace is evaluated on both sides as a whole. A derivative
+keeps its source summand's sidedness even if the plus operand disappears.
+Use `dI(...).withTwoSidedTerms()` to evaluate every summand on both sides. A fitted interface keeps every term
 in every block.
 
 The BC trace helpers follow the core convention:

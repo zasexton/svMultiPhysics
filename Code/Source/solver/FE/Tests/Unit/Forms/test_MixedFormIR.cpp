@@ -1043,6 +1043,27 @@ TEST(CompileMixed, MultiFieldLinear_TwoTestNoTrial)
 
 // ============================================================================
 
+TEST(CompileMixed, LinearAndBilinearBlocksRetainExplicitInterfaceSides)
+{
+    spaces::H1Space V(ElementType::Tetra4, 1);
+    spaces::L2Space Q(ElementType::Tetra4, 0);
+    const auto v = FormExpr::testFunction(V, "v");
+    const auto q = FormExpr::testFunction(Q, "q");
+    const auto u = FormExpr::trialFunction(V, "u");
+    const auto p = FormExpr::trialFunction(Q, "p");
+    FormCompiler compiler;
+    for (const auto kind : {FormKind::Linear, FormKind::Bilinear}) {
+        const auto form = kind == FormKind::Linear ? v.dI(29).withTwoSidedTerms() + q.dx()
+                         : (u * v).dI(29).withTwoSidedTerms() + (p * q).dx();
+        const auto mixed = compiler.compileMixed(form, kind);
+        ASSERT_TRUE(mixed.hasBlock(0, 0));
+        const auto& terms = mixed.block(0, 0).terms();
+        ASSERT_EQ(terms.size(), 1u);
+        EXPECT_EQ(terms[0].interface_marker, 29);
+        EXPECT_TRUE(interfaceTermIsTwoSided(terms[0]));
+    }
+}
+
 TEST(CompileMixed, AutoDetect_MatchesExplicitCompileMixed)
 {
     FormCompiler compiler;

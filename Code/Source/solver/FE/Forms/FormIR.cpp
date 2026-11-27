@@ -120,9 +120,7 @@ bool FormIR::hasInterfaceFaceTerms() const noexcept
     return false;
 }
 
-namespace {
-
-[[nodiscard]] bool holdsTwoSidedInterfaceOperator(const FormExprNode* node) noexcept
+bool holdsTwoSidedInterfaceOperator(const FormExprNode* node) noexcept
 {
     if (node == nullptr) {
         return false;
@@ -143,7 +141,130 @@ namespace {
     return false;
 }
 
+namespace {
+
+/// Distribute sidedness through linear operations and products. A plus trace,
+/// jump or average applies to its whole operand. A nonlinear function that
+/// reads either trace is evaluated intact.
+InterfaceSummands splitInterfaceOperands(const FormExpr& expr)
+{
+    const auto& node = *expr.node();
+    const auto kids = node.childrenShared();
+
+    const auto sum = [](const FormExpr& a, const FormExpr& b, bool subtract = false) {
+        if (!b.isValid()) return a;
+        if (!a.isValid()) return subtract ? -b : b;
+        return subtract ? a - b : a + b;
+    };
+    switch (node.type()) {
+        case FormExprType::Add:
+        case FormExprType::Subtract: {
+            const auto a = splitInterfaceOperands(FormExpr(kids[0]));
+            const auto b = splitInterfaceOperands(FormExpr(kids[1]));
+            if (!a.two_sided.isValid() && !b.two_sided.isValid()) return {expr, {}};
+            if (!a.one_sided.isValid() && !b.one_sided.isValid()) return {{}, expr};
+            const bool subtract = node.type() == FormExprType::Subtract;
+            return {sum(a.one_sided, b.one_sided, subtract), sum(a.two_sided, b.two_sided, subtract)};
+        }
+        case FormExprType::Multiply:
+        case FormExprType::InnerProduct:
+        case FormExprType::DoubleContraction:
+        case FormExprType::OuterProduct:
+        case FormExprType::CrossProduct: {
+            const auto a = splitInterfaceOperands(FormExpr(kids[0]));
+            const auto b = splitInterfaceOperands(FormExpr(kids[1]));
+            if (!a.two_sided.isValid() && !b.two_sided.isValid()) return {expr, {}};
+            if (!a.one_sided.isValid() || !b.one_sided.isValid()) return {{}, expr};
+            // A*B = A1*B1 + A2*B + A1*B2. Keep B factored in the second term.
+            const auto left_two_sided = a.two_sided.isValid() ? expr.withChildren({a.two_sided, FormExpr(kids[1])}) : FormExpr{};
+            const auto right_two_sided = b.two_sided.isValid() ? expr.withChildren({a.one_sided, b.two_sided}) : FormExpr{};
+            return {expr.withChildren({a.one_sided, b.one_sided}), sum(left_two_sided, right_two_sided)};
+        }
+        case FormExprType::Divide: {
+            if (holdsTwoSidedInterfaceOperator(kids[1].get())) return {{}, expr};
+            const auto a = splitInterfaceOperands(FormExpr(kids[0]));
+            if (!a.two_sided.isValid()) return {expr, {}};
+            if (!a.one_sided.isValid()) return {{}, expr};
+            return {a.one_sided / FormExpr(kids[1]), a.two_sided / FormExpr(kids[1])};
+        }
+        case FormExprType::Negate:
+        case FormExprType::Gradient:
+        case FormExprType::Divergence:
+        case FormExprType::Curl:
+        case FormExprType::Hessian:
+        case FormExprType::TimeDerivative:
+        case FormExprType::RestrictMinus:
+        case FormExprType::Component:
+        case FormExprType::IndexedAccess:
+        case FormExprType::Transpose:
+        case FormExprType::Trace:
+        case FormExprType::Deviator:
+        case FormExprType::SymmetricPart:
+        case FormExprType::SkewPart:
+        case FormExprType::Pullback:
+        case FormExprType::Pushforward: {
+            const auto a = splitInterfaceOperands(FormExpr(kids[0]));
+            if (!a.two_sided.isValid()) return {expr, {}};
+            if (!a.one_sided.isValid()) return {{}, expr};
+            return {expr.withChildren({a.one_sided}), expr.withChildren({a.two_sided})};
+        }
+        case FormExprType::AsVector:
+        case FormExprType::AsTensor: {
+            std::vector<FormExpr> one, two;
+            const auto zero = FormExpr::constant(0);
+            bool has_one = false, has_two = false;
+            for (const auto& child : kids) {
+                const auto part = splitInterfaceOperands(FormExpr(child));
+                has_one |= part.one_sided.isValid();
+                has_two |= part.two_sided.isValid();
+                one.push_back(part.one_sided.isValid() ? part.one_sided : zero);
+                two.push_back(part.two_sided.isValid() ? part.two_sided : zero);
+            }
+            if (!has_two) return {expr, {}};
+            if (!has_one) return {{}, expr};
+            return {expr.withChildren(std::move(one)), expr.withChildren(std::move(two))};
+        }
+        default:
+            return holdsTwoSidedInterfaceOperator(&node) ? InterfaceSummands{{}, expr} : InterfaceSummands{expr, {}};
+    }
+}
+
 } // namespace
+
+InterfaceSummands splitInterfaceSummands(const FormExpr& expr)
+{
+    if (!holdsTwoSidedInterfaceOperator(expr.node())) return {expr, {}};
+    return splitInterfaceOperands(expr);
+}
+
+[[nodiscard]] FormExpr wrapIntegralTermMeasure(
+    const FormExpr& integrand,
+    const IntegralTerm& term)
+{
+    if (term.exterior_boundary_measure.has_value()) {
+        return integrand.dExteriorBoundary(*term.exterior_boundary_measure);
+    }
+    switch (term.domain) {
+        case IntegralDomain::Cell:
+            return integrand.dx();
+        case IntegralDomain::Boundary:
+            return integrand.ds(term.boundary_marker);
+        case IntegralDomain::InteriorFace:
+            return term.interior_facet_side.has_value()
+                       ? integrand.dS(term.interface_marker,
+                                      *term.interior_facet_side)
+                       : integrand.dS(term.interface_marker);
+        case IntegralDomain::InterfaceFace: {
+            const auto measure = integrand.dI(term.interface_marker);
+            return term.interface_two_sided ? measure.withTwoSidedTerms() : measure;
+        }
+        case IntegralDomain::CutVolume:
+            return integrand.dCutVolume(
+                term.interface_marker, term.cut_volume_side);
+    }
+    throw std::invalid_argument(
+        "unsupported integral domain");
+}
 
 bool interfaceTermIsTwoSided(const IntegralTerm& term) noexcept
 {

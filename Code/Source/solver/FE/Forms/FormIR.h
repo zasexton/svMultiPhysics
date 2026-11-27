@@ -190,6 +190,18 @@ private:
     std::unique_ptr<Impl> impl_;
 };
 
+struct InterfaceSummands {
+    FormExpr one_sided;
+    FormExpr two_sided;
+};
+
+/// Classify additive contributions of a generated interface before optimization or differentiation.
+[[nodiscard]] InterfaceSummands splitInterfaceSummands(const FormExpr& expr);
+[[nodiscard]] bool holdsTwoSidedInterfaceOperator(const FormExprNode* node) noexcept;
+
+/// Reapply the original domain, marker and side selection to a compiled term's integrand or derivative.
+[[nodiscard]] FormExpr wrapIntegralTermMeasure(const FormExpr& integrand, const IntegralTerm& term);
+
 /// Whether an interface term reads the plus side: classified two-sided when
 /// compiled, or holding .plus(), jump() or avg() (D70).
 [[nodiscard]] bool interfaceTermIsTwoSided(const IntegralTerm& term) noexcept;

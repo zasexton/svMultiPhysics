@@ -3577,6 +3577,10 @@ FormExpr FormExpr::dS(const FacetDomain& domain) const
 
 namespace {
 
+std::shared_ptr<FormExprNode> rebuildNodeWithChildren(
+    const std::shared_ptr<FormExprNode>& node,
+    std::vector<std::shared_ptr<FormExprNode>> new_kids);
+
 std::shared_ptr<FormExprNode> transformNodeShared(
     const std::shared_ptr<FormExprNode>& node,
     const FormExpr::NodeTransform& transform)
@@ -3610,10 +3614,13 @@ std::shared_ptr<FormExprNode> transformNodeShared(
         }
         new_kids.push_back(std::move(new_k));
     }
-    if (!changed) {
-        return node;
-    }
+    return changed ? rebuildNodeWithChildren(node, std::move(new_kids)) : node;
+}
 
+std::shared_ptr<FormExprNode> rebuildNodeWithChildren(
+    const std::shared_ptr<FormExprNode>& node,
+    std::vector<std::shared_ptr<FormExprNode>> new_kids)
+{
     switch (node->type()) {
         // Unary operators
         case FormExprType::Negate: return std::make_shared<NegateNode>(new_kids[0]);
@@ -3867,6 +3874,21 @@ FormExpr FormExpr::transformNodes(const NodeTransform& transform) const
         return *this;
     }
     return FormExpr(transformNodeShared(node_, transform));
+}
+
+FormExpr FormExpr::withChildren(std::vector<FormExpr> children) const
+{
+    if (!node_ || children.size() != node_->children().size()) {
+        throw std::invalid_argument("FormExpr::withChildren: wrong number of operands");
+    }
+    if (children.empty()) return *this;
+    std::vector<std::shared_ptr<FormExprNode>> nodes;
+    nodes.reserve(children.size());
+    for (const auto& child : children) {
+        if (!child.isValid()) throw std::invalid_argument("FormExpr::withChildren: invalid operand");
+        nodes.push_back(child.nodeShared());
+    }
+    return FormExpr(rebuildNodeWithChildren(node_, std::move(nodes)));
 }
 
 std::string FormExpr::toString() const

@@ -303,24 +303,6 @@ bool containsGeometrySensitivityTerminal(const FormExprNode& node)
     return false;
 }
 
-bool containsTwoSidedInterfaceOperator(const FormExprNode& node)
-{
-    switch (node.type()) {
-        case FormExprType::RestrictPlus:
-        case FormExprType::Jump:
-        case FormExprType::Average:
-            return true;
-        default:
-            break;
-    }
-    for (const auto& child : node.childrenShared()) {
-        if (child && containsTwoSidedInterfaceOperator(*child)) {
-            return true;
-        }
-    }
-    return false;
-}
-
 /// The first jump() or avg() node under @p node, or null.
 const FormExprNode* findJumpOrAverage(const FormExprNode& node)
 {
@@ -1324,31 +1306,19 @@ void collectIntegralTerms(
             const int marker = n.interfaceMarker().value_or(-1);
             const auto* exterior =
                 n.exteriorBoundaryMeasure();
-            const auto first_new_term = out_terms.size();
-            collect_integrand_terms(collect_integrand_terms,
-                                    makeExprFromNode(children[0]),
-                                    sign,
-                                    IntegralDomain::InterfaceFace,
-                                    /*boundary_marker=*/-1,
-                                    /*interface_marker=*/marker,
-                                    /*interior_facet_side=*/std::nullopt,
-                                    exterior == nullptr
-                                        ? std::optional<
-                                              ExteriorBoundaryMeasure>{}
-                                        : std::optional<
-                                              ExteriorBoundaryMeasure>{
-                                              *exterior},
-                                    CutVolumeSide::Negative);
-            // Each term of the integrand is two-sided when it reads the plus
-            // side, classified here before any optimization, or as the
-            // integral states for a derived term (D70).
-            const bool stated = n.interfaceStatesTwoSided();
-            for (auto k = first_new_term; k < out_terms.size(); ++k) {
-                auto& term = out_terms[k];
-                term.interface_two_sided =
-                    stated || (term.integrand.isValid() && term.integrand.node() != nullptr &&
-                               containsTwoSidedInterfaceOperator(*term.integrand.node()));
-            }
+            const FormExpr integrand(children[0]);
+            const auto parts = n.interfaceStatesTwoSided() ? InterfaceSummands{{}, integrand}
+                                                          : splitInterfaceSummands(integrand);
+            const auto collect_part = [&](const FormExpr& part, bool two_sided) {
+                if (!part.isValid()) return;
+                const auto first = out_terms.size();
+                collect_integrand_terms(collect_integrand_terms, part, sign, IntegralDomain::InterfaceFace,
+                                        -1, marker, std::nullopt,
+                                        exterior ? std::optional{*exterior} : std::nullopt, CutVolumeSide::Negative);
+                for (auto k = first; k < out_terms.size(); ++k) out_terms[k].interface_two_sided = two_sided;
+            };
+            collect_part(parts.one_sided, false);
+            collect_part(parts.two_sided, true);
             return;
         }
         case FormExprType::CutVolumeIntegral: {
@@ -1425,8 +1395,7 @@ FormIR FormCompiler::compileImpl(const FormExpr& form, FormKind kind)
         if (t.exterior_boundary_measure.has_value() &&
             t.exterior_boundary_measure->isGeneratedActiveSubset() &&
             (t.interface_two_sided ||
-             detail::containsTwoSidedInterfaceOperator(
-                 *t.integrand.node()))) {
+             holdsTwoSidedInterfaceOperator(t.integrand.node()))) {
             throw std::invalid_argument(
                 "FormCompiler: generated active exterior boundaries are one-sided and cannot use plus restriction, jump, or average");
         }
@@ -1848,55 +1817,7 @@ MixedFormIR FormCompiler::compileMixed(const FormExpr& form, FormKind kind)
 
             FormExpr block_expr;
             for (std::size_t k = 0; k < block_terms.size(); ++k) {
-                FormExpr term_with_measure;
-                switch (block_terms[k].domain) {
-                    case IntegralDomain::Cell:
-                        term_with_measure = block_terms[k].integrand.dx();
-                        break;
-                    case IntegralDomain::Boundary:
-                        term_with_measure =
-                            block_terms[k]
-                                    .exterior_boundary_measure
-                                    .has_value()
-                                ? block_terms[k]
-                                      .integrand
-                                      .dExteriorBoundary(
-                                          *block_terms[k]
-                                               .exterior_boundary_measure)
-                                : block_terms[k].integrand.ds(
-                                      block_terms[k]
-                                          .boundary_marker);
-                        break;
-                    case IntegralDomain::InteriorFace:
-                        term_with_measure = block_terms[k]
-                                                .interior_facet_side
-                                                .has_value()
-                            ? block_terms[k].integrand.dS(
-                                  block_terms[k].interface_marker,
-                                  *block_terms[k].interior_facet_side)
-                            : block_terms[k].integrand.dS(
-                                  block_terms[k].interface_marker);
-                        break;
-                    case IntegralDomain::InterfaceFace:
-                        term_with_measure =
-                            block_terms[k]
-                                    .exterior_boundary_measure
-                                    .has_value()
-                                ? block_terms[k]
-                                      .integrand
-                                      .dExteriorBoundary(
-                                          *block_terms[k]
-                                               .exterior_boundary_measure)
-                                : block_terms[k].integrand.dI(
-                                      block_terms[k]
-                                          .interface_marker);
-                        break;
-                    case IntegralDomain::CutVolume:
-                        term_with_measure = block_terms[k].integrand.dCutVolume(
-                            block_terms[k].interface_marker,
-                            block_terms[k].cut_volume_side);
-                        break;
-                }
+                const auto term_with_measure = wrapIntegralTermMeasure(block_terms[k].integrand, block_terms[k]);
                 if (!block_expr.isValid()) {
                     block_expr = term_with_measure;
                 } else {
@@ -1938,56 +1859,7 @@ MixedFormIR FormCompiler::compileMixed(const FormExpr& form, FormKind kind)
             FormExpr block_expr;
             for (std::size_t k = 0; k < block_terms.size(); ++k) {
                 // The term's integrand is the integrand-only part; we need to re-wrap it
-                FormExpr term_with_measure;
-                switch (block_terms[k].domain) {
-                    case IntegralDomain::Cell:
-                        term_with_measure = block_terms[k].integrand.dx();
-                        break;
-                    case IntegralDomain::Boundary:
-                        term_with_measure =
-                            block_terms[k]
-                                    .exterior_boundary_measure
-                                    .has_value()
-                                ? block_terms[k]
-                                      .integrand
-                                      .dExteriorBoundary(
-                                          *block_terms[k]
-                                               .exterior_boundary_measure)
-                                : block_terms[k].integrand.ds(
-                                      block_terms[k]
-                                          .boundary_marker);
-                        break;
-                    case IntegralDomain::InteriorFace:
-                        term_with_measure = block_terms[k]
-                                                .interior_facet_side
-                                                .has_value()
-                            ? block_terms[k].integrand.dS(
-                                  block_terms[k].interface_marker,
-                                  *block_terms[k].interior_facet_side)
-                            : block_terms[k].integrand.dS(
-                                  block_terms[k].interface_marker);
-                        break;
-                    case IntegralDomain::InterfaceFace:
-                        term_with_measure =
-                            block_terms[k]
-                                    .exterior_boundary_measure
-                                    .has_value()
-                                ? block_terms[k]
-                                      .integrand
-                                      .dExteriorBoundary(
-                                          *block_terms[k]
-                                               .exterior_boundary_measure)
-                                : block_terms[k].integrand.dI(
-                                      block_terms[k]
-                                          .interface_marker);
-                        break;
-                    case IntegralDomain::CutVolume:
-                        term_with_measure = block_terms[k].integrand.dCutVolume(
-                            block_terms[k].interface_marker,
-                            block_terms[k].cut_volume_side);
-                        break;
-                }
-
+                const auto term_with_measure = wrapIntegralTermMeasure(block_terms[k].integrand, block_terms[k]);
                 if (!block_expr.isValid()) {
                     block_expr = term_with_measure;
                 } else {

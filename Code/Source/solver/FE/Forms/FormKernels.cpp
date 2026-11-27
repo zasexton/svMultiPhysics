@@ -16199,33 +16199,6 @@ private:
     return keepInterfaceTermSides(integrand.dI(interface_marker), term);
 }
 
-[[nodiscard]] FormExpr wrapIntegralTermMeasure(
-    const FormExpr& integrand,
-    const IntegralTerm& term)
-{
-    if (term.exterior_boundary_measure.has_value()) {
-        return integrand.dExteriorBoundary(*term.exterior_boundary_measure);
-    }
-    switch (term.domain) {
-        case IntegralDomain::Cell:
-            return integrand.dx();
-        case IntegralDomain::Boundary:
-            return integrand.ds(term.boundary_marker);
-        case IntegralDomain::InteriorFace:
-            return term.interior_facet_side.has_value()
-                       ? integrand.dS(term.interface_marker,
-                                      *term.interior_facet_side)
-                       : integrand.dS(term.interface_marker);
-        case IntegralDomain::InterfaceFace:
-            return keepInterfaceTermSides(integrand.dI(term.interface_marker), term);
-        case IntegralDomain::CutVolume:
-            return integrand.dCutVolume(
-                term.interface_marker, term.cut_volume_side);
-    }
-    throw std::invalid_argument(
-        "symbolic tangent: unsupported integral domain");
-}
-
 [[nodiscard]] FormExpr rewriteTrialFunctionsToState(const FormExpr& expr, FieldId trial_state_field)
 {
     const auto transform = [&](const FormExprNode& n) -> std::optional<FormExpr> {

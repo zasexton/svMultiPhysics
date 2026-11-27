@@ -3939,13 +3939,19 @@ GeneratedTwoFieldSums generatedReferencePlaneTwoFieldSums(int marker,
     if (path == GeneratedKernelPath::SymbolicJIT) {
         const auto& def = sys.operatorDefinition("op");
         EXPECT_FALSE(def.interface_faces.empty());
+        bool compiled_residual = false, compiled_tangent = false;
         for (const auto& term : def.interface_faces) {
             const auto* jit = dynamic_cast<const svmp::FE::forms::jit::JITKernelWrapper*>(term.kernel.get());
             EXPECT_NE(jit, nullptr) << "interface kernel " << term.kernel->name();
             if (jit != nullptr) {
                 EXPECT_TRUE(jit->isJITReady()) << jit->name();
+                const auto domain = svmp::FE::forms::IntegralDomain::InterfaceFace;
+                compiled_residual |= jit->hasCompiledResidualDispatch(domain, marker);
+                compiled_tangent |= jit->hasCompiledTangentDispatch(domain, marker);
             }
         }
+        EXPECT_TRUE(compiled_residual);
+        EXPECT_TRUE(compiled_tangent);
     }
 
     const Real gamma = std::sqrt(Real{3.0}) / Real{8.0};
@@ -3984,10 +3990,10 @@ struct GeneratedTwoFieldCase {
  * - the same with the one-sided inner(e, n) a va, which adds to the minus
  *   row and the minus-minus block only, with n the rule normal.
  * - inner(e, n(+)) b(+) vb(+): n(+) = -n.
- * - k (a - b(+)) va: two-sided, so read on both rows with a and va on the
- *   evaluated side: row a 2 k (2 - 5); the derivative k da va has lost the
- *   plus operand and keeps the minus-minus and plus-plus blocks of its
- *   source term: block (a, a) = 2 k, (a, b) = -2 k.
+ * - k (a - b(+)) va, factored or expanded: k a va contributes on the
+ *   minus side; -k b(+) va contributes on both test sides, giving
+ *   2 - 2*5 = -8 with derivatives 1 and -2.
+ * - Stating both terms two-sided gives 2*(2 - 5) = -6 with derivatives 2 and -2.
  */
 std::vector<GeneratedTwoFieldCase> generatedTwoFieldCases()
 {
@@ -4014,9 +4020,35 @@ std::vector<GeneratedTwoFieldCase> generatedTwoFieldCases()
              return (svmp::FE::forms::inner(e, n.plus()) * b.plus() * vb.plus()).dI(marker);
          },
          {{0.0, -5.0}, {{{0.0, 0.0}, {0.0, -1.0}}}}},
-        {"derivative without the plus operand",
+        {"factored difference",
          [=](const FormExpr& a, const FormExpr& b, const FormExpr& va, const FormExpr&, int marker) {
              return (k * (a - b.plus()) * va).dI(marker);
+         },
+         {{-8.0, 0.0}, {{{1.0, -2.0}, {0.0, 0.0}}}}},
+        {"expanded difference",
+         [=](const FormExpr& a, const FormExpr& b, const FormExpr& va, const FormExpr&, int marker) {
+             return (k * a * va - k * b.plus() * va).dI(marker);
+         },
+         {{-8.0, 0.0}, {{{1.0, -2.0}, {0.0, 0.0}}}}},
+        {"two factored differences",
+         [=](const FormExpr& a, const FormExpr& b, const FormExpr& va, const FormExpr& vb, int marker) {
+             return (k * (a - b.plus()) * (va + vb.plus())).dI(marker);
+         },
+         {{-8.0, -3.0}, {{{1.0, -2.0}, {1.0, -1.0}}}}},
+        {"contraction of packed components",
+         [=](const FormExpr& a, const FormExpr& b, const FormExpr& va, const FormExpr&, int marker) {
+             const auto z = FormExpr::constant(0);
+             return (FormExpr::asVector({a, b.plus(), z}).inner(FormExpr::asVector({k, -k, z})) * va).dI(marker);
+         },
+         {{-8.0, 0.0}, {{{1.0, -2.0}, {0.0, 0.0}}}}},
+        {"nonlinear coefficient using both traces",
+         [=](const FormExpr& a, const FormExpr& b, const FormExpr& va, const FormExpr&, int marker) {
+             return ((a + b.plus()).log() * va).dI(marker);
+         },
+         {{2 * std::log(7.0), 0.0}, {{{2.0 / 7, 2.0 / 7}, {0.0, 0.0}}}}},
+        {"difference explicitly evaluated on both test sides",
+         [=](const FormExpr& a, const FormExpr& b, const FormExpr& va, const FormExpr&, int marker) {
+             return (k * (a - b.plus()) * va).dI(marker).withTwoSidedTerms();
          },
          {{-6.0, 0.0}, {{{2.0, -2.0}, {0.0, 0.0}}}}},
     };
