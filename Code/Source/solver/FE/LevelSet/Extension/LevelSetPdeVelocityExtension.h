@@ -291,6 +291,8 @@ private:
 // level_set: one value per local vertex (only its gradient is used).
 // source: source_components values per local vertex.
 // known: mask of the known vertices (made communicator-consistent inside).
+// Invalid local fields, extension cells and wall constraints are reported
+// on every mesh-communicator rank before the next collective.
 // extended: resized to n_vertices * target_components on return; it holds
 // the solution of the inactive-region system.
 // rows (optional): the same discrete problem as owner-local algebraic rows

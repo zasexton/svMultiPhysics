@@ -164,6 +164,57 @@ std::map<std::pair<long long, long long>, std::array<double, 2>> extend(
 
 } // namespace
 
+TEST(LevelSetPdeVelocityExtensionMPI, RejectsAnUndefinedNormalOnOneRankAndRecovers)
+{
+  svmp::MeshComm comm(MPI_COMM_WORLD);
+  ASSERT_EQ(comm.size(), 2);
+  const auto arrays = makePdeArrays();
+  svmp::Mesh mesh(comm);
+  mesh.build_from_arrays_global_and_partition(
+      2, arrays.x, arrays.offsets, arrays.connectivity, arrays.shapes,
+      svmp::PartitionHint::Cells, 1, {{"partition_method", "block"}});
+
+  const auto n = mesh.n_vertices();
+  std::vector<double> phi(n), source(n, 0.5), extended{42.0};
+  std::vector<std::uint8_t> known(n);
+  for (std::size_t v = 0; v < n; ++v) {
+    const auto y = mesh.X_ref()[2 * v + 1];
+    // The upper partition alone owns cells wholly inside the plateau.
+    phi[v] = std::min<double>(y, 0.75) - 0.25;
+    known[v] = y <= 0.25;
+  }
+  PdeVelocityExtensionOptions options;
+  options.op = PdeVelocityExtensionOperator::LeastSquaresNormal;
+  options.enforce_wall_impermeability = false;
+  svmp::FE::level_set::PdeVelocityExtensionCache cache;
+  const auto extend = [&] {
+    return svmp::FE::level_set::extendVelocityByPde(
+        mesh, comm, phi, source, 1, known, 1, {}, options, extended, nullptr, &cache);
+  };
+  try {
+    (void)extend();
+    ADD_FAILURE() << "Expected a collective rejection of the flat inactive cells";
+  } catch (const std::runtime_error& error) {
+    EXPECT_NE(std::string(error.what()).find("normal is undefined"), std::string::npos);
+  }
+  EXPECT_EQ(extended, (std::vector<double>{42.0}));
+  for (std::size_t v = 0; v < n; ++v) {
+    phi[v] = mesh.X_ref()[2 * v + 1] - 0.25;
+  }
+  if (comm.rank() == 0) {
+    source.pop_back();
+  }
+  EXPECT_THROW(extend(), std::runtime_error);
+  EXPECT_EQ(extended, (std::vector<double>{42.0}));
+  source.assign(n, 0.5);
+
+  EXPECT_NO_THROW(extend());
+  ASSERT_EQ(extended.size(), n);
+  for (const double value : extended) {
+    EXPECT_NEAR(value, 0.5, 1.e-12);
+  }
+}
+
 TEST(LevelSetPdeVelocityExtensionMPI, TwoRankResultMatchesSerialOnEveryLocalVertex)
 {
   int size = 1;

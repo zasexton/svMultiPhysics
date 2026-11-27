@@ -144,18 +144,19 @@ template <typename T>
   }
 #ifdef MESH_HAS_MPI
   static_assert(std::is_trivially_copyable_v<T>);
-  if (local.size() * sizeof(T) >
-      static_cast<std::size_t>(std::numeric_limits<int>::max())) {
-    throw std::runtime_error(
-        "PDE velocity extension: gathered record block exceeds MPI int range");
-  }
-  const int local_bytes = static_cast<int>(local.size() * sizeof(T));
+  const auto max_bytes = static_cast<std::size_t>(std::numeric_limits<int>::max());
+  const int local_bytes = local.size() > max_bytes / sizeof(T)
+      ? -1 : static_cast<int>(local.size() * sizeof(T));
   std::vector<int> counts(static_cast<std::size_t>(comm.size()), 0);
   MPI_Allgather(&local_bytes, 1, MPI_INT, counts.data(), 1, MPI_INT,
                 comm.native());
   std::vector<int> displacements(counts.size(), 0);
   long long total = 0;
   for (std::size_t rank = 0; rank < counts.size(); ++rank) {
+    if (counts[rank] < 0) {
+      throw std::runtime_error(
+          "PDE velocity extension: gathered record block exceeds MPI int range");
+    }
     displacements[rank] = static_cast<int>(total);
     total += counts[rank];
     if (total > std::numeric_limits<int>::max()) {
@@ -241,6 +242,42 @@ void unionVertexMask(const svmp::Mesh& mesh,
 #endif
   (void)comm;
   return value;
+}
+
+// All local work in the callback must finish before any rank enters its next
+// collective. Preserve the serial exception and share one failing rank's reason.
+template<class Work>
+void runLocalExtensionPhase(const svmp::MeshComm& comm, Work&& work)
+{
+#ifdef MESH_HAS_MPI
+  if (comm.is_parallel()) {
+    int local_rank = comm.size();
+    std::string reason;
+    try {
+      work();
+    } catch (const std::exception& error) {
+      local_rank = comm.rank();
+      reason = error.what();
+    } catch (...) {
+      local_rank = comm.rank();
+      reason = "Unknown exception in PDE velocity extension";
+    }
+
+    int first_rank = comm.size();
+    MPI_Allreduce(&local_rank, &first_rank, 1, MPI_INT, MPI_MIN, comm.native());
+    if (first_rank == comm.size()) {
+      return;
+    }
+    if (comm.rank() != first_rank) {
+      reason.clear();
+    }
+    const auto bytes = allGatherV(std::vector<char>(reason.begin(), reason.end()), comm);
+    throw std::runtime_error(std::string(bytes.begin(), bytes.end()) +
+                             " (PDE velocity extension rank " + std::to_string(first_rank) + ")");
+  }
+#endif
+  (void)comm;
+  work();
 }
 
 // Gradients of the P1 barycentric functions and the measure of an affine
@@ -1469,24 +1506,26 @@ PdeVelocityExtensionReport extendVelocityByPdePass(
   const auto call_start = std::chrono::steady_clock::now();
   const auto n_vertices = mesh.n_vertices();
   const int dim = mesh.dim();
-  if (dim != 2 && dim != 3) {
-    throw std::invalid_argument(
-        "PDE velocity extension requires a 2D or 3D mesh");
-  }
-  if (level_set.size() != n_vertices || known.size() != n_vertices ||
-      source_components == 0u || target_components == 0u ||
-      target_components > 3u ||
-      source.size() < n_vertices * source_components) {
-    throw std::invalid_argument(
-        "PDE velocity extension received incompatible input sizes");
-  }
-  const auto copy_components = std::min(source_components, target_components);
-  if (options.enforce_wall_impermeability && walls.empty()) {
-    throw std::invalid_argument(
-        "PDE velocity extension wall impermeability requires at least one "
-        "strong wall mask (zero or prescribed velocity)");
-  }
+  runLocalExtensionPhase(comm, [&] {
+    if (dim != 2 && dim != 3) {
+      throw std::invalid_argument(
+          "PDE velocity extension requires a 2D or 3D mesh");
+    }
+    if (level_set.size() != n_vertices || known.size() != n_vertices ||
+        source_components == 0u || target_components == 0u ||
+        target_components > 3u ||
+        source.size() / source_components < n_vertices) {
+      throw std::invalid_argument(
+          "PDE velocity extension received incompatible input sizes");
+    }
+    if (options.enforce_wall_impermeability && walls.empty()) {
+      throw std::invalid_argument(
+          "PDE velocity extension wall impermeability requires at least one "
+          "strong wall mask (zero or prescribed velocity)");
+    }
+  });
 
+  const auto copy_components = std::min(source_components, target_components);
   const auto& local_mesh = mesh.local_mesh();
   const auto& coords = mesh.X_ref();
   const auto vertex_gids = localVertexGids(mesh);
@@ -1549,73 +1588,75 @@ PdeVelocityExtensionReport extendVelocityByPdePass(
     }
   }
   if (options.enforce_wall_impermeability) {
-    auto boundary_faces = svmp::DistributedTopology::global_boundary_faces(
-        mesh, /*owned_only=*/false);
-    if (boundary_faces.empty()) {
-      boundary_faces = local_mesh.boundary_faces();
-    }
-    for (const auto& wall : walls) {
-      if (wall.project_boundary_normal) {
-        throw std::invalid_argument(
-            "PDE velocity extension supports only axis-aligned strong "
-            "wall component masks, not boundary-normal projection");
+    runLocalExtensionPhase(comm, [&] {
+      auto boundary_faces = svmp::DistributedTopology::global_boundary_faces(
+          mesh, /*owned_only=*/false);
+      if (boundary_faces.empty()) {
+        boundary_faces = local_mesh.boundary_faces();
       }
-      bool any = false;
-      for (int d = 0; d < dim; ++d) {
-        any = any || wall.constrained_components[static_cast<std::size_t>(d)];
-      }
-      if (!any) {
-        throw std::invalid_argument(
-            "PDE velocity extension received an empty wall component mask");
-      }
-    }
-    for (const auto face : boundary_faces) {
-      if (face < 0 || face >= local_mesh.n_faces()) {
-        continue;
-      }
-      const auto label = local_mesh.boundary_label(face);
-      const auto raw_normal = local_mesh.face_normal(face);
-      const double norm = std::sqrt(raw_normal[0] * raw_normal[0] +
-                                    raw_normal[1] * raw_normal[1] +
-                                    raw_normal[2] * raw_normal[2]);
       for (const auto& wall : walls) {
-        if (wall.boundary_label != svmp::INVALID_LABEL &&
-            wall.boundary_label != label) {
+        if (wall.project_boundary_normal) {
+          throw std::invalid_argument(
+              "PDE velocity extension supports only axis-aligned strong "
+              "wall component masks, not boundary-normal projection");
+        }
+        bool any = false;
+        for (int d = 0; d < dim; ++d) {
+          any = any || wall.constrained_components[static_cast<std::size_t>(d)];
+        }
+        if (!any) {
+          throw std::invalid_argument(
+              "PDE velocity extension received an empty wall component mask");
+        }
+      }
+      for (const auto face : boundary_faces) {
+        if (face < 0 || face >= local_mesh.n_faces()) {
           continue;
         }
-        // A mask is impermeable only if it constrains the wall normal.
-        if (norm > 0.0 && std::isfinite(norm)) {
-          double unconstrained2 = 0.0;
-          for (int d = 0; d < dim; ++d) {
-            if (!wall.constrained_components[static_cast<std::size_t>(d)]) {
-              const double nd = raw_normal[static_cast<std::size_t>(d)] / norm;
-              unconstrained2 += nd * nd;
-            }
-          }
-          if (unconstrained2 > 1.0e-20) {
-            throw std::runtime_error(
-                "PDE velocity extension received a strong wall component "
-                "mask that does not constrain the wall-normal direction");
-          }
-        }
-        auto [fv, count] = local_mesh.face_vertices_span(face);
-        for (std::size_t i = 0; fv != nullptr && i < count; ++i) {
-          if (fv[i] < 0 || static_cast<std::size_t>(fv[i]) >= n_vertices) {
+        const auto label = local_mesh.boundary_label(face);
+        const auto raw_normal = local_mesh.face_normal(face);
+        const double norm = std::sqrt(raw_normal[0] * raw_normal[0] +
+                                      raw_normal[1] * raw_normal[1] +
+                                      raw_normal[2] * raw_normal[2]);
+        for (const auto& wall : walls) {
+          if (wall.boundary_label != svmp::INVALID_LABEL &&
+              wall.boundary_label != label) {
             continue;
           }
-          for (int d = 0; d < dim; ++d) {
-            if (wall.constrained_components[static_cast<std::size_t>(d)]) {
-              wall_mask[static_cast<std::size_t>(d)]
-                       [static_cast<std::size_t>(fv[i])] = 1u;
-              if (wall.prescribed_velocity) {
-                prescribed_mask[static_cast<std::size_t>(d)]
-                               [static_cast<std::size_t>(fv[i])] = 1u;
+          // A mask is impermeable only if it constrains the wall normal.
+          if (norm > 0.0 && std::isfinite(norm)) {
+            double unconstrained2 = 0.0;
+            for (int d = 0; d < dim; ++d) {
+              if (!wall.constrained_components[static_cast<std::size_t>(d)]) {
+                const double nd = raw_normal[static_cast<std::size_t>(d)] / norm;
+                unconstrained2 += nd * nd;
+              }
+            }
+            if (unconstrained2 > 1.0e-20) {
+              throw std::runtime_error(
+                  "PDE velocity extension received a strong wall component "
+                  "mask that does not constrain the wall-normal direction");
+            }
+          }
+          auto [fv, count] = local_mesh.face_vertices_span(face);
+          for (std::size_t i = 0; fv != nullptr && i < count; ++i) {
+            if (fv[i] < 0 || static_cast<std::size_t>(fv[i]) >= n_vertices) {
+              continue;
+            }
+            for (int d = 0; d < dim; ++d) {
+              if (wall.constrained_components[static_cast<std::size_t>(d)]) {
+                wall_mask[static_cast<std::size_t>(d)]
+                         [static_cast<std::size_t>(fv[i])] = 1u;
+                if (wall.prescribed_velocity) {
+                  prescribed_mask[static_cast<std::size_t>(d)]
+                                 [static_cast<std::size_t>(fv[i])] = 1u;
+                }
               }
             }
           }
         }
       }
-    }
+    });
     for (int d = 0; d < dim; ++d) {
       unionVertexMask(mesh, comm, vertex_gids,
                       wall_mask[static_cast<std::size_t>(d)]);
@@ -1645,64 +1686,113 @@ PdeVelocityExtensionReport extendVelocityByPdePass(
   std::vector<HighOrderCellRecord> local_high_order_cells;
   const svmp::FE::assembly::MeshAccess mesh_access(mesh);
   LagrangeCellMatrices lagrange_matrices;
-  // The first unsupported inactive cell of this rank; every rank fails together.
-  std::string unsupported_cell;
-  for (std::size_t c = 0; c < n_cells; ++c) {
-    const auto cell = static_cast<svmp::index_t>(c);
-    if (!mesh.is_owned_cell(cell)) {
-      continue;
-    }
-    auto [cv, count] = local_mesh.cell_vertices_span(cell);
-    if (cv == nullptr || count == 0u) {
-      continue;
-    }
-    bool has_domain = false;
-    bool inside = true;
-    for (std::size_t i = 0; i < count; ++i) {
-      const auto v = static_cast<std::size_t>(cv[i]);
-      has_domain = has_domain || domain[v] != 0u;
-      inside = inside && (domain[v] != 0u || known_mask[v] != 0u);
-    }
-    if (!has_domain || !inside) {
-      continue;
-    }
-    const auto shape = local_mesh.cell_shape(cell);
-    const bool simplex =
-        shape.order == 1 &&
-        ((dim == 2 && shape.family == svmp::CellFamily::Triangle &&
-          count == 3u) ||
-         (dim == 3 && shape.family == svmp::CellFamily::Tetra &&
-          count == 4u));
-    if (!simplex) {
-      // Other first-order cells and the high-order Lagrange cells: the FE
-      // Lagrange element of the cell type and geometry order, whose nodes are
-      // the cell vertices.
-      std::optional<svmp::FE::ElementType> type;
-      if (shape.order >= 1) {
-        try {
-          const auto candidate = mesh_access.getCellType(
-              static_cast<svmp::FE::GlobalIndex>(cell));
-          if (svmp::FE::element_dimension(candidate) == dim &&
-              count <= kMaxHighOrderCellVertices &&
-              lagrange_matrices.supports(candidate, shape.order, count)) {
-            type = candidate;
-          }
-        } catch (const std::exception&) {
-          type.reset();
-        }
+  std::vector<VertexRecord> local_vertices;
+  // Over the known vertices and the prescribed wall components of the inactive
+  // vertices: the data of the extension.
+  double max_known_speed = 0.0;
+  double max_prescribed_wall_speed = 0.0;
+  // Both loops build partition-local records before the first gather.
+  runLocalExtensionPhase(comm, [&] {
+    for (std::size_t c = 0; c < n_cells; ++c) {
+      const auto cell = static_cast<svmp::index_t>(c);
+      if (!mesh.is_owned_cell(cell)) {
+        continue;
       }
-      if (!type.has_value()) {
-        if (unsupported_cell.empty()) {
-          unsupported_cell =
-              "; inactive cell " + std::to_string(cell_gids[c]) + " is a " +
-              cellFamilyName(shape.family) + " cell with " +
-              std::to_string(count) + " vertices (order " +
-              std::to_string(shape.order) + ")";
+      auto [cv, count] = local_mesh.cell_vertices_span(cell);
+      if (cv == nullptr || count == 0u) {
+        continue;
+      }
+      bool has_domain = false;
+      bool inside = true;
+      for (std::size_t i = 0; i < count; ++i) {
+        const auto v = static_cast<std::size_t>(cv[i]);
+        has_domain = has_domain || domain[v] != 0u;
+        inside = inside && (domain[v] != 0u || known_mask[v] != 0u);
+      }
+      if (!has_domain || !inside) {
+        continue;
+      }
+      const auto shape = local_mesh.cell_shape(cell);
+      const bool simplex =
+          shape.order == 1 &&
+          ((dim == 2 && shape.family == svmp::CellFamily::Triangle &&
+            count == 3u) ||
+           (dim == 3 && shape.family == svmp::CellFamily::Tetra &&
+            count == 4u));
+      if (!simplex) {
+        // Other first-order cells and the high-order Lagrange cells: the FE
+        // Lagrange element of the cell type and geometry order, whose nodes are
+        // the cell vertices.
+        std::optional<svmp::FE::ElementType> type;
+        if (shape.order >= 1) {
+          try {
+            const auto candidate = mesh_access.getCellType(
+                static_cast<svmp::FE::GlobalIndex>(cell));
+            if (svmp::FE::element_dimension(candidate) == dim &&
+                count <= kMaxHighOrderCellVertices &&
+                lagrange_matrices.supports(candidate, shape.order, count)) {
+              type = candidate;
+            }
+          } catch (const std::exception&) {
+            type.reset();
+          }
+        }
+        if (!type.has_value()) {
+          throw std::runtime_error(
+              "PDE velocity extension requires Lagrange cells with at most 27 "
+              "nodes in the inactive region; inactive cell " + std::to_string(cell_gids[c]) +
+              " is a " + cellFamilyName(shape.family) + " cell with " +
+              std::to_string(count) + " vertices (order " + std::to_string(shape.order) + ").");
+        }
+        std::array<std::array<double, 3>, kMaxHighOrderCellVertices> x{};
+        std::array<double, kMaxHighOrderCellVertices> phi{};
+        for (std::size_t i = 0; i < count; ++i) {
+          const auto v = static_cast<std::size_t>(cv[i]);
+          for (int d = 0; d < dim; ++d) {
+            x[i][static_cast<std::size_t>(d)] = static_cast<double>(
+                coords[v * static_cast<std::size_t>(dim) +
+                       static_cast<std::size_t>(d)]);
+          }
+          phi[i] = level_set[v];
+          if (options.op != PdeVelocityExtensionOperator::Harmonic &&
+              !std::isfinite(phi[i])) {
+            throw std::runtime_error(
+                "PDE velocity extension found a non-finite level set");
+          }
+        }
+        const auto fill = [&](auto& record) {
+          record.cell_gid = static_cast<std::int64_t>(cell_gids[c]);
+          record.count = static_cast<std::int64_t>(count);
+          for (std::size_t i = 0; i < count; ++i) {
+            record.vertex_gid[i] = static_cast<std::int64_t>(
+                vertex_gids[static_cast<std::size_t>(cv[i])]);
+          }
+          constexpr std::size_t n = std::tuple_size_v<
+              std::remove_reference_t<decltype(record.vertex_gid)>>;
+          if (!lagrange_matrices.compute<n>(
+                  *type, shape.order, dim,
+                  std::span<const std::array<double, 3>>(x.data(), count),
+                  std::span<const double>(phi.data(), count), options.op,
+                  record.matrix)) {
+            throw std::runtime_error(
+                "PDE velocity extension found a degenerate cell");
+          }
+        };
+        if (count <= 4u) {
+          CellRecord record;
+          fill(record);
+          local_cells.push_back(record);
+        } else if (count <= kMaxCellVertices) {
+          WideCellRecord record;
+          fill(record);
+          local_wide_cells.push_back(record);
+        } else {
+          local_high_order_cells.emplace_back();
+          fill(local_high_order_cells.back());
         }
         continue;
       }
-      std::array<std::array<double, 3>, kMaxHighOrderCellVertices> x{};
-      std::array<double, kMaxHighOrderCellVertices> phi{};
+      std::array<std::array<double, 3>, 4> x{};
       for (std::size_t i = 0; i < count; ++i) {
         const auto v = static_cast<std::size_t>(cv[i]);
         for (int d = 0; d < dim; ++d) {
@@ -1710,173 +1800,113 @@ PdeVelocityExtensionReport extendVelocityByPdePass(
               coords[v * static_cast<std::size_t>(dim) +
                      static_cast<std::size_t>(d)]);
         }
-        phi[i] = level_set[v];
-        if (options.op != PdeVelocityExtensionOperator::Harmonic &&
-            !std::isfinite(phi[i])) {
-          throw std::runtime_error(
-              "PDE velocity extension found a non-finite level set");
-        }
       }
-      const auto fill = [&](auto& record) {
-        record.cell_gid = static_cast<std::int64_t>(cell_gids[c]);
-        record.count = static_cast<std::int64_t>(count);
-        for (std::size_t i = 0; i < count; ++i) {
-          record.vertex_gid[i] = static_cast<std::int64_t>(
-              vertex_gids[static_cast<std::size_t>(cv[i])]);
-        }
-        constexpr std::size_t n = std::tuple_size_v<
-            std::remove_reference_t<decltype(record.vertex_gid)>>;
-        if (!lagrange_matrices.compute<n>(
-                *type, shape.order, dim,
-                std::span<const std::array<double, 3>>(x.data(), count),
-                std::span<const double>(phi.data(), count), options.op,
-                record.matrix)) {
-          throw std::runtime_error(
-              "PDE velocity extension found a degenerate cell");
-        }
-      };
-      if (count <= 4u) {
-        CellRecord record;
-        fill(record);
-        local_cells.push_back(record);
-      } else if (count <= kMaxCellVertices) {
-        WideCellRecord record;
-        fill(record);
-        local_wide_cells.push_back(record);
-      } else {
-        local_high_order_cells.emplace_back();
-        fill(local_high_order_cells.back());
-      }
-      continue;
-    }
-    std::array<std::array<double, 3>, 4> x{};
-    for (std::size_t i = 0; i < count; ++i) {
-      const auto v = static_cast<std::size_t>(cv[i]);
-      for (int d = 0; d < dim; ++d) {
-        x[i][static_cast<std::size_t>(d)] = static_cast<double>(
-            coords[v * static_cast<std::size_t>(dim) +
-                   static_cast<std::size_t>(d)]);
-      }
-    }
-    std::array<std::array<double, 3>, 4> grad{};
-    double measure = 0.0;
-    if (!simplexGradients(x, dim, grad, measure)) {
-      throw std::runtime_error(
-          "PDE velocity extension found a degenerate cell");
-    }
-    CellRecord record;
-    record.cell_gid = static_cast<std::int64_t>(cell_gids[c]);
-    record.count = static_cast<std::int64_t>(count);
-    for (std::size_t i = 0; i < count; ++i) {
-      record.vertex_gid[i] = static_cast<std::int64_t>(
-          vertex_gids[static_cast<std::size_t>(cv[i])]);
-    }
-    if (options.op == PdeVelocityExtensionOperator::Harmonic) {
-      for (std::size_t i = 0; i < count; ++i) {
-        for (std::size_t j = 0; j < count; ++j) {
-          double dot = 0.0;
-          for (int d = 0; d < dim; ++d) {
-            dot += grad[i][static_cast<std::size_t>(d)] *
-                   grad[j][static_cast<std::size_t>(d)];
-          }
-          record.matrix[i * count + j] = measure * dot;
-        }
-      }
-    } else {
-      std::array<double, 3> gphi{0.0, 0.0, 0.0};
-      for (std::size_t i = 0; i < count; ++i) {
-        const double value = level_set[static_cast<std::size_t>(cv[i])];
-        if (!std::isfinite(value)) {
-          throw std::runtime_error(
-              "PDE velocity extension found a non-finite level set");
-        }
-        for (int d = 0; d < dim; ++d) {
-          gphi[static_cast<std::size_t>(d)] +=
-              value * grad[i][static_cast<std::size_t>(d)];
-        }
-      }
-      const double gnorm = std::sqrt(gphi[0] * gphi[0] + gphi[1] * gphi[1] +
-                                     gphi[2] * gphi[2]);
-      if (!(gnorm > 0.0) || !std::isfinite(gnorm)) {
+      std::array<std::array<double, 3>, 4> grad{};
+      double measure = 0.0;
+      if (!simplexGradients(x, dim, grad, measure)) {
         throw std::runtime_error(
-            "PDE least-squares normal extension found a inactive cell with a zero "
-            "level-set gradient; the normal is undefined");
+            "PDE velocity extension found a degenerate cell");
       }
-      std::array<double, 4> ndg{0.0, 0.0, 0.0, 0.0};
+      CellRecord record;
+      record.cell_gid = static_cast<std::int64_t>(cell_gids[c]);
+      record.count = static_cast<std::int64_t>(count);
       for (std::size_t i = 0; i < count; ++i) {
-        for (int d = 0; d < dim; ++d) {
-          ndg[i] += gphi[static_cast<std::size_t>(d)] / gnorm *
-                    grad[i][static_cast<std::size_t>(d)];
-        }
+        record.vertex_gid[i] = static_cast<std::int64_t>(
+            vertex_gids[static_cast<std::size_t>(cv[i])]);
       }
-      for (std::size_t i = 0; i < count; ++i) {
-        for (std::size_t j = 0; j < count; ++j) {
-          record.matrix[i * count + j] = measure * ndg[i] * ndg[j];
+      if (options.op == PdeVelocityExtensionOperator::Harmonic) {
+        for (std::size_t i = 0; i < count; ++i) {
+          for (std::size_t j = 0; j < count; ++j) {
+            double dot = 0.0;
+            for (int d = 0; d < dim; ++d) {
+              dot += grad[i][static_cast<std::size_t>(d)] *
+                     grad[j][static_cast<std::size_t>(d)];
+            }
+            record.matrix[i * count + j] = measure * dot;
+          }
         }
-      }
-    }
-    local_cells.push_back(record);
-  }
-  if (globalMax(unsupported_cell.empty() ? 0.0 : 1.0, comm) > 0.0) {
-    throw std::runtime_error(
-        "PDE velocity extension requires Lagrange cells with at most 27 "
-        "nodes in the inactive region (first-order: Triangle3 or Quad4 in 2D; "
-        "Tetra4, Hex8, Wedge6 or Pyramid5 in 3D; high-order: Triangle6, "
-        "Quad9, Tetra10, Pyramid14, Wedge18, Hex27, ...)" +
-        unsupported_cell + ".");
-  }
-
-  std::vector<VertexRecord> local_vertices;
-  // Over the known vertices and the prescribed wall components of the inactive
-  // vertices: the data of the extension.
-  double max_known_speed = 0.0;
-  double max_prescribed_wall_speed = 0.0;
-  for (std::size_t v = 0; v < n_vertices; ++v) {
-    if (known_mask[v] != 0u) {
-      double speed2 = 0.0;
-      for (std::size_t c = 0; c < copy_components; ++c) {
-        const double value = source[v * source_components + c];
-        speed2 += value * value;
-      }
-      max_known_speed = std::max(max_known_speed, std::sqrt(speed2));
-    } else if (prescribed_walls && domain[v] != 0u) {
-      double speed2 = 0.0;
-      for (std::size_t c = 0; c < copy_components; ++c) {
-        const double value = source[v * source_components + c];
-        if (!prescribed(c, v)) {
-          continue;
+      } else {
+        std::array<double, 3> gphi{0.0, 0.0, 0.0};
+        for (std::size_t i = 0; i < count; ++i) {
+          const double value = level_set[static_cast<std::size_t>(cv[i])];
+          if (!std::isfinite(value)) {
+            throw std::runtime_error(
+                "PDE velocity extension found a non-finite level set");
+          }
+          for (int d = 0; d < dim; ++d) {
+            gphi[static_cast<std::size_t>(d)] +=
+                value * grad[i][static_cast<std::size_t>(d)];
+          }
         }
-        if (!std::isfinite(value)) {
+        const double gnorm = std::sqrt(gphi[0] * gphi[0] + gphi[1] * gphi[1] +
+                                       gphi[2] * gphi[2]);
+        if (!(gnorm > 0.0) || !std::isfinite(gnorm)) {
           throw std::runtime_error(
-              "PDE velocity extension found a non-finite prescribed wall "
-              "velocity");
+              "PDE least-squares normal extension found a inactive cell with a zero "
+              "level-set gradient; the normal is undefined");
         }
-        speed2 += value * value;
-      }
-      max_prescribed_wall_speed =
-          std::max(max_prescribed_wall_speed, std::sqrt(speed2));
-    }
-    if ((known_mask[v] == 0u && domain[v] == 0u) || !ownsVertex(mesh, comm, v)) {
-      continue;
-    }
-    VertexRecord record;
-    record.gid = static_cast<std::int64_t>(vertex_gids[v]);
-    record.flags = static_cast<std::uint8_t>(
-        (known_mask[v] != 0u ? kKnownFlag : 0u) |
-        (domain[v] != 0u ? kExtensionFlag : 0u));
-    for (std::size_t c = 0; c < 3u; ++c) {
-      record.wall[c] = prescribed(c, v) ? kPrescribedWall : wall_mask[c][v];
-      if (c < copy_components) {
-        const double value = source[v * source_components + c];
-        if (known_mask[v] != 0u && !std::isfinite(value)) {
-          throw std::runtime_error(
-              "PDE velocity extension found a non-finite known velocity");
+        std::array<double, 4> ndg{0.0, 0.0, 0.0, 0.0};
+        for (std::size_t i = 0; i < count; ++i) {
+          for (int d = 0; d < dim; ++d) {
+            ndg[i] += gphi[static_cast<std::size_t>(d)] / gnorm *
+                      grad[i][static_cast<std::size_t>(d)];
+          }
         }
-        record.value[c] = std::isfinite(value) ? value : 0.0;
+        for (std::size_t i = 0; i < count; ++i) {
+          for (std::size_t j = 0; j < count; ++j) {
+            record.matrix[i * count + j] = measure * ndg[i] * ndg[j];
+          }
+        }
       }
+      local_cells.push_back(record);
     }
-    local_vertices.push_back(record);
-  }
+    for (std::size_t v = 0; v < n_vertices; ++v) {
+      if (known_mask[v] != 0u) {
+        double speed2 = 0.0;
+        for (std::size_t c = 0; c < copy_components; ++c) {
+          const double value = source[v * source_components + c];
+          speed2 += value * value;
+        }
+        max_known_speed = std::max(max_known_speed, std::sqrt(speed2));
+      } else if (prescribed_walls && domain[v] != 0u) {
+        double speed2 = 0.0;
+        for (std::size_t c = 0; c < copy_components; ++c) {
+          const double value = source[v * source_components + c];
+          if (!prescribed(c, v)) {
+            continue;
+          }
+          if (!std::isfinite(value)) {
+            throw std::runtime_error(
+                "PDE velocity extension found a non-finite prescribed wall "
+                "velocity");
+          }
+          speed2 += value * value;
+        }
+        max_prescribed_wall_speed =
+            std::max(max_prescribed_wall_speed, std::sqrt(speed2));
+      }
+      if ((known_mask[v] == 0u && domain[v] == 0u) || !ownsVertex(mesh, comm, v)) {
+        continue;
+      }
+      VertexRecord record;
+      record.gid = static_cast<std::int64_t>(vertex_gids[v]);
+      record.flags = static_cast<std::uint8_t>(
+          (known_mask[v] != 0u ? kKnownFlag : 0u) |
+          (domain[v] != 0u ? kExtensionFlag : 0u));
+      for (std::size_t c = 0; c < 3u; ++c) {
+        record.wall[c] = prescribed(c, v) ? kPrescribedWall : wall_mask[c][v];
+        if (c < copy_components) {
+          const double value = source[v * source_components + c];
+          if (known_mask[v] != 0u && !std::isfinite(value)) {
+            throw std::runtime_error(
+                "PDE velocity extension found a non-finite known velocity");
+          }
+          record.value[c] = std::isfinite(value) ? value : 0.0;
+        }
+      }
+      local_vertices.push_back(record);
+    }
+  });
   max_known_speed = globalMax(max_known_speed, comm);
   if (prescribed_walls) {
     max_prescribed_wall_speed = globalMax(max_prescribed_wall_speed, comm);
@@ -2562,130 +2592,132 @@ PdeVelocityExtensionReport extendVelocityByPdePass(
   // The rows depend only on the cached content; cached rows passed every
   // check below when they were built.
   const bool rows_from_cache = rows != nullptr && reuse && cached->has_rows;
-  if (rows_from_cache) {
-    *rows = cached->rows;
-  }
-  if (rows != nullptr && !rows_from_cache) {
-    rows->clear();
-    std::unordered_map<std::int64_t, std::size_t> local_by_gid;
-    local_by_gid.reserve(n_vertices);
-    for (std::size_t v = 0; v < n_vertices; ++v) {
-      local_by_gid.emplace(static_cast<std::int64_t>(vertex_gids[v]), v);
-    }
-    // Operator row of every owned inactive vertex, accumulated in the canonical
-    // (sorted cell) order used for the solve.
-    std::unordered_map<std::int64_t, std::map<std::int64_t, double>> row_entries;
-    for (std::size_t v = 0; v < n_vertices; ++v) {
-      if (domain[v] != 0u && ownsVertex(mesh, comm, v)) {
-        row_entries.emplace(static_cast<std::int64_t>(vertex_gids[v]),
-                            std::map<std::int64_t, double>{});
-      }
-    }
-    cells.forEach([&](const auto& cell, const auto&) {
-      const auto count = static_cast<std::size_t>(cell.count);
-      for (std::size_t a = 0; a < count; ++a) {
-        const auto found = row_entries.find(cell.vertex_gid[a]);
-        if (found == row_entries.end()) {
-          continue;
-        }
-        for (std::size_t b = 0; b < count; ++b) {
-          found->second[cell.vertex_gid[b]] += cell.matrix[a * count + b];
-        }
-      }
-    });
-    for (std::size_t v = 0; v < n_vertices; ++v) {
-      if (!ownsVertex(mesh, comm, v)) {
-        continue;
-      }
-      for (std::size_t c = 0; c < target_components; ++c) {
-        svmp::FE::level_set::VelocityExtensionConstraintRow row;
-        row.vertex = static_cast<svmp::FE::GlobalIndex>(v);
-        row.component = static_cast<int>(c);
-        if (known_mask[v] != 0u ||
-            (domain[v] != 0u && c < copy_components && prescribed(c, v))) {
-          if (c < copy_components) {
-            row.dependencies.push_back(
-                svmp::FE::level_set::VelocityExtensionDependency{
-                    .field = svmp::FE::level_set::
-                        VelocityExtensionDependencyField::SourceVelocity,
-                    .vertex = static_cast<svmp::FE::GlobalIndex>(v),
-                    .component = static_cast<int>(c),
-                    .coefficient = 1.0});
-          }
-        } else if (domain[v] != 0u && c < copy_components &&
-                   wall_mask[c][v] == 0u) {
-          const auto gid = static_cast<std::int64_t>(vertex_gids[v]);
-          const auto& entries = row_entries.at(gid);
-          const auto diagonal = entries.find(gid);
-          if (diagonal == entries.end() || !(diagonal->second > 0.0)) {
-            throw std::runtime_error(
-                std::string("PDE velocity extension (") +
-                std::string(pdeVelocityExtensionOperatorName(options.op)) +
-                ") found a inactive vertex with a non-positive operator diagonal; "
-                "its algebraic row is undefined");
-          }
-          for (const auto& [neighbor_gid, value] : entries) {
-            if (neighbor_gid == gid) {
-              continue;
-            }
-            const auto local = local_by_gid.find(neighbor_gid);
-            if (local == local_by_gid.end()) {
-              throw std::runtime_error(
-                  "PDE velocity extension row depends on a vertex that is not "
-                  "present on its owner rank (ghost layer too thin)");
-            }
-            row.dependencies.push_back(
-                svmp::FE::level_set::VelocityExtensionDependency{
-                    .field = svmp::FE::level_set::
-                        VelocityExtensionDependencyField::ExtensionVelocity,
-                    .vertex = static_cast<svmp::FE::GlobalIndex>(local->second),
-                    .component = static_cast<int>(c),
-                    .coefficient = -value / diagonal->second});
-          }
-        }
-        rows->push_back(std::move(row));
-      }
-    }
-  }
-
-  // ---- scatter back ----------------------------------------------------------
-  extended.assign(n_vertices * target_components, 0.0);
   double max_extended_speed = 0.0;
   double max_wall_normal = 0.0;
   std::size_t outside = 0u;
-  for (std::size_t v = 0; v < n_vertices; ++v) {
-    if (known_mask[v] != 0u) {
-      for (std::size_t c = 0; c < copy_components; ++c) {
-        extended[v * target_components + c] = source[v * source_components + c];
+  runLocalExtensionPhase(comm, [&] {
+    if (rows_from_cache) {
+      *rows = cached->rows;
+    }
+    if (rows != nullptr && !rows_from_cache) {
+      rows->clear();
+      std::unordered_map<std::int64_t, std::size_t> local_by_gid;
+      local_by_gid.reserve(n_vertices);
+      for (std::size_t v = 0; v < n_vertices; ++v) {
+        local_by_gid.emplace(static_cast<std::int64_t>(vertex_gids[v]), v);
       }
-      continue;
+      // Operator row of every owned inactive vertex, accumulated in the canonical
+      // (sorted cell) order used for the solve.
+      std::unordered_map<std::int64_t, std::map<std::int64_t, double>> row_entries;
+      for (std::size_t v = 0; v < n_vertices; ++v) {
+        if (domain[v] != 0u && ownsVertex(mesh, comm, v)) {
+          row_entries.emplace(static_cast<std::int64_t>(vertex_gids[v]),
+                              std::map<std::int64_t, double>{});
+        }
+      }
+      cells.forEach([&](const auto& cell, const auto&) {
+        const auto count = static_cast<std::size_t>(cell.count);
+        for (std::size_t a = 0; a < count; ++a) {
+          const auto found = row_entries.find(cell.vertex_gid[a]);
+          if (found == row_entries.end()) {
+            continue;
+          }
+          for (std::size_t b = 0; b < count; ++b) {
+            found->second[cell.vertex_gid[b]] += cell.matrix[a * count + b];
+          }
+        }
+      });
+      for (std::size_t v = 0; v < n_vertices; ++v) {
+        if (!ownsVertex(mesh, comm, v)) {
+          continue;
+        }
+        for (std::size_t c = 0; c < target_components; ++c) {
+          svmp::FE::level_set::VelocityExtensionConstraintRow row;
+          row.vertex = static_cast<svmp::FE::GlobalIndex>(v);
+          row.component = static_cast<int>(c);
+          if (known_mask[v] != 0u ||
+              (domain[v] != 0u && c < copy_components && prescribed(c, v))) {
+            if (c < copy_components) {
+              row.dependencies.push_back(
+                  svmp::FE::level_set::VelocityExtensionDependency{
+                      .field = svmp::FE::level_set::
+                          VelocityExtensionDependencyField::SourceVelocity,
+                      .vertex = static_cast<svmp::FE::GlobalIndex>(v),
+                      .component = static_cast<int>(c),
+                      .coefficient = 1.0});
+            }
+          } else if (domain[v] != 0u && c < copy_components &&
+                     wall_mask[c][v] == 0u) {
+            const auto gid = static_cast<std::int64_t>(vertex_gids[v]);
+            const auto& entries = row_entries.at(gid);
+            const auto diagonal = entries.find(gid);
+            if (diagonal == entries.end() || !(diagonal->second > 0.0)) {
+              throw std::runtime_error(
+                  std::string("PDE velocity extension (") +
+                  std::string(pdeVelocityExtensionOperatorName(options.op)) +
+                  ") found a inactive vertex with a non-positive operator diagonal; "
+                  "its algebraic row is undefined");
+            }
+            for (const auto& [neighbor_gid, value] : entries) {
+              if (neighbor_gid == gid) {
+                continue;
+              }
+              const auto local = local_by_gid.find(neighbor_gid);
+              if (local == local_by_gid.end()) {
+                throw std::runtime_error(
+                    "PDE velocity extension row depends on a vertex that is not "
+                    "present on its owner rank (ghost layer too thin)");
+              }
+              row.dependencies.push_back(
+                  svmp::FE::level_set::VelocityExtensionDependency{
+                      .field = svmp::FE::level_set::
+                          VelocityExtensionDependencyField::ExtensionVelocity,
+                      .vertex = static_cast<svmp::FE::GlobalIndex>(local->second),
+                      .component = static_cast<int>(c),
+                      .coefficient = -value / diagonal->second});
+            }
+          }
+          rows->push_back(std::move(row));
+        }
+      }
     }
-    if (domain[v] == 0u) {
-      outside += ownsVertex(mesh, comm, v) ? 1u : 0u;
-      continue;
-    }
-    const auto found =
-        vertex_index.find(static_cast<std::int64_t>(vertex_gids[v]));
-    if (found == vertex_index.end()) {
-      throw std::runtime_error(
-          "PDE velocity extension lost a local inactive vertex in the gathered "
-          "system");
-    }
-    double speed2 = 0.0;
-    for (std::size_t c = 0; c < copy_components; ++c) {
-      const double value = solution[found->second * 3u + c];
-      if (!std::isfinite(value)) {
+
+    // ---- scatter back ----------------------------------------------------------
+    extended.assign(n_vertices * target_components, 0.0);
+    for (std::size_t v = 0; v < n_vertices; ++v) {
+      if (known_mask[v] != 0u) {
+        for (std::size_t c = 0; c < copy_components; ++c) {
+          extended[v * target_components + c] = source[v * source_components + c];
+        }
+        continue;
+      }
+      if (domain[v] == 0u) {
+        outside += ownsVertex(mesh, comm, v) ? 1u : 0u;
+        continue;
+      }
+      const auto found =
+          vertex_index.find(static_cast<std::int64_t>(vertex_gids[v]));
+      if (found == vertex_index.end()) {
         throw std::runtime_error(
-            "PDE velocity extension produced a non-finite velocity");
+            "PDE velocity extension lost a local inactive vertex in the gathered "
+            "system");
       }
-      extended[v * target_components + c] = value;
-      speed2 += value * value;
-      if (wall_mask[c][v] != 0u && !prescribed(c, v)) {
-        max_wall_normal = std::max(max_wall_normal, std::abs(value));
+      double speed2 = 0.0;
+      for (std::size_t c = 0; c < copy_components; ++c) {
+        const double value = solution[found->second * 3u + c];
+        if (!std::isfinite(value)) {
+          throw std::runtime_error(
+              "PDE velocity extension produced a non-finite velocity");
+        }
+        extended[v * target_components + c] = value;
+        speed2 += value * value;
+        if (wall_mask[c][v] != 0u && !prescribed(c, v)) {
+          max_wall_normal = std::max(max_wall_normal, std::abs(value));
+        }
       }
+      max_extended_speed = std::max(max_extended_speed, std::sqrt(speed2));
     }
-    max_extended_speed = std::max(max_extended_speed, std::sqrt(speed2));
-  }
+  });
   report.outside_vertices = globalSum(outside, comm);
   report.max_extended_speed = globalMax(max_extended_speed, comm);
   report.max_wall_normal_velocity = globalMax(max_wall_normal, comm);
