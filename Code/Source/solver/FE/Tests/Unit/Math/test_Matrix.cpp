@@ -479,9 +479,11 @@ TEST_F(MatrixTest, NumericalStability) {
     Matrix<double, 2, 2> m{{1.0, 1.0},
                            {1.0, 1.0 + eps}};
 
-    double det = m.determinant();
-    // Relax tolerance due to floating-point arithmetic in determinant calculation
-    EXPECT_NEAR(det, eps, 1e-14);
+    // 1 + eps rounds to 1 + 5*2^-52. Its difference from 1 is exact.
+    const double expected = 5.0 * std::numeric_limits<double>::epsilon();
+    EXPECT_DOUBLE_EQ(m.determinant(), expected);
+    Matrix<double, 2, 2> reversed{{1.0, 1.0 + eps}, {1.0, 1.0}};
+    EXPECT_DOUBLE_EQ(reversed.determinant(), -expected);
 }
 
 TEST_F(MatrixTest, OrthogonalMatrixProperties) {

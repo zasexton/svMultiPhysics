@@ -501,25 +501,22 @@ TEST_F(RotationsTest, Rotation3D_Rank4TensorRotation) {
     double angle = Constants<double>::pi / 6.0;
     auto rot = Rotation3D<double>::from_axis_angle(axis, angle);
 
-    // Create a rank-4 tensor (simplified elasticity tensor)
+    // Rotate two elementary tensors with distinct ordered slots. A rotation
+    // of a tensor product is the tensor product of the rotated basis vectors.
     Tensor4<double, 3> C;
-
-    // Set some non-zero values
-    C(0, 0, 0, 0) = 1.0;
-    C(1, 1, 1, 1) = 2.0;
-    C(2, 2, 2, 2) = 3.0;
-    C(0, 1, 0, 1) = 0.5;
-    C(0, 2, 0, 2) = 0.5;
-    C(1, 2, 1, 2) = 0.5;
-
-    auto C_rot = rot.rotate_tensor(C);
-
-    // Check that rotation preserves tensor structure
-    // The rotated tensor should still be a valid elasticity tensor
-    // (This is a simplified check)
-    EXPECT_TRUE(std::isfinite(C_rot(0, 0, 0, 0)));
-    EXPECT_TRUE(std::isfinite(C_rot(1, 1, 1, 1)));
-    EXPECT_TRUE(std::isfinite(C_rot(2, 2, 2, 2)));
+    C(0, 1, 0, 2) = 2.0;
+    C(1, 0, 2, 1) = -3.0;
+    const auto rotated = rot.rotate_tensor(C);
+    const Vector3<double> x{std::sqrt(3.0) / 2.0, 0.5, 0.0};
+    const Vector3<double> y{-0.5, std::sqrt(3.0) / 2.0, 0.0};
+    const Vector3<double> z{0.0, 0.0, 1.0};
+    for (int i = 0; i < 3; ++i) for (int j = 0; j < 3; ++j) {
+        for (int k = 0; k < 3; ++k) for (int l = 0; l < 3; ++l) {
+            const double expected = 2.0 * x[i] * y[j] * x[k] * z[l] -
+                                    3.0 * y[i] * x[j] * z[k] * y[l];
+            EXPECT_NEAR(rotated(i,j,k,l), expected, 2.e-15) << i << j << k << l;
+        }
+    }
 }
 
 TEST_F(RotationsTest, Rotation3D_Composition) {

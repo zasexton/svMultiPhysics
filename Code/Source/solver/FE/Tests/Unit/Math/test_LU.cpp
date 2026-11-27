@@ -83,11 +83,11 @@ TEST_F(LUTest, Solve2x2NearSingular) {
 
     Vector<double, 2> x = solve_2x2(A, b);
 
-    // Solution should be approximately [1, 1]
-    // For ill-conditioned matrix with det~1e-15, expect reduced accuracy
-    // Condition number ~ 1/det ~ 1e15, so accuracy ~ eps * cond ~ 1e-16 * 1e15 = 1e-1
-    EXPECT_NEAR(x[0], 1.0, 0.5);
-    EXPECT_NEAR(x[1], 1.0, 0.5);
+    // The stored perturbations at 1 and 2 are five and four units of
+    // 2^-52, respectively. Subtracting the first row from the second
+    // gives 5*x[1]=4 exactly for this floating-point system.
+    EXPECT_DOUBLE_EQ(x[0], 6.0 / 5.0);
+    EXPECT_DOUBLE_EQ(x[1], 4.0 / 5.0);
 }
 
 // =============================================================================
