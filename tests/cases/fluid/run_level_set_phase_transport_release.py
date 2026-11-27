@@ -211,25 +211,15 @@ def run_monitored(
     }
 
 
-def find_test_properties(result_path: Path) -> dict[str, str]:
+def read_qualification_test(result_path: Path) -> dict[str, Any]:
     document = json.loads(result_path.read_text(encoding="utf-8"))
     for suite in document.get("testsuites", []):
         for test in suite.get("testsuite", []):
-            if test.get("classname") == "LevelSetConservativePhaseQualification":
-                excluded = {
-                    "name",
-                    "status",
-                    "result",
-                    "timestamp",
-                    "time",
-                    "classname",
-                }
-                return {
-                    key: str(value)
-                    for key, value in test.items()
-                    if key not in excluded
-                }
-    raise RuntimeError("qualification test properties are absent")
+            if f"{test.get('classname')}.{test.get('name')}" == TEST_FILTER:
+                if test.get("status") != "RUN" or test.get("result") != "COMPLETED":
+                    raise RuntimeError("qualification test did not complete")
+                return test
+    raise RuntimeError("qualification test result is absent")
 
 
 def evaluate_point(
@@ -480,7 +470,13 @@ def summarize_matrix(arguments: argparse.Namespace, registry: dict[str, Any]) ->
         infrastructure_failures.extend(f"{key}: {item}" for item in checksum_failures)
         comparison = json.loads(comparison_path.read_text(encoding="utf-8"))
         build = json.loads(build_path.read_text(encoding="utf-8"))
-        properties = find_test_properties(result_path)
+        try:
+            properties = read_qualification_test(result_path)
+        except (OSError, ValueError, RuntimeError) as error:
+            infrastructure_failures.append(f"invalid test result: {key}: {error}")
+            continue
+        if comparison.get("point_outcome") == "INFRASTRUCTURE_FAILURE":
+            infrastructure_failures.append(f"point process failed: {key}")
         points[key] = {
             "directory": point_directory,
             "manifest": manifest,
@@ -508,10 +504,14 @@ def summarize_matrix(arguments: argparse.Namespace, registry: dict[str, Any]) ->
     spatial_studies: list[dict[str, Any]] = []
     temporal_studies: list[dict[str, Any]] = []
     convergence_failures: list[str] = []
-    if not missing:
+    if not missing and not infrastructure_failures:
         for case_id, case in registry["cases"].items():
             resolutions = [int(value) for value in case["resolutions"]]
             fixed_cfl = float(case["fixed_cfl_for_space_study"])
+            if any("interface_l1" not in points[(case_id, n, fixed_cfl)]["properties"]
+                   for n in resolutions):
+                convergence_failures.append(f"spatial study lacks completed measurements: {case_id}")
+                continue
             errors = [
                 float(points[(case_id, resolution, fixed_cfl)]["properties"]["interface_l1"])
                 for resolution in resolutions
@@ -553,6 +553,9 @@ def summarize_matrix(arguments: argparse.Namespace, registry: dict[str, Any]) ->
                 / "control_volumes.csv"
                 for cfl in cfl_values
             ]
+            if any(not path.is_file() for path in detail_paths):
+                convergence_failures.append(f"temporal study lacks final control volumes: {case_id}")
+                continue
             coarse_medium = weighted_control_volume_difference(
                 detail_paths[0], detail_paths[1]
             )
@@ -791,11 +794,27 @@ def run_point(arguments: argparse.Namespace, registry: dict[str, Any]) -> int:
 
     checks: list[dict[str, Any]] = []
     failure_reason: str | None = resources["termination_reason"]
-    if resources["return_code"] == 0 and test_result_path.is_file():
+    point_outcome = "INFRASTRUCTURE_FAILURE"
+    if failure_reason is None:
         try:
-            properties = find_test_properties(test_result_path)
-            checks = evaluate_point(
-                properties,
+            if not test_result_path.is_file():
+                raise RuntimeError(f"qualification exited with status {resources['return_code']} without a test result")
+            test = read_qualification_test(test_result_path)
+            failures = test.get("failures", [])
+            if not isinstance(failures, list) or any(
+                not isinstance(item, dict) or not isinstance(item.get("failure"), str)
+                for item in failures
+            ):
+                raise ValueError("invalid native failure records")
+            if resources["return_code"] not in (0, 1) or (resources["return_code"] and not failures):
+                raise RuntimeError(f"qualification process exited with status {resources['return_code']}")
+            if failures:
+                point_outcome = "FAIL_METHOD"
+                failure_reason = "\n".join(item["failure"] for item in failures)
+                checks.append({"metric": "native_assertions", "actual": len(failures),
+                               "expected": 0, "relation": "equal", "passed": False})
+            checks.extend(evaluate_point(
+                test,
                 arguments.case_id,
                 arguments.resolution,
                 arguments.cfl,
@@ -803,31 +822,30 @@ def run_point(arguments: argparse.Namespace, registry: dict[str, Any]) -> int:
                 case["gates"],
                 history_path,
                 details_path,
-            )
+            ))
+            if not failures:
+                missing_artifacts = [
+                    check["metric"] for check in checks
+                    if not check["passed"] and check["metric"].startswith("artifact:")
+                ]
+                if missing_artifacts:
+                    failure_reason = "missing or empty " + ", ".join(missing_artifacts)
+                else:
+                    point_outcome = "PASS" if all(check["passed"] for check in checks) else "FAIL_METHOD"
         except (OSError, ValueError, KeyError, RuntimeError) as error:
-            failure_reason = str(error)
-    elif failure_reason is None:
-        failure_reason = "qualification test returned nonzero"
-    point_passed = (
-        resources["return_code"] == 0
-        and checks
-        and all(check["passed"] for check in checks)
-        and failure_reason is None
+            if failure_reason is None:
+                failure_reason = str(error)
+    point_passed = point_outcome == "PASS"
+    release_disposition = (
+        registry["qualification_rule"]["single_point_release_disposition"]
+        if point_passed else point_outcome
     )
-    if point_passed:
-        release_disposition = registry["qualification_rule"][
-            "single_point_release_disposition"
-        ]
-    elif resources["return_code"] != 0 or resources["termination_reason"]:
-        release_disposition = "INFRASTRUCTURE_FAILURE"
-    else:
-        release_disposition = "FAIL_METHOD"
     comparison = {
         "schema_version": 1,
         "case_id": arguments.case_id,
         "resolution": arguments.resolution,
         "requested_cfl": arguments.cfl,
-        "point_outcome": "PASS" if point_passed else "FAIL_METHOD",
+        "point_outcome": point_outcome,
         "release_disposition": release_disposition,
         "failure_reason": failure_reason,
         "checks": checks,

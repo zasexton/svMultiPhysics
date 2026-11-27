@@ -5,6 +5,8 @@ from pathlib import Path
 import subprocess
 import sys
 
+import pytest
+
 
 def _load_runner():
     repository = Path(__file__).resolve().parents[1]
@@ -109,6 +111,51 @@ def test_checksum_verification_detects_mutation(tmp_path):
     assert runner.verify_checksums(tmp_path) == [
         "checksum mismatch: history.csv"
     ]
+
+
+@pytest.mark.parametrize(
+    "native_assertion,expected",
+    [(True, "FAIL_METHOD"), (False, "INFRASTRUCTURE_FAILURE")],
+)
+def test_point_run_preserves_a_native_assertion_or_process_failure(tmp_path, native_assertion, expected):
+    runner = _load_runner()
+    source = tmp_path / "source"
+    subprocess.run(["git", "init", "-q", str(source)], check=True)
+    subprocess.run(
+        ["git", "-C", str(source), "-c", "user.name=Test", "-c", "user.email=test@example.invalid",
+         "commit", "--allow-empty", "-qm", "source"],
+        check=True,
+    )
+    binary = tmp_path / "qualification"
+    program = f"#!{sys.executable}\nimport json, sys\nfrom pathlib import Path\n"
+    if native_assertion:
+        suite, name = runner.TEST_FILTER.split(".")
+        report = {"testsuites": [{"testsuite": [{
+            "classname": suite, "name": name, "status": "RUN", "result": "COMPLETED",
+            "failures": [{"failure": "Expected one component, observed three"}],
+        }]}]}
+        program += (
+            "output = next(arg.split('json:', 1)[1] for arg in sys.argv if arg.startswith('--gtest_output=json:'))\n"
+            f"Path(output).write_text(json.dumps({report!r}))\n"
+            "sys.exit(1)\n"
+        )
+    else:
+        program += "sys.exit(73)\n"
+    binary.write_text(program, encoding="utf-8")
+    binary.chmod(0o755)
+    output = tmp_path / "point"
+    args = runner.build_parser().parse_args([
+        "run", "--case", "translating_drop_2d", "--resolution", "64", "--cfl", "0.25",
+        "--test-binary", str(binary), "--source-root", str(source), "--output-dir", str(output),
+    ])
+    assert runner.run_point(args, _registry()) == 2
+    comparison = json.loads((output / "comparison.json").read_text())
+    assert comparison["point_outcome"] == expected
+    assert comparison["release_disposition"] == expected
+    if native_assertion:
+        assert "Expected one component, observed three" in comparison["failure_reason"]
+        assert any(check["metric"] == "native_assertions" and not check["passed"]
+                   for check in comparison["checks"])
 
 
 def test_point_gate_requires_metrics_and_nonempty_flux_artifacts(tmp_path):
