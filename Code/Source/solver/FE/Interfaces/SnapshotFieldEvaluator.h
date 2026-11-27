@@ -63,13 +63,15 @@ struct SnapshotFieldAccess {
  * by the components (bitwise as ProductSpace::evaluate and
  * evaluate_jacobian) unless @p allow_scalar_product_fast_path is false.  The
  * evaluator keeps the coefficients and geometry mapping of the last cell, so
- * it is single-threaded.  @p diagnostic_context starts its error messages.
+ * it is single-threaded. @p diagnostic_context prefixes errors and
+ * @p field_name identifies the vector quantity in them.
  */
 [[nodiscard]] SnapshotVectorEvaluator makeSnapshotVectorFieldEvaluator(
     const SnapshotFieldAccess& field,
     std::span<const Real> solution,
     std::string_view diagnostic_context,
-    bool allow_scalar_product_fast_path = true);
+    bool allow_scalar_product_fast_path = true,
+    std::string_view field_name = "vector");
 
 /// Values and reference gradients of a scalar field (one component).
 [[nodiscard]] LevelSetGeometryScalarEvaluator makeSnapshotScalarFieldEvaluator(

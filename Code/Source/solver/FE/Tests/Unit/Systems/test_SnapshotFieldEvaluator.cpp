@@ -258,11 +258,19 @@ TEST(SnapshotFieldEvaluator, RejectsIncompatibleFieldsAndShortSolutions)
     const auto scalar = svmp::FE::systems::snapshotFieldAccess(f.system, f.pressure);
     try {
         (void)svmp::FE::interfaces::makeSnapshotVectorFieldEvaluator(scalar, f.solution, "unit context");
-        ADD_FAILURE() << "a scalar field was accepted as a velocity";
+        ADD_FAILURE() << "a scalar field was accepted as a vector";
     } catch (const std::runtime_error& error) {
         EXPECT_EQ(std::string(error.what()),
-                  "[svMultiPhysics::Application] unit context velocity field is "
+                  "unit context vector field is "
                   "incompatible with its level-set declaration.");
+    }
+    try {
+        (void)svmp::FE::interfaces::makeSnapshotVectorFieldEvaluator(
+            scalar, f.solution, "elastic diagnostics", true, "displacement");
+        ADD_FAILURE() << "a scalar field was accepted as a vector";
+    } catch (const std::runtime_error& error) {
+        EXPECT_EQ(std::string(error.what()),
+                  "elastic diagnostics displacement field is incompatible with its level-set declaration.");
     }
     const auto vector = svmp::FE::systems::snapshotFieldAccess(f.system, f.velocity);
     try {
@@ -270,7 +278,7 @@ TEST(SnapshotFieldEvaluator, RejectsIncompatibleFieldsAndShortSolutions)
         ADD_FAILURE() << "a vector field was accepted as a scalar";
     } catch (const std::runtime_error& error) {
         EXPECT_EQ(std::string(error.what()),
-                  "[svMultiPhysics::Application] unit context scalar field is "
+                  "unit context scalar field is "
                   "incompatible with its diagnostic declaration.");
     }
 
@@ -283,7 +291,7 @@ TEST(SnapshotFieldEvaluator, RejectsIncompatibleFieldsAndShortSolutions)
         ADD_FAILURE() << "a short solution was read";
     } catch (const std::runtime_error& error) {
         EXPECT_EQ(std::string(error.what()),
-                  "[svMultiPhysics::Application] unit context solution is too "
-                  "small for the velocity field.");
+                  "unit context solution is too "
+                  "small for the vector field.");
     }
 }

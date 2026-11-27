@@ -121,21 +121,23 @@ evaluateCurrentTwoFluidStageDiagnostics(
           .velocity = makeSnapshotVectorFieldEvaluator(
               snapshotFieldAccess(*sim.fe_system, declaration.negative_velocity_field),
               stage_solution,
-              "Two-fluid negative-phase stage"),
+              "[svMultiPhysics::Application] Two-fluid negative-phase stage",
+              /*allow_scalar_product_fast_path=*/true, "velocity"),
           .pressure = makeSnapshotScalarFieldEvaluator(
               snapshotFieldAccess(*sim.fe_system, declaration.negative_pressure_field),
               stage_solution,
-              "Two-fluid negative-phase stage"),
+              "[svMultiPhysics::Application] Two-fluid negative-phase stage"),
       };
       IncompressibleTwoFluidPhaseEvaluators positive{
           .velocity = makeSnapshotVectorFieldEvaluator(
               snapshotFieldAccess(*sim.fe_system, declaration.positive_velocity_field),
               stage_solution,
-              "Two-fluid positive-phase stage"),
+              "[svMultiPhysics::Application] Two-fluid positive-phase stage",
+              /*allow_scalar_product_fast_path=*/true, "velocity"),
           .pressure = makeSnapshotScalarFieldEvaluator(
               snapshotFieldAccess(*sim.fe_system, declaration.positive_pressure_field),
               stage_solution,
-              "Two-fluid positive-phase stage"),
+              "[svMultiPhysics::Application] Two-fluid positive-phase stage"),
       };
       auto cell_measures =
           std::make_shared<std::map<svmp::FE::GlobalIndex, svmp::FE::Real>>();

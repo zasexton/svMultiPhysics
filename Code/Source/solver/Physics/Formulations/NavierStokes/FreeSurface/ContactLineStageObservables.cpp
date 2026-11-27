@@ -394,7 +394,8 @@ evaluateAcceptedFreeSurfaceContactStages(
       const auto velocity = makeSnapshotVectorFieldEvaluator(
           snapshotFieldAccess(system, declaration.velocity_field),
           stage_solution,
-          "Accepted contact-stage");
+          "[svMultiPhysics::Application] Accepted contact-stage",
+          /*allow_scalar_product_fast_path=*/true, "velocity");
       local_state =
           evaluateFreeSurfaceDynamicContactState(
               snapshot, declaration.parameters, velocity);

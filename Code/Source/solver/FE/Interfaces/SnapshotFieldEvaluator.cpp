@@ -76,27 +76,27 @@ std::shared_ptr<svmp::FE::geometry::GeometryMapping> createCellGeometryMapping(
 
 svmp::FE::interfaces::SnapshotVectorEvaluator
 makeSnapshotVectorFieldEvaluator(
-    const SnapshotFieldAccess& velocity_record,
+    const SnapshotFieldAccess& record,
     std::span<const svmp::FE::Real> solution,
     std::string_view diagnostic_context,
-    bool allow_scalar_product_fast_path)
+    bool allow_scalar_product_fast_path,
+    std::string_view field_name)
 {
-  const auto velocity_offset = velocity_record.dof_offset;
-  const auto& field_mesh = velocity_record.mesh();
+  const std::string context(diagnostic_context);
+  const auto offset = record.dof_offset;
+  const std::string name(field_name);
+  const auto& field_mesh = record.mesh();
   const int dimension = field_mesh.dimension();
-  if (!velocity_record.space || velocity_offset < 0 ||
-      velocity_record.components < dimension ||
-      velocity_record.space->value_dimension() < dimension) {
+  if (!record.space || offset < 0 ||
+      record.components < dimension ||
+      record.space->value_dimension() < dimension) {
     throw std::runtime_error(
-        "[svMultiPhysics::Application] " +
-        std::string(diagnostic_context) +
-        " velocity field is incompatible with its level-set declaration.");
+        context + " " + name + " field is incompatible with its level-set declaration.");
   }
 
-  const auto cell_dofs_of = velocity_record.cell_dofs;
+  const auto cell_dofs_of = record.cell_dofs;
   auto* const mesh_access = &field_mesh;
-  const auto velocity_space = velocity_record.space;
-  const auto context = std::string(diagnostic_context);
+  const auto space = record.space;
 
   // The diagnostic loops visit all points of one parent cell in a row.  The
   // scratch below keeps that cell's coefficients and geometry mapping, the
@@ -104,7 +104,7 @@ makeSnapshotVectorFieldEvaluator(
   // reference point), and reusable basis buffers, so a point no longer
   // allocates.  Every returned value keeps its exact arithmetic.  Like the
   // mapping cache before it, the scratch makes the evaluator single-threaded.
-  struct VelocityEvaluationScratch {
+  struct VectorEvaluationScratch {
     bool coefficients_valid{false};
     svmp::FE::GlobalIndex coefficient_cell{-1};
     std::vector<svmp::FE::Real> coefficients{};
@@ -120,12 +120,11 @@ makeSnapshotVectorFieldEvaluator(
     std::vector<svmp::FE::Real> basis_values{};
     std::vector<svmp::FE::basis::Gradient> basis_gradients{};
   };
-  auto scratch = std::make_shared<VelocityEvaluationScratch>();
+  auto scratch = std::make_shared<VectorEvaluationScratch>();
   const auto cell_coefficients =
-      [cell_dofs_of, velocity_offset, solution, context, scratch](
+      [cell_dofs_of, offset, solution, context, name, scratch](
           svmp::FE::GlobalIndex cell,
-          const char* negative_dof_message,
-          const char* short_solution_message)
+          bool gradient)
       -> const std::vector<svmp::FE::Real>& {
         auto& state = *scratch;
         if (state.coefficients_valid && state.coefficient_cell == cell) {
@@ -138,15 +137,15 @@ makeSnapshotVectorFieldEvaluator(
         for (const auto dof : cell_dofs) {
           if (dof < 0) {
             throw std::runtime_error(
-                "[svMultiPhysics::Application] " + context +
-                negative_dof_message);
+                context + " " + name +
+                (gradient ? "-gradient cell has a negative DOF." : " cell has a negative DOF."));
           }
           const auto index =
-              static_cast<std::size_t>(velocity_offset + dof);
+              static_cast<std::size_t>(offset + dof);
           if (index >= solution.size()) {
             throw std::runtime_error(
-                "[svMultiPhysics::Application] " + context +
-                short_solution_message);
+                context + " solution is too small for the " + name +
+                (gradient ? " gradient." : " field."));
           }
           state.coefficients.push_back(solution[index]);
         }
@@ -166,7 +165,7 @@ makeSnapshotVectorFieldEvaluator(
   if (allow_scalar_product_fast_path) {
     const auto* product =
         dynamic_cast<const svmp::FE::spaces::ProductSpace*>(
-            velocity_space.get());
+            space.get());
     if (product != nullptr &&
         typeid(*product) == typeid(svmp::FE::spaces::ProductSpace) &&
         product->base_space() != nullptr) {
@@ -186,10 +185,9 @@ makeSnapshotVectorFieldEvaluator(
     }
   }
 
-  svmp::FE::interfaces::SnapshotVectorEvaluator
-      velocity;
-  velocity.value =
-      [velocity_space,
+  SnapshotVectorEvaluator evaluator;
+  evaluator.value =
+      [space,
        scratch,
        cell_coefficients,
        scalar_element,
@@ -198,10 +196,7 @@ makeSnapshotVectorFieldEvaluator(
           svmp::FE::GlobalIndex cell,
           const std::array<svmp::FE::Real, 3>& reference_point,
           const svmp::FE::geometry::CutQuadratureProvenance&) {
-        const auto& coefficients = cell_coefficients(
-            cell,
-            " velocity cell has a negative DOF.",
-            " solution is too small for the velocity field.");
+        const auto& coefficients = cell_coefficients(cell, /*gradient=*/false);
         const svmp::FE::spaces::FunctionSpace::Value reference_value{
             reference_point[0], reference_point[1], reference_point[2]};
         if (scalar_element != nullptr &&
@@ -224,14 +219,15 @@ makeSnapshotVectorFieldEvaluator(
           return result;
         }
         const auto value =
-            velocity_space->element_space(cell).evaluate(reference_value, coefficients);
+            space->element_space(cell).evaluate(reference_value, coefficients);
         return std::array<svmp::FE::Real, 3>{
             value[0], value[1], value[2]};
       };
-  velocity.physical_gradient =
+  evaluator.physical_gradient =
       [mesh_access,
-       velocity_space,
+       space,
        context,
+       name,
        scratch,
        cell_coefficients,
        scalar_element,
@@ -240,10 +236,7 @@ makeSnapshotVectorFieldEvaluator(
           svmp::FE::GlobalIndex cell,
           const std::array<svmp::FE::Real, 3>& reference_point,
           const svmp::FE::geometry::CutQuadratureProvenance&) {
-        const auto& coefficients = cell_coefficients(
-            cell,
-            " velocity-gradient cell has a negative DOF.",
-            " solution is too small for the velocity gradient.");
+        const auto& coefficients = cell_coefficients(cell, /*gradient=*/true);
         const svmp::FE::spaces::FunctionSpace::Value reference_value{
             reference_point[0], reference_point[1], reference_point[2]};
         std::array<std::array<svmp::FE::Real, 3>, 3> reference_jacobian{};
@@ -269,7 +262,7 @@ makeSnapshotVectorFieldEvaluator(
             reference_jacobian[component] = row;
           }
         } else {
-          const auto jacobian = velocity_space->element_space(cell).evaluate_jacobian(
+          const auto jacobian = space->element_space(cell).evaluate_jacobian(
               reference_value, coefficients);
           for (std::size_t row = 0u; row < 3u; ++row) {
             for (std::size_t column = 0u; column < 3u; ++column) {
@@ -291,8 +284,7 @@ makeSnapshotVectorFieldEvaluator(
           }
           if (!mapping->second) {
             throw std::runtime_error(
-                "[svMultiPhysics::Application] " + context +
-                " could not construct the velocity-gradient geometry mapping.");
+                context + " could not construct the " + name + "-gradient geometry mapping.");
           }
           const auto& cell_mapping = *mapping->second;
           state.mapping = &cell_mapping;
@@ -332,7 +324,7 @@ makeSnapshotVectorFieldEvaluator(
         }
         return physical_gradient;
       };
-  return velocity;
+  return evaluator;
 }
 
 svmp::FE::interfaces::LevelSetGeometryScalarEvaluator
@@ -341,17 +333,16 @@ makeSnapshotScalarFieldEvaluator(
     std::span<const svmp::FE::Real> solution,
     std::string_view diagnostic_context)
 {
+  const std::string context(diagnostic_context);
   const auto offset = record.dof_offset;
   if (!record.space || offset < 0 || record.components != 1 ||
       record.space->value_dimension() != 1) {
     throw std::runtime_error(
-        "[svMultiPhysics::Application] " +
-        std::string(diagnostic_context) +
+        context +
         " scalar field is incompatible with its diagnostic declaration.");
   }
   const auto cell_dofs_of = record.cell_dofs;
   const auto space = record.space;
-  const auto context = std::string(diagnostic_context);
   const auto coefficients_for_cell =
       [cell_dofs_of,
        offset,
@@ -363,13 +354,13 @@ makeSnapshotScalarFieldEvaluator(
         for (const auto dof : cell_dofs) {
           if (dof < 0) {
             throw std::runtime_error(
-                "[svMultiPhysics::Application] " + context +
+                context +
                 " scalar cell has a negative DOF.");
           }
           const auto index = static_cast<std::size_t>(offset + dof);
           if (index >= solution.size()) {
             throw std::runtime_error(
-                "[svMultiPhysics::Application] " + context +
+                context +
                 " solution is too small for the scalar field.");
           }
           coefficients.push_back(solution[index]);
