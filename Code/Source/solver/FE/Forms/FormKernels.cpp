@@ -1133,21 +1133,52 @@ void inlineInlinableConstitutives(std::span<FormIR*> irs,
 inline constexpr Real kCoeffFDStep = 1e-7;
 inline constexpr Real kCoeffFDStep2 = 1e-5;
 
-// Lift the callback's ordinary z partial into the same expression that
-// contracts its in-plane derivatives. Use the interpreter's coefficient stencil.
-template <typename Callback> Callback callbackZDerivative(Callback callback)
+// Use the coordinate increment actually representable in the mesh frame.
+// A large coordinate offset alone does not increase a callback's length scale.
+struct DifferenceNodes {
+    Real minus;
+    Real plus;
+    Real width() const noexcept { return plus - minus; }
+};
+
+DifferenceNodes coefficientDifferenceNodes(Real x, Real step)
+{
+    const Real inf = std::numeric_limits<Real>::infinity();
+    const Real minus = x - step < x ? x - step : std::nextafter(x, -inf);
+    const Real plus = x + step > x ? x + step : std::nextafter(x, inf);
+    FE_THROW_IF(!std::isfinite(minus) || !std::isfinite(plus), InvalidArgumentException,
+                "coefficient derivative requires two finite neighboring coordinates");
+    return {minus, plus};
+}
+
+template<class Value>
+Value differenceQuotient(Value plus, const Value& minus, Real width)
+{
+    if constexpr (std::is_same_v<Value, Real>) {
+        return (plus - minus) / width;
+    } else {
+        for (std::size_t k = 0; k < plus.size(); ++k) {
+            plus[k] = differenceQuotient(plus[k], minus[k], width);
+        }
+        return plus;
+    }
+}
+
+template<class Callback, class... Args>
+auto coefficientPartial(const Callback& f, std::array<Real, 3> x, int d, Args... args)
+{
+    const auto nodes = coefficientDifferenceNodes(x[d], kCoeffFDStep);
+    x[d] = nodes.plus;
+    const auto plus = f(x[0], x[1], x[2], args...);
+    x[d] = nodes.minus;
+    return differenceQuotient(plus, f(x[0], x[1], x[2], args...), nodes.width());
+}
+
+template<class Callback>
+Callback callbackZDerivative(Callback callback)
 {
     return [callback = std::move(callback)](Real x, Real y, Real z, auto... time) {
-        auto derivative = callback(x, y, z + kCoeffFDStep, time...);
-        const auto minus = callback(x, y, z - kCoeffFDStep, time...);
-        if constexpr (std::is_same_v<decltype(derivative), Real>) {
-            return (derivative - minus) / (2 * kCoeffFDStep);
-        } else {
-            for (std::size_t i = 0; i < derivative.size(); ++i) {
-                derivative[i] = (derivative[i] - minus[i]) / (2 * kCoeffFDStep);
-            }
-            return derivative;
-        }
+        return coefficientPartial(callback, {x, y, z}, 2, time...);
     };
 }
 
@@ -1167,294 +1198,103 @@ FormExpr outOfPlaneCallbackMotion(const FormExprNode &coefficient, const FormExp
         "differentiated cut point requires a spatial derivative for this coefficient rank");
 }
 
-std::array<Real, 3> fdGradScalar(const ScalarCoefficient& f, const std::array<Real, 3>& x, int dim)
+template<class Callback, class... Args>
+std::array<Real, 3> fdGradScalar(const Callback& f, const std::array<Real, 3>& x, int dim, Args... args)
 {
-    std::array<Real, 3> g{0.0, 0.0, 0.0};
-    const Real h = kCoeffFDStep;
-    for (int d = 0; d < dim; ++d) {
-        auto xp = x;
-        auto xm = x;
-        xp[static_cast<std::size_t>(d)] += h;
-        xm[static_cast<std::size_t>(d)] -= h;
-        const Real fp = f(xp[0], xp[1], xp[2]);
-        const Real fm = f(xm[0], xm[1], xm[2]);
-        g[static_cast<std::size_t>(d)] = (fp - fm) / (2.0 * h);
-    }
-    return g;
-}
-
-std::array<Real, 3> fdGradScalarTime(const TimeScalarCoefficient& f,
-                                     const std::array<Real, 3>& x,
-                                     Real t,
-                                     int dim)
-{
-    std::array<Real, 3> g{0.0, 0.0, 0.0};
-    const Real h = kCoeffFDStep;
-    for (int d = 0; d < dim; ++d) {
-        auto xp = x;
-        auto xm = x;
-        xp[static_cast<std::size_t>(d)] += h;
-        xm[static_cast<std::size_t>(d)] -= h;
-        const Real fp = f(xp[0], xp[1], xp[2], t);
-        const Real fm = f(xm[0], xm[1], xm[2], t);
-        g[static_cast<std::size_t>(d)] = (fp - fm) / (2.0 * h);
-    }
+    std::array<Real, 3> g{};
+    for (int d = 0; d < dim; ++d) g[d] = coefficientPartial(f, x, d, args...);
     return g;
 }
 
 std::array<std::array<Real, 3>, 3> fdGradVector(const VectorCoefficient& f, const std::array<Real, 3>& x, int dim)
 {
-    std::array<std::array<Real, 3>, 3> J{};
-    const Real h = kCoeffFDStep;
+    std::array<std::array<Real, 3>, 3> jacobian{};
     for (int d = 0; d < dim; ++d) {
-        auto xp = x;
-        auto xm = x;
-        xp[static_cast<std::size_t>(d)] += h;
-        xm[static_cast<std::size_t>(d)] -= h;
-        const auto vp = f(xp[0], xp[1], xp[2]);
-        const auto vm = f(xm[0], xm[1], xm[2]);
-        for (int comp = 0; comp < 3; ++comp) {
-            J[static_cast<std::size_t>(comp)][static_cast<std::size_t>(d)] =
-                (vp[static_cast<std::size_t>(comp)] - vm[static_cast<std::size_t>(comp)]) / (2.0 * h);
-        }
+        const auto column = coefficientPartial(f, x, d);
+        for (int c = 0; c < 3; ++c) jacobian[c][d] = column[c];
     }
-    return J;
+    return jacobian;
 }
 
 std::array<Real, 27> fdGradMatrix(const MatrixCoefficient& f, const std::array<Real, 3>& x, int dim)
 {
-    // Return (dA_{ij}/dx_k) stored as (i,j,k) with stride-3 packing.
-    std::array<Real, 27> G{};
-    const Real h = kCoeffFDStep;
-    for (int k = 0; k < dim; ++k) {
-        auto xp = x;
-        auto xm = x;
-        xp[static_cast<std::size_t>(k)] += h;
-        xm[static_cast<std::size_t>(k)] -= h;
-        const auto Ap = f(xp[0], xp[1], xp[2]);
-        const auto Am = f(xm[0], xm[1], xm[2]);
+    std::array<Real, 27> gradient{};
+    for (int d = 0; d < dim; ++d) {
+        const auto partial = coefficientPartial(f, x, d);
         for (int i = 0; i < dim; ++i) {
-            for (int j = 0; j < dim; ++j) {
-                const std::size_t idx = static_cast<std::size_t>((i * 3 + j) * 3 + k);
-                G[idx] = (Ap[static_cast<std::size_t>(i)][static_cast<std::size_t>(j)] -
-                          Am[static_cast<std::size_t>(i)][static_cast<std::size_t>(j)]) /
-                         (2.0 * h);
+            for (int j = 0; j < dim; ++j) gradient[(i * 3 + j) * 3 + d] = partial[i][j];
+        }
+    }
+    return gradient;
+}
+
+template<class Sample, class Store>
+void coefficientHessian(const std::array<Real, 3>& x, int dim, Sample sample, Store store)
+{
+    const auto center = sample(x);
+    std::array<DifferenceNodes, 3> nodes{};
+    for (int i = 0; i < dim; ++i) {
+        nodes[i] = coefficientDifferenceNodes(x[i], kCoeffFDStep2);
+        auto point = x;
+        point[i] = nodes[i].plus;
+        const auto plus = sample(point);
+        point[i] = nodes[i].minus;
+        const auto minus = sample(point);
+        // The two rounded increments can differ at a power-of-two boundary.
+        for (std::size_t c = 0; c < center.size(); ++c) {
+            const Real forward = (plus[c] - center[c]) / (nodes[i].plus - x[i]);
+            const Real backward = (center[c] - minus[c]) / (x[i] - nodes[i].minus);
+            store(c, i, i, 2 * (forward - backward) / nodes[i].width());
+        }
+        for (int j = 0; j < i; ++j) {
+            point[j] = nodes[j].minus;
+            const auto mm = sample(point);
+            point[i] = nodes[i].plus;
+            const auto pm = sample(point);
+            point[j] = nodes[j].plus;
+            const auto pp = sample(point);
+            point[i] = nodes[i].minus;
+            const auto mp = sample(point);
+            point[j] = x[j];
+            for (std::size_t c = 0; c < center.size(); ++c) {
+                const Real mixed = ((pp[c] - mp[c]) - (pm[c] - mm[c])) / nodes[i].width() / nodes[j].width();
+                store(c, i, j, mixed);
+                store(c, j, i, mixed);
             }
         }
     }
-    return G;
 }
 
-std::array<std::array<Real, 3>, 3> fdHessScalar(const ScalarCoefficient& f, const std::array<Real, 3>& x, int dim)
+template<class Callback, class... Args>
+std::array<std::array<Real, 3>, 3> fdHessScalar(const Callback& f, const std::array<Real, 3>& x, int dim, Args... args)
 {
-    std::array<std::array<Real, 3>, 3> H{};
-    const Real h = kCoeffFDStep2;
-    const Real f0 = f(x[0], x[1], x[2]);
-
-    // Diagonal second derivatives
-    for (int i = 0; i < dim; ++i) {
-        auto xp = x;
-        auto xm = x;
-        xp[static_cast<std::size_t>(i)] += h;
-        xm[static_cast<std::size_t>(i)] -= h;
-        const Real fp = f(xp[0], xp[1], xp[2]);
-        const Real fm = f(xm[0], xm[1], xm[2]);
-        H[static_cast<std::size_t>(i)][static_cast<std::size_t>(i)] = (fp - 2.0 * f0 + fm) / (h * h);
-    }
-
-    // Mixed second derivatives (symmetric)
-    for (int i = 0; i < dim; ++i) {
-        for (int j = i + 1; j < dim; ++j) {
-            auto xpp = x;
-            auto xpm = x;
-            auto xmp = x;
-            auto xmm = x;
-
-            xpp[static_cast<std::size_t>(i)] += h;
-            xpp[static_cast<std::size_t>(j)] += h;
-
-            xpm[static_cast<std::size_t>(i)] += h;
-            xpm[static_cast<std::size_t>(j)] -= h;
-
-            xmp[static_cast<std::size_t>(i)] -= h;
-            xmp[static_cast<std::size_t>(j)] += h;
-
-            xmm[static_cast<std::size_t>(i)] -= h;
-            xmm[static_cast<std::size_t>(j)] -= h;
-
-            const Real fpp = f(xpp[0], xpp[1], xpp[2]);
-            const Real fpm = f(xpm[0], xpm[1], xpm[2]);
-            const Real fmp = f(xmp[0], xmp[1], xmp[2]);
-            const Real fmm = f(xmm[0], xmm[1], xmm[2]);
-
-            const Real val = (fpp - fpm - fmp + fmm) / (4.0 * h * h);
-            H[static_cast<std::size_t>(i)][static_cast<std::size_t>(j)] = val;
-            H[static_cast<std::size_t>(j)][static_cast<std::size_t>(i)] = val;
-        }
-    }
-
-    return H;
+    std::array<std::array<Real, 3>, 3> hessian{};
+    coefficientHessian(x, dim, [&](const auto& p) { return std::array{f(p[0], p[1], p[2], args...)}; },
+        [&](std::size_t, int i, int j, Real value) { hessian[i][j] = value; });
+    return hessian;
 }
 
 std::array<Real, 27> fdHessVector(const VectorCoefficient& f, const std::array<Real, 3>& x, int dim)
 {
-    std::array<Real, 27> H{};
-    const Real h = kCoeffFDStep2;
-    const auto f0 = f(x[0], x[1], x[2]);
-
-    // Diagonal second derivatives
-    for (int i = 0; i < dim; ++i) {
-        auto xp = x;
-        auto xm = x;
-        xp[static_cast<std::size_t>(i)] += h;
-        xm[static_cast<std::size_t>(i)] -= h;
-        const auto fp = f(xp[0], xp[1], xp[2]);
-        const auto fm = f(xm[0], xm[1], xm[2]);
-        for (int comp = 0; comp < 3; ++comp) {
-            const std::size_t idx = static_cast<std::size_t>((comp * 3 + i) * 3 + i);
-            H[idx] = (fp[static_cast<std::size_t>(comp)] - 2.0 * f0[static_cast<std::size_t>(comp)] +
-                      fm[static_cast<std::size_t>(comp)]) /
-                     (h * h);
-        }
-    }
-
-    // Mixed second derivatives (symmetric)
-    for (int i = 0; i < dim; ++i) {
-        for (int j = i + 1; j < dim; ++j) {
-            auto xpp = x;
-            auto xpm = x;
-            auto xmp = x;
-            auto xmm = x;
-
-            xpp[static_cast<std::size_t>(i)] += h;
-            xpp[static_cast<std::size_t>(j)] += h;
-
-            xpm[static_cast<std::size_t>(i)] += h;
-            xpm[static_cast<std::size_t>(j)] -= h;
-
-            xmp[static_cast<std::size_t>(i)] -= h;
-            xmp[static_cast<std::size_t>(j)] += h;
-
-            xmm[static_cast<std::size_t>(i)] -= h;
-            xmm[static_cast<std::size_t>(j)] -= h;
-
-            const auto fpp = f(xpp[0], xpp[1], xpp[2]);
-            const auto fpm = f(xpm[0], xpm[1], xpm[2]);
-            const auto fmp = f(xmp[0], xmp[1], xmp[2]);
-            const auto fmm = f(xmm[0], xmm[1], xmm[2]);
-
-            for (int comp = 0; comp < 3; ++comp) {
-                const Real val =
-                    (fpp[static_cast<std::size_t>(comp)] - fpm[static_cast<std::size_t>(comp)] -
-                     fmp[static_cast<std::size_t>(comp)] + fmm[static_cast<std::size_t>(comp)]) /
-                    (4.0 * h * h);
-                const std::size_t idx_ij = static_cast<std::size_t>((comp * 3 + i) * 3 + j);
-                const std::size_t idx_ji = static_cast<std::size_t>((comp * 3 + j) * 3 + i);
-                H[idx_ij] = val;
-                H[idx_ji] = val;
-            }
-        }
-    }
-
-    return H;
-}
-
-std::array<std::array<Real, 3>, 3> fdHessScalarTime(const TimeScalarCoefficient& f,
-                                                    const std::array<Real, 3>& x,
-                                                    Real t,
-                                                    int dim)
-{
-    std::array<std::array<Real, 3>, 3> H{};
-    const Real h = kCoeffFDStep2;
-    const Real f0 = f(x[0], x[1], x[2], t);
-
-    // Diagonal second derivatives
-    for (int i = 0; i < dim; ++i) {
-        auto xp = x;
-        auto xm = x;
-        xp[static_cast<std::size_t>(i)] += h;
-        xm[static_cast<std::size_t>(i)] -= h;
-        const Real fp = f(xp[0], xp[1], xp[2], t);
-        const Real fm = f(xm[0], xm[1], xm[2], t);
-        H[static_cast<std::size_t>(i)][static_cast<std::size_t>(i)] = (fp - 2.0 * f0 + fm) / (h * h);
-    }
-
-    // Mixed second derivatives (symmetric)
-    for (int i = 0; i < dim; ++i) {
-        for (int j = i + 1; j < dim; ++j) {
-            auto xpp = x;
-            auto xpm = x;
-            auto xmp = x;
-            auto xmm = x;
-
-            xpp[static_cast<std::size_t>(i)] += h;
-            xpp[static_cast<std::size_t>(j)] += h;
-
-            xpm[static_cast<std::size_t>(i)] += h;
-            xpm[static_cast<std::size_t>(j)] -= h;
-
-            xmp[static_cast<std::size_t>(i)] -= h;
-            xmp[static_cast<std::size_t>(j)] += h;
-
-            xmm[static_cast<std::size_t>(i)] -= h;
-            xmm[static_cast<std::size_t>(j)] -= h;
-
-            const Real fpp = f(xpp[0], xpp[1], xpp[2], t);
-            const Real fpm = f(xpm[0], xpm[1], xpm[2], t);
-            const Real fmp = f(xmp[0], xmp[1], xmp[2], t);
-            const Real fmm = f(xmm[0], xmm[1], xmm[2], t);
-
-            const Real val = (fpp - fpm - fmp + fmm) / (4.0 * h * h);
-            H[static_cast<std::size_t>(i)][static_cast<std::size_t>(j)] = val;
-            H[static_cast<std::size_t>(j)][static_cast<std::size_t>(i)] = val;
-        }
-    }
-
-    return H;
+    std::array<Real, 27> hessian{};
+    coefficientHessian(x, dim, [&](const auto& p) { return f(p[0], p[1], p[2]); },
+        [&](std::size_t c, int i, int j, Real value) { hessian[(3 * c + i) * 3 + j] = value; });
+    return hessian;
 }
 
 Real fdDivVector(const VectorCoefficient& f, const std::array<Real, 3>& x, int dim)
 {
-    const Real h = kCoeffFDStep;
-    Real div = 0.0;
-    for (int d = 0; d < dim; ++d) {
-        auto xp = x;
-        auto xm = x;
-        xp[static_cast<std::size_t>(d)] += h;
-        xm[static_cast<std::size_t>(d)] -= h;
-        const auto vp = f(xp[0], xp[1], xp[2]);
-        const auto vm = f(xm[0], xm[1], xm[2]);
-        div += (vp[static_cast<std::size_t>(d)] - vm[static_cast<std::size_t>(d)]) / (2.0 * h);
-    }
+    Real div{};
+    for (int d = 0; d < dim; ++d) div += coefficientPartial(f, x, d)[d];
     return div;
 }
 
 std::array<Real, 3> fdCurlVector(const VectorCoefficient& f, const std::array<Real, 3>& x, int dim)
 {
-    // curl(v) = [dVz/dy - dVy/dz, dVx/dz - dVz/dx, dVy/dx - dVx/dy]
-    const Real h = kCoeffFDStep;
-
-    auto d = [&](int comp, int wrt) -> Real {
-        auto xp = x;
-        auto xm = x;
-        xp[static_cast<std::size_t>(wrt)] += h;
-        xm[static_cast<std::size_t>(wrt)] -= h;
-        const auto vp = f(xp[0], xp[1], xp[2]);
-        const auto vm = f(xm[0], xm[1], xm[2]);
-        return (vp[static_cast<std::size_t>(comp)] - vm[static_cast<std::size_t>(comp)]) / (2.0 * h);
-    };
-
-    std::array<Real, 3> c{0.0, 0.0, 0.0};
-    if (dim == 2) {
-        // 2D: return curl in z component
-        c[2] = d(1, 0) - d(0, 1);
-        return c;
-    }
-
-    c[0] = d(2, 1) - d(1, 2);
-    c[1] = d(0, 2) - d(2, 0);
-    c[2] = d(1, 0) - d(0, 1);
-    return c;
+    const auto grad = fdGradVector(f, x, dim == 2 ? 2 : 3);
+    const Real z = grad[1][0] - grad[0][1];
+    if (dim == 2) return {0, 0, z};
+    return {grad[2][1] - grad[1][2], grad[0][2] - grad[2][0], z};
 }
 
 // ============================================================================
@@ -2821,7 +2661,7 @@ SpatialJet<Scalar> evalSpatialJet(const FormExprNode& node,
                 out.value.kind = EvalValue<Scalar>::Kind::Scalar;
                 out.value.s = makeScalarConstant<Scalar>((*f)(x[0], x[1], x[2], ctx.time()), env);
                 if (out.has_grad) {
-                    const auto g = fdGradScalarTime(*f, x, ctx.time(), dim);
+                    const auto g = fdGradScalar(*f, x, dim, ctx.time());
                     out.grad.kind = EvalValue<Scalar>::Kind::Vector;
                     out.grad.vector_size = dim;
                     for (int d = 0; d < 3; ++d) {
@@ -2829,7 +2669,7 @@ SpatialJet<Scalar> evalSpatialJet(const FormExprNode& node,
                     }
                 }
                 if (out.has_hess) {
-                    const auto H = fdHessScalarTime(*f, x, ctx.time(), dim);
+                    const auto H = fdHessScalar(*f, x, dim, ctx.time());
                     out.hess.kind = EvalValue<Scalar>::Kind::Matrix;
                     out.hess.matrix_rows = dim;
                     out.hess.matrix_cols = dim;
@@ -6665,7 +6505,7 @@ EvalValue<Real> evalRealSwitchImpl(const FormExprNode& node,
             }
             if (child.type() == FormExprType::Coefficient && child.timeScalarCoefficient()) {
                 const auto x = ctx.physicalPoint(q);
-                const auto g = fdGradScalarTime(*child.timeScalarCoefficient(), x, ctx.time(), dim);
+                const auto g = fdGradScalar(*child.timeScalarCoefficient(), x, dim, ctx.time());
                 EvalValue<Real> out;
                 out.kind = EvalValue<Real>::Kind::Vector;
                 out.v = g;
@@ -6861,7 +6701,11 @@ EvalValue<Real> evalRealSwitchImpl(const FormExprNode& node,
 	                    return out;
 	                }
 
-	                throw FEException("Forms: H(component(...)) currently supports TestFunction, TrialFunction, and DiscreteField only",
+	                if (base.type() == FormExprType::Coefficient) {
+                        return evalSpatialJet<Real>(node, env, side, q, 0).value;
+                    }
+
+                    throw FEException("Forms: H(component(...)) currently supports TestFunction, TrialFunction, and DiscreteField only",
 	                                  __FILE__, __LINE__, __func__, FEStatus::NotImplemented);
 	            }
 
@@ -6951,7 +6795,7 @@ EvalValue<Real> evalRealSwitchImpl(const FormExprNode& node,
 	            }
             if (child.type() == FormExprType::Coefficient && child.timeScalarCoefficient()) {
                 const auto x = ctx.physicalPoint(q);
-                const auto H = fdHessScalarTime(*child.timeScalarCoefficient(), x, ctx.time(), dim);
+                const auto H = fdHessScalar(*child.timeScalarCoefficient(), x, dim, ctx.time());
                 EvalValue<Real> out;
                 out.kind = EvalValue<Real>::Kind::Matrix;
                 out.m = H;
@@ -10974,7 +10818,7 @@ EvalValue<Dual> evalDualSwitchImpl(const FormExprNode& node,
             }
             if (child.type() == FormExprType::Coefficient && child.timeScalarCoefficient()) {
                 const auto x = ctx.physicalPoint(q);
-                const auto g = fdGradScalarTime(*child.timeScalarCoefficient(), x, ctx.time(), dim);
+                const auto g = fdGradScalar(*child.timeScalarCoefficient(), x, dim, ctx.time());
                 EvalValue<Dual> out;
                 out.kind = EvalValue<Dual>::Kind::Vector;
                 out.vector_size = dim;
@@ -11228,7 +11072,11 @@ EvalValue<Dual> evalDualSwitchImpl(const FormExprNode& node,
 	                                      __FILE__, __LINE__, __func__, FEStatus::NotImplemented);
 	                }
 
-	                throw FEException("Forms: H(component(...)) currently supports TestFunction, TrialFunction, and DiscreteField only (dual)",
+	                if (base.type() == FormExprType::Coefficient) {
+                        return evalSpatialJet<Dual>(node, env, side, q, 0).value;
+                    }
+
+                    throw FEException("Forms: H(component(...)) currently supports TestFunction, TrialFunction, and DiscreteField only (dual)",
 	                                  __FILE__, __LINE__, __func__, FEStatus::NotImplemented);
 	            }
 
@@ -11355,7 +11203,7 @@ EvalValue<Dual> evalDualSwitchImpl(const FormExprNode& node,
 	            }
             if (child.type() == FormExprType::Coefficient && child.timeScalarCoefficient()) {
                 const auto x = ctx.physicalPoint(q);
-                const auto H = fdHessScalarTime(*child.timeScalarCoefficient(), x, ctx.time(), dim);
+                const auto H = fdHessScalar(*child.timeScalarCoefficient(), x, dim, ctx.time());
                 EvalValue<Dual> out;
                 out.kind = EvalValue<Dual>::Kind::Matrix;
                 out.matrix_rows = dim;

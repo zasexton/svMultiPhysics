@@ -511,6 +511,64 @@ TEST(FormKernelCellTest, LinearDxIntegratesBasisFunctions)
     }
 }
 
+TEST(FormKernelCellTest, CallbackDerivativesUseRepresentablePhysicalCoordinates)
+{
+    constexpr Real offset = 2147483648.0;
+    class TranslatedTetra : public SingleTetraMeshAccess {
+    public:
+        std::array<Real, 3> getNodeCoordinates(GlobalIndex node) const override
+        {
+            auto x = SingleTetraMeshAccess::getNodeCoordinates(node);
+            return {offset + x[0], -offset + x[1], offset + x[2]};
+        }
+        void getCellCoordinates(GlobalIndex, std::vector<std::array<Real, 3>>& x) const override
+        {
+            x.clear();
+            for (GlobalIndex a = 0; a < 4; ++a) x.push_back(getNodeCoordinates(a));
+        }
+    } mesh;
+    spaces::H1Space space(ElementType::Tetra4, 1);
+    const auto dofs = createSingleTetraDofMap();
+    assembly::StandardAssembler assembler;
+    assembler.setDofMap(dofs);
+    assembler.setTime(3);
+    const auto v = FormExpr::testFunction(space, "v");
+    const auto average = [&](const FormExpr& scalar) {
+        FormKernel kernel(FormCompiler{}.compileLinear((v * scalar).dx()));
+        assembly::DenseVectorView rhs(4);
+        assembler.assembleVector(mesh, space, kernel, rhs);
+        Real total{};
+        for (GlobalIndex i = 0; i < 4; ++i) total += rhs.getVectorEntry(i);
+        return 6 * total;
+    };
+    const auto linear = FormExpr::coefficient("linear", ScalarCoefficient([](Real x, Real y, Real z) {
+        return 2 * (x - offset) + 3 * (y + offset) - 4 * (z - offset);
+    }));
+    const auto quadratic = FormExpr::coefficient("quadratic", TimeScalarCoefficient([](Real x, Real y, Real z, Real t) {
+        return t * ((x - offset) * (y + offset) + (z - offset) * (z - offset));
+    }));
+    const auto linear_vector = FormExpr::coefficient("linear vector", VectorCoefficient([](Real x, Real y, Real z) {
+        return std::array<Real, 3>{2 * (x - offset) + (y + offset), -3 * (y + offset) + 2 * (z - offset), 4 * (z - offset)};
+    }));
+    const auto quadratic_vector = FormExpr::coefficient("quadratic vector", VectorCoefficient([](Real x, Real y, Real z) {
+        return std::array<Real, 3>{(z - offset) * (z - offset), (x - offset) * (y + offset), 0};
+    }));
+    const auto linear_matrix = FormExpr::coefficient("linear matrix", MatrixCoefficient([](Real, Real y, Real) {
+        std::array<std::array<Real, 3>, 3> m{};
+        m[0][1] = -2 * (y + offset);
+        return m;
+    }));
+    EXPECT_NEAR(average(linear.grad().component(0)), 2, 1e-10);
+    EXPECT_NEAR(average(linear.grad().component(1)), 3, 1e-10);
+    EXPECT_NEAR(average(linear.grad().component(2)), -4, 1e-10);
+    EXPECT_NEAR(average(quadratic.hessian().component(0, 1)), 3, 2e-5);
+    EXPECT_NEAR(average(quadratic.hessian().component(2, 2)), 6, 2e-5);
+    EXPECT_NEAR(average(linear_vector.div()), 3, 1e-10);
+    EXPECT_NEAR(average(linear_vector.curl().component(0)), -2, 1e-10);
+    EXPECT_NEAR(average(quadratic_vector.component(1).hessian().component(0, 1)), 1, 1e-5);
+    EXPECT_NEAR(average(linear_matrix.component(0, 1).grad().component(1)), -2, 1e-10);
+}
+
 TEST(FormKernelCellTest, LinearDxWithConstantScaling)
 {
     SingleTetraMeshAccess mesh;
