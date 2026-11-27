@@ -14,14 +14,17 @@
 #include "Geometry/MappingFactory.h"
 #include "Spaces/FaceRestriction.h"
 #include "Systems/FESystem.h"
+#include "Systems/SystemCollectives.h"
 #include "Systems/SystemsExceptions.h"
 
 #include <algorithm>
 #include <array>
+#include <bit>
+#include <map>
+#include <set>
 #include <cstddef>
 #include <stdexcept>
 #include <string>
-#include <unordered_map>
 #include <utility>
 #include <vector>
 
@@ -37,22 +40,6 @@ struct BoundaryPointDofsWithCoords {
     std::vector<std::array<double, 3>> coords{};
     std::vector<GlobalIndex> dofs{}; // interleaved by component: [pt0_c0, pt0_c1, ..., pt1_c0, ...]
 };
-
-[[nodiscard]] inline spaces::FaceRestriction& getFaceRestriction(
-    std::unordered_map<int, spaces::FaceRestriction>& cache,
-    ElementType element_type,
-    int order,
-    Continuity continuity)
-{
-    const int key = static_cast<int>(element_type);
-    auto it = cache.find(key);
-    if (it != cache.end()) {
-        return it->second;
-    }
-    auto [ins, inserted] = cache.emplace(key, spaces::FaceRestriction(element_type, order, continuity));
-    (void)inserted;
-    return ins->second;
-}
 
 [[nodiscard]] inline BoundaryPointDofsWithCoords boundaryPointDofsWithCoordsByMarker(
     const systems::FESystem& system,
@@ -76,8 +63,8 @@ struct BoundaryPointDofsWithCoords {
         std::array<double, 3> coord{};
         std::vector<GlobalIndex> dofs{};
     };
-    std::unordered_map<GlobalIndex, PointEntry> by_base_dof;
-    std::unordered_map<int, spaces::FaceRestriction> face_restriction_cache;
+    std::map<GlobalIndex, PointEntry> by_base_dof;
+    std::map<std::pair<ElementType, const elements::Element*>, spaces::FaceRestriction> restrictions;
 
     std::vector<std::array<Real, 3>> cell_coords;
     std::vector<math::Vector<Real, 3>> geom_nodes;
@@ -85,11 +72,21 @@ struct BoundaryPointDofsWithCoords {
     mesh.forEachBoundaryFace(boundary_marker, [&](GlobalIndex face_id, GlobalIndex cell_id) {
         const ElementType cell_type = mesh.getCellType(cell_id);
 
-        auto& face_restriction = getFaceRestriction(face_restriction_cache,
-                                                    cell_type,
-                                                    rec.space->polynomial_order(),
-                                                    rec.space->continuity());
-
+        const auto& element = rec.space->getElement(cell_type, cell_id);
+        FE_CHECK_ARG(!element.basis().is_vector_valued() &&
+                         rec.space->continuity() != Continuity::H_div && rec.space->continuity() != Continuity::H_curl,
+                     "PeriodicBC: coordinate matching requires a nodal field");
+        const auto type = to_mesh_family(element.element_type()) == to_mesh_family(cell_type)
+                              ? element.element_type() : cell_type;
+        const auto key = std::make_pair(type, &element);
+        auto restriction = restrictions.find(key);
+        if (restriction == restrictions.end()) {
+            restriction = type == rec.space->element_type() && &element == &rec.space->element()
+                     ? restrictions.try_emplace(key, *rec.space).first
+                     : restrictions.try_emplace(key, type, element.polynomial_order(), rec.space->continuity(),
+                                                element.basis().basis_type()).first;
+        }
+        const auto& face_restriction = restriction->second;
         const auto face_local = static_cast<int>(mesh.getLocalFaceIndex(face_id, cell_id));
         const auto local_face_dofs = face_restriction.face_dofs(face_local);
 
@@ -117,8 +114,8 @@ struct BoundaryPointDofsWithCoords {
 
         geometry::MappingRequest req;
         req.element_type = cell_type;
-        req.geometry_order = 1;
-        req.use_affine = true;
+        req.geometry_order = mesh.getCellGeometryOrder(cell_id);
+        req.use_affine = req.geometry_order <= 1;
         auto mapping = geometry::MappingFactory::create(req, geom_nodes);
         FE_CHECK_NOT_NULL(mapping.get(), "boundaryPointDofsWithCoordsByMarker: mapping");
 
@@ -157,27 +154,55 @@ struct BoundaryPointDofsWithCoords {
         }
     });
 
-    std::vector<GlobalIndex> keys;
-    keys.reserve(by_base_dof.size());
-    for (const auto& [base, _] : by_base_dof) {
-        keys.push_back(base);
+    for (const auto& [base, point] : by_base_dof) {
+        out.coords.push_back(point.coord);
+        out.dofs.insert(out.dofs.end(), point.dofs.begin(), point.dofs.end());
     }
-    std::sort(keys.begin(), keys.end());
-    keys.erase(std::unique(keys.begin(), keys.end()), keys.end());
-
-    out.coords.reserve(keys.size());
-    out.dofs.reserve(keys.size() * static_cast<std::size_t>(n_components));
-    for (const auto base : keys) {
-        auto it = by_base_dof.find(base);
-        FE_THROW_IF(it == by_base_dof.end(), systems::InvalidStateException,
-                    "boundaryPointDofsWithCoordsByMarker: internal map missing key");
-        out.coords.push_back(it->second.coord);
-        for (int comp = 0; comp < n_components; ++comp) {
-            out.dofs.push_back(it->second.dofs[static_cast<std::size_t>(comp)]);
-        }
-    }
-
     return out;
+}
+
+/// Pack the point and its component DOF IDs together so opposite markers
+/// can be matched even when their incident cells live on different ranks.
+inline std::array<BoundaryPointDofsWithCoords, 2> gatherPeriodicBoundaries(
+    const systems::FESystem& system, FieldId field, const std::array<int, 2>& markers)
+{
+    systems::CollectiveCommunicator comm;
+#if FE_HAS_MPI
+    comm = systems::CollectiveCommunicator(system.activeMpiCommunicator());
+#endif
+    std::vector<std::uint64_t> local;
+    std::size_t components = 0;
+    std::exception_ptr failure;
+    try {
+        for (std::size_t side = 0; side < markers.size(); ++side) {
+            const auto boundary = boundaryPointDofsWithCoordsByMarker(system, field, markers[side]);
+            components = static_cast<std::size_t>(boundary.num_components);
+            for (std::size_t i = 0; i < boundary.coords.size(); ++i) {
+                local.push_back(side);
+                for (const double x : boundary.coords[i]) local.push_back(std::bit_cast<std::uint64_t>(x));
+                for (std::size_t c = 0; c < components; ++c) local.push_back(boundary.dofs[i * components + c]);
+            }
+        }
+    } catch (...) {
+        failure = std::current_exception();
+    }
+    systems::requireCollectivePhasePreparation(failure, comm, "periodic boundary coordinates");
+    const auto words = systems::collectiveGatherWords(local, comm, "Periodic boundary coordinates");
+    const auto stride = 4 + components;
+    FE_CHECK_ARG(words.size() % stride == 0, "PeriodicBC: inconsistent component count across ranks");
+    std::array<BoundaryPointDofsWithCoords, 2> boundaries;
+    std::array<std::set<GlobalIndex>, 2> seen;
+    for (std::size_t start = 0; start < words.size(); start += stride) {
+        const auto side = words[start];
+        FE_CHECK_ARG(side < boundaries.size(), "PeriodicBC: inconsistent boundary record across ranks");
+        const auto first = static_cast<GlobalIndex>(words[start + 4]);
+        if (!seen[side].insert(first).second) continue;
+        auto& boundary = boundaries[side];
+        boundary.coords.push_back({std::bit_cast<double>(words[start + 1]), std::bit_cast<double>(words[start + 2]),
+                                   std::bit_cast<double>(words[start + 3])});
+        for (std::size_t c = 0; c < components; ++c) boundary.dofs.push_back(words[start + 4 + c]);
+    }
+    return boundaries;
 }
 
 } // namespace detail
@@ -234,39 +259,18 @@ public:
     {
         FE_CHECK_NOT_NULL(system_, "PeriodicBC::addAffineConstraints: missing system pointer (setup not called)");
 
-        const auto slave = detail::boundaryPointDofsWithCoordsByMarker(*system_, field_id, slave_marker_);
-        const auto master = detail::boundaryPointDofsWithCoordsByMarker(*system_, field_id, master_marker_);
-
-        const int nc = slave.num_components;
-        FE_THROW_IF(nc != master.num_components, InvalidArgumentException,
-                    "PeriodicBC::addAffineConstraints: component count mismatch");
-        FE_THROW_IF(nc < 1, InvalidArgumentException,
-                    "PeriodicBC::addAffineConstraints: invalid component count");
-
-        const std::array<double, 3> t = translation_;
-        auto transform = [t](std::array<double, 3> p) -> std::array<double, 3> {
-            return {{p[0] + t[0], p[1] + t[1], p[2] + t[2]}};
+        const auto boundaries = detail::gatherPeriodicBoundaries(*system_, field_id, {slave_marker_, master_marker_});
+        const auto& slave = boundaries[0];
+        const auto& master = boundaries[1];
+        const auto translate = [this](std::array<double, 3> p) {
+            for (std::size_t d = 0; d < p.size(); ++d) p[d] += translation_[d];
+            return p;
         };
-
-        const auto matches = constraints::findMatchingPoints(
-            slave.coords, master.coords, transform, /*tolerance=*/matching_tolerance_);
-
-        for (const auto& [slave_idx, master_idx] : matches) {
-            const std::size_t s0 = slave_idx * static_cast<std::size_t>(nc);
-            const std::size_t m0 = master_idx * static_cast<std::size_t>(nc);
-            for (int comp = 0; comp < nc; ++comp) {
-                const auto s = s0 + static_cast<std::size_t>(comp);
-                const auto m = m0 + static_cast<std::size_t>(comp);
-                FE_THROW_IF(s >= slave.dofs.size() || m >= master.dofs.size(), InvalidArgumentException,
-                            "PeriodicBC::addAffineConstraints: DOF index out of range");
-
-                const GlobalIndex slave_dof = slave.dofs[s];
-                const GlobalIndex master_dof = master.dofs[m];
-
-                constraints.addLine(slave_dof);
-                constraints.addEntry(slave_dof, master_dof, 1.0);
-            }
-        }
+        auto pairs = constraints::matchNodalPeriodicDofs(slave.dofs, slave.coords, master.dofs, master.coords,
+                                                        translate, {.matching_tolerance = matching_tolerance_});
+        const auto& owned = system_->dofHandler().getPartition().locallyOwned();
+        std::erase_if(pairs, [&](const auto& pair) { return !owned.contains(pair.slave_dof); });
+        constraints::PeriodicBC(std::move(pairs)).apply(constraints);
     }
 
     [[nodiscard]] std::vector<analysis::BoundaryConditionDescriptor>

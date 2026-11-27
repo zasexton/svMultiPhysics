@@ -11,9 +11,11 @@
  */
 
 #include <gtest/gtest.h>
+
 #include "Constraints/PeriodicBC.h"
 #include "Constraints/AffineConstraints.h"
 
+#include <algorithm>
 #include <cmath>
 #include <vector>
 #include <array>
@@ -106,6 +108,50 @@ TEST(PeriodicBCTest, CoordinateMatching) {
     auto c1 = aff.getConstraint(1);
     ASSERT_TRUE(c1.has_value());
     EXPECT_EQ(c1->entries[0].master_dof, 11);
+}
+
+TEST(PeriodicBCTest, ColocatedComponentsFollowTheirOwnTranslatedPoint) {
+    const std::vector<GlobalIndex> slave{7, 2, 4, 8}, master{33, 11, 22, 44};
+    const std::array<double, 3> a{0, 0, 0}, b{0, 1, 0}, c{1, 1, 0}, d{1, 0, 0};
+    const std::array<double, 3> shift{1, 0, 0};
+    // Legacy per-DOF coordinates, including nonconsecutive IDs and a
+    // different point ordering on the master boundary.
+    const PeriodicBC flat(slave, {a, a, b, b}, master, {c, c, d, d}, shift);
+    const std::array<GlobalIndex, 4> expected{22, 44, 33, 11};
+    ASSERT_EQ(flat.numPairs(), 4u);
+    for (const auto& pair : flat.getPairs()) {
+        const auto it = std::find(slave.begin(), slave.end(), pair.slave_dof);
+        ASSERT_NE(it, slave.end());
+        EXPECT_EQ(pair.master_dof, expected[it - slave.begin()]);
+    }
+
+    PeriodicBCOptions options;
+    options.anti_periodic = true;
+    options.component_mask = ComponentMask(1, 2);
+    const PeriodicBC grouped(slave, {a, b}, master, {c, d}, shift, options);
+    ASSERT_EQ(grouped.numPairs(), 2u);
+    for (const auto& pair : grouped.getPairs()) {
+        EXPECT_TRUE((pair.slave_dof == 2 && pair.master_dof == 44) ||
+                    (pair.slave_dof == 8 && pair.master_dof == 11));
+        EXPECT_DOUBLE_EQ(pair.weight, -1.0);
+    }
+}
+
+TEST(PeriodicBCTest, NonBijectiveNodalCorrespondenceCannotDropEquations) {
+    const std::vector<GlobalIndex> slave{0, 1}, master{2, 3};
+    const std::array<double, 3> shift{1, 0, 0};
+    EXPECT_ANY_THROW(PeriodicBC(slave, {{0, 0, 0}, {0, 0.125, 0}},
+                                master, {{1, 0, 0}, {1, 1, 0}}, shift));
+}
+
+TEST(PeriodicBCTest, MatchingToleranceRetainsSmallPhysicalLengths) {
+    const std::array<double, 3> shift{1.e-200, 0., 0.};
+    const PeriodicBC points({7, 8}, {{0, 0, 0}, {0, 2.e-200, 0}},
+                            {11, 12}, {{1.e-200, 2.e-200, 0}, {1.e-200, 0, 0}}, shift,
+                            {.matching_tolerance = 1.e-210});
+    ASSERT_EQ(points.numPairs(), 2u);
+    EXPECT_EQ(points.getPairs()[0].master_dof, 12);
+    EXPECT_EQ(points.getPairs()[1].master_dof, 11);
 }
 
 TEST(PeriodicBCTest, NonMatchingPeriodicMeshTolerance) {

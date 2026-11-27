@@ -75,6 +75,19 @@ struct PeriodicPair {
     double weight{1.0};  ///< Usually 1.0 (or -1.0 for anti-periodic)
 };
 
+/// Match one nodal field across two boundaries. Give one coordinate per
+/// point and its component DOFs in field order. Repeated coordinates in
+/// legacy per-DOF arrays use the order of occurrence at each point to
+/// identify components. Direct pairs can express other component orderings.
+/// A coordinate match must be one-to-one across the complete boundaries.
+[[nodiscard]] std::vector<PeriodicPair> matchNodalPeriodicDofs(
+    std::span<const GlobalIndex> slave_dofs,
+    std::span<const std::array<double, 3>> slave_coords,
+    std::span<const GlobalIndex> master_dofs,
+    std::span<const std::array<double, 3>> master_coords,
+    const std::function<std::array<double, 3>(std::array<double, 3>)>& transform,
+    const PeriodicBCOptions& options = {});
+
 /**
  * @brief Periodic boundary condition constraint
  *
@@ -140,7 +153,7 @@ public:
     /**
      * @brief Construct with coordinate matching and translation
      *
-     * DOFs are matched based on coordinates after applying translation.
+     * DOFs are matched by point and component as in matchNodalPeriodicDofs.
      *
      * @param slave_dofs DOFs on slave boundary
      * @param slave_coords Coordinates of slave DOFs
@@ -323,14 +336,6 @@ private:
 
     // Options
     PeriodicBCOptions options_;
-
-    // Helper to match coordinates
-    void matchCoordinates(
-        std::span<const GlobalIndex> slave_dofs,
-        std::span<const std::array<double, 3>> slave_coords,
-        std::span<const GlobalIndex> master_dofs,
-        std::span<const std::array<double, 3>> master_coords,
-        const std::function<std::array<double, 3>(std::array<double, 3>)>& transform);
 };
 
 } // namespace constraints

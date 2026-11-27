@@ -10,7 +10,7 @@
 
 #include <algorithm>
 #include <cmath>
-#include <limits>
+#include <map>
 
 namespace svmp {
 namespace FE {
@@ -70,7 +70,7 @@ PeriodicBC::PeriodicBC(std::vector<GlobalIndex> slave_dofs,
         return {{p[0] + translation[0], p[1] + translation[1], p[2] + translation[2]}};
     };
 
-    matchCoordinates(slave_dofs, slave_coords, master_dofs, master_coords, transform);
+    pairs_ = matchNodalPeriodicDofs(slave_dofs, slave_coords, master_dofs, master_coords, transform, options_);
 }
 
 PeriodicBC::PeriodicBC(std::vector<GlobalIndex> slave_dofs,
@@ -82,7 +82,7 @@ PeriodicBC::PeriodicBC(std::vector<GlobalIndex> slave_dofs,
     : options_(options)
 {
     coordinate_matched_ = true;
-    matchCoordinates(slave_dofs, slave_coords, master_dofs, master_coords, transform);
+    pairs_ = matchNodalPeriodicDofs(slave_dofs, slave_coords, master_dofs, master_coords, transform, options_);
 }
 
 // ============================================================================
@@ -100,8 +100,12 @@ PeriodicBC& PeriodicBC::operator=(PeriodicBC&& other) noexcept = default;
 
 void PeriodicBC::apply(AffineConstraints& constraints) const {
     for (const auto& pair : pairs_) {
-        constraints.addLine(pair.slave_dof);
-        constraints.addEntry(pair.slave_dof, pair.master_dof, pair.weight);
+        if (pair.slave_dof == pair.master_dof) {
+            if (pair.weight != 1.0) constraints.addDirichlet(pair.slave_dof, 0.0);
+        } else {
+            constraints.addLine(pair.slave_dof);
+            constraints.addEntry(pair.slave_dof, pair.master_dof, pair.weight);
+        }
     }
 }
 
@@ -192,49 +196,68 @@ PeriodicBC PeriodicBC::zPeriodic(
 // Internal helpers
 // ============================================================================
 
-void PeriodicBC::matchCoordinates(
-    std::span<const GlobalIndex> slave_dofs,
-    std::span<const std::array<double, 3>> slave_coords,
-    std::span<const GlobalIndex> master_dofs,
-    std::span<const std::array<double, 3>> master_coords,
-    const std::function<std::array<double, 3>(std::array<double, 3>)>& transform)
+namespace {
+using Coordinate = std::array<double, 3>;
+struct NodalBoundary {
+    std::vector<Coordinate> coordinates;
+    std::vector<std::vector<GlobalIndex>> dofs;
+};
+
+NodalBoundary groupNodalDofs(std::span<const GlobalIndex> dofs, std::span<const Coordinate> coords) {
+    NodalBoundary result;
+    if (dofs.empty() && coords.empty()) return result;
+    if (coords.empty() || dofs.empty() || dofs.size() % coords.size() != 0) {
+        CONSTRAINT_THROW("PeriodicBC: each point must supply the same number of component DOFs");
+    }
+    const auto stride = dofs.size() / coords.size();
+    std::map<Coordinate, std::size_t> locations;
+    for (std::size_t i = 0; i < coords.size(); ++i) {
+        if (!std::all_of(coords[i].begin(), coords[i].end(), [](double x) { return std::isfinite(x); })) {
+            CONSTRAINT_THROW("PeriodicBC: nonfinite nodal coordinate");
+        }
+        const auto [it, inserted] = locations.emplace(coords[i], result.coordinates.size());
+        if (inserted) {
+            result.coordinates.push_back(coords[i]);
+            result.dofs.emplace_back();
+        }
+        const auto components = dofs.subspan(i * stride, stride);
+        auto& point = result.dofs[it->second];
+        point.insert(point.end(), components.begin(), components.end());
+    }
+    return result;
+}
+} // namespace
+
+std::vector<PeriodicPair> matchNodalPeriodicDofs(
+    std::span<const GlobalIndex> slave_dofs, std::span<const Coordinate> slave_coords,
+    std::span<const GlobalIndex> master_dofs, std::span<const Coordinate> master_coords,
+    const std::function<Coordinate(Coordinate)>& transform, const PeriodicBCOptions& options)
 {
-    if (slave_dofs.size() != slave_coords.size()) {
-        CONSTRAINT_THROW("Slave DOFs and coordinates must have same size");
+    const auto slave = groupNodalDofs(slave_dofs, slave_coords);
+    const auto master = groupNodalDofs(master_dofs, master_coords);
+    const auto matches = findMatchingPoints(slave.coordinates, master.coordinates, transform, options.matching_tolerance);
+    if (matches.size() != slave.coordinates.size() || matches.size() != master.coordinates.size()) {
+        CONSTRAINT_THROW("PeriodicBC: the transformed boundaries do not have a one-to-one nodal match");
     }
-    if (master_dofs.size() != master_coords.size()) {
-        CONSTRAINT_THROW("Master DOFs and coordinates must have same size");
-    }
-
-    double weight = options_.anti_periodic ? -1.0 : 1.0;
-    double tol_sq = options_.matching_tolerance * options_.matching_tolerance;
-
-    for (std::size_t i = 0; i < slave_dofs.size(); ++i) {
-        std::array<double, 3> transformed = transform(slave_coords[i]);
-
-        // Find matching master
-        double best_dist_sq = std::numeric_limits<double>::max();
-        std::size_t best_j = master_coords.size();
-
-        for (std::size_t j = 0; j < master_coords.size(); ++j) {
-            double dx = transformed[0] - master_coords[j][0];
-            double dy = transformed[1] - master_coords[j][1];
-            double dz = transformed[2] - master_coords[j][2];
-            double dist_sq = dx*dx + dy*dy + dz*dz;
-
-            if (dist_sq < best_dist_sq) {
-                best_dist_sq = dist_sq;
-                best_j = j;
+    std::vector<bool> used(master.coordinates.size(), false);
+    std::vector<PeriodicPair> pairs;
+    pairs.reserve(slave_dofs.size());
+    for (const auto& [i, j] : matches) {
+        if (used[j]) CONSTRAINT_THROW("PeriodicBC: two distinct slave points matched the same master");
+        used[j] = true;
+        const auto& components = slave.dofs[i];
+        if (components.size() != master.dofs[j].size() ||
+            components.size() != slave.dofs.front().size() ||
+            (!options.component_mask.allSelected() && options.component_mask.size() != components.size())) {
+            CONSTRAINT_THROW("PeriodicBC: component counts on the periodic field must agree");
+        }
+        for (std::size_t c = 0; c < components.size(); ++c) {
+            if (options.component_mask[c]) {
+                pairs.push_back({components[c], master.dofs[j][c], options.anti_periodic ? -1.0 : 1.0});
             }
         }
-
-        if (best_j < master_coords.size() && best_dist_sq < tol_sq) {
-            pairs_.push_back({slave_dofs[i], master_dofs[best_j], weight});
-        } else {
-            // No match found - could be an error or the user intentionally
-            // provided non-matching boundaries
-        }
     }
+    return pairs;
 }
 
 } // namespace constraints

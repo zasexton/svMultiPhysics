@@ -30,9 +30,11 @@
 #include "Constraints/NormalComponentConstraint.h"
 #include "Constraints/StrongDirichletConstraint.h"
 #include "Elements/ReferenceElement.h"
+#include "Forms/ConstraintBCs.h"
 #include "Forms/Vocabulary.h"
 #include "Spaces/H1Space.h"
 #include "Spaces/ProductSpace.h"
+#include "Systems/BoundaryConditionManager.h"
 #include "Systems/FESystem.h"
 #include "Systems/FormsInstaller.h"
 
@@ -348,6 +350,82 @@ struct BuiltSystem {
     const NormalComponentConstraint* constraint{nullptr};
     FieldId u{INVALID_FIELD_ID};
 };
+
+void checkTranslatedPeriodicField(MPI_Comm comm, double shear) {
+    int rank = 0, size = 1;
+    MPI_Comm_rank(comm, &rank);
+    MPI_Comm_size(comm, &size);
+    auto data = std::make_shared<StructuredMesh>(structuredMesh(2, 2, false, false));
+    for (auto& x : data->x) x[0] += shear * (x[1] + 1.) / 2.;
+    constexpr int bottom = 10, top = 20;
+    for (auto& face : data->faces) {
+        if (face.local == 0) face.marker = bottom;
+        if (face.local == 2) face.marker = top;
+    }
+    auto mesh = std::make_shared<ReplicatedMeshAccess>(data, rank, size);
+    auto scalar = std::make_shared<spaces::H1Space>(ElementType::Quad4, 1);
+    auto vector = std::make_shared<spaces::ProductSpace>(scalar, 2);
+    systems::FESystem system(mesh);
+    (void)system.addField({.name = "other", .space = scalar, .components = 1});
+    const auto u = system.addField({.name = "u", .space = vector, .components = 2});
+    systems::BoundaryConditionManager bcs;
+    bcs.add(std::make_unique<forms::bc::PeriodicBC>(top, bottom, std::vector<double>{shear, 2., 0.}));
+    bcs.applyAll(system, u);
+
+    systems::SetupOptions options;
+    options.dof_options.global_numbering = dofs::GlobalNumberingMode::GlobalIds;
+    options.dof_options.ownership = dofs::OwnershipStrategy::VertexGID;
+    options.dof_options.my_rank = rank;
+    options.dof_options.world_size = size;
+    options.dof_options.mpi_comm = comm;
+    systems::SetupInputs inputs;
+    inputs.topology_override = mesh->topology();
+    system.setup(options, inputs);
+
+    const auto& map = system.fieldDofHandler(u).getDofMap();
+    const auto offset = system.fieldDofOffset(u);
+    ASSERT_GT(offset, 0);
+    const auto& owned = system.dofHandler().getPartition().locallyOwned();
+    int owned_rows = 0;
+    for (int x = 0; x < 3; ++x) {
+        const int col = std::min(x, 1);
+        const auto bottom_cell = map.getCellDofs(col);
+        const auto top_cell = map.getCellDofs(col + 2);
+        for (int component = 0; component < 2; ++component) {
+            const auto slave = offset + bottom_cell[4 * component + (x == 2 ? 1 : 0)];
+            const auto master = offset + top_cell[4 * component + (x == 2 ? 2 : 3)];
+            if (!owned.contains(slave)) continue;
+            const auto line = system.constraints().getConstraint(slave);
+            EXPECT_TRUE(line.has_value()) << slave;
+            if (!line) continue;
+            ++owned_rows;
+            EXPECT_EQ(line->entries.size(), 1u);
+            if (!line->entries.empty()) {
+                EXPECT_EQ(line->entries[0].master_dof, master);
+                EXPECT_DOUBLE_EQ(line->entries[0].weight, 1.);
+            }
+        }
+    }
+    int total = 0;
+    MPI_Allreduce(&owned_rows, &total, 1, MPI_INT, MPI_SUM, comm);
+    EXPECT_EQ(total, 6);
+}
+
+TEST(FieldPeriodicBCMPI, ProductFieldMatchesTranslatedNodesAcrossOwnedBoundaryFaces) {
+    checkTranslatedPeriodicField(MPI_COMM_WORLD, 0.);
+}
+
+TEST(FieldPeriodicBCMPI, IndependentCommunicatorsUseTheirOwnPeriodicGeometry) {
+    int world_rank = 0, size = 1;
+    MPI_Comm_rank(MPI_COMM_WORLD, &world_rank);
+    MPI_Comm_size(MPI_COMM_WORLD, &size);
+    if (size < 4) GTEST_SKIP() << "Requires two independent distributed meshes";
+    const int group = world_rank % 2;
+    MPI_Comm comm;
+    MPI_Comm_split(MPI_COMM_WORLD, group, -world_rank, &comm);
+    checkTranslatedPeriodicField(comm, group == 0 ? 0. : 0.5);
+    MPI_Comm_free(&comm);
+}
 
 /// A vector mass system on the mesh of @p c, with the constraints
 /// @p add_constraints adds, set up on @p comm.

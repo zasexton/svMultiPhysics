@@ -359,19 +359,12 @@ void makePeriodicConstraints(
     AffineConstraints& constraints,
     const PeriodicConstraintOptions& options)
 {
-    // Find matching pairs
-    auto matches = findMatchingPoints(slave_coords, master_coords, transform, options.tolerance);
-
-    // Create periodic constraints for each match
-    double sign = options.flip_sign ? -1.0 : 1.0;
-
-    for (const auto& [slave_idx, master_idx] : matches) {
-        GlobalIndex slave_dof = slave_dofs[slave_idx];
-        GlobalIndex master_dof = master_dofs[master_idx];
-
-        constraints.addLine(slave_dof);
-        constraints.addEntry(slave_dof, master_dof, sign);
-    }
+    PeriodicBCOptions match;
+    match.matching_tolerance = options.tolerance;
+    match.anti_periodic = options.flip_sign;
+    match.component_mask = options.component_mask;
+    PeriodicBC(matchNodalPeriodicDofs(slave_dofs, slave_coords, master_dofs, master_coords, transform, match))
+        .apply(constraints);
 }
 
 void makePeriodicConstraintsTranslation(
@@ -577,7 +570,7 @@ std::vector<std::pair<std::size_t, std::size_t>> findMatchingPoints(
     std::vector<std::pair<std::size_t, std::size_t>> matches;
     matches.reserve(std::min(coords_a.size(), coords_b.size()));
 
-    double tol_sq = tolerance * tolerance;
+    FE_CHECK_ARG(std::isfinite(tolerance) && tolerance >= 0.0, "findMatchingPoints: invalid matching tolerance");
 
     for (std::size_t i = 0; i < coords_a.size(); ++i) {
         std::array<double, 3> point_a = coords_a[i];
@@ -586,22 +579,22 @@ std::vector<std::pair<std::size_t, std::size_t>> findMatchingPoints(
         }
 
         // Find closest point in B
-        double best_dist_sq = std::numeric_limits<double>::max();
+        double best_distance = std::numeric_limits<double>::max();
         std::size_t best_j = coords_b.size();
 
         for (std::size_t j = 0; j < coords_b.size(); ++j) {
             double dx = point_a[0] - coords_b[j][0];
             double dy = point_a[1] - coords_b[j][1];
             double dz = point_a[2] - coords_b[j][2];
-            double dist_sq = dx*dx + dy*dy + dz*dz;
+            const double distance = std::hypot(dx, dy, dz);
 
-            if (dist_sq < best_dist_sq) {
-                best_dist_sq = dist_sq;
+            if (distance < best_distance) {
+                best_distance = distance;
                 best_j = j;
             }
         }
 
-        if (best_j < coords_b.size() && best_dist_sq < tol_sq) {
+        if (best_j < coords_b.size() && best_distance <= tolerance) {
             matches.emplace_back(i, best_j);
         }
     }

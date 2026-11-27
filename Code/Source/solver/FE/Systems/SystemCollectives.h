@@ -119,6 +119,12 @@ private:
     std::uint64_t local,
     const CollectiveCommunicator& comm);
 
+/// Concatenate variable-length word streams in communicator rank order.
+[[nodiscard]] std::vector<std::uint64_t> collectiveGatherWords(
+    std::span<const std::uint64_t> local,
+    const CollectiveCommunicator& comm,
+    std::string_view purpose);
+
 /// A rank-local value (for example a wall time) with its minimum, mean and
 /// maximum over all ranks.
 struct CollectiveTimingStatistics {

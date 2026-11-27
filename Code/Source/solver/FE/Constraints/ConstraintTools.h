@@ -186,7 +186,7 @@ void makeDirichletConstraintsVector(
  * @brief Create periodic constraints between two boundaries
  *
  * Establishes constraints u_slave = u_master for matching DOFs on
- * two periodic boundaries.
+ * two periodic boundaries. The nodal component layout follows matchNodalPeriodicDofs.
  *
  * @param slave_dofs DOFs on the slave boundary
  * @param slave_coords Coordinates of slave DOFs

@@ -899,6 +899,48 @@ double collectiveMaxAbsDifference(std::span<const Real> left,
   return local;
 }
 
+std::vector<std::uint64_t> collectiveGatherWords(
+    std::span<const std::uint64_t> local,
+    const CollectiveCommunicator& comm,
+    std::string_view purpose)
+{
+  if (!comm.isParallel()) return {local.begin(), local.end()};
+#if FE_HAS_MPI
+  std::vector<int> counts, displacements;
+  std::vector<std::uint64_t> gathered;
+  std::exception_ptr failure;
+  try {
+    counts.resize(static_cast<std::size_t>(comm.size()));
+    displacements.resize(counts.size());
+  } catch (...) {
+    failure = std::current_exception();
+  }
+  requireCollectivePhasePreparation(failure, comm, purpose);
+  const int count = local.size() <= static_cast<std::size_t>(std::numeric_limits<int>::max())
+                        ? static_cast<int>(local.size()) : -1;
+  MPI_Allgather(&count, 1, MPI_INT, counts.data(), 1, MPI_INT, comm.native());
+  int total = 0;
+  for (std::size_t rank = 0; rank < counts.size(); ++rank) {
+    if (counts[rank] < 0 || counts[rank] > std::numeric_limits<int>::max() - total) {
+      throw std::runtime_error(std::string(purpose) + " exceeds MPI gather count limits.");
+    }
+    displacements[rank] = total;
+    total += counts[rank];
+  }
+  try {
+    gathered.resize(static_cast<std::size_t>(total));
+  } catch (...) {
+    failure = std::current_exception();
+  }
+  requireCollectivePhasePreparation(failure, comm, purpose);
+  MPI_Allgatherv(local.data(), count, MPI_UINT64_T, gathered.data(), counts.data(),
+                 displacements.data(), MPI_UINT64_T, comm.native());
+  return gathered;
+#else
+  throw std::runtime_error(std::string(purpose) + " requires MPI in a parallel run.");
+#endif
+}
+
 std::vector<std::size_t> collectiveIndexUnion(
     std::vector<std::size_t> local_indices,
     std::size_t upper_bound,
@@ -932,69 +974,15 @@ std::vector<std::size_t> collectiveIndexUnion(
 
 #if FE_HAS_MPI
   if (comm.isParallel()) {
-    const int local_count_overflow =
-        local_indices.size() >
-                static_cast<std::size_t>(std::numeric_limits<int>::max())
-            ? 1
-            : 0;
-    int any_count_overflow = 0;
-    MPI_Allreduce(&local_count_overflow,
-                  &any_count_overflow,
-                  1,
-                  MPI_INT,
-                  MPI_MAX,
-                  comm.native());
-    if (any_count_overflow != 0) {
-      throw std::runtime_error(
-          "[svMultiPhysics::Application] " + std::string(purpose) +
-          " exceeds MPI local-count limits.");
-    }
-
     std::vector<std::uint64_t> local_values;
-    local_values.reserve(local_indices.size());
-    for (const auto index : local_indices) {
-      local_values.push_back(static_cast<std::uint64_t>(index));
+    std::exception_ptr failure;
+    try {
+      local_values.assign(local_indices.begin(), local_indices.end());
+    } catch (...) {
+      failure = std::current_exception();
     }
-
-    const int local_count = static_cast<int>(local_values.size());
-    std::vector<int> counts(static_cast<std::size_t>(comm.size()), 0);
-    MPI_Allgather(&local_count,
-                  1,
-                  MPI_INT,
-                  counts.data(),
-                  1,
-                  MPI_INT,
-                  comm.native());
-
-    std::vector<int> displacements(counts.size(), 0);
-    int total_count = 0;
-    for (std::size_t rank = 0u; rank < counts.size(); ++rank) {
-      if (counts[rank] < 0 ||
-          counts[rank] > std::numeric_limits<int>::max() - total_count) {
-        throw std::runtime_error(
-            "[svMultiPhysics::Application] " + std::string(purpose) +
-            " exceeds MPI aggregate-count limits.");
-      }
-      displacements[rank] = total_count;
-      total_count += counts[rank];
-    }
-
-    std::vector<std::uint64_t> gathered(
-        static_cast<std::size_t>(total_count), 0u);
-#ifdef MPI_UINT64_T
-    const MPI_Datatype index_type = MPI_UINT64_T;
-#else
-    const MPI_Datatype index_type = MPI_UNSIGNED_LONG_LONG;
-#endif
-    MPI_Allgatherv(local_values.empty() ? nullptr : local_values.data(),
-                   local_count,
-                   index_type,
-                   gathered.empty() ? nullptr : gathered.data(),
-                   counts.data(),
-                   displacements.data(),
-                   index_type,
-                   comm.native());
-
+    requireCollectivePhasePreparation(failure, comm, purpose);
+    const auto gathered = collectiveGatherWords(local_values, comm, purpose);
     local_indices.clear();
     local_indices.reserve(gathered.size());
     for (const auto value : gathered) {
@@ -1070,59 +1058,7 @@ interfaces::LevelSetGeometryOwnershipCollective ownershipCollective(
   collective.size = comm.size();
   collective.all_gather_owned_rule_identity_values =
       [comm](std::span<const std::uint64_t> local_values) {
-        std::vector<std::uint64_t> gathered(local_values.begin(),
-                                            local_values.end());
-#if FE_HAS_MPI
-        if (!comm.isParallel()) {
-          return gathered;
-        }
-        if (local_values.size() >
-            static_cast<std::size_t>(std::numeric_limits<int>::max())) {
-          throw std::runtime_error(
-              "Level-set snapshot ownership stream exceeds MPI limits.");
-        }
-        const int local_count = static_cast<int>(local_values.size());
-        std::vector<int> counts(static_cast<std::size_t>(comm.size()), 0);
-        MPI_Allgather(&local_count,
-                      1,
-                      MPI_INT,
-                      counts.data(),
-                      1,
-                      MPI_INT,
-                      comm.native());
-        std::vector<int> displacements(counts.size(), 0);
-        int total_values = 0;
-        for (std::size_t rank = 0; rank < counts.size(); ++rank) {
-          if (counts[rank] < 0 ||
-              counts[rank] >
-                  std::numeric_limits<int>::max() - total_values) {
-            throw std::runtime_error(
-                "Level-set snapshot ownership gather exceeds MPI limits.");
-          }
-          displacements[rank] = total_values;
-          total_values += counts[rank];
-        }
-        gathered.assign(static_cast<std::size_t>(total_values), 0u);
-#ifdef MPI_UINT64_T
-        const MPI_Datatype identity_type = MPI_UINT64_T;
-#else
-        const MPI_Datatype identity_type = MPI_UNSIGNED_LONG_LONG;
-#endif
-        MPI_Allgatherv(local_values.empty() ? nullptr : local_values.data(),
-                       local_count,
-                       identity_type,
-                       gathered.empty() ? nullptr : gathered.data(),
-                       counts.data(),
-                       displacements.data(),
-                       identity_type,
-                       comm.native());
-#else
-        if (comm.isParallel()) {
-          throw std::runtime_error(
-              "Level-set snapshot ownership validation requires MPI in a parallel run.");
-        }
-#endif
-        return gathered;
+        return collectiveGatherWords(local_values, comm, "Level-set snapshot ownership");
       };
   collective.all_gather_revision_values =
       collective.all_gather_owned_rule_identity_values;
