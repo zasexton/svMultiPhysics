@@ -70,15 +70,15 @@ using svmp::FE::systems::SystemStateView;
 
 namespace {
 
-std::shared_ptr<Mesh> build_single_quad_mesh_with_left_edge_marker(int marker)
+std::shared_ptr<Mesh> build_single_quad_mesh_with_left_edge_marker(int marker, double shear = 0.0)
 {
     auto base = std::make_shared<MeshBase>();
 
     const std::vector<svmp::real_t> X_ref = {
         0.0, 0.0,
         1.0, 0.0,
-        1.0, 1.0,
-        0.0, 1.0
+        1.0 + shear, 1.0,
+        shear, 1.0
     };
     const std::vector<svmp::offset_t> cell2vertex_offsets = {0, 4};
     const std::vector<svmp::index_t> cell2vertex = {0, 1, 2, 3};
@@ -933,6 +933,78 @@ TEST(StrongDirichletConstraint, WettedSubsetHoldsOnlyTheNodesOfWettedFaces)
         u, {{floor, floor_wet, {tank.floor_left, tank.floor_right}}, {right, right_wet, {tank.right_wall}}}));
     ASSERT_NO_THROW(sys.rebuildConstraintState());
     expect_holds({1.0, 1.0, 2.0, free, free, 2.0}, "wet corner");
+}
+
+TEST(NormalComponentConstraint, AChangingNormalPreservesHistoryAtItsOwnTime)
+{
+    using namespace svmp::FE;
+    constexpr int side = 7;
+    auto mesh = build_single_quad_mesh_with_left_edge_marker(side);
+    auto& geometry = mesh->local_mesh();
+    geometry.set_current_coords({0, 0, 1, 0, 1, 1, 0, 1});
+    FESystem system(mesh, svmp::Configuration::Current);
+    auto vector = spaces::SpaceFactory::create_vector_h1(ElementType::Quad4, 1, 2);
+    const auto field = system.addField({.name = "u", .space = vector, .components = 2});
+    auto condition = std::make_unique<constraints::NormalComponentConstraint>(
+        field, std::vector<int>{side}, FormExpr::constant(0.0));
+    const auto* normal = condition.get();
+    system.addSystemConstraint(std::move(condition));
+    system.setup();
+    ASSERT_EQ(normal->lines().size(), 2u);
+    for (const auto& line : normal->lines()) {
+        EXPECT_TRUE(line.masters.empty());
+    }
+
+    // The formerly vertical wall now has tangent (1/2,1). The current
+    // constraint is u_x = u_y/2. At the accepted time u was (0,1).
+    geometry.set_current_coords({0, 0, 1, 0, 1.5, 1, 0.5, 1});
+    system.updateConstraints(1.0, 1.0);
+    ASSERT_EQ(normal->lines().size(), 2u);
+    std::vector<Real> accepted(system.dofHandler().getNumDofs(), 0);
+    auto rate = accepted;
+    for (const auto& line : normal->lines()) {
+        ASSERT_EQ(line.masters.size(), 1u);
+        EXPECT_DOUBLE_EQ(line.weights[0], 0.5);
+        accepted[line.masters[0]] = 1;
+        rate[line.slave] = 0.5;
+    }
+    const auto& lines = system.constraints();
+    auto at_current_time = accepted;
+    lines.distributeMasterBearing(at_current_time);
+    const auto old_rate = rate;
+    const auto old_state = accepted;
+    lines.distributeMasterBearing(accepted, constraints::AffineConstraints::MasterBearingLines::TimeInvariant);
+    lines.distributeMasterBearingHomogeneous(rate);
+    EXPECT_EQ(accepted, old_state);
+    EXPECT_EQ(rate, old_rate);
+    for (const auto& line : normal->lines()) {
+        EXPECT_TRUE(lines.isInstantaneous(line.slave));
+        EXPECT_DOUBLE_EQ(at_current_time[line.slave], 0.5);
+    }
+}
+
+TEST(NormalComponentConstraint, AFittedReferenceNormalProjectsStaticHistory)
+{
+    using namespace svmp::FE;
+    constexpr int side = 7;
+    FESystem system(build_single_quad_mesh_with_left_edge_marker(side, 0.5));
+    auto vector = spaces::SpaceFactory::create_vector_h1(ElementType::Quad4, 1, 2);
+    const auto field = system.addField({.name = "u", .space = vector, .components = 2});
+    auto condition = std::make_unique<constraints::NormalComponentConstraint>(field, std::vector<int>{side});
+    const auto* normal = condition.get();
+    system.addSystemConstraint(std::move(condition));
+    system.setup();
+    ASSERT_EQ(normal->lines().size(), 2u);
+    std::vector<Real> rate(system.dofHandler().getNumDofs(), 0);
+    for (const auto& line : normal->lines()) {
+        ASSERT_EQ(line.masters.size(), 1u);
+        EXPECT_FALSE(system.constraints().isInstantaneous(line.slave));
+        rate[line.masters[0]] = 1;
+    }
+    system.constraints().distributeMasterBearingHomogeneous(rate);
+    for (const auto& line : normal->lines()) {
+        EXPECT_DOUBLE_EQ(rate[line.slave], 0.5);
+    }
 }
 
 // The strong normal (slip) route: walls of one constant value join one

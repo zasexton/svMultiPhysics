@@ -54,6 +54,7 @@
 #include "Forms/FormExpr.h"
 
 #include <array>
+#include <cstdint>
 #include <optional>
 #include <span>
 #include <string>
@@ -119,6 +120,8 @@ private:
     forms::FormExpr value_{};
     NormalComponentOptions options_{};
     bool is_time_dependent_{false};
+    std::optional<std::uint64_t> initial_geometry_revision_;
+    bool normal_frame_can_change_{false};
     std::vector<Line> lines_{};
 };
 

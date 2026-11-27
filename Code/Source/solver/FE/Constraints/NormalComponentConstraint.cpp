@@ -625,6 +625,8 @@ NormalComponentConstraint::NormalComponentConstraint(FieldId field,
         throw std::invalid_argument("NormalComponentConstraint: the feature angle must lie in (0, 90) degrees");
     }
     is_time_dependent_ = forms::isTimeDependent(value_);
+    normal_frame_can_change_ = std::any_of(boundaries_.begin(), boundaries_.end(),
+        [](const auto& boundary) { return boundary.isGeneratedActiveSubset(); });
 }
 
 void NormalComponentConstraint::apply(const FESystem& system, AffineConstraints& constraints)
@@ -641,6 +643,14 @@ void NormalComponentConstraint::apply(const FESystem& system, AffineConstraints&
                 "NormalComponentConstraint: field '" + rec.name + "' must have one component per space dimension");
 
     const auto contributions = ownedPointContributions(system, field_, boundaries_, dim);
+    const auto revision = system.meshAccess().geometryRevision();
+    if (!initial_geometry_revision_) {
+        initial_geometry_revision_ = revision;
+    }
+    normal_frame_can_change_ |= revision != *initial_geometry_revision_;
+#if defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH
+    normal_frame_can_change_ |= system.coordinateConfiguration() != svmp::Configuration::Reference;
+#endif
     const Real cos_feature_angle = std::cos(options_.feature_angle_degrees * kPi / 180.0);
     forms::PointEvalContext pctx;
     lines_.clear();
@@ -663,8 +673,9 @@ void NormalComponentConstraint::apply(const FESystem& system, AffineConstraints&
                 constraints.addEntry(line.slave, line.masters[m], line.weights[m]);
             }
             constraints.setInhomogeneity(line.slave, g * line.value_factor);
-            if (is_time_dependent_ && line.value_factor != 0.0) {
-                // u . n = g(t) changes in time; stored history keeps its own g.
+            if ((is_time_dependent_ && line.value_factor != 0.0) ||
+                (normal_frame_can_change_ && !line.masters.empty())) {
+                // Accepted states and rates belong to the normal at their own time.
                 constraints.setInstantaneous(line.slave);
             }
             lines_.push_back(std::move(line));
