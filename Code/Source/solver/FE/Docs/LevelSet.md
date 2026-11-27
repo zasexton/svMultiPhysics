@@ -237,7 +237,10 @@ The production transport operator is Galerkin advection with optional SUPG. Its
 directional, transient scale is
 
 `tau = c_tau / sqrt((c_t / dt_eff)^2 + u . G u + epsilon_u)`,
-`G = J^-T J^-1`.
+`G = J^-T M J^-1`. The reference metric `M` is the unit-determinant
+regular-simplex Gram matrix on triangles and tetrahedra. A wedge uses the
+triangular metric in its base and unit axial scale. Tensor cells and the
+square-based pyramid use the identity on their reference coordinates.
 
 This metric responds to the streamline direction on anisotropic cells and stays
 finite as the velocity tends to zero. The residual-based discontinuity

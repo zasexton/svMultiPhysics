@@ -291,6 +291,20 @@ TEST(LevelSetSideSupport, WithoutANativeMeshTheSupportIsTheVerticesOnTheSide)
               (std::vector<unsigned char>{0, 1, 1, 1}));
 }
 
+TEST(LevelSetSideSupport, EverywhereIncludesEveryVertexRegardlessOfCutRules)
+{
+    svmp::FE::systems::FESystem system(twoTriangleMesh());
+    const std::vector<Real> phi{-2, -1, -3, -4};
+    LevelSetSideSupportQuery query{};
+    query.side = LevelSetSupportSide::Everywhere;
+    query.level_set = {phi.data(), 1, phi.size()};
+    for (const bool cut_rules : {false, true}) {
+        query.use_generated_volume_rules = cut_rules;
+        EXPECT_EQ(levelSetSideSupportVertices(system, query, 4),
+                  (std::vector<unsigned char>{1, 1, 1, 1}));
+    }
+}
+
 TEST(LevelSetSideSupport, VertexSideAndDistanceToTheIsovalue)
 {
     const std::vector<Real> phi{-1.0, 0.0, 1.0e-9, 2.0};

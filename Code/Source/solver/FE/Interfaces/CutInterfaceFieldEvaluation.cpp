@@ -151,10 +151,8 @@ std::vector<Real> linearH1ShapeValues(ElementType element_type,
     case ElementType::Triangle3:
         return {Real{1.0} - x - y, x, y};
     case ElementType::Quad4:
-        return {(Real{1.0} - x) * (Real{1.0} - y),
-                x * (Real{1.0} - y),
-                x * y,
-                (Real{1.0} - x) * y};
+        return {0.25 * (1 - x) * (1 - y), 0.25 * (1 + x) * (1 - y),
+                0.25 * (1 + x) * (1 + y), 0.25 * (1 - x) * (1 + y)};
     case ElementType::Tetra4:
         return {Real{1.0} - x - y - z, x, y, z};
     default:
@@ -174,10 +172,10 @@ std::vector<std::array<Real, 3>> linearH1ShapeGradients(
                 {Real{1.0}, Real{0.0}, Real{0.0}},
                 {Real{0.0}, Real{1.0}, Real{0.0}}};
     case ElementType::Quad4:
-        return {{-(Real{1.0} - y), -(Real{1.0} - x), Real{0.0}},
-                {Real{1.0} - y, -x, Real{0.0}},
-                {y, x, Real{0.0}},
-                {-y, Real{1.0} - x, Real{0.0}}};
+        return {{-0.25 * (1 - y), -0.25 * (1 - x), 0},
+                { 0.25 * (1 - y), -0.25 * (1 + x), 0},
+                { 0.25 * (1 + y),  0.25 * (1 + x), 0},
+                {-0.25 * (1 + y),  0.25 * (1 - x), 0}};
     case ElementType::Tetra4:
         return {{-Real{1.0}, -Real{1.0}, -Real{1.0}},
                 {Real{1.0}, Real{0.0}, Real{0.0}},

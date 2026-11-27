@@ -61,6 +61,7 @@ struct CutInterfaceTwoSidedFieldGradient {
     CutInterfaceFieldGradient average{};
 };
 
+/// Reference coordinates follow the parent element, including [-1,1]^2 on Quad4.
 [[nodiscard]] std::vector<Real> linearH1ShapeValues(
     ElementType element_type,
     const std::array<Real, 3>& parent_coordinate);

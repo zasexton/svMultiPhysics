@@ -58,10 +58,10 @@ TEST(CutInterfaceFieldEvaluation, EvaluatesVectorH1FieldOnCutInterfacePoints)
         domain,
         LevelSetCellCutInput{.parent_cell = 2,
                              .element_type = ElementType::Quad4,
-                             .node_coordinates = {{{0.0, 0.0, 0.0}},
-                                                  {{1.0, 0.0, 0.0}},
+                             .node_coordinates = {{{-1.0, -1.0, 0.0}},
+                                                  {{1.0, -1.0, 0.0}},
                                                   {{1.0, 1.0, 0.0}},
-                                                  {{0.0, 1.0, 0.0}}},
+                                                  {{-1.0, 1.0, 0.0}}},
                              .level_set_values = {-0.5, 0.5, 0.5, -0.5}});
     ASSERT_EQ(domain.fragments().size(), 1u);
 
@@ -80,6 +80,24 @@ TEST(CutInterfaceFieldEvaluation, EvaluatesVectorH1FieldOnCutInterfacePoints)
     ASSERT_EQ(values.front().components.size(), 2u);
     EXPECT_NEAR(values.front().components[0], 0.5, 1.0e-14);
     EXPECT_NEAR(values.front().components[1], 10.5, 1.0e-14);
+}
+
+TEST(CutInterfaceFieldEvaluation, QuadTraceReproducesBilinearValueAndPhysicalGradient)
+{
+    H1NodalFieldData field;
+    field.element_type = ElementType::Quad4;
+    field.components = 1;
+    field.node_coordinates = {{0, 0, 0}, {2, 0, 0}, {2, 1, 0}, {0, 1, 0}};
+    field.nodal_values = {0, 0, 2, 0};  // u(x,y) = xy
+    for (const std::array<Real, 3> xi : {std::array<Real, 3>{0, 0, 0}, {-0.5, 0.5, 0}, {1, -1, 0}}) {
+        const Real x = 1 + xi[0];
+        const Real y = (1 + xi[1]) / 2;
+        EXPECT_DOUBLE_EQ(evaluateH1FieldValueAtPoint(field, xi).components.at(0), x * y);
+        const auto gradient = evaluateH1FieldGradientAtPoint(field, xi).components.at(0);
+        EXPECT_DOUBLE_EQ(gradient[0], y);
+        EXPECT_DOUBLE_EQ(gradient[1], x);
+        EXPECT_DOUBLE_EQ(gradient[2], 0);
+    }
 }
 
 TEST(CutInterfaceFieldEvaluation,

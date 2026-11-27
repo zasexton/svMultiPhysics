@@ -101,6 +101,9 @@ std::vector<unsigned char> levelSetSideSupportVertices(
     const LevelSetSideSupportQuery& query,
     GlobalIndex n_vertices)
 {
+    if (query.side == LevelSetSupportSide::Everywhere) {
+        return std::vector<unsigned char>(static_cast<std::size_t>(n_vertices), 1);
+    }
     std::vector<unsigned char> support(
         static_cast<std::size_t>(n_vertices), static_cast<unsigned char>(0));
 #if defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH
