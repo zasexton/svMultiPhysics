@@ -586,9 +586,9 @@ CutQuadratureRule makeMomentFittedCutVolumeQuadrature(
     Real parent_measure,
     Real side_fraction,
     CutIntegrationSide side,
-    const std::array<Real, 3>& moment_point,
+    const std::array<Real, 3>& side_centroid,
     const std::array<Real, 3>& interface_normal,
-    int exact_polynomial_order,
+    int requested_polynomial_order,
     CutQuadratureProvenance provenance) {
     if (side == CutIntegrationSide::Interface) {
         throw std::invalid_argument("moment-fitted volume quadrature requires Negative or Positive side");
@@ -596,7 +596,7 @@ CutQuadratureRule makeMomentFittedCutVolumeQuadrature(
     CutQuadratureConstructionPolicy policy;
     policy.kind = CutQuadratureConstructionKind::MomentFittedImplicit;
     policy.moment_fitted = true;
-    policy.polynomial_order = std::max(0, exact_polynomial_order);
+    policy.polynomial_order = std::max(0, requested_polynomial_order);
     policy.name = "moment-fitted-implicit";
     side_fraction = std::max(Real{0.0}, std::min(Real{1.0}, side_fraction));
 
@@ -612,10 +612,10 @@ CutQuadratureRule makeMomentFittedCutVolumeQuadrature(
     rule.provenance_id = rule.provenance.embedded_geometry_id;
     rule.frame = rule.provenance.frame;
     rule.exact_for_constants = true;
-    rule.exact_polynomial_order = policy.polynomial_order;
+    rule.exact_polynomial_order = std::min(1, policy.polynomial_order);
     if (rule.measure > Real{0.0}) {
         CutQuadraturePoint qp;
-        qp.point = moment_point;
+        qp.point = side_centroid;
         qp.weight = rule.measure;
         qp.normal = side == CutIntegrationSide::Negative
                         ? unit_or_default(interface_normal)

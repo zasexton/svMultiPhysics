@@ -322,7 +322,7 @@ TEST(CoefficientClassificationPolicy, TetrahedronCellCutIsScaleInvariant)
     }
 }
 
-TEST(ProducerObservation, FiniteDyadicGradientNormOverflowStampsEveryRecord)
+TEST(ProducerObservation, LargeFiniteGradientsOrientTriangleAndTetrahedronNormals)
 {
     const auto request = make_request(70);
     const Real magnitude = std::ldexp(Real{1.0}, 600);
@@ -346,6 +346,7 @@ TEST(ProducerObservation, FiniteDyadicGradientNormOverflowStampsEveryRecord)
         ASSERT_TRUE(result.supported);
         ASSERT_EQ(result.fragments.size(), 1u);
         ASSERT_EQ(result.volume_regions.size(), 2u);
+        expect_observation(result, LinearCornerStrictBranch::Unchecked);
         const auto& fragment = result.fragments.front();
         ASSERT_EQ(fragment.vertices.size(), 2u);
         EXPECT_EQ(fragment.vertices[0].point, (std::array<Real, 3>{{0.5, 0, 0}}));
@@ -361,11 +362,21 @@ TEST(ProducerObservation, FiniteDyadicGradientNormOverflowStampsEveryRecord)
             EXPECT_FALSE(region.quadrature_points.empty());
             EXPECT_FALSE(region.reference_subcells.empty());
         }
-        // The existing overflowing gradient normalization loses its orientation
-        // direction under either sign. This observation-only fix must not repair it.
-        const Real normal_component = 0.5 * (1.0 / std::sqrt(0.5));
-        EXPECT_EQ(fragment.normal, (std::array<Real, 3>{{normal_component, normal_component, 0}}));
-        expect_observation(result, LinearCornerStrictBranch::ModifiedOrUnresolved);
+        for (int d = 0; d < 2; ++d) {
+            EXPECT_NEAR(fragment.normal[d], sign / std::sqrt(2.0), 2.0e-15);
+        }
+        EXPECT_EQ(fragment.normal[2], 0.0);
+        auto tetra = input;
+        tetra.element_type = ElementType::Tetra4;
+        tetra.node_coordinates.push_back({0, 0, 1});
+        tetra.level_set_values.push_back(sign * magnitude);
+        const auto volume_cut = cutLinearLevelSetCell3D(request, tetra);
+        ASSERT_TRUE(volume_cut.supported) << volume_cut.diagnostic;
+        ASSERT_EQ(volume_cut.fragments.size(), 1u);
+        expect_observation(volume_cut, LinearCornerStrictBranch::Unchecked);
+        for (const auto component : volume_cut.fragments.front().normal) {
+            EXPECT_NEAR(component, sign / std::sqrt(3.0), 2.0e-15);
+        }
     }
 }
 

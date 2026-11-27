@@ -2,7 +2,9 @@
 
 #include <gtest/gtest.h>
 
+#include <array>
 #include <cmath>
+#include <vector>
 #include <stdexcept>
 
 using namespace svmp::FE;
@@ -369,23 +371,20 @@ TEST(CutQuadrature, CurvedAndMomentFittedRulesCarryFrameAndExactnessMetadata)
     EXPECT_DOUBLE_EQ(moment.measure, 1.0);
     EXPECT_TRUE(moment.policy.moment_fitted);
     EXPECT_EQ(moment.policy.kind, CutQuadratureConstructionKind::MomentFittedImplicit);
-    EXPECT_EQ(moment.exact_polynomial_order, 3);
+    EXPECT_EQ(moment.policy.polynomial_order, 3);
+    EXPECT_EQ(moment.exact_polynomial_order, 1);
     EXPECT_EQ(moment.frame, CutGeometryFrame::Current);
 }
 
 TEST(CutQuadrature, SphericalCapReferencesValidateCurvedAndMomentFittedRules)
 {
-    const Real radius = 2.0;
-    const Real cut_coordinate = 0.5;
-    const Real cap_height = radius - cut_coordinate;
-    const Real disk_radius = std::sqrt(radius * radius - cut_coordinate * cut_coordinate);
-    const Real total_volume = sphere_volume(radius);
-    const Real cap_volume = spherical_cap_volume(radius, cap_height);
-    const Real complement_volume = total_volume - cap_volume;
-    const Real cap_fraction = cap_volume / total_volume;
-    const Real complement_fraction = complement_volume / total_volume;
-    const Real cap_area = spherical_cap_surface_area(radius, cap_height);
-    const Real disk_area = circular_disk_area(disk_radius);
+    constexpr Real radius = 2.0;
+    constexpr Real plane = 0.5;
+    const Real height = radius - plane;
+    const Real total = sphere_volume(radius);
+    const Real cap = spherical_cap_volume(radius, height);
+    const Real disk_area = circular_disk_area(std::sqrt(radius * radius - plane * plane));
+    const Real cap_first_moment = disk_area * disk_area / (4.0 * kPi);
 
     CutQuadratureProvenance provenance;
     provenance.embedded_geometry_id = "analytic-sphere";
@@ -394,71 +393,91 @@ TEST(CutQuadrature, SphericalCapReferencesValidateCurvedAndMomentFittedRules)
     provenance.predicate_policy_key = 144;
     provenance.frame = CutGeometryFrame::Current;
 
-    const auto positive_cap = makeMomentFittedCutVolumeQuadrature(
-        total_volume,
-        cap_fraction,
-        CutIntegrationSide::Positive,
-        {{cut_coordinate + 0.5 * cap_height, 0.0, 0.0}},
-        {{1.0, 0.0, 0.0}},
-        2,
-        provenance);
-    const auto negative_complement = makeMomentFittedCutVolumeQuadrature(
-        total_volume,
-        complement_fraction,
-        CutIntegrationSide::Negative,
-        {{-0.25 * radius, 0.0, 0.0}},
-        {{1.0, 0.0, 0.0}},
-        2,
-        provenance);
-
-    EXPECT_FALSE(positive_cap.curved_geometry);
-    EXPECT_TRUE(positive_cap.policy.moment_fitted);
-    EXPECT_EQ(positive_cap.policy.kind, CutQuadratureConstructionKind::MomentFittedImplicit);
-    EXPECT_EQ(positive_cap.frame, CutGeometryFrame::Current);
+    // Integrate circular cross sections of the sphere. Their area is quadratic
+    // in x, so three Gauss abscissae also integrate its first and second moments.
+    const std::array<Real, 3> abscissae{-std::sqrt(0.6), 0, std::sqrt(0.6)};
+    const std::array<Real, 3> weights{5.0 / 9.0, 8.0 / 9.0, 5.0 / 9.0};
+    const auto section_moments = [&](Real lower, Real upper) {
+        std::array<Real, 3> moments{};
+        for (std::size_t i = 0; i < abscissae.size(); ++i) {
+            const Real x = (lower + upper + (upper - lower) * abscissae[i]) / 2.0;
+            const Real section_area = kPi * (radius * radius - x * x);
+            const Real dv = (upper - lower) * weights[i] * section_area / 2.0;
+            moments[0] += dv;
+            moments[1] += x * dv;
+            moments[2] += x * x * dv;
+        }
+        return moments;
+    };
+    const auto make_volume = [&](const auto& moments, CutIntegrationSide side) {
+        return makeMomentFittedCutVolumeQuadrature(
+            total, moments[0] / total, side, {moments[1] / moments[0], 0, 0},
+            {1, 0, 0}, 2, provenance);
+    };
+    const auto positive = section_moments(plane, radius);
+    const auto positive_cap = make_volume(positive, CutIntegrationSide::Positive);
+    const auto negative_complement = make_volume(
+        section_moments(-radius, plane), CutIntegrationSide::Negative);
+    ASSERT_EQ(positive_cap.points.size(), 1u);
+    ASSERT_EQ(negative_complement.points.size(), 1u);
+    const auto& cap_point = positive_cap.points.front();
+    const auto& complement_point = negative_complement.points.front();
     EXPECT_EQ(positive_cap.provenance.cut_topology_revision, 812u);
-    EXPECT_NEAR(positive_cap.measure, cap_volume, 1.0e-12);
-    EXPECT_NEAR(positive_cap.volume_fraction, cap_fraction, 1.0e-14);
-    EXPECT_NEAR(negative_complement.measure, complement_volume, 1.0e-12);
-    EXPECT_NEAR(negative_complement.volume_fraction, complement_fraction, 1.0e-14);
+    EXPECT_EQ(positive_cap.policy.kind, CutQuadratureConstructionKind::MomentFittedImplicit);
+    EXPECT_NEAR(positive_cap.measure, cap, 1.0e-12);
+    EXPECT_NEAR(cap_point.weight * cap_point.point[0], cap_first_moment, 1.0e-12);
+    EXPECT_NEAR(complement_point.weight * complement_point.point[0], -cap_first_moment, 1.0e-12);
+    EXPECT_TRUE(checkCutVolumeConservation(negative_complement, positive_cap, 1.0e-12).ok);
+    EXPECT_GT(positive[2] - cap_point.weight * cap_point.point[0] * cap_point.point[0], 0.1);
+    EXPECT_EQ(positive_cap.exact_polynomial_order, 1);
 
-    const auto conservation = checkCutVolumeConservation(
-        negative_complement,
-        positive_cap,
-        1.0e-12);
-    EXPECT_TRUE(conservation.ok);
-    EXPECT_NEAR(conservation.residual, 0.0, 1.0e-12);
+    // On a sphere, x and azimuth parameterize dS=R dx dtheta. Supply actual
+    // surface points and unnormalized outward normals to the geometry factory.
+    std::vector<CutQuadraturePoint> samples;
+    for (std::size_t i = 0; i < abscissae.size(); ++i) {
+        const Real x = plane + height * (1 + abscissae[i]) / 2.0;
+        const Real r = std::sqrt(radius * radius - x * x);
+        const Real weight = kPi * radius * height * weights[i] / 4.0;
+        const std::array<std::array<Real, 2>, 4> ring{{{r, 0}, {0, r}, {-r, 0}, {0, -r}}};
+        for (const auto& yz : ring) {
+            const std::array<Real, 3> point{x, yz[0], yz[1]};
+            samples.push_back({.point = point, .normal = point, .weight = weight});
+        }
+    }
+    CutQuadratureConstructionPolicy surface_policy;
+    surface_policy.polynomial_order = 2;
+    const auto surface = makeCurvedInterfaceQuadrature(
+        samples, CutGeometryFrame::Current, surface_policy, provenance);
+    surface_policy.polynomial_order = 1;
+    const auto disk = makeCurvedInterfaceQuadrature(
+        {{.point = {plane, 0, 0}, .normal = {-radius, 0, 0}, .weight = disk_area}},
+        CutGeometryFrame::Current, surface_policy, provenance);
+    EXPECT_TRUE(surface.curved_geometry);
+    EXPECT_NEAR(surface.measure, spherical_cap_surface_area(radius, height), 1.0e-12);
+    EXPECT_EQ(surface.exact_polynomial_order, 2);
+    EXPECT_EQ(disk.provenance.predicate_policy_key, 144u);
+    for (const auto& point : surface.points) {
+        EXPECT_NEAR(std::hypot(point.point[0], point.point[1], point.point[2]),
+                    radius, 1.0e-14);
+        for (int d = 0; d < 3; ++d) {
+            EXPECT_NEAR(point.normal[d], point.point[d] / radius, 1.0e-14);
+        }
+    }
 
-    CutQuadratureConstructionPolicy curved_policy;
-    curved_policy.kind = CutQuadratureConstructionKind::CurvedInterface;
-    curved_policy.polynomial_order = 2;
-    curved_policy.name = "analytic-spherical-reference";
-
-    const auto cap_surface = makeCurvedInterfaceQuadrature(
-        {CutQuadraturePoint{.point = {{cut_coordinate + 0.5 * cap_height, 0.0, 0.0}},
-                            .normal = {{2.0, 0.0, 0.0}},
-                            .weight = cap_area}},
-        CutGeometryFrame::Current,
-        curved_policy,
-        provenance);
-    EXPECT_TRUE(cap_surface.curved_geometry);
-    EXPECT_EQ(cap_surface.policy.kind, CutQuadratureConstructionKind::CurvedInterface);
-    EXPECT_EQ(cap_surface.frame, CutGeometryFrame::Current);
-    EXPECT_EQ(cap_surface.exact_polynomial_order, 2);
-    EXPECT_NEAR(cap_surface.measure, cap_area, 1.0e-12);
-    ASSERT_EQ(cap_surface.points.size(), 1u);
-    EXPECT_NEAR(cap_surface.points[0].weight, cap_area, 1.0e-12);
-    EXPECT_NEAR(cap_surface.points[0].normal[0], 1.0, 1.0e-14);
-
-    const auto disk_interface = makeCurvedInterfaceQuadrature(
-        {CutQuadraturePoint{.point = {{cut_coordinate, 0.0, 0.0}},
-                            .normal = {{1.0, 0.0, 0.0}},
-                            .weight = disk_area}},
-        CutGeometryFrame::Current,
-        curved_policy,
-        provenance);
-    EXPECT_NEAR(disk_interface.measure, disk_area, 1.0e-12);
-    EXPECT_NEAR(disk_interface.points.front().weight, disk_area, 1.0e-12);
-    EXPECT_EQ(disk_interface.provenance.predicate_policy_key, 144u);
+    // Divergence of e_x, x e_x and x² e_x/2 is 0, 1 and x respectively.
+    std::array<Real, 3> flux{};
+    for (const auto* boundary : {&surface, &disk}) {
+        for (const auto& point : boundary->points) {
+            const Real directed_measure = point.weight * point.normal[0];
+            const Real x = point.point[0];
+            flux[0] += directed_measure;
+            flux[1] += x * directed_measure;
+            flux[2] += x * x * directed_measure / 2.0;
+        }
+    }
+    EXPECT_NEAR(flux[0], 0.0, 1.0e-12);
+    EXPECT_NEAR(flux[1], positive_cap.measure, 1.0e-12);
+    EXPECT_NEAR(flux[2], cap_point.weight * cap_point.point[0], 1.0e-12);
 }
 
 TEST(CutQuadrature, CurvedReferenceDiagnosticsRejectDegenerateAnalyticRules)

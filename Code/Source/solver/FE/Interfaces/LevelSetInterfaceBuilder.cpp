@@ -347,7 +347,7 @@ struct RegionMoments {
 }
 
 [[nodiscard]] Real norm3(const std::array<Real, 3>& a) noexcept {
-    return std::sqrt(dot3(a, a));
+    return std::hypot(a[0], a[1], a[2]);
 }
 
 [[nodiscard]] std::array<Real, 3> cross(const std::array<Real, 3>& a,
@@ -615,7 +615,7 @@ void addUniqueCandidate(StrictConstructionObservation& observation, std::vector<
         if (observation) observation->unresolved();
         return {{1.0, 0.0, 0.0}};
     }
-    const Real len = std::sqrt(solution[0] * solution[0] + solution[1] * solution[1]);
+    const Real len = std::hypot(solution[0], solution[1]);
     if (observation && !std::isfinite(len)) observation->unresolved();
     if (len <= Real{1.0e-30}) {
         if (observation) observation->unresolved();

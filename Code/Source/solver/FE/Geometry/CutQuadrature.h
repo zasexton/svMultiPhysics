@@ -311,13 +311,15 @@ struct CutTopologyQuadratureRules {
     const CutQuadratureConstructionPolicy& policy = {},
     CutQuadratureProvenance provenance = {});
 
+/// The supplied phase centroid integrates affine functions exactly. A single
+/// volume sample attains at most degree one, independently of the requested order.
 [[nodiscard]] CutQuadratureRule makeMomentFittedCutVolumeQuadrature(
     Real parent_measure,
     Real side_fraction,
     CutIntegrationSide side,
-    const std::array<Real, 3>& moment_point,
+    const std::array<Real, 3>& side_centroid,
     const std::array<Real, 3>& interface_normal,
-    int exact_polynomial_order,
+    int requested_polynomial_order,
     CutQuadratureProvenance provenance = {});
 
 [[nodiscard]] std::array<CutQuadratureRule, 2> makeConservativeSplitCutVolumeQuadrature(
