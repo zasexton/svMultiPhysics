@@ -10,6 +10,7 @@
 #include "Assembly/ParallelAssembler.h"
 #include "Assembly/StandardAssembler.h"
 #include "Dofs/DofHandler.h"
+#include "Elements/ReferenceElement.h"
 #include "Forms/FormCompiler.h"
 #include "Forms/FormKernels.h"
 #include "Forms/Vocabulary.h"
@@ -210,19 +211,11 @@ public:
     [[nodiscard]] LocalIndex getLocalFaceIndex(GlobalIndex face_id,
                                                GlobalIndex cell_id) const override
     {
-        // Interior face id = 0: shared face {1,2,3}.
-        // - cell 0 local face 0
-        // - cell 1 local face 3
-        if (face_id == 0) {
-            if (cell_id == 0) return 0;
-            if (cell_id == 1) return 3;
-        }
-
-        // Boundary face id = 1: cell 0 local face 3 (nodes {0,1,2})
-        if (face_id == 1 && cell_id == 0) return 3;
-        // Boundary face id = 2: cell 1 local face 0 (nodes {2,3,4})
-        if (face_id == 2 && cell_id == 1) return 0;
-
+        // The reference tetrahedron numbers {0,1,2} as face 0 and {1,2,3} as face 2.
+        if (face_id == 0 && cell_id == 0) return 2;  // global {1,2,3}
+        if (face_id == 0 && cell_id == 1) return 0;  // global {1,2,3}
+        if (face_id == 1 && cell_id == 0) return 0;  // global {0,1,2}
+        if (face_id == 2 && cell_id == 1) return 2;  // global {2,3,4}
         throw std::runtime_error("TwoTetraFaceMeshAccess::getLocalFaceIndex: invalid face/cell pair");
     }
 
@@ -571,6 +564,25 @@ struct GlobalAssemblyResult {
 };
 
 } // namespace
+
+TEST(SerialParallelFaceIntegralsMPI, TwoTetraCellChartsReferToThePhysicalFaces)
+{
+    TwoTetraFaceMeshAccess mesh({0, 0}, 0);
+    const auto& reference = elements::ReferenceElement::shared(ElementType::Tetra4);
+    const auto physical_vertices = [&](GlobalIndex face_id, GlobalIndex cell_id) {
+        std::vector<GlobalIndex> cell, face;
+        mesh.getCellNodes(cell_id, cell);
+        for (const auto local : reference.face_nodes(mesh.getLocalFaceIndex(face_id, cell_id))) {
+            face.push_back(cell.at(local));
+        }
+        std::sort(face.begin(), face.end());
+        return face;
+    };
+    EXPECT_EQ(physical_vertices(0, 0), (std::vector<GlobalIndex>{1, 2, 3}));
+    EXPECT_EQ(physical_vertices(0, 1), (std::vector<GlobalIndex>{1, 2, 3}));
+    EXPECT_EQ(physical_vertices(1, 0), (std::vector<GlobalIndex>{0, 1, 2}));
+    EXPECT_EQ(physical_vertices(2, 1), (std::vector<GlobalIndex>{2, 3, 4}));
+}
 
 TEST(SerialParallelFaceIntegralsMPI, BoundaryAssemblyMatchesSerialAndGhostPoliciesAgree)
 {

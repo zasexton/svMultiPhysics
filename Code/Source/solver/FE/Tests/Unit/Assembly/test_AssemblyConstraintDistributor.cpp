@@ -270,9 +270,7 @@ TEST_F(AssemblyConstraintDistributorTest, GlobalSystemMatrixAdapterSetDiagonal) 
     adapter.setDiagonal(2, 1.0);  // Then set diagonal
     view.endAssemblyPhase();
 
-    // Note: setDiagonal may overwrite or add depending on implementation
-    // Just verify it doesn't crash
-    EXPECT_TRUE(true);
+    EXPECT_DOUBLE_EQ(view.getMatrixEntry(2, 2), 1.0);
 }
 
 // ============================================================================
@@ -324,8 +322,7 @@ TEST_F(AssemblyConstraintDistributorTest, GlobalSystemVectorAdapterSetValue) {
     adapter.setValue(1, 10.0);  // Should overwrite
     view.endAssemblyPhase();
 
-    // Note: behavior depends on implementation
-    EXPECT_TRUE(true);
+    EXPECT_DOUBLE_EQ(view.getVectorEntry(1), 10.0);
 }
 
 TEST_F(AssemblyConstraintDistributorTest, GlobalSystemVectorAdapterGetValue) {

@@ -772,6 +772,7 @@ TEST_F(AssemblyStatisticsTest, FormatPercent) {
 // ============================================================================
 
 TEST_F(AssemblyStatisticsTest, GetFLOPRate) {
+    EXPECT_TRUE(ScopedTimer::Clock::is_steady);
     stats_->startCollection();
     stats_->recordFLOPs(1000000);
     std::this_thread::sleep_for(std::chrono::milliseconds(10));

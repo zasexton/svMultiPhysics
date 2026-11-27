@@ -217,12 +217,12 @@ public:
     std::mutex mutex_;  // For thread-safe operations
 
     bool collecting_{false};
-    std::chrono::high_resolution_clock::time_point collection_start_;
+    ScopedTimer::TimePoint collection_start_;
 
     // Timing data per category
     std::map<TimingCategory, TimingData> timings_;
     std::map<TimingCategory, bool> enabled_categories_;
-    std::map<TimingCategory, std::chrono::high_resolution_clock::time_point> timing_starts_;
+    std::map<TimingCategory, ScopedTimer::TimePoint> timing_starts_;
 
     // FLOP data
     FLOPData flop_data_;
@@ -260,13 +260,13 @@ AssemblyStatistics& AssemblyStatistics::operator=(AssemblyStatistics&& other) no
 void AssemblyStatistics::startCollection()
 {
     impl_->collecting_ = true;
-    impl_->collection_start_ = std::chrono::high_resolution_clock::now();
+    impl_->collection_start_ = ScopedTimer::Clock::now();
 }
 
 void AssemblyStatistics::endCollection()
 {
     if (impl_->collecting_) {
-        auto end_time = std::chrono::high_resolution_clock::now();
+        auto end_time = ScopedTimer::Clock::now();
         double total_seconds = std::chrono::duration<double>(
             end_time - impl_->collection_start_).count();
         impl_->timings_[TimingCategory::Total].accumulate(total_seconds);
@@ -311,7 +311,7 @@ bool AssemblyStatistics::isEnabled(TimingCategory category) const noexcept
 void AssemblyStatistics::startTiming(TimingCategory category)
 {
     if (isEnabled(category)) {
-        impl_->timing_starts_[category] = std::chrono::high_resolution_clock::now();
+        impl_->timing_starts_[category] = ScopedTimer::Clock::now();
     }
 }
 
@@ -321,7 +321,7 @@ void AssemblyStatistics::stopTiming(TimingCategory category)
 
     auto it = impl_->timing_starts_.find(category);
     if (it != impl_->timing_starts_.end()) {
-        auto end_time = std::chrono::high_resolution_clock::now();
+        auto end_time = ScopedTimer::Clock::now();
         double seconds = std::chrono::duration<double>(end_time - it->second).count();
         impl_->timings_[category].accumulate(seconds);
         impl_->timing_starts_.erase(it);
