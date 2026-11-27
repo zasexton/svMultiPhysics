@@ -6134,12 +6134,6 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
         const bool want_matrix = coupled ? true : ((ir.kind() == FormKind::Bilinear) || is_fused);
         const bool want_vector = coupled ? true : ((ir.kind() == FormKind::Linear) || is_residual || is_fused);
 
-        if (is_face_domain) {
-            if (!coupled && ir.kind() == FormKind::Linear && !is_functional) {
-                return LLVMGenResult{.ok = false, .message = "LLVMGen: face kernels currently support bilinear/residual forms only"};
-            }
-        }
-
         if (!coupled && !want_matrix && !want_vector) {
             return LLVMGenResult{.ok = false, .message = "LLVMGen: unsupported FormKind"};
         }

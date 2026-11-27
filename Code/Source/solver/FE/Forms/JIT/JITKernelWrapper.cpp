@@ -1923,22 +1923,23 @@ void JITKernelWrapper::computeInteriorFace(const assembly::AssemblyContext& ctx_
 
     if (kind_ == WrappedKind::FormKernel) {
         const auto* k = dynamic_cast<const FormKernel*>(fallback_.get());
-        if (!k || k->ir().kind() != FormKind::Bilinear) {
+        if (!k) {
             fallback_->computeInteriorFace(ctx_minus, ctx_plus,
                                            output_minus, output_plus,
                                            coupling_minus_plus, coupling_plus_minus);
             return;
         }
 
+        const bool matrix = k->ir().kind() == FormKind::Bilinear;
         const auto n_test_minus = ctx_minus.numTestDofs();
         const auto n_trial_minus = ctx_minus.numTrialDofs();
         const auto n_test_plus = ctx_plus.numTestDofs();
         const auto n_trial_plus = ctx_plus.numTrialDofs();
 
-        output_minus.reserve(n_test_minus, n_trial_minus, true, false);
-        output_plus.reserve(n_test_plus, n_trial_plus, true, false);
-        coupling_minus_plus.reserve(n_test_minus, n_trial_plus, true, false);
-        coupling_plus_minus.reserve(n_test_plus, n_trial_minus, true, false);
+        output_minus.reserve(n_test_minus, n_trial_minus, matrix, !matrix);
+        output_plus.reserve(n_test_plus, n_trial_plus, matrix, !matrix);
+        coupling_minus_plus.reserve(n_test_minus, n_trial_plus, matrix, false);
+        coupling_plus_minus.reserve(n_test_plus, n_trial_minus, matrix, false);
 
         output_minus.clear();
         output_plus.clear();
@@ -1948,7 +1949,7 @@ void JITKernelWrapper::computeInteriorFace(const assembly::AssemblyContext& ctx_
         const auto& updates = k->inlinedStateUpdates().interior_face;
         if (!updates.empty()) {
             for (LocalIndex q = 0; q < ctx_minus.numQuadraturePoints(); ++q) {
-                applyInlinedMaterialStateUpdatesReal(ctx_minus, &ctx_plus, FormKind::Bilinear,
+                applyInlinedMaterialStateUpdatesReal(ctx_minus, &ctx_plus, k->ir().kind(),
                                                      k->constitutiveStateLayout(),
                                                      updates,
                                                      Side::Minus, q);
@@ -1956,7 +1957,7 @@ void JITKernelWrapper::computeInteriorFace(const assembly::AssemblyContext& ctx_
                 const auto* base_minus = ctx_minus.materialStateWorkBase();
                 const auto* base_plus = ctx_plus.materialStateWorkBase();
                 if (base_plus != nullptr && base_plus != base_minus) {
-                    applyInlinedMaterialStateUpdatesReal(ctx_minus, &ctx_plus, FormKind::Bilinear,
+                    applyInlinedMaterialStateUpdatesReal(ctx_minus, &ctx_plus, k->ir().kind(),
                                                          k->constitutiveStateLayout(),
                                                          updates,
                                                          Side::Plus, q);
@@ -1982,13 +1983,13 @@ void JITKernelWrapper::computeInteriorFace(const assembly::AssemblyContext& ctx_
             }
 	        callJIT(address, &args);
 
-        output_minus.has_matrix = true;
-        output_minus.has_vector = false;
-        output_plus.has_matrix = true;
-        output_plus.has_vector = false;
-        coupling_minus_plus.has_matrix = true;
+        output_minus.has_matrix = matrix;
+        output_minus.has_vector = !matrix;
+        output_plus.has_matrix = matrix;
+        output_plus.has_vector = !matrix;
+        coupling_minus_plus.has_matrix = matrix;
         coupling_minus_plus.has_vector = false;
-        coupling_plus_minus.has_matrix = true;
+        coupling_plus_minus.has_matrix = matrix;
         coupling_plus_minus.has_vector = false;
         return;
     }
@@ -2188,7 +2189,7 @@ void JITKernelWrapper::computeInterfaceFace(const assembly::AssemblyContext& ctx
 
     if (kind_ == WrappedKind::FormKernel) {
         const auto* k = dynamic_cast<const FormKernel*>(fallback_.get());
-        if (!k || k->ir().kind() != FormKind::Bilinear ||
+        if (!k ||
             (mixesSides(k->ir()) && !interfaceSidesOnce(sides_form_, k->ir()).ok)) {
             fallback_->computeInterfaceFace(ctx_minus, ctx_plus, interface_marker,
                                             output_minus, output_plus,
@@ -2196,15 +2197,16 @@ void JITKernelWrapper::computeInterfaceFace(const assembly::AssemblyContext& ctx
             return;
         }
 
+        const bool matrix = k->ir().kind() == FormKind::Bilinear;
         const auto n_test_minus = ctx_minus.numTestDofs();
         const auto n_trial_minus = ctx_minus.numTrialDofs();
         const auto n_test_plus = ctx_plus.numTestDofs();
         const auto n_trial_plus = ctx_plus.numTrialDofs();
 
-        output_minus.reserve(n_test_minus, n_trial_minus, true, false);
-        output_plus.reserve(n_test_plus, n_trial_plus, !one_sided_embedded, false);
-        coupling_minus_plus.reserve(n_test_minus, n_trial_plus, !one_sided_embedded, false);
-        coupling_plus_minus.reserve(n_test_plus, n_trial_minus, !one_sided_embedded, false);
+        output_minus.reserve(n_test_minus, n_trial_minus, matrix, !matrix);
+        output_plus.reserve(n_test_plus, n_trial_plus, !one_sided_embedded && matrix, !one_sided_embedded && !matrix);
+        coupling_minus_plus.reserve(n_test_minus, n_trial_plus, !one_sided_embedded && matrix, false);
+        coupling_plus_minus.reserve(n_test_plus, n_trial_minus, !one_sided_embedded && matrix, false);
 
         output_minus.clear();
         output_plus.clear();
@@ -2214,7 +2216,7 @@ void JITKernelWrapper::computeInterfaceFace(const assembly::AssemblyContext& ctx
         const auto& updates = k->inlinedStateUpdates().interface_face;
         if (!updates.empty()) {
             for (LocalIndex q = 0; q < ctx_minus.numQuadraturePoints(); ++q) {
-                applyInlinedMaterialStateUpdatesReal(ctx_minus, &ctx_plus, FormKind::Bilinear,
+                applyInlinedMaterialStateUpdatesReal(ctx_minus, &ctx_plus, k->ir().kind(),
                                                      k->constitutiveStateLayout(),
                                                      updates,
                                                      Side::Minus, q);
@@ -2222,7 +2224,7 @@ void JITKernelWrapper::computeInterfaceFace(const assembly::AssemblyContext& ctx
                 const auto* base_minus = ctx_minus.materialStateWorkBase();
                 const auto* base_plus = ctx_plus.materialStateWorkBase();
                 if (base_plus != nullptr && base_plus != base_minus) {
-                    applyInlinedMaterialStateUpdatesReal(ctx_minus, &ctx_plus, FormKind::Bilinear,
+                    applyInlinedMaterialStateUpdatesReal(ctx_minus, &ctx_plus, k->ir().kind(),
                                                          k->constitutiveStateLayout(),
                                                          updates,
                                                          Side::Plus, q);
@@ -2245,13 +2247,13 @@ void JITKernelWrapper::computeInterfaceFace(const assembly::AssemblyContext& ctx
 	            callOnMarker(compiled, &args);
 	        }
 
-        output_minus.has_matrix = true;
-        output_minus.has_vector = false;
-        output_plus.has_matrix = !one_sided_embedded;
-        output_plus.has_vector = false;
-        coupling_minus_plus.has_matrix = !one_sided_embedded;
+        output_minus.has_matrix = matrix;
+        output_minus.has_vector = !matrix;
+        output_plus.has_matrix = !one_sided_embedded && matrix;
+        output_plus.has_vector = !one_sided_embedded && !matrix;
+        coupling_minus_plus.has_matrix = !one_sided_embedded && matrix;
         coupling_minus_plus.has_vector = false;
-        coupling_plus_minus.has_matrix = !one_sided_embedded;
+        coupling_plus_minus.has_matrix = !one_sided_embedded && matrix;
         coupling_plus_minus.has_vector = false;
         return;
     }

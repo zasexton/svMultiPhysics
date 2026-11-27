@@ -13958,6 +13958,93 @@ void FormKernel::computeBoundaryFace(
     output.has_vector = want_vector;
 }
 
+namespace {
+
+struct FaceOutputs {
+    assembly::KernelOutput& minus;
+    assembly::KernelOutput& plus;
+    assembly::KernelOutput& minus_plus;
+    assembly::KernelOutput& plus_minus;
+};
+
+struct FaceFormEvaluator {
+    const FormIR& ir;
+    const ConstitutiveStateLayout* constitutive;
+    const std::vector<std::shared_ptr<const tensor::TensorIR>>& tensor_terms;
+    const std::vector<FormExpr>& fallback_terms;
+};
+
+void assembleFaceForm(const FaceFormEvaluator& form,
+                      const std::vector<MaterialStateUpdate>& updates,
+                      const assembly::AssemblyContext& minus,
+                      const assembly::AssemblyContext& plus,
+                      std::optional<int> interface_marker,
+                      FaceOutputs output)
+{
+    const auto kind = form.ir.kind();
+    const bool bilinear = kind == FormKind::Bilinear;
+    const bool one_sided = interface_marker && &minus == &plus;
+    const bool split_sides = interface_marker && generatedTwoSidedCall(minus, plus);
+    const auto nq = minus.numQuadraturePoints();
+    if (!updates.empty()) {
+        for (LocalIndex q = 0; q < nq; ++q) {
+            applyInlinedMaterialStateUpdatesReal(minus, &plus, kind, form.constitutive, updates, Side::Minus, q);
+            if (plus.materialStateWorkBase() && plus.materialStateWorkBase() != minus.materialStateWorkBase()) {
+                applyInlinedMaterialStateUpdatesReal(minus, &plus, kind, form.constitutive, updates, Side::Plus, q);
+            }
+        }
+    }
+    const auto block = [&](Side row_side, Side col_side, assembly::KernelOutput& out) {
+        const auto& row = ctxForSide(minus, &plus, row_side);
+        const auto& col = ctxForSide(minus, &plus, col_side);
+        const bool active = !one_sided || (row_side == Side::Minus && col_side == Side::Minus);
+        const bool matrix = active && bilinear;
+        const bool vector = active && !bilinear && row_side == col_side;
+        out.reserve(row.numTestDofs(), col.numTrialDofs(), matrix, vector);
+        if (!matrix && !vector) return;
+
+        ConstitutiveCallCacheReal cache;
+        EvalEnvReal env{minus, &plus, kind, row_side, col_side, 0, 0, form.constitutive, &cache};
+        const auto& terms = form.ir.terms();
+        for (std::size_t t = 0; t < terms.size(); ++t) {
+            const auto& term = terms[t];
+            if (interface_marker) {
+                if (term.domain != IntegralDomain::InterfaceFace ||
+                    (term.interface_marker >= 0 && term.interface_marker != *interface_marker) ||
+                    !interfaceTermEntersBlock(split_sides, term, row_side, matrix ? col_side : Side::Minus)) continue;
+            } else if (!interiorFaceTermMatchesContext(term, minus)) {
+                continue;
+            }
+            const auto factor = termWeightFor(row.timeIntegrationContext(), term.time_derivative_order);
+            if (factor == 0.) continue;
+            for (LocalIndex q = 0; q < nq; ++q) {
+                const Real weight = factor * row.integrationWeight(q);
+                const auto value = [&] {
+                    return evalScalarIntegrandTensorAware(t, term.integrand, form.tensor_terms,
+                                                          form.fallback_terms, env, row_side, q);
+                };
+                for (LocalIndex i = 0; i < row.numTestDofs(); ++i) {
+                    env.i = i;
+                    if (vector) {
+                        out.vectorEntry(i) += weight * value();
+                    } else {
+                        for (LocalIndex j = 0; j < col.numTrialDofs(); ++j) {
+                            env.j = j;
+                            out.matrixEntry(i,j) += weight * value();
+                        }
+                    }
+                }
+            }
+        }
+    };
+    block(Side::Minus, Side::Minus, output.minus);
+    block(Side::Plus, Side::Plus, output.plus);
+    block(Side::Minus, Side::Plus, output.minus_plus);
+    block(Side::Plus, Side::Minus, output.plus_minus);
+}
+
+} // namespace
+
 void FormKernel::computeInteriorFace(
     const assembly::AssemblyContext& ctx_minus,
     const assembly::AssemblyContext& ctx_plus,
@@ -13967,107 +14054,9 @@ void FormKernel::computeInteriorFace(
     assembly::KernelOutput& coupling_pm)
 {
     ensureInterpreterLoweredIndexedAccess();
-
-    if (ir_.kind() != FormKind::Bilinear) {
-        // Interior face assembly is currently defined only for bilinear forms in FormKernel.
-        output_minus.clear();
-        output_plus.clear();
-        coupling_mp.clear();
-        coupling_pm.clear();
-        return;
-    }
-
-    const auto n_test_minus = ctx_minus.numTestDofs();
-    const auto n_trial_minus = ctx_minus.numTrialDofs();
-    const auto n_test_plus = ctx_plus.numTestDofs();
-    const auto n_trial_plus = ctx_plus.numTrialDofs();
-
-    output_minus.reserve(n_test_minus, n_trial_minus, true, false);
-    output_plus.reserve(n_test_plus, n_trial_plus, true, false);
-    coupling_mp.reserve(n_test_minus, n_trial_plus, true, false);
-    coupling_pm.reserve(n_test_plus, n_trial_minus, true, false);
-
-    output_minus.clear();
-    output_plus.clear();
-    coupling_mp.clear();
-    coupling_pm.clear();
-
-    const auto n_qpts = ctx_minus.numQuadraturePoints();
-
-    if (!inlined_state_updates_.interior_face.empty()) {
-        for (LocalIndex q = 0; q < n_qpts; ++q) {
-            applyInlinedMaterialStateUpdatesReal(ctx_minus, &ctx_plus, FormKind::Bilinear,
-                                                 constitutive_state_.get(),
-                                                 inlined_state_updates_.interior_face,
-                                                 Side::Minus, q);
-
-            const auto* base_minus = ctx_minus.materialStateWorkBase();
-            const auto* base_plus = ctx_plus.materialStateWorkBase();
-            if (base_plus != nullptr && base_plus != base_minus) {
-                applyInlinedMaterialStateUpdatesReal(ctx_minus, &ctx_plus, FormKind::Bilinear,
-                                                     constitutive_state_.get(),
-                                                     inlined_state_updates_.interior_face,
-                                                     Side::Plus, q);
-            }
-        }
-    }
-
-    auto assembleBlock = [&](Side eval_side,
-                             Side test_active,
-                             Side trial_active,
-                             assembly::KernelOutput& out,
-                             LocalIndex n_test,
-                             LocalIndex n_trial) {
-        ConstitutiveCallCacheReal constitutive_cache;
-        EvalEnvReal env{ctx_minus, &ctx_plus, FormKind::Bilinear, test_active, trial_active, 0, 0,
-                        constitutive_state_.get(), &constitutive_cache};
-
-        const auto& terms = ir_.terms();
-        for (std::size_t term_index = 0; term_index < terms.size(); ++term_index) {
-            const auto& term = terms[term_index];
-            if (!interiorFaceTermMatchesContext(term, ctx_minus)) continue;
-            const auto& ctx_eval = ctxForSide(ctx_minus, &ctx_plus, eval_side);
-            const auto* time_ctx = ctx_eval.timeIntegrationContext();
-            const Real term_weight = termWeightFor(time_ctx, term.time_derivative_order);
-            if (term_weight == 0.0) continue;
-
-            for (LocalIndex q = 0; q < n_qpts; ++q) {
-                const Real w = ctx_eval.integrationWeight(q);
-                for (LocalIndex i = 0; i < n_test; ++i) {
-                    env.i = i;
-                    for (LocalIndex j = 0; j < n_trial; ++j) {
-                        env.j = j;
-                        const Real s = evalScalarIntegrandTensorAware(term_index,
-                                                                      term.integrand,
-                                                                      tensor_term_ir_,
-                                                                      tensor_term_fallback_,
-                                                                      env,
-                                                                      eval_side,
-                                                                      q);
-                        out.matrixEntry(i, j) += (term_weight * w) * s;
-                    }
-                }
-            }
-        }
-        out.has_matrix = true;
-        out.has_vector = false;
-    };
-
-    // minus-minus (evaluate on minus side)
-    assembleBlock(Side::Minus, Side::Minus, Side::Minus,
-                  output_minus, n_test_minus, n_trial_minus);
-
-    // plus-plus (evaluate on plus side)
-    assembleBlock(Side::Plus, Side::Plus, Side::Plus,
-                  output_plus, n_test_plus, n_trial_plus);
-
-    // minus-plus coupling (evaluate on minus side; trial active on plus)
-    assembleBlock(Side::Minus, Side::Minus, Side::Plus,
-                  coupling_mp, n_test_minus, n_trial_plus);
-
-    // plus-minus coupling (evaluate on plus side; trial active on minus)
-    assembleBlock(Side::Plus, Side::Plus, Side::Minus,
-                  coupling_pm, n_test_plus, n_trial_minus);
+    assembleFaceForm({ir_, constitutive_state_.get(), tensor_term_ir_, tensor_term_fallback_},
+                     inlined_state_updates_.interior_face, ctx_minus, ctx_plus, std::nullopt,
+                     {output_minus, output_plus, coupling_mp, coupling_pm});
 }
 
 void FormKernel::computeInterfaceFace(
@@ -14080,195 +14069,9 @@ void FormKernel::computeInterfaceFace(
     assembly::KernelOutput& coupling_pm)
 {
     ensureInterpreterLoweredIndexedAccess();
-
-    const auto n_test_minus = ctx_minus.numTestDofs();
-    const auto n_trial_minus = ctx_minus.numTrialDofs();
-    const auto n_test_plus = ctx_plus.numTestDofs();
-    const auto n_trial_plus = ctx_plus.numTrialDofs();
-    const bool one_sided_embedded = &ctx_plus == &ctx_minus;
-
-    if (ir_.kind() == FormKind::Linear) {
-        output_minus.reserve(n_test_minus, n_trial_minus, false, true);
-        output_plus.reserve(n_test_plus, n_trial_plus, false, !one_sided_embedded);
-        coupling_mp.reserve(n_test_minus, n_trial_plus, false, false);
-        coupling_pm.reserve(n_test_plus, n_trial_minus, false, false);
-
-        output_minus.clear();
-        output_plus.clear();
-        coupling_mp.clear();
-        coupling_pm.clear();
-
-        const auto n_qpts = ctx_minus.numQuadraturePoints();
-
-        if (!inlined_state_updates_.interface_face.empty()) {
-            for (LocalIndex q = 0; q < n_qpts; ++q) {
-                applyInlinedMaterialStateUpdatesReal(ctx_minus, &ctx_plus, FormKind::Linear,
-                                                     constitutive_state_.get(),
-                                                     inlined_state_updates_.interface_face,
-                                                     Side::Minus, q);
-                const auto* base_minus = ctx_minus.materialStateWorkBase();
-                const auto* base_plus = ctx_plus.materialStateWorkBase();
-                if (!one_sided_embedded && base_plus != nullptr && base_plus != base_minus) {
-                    applyInlinedMaterialStateUpdatesReal(ctx_minus, &ctx_plus, FormKind::Linear,
-                                                         constitutive_state_.get(),
-                                                         inlined_state_updates_.interface_face,
-                                                         Side::Plus, q);
-                }
-            }
-        }
-
-        const bool generated_two_sided = generatedTwoSidedCall(ctx_minus, ctx_plus);
-        auto assembleVector = [&](Side eval_side,
-                                  Side test_active,
-                                  assembly::KernelOutput& out,
-                                  LocalIndex n_test) {
-            const auto& ctx_eval = ctxForSide(ctx_minus, &ctx_plus, eval_side);
-            const auto* side_time_ctx = ctx_eval.timeIntegrationContext();
-            ConstitutiveCallCacheReal constitutive_cache;
-            EvalEnvReal env{ctx_minus, &ctx_plus, FormKind::Linear, test_active, test_active,
-                            0, 0, constitutive_state_.get(), &constitutive_cache};
-            for (LocalIndex q = 0; q < n_qpts; ++q) {
-                const Real w = ctx_eval.integrationWeight(q);
-                for (LocalIndex i = 0; i < n_test; ++i) {
-                    env.i = i;
-                    Real sum_q = Real{0.0};
-                    const auto& terms = ir_.terms();
-                    for (std::size_t term_index = 0; term_index < terms.size(); ++term_index) {
-                        const auto& term = terms[term_index];
-                        if (term.domain != IntegralDomain::InterfaceFace) continue;
-                        if (term.interface_marker >= 0 && term.interface_marker != interface_marker) continue;
-                        if (!interfaceTermEntersBlock(generated_two_sided, term, test_active, Side::Minus)) continue;
-                        const Real term_weight = termWeightFor(side_time_ctx, term.time_derivative_order);
-                        if (term_weight == 0.0) continue;
-                        const Real s = evalScalarIntegrandTensorAware(term_index,
-                                                                      term.integrand,
-                                                                      tensor_term_ir_,
-                                                                      tensor_term_fallback_,
-                                                                      env,
-                                                                      eval_side,
-                                                                      q);
-                        sum_q += term_weight * s;
-                    }
-                    out.vectorEntry(i) += w * sum_q;
-                }
-            }
-        };
-
-        assembleVector(Side::Minus, Side::Minus, output_minus, n_test_minus);
-        if (!one_sided_embedded) {
-            assembleVector(Side::Plus, Side::Plus, output_plus, n_test_plus);
-        }
-
-        output_minus.has_matrix = false;
-        output_minus.has_vector = true;
-        output_plus.has_matrix = false;
-        output_plus.has_vector = !one_sided_embedded;
-        coupling_mp.has_matrix = false;
-        coupling_mp.has_vector = false;
-        coupling_pm.has_matrix = false;
-        coupling_pm.has_vector = false;
-        return;
-    }
-
-    if (ir_.kind() != FormKind::Bilinear) {
-        // Interface face assembly is currently defined only for linear or bilinear forms in FormKernel.
-        output_minus.clear();
-        output_plus.clear();
-        coupling_mp.clear();
-        coupling_pm.clear();
-        return;
-    }
-
-    output_minus.reserve(n_test_minus, n_trial_minus, true, false);
-    output_plus.reserve(n_test_plus, n_trial_plus, true, false);
-    coupling_mp.reserve(n_test_minus, n_trial_plus, true, false);
-    coupling_pm.reserve(n_test_plus, n_trial_minus, true, false);
-
-    output_minus.clear();
-    output_plus.clear();
-    coupling_mp.clear();
-    coupling_pm.clear();
-
-    const auto n_qpts = ctx_minus.numQuadraturePoints();
-
-    if (!inlined_state_updates_.interface_face.empty()) {
-        for (LocalIndex q = 0; q < n_qpts; ++q) {
-            applyInlinedMaterialStateUpdatesReal(ctx_minus, &ctx_plus, FormKind::Bilinear,
-                                                 constitutive_state_.get(),
-                                                 inlined_state_updates_.interface_face,
-                                                 Side::Minus, q);
-
-            const auto* base_minus = ctx_minus.materialStateWorkBase();
-            const auto* base_plus = ctx_plus.materialStateWorkBase();
-            if (base_plus != nullptr && base_plus != base_minus) {
-                applyInlinedMaterialStateUpdatesReal(ctx_minus, &ctx_plus, FormKind::Bilinear,
-                                                     constitutive_state_.get(),
-                                                     inlined_state_updates_.interface_face,
-                                                     Side::Plus, q);
-            }
-        }
-    }
-
-    const bool generated_two_sided = generatedTwoSidedCall(ctx_minus, ctx_plus);
-    auto assembleBlock = [&](Side eval_side,
-                             Side test_active,
-                             Side trial_active,
-                             assembly::KernelOutput& out,
-                             LocalIndex n_test,
-                             LocalIndex n_trial) {
-        ConstitutiveCallCacheReal constitutive_cache;
-        EvalEnvReal env{ctx_minus, &ctx_plus, FormKind::Bilinear, test_active, trial_active, 0, 0,
-                        constitutive_state_.get(), &constitutive_cache};
-
-        const auto& terms = ir_.terms();
-        for (std::size_t term_index = 0; term_index < terms.size(); ++term_index) {
-            const auto& term = terms[term_index];
-            if (term.domain != IntegralDomain::InterfaceFace) continue;
-            if (term.interface_marker >= 0 && term.interface_marker != interface_marker) continue;
-            if (!interfaceTermEntersBlock(generated_two_sided, term, test_active, trial_active)) continue;
-
-            const auto& ctx_eval = ctxForSide(ctx_minus, &ctx_plus, eval_side);
-            const auto* time_ctx = ctx_eval.timeIntegrationContext();
-            const Real term_weight = termWeightFor(time_ctx, term.time_derivative_order);
-            if (term_weight == 0.0) continue;
-
-            for (LocalIndex q = 0; q < n_qpts; ++q) {
-                const Real w = ctx_eval.integrationWeight(q);
-                for (LocalIndex i = 0; i < n_test; ++i) {
-                    env.i = i;
-                    for (LocalIndex j = 0; j < n_trial; ++j) {
-                        env.j = j;
-                        const Real s = evalScalarIntegrandTensorAware(term_index,
-                                                                      term.integrand,
-                                                                      tensor_term_ir_,
-                                                                      tensor_term_fallback_,
-                                                                      env,
-                                                                      eval_side,
-                                                                      q);
-                        out.matrixEntry(i, j) += (term_weight * w) * s;
-                    }
-                }
-            }
-        }
-        out.has_matrix = true;
-        out.has_vector = false;
-    };
-
-    // minus-minus (evaluate on minus side)
-    assembleBlock(Side::Minus, Side::Minus, Side::Minus,
-                  output_minus, n_test_minus, n_trial_minus);
-
-    // plus-plus (evaluate on plus side)
-    assembleBlock(Side::Plus, Side::Plus, Side::Plus,
-                  output_plus, n_test_plus, n_trial_plus);
-
-    // minus-plus coupling (evaluate on minus side; trial active on plus)
-    assembleBlock(Side::Minus, Side::Minus, Side::Plus,
-                  coupling_mp, n_test_minus, n_trial_plus);
-
-    // plus-minus coupling (evaluate on plus side; trial active on minus)
-    assembleBlock(Side::Plus, Side::Plus, Side::Minus,
-                  coupling_pm, n_test_plus, n_trial_minus);
+    assembleFaceForm({ir_, constitutive_state_.get(), tensor_term_ir_, tensor_term_fallback_},
+                     inlined_state_updates_.interface_face, ctx_minus, ctx_plus, interface_marker,
+                     {output_minus, output_plus, coupling_mp, coupling_pm});
 }
 
 // ============================================================================

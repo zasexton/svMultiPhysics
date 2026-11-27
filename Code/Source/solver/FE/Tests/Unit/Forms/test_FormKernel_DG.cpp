@@ -18,9 +18,11 @@
 #include "Forms/CutCellForms.h"
 #include "Forms/FormCompiler.h"
 #include "Forms/FormKernels.h"
+#include "Forms/JIT/JITKernelWrapper.h"
 #include "Forms/Vocabulary.h"
 #include "Spaces/H1Space.h"
 #include "Tests/Unit/Forms/FormsTestHelpers.h"
+#include "Tests/Unit/Forms/JITTestHelpers.h"
 
 #include <array>
 #include <cmath>
@@ -237,6 +239,69 @@ TEST(FormKernelDGTest, PenaltyJumpJumpProducesExpectedBlocks)
             EXPECT_NEAR(mat.getMatrixEntry(i, j), expected_entry(i, j), 5e-11);
         }
     }
+}
+
+static void checkLinearFacetSources(bool compiled)
+{
+    TwoTetraSharedFaceMeshAccess mesh;
+    auto dofs = createTwoTetraDG_DofMap();
+    spaces::H1Space space(ElementType::Tetra4, 1);
+    const auto v = FormExpr::testFunction(space, "v");
+    constexpr int marker = 12;
+    const auto load = 2.0*minus(v) - 3.0*plus(v);
+    FormCompiler compiler;
+    auto interpreted = std::make_shared<FormKernel>(compiler.compileLinear(load.dS() + (2.0*load).dS(marker)
+                         + (3.0*load).dS(marker, CutVolumeSide::Negative)
+                         + (4.0*load).dS(marker, CutVolumeSide::Positive)));
+
+    std::unique_ptr<jit::JITKernelWrapper> wrapper;
+    if (compiled) wrapper = std::make_unique<jit::JITKernelWrapper>(interpreted, makeUnitTestJITOptions());
+    auto& kernel = wrapper ? static_cast<assembly::AssemblyKernel&>(*wrapper) : *interpreted;
+
+    assembly::CutIntegrationContext cut;
+    using Phase = geometry::CutIntegrationSide;
+    for (const auto side : {Phase::Interface, Phase::Negative, Phase::Positive}) {
+        assembly::CutFacetSetHandle handle;
+        handle.marker = marker;
+        handle.side = side;
+        handle.facets = {0};
+        cut.addFacetSetHandle(std::move(handle));
+    }
+    assembly::StandardAssembler assembler;
+    assembler.setDofMap(dofs);
+    assembler.setCutIntegrationContext(&cut);
+    const auto check = [&](int id, Phase side, Real multiplier) {
+        assembly::DenseMatrixView matrix(8);
+        assembly::DenseVectorView vector(8);
+        const auto result = assembler.assembleInteriorFaces(mesh, space, space, kernel,
+                                                             matrix, &vector, id, side);
+        ASSERT_TRUE(result.success);
+        ASSERT_EQ(result.interior_faces_assembled, 1);
+        // Each of the three active P1 traces integrates to one third of the triangular area.
+        const Real integral = multiplier*std::sqrt(3.)/6.;
+        for (GlobalIndex i = 0; i < 8; ++i) {
+            const auto expected = (i >= 1 && i <= 3) ? 2.*integral
+                                : (i >= 4 && i <= 6) ? -3.*integral : 0.;
+            EXPECT_NEAR(vector.getVectorEntry(i), expected, 2e-12) << i;
+        }
+        for (const auto a : matrix.data()) EXPECT_EQ(a, 0.);
+    };
+    check(-1, Phase::Interface, 1.);
+    check(marker, Phase::Interface, 2.);
+    check(marker, Phase::Negative, 3.);
+    check(marker, Phase::Positive, 4.);
+    if (compiled) EXPECT_TRUE(wrapper->isJITReady());
+}
+
+TEST(FormKernelDGTest, LinearSourcesLoadBothTracesOnlyOnTheirSelectedFacets)
+{
+    checkLinearFacetSources(false);
+}
+
+TEST(FormKernelDGTest, CompiledLinearSourcesLoadBothTracesOnlyOnTheirSelectedFacets)
+{
+    requireLLVMJITOrSkip();
+    checkLinearFacetSources(true);
 }
 
 TEST(FormKernelDGTest, MarkedInteriorFacesUseCutFacetSetHandle)
