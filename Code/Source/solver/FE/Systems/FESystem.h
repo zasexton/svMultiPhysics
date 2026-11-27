@@ -2123,6 +2123,22 @@ public:
 	    FieldId addMeshDisplacementUnknown(std::string name,
 	                                       std::shared_ptr<const spaces::FunctionSpace> space,
 	                                       int components = 0);
+	    /// An enclosing time step can outlive several committed nonlinear mesh updates.
+	    class MeshCoordinateSnapshot {
+	        friend class FESystem;
+	        const svmp::Mesh* mesh_{};
+	        struct FieldBackup {
+	            svmp::FieldHandle handle{};
+	            std::vector<svmp::real_t> values{};
+	            std::size_t components{0};
+	            std::size_t entity_count{0};
+	        };
+	        svmp::motion::MotionCoordinateBackup coordinates_{};
+	        std::vector<FieldBackup> fields_{};
+	        OperatorRevisionSnapshot start_revision_{};
+	    };
+	    [[nodiscard]] MeshCoordinateSnapshot captureMeshCoordinateSnapshot() const;
+	    void restoreMeshCoordinateSnapshot(MeshCoordinateSnapshot snapshot);
 	    void beginMeshCoordinateTransaction();
 	    MeshCoordinateUpdateResult updateCurrentCoordinatesFromMeshDisplacement(
 	        const SystemStateView& state,
@@ -2717,14 +2733,8 @@ private:
 	    svmp::Configuration coord_cfg_{svmp::Configuration::Reference};
 	    std::unordered_map<InterfaceId, std::shared_ptr<const svmp::InterfaceMesh>> interface_meshes_{};
 	    std::optional<svmp::motion::MotionCoordinateBackup> mesh_coordinate_backup_{};
-	    struct MeshMotionFieldBackup {
-	        svmp::FieldHandle handle{};
-	        std::string name{};
-	        std::vector<svmp::real_t> values{};
-	        std::size_t components{0};
-	        std::size_t entity_count{0};
-	    };
-	    std::vector<MeshMotionFieldBackup> mesh_motion_field_backup_{};
+	    std::vector<MeshCoordinateSnapshot::FieldBackup> mesh_motion_field_backup_{};
+	    void rollbackMeshCoordinateTransaction(bool exchange_ghost_coordinates);
 	    GeometryTransactionState geometry_transaction_state_{GeometryTransactionState::Committed};
 	    OperatorRevisionSnapshot geometry_transaction_start_revision_{};
 	    OperatorRevisionSnapshot geometry_transaction_last_revision_{};

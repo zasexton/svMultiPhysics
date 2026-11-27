@@ -831,21 +831,29 @@ void copyVector(backends::GenericVector& dst, const backends::GenericVector& src
  * multistage/adaptive attempt must restore the initializer ledger so the
  * retry reconstructs that discarded correction.  restore() rolls back at a
  * rejection before any rejection callback runs; the destructor rolls back an
- * attempt left by any other path.
+ * attempt left by any other path. The native mesh snapshot spans all
+ * nonlinear iterates of the attempt, including iterates already committed.
  */
 class AttemptStateGuard {
 public:
-    AttemptStateGuard(TimeHistory& history,
+    AttemptStateGuard(systems::FESystem& system,
+                      TimeHistory& history,
                       const backends::BackendFactory& factory,
                       TimeHistory::RateStateSnapshot& snapshot,
                       std::vector<std::unique_ptr<backends::GenericVector>>& solution_snapshot,
                       NewtonWorkspace& workspace)
-        : history_(history)
+        : system_(system)
+        , history_(history)
         , snapshot_(snapshot)
         , solution_snapshot_(solution_snapshot)
         , workspace_(workspace)
         , initializer_ledger_(workspace.initializer_ledger)
     {
+#if defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH
+        if (system_.hasSingleNativeMesh()) {
+            mesh_snapshot_ = system_.captureMeshCoordinateSnapshot();
+        }
+#endif
         history_.snapshotRateState(snapshot_, factory);
         const auto depth = static_cast<std::size_t>(history_.historyDepth());
         solution_snapshot_.resize(depth);
@@ -883,11 +891,21 @@ public:
         for (std::size_t k = 0; k < solution_snapshot_.size(); ++k) {
             history_.uPrevK(static_cast<int>(k + 1u)).copyFrom(*solution_snapshot_[k]);
         }
+#if defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH
+        if (mesh_snapshot_) {
+            history_.resetCurrentToPrevious();
+            system_.restoreMeshCoordinateSnapshot(std::move(*mesh_snapshot_));
+        }
+#endif
     }
 
     void commit() noexcept { committed_ = true; }
 
 private:
+    systems::FESystem& system_;
+#if defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH
+    std::optional<systems::FESystem::MeshCoordinateSnapshot> mesh_snapshot_;
+#endif
     TimeHistory& history_;
     TimeHistory::RateStateSnapshot& snapshot_;
     std::vector<std::unique_ptr<backends::GenericVector>>& solution_snapshot_;
@@ -2665,6 +2683,7 @@ TimeLoopReport TimeLoop::run(systems::TransientSystem& transient,
             // Every earlier continue/return/throw path restores both values
             // and allocation state automatically.
             AttemptStateGuard attempt_state(
+                transient.system(),
                 history,
                 factory,
                 attempt_rate_state_snapshot,
@@ -4034,12 +4053,12 @@ TimeLoopReport TimeLoop::run(systems::TransientSystem& transient,
                 }
             });
             auto restoreAcceptedGeneratedState = [&]() {
-                candidate_rollback_guard.discard();
                 // Accepted rates and stored solutions first: the stage solve
                 // may have projected trial constraint values into u_n, and
                 // every callback below (including rejection observers) must
                 // see the accepted state.
                 attempt_state.restore();
+                candidate_rollback_guard.discard();
                 if (options_.newton.synchronize_state) {
                     auto restored_state = makeRestoredTimeStepStateView(
                         history, t, dt);

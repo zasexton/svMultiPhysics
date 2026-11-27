@@ -34,6 +34,14 @@
 #include "TimeStepping/TimeHistory.h"
 #include "TimeStepping/TimeLoop.h"
 
+#if defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH
+#include "Mesh/Fields/MeshFields.h"
+#include "Mesh/Mesh.h"
+#include "Mesh/Motion/MotionFields.h"
+#include "Spaces/ProductSpace.h"
+#include "Systems/FormsInstaller.h"
+#endif
+
 #include <cmath>
 #include <functional>
 #include <memory>
@@ -414,5 +422,94 @@ TEST(TimeLoopAcceptedState, InitialRateSolveThatThrowsIsNotAccepted)
         EXPECT_DOUBLE_EQ((*failed_solve)[i], (*history_start)[i]) << "dof=" << i;
     }
 }
+
+#if defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH
+TEST(TimeLoopAcceptedState, NativeCoordinatesAndMotionFieldsReturnToAcceptedValuesOnRejection)
+{
+    namespace fe = svmp::FE;
+    auto factory = ts_test::createTestFactory();
+    if (!factory) {
+        GTEST_SKIP() << "Eigen backend is unavailable";
+    }
+    auto base = std::make_shared<svmp::MeshBase>(3);
+    base->build_from_arrays(3, {0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0, 1},
+                            {0, 4}, {0, 1, 2, 3}, {{svmp::CellFamily::Tetra, 4, 1}});
+    base->finalize();
+    auto mesh = svmp::create_mesh(std::move(base));
+    const auto handles = svmp::motion::attach_motion_fields(*mesh, 3);
+    auto* velocity = svmp::MeshFields::field_data_as<svmp::real_t>(
+        mesh->local_mesh(), handles.velocity);
+    velocity[0] = 7.0;
+    const auto scalar = std::make_shared<fe::spaces::H1Space>(fe::ElementType::Tetra4, 1);
+    const auto space = std::make_shared<fe::spaces::ProductSpace>(scalar, 3);
+    fe::systems::FESystem system(mesh, svmp::Configuration::Reference);
+    system.setGeometricNonlinearityPolicy({.enabled = true});
+    const auto field = system.addMeshDisplacementUnknown("d", space);
+    const auto d = fe::forms::FormExpr::stateField(field, *space, "d");
+    const auto v = fe::forms::TestFunction(*space, "v");
+    // The exact displacement is (t X, 0, 0), in reference coordinates.
+    const auto residual = fe::forms::inner(d.dt(1), v) -
+        fe::forms::x().component(0) * v.component(0);
+    system.addOperator("op");
+    fe::systems::installFormulation(system, "op", {field}, residual.dx());
+    system.setup();
+    fe::systems::TransientSystem transient(system, std::make_shared<fe::systems::BackwardDifferenceIntegrator>());
+    auto solver = factory->createLinearSolver(ts_test::directSolve());
+    auto history = ts::TimeHistory::allocate(*factory, system.dofHandler().getNumDofs(), 2);
+    ts::TimeLoopOptions options;
+    options.dt = options.t_end = 0.2;
+    options.scheme = ts::SchemeKind::BackwardEuler;
+    options.step_controller = std::make_shared<RetrySameStepController>();
+    options.newton.residual_op = options.newton.jacobian_op = "op";
+    int attempts = 0;
+    int rejections = 0;
+    const bool had_current = mesh->has_current_coords();
+    const auto volume = [&] { return mesh->cell_measure(0, svmp::Configuration::Current); };
+    ts::TimeLoopCallbacks callbacks;
+    const auto check_accepted = [&](const ts::TimeHistory&) {
+        EXPECT_NEAR(volume(), 1.0 / 6.0, 1e-13);
+        EXPECT_EQ(mesh->has_current_coords(), had_current);
+        EXPECT_DOUBLE_EQ(velocity[0], 7.0);
+    };
+    callbacks.on_step_start = check_accepted;
+    callbacks.on_step_candidate_discarded = check_accepted;
+    callbacks.on_before_step_accept = [&](ts::TimeHistory&, const ts::NewtonReport&) {
+        EXPECT_NEAR(volume(), 1.0 / 5.0, 1e-13);
+        velocity[0] = 9.0;
+        return ++attempts == 2;
+    };
+    callbacks.on_step_rejected = [&](const ts::TimeHistory& restored, ts::StepRejectReason, const ts::NewtonReport&) {
+        ++rejections;
+        check_accepted(restored);
+    };
+    const auto report = ts::TimeLoop(options).run(transient, *factory, *solver, history, callbacks);
+    ASSERT_TRUE(report.success) << report.message;
+    EXPECT_EQ(rejections, 1);
+    EXPECT_EQ(attempts, 2);
+    EXPECT_NEAR(volume(), 1.0 / 5.0, 1e-13);
+    EXPECT_DOUBLE_EQ(velocity[0], 9.0);
+
+    // A prescribed coordinate update can fail even before Newton starts.
+    // The next attempt now starts with a real current-coordinate buffer.
+    const auto accepted = mesh->local_mesh().X_cur();
+    const auto active = mesh->local_mesh().active_configuration();
+    options.t0 = history.time();
+    options.t_end = options.t0 + options.dt;
+    callbacks = {};
+    callbacks.on_before_physics_solve = [&](ts::TimeHistory&, double, double) -> bool {
+        auto trial = accepted;
+        trial[3] += 0.5;
+        mesh->set_current_coords(trial);
+        mesh->local_mesh().use_reference_configuration();
+        velocity[0] = -4.0;
+        throw std::runtime_error("prescribed update failed");
+    };
+    EXPECT_THROW(ts::TimeLoop(options).run(transient, *factory, *solver, history, callbacks), std::runtime_error);
+    EXPECT_EQ(mesh->local_mesh().X_cur(), accepted);
+    EXPECT_EQ(mesh->local_mesh().active_configuration(), active);
+    EXPECT_NEAR(volume(), 1.0 / 5.0, 1e-13);
+    EXPECT_DOUBLE_EQ(velocity[0], 9.0);
+}
+#endif
 
 } // namespace

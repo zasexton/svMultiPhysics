@@ -932,4 +932,33 @@ TEST(FESystemSerialParallelEquivalenceMPI,
     }
 }
 
+TEST(FESystemSerialParallelEquivalenceMPI, NativeSnapshotRestoresRankLocalMotionOnEveryRank)
+{
+    const auto rank = mpiRank(MPI_COMM_WORLD);
+    auto base = std::make_shared<svmp::MeshBase>(3);
+    base->build_from_arrays(3, {0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0, 1},
+                            {0, 4}, {0, 1, 2, 3}, {{svmp::CellFamily::Tetra, 4, 1}});
+    base->finalize();
+    auto mesh = svmp::create_mesh(std::move(base), svmp::MeshComm(MPI_COMM_WORLD));
+    systems::FESystem system(mesh);
+    int rollbacks = 0;
+    system.addGeometryTransactionCallback({
+        .name = "observe-restored-coordinates",
+        .callback = [&](const systems::GeometryTransactionDiagnostics& event) {
+            if (event.state == systems::GeometryTransactionState::RolledBack) {
+                ++rollbacks;
+                EXPECT_FALSE(mesh->has_current_coords());
+            }
+        }});
+    auto accepted = system.captureMeshCoordinateSnapshot();
+    if (rank == 0) {
+        auto trial = mesh->local_mesh().X_ref();
+        trial[3] = 1.2;
+        mesh->local_mesh().set_current_coords(trial);
+    }
+    system.restoreMeshCoordinateSnapshot(std::move(accepted));
+    EXPECT_FALSE(mesh->has_current_coords());
+    EXPECT_EQ(rollbacks, 1);
+}
+
 } // namespace svmp::FE::assembly::testing

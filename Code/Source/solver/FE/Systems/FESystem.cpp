@@ -10646,16 +10646,13 @@ FieldId FESystem::addMeshDisplacementUnknown(std::string name,
     return field;
 }
 
-void FESystem::beginMeshCoordinateTransaction()
+FESystem::MeshCoordinateSnapshot FESystem::captureMeshCoordinateSnapshot() const
 {
-    const auto& mesh = singleMesh("FESystem::beginMeshCoordinateTransaction");
-    FE_THROW_IF(mesh_coordinate_backup_.has_value(), InvalidStateException,
-                "FESystem::beginMeshCoordinateTransaction: transaction already active");
-    svmp::motion::MotionCoordinateBackup backup;
-    svmp::motion::save_coordinates(mesh, backup);
-    mesh_coordinate_backup_ = std::move(backup);
-    mesh_motion_field_backup_.clear();
-
+    const auto& mesh = singleMesh("FESystem::captureMeshCoordinateSnapshot");
+    MeshCoordinateSnapshot snapshot;
+    snapshot.mesh_ = &mesh;
+    svmp::motion::save_coordinates(mesh, snapshot.coordinates_);
+    snapshot.start_revision_ = operatorRevisionSnapshot();
     const auto& local_mesh = mesh.local_mesh();
     for (const auto role : svmp::motion::standard_motion_field_roles()) {
         const std::string field_name(svmp::motion::standard_motion_field_name(role));
@@ -10667,19 +10664,50 @@ void FESystem::beginMeshCoordinateTransaction()
         if (svmp::MeshFields::field_type(local_mesh, handle) != svmp::FieldScalarType::Float64) {
             continue;
         }
-        FESystem::MeshMotionFieldBackup field_backup;
+        MeshCoordinateSnapshot::FieldBackup field_backup;
         field_backup.handle = handle;
-        field_backup.name = field_name;
         field_backup.components = svmp::MeshFields::field_components(local_mesh, handle);
         field_backup.entity_count = svmp::MeshFields::field_entity_count(local_mesh, handle);
         const auto count = field_backup.components * field_backup.entity_count;
-        const auto* values = svmp::MeshFields::field_data_as<svmp::real_t>(local_mesh, handle);
-        FE_CHECK_NOT_NULL(values, "FESystem::beginMeshCoordinateTransaction: mesh-motion field data");
-        field_backup.values.assign(values, values + count);
-        mesh_motion_field_backup_.push_back(std::move(field_backup));
+        if (count > 0) {
+            const auto* values = svmp::MeshFields::field_data_as<svmp::real_t>(local_mesh, handle);
+            FE_CHECK_NOT_NULL(values, "FESystem::captureMeshCoordinateSnapshot: mesh-motion field data");
+            field_backup.values.assign(values, values + count);
+        }
+        snapshot.fields_.push_back(std::move(field_backup));
     }
+    return snapshot;
+}
 
-    geometry_transaction_start_revision_ = operatorRevisionSnapshot();
+void FESystem::restoreMeshCoordinateSnapshot(MeshCoordinateSnapshot snapshot)
+{
+    FE_CHECK_ARG(snapshot.mesh_ != nullptr && snapshot.mesh_ == mesh_.get(),
+                 "FESystem::restoreMeshCoordinateSnapshot: snapshot belongs to another mesh");
+    const bool has_geometry = snapshot.coordinates_.has_current || mesh_->has_current_coords() ||
+                              !snapshot.fields_.empty() || meshCoordinateTransactionActive();
+#if FE_HAS_MPI
+    const bool restore = collectiveAnyTrue(has_geometry, CollectiveCommunicator(activeMpiCommunicator()));
+#else
+    const bool restore = has_geometry;
+#endif
+    if (!restore) {
+        return;
+    }
+    mesh_coordinate_backup_ = std::move(snapshot.coordinates_);
+    mesh_motion_field_backup_ = std::move(snapshot.fields_);
+    geometry_transaction_start_revision_ = snapshot.start_revision_;
+    // The snapshot includes the exact ghost coordinates at attempt entry.
+    rollbackMeshCoordinateTransaction(false);
+}
+
+void FESystem::beginMeshCoordinateTransaction()
+{
+    FE_THROW_IF(mesh_coordinate_backup_.has_value(), InvalidStateException,
+                "FESystem::beginMeshCoordinateTransaction: transaction already active");
+    auto snapshot = captureMeshCoordinateSnapshot();
+    mesh_coordinate_backup_ = std::move(snapshot.coordinates_);
+    mesh_motion_field_backup_ = std::move(snapshot.fields_);
+    geometry_transaction_start_revision_ = snapshot.start_revision_;
     geometry_transaction_last_revision_ = geometry_transaction_start_revision_;
     geometry_transaction_state_ = GeometryTransactionState::Trial;
     geometry_transaction_last_event_ = "begin";
@@ -10804,6 +10832,11 @@ void FESystem::commitMeshCoordinateTransaction()
 
 void FESystem::rollbackMeshCoordinateTransaction()
 {
+    rollbackMeshCoordinateTransaction(true);
+}
+
+void FESystem::rollbackMeshCoordinateTransaction(bool exchange_ghost_coordinates)
+{
     const auto& mesh_ref = singleMesh("FESystem::rollbackMeshCoordinateTransaction");
     if (!mesh_coordinate_backup_.has_value()) {
         return;
@@ -10813,7 +10846,7 @@ void FESystem::rollbackMeshCoordinateTransaction()
     auto& local_mesh = mesh.local_mesh();
     for (const auto& field_backup : mesh_motion_field_backup_) {
         auto handle = field_backup.handle;
-        if (handle.id == 0 ||
+        if (field_backup.values.empty() || handle.id == 0 ||
             !svmp::MeshFields::has_field(local_mesh, handle.kind, handle.name)) {
             continue;
         }
@@ -10828,7 +10861,7 @@ void FESystem::rollbackMeshCoordinateTransaction()
         FE_CHECK_NOT_NULL(values, "FESystem::rollbackMeshCoordinateTransaction: mesh-motion field data");
         std::copy(field_backup.values.begin(), field_backup.values.end(), values);
     }
-    if (mesh.local_mesh().has_current_coords()) {
+    if (exchange_ghost_coordinates && mesh.local_mesh().has_current_coords()) {
         mesh.update_exchange_ghost_coordinates(svmp::Configuration::Current);
     }
     if (material_state_provider_) {
