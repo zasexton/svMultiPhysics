@@ -2813,6 +2813,13 @@ TEST(IncompressibleTwoFluidModule,
                    .front()
                    .numerics.has_value());
 
+  auto exhausted_search = reports;
+  exhausted_search.front().root_path_guard_rejections = 1u;
+  auto records = svmp::Physics::formulations::navier_stokes::two_fluid::twoFluidStageRecords(fixture.system);
+  EXPECT_THROW(records.bindPendingTwoFluidAcceptedStageNumerics(solve, exhausted_search),
+               FE::InvalidArgumentException);
+  EXPECT_FALSE(records.pendingTwoFluidAcceptedStageDiagnostics().front().numerics.has_value());
+
   auto stale_transition = reports;
   auto& transition =
       stale_transition.front().canonical_topology_transition.emplace();

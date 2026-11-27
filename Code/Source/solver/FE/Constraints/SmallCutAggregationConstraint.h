@@ -434,12 +434,10 @@ struct SmallCutAggregationTopologyTransitionReport {
  * physical cell and is repeated in each field-specific report. It is retained
  * geometry affected by the homogeneous support-removal policy, not a claim
  * that active-side measure was conservatively transferred or geometrically deleted.
- * Guard maxima describe provider-visible proposal or bounded traversal
- * attempts. Root search is restricted to the configured path neighborhood;
- * roots outside that envelope are never row candidates. A root-path rejection
- * counts a candidate in a structurally root-eligible feature for which the
- * bounded search found no admissible root. It does not enumerate every remote
- * full-active cell in that feature.
+ * The maximum observed root path is the longest path to a root found within
+ * the configured search neighborhood. The root-path rejection count records
+ * candidates in structurally root-eligible features for which the bounded
+ * search found no admissible root.
  * Extrapolation and line rejection counts are communicator sums of rank-local
  * attempts. The corresponding maximum-observed values cover only proposals
  * admitted by their guards; attempted maxima, including rejected proposals,

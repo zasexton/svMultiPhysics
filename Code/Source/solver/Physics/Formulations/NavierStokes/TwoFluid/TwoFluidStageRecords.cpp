@@ -766,8 +766,8 @@ compactTwoFluidAcceptedStageAggregation(
     validateTwoFluidAcceptedStageAggregationGeometry(
         geometry, expected_geometry);
     FE_THROW_IF(
-        source.maximum_observed_root_path >
-                source.maximum_root_path_length ||
+        source.root_path_guard_rejections != 0u ||
+            source.maximum_observed_root_path > source.maximum_root_path_length ||
             !twoFluidTelemetryWithinGuard(
                 source.maximum_observed_reference_extrapolation,
                 source.maximum_reference_extrapolation_distance) ||

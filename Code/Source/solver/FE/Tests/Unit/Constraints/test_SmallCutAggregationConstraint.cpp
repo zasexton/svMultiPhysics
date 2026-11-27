@@ -2142,7 +2142,9 @@ TEST(SmallCutAggregationConstraint, RootPathGuardRejectsLongCutBand)
 {
     SVMP_AGG_TEST_BODY
 #if defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH
-    auto mesh = buildQuadStrip(3);
+    // The nearest full cell is three links from the left corner. A bounded
+    // one-link search cannot report its distance.
+    auto mesh = buildQuadStrip(4);
     auto space =
         std::make_shared<spaces::H1Space>(ElementType::Quad4, /*order=*/1);
     systems::FESystem system(mesh);
@@ -2162,7 +2164,8 @@ TEST(SmallCutAggregationConstraint, RootPathGuardRejectsLongCutBand)
     system.setCutIntegrationContext(makeCutContext({
         {.cell = 0, .volume_fraction = Real{0.2}, .full_cell_equivalent = false},
         {.cell = 1, .volume_fraction = Real{0.5}, .full_cell_equivalent = false},
-        {.cell = 2, .volume_fraction = Real{1.0}, .full_cell_equivalent = true},
+        {.cell = 2, .volume_fraction = Real{0.6}, .full_cell_equivalent = false},
+        {.cell = 3, .volume_fraction = Real{1.0}, .full_cell_equivalent = true},
     }));
     try {
         system.rebuildConstraintState();
@@ -2173,6 +2176,9 @@ TEST(SmallCutAggregationConstraint, RootPathGuardRejectsLongCutBand)
                   std::string::npos);
         EXPECT_NE(std::string(error.what()).find("maximum_allowed_path=1"),
                   std::string::npos);
+        EXPECT_NE(std::string(error.what()).find("reason=no_admissible_root_within_path_limit"),
+                  std::string::npos);
+        EXPECT_EQ(std::string(error.what()).find("maximum_observed_path="), std::string::npos);
         EXPECT_NE(std::string(error.what()).find(
                       "SmallCutAggregationGuardOptions::rootless_fallback"),
                   std::string::npos);
@@ -2231,6 +2237,7 @@ TEST(SmallCutAggregationConstraint, RootlessFallbackPinsCandidatesBeyondRootPath
     const auto reports = system.completedSmallCutAggregationRefreshReports();
     ASSERT_EQ(reports.size(), 1u);
     EXPECT_EQ(reports.front().root_path_guard_rejections, 2u);
+    EXPECT_EQ(reports.front().maximum_observed_root_path, 1u);
     EXPECT_NE(log_output.find("diagnostic=aggregation_guard_rootless "
                               "reason=root_path_guard"),
               std::string::npos);

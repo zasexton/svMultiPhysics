@@ -5921,10 +5921,9 @@ using ConditionedRoots = std::map<GlobalIndex, SmallCutAggregationSimplexRootSup
 
 [[noreturn]] void throwExhaustedRootPath(GlobalIndex dof, std::size_t limit, const char* hint)
 {
-    const auto observed = limit == std::numeric_limits<std::size_t>::max() ? limit : limit + 1;
     throw InadmissibleGeneratedGeometry(
         "SmallCutAggregationConstraint: diagnostic=root_path_guard_rejection candidate_dof=" +
-        std::to_string(dof) + " maximum_observed_path=" + std::to_string(observed) +
+        std::to_string(dof) + " reason=no_admissible_root_within_path_limit"
         " maximum_allowed_path=" + std::to_string(limit) + ": " + hint + ".");
 }
 
@@ -6282,12 +6281,6 @@ void traverseCandidateRoots(const AggregationCellGraph& graph,
                 continue;
             }
             ++root_path_guard_rejections;
-            maximum_observed_root_path = std::max(
-                maximum_observed_root_path,
-                guards_.maximum_root_path_length ==
-                        std::numeric_limits<std::size_t>::max()
-                    ? guards_.maximum_root_path_length
-                    : guards_.maximum_root_path_length + 1u);
             if (!guards_.rootless_fallback) {
                 throwExhaustedRootPath(dof, guards_.maximum_root_path_length, rootless_hint);
             }
