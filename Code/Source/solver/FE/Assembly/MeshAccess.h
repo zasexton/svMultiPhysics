@@ -21,7 +21,12 @@
 
 namespace svmp {
 namespace FE {
+namespace geometry { class GeometryMapping; }
 namespace assembly {
+
+/// Physical map of one native cell in the requested coordinate configuration.
+[[nodiscard]] std::shared_ptr<geometry::GeometryMapping> meshCellGeometryMapping(
+    const svmp::MeshBase& mesh, GlobalIndex cell, svmp::Configuration configuration);
 
 /**
  * @brief IMeshAccess adapter for the unified svmp::Mesh (DistributedMesh)

@@ -12,6 +12,7 @@
 #include "Core/FEException.h"
 #include "Dofs/MeshTopologyBuilder.h"
 #include "Elements/ReferenceElement.h"
+#include "Geometry/MappingFactory.h"
 
 #include "Mesh/Core/MeshBase.h"
 
@@ -239,6 +240,22 @@ svmp::Configuration configuration_from_coordinate_frame(
 }
 
 } // namespace
+
+std::shared_ptr<geometry::GeometryMapping> meshCellGeometryMapping(
+    const svmp::MeshBase& mesh, GlobalIndex cell, svmp::Configuration configuration)
+{
+    const auto [vertices, count] = mesh.cell_vertices_span(cell);
+    std::vector<math::Vector<Real, 3>> nodes;
+    nodes.reserve(count);
+    for (std::size_t i = 0; i < count; ++i) {
+        const auto x = vertex_coords_from_mesh(mesh, vertices[i], true, configuration);
+        nodes.push_back({x[0], x[1], x[2]});
+    }
+    geometry::MappingRequest request;
+    request.element_type = element_type_from_mesh_cell(mesh, cell);
+    request.geometry_order = mesh.geometry_order(cell);
+    return geometry::MappingFactory::create(request, nodes);
+}
 
 MeshAccess::MeshAccess(const svmp::Mesh& mesh)
     : mesh_(mesh), coord_cfg_override_enabled_(false), coord_cfg_override_(svmp::Configuration::Reference) {}

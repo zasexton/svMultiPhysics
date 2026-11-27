@@ -12,6 +12,7 @@
 #include "Core/Types.h"
 
 #include <cstdint>
+#include <optional>
 #include <span>
 #include <string>
 #include <vector>
@@ -24,6 +25,8 @@
 namespace svmp {
 namespace FE {
 namespace systems {
+
+class CollectiveCommunicator;
 
 enum class FEFieldTransferMethod : std::uint8_t {
     Interpolate,
@@ -47,9 +50,8 @@ struct FEFieldTransferDiagnostics {
 /**
  * @brief Transfer entity-major nodal field values across a Mesh refinement delta.
  *
- * This helper is physics-agnostic: it only uses stable vertex GIDs and Mesh-owned
- * vertex provenance. `old_vertex_values` and `new_vertex_values` are flat
- * entity-major arrays with `components` values per vertex.
+ * The arrays hold components per vertex in mesh order. Conservative transfer
+ * preserves each component's finite-element integral on the physical mesh.
  */
 FEFieldTransferDiagnostics transferNodalFieldByVertexProvenance(
     const svmp::MeshBase& old_mesh,
@@ -59,6 +61,15 @@ FEFieldTransferDiagnostics transferNodalFieldByVertexProvenance(
     std::span<const Real> old_vertex_values,
     std::span<Real> new_vertex_values,
     const FEFieldTransferOptions& options = {});
+
+/// Distributed transfer counts each global cell once, including on overlapping
+/// partitions. By default each mesh supplies its own active geometry.
+FEFieldTransferDiagnostics transferNodalFieldByVertexProvenance(
+    const svmp::MeshBase& old_mesh, const svmp::MeshBase& new_mesh,
+    const svmp::RefinementDelta& delta, int components,
+    std::span<const Real> old_vertex_values, std::span<Real> new_vertex_values,
+    const FEFieldTransferOptions& options, const CollectiveCommunicator& comm,
+    std::optional<svmp::Configuration> configuration = {});
 #endif
 
 } // namespace systems

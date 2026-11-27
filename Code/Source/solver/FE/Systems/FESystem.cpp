@@ -12480,6 +12480,11 @@ FEAdaptedStateTransferResult FESystem::onMeshAdapted(
         }
     };
 
+#if FE_HAS_MPI
+    const CollectiveCommunicator transfer_comm(dof_handler_.mpiComm());
+#else
+    const CollectiveCommunicator transfer_comm;
+#endif
     auto prepare_transfer = [&](const FieldRecord& rec,
                                 std::span<const Real> source,
                                 std::vector<Real>& target_values,
@@ -12494,7 +12499,8 @@ FEAdaptedStateTransferResult FESystem::onMeshAdapted(
                                                                std::max(1, rec.components),
                                                                old_values,
                                                                target_values,
-                                                               request.field_transfer_options);
+                                                               request.field_transfer_options, transfer_comm,
+                                                               coordinateConfiguration());
         result.values_transferred += diag.values_transferred;
         result.diagnostics.insert(result.diagnostics.end(),
                                   diag.diagnostics.begin(),

@@ -240,7 +240,7 @@ Real read_vertex_state(const FESystem& sys,
 
 } // namespace
 
-TEST(FEAdaptivityTransfer, MissingProvenanceReportsDiagnosticsAndConservativeModePreservesSum)
+TEST(FEAdaptivityTransfer, MissingProvenanceReportsDiagnosticsAndConservativeModePreservesLinearIntegral)
 {
     auto old_mesh = build_line_mesh_with_gids({0.0, 1.0}, {0, 1});
     auto new_mesh = build_line_mesh_with_gids({0.0, 0.5, 1.0}, {0, 42, 1});
@@ -272,8 +272,62 @@ TEST(FEAdaptivityTransfer, MissingProvenanceReportsDiagnosticsAndConservativeMod
 
     EXPECT_TRUE(conserved.success);
     EXPECT_LE(conserved.conservation_error, 1.0e-12);
-    const Real new_sum = new_values[0] + new_values[1] + new_values[2];
-    EXPECT_NEAR(new_sum, 6.0, 1.0e-12);
+    EXPECT_EQ(new_values, (std::vector<Real>{2., 3., 4.}));
+    EXPECT_NEAR((new_values[0] + 2 * new_values[1] + new_values[2]) / 4, 3., 1e-13);
+}
+
+TEST(FEAdaptivityTransfer, UnequalTriangleChildrenPreserveAffineAndZeroMeanFields)
+{
+    MeshBase coarse, fine;
+    const CellShape tri{CellFamily::Triangle, 3, 1};
+    coarse.build_from_arrays(2, {0., 0., 1., 0., 0., 1.}, {0, 3}, {0, 1, 2}, {tri});
+    fine.build_from_arrays(2, {0., 0., 1., 0., 0., 1., .25, 0.}, {0, 3, 6},
+                           {0, 3, 2, 3, 1, 2}, {tri, tri});
+    coarse.set_vertex_gids({0, 1, 2});
+    fine.set_vertex_gids({0, 1, 2, 3});
+    coarse.finalize();
+    fine.finalize();
+    svmp::RefinementDelta delta;
+    svmp::VertexProvenanceRecord split;
+    split.new_vertex_gid = 3;
+    split.parent_vertex_weights = {{0, .75}, {1, .25}};
+    delta.new_vertices.push_back(split);
+    // The two fields are x and 3x-1. Their integrals are 1/6 and zero.
+    const std::vector<Real> old{0., -1., 1., 2., 0., -1.};
+    std::vector<Real> values(8);
+    FEFieldTransferOptions options;
+    options.method = FEFieldTransferMethod::Conservative;
+    const auto result = svmp::FE::systems::transferNodalFieldByVertexProvenance(
+        coarse, fine, delta, 2, old, values, options);
+    EXPECT_TRUE(result.success);
+    for (int c = 0; c < 2; ++c) {
+        const auto val = [&](int node) { return values[2 * node + c]; };
+        const Real integral = (val(0) + val(3) + val(2)) / 24 + (val(3) + val(1) + val(2)) / 8;
+        EXPECT_NEAR(integral, c == 0 ? 1. / 6. : 0., 1e-14);
+    }
+    EXPECT_EQ(values, (std::vector<Real>{0., -1., 1., 2., 0., -1., .25, -.25}));
+}
+
+TEST(FEAdaptivityTransfer, ConservativeCorrectionIntegratesTheMappedQuadBasis)
+{
+    auto old_mesh = build_single_quad_mesh();
+    auto new_mesh = build_single_quad_mesh();
+    auto& target = new_mesh->local_mesh();
+    target.set_current_coords({0., 0., 2., 0., 1., 1., 0., 1.});
+    target.use_current_configuration();
+    // On the mapped trapezoid det(dx/dr) = 2-s in [0,1]^2. The top-right
+    // shape r*s integrates to 1/3, while on the old square it integrates to 1/4.
+    const std::vector<Real> old{0., 0., 1., 0.};
+    std::vector<Real> values(4);
+    FEFieldTransferOptions options;
+    options.method = FEFieldTransferMethod::Conservative;
+    const auto result = svmp::FE::systems::transferNodalFieldByVertexProvenance(
+        old_mesh->local_mesh(), target, {}, 1, old, values, options);
+    EXPECT_TRUE(result.success);
+    const Real mass = (values[0] + values[1]) * (5. / 12.) + (values[2] + values[3]) / 3.;
+    EXPECT_NEAR(mass, 0.25, 1e-14);
+    EXPECT_NEAR(values[2], .75, 1e-14);
+    EXPECT_LE(result.conservation_error, 1e-14);
 }
 
 #ifdef MESH_HAS_ADAPTIVITY
@@ -318,6 +372,7 @@ TEST(FEAdaptivityTransfer, OnMeshAdaptedRebuildsLayoutAndTransfersSolutionHistor
     FEAdaptedStateTransferRequest request;
     request.solution = solution;
     request.previous_solution = previous;
+    request.field_transfer_options.method = FEFieldTransferMethod::Conservative;
     request.transferred_solution = &transferred_solution;
     request.transferred_previous_solution = &transferred_previous;
 
