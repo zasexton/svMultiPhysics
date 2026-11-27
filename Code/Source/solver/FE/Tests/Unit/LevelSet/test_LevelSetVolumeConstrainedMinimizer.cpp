@@ -41,6 +41,8 @@ level_set::LevelSetVolumeConstrainedProblem
 capillaryProblem(const CapillaryOptions& options)
 {
     level_set::LevelSetVolumeConstrainedProblem problem;
+    problem.records = {"static capillary equilibrium minimization", "static_capillary_equilibrium",
+                       "capillary_merit", "fixed_volume_discrete_capillary_equilibrium_converged"};
     problem.energy_components = {"surface_wall_energy",
                                  "gravitational_potential_energy"};
     problem.acceptance_checks.resize(3u);
@@ -280,6 +282,33 @@ piecewiseTransitionOptions(int line_search_trials, FE::Real shrink = 0.5)
     options.armijo_fraction = 1.0e-4;
     options.limited_memory_history_size = 0;
     return options;
+}
+
+TEST(LevelSetVolumeConstrainedMinimizer, ReportsTheNumericalProblemByDefault)
+{
+    const auto options = quadraticOptions();
+    level_set::LevelSetVolumeConstrainedProblem problem;
+    problem.energy_components = {"quadratic"};
+    const std::array<FE::Real, 1> coefficients{1.0};
+    const std::array<std::size_t, 1> active{0u};
+    std::vector<FE::Real> accepted;
+    try {
+        static_cast<void>(level_set::minimizeLevelSetVolumeConstrained(
+            options, problem, coefficients, active, {}, accepted));
+        FAIL() << "An absent evaluator must be rejected";
+    } catch (const std::invalid_argument& error) {
+        EXPECT_STREQ(error.what(), "volume-constrained minimization requires an evaluator");
+    }
+    const std::array<FE::Real, 2> stationary{1.0, 2.0};
+    const std::array<std::size_t, 2> both{0u, 1u};
+    auto numerical_problem = capillaryProblem(options);
+    numerical_problem.records = {};
+    const auto result = level_set::minimizeLevelSetVolumeConstrained(
+        options, numerical_problem, stationary, both,
+        [](auto q, EvaluationPurpose intent) { return quadraticCapillaryEvaluation(q, intent); }, accepted);
+    ASSERT_TRUE(result.success) << result.diagnostic;
+    EXPECT_EQ(result.diagnostic, "fixed_volume_equilibrium_converged");
+
 }
 
 TEST(LevelSetVolumeConstrainedMinimizer, TakesAPureFeasibilityStepAtAStationaryEnergy)

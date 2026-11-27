@@ -5260,6 +5260,7 @@ staticCapillaryEquilibriumProblem(
     const application::core::StaticCapillaryEquilibriumOptions& options)
 {
   svmp::FE::level_set::LevelSetVolumeConstrainedProblem problem;
+  problem.records = svmp::Physics::formulations::navier_stokes::free_surface::staticCapillaryMinimizerRecords;
   problem.energy_components = {"surface_wall_energy",
                                "gravitational_potential_energy"};
   // The constrained pressure-space certificate.

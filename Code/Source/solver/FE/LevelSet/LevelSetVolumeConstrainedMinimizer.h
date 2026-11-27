@@ -12,6 +12,7 @@
  * by the evaluator.
  */
 
+#include "LevelSet/LevelSetRecordLabels.h"
 #include "Core/Types.h"
 
 #include <cstddef>
@@ -106,6 +107,7 @@ struct LevelSetVolumeConstrainedProblem {
     // the evaluation's, and the minimizer's.
     std::string forbidden_substitution_evaluation_diagnostic{};
     std::string forbidden_substitution_diagnostic{};
+    LevelSetMinimizerRecordLabels records{};
 };
 
 /**
@@ -137,8 +139,7 @@ struct LevelSetVolumeConstrainedEvaluation {
     // The problem's acceptance certificates, in its order.
     std::vector<LevelSetVolumeConstrainedCheckValue> checks{};
     // Trial evaluation must never obtain the energy's equilibrium by a
-    // substitution the problem forbids (for a static cap, replacing the
-    // production surface/Young load with a pressure-range projection).
+    // substitution the problem forbids.
     bool forbidden_substitution_applied{false};
     std::string diagnostic{};
 };
@@ -301,10 +302,7 @@ struct LevelSetVolumeConstrainedMinimizerResult {
  * safeguarded limited-memory tangent inverse Hessian, satisfies the linearized
  * volume constraint, and descends an l1 volume-merit function. Convergence
  * additionally requires the problem's acceptance certificates, measured by
- * the evaluator, in their declared order (for a static cap: the constrained
- * pressure-space and production-residual gates of the unprojected
- * physical-potential load, and a constant-pressure KKT gate when the
- * evaluator declares it required).
+ * the evaluator in their declared order.
  *
  * `accepted_coefficients` is assigned only after every convergence gate
  * passes. It is left byte-for-byte unchanged on invalid input, evaluator

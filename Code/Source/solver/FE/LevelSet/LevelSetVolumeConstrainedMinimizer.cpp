@@ -29,28 +29,26 @@ void validateOptions(
     std::span<const std::size_t> active_coefficient_indices,
     const LevelSetVolumeConstrainedEvaluator& evaluator)
 {
+    const auto invalid = [&](const char* reason) {
+        return std::invalid_argument(std::string(problem.records.method) + reason);
+    };
     if (!evaluator) {
-        throw std::invalid_argument(
-            "static capillary equilibrium minimization requires an evaluator");
+        throw invalid(" requires an evaluator");
     }
     if (input_coefficients.empty()) {
-        throw std::invalid_argument(
-            "static capillary equilibrium minimization requires coefficients");
+        throw invalid(" requires coefficients");
     }
     if (active_coefficient_indices.empty()) {
-        throw std::invalid_argument(
-            "static capillary equilibrium minimization requires active coefficient indices");
+        throw invalid(" requires active coefficient indices");
     }
     if (!std::all_of(
             input_coefficients.begin(),
             input_coefficients.end(),
             [](Real value) { return std::isfinite(value); })) {
-        throw std::invalid_argument(
-            "static capillary equilibrium minimization requires finite coefficients");
+        throw invalid(" requires finite coefficients");
     }
     if (problem.energy_components.empty()) {
-        throw std::invalid_argument(
-            "static capillary equilibrium minimization requires named energy components");
+        throw invalid(" requires named energy components");
     }
     const bool check_limits_valid = std::all_of(
         problem.acceptance_checks.begin(),
@@ -86,8 +84,7 @@ void validateOptions(
         !finitePositive(
             options.limited_memory_curvature_tolerance) ||
         !finitePositive(options.minimum_volume_merit_penalty)) {
-        throw std::invalid_argument(
-            "static capillary equilibrium minimization received invalid tolerances or iteration controls");
+        throw invalid(" received invalid tolerances or iteration controls");
     }
 
     std::vector<std::size_t> sorted_indices(
@@ -97,8 +94,7 @@ void validateOptions(
     if (sorted_indices.back() >= input_coefficients.size() ||
         std::adjacent_find(sorted_indices.begin(), sorted_indices.end()) !=
             sorted_indices.end()) {
-        throw std::invalid_argument(
-            "static capillary equilibrium minimization active coefficient indices are duplicated or out of range");
+        throw invalid(" active coefficient indices are duplicated or out of range");
     }
 }
 
@@ -108,7 +104,7 @@ void validateOptions(
 {
     if (left.size() != right.size()) {
         throw std::invalid_argument(
-            "static capillary equilibrium minimization vector sizes differ");
+            "volume-constrained minimization vector sizes differ");
     }
     long double value = 0.0L;
     for (std::size_t i = 0u; i < left.size(); ++i) {
@@ -167,6 +163,9 @@ minimizeLevelSetVolumeConstrained(
         active_coefficient_indices,
         evaluator);
 
+    const auto equilibrium_reason = [&](const char* reason) {
+        return std::string(problem.records.equilibrium) + reason;
+    };
     LevelSetVolumeConstrainedMinimizerResult result;
     result.line_search_trace.reserve(
         kLevelSetVolumeConstrainedLineSearchTraceCapacity);
@@ -833,14 +832,14 @@ minimizeLevelSetVolumeConstrained(
                 result.converged = true;
                 result.accepted_coefficients_assigned = true;
                 result.diagnostic =
-                    "fixed_volume_discrete_capillary_equilibrium_converged";
+                    problem.records.converged;
                 return result;
             }
         }
         if (result.iterations >= options.max_iterations) {
             if (pending_acceptance_gate_diagnostic.empty()) {
                 result.diagnostic =
-                    "static_capillary_equilibrium_iteration_limit_reached";
+                    equilibrium_reason("_iteration_limit_reached");
             } else {
                 result.diagnostic =
                     "acceptance_certificate_refinement_iteration_limit_reached:" +
@@ -940,7 +939,7 @@ minimizeLevelSetVolumeConstrained(
         }
         if (!std::isfinite(tangent_direction_norm)) {
             result.diagnostic =
-                "static_capillary_equilibrium_tangent_step_is_nonfinite";
+                equilibrium_reason("_tangent_step_is_nonfinite");
             return result;
         }
         if (!(tangent_direction_norm > Real{0.0})) {
@@ -972,7 +971,7 @@ minimizeLevelSetVolumeConstrained(
         for (const Real value : direction) {
             if (!std::isfinite(value)) {
                 result.diagnostic =
-                    "static_capillary_equilibrium_direction_is_nonfinite";
+                    equilibrium_reason("_direction_is_nonfinite");
                 return result;
             }
             direction_linf =
@@ -980,7 +979,7 @@ minimizeLevelSetVolumeConstrained(
         }
         if (!finitePositive(direction_linf)) {
             result.diagnostic =
-                "static_capillary_equilibrium_has_no_admissible_descent_direction";
+                equilibrium_reason("_has_no_admissible_descent_direction");
             return result;
         }
 
@@ -993,7 +992,7 @@ minimizeLevelSetVolumeConstrained(
             Real{2.0} * std::abs(volume_multiplier);
         if (!finitePositive(merit_penalty)) {
             result.diagnostic =
-                "static_capillary_equilibrium_merit_penalty_is_nonfinite";
+                equilibrium_reason("_merit_penalty_is_nonfinite");
             return result;
         }
         const Real volume_error_sign =
@@ -1014,7 +1013,7 @@ minimizeLevelSetVolumeConstrained(
             -directional_merit;
         if (!finitePositive(predicted_merit_decrease)) {
             result.diagnostic =
-                "static_capillary_equilibrium_merit_direction_is_not_descent";
+                equilibrium_reason("_merit_direction_is_not_descent");
             return result;
         }
         const Real current_merit =
@@ -1201,9 +1200,8 @@ minimizeLevelSetVolumeConstrained(
                         break;
                     }
                     last_evaluation_diagnostic =
-                        std::isfinite(trial_merit)
-                            ? "candidate_capillary_merit_decrease_insufficient"
-                            : "candidate_capillary_merit_is_nonfinite";
+                        std::string("candidate_") + problem.records.merit +
+                        (std::isfinite(trial_merit) ? "_decrease_insufficient" : "_is_nonfinite");
                     trace_record.disposition =
                         LevelSetVolumeConstrainedLineSearchDisposition::
                             SameTopologyMeritRejected;
@@ -1325,9 +1323,8 @@ minimizeLevelSetVolumeConstrained(
             } else {
                 if (pending_acceptance_gate_diagnostic.empty()) {
                     result.diagnostic =
-                        (options.allow_topology_epoch_transitions
-                             ? "capillary_merit_line_search_failed:"
-                             : "fixed_topology_capillary_merit_line_search_failed:") +
+                        std::string(options.allow_topology_epoch_transitions ? "" : "fixed_topology_") +
+                        problem.records.merit + "_line_search_failed:" +
                         last_evaluation_diagnostic;
                 } else {
                     result.diagnostic =

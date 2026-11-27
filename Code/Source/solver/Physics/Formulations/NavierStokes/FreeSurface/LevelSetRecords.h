@@ -36,6 +36,12 @@ inline constexpr FE::level_set::LevelSetRecordLabels levelSetRecordLabels{
         "candidates, which degrades results inside connected liquid; every case "
         "is logged and counted in the run summary)"};
 
+inline constexpr FE::level_set::LevelSetMinimizerRecordLabels staticCapillaryMinimizerRecords{
+    .method = "static capillary equilibrium minimization",
+    .equilibrium = "static_capillary_equilibrium",
+    .merit = "capillary_merit",
+    .converged = "fixed_volume_discrete_capillary_equilibrium_converged"};
+
 inline constexpr FE::level_set::ConservativePhaseRecordSchema conservativePhaseRecordSchema{
     .version = 3,
     .active_side = "liquid_side",

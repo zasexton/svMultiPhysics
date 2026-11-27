@@ -36,6 +36,15 @@ struct LevelSetRecordLabels {
 
 inline constexpr LevelSetRecordLabels defaultLevelSetRecordLabels{};
 
+/// Formulation-specific labels, when required by a published convergence record.
+/// Strings must remain valid for the duration of the minimization.
+struct LevelSetMinimizerRecordLabels {
+    const char* method{"volume-constrained minimization"};
+    const char* equilibrium{"volume_constrained_equilibrium"};
+    const char* merit{"volume_merit"};
+    const char* converged{"fixed_volume_equilibrium_converged"};
+};
+
 /// A formulation or application may attach its reporting labels to the system.
 [[nodiscard]] const LevelSetRecordLabels& levelSetRecordLabels(const systems::FESystem& system) noexcept;
 
