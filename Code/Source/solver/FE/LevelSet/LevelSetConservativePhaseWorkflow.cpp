@@ -307,6 +307,13 @@ void initializeConservativePhaseStates(
         request.runtime.conservative_phase_initialized) {
       continue;
     }
+    if (history.stepIndex() > 0) {
+      // Accepted q is an independently transported field on restart.
+      requireConservativePhaseGeometryBinding(system, request);
+      requireCurrentConservativePhaseGraph(system, request);
+      request.runtime.conservative_phase_initialized = true;
+      continue;
+    }
     const auto projection = projectCurrentConservativePhaseGeometry(
         system, request);
     if (!projection.success) {
@@ -318,23 +325,19 @@ void initializeConservativePhaseStates(
     const auto phase_field = system.findFieldByName(
         request.configuration->transport.conservative_phase.phase_indicator.field_name);
     auto current = gatherFeOrderedSolution(history.u(), comm);
+    // Fresh histories contain copies of the initial state. A distinct older
+    // state may have been supplied by the caller and already owns its q.
+    std::vector<int> initial_copies;
+    for (int k = 1; k <= history.historyDepth(); ++k) {
+      if (gatherFeOrderedSolution(history.uPrevK(k), comm) == current) {
+        initial_copies.push_back(k);
+      }
+    }
     assignConservativePhaseSlice(
         system, phase_field, projection.phase_indicator, current);
-    std::vector<std::vector<svmp::FE::Real>> initialized_history;
-    initialized_history.reserve(
-        static_cast<std::size_t>(history.historyDepth()));
-    for (int k = 1; k <= history.historyDepth(); ++k) {
-      auto previous =
-          gatherFeOrderedSolution(history.uPrevK(k), comm);
-      assignConservativePhaseSlice(
-          system, phase_field, projection.phase_indicator, previous);
-      initialized_history.push_back(std::move(previous));
-    }
     scatterFeOrderedSolution(history.u(), current);
-    for (int k = 1; k <= history.historyDepth(); ++k) {
-      scatterFeOrderedSolution(
-          history.uPrevK(k),
-          initialized_history[static_cast<std::size_t>(k - 1)]);
+    for (const int k : initial_copies) {
+      history.uPrevK(k).copyFrom(history.u());
     }
     if (history.hasUDotState()) {
       zeroConservativePhaseRateSlice(system, phase_field, history.uDot());

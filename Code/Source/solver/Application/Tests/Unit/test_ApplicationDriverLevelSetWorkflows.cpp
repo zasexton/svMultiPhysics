@@ -14700,6 +14700,50 @@ TEST_F(ApplicationDriverConservativePhaseCandidatesTest,
 }
 
 TEST_F(ApplicationDriverConservativePhaseCandidatesTest,
+       PreservesSuppliedOlderPhaseAtColdStartup)
+{
+  auto older = gatherFeOrderedSolution(history().uPrev2());
+  older[fieldOffset(phase_)] = 0.375;
+  scatterFeOrderedSolution(history().uPrev2(), older);
+  auto initial = initialized_solution_;
+  std::fill_n(initial.begin() + fieldOffset(phase_), fieldCount(phase_), 0.0);
+  scatterFeOrderedSolution(history().u(), initial);
+  scatterFeOrderedSolution(history().uPrev(), initial);
+
+  requests_.front().runtime.conservative_phase_initialized = false;
+  initializeConservativePhaseStates(sim_, requests_);
+  EXPECT_EQ(gatherFeOrderedSolution(history().u()), initialized_solution_);
+  EXPECT_EQ(gatherFeOrderedSolution(history().uPrev()), initialized_solution_);
+  EXPECT_EQ(gatherFeOrderedSolution(history().uPrev2()), older);
+}
+
+TEST_F(ApplicationDriverConservativePhaseCandidatesTest,
+       PreservesAcceptedPhaseHistoryAndRatesOnRestart)
+{
+  history().setStepIndex(3);
+  history().setTime(0.15);
+  std::array<svmp::FE::backends::GenericVector*, 5> states{
+      &history().u(), &history().uPrev(), &history().uPrev2(),
+      &history().uDot(), &history().uDDot()};
+  std::array<std::vector<svmp::FE::Real>, 5> saved;
+  for (std::size_t i = 0; i < states.size(); ++i) {
+    saved[i] = gatherFeOrderedSolution(*states[i]);
+    std::fill_n(saved[i].begin() + fieldOffset(phase_),
+                fieldCount(phase_), 0.1 * (i + 1));
+    scatterFeOrderedSolution(*states[i], saved[i]);
+  }
+  requests_.front().runtime.conservative_phase_initialized = false;
+  requests_.front().runtime.conservative_phase_graph.reset();
+  initializeConservativePhaseStates(sim_, requests_);
+
+  EXPECT_TRUE(requests_.front().runtime.conservative_phase_initialized);
+  EXPECT_TRUE(requests_.front().runtime.conservative_phase_graph.has_value());
+  for (std::size_t i = 0; i < states.size(); ++i) {
+    EXPECT_EQ(gatherFeOrderedSolution(*states[i]), saved[i]) << "state " << i;
+  }
+}
+
+TEST_F(ApplicationDriverConservativePhaseCandidatesTest,
        ExplicitPointwiseWallVelocityContractIsMarkedUnsupported)
 {
   EXPECT_FALSE(
