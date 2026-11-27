@@ -35,42 +35,15 @@
  * @file ColoredAssembler.h
  * @brief Graph-colored parallel assembly strategy (decorator)
  *
- * ColoredAssembler implements race-free parallel assembly using element graph
- * coloring. Elements are colored such that no two elements of the same color
- * share DOFs, allowing parallel assembly within each color without
- * synchronization or atomic operations.
- *
- * Key features:
- * - Automatic element graph construction from DOF connectivity
- * - Multiple coloring algorithms (greedy, DSatur, Kempe chain optimization)
- * - Color-wise parallel assembly with OpenMP
- * - Deterministic results (within numerical precision)
- * - Balance optimization for better load distribution
- *
- * Threading model:
- * - Colors are processed sequentially (color barrier between colors)
- * - Elements of same color are processed in parallel (no races)
- * - Thread-local scratch buffers for computation
- * - Direct insertion into global matrices (no aggregation needed)
- *
- * Determinism:
- * - Element processing order within a color is deterministic
- * - Global insertion order is determined by element ordering
- * - Results are reproducible for same input and thread count
- *
- * Performance characteristics:
- * - Coloring overhead: O(|E| * k) where k is average color degree
- * - Assembly parallelism: limited by number of colors
- * - Memory overhead: O(|E|) for color storage
- * - Ideal when: many elements, low-order elements (few colors needed)
- *
- * @see AssemblyLoop for the underlying loop with coloring support
- * @see StandardAssembler for simple sequential assembly
+ * The standard base prepares physical cell contexts. Local kernels of the
+ * same color may execute concurrently, then the base inserts their outputs
+ * in traversal order, including projection onto shared constraint masters.
+ * Other decorated backends retain their own assembly strategy.
  */
 
 #include "Assembly/Coloring.h"
 #include "Assembly/DecoratorAssembler.h"
-#include "Assembly/AssemblyLoop.h"
+#include "Assembly/AssemblyKernel.h"
 
 #include <vector>
 #include <span>
@@ -144,13 +117,13 @@ public:
 
     [[nodiscard]] std::string name() const override { return "Colored(" + base().name() + ")"; }
 
-    [[nodiscard]] bool isThreadSafe() const noexcept override { return true; }
 
     // =========================================================================
     // Configuration (Assembler interface)
     // =========================================================================
 
     void setDofMap(const dofs::DofMap& dof_map) override;
+    void setDofHandler(const dofs::DofHandler& dof_handler) override;
     void setRowDofMap(const dofs::DofMap& dof_map,
                       GlobalIndex row_offset = 0,
                       DofEntityScope row_scope = DofEntityScope::Cell) override;
@@ -274,11 +247,6 @@ private:
      */
     void balanceColors();
 
-    /**
-     * @brief Build color-wise element lists
-     */
-    void buildColorLists();
-
     [[nodiscard]] AssemblyResult assembleCells(
         const IMeshAccess& mesh,
         const spaces::FunctionSpace& test_space,
@@ -293,7 +261,6 @@ private:
 
     ColoringOptions options_;
     const dofs::DofMap* dof_map_{nullptr};
-    GlobalIndex last_num_cells_{0};
 
     // Element graph
     ElementGraph element_graph_;
@@ -303,12 +270,6 @@ private:
     int num_colors_{0};
     bool has_coloring_{false};
     ColoringStats coloring_stats_;
-
-    // Color-wise element lists (for efficient parallel iteration)
-    std::vector<std::vector<GlobalIndex>> color_elements_;
-
-    // Assembly infrastructure
-    std::unique_ptr<AssemblyLoop> loop_;
 };
 
 } // namespace assembly

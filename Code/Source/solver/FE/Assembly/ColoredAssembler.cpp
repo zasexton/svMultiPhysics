@@ -32,6 +32,7 @@
 
 #include "Core/FEException.h"
 #include "Dofs/DofMap.h"
+#include "Dofs/DofHandler.h"
 #include "StandardAssembler.h"
 
 #include <algorithm>
@@ -41,10 +42,6 @@
 #include <queue>
 #include <unordered_map>
 #include <unordered_set>
-
-#ifdef _OPENMP
-#include <omp.h>
-#endif
 
 namespace svmp {
 namespace FE {
@@ -199,23 +196,20 @@ void ElementGraph::clear()
 
 ColoredAssembler::ColoredAssembler()
     : DecoratorAssembler(createStandardAssembler()),
-      options_{},
-      loop_(std::make_unique<AssemblyLoop>())
+      options_{}
 {
 }
 
 ColoredAssembler::ColoredAssembler(const ColoringOptions& options)
     : DecoratorAssembler(createStandardAssembler()),
-      options_(options),
-      loop_(std::make_unique<AssemblyLoop>())
+      options_(options)
 {
 }
 
 ColoredAssembler::ColoredAssembler(std::unique_ptr<Assembler> base,
                                    const ColoringOptions& options)
     : DecoratorAssembler(std::move(base)),
-      options_(options),
-      loop_(std::make_unique<AssemblyLoop>())
+      options_(options)
 {
 }
 
@@ -230,6 +224,13 @@ void ColoredAssembler::setDofMap(const dofs::DofMap& dof_map)
     dof_map_ = &dof_map;
     invalidateColoring();
     base().setDofMap(dof_map);
+}
+
+void ColoredAssembler::setDofHandler(const dofs::DofHandler& dof_handler)
+{
+    dof_map_ = &dof_handler.getDofMap();
+    invalidateColoring();
+    base().setDofHandler(dof_handler);
 }
 
 void ColoredAssembler::setRowDofMap(const dofs::DofMap& dof_map,
@@ -275,14 +276,11 @@ void ColoredAssembler::reset()
 {
     base().reset();
     invalidateColoring();
-    last_num_cells_ = 0;
 }
 
 void ColoredAssembler::computeColoring(const IMeshAccess& mesh, const dofs::DofMap& dof_map)
 {
     auto start_time = std::chrono::high_resolution_clock::now();
-
-    last_num_cells_ = mesh.numCells();
 
     // Build element graph
     buildElementGraph(mesh, dof_map);
@@ -308,12 +306,6 @@ void ColoredAssembler::computeColoring(const IMeshAccess& mesh, const dofs::DofM
     if (options_.balance_colors) {
         balanceColors();
     }
-
-    // Build color lists for efficient iteration
-    buildColorLists();
-
-    // Update loop with coloring
-    loop_->setColoring(element_colors_, num_colors_);
 
     has_coloring_ = true;
 
@@ -342,12 +334,13 @@ void ColoredAssembler::computeColoring(const IMeshAccess& mesh, const dofs::DofM
 
 void ColoredAssembler::setColoring(std::span<const int> colors, int num_colors)
 {
+    FE_CHECK_ARG(num_colors >= 0 && std::all_of(colors.begin(), colors.end(),
+                 [num_colors](int color) { return color >= 0 && color < num_colors; }),
+                 "ColoredAssembler: invalid cell color");
     element_colors_.assign(colors.begin(), colors.end());
     num_colors_ = num_colors;
     has_coloring_ = true;
 
-    buildColorLists();
-    loop_->setColoring(element_colors_, num_colors_);
 }
 
 void ColoredAssembler::invalidateColoring()
@@ -355,7 +348,6 @@ void ColoredAssembler::invalidateColoring()
     has_coloring_ = false;
     num_colors_ = 0;
     element_colors_.clear();
-    color_elements_.clear();
     coloring_stats_ = ColoringStats{};
     element_graph_.clear();
 }
@@ -570,17 +562,6 @@ void ColoredAssembler::balanceColors()
     }
 }
 
-void ColoredAssembler::buildColorLists()
-{
-    color_elements_.clear();
-    color_elements_.resize(static_cast<std::size_t>(num_colors_));
-
-    for (std::size_t i = 0; i < element_colors_.size(); ++i) {
-        int color = element_colors_[i];
-        color_elements_[static_cast<std::size_t>(color)].push_back(static_cast<GlobalIndex>(i));
-    }
-}
-
 AssemblyResult ColoredAssembler::assembleMatrix(
     const IMeshAccess& mesh,
     const spaces::FunctionSpace& test_space,
@@ -691,38 +672,15 @@ AssemblyResult ColoredAssembler::assembleCells(
     GlobalSystemView* matrix_view,
     GlobalSystemView* vector_view)
 {
-    FE_THROW_IF(dof_map_ == nullptr, FEException,
-                "ColoredAssembler::assembleCells: DOF map not set");
-
-    loop_->setMesh(mesh);
-    loop_->setDofMap(*dof_map_);
-
-    if (!has_coloring_) {
-        computeColoring(mesh, *dof_map_);
+    if (auto* standard = dynamic_cast<StandardAssembler*>(&base())) {
+        FE_CHECK_NOT_NULL(dof_map_, "ColoredAssembler::assembleCells: DOF map");
+        if (!has_coloring_) computeColoring(mesh, *dof_map_);
+        return standard->assembleCellsCore(mesh, test_space, trial_space, kernel, matrix_view, vector_view,
+                                           matrix_view != nullptr, vector_view != nullptr, nullptr, element_colors_);
     }
-
-    if (matrix_view) {
-        matrix_view->beginAssemblyPhase();
-    }
-    if (vector_view && vector_view != matrix_view) {
-        vector_view->beginAssemblyPhase();
-    }
-
-    LoopOptions loop_opts;
-    loop_opts.mode = LoopMode::Colored;
-    loop_opts.num_threads = getOptions().num_threads;
-    loop_opts.deterministic = getOptions().deterministic;
-    loop_opts.skip_ghost_cells = (getOptions().ghost_policy == GhostPolicy::ReverseScatter);
-    loop_opts.verbose = getOptions().verbose;
-    loop_->setOptions(loop_opts);
-
-    const auto stats = loop_->cellLoop(test_space, trial_space, kernel, matrix_view, vector_view);
-
-    AssemblyResult result;
-    result.success = true;
-    result.elements_assembled = stats.total_iterations;
-    result.elapsed_time_seconds = stats.elapsed_seconds;
-    return result;
+    if (!matrix_view) return base().assembleVector(mesh, test_space, kernel, *vector_view);
+    if (!vector_view) return base().assembleMatrix(mesh, test_space, trial_space, kernel, *matrix_view);
+    return base().assembleBoth(mesh, test_space, trial_space, kernel, *matrix_view, *vector_view);
 }
 
 // ============================================================================

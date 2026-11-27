@@ -6704,7 +6704,8 @@ AssemblyResult StandardAssembler::assembleCellsCore(
     GlobalSystemView* vector_view,
     bool assemble_matrix,
     bool assemble_vector,
-    const spaces::FunctionSpace* rule_space)
+    const spaces::FunctionSpace* rule_space,
+    std::span<const int> cell_colors)
 {
     AssemblyResult result;
     auto start_time = std::chrono::steady_clock::now();
@@ -6816,10 +6817,18 @@ AssemblyResult StandardAssembler::assembleCellsCore(
         cell_ids.push_back(cell_id);
     });
 
-    const std::size_t requested_batch_size =
-        (options_.use_batching && options_.batch_size > 1)
-            ? static_cast<std::size_t>(options_.batch_size)
-            : 1u;
+    int color_threads = 1;
+    if (!cell_colors.empty()) {
+        FE_CHECK_ARG(cell_colors.size() == static_cast<std::size_t>(mesh.numCells()),
+                     "ColoredAssembler: one color is required per cell");
+        color_threads = std::max(1, options_.num_threads);
+#ifdef _OPENMP
+        if (options_.num_threads == 0) color_threads = omp_get_max_threads();
+#endif
+    }
+    const std::size_t color_batch_size = std::min<std::size_t>(color_threads, cell_ids.size());
+    const std::size_t requested_batch_size = std::max<std::size_t>(color_batch_size,
+        options_.use_batching ? std::max(1, options_.batch_size) : 1);
 
     // Sub-phase timing accumulators for prepareContext breakdown
     double tp_sub_dofmap = 0.0, tp_sub_prepare_ctx = 0.0, tp_sub_solution = 0.0;
@@ -6961,7 +6970,7 @@ AssemblyResult StandardAssembler::assembleCellsCore(
 
     auto assemble_cells_with_kernel = [&](auto& kernel_impl) {
         const bool use_batch_path =
-            (requested_batch_size > 1u) && kernel_impl.supportsCellBatch();
+            color_threads > 1 || ((requested_batch_size > 1u) && kernel_impl.supportsCellBatch());
 
         if (!use_batch_path) {
             double tp_prepare = 0.0, tp_kernel = 0.0, tp_insert = 0.0;
@@ -7041,6 +7050,7 @@ AssemblyResult StandardAssembler::assembleCellsCore(
         std::vector<KernelOutput> batch_outputs(requested_batch_size);
         std::vector<const AssemblyContext*> batch_context_ptrs(requested_batch_size, nullptr);
 
+        std::vector<std::size_t> color_order;
         double tp_prepare = 0.0, tp_kernel = 0.0, tp_insert = 0.0;
         auto TP = assemblyTimeNow;
 
@@ -7055,15 +7065,44 @@ AssemblyResult StandardAssembler::assembleCellsCore(
                                       batch_contexts[slot],
                                       batch_row_dofs[slot],
                                       batch_col_dofs[slot]);
-                    batch_outputs[slot].clear();
+                    if (color_threads > 1) {
+                        prepareKernelOutputRequest(batch_outputs[slot], batch_contexts[slot].numTestDofs(),
+                                                   batch_contexts[slot].numTrialDofs(), assemble_matrix, assemble_vector);
+                    } else {
+                        batch_outputs[slot].clear();
+                    }
                     batch_context_ptrs[slot] = &batch_contexts[slot];
                 }
                 tp_prepare += TP() - tp0;
 
                 tp0 = TP();
-                kernel_impl.computeCellBatch(
-                    std::span<const AssemblyContext* const>(batch_context_ptrs.data(), active),
-                    std::span<KernelOutput>(batch_outputs.data(), active));
+                if (color_threads > 1) {
+                    // Color only the independent local computations. Replay the
+                    // outputs below in traversal order through the distributor:
+                    // unrelated elements may constrain onto the same master.
+                    color_order.resize(active);
+                    std::iota(color_order.begin(), color_order.end(), std::size_t{0});
+                    const auto color = [&](std::size_t slot) { return cell_colors[grouped_cell_ids[begin + slot]]; };
+                    std::stable_sort(color_order.begin(), color_order.end(),
+                                     [&](auto i, auto j) { return color(i) < color(j); });
+                    for (std::size_t first = 0; first < active;) {
+                        auto end = first + 1;
+                        while (end < active && color(color_order[end]) == color(color_order[first])) ++end;
+                        const auto workers = static_cast<int>(std::min<std::size_t>(color_threads, end - first));
+                        AssemblyThreadPool::global().run(workers, [&](int worker) {
+                            ConcurrentComputeScope compute_scope;
+                            for (auto i = first + worker; i < end; i += workers) {
+                                const auto slot = color_order[i];
+                                kernel_impl.computeCell(batch_contexts[slot], batch_outputs[slot]);
+                            }
+                        });
+                        first = end;
+                    }
+                } else {
+                    kernel_impl.computeCellBatch(
+                        std::span<const AssemblyContext* const>(batch_context_ptrs.data(), active),
+                        std::span<KernelOutput>(batch_outputs.data(), active));
+                }
                 tp_kernel += TP() - tp0;
 
                 tp0 = TP();

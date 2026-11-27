@@ -13,6 +13,15 @@
 #include <gtest/gtest.h>
 #include "Assembly/ColoredAssembler.h"
 #include "Assembly/BlockAssembler.h"
+#include "Assembly/GlobalSystemView.h"
+#include "Assembly/StandardAssembler.h"
+#include "Constraints/AffineConstraints.h"
+#include "Dofs/DofMap.h"
+#include "Spaces/H1Space.h"
+#include "Spaces/L2Space.h"
+
+#include <atomic>
+#include <thread>
 #include "Core/Types.h"
 
 #include <vector>
@@ -111,6 +120,28 @@ private:
     GlobalIndex num_cells_;
 };
 
+class DisjointTets final : public MockMeshAccess {
+public:
+    using MockMeshAccess::MockMeshAccess;
+    std::array<Real, 3> getNodeCoordinates(GlobalIndex d) const override {
+        const auto i = d % 4;
+        return {static_cast<Real>(2 * (d/4) + (i == 1)), Real(i == 2), Real(i == 3)};
+    }
+};
+
+class ObservedPoisson final : public AssemblyKernel {
+public:
+    [[nodiscard]] RequiredData getRequiredData() const override { return poisson_.getRequiredData(); }
+    void computeCell(const AssemblyContext& ctx, KernelOutput& output) override {
+        if (std::this_thread::get_id() != caller_) ++worker_calls;
+        poisson_.computeCell(ctx, output);
+    }
+    std::atomic<unsigned> worker_calls{0};
+private:
+    PoissonKernel poisson_{2.};
+    const std::thread::id caller_{std::this_thread::get_id()};
+};
+
 } // namespace
 
 // ============================================================================
@@ -129,6 +160,108 @@ protected:
 // ============================================================================
 // Construction Tests
 // ============================================================================
+
+TEST_F(ColoredAssemblerTest, PoissonAssemblyMatchesStandardWithSharedAffineMasters)
+{
+    constexpr int cells = 16;
+    constexpr GlobalIndex shared = 4 * cells;
+    DisjointTets mesh(cells);
+    dofs::DofMap map(cells, shared + 1, 4);
+    constraints::AffineConstraints constraints;
+    for (int c = 0; c < cells; ++c) {
+        const GlobalIndex d = 4*c;
+        map.setCellDofs(c, std::array<GlobalIndex,4>{d, d+1, d+2, d+3});
+        constraints.addLine(d);
+        constraints.addEntry(d, shared, 1.);
+        constraints.setInhomogeneity(d, 1.);
+    }
+    constraints.addDirichlet(1, 0.25);
+    constraints.close();
+    map.finalize();
+    spaces::H1Space space(ElementType::Tetra4, 1);
+    ObservedPoisson kernel;
+    for (int threads : {1, 4}) {
+        AssemblyOptions options;
+        options.num_threads = threads;
+        options.use_coloring = true;
+        ColoredAssembler colored;
+        StandardAssembler standard;
+        for (Assembler* assembler : std::array<Assembler*,2>{&colored, &standard}) {
+            assembler->setOptions(options);
+            assembler->setDofMap(map);
+            assembler->setConstraints(&constraints);
+        }
+        for (int operation = 0; operation < 3; ++operation) {
+            DenseSystemView expected(shared+1), actual(shared+1);
+            auto assemble = [&](Assembler& assembler, DenseSystemView& out) {
+                if (operation == 0) return assembler.assembleBoth(mesh, space, space, kernel, out, out);
+                if (operation == 1) return assembler.assembleMatrix(mesh, space, space, kernel, out);
+                return assembler.assembleVector(mesh, space, kernel, out);
+            };
+            ASSERT_TRUE(assemble(standard, expected));
+            ASSERT_TRUE(assemble(colored, actual));
+            if (operation != 2) EXPECT_NEAR(expected.getMatrixEntry(shared, shared), cells/2., 1.e-12);
+            if (operation == 0) EXPECT_NEAR(expected.getVectorEntry(shared), -5.*cells/12. + 1./24., 1.e-12);
+            if (operation == 2) EXPECT_NEAR(expected.getVectorEntry(shared), cells/12., 1.e-12);
+            Real error = 0.;
+            for (GlobalIndex i = 0; i <= shared; ++i) {
+                error = std::max(error, std::abs(expected.getVectorEntry(i) - actual.getVectorEntry(i)));
+                for (GlobalIndex j = 0; j <= shared; ++j) {
+                    error = std::max(error, std::abs(expected.getMatrixEntry(i,j) - actual.getMatrixEntry(i,j)));
+                }
+            }
+            EXPECT_NEAR(error, 0., 1.e-12) << "threads=" << threads << " operation=" << operation;
+        }
+        colored.setConstraints(nullptr);
+        DenseSystemView unconstrained(shared+1);
+        ASSERT_TRUE(colored.assembleBoth(mesh, space, space, kernel, unconstrained, unconstrained));
+        EXPECT_NEAR(unconstrained.getMatrixEntry(0,0), .5, 1.e-13);
+        EXPECT_NEAR(unconstrained.getVectorEntry(0), 1./12., 1.e-13);
+        EXPECT_EQ(unconstrained.getMatrixEntry(shared,shared), 0.);
+        EXPECT_EQ(kernel.worker_calls.load() > 0, threads > 1);
+    }
+}
+
+TEST_F(ColoredAssemblerTest, RectangularConstraintAssemblyUsesBothFieldOffsets)
+{
+    DisjointTets mesh(2);
+    spaces::H1Space test_space(ElementType::Tetra4, 1);
+    spaces::L2Space trial_space(ElementType::Tetra4, 0);
+    dofs::DofMap row_map(2, 8, 4), col_map(2, 2, 1);
+    row_map.setCellDofs(0, std::array<GlobalIndex,4>{0, 1, 2, 3});
+    row_map.setCellDofs(1, std::array<GlobalIndex,4>{4, 5, 6, 7});
+    col_map.setCellDofs(0, std::array<GlobalIndex,1>{0});
+    col_map.setCellDofs(1, std::array<GlobalIndex,1>{1});
+    row_map.finalize();
+    col_map.finalize();
+    constraints::AffineConstraints ac;
+    ac.addLine(3);
+    ac.addEntry(3, 0, .5);
+    ac.addLine(15);
+    ac.addEntry(15, 19, -2.);
+    ac.close();
+    MassKernel kernel;
+    StandardAssembler standard;
+    ColoredAssembler colored;
+    DenseSystemView reference(11, 20), result(11, 20);
+    auto assemble = [&](Assembler& assembler, DenseSystemView& out) {
+        AssemblyOptions options;
+        options.num_threads = 2;
+        assembler.setOptions(options);
+        assembler.setRowDofMap(row_map, 3);
+        assembler.setColDofMap(col_map, 15);
+        assembler.setConstraints(&ac);
+        return assembler.assembleMatrix(mesh, test_space, trial_space, kernel, out);
+    };
+    ASSERT_TRUE(assemble(standard, reference));
+    ASSERT_TRUE(assemble(colored, result));
+    EXPECT_NEAR(reference.getMatrixEntry(0, 19), -1./24., 1.e-12);
+    for (GlobalIndex i = 0; i < 11; ++i) {
+        for (GlobalIndex j = 0; j < 20; ++j) {
+            EXPECT_NEAR(result.getMatrixEntry(i,j), reference.getMatrixEntry(i,j), 1.e-12);
+        }
+    }
+}
 
 TEST_F(ColoredAssemblerTest, DefaultConstruction) {
     ColoredAssembler assembler;

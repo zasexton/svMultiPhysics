@@ -402,6 +402,7 @@ public:
     [[nodiscard]] bool isThreadSafe() const noexcept override { return false; }
 
 private:
+    friend class ColoredAssembler; // Supplies the cell schedule to the canonical assembly path.
     friend class MatrixFreeAssembler;  // Shares cell geometry, basis and orientation transforms.
 
     /**
@@ -587,7 +588,8 @@ private:
         GlobalSystemView* vector_view,
         bool assemble_matrix,
         bool assemble_vector,
-        const spaces::FunctionSpace* rule_space = nullptr);
+        const spaces::FunctionSpace* rule_space = nullptr,
+        std::span<const int> cell_colors = {});
 
     /**
      * @brief Prepare assembly context for a cell
