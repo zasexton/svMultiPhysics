@@ -691,6 +691,82 @@ TEST(LevelSetKinematicReconciliation, RedistancingIsJudgedByItsOwnVolumeAndDispl
     EXPECT_GT(0.5 * 0.001 * std::abs(flux(redistanced) - flux(reconciled)), 1.0e3 * transport.volume_tolerance);
 }
 
+TEST(LevelSetKinematicReconciliation, InadmissibleRedistancingKeepsTheReconciledStepAndItsHistory)
+{
+    namespace ts = FE::timestepping;
+    SimplexSystem s(buildStructuredTriangleMesh(14), 2);
+    const auto previous = s.scalar([](const Point& x) {
+        return ellipse(x) * (0.4 + x[0] + 0.3 * x[1]);
+    });
+    const auto velocity = s.vector([](const Point& x) { return Point{0.2 * x[0] * x[0], 0., 0.}; });
+    const auto factory = ts::test::createTestFactory();
+    auto history = ts::TimeHistory::allocate(*factory, s.system.dofHandler().getNumDofs(), 1, true);
+    std::vector<FE::Real> state(s.system.dofHandler().getNumDofs(), 0.);
+    std::copy(previous.begin(), previous.end(), state.begin() + s.system.fieldDofOffset(s.phi));
+    std::copy(velocity.begin(), velocity.end(), state.begin() + s.system.fieldDofOffset(s.velocity));
+    ts::test::setVectorByDof(history.u(), state);
+    ts::test::setVectorByDof(history.uPrev(), state);
+    std::vector<FE::Real> rate(state.size(), 0.125);
+    ts::test::setVectorByDof(history.uDot(), rate);
+    history.setStepIndex(1);
+    history.setTime(0.001);
+    history.setDt(0.001);
+    auto config = std::make_shared<level_set::LevelSetMaintenanceConfiguration>();
+    config->transport.level_set.field_name = "phi";
+    config->transport.velocity.field_name = "w";
+    config->transport.kinematic_reconciliation.enabled = true;
+    config->transport.interface_preserving_redistancing.enabled = true;
+    std::vector<level_set::LevelSetMaintenanceRequest> requests{{.configuration = config}};
+    requests.front().runtime.redistancing_accumulated_displacement = 1.;
+    const auto baseline = level_set::LevelSetKinematicBaseline{.level_set_field=s.phi, .velocity_field=s.velocity, .step=0, .level_set=previous, .velocity=velocity};
+    std::vector<FE::Real> preceding;
+    int declined = 0;
+    const level_set::LevelSetMaintenanceStageObserver observe =
+        [&](level_set::MaintenanceSubstage stage, std::span<const FE::Real> before,
+            std::span<const FE::Real> after) {
+            if (stage == level_set::MaintenanceSubstage::GeometryReconciliation) {
+                preceding.assign(after.begin(), after.end());
+            }
+            if (stage == level_set::MaintenanceSubstage::Reinitialization) {
+                EXPECT_EQ(std::vector<FE::Real>(before.begin(), before.end()), preceding);
+                EXPECT_NE(std::vector<FE::Real>(after.begin(), after.end()), preceding);
+                ++declined;
+                throw level_set::RedistancingGeometryRejected("candidate exceeds the root-path guard");
+            }
+        };
+    // A structural observer failure still rejects the enclosing transaction.
+    const level_set::LevelSetMaintenanceStageObserver broken_observer =
+        [](level_set::MaintenanceSubstage stage, auto, auto) {
+            if (stage == level_set::MaintenanceSubstage::Reinitialization) {
+                throw std::runtime_error("failed to restore the preceding geometry");
+            }
+        };
+    ASSERT_THROW(level_set::applyLevelSetMaintenance(
+        {.fe_system = &s.system}, history, requests, {}, broken_observer, nullptr, nullptr,
+        std::span(&baseline, 1)), std::runtime_error);
+    EXPECT_EQ(ts::test::getVectorByDof(history.u()), state);
+    EXPECT_EQ(ts::test::getVectorByDof(history.uDot()), rate);
+    std::vector<FE::LogRecord> logs;
+    ASSERT_TRUE(level_set::applyLevelSetMaintenance(
+        {.fe_system = &s.system}, history, requests, {}, observe, &logs, nullptr,
+        std::span(&baseline, 1)));
+    ASSERT_EQ(declined, 1);
+    ASSERT_NE(preceding, state);
+    EXPECT_EQ(ts::test::getVectorByDof(history.u()), preceding);
+    // Equal current and previous input states receive only the accepted reconciliation delta.
+    EXPECT_EQ(ts::test::getVectorByDof(history.uPrev()), preceding);
+    EXPECT_EQ(ts::test::getVectorByDof(history.uDot()), rate);
+    EXPECT_EQ(requests.front().runtime.redistancing_calls, 0u);
+    EXPECT_EQ(requests.front().runtime.redistancing_skips, 1u);
+    EXPECT_EQ(requests.front().runtime.redistancing_restoration_failures, 0u);
+    EXPECT_GE(requests.front().runtime.redistancing_accumulated_displacement, 1.);
+    const auto recorded = std::find_if(logs.begin(), logs.end(), [](const auto& entry) {
+        return entry.str().find("geometry_admissible=false") != std::string::npos;
+    });
+    ASSERT_NE(recorded, logs.end());
+    EXPECT_NE(recorded->str().find("candidate exceeds the root-path guard"), std::string::npos);
+}
+
 TEST(LevelSetKinematicReconciliation, RedistancingKeepsTheAcceptedFieldWhenItsRestorationFails)
 {
     // Without a step to integrate over (dt = 0) the volume restoration of the

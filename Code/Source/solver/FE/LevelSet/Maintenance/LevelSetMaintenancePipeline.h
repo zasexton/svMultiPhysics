@@ -32,6 +32,7 @@
 #include <memory>
 #include <optional>
 #include <span>
+#include <stdexcept>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -64,6 +65,14 @@ struct LevelSetMaintenanceHost {
 /// before it is published (throws to reject it).
 using LevelSetMaintenanceCandidateValidator =
     std::function<void(std::span<const Real>)>;
+
+/// An optional redistancing proposal violated a generated-geometry guard.
+/// The stage observer may decline it after restoring the preceding geometry
+/// and before it records any work for this proposal.
+class RedistancingGeometryRejected : public std::runtime_error {
+public:
+    using std::runtime_error::runtime_error;
+};
 
 /// Observer of each maintenance substage that changed the level set, with
 /// the FE-ordered solution before and after it.

@@ -686,21 +686,28 @@ void redistanceMaintainedLevelSet(
     const bool keeps_interface =
         change.max_crossing_shift <= change_raw.max_crossing_shift &&
         change.max_open_end_shift <= change_raw.max_open_end_shift;
-    const bool applied = representation_changed && keeps_volume && keeps_interface;
+    bool applied = representation_changed && keeps_volume && keeps_interface;
+    std::optional<std::string> geometry_rejection;
     if (applied) {
-      // The stored increments and rate follow the change of representation.
-      representation_slopes[field] = svmp::FE::level_set::levelSetRepresentationSlope(
-          mesh_access, phi_dofs, input, restored);
-      std::copy(restored.begin(), restored.end(),
-                fe_solution.begin() + static_cast<std::ptrdiff_t>(offset));
-      changed = true;
-      modified_level_set_fields.insert(field);
+      auto field_begin = fe_solution.begin() + static_cast<std::ptrdiff_t>(offset);
+      std::copy(restored.begin(), restored.end(), field_begin);
       if (observe_stage) {
-        observe_stage(
-            MaintenanceSubstage::
-                Reinitialization,
-            before_redistancing,
-            fe_solution);
+        try {
+          observe_stage(MaintenanceSubstage::Reinitialization,
+                        before_redistancing, fe_solution);
+        } catch (const RedistancingGeometryRejected& rejection) {
+          // The observer restored the certified preceding geometry and did
+          // not record work for the declined representation.
+          std::copy(input.begin(), input.end(), field_begin);
+          geometry_rejection = rejection.what();
+          applied = false;
+        }
+      }
+      if (applied) {
+        representation_slopes[field] = svmp::FE::level_set::levelSetRepresentationSlope(
+            mesh_access, phi_dofs, input, restored);
+        changed = true;
+        modified_level_set_fields.insert(field);
       }
     }
     svmp::FE::LogRecord record("LevelSetMaintenancePipeline", "interface-preserving redistancing");
@@ -740,6 +747,9 @@ void redistanceMaintainedLevelSet(
         .value("time", history.time())
         .quoted("status", redistance.diagnostic)
         .quoted("restoration_status", restoration.diagnostic);
+    if (geometry_rejection) {
+      record.boolean("geometry_admissible", false).quoted("geometry_rejection", *geometry_rejection);
+    }
     staged_commit_logs.push_back(std::move(record));
     if ((representation_changed && !applied) || restoration_failed) {
       ++request.runtime.redistancing_skips;

@@ -36,6 +36,7 @@
 #include "FE/LevelSet/LevelSetConservativePhaseWorkflow.h"
 #include "FE/LevelSet/LevelSetMaintenanceSchedule.h"
 #include "FE/LevelSet/Maintenance/LevelSetMaintenanceConfiguration.h"
+#include "FE/Core/FEException.h"
 #include "FE/LevelSet/Maintenance/LevelSetMaintenancePipeline.h"
 #include "FE/LevelSet/Maintenance/LevelSetMaintenanceRequestSchedule.h"
 #include "FE/LevelSet/Maintenance/LevelSetWallAwareMaintenance.h"
@@ -9597,8 +9598,42 @@ void ApplicationDriver::runTransient(SimulationComponents& sim, const Parameters
               std::span<const svmp::FE::Real> before_candidate,
               std::span<const svmp::FE::Real> after_candidate) {
             ensure_maintenance_geometry_transaction();
-            cut_report = maintenance_geometry_transaction->refresh(
-                params, after_candidate);
+            const bool redistancing = substage == application::core::
+                LevelSetMaintenanceWorkSubstage::Reinitialization;
+            std::optional<std::string> geometry_rejection;
+            std::exception_ptr failure;
+            try {
+              cut_report = maintenance_geometry_transaction->refresh(params, after_candidate);
+            } catch (const svmp::FE::InadmissibleGeneratedGeometry& error) {
+              if (!redistancing) {
+                throw;
+              }
+              geometry_rejection = error.what();
+            } catch (...) {
+              if (!redistancing) {
+                throw;
+              }
+              failure = std::current_exception();
+            }
+            if (redistancing) {
+              requireCollectivePhasePreparation(failure, velocity_extension_artifact_comm,
+                                                "redistancing_candidate_geometry");
+              if (globalAnyBool(geometry_rejection.has_value(), velocity_extension_artifact_comm)) {
+                // A failed partial refresh may have installed candidate rows.
+                // Rebuild every rank from the last admissible stage before its
+                // geometry, rate history or work record can be published.
+                try {
+                  cut_report = maintenance_geometry_transaction->refresh(
+                      params, before_candidate, /*force_rebuild=*/true);
+                } catch (...) {
+                  failure = std::current_exception();
+                }
+                requireCollectivePhasePreparation(failure, velocity_extension_artifact_comm,
+                                                  "redistancing_preceding_geometry_restore");
+                throw svmp::FE::level_set::RedistancingGeometryRejected(geometry_rejection.value_or(
+                    "another rank rejected the generated redistancing geometry"));
+              }
+            }
             svmp::Physics::formulations::navier_stokes::free_surface::stageLevelSetMaintenanceWorkRow(
                 level_set_maintenance_work,
                 maintenance_work_rows,
