@@ -2175,13 +2175,17 @@ LevelSetKinematicReconciliationResult integrateKinematicStep(
     // Their unsatisfied local volume constraints cannot cancel one another,
     // so every connected interface also meets its own budget.
     Real worst_component = 0;
+    std::size_t worst_component_index = component.count;
     for (std::size_t c = 0; c < component.count; ++c) {
         const Real* terms = &budget[kBudgetTerms * c];
         const Real error = terms[0] - Real{0.5} * dt * (terms[1] + terms[2]);
         const Real allowed = std::abs(terms[3]) + kGeometryRelativeTolerance * correction_volume +
                              Real{128} * std::numeric_limits<Real>::epsilon() *
                                  (terms[4] + dt * (std::abs(terms[1]) + std::abs(terms[2])));
-        if (!(std::abs(error) <= allowed)) worst_component = std::max(worst_component, std::abs(error));
+        if (!(std::abs(error) <= allowed) && std::abs(error) > worst_component) {
+            worst_component = std::abs(error);
+            worst_component_index = c;
+        }
     }
     result.volume_balance_satisfied = std::abs(result.reconciled_volume_error) <= result.volume_tolerance &&
                                       unplaced_volume <= solver_volume_tolerance && worst_component == 0;
@@ -2195,6 +2199,27 @@ LevelSetKinematicReconciliationResult integrateKinematicStep(
                 << ", tolerance=" << result.volume_tolerance
                 << ", unplaced constrained volume=" << unplaced_volume
                 << ", largest connected-interface defect=" << worst_component;
+        if (worst_component_index < component.count) {
+            // A translated closed interface can miss every vertex of its former
+            // support. Distinguish loss of the retained P1 cut from a constraint
+            // on an interface that still exists. Each rank sees only its cells.
+            std::vector<Real> cut_present(2u, 0);
+            for (std::size_t c = 0; c < cells.size(); ++c) {
+                if (component.cell[c] != static_cast<long long>(worst_component_index)) {
+                    continue;
+                }
+                if (cells[c].previous_has_surface) {
+                    cut_present[0] = 1;
+                }
+                if (hasCutSurface(transported_cut_class[c])) {
+                    cut_present[1] = 1;
+                }
+            }
+            maxInPlace(context, cut_present);
+            if (cut_present[0] > 0 && cut_present[1] == 0) {
+                message << ", previously cut component has no retained P1 endpoint interface";
+            }
+        }
         result.diagnostic = message.str();
         return result;
     }

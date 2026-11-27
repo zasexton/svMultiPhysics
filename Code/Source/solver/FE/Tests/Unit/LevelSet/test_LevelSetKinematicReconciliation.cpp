@@ -420,6 +420,43 @@ TEST(LevelSetKinematicReconciliation, LeavesOutputAloneWhenTheTransportedTopolog
     EXPECT_EQ(endpoint, (std::vector<FE::Real>{3.}));
 }
 
+TEST(LevelSetKinematicReconciliation, ReportsWhenAnAdvectedPocketFallsBetweenAllP1Vertices)
+{
+    SimplexSystem system(buildStructuredTriangleMesh(2), 2);
+    constexpr FE::Real radius = 0.125;
+    constexpr FE::Real displacement = 0.2;
+    constexpr FE::Real area = 2.0 * radius * radius;
+    const auto velocity = system.vector([](const Point&) { return Point{1.0, 0.0, 0.0}; });
+    const auto diamond = [&](FE::Real center, FE::Real sign) {
+        return system.scalar([=](const Point& x) {
+            return sign * (radius - std::abs(x[0] - center) - std::abs(x[1] - 0.5));
+        });
+    };
+
+    // Rigid translation preserves the enclosed area. At x=0.7 the diamond
+    // contains no vertex of the half-unit grid, for either choice of phase.
+    for (const FE::Real sign : {-1.0, 1.0}) {
+        const auto previous = diamond(0.5, sign);
+        const auto transported = diamond(0.5 + displacement, sign);
+        ASSERT_TRUE(std::all_of(transported.begin(), transported.end(),
+                                [sign](FE::Real value) { return sign * value < 0.0; }));
+        std::vector<FE::Real> endpoint = previous;
+        const auto result = system.reconcile(
+            displacement, previous, transported, velocity, velocity, endpoint);
+
+        EXPECT_FALSE(result.success);
+        EXPECT_TRUE(result.retryable_failure);
+        EXPECT_EQ(endpoint, previous);
+        EXPECT_NEAR(result.previous_interface_flux, 0.0, 1.0e-15);
+        EXPECT_DOUBLE_EQ(result.current_interface_flux, 0.0);
+        EXPECT_GT(result.previous_interface_cells, 0u);
+        EXPECT_EQ(result.current_interface_cells, 0u);
+        EXPECT_NEAR(result.reconciled_volume_error, sign * area, 1.0e-15);
+        EXPECT_NE(result.diagnostic.find("previously cut component has no retained P1 endpoint interface"),
+                  std::string::npos) << result.diagnostic;
+    }
+}
+
 TEST(LevelSetKinematicReconciliation, RedistributesTheFluxShareOfAnInterfaceVertex)
 {
     SimplexSystem s(buildUnitTriangle(), 2);
