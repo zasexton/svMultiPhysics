@@ -7027,6 +7027,183 @@ TEST(StandardAssemblerFused, CellDependentSpaceUsesEachCellsQuadrature)
     }
 }
 
+namespace {
+
+class TriangleQuadH1Space final : public spaces::H1Space {
+public:
+    TriangleQuadH1Space(int degree, bool second_is_quad)
+        : H1Space(ElementType::Triangle3, degree), quad_(ElementType::Quad4, degree), second_is_quad_(second_is_quad) {}
+
+    const elements::Element& getElement(ElementType type, GlobalIndex) const noexcept override {
+        return type == ElementType::Quad4 ? quad_.element() : element();
+    }
+    std::size_t dofs_per_element(GlobalIndex cell) const noexcept override {
+        return cell == 1 && second_is_quad_ ? quad_.element().num_dofs() : element().num_dofs();
+    }
+private:
+    spaces::H1Space quad_;
+    bool second_is_quad_;
+};
+
+enum class BlockCellCase { AdditionalTerm, DifferentRules, MixedCells, AdaptiveBlock };
+
+template<class Container>
+void checkResolvedCellBlocks(BlockCellCase mode, bool base_fallback)
+{
+    const bool quad = mode == BlockCellCase::MixedCells;
+    const bool extra = mode == BlockCellCase::AdditionalTerm || mode == BlockCellCase::DifferentRules;
+    auto base = std::make_shared<MeshBase>();
+    std::vector<real_t> nodes{0, 0, 1, 0, 0, 1,  2, 0, 3, 0};
+    if (quad) nodes.insert(nodes.end(), {3, 1, 2, 1});
+    else nodes.insert(nodes.end(), {2, 1});
+    std::vector<index_t> connectivity(nodes.size() / 2);
+    std::iota(connectivity.begin(), connectivity.end(), index_t{0});
+    const CellShape triangle{CellFamily::Triangle, 3, 1}, square{CellFamily::Quad, 4, 1};
+    base->build_from_arrays(2, nodes, {0, 3, static_cast<offset_t>(connectivity.size())},
+                            connectivity, {triangle, quad ? square : triangle});
+    base->finalize();
+    const auto native_mesh = create_mesh(base);
+    MeshAccess mesh(*native_mesh);
+
+    auto p1 = std::make_shared<TriangleQuadH1Space>(1, quad);
+    auto p2 = std::make_shared<TriangleQuadH1Space>(2, quad);
+    auto rule = std::make_shared<TriangleQuadH1Space>(3, quad);
+    auto adaptive = std::make_shared<spaces::AdaptiveSpace>();
+    adaptive->add_level(1, p1);
+    adaptive->add_level(2, p2);
+    adaptive->resize_element_orders(2);
+    adaptive->set_element_order(0, 1);
+    adaptive->set_element_order(1, 2);
+    std::array<const spaces::FunctionSpace*, 2> fields{p1.get(), p2.get()};
+    if (mode == BlockCellCase::AdaptiveBlock) fields[1] = adaptive.get();
+
+    auto field_map = [&](const spaces::FunctionSpace& space) {
+        const auto n0 = space.getElement(mesh.getCellType(0), 0).num_dofs();
+        const auto n1 = space.getElement(mesh.getCellType(1), 1).num_dofs();
+        std::vector<GlobalIndex> indices(n0 + n1);
+        std::iota(indices.begin(), indices.end(), GlobalIndex{0});
+        dofs::DofMap map(2, n0+n1, static_cast<LocalIndex>(std::max(n0, n1)));
+        map.setCellDofs(0, std::span(indices).first(n0));
+        map.setCellDofs(1, std::span(indices).subspan(n0));
+        map.setNumDofs(n0+n1);
+        map.setNumLocalDofs(n0+n1);
+        map.finalize();
+        return map;
+    };
+    std::array maps{field_map(*fields[0]), field_map(*fields[1])};
+    const std::array<GlobalIndex, 2> offset{0, maps[0].getNumDofs()};
+    const auto n = offset[1] + maps[1].getNumDofs();
+    TestDenseSystemView expected(n), actual(n);
+    StandardAssembler per_block, fused;
+    per_block.setDofMap(maps[0]);
+    fused.setDofMap(maps[0]);
+
+    forms::FormCompiler compiler;
+    forms::JITOptions jit;
+    jit.enable = true;
+    std::vector<typename Container::BlockSpec> blocks;
+    const auto x = forms::x().component(0);
+    const auto f = forms::FormExpr::constant(1) + x*x*x*x;
+    const std::array<Real, 4> stiffness{2., -3., 5., 11.};
+    const std::array<Real, 2> loads{3., -7.};
+    for (std::size_t i = 0; i < 2; ++i) {
+        const auto v = forms::TestFunction(*fields[i], "v");
+        for (std::size_t j = 0; j < 3; ++j) {
+            const bool load = j == 2;
+            const auto trial = load ? i : j;
+            const auto u = forms::TrialFunction(*fields[trial], "u");
+            auto ir = load ? compiler.compileLinear((loads[i] * f * v).dx())
+                           : compiler.compileBilinear((stiffness[2*i + j] * v * u).dx());
+            auto reference = std::make_shared<forms::FormKernel>(std::move(ir));
+            reference->setCellRuleSpace(rule);
+            per_block.setRowDofMap(maps[i], offset[i]);
+            per_block.setColDofMap(maps[trial], offset[trial]);
+            if (load) {
+                ASSERT_TRUE(per_block.assembleVector(mesh, *fields[i], *reference, expected).success);
+            } else {
+                ASSERT_TRUE(per_block.assembleMatrix(mesh, *fields[i], *fields[trial], *reference, expected).success);
+            }
+            typename Container::BlockSpec b;
+            b.test_field = static_cast<FieldId>(i);
+            b.trial_field = static_cast<FieldId>(trial);
+            b.want_matrix = !load;
+            b.want_vector = load;
+            b.fallback_kernel = std::make_shared<forms::jit::JITKernelWrapper>(reference, jit);
+            b.test_space = fields[i];
+            b.trial_space = fields[trial];
+            b.row_dof_map = &maps[i];
+            b.col_dof_map = &maps[trial];
+            b.row_dof_offset = offset[i];
+            b.col_dof_offset = offset[trial];
+            blocks.push_back(std::move(b));
+        }
+    }
+    Container container(std::move(blocks), forms::jit::JITCompiler::getOrCreate(jit), jit);
+    container.setCellRuleSpace(rule);
+    container.setResolved();
+    FusedCellTerm parent{.test_space = p1.get(), .trial_space = p1.get(), .kernel = &container,
+        .row_dof_map = &maps[0], .col_dof_map = &maps[0], .matrix_view = &actual, .vector_view = &actual,
+        .assemble_matrix = true, .assemble_vector = true};
+    std::vector<FusedCellTerm> terms{parent};
+    RectangularMassKernel other;
+    if (extra) {
+        other.setCellRuleSpace(mode == BlockCellCase::DifferentRules ? p1 : rule);
+        FusedCellTerm leaf = parent;
+        leaf.kernel = &other;
+        terms.push_back(leaf);
+        per_block.setDofMap(maps[0]);
+        ASSERT_TRUE(per_block.assembleBoth(mesh, *p1, *p1, other, expected, expected).success);
+    }
+
+    for (const auto [matrix, vector] : {std::pair{true, true}, {true, false}, {false, true}}) {
+        SCOPED_TRACE(::testing::Message() << "matrix=" << matrix << ", vector=" << vector);
+        actual.zero();
+        for (auto& t : terms) {
+            t.assemble_matrix = matrix;
+            t.assemble_vector = vector;
+        }
+        const auto result = base_fallback ? fused.Assembler::assembleCellsFused(mesh, terms)
+                                         : fused.assembleCellsFused(mesh, terms);
+        ASSERT_TRUE(result.success);
+        const Real area = quad ? 1.5 : 1.;
+        // Integral of 1+x^4 on the origin triangle and the translated triangle or square.
+        const Real source_integral = area + 1./30 + (quad ? 211./5 : 473./30);
+        for (std::size_t i = 0; i < 2; ++i) {
+            Real load = 0;
+            for (auto r = offset[i]; r < offset[i] + maps[i].getNumDofs(); ++r) {
+                EXPECT_NEAR(actual.getVectorEntry(r), vector ? expected.getVectorEntry(r) : 0.0, 1e-11) << r;
+                load += actual.getVectorEntry(r);
+            }
+            EXPECT_NEAR(load, vector ? source_integral * loads[i] + area * (extra && i == 0) : 0.0, 1e-11);
+            for (std::size_t j = 0; j < 2; ++j) {
+                Real constant_action = 0;
+                for (auto r = offset[i]; r < offset[i] + maps[i].getNumDofs(); ++r) {
+                    for (auto c = offset[j]; c < offset[j] + maps[j].getNumDofs(); ++c) {
+                        EXPECT_NEAR(actual.getMatrixEntry(r, c), matrix ? expected.getMatrixEntry(r, c) : 0.0, 1e-11) << r << "," << c;
+                        constant_action += actual.getMatrixEntry(r, c);
+                    }
+                }
+                EXPECT_NEAR(constant_action, matrix ? area * (stiffness[2*i + j] + (extra && i == 0 && j == 0)) : 0.0, 1e-11);
+            }
+        }
+    }
+}
+
+} // namespace
+
+TEST(StandardAssemblerFused, ResolvedFieldBlocksSurviveOtherTermsAndCellSpecificRules)
+{
+    for (auto mode : {BlockCellCase::AdditionalTerm, BlockCellCase::DifferentRules,
+                      BlockCellCase::MixedCells, BlockCellCase::AdaptiveBlock}) {
+        SCOPED_TRACE(static_cast<int>(mode));
+        for (bool base_fallback : {false, true}) {
+            SCOPED_TRACE(base_fallback ? "base assembler fallback" : "standard assembler");
+            checkResolvedCellBlocks<forms::MixedBlockKernelSet>(mode, base_fallback);
+            checkResolvedCellBlocks<forms::MonolithicCellKernel>(mode, base_fallback);
+        }
+    }
+}
+
 TEST(StandardAssemblerCaches, FlatCoordinateCacheReusedForStaticDenseMeshes)
 {
     const std::array<std::array<Real, 3>, 4> nodes = {{

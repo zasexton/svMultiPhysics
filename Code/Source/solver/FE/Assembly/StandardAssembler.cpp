@@ -40,8 +40,7 @@
 #include "Forms/CutCellForms.h"
 #include "Forms/CutSurfaceGeometry.h"
 #include "Forms/FormKernels.h"
-#include "Forms/MixedBlockKernelSet.h"
-#include "Forms/MonolithicCellKernel.h"
+#include "Assembly/ResolvedCellTerms.h"
 #include "Forms/JIT/JITKernelWrapper.h"
 #include "Math/Vector.h"
 #include "Math/Matrix.h"
@@ -13309,20 +13308,17 @@ AssemblyResult StandardAssembler::assembleCellsFused(
         }
     }
 
-    if (std::any_of(terms.begin(), terms.end(), [](const FusedCellTerm& t) {
-            return t.kernel->hasCell() && requiresMovingDomainData(t.kernel->getRequiredData());
-        })) {
-        // The ordinary cell loop prepares explicit frames and moving fields.
-        // Resolved containers must be unpacked before calling it: their
-        // compatibility computeCell() entry point evaluates just the first block.
-        const auto assemble = [&](const FusedCellTerm& t, const spaces::FunctionSpace* rule) {
+    // Each leaf needs its own basis, DOF map, offsets and output request. A
+    // container's local compatibility kernel has none of that block layout.
+    const auto assemble_per_term = [&] {
+        const auto assemble = [&](const FusedCellTerm& t, const AssemblyKernel* parent) {
             const bool matrix = t.assemble_matrix && t.matrix_view;
             const bool vector = t.assemble_vector && t.vector_view;
             if ((!matrix && !vector) || !t.kernel->hasCell()) return;
             setRowDofMap(*t.row_dof_map, t.row_dof_offset);
             setColDofMap(*t.col_dof_map, t.col_dof_offset);
             const auto part = assembleCellsCore(mesh, *t.test_space, *t.trial_space, *t.kernel,
-                t.matrix_view, t.vector_view, matrix, vector, rule);
+                t.matrix_view, t.vector_view, matrix, vector, parent ? parent->cellRuleSpace() : nullptr);
             result.elements_assembled += part.elements_assembled;
             result.matrix_entries_inserted += part.matrix_entries_inserted;
             result.vector_entries_inserted += part.vector_entries_inserted;
@@ -13332,35 +13328,25 @@ AssemblyResult StandardAssembler::assembleCellsFused(
                 result.error_message = part.error_message;
             }
         };
-        for (const auto& t : terms) {
-            const auto assemble_blocks = [&](const auto& container) {
-                for (std::size_t b = 0; b < container.numBlocks(); ++b) {
-                    const auto& block = container.blockSpec(b);
-                    if (!block.fallback_kernel) continue;
-                    FusedCellTerm leaf = t;
-                    leaf.kernel = block.fallback_kernel.get();
-                    leaf.test_space = block.test_space;
-                    leaf.trial_space = block.trial_space;
-                    leaf.row_dof_map = block.row_dof_map;
-                    leaf.col_dof_map = block.col_dof_map;
-                    leaf.row_dof_offset = block.row_dof_offset;
-                    leaf.col_dof_offset = block.col_dof_offset;
-                    leaf.assemble_matrix = t.assemble_matrix && block.want_matrix;
-                    leaf.assemble_vector = t.assemble_vector && block.want_vector;
-                    assemble(leaf, t.kernel->cellRuleSpace());
-                }
-            };
-            if (const auto* mixed = dynamic_cast<const forms::MixedBlockKernelSet*>(t.kernel);
-                mixed && mixed->isResolved()) {
-                assemble_blocks(*mixed);
-            } else if (const auto* monolithic = dynamic_cast<const forms::MonolithicCellKernel*>(t.kernel);
-                       monolithic && monolithic->isResolved()) {
-                assemble_blocks(*monolithic);
-            } else {
-                assemble(t, nullptr);
-            }
-        }
+        for (const auto& t : terms) forEachCellTermBlock(t, assemble);
         return result;
+    };
+
+    for (const auto& t : terms) {
+        if (!t.kernel->hasCell()) continue;
+        if (requiresMovingDomainData(t.kernel->getRequiredData())) return assemble_per_term();
+        bool needs_block_rules = false;
+        visitResolvedCellContainer(*t.kernel, [&](const auto& container) {
+            needs_block_rules = terms.size() > 1;
+            for (std::size_t b = 0; !needs_block_rules && b < container.numBlocks(); ++b) {
+                const auto& block = container.blockSpec(b);
+                needs_block_rules = (block.test_space && block.test_space->space_type() == spaces::SpaceType::Adaptive) ||
+                                    (block.trial_space && block.trial_space->space_type() == spaces::SpaceType::Adaptive) ||
+                                    (block.fallback_kernel && block.fallback_kernel->cellRuleSpace() &&
+                                     block.fallback_kernel->cellRuleSpace()->space_type() == spaces::SpaceType::Adaptive);
+            }
+        });
+        if (needs_block_rules) return assemble_per_term();
     }
 
     ensureFieldAccessPlans(mesh);
@@ -13446,7 +13432,7 @@ AssemblyResult StandardAssembler::assembleCellsFused(
             auto other_qr = resolveQuadratureRule(rule_space(terms[ti]), first_cell, cell_type);
             if (!same_rule(*other_qr, *fused_quad_rule)) {
                 // Quad rule mismatch — fall back to default sequential path
-                return Assembler::assembleCellsFused(mesh, terms);
+                return assemble_per_term();
             }
         }
 
@@ -13470,7 +13456,7 @@ AssemblyResult StandardAssembler::assembleCellsFused(
             });
         }
         if (!one_rule) {
-            return Assembler::assembleCellsFused(mesh, terms);
+            return assemble_per_term();
         }
     }
     if (cached_quad_rule_.get() != fused_quad_rule.get()) {

@@ -936,6 +936,22 @@ void JITKernelWrapper::computeCellBatch(std::span<const assembly::AssemblyContex
         return;
     }
 
+    // Each compiled dispatch and output stride is specialized to this shape.
+    // Adaptive fields can change degree within an ordinary assembly batch.
+    for (std::size_t i = 0; i < n; ++i) {
+        const auto* ctx = contexts[i];
+        if (ctx == nullptr || ctx->numQuadraturePoints() != first_ctx->numQuadraturePoints() ||
+            ctx->numTestDofs() != first_ctx->numTestDofs() || ctx->numTrialDofs() != first_ctx->numTrialDofs() ||
+            ctx->dimension() != first_ctx->dimension() ||
+            outputs[i].has_matrix != outputs[first_idx].has_matrix ||
+            outputs[i].has_vector != outputs[first_idx].has_vector) {
+            for (std::size_t j = 0; j < n; ++j) {
+                if (contexts[j]) computeCell(*contexts[j], outputs[j]);
+            }
+            return;
+        }
+    }
+
     try {
         const auto checks = assembly::jit::PackingChecks{.validate_alignment = false};
 

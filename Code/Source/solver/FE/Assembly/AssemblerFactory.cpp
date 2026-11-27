@@ -6,6 +6,7 @@
  */
 
 #include "Assembly/Assembler.h"
+#include "Assembly/ResolvedCellTerms.h"
 #include "Assembly/GlobalSystemView.h"
 
 #include "Assembly/AssemblerSelection.h"
@@ -21,6 +22,7 @@
 
 #include <algorithm>
 #include <cctype>
+#include <optional>
 #include <string>
 
 namespace svmp {
@@ -58,6 +60,33 @@ std::string normalizeName(std::string_view name)
     return s;
 }
 
+// Direct assembler APIs obtain their rule from the kernel. A synchronous
+// leaf call may inherit a container rule without changing the shared leaf.
+class CellKernelWithRule final : public AssemblyKernel {
+public:
+    CellKernelWithRule(AssemblyKernel& leaf, const AssemblyKernel& rule_source)
+        : AssemblyKernel(rule_source), leaf_(leaf) {}
+
+    RequiredData getRequiredData() const override { return leaf_.getRequiredData(); }
+    std::vector<FieldRequirement> fieldRequirements() const override { return leaf_.fieldRequirements(); }
+    MaterialStateSpec materialStateSpec() const noexcept override { return leaf_.materialStateSpec(); }
+    int maxTemporalDerivativeOrder() const noexcept override { return leaf_.maxTemporalDerivativeOrder(); }
+    bool hasExplicitTimeDependency() const noexcept override { return leaf_.hasExplicitTimeDependency(); }
+    bool hasStateIndependentMatrix() const noexcept override { return leaf_.hasStateIndependentMatrix(); }
+    std::string name() const override { return leaf_.name(); }
+    bool isSymmetric() const noexcept override { return leaf_.isSymmetric(); }
+    bool isMatrixOnly() const noexcept override { return leaf_.isMatrixOnly(); }
+    bool isVectorOnly() const noexcept override { return leaf_.isVectorOnly(); }
+    bool supportsCellBatch() const noexcept override { return leaf_.supportsCellBatch(); }
+    void computeCell(const AssemblyContext& ctx, KernelOutput& out) override { leaf_.computeCell(ctx, out); }
+    void computeCellBatch(std::span<const AssemblyContext* const> contexts, std::span<KernelOutput> outputs) override
+    {
+        leaf_.computeCellBatch(contexts, outputs);
+    }
+private:
+    AssemblyKernel& leaf_;
+};
+
 } // namespace
 
 // ============================================================================
@@ -69,27 +98,33 @@ AssemblyResult Assembler::assembleCellsFused(
     std::span<const FusedCellTerm> terms)
 {
     AssemblyResult total;
-    for (const auto& t : terms) {
+    const auto assemble = [&](const FusedCellTerm& t, const AssemblyKernel* parent) {
+        if (!t.kernel->hasCell()) return;
+        std::optional<CellKernelWithRule> with_rule;
+        if (parent && parent->cellRuleSpace() && parent->cellRuleSpace() != t.kernel->cellRuleSpace()) {
+            with_rule.emplace(*t.kernel, *parent);
+        }
+        AssemblyKernel& kernel = with_rule ? static_cast<AssemblyKernel&>(*with_rule) : *t.kernel;
         setRowDofMap(*t.row_dof_map, t.row_dof_offset);
         setColDofMap(*t.col_dof_map, t.col_dof_offset);
 
         AssemblyResult r;
         if (t.assemble_matrix && t.matrix_view && t.assemble_vector && t.vector_view) {
-            r = assembleBoth(mesh, *t.test_space, *t.trial_space, *t.kernel,
+            r = assembleBoth(mesh, *t.test_space, *t.trial_space, kernel,
                              *t.matrix_view, *t.vector_view);
         } else if (t.assemble_matrix && t.matrix_view) {
-            r = assembleMatrix(mesh, *t.test_space, *t.trial_space, *t.kernel,
+            r = assembleMatrix(mesh, *t.test_space, *t.trial_space, kernel,
                                *t.matrix_view);
         } else if (t.assemble_vector && t.vector_view) {
             if (t.test_space == t.trial_space) {
-                r = assembleVector(mesh, *t.test_space, *t.kernel, *t.vector_view);
+                r = assembleVector(mesh, *t.test_space, kernel, *t.vector_view);
             } else {
                 DenseVectorView dummy(0);
-                r = assembleBoth(mesh, *t.test_space, *t.trial_space, *t.kernel,
+                r = assembleBoth(mesh, *t.test_space, *t.trial_space, kernel,
                                  dummy, *t.vector_view);
             }
         } else {
-            continue;
+            return;
         }
 
         total.elements_assembled += r.elements_assembled;
@@ -100,7 +135,8 @@ AssemblyResult Assembler::assembleCellsFused(
             total.success = false;
             total.error_message = r.error_message;
         }
-    }
+    };
+    for (const auto& t : terms) forEachCellTermBlock(t, assemble);
     return total;
 }
 
