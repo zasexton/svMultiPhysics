@@ -4009,6 +4009,27 @@ std::vector<GeneratedTwoFieldCase> generatedTwoFieldCases()
             .dI(marker);
     };
     return {
+        // One generated parent supplies the same state a=2 on both sides.
+        // A bare va contributes to both test rows, which share the same DOFs.
+        {"scalar jump and average of single continuous fields",
+         [](const FormExpr& a, const FormExpr& b, const FormExpr& va, const FormExpr& vb, int marker) {
+             namespace bc = svmp::FE::forms::bc;
+             const auto jump = bc::applyInterfaceScalarTrace(a, bc::ScalarTraceOperator::Identity,
+                                                              bc::InterfaceTraceReduction::Jump);
+             const auto average = bc::applyInterfaceScalarTrace(b, bc::ScalarTraceOperator::Identity,
+                                                                 bc::InterfaceTraceReduction::Average);
+             return (jump * va + average * vb).dI(marker);
+         }, {{0.0, 10.0}, {{{0.0, 0.0}, {0.0, 2.0}}}}},
+        {"normal jump of a single continuous field",
+         [=](const FormExpr& a, const FormExpr&, const FormExpr& va, const FormExpr&, int marker) {
+             return (svmp::FE::forms::bc::interfaceNormalComponent(
+                         a * e, svmp::FE::forms::bc::InterfaceTraceReduction::Jump) * va).dI(marker);
+         }, {}},
+        {"normal average of a single continuous field",
+         [=](const FormExpr& a, const FormExpr&, const FormExpr& va, const FormExpr&, int marker) {
+             return (svmp::FE::forms::bc::interfaceNormalComponent(
+                         a * e, svmp::FE::forms::bc::InterfaceTraceReduction::Average) * va).dI(marker);
+         }, {{4.0, 0.0}, {{{2.0, 0.0}, {0.0, 0.0}}}}},
         {"two-sided blocks", signed_blocks, {{-8.0, -24.0}, {{{1.0, -2.0}, {3.0, -6.0}}}}},
         {"two-sided blocks with a one-sided term",
          [=](const FormExpr& a, const FormExpr& b, const FormExpr& va, const FormExpr& vb, int marker) {

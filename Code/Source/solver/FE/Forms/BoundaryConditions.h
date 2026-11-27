@@ -379,52 +379,27 @@ enum class InterfaceTraceReduction : std::uint8_t {
                                                         ScalarTraceOperator op,
                                                         InterfaceTraceReduction reduction)
 {
-    const auto minus_value = [&]() -> FormExpr {
+    const auto trace = [op](const FormExpr& side_value, const FormExpr& normal) {
         switch (op) {
         case ScalarTraceOperator::Identity:
-            return expr.minus();
+            return side_value;
         case ScalarTraceOperator::NormalComponent:
-            return dot(expr.minus(), FormExpr::normal().minus());
+            return dot(side_value, normal);
         }
-
-        throw std::invalid_argument(
-            "forms::bc::applyInterfaceScalarTrace: unsupported scalar trace operator");
+        throw std::invalid_argument("forms::bc::applyInterfaceScalarTrace: unsupported scalar trace operator");
     };
-
-    const auto plus_value = [&]() -> FormExpr {
-        switch (op) {
-        case ScalarTraceOperator::Identity:
-            return expr.plus();
-        case ScalarTraceOperator::NormalComponent:
-            return dot(expr.plus(), FormExpr::normal().plus());
-        }
-
-        throw std::invalid_argument(
-            "forms::bc::applyInterfaceScalarTrace: unsupported scalar trace operator");
-    };
-
-    const auto tau_minus = minus_value();
-    const auto tau_plus = plus_value();
-
+    const auto n = FormExpr::normal();
     switch (reduction) {
     case InterfaceTraceReduction::Minus:
-        return tau_minus;
+        return trace(expr.minus(), n.minus());
     case InterfaceTraceReduction::Plus:
-        return tau_plus;
+        return trace(expr.plus(), n.plus());
     case InterfaceTraceReduction::Jump:
-        // The jump of the core, jump(u) = u(-) - u(+); for the normal trace,
-        // jump(u).n(-) = u(-).n(-) + u(+).n(+) (n(+) = -n(-)).
-        if (op == ScalarTraceOperator::Identity) {
-            return tau_minus - tau_plus;
-        }
-        return tau_plus + tau_minus;
+        // Keep the jump atomic so the compiler evaluates it on both sides.
+        // Using n(-) gives u(-).n(-) + u(+).n(+) for a normal jump.
+        return trace(expr.jump(), n.minus());
     case InterfaceTraceReduction::Average:
-        // The average of the core, avg(u) = (u(-) + u(+)) / 2; for the normal
-        // trace, avg(u).n(-) = (u(-).n(-) - u(+).n(+)) / 2 (n(+) = -n(-)).
-        if (op == ScalarTraceOperator::Identity) {
-            return 0.5 * (tau_plus + tau_minus);
-        }
-        return 0.5 * (tau_minus - tau_plus);
+        return trace(expr.avg(), n.minus());
     }
 
     throw std::invalid_argument(

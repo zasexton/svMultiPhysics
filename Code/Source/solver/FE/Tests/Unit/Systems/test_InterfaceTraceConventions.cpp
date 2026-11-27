@@ -38,6 +38,7 @@
 #include "Forms/BoundaryConditions.h"
 #include "Forms/InterfaceConditions.h"
 #include "Forms/JIT/JITKernelWrapper.h"
+#include "Forms/NitscheBC.h"
 #include "Forms/StandardBCs.h"
 #include "Forms/Vocabulary.h"
 #include "Mesh/Core/InterfaceMesh.h"
@@ -259,6 +260,39 @@ TEST(InterfaceTraceConventions, NormalComponentJumpIsTheCoreJumpAlongTheMinusNor
     EXPECT_GT(std::abs(with_core.left), 0.5);
 }
 
+TEST(InterfaceTraceConventions, FittedNormalJumpBoundaryConditionsAssembleBothRows)
+{
+    using forms::FormExpr;
+    const auto state = [](GlobalIndex cell, Real) { return cell == 0 ? 2.0 : -1.0; };
+    const auto normal_field = [](const FormExpr& w) { return forms::as_vector({w, FormExpr::constant(0)}); };
+    const auto sums = assembleCellSums([&](const FormExpr& w, const FormExpr& v) {
+        auto residual = (0.0 * w * v).dx();
+        forms::bc::InterfaceTraceLoadBC(kInterfaceMarker, FormExpr::constant(2))
+            .contributeToResidual(residual, normal_field(w), normal_field(v));
+        forms::bc::InterfaceTraceJumpPenaltyBC(kInterfaceMarker, FormExpr::constant(5), FormExpr::constant(4))
+            .contributeToResidual(residual, normal_field(w), normal_field(v));
+        return residual;
+    }, state);
+    // The unit face's outward traces give jump(u).n(-) = 3.  The jumps of
+    // the left and right tests are +1 and -1.  Only the minus test sees the load.
+    EXPECT_NEAR(sums.left, 9.0, 1e-12);
+    EXPECT_NEAR(sums.right, -11.0, 1e-12);
+
+    const auto nitsche = assembleCellSums([&](const FormExpr& w, const FormExpr& v) {
+        const auto U = normal_field(w), V = normal_field(v), n = FormExpr::normal().minus();
+        auto residual = (0.0 * w * v).dx();
+        forms::bc::InterfaceTraceNitscheBC(kInterfaceMarker, FormExpr::constant(1),
+            forms::inner(U.avg(), n), forms::inner(V.avg(), n), FormExpr::constant(3),
+            forms::bc::ScalarTraceOperator::NormalComponent, forms::bc::InterfaceTraceReduction::Jump, 2.0)
+            .contributeToResidual(residual, U, V);
+        return residual;
+    }, state);
+    // The consistency flux is 1/2, each adjoint test flux is 1/2, and
+    // the prescribed jump leaves an error of 2 with penalty 6.
+    EXPECT_NEAR(nitsche.left, 10.5, 1e-12);
+    EXPECT_NEAR(nitsche.right, -12.5, 1e-12);
+}
+
 TEST(InterfaceTraceConventions, UpwindValueOnAFittedInterfaceCarriesTheUpstreamState)
 {
     // The upwind flux {beta}.n(-) upwindValue(u, beta) jump(v) for u = 1 on the
@@ -378,7 +412,7 @@ TEST(InterfaceTraceConventions, IdentityJumpReductionIsTheCoreJump)
     EXPECT_EQ(forms::bc::applyInterfaceScalarTrace(u, forms::bc::ScalarTraceOperator::Identity,
                                                    forms::bc::InterfaceTraceReduction::Jump)
                   .toString(),
-              (u.minus() - u.plus()).toString());
+              forms::jump(u).toString());
 
     const auto indicator = [](Real x) { return x < 1.0 ? Real(1.0) : Real(0.0); };
     const auto with_helper = assembleCellSums(
