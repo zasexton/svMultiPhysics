@@ -1144,7 +1144,7 @@ TEST_P(LinearSolverConformance, MissingPatternEntryBehaviorIsDeterministic)
     auto A = factory->createMatrix(pat);
     auto viewA = A->createAssemblyView();
     viewA->beginAssemblyPhase();
-    if (kind == BackendKind::FSILS) {
+    if (kind == BackendKind::FSILS || kind == BackendKind::Eigen) {
         EXPECT_THROW(viewA->addMatrixEntry(0, 1, 2.0, assembly::AddMode::Insert), FEException);
         A->zero();
     } else {
