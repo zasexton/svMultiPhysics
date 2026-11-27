@@ -324,7 +324,7 @@ std::shared_ptr<svmp::FE::analysis::ConstraintRangeCertificate> installTestCerti
     auto method = read_environment
                       ? svmp::FE::analysis::constraintRangeMethodFromEnvironment()
                       : svmp::FE::analysis::ConstraintRangeMethod{
-                            .observe = svmp::FE::analysis::staticCertificateDiagnosticEnabled()};
+                            .observe = svmp::FE::analysis::constraintRangeMethodFromEnvironment().observe};
     if (explicit_method.max_range_distance.has_value()) {
         method.max_range_distance = explicit_method.max_range_distance;
     }
@@ -7331,7 +7331,7 @@ TEST(NewtonSolver,
     nopt.use_line_search = false;
 
     ScopedEnvVar enable_balance(
-        "SVMP_NS_FREE_SURFACE_CONSERVATIVE_BALANCE_DIAGNOSTIC", "1");
+        "SVMP_FE_CONSTRAINT_RANGE_DIAGNOSTIC", "1");
     installTestCertificate(nopt, *problem.sys);
     svmp::FE::timestepping::NewtonSolver newton(nopt);
     svmp::FE::timestepping::NewtonWorkspace workspace;
@@ -7363,7 +7363,7 @@ TEST(NewtonSolver,
 #endif
     FreeSurfaceConservativeBalanceKernelCounts diagnostic_counts;
     ScopedEnvVar enable_balance(
-        "SVMP_NS_FREE_SURFACE_CONSERVATIVE_BALANCE_DIAGNOSTIC", "1");
+        "SVMP_FE_CONSTRAINT_RANGE_DIAGNOSTIC", "1");
     const std::array<svmp::FE::Real, 4> pressure_pair_diagonal{
         1.0, 1.0, 1.0, 1.0};
     auto problem = makePressureRepresentabilityProblem(
@@ -7470,7 +7470,7 @@ TEST(NewtonSolver,
 #endif
     FreeSurfaceConservativeBalanceKernelCounts diagnostic_counts;
     ScopedEnvVar enable_balance(
-        "SVMP_NS_FREE_SURFACE_CONSERVATIVE_BALANCE_DIAGNOSTIC", "1");
+        "SVMP_FE_CONSTRAINT_RANGE_DIAGNOSTIC", "1");
     auto problem = makePressureRepresentabilityProblem(
         diagnostic_counts,
         /*two_cells=*/false,
@@ -7563,7 +7563,7 @@ TEST(NewtonSolver,
 #endif
     FreeSurfaceConservativeBalanceKernelCounts diagnostic_counts;
     ScopedEnvVar enable_balance(
-        "SVMP_NS_FREE_SURFACE_CONSERVATIVE_BALANCE_DIAGNOSTIC", "1");
+        "SVMP_FE_CONSTRAINT_RANGE_DIAGNOSTIC", "1");
     const std::array<svmp::FE::Real, 4> pressure_pair_diagonal{
         1.0, 1.0, 1.0, 1.0};
     auto problem = makePressureRepresentabilityProblem(
@@ -7656,9 +7656,9 @@ TEST(NewtonSolver,
 #endif
     FreeSurfaceConservativeBalanceKernelCounts diagnostic_counts;
     ScopedEnvVar enable_balance(
-        "SVMP_NS_FREE_SURFACE_CONSERVATIVE_BALANCE_DIAGNOSTIC", "1");
+        "SVMP_FE_CONSTRAINT_RANGE_DIAGNOSTIC", "1");
     ScopedEnvVar every_assembly(
-        "SVMP_NS_FREE_SURFACE_CONSERVATIVE_BALANCE_DIAGNOSTIC_EVERY_ASSEMBLY",
+        "SVMP_FE_CONSTRAINT_RANGE_REASSEMBLE_EACH_SAMPLE",
         "1");
     const std::array<svmp::FE::Real, 4> pressure_pair_diagonal{
         1.0, 1.0, 1.0, 1.0};
@@ -7745,7 +7745,7 @@ TEST(NewtonSolver,
 #endif
     FreeSurfaceConservativeBalanceKernelCounts diagnostic_counts;
     ScopedEnvVar enable_balance(
-        "SVMP_NS_FREE_SURFACE_CONSERVATIVE_BALANCE_DIAGNOSTIC", "1");
+        "SVMP_FE_CONSTRAINT_RANGE_DIAGNOSTIC", "1");
     ScopedEnvVar enable_assembly_diagnostics(
         "SVMP_NEWTON_ASSEMBLY_DIAGNOSTICS", "1");
     auto problem =
@@ -7895,7 +7895,7 @@ TEST(NewtonSolver,
 #else
     FreeSurfaceConservativeBalanceKernelCounts diagnostic_counts;
     ScopedEnvVar enable_balance(
-        "SVMP_NS_FREE_SURFACE_CONSERVATIVE_BALANCE_DIAGNOSTIC", "1");
+        "SVMP_FE_CONSTRAINT_RANGE_DIAGNOSTIC", "1");
     auto problem = makePressureRepresentabilityProblem(
         diagnostic_counts,
         /*two_cells=*/false,
@@ -8043,7 +8043,7 @@ TEST(NewtonSolver,
 #else
     FreeSurfaceConservativeBalanceKernelCounts diagnostic_counts;
     ScopedEnvVar enable_balance(
-        "SVMP_NS_FREE_SURFACE_CONSERVATIVE_BALANCE_DIAGNOSTIC", "1");
+        "SVMP_FE_CONSTRAINT_RANGE_DIAGNOSTIC", "1");
     auto dirichlet = std::make_shared<FixedPressureDirichletState>();
     dirichlet->field_local_dof = 2;
     auto problem = makeRetainedVolumePressureProblem(
@@ -8099,7 +8099,7 @@ TEST(NewtonSolver,
 #else
     FreeSurfaceConservativeBalanceKernelCounts diagnostic_counts;
     ScopedEnvVar enable_balance(
-        "SVMP_NS_FREE_SURFACE_CONSERVATIVE_BALANCE_DIAGNOSTIC", "1");
+        "SVMP_FE_CONSTRAINT_RANGE_DIAGNOSTIC", "1");
     auto problem = makeRetainedVolumePressureProblem(
         diagnostic_counts, {}, /*aggregation_count=*/0u);
     ASSERT_TRUE(problem.sys
@@ -8154,7 +8154,7 @@ TEST(NewtonSolver,
 #else
     FreeSurfaceConservativeBalanceKernelCounts diagnostic_counts;
     ScopedEnvVar enable_balance(
-        "SVMP_NS_FREE_SURFACE_CONSERVATIVE_BALANCE_DIAGNOSTIC", "1");
+        "SVMP_FE_CONSTRAINT_RANGE_DIAGNOSTIC", "1");
     ScopedEnvVar allow_unaggregated(
         "SVMP_AGGREGATION_ALLOW_UNAGGREGATED", "1");
     auto problem = makeRetainedVolumePressureProblem(diagnostic_counts);
@@ -8185,7 +8185,7 @@ TEST(NewtonSolver,
 #else
     FreeSurfaceConservativeBalanceKernelCounts diagnostic_counts;
     ScopedEnvVar enable_balance(
-        "SVMP_NS_FREE_SURFACE_CONSERVATIVE_BALANCE_DIAGNOSTIC", "1");
+        "SVMP_FE_CONSTRAINT_RANGE_DIAGNOSTIC", "1");
     auto problem = makeRetainedVolumePressureProblem(
         diagnostic_counts, {}, /*aggregation_count=*/2u);
     ASSERT_EQ(
@@ -8213,7 +8213,7 @@ TEST(NewtonSolver,
 #else
     FreeSurfaceConservativeBalanceKernelCounts diagnostic_counts;
     ScopedEnvVar enable_balance(
-        "SVMP_NS_FREE_SURFACE_CONSERVATIVE_BALANCE_DIAGNOSTIC", "1");
+        "SVMP_FE_CONSTRAINT_RANGE_DIAGNOSTIC", "1");
     auto problem = makeRetainedVolumePressureProblem(
         diagnostic_counts,
         {},
@@ -8242,7 +8242,7 @@ TEST(NewtonSolver,
 #endif
     FreeSurfaceConservativeBalanceKernelCounts diagnostic_counts;
     ScopedEnvVar enable_balance(
-        "SVMP_NS_FREE_SURFACE_CONSERVATIVE_BALANCE_DIAGNOSTIC", "1");
+        "SVMP_FE_CONSTRAINT_RANGE_DIAGNOSTIC", "1");
     auto problem = makePressureRepresentabilityProblem(
         diagnostic_counts,
         /*two_cells=*/false,
@@ -8324,7 +8324,7 @@ TEST(NewtonSolver,
 #endif
     FreeSurfaceConservativeBalanceKernelCounts diagnostic_counts;
     ScopedEnvVar enable_balance(
-        "SVMP_NS_FREE_SURFACE_CONSERVATIVE_BALANCE_DIAGNOSTIC", "1");
+        "SVMP_FE_CONSTRAINT_RANGE_DIAGNOSTIC", "1");
     auto problem = makePressureRepresentabilityProblem(
         diagnostic_counts,
         /*two_cells=*/false,
@@ -8393,7 +8393,7 @@ TEST(NewtonSolver,
         1.0, 2.0, 3.0, 4.0};
     FreeSurfaceConservativeBalanceKernelCounts diagnostic_counts;
     ScopedEnvVar enable_balance(
-        "SVMP_NS_FREE_SURFACE_CONSERVATIVE_BALANCE_DIAGNOSTIC", "1");
+        "SVMP_FE_CONSTRAINT_RANGE_DIAGNOSTIC", "1");
     auto problem = makePressureRepresentabilityProblem(
         diagnostic_counts,
         /*two_cells=*/false,
@@ -8612,10 +8612,10 @@ TEST(NewtonSolver,
 #endif
     FreeSurfaceConservativeBalanceKernelCounts diagnostic_counts;
     ScopedEnvVar ambient_pressure_initializer(
-        "SVMP_NS_FREE_SURFACE_STATIC_COMPATIBLE_PRESSURE_INITIALIZER",
+        "SVMP_FE_CONSTRAINT_RANGE_INITIALIZE_CONSTRAINT_FIELD",
         "1");
     ScopedEnvVar ambient_pressure_gate(
-        "SVMP_NS_FREE_SURFACE_PRESSURE_REPRESENTABILITY_MAX_RELATIVE_DISTANCE",
+        "SVMP_FE_CONSTRAINT_RANGE_MAX_RELATIVE_DISTANCE",
         "invalid");
     auto problem = makePressureRepresentabilityProblem(diagnostic_counts);
     const auto entry_state =
@@ -8849,7 +8849,7 @@ TEST(NewtonSolver,
     };
     FreeSurfaceConservativeBalanceKernelCounts diagnostic_counts;
     ScopedEnvVar enable_balance(
-        "SVMP_NS_FREE_SURFACE_CONSERVATIVE_BALANCE_DIAGNOSTIC", "1");
+        "SVMP_FE_CONSTRAINT_RANGE_DIAGNOSTIC", "1");
     auto problem = makePressureRepresentabilityProblem(
         diagnostic_counts,
         /*two_cells=*/false,
@@ -8979,7 +8979,7 @@ TEST(NewtonSolver,
     };
     FreeSurfaceConservativeBalanceKernelCounts diagnostic_counts;
     ScopedEnvVar enable_balance(
-        "SVMP_NS_FREE_SURFACE_CONSERVATIVE_BALANCE_DIAGNOSTIC", "1");
+        "SVMP_FE_CONSTRAINT_RANGE_DIAGNOSTIC", "1");
     auto problem = makePressureRepresentabilityProblem(
         diagnostic_counts,
         /*two_cells=*/false,
@@ -9039,7 +9039,7 @@ TEST(NewtonSolver,
     };
     FreeSurfaceConservativeBalanceKernelCounts diagnostic_counts;
     ScopedEnvVar enable_balance(
-        "SVMP_NS_FREE_SURFACE_CONSERVATIVE_BALANCE_DIAGNOSTIC", "1");
+        "SVMP_FE_CONSTRAINT_RANGE_DIAGNOSTIC", "1");
     auto problem = makePressureRepresentabilityProblem(
         diagnostic_counts,
         /*two_cells=*/false,
@@ -9110,7 +9110,7 @@ TEST(NewtonSolver,
         std::make_shared<FixedPressureDirichletState>();
     pressure_dirichlet->value = 0.0;
     ScopedEnvVar enable_balance(
-        "SVMP_NS_FREE_SURFACE_CONSERVATIVE_BALANCE_DIAGNOSTIC", "1");
+        "SVMP_FE_CONSTRAINT_RANGE_DIAGNOSTIC", "1");
     auto problem = makePressureRepresentabilityProblem(
         diagnostic_counts,
         /*two_cells=*/false,
@@ -10704,7 +10704,7 @@ TEST(NewtonSolver,
         std::make_shared<FixedPressureDirichletState>();
     pressure_dirichlet->value = 1.0;
     ScopedEnvVar enable_balance(
-        "SVMP_NS_FREE_SURFACE_CONSERVATIVE_BALANCE_DIAGNOSTIC", "1");
+        "SVMP_FE_CONSTRAINT_RANGE_DIAGNOSTIC", "1");
     auto problem = makePressureRepresentabilityProblem(
         diagnostic_counts,
         /*two_cells=*/false,
@@ -10763,7 +10763,7 @@ TEST(NewtonSolver,
 #endif
     FreeSurfaceConservativeBalanceKernelCounts diagnostic_counts;
     ScopedEnvVar enable_balance(
-        "SVMP_NS_FREE_SURFACE_CONSERVATIVE_BALANCE_DIAGNOSTIC", "1");
+        "SVMP_FE_CONSTRAINT_RANGE_DIAGNOSTIC", "1");
     auto problem = makePressureRepresentabilityProblem(
         diagnostic_counts,
         /*two_cells=*/false,
@@ -10833,7 +10833,7 @@ TEST(NewtonSolver,
 #endif
     FreeSurfaceConservativeBalanceKernelCounts diagnostic_counts;
     ScopedEnvVar enable_balance(
-        "SVMP_NS_FREE_SURFACE_CONSERVATIVE_BALANCE_DIAGNOSTIC", "1");
+        "SVMP_FE_CONSTRAINT_RANGE_DIAGNOSTIC", "1");
     auto problem =
         makePressureRepresentabilityProblem(diagnostic_counts);
 
@@ -10886,7 +10886,7 @@ TEST(NewtonSolver,
     auto constraint_state =
         std::make_shared<CrossCellPressureMpcState>();
     ScopedEnvVar enable_balance(
-        "SVMP_NS_FREE_SURFACE_CONSERVATIVE_BALANCE_DIAGNOSTIC", "1");
+        "SVMP_FE_CONSTRAINT_RANGE_DIAGNOSTIC", "1");
     auto problem = makePressureRepresentabilityProblem(
         diagnostic_counts,
         /*two_cells=*/true,

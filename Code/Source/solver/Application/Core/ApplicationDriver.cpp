@@ -53,7 +53,7 @@
 #include "FE/Geometry/CutQuadratureMapping.h"
 #include "FE/Interfaces/GeneratedActiveBoundaryDomain.h"
 #include "FE/Core/DeterministicParallel.h"
-#include "FE/Core/EnvironmentNames.h"
+#include "Physics/Formulations/NavierStokes/FreeSurface/CertificateEnvironment.h"
 #include "FE/Core/AggregationGuardDiagnostics.h"
 #include "FE/Core/HaloDiagnostics.h"
 #include "Physics/Formulations/NavierStokes/FreeSurface/ContactLineStageObservables.h"
@@ -233,7 +233,7 @@ void writeEffectiveConfigurationArtifact(
       output << artifacts[i].json;
     }
     output << "]";
-    if (const auto environment_names = svmp::FE::environment::configurationRecord();
+    if (const auto environment_names = svmp::Physics::formulations::navier_stokes::free_surface::environmentRegistry().configurationRecord();
         !environment_names.empty()) {
       output << ',' << environment_names;
     }
@@ -4904,13 +4904,14 @@ evaluateStaticCapillaryPressureCertificate(
     // own certificate: the deck's range threshold, no environment gates,
     // the initializer on request.
     auto analysis_method =
-        svmp::FE::analysis::newtonAnalysisMethodFromEnvironment();
+        svmp::Physics::formulations::navier_stokes::free_surface::newtonAnalysisMethodFromEnvironment();
     analysis_method.constraint_range =
         svmp::FE::analysis::ConstraintRangeMethod{
             .max_range_distance = static_cast<double>(
                 certificate_options
                     .pressure_representability_max_relative_distance),
-            .initialize_constraint_field = initialize_compatible_pressure};
+            .initialize_constraint_field = initialize_compatible_pressure,
+            .reassemble_each_sample = analysis_method.constraint_range.reassemble_each_sample};
     const auto analysis =
         svmp::FE::analysis::buildNewtonAnalysisExtensions(
             system, analysis_method);
@@ -7120,7 +7121,7 @@ void ApplicationDriver::runSteadyState(SimulationComponents& sim, const Paramete
   newton_opts.extensions =
       svmp::FE::analysis::buildNewtonAnalysisExtensions(
           *sim.fe_system,
-          svmp::FE::analysis::newtonAnalysisMethodFromEnvironment())
+          svmp::Physics::formulations::navier_stokes::free_surface::newtonAnalysisMethodFromEnvironment())
           .extensions;
   svmp::FE::timestepping::NewtonSolver newton(newton_opts);
   svmp::FE::timestepping::NewtonWorkspace workspace;
@@ -7317,7 +7318,7 @@ void ApplicationDriver::runTransient(SimulationComponents& sim, const Parameters
   opts.newton.extensions =
       svmp::FE::analysis::buildNewtonAnalysisExtensions(
           *sim.fe_system,
-          svmp::FE::analysis::newtonAnalysisMethodFromEnvironment())
+          svmp::Physics::formulations::navier_stokes::free_surface::newtonAnalysisMethodFromEnvironment())
           .extensions;
 
   const auto transient_cut_topology_preflight_comm =

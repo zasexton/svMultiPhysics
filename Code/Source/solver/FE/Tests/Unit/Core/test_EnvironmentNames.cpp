@@ -9,6 +9,7 @@
 
 #include <gtest/gtest.h>
 
+#include <cmath>
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
@@ -119,6 +120,24 @@ TEST_F(EnvironmentNamesTest, RejectsDuplicateAndIncompleteDeclarations)
          RunStatus::Reference, "a trace"},
     };
     EXPECT_THROW(EnvironmentNameRegistry{no_owner}, std::logic_error);
+}
+
+TEST_F(EnvironmentNamesTest, ExtendsCataloguesAndChecksRealAliasesInOrder)
+{
+    constexpr NameDeclaration extra[] = {
+        {"SVMP_TEST_ADDITIONAL_THRESHOLD", NameKind::NumericalOverride, "test", ValueType::Real,
+         "unset", RunStatus::NonReference, "optional threshold"}};
+    const EnvironmentNameRegistry extended(registry_, extra);
+    EXPECT_THROW((void)EnvironmentNameRegistry(extended, extra), std::logic_error);
+    EXPECT_EQ(registry_.find(extra[0].name), nullptr);
+    std::vector<std::string> aliases{"SVMP_TEST_ENVIRONMENT_TOLERANCE", extra[0].name};
+    ScopedVariable primary(aliases[0].c_str(), "");
+    ScopedVariable fallback(aliases[1].c_str(), "0.125");
+    EXPECT_EQ(extended.firstReal(aliases), 0.125);
+    ScopedVariable invalid(aliases[0].c_str(), "2x");
+    ASSERT_TRUE(extended.firstReal(aliases).has_value());
+    EXPECT_TRUE(std::isnan(*extended.firstReal(aliases)));
+    EXPECT_THROW((void)extended.optionalReal("SVMP_TEST_ENVIRONMENT_TRACE"), std::logic_error);
 }
 
 TEST_F(EnvironmentNamesTest, ReadsTheProcessEnvironmentOnEveryCall)

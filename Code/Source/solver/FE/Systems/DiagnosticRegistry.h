@@ -82,6 +82,11 @@ public:
     /// others it throws std::invalid_argument.
     void declareSet(std::string set, std::vector<std::string> environment_switches);
 
+    /// Use a formulation's extended catalogue when reading this set. The
+    /// catalogue must outlive the registry.
+    void declareSet(std::string set, std::vector<std::string> environment_switches,
+                    const environment::EnvironmentNameRegistry& names);
+
     /// Whether @p set is switched on now: the first of its environment
     /// switches that is set to a nonempty value decides.  The switches are
     /// read through the solver's environment-name registry, which declares
@@ -154,6 +159,7 @@ private:
     struct Set {
         std::string name{};
         std::vector<std::string> environment_switches{};
+        const environment::EnvironmentNameRegistry* names{};
         std::vector<OperatorTag> operators{};
         std::vector<std::any> declarations{};
     };

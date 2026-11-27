@@ -11,8 +11,6 @@
 #include "Systems/FESystem.h"
 
 #include <algorithm>
-#include <cctype>
-#include <cstdlib>
 #include <stdexcept>
 #include <utility>
 
@@ -27,9 +25,15 @@ bool DiagnosticOperatorHandle::installedOn(const FESystem& system) const
 
 void DiagnosticRegistry::declareSet(std::string set, std::vector<std::string> environment_switches)
 {
+    declareSet(std::move(set), std::move(environment_switches), environment::EnvironmentNameRegistry::solver());
+}
+
+void DiagnosticRegistry::declareSet(std::string set, std::vector<std::string> environment_switches,
+                                    const environment::EnvironmentNameRegistry& names)
+{
     for (const auto& existing : sets_) {
         if (existing.name == set) {
-            if (existing.environment_switches != environment_switches) {
+            if (existing.environment_switches != environment_switches || existing.names != &names) {
                 throw std::invalid_argument("DiagnosticRegistry: diagnostic set '" + set +
                                             "' is already declared with other environment switches");
             }
@@ -38,28 +42,20 @@ void DiagnosticRegistry::declareSet(std::string set, std::vector<std::string> en
     }
     sets_.push_back(Set{.name = std::move(set),
                         .environment_switches = std::move(environment_switches),
+                        .names = &names,
                         .operators = {}});
 }
 
 bool DiagnosticRegistry::enabled(std::string_view set) const
 {
-    return enabled(set, environment::EnvironmentNameRegistry::solver());
+    const auto& declaration = find(set);
+    return declaration.names->firstEnabled(declaration.environment_switches);
 }
 
 bool DiagnosticRegistry::enabled(std::string_view set,
                                  const environment::EnvironmentNameRegistry& names) const
 {
-    for (const auto& name : find(set).environment_switches) {
-        const char* env = names.value(name);
-        if (env == nullptr || env[0] == '\0') {
-            continue;
-        }
-        std::string normalized(env);
-        std::transform(normalized.begin(), normalized.end(), normalized.begin(),
-                       [](unsigned char ch) { return static_cast<char>(std::tolower(ch)); });
-        return normalized != "0" && normalized != "false" && normalized != "no" && normalized != "off";
-    }
-    return false;
+    return names.firstEnabled(find(set).environment_switches);
 }
 
 FormInstallOptions DiagnosticRegistry::operatorOptions(const FormInstallOptions& formulation_options,

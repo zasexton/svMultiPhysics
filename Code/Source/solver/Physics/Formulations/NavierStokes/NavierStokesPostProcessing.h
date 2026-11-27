@@ -19,6 +19,7 @@
  * factories collect the groups while they state the terms and pass them in.
  */
 
+#include "Physics/Formulations/NavierStokes/FreeSurface/CertificateEnvironment.h"
 #include "Physics/Formulations/NavierStokes/FreeSurface/SnapshotFunctionals.h"
 
 #include "Physics/Formulations/NavierStokes/IncompressibleNavierStokesVMSModule.h"
@@ -529,10 +530,7 @@ inline void declareDiagnosticSets(FE::systems::DiagnosticRegistry& registry, FE:
     // qualification scripts written while the diagnostic was being designed.
     registry.declareSet(
         std::string(kConservativeBalanceDiagnostics),
-        {"SVMP_NS_FREE_SURFACE_CONSERVATIVE_BALANCE_DIAGNOSTIC",
-         "SVMP_FREE_SURFACE_CONSERVATIVE_BALANCE_DIAGNOSTIC",
-         "SVMP_NS_FREE_SURFACE_EQUILIBRIUM_DIAGNOSTIC",
-         "SVMP_FREE_SURFACE_EQUILIBRIUM_DIAGNOSTIC"});
+        free_surface::conservativeBalanceDiagnosticSwitches(), free_surface::environmentRegistry());
 
     using Balance = FreeSurfaceConservativeBalanceDiagnosticOperators;
     const auto balance = [&](std::string_view tag) {

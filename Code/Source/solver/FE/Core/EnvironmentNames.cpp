@@ -12,6 +12,7 @@
 #include <algorithm>
 #include <cctype>
 #include <cstdlib>
+#include <limits>
 #include <stdexcept>
 
 namespace svmp {
@@ -139,22 +140,16 @@ std::span<const NameDeclaration> solverCatalogue() noexcept
         {"SVMP_ANALYSIS_SCAN_SELF_CHECK", Diagnostic, kAnalysis, Flag, "the first 256 reads", Reference,
          "checks every direct matrix read of the analysis scan against getEntry and throws on a "
          "difference"},
-        {"SVMP_FREE_SURFACE_CONSERVATIVE_BALANCE_DIAGNOSTIC", Diagnostic, kCertificate, Flag, "off", Reference,
-         "second spelling of SVMP_NS_FREE_SURFACE_CONSERVATIVE_BALANCE_DIAGNOSTIC"},
-        {"SVMP_FREE_SURFACE_CONSERVATIVE_BALANCE_DIAGNOSTIC_EVERY_ASSEMBLY", Performance, kCertificate, Flag,
-         "off", Reference,
-         "second spelling of SVMP_NS_FREE_SURFACE_CONSERVATIVE_BALANCE_DIAGNOSTIC_EVERY_ASSEMBLY"},
-        {"SVMP_FREE_SURFACE_CONSTANT_PRESSURE_KKT_MAX_RELATIVE_DISTANCE", NumericalOverride, kCertificate, Real,
-         "no gate", NonReference,
-         "second spelling of SVMP_NS_FREE_SURFACE_CONSTANT_PRESSURE_KKT_MAX_RELATIVE_DISTANCE"},
-        {"SVMP_FREE_SURFACE_EQUILIBRIUM_DIAGNOSTIC", Diagnostic, kCertificate, Flag, "off", Reference,
-         "fourth spelling of SVMP_NS_FREE_SURFACE_CONSERVATIVE_BALANCE_DIAGNOSTIC"},
-        {"SVMP_FREE_SURFACE_PRESSURE_REPRESENTABILITY_MAX_RELATIVE_DISTANCE", NumericalOverride, kCertificate,
-         Real, "no gate", NonReference,
-         "second spelling of SVMP_NS_FREE_SURFACE_PRESSURE_REPRESENTABILITY_MAX_RELATIVE_DISTANCE"},
-        {"SVMP_FREE_SURFACE_STATIC_COMPATIBLE_PRESSURE_INITIALIZER", NumericalOverride, kCertificate, Flag,
-         "off", NonReference,
-         "second spelling of SVMP_NS_FREE_SURFACE_STATIC_COMPATIBLE_PRESSURE_INITIALIZER"},
+        {"SVMP_FE_CONSTRAINT_RANGE_DIAGNOSTIC", Diagnostic, kCertificate, Flag, "off", Reference,
+         "samples the declared constraint range and constant-field KKT residual"},
+        {"SVMP_FE_CONSTRAINT_RANGE_REASSEMBLE_EACH_SAMPLE", Performance, kCertificate, Flag, "off", Reference,
+         "disables reuse of the mixed pair and range solve between samples"},
+        {"SVMP_FE_CONSTRAINT_RANGE_MAX_RELATIVE_DISTANCE", NumericalOverride, kCertificate, Real,
+         "no gate", NonReference, "maximum accepted relative distance from the range"},
+        {"SVMP_FE_CONSTRAINT_RANGE_CONSTANT_FIELD_KKT_MAX_RELATIVE_DISTANCE", NumericalOverride, kCertificate,
+         Real, "no gate", NonReference, "maximum accepted relative residual for a constant constraint field"},
+        {"SVMP_FE_CONSTRAINT_RANGE_INITIALIZE_CONSTRAINT_FIELD", NumericalOverride, kCertificate, Flag,
+         "off", NonReference, "adds the least-squares correction to the initial constraint field"},
         {"SVMP_NEWTON_FIELD_RESIDUAL_DIAGNOSTIC", Diagnostic, kRowObserver, Flag, "off", Reference,
          "logs the residual of one field per Newton assembly"},
         {"SVMP_NEWTON_FIELD_RESIDUAL_FIELD", Diagnostic, kRowObserver, Text, "Pressure", Reference,
@@ -163,22 +158,6 @@ std::span<const NameDeclaration> solverCatalogue() noexcept
          "global DOFs sampled by the field-residual log"},
         {"SVMP_NEWTON_MATRIX_SUPPORT_SAMPLE_DOFS", Diagnostic, kRowObserver, List, "none", Reference,
          "global DOFs whose matrix support is logged"},
-        {"SVMP_NS_FREE_SURFACE_CONSERVATIVE_BALANCE_DIAGNOSTIC", Diagnostic, kCertificate, Flag, "off",
-         Reference,
-         "logs the constraint-range certificate (representability and constant-field KKT distances); "
-         "the first set spelling of the four decides"},
-        {"SVMP_NS_FREE_SURFACE_CONSERVATIVE_BALANCE_DIAGNOSTIC_EVERY_ASSEMBLY", Performance, kCertificate, Flag,
-         "off", Reference, "recomputes the certificate's pair matrix and least-squares solve for every sample"},
-        {"SVMP_NS_FREE_SURFACE_CONSTANT_PRESSURE_KKT_MAX_RELATIVE_DISTANCE", NumericalOverride, kCertificate,
-         Real, "no gate", NonReference,
-         "accepts a converged step only if the constant-field KKT distance is at most this value"},
-        {"SVMP_NS_FREE_SURFACE_EQUILIBRIUM_DIAGNOSTIC", Diagnostic, kCertificate, Flag, "off", Reference,
-         "third spelling of SVMP_NS_FREE_SURFACE_CONSERVATIVE_BALANCE_DIAGNOSTIC"},
-        {"SVMP_NS_FREE_SURFACE_PRESSURE_REPRESENTABILITY_MAX_RELATIVE_DISTANCE", NumericalOverride, kCertificate,
-         Real, "no gate", NonReference,
-         "accepts a converged step only if the representability distance is at most this value"},
-        {"SVMP_NS_FREE_SURFACE_STATIC_COMPATIBLE_PRESSURE_INITIALIZER", NumericalOverride, kCertificate, Flag,
-         "off", NonReference, "replaces the initial guess by the static-compatible least-squares correction"},
         {"SVMP_NS_PRESSURE_ROW_CONTRIBUTION_DIAGNOSTIC", Diagnostic, kRowObserver, Flag, "off", Reference,
          "logs the declared row-contribution operators per assembly, and the field-residual log"},
         {"SVMP_NS_PRESSURE_ROW_CONTRIBUTION_MATRIX_DIAGNOSTIC", Diagnostic, kRowObserver, Flag, "off",
@@ -759,7 +738,19 @@ const char* toString(ValueType type) noexcept
 
 EnvironmentNameRegistry::EnvironmentNameRegistry(std::span<const NameDeclaration> declarations)
 {
-    by_name_.reserve(declarations.size());
+    append(declarations);
+}
+
+EnvironmentNameRegistry::EnvironmentNameRegistry(const EnvironmentNameRegistry& base,
+                                                 std::span<const NameDeclaration> additions)
+    : by_name_(base.by_name_)
+{
+    append(additions);
+}
+
+void EnvironmentNameRegistry::append(std::span<const NameDeclaration> declarations)
+{
+    by_name_.reserve(by_name_.size() + declarations.size());
     for (const auto& declaration : declarations) {
         if (declaration.name == nullptr || !validName(declaration.name)) {
             throw std::logic_error(
@@ -837,6 +828,44 @@ bool EnvironmentNameRegistry::enabled(std::string_view name) const
     std::transform(lowered.begin(), lowered.end(), lowered.begin(),
                    [](unsigned char ch) { return static_cast<char>(std::tolower(ch)); });
     return !(lowered == "0" || lowered == "false" || lowered == "off" || lowered == "no");
+}
+
+const std::string* EnvironmentNameRegistry::firstConfigured(std::span<const std::string> names) const
+{
+    for (const auto& name : names) {
+        if (const char* text = value(name); text && *text) {
+            return &name;
+        }
+    }
+    return nullptr;
+}
+
+bool EnvironmentNameRegistry::firstEnabled(std::span<const std::string> names) const
+{
+    const auto* name = firstConfigured(names);
+    return name && enabled(*name);
+}
+
+std::optional<double> EnvironmentNameRegistry::optionalReal(std::string_view name) const
+{
+    const auto& declared = declaration(name);
+    if (declared.type != ValueType::Real) {
+        throw std::logic_error(std::string("EnvironmentNameRegistry: '") + declared.name +
+                               "' is not declared as a real");
+    }
+    const char* text = value(name);
+    if (!text || !*text) {
+        return std::nullopt;
+    }
+    char* end = nullptr;
+    const double number = std::strtod(text, &end);
+    return end == text || *end != '\0' ? std::numeric_limits<double>::quiet_NaN() : number;
+}
+
+std::optional<double> EnvironmentNameRegistry::firstReal(std::span<const std::string> names) const
+{
+    const auto* name = firstConfigured(names);
+    return name ? optionalReal(*name) : std::nullopt;
 }
 
 std::vector<NameUse> EnvironmentNameRegistry::setNames() const

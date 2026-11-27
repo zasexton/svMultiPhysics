@@ -8,6 +8,7 @@
 #include <gtest/gtest.h>
 
 #include "Physics/Core/Domain.h"
+#include "Physics/Formulations/NavierStokes/FreeSurface/CertificateEnvironment.h"
 #include "Physics/Core/JITRuntimePolicy.h"
 #include "Physics/Core/PhysicsModule.h"
 #include "Physics/Core/TemporalValues.h"
@@ -17,12 +18,15 @@
 #include "FE/Systems/TimeSeries.h"
 
 #include <array>
+#include <cmath>
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
+#include <memory>
 #include <optional>
 #include <stdexcept>
 #include <string>
+#include <vector>
 
 namespace svmp {
 namespace Physics {
@@ -67,6 +71,75 @@ public:
 };
 
 } // namespace
+
+class FreeSurfaceCertificateEnvironment : public ::testing::Test {
+protected:
+    void SetUp() override
+    {
+        namespace fs = formulations::navier_stokes::free_surface;
+        for (const auto* setting : fs::environmentRegistry().declarations()) {
+            if (std::string_view(setting->owner) == "FE/Analysis/ConstraintRangeCertificate") {
+                clean_.push_back(std::make_unique<ScopedEnvVar>(setting->name, std::nullopt));
+            }
+        }
+    }
+
+private:
+    std::vector<std::unique_ptr<ScopedEnvVar>> clean_;
+};
+
+TEST_F(FreeSurfaceCertificateEnvironment, KeepsAliasPrecedenceAndReadsCachePolicyAtEachSample)
+{
+    namespace fs = formulations::navier_stokes::free_surface;
+    ScopedEnvVar primary("SVMP_NS_FREE_SURFACE_CONSERVATIVE_BALANCE_DIAGNOSTIC", "off");
+    ScopedEnvVar fallback("SVMP_FREE_SURFACE_EQUILIBRIUM_DIAGNOSTIC", "1");
+    ScopedEnvVar canonical("SVMP_FE_CONSTRAINT_RANGE_DIAGNOSTIC", std::nullopt);
+    ScopedEnvVar repeat("SVMP_NS_FREE_SURFACE_CONSERVATIVE_BALANCE_DIAGNOSTIC_EVERY_ASSEMBLY", "0");
+    const auto method = fs::newtonAnalysisMethodFromEnvironment().constraint_range;
+    EXPECT_FALSE(method.observe);
+    ASSERT_NE(method.reassemble_each_sample, nullptr);
+    EXPECT_FALSE(method.reassemble_each_sample());
+    {
+        ScopedEnvVar scoped_repeat("SVMP_NS_FREE_SURFACE_CONSERVATIVE_BALANCE_DIAGNOSTIC_EVERY_ASSEMBLY", "on");
+        EXPECT_TRUE(method.reassemble_each_sample());
+        ScopedEnvVar canonical_repeat("SVMP_FE_CONSTRAINT_RANGE_REASSEMBLE_EACH_SAMPLE", "false");
+        EXPECT_FALSE(method.reassemble_each_sample());
+    }
+    ScopedEnvVar empty_primary("SVMP_NS_FREE_SURFACE_CONSERVATIVE_BALANCE_DIAGNOSTIC", "");
+    EXPECT_TRUE(fs::newtonAnalysisMethodFromEnvironment().constraint_range.observe);
+    EXPECT_FALSE(FE::analysis::constraintRangeMethodFromEnvironment().observe);
+    ScopedEnvVar override("SVMP_FE_CONSTRAINT_RANGE_DIAGNOSTIC", "0");
+    EXPECT_FALSE(fs::newtonAnalysisMethodFromEnvironment().constraint_range.observe);
+}
+
+TEST_F(FreeSurfaceCertificateEnvironment, PreservesThresholdValidationAndEffectiveConfiguration)
+{
+    namespace fs = formulations::navier_stokes::free_surface;
+    constexpr auto range = "SVMP_NS_FREE_SURFACE_PRESSURE_REPRESENTABILITY_MAX_RELATIVE_DISTANCE";
+    constexpr auto kkt = "SVMP_FREE_SURFACE_CONSTANT_PRESSURE_KKT_MAX_RELATIVE_DISTANCE";
+    constexpr auto initialize = "SVMP_FREE_SURFACE_STATIC_COMPATIBLE_PRESSURE_INITIALIZER";
+    ScopedEnvVar threshold(range, "0.25");
+    ScopedEnvVar constant(kkt, "1e-4");
+    ScopedEnvVar initializer(initialize, "yes");
+    auto method = fs::newtonAnalysisMethodFromEnvironment().constraint_range;
+    EXPECT_EQ(method.max_range_distance, 0.25);
+    EXPECT_EQ(method.max_constant_field_kkt_distance, 1e-4);
+    EXPECT_TRUE(method.initialize_constraint_field);
+    const auto& names = fs::environmentRegistry();
+    EXPECT_EQ(names.declarations().size(), FE::environment::EnvironmentNameRegistry::solver().declarations().size() + 12);
+    EXPECT_TRUE(names.declaration(range).marksNonReference());
+    EXPECT_STREQ(names.declaration(range).owner, "FE/Analysis/ConstraintRangeCertificate");
+    EXPECT_EQ(FE::environment::EnvironmentNameRegistry::solver().find(range), nullptr);
+    EXPECT_TRUE(names.declaration("SVMP_FE_CONSTRAINT_RANGE_MAX_RELATIVE_DISTANCE").marksNonReference());
+    const auto record = names.configurationRecord();
+    EXPECT_NE(record.find(range), std::string::npos);
+    EXPECT_NE(record.find(kkt), std::string::npos);
+    EXPECT_NE(record.find(initialize), std::string::npos);
+    ScopedEnvVar malformed("SVMP_FE_CONSTRAINT_RANGE_MAX_RELATIVE_DISTANCE", "0.01bad");
+    const auto failed = fs::newtonAnalysisMethodFromEnvironment().constraint_range.max_range_distance;
+    ASSERT_TRUE(failed.has_value());
+    EXPECT_TRUE(std::isnan(*failed));
+}
 
 TEST(TemporalValues, ReadsAndInterpolatesClampedScalarTable)
 {

@@ -13,8 +13,8 @@
  * @brief The environment-name registry: the one service through which the
  *        solver reads environment variables.
  *
- * Every name the solver reads is declared once, in the catalogue of
- * EnvironmentNames.cpp, with its kind, owning service, value type, value
+ * A name is declared by the service or formulation that accepts it,
+ * with its kind, owning service, value type, value
  * when unset, and whether setting it makes the run a non-reference run.
  * Code reads a name only through the registry; reading a name that is not
  * declared is a programming error (std::logic_error).
@@ -32,6 +32,7 @@
  */
 
 #include <cstdint>
+#include <optional>
 #include <span>
 #include <string>
 #include <string_view>
@@ -96,7 +97,10 @@ public:
     /// incomplete.
     explicit EnvironmentNameRegistry(std::span<const NameDeclaration> declarations);
 
-    /// The registry of every name the solver reads.
+    /// Extend a catalogue. The declarations must outlive the registry.
+    EnvironmentNameRegistry(const EnvironmentNameRegistry& base, std::span<const NameDeclaration> additions);
+
+    /// The base catalogue of solver controls.
     [[nodiscard]] static const EnvironmentNameRegistry& solver();
 
     /// The declarations in name order.
@@ -122,6 +126,14 @@ public:
     /// 0, false, off or no (in any letter case).
     [[nodiscard]] bool enabled(std::string_view name) const;
 
+    /// The first nonempty setting takes precedence over later aliases.
+    [[nodiscard]] bool firstEnabled(std::span<const std::string> names) const;
+    [[nodiscard]] std::optional<double> firstReal(std::span<const std::string> names) const;
+
+    /// Unset or empty is absent. Malformed text is a present NaN so a
+    /// numerical gate fails closed.
+    [[nodiscard]] std::optional<double> optionalReal(std::string_view name) const;
+
     /// The declared names that are set now, in name order.
     [[nodiscard]] std::vector<NameUse> setNames() const;
 
@@ -132,6 +144,8 @@ public:
     [[nodiscard]] std::string configurationRecord() const;
 
 private:
+    void append(std::span<const NameDeclaration> declarations);
+    [[nodiscard]] const std::string* firstConfigured(std::span<const std::string> names) const;
     std::vector<const NameDeclaration*> by_name_{};
 };
 

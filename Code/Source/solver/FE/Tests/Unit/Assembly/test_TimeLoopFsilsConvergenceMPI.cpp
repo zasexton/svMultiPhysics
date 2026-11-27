@@ -3449,7 +3449,7 @@ TEST(TimeLoopFsilsConvergenceMPI,
         "threshold validity differs");
     {
         constexpr const char* threshold_environment =
-            "SVMP_NS_FREE_SURFACE_PRESSURE_REPRESENTABILITY_MAX_RELATIVE_DISTANCE";
+            "SVMP_FE_CONSTRAINT_RANGE_MAX_RELATIVE_DISTANCE";
         ScopedEnvironmentValue scoped_threshold(
             threshold_environment,
             rank == 0 ? "not-a-number" : nullptr);
@@ -3483,7 +3483,7 @@ TEST(TimeLoopFsilsConvergenceMPI,
         "constant-pressure KKT threshold validity differs");
     {
         constexpr const char* threshold_environment =
-            "SVMP_NS_FREE_SURFACE_CONSTANT_PRESSURE_KKT_MAX_RELATIVE_DISTANCE";
+            "SVMP_FE_CONSTRAINT_RANGE_CONSTANT_FIELD_KKT_MAX_RELATIVE_DISTANCE";
         ScopedEnvironmentValue scoped_threshold(
             threshold_environment,
             rank == 0 ? "not-a-number" : nullptr);
