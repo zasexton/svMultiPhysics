@@ -24,12 +24,8 @@ namespace level_set {
 /**
  * @brief One parent cell of an accepted contact rule on a contact wall.
  *
- * The record names the accepted contact geometry and nothing else: the
- * contact angle has one owner, the momentum-side Young term (decision D4 in
- * Documentation/free_surface_program_tracker.md), so no target angle or
- * physical frame is carried.  Maintenance that must not move the accepted
- * contact line (the conservative-phase geometry reconciliation) leaves the
- * coefficients of these cells unchanged.
+ * Maintenance that preserves the accepted contact line keeps the coefficients
+ * of these parent cells fixed during geometry reconciliation.
  *
  * The parent identity is partition independent.  A caller may hold only the
  * locally owned records; consumers form one sorted, duplicate-free

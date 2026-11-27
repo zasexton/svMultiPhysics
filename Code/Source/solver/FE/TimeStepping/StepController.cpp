@@ -17,8 +17,6 @@ namespace svmp {
 namespace FE {
 namespace timestepping {
 
-// Moved from the Navier-Stokes free-surface physics
-// (FreeSurfaceRunSupport.cpp step_reject_reason_to_string), unchanged.
 std::string stepRejectReasonName(StepRejectReason reason)
 {
     switch (reason) {

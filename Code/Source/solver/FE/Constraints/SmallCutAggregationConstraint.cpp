@@ -3796,7 +3796,7 @@ resolveDistributedAggregationDeclarations(
 /// reference space is about eps |x| ||J^{-1}|| ~ eps |x| / h.  On fine meshes
 /// far from the origin (|x| / h above about 64 |xi|) the corrections then stall
 /// at that image: Newton cycles between round-off neighbours of the solution
-/// and never meets the test.  On the capillary-rise level-40 mesh this
+/// and never meets the test.  On the refinement-level-40 regression mesh this
 /// rejected 15% of the root/vertex pairs within 4.5 cells at y = 20-24 mm
 /// (8% with fused multiply-add), and the run stopped at a wall vertex whose
 /// only root failed this way.  If the iteration budget

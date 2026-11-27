@@ -39,14 +39,8 @@ namespace svmp {
 namespace FE {
 namespace interfaces {
 
-// The evaluators were the velocity and scalar evaluators of the Navier-Stokes
-// level-set physics (FreeSurface/FreeSurfaceFieldEvaluators.cpp); they
-// read the field through a SnapshotFieldAccess and are otherwise unchanged.
-
 namespace {
 
-// The cell geometry mapping of the level-set physics
-// (FreeSurfaceRunSupport.cpp createCellGeometryMapping), unchanged.
 std::shared_ptr<svmp::FE::geometry::GeometryMapping> createCellGeometryMapping(
     const svmp::FE::assembly::IMeshAccess& mesh,
     svmp::FE::GlobalIndex cell)

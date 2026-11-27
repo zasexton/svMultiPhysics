@@ -20,11 +20,7 @@ namespace svmp {
 namespace FE {
 namespace systems {
 
-// The transaction rules, provenance chain and balance are those of the
-// Navier-Stokes free-surface energy ledger
-// (Physics/.../FreeSurface/FreeSurfaceEnergyLedger.cpp), whose hard-coded
-// channel fields became the declared channels of a catalogue.  Each kind is
-// summed in declaration order, as the fields were.
+// Sum each kind of channel in declaration order.
 
 namespace {
 
@@ -337,9 +333,7 @@ double transportCouplingWork(double energy_change, double dt, double power) noex
     return energy_change - dt * power;
 }
 
-// The residual-work rows of the free-surface energy account
-// (Physics/.../FreeSurface/FreeSurfaceEnergyAccount.cpp), with the seven
-// channel names declared by the caller; checks in the same order.
+// Evaluate the residual-work channels in declaration order.
 std::vector<double> evaluateResidualStepWork(std::span<const ResidualWorkPairing> pairings,
                                              std::span<const std::string> channels,
                                              double dt,

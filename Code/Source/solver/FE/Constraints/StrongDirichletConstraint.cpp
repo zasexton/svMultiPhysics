@@ -692,7 +692,7 @@ ConstraintDependencyDeclaration StrongDirichletConstraint::dependencyDeclaration
         out.value.time = true;
     }
     if (active_boundary_marker_ >= 0) {
-        // The wetted faces come from the installed cut-integration context; a
+        // The active faces come from the installed cut-integration context; a
         // new context rebuilds the constraint state (as for the constraints of
         // the active side), so the constrained set follows the cut.
         out.structural.fe_constraint_layout = true;

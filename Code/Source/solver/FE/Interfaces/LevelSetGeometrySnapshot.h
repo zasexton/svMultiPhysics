@@ -144,7 +144,7 @@ struct LevelSetGeometrySnapshotPolicy {
     int minimum_achieved_quadrature_order{0};
     bool require_complete_exterior_boundary_partition{true};
     // Volume side (Negative or Positive) whose full-cell rules are stored
-    // classification-only after validation, typically the dry side of a
+    // classification-only after validation, typically the inactive side of
     // a one-sided level-set domain.  A rule qualifies when it is the only volume
     // rule of its parent cell.  Its points are validated and digested exactly
     // as before and then released, so the snapshot revision is unchanged.

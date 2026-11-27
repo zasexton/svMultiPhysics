@@ -464,9 +464,9 @@ enum class Trace : std::uint8_t {
  *   constant of u (setup reads them).
  *
  * The target is a Boundary: a marker or an exterior measure (the generated
- * wet part of a cut boundary).  On the wet part, a strong condition acts on
+ * active subset of a cut boundary).  On that subset, a strong condition acts on
  * the degrees of freedom whose basis function has a nonzero trace on a face
- * of positive wetted measure (StrongDirichletConstraint,
+ * of positive active measure (StrongDirichletConstraint,
  * NormalComponentConstraint); a multiplier needs the whole marker.  Strong
  * normal conditions of one constant value on several boundaries join one
  * NormalComponentConstraint (joinNormals, BoundaryConditionManager::add), so
@@ -1255,7 +1255,7 @@ private:
 };
 
 /// The strong Dirichlet condition of the active components of @p values on
-/// @p target (a marker, or its generated wet part), named @p source_name in
+/// @p target (a marker, or its generated active subset), named @p source_name in
 /// its descriptors.
 template <class Values, class ActiveComponents>
 [[nodiscard]] inline std::unique_ptr<Dirichlet>

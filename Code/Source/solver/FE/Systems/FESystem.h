@@ -886,9 +886,8 @@ public:
      * @brief Fix the mesh-normal constraint declarations and their consumer
      * bindings.
      *
-     * For a component whose records depend on the declarations (the
-     * fitted-ALE operator-stage measurements of the free-surface physics):
-     * it calls this when its first collective stage begins.  Afterwards
+     * A component whose records depend on these declarations calls this
+     * before its first collective stage. Afterwards
      * declareMeshNormalBoundaryConstraint and
      * bindMeshNormalBoundaryConstraintConsumer throw.  It cannot be undone.
      */
@@ -1139,9 +1138,7 @@ public:
      * @brief Bind secondary fields and set dof_per_node on a
      * BoundaryReductionService for multi-field integrand evaluation.
      *
-     * For components that register boundary functionals of their own on
-     * the service (the fitted-ALE operator-stage measurements of the
-     * free-surface physics).
+     * Components use this when registering their own boundary functionals.
      */
     void bindSecondaryFields(BoundaryReductionService& svc,
                               FieldId primary_fid,

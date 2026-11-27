@@ -104,7 +104,7 @@ struct CutQuadratureProvenance {
     int implicit_cut_root_max_iterations{0};
     int requested_quadrature_order{-1};
     int achieved_quadrature_order{-1};
-    // Complete immutable free-surface snapshot binding.  Standalone cut
+    // Complete immutable level-set snapshot binding.  Standalone cut
     // rules leave this zero; importing a validated snapshot stamps every
     // retained rule with the finalized, content-addressed revision key.
     std::uint64_t level_set_snapshot_revision_key{0};

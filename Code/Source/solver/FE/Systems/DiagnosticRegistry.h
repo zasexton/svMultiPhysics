@@ -75,11 +75,9 @@ struct DiagnosticOperatorOptions {
 
 class DiagnosticRegistry {
 public:
-    /// Declares @p set when it is missing.  The formulations that share a
-    /// system share its registry (for example the two phases of a two-fluid
-    /// formulation), so a set may be declared again: with the same
-    /// environment switches this keeps the set and its operators; with
-    /// others it throws std::invalid_argument.
+    /// Formulations sharing a system share its registry. Redeclaring @p set
+    /// with identical switches preserves its operators. Conflicting switches
+    /// throw std::invalid_argument.
     void declareSet(std::string set, std::vector<std::string> environment_switches);
 
     /// Use a formulation's extended catalogue when reading this set. The

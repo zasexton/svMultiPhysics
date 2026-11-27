@@ -37,7 +37,7 @@ struct BlockLayoutRequest {
     /// another, when they are two contiguous runs, primary first, and one run
     /// has several fields (a two-way Schur-complement solve).
     bool split_by_role{false};
-    /// Name the momentum and constraint blocks of a layout that is not merged:
+    /// Name the primary and constraint blocks of a layout that is not merged:
     /// the first primary field and the first constraint field.
     bool name_saddle_pair{false};
 };

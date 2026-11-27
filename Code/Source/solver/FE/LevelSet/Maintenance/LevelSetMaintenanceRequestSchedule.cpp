@@ -236,7 +236,7 @@ std::uint64_t levelSetMaintenanceRequestActionBits(
   bits |= configuration.transport.conservative_phase.reconcile_geometry
               ? (1ull << 10u)
               : 0u;
-  // Bit 11 is the application's (static capillary equilibrium).
+  // Bit 11 is reserved for the application's maintenance stage.
   bits |= accepted_kinematic_due ? (1ull << 12u) : 0u;
   bits |= accepted_patch_bounds_due ? (1ull << 13u) : 0u;
   bits |= accepted_redistancing_due ? (1ull << 14u) : 0u;

@@ -522,7 +522,7 @@ public:
      *
      * Set for the generated rules that lie on the physical boundary: a
      * contact line (the rule's boundary normal, mapped to the physical
-     * frame) and a wetted (generated active) boundary (its face normal).
+     * frame) and a generated active boundary subset (its face normal).
      * Throws for any other context.
      */
     [[nodiscard]] Vector3D boundaryNormal(LocalIndex q) const;

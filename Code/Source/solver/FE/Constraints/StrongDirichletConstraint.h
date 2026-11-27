@@ -15,9 +15,8 @@
  * at any rank count), refused at a node where the facets meet at an edge or
  * corner.  It must not read an unknown.
  *
- * With a generated active subset of the marker (the wetted part of a cut
- * boundary, by its generated marker in the installed cut-integration
- * context), only the faces of positive wetted measure hold nodes: a degree of
+ * For a boundary subset identified by its generated marker in the installed
+ * cut context, only the faces of positive active measure hold nodes. A degree of
  * freedom whose basis function has a nonzero trace only on inactive faces is left
  * to the constraints of the active side (an inactive node of a cut cell would
  * otherwise shape the field inside that cell).  A new cut context
@@ -46,7 +45,7 @@ public:
     struct Yield {
         int boundary_marker{-1};
         int component{-1};
-        int active_boundary_marker{-1};   ///< its wetted subset, when restricted
+        int active_boundary_marker{-1};   ///< its active subset, when restricted
     };
 
     /// @p active_boundary_marker, when >= 0, is the generated active subset

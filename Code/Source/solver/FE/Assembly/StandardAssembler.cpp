@@ -194,7 +194,7 @@ public:
     }
 };
 
-// Uncut cells of a free-surface snapshot are assembled through full-side
+// Uncut cells of a level-set snapshot are assembled through full-side
 // cut-volume rules that repeat the same reference rule in every cell of a
 // type. Such cells share one rule object for an assembly call, and the basis
 // tabulations at its points are computed once and reused. Like the per-cell
@@ -530,8 +530,8 @@ void remapCutInterfaceGeometry(AssemblyContext& context,
     const auto jacobian_dets = context.jacobianDets();
     std::vector<AssemblyContext::Vector3D> normals;
     normals.reserve(rule.points.size());
-    // A generated rule on the physical boundary (a contact line or a wetted
-    // boundary) also carries the boundary's outward normal (boundaryNormal()).
+    // A generated rule on the physical boundary (a contact line or an active
+    // boundary subset) also carries the boundary's outward normal (boundaryNormal()).
     const bool on_physical_boundary = rule.provenance.parent_boundary_entity >= 0;
     std::vector<AssemblyContext::Vector3D> boundary_normals;
     if (on_physical_boundary) {
@@ -10147,7 +10147,7 @@ AssemblyResult StandardAssembler::assembleCutVolumes(
             ++cut_partial_rules;
         }
         if (active_rule_is_partial_cut && isFullSideVolumeRule(rule)) {
-            // Uncut cell of a free-surface snapshot: share the rule object so
+            // Uncut cell of a level-set snapshot: share the rule object so
             // its basis tabulations are reused across cells.
             active_rule = &full_side_snapshot_rules.intern(*active_rule);
         }
@@ -11032,7 +11032,7 @@ void StandardAssembler::assembleCutVolumeFusedRule(const CutVolumeFusedLoop& loo
         ++cut_partial_rules;
     }
     if (active_rule_is_partial_cut && isFullSideVolumeRule(rule)) {
-        // Uncut cell of a free-surface snapshot: share the rule object so
+        // Uncut cell of a level-set snapshot: share the rule object so
         // its basis tabulations are reused across cells.
         active_rule = &full_side_snapshot_rules.intern(*active_rule);
     }

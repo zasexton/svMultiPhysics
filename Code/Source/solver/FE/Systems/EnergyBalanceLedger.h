@@ -128,7 +128,7 @@ struct EnergyChannelDeclaration {
 /**
  * @brief The declared channels of one energy balance.
  *
- * @p subject names the balance in messages ("free-surface energy").  Names
+ * @p subject names the balance in messages.  Names
  * are unique within a kind; only non-stored channels declare identities, and
  * an identity names declared stored channels and one input.
  */

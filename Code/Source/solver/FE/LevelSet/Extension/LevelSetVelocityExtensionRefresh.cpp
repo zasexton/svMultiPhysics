@@ -59,9 +59,6 @@ std::array<bool, 3> strongZeroVelocityComponentMask(
         effective_direction[component] != 0;
     active_count += requested[component] ? 1 : 0;
   }
-  // Match NavierStokesRegister.cpp exactly for a zero-valued steady
-  // Dirichlet BC: only a nonempty proper subset changes the default
-  // all-component constraint.
   if (active_count > 0 && active_count < dimension) {
     mask = requested;
   }

@@ -107,7 +107,7 @@ struct FacetContribution {
 }
 
 /// The facet contributions this rank sees: the boundary facets of the
-/// boundaries on its owned cells (the wetted ones of a generated active
+/// boundaries on its owned cells (the faces of a generated active
 /// subset), at every support point of the field (of @p components
 /// components) there.
 std::vector<FacetContribution> collectContributions(const FESystem& system,

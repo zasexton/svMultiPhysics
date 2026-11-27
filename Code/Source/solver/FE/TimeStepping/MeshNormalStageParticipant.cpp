@@ -22,10 +22,6 @@ namespace svmp {
 namespace FE {
 namespace timestepping {
 
-// The participant was the fitted-ALE stage participant of the Navier-Stokes
-// free-surface physics (FreeSurface/FittedALEOperatorStage.cpp); its checks,
-// collectives and messages are unchanged.
-
 void requireMeshNormalStageSchemeCoverage(
     std::uint64_t declaration_count,
     bool scheme_supported,

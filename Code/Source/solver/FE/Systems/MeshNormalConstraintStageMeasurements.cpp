@@ -36,9 +36,6 @@
 
 namespace svmp::FE::systems {
 
-// The record code was in FESystem.cpp and then in the Navier-Stokes
-// free-surface physics (FreeSurface/FittedALEStageRecords.cpp); it keeps the
-// names it used there.
 using namespace record_support;
 
 namespace {

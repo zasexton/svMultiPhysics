@@ -820,9 +820,8 @@ public:
      * @brief Assemble a cell functional over the cut-volume rules of one
      * generated interface marker and side.
      *
-     * The rules are those of the cut context (for a free surface, the rules of
-     * its authoritative geometry snapshot).  Each rule of a locally owned
-     * parent cell is integrated once with the kernel's cell integrand.
+     * Integrate each rule of a locally owned parent cell once using the cut
+     * context and the kernel's cell integrand.
      */
     [[nodiscard]] Real assembleCutVolumeScalar(
         FunctionalKernel& kernel,

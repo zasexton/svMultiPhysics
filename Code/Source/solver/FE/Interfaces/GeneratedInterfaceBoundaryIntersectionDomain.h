@@ -157,7 +157,7 @@ struct GeneratedInterfaceBoundaryIntersectionFragment {
     std::string diagnostic{};
     // Exact reference-frame trace vertices inherited from the authoritative
     // source interface fragment.  Quadrature samples are not a substitute for
-    // these endpoints when constructing the adjacent wet/dry wall patches.
+    // these endpoints when constructing the boundary patches on either side of the interface.
     std::vector<std::array<Real, 3>> vertices{};
     std::vector<GeneratedInterfaceBoundaryIntersectionQuadraturePoint>
         quadrature_points{};

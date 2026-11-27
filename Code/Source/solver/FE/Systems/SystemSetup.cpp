@@ -8404,10 +8404,7 @@ void FESystem::buildAssemblyPlans()
 
                 // StandardAssembler's semantic MixedBlockSet fast path owns
                 // the complete cell-term batch and therefore applies only
-                // when this is the operator's sole registered cell term.  A
-                // coupled operator commonly contains an existing physics
-                // formulation (for example Navier--Stokes momentum) before a
-                // level-set phi/E formulation is appended.  Passing the
+                // when this is the operator's sole registered cell term. Passing the
                 // semantic parent through the generic multi-term path uses
                 // only its first block's row/column maps and silently omits
                 // cross blocks such as dR_phi/dE.  Preserve correctness in

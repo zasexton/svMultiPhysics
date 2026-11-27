@@ -73,10 +73,8 @@ namespace level_set {
 struct LevelSetVelocityExtensionRequest {
   struct WallConstraint {
     std::string face_name{};
-    // Preserve the raw Navier--Stokes Effective_direction metadata until the
-    // mesh dimension is known.  Empty (and all-zero/all-active) directions
-    // have the same all-component semantics as the production NS translator
-    // for a homogeneous Dirichlet condition.
+    // Keep the component mask until the mesh dimension is known. An empty,
+    // all-zero or all-active mask constrains every component.
     std::vector<int> effective_direction{};
     // The strong Dirichlet condition prescribes a velocity of any value
     // (time- or space-varying, from a file): the extension takes the source
@@ -116,10 +114,8 @@ struct LevelSetVelocityExtensionRefreshOptions {
   bool trace{false};
 };
 
-/// The velocity components a strong Dirichlet condition with this
-/// Effective_direction constrains (all of them unless the direction selects
-/// a nonempty proper subset, as the Navier--Stokes translator does), for a
-/// homogeneous wall and for a wall with a prescribed velocity alike.
+/// Components constrained by a boundary direction. An empty, all-zero or
+/// all-active mask constrains every component.
 [[nodiscard]] std::array<bool, 3> strongZeroVelocityComponentMask(
     std::span<const int> effective_direction,
     int dimension);

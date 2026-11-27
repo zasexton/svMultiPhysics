@@ -736,8 +736,6 @@ std::vector<Real> captureFeOrderedVectorCollectively(
   return values;
 }
 
-// Moved from the Navier-Stokes free-surface physics
-// (FreeSurfaceRunSupport.cpp gatherFeOrderedSolution), unchanged.
 std::vector<Real> captureFeOrderedVectorCollectively(
     const SystemStateView& state,
     const CollectiveCommunicator& comm)
@@ -1161,8 +1159,6 @@ std::uint64_t collectiveConstraintSemanticsKey(
 }
 
 #if defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH
-// Moved from the Navier-Stokes free-surface physics
-// (FreeSurfaceRunSupport.cpp activeFESystemCommunicator), unchanged.
 svmp::MeshComm activeMeshCommunicator(const FESystem& system)
 {
 #if defined(MESH_HAS_MPI) && FE_HAS_MPI

@@ -21,12 +21,6 @@
  * (LevelSetWallAwareMaintenanceInput) after validating its own contact
  * declarations and accepted stages.  The geometry (the snapshots, their rules
  * and the canonical constraints) is resolved here.
- *
- * resolveLevelSetWallContactConstraints holds the geometry part of the
- * Application driver's former wall-aware maintenance context;
- * makeAcceptedSnapshotWallConstraint and canonicalizeAcceptedWallConstraints
- * come from the Navier-Stokes FreeSurfaceContactStages.  The messages are
- * unchanged.
  */
 
 #include "Core/Types.h"

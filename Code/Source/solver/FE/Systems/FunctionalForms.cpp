@@ -342,10 +342,6 @@ std::vector<DeclaredWallFunctionalForm> declaredWallFunctionalForms(
   return out;
 }
 
-// Moved from Physics/Formulations/NavierStokes/FreeSurface/
-// FreeSurfaceContactStages.cpp with bodies, messages and collective order
-// unchanged; the free-surface functional declarations are an argument.
-
 } // namespace systems
 } // namespace FE
 } // namespace svmp

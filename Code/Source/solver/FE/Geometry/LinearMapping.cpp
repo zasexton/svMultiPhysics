@@ -24,12 +24,10 @@ bool is_simplex(ElementType type) {
 }
 
 // The linear Lagrange basis of an affine simplex depends only on its type.
-// Cut-cell measures, face frames and the free-surface snapshot construct a
-// LinearMapping for every cell they evaluate (about 0.2 million per 3D sessile
-// step at R/h = 8), so one immutable basis per type is built on first use
-// (thread-safe initialization of a function-local static) and shared.  It is
-// only evaluated through const member functions, which keep their scratch per
-// thread, so concurrent mappings may share it.
+// Cut-cell measures, face frames and level-set snapshots construct one
+// mapping per cell. Share one immutable basis per type across mappings.
+// Function-local static initialization is thread-safe and basis evaluations
+// keep their scratch per thread.
 std::shared_ptr<const basis::LagrangeBasis> sharedLinearBasis(ElementType type) {
     switch (type) {
     case ElementType::Line2: {
