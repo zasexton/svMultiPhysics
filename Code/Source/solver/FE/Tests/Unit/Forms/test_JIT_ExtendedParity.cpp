@@ -16,6 +16,7 @@
 #include "Assembly/CutIntegrationContext.h"
 #include "Assembly/StandardAssembler.h"
 #include "Assembly/TimeIntegrationContext.h"
+#include "Dofs/DofHandler.h"
 #include "Forms/BoundaryConditions.h"
 #include "Forms/CutCellForms.h"
 #include "Forms/FormCompiler.h"
@@ -25,6 +26,7 @@
 #include "Spaces/HCurlSpace.h"
 #include "Spaces/HDivSpace.h"
 #include "Spaces/H1Space.h"
+#include "Spaces/SpaceFactory.h"
 #include "Tests/Unit/Forms/FormsTestHelpers.h"
 
 #include <array>
@@ -78,6 +80,7 @@ struct CompareOptions {
     Real time_step{0.0};
     std::optional<std::vector<Real>> prev_solution{};
     std::optional<std::vector<Real>> prev_solution2{};
+    bool require_jit{false};
 };
 
 [[nodiscard]] dofs::DofMap createSingleTetraDofMap(LocalIndex n_dofs)
@@ -153,6 +156,9 @@ void expectJitMatchesInterpreterCell(const assembly::IMeshAccess& mesh,
     R_jit.zero();
     (void)assembler.assembleBoth(mesh, space, space, jit_kernel, J_jit, R_jit);
 
+    if (options.require_jit) {
+        ASSERT_TRUE(jit_kernel.isJITReady());
+    }
     expectDenseNear(R_jit, R_interp, vec_tol);
     expectDenseNear(J_jit, J_interp, mat_tol);
 }
@@ -325,7 +331,8 @@ void expectJitMatchesInterpreterInteriorFacesResidual(
     Real mat_tol,
     geometry::CutIntegrationSide side =
         geometry::CutIntegrationSide::Interface,
-    bool require_jit = false)
+    bool require_jit = false,
+    const dofs::DofHandler* handler = nullptr)
 {
     FormCompiler compiler;
     auto ir_interp = compiler.compileResidual(residual);
@@ -341,7 +348,8 @@ void expectJitMatchesInterpreterInteriorFacesResidual(
     jit_kernel.resolveInlinableConstitutives();
 
     assembly::StandardAssembler assembler;
-    assembler.setDofMap(dof_map);
+    if (handler) assembler.setDofHandler(*handler);
+    else assembler.setDofMap(dof_map);
     assembler.setCutIntegrationContext(cut_context);
     assembler.setCurrentSolution(U);
 
@@ -363,12 +371,13 @@ void expectJitMatchesInterpreterInteriorFacesResidual(
 
     if (require_jit) {
         ASSERT_TRUE(jit_kernel.isJITReady());
-        const auto form_side =
-            side == geometry::CutIntegrationSide::Negative
-                ? CutVolumeSide::Negative
-                : CutVolumeSide::Positive;
-        ASSERT_TRUE(jit_kernel.hasCompiledInteriorFaceTangentDispatch(
-            marker, form_side));
+        if (side == geometry::CutIntegrationSide::Interface) {
+            ASSERT_TRUE(jit_kernel.hasCompiledTangentDispatch(IntegralDomain::InteriorFace, marker));
+        } else {
+            const auto form_side = side == geometry::CutIntegrationSide::Negative
+                ? CutVolumeSide::Negative : CutVolumeSide::Positive;
+            ASSERT_TRUE(jit_kernel.hasCompiledInteriorFaceTangentDispatch(marker, form_side));
+        }
     }
 
     expectDenseNear(R_jit, R_interp, vec_tol);
@@ -435,6 +444,64 @@ TEST(JITExtendedParityTest, SmoothHeavisideCellMatchesInterpreter)
 
     const std::vector<Real> U = {-0.2, 0.1, 0.25, -0.05};
     expectJitMatchesInterpreterCell(mesh, dof_map, space, residual, U, /*vec_tol=*/1e-12, /*mat_tol=*/1e-12);
+}
+
+TEST(JITExtendedParityTest, CachedCurrentStateCurlUsesTheOrientedBasisCurls)
+{
+    SingleTetraMeshAccess mesh;
+    spaces::HCurlSpace space(ElementType::Tetra4, 0, BasisType::Nedelec);
+    const auto dof_map = createSingleTetraDofMap(static_cast<LocalIndex>(space.dofs_per_element()));
+    const auto state = StateField(CURRENT_SOLUTION_FIELD_ID, space, "u");
+    const auto test = TestFunction(space, "v");
+    const auto trial = TrialFunction(space, "trial");
+    const auto residual = (inner(curl(state), curl(test)) + inner(trial, test)).dx();
+    const std::vector<Real> coefficients{0.12, -0.08, 0.15, -0.03, 0.21, -0.11};
+    CompareOptions options;
+    options.require_jit = true;
+    expectJitMatchesInterpreterCell(mesh, dof_map, space, residual, coefficients, 1e-12, 1e-12, options);
+}
+
+TEST(JITExtendedParityTest, CachedCurrentStateCurlUsesScalarFactorGradientsForNodalVectors)
+{
+    SingleTetraMeshAccess mesh;
+    const auto space = spaces::VectorSpace(spaces::SpaceType::H1, ElementType::Tetra4, 1, 3);
+    const auto dof_map = createSingleTetraDofMap(static_cast<LocalIndex>(space->dofs_per_element()));
+    const auto state = StateField(CURRENT_SOLUTION_FIELD_ID, *space, "u");
+    const auto trial = TrialFunction(*space, "trial");
+    const auto test = TestFunction(*space, "v");
+    const auto residual = (inner(curl(state), curl(test)) + inner(trial, test)).dx();
+    const std::vector<Real> coefficients{0.4, 0.1, -0.3, 0.6, 0.7, -0.2,
+                                         0.1, -0.8, 0.3, 0.9, -0.1, -0.5};
+    CompareOptions options;
+    options.require_jit = true;
+    expectJitMatchesInterpreterCell(mesh, dof_map, *space, residual, coefficients, 1e-12, 1e-12, options);
+}
+
+TEST(JITExtendedParityTest, CachedCurrentStateCurlUsesBothInteriorFaceTraces)
+{
+    TwoTetraSharedFacePermutedPlusMeshAccess mesh;
+    spaces::HCurlSpace space(ElementType::Tetra4, 0, BasisType::Nedelec);
+    dofs::MeshTopologyInfo topology;
+    topology.dim = 3;
+    topology.n_cells = 2;
+    topology.n_vertices = 5;
+    topology.vertex_gids = {0, 1, 2, 3, 4};
+    topology.cell2vertex_offsets = {0, 4, 8};
+    std::vector<GlobalIndex> nodes;
+    for (GlobalIndex cell = 0; cell < mesh.numCells(); ++cell) {
+        mesh.getCellNodes(cell, nodes);
+        topology.cell2vertex_data.insert(topology.cell2vertex_data.end(), nodes.begin(), nodes.end());
+    }
+    dofs::DofHandler dofs;
+    dofs.distributeDofs(topology, space);
+    const auto state = StateField(CURRENT_SOLUTION_FIELD_ID, space, "u");
+    const auto trial = TrialFunction(space, "trial");
+    const auto test = TestFunction(space, "v");
+    const auto residual = (inner(avg(curl(state)), jump(test)) + inner(jump(trial), jump(test))).dS();
+    const std::vector<Real> coefficients{0.4, 0.1, -0.3, 0.6, 0.7, -0.2, 0.1, -0.8, 0.3};
+    ASSERT_EQ(dofs.getDofMap().getNumDofs(), coefficients.size());
+    expectJitMatchesInterpreterInteriorFacesResidual(mesh, dofs.getDofMap(), space, residual, coefficients,
+        -1, nullptr, 1e-12, 1e-12, geometry::CutIntegrationSide::Interface, true, &dofs);
 }
 
 TEST(JITExtendedParityTest, IntrinsicVectorBasisGradientMatchesInterpreter)

@@ -6451,6 +6451,68 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
 		            return phi;
 		        };
 
+        auto scalarBasisCurl = [&](const SideView& side, bool test_side, llvm::Value* dof,
+                                   llvm::Value* q, std::size_t value_dim) {
+            auto* n = test_side ? side.n_test_dofs : side.n_trial_dofs;
+            auto* per_component = builder.CreateUDiv(n, builder.getInt32(static_cast<unsigned>(value_dim)));
+            auto* component = builder.CreateUDiv(dof, per_component);
+            const auto g = loadScalarPhysicalGradientMaybeBaked(side, test_side, dof, q);
+            auto* c0 = builder.CreateICmpEQ(component, builder.getInt32(0));
+            std::array<llvm::Value*, 3> curl{
+                rc(0.0), builder.CreateSelect(c0, g[2], rc(0.0)),
+                builder.CreateSelect(c0, builder.CreateFNeg(g[1]), rc(0.0))};
+            if (value_dim >= 2) {
+                auto* c1 = builder.CreateICmpEQ(component, builder.getInt32(1));
+                curl[0] = builder.CreateSelect(c1, builder.CreateFNeg(g[2]), curl[0]);
+                curl[2] = builder.CreateSelect(c1, g[0], curl[2]);
+            }
+            if (value_dim >= 3) {
+                auto* c2 = builder.CreateICmpEQ(component, builder.getInt32(2));
+                curl[0] = builder.CreateSelect(c2, g[1], curl[0]);
+                curl[1] = builder.CreateSelect(c2, builder.CreateFNeg(g[0]), curl[1]);
+            }
+            return curl;
+        };
+
+        auto evalCurrentSolutionCurl = [&](const SideView& side, std::size_t value_dim,
+                                           llvm::Value* q) -> CodeValue {
+            // Curl is linear. Use the physical curl of each oriented H(curl) basis
+            // function, or the gradient of its scalar factor for a product basis.
+            auto projected = [&](bool vector_basis) {
+                return emitReduceSum(side.n_trial_dofs, vector_basis ? "curl_u_vb" : "curl_u_sb", 3u,
+                    [&](llvm::Value* j) {
+                        auto* cj = loadRealPtrAt(side.solution_coefficients, builder.CreateZExt(j, i64));
+                        const auto phi = vector_basis
+                            ? loadVec3FromTable(side.trial_basis_curls_xyz, side.n_trial_dofs, j, q)
+                            : scalarBasisCurl(side, false, j, q, value_dim);
+                        return std::vector<llvm::Value*>{builder.CreateFMul(cj, phi[0]),
+                                                         builder.CreateFMul(cj, phi[1]),
+                                                         builder.CreateFMul(cj, phi[2])};
+                    });
+            };
+            auto* vb = llvm::BasicBlock::Create(*ctx, "curl.u.vec_basis", fn);
+            auto* sb = llvm::BasicBlock::Create(*ctx, "curl.u.scalar_basis", fn);
+            auto* merge = llvm::BasicBlock::Create(*ctx, "curl.u.merge", fn);
+            builder.CreateCondBr(builder.CreateICmpNE(side.trial_uses_vector_basis, builder.getInt32(0)), vb, sb);
+            builder.SetInsertPoint(vb);
+            const auto vector_sums = projected(true);
+            builder.CreateBr(merge);
+            auto* vb_end = builder.GetInsertBlock();
+            builder.SetInsertPoint(sb);
+            const auto scalar_sums = projected(false);
+            builder.CreateBr(merge);
+            auto* sb_end = builder.GetInsertBlock();
+            builder.SetInsertPoint(merge);
+            std::array<llvm::Value*, 3> out{};
+            for (std::size_t d = 0; d < out.size(); ++d) {
+                auto* phi = builder.CreatePHI(simd_active ? vf64 : f64, 2);
+                phi->addIncoming(vector_sums[d], vb_end);
+                phi->addIncoming(scalar_sums[d], sb_end);
+                out[d] = phi;
+            }
+            return makeVector(3u, out[0], out[1], out[2]);
+        };
+
 		        auto evalCurrentSolution = [&](const SideView& side,
 		                                       const Shape& out_shape,
 		                                       llvm::Value* q_index) -> CodeValue {
@@ -8498,33 +8560,6 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
                         const auto& kid = term.ir.ops[child_idx];
                         const auto vd = static_cast<std::size_t>(term.shapes[child_idx].dims[0]);
 
-                        auto curlScalarBasis = [&](bool test_side,
-                                                   llvm::Value* n_dofs,
-                                                   llvm::Value* dof_index) -> std::array<llvm::Value*, 3> {
-	                        auto* dofs_per_comp = builder.CreateUDiv(n_dofs, builder.getInt32(static_cast<std::uint32_t>(vd)));
-	                        auto* comp = builder.CreateUDiv(dof_index, dofs_per_comp);
-	                        const auto g = loadScalarPhysicalGradientMaybeBaked(side, test_side, dof_index, q_index);
-	                        llvm::Value* x = rc(0.0);
-	                        llvm::Value* y = rc(0.0);
-	                        llvm::Value* z = rc(0.0);
-	                        if (vd >= 1) {
-	                            auto* is0 = builder.CreateICmpEQ(comp, builder.getInt32(0));
-	                            y = builder.CreateSelect(is0, g[2], y);
-	                            z = builder.CreateSelect(is0, builder.CreateFNeg(g[1]), z);
-	                        }
-                            if (vd >= 2) {
-                                auto* is1 = builder.CreateICmpEQ(comp, builder.getInt32(1));
-                                x = builder.CreateSelect(is1, builder.CreateFNeg(g[2]), x);
-                                z = builder.CreateSelect(is1, g[0], z);
-                            }
-                            if (vd >= 3) {
-                                auto* is2 = builder.CreateICmpEQ(comp, builder.getInt32(2));
-                                x = builder.CreateSelect(is2, g[1], x);
-                                y = builder.CreateSelect(is2, builder.CreateFNeg(g[0]), y);
-                            }
-                            return {x, y, z};
-                        };
-
                         auto curlTest = [&]() -> CodeValue {
                             auto* uses_vec_basis = builder.CreateICmpNE(side.test_uses_vector_basis, builder.getInt32(0));
                             auto* vb = llvm::BasicBlock::Create(*ctx, "curl.test.vec_basis", fn);
@@ -8541,7 +8576,7 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
 
                             std::array<llvm::Value*, 3> sb_vals{rc(0.0), rc(0.0), rc(0.0)};
                             builder.SetInsertPoint(sb);
-                            sb_vals = curlScalarBasis(/*test_side=*/true, side.n_test_dofs, i_index);
+                            sb_vals = scalarBasisCurl(side, true, i_index, q_index, vd);
                             builder.CreateBr(merge);
                             auto* sb_block = builder.GetInsertBlock();
 
@@ -8572,7 +8607,7 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
 
                             std::array<llvm::Value*, 3> sb_vals{rc(0.0), rc(0.0), rc(0.0)};
                             builder.SetInsertPoint(sb);
-                            sb_vals = curlScalarBasis(/*test_side=*/false, side.n_trial_dofs, j_index);
+                            sb_vals = scalarBasisCurl(side, false, j_index, q_index, vd);
                             builder.CreateBr(merge);
                             auto* sb_block = builder.GetInsertBlock();
 
@@ -8587,77 +8622,18 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
                             return makeVector(3u, out[0], out[1], out[2]);
                         };
 
-	                        auto curlCurrentSolution = [&]() -> CodeValue {
-	                            auto* coeffs = side.solution_coefficients;
-	                            auto* uses_vec_basis = builder.CreateICmpNE(side.trial_uses_vector_basis, builder.getInt32(0));
-	                            auto* vb = llvm::BasicBlock::Create(*ctx, "curl.u.vec_basis", fn);
-	                            auto* sb = llvm::BasicBlock::Create(*ctx, "curl.u.scalar_basis", fn);
-	                            auto* merge = llvm::BasicBlock::Create(*ctx, "curl.u.merge", fn);
-
-	                            builder.CreateCondBr(uses_vec_basis, vb, sb);
-
-	                            std::array<llvm::Value*, 3> vb_vals{rc(0.0), rc(0.0), rc(0.0)};
-	                            builder.SetInsertPoint(vb);
-	                            {
-	                                const auto sums = emitReduceSum(side.n_trial_dofs, "curl_u_vb", 3u, [&](llvm::Value* j) {
-	                                    auto* j64 = builder.CreateZExt(j, i64);
-	                                    auto* cj = loadRealPtrAt(coeffs, j64);
-	                                    const auto phi =
-	                                        loadVec3FromTable(side.trial_basis_curls_xyz, side.n_trial_dofs, j, q_index);
-	                                    std::vector<llvm::Value*> terms;
-	                                    terms.reserve(3u);
-	                                    for (std::size_t d = 0; d < 3u; ++d) {
-	                                        terms.push_back(builder.CreateFMul(cj, phi[d]));
-	                                    }
-	                                    return terms;
-	                                });
-	                                vb_vals = {sums[0], sums[1], sums[2]};
-	                                builder.CreateBr(merge);
-	                            }
-	                            auto* vb_block = builder.GetInsertBlock();
-
-	                            std::array<llvm::Value*, 3> sb_vals{rc(0.0), rc(0.0), rc(0.0)};
-	                            builder.SetInsertPoint(sb);
-	                            {
-	                                const auto sums = emitReduceSum(side.n_trial_dofs, "curl_u_sb", 3u, [&](llvm::Value* j) {
-	                                    auto* j64 = builder.CreateZExt(j, i64);
-	                                    auto* cj = loadRealPtrAt(coeffs, j64);
-	                                    const auto phi = curlScalarBasis(/*test_side=*/false, side.n_trial_dofs, j);
-	                                    std::vector<llvm::Value*> terms;
-	                                    terms.reserve(3u);
-	                                    for (std::size_t d = 0; d < 3u; ++d) {
-	                                        terms.push_back(builder.CreateFMul(cj, phi[d]));
-	                                    }
-	                                    return terms;
-	                                });
-	                                sb_vals = {sums[0], sums[1], sums[2]};
-	                                builder.CreateBr(merge);
-	                            }
-	                            auto* sb_block = builder.GetInsertBlock();
-
-                            builder.SetInsertPoint(merge);
-                            std::array<llvm::Value*, 3> out{rc(0.0), rc(0.0), rc(0.0)};
-                            for (std::size_t d = 0; d < 3; ++d) {
-                                auto* phi = builder.CreatePHI(simd_active ? vf64 : f64, 2, "curl.u." + std::to_string(d));
-                                phi->addIncoming(vb_vals[d], vb_block);
-                                phi->addIncoming(sb_vals[d], sb_block);
-                                out[d] = phi;
-                            }
-                            return makeVector(3u, out[0], out[1], out[2]);
-                        };
-
                         if (kid.type == FormExprType::TestFunction) {
                             values[op_idx] = curlTest();
                             break;
                         }
                         if (kid.type == FormExprType::TrialFunction) {
-                            values[op_idx] = is_residual ? curlCurrentSolution() : curlTrial();
+                            values[op_idx] = is_residual ? evalCurrentSolutionCurl(side, vd, q_index) : curlTrial();
                             break;
                         }
                         if (kid.type == FormExprType::DiscreteField || kid.type == FormExprType::StateField) {
                             const int fid = unpackFieldIdImm1(kid.imm1);
                             if (kid.type == FormExprType::StateField && fid == kCurrentSolutionFid) {
-                                values[op_idx] = curlCurrentSolution();
+                                values[op_idx] = evalCurrentSolutionCurl(side, vd, q_index);
                                 break;
                             }
                             auto* entry = fieldEntryPtrFor(/*plus_side=*/false, fid);
@@ -8751,7 +8727,7 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
                             const auto& dt_child = term.ir.ops[dt_child_idx];
 
                             if (dt_child.type == FormExprType::TrialFunction) {
-                                const auto v = is_residual ? curlCurrentSolution() : curlTrial();
+                                const auto v = is_residual ? evalCurrentSolutionCurl(side, vd, q_index) : curlTrial();
                                 values[op_idx] = mul(makeScalar(coeff0), v);
                                 break;
                             }
@@ -8760,7 +8736,7 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
                                 const int fid = unpackFieldIdImm1(dt_child.imm1);
                                 const auto v =
                                     (dt_child.type == FormExprType::StateField && fid == kCurrentSolutionFid)
-                                        ? curlCurrentSolution()
+                                        ? evalCurrentSolutionCurl(side, vd, q_index)
                                         : [&]() -> CodeValue {
                                               auto* entry = fieldEntryPtrFor(/*plus_side=*/false, fid);
                                               auto* entry_is_null =
@@ -11784,6 +11760,11 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
                         const auto& kid = term.ir.ops[child_idx];
                         const auto vd = static_cast<std::size_t>(term.shapes[child_idx].dims[0]);
 
+                        if ((kid.type == FormExprType::TrialFunction && is_residual) ||
+                            (kid.type == FormExprType::StateField && unpackFieldIdImm1(kid.imm1) == kCurrentSolutionFid)) {
+                            values[op_idx] = evalCurrentSolutionCurl(side, vd, q_index);
+                            break;
+                        }
                         if (kid.type == FormExprType::DiscreteField || kid.type == FormExprType::StateField) {
                             const int fid = unpackFieldIdImm1(kid.imm1);
                             auto* entry = fieldEntryPtrFor(/*plus_side=*/false, fid);
@@ -14031,6 +14012,10 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
                         const auto vd = static_cast<std::size_t>(term.shapes[child_idx].dims[0]);
 
                         auto evalSide = [&](const SideView& side, bool plus_side) -> CodeValue {
+                            if ((kid.type == FormExprType::TrialFunction && is_residual) ||
+                                (kid.type == FormExprType::StateField && unpackFieldIdImm1(kid.imm1) == kCurrentSolutionFid)) {
+                                return evalCurrentSolutionCurl(side, vd, q_index);
+                            }
                             if (kid.type == FormExprType::DiscreteField || kid.type == FormExprType::StateField) {
                                 const int fid = unpackFieldIdImm1(kid.imm1);
                                 auto* entry = fieldEntryPtrFor(plus_side, fid);
@@ -18877,33 +18862,6 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
                     const auto& kid = term.ir.ops[child_idx];
                     const auto vd = static_cast<std::size_t>(term.shapes[child_idx].dims[0]);
 
-	                    auto curlScalarBasis = [&](bool test_side,
-	                                               llvm::Value* n_dofs,
-	                                               llvm::Value* dof_index) -> std::array<llvm::Value*, 3> {
-	                        auto* dofs_per_comp = builder.CreateUDiv(n_dofs, builder.getInt32(static_cast<std::uint32_t>(vd)));
-	                        auto* comp = builder.CreateUDiv(dof_index, dofs_per_comp);
-	                        const auto g = loadScalarPhysicalGradientMaybeBaked(side, test_side, dof_index, q_index);
-	                        llvm::Value* x = rc(0.0);
-	                        llvm::Value* y = rc(0.0);
-	                        llvm::Value* z = rc(0.0);
-	                        if (vd >= 1) {
-	                            auto* is0 = builder.CreateICmpEQ(comp, builder.getInt32(0));
-	                            y = builder.CreateSelect(is0, g[2], y);
-	                            z = builder.CreateSelect(is0, builder.CreateFNeg(g[1]), z);
-	                        }
-                        if (vd >= 2) {
-                            auto* is1 = builder.CreateICmpEQ(comp, builder.getInt32(1));
-                            x = builder.CreateSelect(is1, builder.CreateFNeg(g[2]), x);
-                            z = builder.CreateSelect(is1, g[0], z);
-                        }
-                        if (vd >= 3) {
-                            auto* is2 = builder.CreateICmpEQ(comp, builder.getInt32(2));
-                            x = builder.CreateSelect(is2, g[1], x);
-                            y = builder.CreateSelect(is2, builder.CreateFNeg(g[0]), y);
-                        }
-                        return {x, y, z};
-                    };
-
                     auto curlTest = [&]() -> CodeValue {
                         if (is_plus != test_active_plus) return makeZero(vectorShape(3u));
 
@@ -18922,7 +18880,7 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
 
                         std::array<llvm::Value*, 3> sb_vals{rc(0.0), rc(0.0), rc(0.0)};
                         builder.SetInsertPoint(sb);
-                        sb_vals = curlScalarBasis(/*test_side=*/true, side.n_test_dofs, i_index);
+                        sb_vals = scalarBasisCurl(side, true, i_index, q_index, vd);
                         builder.CreateBr(merge);
                         auto* sb_block = builder.GetInsertBlock();
 
@@ -18955,7 +18913,7 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
 
                         std::array<llvm::Value*, 3> sb_vals{rc(0.0), rc(0.0), rc(0.0)};
                         builder.SetInsertPoint(sb);
-                        sb_vals = curlScalarBasis(/*test_side=*/false, side.n_trial_dofs, j_index);
+                        sb_vals = scalarBasisCurl(side, false, j_index, q_index, vd);
                         builder.CreateBr(merge);
                         auto* sb_block = builder.GetInsertBlock();
 
@@ -18970,75 +18928,16 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
                         return makeVector(3u, out[0], out[1], out[2]);
                     };
 
-                    auto curlCurrentSolution = [&]() -> CodeValue {
-                        auto* coeffs = side.solution_coefficients;
-                        auto* uses_vec_basis = builder.CreateICmpNE(side.trial_uses_vector_basis, builder.getInt32(0));
-                        auto* vb = llvm::BasicBlock::Create(*ctx, "curl.u.vec_basis", fn);
-                        auto* sb = llvm::BasicBlock::Create(*ctx, "curl.u.scalar_basis", fn);
-                        auto* merge = llvm::BasicBlock::Create(*ctx, "curl.u.merge", fn);
-
-                        builder.CreateCondBr(uses_vec_basis, vb, sb);
-
-	                        std::array<llvm::Value*, 3> vb_vals{rc(0.0), rc(0.0), rc(0.0)};
-	                        builder.SetInsertPoint(vb);
-	                        {
-	                            const auto sums = emitReduceSum(side.n_trial_dofs, "curl_u_vb", 3u, [&](llvm::Value* j) {
-	                                auto* j64 = builder.CreateZExt(j, i64);
-	                                auto* cj = loadRealPtrAt(coeffs, j64);
-	                                const auto phi =
-	                                    loadVec3FromTable(side.trial_basis_curls_xyz, side.n_trial_dofs, j, q_index);
-	                                std::vector<llvm::Value*> terms;
-	                                terms.reserve(3u);
-	                                for (std::size_t d = 0; d < 3u; ++d) {
-	                                    terms.push_back(builder.CreateFMul(cj, phi[d]));
-	                                }
-	                                return terms;
-	                            });
-	                            vb_vals = {sums[0], sums[1], sums[2]};
-	                            builder.CreateBr(merge);
-	                        }
-	                        auto* vb_block = builder.GetInsertBlock();
-
-	                        std::array<llvm::Value*, 3> sb_vals{rc(0.0), rc(0.0), rc(0.0)};
-	                        builder.SetInsertPoint(sb);
-	                        {
-	                            const auto sums = emitReduceSum(side.n_trial_dofs, "curl_u_sb", 3u, [&](llvm::Value* j) {
-	                                auto* j64 = builder.CreateZExt(j, i64);
-	                                auto* cj = loadRealPtrAt(coeffs, j64);
-	                                const auto phi = curlScalarBasis(/*test_side=*/false, side.n_trial_dofs, j);
-	                                std::vector<llvm::Value*> terms;
-	                                terms.reserve(3u);
-	                                for (std::size_t d = 0; d < 3u; ++d) {
-	                                    terms.push_back(builder.CreateFMul(cj, phi[d]));
-	                                }
-	                                return terms;
-	                            });
-	                            sb_vals = {sums[0], sums[1], sums[2]};
-	                            builder.CreateBr(merge);
-	                        }
-	                        auto* sb_block = builder.GetInsertBlock();
-
-                        builder.SetInsertPoint(merge);
-                        std::array<llvm::Value*, 3> out{rc(0.0), rc(0.0), rc(0.0)};
-                        for (std::size_t d = 0; d < 3; ++d) {
-                            auto* phi = builder.CreatePHI(simd_active ? vf64 : f64, 2, "curl.u." + std::to_string(d));
-                            phi->addIncoming(vb_vals[d], vb_block);
-                            phi->addIncoming(sb_vals[d], sb_block);
-                            out[d] = phi;
-                        }
-                        return makeVector(3u, out[0], out[1], out[2]);
-                    };
-
                     if (kid.type == FormExprType::TestFunction) {
                         return curlTest();
                     }
                     if (kid.type == FormExprType::TrialFunction) {
-                        return is_residual ? curlCurrentSolution() : curlTrial();
+                        return is_residual ? evalCurrentSolutionCurl(side, vd, q_index) : curlTrial();
                     }
                     if (kid.type == FormExprType::DiscreteField || kid.type == FormExprType::StateField) {
                         const int fid = unpackFieldIdImm1(kid.imm1);
                         if (kid.type == FormExprType::StateField && fid == kCurrentSolutionFid) {
-                            return curlCurrentSolution();
+                            return evalCurrentSolutionCurl(side, vd, q_index);
                         }
                         auto* entry = fieldEntryPtrFor(is_plus, fid);
                         auto* entry_is_null =
@@ -19128,13 +19027,13 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
                             term.ir.children[static_cast<std::size_t>(kid.first_child)];
                         const auto& dt_child = term.ir.ops[dt_child_idx];
                         if (dt_child.type == FormExprType::TrialFunction) {
-                            return mul(makeScalar(coeff0), is_residual ? curlCurrentSolution() : curlTrial());
+                            return mul(makeScalar(coeff0), is_residual ? evalCurrentSolutionCurl(side, vd, q_index) : curlTrial());
                         }
 
                         if (dt_child.type == FormExprType::DiscreteField || dt_child.type == FormExprType::StateField) {
                             const int fid = unpackFieldIdImm1(dt_child.imm1);
                             if (dt_child.type == FormExprType::StateField && fid == kCurrentSolutionFid) {
-                                return mul(makeScalar(coeff0), curlCurrentSolution());
+                                return mul(makeScalar(coeff0), evalCurrentSolutionCurl(side, vd, q_index));
                             }
 
                             // Reuse the standard curl(field) lowering and scale by coeff0.
