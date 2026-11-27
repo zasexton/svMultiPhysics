@@ -344,6 +344,14 @@ template <typename... Values>
         stage.flux_edges.size() != correction.edges.size()) {
         return false;
     }
+    if (!stage.integrated_velocity_couplings.empty() &&
+        (stage.integrated_velocity_couplings.size() !=
+             2 * (correction.nodes.size() + correction.edges.size()) ||
+         !std::all_of(stage.integrated_velocity_couplings.begin(),
+                      stage.integrated_velocity_couplings.end(),
+                      [](Real value) { return std::isfinite(value); }))) {
+        return false;
+    }
     for (std::size_t index = 0u; index < correction.nodes.size(); ++index) {
         const auto& node = correction.nodes[index];
         const auto& velocity = stage.sampled_nodal_velocity[index];
@@ -538,7 +546,7 @@ template <typename... Values>
     return levelSetP1PhaseScalarContentRevision(previous_q) ==
                provenance.previous_q_revision &&
            levelSetP1PhaseVelocityContentRevision(
-               stage.sampled_nodal_velocity) ==
+               stage.sampled_nodal_velocity, stage.integrated_velocity_couplings) ==
                provenance.nodal_velocity_revision &&
            levelSetP1PhaseFluxLedgerDigest(stage) ==
                provenance.final_flux_ledger_digest;
@@ -1061,6 +1069,16 @@ void writeArtifact(
            << ",\"retained_assembly_geometry_measure\":"
            << context.retained_assembly_geometry_measure << '}';
 
+    if (!stage.integrated_velocity_couplings.empty()) {
+        output << ",\"integrated_velocity_couplings\":[";
+        for (std::size_t i = 0; i < stage.integrated_velocity_couplings.size(); ++i) {
+            if (i != 0) {
+                output << ',';
+            }
+            output << stage.integrated_velocity_couplings[i];
+        }
+        output << ']';
+    }
     output << ",\"nodes\":[";
     for (std::size_t index = 0u; index < correction.nodes.size(); ++index) {
         if (index != 0u) {

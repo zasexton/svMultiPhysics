@@ -199,7 +199,7 @@ struct ConservativePhaseWorkflowHost {
         evaluate_vertex_field{};
 
     /// Number of vertices of the primary mesh; set with
-    /// evaluate_vertex_field (C3b).
+    /// evaluate_vertex_field for order-one sampling.
     std::function<std::size_t()> primary_mesh_vertex_count{};
 
     /// Communicator-wide fingerprint of the content of a distributed FE
@@ -248,6 +248,7 @@ struct ConservativePhaseCandidateStageRequest {
   std::uint64_t graph_ownership_revision{0u};
   std::uint64_t graph_numbering_revision{0u};
   std::vector<std::array<svmp::FE::Real, 3>> sampled_nodal_velocity{};
+  std::vector<Real> integrated_velocity_couplings{};
 };
 
 struct ConservativePhaseCandidateStageSnapshot {
@@ -395,9 +396,9 @@ inline void mixConservativePhaseArtifactFingerprint(
     bool allow_graph_rebuild = true);
 
 /**
- * @brief Sets q of every enabled request, not yet initialized, to the
- *        projection of the cut geometry, in u and every history level, with
- *        zero rates.
+ * @brief Project q on fresh startup and seed copies of the initial state.
+ * A supplied older level and the complete accepted history on restart retain
+ * their own q. Only a fresh projection initializes the current q rates.
  *
  * Uses host.fe_system and host.time_history; does nothing without them.
  */
@@ -408,16 +409,26 @@ void initializeConservativePhaseStates(
 /**
  * @brief Velocity of @p request at the nodes of @p graph in @p state.
  *
- * A constant velocity, or the vertex average of the request's velocity field
- * (or the common trace velocity of its material-interface phase pair).
- * Uses host.fe_system, host.evaluate_vertex_field and
- * host.primary_mesh_vertex_count.
+ * A constant velocity, a registered field or the weighted common trace of
+ * a phase pair. Higher-order fields are evaluated in their own FE space at
+ * the corners of owned cells. The order-one path uses the host's vertex
+ * field evaluator.
  */
 [[nodiscard]] std::vector<std::array<Real, 3>> sampleConservativePhaseVelocity(
     const ConservativePhaseWorkflowHost& host,
     const ConservativePhaseRequest& request,
     const LevelSetP1PhaseTransportGraph& graph,
     const systems::SystemStateView& state);
+
+/// Capture both vertex samples and the integrated convection matrix needed by
+/// advanceLevelSetP1ConservativePhaseStage for a higher-order velocity field.
+/// The returned couplings are empty for constant and order-one fields.
+[[nodiscard]] std::vector<std::array<Real, 3>> sampleConservativePhaseVelocity(
+    const ConservativePhaseWorkflowHost& host,
+    const ConservativePhaseRequest& request,
+    const LevelSetP1PhaseTransportGraph& graph,
+    const systems::SystemStateView& state,
+    std::vector<Real>& integrated_velocity_couplings);
 
 /// Flags (1) the phase-graph nodes of the parent cells of @p constraints.
 [[nodiscard]] std::vector<std::uint8_t> conservativePhaseContactProtectedNodes(

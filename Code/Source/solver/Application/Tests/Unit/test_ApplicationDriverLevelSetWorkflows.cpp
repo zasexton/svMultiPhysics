@@ -13661,6 +13661,8 @@ protected:
     return makeWorkflowTriangleMesh();
   }
 
+  virtual void addVelocityFields(svmp::FE::systems::FESystem&) {}
+
   void SetUp() override
   {
     const auto *test_info = ::testing::UnitTest::GetInstance()->current_test_info();
@@ -13691,6 +13693,7 @@ protected:
         .space = scalar_space,
         .components = 1,
     });
+    addVelocityFields(*system);
     ASSERT_NO_THROW(system->setup({}));
 
     sim_.primary_mesh = mesh_;
@@ -13923,6 +13926,140 @@ protected:
   ActiveCutContextRefreshCache refresh_cache_{};
   std::vector<svmp::FE::Real> initialized_solution_{};
 };
+
+class ApplicationDriverConservativeP2VelocityTest
+    : public ApplicationDriverConservativePhaseCandidatesTest {
+protected:
+  void addVelocityFields(svmp::FE::systems::FESystem& system) override
+  {
+    const auto scalar = std::make_shared<svmp::FE::spaces::H1Space>(
+        svmp::FE::ElementType::Triangle3, 2);
+    const auto space = std::make_shared<svmp::FE::spaces::ProductSpace>(scalar, 2);
+    velocity_ = system.addField({.name = "u", .space = space, .components = 2});
+    const auto positive = system.addField({.name = "u_plus", .space = space, .components = 2});
+    system.declareMaterialInterfaceTransportVelocity({
+        .dimension = 2, .interface_marker = 911, .level_set_field = phi_,
+        .negative_velocity_field = velocity_, .positive_velocity_field = positive,
+        .negative_trace_weight = 0.25, .positive_trace_weight = 0.75,
+        .geometry_domain_id = "conservative_phase_interface", .owner_component = "test"});
+  }
+
+  using Value = svmp::FE::spaces::FunctionSpace::Value;
+  void interpolateVelocity(const svmp::FE::spaces::FunctionSpace::ValueFunction& field)
+  {
+    auto& system = *sim_.fe_system;
+    std::vector<svmp::FE::Real> local;
+    system.fieldRecord(velocity_).space->interpolate(field, local);
+    auto endpoint = gatherFeOrderedSolution(history().u());
+    const auto dofs = system.fieldDofHandler(velocity_).getCellDofs(0);
+    ASSERT_EQ(dofs.size(), local.size());
+    for (std::size_t k = 0; k < dofs.size(); ++k) {
+      endpoint[fieldOffset(velocity_) + dofs[k]] = local[k];
+    }
+    scatterFeOrderedSolution(history().u(), endpoint);
+  }
+
+  svmp::FE::FieldId velocity_{svmp::FE::INVALID_FIELD_ID};
+};
+
+TEST_F(ApplicationDriverConservativeP2VelocityTest, IntegratesEdgeModesForFluxAndCourant)
+{
+  using Source = svmp::FE::level_set::LevelSetVelocitySource;
+  auto& system = *sim_.fe_system;
+  interpolateVelocity([](const Value& x) {
+    return Value{0.0, 4.0 * x[0] * (1.0 - x[0]), 0.0};
+  });
+  for (const auto source : {Source::CoupledField, Source::MaterialInterfacePhasePair}) {
+    SCOPED_TRACE(static_cast<int>(source));
+    requests_.front() = withMaintenanceConfiguration(requests_.front(), [&](auto& c) {
+      c.transport.velocity.source = source;
+      c.transport.velocity.field_name = "u";
+      c.transport.velocity.material_interface_marker = 911;
+      c.transport.conservative_phase.write_flux_artifacts = true;
+      c.transport.conservative_phase.boundary_flux_policy = svmp::FE::level_set::
+          LevelSetConservativePhaseBoundaryFluxPolicy::GloballyBalancedDiscreteQFlux;
+    });
+    auto result = applyPreparedConservativePhaseCandidate();
+    ASSERT_TRUE(result.accept_step);
+    ASSERT_EQ(result.maintenance_ledgers.size(), 1u);
+    const auto& stage = result.maintenance_ledgers.front().transport_stage;
+    const auto weight = source == Source::CoupledField ? 1.0 : 0.25;
+    // On the unit triangle, integrals of N_i u_y are 1/10, 2/15, 1/10.
+    // The y-gradients are -1, 0, 1. They give a maximum graph CFL of 2 dt.
+    EXPECT_NEAR(stage.maximum_courant, weight * 2.0 * history().dt(), 1.e-13);
+    const auto* map = system.fieldDofHandler(phase_).getEntityDofMap();
+    ASSERT_NE(map, nullptr);
+    for (int vertex = 0; vertex < 3; ++vertex) {
+      const auto node = map->getVertexDofs(vertex).front();
+      const double boundary = vertex == 0 ? -1.0 / 3.0 :
+                              vertex == 2 ? 1.0 / 3.0 : 0.0;
+      EXPECT_NEAR(stage.physical_boundary_mass_transfer.at(node),
+                  -history().dt() * weight * boundary *
+                      stage.correction.nodes.at(node).previous_phase_indicator,
+                  1.e-13);
+    }
+    const auto& ledger = result.maintenance_ledgers.front();
+    ASSERT_TRUE(ledger.split_stage_provenance.has_value());
+    auto forged = stage;
+    ASSERT_FALSE(forged.integrated_velocity_couplings.empty());
+    forged.integrated_velocity_couplings.back() += 0.125;
+    auto claimed = *ledger.split_stage_provenance;
+    claimed.nodal_velocity_revision =
+        svmp::FE::level_set::levelSetP1PhaseVelocityContentRevision(
+            forged.sampled_nodal_velocity, forged.integrated_velocity_couplings);
+    claimed.final_flux_ledger_digest = svmp::FE::level_set::levelSetP1PhaseFluxLedgerDigest(forged);
+    const auto verification = svmp::FE::level_set::validateLevelSetP1PhaseSplitStage(
+        *requests_.front().runtime.conservative_phase_graph,
+        fieldSlice(gatherFeOrderedSolution(history().uPrev()), phase_), forged, claimed);
+    EXPECT_FALSE(verification.valid);
+
+    if (source == Source::MaterialInterfacePhasePair) {
+      result.geometry_transaction->commit();
+      result.geometry_transaction.reset();
+      const auto directory = std::filesystem::temp_directory_path() /
+          ("svmp-phase-velocity-quadrature-" +
+           std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()));
+      params_->general_simulation_parameters.save_results_in_folder.set(directory.string());
+      writeAcceptedConservativePhaseArtifacts(*params_, requests_, result, 1u, 0.05, 0.05,
+          history().u().valueRevision(), svmp::MeshComm::world());
+      std::ifstream artifact(directory / "conservative_phase_flux" /
+                            "conservative_phase_flux_phase_step_00000001.json");
+      ASSERT_TRUE(artifact);
+      const std::string contents{std::istreambuf_iterator<char>{artifact}, {}};
+      artifact.close();
+      std::filesystem::remove_all(directory);
+      EXPECT_NE(contents.find("\"integrated_velocity_couplings\":["), std::string::npos);
+    } else {
+      result.geometry_transaction->rollback();
+    }
+  }
+}
+
+TEST_F(ApplicationDriverConservativeP2VelocityTest, RejectsUnresolvedNormalEdgeFluxAtTheCourantLimit)
+{
+  interpolateVelocity([](const Value& x) {
+    return Value{4.0 * x[0] * (1.0 - x[0] - x[1]), 0.0, 0.0};
+  });
+  auto& system = *sim_.fe_system;
+  const auto endpoint = gatherFeOrderedSolution(history().u());
+  const auto field = svmp::FE::interfaces::makeSnapshotVectorFieldEvaluator(
+      svmp::FE::systems::snapshotFieldAccess(system, velocity_), endpoint, "phase test");
+  constexpr double cut = 0.75;
+  // On x=3/4 the edge mode is linear in y; the midpoint integrates it exactly.
+  // Its common trace has weight 1/4 and the tested shape N_1=x.
+  const auto u = field.value(0, {cut, (1.0 - cut) / 2, 0.0}, {});
+  EXPECT_NEAR((1.0 - cut) * cut * 0.25 * u[0], 9.0 / 512.0, 1.e-14);
+  requests_.front() = withMaintenanceConfiguration(requests_.front(), [](auto& c) {
+    c.transport.velocity.source = svmp::FE::level_set::LevelSetVelocitySource::MaterialInterfacePhasePair;
+    c.transport.velocity.material_interface_marker = 911;
+    c.transport.conservative_phase.maximum_courant = 0.01;
+    c.transport.conservative_phase.enforce_courant_limit = true;
+  });
+  // The exact maximum CFL is dt/4 = 0.0125, although every vertex velocity vanishes.
+  const auto result = applyPreparedConservativePhaseCandidate();
+  EXPECT_FALSE(result.accept_step);
+  EXPECT_EQ(gatherFeOrderedSolution(history().u()), endpoint);
+}
 
 TEST_F(ApplicationDriverConservativePhaseCandidatesTest,
        RequestCopyIsolatesGraphVectorsMetadataAndRuntimeTargets)

@@ -491,22 +491,32 @@ template <typename ValueAt>
     return stream.str();
 }
 
+[[nodiscard]] bool validConvectionEntries(const LevelSetP1PhaseTransportGraph& graph,
+                                          std::span<const Real> entries)
+{
+    return entries.empty() ||
+           (entries.size() == 2 * (graph.nodes + graph.edges.size()) &&
+            std::all_of(entries.begin(), entries.end(), [](Real x) { return std::isfinite(x); }));
+}
+
 [[nodiscard]] bool replicatedStageInputsMatch(
     const PhaseGraphCollectiveContext& context,
     std::span<const Real> previous_phase_indicator,
     std::span<const Real> lower_phase_indicator,
     std::span<const Real> upper_phase_indicator,
     std::span<const std::array<Real, 3>> nodal_velocity,
+    std::span<const Real> integrated_velocity_couplings,
     Real time_step,
     const LevelSetP1PhaseStageOptions& options,
     std::string& diagnostic)
 {
-    const std::array<std::pair<std::string_view, std::size_t>, 4>
+    const std::array<std::pair<std::string_view, std::size_t>, 5>
         replicated_sizes{{
             {"previous phase indicator", previous_phase_indicator.size()},
             {"lower phase-indicator bound", lower_phase_indicator.size()},
             {"upper phase-indicator bound", upper_phase_indicator.size()},
             {"nodal velocity", nodal_velocity.size()},
+            {"integrated velocity couplings", integrated_velocity_couplings.size()},
         }};
     for (const auto& [name, size] : replicated_sizes) {
         const auto local_size = static_cast<std::uint64_t>(size);
@@ -544,7 +554,9 @@ template <typename ValueAt>
         !require_nodal_values(lower_phase_indicator,
                               "lower phase-indicator bound") ||
         !require_nodal_values(upper_phase_indicator,
-                              "upper phase-indicator bound")) {
+                              "upper phase-indicator bound") ||
+        !require_nodal_values(integrated_velocity_couplings,
+                              "integrated velocity coupling")) {
         return false;
     }
 
@@ -1046,6 +1058,7 @@ void mixPhaseFluxEdgeLedger(
         graph.boundary_column_sum.size() != graph.nodes ||
         previous_phase_indicator.size() != graph.nodes ||
         stage.sampled_nodal_velocity.size() != graph.nodes ||
+        !validConvectionEntries(graph, stage.integrated_velocity_couplings) ||
         stage.nodal_courant.size() != graph.nodes ||
         stage.physical_boundary_mass_transfer.size() != graph.nodes ||
         stage.discrete_divergence_mass_source.size() != graph.nodes ||
@@ -1321,6 +1334,15 @@ void mixPhaseFluxEdgeLedger(
     return value;
 }
 
+// Empty integrated coefficients select the original nodal flux interpolation.
+[[nodiscard]] Real convectionEntry(std::span<const Real> integrated, std::size_t index,
+                                   const Vector3& gradient, const Vector3& velocity,
+                                   int dimension)
+{
+    return integrated.empty() ? dot(gradient, velocity, dimension) : integrated[index];
+}
+
+
 struct PhaseStageVerificationNode {
     Real row_divergence{0.0};
     Real direct_strong_rate{0.0};
@@ -1428,8 +1450,8 @@ struct PhaseStageVerificationNode {
         values.parent = node;
         values.expected_lower = previous_phase_indicator[node];
         values.expected_upper = previous_phase_indicator[node];
-        const Real diagonal_velocity = dot(
-            graph.diagonal_gradient[node],
+        const Real diagonal_velocity = convectionEntry(
+            stage.integrated_velocity_couplings, 2 * node, graph.diagonal_gradient[node],
             stage.sampled_nodal_velocity[node], graph.dimension);
         values.row_divergence = diagonal_velocity;
         values.direct_strong_rate =
@@ -1446,10 +1468,12 @@ struct PhaseStageVerificationNode {
             static_cast<std::size_t>(graph_edge.first_node);
         const auto second =
             static_cast<std::size_t>(graph_edge.second_node);
-        const Real first_to_second_speed = dot(
+        const Real first_to_second_speed = convectionEntry(
+            stage.integrated_velocity_couplings, 2 * (node_count + edge_index),
             graph_edge.first_test_second_gradient,
             stage.sampled_nodal_velocity[second], graph.dimension);
-        const Real second_to_first_speed = dot(
+        const Real second_to_first_speed = convectionEntry(
+            stage.integrated_velocity_couplings, 2 * (node_count + edge_index) + 1,
             graph_edge.second_test_first_gradient,
             stage.sampled_nodal_velocity[first], graph.dimension);
         const Real diffusion = std::max(
@@ -1555,7 +1579,8 @@ struct PhaseStageVerificationNode {
         auto& values = scratch[node];
         const Real indicator = previous_phase_indicator[node];
         const Real boundary_rate =
-            -indicator * dot(
+            -indicator * convectionEntry(
+                stage.integrated_velocity_couplings, 2 * node + 1,
                 graph.boundary_column_sum[node],
                 stage.sampled_nodal_velocity[node], graph.dimension);
         const Real divergence_rate =
@@ -2585,6 +2610,21 @@ std::uint64_t levelSetP1PhaseVelocityContentRevision(
     return finishPhaseStageHash(hash);
 }
 
+std::uint64_t levelSetP1PhaseVelocityContentRevision(
+    std::span<const std::array<Real, 3>> values, std::span<const Real> couplings) noexcept
+{
+    auto hash = levelSetP1PhaseVelocityContentRevision(values);
+    if (couplings.empty()) {
+        return hash;
+    }
+    mixPhaseStageHashWord(hash, UINT64_C(0x4645434f4e564543));
+    mixPhaseStageHashSize(hash, couplings.size());
+    for (const Real value : couplings) {
+        mixPhaseStageHashReal(hash, value);
+    }
+    return finishPhaseStageHash(hash);
+}
+
 std::uint64_t levelSetP1PhaseFluxLedgerDigest(
     const LevelSetP1PhaseTransportStageResult& stage) noexcept
 {
@@ -3369,6 +3409,22 @@ advanceLevelSetP1ConservativePhaseStage(
     Real time_step,
     const LevelSetP1PhaseStageOptions& options)
 {
+    return advanceLevelSetP1ConservativePhaseStage(
+        graph, previous_phase_indicator, lower_phase_indicator, upper_phase_indicator,
+        nodal_velocity, time_step, options, {});
+}
+
+LevelSetP1PhaseTransportStageResult
+advanceLevelSetP1ConservativePhaseStage(
+    const LevelSetP1PhaseTransportGraph& graph,
+    std::span<const Real> previous_phase_indicator,
+    std::span<const Real> lower_phase_indicator,
+    std::span<const Real> upper_phase_indicator,
+    std::span<const std::array<Real, 3>> nodal_velocity,
+    Real time_step,
+    const LevelSetP1PhaseStageOptions& options,
+    std::span<const Real> integrated_velocity_couplings)
+{
     LevelSetP1PhaseTransportStageResult result;
     try {
         const auto collective = phaseStageCollectiveContext(graph);
@@ -3401,7 +3457,8 @@ advanceLevelSetP1ConservativePhaseStage(
             previous_phase_indicator.size() != node_count ||
             lower_phase_indicator.size() != node_count ||
             upper_phase_indicator.size() != node_count ||
-            nodal_velocity.size() != node_count) {
+            nodal_velocity.size() != node_count ||
+            !validConvectionEntries(graph, integrated_velocity_couplings)) {
             reject_preflight(
                 "P1 conservative phase stage received inconsistent nodal spans");
         }
@@ -3448,7 +3505,7 @@ advanceLevelSetP1ConservativePhaseStage(
         if (!replicatedStageInputsMatch(
                 collective, previous_phase_indicator,
                 lower_phase_indicator, upper_phase_indicator,
-                nodal_velocity, time_step, options,
+                nodal_velocity, integrated_velocity_couplings, time_step, options,
                 result.diagnostic)) {
             return result;
         }
@@ -3461,6 +3518,8 @@ advanceLevelSetP1ConservativePhaseStage(
             result.executed_options = options;
             result.sampled_nodal_velocity.assign(
                 nodal_velocity.begin(), nodal_velocity.end());
+            result.integrated_velocity_couplings.assign(integrated_velocity_couplings.begin(),
+                                                        integrated_velocity_couplings.end());
         } catch (const std::exception& exception) {
             local_endpoint_velocity_capture_success = false;
             local_endpoint_velocity_capture_diagnostic = exception.what();
@@ -3489,14 +3548,16 @@ advanceLevelSetP1ConservativePhaseStage(
 
         for (std::size_t node = 0; node < node_count; ++node) {
             const auto& velocity = nodal_velocity[node];
-            const Real diagonal_velocity = dot(
-                graph.diagonal_gradient[node], velocity, graph.dimension);
+            const Real diagonal_velocity = convectionEntry(
+                integrated_velocity_couplings, 2 * node, graph.diagonal_gradient[node],
+                velocity, graph.dimension);
             row_divergence[node] = diagonal_velocity;
             direct_strong_rate[node] =
                 -diagonal_velocity * previous_phase_indicator[node];
         }
 
-        for (const auto& edge : graph.edges) {
+        for (std::size_t edge_index = 0; edge_index < graph.edges.size(); ++edge_index) {
+            const auto& edge = graph.edges[edge_index];
             if (edge.first_node < 0 || edge.second_node < 0 ||
                 edge.first_node >= edge.second_node ||
                 static_cast<std::size_t>(edge.second_node) >= node_count) {
@@ -3506,10 +3567,12 @@ advanceLevelSetP1ConservativePhaseStage(
             }
             const auto first = static_cast<std::size_t>(edge.first_node);
             const auto second = static_cast<std::size_t>(edge.second_node);
-            const Real first_to_second_speed = dot(
+            const Real first_to_second_speed = convectionEntry(
+                integrated_velocity_couplings, 2 * (node_count + edge_index),
                 edge.first_test_second_gradient,
                 nodal_velocity[second], graph.dimension);
-            const Real second_to_first_speed = dot(
+            const Real second_to_first_speed = convectionEntry(
+                integrated_velocity_couplings, 2 * (node_count + edge_index) + 1,
                 edge.second_test_first_gradient,
                 nodal_velocity[first], graph.dimension);
             const Real diffusion = std::max(
@@ -3585,8 +3648,8 @@ advanceLevelSetP1ConservativePhaseStage(
                 result.maximum_courant, result.nodal_courant[node]);
             const Real indicator = previous_phase_indicator[node];
             const Real boundary_rate =
-                -indicator * dot(graph.boundary_column_sum[node],
-                                 nodal_velocity[node], graph.dimension);
+                -indicator * convectionEntry(integrated_velocity_couplings, 2 * node + 1,
+                    graph.boundary_column_sum[node], nodal_velocity[node], graph.dimension);
             const Real divergence_rate = indicator * row_divergence[node];
             result.physical_boundary_mass_transfer[node] =
                 time_step * boundary_rate;
@@ -3719,7 +3782,7 @@ validateLevelSetP1PhaseSplitStage(
                     previous_phase_indicator);
             result.computed_nodal_velocity_revision =
                 levelSetP1PhaseVelocityContentRevision(
-                    stage.sampled_nodal_velocity);
+                    stage.sampled_nodal_velocity, stage.integrated_velocity_couplings);
             result.computed_flux_ledger_digest =
                 levelSetP1PhaseFluxLedgerDigest(stage);
 

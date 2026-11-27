@@ -177,6 +177,10 @@ struct LevelSetP1PhaseTransportStageResult {
     Real time_step{0.0};
     /// Exact operator-endpoint nodal velocity sampled by this stage.
     std::vector<std::array<Real, 3>> sampled_nodal_velocity{};
+    /// For higher-order endpoint fields, signed FE convection coefficients
+    /// in graph order. Each node contributes (diagonal, boundary-column sum),
+    /// followed by (i,j) and (j,i) for each edge. Empty for nodal transport.
+    std::vector<Real> integrated_velocity_couplings{};
     /// Exact policy and thresholds used to execute this stage.
     LevelSetP1PhaseStageOptions executed_options{};
     std::vector<Real> nodal_courant{};
@@ -260,6 +264,10 @@ struct LevelSetP1PhaseSplitStageValidationResult {
 [[nodiscard]] std::uint64_t levelSetP1PhaseVelocityContentRevision(
     std::span<const std::array<Real, 3>> values) noexcept;
 
+[[nodiscard]] std::uint64_t levelSetP1PhaseVelocityContentRevision(
+    std::span<const std::array<Real, 3>> values,
+    std::span<const Real> integrated_velocity_couplings) noexcept;
+
 [[nodiscard]] std::uint64_t levelSetP1PhaseFluxLedgerDigest(
     const LevelSetP1PhaseTransportStageResult& stage) noexcept;
 
@@ -291,6 +299,19 @@ advanceLevelSetP1ConservativePhaseStage(
     std::span<const std::array<Real, 3>> nodal_velocity,
     Real time_step,
     const LevelSetP1PhaseStageOptions& options = {});
+
+/// Use the endpoint FE convection coefficients retained with a higher-order
+/// velocity sample. Nodal point values remain available as diagnostics.
+[[nodiscard]] LevelSetP1PhaseTransportStageResult
+advanceLevelSetP1ConservativePhaseStage(
+    const LevelSetP1PhaseTransportGraph& graph,
+    std::span<const Real> previous_phase_indicator,
+    std::span<const Real> lower_phase_indicator,
+    std::span<const Real> upper_phase_indicator,
+    std::span<const std::array<Real, 3>> nodal_velocity,
+    Real time_step,
+    const LevelSetP1PhaseStageOptions& options,
+    std::span<const Real> integrated_velocity_couplings);
 
 /**
  * @brief Validate a fixed-mesh BE split-stage metadata/fingerprint binding.

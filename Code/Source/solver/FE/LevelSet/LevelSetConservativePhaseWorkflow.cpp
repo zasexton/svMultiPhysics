@@ -14,6 +14,13 @@
 #include "Dofs/DofHandler.h"
 #include "Dofs/EntityDofMap.h"
 #include "Interfaces/MaterialInterfaceTransportVelocity.h"
+#include "Basis/BasisFunction.h"
+#include "Basis/NodeOrderingConventions.h"
+#include "Geometry/CutQuadratureMapping.h"
+#include "Geometry/GeometryMapping.h"
+#include "Quadrature/QuadratureFactory.h"
+#include "Spaces/FunctionSpace.h"
+#include "Systems/SnapshotFieldAccess.h"
 #include "LevelSet/LevelSetConservativePhaseArtifact.h"
 #include "LevelSet/LevelSetConservativePhaseState.h"
 #include "Systems/SystemState.h"
@@ -414,16 +421,197 @@ void allReduceConservativePhaseBuffer(
 #endif
 }
 
-} // namespace
+struct WeightedVelocityField {
+  FieldId field;
+  Real weight;
+};
+
+bool integrateHigherOrderPhaseVelocity(
+    const systems::FESystem& system, FieldId phase,
+    const LevelSetP1PhaseTransportGraph& graph, const systems::SystemStateView& state,
+    std::span<const WeightedVelocityField> fields,
+    std::vector<std::array<Real, 3>>& nodal_velocity, std::vector<Real>* integrated_couplings)
+{
+  const auto comm = activeFESystemCommunicator(system);
+  const auto& mesh = system.meshAccess();
+  int order = 0;
+  std::vector<std::uint64_t> source_words;
+  std::exception_ptr failure;
+  try {
+    for (const auto& field : fields) {
+      source_words.push_back(static_cast<std::uint64_t>(field.field));
+      appendMaintenanceScheduleReal(source_words, field.weight);
+      const auto& space = *system.fieldRecord(field.field).space;
+      order = std::max(order, space.polynomial_order());
+      if (space.is_variable_order()) {
+        mesh.forEachOwnedCell([&](GlobalIndex cell) {
+          order = std::max(order, space.polynomial_order(cell));
+        });
+      }
+    }
+  } catch (...) {
+    failure = std::current_exception();
+  }
+  requireCollectivePhasePreparation(failure, comm, "conservative_phase_velocity_order");
+  order = static_cast<int>(systems::collectiveMaxDouble(order, comm));
+  if (order <= 1) {
+    return false;
+  }
+  if (!collectiveLevelSetMaintenanceCanonicalWordsAgree(source_words, comm)) {
+    throw std::runtime_error("Conservative phase velocity fields or weights differ across ranks.");
+  }
+  const auto solution = systems::captureFeOrderedVectorCollectively(state, comm);
+  std::vector<Real> entries, samples;
+  try {
+    const auto& space = *system.fieldRecord(phase).space;
+    const auto& dofs = system.fieldDofHandler(phase);
+    std::vector<interfaces::SnapshotVectorEvaluator> evaluators;
+    for (const auto& field : fields) {
+      evaluators.push_back(interfaces::makeSnapshotVectorFieldEvaluator(
+          systems::snapshotFieldAccess(system, field.field), solution, "conservative phase transport"));
+    }
+    if (graph.nodes > samples.max_size() / 4 ||
+        graph.edges.size() > entries.max_size() / 2 - graph.nodes) {
+      throw std::length_error("Conservative phase velocity matrix exceeds its storage range.");
+    }
+    samples.assign(4 * graph.nodes, Real{0});
+    nodal_velocity.resize(graph.nodes);
+    if (integrated_couplings) {
+      entries.assign(2 * (graph.nodes + graph.edges.size()), Real{0});
+    }
+    mesh.forEachOwnedCell([&](GlobalIndex cell) {
+      const auto nodes = dofs.getCellDofs(cell);
+      if (std::any_of(nodes.begin(), nodes.end(), [&](GlobalIndex node) {
+            return node < 0 || static_cast<std::size_t>(node) >= graph.nodes;
+          })) {
+        throw std::invalid_argument("Conservative phase velocity cell has a node outside its graph.");
+      }
+      const auto type = mesh.getCellType(cell);
+      // Vertex values are evaluations of the velocity space too. In
+      // particular a Q2 field on Quad4 geometry has a cell-interior DOF
+      // without a corresponding mesh geometry node.
+      for (std::size_t i = 0; i < nodes.size(); ++i) {
+        const auto xi = basis::ReferenceNodeLayout::get_node_coords(type, i);
+        const std::array<Real, 3> point{xi[0], xi[1], xi[2]};
+        const auto offset = 4 * static_cast<std::size_t>(nodes[i]);
+        for (std::size_t f = 0; f < fields.size(); ++f) {
+          const auto value = evaluators[f].value(cell, point, {});
+          for (int axis = 0; axis < graph.dimension; ++axis) {
+            samples[offset + axis] += fields[f].weight * value[axis];
+          }
+        }
+        samples[offset + 3] += 1;
+      }
+      if (!integrated_couplings) {
+        return;
+      }
+      const auto& basis = space.getElement(type, cell).basis();
+      const auto mapping = geometry::makeCutCellGeometryMapping(mesh, cell);
+      const auto quadrature = quadrature::QuadratureFactory::create(
+          type, std::max(graph.maximum_quadrature_order,
+                         order + geometry::cellMeasureQuadratureOrder(
+                                     mesh.getCellGeometryOrder(cell), graph.dimension) + 1));
+      // Index the cell matrix into the replicated canonical graph once per cell.
+      std::vector<std::size_t> offsets(nodes.size() * nodes.size());
+      for (std::size_t i = 0; i < nodes.size(); ++i) {
+        for (std::size_t j = 0; j < nodes.size(); ++j) {
+          std::size_t offset = 2 * static_cast<std::size_t>(nodes[i]);
+          if (i != j) {
+            const std::pair key{std::min(nodes[i], nodes[j]), std::max(nodes[i], nodes[j])};
+            const auto edge = std::lower_bound(graph.edges.begin(), graph.edges.end(), key,
+                [](const auto& e, const auto& endpoints) {
+                  return std::pair{e.first_node, e.second_node} < endpoints;
+                });
+            if (edge == graph.edges.end() || edge->first_node != key.first || edge->second_node != key.second) {
+              throw std::logic_error("Conservative phase velocity integration found a missing graph edge.");
+            }
+            offset = 2 * (graph.nodes + static_cast<std::size_t>(edge - graph.edges.begin())) +
+                     (nodes[i] != key.first);
+          }
+          offsets[i * nodes.size() + j] = offset;
+        }
+      }
+      std::vector<Real> values, advected_basis(nodes.size());
+      std::vector<basis::Gradient> gradients;
+      for (std::size_t q = 0; q < quadrature->num_points(); ++q) {
+        const auto xi = quadrature->point(q);
+        const std::array<Real, 3> point{xi[0], xi[1], xi[2]};
+        const Real weight = quadrature->weight(q) * mapping->jacobian_determinant(xi);
+        const auto inverse = mapping->jacobian_inverse(xi);
+        basis.evaluate_values(xi, values);
+        basis.evaluate_gradients(xi, gradients);
+        std::array<Real, 3> velocity{};
+        Real divergence = 0;
+        for (std::size_t f = 0; f < fields.size(); ++f) {
+          const auto value = evaluators[f].value(cell, point, {});
+          const auto derivative = evaluators[f].physical_gradient(cell, point, {});
+          for (int axis = 0; axis < graph.dimension; ++axis) {
+            velocity[axis] += fields[f].weight * value[axis];
+            divergence += fields[f].weight * derivative[axis][axis];
+          }
+        }
+        for (std::size_t i = 0; i < nodes.size(); ++i) {
+          const auto grad = mapping->transform_gradient(gradients[i], inverse);
+          advected_basis[i] = std::inner_product(velocity.begin(), velocity.end(), grad.data(), Real{0});
+        }
+        // The off-diagonal advection is integral N_i u.grad(N_j).
+        // Lumping integral N_i div(u) on the diagonal reproduces the strong
+        // advective target and gives integral_boundary N_i u.n as column sum.
+        for (std::size_t i = 0; i < nodes.size(); ++i) {
+          const auto offset = 2 * static_cast<std::size_t>(nodes[i]);
+          const Real div_i = values[i] * divergence;
+          entries[offset] += weight * div_i;
+          for (std::size_t j = 0; j < nodes.size(); ++j) {
+            entries[offsets[i * nodes.size() + j]] += weight * values[i] * advected_basis[j];
+          }
+        }
+      }
+    });
+  } catch (...) {
+    failure = std::current_exception();
+  }
+  requireCollectivePhasePreparation(failure, comm, "conservative_phase_velocity_quadrature");
+  allReduceConservativePhaseBuffer(samples, comm);
+  for (std::size_t i = 0; i < graph.nodes; ++i) {
+    const auto count = samples[4 * i + 3];
+    if (!(count > 0)) {
+      throw std::runtime_error("Conservative phase graph has an unsampled vertex.");
+    }
+    for (int axis = 0; axis < graph.dimension; ++axis) {
+      nodal_velocity[i][axis] = samples[4 * i + axis] / count;
+      if (!std::isfinite(nodal_velocity[i][axis])) {
+        throw std::runtime_error("Conservative phase velocity is non-finite at a graph vertex.");
+      }
+    }
+  }
+  if (!integrated_couplings) {
+    return true;
+  }
+  allReduceConservativePhaseBuffer(entries, comm);
+  for (std::size_t i = 0; i < graph.nodes; ++i) {
+    entries[2 * i + 1] = entries[2 * i];
+  }
+  for (std::size_t i = 0; i < graph.edges.size(); ++i) {
+    const auto& edge = graph.edges[i];
+    const auto offset = 2 * (graph.nodes + i);
+    entries[2 * edge.second_node + 1] += entries[offset];
+    entries[2 * edge.first_node + 1] += entries[offset + 1];
+  }
+  *integrated_couplings = std::move(entries);
+  return true;
+}
 
 std::vector<std::array<svmp::FE::Real, 3>>
-sampleConservativePhaseVelocity(
+samplePhaseEndpointVelocity(
     const ConservativePhaseWorkflowHost& host,
     const ConservativePhaseRequest& request,
     const svmp::FE::level_set::LevelSetP1PhaseTransportGraph& graph,
-    const svmp::FE::systems::SystemStateView& state)
+    const svmp::FE::systems::SystemStateView& state,
+    std::vector<Real>* integrated_couplings)
 {
   std::vector<std::array<svmp::FE::Real, 3>> velocity;
+  std::vector<WeightedVelocityField> fields;
+  FieldId phase_field = INVALID_FIELD_ID;
   if (request.configuration->transport.velocity.source ==
       svmp::FE::level_set::LevelSetVelocitySource::ConstantVector) {
     std::exception_ptr local_preparation_failure;
@@ -450,47 +638,20 @@ sampleConservativePhaseVelocity(
     }
     return velocity;
   }
-  if (!host.fe_system || !host.evaluate_vertex_field) {
-    throw std::runtime_error(
-        "[svMultiPhysics::Application] Conservative phase velocity sampling requires an FE system and primary mesh.");
+  if (!host.fe_system) {
+    throw std::runtime_error("Conservative phase velocity sampling requires an FE system.");
   }
   auto& system = *host.fe_system;
   const auto comm = activeFESystemCommunicator(system);
-  std::vector<svmp::FE::Real> accumulated;
   std::exception_ptr local_preparation_failure;
   try {
-    if (graph.nodes >
-        std::numeric_limits<std::size_t>::max() / 4u) {
-      throw std::overflow_error(
-          "[svMultiPhysics::Application] Conservative phase velocity sampling graph size overflows its accumulation layout.");
-    }
-    velocity.resize(graph.nodes);
-    accumulated.assign(
-        graph.nodes * 4u, svmp::FE::Real{0.0});
-    const auto phase_field = system.findFieldByName(
+    phase_field = system.findFieldByName(
         request.configuration->transport.conservative_phase.phase_indicator.field_name);
-    if (phase_field == svmp::FE::INVALID_FIELD_ID) {
-      throw std::runtime_error(
-          "[svMultiPhysics::Application] Conservative phase velocity sampling could not resolve its phase field.");
+    if (phase_field == INVALID_FIELD_ID) {
+      throw std::runtime_error("Conservative phase velocity sampling could not resolve its phase field.");
     }
-    const auto* entity_map =
-        system.fieldDofHandler(phase_field).getEntityDofMap();
-    if (entity_map == nullptr) {
-      throw std::runtime_error(
-          "[svMultiPhysics::Application] Conservative phase velocity sampling requires a vertex-nodal phase field.");
-    }
-
-    const bool material_interface_velocity =
-        request.configuration->transport.velocity.source ==
-        svmp::FE::level_set::LevelSetVelocitySource::
-            MaterialInterfacePhasePair;
-    std::vector<double> vertex_velocity;
-    std::vector<double> negative_vertex_velocity;
-    std::vector<double> positive_vertex_velocity;
-    const svmp::FE::interfaces::
-        MaterialInterfaceTransportVelocityDeclaration*
-        material_declaration = nullptr;
-    if (material_interface_velocity) {
+    if (request.configuration->transport.velocity.source == LevelSetVelocitySource::MaterialInterfacePhasePair) {
+      const interfaces::MaterialInterfaceTransportVelocityDeclaration* material_declaration = nullptr;
       const auto level_set_field = system.findFieldByName(
           request.configuration->transport.level_set.field_name);
       if (level_set_field == svmp::FE::INVALID_FIELD_ID ||
@@ -516,16 +677,8 @@ sampleConservativePhaseVelocity(
         throw std::runtime_error(
             "[svMultiPhysics::Application] Conservative phase material-interface velocity declaration is missing or dimensionally incompatible.");
       }
-      negative_vertex_velocity = host.evaluate_vertex_field(
-          material_declaration->negative_velocity_field,
-          state,
-          static_cast<std::size_t>(graph.dimension),
-          "sampling conservative negative-phase velocity");
-      positive_vertex_velocity = host.evaluate_vertex_field(
-          material_declaration->positive_velocity_field,
-          state,
-          static_cast<std::size_t>(graph.dimension),
-          "sampling conservative positive-phase velocity");
+      fields = {{material_declaration->negative_velocity_field, material_declaration->negative_trace_weight},
+                {material_declaration->positive_velocity_field, material_declaration->positive_trace_weight}};
     } else {
       const auto velocity_field = system.findFieldByName(
           request.configuration->transport.velocity.field_name);
@@ -538,56 +691,48 @@ sampleConservativePhaseVelocity(
         throw std::runtime_error(
             "[svMultiPhysics::Application] Conservative phase velocity dimension does not match the phase graph.");
       }
-      vertex_velocity = host.evaluate_vertex_field(
-          velocity_field,
-          state,
-          static_cast<std::size_t>(graph.dimension),
-          "sampling conservative phase velocity");
+      fields = {{velocity_field, Real{1}}};
     }
-    for (std::size_t vertex = 0;
-         vertex < host.primary_mesh_vertex_count(); ++vertex) {
-      const auto dofs = entity_map->getVertexDofs(
-          static_cast<svmp::FE::GlobalIndex>(vertex));
-      if (dofs.size() != 1u || dofs.front() < 0 ||
-          static_cast<std::size_t>(dofs.front()) >= graph.nodes) {
-        throw std::runtime_error(
-            "[svMultiPhysics::Application] Conservative phase field does not have exactly one in-range DOF per mesh vertex.");
+  } catch (...) {
+    local_preparation_failure = std::current_exception();
+  }
+  requireCollectivePhasePreparation(local_preparation_failure, comm, "conservative_phase_velocity_fields");
+  if (integrateHigherOrderPhaseVelocity(system, phase_field, graph, state, fields,
+                                        velocity, integrated_couplings)) {
+    return velocity;
+  }
+
+  std::vector<Real> accumulated;
+  try {
+    if (!host.evaluate_vertex_field || !host.primary_mesh_vertex_count) {
+      throw std::runtime_error("Conservative phase nodal velocity sampling requires a primary mesh.");
+    }
+    velocity.resize(graph.nodes);
+    accumulated.assign(4 * graph.nodes, Real{0});
+    const auto* entity_map = system.fieldDofHandler(phase_field).getEntityDofMap();
+    if (!entity_map) {
+      throw std::runtime_error("Conservative phase velocity sampling requires a vertex-nodal phase field.");
+    }
+    std::vector<std::vector<double>> field_samples;
+    for (const auto& field : fields) {
+      field_samples.push_back(host.evaluate_vertex_field(
+          field.field, state, graph.dimension, "sampling conservative phase velocity"));
+    }
+    for (std::size_t vertex = 0; vertex < host.primary_mesh_vertex_count(); ++vertex) {
+      const auto nodes = entity_map->getVertexDofs(static_cast<GlobalIndex>(vertex));
+      if (nodes.size() != 1 || nodes.front() < 0 || static_cast<std::size_t>(nodes.front()) >= graph.nodes) {
+        throw std::runtime_error("Conservative phase field requires one in-range DOF per mesh vertex.");
       }
-      const auto node = static_cast<std::size_t>(dofs.front());
-      std::array<svmp::FE::Real, 3> sampled_velocity{};
-      if (material_interface_velocity) {
-        std::array<svmp::FE::Real, 3> negative{};
-        std::array<svmp::FE::Real, 3> positive{};
-        for (int d = 0; d < graph.dimension; ++d) {
-          const auto component = static_cast<std::size_t>(d);
-          negative[component] = static_cast<svmp::FE::Real>(
-              negative_vertex_velocity[
-                  vertex * static_cast<std::size_t>(graph.dimension) +
-                  component]);
-          positive[component] = static_cast<svmp::FE::Real>(
-              positive_vertex_velocity[
-                  vertex * static_cast<std::size_t>(graph.dimension) +
-                  component]);
+      const auto offset = 4 * static_cast<std::size_t>(nodes.front());
+      for (int axis = 0; axis < graph.dimension; ++axis) {
+        const auto entry = vertex * static_cast<std::size_t>(graph.dimension) + axis;
+        Real value = fields.front().weight * field_samples.front().at(entry);
+        for (std::size_t f = 1; f < fields.size(); ++f) {
+          value += fields[f].weight * field_samples[f].at(entry);
         }
-        sampled_velocity = svmp::FE::interfaces::
-            materialInterfaceCommonTraceVelocity(
-                *material_declaration,
-                negative,
-                positive);
-      } else {
-        for (int d = 0; d < graph.dimension; ++d) {
-          sampled_velocity[static_cast<std::size_t>(d)] =
-              static_cast<svmp::FE::Real>(
-                  vertex_velocity[
-                      vertex * static_cast<std::size_t>(graph.dimension) +
-                      static_cast<std::size_t>(d)]);
-        }
+        accumulated[offset + axis] += value;
       }
-      for (int d = 0; d < graph.dimension; ++d) {
-        accumulated[4u * node + static_cast<std::size_t>(d)] +=
-            sampled_velocity[static_cast<std::size_t>(d)];
-      }
-      accumulated[4u * node + 3u] += svmp::FE::Real{1.0};
+      accumulated[offset + 3] += 1;
     }
   } catch (...) {
     local_preparation_failure = std::current_exception();
@@ -624,6 +769,27 @@ sampleConservativePhaseVelocity(
       comm,
       "conservative_phase_velocity_post_reduction_validation");
   return velocity;
+}
+
+} // namespace
+
+std::vector<std::array<svmp::FE::Real, 3>>
+sampleConservativePhaseVelocity(
+    const ConservativePhaseWorkflowHost& host,
+    const ConservativePhaseRequest& request,
+    const svmp::FE::level_set::LevelSetP1PhaseTransportGraph& graph,
+    const svmp::FE::systems::SystemStateView& state)
+{
+  return samplePhaseEndpointVelocity(host, request, graph, state, nullptr);
+}
+
+std::vector<std::array<Real, 3>> sampleConservativePhaseVelocity(
+    const ConservativePhaseWorkflowHost& host, const ConservativePhaseRequest& request,
+    const LevelSetP1PhaseTransportGraph& graph, const systems::SystemStateView& state,
+    std::vector<Real>& integrated_velocity_couplings)
+{
+  integrated_velocity_couplings.clear();
+  return samplePhaseEndpointVelocity(host, request, graph, state, &integrated_velocity_couplings);
 }
 
 namespace {
@@ -918,7 +1084,7 @@ void appendConservativePhaseCandidateStageWords(
     appendMaintenanceScheduleWord(
         words,
         svmp::FE::level_set::levelSetP1PhaseVelocityContentRevision(
-            request.sampled_nodal_velocity));
+            request.sampled_nodal_velocity, request.integrated_velocity_couplings));
   }
 }
 
@@ -1363,10 +1529,8 @@ buildConservativePhaseCandidateStageSnapshot(
     }
     staged_request.sampled_nodal_velocity =
         sampleConservativePhaseVelocity(
-            host,
-            request,
-            *request.runtime.conservative_phase_graph,
-            operator_state);
+            host, request, *request.runtime.conservative_phase_graph, operator_state,
+            staged_request.integrated_velocity_couplings);
     if (!collectiveConservativePhaseVelocityBitsAgree(
             staged_request.sampled_nodal_velocity, comm)) {
       throw std::runtime_error(
@@ -1461,7 +1625,7 @@ std::uint64_t conservativePhaseArtifactFingerprint(
   mixConservativePhaseArtifactFingerprint(
       fingerprint,
       svmp::FE::level_set::levelSetP1PhaseVelocityContentRevision(
-          ledger.transport_stage.sampled_nodal_velocity));
+          ledger.transport_stage.sampled_nodal_velocity, ledger.transport_stage.integrated_velocity_couplings));
   if (ledger.split_stage_provenance.has_value()) {
     const auto& provenance = *ledger.split_stage_provenance;
     const auto mix_replicated_graph = [&](const auto& identity) {
@@ -1804,7 +1968,8 @@ void writeAcceptedConservativePhaseArtifacts(
                 ? svmp::FE::level_set::
                       levelSetP1PhaseVelocityContentRevision(
                           candidate.maintenance_ledgers[index]
-                              .transport_stage.sampled_nodal_velocity)
+                              .transport_stage.sampled_nodal_velocity,
+                          candidate.maintenance_ledgers[index].transport_stage.integrated_velocity_couplings)
                 : 0u;
         svmp::FE::Real live_maximum_nodal_boundary_transfer{0.0};
         bool live_nodal_boundary_transfer_finite = true;
@@ -2428,7 +2593,8 @@ ConservativePhaseCandidateResult applyConservativePhaseCandidates(
             upper,
             staged_request.sampled_nodal_velocity,
             static_cast<svmp::FE::Real>(history.dt()),
-            stage_options);
+            stage_options, staged_request.integrated_velocity_couplings);
+    std::vector<Real>{}.swap(staged_request.integrated_velocity_couplings);
     std::vector<std::array<svmp::FE::Real, 3>>{}.swap(
         staged_request.sampled_nodal_velocity);
     const bool any_stage_success = globalAnyBool(stage.success, comm);
@@ -2530,7 +2696,7 @@ ConservativePhaseCandidateResult applyConservativePhaseCandidates(
             .nodal_velocity_revision =
                 svmp::FE::level_set::
                     levelSetP1PhaseVelocityContentRevision(
-                        stage.sampled_nodal_velocity),
+                        stage.sampled_nodal_velocity, stage.integrated_velocity_couplings),
             .previous_graph_identity =
                 fixed_graph_bindings[request_index].identity,
             .operator_graph_identity = staged_request.graph_identity,

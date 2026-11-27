@@ -7210,6 +7210,78 @@ TEST(ApplicationDriverLevelSetWorkflowsMPI,
   EXPECT_EQ(minimum_no_drift_callback_sentinel, 1);
 }
 
+TEST(ApplicationDriverLevelSetWorkflowsMPI, IntegratesOwnedQuadraticVelocityOnceAcrossPartitions)
+{
+  using namespace svmp::FE;
+  int rank = 0, size = 1;
+  MPI_Comm_rank(MPI_COMM_WORLD, &rank);
+  MPI_Comm_size(MPI_COMM_WORLD, &size);
+  ASSERT_EQ(size, 2);
+  application::core::SimulationComponents sim;
+  sim.primary_mesh = makePartitionedQuadStrip();
+  sim.fe_system = std::make_unique<systems::FESystem>(sim.primary_mesh);
+  auto& sys = *sim.fe_system;
+  const auto phase = sys.addField({.name = "q", .space = spaces::SpaceFactory::create_h1(ElementType::Quad4, 1),
+                                   .components = 1});
+  const auto velocity = sys.addField({.name = "u", .space = spaces::SpaceFactory::create_vector_h1(
+      ElementType::Quad4, 2, 2), .components = 2});
+  systems::SetupOptions setup;
+  setup.dof_options.global_numbering = dofs::GlobalNumberingMode::OwnerContiguous;
+  setup.dof_options.ownership = dofs::OwnershipStrategy::LowestRank;
+  setup.dof_options.my_rank = rank;
+  setup.dof_options.world_size = size;
+  setup.dof_options.mpi_comm = MPI_COMM_WORLD;
+  sys.setup(setup);
+  const auto graph = level_set::buildLevelSetP1PhaseTransportGraph(sys, phase);
+  ASSERT_TRUE(graph.success) << graph.diagnostic;
+
+  std::vector<Real> cell_values;
+  using Value = spaces::FunctionSpace::Value;
+  sys.fieldRecord(velocity).space->interpolate([](const Value& xi) {
+    return Value{0.0, 1.0 - xi[0] * xi[0], 0.0};
+  }, cell_values);
+  std::vector<Real> solution(sys.dofHandler().getNumDofs(), 0.0);
+  sys.meshAccess().forEachOwnedCell([&](GlobalIndex cell) {
+    const auto cell_dofs = sys.fieldDofHandler(velocity).getCellDofs(cell);
+    ASSERT_EQ(cell_dofs.size(), cell_values.size());
+    for (std::size_t i = 0; i < cell_dofs.size(); ++i) {
+      solution[sys.fieldDofOffset(velocity) + cell_dofs[i]] = cell_values[i];
+    }
+  });
+  MPI_Allreduce(MPI_IN_PLACE, solution.data(), static_cast<int>(solution.size()),
+                MPI_DOUBLE, MPI_MAX, MPI_COMM_WORLD);
+  systems::SystemStateView state;
+  state.u = solution;
+  application::core::ResolvedLevelSetMaintenanceCompatibilityConfiguration configuration;
+  configuration.transport.conservative_phase.phase_indicator.field_name = "q";
+  configuration.transport.velocity.field_name = "u";
+  configuration.transport.velocity.source = level_set::LevelSetVelocitySource::CoupledField;
+  auto request = freezeMaintenanceConfiguration(std::move(configuration));
+  ConservativePhaseRequestViews views(std::span<const LevelSetMaintenanceRequest>(&request, 1u));
+  std::vector<Real> couplings;
+  const auto samples = level_set::sampleConservativePhaseVelocity(
+      conservativePhaseWorkflowHost(sim), views.front(), graph, state, couplings);
+  const std::vector<Real> q(graph.nodes, 0.5);
+  const auto stage = level_set::advanceLevelSetP1ConservativePhaseStage(
+      graph, q, q, q, samples, 0.01, {}, couplings);
+  ASSERT_TRUE(stage.success) << stage.diagnostic;
+  EXPECT_GT(stage.maximum_courant, 0.001);
+  Real inflow = 0, outflow = 0;
+  for (const auto transfer : stage.physical_boundary_mass_transfer) {
+    inflow += std::max(transfer, 0.0);
+    outflow += std::min(transfer, 0.0);
+  }
+  // The top and bottom flux of each unit square is q * integral(1-xi^2) = 1/3.
+  EXPECT_NEAR(inflow, 0.01 * kCellCount / 3.0, 1.e-12);
+  EXPECT_NEAR(outflow, -inflow, 1.e-12);
+  ASSERT_FALSE(couplings.empty());
+  if (rank == 1) couplings[0] += 0.125;
+  const auto invalid = level_set::advanceLevelSetP1ConservativePhaseStage(
+      graph, q, q, q, samples, 0.01, {}, couplings);
+  EXPECT_FALSE(invalid.success);
+  EXPECT_NE(invalid.diagnostic.find("integrated velocity coupling"), std::string::npos);
+}
+
 TEST(ApplicationDriverLevelSetWorkflowsMPI,
      ConservativePhaseCandidateStageRejectsRankOnlyDriftWithoutMutation)
 {
