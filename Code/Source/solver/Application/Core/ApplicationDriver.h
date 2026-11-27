@@ -1,6 +1,6 @@
 #pragma once
 
-#include "FE/LevelSet/LevelSetEnergyBalance.h"
+#include "Physics/Formulations/NavierStokes/FreeSurface/FreeSurfaceEnergyBalance.h"
 
 #include <cstddef>
 #include <cstdint>
@@ -23,7 +23,7 @@ struct VtkTimeSeriesCollection;
 // account are FE services
 // (FE/LevelSet/Maintenance/LevelSetMaintenanceWorkLedger.h); the physical
 // endpoint channels and the residual-work channels are part of the energy
-// record of a level-set run (FE/LevelSet/LevelSetEnergyBalance.h).
+// record of a level-set run (Physics/Formulations/NavierStokes/FreeSurface/FreeSurfaceEnergyBalance.h).
 using svmp::FE::level_set::LevelSetMaintenanceWorkStatus;
 using svmp::FE::level_set::LevelSetMaintenanceWorkSubstage;
 using svmp::FE::level_set::LevelSetMaintenanceDeclaredStage;
@@ -35,10 +35,10 @@ using svmp::FE::level_set::LevelSetMaintenanceModeledEnergyBreakdown;
 using svmp::FE::level_set::LevelSetMaintenanceWorkAttempt;
 using svmp::FE::level_set::LevelSetMaintenanceAcceptedStepEnergyAccount;
 using svmp::FE::level_set::aggregateLevelSetMaintenanceAcceptedStepEnergy;
-using svmp::FE::level_set::LevelSetMaintenancePhysicalEndpointChannels;
-using svmp::FE::level_set::FreeSurfaceResidualWorkChannels;
-using svmp::FE::level_set::evaluateFreeSurfaceResidualWorkChannels;
-using svmp::FE::level_set::evaluateLevelSetMaintenancePhysicalEndpointChannels;
+using svmp::Physics::formulations::navier_stokes::free_surface::LevelSetMaintenancePhysicalEndpointChannels;
+using svmp::Physics::formulations::navier_stokes::free_surface::FreeSurfaceResidualWorkChannels;
+using svmp::Physics::formulations::navier_stokes::free_surface::evaluateFreeSurfaceResidualWorkChannels;
+using svmp::Physics::formulations::navier_stokes::free_surface::evaluateLevelSetMaintenancePhysicalEndpointChannels;
 using svmp::FE::level_set::LevelSetMaintenanceWorkLedger;
 
 class ApplicationDriver {

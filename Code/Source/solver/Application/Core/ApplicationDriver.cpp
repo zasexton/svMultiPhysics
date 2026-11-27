@@ -85,7 +85,7 @@
 #include "Mesh/Topology/DistributedTopology.h"
 #include "Physics/Core/PhysicsModule.h"
 #include "FE/LevelSet/AcceptedFunctionalRecorder.h"
-#include "FE/LevelSet/LevelSetEnergyParticipant.h"
+#include "Physics/Formulations/NavierStokes/FreeSurface/FreeSurfaceEnergyParticipant.h"
 #include "FE/LevelSet/LevelSetVolumeConstrainedMinimizer.h"
 #include "Physics/Formulations/NavierStokes/TwoFluid/TwoFluidAcceptedStage.h"
 #include "Physics/Formulations/NavierStokes/TwoFluid/TwoFluidStageParticipant.h"
@@ -144,20 +144,20 @@
 namespace application::core {
 
 // The complete energy record of a level-set run
-// (FE/LevelSet/LevelSetEnergyBalance.h) on the FE energy-balance ledger
+// (Physics/Formulations/NavierStokes/FreeSurface/FreeSurfaceEnergyBalance.h) on the FE energy-balance ledger
 // (FE/Systems/EnergyBalanceLedger.h).
-using svmp::FE::level_set::FreeSurfaceAcceptedEnergyGroup;
-using svmp::FE::level_set::freeSurfaceEnergyBalanceCatalogue;
-using svmp::FE::level_set::summarizeAcceptedFreeSurfaceEnergyGroup;
-using svmp::FE::level_set::FreeSurfaceCompleteEnergyCandidate;
-using svmp::FE::level_set::FreeSurfaceCompleteEnergyBuildResult;
-using svmp::FE::level_set::buildFixedTopologyOnePhaseEnergyCandidate;
-using svmp::FE::level_set::buildUnstagedFreeSurfaceEnergyAttemptMetadata;
-using svmp::FE::level_set::freeSurfaceEnergyRejectionReasonForStepReject;
-using svmp::FE::level_set::FreeSurfaceAggregationEnergyClassification;
-using svmp::FE::level_set::classifyAcceptedAggregationEnergy;
+using svmp::Physics::formulations::navier_stokes::free_surface::FreeSurfaceAcceptedEnergyGroup;
+using svmp::Physics::formulations::navier_stokes::free_surface::freeSurfaceEnergyBalanceCatalogue;
+using svmp::Physics::formulations::navier_stokes::free_surface::summarizeAcceptedFreeSurfaceEnergyGroup;
+using svmp::Physics::formulations::navier_stokes::free_surface::FreeSurfaceCompleteEnergyCandidate;
+using svmp::Physics::formulations::navier_stokes::free_surface::FreeSurfaceCompleteEnergyBuildResult;
+using svmp::Physics::formulations::navier_stokes::free_surface::buildFixedTopologyOnePhaseEnergyCandidate;
+using svmp::Physics::formulations::navier_stokes::free_surface::buildUnstagedFreeSurfaceEnergyAttemptMetadata;
+using svmp::Physics::formulations::navier_stokes::free_surface::freeSurfaceEnergyRejectionReasonForStepReject;
+using svmp::Physics::formulations::navier_stokes::free_surface::FreeSurfaceAggregationEnergyClassification;
+using svmp::Physics::formulations::navier_stokes::free_surface::classifyAcceptedAggregationEnergy;
 using svmp::FE::level_set::logLevelSetMaintenanceWorkPublishedSince;
-using svmp::FE::level_set::logLevelSetMaintenancePhysicalEndpointChannels;
+using svmp::Physics::formulations::navier_stokes::free_surface::logLevelSetMaintenancePhysicalEndpointChannels;
 
 } // namespace application::core
 
@@ -7810,9 +7810,9 @@ void ApplicationDriver::runTransient(SimulationComponents& sim, const Parameters
   const bool& reconcile_two_fluid_momentum =
       two_fluid_stage.reconcile_two_fluid_momentum;
   // Free-surface energy account: FE step participant
-  // (FE/LevelSet/LevelSetEnergyParticipant.h).
+  // (Physics/Formulations/NavierStokes/FreeSurface/FreeSurfaceEnergyParticipant.h).
   const auto energy_participant =
-      std::make_shared<svmp::FE::level_set::EnergyParticipant>(
+      std::make_shared<svmp::Physics::formulations::navier_stokes::free_surface::EnergyParticipant>(
           free_surface_step_context);
   auto& energy = *energy_participant;
   const auto& free_surface_declarations = energy.free_surface_declarations;

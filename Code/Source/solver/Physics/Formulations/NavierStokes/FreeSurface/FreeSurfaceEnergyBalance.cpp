@@ -5,10 +5,10 @@
  * See Copyright-SimVascular.txt for additional details.
  */
 
-#include "LevelSet/LevelSetEnergyBalance.h"
+#include "Physics/Formulations/NavierStokes/FreeSurface/FreeSurfaceEnergyBalance.h"
 
-#include "Core/LogRecord.h"
-#include "Core/RankLog.h"
+#include "FE/Core/LogRecord.h"
+#include "FE/Core/RankLog.h"
 
 #include <algorithm>
 #include <array>
@@ -24,11 +24,9 @@
 #include <utility>
 #include <vector>
 
-namespace svmp::FE::level_set {
+namespace svmp::Physics::formulations::navier_stokes::free_surface {
 
-// Moved from the Navier-Stokes free-surface physics
-// (FreeSurface/FreeSurfaceEnergyCandidate.cpp, which held the free-surface
-// energy account too); bodies, owner texts, messages and log text unchanged.
+using namespace svmp::FE::level_set;
 
 using svmp::FE::systems::EnergyBalanceAttemptMetadata;
 using svmp::FE::systems::EnergyBalanceCatalogue;
@@ -1112,4 +1110,4 @@ classifyAcceptedAggregationEnergy(
   return classification;
 }
 
-} // namespace svmp::FE::level_set
+} // namespace svmp::Physics::formulations::navier_stokes::free_surface

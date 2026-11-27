@@ -5,17 +5,17 @@
  * See Copyright-SimVascular.txt for additional details.
  */
 
-#include "LevelSet/LevelSetEnergyParticipant.h"
+#include "Physics/Formulations/NavierStokes/FreeSurface/FreeSurfaceEnergyParticipant.h"
 
-#include "Core/LogRecord.h"
-#include "Core/RankLog.h"
-#include "LevelSet/LevelSetConservativePhaseWorkflow.h"
-#include "LevelSet/Maintenance/LevelSetMaintenanceRequestSchedule.h"
-#include "Systems/SystemCollectives.h"
-#include "Systems/SystemState.h"
-#include "TimeStepping/OperatorStageCapture.h"
-#include "TimeStepping/StepController.h"
-#include "Systems/FunctionalRecords.h"
+#include "FE/Core/LogRecord.h"
+#include "FE/Core/RankLog.h"
+#include "FE/LevelSet/LevelSetConservativePhaseWorkflow.h"
+#include "FE/LevelSet/Maintenance/LevelSetMaintenanceRequestSchedule.h"
+#include "FE/Systems/SystemCollectives.h"
+#include "FE/Systems/SystemState.h"
+#include "FE/TimeStepping/OperatorStageCapture.h"
+#include "FE/TimeStepping/StepController.h"
+#include "FE/Systems/FunctionalRecords.h"
 
 #include <algorithm>
 #include <array>
@@ -29,11 +29,11 @@
 #include <string>
 #include <utility>
 
-namespace svmp::FE::level_set {
+namespace svmp::Physics::formulations::navier_stokes::free_surface {
 
-// Moved from the Navier-Stokes free-surface physics
-// (FreeSurface/FreeSurfaceEnergyParticipant.cpp); checks, collectives, messages
-// and log text unchanged.
+using namespace svmp::FE::level_set;
+using svmp::FE::LogRecord;
+using svmp::FE::logRecord;
 
 using svmp::FE::rank_log::oopCout;
 using svmp::FE::systems::captureFeOrderedVectorCollectively;
@@ -1633,4 +1633,4 @@ void EnergyParticipant::clearPendingAccount() noexcept
   pending_accepted_step_physical_endpoint_channels.reset();
 }
 
-} // namespace svmp::FE::level_set
+} // namespace svmp::Physics::formulations::navier_stokes::free_surface

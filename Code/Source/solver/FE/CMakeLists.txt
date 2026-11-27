@@ -968,7 +968,6 @@ set(FE_LEVELSET_HEADERS
     LevelSet/Maintenance/LevelSetMaintenanceRequestSchedule.h
     LevelSet/Maintenance/LevelSetWallAwareMaintenance.h
     LevelSet/Maintenance/LevelSetMaintenanceWorkLedger.h
-    LevelSet/LevelSetEnergyBalance.h
     LevelSet/LevelSetImplicitCutQuadratureBackend.h
     LevelSet/LevelSetVolume.h
     LevelSet/LevelSetVolumeConstrainedMinimizer.h
@@ -1003,7 +1002,6 @@ set(FE_LEVELSET_SOURCES
     LevelSet/Maintenance/LevelSetMaintenanceRequestSchedule.cpp
     LevelSet/Maintenance/LevelSetWallAwareMaintenance.cpp
     LevelSet/Maintenance/LevelSetMaintenanceWorkLedger.cpp
-    LevelSet/LevelSetEnergyBalance.cpp
     LevelSet/LevelSetVolume.cpp
     LevelSet/LevelSetVolumeConstrainedMinimizer.cpp
     LevelSet/LevelSetKinematicReconciliation.cpp
@@ -1024,13 +1022,11 @@ if(FE_WITH_MESH)
         LevelSet/LevelSetGeometryService.h
         LevelSet/AcceptedFunctionalRecorder.h
         LevelSet/LevelSetContactStageParticipant.h
-        LevelSet/LevelSetEnergyParticipant.h
     )
     list(APPEND FE_LEVELSET_SOURCES
         LevelSet/LevelSetGeometryService.cpp
         LevelSet/AcceptedFunctionalRecorder.cpp
         LevelSet/LevelSetContactStageParticipant.cpp
-        LevelSet/LevelSetEnergyParticipant.cpp
     )
 endif()
 

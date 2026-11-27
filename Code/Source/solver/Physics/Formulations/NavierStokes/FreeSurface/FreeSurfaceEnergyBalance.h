@@ -5,15 +5,14 @@
  * See Copyright-SimVascular.txt for additional details.
  */
 
-#ifndef SVMP_FE_LEVELSET_LEVELSETENERGYBALANCE_H
-#define SVMP_FE_LEVELSET_LEVELSETENERGYBALANCE_H
+#ifndef SVMP_PHYSICS_FREE_SURFACE_ENERGYBALANCE_H
+#define SVMP_PHYSICS_FREE_SURFACE_ENERGYBALANCE_H
 
 /**
- * @file LevelSetEnergyBalance.h
+ * @file FreeSurfaceEnergyBalance.h
  * @brief Complete fixed-topology one-phase free-surface energy record of a
- *        level-set run (moved from the Navier-Stokes free-surface physics,
- *        FreeSurface/FreeSurfaceEnergyCandidate):
- *        the channels of the free-surface energy balance (data for the FE
+ *        level-set run including
+ *        *        the channels of the free-surface energy balance (data for the FE
  *        energy-balance ledger, FE/Systems/EnergyBalanceLedger.h), accepted
  *        functional groups, the energy candidate and its ledger metadata,
  *        rejection reasons, aggregation classification, the residual-work
@@ -25,13 +24,13 @@
  * (FE/LevelSet/Maintenance/LevelSetMaintenanceWorkLedger.h).
  */
 
-#include "Constraints/SmallCutAggregationConstraint.h"
-#include "Core/Types.h"
-#include "Interfaces/LevelSetGeometrySnapshot.h"
-#include "LevelSet/Maintenance/LevelSetMaintenanceWorkLedger.h"
-#include "Systems/EnergyBalanceLedger.h"
-#include "Systems/FESystem.h"
-#include "TimeStepping/StepController.h"
+#include "FE/Constraints/SmallCutAggregationConstraint.h"
+#include "FE/Core/Types.h"
+#include "FE/Interfaces/LevelSetGeometrySnapshot.h"
+#include "FE/LevelSet/Maintenance/LevelSetMaintenanceWorkLedger.h"
+#include "FE/Systems/EnergyBalanceLedger.h"
+#include "FE/Systems/FESystem.h"
+#include "FE/TimeStepping/StepController.h"
 
 #include <cstddef>
 #include <cstdint>
@@ -43,7 +42,7 @@
 #include <string_view>
 #include <vector>
 
-namespace svmp::FE::level_set {
+namespace svmp::Physics::formulations::navier_stokes::free_surface {
 
 /**
  * The channels of the free-surface energy balance, in the order in which
@@ -232,6 +231,6 @@ classifyAcceptedAggregationEnergy(
                   SmallCutAggregationRefreshReport> refresh_reports,
     std::span<const svmp::FE::Real> accepted_solution);
 
-} // namespace svmp::FE::level_set
+} // namespace svmp::Physics::formulations::navier_stokes::free_surface
 
-#endif // SVMP_FE_LEVELSET_LEVELSETENERGYBALANCE_H
+#endif // SVMP_PHYSICS_FREE_SURFACE_ENERGYBALANCE_H

@@ -195,6 +195,7 @@ list(FILTER PHYSICS_FORMULATION_HEADERS EXCLUDE REGEX ".*/(Tests|Examples)/.*")
 list(FILTER PHYSICS_FORMULATION_SOURCES EXCLUDE REGEX ".*/(Tests|Examples)/.*")
 if(NOT FE_WITH_MESH)
     list(REMOVE_ITEM PHYSICS_FORMULATION_SOURCES
+        "${CMAKE_CURRENT_SOURCE_DIR}/Formulations/NavierStokes/FreeSurface/FreeSurfaceEnergyParticipant.cpp"
         "${CMAKE_CURRENT_SOURCE_DIR}/Formulations/NavierStokes/TwoFluid/TwoFluidAcceptedStage.cpp"
         "${CMAKE_CURRENT_SOURCE_DIR}/Formulations/NavierStokes/TwoFluid/TwoFluidStageParticipant.cpp")
 endif()

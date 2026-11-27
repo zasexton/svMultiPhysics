@@ -8,10 +8,10 @@
 
 // The free-surface energy ledger: the FE energy-balance ledger
 // (FE/Systems/EnergyBalanceLedger.h) over the free-surface channel catalogue
-// (FE/LevelSet/LevelSetEnergyBalance.h).
+// (Physics/Formulations/NavierStokes/FreeSurface/FreeSurfaceEnergyBalance.h).
 
 #include "FE/Systems/EnergyBalanceLedger.h"
-#include "FE/LevelSet/LevelSetEnergyBalance.h"
+#include "Physics/Formulations/NavierStokes/FreeSurface/FreeSurfaceEnergyBalance.h"
 
 #include "../Support/FreeSurfaceLifecycleReferenceCapture.h"
 
@@ -51,14 +51,14 @@ class FreeSurfaceEnergyLedger : public svmp::FE::systems::EnergyBalanceLedger {
 public:
   FreeSurfaceEnergyLedger()
       : svmp::FE::systems::EnergyBalanceLedger(
-            svmp::FE::level_set::freeSurfaceEnergyBalanceCatalogue())
+            svmp::Physics::formulations::navier_stokes::free_surface::freeSurfaceEnergyBalanceCatalogue())
   {
   }
 };
 
 const svmp::FE::systems::EnergyBalanceCatalogue& catalogue()
 {
-  return svmp::FE::level_set::freeSurfaceEnergyBalanceCatalogue();
+  return svmp::Physics::formulations::navier_stokes::free_surface::freeSurfaceEnergyBalanceCatalogue();
 }
 
 FreeSurfaceEnergyAttemptMetadata metadata(

@@ -5,14 +5,14 @@
  * See Copyright-SimVascular.txt for additional details.
  */
 
-#ifndef SVMP_FE_LEVELSET_LEVELSETENERGYPARTICIPANT_H
-#define SVMP_FE_LEVELSET_LEVELSETENERGYPARTICIPANT_H
+#ifndef SVMP_PHYSICS_FREE_SURFACE_ENERGYPARTICIPANT_H
+#define SVMP_PHYSICS_FREE_SURFACE_ENERGYPARTICIPANT_H
 
 /**
- * @file LevelSetEnergyParticipant.h
+ * @file FreeSurfaceEnergyParticipant.h
  * @brief Step participant of the free-surface energy account of a level-set
- *        run (moved from the Navier-Stokes free-surface physics,
- *        FreeSurface/FreeSurfaceEnergyParticipant): the
+ *        run including
+ *        the
  *        functional and residual-work declarations of the run, the
  *        backward-Euler residual-work stage of each candidate, the initial
  *        functional baseline, the accepted-step maintenance energy account
@@ -20,17 +20,17 @@
  *        the complete energy ledger with its accepted and rejected records.
  */
 
-#include "LevelSet/AcceptedFunctionalRecorder.h"
+#include "FE/LevelSet/AcceptedFunctionalRecorder.h"
 
-#include "Backends/Interfaces/GenericVector.h"
-#include "LevelSet/LevelSetContactStageParticipant.h"
-#include "LevelSet/LevelSetEnergyBalance.h"
-#include "Systems/FESystem.h"
-#include "TimeStepping/StepContext.h"
-#include "TimeStepping/StepController.h"
-#include "TimeStepping/StepParticipants.h"
-#include "TimeStepping/TimeHistory.h"
-#include "TimeStepping/TimeLoop.h"
+#include "FE/Backends/Interfaces/GenericVector.h"
+#include "FE/LevelSet/LevelSetContactStageParticipant.h"
+#include "Physics/Formulations/NavierStokes/FreeSurface/FreeSurfaceEnergyBalance.h"
+#include "FE/Systems/FESystem.h"
+#include "FE/TimeStepping/StepContext.h"
+#include "FE/TimeStepping/StepController.h"
+#include "FE/TimeStepping/StepParticipants.h"
+#include "FE/TimeStepping/TimeHistory.h"
+#include "FE/TimeStepping/TimeLoop.h"
 
 #include <cstddef>
 #include <cstdint>
@@ -39,7 +39,7 @@
 #include <span>
 #include <vector>
 
-namespace svmp::FE::level_set {
+namespace svmp::Physics::formulations::navier_stokes::free_surface {
 
 class EnergyParticipant final
     : public svmp::FE::timestepping::IStepParticipant,
@@ -53,7 +53,7 @@ public:
     std::uint64_t algebraic_state_revision{0u};
     std::vector<svmp::FE::systems::ResidualWorkPairing>
         pairings{};
-    svmp::FE::level_set::FreeSurfaceResidualWorkChannels channels{};
+    FreeSurfaceResidualWorkChannels channels{};
   };
   /// Reads the free-surface functional, residual-work and exterior-boundary
   /// energy declarations and checks them on the active FE communicator
@@ -129,7 +129,7 @@ public:
   void clearPendingAccount() noexcept;
 
   svmp::FE::systems::EnergyBalanceLedger free_surface_energy_ledger{
-      svmp::FE::level_set::freeSurfaceEnergyBalanceCatalogue()};
+      freeSurfaceEnergyBalanceCatalogue()};
   std::uint64_t free_surface_energy_transaction_sequence{0u};
   bool free_surface_energy_history_contiguous{true};
   std::uint64_t free_surface_energy_attempt{0u};
@@ -157,10 +157,10 @@ public:
   std::uint64_t pending_pre_maintenance_endpoint_state_revision{0u};
   std::optional<svmp::FE::level_set::LevelSetMaintenanceAcceptedStepEnergyAccount>
       pending_accepted_step_maintenance_energy_account;
-  std::optional<svmp::FE::level_set::LevelSetMaintenancePhysicalEndpointChannels>
+  std::optional<LevelSetMaintenancePhysicalEndpointChannels>
       pending_accepted_step_physical_endpoint_channels;
 };
 
-} // namespace svmp::FE::level_set
+} // namespace svmp::Physics::formulations::navier_stokes::free_surface
 
-#endif // SVMP_FE_LEVELSET_LEVELSETENERGYPARTICIPANT_H
+#endif // SVMP_PHYSICS_FREE_SURFACE_ENERGYPARTICIPANT_H
