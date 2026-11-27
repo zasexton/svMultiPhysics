@@ -7,11 +7,27 @@
 
 #include "Forms/FormIR.h"
 
+#include <algorithm>
+#include <map>
 #include <sstream>
 
 namespace svmp {
 namespace FE {
 namespace forms {
+
+namespace {
+void collectCutSurfaceFields(const FormExprNode& node, std::vector<FieldId>& fields)
+{
+    if (node.type() == FormExprType::CutSurfaceVariation) {
+        const auto field = node.fieldId().value();
+        auto it = std::lower_bound(fields.begin(), fields.end(), field);
+        if (it == fields.end() || *it != field) fields.insert(it, field);
+        return;
+    }
+    for (const auto& child : node.childrenShared()) collectCutSurfaceFields(*child, fields);
+}
+
+} // namespace
 
 struct FormIR::Impl {
     bool compiled{false};
@@ -25,6 +41,19 @@ struct FormIR::Impl {
     GeometrySensitivityOptions geometry_sensitivity{};
     bool has_geometry_sensitivity_terminals{false};
     std::vector<IntegralTerm> terms{};
+    std::map<std::pair<int, std::optional<bool>>, std::vector<FieldId>> cut_surface_fields{};
+
+    void indexCutSurfaceFields()
+    {
+        cut_surface_fields.clear();
+        for (const auto& term : terms) {
+            if (term.domain != IntegralDomain::InterfaceFace ||
+                !assembly::hasFlag(term.required_data, assembly::RequiredData::CutSurfaceVariations)) continue;
+            collectCutSurfaceFields(*term.integrand.node(), cut_surface_fields[{term.interface_marker, std::nullopt}]);
+            collectCutSurfaceFields(*term.integrand.node(),
+                                    cut_surface_fields[{term.interface_marker, interfaceTermIsTwoSided(term)}]);
+        }
+    }
     std::string dump{};
 };
 
@@ -182,6 +211,7 @@ void FormIR::transformIntegrands(const FormExpr::NodeTransform& transform)
         term.debug_string = term.integrand.toString();
     }
     // Any cached dump is now stale (term strings may have changed).
+    impl_->indexCutSurfaceFields();
     impl_->dump.clear();
 }
 
@@ -200,6 +230,7 @@ void FormIR::transformIntegrands(const TermTransform& transform)
         term.integrand = term.integrand.transformNodes(per_term);
         term.debug_string = term.integrand.toString();
     }
+    impl_->indexCutSurfaceFields();
     impl_->dump.clear();
 }
 
@@ -213,7 +244,17 @@ void FormIR::setMaxTimeDerivativeOrder(int order) { impl_->max_time_derivative_o
 void FormIR::setHasExplicitTimeDependency(bool has_time_dependency) { impl_->has_explicit_time_dependency = has_time_dependency; }
 void FormIR::setGeometrySensitivityOptions(GeometrySensitivityOptions options) { impl_->geometry_sensitivity = options; }
 void FormIR::setHasGeometrySensitivityTerminals(bool has_terminals) { impl_->has_geometry_sensitivity_terminals = has_terminals; }
-void FormIR::setTerms(std::vector<IntegralTerm> terms) { impl_->terms = std::move(terms); }
+void FormIR::setTerms(std::vector<IntegralTerm> terms)
+{
+    impl_->terms = std::move(terms);
+    impl_->indexCutSurfaceFields();
+}
+
+std::span<const FieldId> FormIR::cutSurfaceFields(int marker, std::optional<bool> two_sided) const noexcept
+{
+    const auto it = impl_->cut_surface_fields.find({marker, two_sided});
+    return it == impl_->cut_surface_fields.end() ? std::span<const FieldId>{} : it->second;
+}
 void FormIR::setDump(std::string dump) { impl_->dump = std::move(dump); }
 
 } // namespace forms

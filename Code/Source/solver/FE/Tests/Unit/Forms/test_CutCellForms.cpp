@@ -1916,10 +1916,15 @@ void checkRegeneratedSurfaceTangent(const svmp::FE::assembly::IMeshAccess &mesh,
     if (!planar_sum) {
         pressure = pressure + .07 * f::FormExpr::referenceCellCoordinate().component(0) +
                    .1 * f::FormExpr::jacobianDeterminant();
-        pressure = pressure + f::FormExpr::coefficient("spatial pressure",
-                                                       f::ScalarCoefficient([](Real x, Real y, Real z) {
-                                                           return .3 * x * x - .2 * y + .4 * z * z + .5 * z;
-                                                       }));
+        if (jit) {
+            pressure = pressure + .3 * x.component(0) * x.component(0) - .2 * x.component(1) +
+                       .4 * x.component(2) * x.component(2) + .5 * x.component(2);
+        } else {
+            pressure = pressure + f::FormExpr::coefficient("spatial pressure",
+                f::ScalarCoefficient([](Real x, Real y, Real z) {
+                    return .3 * x * x - .2 * y + .4 * z * z + .5 * z;
+                }));
+        }
     }
     auto traction = pressure * n.component(0);
     if (!planar_sum) {
@@ -1957,9 +1962,7 @@ void checkRegeneratedSurfaceTangent(const svmp::FE::assembly::IMeshAccess &mesh,
         jit_options.specialization.enable = false;
         jit_tangent = std::make_unique<f::jit::JITKernelWrapper>(tangent, jit_options);
         const auto result = f::jit::canCompile(tangent->tangentIR());
-        ASSERT_FALSE(result.ok);
-        ASSERT_TRUE(result.first_issue.has_value());
-        EXPECT_EQ(result.first_issue->type, f::FormExprType::CutSurfaceVariation);
+        ASSERT_TRUE(result.ok) << (result.first_issue ? result.first_issue->message : "");
     }
     a::AssemblyKernel &matrix_kernel = jit_tangent ? static_cast<a::AssemblyKernel &>(*jit_tangent) : *tangent;
     auto dofs = createSingleCellDofMap(space.dofs_per_element());
@@ -2041,9 +2044,14 @@ void checkRegeneratedSurfaceTangent(const svmp::FE::assembly::IMeshAccess &mesh,
     };
     if (stale) {
         EXPECT_THROW((void)evaluate(origin, true), std::invalid_argument);
+        if (jit) EXPECT_TRUE(jit_tangent->isJITReady());
         return;
     }
     const auto base = evaluate(origin, true);
+    if (jit) {
+        ASSERT_TRUE(jit_tangent->isJITReady());
+        ASSERT_TRUE(jit_tangent->hasCompiledTangentDispatch(f::IntegralDomain::InterfaceFace, marker));
+    }
     if (planar_sum) {
         EXPECT_NEAR(std::accumulate(base.begin(), base.begin() + 4, 0.), 9. / 32., 1.e-13);
         EXPECT_NEAR(std::accumulate(base.begin() + 4, base.end(), 0.), .75, 1.e-10);
@@ -2071,10 +2079,17 @@ TEST(CutCellForms, GeneratedTetrahedralTractionDifferentiatesTheMovingEdgeInters
     checkRegeneratedSurfaceTangent(mesh, {.load = TractionLoad::PlanarSum});
 }
 
-TEST(CutCellForms, DifferentiatedGeneratedTractionUsesInterpreterWhenJITIsRequested)
+TEST(CutCellForms, DifferentiatedGeneratedTractionRunsCompiledAndMatchesRecutting)
 {
+    requireLLVMJITOrSkip();
     svmp::FE::forms::test::SingleTetraMeshAccess mesh;
     checkRegeneratedSurfaceTangent(mesh, {.load = TractionLoad::PlanarSum, .jit = true});
+    svmp::FE::forms::test::CurvedTetra10MeshAccess curved;
+    for (auto load : {TractionLoad::PositiveNormal, TractionLoad::TestGradient, TractionLoad::NormalSize}) {
+        checkRegeneratedSurfaceTangent(curved, {.load = load, .signed_values = {-.7, 1.7, .2, -.48},
+                                                .isovalue = .37, .jit = true});
+    }
+    checkRegeneratedSurfaceTangent(mesh, {.load = TractionLoad::PlanarSum, .stale_source = true, .jit = true});
 }
 
 TEST(CutCellForms, GeneratedTractionOnACurvedParentDifferentiatesMappedPointNormalAndArea)

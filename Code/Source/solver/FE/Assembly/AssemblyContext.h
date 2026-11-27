@@ -165,6 +165,10 @@ class CutSurfaceVariationProvider {
 public:
     virtual ~CutSurfaceVariationProvider() = default;
     virtual const CutSurfaceSampleVariation& sample(FieldId field, LocalIndex trial, LocalIndex point) const = 0;
+    // A provider may expose its immutable q-contiguous trial column for a
+    // compiled kernel. Otherwise the packer copies this column through sample().
+    virtual std::span<const CutSurfaceSampleVariation> column(FieldId, LocalIndex) const { return {}; }
+
 };
 
 /**
@@ -1495,6 +1499,12 @@ public:
     {
         if (!cut_surface_variations_) throw std::invalid_argument("cut surface variation requires generated quadrature");
         return cut_surface_variations_->sample(field, j, q);
+    }
+
+    [[nodiscard]] std::span<const CutSurfaceSampleVariation> cutSurfaceColumn(FieldId field, LocalIndex j) const
+    {
+        if (!cut_surface_variations_) throw std::invalid_argument("cut surface variation requires generated quadrature");
+        return cut_surface_variations_->column(field, j);
     }
 
     void setUserData(const void* user_data) noexcept { user_data_ = user_data; }

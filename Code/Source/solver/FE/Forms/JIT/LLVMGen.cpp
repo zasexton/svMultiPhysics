@@ -67,6 +67,43 @@ namespace jit {
 
 namespace {
 
+// Offsets in the checked host-side cut table; the LLVM kernel dereferences
+// only the scalar used by each compiled expression.
+std::size_t cutSurfaceOffset(std::uint64_t component)
+{
+    using Sample = assembly::CutSurfaceSampleVariation;
+    const auto offset = [&](CutSurfaceComponent first, std::size_t member) {
+        return member + (component - static_cast<std::uint64_t>(first)) * sizeof(Real);
+    };
+    using C = CutSurfaceComponent;
+    if (component >= static_cast<unsigned>(C::InverseJacobianXX)) {
+        return offset(C::InverseJacobianXX, offsetof(Sample, inverse_jacobian));
+    }
+    if (component >= static_cast<unsigned>(C::JacobianXX)) {
+        return offset(C::JacobianXX, offsetof(Sample, jacobian));
+    }
+    if (component == static_cast<unsigned>(C::RelativeJacobianDeterminant)) {
+        return offsetof(Sample, relative_jacobian_determinant);
+    }
+    if (component >= static_cast<unsigned>(C::FieldPointX)) {
+        return offset(C::FieldPointX, offsetof(Sample, field_point));
+    }
+    if (component >= static_cast<unsigned>(C::ReferencePointX)) {
+        return offset(C::ReferencePointX, offsetof(Sample, reference_point));
+    }
+    if (component == static_cast<unsigned>(C::FacetMeasure)) {
+        return offsetof(Sample, facet_measure);
+    }
+    if (component == static_cast<unsigned>(C::RelativeWeight)) {
+        return offsetof(Sample, relative_weight);
+    }
+    if (component >= static_cast<unsigned>(C::NormalX)) {
+        return offset(C::NormalX, offsetof(Sample, normal));
+    }
+    return offset(C::PointX, offsetof(Sample, point));
+}
+
+
 std::atomic<bool> g_uniform_structural_hashes{false};
 
 /// Packed integer value of CURRENT_SOLUTION_FIELD_ID for comparison against
@@ -780,6 +817,7 @@ struct ShapeInferenceResult {
             case FormExprType::ReferenceJacobianDeterminant:
             case FormExprType::CurrentMeanCurvature:
             case FormExprType::CurrentMeasure:
+            case FormExprType::CutSurfaceVariation:
             case FormExprType::CurrentMeasureVariation:
             case FormExprType::ReferenceMeasure:
                 out.shapes[idx] = scalarShape();
@@ -1691,6 +1729,7 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
 
         // terms is empty in coupled mode (block-sequential dispatch handles terms).
         std::vector<LoweredTerm> terms;
+        const auto cut_surface_fields = ir.cutSurfaceFields(interface_marker);
 
         if (!coupled) {
         if (!ir.isCompiled()) {
@@ -1840,6 +1879,7 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
                            (op.type == FormExprType::GeometryTrialVectorVariation ||
                             op.type == FormExprType::GeometryTrialJacobianVariation ||
                             op.type == FormExprType::MeshVelocityVariation ||
+                            op.type == FormExprType::CutSurfaceVariation ||
                             op.type == FormExprType::CurrentMeasureVariation ||
                             op.type == FormExprType::CurrentNormalVariation ||
                             op.type == FormExprType::SurfaceJacobianVariation)) {
@@ -19676,6 +19716,31 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
                             values_plus[op_idx] = makeScalar(loadRealPtrAt(side_plus.reference_measures, q_index));
                             break;
 
+                        case FormExprType::CutSurfaceVariation: {
+                            // A generated facet's sample is differentiated with respect
+                            // to the active trial side, including its outward normal sign.
+                            using Args = assembly::jit::InteriorFaceKernelArgsV6;
+                            using Sample = assembly::CutSurfaceSampleVariation;
+                            const auto field = static_cast<FieldId>(op.imm0);
+                            const auto it = std::lower_bound(cut_surface_fields.begin(), cut_surface_fields.end(), field);
+                            if (it == cut_surface_fields.end() || *it != field) {
+                                throw std::logic_error("missing generated cut field in kernel layout");
+                            }
+                            const auto slot = static_cast<std::uint64_t>(it - cut_surface_fields.begin());
+                            const auto tables = loadPtr(args_ptr, trial_active_plus ? offsetof(Args, cut_surface_plus)
+                                                                                  : offsetof(Args, cut_surface_minus));
+                            const auto& side = trial_active_plus ? side_plus : side_minus;
+                            const auto column = builder.CreateAdd(builder.CreateZExtOrTrunc(j_index, i64),
+                                builder.CreateMul(builder.getInt64(slot), builder.CreateZExtOrTrunc(side.n_trial_dofs, i64)));
+                            const auto column_ptr = builder.CreateGEP(i8_ptr, tables, column);
+                            const auto base = builder.CreateLoad(i8_ptr, column_ptr);
+                            const auto sample = builder.CreateGEP(builder.getInt8Ty(), base,
+                                builder.CreateMul(builder.CreateZExtOrTrunc(q_index, i64), builder.getInt64(sizeof(Sample))));
+                            const auto value = makeScalar(loadF64(sample, cutSurfaceOffset(op.imm1)));
+                            values_minus[op_idx] = trial_active_plus ? makeZero(shape) : value;
+                            values_plus[op_idx] = trial_active_plus ? value : makeZero(shape);
+                            break;
+                        }
                         case FormExprType::GeometryTrialVectorVariation:
                         case FormExprType::GeometryTrialJacobianVariation:
                         case FormExprType::MeshVelocityVariation:

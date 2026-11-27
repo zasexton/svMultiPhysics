@@ -2150,23 +2150,37 @@ void JITKernelWrapper::computeInterfaceFace(const assembly::AssemblyContext& ctx
         return;
     }
 
+    bool binding_cut_data = false;
     try {
         const auto checks = assembly::jit::PackingChecks{.validate_alignment = false};
         const bool one_sided_embedded = &ctx_plus == &ctx_minus;
         const bool generated_two_sided = !one_sided_embedded && ctx_minus.isGeneratedInterfaceTwoSided();
-        const auto callOnMarker = [&](const CompiledDispatch& compiled, const void* args) {
-            callJIT(compiled.interface_all, args);
+        const auto callOnMarker = [&](const CompiledDispatch& compiled,
+                                      const assembly::jit::InteriorFaceKernelArgsV6& packed,
+                                      const FormIR& ir, std::optional<bool> two_sided = {}) {
+            const auto call = [&](int marker, std::uintptr_t address) {
+                if (!address) return;
+                if (!assembly::hasFlag(ir.requiredData(), assembly::RequiredData::CutSurfaceVariations)) {
+                    callJIT(address, &packed);
+                    return;
+                }
+                auto args = packed;
+                assembly::jit::CutSurfaceKernelTables tables;
+                binding_cut_data = true;
+                tables.bind(args, ctx_minus, ctx_plus, ir.cutSurfaceFields(marker, two_sided));
+                binding_cut_data = false;
+                callJIT(address, &args);
+            };
+            call(-1, compiled.interface_all);
             if (const auto it = compiled.interface_by_marker.find(interface_marker);
-                it != compiled.interface_by_marker.end()) {
-                callJIT(it->second, args);
-            }
+                it != compiled.interface_by_marker.end()) call(interface_marker, it->second);
         };
         // A two-sided generated call of an IR mixing interface term sides
         // (D70): the two-sided terms fill every block; the one-sided terms
         // run with their plus row and coupling blocks sent to scratch, so
         // they fill the minus row and the minus-minus block only.
-        const auto callSides = [&](const InterfaceSidesDispatch& sides, const void* args) {
-            callOnMarker(sides.two_sided, args);
+        const auto callSides = [&](const InterfaceSidesDispatch& sides, const assembly::jit::InteriorFaceKernelArgsV6& args, const FormIR& ir) {
+            callOnMarker(sides.two_sided, args, ir, true);
             thread_local assembly::KernelOutput scratch_plus;
             thread_local assembly::KernelOutput scratch_mp;
             thread_local assembly::KernelOutput scratch_pm;
@@ -2181,7 +2195,7 @@ void JITKernelWrapper::computeInterfaceFace(const assembly::AssemblyContext& ctx
                                                              output_minus, scratch_plus,
                                                              scratch_mp, scratch_pm,
                                                              checks);
-            callOnMarker(sides.one_sided, &minus_only_args);
+            callOnMarker(sides.one_sided, minus_only_args, ir, false);
         };
         const auto mixesSides = [&](const FormIR& ir) {
             return generated_two_sided && interfaceTermsMixSidesOnMarker(ir, interface_marker);
@@ -2238,13 +2252,13 @@ void JITKernelWrapper::computeInterfaceFace(const assembly::AssemblyContext& ctx
 	                                                         coupling_minus_plus, coupling_plus_minus,
 	                                                         checks);
 	        if (mixesSides(k->ir())) {
-	            callSides(sides_form_, &args);
+	            callSides(sides_form_, args, k->ir());
 	        } else {
 	            const auto disp =
 	                getSpecializedDispatch(KernelRole::Form, k->ir(), IntegralDomain::InterfaceFace, ctx_minus, &ctx_plus);
 	            const auto& compiled = disp ? *disp : compiled_form_;
 
-	            callOnMarker(compiled, &args);
+	            callOnMarker(compiled, args, k->ir());
 	        }
 
         output_minus.has_matrix = matrix;
@@ -2333,25 +2347,25 @@ void JITKernelWrapper::computeInterfaceFace(const assembly::AssemblyContext& ctx
 
 	        if (want_matrix) {
 	            if (mixesSides(k->tangentIR())) {
-	                callSides(sides_tangent_, &args);
+	                callSides(sides_tangent_, args, k->tangentIR());
 	            } else {
 	                const auto disp =
 	                    getSpecializedDispatch(KernelRole::Tangent, k->tangentIR(), IntegralDomain::InterfaceFace, ctx_minus, &ctx_plus);
 	                const auto& compiled = disp ? *disp : compiled_tangent_;
 
-	                callOnMarker(compiled, &args);
+	                callOnMarker(compiled, args, k->tangentIR());
 	            }
 	        }
 
 	        if (want_vector) {
 	            if (mixesSides(k->residualIR())) {
-	                callSides(sides_residual_, &args);
+	                callSides(sides_residual_, args, k->residualIR());
 	            } else {
 	                const auto disp =
 	                    getSpecializedDispatch(KernelRole::Residual, k->residualIR(), IntegralDomain::InterfaceFace, ctx_minus, &ctx_plus);
 	                const auto& compiled = disp ? *disp : compiled_residual_;
 
-	                callOnMarker(compiled, &args);
+	                callOnMarker(compiled, args, k->residualIR());
 	            }
 	        }
 
@@ -2372,6 +2386,7 @@ void JITKernelWrapper::computeInterfaceFace(const assembly::AssemblyContext& ctx
     } catch (const assembly::DeferredSerialWork&) {
         throw;
     } catch (const std::exception& e) {
+        if (binding_cut_data) throw;
         if (assembly::concurrentComputeActive()) {
             // Threaded assembly: let the serial loop meet the failure, so the
             // switch to the interpreter happens in the serial order.
@@ -2382,6 +2397,7 @@ void JITKernelWrapper::computeInterfaceFace(const assembly::AssemblyContext& ctx
                                         output_minus, output_plus,
                                         coupling_minus_plus, coupling_plus_minus);
     } catch (...) {
+        if (binding_cut_data) throw;
         if (assembly::concurrentComputeActive()) {
             throw assembly::DeferredSerialWork("JIT runtime failure in computeInterfaceFace");
         }

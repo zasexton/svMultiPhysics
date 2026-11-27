@@ -23,6 +23,9 @@
 #include <cstddef>
 #include <cstdint>
 #include <optional>
+#include <span>
+#include <stdexcept>
+#include <vector>
 #include <type_traits>
 
 namespace svmp {
@@ -1011,6 +1014,51 @@ struct InteriorFaceKernelArgsV6 {
     KernelOutputViewV6 output_plus{};
     KernelOutputViewV6 coupling_minus_plus{};
     KernelOutputViewV6 coupling_plus_minus{};
+
+    // Optional trial columns, indexed by [field_slot * n_trial + j][q].
+    // Field slots follow FormIR::cutSurfaceFields(); all earlier V6 offsets are stable.
+    const CutSurfaceSampleVariation* const* cut_surface_minus{nullptr};
+    const CutSurfaceSampleVariation* const* cut_surface_plus{nullptr};
+};
+
+/** Keep the generated-sample columns alive for one call of a compiled
+ *  interface kernel. Ordinary forms require no cut table. */
+class CutSurfaceKernelTables {
+public:
+    void bind(InteriorFaceKernelArgsV6& args, const AssemblyContext& minus, const AssemblyContext& plus,
+              std::span<const FieldId> fields)
+    {
+        const auto pack = [&](const AssemblyContext& side, std::vector<const CutSurfaceSampleVariation*>& columns) {
+            columns.clear();
+            const auto n_q = static_cast<std::size_t>(side.numQuadraturePoints());
+            for (auto field : fields) {
+                for (LocalIndex j = 0; j < side.numTrialDofs(); ++j) {
+                    auto values = side.cutSurfaceColumn(field, j);
+                    if (values.empty()) {
+                        auto& copy = owned_.emplace_back();
+                        copy.reserve(n_q);
+                        for (LocalIndex q = 0; q < side.numQuadraturePoints(); ++q) {
+                            copy.push_back(side.cutSurfaceVariation(field, j, q));
+                        }
+                        values = copy;
+                    }
+                    if (values.size() != n_q) throw std::invalid_argument("generated cut tangent column size mismatch");
+                    columns.push_back(values.data());
+                }
+            }
+        };
+        owned_.clear();
+        const bool need_minus = args.output_minus.element_matrix || args.coupling_plus_minus.element_matrix;
+        const bool need_plus = args.output_plus.element_matrix || args.coupling_minus_plus.element_matrix;
+        if (need_minus || (need_plus && &minus == &plus)) pack(minus, minus_);
+        if (need_plus && &minus != &plus) pack(plus, plus_);
+        args.cut_surface_minus = need_minus ? minus_.data() : nullptr;
+        args.cut_surface_plus = need_plus ? (&minus == &plus ? minus_ : plus_).data() : nullptr;
+    }
+
+private:
+    std::vector<const CutSurfaceSampleVariation*> minus_, plus_;
+    std::vector<std::vector<CutSurfaceSampleVariation>> owned_;
 };
 
 static_assert(std::is_standard_layout_v<KernelOutputViewV6>);

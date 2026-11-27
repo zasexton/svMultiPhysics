@@ -46,6 +46,17 @@ public:
     const assembly::CutSurfaceSampleVariation& sample(
         FieldId field, LocalIndex trial_dof, LocalIndex quadrature_point) const override
     {
+        return table(field).at(trial_dof).at(quadrature_point);
+    }
+
+    std::span<const assembly::CutSurfaceSampleVariation> column(FieldId field, LocalIndex trial_dof) const override
+    {
+        return table(field).at(trial_dof);
+    }
+
+private:
+    const Table& table(FieldId field) const
+    {
         auto table = tables_.find(field);
         if (table == tables_.end()) {
             auto variations = build_(field);
@@ -60,10 +71,9 @@ public:
             }
             table = tables_.emplace(field, std::move(variations)).first;
         }
-        return table->second.at(trial_dof).at(quadrature_point);
+        return table->second;
     }
 
-private:
     assembly::AssemblyContext& context_;
     Build build_;
     bool positive_side_;

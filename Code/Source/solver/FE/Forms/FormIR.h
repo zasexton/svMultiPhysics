@@ -11,6 +11,7 @@
 
 #include <memory>
 #include <optional>
+#include <span>
 #include <string>
 #include <vector>
 
@@ -128,6 +129,11 @@ public:
 	    [[nodiscard]] bool hasInteriorFaceTerms() const noexcept;
 	    [[nodiscard]] bool hasInterfaceFaceTerms() const noexcept;
         [[nodiscard]] bool hasCutVolumeTerms() const noexcept;
+
+    /** Cut-geometry sources, in kernel-table order, for exactly this marker
+     *  (-1 denotes the all-marker kernel) and optional generated-side group. */
+    [[nodiscard]] std::span<const FieldId> cutSurfaceFields(
+        int marker, std::optional<bool> two_sided = {}) const noexcept;
 
     [[nodiscard]] const std::vector<IntegralTerm>& terms() const noexcept;
 

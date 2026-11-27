@@ -269,6 +269,7 @@ struct ConstantMatrix {
         case FormExprType::CurrentMeanCurvature:
         case FormExprType::CurrentMeasure:
         case FormExprType::ReferenceMeasure:
+        case FormExprType::CutSurfaceVariation:
         case FormExprType::CurrentMeasureVariation:
         case FormExprType::CellDiameter:
         case FormExprType::CellVolume:
@@ -785,6 +786,9 @@ void collectShapeContextSeed(const FormExprNode& node,
         case FormExprType::SurfaceJacobianVariation:
             return hasChildren(0u);
 
+        case FormExprType::CutSurfaceVariation:
+            return hasChildren(2u) && node.fieldId().has_value() && node.componentIndex0().has_value();
+
         case FormExprType::Constant:
             return hasChildren(0u) &&
                    node.constantValue().has_value();
@@ -1128,10 +1132,6 @@ ValidationResult canCompileImpl(const FormExpr& integrand,
                 out.first_issue = issue(
                     n,
                     "JIT: AuxiliaryOutputRef requires runtime entity-aware lookup; use interpreter fallback");
-                return;
-            case FormExprType::CutSurfaceVariation:
-                out.ok = false;
-                out.first_issue = issue(n, "JIT: differentiated cut quadrature uses the assembly-context interpreter fallback");
                 return;
             case FormExprType::CellDiameterVariation:
             case FormExprType::CellVolumeVariation:
@@ -1572,6 +1572,13 @@ ValidationResult canCompile(const FormIR& ir, const ValidationOptions& options)
                 .message = "forms::jit::canCompile(FormIR): term integrand is invalid",
                 .subexpr = term.debug_string,
             };
+            return out;
+        }
+
+        if (assembly::hasFlag(term.required_data, assembly::RequiredData::CutSurfaceVariations) &&
+            (term.domain != IntegralDomain::InterfaceFace || ir.kind() != FormKind::Bilinear)) {
+            out.ok = false;
+            out.first_issue = issue(*term.integrand.node(), "cut surface variations require a bilinear interface form");
             return out;
         }
 

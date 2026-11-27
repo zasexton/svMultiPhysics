@@ -250,6 +250,10 @@ struct ImmPayload {
 {
     ImmPayload out{};
     switch (node.type()) {
+        case FormExprType::CutSurfaceVariation:
+            out.imm0 = node.fieldId().value();
+            out.imm1 = static_cast<std::uint64_t>(node.componentIndex0().value());
+            return out;
         case FormExprType::TypedZero: {
             // TypedZero lowers to Constant(0.0) in KernelIR
             const double zero = 0.0;
@@ -521,13 +525,17 @@ struct Builder {
         }
 
         std::vector<std::uint32_t> kid_indices;
-        const auto kids = node.childrenShared();
-        kid_indices.reserve(kids.size());
-        for (const auto& child : kids) {
-            if (!child) {
-                throw std::invalid_argument("KernelIR: null child pointer in FormExprNode");
+        // These two children identify a retained table. Its entries already
+        // include the trial basis action at the moving quadrature point.
+        if (node.type() != FormExprType::CutSurfaceVariation) {
+            const auto kids = node.childrenShared();
+            kid_indices.reserve(kids.size());
+            for (const auto& child : kids) {
+                if (!child) {
+                    throw std::invalid_argument("KernelIR: null child pointer in FormExprNode");
+                }
+                kid_indices.push_back(lower(*child));
             }
-            kid_indices.push_back(lower(*child));
         }
 
         if (options.canonicalize_commutative && kid_indices.size() == 2u && isCommutative(node.type())) {
