@@ -11949,28 +11949,10 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
 		                            break;
 		                        }
 
-                        if (kid.type == FormExprType::StateField &&
-                            unpackFieldIdImm1(kid.imm1) == kCurrentSolutionFid) {
-                            // The current solution's Hessian, from its coefficients (it has no
-                            // field entry: reading one gave zero).
-                            CodeValue out = makeZero(shape);
-                            const auto sums = emitReduceSum(
-                                side.n_trial_dofs, "hess_state_u", mat_len, [&](llvm::Value* j) {
-                                    auto* j64 = builder.CreateZExt(j, i64);
-                                    auto* cj = loadRealPtrAt(side.solution_coefficients, j64);
-                                    const auto H =
-                                        loadScalarPhysicalHessianMaybeBaked(side, false, j, q_index, dim_u32);
-                                    std::vector<llvm::Value*> terms;
-                                    terms.reserve(mat_len);
-                                    for (std::size_t i = 0; i < mat_len; ++i) {
-                                        terms.push_back(builder.CreateFMul(cj, H.elems[i]));
-                                    }
-                                    return terms;
-                                });
-                            for (std::size_t i = 0; i < mat_len; ++i) {
-                                out.elems[i] = sums[i];
-                            }
-                            values[op_idx] = out;
+                        if ((kid.type == FormExprType::TrialFunction && is_residual) ||
+                            (kid.type == FormExprType::StateField && unpackFieldIdImm1(kid.imm1) == kCurrentSolutionFid)) {
+                            values[op_idx] = reduceComponentHessianFromCoeffs(
+                                side, side.solution_coefficients, 0, 1, q_index, dim_u32, "current_hessian");
                             break;
                         }
 
@@ -14196,28 +14178,10 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
 		                                return out;
 		                            }
 
-                            if (kid.type == FormExprType::StateField &&
-                                unpackFieldIdImm1(kid.imm1) == kCurrentSolutionFid) {
-                                // The current solution's Hessian on this side, from its
-                                // coefficients (it has no field entry).
-                                CodeValue out = makeZero(shape);
-                                const auto sums = emitReduceSum(
-                                    side.n_trial_dofs, "face_hess_state_u", mat_len, [&](llvm::Value* j) {
-                                        auto* j64 = builder.CreateZExt(j, i64);
-                                        auto* cj = loadRealPtrAt(side.solution_coefficients, j64);
-                                        const auto H =
-                                            loadScalarPhysicalHessianMaybeBaked(side, false, j, q_index, dim_u32);
-                                        std::vector<llvm::Value*> terms;
-                                        terms.reserve(mat_len);
-                                        for (std::size_t i = 0; i < mat_len; ++i) {
-                                            terms.push_back(builder.CreateFMul(cj, H.elems[i]));
-                                        }
-                                        return terms;
-                                    });
-                                for (std::size_t i = 0; i < mat_len; ++i) {
-                                    out.elems[i] = sums[i];
-                                }
-                                return out;
+                            if ((kid.type == FormExprType::TrialFunction && is_residual) ||
+                                (kid.type == FormExprType::StateField && unpackFieldIdImm1(kid.imm1) == kCurrentSolutionFid)) {
+                                return reduceComponentHessianFromCoeffs(
+                                    side, side.solution_coefficients, 0, 1, q_index, dim_u32, "current_hessian");
                             }
 
                             if (kid.type == FormExprType::DiscreteField || kid.type == FormExprType::StateField) {

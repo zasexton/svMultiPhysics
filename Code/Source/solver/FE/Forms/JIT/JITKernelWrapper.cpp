@@ -2016,34 +2016,37 @@ void JITKernelWrapper::computeInteriorFace(const assembly::AssemblyContext& ctx_
         return;
     }
 
-    if (kind_ == WrappedKind::SymbolicNonlinearFormKernel) {
-        const auto* k = dynamic_cast<const SymbolicNonlinearFormKernel*>(fallback_.get());
-        if (!k) {
-            fallback_->computeInteriorFace(ctx_minus, ctx_plus,
-                                           output_minus, output_plus,
-                                           coupling_minus_plus, coupling_plus_minus);
-            return;
-        }
-
+    const auto* symbolic = dynamic_cast<const SymbolicNonlinearFormKernel*>(fallback_.get());
+    const auto* ad = symbolic ? nullptr : dynamic_cast<const NonlinearFormKernel*>(fallback_.get());
+    if (symbolic || ad) {
+        const bool can_matrix = symbolic ? !symbolic->isVectorOnly() : !ad->isVectorOnly();
+        const bool can_vector = symbolic ? !symbolic->isMatrixOnly() : !ad->isMatrixOnly();
         const auto minus_requested = requestedKernelOutputs(
             output_minus,
-            !k->isVectorOnly(),
-            !k->isMatrixOnly());
+            can_matrix,
+            can_vector);
         const auto plus_requested = requestedKernelOutputs(
             output_plus,
-            !k->isVectorOnly(),
-            !k->isMatrixOnly());
+            can_matrix,
+            can_vector);
         const auto mp_requested = requestedKernelOutputs(
             coupling_minus_plus,
-            !k->isVectorOnly(),
+            can_matrix,
             /*can_vector=*/false);
         const auto pm_requested = requestedKernelOutputs(
             coupling_plus_minus,
-            !k->isVectorOnly(),
+            can_matrix,
             /*can_vector=*/false);
         const bool want_matrix =
             minus_requested.matrix || plus_requested.matrix || mp_requested.matrix || pm_requested.matrix;
         const bool want_vector = minus_requested.vector || plus_requested.vector;
+        // The forward-AD tangent is evaluated by its dual-number kernel. A
+        // residual-only request can use the compiled physical-facet residual.
+        if (ad && want_matrix) {
+            fallback_marked_interior_face();
+            return;
+        }
+
 
         const auto n_test_minus = ctx_minus.numTestDofs();
         const auto n_trial_minus = ctx_minus.numTrialDofs();
@@ -2060,11 +2063,12 @@ void JITKernelWrapper::computeInteriorFace(const assembly::AssemblyContext& ctx_
         coupling_minus_plus.clear();
         coupling_plus_minus.clear();
 
-        const auto& updates = k->inlinedStateUpdates().interior_face;
+        const auto& updates = (symbolic ? symbolic->inlinedStateUpdates() : ad->inlinedStateUpdates()).interior_face;
         if (!updates.empty()) {
+            const auto& layout = symbolic ? symbolic->constitutiveStateLayout() : ad->constitutiveStateLayout();
             for (LocalIndex q = 0; q < ctx_minus.numQuadraturePoints(); ++q) {
                 applyInlinedMaterialStateUpdatesReal(ctx_minus, &ctx_plus, FormKind::Residual,
-                                                     k->constitutiveStateLayout(),
+                                                     layout,
                                                      updates,
                                                      Side::Minus, q);
 
@@ -2072,7 +2076,7 @@ void JITKernelWrapper::computeInteriorFace(const assembly::AssemblyContext& ctx_
                 const auto* base_plus = ctx_plus.materialStateWorkBase();
                 if (base_plus != nullptr && base_plus != base_minus) {
                     applyInlinedMaterialStateUpdatesReal(ctx_minus, &ctx_plus, FormKind::Residual,
-                                                         k->constitutiveStateLayout(),
+                                                         layout,
                                                          updates,
                                                          Side::Plus, q);
                 }
@@ -2088,7 +2092,7 @@ void JITKernelWrapper::computeInteriorFace(const assembly::AssemblyContext& ctx_
             std::uintptr_t residual_address = 0u;
 	        if (want_matrix) {
 	            const auto disp =
-	                getSpecializedDispatch(KernelRole::Tangent, k->tangentIR(), IntegralDomain::InteriorFace, ctx_minus, &ctx_plus);
+	                getSpecializedDispatch(KernelRole::Tangent, symbolic->tangentIR(), IntegralDomain::InteriorFace, ctx_minus, &ctx_plus);
 	            const auto& compiled = disp ? *disp : compiled_tangent_;
             tangent_address =
                     interior_face_address(compiled,
@@ -2101,7 +2105,7 @@ void JITKernelWrapper::computeInteriorFace(const assembly::AssemblyContext& ctx_
 	        }
 	        if (want_vector) {
 	            const auto disp =
-	                getSpecializedDispatch(KernelRole::Residual, k->residualIR(), IntegralDomain::InteriorFace, ctx_minus, &ctx_plus);
+	                getSpecializedDispatch(KernelRole::Residual, (symbolic ? symbolic->residualIR() : ad->residualIR()), IntegralDomain::InteriorFace, ctx_minus, &ctx_plus);
 	            const auto& compiled = disp ? *disp : compiled_residual_;
             residual_address =
                     interior_face_address(compiled,
@@ -2964,56 +2968,64 @@ bool JITKernelWrapper::isJITReady() const noexcept
     return canUseJIT();
 }
 
+bool JITKernelWrapper::hasCompiledResidualDispatch(IntegralDomain domain, int marker) const noexcept
+{
+    std::lock_guard<std::mutex> lock(jit_mutex_);
+    return hasDispatch(compiled_residual_, domain, marker);
+}
+
 bool JITKernelWrapper::hasCompiledTangentDispatch(IntegralDomain domain, int marker) const noexcept
 {
     std::lock_guard<std::mutex> lock(jit_mutex_);
-    if (!options_.enable || compiled_revision_ != revision_ || !compiled_tangent_.ok) {
-        return false;
-    }
+    return hasDispatch(compiled_tangent_, domain, marker);
+}
 
+bool JITKernelWrapper::hasDispatch(const CompiledDispatch& dispatch, IntegralDomain domain, int marker) const noexcept
+{
+    if (!options_.enable || compiled_revision_ != revision_ || !dispatch.ok) return false;
     switch (domain) {
         case IntegralDomain::Cell:
-            return compiled_tangent_.cell != 0;
+            return dispatch.cell != 0;
         case IntegralDomain::Boundary:
             if (marker >= 0) {
-                return compiled_tangent_.boundary_by_marker.find(marker) !=
-                       compiled_tangent_.boundary_by_marker.end();
+                return dispatch.boundary_by_marker.find(marker) !=
+                       dispatch.boundary_by_marker.end();
             }
-            return compiled_tangent_.boundary_all != 0 ||
-                   !compiled_tangent_.boundary_by_marker.empty();
+            return dispatch.boundary_all != 0 ||
+                   !dispatch.boundary_by_marker.empty();
         case IntegralDomain::InteriorFace:
             if (marker >= 0) {
-                return compiled_tangent_.interior_by_marker.find(marker) !=
-                           compiled_tangent_.interior_by_marker.end() ||
-                       compiled_tangent_.interior_by_region.find(
+                return dispatch.interior_by_marker.find(marker) !=
+                           dispatch.interior_by_marker.end() ||
+                       dispatch.interior_by_region.find(
                            interiorFaceDispatchKey(
                                marker, CutVolumeSide::Negative)) !=
-                           compiled_tangent_.interior_by_region.end() ||
-                       compiled_tangent_.interior_by_region.find(
+                           dispatch.interior_by_region.end() ||
+                       dispatch.interior_by_region.find(
                            interiorFaceDispatchKey(
                                marker, CutVolumeSide::Positive)) !=
-                           compiled_tangent_.interior_by_region.end();
+                           dispatch.interior_by_region.end();
             }
-            return compiled_tangent_.interior_face != 0 ||
-                   !compiled_tangent_.interior_by_marker.empty() ||
-                   !compiled_tangent_.interior_by_region.empty();
+            return dispatch.interior_face != 0 ||
+                   !dispatch.interior_by_marker.empty() ||
+                   !dispatch.interior_by_region.empty();
         case IntegralDomain::InterfaceFace:
             if (marker >= 0) {
-                return compiled_tangent_.interface_by_marker.find(marker) !=
-                       compiled_tangent_.interface_by_marker.end();
+                return dispatch.interface_by_marker.find(marker) !=
+                       dispatch.interface_by_marker.end();
             }
-            return compiled_tangent_.interface_all != 0 ||
-                   !compiled_tangent_.interface_by_marker.empty();
+            return dispatch.interface_all != 0 ||
+                   !dispatch.interface_by_marker.empty();
         case IntegralDomain::CutVolume:
             if (marker >= 0) {
-                return compiled_tangent_.cut_volume_by_region.find(
+                return dispatch.cut_volume_by_region.find(
                            cutVolumeDispatchKey(marker, CutVolumeSide::Negative)) !=
-                           compiled_tangent_.cut_volume_by_region.end() ||
-                       compiled_tangent_.cut_volume_by_region.find(
+                           dispatch.cut_volume_by_region.end() ||
+                       dispatch.cut_volume_by_region.find(
                            cutVolumeDispatchKey(marker, CutVolumeSide::Positive)) !=
-                           compiled_tangent_.cut_volume_by_region.end();
+                           dispatch.cut_volume_by_region.end();
             }
-            return !compiled_tangent_.cut_volume_by_region.empty();
+            return !dispatch.cut_volume_by_region.empty();
     }
     return false;
 }

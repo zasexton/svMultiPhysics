@@ -37,6 +37,7 @@
 #include "Elements/ReferenceElement.h"
 #include "Forms/BoundaryConditions.h"
 #include "Forms/InterfaceConditions.h"
+#include "Forms/JIT/JITKernelWrapper.h"
 #include "Forms/StandardBCs.h"
 #include "Forms/Vocabulary.h"
 #include "Mesh/Core/InterfaceMesh.h"
@@ -286,12 +287,13 @@ TEST(InterfaceTraceConventions, AverageOfALaplacianOnAnInteriorFacetIsAssembled)
     // two unit squares, whose interior facet x = 1 has length 1: the residual
     // sums to 6 over the DOFs (jv sums to zero), and, the residual being linear
     // in u, the tangent times the state is the residual; with the
-    // automatic-differentiation and with the symbolic tangent, interpreted.
-    // (Compiled, the symbolic-tangent kernel's residual evaluates the facet
-    // Laplacian to zero; the automatic-differentiation kernel is not compiled,
-    // "cached Hessian operand not supported", and runs interpreted.)
+    // automatic-differentiation and symbolic tangents.
     using forms::FormExpr;
-    for (const bool symbolic : {false, true}) {
+    struct Mode { bool symbolic, compiled; };
+    for (const Mode mode : {Mode{false, false}, Mode{true, false}, Mode{false, true}, Mode{true, true}}) {
+        if (mode.compiled && !SVMP_FE_ENABLE_LLVM_JIT) continue;
+        const bool symbolic = mode.symbolic;
+        SCOPED_TRACE(mode.compiled ? "LLVM" : "interpreter");
         SCOPED_TRACE(symbolic ? "symbolic tangent" : "automatic differentiation");
         auto space = std::make_shared<spaces::H1Space>(ElementType::Quad4, 2);
         FESystem sys(twoUnitSquaresSharingAnInterface());
@@ -304,9 +306,9 @@ TEST(InterfaceTraceConventions, AverageOfALaplacianOnAnInteriorFacetIsAssembled)
                               (forms::avg(forms::laplacian(u)) * forms::avg(v)).dS() +
                               (forms::avg(forms::laplacian(u)) * jv).dS();
         FormInstallOptions options;
-        options.compiler_options.jit.enable = false;
+        options.compiler_options.jit.enable = mode.compiled;
         options.compiler_options.use_symbolic_tangent = symbolic;
-        (void)installFormulation(sys, "op", {u_id}, residual, options);
+        const auto kernels = installFormulation(sys, "op", {u_id}, residual, options);
         sys.setup();
 
         const auto n_dofs = sys.dofHandler().getNumDofs();
@@ -337,6 +339,21 @@ TEST(InterfaceTraceConventions, AverageOfALaplacianOnAnInteriorFacetIsAssembled)
         J.zero();
         R.zero();
         ASSERT_TRUE(sys.assemble(request, view, &J, &R).success);
+        if (mode.compiled) {
+            ASSERT_EQ(kernels.residual.size(), 1u);
+            const auto* driver = dynamic_cast<const forms::jit::JITKernelWrapper*>(kernels.residual.front().get());
+            ASSERT_NE(driver, nullptr);
+            ASSERT_TRUE(driver->hasCompiledResidualDispatch(forms::IntegralDomain::InteriorFace));
+            // Residual-only is also the normal LLVM route for the forward-AD kernel.
+            request.want_matrix = false;
+            assembly::DenseVectorView residual_only(n_dofs);
+            residual_only.zero();
+            ASSERT_TRUE(sys.assemble(request, view, nullptr, &residual_only).success);
+            for (GlobalIndex i = 0; i < n_dofs; ++i) {
+                EXPECT_NEAR(residual_only.getVectorEntry(i), R.getVectorEntry(i), 1e-12);
+            }
+            EXPECT_TRUE(driver->isJITReady());
+        }
         Real sum = 0.0;
         Real defect = 0.0;
         for (GlobalIndex i = 0; i < n_dofs; ++i) {

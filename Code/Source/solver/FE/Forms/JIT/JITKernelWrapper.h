@@ -143,6 +143,9 @@ public:
     /** @brief Check if JIT-compiled kernel is available. */
     [[nodiscard]] bool isJITReady() const noexcept;
 
+    /** @brief Check whether a nonlinear residual was compiled for a domain. */
+    [[nodiscard]] bool hasCompiledResidualDispatch(IntegralDomain domain, int marker = -1) const noexcept;
+
     /** @brief Check whether a generic symbolic tangent dispatch was compiled for a domain. */
     [[nodiscard]] bool hasCompiledTangentDispatch(IntegralDomain domain, int marker = -1) const noexcept;
 
@@ -340,6 +343,7 @@ private:
 
     WrappedKind kind_{WrappedKind::Unknown};
     std::shared_ptr<JITCompiler> compiler_{};
+    [[nodiscard]] bool hasDispatch(const CompiledDispatch& dispatch, IntegralDomain domain, int marker) const noexcept;
     CompiledDispatch compiled_form_{};
     CompiledDispatch compiled_bilinear_{};
     CompiledDispatch compiled_linear_{};
