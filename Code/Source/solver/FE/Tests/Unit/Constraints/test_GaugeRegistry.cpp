@@ -7,6 +7,7 @@
 
 #include "Constraints/GaugeRegistry.h"
 #include "Constraints/AffineConstraints.h"
+#include "Math/DenseLinearAlgebra.h"
 
 using namespace svmp::FE;
 using namespace svmp::FE::gauge;
@@ -670,6 +671,40 @@ TEST(GaugeRegistry, Resolve_GlobalPreservedEvidence_StillMatchesRegions)
 // Area 3: KernelOfSymGrad rotation modes
 // ============================================================================
 
+namespace {
+
+// Apply the actual affine constraint rows to independent physical fields
+// t + omega x (x-origin), then measure the rank of that restricted matrix.
+template<class Component, class Point>
+int rigidConstraintRank(const constraints::AffineConstraints& ac, Component component,
+                        Point point, int dim) {
+    auto rigidRow = [&](GlobalIndex dof) {
+        const auto& x = point(dof);
+        const int c = component(dof);
+        std::array<double, 6> row{};
+        row[c] = 1.0;
+        row[3] = c == 0 ? -x[1] : (c == 1 ? x[0] : 0.0);
+        if (dim == 3) {
+            row[4] = c == 1 ? -x[2] : (c == 2 ? x[1] : 0.0);
+            row[5] = c == 0 ? x[2] : (c == 2 ? -x[0] : 0.0);
+        }
+        return row;
+    };
+    std::vector<Real> rows;
+    ac.forEach([&](const auto& line) {
+        auto row = rigidRow(line.slave_dof);
+        for (const auto& entry : line.entries) {
+            auto master = rigidRow(entry.master_dof);
+            for (unsigned k=0; k<6; ++k) row[k] -= entry.weight * master[k];
+        }
+        rows.insert(rows.end(), row.begin(), row.end());
+    });
+    const auto n = rows.size()/6;
+    return static_cast<int>(math::dense_matrix_rank(std::move(rows), n, 6));
+}
+
+} // namespace
+
 TEST(GaugeRegistry, Resolve_KernelOfSymGrad_WithCoords_ExpandsRotations3D)
 {
     GaugeRegistry reg;
@@ -726,25 +761,10 @@ TEST(GaugeRegistry, Resolve_KernelOfSymGrad_WithCoords_ExpandsRotations3D)
                   EnforcementPolicy::PinDof);
     }
 
-    // Verify enforcement: rotation modes pin DISTINCT DOFs (one per component)
     constraints::AffineConstraints ac;
-    int n = reg.applyEnforcement(ac, dof_provider);
-
-    // 3 translations (MeanZero → pin first DOF of each component) + 3 rotations (PinDof)
-    EXPECT_EQ(n, 6);
-
-    // Translation MeanZero pins: DOF 0 (vertex 0 x), DOF 4 (vertex 0 y), DOF 8 (vertex 0 z)
-    EXPECT_TRUE(ac.isConstrained(0));
-    EXPECT_TRUE(ac.isConstrained(4));
-    EXPECT_TRUE(ac.isConstrained(8));
-    // Rotation PinDof pins at geometrically distinct vertices:
-    //   rot 0 (ωz, comp 0, skip 0): DOF 1 (vertex 1, x)
-    //   rot 1 (ωx, comp 1, skip 1): DOF 6 (vertex 2, y)  — skips DOF 5
-    //   rot 2 (ωy, comp 2, skip 2): DOF 11 (vertex 3, z) — skips DOFs 9,10
-    // This provides rank-3 on the rotational subspace (3 distinct vertices).
-    EXPECT_TRUE(ac.isConstrained(1));
-    EXPECT_TRUE(ac.isConstrained(6));
-    EXPECT_TRUE(ac.isConstrained(11));
+    EXPECT_EQ(reg.applyEnforcement(ac, dof_provider), 6);
+    EXPECT_EQ(rigidConstraintRank(ac, [](GlobalIndex d){ return d/4; },
+                                  [&](GlobalIndex d){ return coord_provider(0, d); }, 3), 6);
 }
 
 TEST(GaugeRegistry, Resolve_KernelOfSymGrad_WithCoords_ExpandsRotations2D)
@@ -785,6 +805,81 @@ TEST(GaugeRegistry, Resolve_KernelOfSymGrad_WithCoords_ExpandsRotations2D)
 
     // 2D: 2 translations + 1 rotation = 3 modes
     ASSERT_EQ(reg.resolvedModes().size(), 3u);
+    constraints::AffineConstraints ac;
+    EXPECT_EQ(reg.applyEnforcement(ac, dof_provider), 3);
+    EXPECT_EQ(rigidConstraintRank(ac, [](GlobalIndex d){ return d/3; },
+                                  [&](GlobalIndex d){ return coord_provider(0, d); }, 2), 3);
+}
+
+TEST(GaugeRegistry, RigidGaugeUsesPhysicalPointsOnEachRegionAndPreservesExistingPins)
+{
+    constexpr int n = 8;
+    // Two tetrahedra with interleaved DOFs and independently permuted
+    // component lists. Nonuniform lumped weights produce affine mean rows.
+    for (const double scale : {1.e-80, 1., 1.e80}) {
+        auto dofs = [](FieldId, int c) {
+            std::vector<GlobalIndex> result;
+            if (c < -1 || c >= 3) return result;
+            if (c == -1) {
+                for (int i = 0; i < 3*n; ++i) result.push_back(i);
+            } else {
+                for (int i = 0; i < n; ++i) result.push_back(3*((i + c) % n) + c);
+            }
+            return result;
+        };
+        auto region = [](GlobalIndex d) { return static_cast<int>(d/12); };
+        auto relative = [](GlobalIndex d) {
+            const int i = static_cast<int>((d/3)%4);
+            return std::array<double, 3>{double(i==1), double(i==2), double(i==3)};
+        };
+        auto coords = [&](FieldId, GlobalIndex d) {
+            auto x = relative(d);
+            for (double& value : x) value = scale*(value + 71. + 9.*region(d));
+            return x;
+        };
+        GaugeRegistry registry;
+        registry.addCandidate({.field=0, .family=NullspaceModeFamily::KernelOfSymGrad});
+        registry.resolve(dofs, region, coords);
+        EXPECT_EQ(registry.resolvedModes().size(), 12u);
+        constraints::AffineConstraints ac;
+        ac.addDirichlet(0, 2.5);
+        const auto weights = [&](FieldId f, int c) {
+            std::vector<double> result;
+            for (auto d : dofs(f, c)) result.push_back(1. + (d/3)%4);
+            return result;
+        };
+        EXPECT_EQ(registry.applyEnforcement(ac, dofs, weights), 11);
+        ac.close();
+        EXPECT_DOUBLE_EQ(ac.getConstraint(0)->inhomogeneity, 2.5);
+        for (int r = 0; r < 2; ++r) {
+            constraints::AffineConstraints local;
+            ac.forEach([&](const auto& line) {
+                if (region(line.slave_dof) != r) return;
+                local.addLine(line.slave_dof);
+                for (const auto& e : line.entries) {
+                    EXPECT_EQ(region(e.master_dof), r);
+                    local.addEntry(line.slave_dof, e.master_dof, e.weight);
+                }
+            });
+            EXPECT_EQ(rigidConstraintRank(local, [](GlobalIndex d){return d%3;}, relative, 3), 6);
+        }
+    }
+}
+
+TEST(GaugeRegistry, CollinearPointsDoNotAcquireAConstraintForAnInvisibleRotation)
+{
+    GaugeRegistry registry;
+    registry.addCandidate({.field=0, .family=NullspaceModeFamily::KernelOfSymGrad});
+    auto dofs = [](FieldId, int c) {
+        std::vector<GlobalIndex> result;
+        for (int d = 0; d < 9; ++d) if (c == -1 || d%3 == c) result.push_back(d);
+        return result;
+    };
+    auto coords = [](FieldId, GlobalIndex d){ return std::array<double,3>{double(d/3), 0., 0.}; };
+    registry.resolve(dofs, {}, coords);
+    constraints::AffineConstraints ac;
+    EXPECT_EQ(registry.applyEnforcement(ac, dofs), 5);
+    EXPECT_EQ(rigidConstraintRank(ac, [](GlobalIndex d){return d%3;}, [&](GlobalIndex d){return coords(0,d);}, 3), 5);
 }
 
 TEST(GaugeRegistry, Resolve_KernelOfSymGrad_WithoutCoords_TranslationsOnly)

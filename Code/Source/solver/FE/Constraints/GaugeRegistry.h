@@ -63,7 +63,7 @@ namespace gauge {
 enum class NullspaceModeFamily : std::uint8_t {
     ScalarConstant,           ///< p → p + c  (scalar field constant shift)
     ComponentwiseConstant,    ///< u_i → u_i + c_i  (per-component vector shift)
-    KernelOfSymGrad,          ///< ker(sym(grad)): translations enforced; rotations deferred
+    KernelOfSymGrad,          ///< ker(sym(grad)): rigid translations and rotations
 };
 
 /**
@@ -245,7 +245,9 @@ public:
     /**
      * @brief Callback: given a field and DOF, returns its physical coordinates.
      *
-     * Used for constructing rotation mode nullspace vectors for KernelOfSymGrad.
+     * Used for enforcing rigid rotations of KernelOfSymGrad. Non-finite coordinates
+     * denote DOFs whose physical point is unavailable. This callback is retained
+     * through enforcement.
      * When null, only translation modes are produced.
      */
     using CoordinateProvider = std::function<std::array<double,3>(FieldId, GlobalIndex dof)>;
@@ -289,9 +291,7 @@ public:
      *
      * For ScalarConstant: one vector with 1/sqrt(n) at every field DOF.
      * For ComponentwiseConstant: one vector per component.
-     * For KernelOfSymGrad: currently falls back to componentwise constant
-     * (translation-only; full RB mode vectors require mesh coordinates,
-     * deferred to a future phase).
+     * For KernelOfSymGrad: one physical rotation per resolved rotation axis.
      *
      * @param n_total_dofs  Total DOFs in the monolithic system
      * @param get_field_dofs  Same callback as resolve()
@@ -321,6 +321,10 @@ private:
 
     // Retained from resolve() for use in applyEnforcement/buildNullspaceBasis
     RegionProvider region_provider_{};
+    CoordinateProvider coordinate_provider_{};
+
+    [[nodiscard]] std::vector<std::vector<GlobalIndex>>
+    rigidComponents(const DofProvider& get_dofs, FieldId field, int region) const;
 
     // Helper: filter DOFs by region when the resolved mode has a specific region.
     [[nodiscard]] std::vector<GlobalIndex>

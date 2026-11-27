@@ -17,6 +17,8 @@
 #include "Constraints/DirichletBC.h"
 #include "Forms/Vocabulary.h"
 #include "Mesh/Mesh.h"
+#include "Math/DenseLinearAlgebra.h"
+#include "Assembly/MeshAccess.h"
 #include "Spaces/SpaceFactory.h"
 #include "Sparsity/DistributedSparsityPattern.h"
 #include "Systems/FESystem.h"
@@ -502,6 +504,90 @@ TEST(FESystemSerialParallelEquivalenceMPI, CoupledNavierStokesLikeAssemblyMatche
 
         EXPECT_LT(maxAbsDiff(owned.matrix, scatter.matrix), tol);
         EXPECT_LT(maxAbsDiff(owned.vector, scatter.vector), tol);
+    }
+}
+
+TEST(FESystemSerialParallelEquivalenceMPI, NaturalSymmetricGradientRemovesSixRigidMotions)
+{
+    MPI_Comm comm = MPI_COMM_WORLD;
+    const int rank = mpiRank(comm);
+    const int size = mpiSize(comm);
+    // Consecutive tetrahedra share a face. No rank has the whole mesh.
+    dofs::MeshTopologyInfo topo;
+    topo.dim = 3;
+    topo.n_cells = 1;
+    topo.n_vertices = 4;
+    topo.cell2vertex_offsets = {0, 4};
+    topo.cell2vertex_data = {0, 1, 2, 3};
+    topo.cell_gids = {static_cast<dofs::gid_t>(rank)};
+    topo.cell_owner_ranks = {rank};
+    topo.neighbor_ranks = neighborRanks(rank, size);
+    for (int v = rank; v < rank + 4; ++v) {
+        topo.vertex_gids.push_back(static_cast<dofs::gid_t>(v));
+        const Real s = v;
+        topo.vertex_coords.insert(topo.vertex_coords.end(), {s, s*s, s*s*s});
+    }
+    auto mesh_base = std::make_shared<svmp::MeshBase>();
+    svmp::CellShape tet{};
+    tet.family = svmp::CellFamily::Tetra;
+    tet.order = 1;
+    tet.num_corners = 4;
+    mesh_base->build_from_arrays(3, topo.vertex_coords, {0, 4}, {0, 1, 2, 3}, {tet});
+    mesh_base->finalize();
+    auto mesh = svmp::create_mesh(mesh_base, svmp::MeshComm(comm));
+    for (auto numbering : {dofs::DofNumberingStrategy::Block, dofs::DofNumberingStrategy::Interleaved}) {
+        systems::FESystem system(std::make_shared<MeshAccess>(*mesh));
+        auto space = spaces::VectorSpace(spaces::SpaceType::H1, ElementType::Tetra4, 1, 3);
+        const auto field = system.addField({.name="u", .space=space, .components=3});
+        system.addOperator("op");
+        const auto u = forms::FormExpr::stateField(field, *space, "u");
+        const auto v = forms::TestFunction(*space, "v");
+        systems::installFormulation(system, "op", {field}, forms::inner(forms::sym(forms::grad(u)), forms::sym(forms::grad(v))).dx());
+        systems::SetupOptions options;
+        options.dof_options.mpi_comm = comm;
+        options.dof_options.world_size = size;
+        options.dof_options.my_rank = rank;
+        options.dof_options.numbering = numbering;
+        options.dof_options.global_numbering = dofs::GlobalNumberingMode::GlobalIds;
+        systems::SetupInputs inputs;
+        inputs.topology_override = topo;
+        ASSERT_NO_THROW(system.setup(options, inputs));
+        const auto& handler = system.dofHandler();
+        const auto n = static_cast<std::size_t>(handler.getNumDofs());
+        ASSERT_EQ(n, 3u * (size + 3));
+        std::vector<Real> modes(n * 6, Real(0));
+        const auto cell_dofs = handler.getCellDofs(0);
+        ASSERT_EQ(cell_dofs.size(), 12u);
+        for (int c = 0; c < 3; ++c) {
+            for (int i = 0; i < 4; ++i) {
+                const auto d = cell_dofs[4*c + i];
+                if (!handler.getPartition().isOwned(d)) continue;
+                const Real x = rank + i, y = x*x, z = x*y;
+                auto* row = modes.data() + 6*d;
+                row[c] = 1.;
+                row[3] = (c == 0 ? -y : (c == 1 ? x : 0.));
+                row[4] = (c == 1 ? -z : (c == 2 ? y : 0.));
+                row[5] = (c == 2 ? -x : (c == 0 ? z : 0.));
+            }
+        }
+        modes = allreduceSum(modes, comm);
+        std::vector<Real> restriction(n * 6, Real(0));
+        int local_lines = 0, local_means = 0;
+        system.constraints().forEach([&](const auto& line) {
+            if (!handler.getPartition().isOwned(line.slave_dof)) return;
+            ++local_lines;
+            if (!line.entries.empty()) ++local_means;
+            for (int k = 0; k < 6; ++k) {
+                auto& value = restriction[6*line.slave_dof + k];
+                value = modes[6*line.slave_dof + k];
+                for (const auto& e : line.entries) value -= e.weight * modes[6*e.master_dof + k];
+            }
+        });
+        EXPECT_EQ(math::dense_matrix_rank(allreduceSum(restriction, comm), n, 6), 6u);
+        int counts[2]{local_lines, local_means};
+        MPI_Allreduce(MPI_IN_PLACE, counts, 2, MPI_INT, MPI_SUM, comm);
+        EXPECT_EQ(counts[0], 6);
+        EXPECT_EQ(counts[1], 3); // same lumped-mean translation gauge as a single rank
     }
 }
 

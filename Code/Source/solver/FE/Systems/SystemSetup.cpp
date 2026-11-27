@@ -4016,8 +4016,52 @@ void FESystem::setup(const SetupOptions& user_opts, const SetupInputs& inputs)
     // StrongDirichlet BCs that constrained any DOF of a field are treated
     // as anchoring evidence for the constant-mode nullspace of that field.
     if (gauge_registry_ && !gauge_registry_->candidates().empty()) {
-        // Provide a DOF-lookup callback for the resolver
-        auto get_field_dofs = [this](FieldId fid, int component) -> std::vector<GlobalIndex> {
+        // A monolithic numbering policy alone does not identify a physical
+        // component after distributed or spatial renumbering. The cell map
+        // orders a product space by component regardless of its global IDs.
+        std::map<FieldId, std::vector<std::vector<GlobalIndex>>> rigid_dofs;
+#if FE_HAS_MPI
+        const CollectiveCommunicator gauge_comm(dof_handler_.mpiComm());
+        auto reduce_gauge_data = [&](auto& data, MPI_Datatype type, MPI_Op operation) {
+            for (std::size_t first = 0; gauge_comm.isParallel() && first < data.size();) {
+                const int count = static_cast<int>(std::min<std::size_t>(data.size() - first,
+                                                                        std::numeric_limits<int>::max()));
+                MPI_Allreduce(MPI_IN_PLACE, data.data() + first, count, type, operation, gauge_comm.native());
+                first += count;
+            }
+        };
+#endif
+        for (const auto& candidate : gauge_registry_->candidates()) {
+            const auto f = candidate.field;
+            if (candidate.family != gauge::NullspaceModeFamily::KernelOfSymGrad || f >= field_map_.numFields()) continue;
+            const auto dim = field_map_.numComponents(f);
+            if (dim == 2 || dim == 3) rigid_dofs[f].resize(static_cast<std::size_t>(dim));
+        }
+        // The collective order also holds for differently ordered declarations.
+        for (auto& [f, by_component] : rigid_dofs) {
+            const auto dim = by_component.size();
+            const auto& handler = field_dof_handlers_[f];
+            std::vector<int> components(static_cast<std::size_t>(handler.getNumDofs()), -1);
+            for (GlobalIndex cell = 0; cell < handler.getDofMap().getNumCells(); ++cell) {
+                const auto dofs = handler.getCellDofs(cell);
+                const auto n = dofs.size() / static_cast<std::size_t>(dim);
+                if (n == 0 || n * dim != dofs.size()) continue;
+                for (std::size_t i = 0; i < dofs.size(); ++i) components[dofs[i]] = static_cast<int>(i/n);
+            }
+#if FE_HAS_MPI
+            reduce_gauge_data(components, MPI_INT, MPI_MAX);
+#endif
+            for (std::size_t i = 0; i < components.size(); ++i) {
+                if (components[i] >= 0) by_component[components[i]].push_back(field_dof_offsets_[f] + static_cast<GlobalIndex>(i));
+            }
+        }
+        auto get_field_dofs = [this, &rigid_dofs](FieldId fid, int component) -> std::vector<GlobalIndex> {
+            if (const auto f = rigid_dofs.find(fid); f != rigid_dofs.end()) {
+                if (component >= 0) return f->second.at(static_cast<std::size_t>(component));
+                std::vector<GlobalIndex> all;
+                for (const auto& dofs : f->second) all.insert(all.end(), dofs.begin(), dofs.end());
+                return all;
+            }
             const auto idx = static_cast<std::size_t>(fid);
             if (idx >= field_dof_handlers_.size()) return {};
 
@@ -4250,7 +4294,7 @@ void FESystem::setup(const SetupOptions& user_opts, const SetupInputs& inputs)
                     const auto n_comp = field_map_.numComponents(idx);
                     if (n_comp > 1) {
                         for (LocalIndex comp = 0; comp < n_comp; ++comp) {
-                            auto comp_dofs = field_map_.getComponentDofs(idx, comp).toVector();
+                            auto comp_dofs = get_field_dofs(fid, static_cast<int>(comp));
                             addDirichletEvidence(fid, static_cast<int>(comp), comp_dofs);
                         }
                         continue;
@@ -4554,25 +4598,70 @@ void FESystem::setup(const SetupOptions& user_opts, const SetupInputs& inputs)
                 });
         }
 
-        // Build CoordinateProvider: DOF → physical coordinates.
-        // Maps a DOF to its owning vertex via EntityDofMap, then to coordinates.
+        // Rigid gauges use physical point evaluations. Non-vertex DOFs do
+        // not have a point in the entity map and cannot be selected as pins.
         gauge::GaugeRegistry::CoordinateProvider coord_provider;
+        const auto* gauge_entities = dof_handler_.getEntityDofMap();
+        auto global_points = std::make_shared<std::vector<double>>();
+        if (mesh_access_ && (gauge_entities || !allow_local_region_scoping)) {
+            coord_provider = [this, gauge_entities, global_points](FieldId, GlobalIndex d) -> std::array<double, 3> {
+                if (!global_points->empty()) {
+                    const auto k = 3 * static_cast<std::size_t>(d);
+                    return {(*global_points)[k], (*global_points)[k + 1], (*global_points)[k + 2]};
+                }
+                if (gauge_entities) {
+                    const auto entity = gauge_entities->getDofEntity(d);
+                    if (entity && entity->kind == dofs::EntityKind::Vertex) return meshAccess().getNodeCoordinates(entity->id);
+                }
+                const auto missing = -std::numeric_limits<double>::infinity();
+                return {missing, missing, missing};
+            };
+        }
+        gauge_registry_->resolve(get_field_dofs, region_provider, coord_provider);
+
+#if FE_HAS_MPI
         {
-            const auto* emap = dof_handler_.getEntityDofMap();
-            if (emap && mesh_access_) {
-                coord_provider = [this, emap](FieldId /*fid*/, GlobalIndex dof)
-                    -> std::array<double, 3> {
-                    auto ent = emap->getDofEntity(dof);
-                    if (ent && ent->kind == dofs::EntityKind::Vertex) {
-                        auto p = meshAccess().getNodeCoordinates(ent->id);
-                        return {static_cast<double>(p[0]),
-                                static_cast<double>(p[1]),
-                                static_cast<double>(p[2])};
-                    }
-                    return {0.0, 0.0, 0.0};
-                };
+            int mpi_initialized = 0;
+            MPI_Initialized(&mpi_initialized);
+            if (mpi_initialized &&
+                !gaugeResolutionConsistentAcrossRanks(*gauge_registry_, dof_handler_.mpiComm())) {
+                FE_THROW(FEException,
+                         "FESystem::setup: GaugeRegistry resolved modes differ across MPI ranks. "
+                         "This would create inconsistent replicated algebraic constraints.");
             }
         }
+#endif
+
+        [[maybe_unused]] bool distributed_rigid_gauge = false;
+#if FE_HAS_MPI
+        const auto& modes = gauge_registry_->resolvedModes();
+        distributed_rigid_gauge = gauge_comm.isParallel() && std::any_of(modes.begin(), modes.end(), [](const auto& m) {
+            return m.candidate.family == gauge::NullspaceModeFamily::KernelOfSymGrad &&
+                   m.candidate.component < -1 && m.policy == gauge::EnforcementPolicy::PinDof;
+        });
+        if (distributed_rigid_gauge) {
+            const auto total = dof_handler_.getNumDofs();
+            std::vector<double> points(static_cast<std::size_t>(total) * 3, -std::numeric_limits<double>::infinity());
+            if (gauge_entities) {
+                for (GlobalIndex v = 0; v < gauge_entities->numVertices(); ++v) {
+                    const auto dofs = gauge_entities->getVertexDofs(v);
+                    if (dofs.empty()) continue;
+                    const auto x = meshAccess().getNodeCoordinates(v);
+                    for (auto d : dofs) std::copy(x.begin(), x.end(), points.begin() + 3 * d);
+                }
+            }
+            reduce_gauge_data(points, MPI_DOUBLE, MPI_MAX);
+            *global_points = std::move(points);
+            // Each rank chooses identical pivots, including when an existing
+            // affine equation was supplied only on the owner of its slave.
+            if (collectiveAnyTrue(affine_constraints_.numConstraints() != 0, gauge_comm)) {
+                const auto& owned = dof_handler_.getPartition().locallyOwned();
+                dofs::DofPartition all_rows(owned, dofs::IndexSet(0, total).difference(owned));
+                all_rows.setGlobalSize(total);
+                constraints::ParallelConstraints(gauge_comm.native(), all_rows).synchronize(affine_constraints_);
+            }
+        }
+#endif
 
         // Build MassWeightProvider: lumped mass weights w_i = ∫ φ_i dΩ.
         // For P1 Lagrange on simplices, w_i = Σ_{cells touching i} |V_cell| / n_verts.
@@ -4598,9 +4687,10 @@ void FESystem::setup(const SetupOptions& user_opts, const SetupInputs& inputs)
 
             const auto* emap = dof_handler_.getEntityDofMap();
             const int mesh_dim = mesh.dimension();
-            bool has_unsupported_cells = false;
-            if (emap && n_cells > 0) {
+            bool has_unsupported_cells = !emap && mesh.numOwnedCells() > 0;
+            if (emap) {
                 for (GlobalIndex c = 0; c < n_cells; ++c) {
+                    if (distributed_rigid_gauge && !mesh.isOwnedCell(c)) continue;
                     mesh.getCellNodes(c, cell_nodes);
                     mesh.getCellCoordinates(c, cell_coords);
                     const auto nv = cell_nodes.size();
@@ -4647,37 +4737,16 @@ void FESystem::setup(const SetupOptions& user_opts, const SetupInputs& inputs)
                     }
                 }
 
-                // Only build the provider if all cells were supported simplices.
-                // If any unsupported cell was encountered, leave mass_weight_provider
-                // null so that applyEnforcement falls back to uniform weights.
-                if (!has_unsupported_cells) {
-                auto field_offsets = field_dof_offsets_;
-                auto n_fields = field_dof_handlers_.size();
-                auto field_handlers_ptr = &field_dof_handlers_;
-                auto field_map_ptr = &field_map_;
-                mass_weight_provider = [vertex_mass, field_offsets, n_fields,
-                                        field_handlers_ptr, field_map_ptr]
-                                       (FieldId fid, int component) -> std::vector<double> {
-                    const auto idx = static_cast<std::size_t>(fid);
-                    if (idx >= n_fields) return {};
-
-                    // Get DOFs for this field/component (same logic as get_field_dofs)
-                    std::vector<GlobalIndex> dofs;
-                    if (component >= 0 && idx < field_map_ptr->numFields()) {
-                        const auto n_comp = field_map_ptr->numComponents(idx);
-                        if (n_comp > 1 && static_cast<LocalIndex>(component) < n_comp) {
-                            dofs = field_map_ptr->getComponentDofs(idx, static_cast<LocalIndex>(component)).toVector();
-                        }
-                    }
-                    if (dofs.empty()) {
-                        const auto offset = field_offsets[idx];
-                        const auto nd = (*field_handlers_ptr)[idx].getNumDofs();
-                        dofs.reserve(static_cast<std::size_t>(nd));
-                        for (GlobalIndex d = offset; d < offset + nd; ++d) {
-                            dofs.push_back(d);
-                        }
-                    }
-
+            }
+#if FE_HAS_MPI
+            if (distributed_rigid_gauge) {
+                has_unsupported_cells = collectiveAnyTrue(has_unsupported_cells, gauge_comm);
+                if (!has_unsupported_cells) reduce_gauge_data(*vertex_mass, MPI_DOUBLE, MPI_SUM);
+            }
+#endif
+            if (!has_unsupported_cells) {
+                mass_weight_provider = [vertex_mass, get_field_dofs](FieldId fid, int component) {
+                    const auto dofs = get_field_dofs(fid, component);
                     // Extract weights and validate: if any DOF has zero weight
                     // (unsupported cell type like Quad4), return empty to trigger
                     // the uniform-weight fallback in applyEnforcement.
@@ -4695,27 +4764,11 @@ void FESystem::setup(const SetupOptions& user_opts, const SetupInputs& inputs)
                         }
                         weights.push_back(w);
                     }
-                    if (!all_positive) return {};  // fallback to uniform
+                    if (!all_positive) return std::vector<double>{};
                     return weights;
                 };
-                } // if (!has_unsupported_cells)
             }
         }
-
-        gauge_registry_->resolve(get_field_dofs, region_provider, coord_provider);
-
-#if FE_HAS_MPI
-        {
-            int mpi_initialized = 0;
-            MPI_Initialized(&mpi_initialized);
-            if (mpi_initialized &&
-                !gaugeResolutionConsistentAcrossRanks(*gauge_registry_, dof_handler_.mpiComm())) {
-                FE_THROW(FEException,
-                         "FESystem::setup: GaugeRegistry resolved modes differ across MPI ranks. "
-                         "This would create inconsistent replicated algebraic constraints.");
-            }
-        }
-#endif
 
         if (hasBorderedGlobalFields()) {
             refuseGaugeTypeMultipliersUnderBorderedLowering();

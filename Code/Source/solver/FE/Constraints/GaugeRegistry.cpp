@@ -11,6 +11,9 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
+#include <limits>
+#include <map>
+#include <numeric>
 #include <sstream>
 #include <unordered_map>
 
@@ -158,12 +161,26 @@ GaugeRegistry::getRegionFilteredDofs(const DofProvider& get_field_dofs,
     return filtered;
 }
 
+std::vector<std::vector<GlobalIndex>>
+GaugeRegistry::rigidComponents(const DofProvider& get_dofs, FieldId field, int region) const {
+    const auto first = get_dofs(field, 0);
+    if (first.empty()) return {};
+    const auto dim = get_dofs(field, -1).size() / first.size();
+    if (dim != 2 && dim != 3) return {};
+    std::vector<std::vector<GlobalIndex>> components(dim);
+    for (std::size_t c = 0; c < dim; ++c) {
+        components[c] = getRegionFilteredDofs(get_dofs, field, static_cast<int>(c), region);
+    }
+    return components;
+}
+
 void GaugeRegistry::resolve(const DofProvider& get_field_dofs,
                              const RegionProvider& get_region,
                              const CoordinateProvider& get_coords) {
     resolved_.clear();
     resolved_.reserve(candidates_.size());
-    region_provider_ = get_region;  // store for applyEnforcement/buildNullspaceBasis
+    region_provider_ = get_region;
+    coordinate_provider_ = get_coords;
 
     // ================================================================
     // Phase 1: Expand multi-component candidates
@@ -213,7 +230,8 @@ void GaugeRegistry::resolve(const DofProvider& get_field_dofs,
             }
 
             // Expand rotation modes when CoordinateProvider is available
-            if (candidate.family == NullspaceModeFamily::KernelOfSymGrad && get_coords) {
+            if (candidate.family == NullspaceModeFamily::KernelOfSymGrad && get_coords &&
+                (n_comp == 2 || n_comp == 3)) {
                 const int n_rot = n_comp * (n_comp - 1) / 2;  // 3 in 3D, 1 in 2D
                 for (int r = 0; r < n_rot; ++r) {
                     GaugeCandidate rot;
@@ -262,13 +280,14 @@ void GaugeRegistry::resolve(const DofProvider& get_field_dofs,
             }
 
             // Build a hash key from field + component
+            const int component = candidate.component < -1 ? -1 : candidate.component;
             const auto key = static_cast<std::size_t>(candidate.field) * 10000 +
-                             static_cast<std::size_t>(candidate.component + 1000);
+                             static_cast<std::size_t>(component + 1000);
 
             auto it = field_regions.find(key);
             if (it == field_regions.end()) {
                 // Discover regions for this field/component
-                auto dofs = get_field_dofs(candidate.field, candidate.component);
+                auto dofs = get_field_dofs(candidate.field, component);
                 std::vector<int> regions;
                 for (const auto d : dofs) {
                     const int r = get_region(d);
@@ -421,6 +440,121 @@ void GaugeRegistry::resolve(const DofProvider& get_field_dofs,
 // GaugeRegistry — enforcement
 // ============================================================================
 
+namespace {
+
+// Columns are the Cartesian translations and the infinitesimal rotations in
+// the xy, yz and zx planes. Centering and scaling preserve their span and
+// make the gauge independent of the coordinate origin and units.
+using RigidRow = std::array<double, 6>;
+using RigidRows = std::map<GlobalIndex, RigidRow>;
+
+RigidRows rigidDisplacements(const std::vector<std::vector<GlobalIndex>>& components,
+                             FieldId field, const GaugeRegistry::CoordinateProvider& coordinates,
+                             const std::array<bool, 6>& active) {
+    std::array<double, 3> lo, hi;
+    lo.fill(std::numeric_limits<double>::infinity());
+    hi.fill(-std::numeric_limits<double>::infinity());
+    const int dim = static_cast<int>(components.size());
+    for (const auto& dofs : components) {
+        for (auto d : dofs) {
+            const auto x = coordinates(field, d);
+            if (!std::all_of(x.begin(), x.begin() + dim, [](double v){ return std::isfinite(v); })) continue;
+            for (int j = 0; j < dim; ++j) {
+                lo[j] = std::min(lo[j], x[j]);
+                hi[j] = std::max(hi[j], x[j]);
+            }
+        }
+    }
+    RigidRows rows;
+    if (!std::isfinite(lo[0])) return rows;
+    for (int c = 0; c < dim; ++c) {
+        for (auto d : components[c]) {
+            const auto x = coordinates(field, d);
+            auto& row = rows[d];
+            if (!std::all_of(x.begin(), x.begin() + dim, [](double v){ return std::isfinite(v); })) {
+                row[0] = std::numeric_limits<double>::quiet_NaN();
+                continue;
+            }
+            row[c] = active[c] ? 1.0 : 0.0;
+            for (int a = 0; a < (dim == 2 ? 1 : 3); ++a) {
+                const int b = (a + 1) % 3;
+                if (!active[3 + a] || (c != a && c != b)) continue;
+                const int j = (c == a) ? b : a;
+                const long double extent = std::max(static_cast<long double>(hi[a]) - lo[a],
+                                                      static_cast<long double>(hi[b]) - lo[b]);
+                if (extent > 0.0L) {
+                    const long double dx = static_cast<long double>(x[j]) - std::midpoint(lo[j], hi[j]);
+                    row[3 + a] = static_cast<double>((c == a ? -dx : dx) / extent);
+                }
+            }
+        }
+    }
+    return rows;
+}
+
+template<class Row>
+double orthogonalRemainder(Row& row, const std::vector<Row>& basis) {
+    // Reorthogonalize when the requested directions are nearly dependent.
+    for (int pass = 0; pass < 2; ++pass) {
+        for (const auto& q : basis) {
+            const double dot = std::inner_product(row.begin(), row.end(), q.begin(), 0.0);
+            for (std::size_t j = 0; j < row.size(); ++j) row[j] -= dot * q[j];
+        }
+    }
+    return std::sqrt(std::inner_product(row.begin(), row.end(), row.begin(), 0.0));
+}
+
+// A row records one existing equation evaluated on the rigid displacement
+// fields. Independent point pins complete its row space (at most six axes).
+int completeRigidGauge(const RigidRows& rows, constraints::AffineConstraints& constraints) {
+    std::vector<RigidRow> basis;
+    auto append = [&](RigidRow row, double norm) {
+        for (auto& value : row) value /= norm;
+        basis.push_back(row);
+    };
+    constexpr double tolerance = 64.0 * std::numeric_limits<double>::epsilon();
+    for (const auto& [dof, point_row] : rows) {
+        if (basis.size() == 6) break;
+        const auto line = constraints.getConstraint(dof);
+        if (!line) continue;
+        if (!std::isfinite(point_row[0])) throw constraints::ConstraintException("Rigid gauge requires physical coordinates of an existing constrained DOF", dof);
+        RigidRow equation = point_row;
+        double scale = 1.0;
+        for (const auto& entry : line->entries) {
+            auto master = rows.find(entry.master_dof);
+            if (master == rows.end() || entry.weight == 0.0) continue;
+            if (!std::isfinite(master->second[0])) throw constraints::ConstraintException("Rigid gauge requires physical coordinates of an existing constraint master", entry.master_dof);
+            scale += std::abs(entry.weight);
+            for (std::size_t j = 0; j < equation.size(); ++j) equation[j] -= entry.weight * master->second[j];
+        }
+        const double norm = orthogonalRemainder(equation, basis);
+        if (norm > tolerance * scale) append(equation, norm);
+    }
+    int count = 0;
+    while (basis.size() < 6) {
+        double best = tolerance;
+        RigidRow pivot{};
+        GlobalIndex pin = INVALID_GLOBAL_INDEX;
+        for (const auto& [dof, sample] : rows) {
+            if (!std::isfinite(sample[0]) || constraints.isConstrained(dof)) continue;
+            auto row = sample;
+            const double norm = orthogonalRemainder(row, basis);
+            if (norm > best) {
+                best = norm;
+                pivot = row;
+                pin = dof;
+            }
+        }
+        if (pin == INVALID_GLOBAL_INDEX) break;
+        append(pivot, best);
+        constraints.addDirichlet(pin, 0.0);
+        ++count;
+    }
+    return count;
+}
+
+} // namespace
+
 int GaugeRegistry::applyEnforcement(constraints::AffineConstraints& constraints,
                                      const DofProvider& get_field_dofs,
                                      const MassWeightProvider& get_mass_weights) {
@@ -429,29 +563,43 @@ int GaugeRegistry::applyEnforcement(constraints::AffineConstraints& constraints,
     }
 
     int count = 0;
+    using Group = std::pair<FieldId, int>;
+    std::map<Group, std::array<bool, 6>> rigid_groups;
+    for (const auto& mode : resolved_) {
+        const auto& candidate = mode.candidate;
+        if (candidate.family == NullspaceModeFamily::KernelOfSymGrad &&
+            candidate.component <= -2 && candidate.component >= -4 &&
+            mode.policy == EnforcementPolicy::PinDof && coordinate_provider_) {
+            rigid_groups[{candidate.field, candidate.region}][3 - (candidate.component + 2)] = true;
+        }
+    }
 
     for (const auto& mode : resolved_) {
-        if (mode.policy == EnforcementPolicy::None) {
-            continue;
-        }
-
-        // For rotation modes (component < -1), the sentinel component is not a
-        // valid DofProvider key.  Map each rotation to a distinct component so
-        // that independent rotation modes pin distinct DOFs:
-        //   rot_idx 0 (ωz) → component 0
-        //   rot_idx 1 (ωx) → component 1
-        //   rot_idx 2 (ωy) → component 2
-        int lookup_comp = mode.candidate.component;
-        if (lookup_comp < -1) {
-            const int rot_idx = -(lookup_comp + 2);
-            lookup_comp = rot_idx;  // distinct component per rotation
-        }
+        if (mode.policy == EnforcementPolicy::None || mode.candidate.component < -1) continue;
+        const int lookup_comp = mode.candidate.component;
+        auto rigid = rigid_groups.find({mode.candidate.field, mode.candidate.region});
+        const bool translation = rigid != rigid_groups.end() && lookup_comp >= 0 && lookup_comp < 3 &&
+                                 mode.candidate.family == NullspaceModeFamily::ComponentwiseConstant;
+        if (translation) rigid->second[lookup_comp] = true;
         auto dofs = getRegionFilteredDofs(get_field_dofs,
                                            mode.candidate.field, lookup_comp,
                                            mode.candidate.region);
         if (dofs.empty()) {
             continue;
         }
+
+        auto usablePin = [&](GlobalIndex d) {
+            if (constraints.isConstrained(d)) return false;
+            if (!translation) return true;
+            const auto x = coordinate_provider_(mode.candidate.field, d);
+            return std::isfinite(x[0]) && std::isfinite(x[1]) && std::isfinite(x[2]);
+        };
+        // A prescribed value already fixes this translation. In particular,
+        // never replace its inhomogeneity by a homogeneous gauge pin.
+        if (translation && std::any_of(dofs.begin(), dofs.end(), [&](auto d) {
+                const auto line = constraints.getConstraint(d);
+                return line && line->isDirichlet();
+            })) continue;
 
         switch (mode.policy) {
             case EnforcementPolicy::MeanZeroElimination: {
@@ -485,6 +633,13 @@ int GaugeRegistry::applyEnforcement(constraints::AffineConstraints& constraints,
                         }
 
                         if (final_weights.size() == final_dofs.size()) {
+                            if (translation) {
+                                const auto pivot = std::find_if(final_dofs.begin(), final_dofs.end(), usablePin);
+                                if (pivot == final_dofs.end()) break;
+                                const auto k = pivot - final_dofs.begin();
+                                std::swap(final_weights[0], final_weights[k]);
+                                std::iter_swap(final_dofs.begin(), pivot);
+                            }
                             constraints::GlobalConstraintOptions wopts;
                             wopts.strategy = constraints::GlobalConstraintStrategy::WeightedMean;
                             auto gc = constraints::GlobalConstraint(
@@ -509,6 +664,11 @@ int GaugeRegistry::applyEnforcement(constraints::AffineConstraints& constraints,
                     // weights not usable — fall through to uniform
                 }
 
+                if (translation) {
+                    const auto pivot = std::find_if(dofs.begin(), dofs.end(), usablePin);
+                    if (pivot == dofs.end()) break;
+                    std::iter_swap(dofs.begin(), pivot);
+                }
                 auto gc = constraints::GlobalConstraint::zeroMean(std::move(dofs));
                 gc.apply(constraints);
                 ++count;
@@ -524,35 +684,9 @@ int GaugeRegistry::applyEnforcement(constraints::AffineConstraints& constraints,
             }
 
             case EnforcementPolicy::PinDof: {
-                // Find an unconstrained DOF that provides a geometrically
-                // independent constraint.  For rotation modes, successive
-                // rotations must pin at different mesh vertices.  We skip
-                // already-constrained DOFs and additionally skip one more
-                // unconstrained DOF per rotation index to spread pins across
-                // distinct vertices (important for rank-3 rigid-body gauge in 3D).
-                //
-                // Note: this is a pragmatic heuristic that depends on DOF ordering
-                // (component-blocked, vertices numbered consecutively).  It works
-                // for current H1/P1 component-blocked layouts but is not a general
-                // geometry-aware ker(sym(grad)) enforcement.  A robust solution
-                // would construct scalar constraints from the actual rotation basis
-                // vectors — e.g., nullspacePinning(dofs, rotation_vector).
-                int skip_count = 0;
-                if (mode.candidate.component < -1) {
-                    // rot_idx 0 → skip 0 extra, rot_idx 1 → skip 1, rot_idx 2 → skip 2
-                    skip_count = -(mode.candidate.component + 2);
-                }
-                GlobalIndex pin_dof = dofs[0];
-                int unconstrained_seen = 0;
-                for (const auto d : dofs) {
-                    if (!constraints.isConstrained(d)) {
-                        if (unconstrained_seen >= skip_count) {
-                            pin_dof = d;
-                            break;
-                        }
-                        ++unconstrained_seen;
-                    }
-                }
+                const auto free = std::find_if(dofs.begin(), dofs.end(), usablePin);
+                if (free == dofs.end()) break;
+                const GlobalIndex pin_dof = *free;
                 auto gc = constraints::GlobalConstraint::pinDof(pin_dof, 0.0);
                 gc.apply(constraints);
                 ++count;
@@ -591,6 +725,20 @@ int GaugeRegistry::applyEnforcement(constraints::AffineConstraints& constraints,
         }
     }
 
+    for (const auto& [group, active] : rigid_groups) {
+        const auto [field, region] = group;
+        const auto components = rigidComponents(get_field_dofs, field, region);
+        if (components.empty()) continue;
+        auto columns = active;
+        for (std::size_t c = 0; c < components.size(); ++c) {
+            // Even a prescribed point fixes a combination of translation and
+            // rotation about the coordinate origin. Retain that translation in
+            // the rank test so rotations about the prescribed point survive.
+            if (std::any_of(components[c].begin(), components[c].end(),
+                            [&](auto d) { return constraints.isConstrained(d); })) columns[c] = true;
+        }
+        count += completeRigidGauge(rigidDisplacements(components, field, coordinate_provider_, columns), constraints);
+    }
     return count;
 }
 
@@ -598,222 +746,39 @@ int GaugeRegistry::applyEnforcement(constraints::AffineConstraints& constraints,
 // GaugeRegistry — nullspace basis construction
 // ============================================================================
 
-// Helper: compute rotation mode basis vector for a given rotation index.
-// rot_idx: 0=ωz (2D/3D), 1=ωx (3D), 2=ωy (3D)
-// For 2D (dim=2): only rot_idx=0 → v[dof_x] = -(y-ȳ), v[dof_y] = (x-x̄)
-// For 3D (dim=3):
-//   rot_idx 0 (ωz): v[dof_x] = -(y-ȳ), v[dof_y] = (x-x̄)
-//   rot_idx 1 (ωx): v[dof_y] = -(z-z̄), v[dof_z] = (y-ȳ)
-//   rot_idx 2 (ωy): v[dof_x] = (z-z̄), v[dof_z] = -(x-x̄)
-static void buildRotationVector(
-    std::vector<double>& vec,
-    int rot_idx, int dim,
-    FieldId field,
-    const GaugeRegistry::DofProvider& get_field_dofs,
-    const GaugeRegistry::CoordinateProvider& get_coords)
-{
-    // Get DOFs for each component
-    std::vector<std::vector<GlobalIndex>> comp_dofs(static_cast<std::size_t>(dim));
-    for (int c = 0; c < dim; ++c) {
-        comp_dofs[static_cast<std::size_t>(c)] = get_field_dofs(field, c);
-    }
-    const auto n_verts = comp_dofs[0].size();
-    if (n_verts == 0) return;
-
-    // Compute centroid
-    double cx = 0, cy = 0, cz = 0;
-    for (std::size_t i = 0; i < n_verts; ++i) {
-        auto coords = get_coords(field, comp_dofs[0][i]);
-        cx += coords[0]; cy += coords[1]; cz += coords[2];
-    }
-    const double inv_n = 1.0 / static_cast<double>(n_verts);
-    cx *= inv_n; cy *= inv_n; cz *= inv_n;
-
-    // Fill rotation vector entries
-    for (std::size_t i = 0; i < n_verts; ++i) {
-        auto coords = get_coords(field, comp_dofs[0][i]);
-        const double dx = coords[0] - cx;
-        const double dy = coords[1] - cy;
-        const double dz = coords[2] - cz;
-
-        const auto n = vec.size();
-        auto set = [&](int comp, std::size_t vert_idx, double val) {
-            auto d = comp_dofs[static_cast<std::size_t>(comp)][vert_idx];
-            if (d >= 0 && static_cast<std::size_t>(d) < n) {
-                vec[static_cast<std::size_t>(d)] = val;
-            }
-        };
-
-        if (dim == 2) {
-            // ωz rotation: v_x = -dy, v_y = dx
-            set(0, i, -dy);
-            set(1, i, dx);
-        } else {
-            switch (rot_idx) {
-                case 0: // ωz: v_x = -(y-ȳ), v_y = (x-x̄)
-                    set(0, i, -dy);
-                    set(1, i, dx);
-                    break;
-                case 1: // ωx: v_y = -(z-z̄), v_z = (y-ȳ)
-                    set(1, i, -dz);
-                    set(2, i, dy);
-                    break;
-                case 2: // ωy: v_x = (z-z̄), v_z = -(x-x̄)
-                    set(0, i, dz);
-                    set(2, i, -dx);
-                    break;
-                default: break;
-            }
-        }
-    }
-}
-
-// Helper: Gram-Schmidt orthogonalize vec against existing basis vectors.
-// Returns the norm after orthogonalization.
-static double gramSchmidtProject(std::vector<double>& vec,
-                                  const std::vector<std::vector<double>>& basis) {
-    for (const auto& b : basis) {
-        double dot = 0;
-        for (std::size_t i = 0; i < vec.size(); ++i) {
-            dot += vec[i] * b[i];
-        }
-        for (std::size_t i = 0; i < vec.size(); ++i) {
-            vec[i] -= dot * b[i];
-        }
-    }
-    double norm = 0;
-    for (double v : vec) norm += v * v;
-    return std::sqrt(norm);
-}
-
 std::vector<std::vector<double>>
 GaugeRegistry::buildNullspaceBasis(GlobalIndex n_total_dofs,
-                                    const DofProvider& get_field_dofs,
-                                    const CoordinateProvider& get_coords) const
-{
+                                   const DofProvider& get_field_dofs,
+                                   const CoordinateProvider& get_coords) const {
     std::vector<std::vector<double>> basis;
-
-    if (!resolved_flag_ || n_total_dofs <= 0) {
-        return basis;
-    }
-
+    if (!resolved_flag_ || n_total_dofs <= 0) return basis;
+    const auto& coordinates = get_coords ? get_coords : coordinate_provider_;
     for (const auto& mode : resolved_) {
-        // Only build basis vectors for modes with SolverNullspace policy.
-        if (mode.policy != EnforcementPolicy::SolverNullspace) {
-            continue;
-        }
-
-        const auto& candidate = mode.candidate;
-        int lookup_comp = candidate.component;
-        if (lookup_comp < -1) lookup_comp = 0;
-        auto dofs = getRegionFilteredDofs(get_field_dofs, candidate.field,
-                                           lookup_comp, candidate.region);
-        if (dofs.empty() && candidate.component < -1) {
-            // For rotation modes, DOFs are fetched per-component inside the helper
-        } else if (dofs.empty()) {
-            continue;
-        }
-
-        const auto n = static_cast<std::size_t>(n_total_dofs);
-
-        switch (candidate.family) {
-            case NullspaceModeFamily::ScalarConstant: {
-                std::vector<double> vec(n, 0.0);
-                const double val = 1.0 / std::sqrt(static_cast<double>(dofs.size()));
-                for (GlobalIndex d : dofs) {
-                    if (d >= 0 && static_cast<std::size_t>(d) < n) {
-                        vec[static_cast<std::size_t>(d)] = val;
-                    }
-                }
-                basis.push_back(std::move(vec));
-                break;
+        if (mode.policy != EnforcementPolicy::SolverNullspace) continue;
+        const auto& c = mode.candidate;
+        std::vector<double> vec(static_cast<std::size_t>(n_total_dofs));
+        if (c.family == NullspaceModeFamily::KernelOfSymGrad && c.component < -1) {
+            if (!coordinates || c.component < -4) continue;
+            const auto components = rigidComponents(get_field_dofs, c.field, c.region);
+            if (components.empty()) continue;
+            std::array<bool, 6> active{};
+            const auto axis = 3 - (c.component + 2);
+            active[axis] = true;
+            for (const auto& [d, row] : rigidDisplacements(components, c.field, coordinates, active)) {
+                if (!std::isfinite(row[0])) throw constraints::ConstraintException("Rigid solver nullspace requires coordinates of every field DOF", d);
+                if (d >= 0 && d < n_total_dofs) vec[static_cast<std::size_t>(d)] = row[axis];
             }
-
-            case NullspaceModeFamily::ComponentwiseConstant: {
-                int n_comp = 3;
-                if (dofs.size() % 3u != 0 && dofs.size() % 2u == 0) {
-                    n_comp = 2;
-                } else if (dofs.size() % 3u != 0) {
-                    n_comp = 1;
-                }
-                const auto dofs_per_comp = dofs.size() / static_cast<std::size_t>(n_comp);
-                if (dofs_per_comp == 0) break;
-
-                for (int c = 0; c < n_comp; ++c) {
-                    std::vector<double> vec(n, 0.0);
-                    const double val = 1.0 / std::sqrt(static_cast<double>(dofs_per_comp));
-                    const std::size_t start = static_cast<std::size_t>(c) * dofs_per_comp;
-                    const std::size_t end = start + dofs_per_comp;
-                    for (std::size_t i = start; i < end && i < dofs.size(); ++i) {
-                        GlobalIndex d = dofs[i];
-                        if (d >= 0 && static_cast<std::size_t>(d) < n) {
-                            vec[static_cast<std::size_t>(d)] = val;
-                        }
-                    }
-                    basis.push_back(std::move(vec));
-                }
-                break;
-            }
-
-            case NullspaceModeFamily::KernelOfSymGrad: {
-                // Rotation mode: candidate.component is -(2+rot_idx)
-                if (candidate.component < -1 && get_coords) {
-                    const int rot_idx = -(candidate.component + 2);
-                    // Infer dimension from the reason string or from DOFs
-                    auto comp0_dofs = get_field_dofs(candidate.field, 0);
-                    auto all_dofs = get_field_dofs(candidate.field, -1);
-                    if (comp0_dofs.empty() || all_dofs.empty()) break;
-                    const int dim = static_cast<int>(all_dofs.size() / comp0_dofs.size());
-
-                    std::vector<double> vec(n, 0.0);
-                    buildRotationVector(vec, rot_idx, dim, candidate.field,
-                                        get_field_dofs, get_coords);
-
-                    // Orthogonalize against all existing basis vectors
-                    double norm = gramSchmidtProject(vec, basis);
-                    if (norm > 1e-12) {
-                        const double inv_norm = 1.0 / norm;
-                        for (auto& v : vec) v *= inv_norm;
-                        basis.push_back(std::move(vec));
-                    }
-                } else {
-                    // Translation modes — same as ComponentwiseConstant
-                    int n_comp = 3;
-                    if (dofs.size() % 3u != 0 && dofs.size() % 2u == 0) {
-                        n_comp = 2;
-                    } else if (dofs.size() % 3u != 0) {
-                        n_comp = 1;
-                    }
-                    const auto dofs_per_comp = dofs.size() / static_cast<std::size_t>(n_comp);
-                    if (dofs_per_comp == 0) break;
-
-                    for (int c = 0; c < n_comp; ++c) {
-                        std::vector<double> vec(n, 0.0);
-                        const double val = 1.0 / std::sqrt(static_cast<double>(dofs_per_comp));
-                        const std::size_t start = static_cast<std::size_t>(c) * dofs_per_comp;
-                        const std::size_t end = start + dofs_per_comp;
-                        for (std::size_t i = start; i < end && i < dofs.size(); ++i) {
-                            GlobalIndex d = dofs[i];
-                            if (d >= 0 && static_cast<std::size_t>(d) < n) {
-                                vec[static_cast<std::size_t>(d)] = val;
-                            }
-                        }
-                        basis.push_back(std::move(vec));
-                    }
-
-                    if (!get_coords) {
-                        std::fprintf(stderr,
-                            "[GaugeRegistry] WARNING: KernelOfSymGrad nullspace basis for "
-                            "field %d includes only translation modes (%d vectors). "
-                            "Rotation modes require CoordinateProvider.\n",
-                            static_cast<int>(candidate.field), n_comp);
-                    }
-                }
-                break;
+        } else {
+            // resolve() already split vector constants into individual components.
+            for (auto d : getRegionFilteredDofs(get_field_dofs, c.field, c.component, c.region)) {
+                if (d >= 0 && d < n_total_dofs) vec[static_cast<std::size_t>(d)] = 1.0;
             }
         }
+        const double norm = orthogonalRemainder(vec, basis);
+        if (norm <= 64.0 * std::numeric_limits<double>::epsilon()) continue;
+        for (auto& value : vec) value /= norm;
+        basis.push_back(std::move(vec));
     }
-
     return basis;
 }
 
@@ -882,6 +847,8 @@ void GaugeRegistry::clear() noexcept {
     anchoring_.clear();
     resolved_.clear();
     resolved_flag_ = false;
+    region_provider_ = {};
+    coordinate_provider_ = {};
 }
 
 } // namespace gauge
