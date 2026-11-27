@@ -1210,6 +1210,8 @@ struct InterfaceComponents {
 }
 
 // A read-only endpoint measurement stops after the first trace integration.
+// A supplied flag enables the connected-patch search for a shared node and
+// records whether any of its volume was distributed beyond the first ring.
 LevelSetKinematicReconciliationResult integrateKinematicStep(
     const assembly::IMeshAccess& mesh,
     const dofs::DofHandler& level_set_dofs,
@@ -1222,7 +1224,8 @@ LevelSetKinematicReconciliationResult integrateKinematicStep(
     std::span<const Real> previous_velocity,
     std::span<const Real> transported_velocity,
     std::vector<Real>* reconciled_level_set,
-    const spaces::FunctionSpace* velocity_space)
+    const spaces::FunctionSpace* velocity_space,
+    bool* used_connected_shared_patch = nullptr)
 {
     LevelSetKinematicReconciliationResult result;
     const auto context = collectiveFor(level_set_dofs);
@@ -1855,7 +1858,7 @@ LevelSetKinematicReconciliationResult integrateKinematicStep(
         // wider connected patch below.
         std::vector<Real> frozen_flag(n, 0);
         std::vector<Real> unplaced(n, 0);
-        std::map<long long, Real> split_unplaced;
+        std::vector<Real> split_unplaced(splits, 0);
         const auto scatter = [&](const std::vector<Real>& shares) {
             std::vector<Real> patch(n, 0), added(n, 0);
             const auto visit_receivers = [&](const auto& add) {
@@ -1910,7 +1913,7 @@ LevelSetKinematicReconciliationResult integrateKinematicStep(
             for (const auto& [key, k] : component.splits) {
                 if (shares[k] == 0) continue;
                 if (patch[k] > 0) ++redistributed;
-                else split_unplaced[key.second] += shares[k];
+                else split_unplaced[k] += shares[k];
             }
             for (std::size_t j = 0; j < n; ++j) added[j] += extra[j];
         };
@@ -1992,15 +1995,13 @@ LevelSetKinematicReconciliationResult integrateKinematicStep(
         // summed over its connected interface: opposite parts of one interface
         // cancel, those of separate interfaces cannot.
         unplaced_by_interface.clear();
-        for (std::size_t source = 0; source < n; ++source) {
-            Real remaining = unplaced[source];
-            if (remaining == 0) continue;
+        const auto distribute_remaining = [&](std::size_t source, long long label, Real remaining) {
             std::vector<Real> seen(n, 0), front(n, 0);
             seen[source] = front[source] = 1;
             while (remaining != 0) {
                 std::vector<Real> next(n, 0);
                 for (std::size_t c = 0; c < cells.size(); ++c) {
-                    if (!supported_cell[c] || component.cell[c] != component.node[source]) continue;
+                    if (!supported_cell[c] || component.cell[c] != label) continue;
                     const auto& cell = cells[c];
                     bool touches = false;
                     for (int a = 0; a < cell.corners; ++a) touches = touches || front[cell.dof[a]] != 0;
@@ -2033,12 +2034,31 @@ LevelSetKinematicReconciliationResult integrateKinematicStep(
                 protect_cut_classes(delta, added, [&](auto, Real rejected) { remaining += rejected; });
                 for (std::size_t i = 0; i < n; ++i) delta[i] += added[i];
             }
-            unplaced_by_interface[component.node[source] >= 0 ? component.node[source]
-                                                               : -1 - static_cast<long long>(source)] += remaining;
+            unplaced_by_interface[label] += remaining;
             if (remaining == 0) ++redistributed;
             else ++skipped;
+            return remaining;
+        };
+        for (std::size_t i = 0; i < n; ++i) {
+            if (unplaced[i] != 0) {
+                const auto label = component.node[i] >= 0 ? component.node[i] : -1 - static_cast<long long>(i);
+                distribute_remaining(i, label, unplaced[i]);
+            }
         }
-        for (const auto& [label, remaining] : split_unplaced) unplaced_by_interface[label] += remaining;
+        for (const auto& [origin, k] : component.splits) {
+            const auto share = split_unplaced[k];
+            if (share == 0) {
+                continue;
+            }
+            const auto [source, label] = origin;
+            if (used_connected_shared_patch) {
+                if (distribute_remaining(source, label, share) != share) {
+                    *used_connected_shared_patch = true;
+                }
+            } else {
+                unplaced_by_interface[label] += share;
+            }
+        }
         for (const auto& [label, remaining] : unplaced_by_interface) unplaced_volume += std::abs(remaining);
         result.degeneracy_frozen_dof_indices.clear();
         for (std::size_t i = 0; i < n; ++i) {
@@ -2202,9 +2222,21 @@ LevelSetKinematicReconciliationResult reconcileLevelSetWithKinematicFlux(
     std::span<const Real> previous_velocity, std::span<const Real> transported_velocity,
     std::vector<Real>& reconciled_level_set, const spaces::FunctionSpace* velocity_space)
 {
-    return integrateKinematicStep(mesh, level_set_dofs, velocity_dofs, isovalue, tolerance, dt,
-        previous_level_set, transported_level_set, previous_velocity, transported_velocity,
-        &reconciled_level_set, velocity_space);
+    const auto reconcile = [&](bool* used_connected_shared_patch) {
+        return integrateKinematicStep(mesh, level_set_dofs, velocity_dofs, isovalue, tolerance, dt,
+            previous_level_set, transported_level_set, previous_velocity, transported_velocity,
+            &reconciled_level_set, velocity_space, used_connected_shared_patch);
+    };
+    bool used_connected_shared_patch = false;
+    auto result = reconcile(&used_connected_shared_patch);
+    if (!result.success && used_connected_shared_patch) {
+        // A distant trace can carry a linearized share yet approach its maximum
+        // swept volume before the nonlinear budget closes. The one-ring solve
+        // can then release its component's wall constraints. Restart it from
+        // the transported field so the failed geometry cannot bias the solve.
+        result = reconcile(nullptr);
+    }
+    return result;
 }
 
 std::vector<Real> levelSetRepresentationSlope(const assembly::IMeshAccess& mesh,

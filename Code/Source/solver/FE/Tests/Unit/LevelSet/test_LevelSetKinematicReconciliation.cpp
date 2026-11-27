@@ -305,6 +305,29 @@ std::shared_ptr<svmp::Mesh> buildUnitTriangle()
     return svmp::create_mesh(std::move(base));
 }
 
+// Three by two rectangles with a rising diagonal in every cell.
+std::shared_ptr<svmp::Mesh> buildTwoRegionTraceMesh()
+{
+    const svmp::CellShape triangle{svmp::CellFamily::Triangle, 3, 1};
+    auto mesh = std::make_shared<svmp::MeshBase>();
+    std::vector<svmp::real_t> coordinates;
+    std::vector<svmp::index_t> vertices;
+    std::vector<svmp::offset_t> offsets{0};
+    for (int j = 0; j < 3; ++j) {
+        for (int i = 0; i < 4; ++i) {
+            coordinates.insert(coordinates.end(), {static_cast<FE::Real>(i), 0.5 * j});
+            if (i == 3 || j == 2) continue;
+            const int a = 4 * j + i;
+            vertices.insert(vertices.end(), {a, a + 1, a + 5, a, a + 5, a + 4});
+            offsets.push_back(offsets.back() + 3);
+            offsets.push_back(offsets.back() + 3);
+        }
+    }
+    mesh->build_from_arrays(2, coordinates, offsets, vertices, std::vector<svmp::CellShape>(12, triangle));
+    mesh->finalize();
+    return svmp::create_mesh(std::move(mesh));
+}
+
 // The single cell uses the canonical reference-node ordering. A component
 // block in the velocity field is one scalar node per local Lagrange basis.
 std::vector<FE::Real> quadraticShear(const SimplexSystem& s)
@@ -1266,6 +1289,66 @@ TEST(LevelSetKinematicReconciliation, KeepsAnExactWallTraceOnTetrahedra)
         }
     });
     EXPECT_GT(roots, 0u);
+}
+
+TEST(LevelSetKinematicReconciliation, SharedTraceUsesTheNextCutCellRingBeforeMovingWallRoots)
+{
+    // Two negative regions share the positive coefficient at (2, 1/2).
+    // Its immediate neighbours on the lower region are shared or follow the
+    // floor characteristic. The next cut-cell ring contains a free coefficient.
+    SimplexSystem s(buildTwoRegionTraceMesh(), 2);
+    const auto previous = s.scalar([](const Point& x) {
+        return x[0] == 0 || (x[1] == 1 && x[0] < 3) || (x[0] == 2 && x[1] == 0) ? -1. : 1.;
+    });
+    const auto dof = [&](int i, int j) {
+        return s.phiDofs().getEntityDofMap()->getVertexDofs(4 * j + i).front();
+    };
+    auto transported = previous;
+    transported[dof(2, 1)] = 0.875;
+    const auto zero = s.vector([](const Point&) { return Point{}; });
+    std::vector<FE::Real> endpoint;
+    const auto result = s.reconcile(0.001, previous, transported, zero, zero, endpoint);
+    ASSERT_TRUE(result.success) << result.diagnostic;
+    EXPECT_EQ(result.wall_trace_released_dofs, 0u);
+    for (int i = 0; i < 3; ++i) {
+        const auto left = endpoint[dof(i, 0)];
+        const auto right = endpoint[dof(i + 1, 0)];
+        EXPECT_NEAR(left / (left - right), 0.5, 1.e-14);
+    }
+    // With its sole negative vertex at (2,0), this component contains
+    // one quarter of each of three triangles of area 1/4. Its area and
+    // that of the companion region must both stay unchanged at rest.
+    const auto wet = endpoint[dof(2, 0)];
+    const auto fraction = [&](int i, int j) { return wet / (wet - endpoint[dof(i, j)]); };
+    const auto isolated_area = 0.25 * (fraction(1, 0) * fraction(2, 1) +
+                                       fraction(3, 0) * fraction(3, 1) +
+                                       fraction(3, 1) * fraction(2, 1));
+    EXPECT_NEAR(isolated_area, 3. / 16., 1.e-12);
+    EXPECT_NEAR(s.negativeVolume(endpoint), s.negativeVolume(previous), 1.e-12);
+    EXPECT_EQ(builderCutClasses(s, endpoint), builderCutClasses(s, transported));
+}
+
+TEST(LevelSetKinematicReconciliation, UsesWallFreedomWhenADistantTraceCannotCloseTheBudget)
+{
+    SimplexSystem s(buildTwoRegionTraceMesh(), 2);
+    // The dry coefficient 8 is two cut-cell rings away. It can absorb the
+    // linearized correction but cannot close the nonlinear swept-volume
+    // budget in the available iterations. Relaxing the wall trace can.
+    constexpr FE::Real values[3][4] = {{-8, 0.125, -0.5, 2}, {-1, 1, 0.25, 8}, {-1, -1, -1, 1}};
+    const auto previous = s.scalar([&](const Point& x) {
+        return values[static_cast<int>(2 * x[1])][static_cast<int>(x[0])];
+    });
+    auto transported = previous;
+    transported[s.phiDofs().getEntityDofMap()->getVertexDofs(6).front()] -= 0.03125;
+    const auto velocity = s.vector([](const Point& x) {
+        return Point{x[0] < 2 || (x[0] == 2 && x[1] > 0) ? 1. : 0., 0., 0.};
+    });
+    std::vector<FE::Real> endpoint;
+    const auto result = s.reconcile(0.001, previous, transported, velocity, velocity, endpoint);
+    ASSERT_TRUE(result.success) << result.diagnostic;
+    EXPECT_EQ(builderCutClasses(s, endpoint), builderCutClasses(s, transported));
+    EXPECT_NEAR(s.negativeVolume(endpoint) - s.negativeVolume(previous),
+                result.kinematic_volume_change, result.volume_tolerance);
 }
 
 TEST(LevelSetKinematicReconciliation, KeepsTheVolumeOfEachDisconnectedRegion)
