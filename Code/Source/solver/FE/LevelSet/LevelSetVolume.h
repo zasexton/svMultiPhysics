@@ -46,6 +46,9 @@ struct LevelSetVolumeOptions {
     int affected_cell_neighborhood_layers{0};
     bool allow_corner_linearized_geometry{false};
     bool require_production_qualified_implicit_cut_backend{false};
+    // Exact coefficient signs leave the geometric point-merging tolerance intact.
+    interfaces::LevelSetCoefficientClassificationPolicy coefficient_classification_policy{
+        interfaces::LevelSetCoefficientClassificationPolicy::LegacyAbsoluteBand};
 };
 
 struct LevelSetVolumeResult {

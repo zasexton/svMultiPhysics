@@ -322,6 +322,52 @@ std::vector<FE::Real> quadraticShear(const SimplexSystem& s)
 
 } // namespace
 
+TEST(LevelSetKinematicReconciliation, FluxAndVolumeUseTheSameCoefficientBand)
+{
+    SimplexSystem s(buildUnitTriangle(), 2);
+    const auto velocity = s.vector([](const Point&) { return Point{1, 0, 0}; });
+    constexpr FE::Real band = 0x1p-42;
+    const auto check = [&](std::array<FE::Real, 3> values, FE::Real tolerance,
+                           FE::Real expected_area, FE::Real expected_flux) {
+        const auto phi = s.scalar([&](const Point& x) {
+            return band * (values[0] + (values[1] - values[0]) * x[0] +
+                            (values[2] - values[0]) * x[1]);
+        });
+        const auto endpoint = level_set::measureLevelSetKinematicEndpoint(
+            s.system.meshAccess(), s.phiDofs(), s.velocityDofs(), *s.system.fieldRecord(s.velocity).space,
+            0.0, tolerance, phi, velocity);
+        ASSERT_TRUE(endpoint.success) << endpoint.diagnostic;
+        EXPECT_NEAR(endpoint.negative_volume, expected_area, 1.0e-13);
+        EXPECT_NEAR(endpoint.interface_flux, expected_flux, 1.0e-13);
+        const auto zero = s.vector([](const Point&) { return Point{}; });
+        std::vector<FE::Real> returned;
+        const auto stationary = level_set::reconcileLevelSetWithKinematicFlux(
+            s.system.meshAccess(), s.phiDofs(), s.velocityDofs(), 0.0, tolerance, 0.1,
+            phi, phi, zero, zero, returned, s.system.fieldRecord(s.velocity).space.get());
+        ASSERT_TRUE(stationary.success) << stationary.diagnostic;
+        EXPECT_EQ(returned, phi);
+    };
+    // Snapping vertex 0 removes the first cut and anchors the second at the origin.
+    check({-0.5, 2, 2}, band, 0, 0);
+    check({-0.5, -2, 2}, band, 0.25, -0.5);
+    check({-0.5, 0.5, 0.5}, band, 0.5, 0);
+    // The same raw coefficients cut x+y=1/5 under exact classification.
+    check({-0.5, 2, 2}, 0.0, 0.02, 0.2);
+}
+
+TEST(LevelSetKinematicReconciliation, CollapsedTriangleHasNoInterfaceFlux)
+{
+    SimplexSystem s(buildUnitTriangle(), 2);
+    const auto phi = s.scalar([](const Point& x) { return -2.0e-12 + 1000.0 * (x[0] + x[1]); });
+    const auto velocity = s.vector([](const Point&) { return Point{1.0e15, 0, 0}; });
+    const auto endpoint = level_set::measureLevelSetKinematicEndpoint(
+        s.system.meshAccess(), s.phiDofs(), s.velocityDofs(), *s.system.fieldRecord(s.velocity).space,
+        0.0, 1.0e-12, phi, velocity);
+    ASSERT_TRUE(endpoint.success) << endpoint.diagnostic;
+    EXPECT_DOUBLE_EQ(endpoint.negative_volume, 0.0);
+    EXPECT_DOUBLE_EQ(endpoint.interface_flux, 0.0);
+}
+
 TEST(LevelSetKinematicReconciliation, ResolvesStationaryFiniteStepAreaBeforePublishing)
 {
     SimplexSystem s(buildUnitTriangle(), 2);

@@ -177,6 +177,7 @@ struct SimplexCell {
     std::shared_ptr<const quadrature::QuadratureRule> trace_rule;
     Real measure{};
     Real previous_fraction{};
+    bool previous_has_surface{};
     CellTrace previous_trace;
 };
 
@@ -466,7 +467,9 @@ bool accumulateCell(const SimplexCell& cell,
     }
     if (n_neg == 0 || n_pos == 0) {
         if (cut_negative_fraction) {
-            *cut_negative_fraction = n_neg == 0 ? Real{0} : Real{1};
+            // The entire zero plateau belongs to the closed negative phase.
+            const bool positive = std::any_of(s.begin(), s.begin() + n, [](Real value) { return value > 0; });
+            *cut_negative_fraction = positive ? Real{0} : Real{1};
         }
         return 3;
     }
@@ -491,6 +494,7 @@ bool accumulateCell(const SimplexCell& cell,
     };
     Real measure = 0.0;
     Real negative_fraction = 0.0;
+    Real positive_fraction = 0.0;
     if (n == 3) {
         const int lone = n_neg == 1 ? neg[0] : pos[0];
         std::array<int, 2> others{};
@@ -503,6 +507,7 @@ bool accumulateCell(const SimplexCell& cell,
         measure = norm(sub(point(lone, others[1]), point(lone, others[0])));
         const Real corner = fraction(lone, others[0]) * fraction(lone, others[1]);
         negative_fraction = n_neg == 1 ? corner : Real{1.0} - corner;
+        positive_fraction = n_neg == 1 ? Real{1.0} - corner : corner;
     } else if (n_neg == 1 || n_pos == 1) {
         const int lone = n_neg == 1 ? neg[0] : pos[0];
         std::array<Point, 3> p{};
@@ -516,6 +521,7 @@ bool accumulateCell(const SimplexCell& cell,
         }
         measure = triangleArea(p[0], p[1], p[2]);
         negative_fraction = n_neg == 1 ? corner : Real{1.0} - corner;
+        positive_fraction = n_neg == 1 ? Real{1.0} - corner : corner;
     } else {
         const auto ap = point(neg[0], pos[0]);
         const auto aq = point(neg[0], pos[1]);
@@ -529,12 +535,15 @@ bool accumulateCell(const SimplexCell& cell,
         const Real negative = tetVolume(a, ap, aq, b) + tetVolume(ap, aq, b, bp) +
                               tetVolume(aq, b, bp, bq);
         negative_fraction = volume > Real{0.0} ? negative / volume : Real{0.0};
+        const auto& p = cell.xi[static_cast<std::size_t>(pos[0])];
+        const auto& q = cell.xi[static_cast<std::size_t>(pos[1])];
+        const Real positive = tetVolume(p, ap, bp, q) + tetVolume(ap, bp, q, aq) + tetVolume(bp, q, aq, bq);
+        positive_fraction = volume > Real{0.0} ? positive / volume : Real{0.0};
     }
     if (cut_negative_fraction) {
         *cut_negative_fraction = negative_fraction;
     }
     int code = measure <= tolerance ? 0 : (measure <= std::sqrt(tolerance) ? 1 : 2);
-    const Real positive_fraction = Real{1.0} - negative_fraction;
     if (negative_fraction > Real{0.0} && negative_fraction < minimum_fraction) {
         code += 4;
     }
@@ -542,6 +551,13 @@ bool accumulateCell(const SimplexCell& cell,
         code += 8;
     }
     return code;
+}
+
+[[nodiscard]] bool hasCutSurface(int classification) noexcept
+{
+    // The low two bits encode collapsed, nearly tangent, regular and uncut.
+    const int geometry = classification % 4;
+    return geometry == 1 || geometry == 2;
 }
 
 void maxInPlace(const Collective& context, std::vector<Real>& values)
@@ -1215,6 +1231,7 @@ LevelSetKinematicReconciliationResult integrateKinematicStep(
     const int dimension = mesh.dimension();
 
     const Real minimum_fraction = assembly::CutIntegrationContext::minGeneratedCutVolumeFraction();
+    const Real geometry_tolerance = tolerance > 0 ? tolerance : LevelSetVolumeOptions{}.tolerance;
     // ---- validation (collective) -------------------------------------------
     std::string local_failure;
     if (!(dt > Real{0.0}) || !std::isfinite(dt) || !std::isfinite(isovalue) ||
@@ -1247,8 +1264,33 @@ LevelSetKinematicReconciliationResult integrateKinematicStep(
 
     // ---- gather owned simplices ---------------------------------------------
     std::vector<SimplexCell> cells;
+    const auto original_transported = transported_level_set;
+    std::vector<Real> previous_geometry, transported_geometry;
     if (local_failure.empty()) {
         try {
+            // Use one represented geometry for the traces, wall intersections,
+            // component support, rates and sharp volumes. Band vertices stay fixed.
+            const auto canonicalize = [&](std::span<const Real>& field, std::vector<Real>& storage) {
+                const auto in_band = [&](Real value) {
+                    return value != isovalue && std::abs(value - isovalue) <= tolerance;
+                };
+                if (std::any_of(field.begin(), field.end(), in_band)) {
+                    storage.assign(field.begin(), field.end());
+                    for (auto& value : storage) {
+                        if (in_band(value)) {
+                            value = isovalue;
+                        }
+                    }
+                    field = storage;
+                }
+            };
+            const bool same_field = previous_level_set.data() == transported_level_set.data();
+            canonicalize(previous_level_set, previous_geometry);
+            if (same_field) {
+                transported_level_set = previous_level_set;
+            } else {
+                canonicalize(transported_level_set, transported_geometry);
+            }
             const auto* phi_map = level_set_dofs.getEntityDofMap();
             const auto* velocity_map = velocity_dofs.getEntityDofMap();
             const ElementType expected =
@@ -1339,8 +1381,8 @@ LevelSetKinematicReconciliationResult integrateKinematicStep(
                 const auto ac = sub(cell.x[2], cell.x[0]);
                 cell.measure = dimension == 2 ? norm(cross(ab, ac)) / Real{2}
                     : std::abs(dot(cross(ab, ac), sub(cell.x[3], cell.x[0]))) / Real{6};
-                (void)cutClass(cell, previous_level_set, isovalue, tolerance,
-                               minimum_fraction, &cell.previous_fraction);
+                cell.previous_has_surface = hasCutSurface(cutClass(
+                    cell, previous_level_set, isovalue, geometry_tolerance, minimum_fraction, &cell.previous_fraction));
                 cells.push_back(std::move(cell));
             });
         } catch (const std::exception& error) {
@@ -1373,7 +1415,7 @@ LevelSetKinematicReconciliationResult integrateKinematicStep(
     unsigned long long previous_cut_cells = 0u;
     try {
         for (auto& cell : cells) {
-            if (accumulateCell(cell, previous_level_set, rate,
+            if (cell.previous_has_surface && accumulateCell(cell, previous_level_set, rate,
                                true, isovalue, rate_roundoff, previous, cell.previous_trace)) {
                 ++previous_cut_cells;
             }
@@ -1395,6 +1437,9 @@ LevelSetKinematicReconciliationResult integrateKinematicStep(
     volume_options.isovalue = isovalue;
     if (tolerance > Real{0.0}) {
         volume_options.tolerance = tolerance;
+    } else {
+        volume_options.coefficient_classification_policy =
+            interfaces::LevelSetCoefficientClassificationPolicy::ExactRepresentedZero;
     }
     if (!reconciled_level_set) {
         const auto volume = computeLevelSetCutCellVolume(mesh, level_set_dofs, volume_options, previous_level_set);
@@ -1458,7 +1503,7 @@ LevelSetKinematicReconciliationResult integrateKinematicStep(
     std::vector<int> transported_cut_class(cells.size(), 3);
     for (std::size_t c = 0; c < cells.size(); ++c) {
         transported_cut_class[c] = cutClass(
-            cells[c], transported_level_set, isovalue, tolerance, minimum_fraction);
+            cells[c], transported_level_set, isovalue, geometry_tolerance, minimum_fraction);
     }
     std::size_t skipped = 0u;
     std::size_t redistributed = 0u;
@@ -1486,11 +1531,12 @@ LevelSetKinematicReconciliationResult integrateKinematicStep(
             for (std::size_t c = 0; c < cells.size(); ++c) {
                 const auto& cell = cells[c];
                 CellTrace trace;
-                if (accumulateCell(cell, endpoint, rate, false, isovalue, rate_roundoff, current, trace)) {
+                Real fraction = 0;
+                const auto classification = cutClass(cell, endpoint, isovalue, geometry_tolerance, minimum_fraction, &fraction);
+                if (hasCutSurface(classification) &&
+                    accumulateCell(cell, endpoint, rate, false, isovalue, rate_roundoff, current, trace)) {
                     ++local_cut_cells;
                 }
-                Real fraction = 0;
-                (void)cutClass(cell, endpoint, isovalue, tolerance, minimum_fraction, &fraction);
                 Real defect = cell.measure * (fraction - cell.previous_fraction);
                 Real weight = 0;
                 bool corrected = false;
@@ -1900,7 +1946,7 @@ LevelSetKinematicReconciliationResult integrateKinematicStep(
                     const auto& cell = cells[c];
                     bool touched = false;
                     for (int a = 0; a < cell.corners; ++a) touched = touched || added[cell.dof[a]] != 0;
-                    if (!touched || cutClass(cell, trial, isovalue, tolerance, minimum_fraction) ==
+                    if (!touched || cutClass(cell, trial, isovalue, geometry_tolerance, minimum_fraction) ==
                                         transported_cut_class[c]) continue;
                     for (int a = 0; a < cell.corners; ++a) strip[cell.dof[a]] = 1;
                 }
@@ -2021,7 +2067,7 @@ LevelSetKinematicReconciliationResult integrateKinematicStep(
             }
             bool same_class = true;
             for (std::size_t c = 0; c < cells.size() && same_class; ++c) {
-                same_class = cutClass(cells[c], trial, isovalue, tolerance, minimum_fraction) == transported_cut_class[c];
+                same_class = cutClass(cells[c], trial, isovalue, geometry_tolerance, minimum_fraction) == transported_cut_class[c];
             }
             if (allTrue(context, same_class)) {
                 candidate.swap(trial);
@@ -2131,6 +2177,14 @@ LevelSetKinematicReconciliationResult integrateKinematicStep(
                 << ", largest connected-interface defect=" << worst_component;
         result.diagnostic = message.str();
         return result;
+    }
+    // Return the caller's original coefficient on every frozen band vertex.
+    if (transported_level_set.data() != original_transported.data()) {
+        for (std::size_t i = 0; i < n; ++i) {
+            if (transported_level_set[i] == isovalue) {
+                iterate[i] = original_transported[i];
+            }
+        }
     }
     *reconciled_level_set = std::move(iterate);
     result.applied = result.corrected_dofs > 0u;

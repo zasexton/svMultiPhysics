@@ -895,6 +895,27 @@ TEST(LevelSetVolume, TinySimplexPhaseIsMeasuredForEitherSign)
 #endif
 }
 
+TEST(LevelSetVolume, ExactCoefficientSignsAreIndependentOfPointMerging)
+{
+    const ScalarFieldFixture fixture;
+    auto phi = planeCoefficients(fixture, 0.25);
+    for (auto& value : phi) {
+        value *= 0x1p-45;
+    }
+    for (const bool generated : {false, true}) {
+        SCOPED_TRACE(generated);
+        level_set::LevelSetVolumeOptions options;
+        options.use_generated_interface_quadrature = generated;
+        options.coefficient_classification_policy =
+            FE::interfaces::LevelSetCoefficientClassificationPolicy::ExactRepresentedZero;
+        const auto measured = level_set::computeLevelSetCutCellVolume(fixture.system, fixture.phi, options, phi);
+        ASSERT_TRUE(measured.success) << measured.diagnostic;
+        // x+y+z < 1/4 is a copy of the parent tetrahedron scaled by 1/4.
+        EXPECT_NEAR(measured.positive_volume, 63.0 / 384.0, 1.0e-14);
+        EXPECT_NEAR(measured.negative_volume, 1.0 / 384.0, 1.0e-14);
+    }
+}
+
 TEST(LevelSetVolume, FESystemOverloadUsesFieldSlice)
 {
     const ScalarFieldFixture fixture;

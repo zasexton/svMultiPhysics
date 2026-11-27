@@ -410,6 +410,7 @@ struct PhaseVolumes {
     generated.requested_interface_marker = options.requested_interface_marker;
     generated.isovalue = options.isovalue;
     generated.tolerance = options.tolerance;
+    generated.coefficient_classification_policy = options.coefficient_classification_policy;
     if (options.quadrature_order.has_value()) {
         generated.quadrature_order = *options.quadrature_order;
     }
@@ -671,6 +672,9 @@ LevelSetVolumeResult computeLevelSetCutCellVolume(
         throw std::invalid_argument(
             "level-set volume calculation requires a finite isovalue and positive finite tolerance");
     }
+    if (!interfaces::validLevelSetCoefficientClassificationPolicy(options.coefficient_classification_policy)) {
+        throw std::invalid_argument("level-set volume calculation requires a valid coefficient classification policy");
+    }
     const auto expected = static_cast<std::size_t>(level_set_dofs.getNumDofs());
     if (coefficients.size() != expected) {
         throw std::invalid_argument(
@@ -691,6 +695,8 @@ LevelSetVolumeResult computeLevelSetCutCellVolume(
     request.interface_marker = 0;
     request.isovalue = options.isovalue;
     request.tolerance = options.tolerance;
+    request.coefficient_classification_policy = options.coefficient_classification_policy;
+    const Real coefficient_band = request.resolvedCoefficientClassificationBand();
     request.quadrature_order = 1;
 
     LevelSetVolumeResult result;
@@ -741,7 +747,7 @@ LevelSetVolumeResult computeLevelSetCutCellVolume(
         ++result.cells;
 
         const Real simple_fraction =
-            negativeFractionFromValues(signed_values, options.tolerance);
+            negativeFractionFromValues(signed_values, coefficient_band);
         PhaseVolumes phase{};
         if (simple_fraction < Real{0.0}) {
             const auto mapping = affine_triangle || affine_tetra
@@ -820,7 +826,7 @@ LevelSetVolumeResult computeLevelSetCutCellVolume(
                         cell_id,
                         tet_coordinates,
                         tet_values,
-                        options.tolerance, mapping.get(), simplex_rule.get());
+                        coefficient_band, mapping.get(), simplex_rule.get());
                     phase.negative += clipped.negative;
                     phase.positive += clipped.positive;
                 }

@@ -129,7 +129,8 @@ struct LevelSetKinematicEndpoint {
  *        flux of its transport velocity.
  *
  * For a P1 level set phi on simplices the negative-side measure
- * V(phi) = |{phi < c}| has the exact nodal derivative dV/dphi_i = -g_i,
+ * V(phi) = |{phi <= c}| has the exact nodal derivative dV/dphi_i = -g_i
+ * on a regular cut, with the same sign-class band for the volume and interface.
  *     g_i(phi) = int_{Gamma(phi)} N_i / |grad phi| ds,
  * and the kinematic interface flux of a velocity w splits into nodal parts
  *     F(phi, w) = int_{Gamma(phi)} w . n ds = sum_i f_i,
