@@ -205,7 +205,7 @@ NavierStokesVMSIntegrands navierStokesVMSIntegrands(const NavierStokesTerms& t,
 
     // Static subscales use the physical step between endpoints and the parent cell's inverse-length metric.
     //   tau_M = 1 / (rho sqrt(4 ct_m^2/dt^2 + a.K a + ct_c (K:K) nu^2 + eps)),
-    //   tau_C = 1 / (tau_M h_div^-2 + eps).
+    //   tau_C = 1 / (tau_M h_div^-2). The frequency-squared floor belongs in tau_M.
     const auto eps = FormExpr::constant(s.epsilon);
     const auto dts = FormExpr::timeStep();
     const auto ct_m = FormExpr::constant(s.ct_m);
@@ -215,7 +215,7 @@ NavierStokesVMSIntegrands navierStokesVMSIntegrands(const NavierStokesTerms& t,
     const auto kT = FormExpr::constant(4.0) * (ct_m * ct_m) / (dts * dts);
     const auto tau_m = FormExpr::constant(1.0) /
                        (rho * sqrt(kT + inner(a, K * a) + ct_c * doubleContraction(K, K) * (nu * nu) + eps));
-    const auto tau_c = FormExpr::constant(1.0) / (tau_m * inverse_divergence_length_squared + eps);
+    const auto tau_c = FormExpr::constant(1.0) / (tau_m * inverse_divergence_length_squared);
     const auto u_s = -tau_m * R_m;                                         // u'
     const auto p_s = -tau_c * div(u);                                      // p'
     const auto u_adv = s.convection ? (u + u_s - w) : a;

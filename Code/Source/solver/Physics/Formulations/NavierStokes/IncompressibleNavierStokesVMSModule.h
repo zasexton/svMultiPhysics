@@ -670,7 +670,7 @@ struct IncompressibleNavierStokesVMSOptions {
     FE::Real ct_m{1.0};
     FE::Real ct_c{36.0};
 
-    // Small positive value added inside sqrt/divisions to avoid singular parameters.
+    // Positive floor on the squared frequency in tau_M (inverse time squared).
     FE::Real stabilization_epsilon{1e-12};
 
     // Optional boundary conditions.
@@ -1067,7 +1067,7 @@ struct IncompressibleTwoFluidOptions {
     bool enable_vms{true};
     FE::Real ct_m{1.0};
     FE::Real ct_c{36.0};
-    FE::Real stabilization_epsilon{1.0e-12};
+    FE::Real stabilization_epsilon{1.0e-12}; // Inverse time squared.
 
     FE::Real pressure_gradient_penalty{1.0};
     IncompressibleNavierStokesVMSOptions::FreeSurfaceSmallCutAggregationGuards
@@ -1109,7 +1109,7 @@ struct NavierStokesVMSSettings {
     bool vms{true};
     FE::Real ct_m{1.0};
     FE::Real ct_c{36.0};
-    FE::Real epsilon{1.0e-12};
+    FE::Real epsilon{1.0e-12}; // Inverse time squared.
     // For integration on one side of a level set. On tetrahedra the pressure
     // subscale uses the parent barycentric gradients throughout this phase.
     bool phase_restricted{false};

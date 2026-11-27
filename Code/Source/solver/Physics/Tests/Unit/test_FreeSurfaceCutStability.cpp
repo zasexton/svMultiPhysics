@@ -5780,7 +5780,8 @@ template <typename MatrixGlobalizer>
     FE::Real complementary_density,
     FE::Real complementary_viscosity,
     FE::systems::SetupOptions setup,
-    MatrixGlobalizer&& globalize_matrix)
+    MatrixGlobalizer&& globalize_matrix,
+    FE::Real frequency_squared_floor = 1e-12)
 {
     constexpr int interface_marker = 27410;
     constexpr std::string_view domain_id =
@@ -5809,6 +5810,7 @@ template <typename MatrixGlobalizer>
     options.surface_tension = FE::Real{0.0};
     options.include_transient_interface_penalty = false;
     options.enable_convection = false;
+    options.stabilization_epsilon = frequency_squared_floor;
 
     const auto target_phase =
         ns::IncompressibleTwoFluidPhaseOptions{
@@ -12339,7 +12341,8 @@ TEST(FreeSurfaceCutStability,
             FE::Real target_density,
             FE::Real target_viscosity,
             FE::Real complementary_density,
-            FE::Real complementary_viscosity) {
+            FE::Real complementary_viscosity,
+            FE::Real frequency_squared_floor = 1e-12) {
             // Three cells per axis: each phase holds a full cell, so neither
             // phase's aggregation would make every DOF of its side a slave.
             auto mesh = makeFixedTetraMesh(
@@ -12362,7 +12365,7 @@ TEST(FreeSurfaceCutStability,
                 [](FE::assembly::DenseMatrixView matrix,
                    const FE::systems::FESystem&) {
                     return matrix;
-                });
+                }, frequency_squared_floor);
         };
 
     constexpr FE::Real dense_density = FE::Real{1000.0};
@@ -12397,6 +12400,20 @@ TEST(FreeSurfaceCutStability,
         light_viscosity,
         dense_density,
         dense_viscosity);
+
+    // The frequency-squared floor belongs to the bulk subscale. The pressure
+    // ghost weight uses the phase's viscosity and rho h²/dt on the facet.
+    const auto changed_frequency_floor = assemble(
+        light_phase_cut, FE::geometry::CutIntegrationSide::Positive,
+        light_density, light_viscosity, dense_density, dense_viscosity, 4e6);
+    ASSERT_EQ(changed_frequency_floor.pressure_ghost_operator.size(),
+              light_positive.pressure_ghost_operator.size());
+    for (std::size_t i = 0; i < light_positive.pressure_ghost_operator.size(); ++i) {
+        EXPECT_DOUBLE_EQ(changed_frequency_floor.pressure_ghost_operator[i],
+                         light_positive.pressure_ghost_operator[i]);
+    }
+    EXPECT_LT(vectorL2Norm(changed_frequency_floor.pressure_pspg_operator),
+              vectorL2Norm(light_positive.pressure_pspg_operator));
 
     for (const auto* sample : {
              &dense_negative,

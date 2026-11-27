@@ -1449,14 +1449,13 @@ inline void addFittedFreeSurface(FE::forms::FormExpr& M, FE::systems::FESystem& 
         return {};
     }
     const auto h = avg(hNormal());
-    const auto nu = t.mu + FormExpr::constant(o.density) * h * h / FormExpr::effectiveTimeStep() +
-                    FormExpr::constant(o.stabilization_epsilon);
+    const auto stiffness = t.mu + FormExpr::constant(o.density) * h * h / FormExpr::effectiveTimeStep();
     const auto gamma_p = FE::forms::bc::toScalarExpr(cut.pressure_gradient_penalty, freeSurfaceValueName("ns_free_surface_cut_pressure_penalty", b));
     const auto& G = identity.geometry.value();
     const auto facets = b.active_domain == FreeSurfaceActiveDomain::None
                             ? G.cutFacets()
                             : G.side(activeDomainSide(b.active_domain)).cutFacets();
-    return ghostPenalty(t.p, t.q, pressure_order > 1 ? 2 : 1, gamma_p * FormExpr::constant(0.01), nu, facets);
+    return ghostPenalty(t.p, t.q, pressure_order > 1 ? 2 : 1, gamma_p * FormExpr::constant(0.01), stiffness, facets);
 }
 
 // ---------------------------------------------------------------------------

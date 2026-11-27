@@ -330,11 +330,12 @@ FourNorms rates(const FourNorms& coarse, const FourNorms& fine)
 
 void expectSimplexGradDivWork(int dim, const std::vector<real_t>& coordinates,
                               const std::vector<std::vector<index_t>>& orderings,
-                              double measure, double expected_tau_c, bool cut = false)
+                              double measure, double expected_tau_c, bool cut = false,
+                              double mass_scale = 1.0, double frequency_squared_floor = 1e-12)
 {
     const CellShape shape{dim == 2 ? CellFamily::Triangle : CellFamily::Tetra, dim + 1, 1};
     const auto element = dim == 2 ? FE::ElementType::Triangle3 : FE::ElementType::Tetra4;
-    constexpr double viscosity = 0.00088733;
+    const double viscosity = mass_scale * 0.00088733;
     for (const auto& vertices : orderings) {
         SCOPED_TRACE(::testing::PrintToString(vertices));
         auto base = std::make_shared<MeshBase>();
@@ -345,7 +346,8 @@ void expectSimplexGradDivWork(int dim, const std::vector<real_t>& coordinates,
         auto scalar = std::make_shared<FE::spaces::H1Space>(element, 1);
         auto velocity = std::make_shared<FE::spaces::ProductSpace>(scalar, dim);
         ns::IncompressibleNavierStokesVMSOptions options;
-        options.density = 997.0;
+        options.density = mass_scale * 997.0;
+        options.stabilization_epsilon = frequency_squared_floor;
         options.viscosity = viscosity;
         options.enable_convection = false;
         options.enable_vms = true;
@@ -564,18 +566,33 @@ TEST(NavierStokesVMSManufactured, QuadraticConvectionIntegratesPolynomialWork)
 // On a coordinate-axis simplex with leg lengths h_i, the unit-determinant
 // regular-simplex metric has G_ij = (1 + delta_ij) / ((dim+1)^(1/dim) h_i h_j).
 // The two tau_C values use this closed form and the 1 ms physical step.
+TEST(NavierStokesVMSManufactured, GradDivWorkScalesWithTheMassUnit)
+{
+    // The unit right triangle has tr(G) = 4/sqrt(3) and G:G = 10/3.
+    // A mass-unit change multiplies rho, mu and pressure work by the same
+    // factor while nu, the step and all inverse frequencies stay fixed.
+    constexpr double nu = 0.00088733 / 997.0;
+    constexpr double eps = 4e6;
+    const double frequency = std::sqrt(4e6 + 36 * nu * nu * (10.0 / 3) + eps);
+    for (double scale : {0.125, 1.0}) {
+        const double tau_c = scale * 997 * frequency * std::sqrt(3.0) / 4;
+        expectSimplexGradDivWork(2, {0, 0, 1, 0, 0, 1}, {{0, 1, 2}}, 0.5, tau_c,
+                                 false, scale, eps);
+    }
+}
+
 TEST(NavierStokesVMSManufactured, TriangleGradDivWorkIsInvariantToVertexOrdering)
 {
     expectSimplexGradDivWork(2, {0, 0, 0.025, 0, 0, 0.0125},
                              {{0, 1, 2}, {1, 2, 0}, {2, 0, 1}},
-                             0.025 * 0.0125 / 2.0, 215.856831896576);
+                             0.025 * 0.0125 / 2.0, 215.85683194317019);
 }
 
 TEST(NavierStokesVMSManufactured, TetrahedronGradDivWorkIsInvariantToVertexOrdering)
 {
     expectSimplexGradDivWork(3, {0, 0, 0, 0.025, 0, 0, 0, 0.0125, 0, 0, 0, 0.05},
                              {{0, 1, 2, 3}, {1, 2, 0, 3}, {2, 3, 0, 1}, {3, 0, 2, 1}},
-                             0.025 * 0.0125 * 0.05 / 6.0, 188.409386781600);
+                             0.025 * 0.0125 * 0.05 / 6.0, 188.40938681709790);
 }
 
 TEST(NavierStokesVMSManufactured, CutTetrahedronGradDivWorkUsesBarycentricGradientsAcrossReferenceOrigins)
@@ -594,7 +611,7 @@ TEST(NavierStokesVMSManufactured, CutTetrahedronGradDivWorkUsesBarycentricGradie
     }
     constexpr double nu = 0.00088733 / 997.0;
     const double tau_m = 1.0 / (997.0 * std::sqrt(4.0e6 + 36.0 * nu * nu * metric_norm_squared + 1.0e-12));
-    const double expected_tau_c = 1.0 / (tau_m * inverse_length_squared + 1.0e-12);
+    const double expected_tau_c = 1.0 / (tau_m * inverse_length_squared);
     expectSimplexGradDivWork(3, {0, 0, 0, hx, 0, 0, 0, hy, 0, 0, 0, hz},
                              {{0, 1, 2, 3}, {1, 2, 0, 3}, {2, 3, 0, 1}, {3, 0, 2, 1}},
                              (7.0 / 8.0) * hx * hy * hz / 6.0, expected_tau_c, true);
