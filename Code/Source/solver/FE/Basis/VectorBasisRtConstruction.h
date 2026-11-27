@@ -11,6 +11,8 @@
 #include "VectorBasis.h"
 
 #include <array>
+#include <functional>
+#include <span>
 #include <vector>
 
 namespace svmp {
@@ -21,10 +23,12 @@ namespace vector_construction {
 
 using Vec3 = math::Vector<Real, 3>;
 
+// Append a reference face's covariant H(curl) moments, in its vertex ordering.
+std::size_t add_hcurl_face_moments(
+    ElementType type, std::span<const LocalIndex> vertices, int order, std::span<Real> rows, std::size_t cols,
+    const std::function<void(const Vec3&, std::vector<Vec3>&)>& evaluate);
+
 std::vector<Real> invert_dense_matrix(std::vector<Real> A, std::size_t n);
-std::vector<Real> rank_revealing_pseudo_inverse_dense_matrix(
-    const std::vector<Real>& A,
-    std::size_t n);
 
 void eval_rt_seed_values(ElementType type,
                          int order,
@@ -40,19 +44,11 @@ std::vector<Real> build_rt_direct_transform(
     std::size_t n,
     const std::vector<std::array<int, 4>>& extra_monomials);
 
-void eval_nd_seed_values(ElementType type,
-                         int order,
-                         const Vec3& xi,
-                         std::vector<Vec3>& values);
-void eval_nd_seed_curl(ElementType type,
-                       int order,
-                       const Vec3& xi,
-                       std::vector<Vec3>& curl);
 std::vector<Real> build_nd_direct_transform(
     ElementType type,
     int order,
     std::size_t n,
-    const std::vector<std::array<int, 4>>& extra_monomials);
+    std::vector<std::array<int, 4>>& extra_monomials);
 
 } // namespace vector_construction
 } // namespace detail

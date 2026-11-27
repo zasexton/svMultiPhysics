@@ -309,13 +309,50 @@ std::size_t tetra_poly_dim(std::size_t k) {
     return (k + 1u) * (k + 2u) * (k + 3u) / 6u;
 }
 
+std::vector<VectorBasisModalPolynomial> wedge_vector_modes(int k, BasisType family) {
+    const bool rt = family == BasisType::RaviartThomas;
+    std::vector<VectorBasisModalPolynomial> modes;
+    const auto append = [&](int c, int i, int j, int l) {
+        VectorBasisModalPolynomial p;
+        p.num_terms = 1;
+        p.terms[0] = {c, i, j, l, Real(1)};
+        modes.push_back(p);
+    };
+    // Horizontal triangle RT or Nedelec functions tensored with line polynomials.
+    for (int l = 0; l <= (rt ? k : k+1); ++l) {
+        for (int j = 0; j <= k; ++j) {
+            for (int i = 0; i <= k-j; ++i) {
+                append(0, i, j, l);
+                append(1, i, j, l);
+            }
+        }
+        for (int i = 0; i <= k; ++i) {
+            VectorBasisModalPolynomial p;
+            p.num_terms = 2;
+            if (rt) {
+                p.terms[0] = {0, i+1, k-i, l, Real(1)};
+                p.terms[1] = {1, i, k-i+1, l, Real(1)};
+            } else {
+                p.terms[0] = {0, i, k-i+1, l, Real(-1)};
+                p.terms[1] = {1, i+1, k-i, l, Real(1)};
+            }
+            modes.push_back(p);
+        }
+    }
+    // The vertical factor has one additional degree along z for H(div),
+    // and one additional triangular degree for H(curl).
+    const int tri_degree = rt ? k : k+1;
+    for (int l = 0; l <= (rt ? k+1 : k); ++l) {
+        for (int j = 0; j <= tri_degree; ++j) {
+            for (int i = 0; i <= tri_degree-j; ++i) append(2, i, j, l);
+        }
+    }
+    return modes;
+}
+
 std::size_t rt_wedge_size(int order) {
-    const std::size_t k = static_cast<std::size_t>(order);
-    const std::size_t face_dofs =
-        2u * triangle_poly_dim(k) + 3u * (k + 1u) * (k + 1u);
-    const std::size_t interior_dofs =
-        (k >= 1u) ? (3u * k * (k + 1u) * (k + 1u) / 2u) : 0u;
-    return face_dofs + interior_dofs;
+    const auto k = static_cast<std::size_t>(order);
+    return (k+1)*(k+3)*(k+1) + triangle_poly_dim(k)*(k+2);
 }
 
 std::size_t rt_pyramid_size(int order) {
@@ -326,12 +363,8 @@ std::size_t rt_pyramid_size(int order) {
 }
 
 std::size_t nd_wedge_size(int order) {
-    const std::size_t k = static_cast<std::size_t>(order);
-    const std::size_t edge_dofs = 9u * (k + 1u);
-    const std::size_t face_dofs = (k >= 1u) ? (8u * k * (k + 1u)) : 0u;
-    const std::size_t interior_dofs =
-        (k >= 2u) ? (3u * k * (k - 1u) * (k + 1u) / 2u) : 0u;
-    return edge_dofs + face_dofs + interior_dofs;
+    const auto k = static_cast<std::size_t>(order);
+    return (k+1)*(k+3)*(k+2) + triangle_poly_dim(k+1)*(k+1);
 }
 
 std::size_t nd_pyramid_size(int order) {
@@ -393,7 +426,7 @@ std::vector<std::array<int, 4>> make_rt_extra_monomial_candidates(ElementType ty
     return candidates;
 }
 
-Real eval_transformed_rt_monomial_scalar(const std::array<int, 4>& mono,
+Real component_monomial_value(const std::array<int, 4>& mono,
                                          const std::vector<Real>& px,
                                          const std::vector<Real>& py,
                                          const std::vector<Real>& pz) {
@@ -519,71 +552,18 @@ void add_component_monomial_curl(Vec3& curl,
     }
 }
 
-std::vector<std::array<int, 4>> make_nd_extra_monomial_candidates(ElementType,
-                                                                  int order) {
-    if (order >= 3) {
-        return make_component_monomial_candidates(3 * order);
-    }
-
-    std::vector<std::array<int, 4>> candidates;
-    const int max_total_degree = (order == 1) ? 4 : 5;
-    for (int component = 0; component < 3; ++component) {
-        for (int total = 0; total <= max_total_degree; ++total) {
-            for (int pz = 0; pz <= total; ++pz) {
-                for (int py = 0; py <= total - pz; ++py) {
-                    const int px = total - py - pz;
-                    candidates.push_back({component, px, py, pz});
-                }
-            }
-        }
+std::vector<std::array<int, 4>> make_nd_extra_monomial_candidates(ElementType type, int order) {
+    const int degree = 2*order+1;
+    auto candidates = make_component_monomial_candidates(degree);
+    if (is_pyramid(type)) {
+        // On z=0 the covariant trace on the base must be in the quadrilateral
+        // Nedelec space. All z-positive powers and all normal components vanish there.
+        std::erase_if(candidates, [=](const auto& m) {
+            if (m[3] != 0 || m[0] == 2) return false;
+            return m[1] > order + (m[0] == 1) || m[2] > order + (m[0] == 0);
+        });
     }
     return candidates;
-}
-
-Real eval_transformed_nd_monomial_scalar(const std::array<int, 4>& mono,
-                                         const std::vector<Real>& px,
-                                         const std::vector<Real>& py,
-                                         const std::vector<Real>& pz) {
-    return px[static_cast<std::size_t>(mono[1])] *
-           py[static_cast<std::size_t>(mono[2])] *
-           pz[static_cast<std::size_t>(mono[3])];
-}
-
-Vec3 eval_transformed_nd_monomial_curl(const std::array<int, 4>& mono,
-                                       const std::vector<Real>& px,
-                                       const std::vector<Real>& py,
-                                       const std::vector<Real>& pz) {
-    const int component = mono[0];
-    const int px_pow = mono[1];
-    const int py_pow = mono[2];
-    const int pz_pow = mono[3];
-
-    const Real dphidx = (px_pow == 0)
-        ? Real(0)
-        : Real(px_pow) *
-              px[static_cast<std::size_t>(px_pow - 1)] *
-              py[static_cast<std::size_t>(py_pow)] *
-              pz[static_cast<std::size_t>(pz_pow)];
-    const Real dphidy = (py_pow == 0)
-        ? Real(0)
-        : Real(py_pow) *
-              px[static_cast<std::size_t>(px_pow)] *
-              py[static_cast<std::size_t>(py_pow - 1)] *
-              pz[static_cast<std::size_t>(pz_pow)];
-    const Real dphidz = (pz_pow == 0)
-        ? Real(0)
-        : Real(pz_pow) *
-              px[static_cast<std::size_t>(px_pow)] *
-              py[static_cast<std::size_t>(py_pow)] *
-              pz[static_cast<std::size_t>(pz_pow - 1)];
-
-    if (component == 0) {
-        return Vec3{Real(0), dphidz, -dphidy};
-    }
-    if (component == 1) {
-        return Vec3{-dphidz, Real(0), dphidx};
-    }
-    return Vec3{dphidy, -dphidx, Real(0)};
 }
 
 } // namespace vector_common

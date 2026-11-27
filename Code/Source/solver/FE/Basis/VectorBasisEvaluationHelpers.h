@@ -278,6 +278,7 @@ std::array<int, 3> component_monomial_power_limits(
     const std::vector<std::array<int, 4>>& candidates);
 std::size_t triangle_poly_dim(std::size_t k);
 std::size_t tetra_poly_dim(std::size_t k);
+std::vector<VectorBasisModalPolynomial> wedge_vector_modes(int order, BasisType family);
 std::size_t rt_wedge_size(int order);
 std::size_t rt_pyramid_size(int order);
 std::size_t nd_wedge_size(int order);
@@ -288,7 +289,7 @@ void ensure_supported_hybrid_vector_order(ElementType type,
 std::vector<std::array<int, 4>> make_component_monomial_candidates(int max_total_degree);
 std::vector<std::array<int, 4>> make_rt_extra_monomial_candidates(ElementType type,
                                                                   int order);
-Real eval_transformed_rt_monomial_scalar(const std::array<int, 4>& mono,
+Real component_monomial_value(const std::array<int, 4>& mono,
                                          const std::vector<Real>& px,
                                          const std::vector<Real>& py,
                                          const std::vector<Real>& pz);
@@ -732,16 +733,6 @@ void evaluate_nodal_modal_vector_strided_with_limits(
 
 std::vector<std::array<int, 4>> make_nd_extra_monomial_candidates(ElementType type,
                                                                   int order);
-Real eval_transformed_nd_monomial_scalar(const std::array<int, 4>& mono,
-                                         const std::vector<Real>& px,
-                                         const std::vector<Real>& py,
-                                         const std::vector<Real>& pz);
-Vec3 eval_transformed_nd_monomial_curl(const std::array<int, 4>& mono,
-                                       const std::vector<Real>& px,
-                                       const std::vector<Real>& py,
-                                       const std::vector<Real>& pz);
-
-
 } // namespace vector_common
 } // namespace detail
 } // namespace basis

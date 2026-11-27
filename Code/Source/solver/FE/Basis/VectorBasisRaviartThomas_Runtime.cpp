@@ -7,7 +7,6 @@
 
 #include "VectorBasis.h"
 #include "Basis/BasisTraits.h"
-#include "VectorBasisDirectSeeds.h"
 #include "VectorBasisRtConstruction.h"
 
 #include <cmath>
@@ -121,7 +120,7 @@ void RaviartThomasBasis::evaluate_vector_values(const math::Vector<Real, 3>& xi,
             const auto& pz = scratch.pz;
 
             for (const auto& mono : transformed_monomial_candidates_) {
-                const Real scalar = eval_transformed_rt_monomial_scalar(mono, px, py, pz);
+                const Real scalar = component_monomial_value(mono, px, py, pz);
                 if (scalar != Real(0)) {
                     const auto component = static_cast<std::size_t>(mono[0]);
                     const std::size_t row_begin = transformed_sparse_coeffs_.row_offsets[candidate];
@@ -260,19 +259,8 @@ void RaviartThomasBasis::evaluate_vector_jacobians(const math::Vector<Real, 3>& 
         std::size_t candidate = 0;
         if (num_seed > 0) {
             auto& seed_jacobians = vector_basis_scratch().vector_jacobians;
-            if (is_wedge(element_type_) && order_ == 1) {
-                detail::vector_direct::eval_wedge_rt1_jacobians(xi, seed_jacobians);
-            } else if (is_wedge(element_type_) && order_ == 2) {
-                detail::vector_direct::eval_wedge_rt2_jacobians(xi, seed_jacobians);
-            } else if (is_pyramid(element_type_) && order_ == 1) {
-                detail::vector_direct::eval_pyramid_rt1_jacobians(xi, seed_jacobians);
-            } else if (is_pyramid(element_type_) && order_ == 2) {
-                detail::vector_direct::eval_pyramid_rt2_jacobians(xi, seed_jacobians);
-            } else {
-                throw NotImplementedException(
-                    "RaviartThomasBasis::evaluate_vector_jacobians: transformed RT seed Jacobians currently support wedge/pyramid orders 1-2",
-                    __FILE__, __LINE__, __func__);
-            }
+            FE_CHECK_ARG(transformed_seed_jacobian_evaluator_, "Missing pyramid RT seed Jacobian evaluator");
+            transformed_seed_jacobian_evaluator_(xi, seed_jacobians);
             FE_CHECK_ARG(seed_jacobians.size() >= num_seed,
                          "RaviartThomasBasis::evaluate_vector_jacobians: RT seed Jacobian size mismatch");
 

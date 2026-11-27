@@ -3675,6 +3675,98 @@ DofLayoutInfo DofLayoutInfo::DG(int order, int num_verts_per_cell, int num_compo
     return info;
 }
 
+DofLayoutInfo conformingVectorLayoutForSpace(const spaces::FunctionSpace& space,
+                                             int dim, int n_verts, LocalIndex total_dofs) {
+    DofLayoutInfo layout{};
+    const auto& elem = space.element();
+    const auto& b = elem.basis();
+    FE_THROW_IF(!b.is_vector_valued(), FEException,
+                "DofHandler::distributeDofs: H(curl)/H(div) space requires a vector-valued basis");
+    const auto* vb = dynamic_cast<const basis::VectorBasisFunction*>(&b);
+    FE_THROW_IF(vb == nullptr, FEException,
+                "DofHandler::distributeDofs: vector basis is not a VectorBasisFunction");
+
+    const auto assoc = vb->dof_associations();
+    const auto cell_type = infer_element_type_from_cell(dim, static_cast<std::size_t>(n_verts));
+    const auto ref = (cell_type != ElementType::Unknown)
+                         ? elements::ReferenceElement::create(cell_type)
+                         : elements::ReferenceElement{};
+
+    const std::size_t num_verts_ref = static_cast<std::size_t>(n_verts);
+    const std::size_t num_edges_ref = ref.num_edges();
+    const std::size_t num_faces_ref = ref.num_faces();
+
+    std::vector<LocalIndex> per_vertex(num_verts_ref, 0);
+    std::vector<LocalIndex> per_edge(num_edges_ref, 0);
+    std::vector<LocalIndex> per_face(num_faces_ref, 0);
+    LocalIndex interior = 0;
+
+    for (const auto& a : assoc) {
+        switch (a.entity_type) {
+            case basis::DofEntity::Vertex: {
+                if (a.entity_id >= 0 && static_cast<std::size_t>(a.entity_id) < per_vertex.size()) {
+                    per_vertex[static_cast<std::size_t>(a.entity_id)] += 1;
+                }
+                break;
+            }
+            case basis::DofEntity::Edge: {
+                if (a.entity_id >= 0 && static_cast<std::size_t>(a.entity_id) < per_edge.size()) {
+                    per_edge[static_cast<std::size_t>(a.entity_id)] += 1;
+                }
+                break;
+            }
+            case basis::DofEntity::Face: {
+                if (a.entity_id >= 0 && static_cast<std::size_t>(a.entity_id) < per_face.size()) {
+                    per_face[static_cast<std::size_t>(a.entity_id)] += 1;
+                }
+                break;
+            }
+            case basis::DofEntity::Interior:
+            default:
+                interior += 1;
+                break;
+        }
+    }
+
+    auto uniform_or_zero = [](const std::vector<LocalIndex>& counts) -> std::optional<LocalIndex> {
+        if (counts.empty()) return LocalIndex{0};
+        LocalIndex v = counts[0];
+        for (const auto c : counts) {
+            if (c != v) return std::nullopt;
+        }
+        return v;
+    };
+
+    const auto vtx = uniform_or_zero(per_vertex);
+    const auto edg = uniform_or_zero(per_edge);
+    FE_THROW_IF(!vtx.has_value() || !edg.has_value(), FEException,
+                "DofHandler::distributeDofs: non-uniform per-entity DOF counts are not supported");
+
+    layout.dofs_per_vertex = vtx.value_or(0);
+    layout.dofs_per_edge = edg.value_or(0);
+    if (const auto uniform = uniform_or_zero(per_face)) {
+        layout.dofs_per_face = *uniform;
+    } else {
+        std::vector<LocalIndex> tri, quad;
+        for (std::size_t face = 0; face < per_face.size(); ++face) {
+            const auto arity = ref.face_nodes(face).size();
+            FE_THROW_IF(arity != 3 && arity != 4, FEException, "Unsupported vector-basis face shape");
+            (arity == 3 ? tri : quad).push_back(per_face[face]);
+        }
+        const auto tri_count = uniform_or_zero(tri), quad_count = uniform_or_zero(quad);
+        FE_THROW_IF(!tri_count || !quad_count, FEException, "Vector-basis DOF counts differ on like faces");
+        layout.dofs_per_tri_face = *tri_count;
+        layout.dofs_per_quad_face = *quad_count;
+    }
+    layout.dofs_per_cell = interior;
+    layout.num_components = 1; // coefficients on vector basis functions
+    layout.is_continuous = true;
+    layout.total_dofs_per_element = total_dofs;
+    layout.tensor_face_dof_layout = false;
+
+    return layout;
+}
+
 DofLayoutInfo continuousScalarLayoutForSpace(const spaces::FunctionSpace& space,
                                              int dim,
                                              int n_verts,
@@ -4326,80 +4418,7 @@ void DofHandler::distributeDofs(const MeshTopologyInfo& topology,
     }
 
     if (continuity == Continuity::H_curl || continuity == Continuity::H_div) {
-        const auto& elem = space.element();
-        const auto& b = elem.basis();
-        FE_THROW_IF(!b.is_vector_valued(), FEException,
-                    "DofHandler::distributeDofs: H(curl)/H(div) space requires a vector-valued basis");
-        const auto* vb = dynamic_cast<const basis::VectorBasisFunction*>(&b);
-        FE_THROW_IF(vb == nullptr, FEException,
-                    "DofHandler::distributeDofs: vector basis is not a VectorBasisFunction");
-
-        const auto assoc = vb->dof_associations();
-        const auto cell_type = infer_element_type_from_cell(dim, static_cast<std::size_t>(n_verts));
-        const auto ref = (cell_type != ElementType::Unknown)
-                             ? elements::ReferenceElement::create(cell_type)
-                             : elements::ReferenceElement{};
-
-        const std::size_t num_verts_ref = static_cast<std::size_t>(n_verts);
-        const std::size_t num_edges_ref = ref.num_edges();
-        const std::size_t num_faces_ref = ref.num_faces();
-
-        std::vector<LocalIndex> per_vertex(num_verts_ref, 0);
-        std::vector<LocalIndex> per_edge(num_edges_ref, 0);
-        std::vector<LocalIndex> per_face(num_faces_ref, 0);
-        LocalIndex interior = 0;
-
-        for (const auto& a : assoc) {
-            switch (a.entity_type) {
-                case basis::DofEntity::Vertex: {
-                    if (a.entity_id >= 0 && static_cast<std::size_t>(a.entity_id) < per_vertex.size()) {
-                        per_vertex[static_cast<std::size_t>(a.entity_id)] += 1;
-                    }
-                    break;
-                }
-                case basis::DofEntity::Edge: {
-                    if (a.entity_id >= 0 && static_cast<std::size_t>(a.entity_id) < per_edge.size()) {
-                        per_edge[static_cast<std::size_t>(a.entity_id)] += 1;
-                    }
-                    break;
-                }
-                case basis::DofEntity::Face: {
-                    if (a.entity_id >= 0 && static_cast<std::size_t>(a.entity_id) < per_face.size()) {
-                        per_face[static_cast<std::size_t>(a.entity_id)] += 1;
-                    }
-                    break;
-                }
-                case basis::DofEntity::Interior:
-                default:
-                    interior += 1;
-                    break;
-            }
-        }
-
-        auto uniform_or_zero = [](const std::vector<LocalIndex>& counts) -> std::optional<LocalIndex> {
-            if (counts.empty()) return LocalIndex{0};
-            LocalIndex v = counts[0];
-            for (const auto c : counts) {
-                if (c != v) return std::nullopt;
-            }
-            return v;
-        };
-
-        const auto vtx = uniform_or_zero(per_vertex);
-        const auto edg = uniform_or_zero(per_edge);
-        const auto fac = uniform_or_zero(per_face);
-        FE_THROW_IF(!vtx.has_value() || !edg.has_value() || !fac.has_value(), FEException,
-                    "DofHandler::distributeDofs: non-uniform per-entity DOF counts are not supported");
-
-        layout.dofs_per_vertex = vtx.value_or(0);
-        layout.dofs_per_edge = edg.value_or(0);
-        layout.dofs_per_face = fac.value_or(0);
-        layout.dofs_per_cell = interior;
-        layout.num_components = 1; // coefficients on vector basis functions
-        layout.is_continuous = true;
-        layout.total_dofs_per_element = total_dofs;
-        layout.tensor_face_dof_layout = false;
-
+        layout = conformingVectorLayoutForSpace(space, dim, n_verts, total_dofs);
         return distributeDofs(dof_topology, layout, options);
     }
 
@@ -8769,76 +8788,7 @@ void DofHandler::distributeDofs(const MeshBase& mesh,
                                                 n_verts,
                                                 total_dofs);
     } else if (continuity == Continuity::H_curl || continuity == Continuity::H_div) {
-        const auto& elem = space.element();
-        const auto& b = elem.basis();
-        FE_THROW_IF(!b.is_vector_valued(), FEException,
-                    "DofHandler::distributeDofs(MeshBase): H(curl)/H(div) space requires a vector-valued basis");
-        const auto* vb = dynamic_cast<const basis::VectorBasisFunction*>(&b);
-        FE_THROW_IF(vb == nullptr, FEException,
-                    "DofHandler::distributeDofs(MeshBase): vector basis is not a VectorBasisFunction");
-
-        const auto assoc = vb->dof_associations();
-        const auto cell_type = infer_element_type_from_cell(mesh.dim(), static_cast<std::size_t>(n_verts));
-        const auto ref = (cell_type != ElementType::Unknown)
-                             ? elements::ReferenceElement::create(cell_type)
-                             : elements::ReferenceElement{};
-
-        const std::size_t num_verts_ref = static_cast<std::size_t>(n_verts);
-        const std::size_t num_edges_ref = ref.num_edges();
-        const std::size_t num_faces_ref = ref.num_faces();
-
-        std::vector<LocalIndex> per_vertex(num_verts_ref, 0);
-        std::vector<LocalIndex> per_edge(num_edges_ref, 0);
-        std::vector<LocalIndex> per_face(num_faces_ref, 0);
-        LocalIndex interior = 0;
-
-        for (const auto& a : assoc) {
-            switch (a.entity_type) {
-                case basis::DofEntity::Vertex:
-                    if (a.entity_id >= 0 && static_cast<std::size_t>(a.entity_id) < per_vertex.size()) {
-                        per_vertex[static_cast<std::size_t>(a.entity_id)] += 1;
-                    }
-                    break;
-                case basis::DofEntity::Edge:
-                    if (a.entity_id >= 0 && static_cast<std::size_t>(a.entity_id) < per_edge.size()) {
-                        per_edge[static_cast<std::size_t>(a.entity_id)] += 1;
-                    }
-                    break;
-                case basis::DofEntity::Face:
-                    if (a.entity_id >= 0 && static_cast<std::size_t>(a.entity_id) < per_face.size()) {
-                        per_face[static_cast<std::size_t>(a.entity_id)] += 1;
-                    }
-                    break;
-                case basis::DofEntity::Interior:
-                default:
-                    interior += 1;
-                    break;
-            }
-        }
-
-        auto uniform_or_zero = [](const std::vector<LocalIndex>& counts) -> std::optional<LocalIndex> {
-            if (counts.empty()) return LocalIndex{0};
-            LocalIndex v = counts[0];
-            for (const auto c : counts) {
-                if (c != v) return std::nullopt;
-            }
-            return v;
-        };
-
-        const auto vtx = uniform_or_zero(per_vertex);
-        const auto edg = uniform_or_zero(per_edge);
-        const auto fac = uniform_or_zero(per_face);
-        FE_THROW_IF(!vtx.has_value() || !edg.has_value() || !fac.has_value(), FEException,
-                    "DofHandler::distributeDofs(MeshBase): non-uniform per-entity DOF counts are not supported");
-
-        layout.dofs_per_vertex = vtx.value_or(0);
-        layout.dofs_per_edge = edg.value_or(0);
-        layout.dofs_per_face = fac.value_or(0);
-        layout.dofs_per_cell = interior;
-        layout.num_components = 1;
-        layout.is_continuous = true;
-        layout.total_dofs_per_element = total_dofs;
-        layout.tensor_face_dof_layout = false;
+        layout = conformingVectorLayoutForSpace(space, mesh.dim(), n_verts, total_dofs);
     } else {
         layout.dofs_per_vertex = 0;
         layout.dofs_per_edge = 0;
@@ -9092,76 +9042,7 @@ void DofHandler::distributeDofs(const Mesh& mesh,
                                                 n_verts,
                                                 total_dofs);
     } else if (continuity == Continuity::H_curl || continuity == Continuity::H_div) {
-        const auto& elem = space.element();
-        const auto& b = elem.basis();
-        FE_THROW_IF(!b.is_vector_valued(), FEException,
-                    "DofHandler::distributeDofs(Mesh): H(curl)/H(div) space requires a vector-valued basis");
-        const auto* vb = dynamic_cast<const basis::VectorBasisFunction*>(&b);
-        FE_THROW_IF(vb == nullptr, FEException,
-                    "DofHandler::distributeDofs(Mesh): vector basis is not a VectorBasisFunction");
-
-        const auto assoc = vb->dof_associations();
-        const auto cell_type = infer_element_type_from_cell(local_mesh.dim(), static_cast<std::size_t>(n_verts));
-        const auto ref = (cell_type != ElementType::Unknown)
-                             ? elements::ReferenceElement::create(cell_type)
-                             : elements::ReferenceElement{};
-
-        const std::size_t num_verts_ref = static_cast<std::size_t>(n_verts);
-        const std::size_t num_edges_ref = ref.num_edges();
-        const std::size_t num_faces_ref = ref.num_faces();
-
-        std::vector<LocalIndex> per_vertex(num_verts_ref, 0);
-        std::vector<LocalIndex> per_edge(num_edges_ref, 0);
-        std::vector<LocalIndex> per_face(num_faces_ref, 0);
-        LocalIndex interior = 0;
-
-        for (const auto& a : assoc) {
-            switch (a.entity_type) {
-                case basis::DofEntity::Vertex:
-                    if (a.entity_id >= 0 && static_cast<std::size_t>(a.entity_id) < per_vertex.size()) {
-                        per_vertex[static_cast<std::size_t>(a.entity_id)] += 1;
-                    }
-                    break;
-                case basis::DofEntity::Edge:
-                    if (a.entity_id >= 0 && static_cast<std::size_t>(a.entity_id) < per_edge.size()) {
-                        per_edge[static_cast<std::size_t>(a.entity_id)] += 1;
-                    }
-                    break;
-                case basis::DofEntity::Face:
-                    if (a.entity_id >= 0 && static_cast<std::size_t>(a.entity_id) < per_face.size()) {
-                        per_face[static_cast<std::size_t>(a.entity_id)] += 1;
-                    }
-                    break;
-                case basis::DofEntity::Interior:
-                default:
-                    interior += 1;
-                    break;
-            }
-        }
-
-        auto uniform_or_zero = [](const std::vector<LocalIndex>& counts) -> std::optional<LocalIndex> {
-            if (counts.empty()) return LocalIndex{0};
-            LocalIndex v = counts[0];
-            for (const auto c : counts) {
-                if (c != v) return std::nullopt;
-            }
-            return v;
-        };
-
-        const auto vtx = uniform_or_zero(per_vertex);
-        const auto edg = uniform_or_zero(per_edge);
-        const auto fac = uniform_or_zero(per_face);
-        FE_THROW_IF(!vtx.has_value() || !edg.has_value() || !fac.has_value(), FEException,
-                    "DofHandler::distributeDofs(Mesh): non-uniform per-entity DOF counts are not supported");
-
-        layout.dofs_per_vertex = vtx.value_or(0);
-        layout.dofs_per_edge = edg.value_or(0);
-        layout.dofs_per_face = fac.value_or(0);
-        layout.dofs_per_cell = interior;
-        layout.num_components = 1;
-        layout.is_continuous = true;
-        layout.total_dofs_per_element = total_dofs;
-        layout.tensor_face_dof_layout = false;
+        layout = conformingVectorLayoutForSpace(space, local_mesh.dim(), n_verts, total_dofs);
     } else {
         layout.dofs_per_vertex = 0;
         layout.dofs_per_edge = 0;

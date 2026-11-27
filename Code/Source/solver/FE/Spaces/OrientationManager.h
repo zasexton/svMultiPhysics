@@ -183,7 +183,7 @@ public:
      * DOFs are assumed to be ordered as:
      *   [ u-directed block (k*(k+1)), w-directed block (k*(k+1)) ]
      * where k is the polynomial order and the blocks correspond to the
-     * Q_{k-1,k} and Q_{k,k-1} tangential moment sets, respectively.
+     * Q_{k,k-1} and Q_{k-1,k} tangential moment sets, respectively.
      */
     static std::vector<Real> orient_hcurl_quad_face_dofs(
         const std::vector<Real>& face_dofs,

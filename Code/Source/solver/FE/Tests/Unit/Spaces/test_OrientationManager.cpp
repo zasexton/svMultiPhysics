@@ -352,6 +352,17 @@ TEST_F(OrientationManagerTest, OrientHCurlQuadFaceDofsIdentityAndInverse) {
     }
 }
 
+TEST_F(OrientationManagerTest, ReflectedCovariantQuadMomentsHavePhysicalSignsAndOrder) {
+    const std::array<int,4> global{0,1,2,3}, local{1,0,3,2};
+    const auto orientation = OrientationManager::quad_face_orientation(local, global);
+    // In global face coordinates the one-form is (1+2u) du + (3+4w) dw.
+    // Reflection reverses du and interchanges the endpoints of the u moment.
+    const std::vector<Real> local_moments{-10./3, -2./3, 10./3, 26./3};
+    const std::vector<Real> expected{2./3, 10./3, 10./3, 26./3};
+    const auto mapped = OrientationManager::orient_hcurl_quad_face_dofs(local_moments, orientation, 1);
+    EXPECT_EQ(mapped, expected);
+}
+
 TEST_F(OrientationManagerTest, OrientHCurlQuadFaceDofsRotationIsInvertible) {
     constexpr int k = 2;
     const std::size_t block = static_cast<std::size_t>(k) * static_cast<std::size_t>(k + 1);

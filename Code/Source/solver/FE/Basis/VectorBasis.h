@@ -133,7 +133,7 @@ private:
     std::size_t size_{0};
 
     bool nodal_generated_{false};
-    bool use_transformed_direct_seed_{false};  ///< True for wedge/pyramid RT(k=1,2) transformed from direct seed functions
+    bool use_transformed_direct_seed_{false};  ///< True for the pyramid RT moment transform
     std::vector<int> transformed_seed_indices_;
     std::vector<std::array<int, 4>> transformed_monomial_candidates_; ///< {component, px, py, pz}
     std::vector<ModalPolynomial> monomials_;
@@ -182,24 +182,15 @@ public:
 private:
     using ModalTerm = VectorBasisModalTerm;
     using ModalPolynomial = VectorBasisModalPolynomial;
-    using SeedJacobianEvaluator = void (*)(
-        const math::Vector<Real, 3>&,
-        std::vector<VectorJacobian>&);
-
     ElementType element_type_;
     int dimension_;
     int order_;
     std::size_t size_{0};
 
     bool nodal_generated_{false};
-    bool use_transformed_direct_seed_{false};  ///< True for wedge/pyramid ND(k=1,2) transformed from direct seed/candidate functions
-    std::vector<std::array<int, 4>> transformed_monomial_candidates_; ///< {component, px, py, pz}
     std::vector<ModalPolynomial> monomials_;
     SparseModalCoefficientMatrix modal_sparse_coeffs_;
-    SparseModalCoefficientMatrix transformed_sparse_coeffs_;
     std::array<int, 3> modal_power_limits_{{0, 0, 0}};
-    std::array<int, 3> transformed_power_limits_{{0, 0, 0}};
-    SeedJacobianEvaluator transformed_seed_jacobian_evaluator_{nullptr};
 };
 
 /**

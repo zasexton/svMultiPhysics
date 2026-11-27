@@ -2329,16 +2329,6 @@ static double integrate_tetra_face_tangential_moment(const NedelecBasis& basis,
     const Vector<Real,3> tu = f.b - f.a;
     const Vector<Real,3> tv = f.c - f.a;
 
-    Vector<Real,3> cross{};
-    cross[0] = tu[1] * tv[2] - tu[2] * tv[1];
-    cross[1] = tu[2] * tv[0] - tu[0] * tv[2];
-    cross[2] = tu[0] * tv[1] - tu[1] * tv[0];
-    const Real scale = cross.norm();
-    EXPECT_GT(scale, Real(0));
-    if (scale <= Real(0)) {
-        return 0.0;
-    }
-
     const int q_order = std::max(2 * order + 2, quad_order);
     const auto quad = QuadratureFactory::create(
         ElementType::Triangle3, q_order, QuadratureType::GaussLegendre, /*use_cache=*/false);
@@ -2363,7 +2353,7 @@ static double integrate_tetra_face_tangential_moment(const NedelecBasis& basis,
         const Vector<Real,3>& t = (dir_id == 0) ? tu : tv;
         const Real dot = w.dot(t);
 
-        moment += static_cast<double>(quad->weight(q) * (scale * phi * dot));
+        moment += static_cast<double>(quad->weight(q) * (phi * dot));
     }
     return moment;
 }
@@ -2666,7 +2656,7 @@ TEST(RaviartThomasBasis, WedgeHigherOrderConstruction) {
         RaviartThomasBasis basis(ElementType::Wedge6, 1);
         EXPECT_EQ(basis.dimension(), 3);
         EXPECT_EQ(basis.order(), 1);
-        EXPECT_EQ(basis.size(), 24u);  // RT(1) on wedge: 18 face + 6 interior
+        EXPECT_EQ(basis.size(), 25u);  // RT(1) on wedge: 18 face + 6 interior
     });
 }
 
@@ -2695,9 +2685,9 @@ TEST(RaviartThomasBasis, WedgeRT1Size) {
     RaviartThomasBasis rt0(ElementType::Wedge6, 0);
     EXPECT_EQ(rt0.size(), 5u);
 
-    // RT(1): 24 DOFs (18 face + 6 interior)
+    // RT(1): 25 DOFs (18 face + 6 interior)
     RaviartThomasBasis rt1(ElementType::Wedge6, 1);
-    EXPECT_EQ(rt1.size(), 24u);
+    EXPECT_EQ(rt1.size(), 25u);
 }
 
 TEST(RaviartThomasBasis, PyramidRT1Size) {
@@ -2719,12 +2709,12 @@ TEST(RaviartThomasBasis, WedgeRT1Evaluation) {
     svmp::FE::math::Vector<Real, 3> xi{Real(0.25), Real(0.25), Real(0.0)};
     std::vector<svmp::FE::math::Vector<Real, 3>> values;
     EXPECT_NO_THROW(basis.evaluate_vector_values(xi, values));
-    EXPECT_EQ(values.size(), 24u);
+    EXPECT_EQ(values.size(), 25u);
 
     // Test divergence evaluation
     std::vector<Real> div;
     EXPECT_NO_THROW(basis.evaluate_divergence(xi, div));
-    EXPECT_EQ(div.size(), 24u);
+    EXPECT_EQ(div.size(), 25u);
 }
 
 TEST(RaviartThomasBasis, PyramidRT1Evaluation) {
@@ -2758,7 +2748,7 @@ TEST(NedelecBasis, WedgeHigherOrderConstruction) {
         NedelecBasis basis(ElementType::Wedge6, 1);
         EXPECT_EQ(basis.dimension(), 3);
         EXPECT_EQ(basis.order(), 1);
-        EXPECT_EQ(basis.size(), 34u);  // 18 edge + 16 face
+        EXPECT_EQ(basis.size(), 36u);  // 18 edge + 16 face
     });
 }
 
@@ -2787,9 +2777,9 @@ TEST(NedelecBasis, WedgeND1Size) {
     NedelecBasis nd0(ElementType::Wedge6, 0);
     EXPECT_EQ(nd0.size(), 9u);
 
-    // ND(1): 34 DOFs (18 edge + 16 face)
+    // ND(1): 36 DOFs (18 edge + 16 face)
     NedelecBasis nd1(ElementType::Wedge6, 1);
-    EXPECT_EQ(nd1.size(), 34u);
+    EXPECT_EQ(nd1.size(), 36u);
 }
 
 TEST(NedelecBasis, PyramidND1Size) {
@@ -2811,12 +2801,12 @@ TEST(NedelecBasis, WedgeND1Evaluation) {
     svmp::FE::math::Vector<Real, 3> xi{Real(0.25), Real(0.25), Real(0.0)};
     std::vector<svmp::FE::math::Vector<Real, 3>> values;
     EXPECT_NO_THROW(basis.evaluate_vector_values(xi, values));
-    EXPECT_EQ(values.size(), 34u);
+    EXPECT_EQ(values.size(), 36u);
 
     // Test curl evaluation (via finite differences)
     std::vector<svmp::FE::math::Vector<Real, 3>> curl;
     EXPECT_NO_THROW(basis.evaluate_curl(xi, curl));
-    EXPECT_EQ(curl.size(), 34u);
+    EXPECT_EQ(curl.size(), 36u);
 }
 
 TEST(NedelecBasis, PyramidND1Evaluation) {
@@ -2845,10 +2835,10 @@ TEST(NedelecBasis, PyramidND1Evaluation) {
 TEST(RaviartThomasBasis, WedgeDimensionFormulas) {
     // Wedge RT(k) dimensions (theoretical):
     // Face DOFs: 2*(k+1)(k+2)/2 + 3*(k+1)^2 = (k+1)(k+2) + 3(k+1)^2
-    // Interior DOFs: 3*k*(k+1)^2/2 for k >= 1
+    // Interior DOFs: k*(k+1)^2 + k*(k+1)*(k+2)/2 for k >= 1
     // RT(0): 5 (5 faces, no interior)
-    // RT(1): 18 face + 6 interior = 24
-    // RT(2): 39 face + 24 interior = 63
+    // RT(1): 18 face + 7 interior = 25
+    // RT(2): 39 face + 30 interior = 69
 
     RaviartThomasBasis rt0(ElementType::Wedge6, 0);
     EXPECT_EQ(rt0.size(), 5u);
@@ -2872,10 +2862,10 @@ TEST(NedelecBasis, WedgeDimensionFormulas) {
     // Wedge Nedelec(k) dimensions (theoretical):
     // Edge DOFs: 9*(k+1)
     // Face DOFs: 2*k(k+1) + 3*2k(k+1) = 8k(k+1) for k >= 1
-    // Interior DOFs: 3*k*(k-1)*(k+1)/2 for k >= 2
+    // Interior DOFs: k*k*(k+1) + k*(k-1)*(k+1)/2 for k >= 1
     // ND(0): 9 edges
-    // ND(1): 18 edge + 16 face + 0 interior = 34
-    // ND(2): 27 edge + 48 face + 9 interior = 84
+    // ND(1): 18 edge + 16 face + 2 interior = 36
+    // ND(2): 27 edge + 48 face + 15 interior = 90
 
     NedelecBasis nd0(ElementType::Wedge6, 0);
     EXPECT_EQ(nd0.size(), 9u);
@@ -2984,7 +2974,7 @@ TEST(RaviartThomasBasis, DofAssociationsWedge) {
     RaviartThomasBasis basis(ElementType::Wedge6, 1);
     auto assoc = basis.dof_associations();
     EXPECT_EQ(assoc.size(), basis.size());
-    EXPECT_EQ(assoc.size(), 24u);
+    EXPECT_EQ(assoc.size(), 25u);
 
     int face_dofs = 0;
     int interior_dofs = 0;
@@ -2993,14 +2983,14 @@ TEST(RaviartThomasBasis, DofAssociationsWedge) {
         else if (a.entity_type == DofEntity::Interior) interior_dofs++;
     }
     EXPECT_EQ(face_dofs, 18);
-    EXPECT_EQ(interior_dofs, 6);
+    EXPECT_EQ(interior_dofs, 7);
 }
 
 TEST(RaviartThomasBasis, DofAssociationsWedgeOrderTwo) {
     RaviartThomasBasis basis(ElementType::Wedge6, 2);
     auto assoc = basis.dof_associations();
     EXPECT_EQ(assoc.size(), basis.size());
-    EXPECT_EQ(assoc.size(), 66u);
+    EXPECT_EQ(assoc.size(), 69u);
 
     int face_dofs = 0;
     int interior_dofs = 0;
@@ -3009,7 +2999,7 @@ TEST(RaviartThomasBasis, DofAssociationsWedgeOrderTwo) {
         else if (a.entity_type == DofEntity::Interior) interior_dofs++;
     }
     EXPECT_EQ(face_dofs, 39);
-    EXPECT_EQ(interior_dofs, 27);
+    EXPECT_EQ(interior_dofs, 30);
 }
 
 TEST(RaviartThomasBasis, DofAssociationsPyramid) {

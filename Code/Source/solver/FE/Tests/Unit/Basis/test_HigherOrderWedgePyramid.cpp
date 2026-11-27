@@ -13,6 +13,9 @@
 #include "FE/Basis/VectorBasis.h"
 #include "FE/Core/FEException.h"
 #include "FE/Elements/ReferenceElement.h"
+#include "FE/Dofs/DofHandler.h"
+#include "FE/Math/DenseLinearAlgebra.h"
+#include "FE/Spaces/SpaceFactory.h"
 #include "FE/Quadrature/GaussQuadrature.h"
 #include "FE/Quadrature/QuadratureFactory.h"
 #include "FE/Quadrature/TriangleQuadrature.h"
@@ -943,7 +946,6 @@ static std::vector<double> integrate_nd_face_tangential_moment_matrix(
             ReferenceNodeLayout::get_node_coords(elem_type, static_cast<std::size_t>(face_nodes[2]));
         const Vector<Real,3> tu = v1 - v0;
         const Vector<Real,3> tv = v2 - v0;
-        const Real scale = tu.cross(tv).norm();
 
         const LagrangeBasis tri_basis(ElementType::Triangle3, k - 1);
         const std::size_t n_face = tri_basis.size();
@@ -981,7 +983,7 @@ static std::vector<double> integrate_nd_face_tangential_moment_matrix(
                 dot_v[i] = static_cast<double>(vals[i].dot(tv));
             }
 
-            const double wq = static_cast<double>(quad->weight(q) * scale);
+            const double wq = static_cast<double>(quad->weight(q));
             for (std::size_t m = 0; m < n_face; ++m) {
                 const double wm = wq * static_cast<double>(bvals[m]);
                 for (std::size_t i = 0; i < num_basis; ++i) {
@@ -999,11 +1001,6 @@ static std::vector<double> integrate_nd_face_tangential_moment_matrix(
         ReferenceNodeLayout::get_node_coords(elem_type, static_cast<std::size_t>(face_nodes[2])),
         ReferenceNodeLayout::get_node_coords(elem_type, static_cast<std::size_t>(face_nodes[3]))
     };
-    const Vector<Real,3> tu_raw = fv[1] - fv[0];
-    const Vector<Real,3> tw_raw = fv[3] - fv[0];
-    const Vector<Real,3> tu = tu_raw / tu_raw.norm();
-    const Vector<Real,3> tw = tw_raw / tw_raw.norm();
-
     const LagrangeBasis u_low(ElementType::Line2, k - 1);
     const LagrangeBasis u_full(ElementType::Line2, k);
     const LagrangeBasis w_low(ElementType::Line2, k - 1);
@@ -1033,7 +1030,6 @@ static std::vector<double> integrate_nd_face_tangential_moment_matrix(
         const Vector<Real,3> xi = bilinear_face_point(fv, u, v);
         const Vector<Real,3> du = bilinear_face_du(fv, u, v);
         const Vector<Real,3> dv = bilinear_face_dv(fv, u, v);
-        const Real scale = du.cross(dv).norm();
 
         u_low_vals.clear();
         u_full_vals.clear();
@@ -1060,34 +1056,22 @@ static std::vector<double> integrate_nd_face_tangential_moment_matrix(
         }
 
         for (std::size_t i = 0; i < num_basis; ++i) {
-            dot_u[i] = static_cast<double>(vals[i].dot(tu));
-            dot_w[i] = static_cast<double>(vals[i].dot(tw));
+            dot_u[i] = static_cast<double>(vals[i].dot(du));
+            dot_w[i] = static_cast<double>(vals[i].dot(dv));
         }
 
-        const double wq = static_cast<double>(quad->weight(q) * scale);
-        for (int jw = 0; jw <= k; ++jw) {
-            for (int iu = 0; iu < k; ++iu) {
-                const std::size_t row = static_cast<std::size_t>(jw * k + iu);
-                const double wm =
-                    wq * static_cast<double>(
-                        u_low_vals[static_cast<std::size_t>(iu)] *
-                        w_full_vals[static_cast<std::size_t>(jw)]);
-                for (std::size_t i = 0; i < num_basis; ++i) {
-                    matrix[row * num_basis + i] += wm * dot_u[i];
-                }
-            }
-        }
         for (int jw = 0; jw < k; ++jw) {
             for (int iu = 0; iu <= k; ++iu) {
-                const std::size_t row =
-                    static_cast<std::size_t>(n_u + jw * (k + 1) + iu);
-                const double wm =
-                    wq * static_cast<double>(
-                        u_full_vals[static_cast<std::size_t>(iu)] *
-                        w_low_vals[static_cast<std::size_t>(jw)]);
-                for (std::size_t i = 0; i < num_basis; ++i) {
-                    matrix[row * num_basis + i] += wm * dot_w[i];
-                }
+                const auto row = static_cast<std::size_t>(jw*(k+1) + iu);
+                const Real weight = quad->weight(q)*u_full_vals[iu]*w_low_vals[jw];
+                for (std::size_t i = 0; i < num_basis; ++i) matrix[row*num_basis+i] += weight*dot_u[i];
+            }
+        }
+        for (int jw = 0; jw <= k; ++jw) {
+            for (int iu = 0; iu < k; ++iu) {
+                const auto row = static_cast<std::size_t>(n_u + jw*k + iu);
+                const Real weight = quad->weight(q)*u_low_vals[iu]*w_full_vals[jw];
+                for (std::size_t i = 0; i < num_basis; ++i) matrix[row*num_basis+i] += weight*dot_w[i];
             }
         }
     }
@@ -1163,6 +1147,218 @@ static void expect_nd_face_kronecker(const NedelecBasis& basis,
 // =============================================================================
 // RT(0) on Wedge and Pyramid - WORKING
 // =============================================================================
+
+TEST(HigherOrderWedgePyramid, PrismTensorPolynomialsAndPhysicalProjectionOrder) {
+    using Vec = math::Vector<Real,3>;
+    for (const auto type : {spaces::SpaceType::HDiv, spaces::SpaceType::HCurl}) {
+        for (int k = 1; k <= 3; ++k) {
+            SCOPED_TRACE(::testing::Message() << "space=" << static_cast<int>(type) << " order=" << k);
+            const auto space = spaces::SpaceFactory::create(type, ElementType::Wedge6, k);
+            const auto& basis = dynamic_cast<const VectorBasisFunction&>(space->element().basis());
+            const auto n = basis.size();
+            const bool rt = type == spaces::SpaceType::HDiv;
+            const std::array<std::size_t,3> expected = rt ? std::array<std::size_t,3>{25,69,146}
+                                                         : std::array<std::size_t,3>{36,90,180};
+            EXPECT_EQ(n, expected[k-1]);
+
+            // Project both a member and a polynomial just beyond the local space.
+            const auto target = [&](const Vec& pt, Real h, bool member) -> Vec {
+                const Real x = h*pt[0], y = h*pt[1], z = h*pt[2];
+                if (!member) return rt ? Vec{1+x+std::pow(x,k+1), y, z}
+                                       : Vec{x, y, 1+z+std::pow(z,k+1)};
+                if (rt) {
+                    const Real a = std::pow(x*z,k);
+                    return {x*a, y*a, std::pow(x,k)*(1-z*z)*std::pow(z,k-1)};
+                }
+                const Real a = std::pow(x*z,k-1)*(1-z*z);
+                return {a*y*(1-y), a*x*y, std::pow(x,k+1)*std::pow(z,k)};
+            };
+            const auto rule = quadrature::QuadratureFactory::create(ElementType::Wedge6, 2*k+6);
+            std::vector<std::vector<Vec>> shape(rule->num_points());
+            std::vector<Real> mass(n*n, 0.);
+            for (std::size_t q = 0; q < shape.size(); ++q) {
+                basis.evaluate_vector_values(rule->point(q), shape[q]);
+                for (std::size_t i = 0; i < n; ++i) {
+                    for (std::size_t j = 0; j < n; ++j) {
+                        mass[i*n+j] += rule->weight(q)*shape[q][i].dot(shape[q][j]);
+                    }
+                }
+            }
+            const auto solve = math::factor_dense_matrix(std::move(mass), n);
+            const auto error = [&](Real h, bool member) {
+                std::vector<Real> rhs(n, 0.);
+                for (std::size_t q = 0; q < shape.size(); ++q) {
+                    const auto value = target(rule->point(q), h, member);
+                    for (std::size_t i = 0; i < n; ++i) rhs[i] += rule->weight(q)*shape[q][i].dot(value);
+                }
+                const auto coeff = solve.solve(rhs);
+                Real sum = 0.;
+                const auto check = quadrature::QuadratureFactory::create(ElementType::Wedge6, 2*k+8);
+                std::vector<Vec> values;
+                for (std::size_t q = 0; q < check->num_points(); ++q) {
+                    basis.evaluate_vector_values(check->point(q), values);
+                    Vec diff = target(check->point(q), h, member);
+                    for (std::size_t i = 0; i < n; ++i) diff -= values[i]*coeff[i];
+                    sum += check->weight(q)*diff.dot(diff);
+                }
+                return std::sqrt(sum);
+            };
+            EXPECT_LT(error(1., true), 2e-8);
+            const auto coarse = error(1., false), fine = error(0.5, false);
+            ASSERT_GT(fine, 1e-9);
+            EXPECT_NEAR(coarse/fine, std::pow(2., k+1), 3e-4);
+        }
+    }
+}
+
+// Scalar duals to the degree-p Lagrange moment tests. The bubble factor enforces
+// vanishing tangential trace on both transverse edges of an interior face mode.
+static std::vector<Real> lineMomentDual(int p, Real x, bool bubble) {
+    LagrangeBasis basis(ElementType::Line2, p);
+    const auto n = basis.size();
+    const auto rule = quadrature::QuadratureFactory::create(ElementType::Line2, 2*p+4);
+    std::vector<Real> mass(n*n, 0.), v;
+    for (std::size_t q = 0; q < rule->num_points(); ++q) {
+        const Real t = rule->point(q)[0];
+        basis.evaluate_values(rule->point(q), v);
+        const Real w = rule->weight(q)*(bubble ? 1-t*t : 1.);
+        for (std::size_t i = 0; i < n; ++i) {
+            for (std::size_t j = 0; j < n; ++j) mass[i*n+j] += w*v[i]*v[j];
+        }
+    }
+    basis.evaluate_values({x,0,0}, v);
+    if (bubble) for (auto& value : v) value *= 1-x*x;
+    return math::factor_dense_matrix(std::move(mass), n).solve(v);
+}
+
+TEST(HigherOrderWedgePyramid, NeighborCellsHaveTheSameCovariantQuadFacePolynomial) {
+    using Vec = math::Vector<Real,3>;
+    for (int k = 1; k <= 3; ++k) {
+        for (auto type : {ElementType::Wedge6, ElementType::Hex8, ElementType::Pyramid5}) {
+            SCOPED_TRACE(::testing::Message() << "type " << static_cast<int>(type) << ", order " << k);
+            NedelecBasis basis(type, k);
+            const auto ref = elements::ReferenceElement::create(type);
+            const auto associations = basis.dof_associations();
+            for (std::size_t f = 0; f < ref.num_faces(); ++f) {
+                const auto vertices = ref.face_nodes(f);
+                if (vertices.size() != 4) continue;
+                const auto a = ReferenceNodeLayout::get_node_coords(type, vertices[0]);
+                const auto du = (ReferenceNodeLayout::get_node_coords(type, vertices[1]) - a)*0.5;
+                const auto dw = (ReferenceNodeLayout::get_node_coords(type, vertices[3]) - a)*0.5;
+                for (const auto uv : {std::array<Real,2>{0.24,-0.38}, std::array<Real,2>{-0.51,0.17}}) {
+                    const auto [u,w] = uv;
+                    const auto fu = lineMomentDual(k,u,false), fw = lineMomentDual(k,w,false);
+                    const auto bu = lineMomentDual(k-1,u,true), bw = lineMomentDual(k-1,w,true);
+                    std::vector<Vec> values;
+                    basis.evaluate_vector_values(a + du*(1+u) + dw*(1+w), values);
+                    for (std::size_t i = 0; i < associations.size(); ++i) {
+                        const auto& dof = associations[i];
+                        if (dof.entity_type == DofEntity::Edge) continue;
+                        Real u_trace = 0., w_trace = 0.;
+                        if (dof.entity_type == DofEntity::Face && dof.entity_id == static_cast<int>(f)) {
+                            const int m = dof.moment_index, block = k*(k+1);
+                            if (m < block) u_trace = fu[m%(k+1)]*bw[m/(k+1)];
+                            else w_trace = bu[(m-block)%k]*fw[(m-block)/k];
+                        }
+                        EXPECT_NEAR(values[i].dot(du), u_trace, 2e-6) << f << " " << i;
+                        EXPECT_NEAR(values[i].dot(dw), w_trace, 2e-6) << f << " " << i;
+                    }
+                }
+            }
+        }
+    }
+}
+
+TEST(HigherOrderWedgePyramid, NeighborCellsReproduceCovariantTriangleTrace) {
+    // This Whitney one-form multiplied by the opposite barycentric coordinate
+    // has zero circulation on every edge. Its interior moments give its trace.
+    for (int k = 1; k <= 3; ++k) {
+        const auto trace = [k](Real u, Real v) {
+            const Real factor = (1-u-v)*std::pow(u,k-1);
+            return std::array<Real,2>{-v*factor,u*factor};
+        };
+        const auto rule = quadrature::QuadratureFactory::create(ElementType::Triangle3, 2*k+3);
+        LagrangeBasis tests(ElementType::Triangle3,k-1);
+        const auto n = tests.size();
+        std::vector<Real> moments(2*n,0.), phi;
+        for (std::size_t q = 0; q < rule->num_points(); ++q) {
+            const auto& p = rule->point(q);
+            const auto field = trace(p[0],p[1]);
+            tests.evaluate_values(p,phi);
+            for (int c = 0; c < 2; ++c) {
+                for (std::size_t i = 0; i < n; ++i) moments[c*n+i] += rule->weight(q)*phi[i]*field[c];
+            }
+        }
+        for (auto type : {ElementType::Tetra4, ElementType::Wedge6}) {
+            SCOPED_TRACE(::testing::Message() << "type " << static_cast<int>(type) << ", order " << k);
+            NedelecBasis basis(type,k);
+            const auto ref = elements::ReferenceElement::create(type);
+            const auto assoc = basis.dof_associations();
+            for (std::size_t f = 0; f < ref.num_faces(); ++f) {
+                const auto corners = ref.face_nodes(f);
+                if (corners.size() != 3) continue;
+                const auto a = ReferenceNodeLayout::get_node_coords(type,corners[0]);
+                const auto du = ReferenceNodeLayout::get_node_coords(type,corners[1])-a;
+                const auto dv = ReferenceNodeLayout::get_node_coords(type,corners[2])-a;
+                for (auto uv : {std::array<Real,2>{.24,.38}, std::array<Real,2>{.51,.17}}) {
+                    const auto [u,v] = uv;
+                    std::vector<math::Vector<Real,3>> values;
+                    basis.evaluate_vector_values(a+du*u+dv*v,values);
+                    math::Vector<Real,3> field{};
+                    for (std::size_t i = 0; i < assoc.size(); ++i) {
+                        if (assoc[i].entity_type == DofEntity::Face && assoc[i].entity_id == static_cast<int>(f)) {
+                            field += values[i]*moments[assoc[i].moment_index];
+                        }
+                    }
+                    EXPECT_NEAR(field.dot(du),trace(u,v)[0],1e-10) << f;
+                    EXPECT_NEAR(field.dot(dv),trace(u,v)[1],1e-10) << f;
+                }
+            }
+        }
+    }
+}
+
+TEST(HigherOrderWedgePyramid, PrismFieldOwnsItsMixedFaceAndCellMoments) {
+    // Two prisms share one diagonal quadrilateral of a unit square extruded in z.
+    dofs::MeshTopologyInfo mesh;
+    mesh.dim = 3;
+    mesh.n_cells = 2;
+    mesh.n_vertices = 8;
+    mesh.cell2vertex_offsets = {0, 6, 12};
+    mesh.cell2vertex_data = {0,1,2,3,4,5, 1,6,2,4,7,5};
+    mesh.vertex_coords = {0,0,-1, 1,0,-1, 0,1,-1, 0,0,1, 1,0,1, 0,1,1, 1,1,-1, 1,1,1};
+    for (const auto type : {spaces::SpaceType::HDiv, spaces::SpaceType::HCurl}) {
+        const auto space = spaces::SpaceFactory::create(type, ElementType::Wedge6, 1);
+        dofs::DofHandler handler;
+        handler.distributeDofs(mesh, *space);
+        handler.finalize();
+        const auto left = handler.getCellDofs(0), right = handler.getCellDofs(1);
+        const bool rt = type == spaces::SpaceType::HDiv;
+        const std::size_t n = rt ? 25 : 36;
+        // Four face moments for both families. H(curl) also shares two per edge.
+        const std::size_t shared = rt ? 4 : 12;
+        EXPECT_EQ(left.size(), n);
+        EXPECT_EQ(right.size(), n);
+        EXPECT_EQ(handler.getNumDofs(), static_cast<GlobalIndex>(2*n-shared));
+        std::vector<GlobalIndex> all(left.begin(),left.end());
+        all.insert(all.end(),right.begin(),right.end());
+        std::sort(all.begin(),all.end());
+        all.erase(std::unique(all.begin(),all.end()),all.end());
+        ASSERT_EQ(all.size(), 2*n-shared);
+        for (std::size_t i = 0; i < all.size(); ++i) EXPECT_EQ(all[i], static_cast<GlobalIndex>(i));
+
+        if (!rt) {
+            const auto l = handler.cellFaceOrientations(0), r = handler.cellFaceOrientations(1);
+            ASSERT_EQ(l.size(), 5u);
+            ASSERT_EQ(r.size(), 5u);
+            // Both are moments of (1+2u)du + (3+4v)dv on the shared face.
+            // The right cell reverses the local u coordinate on this face.
+            using Manager = spaces::OrientationManager;
+            EXPECT_EQ(Manager::orient_hcurl_quad_face_dofs({2./3,10./3,10./3,26./3},l[3],1),
+                      Manager::orient_hcurl_quad_face_dofs({-10./3,-2./3,10./3,26./3},r[4],1));
+        }
+    }
+}
 
 TEST(HigherOrderWedgePyramid, WedgeRT0Construction) {
     // RT(0) on Wedge should work with 5 DOFs (5 faces)
@@ -1287,7 +1483,7 @@ TEST(HigherOrderWedgePyramid, WedgeRT1Implemented) {
     // Expected DOFs: face = 6 + 12 = 18, interior = 6, total = 24
     EXPECT_NO_THROW({
         RaviartThomasBasis basis(ElementType::Wedge6, 1);
-        EXPECT_EQ(basis.size(), 24u);
+        EXPECT_EQ(basis.size(), 25u);
     });
 }
 
@@ -1308,7 +1504,7 @@ TEST(HigherOrderWedgePyramid, WedgeND1Implemented) {
     // Nedelec(1) on Wedge is implemented via direct DOF-based construction
     EXPECT_NO_THROW({
         NedelecBasis basis(ElementType::Wedge6, 1);
-        EXPECT_EQ(basis.size(), 34u);
+        EXPECT_EQ(basis.size(), 36u);
     });
 }
 
@@ -1459,7 +1655,7 @@ TEST(HigherOrderWedgePyramid, WedgeRT1Evaluation) {
 
     std::vector<math::Vector<Real, 3>> values;
     EXPECT_NO_THROW(basis.evaluate_vector_values(xi, values));
-    EXPECT_EQ(values.size(), 24u);
+    EXPECT_EQ(values.size(), 25u);
 
     for (const auto& v : values) {
         EXPECT_TRUE(std::isfinite(v[0]));
@@ -1491,7 +1687,7 @@ TEST(HigherOrderWedgePyramid, WedgeND1Evaluation) {
 
     std::vector<math::Vector<Real, 3>> values;
     EXPECT_NO_THROW(basis.evaluate_vector_values(xi, values));
-    EXPECT_EQ(values.size(), 34u);
+    EXPECT_EQ(values.size(), 36u);
 
     for (const auto& v : values) {
         EXPECT_TRUE(std::isfinite(v[0]));
@@ -1537,10 +1733,10 @@ TEST(HigherOrderWedgePyramid, PyramidND1CurlEvaluation) {
 // =============================================================================
 
 TEST(HigherOrderWedgePyramid, WedgeRT2Construction) {
-    // RT(2) on Wedge: 66 DOFs
+    // RT(2) on Wedge: 69 DOFs
     EXPECT_NO_THROW({
         RaviartThomasBasis basis(ElementType::Wedge6, 2);
-        EXPECT_EQ(basis.size(), 66u);
+        EXPECT_EQ(basis.size(), 69u);
     });
 }
 
@@ -1553,10 +1749,10 @@ TEST(HigherOrderWedgePyramid, PyramidRT2Construction) {
 }
 
 TEST(HigherOrderWedgePyramid, WedgeND2Construction) {
-    // Nedelec(2) on Wedge: 84 DOFs
+    // Nedelec(2) on Wedge: 90 DOFs
     EXPECT_NO_THROW({
         NedelecBasis basis(ElementType::Wedge6, 2);
-        EXPECT_EQ(basis.size(), 84u);
+        EXPECT_EQ(basis.size(), 90u);
     });
 }
 
@@ -1571,7 +1767,7 @@ TEST(HigherOrderWedgePyramid, PyramidND2Construction) {
 TEST(HigherOrderWedgePyramid, WedgeRT3Construction) {
     EXPECT_NO_THROW({
         RaviartThomasBasis basis(ElementType::Wedge6, 3);
-        EXPECT_EQ(basis.size(), 140u);
+        EXPECT_EQ(basis.size(), 146u);
     });
 }
 
@@ -1585,7 +1781,7 @@ TEST(HigherOrderWedgePyramid, PyramidRT3Construction) {
 TEST(HigherOrderWedgePyramid, WedgeND3Construction) {
     EXPECT_NO_THROW({
         NedelecBasis basis(ElementType::Wedge6, 3);
-        EXPECT_EQ(basis.size(), 168u);
+        EXPECT_EQ(basis.size(), 180u);
     });
 }
 
@@ -1603,7 +1799,7 @@ TEST(HigherOrderWedgePyramid, WedgeRT2Evaluation) {
 
     std::vector<math::Vector<Real, 3>> values;
     EXPECT_NO_THROW(basis.evaluate_vector_values(xi, values));
-    EXPECT_EQ(values.size(), 66u);
+    EXPECT_EQ(values.size(), 69u);
 
     for (const auto& v : values) {
         EXPECT_TRUE(std::isfinite(v[0]));
@@ -1635,7 +1831,7 @@ TEST(HigherOrderWedgePyramid, WedgeND2Evaluation) {
 
     std::vector<math::Vector<Real, 3>> values;
     EXPECT_NO_THROW(basis.evaluate_vector_values(xi, values));
-    EXPECT_EQ(values.size(), 84u);
+    EXPECT_EQ(values.size(), 90u);
 
     for (const auto& v : values) {
         EXPECT_TRUE(std::isfinite(v[0]));
@@ -1667,7 +1863,7 @@ TEST(HigherOrderWedgePyramid, WedgeRT3Evaluation) {
 
     std::vector<math::Vector<Real, 3>> values;
     EXPECT_NO_THROW(basis.evaluate_vector_values(xi, values));
-    EXPECT_EQ(values.size(), 140u);
+    EXPECT_EQ(values.size(), 146u);
 
     for (const auto& v : values) {
         EXPECT_TRUE(std::isfinite(v[0]));
@@ -1699,7 +1895,7 @@ TEST(HigherOrderWedgePyramid, WedgeND3Evaluation) {
 
     std::vector<math::Vector<Real, 3>> values;
     EXPECT_NO_THROW(basis.evaluate_vector_values(xi, values));
-    EXPECT_EQ(values.size(), 168u);
+    EXPECT_EQ(values.size(), 180u);
 
     for (const auto& v : values) {
         EXPECT_TRUE(std::isfinite(v[0]));
@@ -1735,7 +1931,7 @@ TEST(HigherOrderWedgePyramid, WedgeRT1DivergenceFinite) {
 
     std::vector<Real> div;
     EXPECT_NO_THROW(basis.evaluate_divergence(xi, div));
-    EXPECT_EQ(div.size(), 24u);
+    EXPECT_EQ(div.size(), 25u);
 
     for (const auto& d : div) {
         EXPECT_TRUE(std::isfinite(d));
@@ -1763,7 +1959,7 @@ TEST(HigherOrderWedgePyramid, WedgeRT2DivergenceFinite) {
 
     std::vector<Real> div;
     EXPECT_NO_THROW(basis.evaluate_divergence(xi, div));
-    EXPECT_EQ(div.size(), 66u);
+    EXPECT_EQ(div.size(), 69u);
 
     for (const auto& d : div) {
         EXPECT_TRUE(std::isfinite(d));
@@ -1791,7 +1987,7 @@ TEST(HigherOrderWedgePyramid, WedgeRT3DivergenceFinite) {
 
     std::vector<Real> div;
     EXPECT_NO_THROW(basis.evaluate_divergence(xi, div));
-    EXPECT_EQ(div.size(), 140u);
+    EXPECT_EQ(div.size(), 146u);
 
     for (const auto& d : div) {
         EXPECT_TRUE(std::isfinite(d));
@@ -1823,7 +2019,7 @@ TEST(HigherOrderWedgePyramid, WedgeND1CurlFinite) {
 
     std::vector<math::Vector<Real, 3>> curl;
     EXPECT_NO_THROW(basis.evaluate_curl(xi, curl));
-    EXPECT_EQ(curl.size(), 34u);
+    EXPECT_EQ(curl.size(), 36u);
 
     for (const auto& c : curl) {
         EXPECT_TRUE(std::isfinite(c[0]));
@@ -1839,7 +2035,7 @@ TEST(HigherOrderWedgePyramid, WedgeND2CurlFinite) {
 
     std::vector<math::Vector<Real, 3>> curl;
     EXPECT_NO_THROW(basis.evaluate_curl(xi, curl));
-    EXPECT_EQ(curl.size(), 84u);
+    EXPECT_EQ(curl.size(), 90u);
 
     for (const auto& c : curl) {
         EXPECT_TRUE(std::isfinite(c[0]));
@@ -1871,7 +2067,7 @@ TEST(HigherOrderWedgePyramid, WedgeND3CurlFinite) {
 
     std::vector<math::Vector<Real, 3>> curl;
     EXPECT_NO_THROW(basis.evaluate_curl(xi, curl));
-    EXPECT_EQ(curl.size(), 168u);
+    EXPECT_EQ(curl.size(), 180u);
 
     for (const auto& c : curl) {
         EXPECT_TRUE(std::isfinite(c[0]));
@@ -1954,7 +2150,7 @@ TEST(HigherOrderWedgePyramid, PyramidRT0FaceNormalMoment) {
 
 TEST(HigherOrderWedgePyramid, WedgeRT1FaceNormalMoment) {
     RaviartThomasBasis basis(ElementType::Wedge6, 1);
-    ASSERT_EQ(basis.size(), 24u);
+    ASSERT_EQ(basis.size(), 25u);
     expect_rt_face_kronecker(basis, ElementType::Wedge6, 1e-8);
 }
 
@@ -2013,7 +2209,7 @@ TEST(HigherOrderWedgePyramid, PyramidND0EdgeTangentMoment) {
 
 TEST(HigherOrderWedgePyramid, WedgeND1EdgeTangentialMomentKronecker) {
     NedelecBasis basis(ElementType::Wedge6, 1);
-    ASSERT_EQ(basis.size(), 34u);
+    ASSERT_EQ(basis.size(), 36u);
     expect_nd_edge_kronecker(basis, ElementType::Wedge6, 5e-8);
 }
 
@@ -2025,7 +2221,7 @@ TEST(HigherOrderWedgePyramid, PyramidND1EdgeTangentialMomentKronecker) {
 
 TEST(HigherOrderWedgePyramid, WedgeND2EdgeTangentialMomentKronecker) {
     NedelecBasis basis(ElementType::Wedge6, 2);
-    ASSERT_EQ(basis.size(), 84u);
+    ASSERT_EQ(basis.size(), 90u);
     expect_nd_edge_kronecker(basis, ElementType::Wedge6, 2e-7);
 }
 
@@ -2037,7 +2233,7 @@ TEST(HigherOrderWedgePyramid, PyramidND2EdgeTangentialMomentKronecker) {
 
 TEST(HigherOrderWedgePyramid, WedgeND1FaceTangentialMomentKronecker) {
     NedelecBasis basis(ElementType::Wedge6, 1);
-    ASSERT_EQ(basis.size(), 34u);
+    ASSERT_EQ(basis.size(), 36u);
     expect_nd_face_kronecker(basis, ElementType::Wedge6, 5e-8);
 }
 
@@ -2049,7 +2245,7 @@ TEST(HigherOrderWedgePyramid, PyramidND1FaceTangentialMomentKronecker) {
 
 TEST(HigherOrderWedgePyramid, WedgeND2FaceTangentialMomentKronecker) {
     NedelecBasis basis(ElementType::Wedge6, 2);
-    ASSERT_EQ(basis.size(), 84u);
+    ASSERT_EQ(basis.size(), 90u);
     expect_nd_face_kronecker(basis, ElementType::Wedge6, 2e-7);
 }
 
@@ -2061,7 +2257,7 @@ TEST(HigherOrderWedgePyramid, PyramidND2FaceTangentialMomentKronecker) {
 
 TEST(HigherOrderWedgePyramid, WedgeND3EdgeTangentialMomentKronecker) {
     NedelecBasis basis(ElementType::Wedge6, 3);
-    ASSERT_EQ(basis.size(), 168u);
+    ASSERT_EQ(basis.size(), 180u);
     expect_nd_edge_kronecker(basis, ElementType::Wedge6, 5e-7);
 }
 
@@ -2073,7 +2269,7 @@ TEST(HigherOrderWedgePyramid, PyramidND3EdgeTangentialMomentKronecker) {
 
 TEST(HigherOrderWedgePyramid, WedgeND3FaceTangentialMomentKronecker) {
     NedelecBasis basis(ElementType::Wedge6, 3);
-    ASSERT_EQ(basis.size(), 168u);
+    ASSERT_EQ(basis.size(), 180u);
     expect_nd_face_kronecker(basis, ElementType::Wedge6, 8e-7);
 }
 
@@ -2098,7 +2294,7 @@ TEST(HigherOrderWedgePyramid, PyramidRT1FaceNormalMoment) {
 
 TEST(HigherOrderWedgePyramid, WedgeRT2FaceNormalMoment) {
     RaviartThomasBasis basis(ElementType::Wedge6, 2);
-    ASSERT_EQ(basis.size(), 66u);
+    ASSERT_EQ(basis.size(), 69u);
     expect_rt_face_kronecker(basis, ElementType::Wedge6, 5e-8);
 }
 
@@ -2110,7 +2306,7 @@ TEST(HigherOrderWedgePyramid, PyramidRT2FaceNormalMoment) {
 
 TEST(HigherOrderWedgePyramid, WedgeRT3FaceNormalMoment) {
     RaviartThomasBasis basis(ElementType::Wedge6, 3);
-    ASSERT_EQ(basis.size(), 140u);
+    ASSERT_EQ(basis.size(), 146u);
     expect_rt_face_kronecker(basis, ElementType::Wedge6, 5e-7, 12);
 }
 
@@ -2122,7 +2318,7 @@ TEST(HigherOrderWedgePyramid, PyramidRT3FaceNormalMoment) {
 
 TEST(HigherOrderWedgePyramid, WedgeRT1DivergenceFluxConsistency) {
     RaviartThomasBasis basis(ElementType::Wedge6, 1);
-    ASSERT_EQ(basis.size(), 24u);
+    ASSERT_EQ(basis.size(), 25u);
     expect_rt_divergence_flux_consistency(basis, ElementType::Wedge6, 1e-8, 8);
 }
 
@@ -2184,7 +2380,7 @@ TEST(HigherOrderWedgePyramid, PyramidRT0LinearCombinationSatisfiesDivergenceTheo
 
 TEST(HigherOrderWedgePyramid, WedgeRT2DivergenceFluxConsistency) {
     RaviartThomasBasis basis(ElementType::Wedge6, 2);
-    ASSERT_EQ(basis.size(), 66u);
+    ASSERT_EQ(basis.size(), 69u);
     expect_rt_divergence_flux_consistency(basis, ElementType::Wedge6, 5e-7, 10);
 }
 
@@ -2196,7 +2392,7 @@ TEST(HigherOrderWedgePyramid, PyramidRT2DivergenceFluxConsistency) {
 
 TEST(HigherOrderWedgePyramid, WedgeRT3DivergenceFluxConsistency) {
     RaviartThomasBasis basis(ElementType::Wedge6, 3);
-    ASSERT_EQ(basis.size(), 140u);
+    ASSERT_EQ(basis.size(), 146u);
     expect_rt_divergence_flux_consistency(basis, ElementType::Wedge6, 1e-6, 12);
 }
 
@@ -2335,7 +2531,7 @@ TEST(HigherOrderWedgePyramid, PyramidND3CurlIsDivergenceFree) {
 // =============================================================================
 // Summary of supported orders
 // =============================================================================
-// RT on Wedge:   k=0 (5 DOFs), k=1 (24 DOFs), k=2 (66 DOFs), k=3 (140 DOFs)
+// RT on Wedge:   k=0 (5 DOFs), k=1 (25 DOFs), k=2 (69 DOFs), k=3 (146 DOFs)
 // RT on Pyramid: k=0 (5 DOFs), k=1 (19 DOFs), k=2 (57 DOFs), k=3 (137 DOFs)
-// ND on Wedge:   k=0 (9 DOFs), k=1 (34 DOFs), k=2 (84 DOFs), k=3 (168 DOFs)
+// ND on Wedge:   k=0 (9 DOFs), k=1 (36 DOFs), k=2 (90 DOFs), k=3 (180 DOFs)
 // ND on Pyramid: k=0 (8 DOFs), k=1 (28 DOFs), k=2 (63 DOFs), k=3 (116 DOFs)

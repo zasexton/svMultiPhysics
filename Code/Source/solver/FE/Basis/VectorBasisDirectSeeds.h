@@ -20,14 +20,6 @@ namespace vector_direct {
 
 using Vec3 = math::Vector<Real, 3>;
 
-void eval_wedge_rt1_values(const Vec3& xi, std::vector<Vec3>& values);
-void eval_wedge_rt1_divergence(const Vec3& xi, std::vector<Real>& divergence);
-void eval_wedge_rt1_jacobians(const Vec3& xi, std::vector<VectorJacobian>& jacobians);
-
-void eval_wedge_rt2_values(const Vec3& xi, std::vector<Vec3>& values);
-void eval_wedge_rt2_divergence(const Vec3& xi, std::vector<Real>& divergence);
-void eval_wedge_rt2_jacobians(const Vec3& xi, std::vector<VectorJacobian>& jacobians);
-
 void eval_pyramid_rt1_values(const Vec3& xi, std::vector<Vec3>& values);
 void eval_pyramid_rt1_divergence(const Vec3& xi, std::vector<Real>& divergence);
 void eval_pyramid_rt1_jacobians(const Vec3& xi, std::vector<VectorJacobian>& jacobians);
@@ -35,22 +27,6 @@ void eval_pyramid_rt1_jacobians(const Vec3& xi, std::vector<VectorJacobian>& jac
 void eval_pyramid_rt2_values(const Vec3& xi, std::vector<Vec3>& values);
 void eval_pyramid_rt2_divergence(const Vec3& xi, std::vector<Real>& divergence);
 void eval_pyramid_rt2_jacobians(const Vec3& xi, std::vector<VectorJacobian>& jacobians);
-
-void eval_wedge_nd1_values(const Vec3& xi, std::vector<Vec3>& values);
-void eval_wedge_nd1_jacobians(const Vec3& xi, std::vector<VectorJacobian>& jacobians);
-void eval_wedge_nd1_curl(const Vec3& xi, std::vector<Vec3>& curl);
-
-void eval_wedge_nd2_values(const Vec3& xi, std::vector<Vec3>& values);
-void eval_wedge_nd2_jacobians(const Vec3& xi, std::vector<VectorJacobian>& jacobians);
-void eval_wedge_nd2_curl(const Vec3& xi, std::vector<Vec3>& curl);
-
-void eval_pyramid_nd1_values(const Vec3& xi, std::vector<Vec3>& values);
-void eval_pyramid_nd1_jacobians(const Vec3& xi, std::vector<VectorJacobian>& jacobians);
-void eval_pyramid_nd1_curl(const Vec3& xi, std::vector<Vec3>& curl);
-
-void eval_pyramid_nd2_values(const Vec3& xi, std::vector<Vec3>& values);
-void eval_pyramid_nd2_jacobians(const Vec3& xi, std::vector<VectorJacobian>& jacobians);
-void eval_pyramid_nd2_curl(const Vec3& xi, std::vector<Vec3>& curl);
 
 } // namespace vector_direct
 } // namespace detail

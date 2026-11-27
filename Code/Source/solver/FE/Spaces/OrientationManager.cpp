@@ -635,10 +635,8 @@ std::vector<Real> OrientationManager::orient_hcurl_quad_face_dofs(
     FE_CHECK_ARG((!swap_blocks && axis_u == 0 && axis_w == 1) || swap_blocks,
                  "orient_hcurl_quad_face_dofs: unexpected axis permutation");
 
-    const auto local_u_nodes = tensor_product_quad_nodes(static_cast<int>(k) - 1, static_cast<int>(k));
-    const auto local_w_nodes = tensor_product_quad_nodes(static_cast<int>(k), static_cast<int>(k) - 1);
-    const auto global_u_nodes = tensor_product_quad_nodes(static_cast<int>(k) - 1, static_cast<int>(k));
-    const auto global_w_nodes = tensor_product_quad_nodes(static_cast<int>(k), static_cast<int>(k) - 1);
+    const auto u_nodes = tensor_product_quad_nodes(static_cast<int>(k), static_cast<int>(k) - 1);
+    const auto w_nodes = tensor_product_quad_nodes(static_cast<int>(k) - 1, static_cast<int>(k));
 
     const std::vector<Real> src_u(face_dofs.begin(), face_dofs.begin() + static_cast<std::ptrdiff_t>(block));
     const std::vector<Real> src_w(face_dofs.begin() + static_cast<std::ptrdiff_t>(block), face_dofs.end());
@@ -656,13 +654,13 @@ std::vector<Real> OrientationManager::orient_hcurl_quad_face_dofs(
     std::vector<Real> out_w;
 
     if (!swap_blocks) {
-        const auto perm_u = compute_node_permutation(local_u_nodes, global_u_nodes, map);
-        const auto perm_w = compute_node_permutation(local_w_nodes, global_w_nodes, map);
+        const auto perm_u = compute_node_permutation(u_nodes, u_nodes, map);
+        const auto perm_w = compute_node_permutation(w_nodes, w_nodes, map);
         out_u = apply_permutation(scaled_u, perm_u);
         out_w = apply_permutation(scaled_w, perm_w);
     } else {
-        const auto perm_u_to_w = compute_node_permutation(local_u_nodes, global_w_nodes, map);
-        const auto perm_w_to_u = compute_node_permutation(local_w_nodes, global_u_nodes, map);
+        const auto perm_u_to_w = compute_node_permutation(u_nodes, w_nodes, map);
+        const auto perm_w_to_u = compute_node_permutation(w_nodes, u_nodes, map);
         out_w = apply_permutation(scaled_u, perm_u_to_w);
         out_u = apply_permutation(scaled_w, perm_w_to_u);
     }
