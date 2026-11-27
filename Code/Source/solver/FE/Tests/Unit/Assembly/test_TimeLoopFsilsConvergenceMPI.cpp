@@ -50,6 +50,7 @@
 
 #include "TimeStepping/TimeHistory.h"
 #include "TimeStepping/TimeLoop.h"
+#include "TimeStepping/VSVO_BDF_Controller.h"
 #include "TimeStepping/NewtonSolver.h"
 #include "Analysis/ConstraintRangeCertificate.h"
 
@@ -65,6 +66,7 @@
 #include <limits>
 #include <map>
 #include <memory>
+#include <numeric>
 #include <optional>
 #include <span>
 #include <sstream>
@@ -3208,6 +3210,89 @@ TEST(TimeLoopFsilsConvergenceMPI,
     for (const auto value : workspace.delta->localSpan()) {
         EXPECT_EQ(value, Real{0});
     }
+#endif
+}
+
+TEST(TimeLoopFsilsConvergenceMPI, AdaptiveBdfEstimatesCountEachGlobalDofOnce)
+{
+#if !defined(FE_HAS_FSILS)
+    GTEST_SKIP() << "FSILS backend is not enabled in this build";
+#else
+    using namespace timestepping;
+    const int rank = mpiRank(MPI_COMM_WORLD);
+    const int ranks = mpiSize(MPI_COMM_WORLD);
+    auto mesh = std::make_shared<RankLocalOwnedQuadMeshAccess>(rank);
+    auto space = spaces::Space(spaces::SpaceType::H1, ElementType::Quad4, 1, 1);
+    systems::FESystem system(mesh);
+    const auto field = system.addField({.name = "u", .space = space, .components = 1});
+    system.addOperator("op");
+    const auto u = forms::FormExpr::stateField(field, *space, "u");
+    const auto v = forms::TestFunction(*space, "v");
+    systems::installFormulation(system, "op", {field}, (u.dt(1) * v + u * v).dx());
+    systems::SetupOptions setup;
+    setup.assembler_name = "StandardAssembler";
+    setup.assembly_options.ghost_policy = GhostPolicy::ReverseScatter;
+    setup.dof_options.global_numbering = dofs::GlobalNumberingMode::OwnerContiguous;
+    setup.dof_options.ownership = dofs::OwnershipStrategy::CellOwner;
+    setup.dof_options.my_rank = rank;
+    setup.dof_options.world_size = ranks;
+    setup.dof_options.mpi_comm = MPI_COMM_WORLD;
+    systems::SetupInputs inputs;
+    inputs.topology_override = buildRankLocalOwnedQuadTopology(rank);
+    system.setup(setup, inputs);
+    const auto n = system.dofHandler().getNumDofs();
+    ASSERT_EQ(n, 4 * ranks);
+    backends::FsilsFactory factory(1);
+    auto solver = factory.createLinearSolver(fsilsGmresDiagOptions());
+    auto history = TimeHistory::allocate(factory, n, 3);
+    for (int k = 1; k <= history.historyDepth(); ++k) {
+        auto entries = history.uPrevK(k).localSpan();
+        ASSERT_EQ(entries.size(), static_cast<std::size_t>(n));
+        std::iota(entries.begin(), entries.end(), Real{1});
+    }
+    history.resetCurrentToPrevious();
+
+    class Recorder final : public VSVO_BDF_Controller {
+    public:
+        using VSVO_BDF_Controller::VSVO_BDF_Controller;
+        std::vector<StepAttemptInfo> attempts;
+        StepDecision onAccepted(const StepAttemptInfo& step) override
+        {
+            attempts.push_back(step);
+            return {.next_dt = step.dt, .next_order = 1};
+        }
+    };
+    constexpr double dt = 0.125;
+    VSVO_BDF_ControllerOptions control;
+    control.abs_tol = 1.0;
+    control.rel_tol = 0.0;
+    control.initial_order = 1;
+    control.max_order = 2;
+    auto controller = std::make_shared<Recorder>(control);
+    TimeLoopOptions options;
+    options.dt = dt;
+    options.t_end = 3 * dt;
+    options.scheme = SchemeKind::VSVO_BDF;
+    options.step_controller = controller;
+    options.newton.residual_op = "op";
+    options.newton.jacobian_op = "op";
+    options.newton.abs_tolerance = 1e-12;
+    options.newton.rel_tolerance = 0;
+    systems::TransientSystem transient(system, std::make_shared<systems::BackwardDifferenceIntegrator>());
+    const auto report = TimeLoop(options).run(transient, factory, *solver, history);
+    ASSERT_TRUE(report.success) << report.message;
+    ASSERT_EQ(controller->attempts.size(), 3u);
+
+    // Each nodal value decays by BE's factor. The initial estimator uses
+    // BE minus CN, and the subsequent estimators use divided differences.
+    const double rms = std::sqrt((n + 1.0) * (2.0 * n + 1.0) / 6.0);
+    const double be = 1.0 / (1.0 + dt);
+    const double cn = (1.0 - dt / 2.0) / (1.0 + dt / 2.0);
+    const double change = 1.0 - be;
+    EXPECT_NEAR(controller->attempts[0].error_norm, (be - cn) * rms, 1e-10);
+    EXPECT_NEAR(controller->attempts[1].error_norm, change * change * rms / 2.0, 1e-10);
+    EXPECT_NEAR(controller->attempts[2].error_norm, be * change * change * rms / 2.0, 1e-10);
+    EXPECT_NEAR(controller->attempts[2].error_norm_high, change * change * change * rms / 3.0, 1e-10);
 #endif
 }
 

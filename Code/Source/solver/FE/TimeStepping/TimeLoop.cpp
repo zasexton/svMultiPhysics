@@ -1512,6 +1512,9 @@ TimeLoopReport TimeLoop::run(systems::TransientSystem& transient,
         prev_state.u = history.uPrevSpan();
         prev_state.u_prev = history.uPrevSpan();
         prev_state.u_prev2 = history.uPrev2Span();
+        prev_state.u_vector = &history.uPrev();
+        prev_state.u_prev_vector = &history.uPrev();
+        prev_state.u_prev2_vector = &history.uPrev2();
         prev_state.u_history = history.uHistorySpans();
         prev_state.dt_history = history.dtHistory();
         // The bordered global DOFs of the previous state: their committed values.
@@ -2515,7 +2518,7 @@ TimeLoopReport TimeLoop::run(systems::TransientSystem& transient,
 
     const VSVO_BDF_Controller* vsvo_controller = nullptr;
     std::vector<std::shared_ptr<const systems::TimeIntegrator>> vsvo_integrators;
-    std::unique_ptr<backends::GenericVector> vsvo_pred{};
+    std::unique_ptr<backends::GenericVector> vsvo_work{};
     int order_next = 0;
 
     const double nominal_time_span = std::max({
@@ -2579,8 +2582,8 @@ TimeLoopReport TimeLoop::run(systems::TransientSystem& transient,
 	            vsvo_integrators[static_cast<std::size_t>(p)] = std::make_shared<const systems::BDFIntegrator>(p);
         }
 
-	        vsvo_pred = factory.createVector(n_dofs);
-	        FE_CHECK_NOT_NULL(vsvo_pred.get(), "TimeLoop: vsvo_pred");
+	        vsvo_work = factory.createVector(n_dofs);
+	        FE_CHECK_NOT_NULL(vsvo_work.get(), "TimeLoop: vsvo_work");
 	        order_next = vsvo_controller->initialOrder();
 	    }
 
@@ -3429,7 +3432,7 @@ TimeLoopReport TimeLoop::run(systems::TransientSystem& transient,
                     }
 	                } else if (options_.scheme == SchemeKind::VSVO_BDF) {
 	                    FE_CHECK_NOT_NULL(vsvo_controller, "TimeLoop: VSVO_BDF controller");
-	                    FE_CHECK_NOT_NULL(vsvo_pred.get(), "TimeLoop: VSVO_BDF predictor");
+	                    FE_CHECK_NOT_NULL(vsvo_work.get(), "TimeLoop: VSVO_BDF predictor");
 	                    const int system_temporal_order = transient.system().temporalOrder();
 
 	                    order = std::max(vsvo_controller->minOrder(), std::min(order, vsvo_controller->maxOrder()));
@@ -3544,6 +3547,13 @@ TimeLoopReport TimeLoop::run(systems::TransientSystem& transient,
                         return out;
                     };
 
+                    // The predictor has been copied to the state before either estimate is evaluated.
+                    // The backend norm sums each global row once, even when local spans contain ghosts.
+                    const auto scaledErrorRms = [&]() {
+                        const auto count = std::max(GlobalIndex{1}, vsvo_work->size());
+                        return vsvo_work->norm() / std::sqrt(static_cast<double>(count));
+                    };
+
 	                    auto computeLTENorm = [&](int p, double dt_step) -> double {
 	                        if (p < vsvo_controller->minOrder() || p > vsvo_controller->maxOrder()) {
 	                            return -1.0;
@@ -3631,30 +3641,23 @@ TimeLoopReport TimeLoop::run(systems::TransientSystem& transient,
                         const double atol = vsvo_controller->absTol();
                         const double rtol = vsvo_controller->relTol();
                         const auto u_np1 = history.uSpan();
-                        FE_CHECK_ARG(u_np1.size() == history.uPrevSpan().size(), "TimeLoop: VSVO_BDF LTE size mismatch");
+                        auto scaled_error = vsvo_work->localSpan();
+                        FE_CHECK_ARG(u_np1.size() == scaled_error.size(), "TimeLoop: VSVO_BDF LTE size mismatch");
 
-	                        double sum = 0.0;
-	                        for (std::size_t i = 0; i < u_np1.size(); ++i) {
-	                            // u^{n+1} coefficient
-	                            double deriv = w[0] * static_cast<double>(u_np1[i]);
-
-	                            // u^n .. history span(s)
-	                            for (int j = 1; j < dd_points; ++j) {
-	                                const auto uj = history.uPrevKSpan(j);
-	                                deriv += w[static_cast<std::size_t>(j)] * static_cast<double>(uj[i]);
-	                            }
-
-                            const double lte = fac * deriv;
+                        for (std::size_t i = 0; i < u_np1.size(); ++i) {
+                            double deriv = w[0] * static_cast<double>(u_np1[i]);
+                            for (int j = 1; j < dd_points; ++j) {
+                                const auto uj = history.uPrevKSpan(j);
+                                deriv += w[static_cast<std::size_t>(j)] * static_cast<double>(uj[i]);
+                            }
                             const double scale = atol + rtol * std::abs(static_cast<double>(u_np1[i]));
-                            const double r = lte / scale;
-                            sum += r * r;
+                            scaled_error[i] = static_cast<Real>(fac * deriv / scale);
                         }
-                        const double n = (u_np1.empty() ? 1.0 : static_cast<double>(u_np1.size()));
-                        return std::sqrt(sum / n);
+                        return scaledErrorRms();
                     };
 
                     auto computePredictor = [&](int p, double dt_step) {
-                        auto dst = vsvo_pred->localSpan();
+                        auto dst = vsvo_work->localSpan();
                         std::fill(dst.begin(), dst.end(), static_cast<Real>(0.0));
 
                         std::vector<double> nodes;
@@ -3699,7 +3702,7 @@ TimeLoopReport TimeLoop::run(systems::TransientSystem& transient,
                     };
 
                     computePredictor(order, dt);
-                    copyVector(history.u(), *vsvo_pred);
+                    copyVector(history.u(), *vsvo_work);
 
                     auto integrator = vsvo_integrators[static_cast<std::size_t>(order)];
                     FE_CHECK_NOT_NULL(integrator.get(), "TimeLoop: VSVO_BDF integrator");
@@ -3714,16 +3717,14 @@ TimeLoopReport TimeLoop::run(systems::TransientSystem& transient,
 
                             const auto u = history.uSpan();
                             const auto ref = scratch_vec1->localSpan();
-                            FE_CHECK_ARG(u.size() == ref.size(), "TimeLoop: VSVO_BDF size mismatch");
-
-                            double sum = 0.0;
+                            auto scaled_error = vsvo_work->localSpan();
+                            FE_CHECK_ARG(u.size() == ref.size() && u.size() == scaled_error.size(),
+                                         "TimeLoop: VSVO_BDF size mismatch");
                             for (std::size_t i = 0; i < u.size(); ++i) {
                                 const double scale = atol + rtol * std::abs(static_cast<double>(u[i]));
-                                const double e = static_cast<double>(u[i] - ref[i]);
-                                sum += (e / scale) * (e / scale);
+                                scaled_error[i] = static_cast<Real>((u[i] - ref[i]) / scale);
                             }
-                            const double denom = (u.empty() ? 1.0 : static_cast<double>(u.size()));
-                            error_norm = std::sqrt(sum / denom);
+                            error_norm = scaledErrorRms();
                         } else {
                             error_norm = computeLTENorm(order, dt);
                             error_norm_low = computeLTENorm(order - 1, dt);
