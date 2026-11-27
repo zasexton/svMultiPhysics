@@ -6,6 +6,7 @@
  */
 
 #include "QuadratureFactory.h"
+#include "Elements/Element.h"
 #include "SymmetricTetrahedronQuadrature.h"
 #include "SymmetricTriangleQuadrature.h"
 #include <algorithm>
@@ -203,6 +204,21 @@ std::shared_ptr<const QuadratureRule> QuadratureFactory::create(
     QuadratureKey key{element_type, order, type};
     return QuadratureCache::instance().get_or_create(
         key, [=]() { return build_rule(element_type, order, type); });
+}
+
+std::shared_ptr<const QuadratureRule> QuadratureFactory::cell_rule(
+    ElementType type, const elements::Element& element, int minimum_order)
+{
+    const int order = element.polynomial_order();
+    auto rule = element.quadrature();
+    if (uses_legacy_tetrahedron_rule(type, order, element.basis().is_vector_valued())) {
+        auto legacy = create_legacy_compatible_pinned(type, default_legacy_modifier(type));
+        if (legacy->order() >= minimum_order) return legacy;
+    }
+    if (rule && (minimum_order == 0 || rule->order() >= minimum_order)) {
+        return rule;
+    }
+    return create_pinned(type, std::max(minimum_order, recommended_order(order, false)));
 }
 
 int QuadratureFactory::recommended_order(int basis_order, bool is_mass_matrix) {

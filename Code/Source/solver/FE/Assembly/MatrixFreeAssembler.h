@@ -291,6 +291,7 @@ public:
 
     /// Optional quadrature space shared by the blocks of a coupled operator.
     [[nodiscard]] virtual const spaces::FunctionSpace* cellRuleSpace() const noexcept { return nullptr; }
+    [[nodiscard]] virtual int minimumCellQuadratureOrder() const noexcept { return 0; }
 };
 
 // ============================================================================

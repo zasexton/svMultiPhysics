@@ -65,7 +65,11 @@ std::string normalizeName(std::string_view name)
 class CellKernelWithRule final : public AssemblyKernel {
 public:
     CellKernelWithRule(AssemblyKernel& leaf, const AssemblyKernel& rule_source)
-        : AssemblyKernel(rule_source), leaf_(leaf) {}
+        : AssemblyKernel(rule_source.cellRuleSpace() ? rule_source : leaf), leaf_(leaf)
+    {
+        setMinimumCellQuadratureOrder(std::max(leaf.minimumCellQuadratureOrder(),
+                                               rule_source.minimumCellQuadratureOrder()));
+    }
 
     RequiredData getRequiredData() const override { return leaf_.getRequiredData(); }
     std::vector<FieldRequirement> fieldRequirements() const override { return leaf_.fieldRequirements(); }
@@ -101,7 +105,8 @@ AssemblyResult Assembler::assembleCellsFused(
     const auto assemble = [&](const FusedCellTerm& t, const AssemblyKernel* parent) {
         if (!t.kernel->hasCell()) return;
         std::optional<CellKernelWithRule> with_rule;
-        if (parent && parent->cellRuleSpace() && parent->cellRuleSpace() != t.kernel->cellRuleSpace()) {
+        if (parent && ((parent->cellRuleSpace() && parent->cellRuleSpace() != t.kernel->cellRuleSpace()) ||
+                       parent->minimumCellQuadratureOrder() > t.kernel->minimumCellQuadratureOrder())) {
             with_rule.emplace(*t.kernel, *parent);
         }
         AssemblyKernel& kernel = with_rule ? static_cast<AssemblyKernel&>(*with_rule) : *t.kernel;

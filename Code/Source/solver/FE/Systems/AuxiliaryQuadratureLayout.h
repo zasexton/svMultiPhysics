@@ -29,17 +29,17 @@ namespace systems {
 resolveAuxiliaryCellQuadratureRule(
     const assembly::IMeshAccess& mesh,
     const spaces::FunctionSpace& space,
-    GlobalIndex cell_id);
+    GlobalIndex cell_id, int minimum_order = 0);
 
 [[nodiscard]] std::size_t numAuxiliaryCellQuadraturePoints(
     const assembly::IMeshAccess& mesh,
     const spaces::FunctionSpace& space,
-    GlobalIndex cell_id);
+    GlobalIndex cell_id, int minimum_order = 0);
 
 [[nodiscard]] std::vector<std::size_t> buildAuxiliaryCellQuadratureOffsets(
     const assembly::IMeshAccess& mesh,
     const spaces::FunctionSpace& space,
-    std::span<const std::size_t> covered_cells);
+    std::span<const std::size_t> covered_cells, int minimum_order = 0);
 
 } // namespace systems
 } // namespace FE

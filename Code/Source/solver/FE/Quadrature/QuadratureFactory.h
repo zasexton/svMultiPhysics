@@ -39,6 +39,8 @@
 #include <cstddef>
 #include <memory>
 
+namespace svmp::FE::elements { class Element; }
+
 namespace svmp {
 namespace FE {
 namespace quadrature {
@@ -104,6 +106,11 @@ public:
      * @return Recommended quadrature order
      */
     static int recommended_order(int basis_order, bool is_mass_matrix = false);
+
+    /// Cell rule used by assembly and setup. Keep the element's selected
+    /// rule when it meets a form's requested polynomial exactness.
+    static std::shared_ptr<const QuadratureRule> cell_rule(
+        ElementType type, const elements::Element& element, int minimum_order = 0);
 
     // =========================================================================
     // Position-based quadrature (legacy compatible approach)

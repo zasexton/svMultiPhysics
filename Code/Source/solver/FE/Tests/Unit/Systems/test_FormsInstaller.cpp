@@ -6777,7 +6777,7 @@ TEST(FormsInstaller, CellScopedAuxiliaryOutputResolvesPerCurrentCell)
     EXPECT_GT(std::abs(cell1_only[1]), 1e-12);
 }
 
-TEST(FormsInstaller, QuadraturePointAutoLayoutSingleConsumerDerivesCount)
+void expectSingleConsumerQuadratureLayout(int requested_order, std::size_t expected_points)
 {
     using namespace svmp::FE;
     using namespace svmp::FE::systems;
@@ -6798,7 +6798,9 @@ TEST(FormsInstaller, QuadraturePointAutoLayoutSingleConsumerDerivesCount)
 
     const auto u = forms::FormExpr::stateField(u_field, *space, "u");
     const auto v = forms::FormExpr::testFunction(*space, "v");
-    (void)installFormulation(sys, "op", {u_field}, (u * v).dx() - (inst.output("P_out") * v).dx());
+    FormInstallOptions options;
+    options.minimum_cell_quadrature_order = requested_order;
+    (void)installFormulation(sys, "op", {u_field}, (u * v).dx() - (inst.output("P_out") * v).dx(), options);
 
     SetupInputs inputs;
     inputs.topology_override = singleTetraTopology();
@@ -6807,7 +6809,19 @@ TEST(FormsInstaller, QuadraturePointAutoLayoutSingleConsumerDerivesCount)
 
     ASSERT_TRUE(sys.auxiliaryStateManager().hasBlock("qp_auto_inst"));
     auto& block = sys.auxiliaryStateManager().getBlock("qp_auto_inst");
-    EXPECT_EQ(block.entityCount(), 4u);
+    EXPECT_EQ(block.entityCount(), expected_points);
+}
+
+TEST(FormsInstaller, QuadraturePointAutoLayoutSingleConsumerDerivesCount)
+{
+    expectSingleConsumerQuadratureLayout(0, 4u);
+}
+
+TEST(FormsInstaller, QuadraturePointLayoutUsesTheDegreeRequestedByItsForm)
+{
+    const auto rule = svmp::FE::quadrature::QuadratureFactory::create(svmp::FE::ElementType::Tetra4, 5);
+    ASSERT_GT(rule->num_points(), 4u);
+    expectSingleConsumerQuadratureLayout(5, rule->num_points());
 }
 
 TEST(FormsInstaller, QuadraturePointRegionRestrictedAutoLayoutUsesCoveredCellsOnly)
@@ -7161,7 +7175,7 @@ TEST(FormsInstaller, QuadraturePointExplicitOffsetsMatchingConsumerAreAccepted)
     EXPECT_EQ(sys.auxiliaryStateManager().getBlock("qp_offsets_ok_inst").entityCount(), 4u);
 }
 
-TEST(FormsInstaller, QuadraturePointExplicitOffsetsMismatchConsumerRejected)
+static void expectExplicitOffsetsRejectConsumer(std::size_t count, bool second_consumer)
 {
     using namespace svmp::FE;
     using namespace svmp::FE::systems;
@@ -7178,18 +7192,36 @@ TEST(FormsInstaller, QuadraturePointExplicitOffsetsMismatchConsumerRejected)
             .name("qp_offsets_bad_inst")
             .quadraturePoint()
             .monolithic()
-            .qpOffsets({0, 2})
+            .qpOffsets({0, count})
             .initialize({0.25}));
 
     const auto u = forms::FormExpr::stateField(u_field, *space, "u");
     const auto v = forms::FormExpr::testFunction(*space, "v");
     (void)installFormulation(sys, "op", {u_field}, (u * v).dx() - (inst.output("P_out") * v).dx());
 
+    if (second_consumer) {
+        sys.addOperator("higher_degree");
+        FormInstallOptions options;
+        options.minimum_cell_quadrature_order = 5;
+        (void)installFormulation(sys, "higher_degree", {u_field},
+            (u * v).dx() - (inst.output("P_out") * v).dx(), options);
+    }
+
     SetupInputs inputs;
     inputs.topology_override = singleTetraTopology();
     sys.setup({}, inputs);
 
     EXPECT_THROW(sys.finalizeAuxiliaryLayout(), svmp::FE::InvalidArgumentException);
+}
+
+TEST(FormsInstaller, QuadraturePointExplicitOffsetsMismatchConsumerRejected)
+{
+    expectExplicitOffsetsRejectConsumer(2, false);
+}
+
+TEST(FormsInstaller, QuadraturePointExplicitOffsetsMustMatchEveryDegree)
+{
+    expectExplicitOffsetsRejectConsumer(4, true);
 }
 
 TEST(FormsInstaller, QuadraturePointOwnedCellInferenceUsesOwnedSubset)

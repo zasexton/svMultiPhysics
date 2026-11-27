@@ -138,6 +138,7 @@ public:
     }
     RequiredData getRequiredData() const noexcept override { return kernel_.getRequiredData(); }
     const spaces::FunctionSpace* cellRuleSpace() const noexcept override { return kernel_.cellRuleSpace(); }
+    int minimumCellQuadratureOrder() const noexcept override { return kernel_.minimumCellQuadratureOrder(); }
 
 private:
     bool canEvaluateCell() const noexcept { return kernel_.hasCell() && !needs_external_state_; }
@@ -375,7 +376,7 @@ void MatrixFreeAssembler::evaluate(Evaluation evaluation, std::span<const Real> 
                     preparer.applyVectorBasisGlobalToLocal(*mesh_, cell, *trial_space_, local);
                 };
                 preparer.prepareContext(context, *mesh_, cell, *test_space_, *trial_space_, required,
-                                        kernel_->cellRuleSpace());
+                                        kernel_->cellRuleSpace(), kernel_->minimumCellQuadratureOrder());
                 if (reads_state) {
                     gather_trial(state, local_state);
                     context.setSolutionCoefficients(local_state);

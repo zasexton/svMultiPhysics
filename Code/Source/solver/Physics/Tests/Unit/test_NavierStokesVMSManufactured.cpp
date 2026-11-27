@@ -466,6 +466,101 @@ TEST(NavierStokesVMSManufactured, BulkIntegrandsInferTheCellFromACompositeTestFi
     EXPECT_NEAR(pressure_work(FormExpr::testFunction(vector_space)), 1.0 / std::sqrt(8.0), 1e-12);
 }
 
+TEST(NavierStokesVMSManufactured, QuadraticConvectionIntegratesPolynomialWork)
+{
+    const std::vector<std::vector<index_t>> cells{{0, 1, 2}, {1, 2, 0}, {2, 0, 1}, {0, 1, 2, 3}};
+    for (const bool jit : {false, true}) {
+        for (const auto& vertices : cells) {
+            const bool quad = vertices.size() == 4;
+            const auto type = quad ? FE::ElementType::Quad4 : FE::ElementType::Triangle3;
+            SCOPED_TRACE(::testing::Message() << "jit=" << jit << " vertices="
+                                              << ::testing::PrintToString(vertices));
+            auto base = std::make_shared<MeshBase>();
+            if (quad) {
+                base->build_from_arrays(2, {0, 0, 1, 0, 1, 1, 0, 1}, {0, 4}, vertices, {{CellFamily::Quad, 4, 1}});
+            } else {
+                base->build_from_arrays(2, {0, 0, 1, 0, 0, 1}, {0, 3}, vertices, {{CellFamily::Triangle, 3, 1}});
+            }
+            base->finalize();
+            auto mesh = create_mesh(base);
+            FE::systems::FESystem system(mesh);
+            auto p2 = std::make_shared<FE::spaces::H1Space>(type, 2);
+            auto p1 = std::make_shared<FE::spaces::H1Space>(type, 1);
+            auto velocity = std::make_shared<FE::spaces::ProductSpace>(p2, 2);
+            ns::IncompressibleNavierStokesVMSOptions options;
+            options.density = 1;
+            options.viscosity = 0.1;
+            options.enable_vms = false;
+            options.enable_convection = true;
+            options.jit_policy.enable = jit;
+            options.jit_policy.enable_was_explicitly_set = true;
+            ns::IncompressibleNavierStokesVMSModule(velocity, p1, std::move(options)).registerOn(system);
+            system.setup();
+
+            const auto u = system.findFieldByName("u");
+            const auto cell_dofs = system.fieldDofHandler(u).getCellDofs(0);
+            const auto offset = system.fieldDofOffset(u);
+            const auto n = system.dofHandler().getNumDofs();
+            std::vector<double> direction(n, 0), test(n, 0), local;
+            const auto a = mesh->get_vertex_coords(vertices[0]);
+            const auto b = mesh->get_vertex_coords(vertices[1]);
+            const auto c = mesh->get_vertex_coords(vertices[2]);
+            using Point = FE::spaces::FunctionSpace::Value;
+            velocity->interpolate([&](const Point& xi) {
+                if (quad) {
+                    const double x = (1 + xi[0]) / 2, y = (1 + xi[1]) / 2;
+                    return Point{x * y * y, 0, 0};
+                }
+                const double x = a[0] + xi[0] * (b[0] - a[0]) + xi[1] * (c[0] - a[0]);
+                const double y = a[1] + xi[0] * (b[1] - a[1]) + xi[1] * (c[1] - a[1]);
+                return Point{x * x, -2 * x * y, 0};
+            }, local);
+            ASSERT_EQ(local.size(), cell_dofs.size());
+            for (std::size_t i = 0; i < local.size(); ++i) {
+                direction[offset + cell_dofs[i]] = local[i];
+                if (i < local.size() / 2) test[offset + cell_dofs[i]] = local[i];
+            }
+
+            FE::systems::SystemStateView field_state;
+            field_state.u = direction;
+            const auto point = system.evaluateFieldAtPoint(u, field_state, {0.2, 0.3, 0}, 0);
+            ASSERT_TRUE(point.has_value());
+            EXPECT_NEAR((*point)[0], quad ? 0.018 : 0.04, 1e-12);
+            EXPECT_NEAR((*point)[1], quad ? 0.0 : -0.12, 1e-12);
+
+            // Adding R(u) and R(-u) isolates the quadratic term. Subtracting
+            // the two Jacobians also cancels the mass and viscous tangents.
+            double convection = 0, tangent = 0;
+            for (const double sign : {-1., 1.}) {
+                auto values = direction;
+                for (auto& value : values) value *= sign;
+                FE::systems::SystemStateView state;
+                state.dt = 1;
+                state.u = state.u_prev = values;
+                const auto integration = FE::systems::BackwardDifferenceIntegrator().buildContext(1, state);
+                state.time_integration = &integration;
+                FE::systems::AssemblyRequest request;
+                request.op = "equations";
+                request.want_matrix = request.want_vector = true;
+                FE::assembly::DenseMatrixView matrix(n);
+                FE::assembly::DenseVectorView residual(n);
+                const auto result = system.assemble(request, state, &matrix, &residual);
+                ASSERT_TRUE(result.success) << result.error_message;
+                for (FE::GlobalIndex i = 0; i < n; ++i) {
+                    convection += 0.5 * test[i] * residual.data()[i];
+                    for (FE::GlobalIndex j = 0; j < n; ++j) {
+                        tangent += 0.25 * sign * test[i] * matrix.getMatrixEntry(i, j) * direction[j];
+                    }
+                }
+            }
+            // The work density is 2x⁵ on the unit triangle and x²y⁶ on the unit
+            // square. Both integrals equal 1/21.
+            EXPECT_NEAR(convection, 1. / 21., 2e-12);
+            EXPECT_NEAR(tangent, 1. / 21., 2e-12);
+        }
+    }
+}
+
 // On a coordinate-axis simplex with leg lengths h_i, the unit-determinant
 // regular-simplex metric has G_ij = (1 + delta_ij) / ((dim+1)^(1/dim) h_i h_j).
 // The two tau_C values use this closed form and the 1 ms physical step.

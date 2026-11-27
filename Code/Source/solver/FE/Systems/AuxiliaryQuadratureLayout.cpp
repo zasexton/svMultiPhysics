@@ -12,42 +12,27 @@ std::shared_ptr<const quadrature::QuadratureRule>
 resolveAuxiliaryCellQuadratureRule(
     const assembly::IMeshAccess& mesh,
     const spaces::FunctionSpace& space,
-    GlobalIndex cell_id)
+    GlobalIndex cell_id, int minimum_order)
 {
     const auto cell_type = mesh.getCellType(cell_id);
     const auto& element = space.getElement(cell_type, cell_id);
 
-    const int basis_order = element.polynomial_order();
-    if (quadrature::QuadratureFactory::uses_legacy_tetrahedron_rule(
-            cell_type, basis_order, element.basis().is_vector_valued())) {
-        const auto legacy_modifier =
-            quadrature::QuadratureFactory::default_legacy_modifier(cell_type);
-        return quadrature::QuadratureFactory::create_legacy_compatible(
-            cell_type, legacy_modifier);
-    }
-
-    auto quad_rule = element.quadrature();
-    if (!quad_rule) {
-        const int quad_order = quadrature::QuadratureFactory::recommended_order(
-            basis_order, false);
-        quad_rule = quadrature::QuadratureFactory::create(cell_type, quad_order);
-    }
-    return quad_rule;
+    return quadrature::QuadratureFactory::cell_rule(cell_type, element, minimum_order);
 }
 
 std::size_t numAuxiliaryCellQuadraturePoints(
     const assembly::IMeshAccess& mesh,
     const spaces::FunctionSpace& space,
-    GlobalIndex cell_id)
+    GlobalIndex cell_id, int minimum_order)
 {
-    const auto quad_rule = resolveAuxiliaryCellQuadratureRule(mesh, space, cell_id);
+    const auto quad_rule = resolveAuxiliaryCellQuadratureRule(mesh, space, cell_id, minimum_order);
     return quad_rule ? quad_rule->num_points() : 0u;
 }
 
 std::vector<std::size_t> buildAuxiliaryCellQuadratureOffsets(
     const assembly::IMeshAccess& mesh,
     const spaces::FunctionSpace& space,
-    std::span<const std::size_t> covered_cells)
+    std::span<const std::size_t> covered_cells, int minimum_order)
 {
     std::vector<std::size_t> offsets;
     offsets.reserve(covered_cells.size() + 1u);
@@ -56,7 +41,7 @@ std::vector<std::size_t> buildAuxiliaryCellQuadratureOffsets(
         offsets.push_back(
             offsets.back() +
             numAuxiliaryCellQuadraturePoints(mesh, space,
-                                             static_cast<GlobalIndex>(cell)));
+                                             static_cast<GlobalIndex>(cell), minimum_order));
     }
     return offsets;
 }

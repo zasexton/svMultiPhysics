@@ -652,9 +652,12 @@ void applyCoupledInstallRuleSpace(
     const FESystem& system,
     FieldId test_field,
     const KernelPtr& kernel,
-    const std::shared_ptr<const spaces::FunctionSpace>& rule_space)
+    const std::shared_ptr<const spaces::FunctionSpace>& rule_space,
+    int minimum_order)
 {
-    if (!kernel || !rule_space) {
+    if (!kernel) return;
+    kernel->setMinimumCellQuadratureOrder(minimum_order);
+    if (!rule_space) {
         return;
     }
     const auto& record = system.fieldRecord(test_field);
@@ -2347,6 +2350,7 @@ KernelPtr installResidualForm(
     if (split.has_value()) {
         kernel = maybeWrapForJIT(std::move(kernel), block_options);
     }
+    kernel->setMinimumCellQuadratureOrder(block_options.minimum_cell_quadrature_order);
     registerKernel(
         system,
         op,
@@ -2484,6 +2488,7 @@ std::vector<std::vector<KernelPtr>> installResidualBlocks(
                                                       block_options,
                                                       "installResidualBlocks");
             }
+            kernel->setMinimumCellQuadratureOrder(block_options.minimum_cell_quadrature_order);
             registerKernel(
                 system,
                 op,
@@ -2848,7 +2853,7 @@ CoupledResidualKernels installCoupledResidual(
 
     const auto rule_space = coupledInstallRuleSpace(system, test_fields, trial_fields);
     for (const auto& pending : pending_installs) {
-        applyCoupledInstallRuleSpace(system, pending.test_field, pending.kernel, rule_space);
+        applyCoupledInstallRuleSpace(system, pending.test_field, pending.kernel, rule_space, install_options.minimum_cell_quadrature_order);
         registerKernelDomains(
             system,
             op,
@@ -2865,7 +2870,7 @@ CoupledResidualKernels installCoupledResidual(
         auto jit_compiler = forms::jit::JITCompiler::getOrCreate(install_options.compiler_options.jit);
         auto monolithic_kernel = std::make_shared<forms::MonolithicCellKernel>(
             std::move(monolithic_cell_blocks), std::move(jit_compiler), install_options.compiler_options.jit);
-        applyCoupledInstallRuleSpace(system, test_fields[0], monolithic_kernel, rule_space);
+        applyCoupledInstallRuleSpace(system, test_fields[0], monolithic_kernel, rule_space, install_options.minimum_cell_quadrature_order);
         system.addCellKernel(op, test_fields[0], trial_fields[0], monolithic_kernel);
     } else if (use_mixed_block_cell_kernel) {
         std::shared_ptr<forms::jit::JITCompiler> jit_compiler{};
@@ -2874,7 +2879,7 @@ CoupledResidualKernels installCoupledResidual(
         }
         auto mixed_block_kernel = std::make_shared<forms::MixedBlockKernelSet>(
             std::move(mixed_block_cell_specs), std::move(jit_compiler), install_options.compiler_options.jit);
-        applyCoupledInstallRuleSpace(system, test_fields[0], mixed_block_kernel, rule_space);
+        applyCoupledInstallRuleSpace(system, test_fields[0], mixed_block_kernel, rule_space, install_options.minimum_cell_quadrature_order);
         system.addCellKernel(op, test_fields[0], trial_fields[0], mixed_block_kernel);
     }
 
@@ -3711,7 +3716,7 @@ CoupledResidualKernels installCoupledResidualMixed(
 
     const auto rule_space = coupledInstallRuleSpace(system, test_fields, trial_fields);
     for (const auto& pending : pending_installs) {
-        applyCoupledInstallRuleSpace(system, pending.test_field, pending.kernel, rule_space);
+        applyCoupledInstallRuleSpace(system, pending.test_field, pending.kernel, rule_space, install_options.minimum_cell_quadrature_order);
         registerKernelDomains(
             system,
             op,
@@ -3734,7 +3739,7 @@ CoupledResidualKernels installCoupledResidualMixed(
         auto jit_compiler = forms::jit::JITCompiler::getOrCreate(install_options.compiler_options.jit);
         auto monolithic_kernel = std::make_shared<forms::MonolithicCellKernel>(
             std::move(monolithic_cell_blocks), std::move(jit_compiler), install_options.compiler_options.jit);
-        applyCoupledInstallRuleSpace(system, test_fields[0], monolithic_kernel, rule_space);
+        applyCoupledInstallRuleSpace(system, test_fields[0], monolithic_kernel, rule_space, install_options.minimum_cell_quadrature_order);
         system.addCellKernel(op, test_fields[0], trial_fields[0], monolithic_kernel);
     } else if (use_mixed_block_cell_kernel) {
         std::shared_ptr<forms::jit::JITCompiler> jit_compiler{};
@@ -3743,7 +3748,7 @@ CoupledResidualKernels installCoupledResidualMixed(
         }
         auto mixed_block_kernel = std::make_shared<forms::MixedBlockKernelSet>(
             std::move(mixed_block_cell_specs), std::move(jit_compiler), install_options.compiler_options.jit);
-        applyCoupledInstallRuleSpace(system, test_fields[0], mixed_block_kernel, rule_space);
+        applyCoupledInstallRuleSpace(system, test_fields[0], mixed_block_kernel, rule_space, install_options.minimum_cell_quadrature_order);
         system.addCellKernel(op, test_fields[0], trial_fields[0], mixed_block_kernel);
     }
 
@@ -3931,7 +3936,7 @@ installMixedFormIR(
 
     const auto rule_space = coupledInstallRuleSpace(system, test_fields, trial_fields);
     for (const auto& pending : pending_installs) {
-        applyCoupledInstallRuleSpace(system, pending.test_field, pending.kernel, rule_space);
+        applyCoupledInstallRuleSpace(system, pending.test_field, pending.kernel, rule_space, options.minimum_cell_quadrature_order);
         registerKernelDomains(
             system,
             op,
@@ -3948,7 +3953,7 @@ installMixedFormIR(
         auto jit_compiler = forms::jit::JITCompiler::getOrCreate(options.compiler_options.jit);
         auto monolithic_kernel = std::make_shared<forms::MonolithicCellKernel>(
             std::move(monolithic_cell_blocks), std::move(jit_compiler), options.compiler_options.jit);
-        applyCoupledInstallRuleSpace(system, test_fields[0], monolithic_kernel, rule_space);
+        applyCoupledInstallRuleSpace(system, test_fields[0], monolithic_kernel, rule_space, options.minimum_cell_quadrature_order);
         system.addCellKernel(op, test_fields[0], trial_fields[0], monolithic_kernel);
     } else if (use_mixed_block_cell_kernel) {
         std::shared_ptr<forms::jit::JITCompiler> jit_compiler{};
@@ -3957,7 +3962,7 @@ installMixedFormIR(
         }
         auto mixed_block_kernel = std::make_shared<forms::MixedBlockKernelSet>(
             std::move(mixed_block_cell_specs), std::move(jit_compiler), options.compiler_options.jit);
-        applyCoupledInstallRuleSpace(system, test_fields[0], mixed_block_kernel, rule_space);
+        applyCoupledInstallRuleSpace(system, test_fields[0], mixed_block_kernel, rule_space, options.minimum_cell_quadrature_order);
         system.addCellKernel(op, test_fields[0], trial_fields[0], mixed_block_kernel);
     }
 
@@ -4650,6 +4655,7 @@ CoupledResidualKernels installFormulation(
     const forms::FormExpr& residual,
     const FormInstallOptions& options)
 {
+    FE_CHECK_ARG(options.minimum_cell_quadrature_order >= 0, "Cell quadrature degree must be nonnegative");
     FE_THROW_IF(fields.empty(), InvalidArgumentException,
                 "installFormulation: empty field list");
     FE_THROW_IF(!residual.isValid(), InvalidArgumentException,
@@ -4778,6 +4784,7 @@ CoupledResidualKernels installFormulation(
     std::vector<analysis::ContributionDescriptor> pending_contributions;
     {
         rec.operator_tag = op;
+        rec.minimum_cell_quadrature_order = options.minimum_cell_quadrature_order;
         rec.contributes_to_problem_analysis =
             options.contributes_to_problem_analysis;
         rec.active_fields.assign(trial_fields.begin(), trial_fields.end());
@@ -4920,6 +4927,7 @@ CoupledResidualKernels installFormulation(
                     consumer.output_id = static_cast<std::uint32_t>(output_id);
                     consumer.qualified_output_name = qualified_name;
                     consumer.operator_tag = op;
+                    consumer.minimum_cell_quadrature_order = options.minimum_cell_quadrature_order;
                     consumer.domain_kind = domain;
                     consumer.reference_field = default_field;
                     consumer.test_field = default_field;
@@ -5195,6 +5203,7 @@ CoupledResidualKernels installFormulation(
             const auto dispatch = analyzeDispatch(ir);
             kernel = std::make_shared<forms::FormKernel>(std::move(ir));
             kernel = maybeWrapForJIT(std::move(kernel), install_options);
+            kernel->setMinimumCellQuadratureOrder(install_options.minimum_cell_quadrature_order);
             registerKernel(
                 system,
                 op,

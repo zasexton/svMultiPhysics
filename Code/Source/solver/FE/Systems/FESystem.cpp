@@ -25712,17 +25712,22 @@ void FESystem::inferQuadraturePointLayout_(DeployedAuxEntry& entry)
         !entry.quadrature_reference_operator.empty();
     const bool has_any_consumers = hasAuxiliaryConsumers_(entry);
 
-    auto append_unique_field = [](std::vector<FieldId>& fields, FieldId field) {
-        if (field == INVALID_FIELD_ID) {
-            return;
-        }
-        if (std::find(fields.begin(), fields.end(), field) == fields.end()) {
-            fields.push_back(field);
+    // A reference field can occur at distinct quadrature degrees. Check each
+    // consumer's point count before binding a shared quadrature-point array.
+    struct ReferenceLayout {
+        FieldId field;
+        int minimum_order;
+        bool operator==(const ReferenceLayout&) const = default;
+    };
+    std::vector<ReferenceLayout> reference_fields;
+    const auto append_reference = [&](FieldId field, int minimum_order) {
+        const ReferenceLayout layout{field, minimum_order};
+        if (field != INVALID_FIELD_ID &&
+            std::find(reference_fields.begin(), reference_fields.end(), layout) == reference_fields.end()) {
+            reference_fields.push_back(layout);
         }
     };
-
-    std::vector<FieldId> reference_fields;
-    append_unique_field(reference_fields, entry.quadrature_reference_field);
+    append_reference(entry.quadrature_reference_field, 0);
     if (!entry.quadrature_reference_operator.empty()) {
         bool found_operator_layout = false;
         for (const auto& record : formulation_records_) {
@@ -25734,7 +25739,7 @@ void FESystem::inferQuadraturePointLayout_(DeployedAuxEntry& entry)
             }
             found_operator_layout = true;
             for (const auto field : record.active_fields) {
-                append_unique_field(reference_fields, field);
+                append_reference(field, record.minimum_cell_quadrature_order);
             }
         }
         FE_THROW_IF(!found_operator_layout, InvalidArgumentException,
@@ -25745,7 +25750,7 @@ void FESystem::inferQuadraturePointLayout_(DeployedAuxEntry& entry)
                         "') did not resolve to any cell-volume formulation");
     }
     for (const auto& consumer : cell_consumers) {
-        append_unique_field(reference_fields, consumer.reference_field);
+        append_reference(consumer.reference_field, consumer.minimum_cell_quadrature_order);
     }
 
     if (cell_consumers.empty() && entry.qp_offsets.empty()) {
@@ -25800,18 +25805,18 @@ void FESystem::inferQuadraturePointLayout_(DeployedAuxEntry& entry)
                         "' has no cell-volume consumers or quadrature hint capable of "
                         "supplying reference field metadata");
 
-        const auto* first_space = fieldRecord(reference_fields.front()).space.get();
+        const auto* first_space = fieldRecord(reference_fields.front().field).space.get();
         FE_CHECK_NOT_NULL(first_space,
                           "FESystem::inferQuadraturePointLayout_: reference space");
         auto inferred_offsets = buildAuxiliaryCellQuadratureOffsets(
-            *mesh_access_, *first_space, entry.entity_map);
+            *mesh_access_, *first_space, entry.entity_map, reference_fields.front().minimum_order);
 
         for (std::size_t i = 1; i < reference_fields.size(); ++i) {
-            const auto* other_space = fieldRecord(reference_fields[i]).space.get();
+            const auto* other_space = fieldRecord(reference_fields[i].field).space.get();
             FE_CHECK_NOT_NULL(other_space,
                               "FESystem::inferQuadraturePointLayout_: comparison space");
             const auto other_offsets = buildAuxiliaryCellQuadratureOffsets(
-                *mesh_access_, *other_space, entry.entity_map);
+                *mesh_access_, *other_space, entry.entity_map, reference_fields[i].minimum_order);
             FE_THROW_IF(other_offsets != inferred_offsets,
                         InvalidArgumentException,
                         "FESystem::finalizeAuxiliaryLayout: QuadraturePoint instance '" +
@@ -25829,17 +25834,19 @@ void FESystem::inferQuadraturePointLayout_(DeployedAuxEntry& entry)
                         std::to_string(entry.qp_offsets.size()) +
                         " but covers " + std::to_string(entry.entity_map.size()) +
                         " cells");
-        if (!reference_fields.empty() && mesh_access_) {
-            const auto* first_space = fieldRecord(reference_fields.front()).space.get();
-            FE_CHECK_NOT_NULL(first_space,
-                              "FESystem::inferQuadraturePointLayout_: explicit comparison space");
-            const auto inferred_offsets = buildAuxiliaryCellQuadratureOffsets(
-                *mesh_access_, *first_space, entry.entity_map);
-            FE_THROW_IF(inferred_offsets != entry.qp_offsets,
-                        InvalidArgumentException,
-                        "FESystem::finalizeAuxiliaryLayout: QuadraturePoint instance '" +
-                            entry.instance_name +
-                            "' explicit qpOffsets() do not match inferred consumer/hint layout");
+        if (mesh_access_) {
+            for (const auto& reference : reference_fields) {
+                const auto* space = fieldRecord(reference.field).space.get();
+                FE_CHECK_NOT_NULL(space,
+                                  "FESystem::inferQuadraturePointLayout_: explicit comparison space");
+                const auto inferred_offsets = buildAuxiliaryCellQuadratureOffsets(
+                    *mesh_access_, *space, entry.entity_map, reference.minimum_order);
+                FE_THROW_IF(inferred_offsets != entry.qp_offsets,
+                            InvalidArgumentException,
+                            "FESystem::finalizeAuxiliaryLayout: QuadraturePoint instance '" +
+                                entry.instance_name +
+                                "' explicit qpOffsets() do not match inferred consumer/hint layout");
+            }
         }
     }
 

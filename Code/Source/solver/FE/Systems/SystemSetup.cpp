@@ -2432,20 +2432,14 @@ constexpr std::uint64_t kSfcMaxCoord = (1ULL << kSfcBits) - 1ULL;
 }
 
 LocalIndex maxCellQuadraturePoints(const assembly::IMeshAccess& mesh,
-                                   const spaces::FunctionSpace& test_space)
+                                   const spaces::FunctionSpace& test_space,
+                                   int minimum_order)
 {
     LocalIndex max_qpts = 0;
     mesh.forEachCell([&](GlobalIndex cell_id) {
-        const ElementType cell_type = mesh.getCellType(cell_id);
-        const auto& test_element = test_space.getElement(cell_type, cell_id);
-
-        auto quad_rule = test_element.quadrature();
-        if (!quad_rule) {
-            const int quad_order = quadrature::QuadratureFactory::recommended_order(
-                test_element.polynomial_order(), false);
-            quad_rule = quadrature::QuadratureFactory::create(cell_type, quad_order);
-        }
-
+        const auto cell_type = mesh.getCellType(cell_id);
+        const auto& element = test_space.getElement(cell_type, cell_id);
+        const auto quad_rule = quadrature::QuadratureFactory::cell_rule(cell_type, element, minimum_order);
         const auto n = static_cast<LocalIndex>(quad_rule->num_points());
         max_qpts = std::max(max_qpts, n);
     });
@@ -6264,7 +6258,8 @@ void FESystem::setup(const SetupOptions& user_opts, const SetupInputs& inputs)
                 FE_CHECK_NOT_NULL(test_field.space.get(), "FESystem::setup: test_field.space");
                 const auto* rule_space = kernel.cellRuleSpace();
                 const auto max_qpts = maxCellQuadraturePoints(
-                    meshAccess(), rule_space != nullptr ? *rule_space : *test_field.space);
+                    meshAccess(), rule_space != nullptr ? *rule_space : *test_field.space,
+                    kernel.minimumCellQuadratureOrder());
                 FE_THROW_IF(max_qpts <= 0, InvalidStateException,
                             "FESystem::setup: failed to determine max quadrature points for MaterialState allocation");
 
@@ -6840,32 +6835,6 @@ void FESystem::setup(const SetupOptions& user_opts, const SetupInputs& inputs)
             }
         });
 
-        auto resolve_cell_quadrature =
-            [&](const spaces::FunctionSpace& qpt_space,
-                GlobalIndex cell_id,
-                ElementType cell_type) {
-                const auto& test_element = qpt_space.getElement(cell_type, cell_id);
-
-                // For P1 Tet4 elements, use position-based Gaussian rules
-                // (4 QPs) matching StandardAssembler::resolveQuadratureRule.
-                // Tri3 keeps the Duffy rule (4 QPs) for better NS-VMS stability.
-                const int basis_order = test_element.polynomial_order();
-                if (quadrature::QuadratureFactory::uses_legacy_tetrahedron_rule(
-                        cell_type, basis_order, test_element.basis().is_vector_valued())) {
-                    const auto default_mod = quadrature::QuadratureFactory::default_legacy_modifier(cell_type);
-                    return quadrature::QuadratureFactory::create_legacy_compatible(
-                        cell_type, default_mod);
-                }
-
-                auto quad_rule = test_element.quadrature();
-                if (!quad_rule) {
-                    const int quad_order = quadrature::QuadratureFactory::recommended_order(
-                        basis_order, false);
-                    quad_rule = quadrature::QuadratureFactory::create(cell_type, quad_order);
-                }
-                return quad_rule;
-            };
-
         auto resolve_boundary_quadrature =
             [&](const spaces::FunctionSpace& test_space,
                 const spaces::FunctionSpace& trial_space,
@@ -6886,7 +6855,7 @@ void FESystem::setup(const SetupOptions& user_opts, const SetupInputs& inputs)
             [&](const spaces::FunctionSpace& qpt_space,
                 const spaces::FunctionSpace& test_space,
                 const spaces::FunctionSpace& trial_space,
-                const forms::JITBasisBakeOptions* bake_options) {
+                const forms::JITBasisBakeOptions* bake_options, int minimum_order) {
                 auto mix_double = [](std::uint64_t& h, double value) {
                     std::uint64_t bits = 0;
                     static_assert(sizeof(bits) == sizeof(value));
@@ -7036,7 +7005,8 @@ void FESystem::setup(const SetupOptions& user_opts, const SetupInputs& inputs)
                 std::vector<forms::jit::JITKernelWrapper::CellSpecializationHint> hints;
                 hints.reserve(cell_exemplars.size());
                 for (const auto& [cell_type, cell_id] : cell_exemplars) {
-                    const auto quad_rule = resolve_cell_quadrature(qpt_space, cell_id, cell_type);
+                    const auto quad_rule = quadrature::QuadratureFactory::cell_rule(
+                        cell_type, qpt_space.getElement(cell_type, cell_id), minimum_order);
                     if (!quad_rule || quad_rule->num_points() == 0u) {
                         continue;
                     }
@@ -7106,7 +7076,8 @@ void FESystem::setup(const SetupOptions& user_opts, const SetupInputs& inputs)
 
                 const auto* bake_options =
                     jit_kernel->wantsBasisBakingHints() ? &jit_kernel->basisBakeOptions() : nullptr;
-                const auto hints = build_cell_hints(qpt_space, test_space, trial_space, bake_options);
+                const auto hints = build_cell_hints(qpt_space, test_space, trial_space, bake_options,
+                                                    kernel->minimumCellQuadratureOrder());
                 if (!hints.empty()) {
                     jit_kernel->primeCellSpecializations(hints);
                 }

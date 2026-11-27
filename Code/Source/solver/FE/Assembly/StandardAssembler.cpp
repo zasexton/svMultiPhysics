@@ -6704,7 +6704,8 @@ AssemblyResult StandardAssembler::assembleCellsCore(
     bool assemble_matrix,
     bool assemble_vector,
     const spaces::FunctionSpace* rule_space,
-    std::span<const int> cell_colors)
+    std::span<const int> cell_colors,
+    int inherited_minimum_order)
 {
     AssemblyResult result;
     auto start_time = std::chrono::steady_clock::now();
@@ -6825,6 +6826,7 @@ AssemblyResult StandardAssembler::assembleCellsCore(
         if (options_.num_threads == 0) color_threads = omp_get_max_threads();
 #endif
     }
+    const int minimum_order = std::max(inherited_minimum_order, kernel.minimumCellQuadratureOrder());
     const std::size_t color_batch_size = std::min<std::size_t>(color_threads, cell_ids.size());
     const std::size_t requested_batch_size = std::max<std::size_t>(color_batch_size,
         options_.use_batching ? std::max(1, options_.batch_size) : 1);
@@ -6845,7 +6847,7 @@ AssemblyResult StandardAssembler::assembleCellsCore(
 
         tp_s0 = TP_SUB();
         prepareContext(ctx, mesh, cell_id, test_space, trial_space, required_data,
-                       rule_space ? rule_space : kernel.cellRuleSpace());
+                       rule_space ? rule_space : kernel.cellRuleSpace(), minimum_order);
         tp_sub_prepare_ctx += TP_SUB() - tp_s0;
 
         tp_s0 = TP_SUB();
@@ -7229,30 +7231,10 @@ AssemblyResult StandardAssembler::assembleCellsCore(
 std::shared_ptr<const quadrature::QuadratureRule> StandardAssembler::resolveQuadratureRule(
     const spaces::FunctionSpace& test_space,
     GlobalIndex cell_id,
-    ElementType cell_type) const
+    ElementType cell_type, int minimum_order) const
 {
-    const auto& test_element = getElement(test_space, cell_id, cell_type);
-
-    // For P1 Tet4 elements, use position-based rules that match the legacy
-    // solver (4 QPs instead of 27 from tensor-product Duffy transform).
-    // Do NOT override Tri3: its Duffy rule already gives 4 QPs, and the
-    // NS-VMS stabilization terms (nonlinear τ) need the extra point for
-    // accurate integration compared to the 3-point position-based rule.
-    const int basis_order = test_element.polynomial_order();
-    if (quadrature::QuadratureFactory::uses_legacy_tetrahedron_rule(
-            cell_type, basis_order, test_element.basis().is_vector_valued())) {
-        const auto default_mod = quadrature::QuadratureFactory::default_legacy_modifier(cell_type);
-        return quadrature::QuadratureFactory::create_legacy_compatible_pinned(
-            cell_type, default_mod);
-    }
-
-    auto quad_rule = test_element.quadrature();
-    if (!quad_rule) {
-        const int quad_order = quadrature::QuadratureFactory::recommended_order(
-            basis_order, false);
-        quad_rule = quadrature::QuadratureFactory::create_pinned(cell_type, quad_order);
-    }
-    return quad_rule;
+    return quadrature::QuadratureFactory::cell_rule(
+        cell_type, getElement(test_space, cell_id, cell_type), minimum_order);
 }
 
 void StandardAssembler::ensureColoring(const IMeshAccess& mesh,
@@ -9705,11 +9687,12 @@ void StandardAssembler::prepareContext(
     const spaces::FunctionSpace& test_space,
     const spaces::FunctionSpace& trial_space,
     RequiredData required_data,
-    const spaces::FunctionSpace* rule_space)
+    const spaces::FunctionSpace* rule_space,
+    int minimum_order)
 {
     const ElementType cell_type = mesh.getCellType(cell_id);
     auto quad_rule = resolveQuadratureRule(rule_space != nullptr ? *rule_space : test_space,
-                                           cell_id, cell_type);
+                                           cell_id, cell_type, minimum_order);
     prepareGeometry(context, mesh, cell_id, *quad_rule);
     prepareBasis(context, mesh, cell_id, test_space, trial_space, required_data, *quad_rule);
     prepareFrameExplicitGeometry(context, mesh, cell_id, cell_type, *quad_rule, required_data);
@@ -10069,7 +10052,6 @@ AssemblyResult StandardAssembler::assembleCutVolumes(
     const auto cut_geometry_cache_misses_before = cut_volume_geometry_cache_misses_;
     const auto cut_geometry_cache_insertions_before = cut_volume_geometry_cache_insertions_;
     const auto cut_geometry_cache_evictions_before = cut_volume_geometry_cache_evictions_;
-    std::array<std::shared_ptr<const quadrature::QuadratureRule>, 256> full_cell_rule_cache{};
     FullSideSnapshotRulePool full_side_snapshot_rules;
     std::span<const GlobalIndex> row_dofs;
     std::span<const GlobalIndex> col_dofs;
@@ -10128,16 +10110,8 @@ AssemblyResult StandardAssembler::assembleCutVolumes(
         bool active_rule_is_partial_cut = false;
         if (isFullSideVolumeRule(rule) &&
             rule.provenance.level_set_snapshot_revision_key == 0u) {
-            const auto type_key = static_cast<std::size_t>(cell_type);
-            if (type_key < full_cell_rule_cache.size()) {
-                auto& cached_rule = full_cell_rule_cache[type_key];
-                if (!cached_rule) {
-                    cached_rule = resolveQuadratureRule(test_space, cell_id, cell_type);
-                }
-                full_cell_rule = cached_rule;
-            } else {
-                full_cell_rule = resolveQuadratureRule(test_space, cell_id, cell_type);
-            }
+            full_cell_rule = resolveQuadratureRule(kernel.cellRuleSpaceOr(test_space), cell_id, cell_type,
+                                                   kernel.minimumCellQuadratureOrder());
             active_rule = full_cell_rule.get();
             ++cut_full_rules;
         } else {
@@ -10478,7 +10452,6 @@ struct alignas(64) StandardAssembler::CutVolumeFusedThreadState {
     };
 
     std::vector<TermScratch> term_scratch{};
-    std::array<std::shared_ptr<const quadrature::QuadratureRule>, 256> full_cell_rule_cache{};
     FullSideSnapshotRulePool full_side_snapshot_rules{};
     std::vector<Real> cut_jit_constants{};
     bool use_epoch_cache{false};
@@ -10958,7 +10931,6 @@ void StandardAssembler::assembleCutVolumeFusedRule(const CutVolumeFusedLoop& loo
     const bool owned_rows_only = loop.owned_rows_only;
     const bool use_epoch_cache = state.use_epoch_cache;
     auto& term_scratch = state.term_scratch;
-    auto& full_cell_rule_cache = state.full_cell_rule_cache;
     auto& full_side_snapshot_rules = state.full_side_snapshot_rules;
     auto& cut_jit_constants = state.cut_jit_constants;
     constexpr forms::CutCellParameterSlots cut_parameter_slots{};
@@ -11036,18 +11008,9 @@ void StandardAssembler::assembleCutVolumeFusedRule(const CutVolumeFusedLoop& loo
         rule.provenance.level_set_snapshot_revision_key == 0u;
     bool active_rule_is_partial_cut = false;
     if (active_rule_is_full_side) {
-        const auto type_key = static_cast<std::size_t>(cell_type);
-        if (type_key < full_cell_rule_cache.size()) {
-            auto& cached_rule = full_cell_rule_cache[type_key];
-            if (!cached_rule) {
-                cached_rule = resolveQuadratureRule(
-                    *first_active_term.test_space, cell_id, cell_type);
-            }
-            full_cell_rule = cached_rule;
-        } else {
-            full_cell_rule = resolveQuadratureRule(
-                *first_active_term.test_space, cell_id, cell_type);
-        }
+        full_cell_rule = resolveQuadratureRule(
+            first_active_term.kernel->cellRuleSpaceOr(*first_active_term.test_space), cell_id, cell_type,
+            first_active_term.kernel->minimumCellQuadratureOrder());
         active_rule = full_cell_rule.get();
         ++cut_full_rules;
     } else {
@@ -11115,8 +11078,9 @@ void StandardAssembler::assembleCutVolumeFusedRule(const CutVolumeFusedLoop& loo
 
         const quadrature::QuadratureRule* term_rule = active_rule;
         std::shared_ptr<const quadrature::QuadratureRule> term_full_cell_rule;
-        if (active_rule_is_full_side && t.test_space != first_active_term.test_space) {
-            term_full_cell_rule = resolveQuadratureRule(*t.test_space, cell_id, cell_type);
+        if (active_rule_is_full_side && &t != &first_active_term) {
+            term_full_cell_rule = resolveQuadratureRule(t.kernel->cellRuleSpaceOr(*t.test_space), cell_id,
+                                                       cell_type, t.kernel->minimumCellQuadratureOrder());
             term_rule = term_full_cell_rule.get();
         }
         if (active_rule_is_full_side &&
@@ -13318,7 +13282,8 @@ AssemblyResult StandardAssembler::assembleCellsFused(
             setRowDofMap(*t.row_dof_map, t.row_dof_offset);
             setColDofMap(*t.col_dof_map, t.col_dof_offset);
             const auto part = assembleCellsCore(mesh, *t.test_space, *t.trial_space, *t.kernel,
-                t.matrix_view, t.vector_view, matrix, vector, parent ? parent->cellRuleSpace() : nullptr);
+                t.matrix_view, t.vector_view, matrix, vector, parent ? parent->cellRuleSpace() : nullptr,
+                {}, parent ? parent->minimumCellQuadratureOrder() : 0);
             result.elements_assembled += part.elements_assembled;
             result.matrix_entries_inserted += part.matrix_entries_inserted;
             result.vector_entries_inserted += part.vector_entries_inserted;
@@ -13403,10 +13368,10 @@ AssemblyResult StandardAssembler::assembleCellsFused(
         });
         const auto cell_type = mesh.getCellType(first_cell);
         const auto rule_space = [](const FusedCellTerm& t) -> const spaces::FunctionSpace& {
-            const auto* space = t.kernel->cellRuleSpace();
-            return space != nullptr ? *space : *t.test_space;
+            return t.kernel->cellRuleSpaceOr(*t.test_space);
         };
-        fused_quad_rule = resolveQuadratureRule(rule_space(first_t), first_cell, cell_type);
+        fused_quad_rule = resolveQuadratureRule(rule_space(first_t), first_cell, cell_type,
+                                                first_t.kernel->minimumCellQuadratureOrder());
 
         // Verify all terms produce the same quad rule (the same points and
         // weights, not only as many)
@@ -13429,7 +13394,8 @@ AssemblyResult StandardAssembler::assembleCellsFused(
             return true;
         };
         for (std::size_t ti = 1; ti < terms.size(); ++ti) {
-            auto other_qr = resolveQuadratureRule(rule_space(terms[ti]), first_cell, cell_type);
+            auto other_qr = resolveQuadratureRule(rule_space(terms[ti]), first_cell, cell_type,
+                                                  terms[ti].kernel->minimumCellQuadratureOrder());
             if (!same_rule(*other_qr, *fused_quad_rule)) {
                 // Quad rule mismatch — fall back to default sequential path
                 return assemble_per_term();

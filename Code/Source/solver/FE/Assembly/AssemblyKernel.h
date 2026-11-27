@@ -846,8 +846,17 @@ public:
     {
         return cell_rule_space_.get();
     }
+    [[nodiscard]] const spaces::FunctionSpace& cellRuleSpaceOr(const spaces::FunctionSpace& fallback) const noexcept
+    {
+        return cell_rule_space_ ? *cell_rule_space_ : fallback;
+    }
+
+    /// Minimum polynomial exactness requested by this form on whole cells.
+    void setMinimumCellQuadratureOrder(int order) noexcept { minimum_cell_quadrature_order_ = order; }
+    [[nodiscard]] int minimumCellQuadratureOrder() const noexcept { return minimum_cell_quadrature_order_; }
 
 private:
+    int minimum_cell_quadrature_order_{0};
     std::shared_ptr<const spaces::FunctionSpace> cell_rule_space_{};
 };
 

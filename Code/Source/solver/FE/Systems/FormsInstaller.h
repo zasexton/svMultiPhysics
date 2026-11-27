@@ -97,6 +97,10 @@ struct FormInstallOptions {
     /// law without duplicating physics-specific options.
     std::vector<analysis::ConstitutiveLawMetadata> constitutive_laws{};
 
+    /// Minimum polynomial exactness required on a whole cell by this residual
+    /// and its tangent. Zero preserves the native element rule.
+    int minimum_cell_quadrature_order{0};
+
     /// Optional subterm/source label preserved through cut-volume assembly
     /// diagnostics. Empty means the whole installed operator/component.
     std::string source_component_tag{};

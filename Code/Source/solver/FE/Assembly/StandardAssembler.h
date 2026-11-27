@@ -589,7 +589,8 @@ private:
         bool assemble_matrix,
         bool assemble_vector,
         const spaces::FunctionSpace* rule_space = nullptr,
-        std::span<const int> cell_colors = {});
+        std::span<const int> cell_colors = {},
+        int inherited_minimum_order = 0);
 
     /**
      * @brief Prepare assembly context for a cell
@@ -610,7 +611,8 @@ private:
         const spaces::FunctionSpace& test_space,
         const spaces::FunctionSpace& trial_space,
         RequiredData required_data,
-        const spaces::FunctionSpace* rule_space = nullptr);
+        const spaces::FunctionSpace* rule_space,
+        int minimum_order);
 
     /**
      * @brief Resolve quadrature rule for a test space element on a cell
@@ -618,7 +620,7 @@ private:
     std::shared_ptr<const quadrature::QuadratureRule> resolveQuadratureRule(
         const spaces::FunctionSpace& test_space,
         GlobalIndex cell_id,
-        ElementType cell_type) const;
+        ElementType cell_type, int minimum_order = 0) const;
 
     /**
      * @brief Prepare geometry data for a cell (cell-only, space-independent)

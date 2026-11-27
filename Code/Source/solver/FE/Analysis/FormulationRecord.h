@@ -50,6 +50,7 @@ struct AuxiliaryOutputConsumerRecord {
     FieldId reference_field{INVALID_FIELD_ID};
     FieldId test_field{INVALID_FIELD_ID};
     FieldId trial_field{INVALID_FIELD_ID};
+    int minimum_cell_quadrature_order{0};
 };
 
 /**
@@ -62,6 +63,9 @@ struct AuxiliaryOutputConsumerRecord {
 struct FormulationRecord {
     /// Operator tag (e.g. "equations", "constraints")
     std::string operator_tag;
+
+    /// Minimum whole-cell polynomial exactness requested by the form.
+    int minimum_cell_quadrature_order{0};
 
     /// False for diagnostic or measurement-only operators that retain this
     /// record solely for assembly provenance. Such records are excluded from
