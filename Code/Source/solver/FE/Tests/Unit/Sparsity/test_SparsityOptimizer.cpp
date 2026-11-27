@@ -142,7 +142,8 @@ TEST(SparsityOptimizerTest, OptimizeWithDefaults) {
 }
 
 TEST(SparsityOptimizerTest, OptimizeAndApply) {
-    auto pattern = createPoorlyOrderedPattern(20);
+    // The default optimizer reorders sparse matrices with at least 100 rows.
+    auto pattern = createPoorlyOrderedPattern(120);
     GlobalIndex original_bw = computePatternBandwidth(pattern);
 
     SparsityOptimizer optimizer;
@@ -152,7 +153,7 @@ TEST(SparsityOptimizerTest, OptimizeAndApply) {
     EXPECT_EQ(optimized.getNnz(), pattern.getNnz());
 
     GlobalIndex new_bw = computePatternBandwidth(optimized);
-    EXPECT_LE(new_bw, original_bw);
+    EXPECT_LT(new_bw, original_bw);
 }
 
 TEST(SparsityOptimizerTest, OptimizeForBandwidth) {
@@ -165,7 +166,7 @@ TEST(SparsityOptimizerTest, OptimizeForBandwidth) {
     auto optimized = pattern.permute(result.permutation, result.permutation);
     GlobalIndex new_bw = computePatternBandwidth(optimized);
 
-    EXPECT_LE(new_bw, original_bw);
+    EXPECT_LT(new_bw, original_bw);
     EXPECT_EQ(result.optimized_bandwidth, new_bw);
 }
 
@@ -295,7 +296,8 @@ TEST(SparsityOptimizerTest, ResultImproved) {
     auto result = optimizer.optimize(pattern, opts);
 
     // For this pattern, we expect improvement
-    EXPECT_TRUE(result.improved() || result.optimized_bandwidth == result.original_bandwidth);
+    EXPECT_TRUE(result.improved());
+    EXPECT_LT(result.optimized_bandwidth, result.original_bandwidth);
 }
 
 TEST(SparsityOptimizerTest, BandwidthReductionRatio) {

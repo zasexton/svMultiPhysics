@@ -588,7 +588,7 @@ TEST(SparsityFormatTest, DetectBlockSize) {
     GlobalIndex detected = detectBlockSize(pattern, 4);
 
     // Should detect 2x2 blocks
-    EXPECT_GE(detected, 1);
+    EXPECT_EQ(detected, 2);
 }
 
 TEST(SparsityFormatTest, ComputeEllpackEfficiency) {
@@ -623,11 +623,8 @@ TEST(SparsityFormatTest, RecommendFormat) {
     }
     diag.finalize();
 
-    SparseFormat rec = recommendFormat(diag);
-    // Should recommend a valid format (implementation specific)
-    EXPECT_TRUE(rec == SparseFormat::CSR || rec == SparseFormat::CSC ||
-                rec == SparseFormat::COO || rec == SparseFormat::BSR ||
-                rec == SparseFormat::ELLPACK || rec == SparseFormat::DIA);
+    EXPECT_EQ(recommendFormat(diag), SparseFormat::ELLPACK);
+    EXPECT_EQ(recommendFormat(createBlockPattern()), SparseFormat::BSR);
 }
 
 // ============================================================================

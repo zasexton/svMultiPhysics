@@ -624,8 +624,7 @@ TEST(AdaptiveSparsityTest, Validate) {
 
 TEST(AdaptiveSparsityTest, ValidationError) {
     AdaptiveSparsity adaptive(10, 10);
-    auto error = adaptive.validationError();
-    // Empty pattern should be valid
+    EXPECT_TRUE(adaptive.validationError().empty());
 }
 
 TEST(AdaptiveSparsityTest, GetStats) {

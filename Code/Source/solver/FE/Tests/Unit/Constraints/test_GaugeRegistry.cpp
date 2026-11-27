@@ -1001,6 +1001,15 @@ TEST(GaugeRegistry, ApplyEnforcement_WeightedMeanZero_UsesWeights)
     int n = reg.applyEnforcement(ac, dof_provider, mass_weights);
     EXPECT_EQ(n, 1);
     EXPECT_TRUE(ac.isConstrained(0));
+    ac.close();
+    const auto equation = ac.getConstraint(0);
+    ASSERT_TRUE(equation);
+    ASSERT_EQ(equation->entries.size(), 3u);
+    for (std::size_t i = 0; i < 3; ++i) {
+        EXPECT_EQ(equation->entries[i].master_dof, i + 1);
+        EXPECT_NEAR(equation->entries[i].weight, -static_cast<double>(i + 2), 1e-14);
+    }
+    EXPECT_DOUBLE_EQ(equation->inhomogeneity, 0.);
 }
 
 TEST(GaugeRegistry, ApplyEnforcement_NoWeights_FallsBackToUniform)

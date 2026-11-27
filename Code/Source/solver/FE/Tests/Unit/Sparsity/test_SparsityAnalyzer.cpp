@@ -338,12 +338,8 @@ TEST(SparsityAnalyzerTest, NoBlockStructure) {
     SparsityAnalyzer analyzer;
     auto stats = analyzer.detectBlocks(pattern, 8);
 
-    // Prime-sized irregular pattern should have limited block structure
-    // Either no block structure, or if detected, block size should be small
-    if (stats.has_block_structure) {
-        // If detected, suggested block sizes should exist
-        EXPECT_FALSE(stats.suggested_block_sizes.empty());
-    }
+    EXPECT_FALSE(stats.has_block_structure);
+    EXPECT_TRUE(stats.suggested_block_sizes.empty());
 }
 
 TEST(SparsityAnalyzerTest, ArrowStructure) {

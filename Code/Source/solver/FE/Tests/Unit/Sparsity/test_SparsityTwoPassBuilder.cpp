@@ -31,6 +31,7 @@
 #include <gtest/gtest.h>
 #include "Sparsity/SparsityTwoPassBuilder.h"
 #include "Sparsity/SparsityPattern.h"
+#include <array>
 #include <vector>
 #include <algorithm>
 #include <numeric>
@@ -181,6 +182,67 @@ TEST(SparsityTwoPassBuilderTest, AddEntry) {
     EXPECT_TRUE(pattern.hasEntry(1, 1));
     EXPECT_TRUE(pattern.hasEntry(1, 2));
     EXPECT_TRUE(pattern.hasEntry(2, 1));
+}
+
+TEST(SparsityTwoPassBuilderTest, AllFillAPIsPreserveUndercountedRowsAndDuplicates) {
+    TwoPassBuildOptions options;
+    options.ensure_diagonal = false;
+    options.ensure_non_empty_rows = false;
+    SparsityTwoPassBuilder builder(3, 5, options);
+    builder.countEntry(0, 0);
+    builder.finalizeCount();
+
+    builder.addEntry(0, 0);
+    builder.addEntry(0, 1);
+    builder.addEntry(0, 0);
+    builder.addEntries(1, std::array<GlobalIndex, 3>{3, -1, 4});
+    builder.addElementCouplings(std::array<GlobalIndex, 2>{2, 4});
+    builder.addElementCouplings(std::array<GlobalIndex, 2>{0, 2}, std::array<GlobalIndex, 1>{3});
+    builder.addEntry(2, 3);
+
+    auto pattern = builder.finalize();
+    EXPECT_EQ(pattern.getNnz(), 8);
+    const std::vector<GlobalIndex> columns{0, 1, 3, 3, 4, 2, 3, 4};
+    EXPECT_EQ(std::vector<GlobalIndex>(pattern.getColIndices().begin(), pattern.getColIndices().end()), columns);
+    EXPECT_EQ(pattern.getRowNnz(0), 3);
+    EXPECT_EQ(pattern.getRowNnz(1), 2);
+    EXPECT_EQ(pattern.getRowNnz(2), 3);
+    EXPECT_EQ(builder.getStats().duplicates_removed, 2);
+
+    builder.reset();
+    builder.finalizeCount();
+    EXPECT_EQ(builder.finalize().getNnz(), 0);
+}
+
+TEST(SparsityTwoPassBuilderTest, RepeatedWorkerBatchesContributeToBothPasses) {
+    TwoPassBuildOptions options;
+    options.num_threads = 2;
+    options.ensure_diagonal = false;
+    options.ensure_non_empty_rows = false;
+    SparsityTwoPassBuilder builder(3, 4, options);
+    for (int col : {1, 3}) {
+        builder.countParallel([&](int worker, auto& counter) { counter.countEntry(worker, col); });
+    }
+    const std::array<GlobalIndex, 1> last_row{2};
+    const std::array<GlobalIndex, 2> even_columns{0, 2};
+    SparsityTwoPassBuilder::Counter count(builder, 0);
+    count.countElementCouplings(last_row, even_columns);
+    builder.finalizeCount();
+    EXPECT_EQ(builder.getRowEstimate(0), 2);
+    EXPECT_EQ(builder.getRowEstimate(1), 2);
+    for (int col : {1, 3}) {
+        builder.fillParallel([&](int worker, auto& filler) { filler.addEntry(worker, col); });
+    }
+    SparsityTwoPassBuilder::Filler fill(builder, 0);
+    fill.addElementCouplings(last_row, even_columns);
+    auto pattern = builder.finalize();
+    EXPECT_EQ(pattern.getNnz(), 6);
+    EXPECT_TRUE(pattern.hasEntry(2, 0));
+    EXPECT_TRUE(pattern.hasEntry(2, 2));
+    for (int row : {0, 1}) {
+        EXPECT_TRUE(pattern.hasEntry(row, 1));
+        EXPECT_TRUE(pattern.hasEntry(row, 3));
+    }
 }
 
 TEST(SparsityTwoPassBuilderTest, AddElementCouplings) {

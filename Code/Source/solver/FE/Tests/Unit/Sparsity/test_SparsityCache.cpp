@@ -318,24 +318,19 @@ TEST(SparsityCacheTest, ManualEviction) {
 }
 
 TEST(SparsityCacheTest, MemoryBasedEviction) {
+    const auto pattern = createTestPattern(100, 10);
     CacheConfig config;
-    config.max_memory_bytes = 10000;  // Small limit
-    config.auto_evict = true;
+    config.max_memory_bytes = 2 * pattern->memoryUsageBytes();
     SparsityCache cache(config);
-
-    // Keep adding patterns until eviction happens
-    int eviction_count = 0;
-    for (int i = 0; i < 10; ++i) {
-        PatternSignature sig("pattern_" + std::to_string(i), 100, 100);
-        static_cast<void>(cache.put(sig, createTestPattern(100, 10)));
-
-        if (cache.memoryUsage() > config.max_memory_bytes) {
-            // Should trigger eviction
-            ++eviction_count;
-        }
-    }
-
-    // Memory should be under limit
+    const PatternSignature first("first", 100, 100), second("second", 100, 100), third("third", 100, 100);
+    ASSERT_TRUE(cache.put(first, pattern));
+    ASSERT_TRUE(cache.put(second, pattern));
+    ASSERT_TRUE(cache.get(first)); // The second key is now least recently used.
+    ASSERT_TRUE(cache.put(third, pattern));
+    EXPECT_TRUE(cache.contains(first));
+    EXPECT_FALSE(cache.contains(second));
+    EXPECT_TRUE(cache.contains(third));
+    EXPECT_EQ(cache.getStats().evictions, 1u);
     EXPECT_LE(cache.memoryUsage(), config.max_memory_bytes);
 }
 

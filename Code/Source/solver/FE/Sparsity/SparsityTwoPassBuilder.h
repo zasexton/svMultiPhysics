@@ -39,11 +39,11 @@
  * sparsity patterns in two passes:
  *
  * Pass 1: Count row NNZ (exact or approximate) - minimal memory
- * Pass 2: Fill column indices - single allocation
+ * Pass 2: Fill preallocated column slots, buffering entries that exceed a row estimate
  *
  * Key advantages over standard SparsityPattern:
  * - Avoids "set-of-sets" memory explosion (40+ bytes per entry in std::set)
- * - Single allocation after counting eliminates reallocation overhead
+ * - Rows filled within their estimates use preallocated slots
  * - Deterministic through sorted merge, not insertion order
  * - Suitable for billion-NNZ problems
  *
@@ -59,7 +59,7 @@
  *
  * Memory:
  * - Pass 1: O(n_rows) for row counts
- * - Pass 2: O(NNZ) for column indices (single allocation)
+ * - Pass 2: O(NNZ) for column indices (with extra storage for underestimated rows)
  * - Final: O(n_rows + NNZ) CSR format
  *
  * @see SparsityPattern for standard construction
@@ -74,9 +74,7 @@
 #include <vector>
 #include <span>
 #include <functional>
-#include <atomic>
-#include <mutex>
-#include <memory>
+#include <utility>
 
 namespace svmp {
 namespace FE {
@@ -484,7 +482,6 @@ public:
     private:
         friend class SparsityTwoPassBuilder;
         SparsityTwoPassBuilder& builder_;
-        int thread_id_;
         std::vector<GlobalIndex> local_counts_;
     };
 
@@ -504,7 +501,7 @@ public:
     private:
         friend class SparsityTwoPassBuilder;
         SparsityTwoPassBuilder& builder_;
-        int thread_id_;
+        bool buffered_{false};
         std::vector<std::pair<GlobalIndex, GlobalIndex>> local_entries_;
     };
 
@@ -515,10 +512,6 @@ private:
     void checkRowIndex(GlobalIndex row) const;
     void checkColIndex(GlobalIndex col) const;
     void addEntryInternal(GlobalIndex row, GlobalIndex col);
-    void mergeThreadCounts();
-    void mergeThreadEntries();
-    void sortAndDeduplicate();
-    void updateStats();
 
     // Dimensions
     GlobalIndex n_rows_{0};
@@ -537,11 +530,7 @@ private:
     std::vector<GlobalIndex> row_offsets_;  // Size: n_rows + 1
     std::vector<GlobalIndex> col_indices_;  // Size: allocated_nnz
     std::vector<GlobalIndex> row_positions_; // Current fill position per row
-
-    // Thread-local buffers for parallel mode
-    std::vector<std::unique_ptr<std::vector<GlobalIndex>>> thread_counts_;
-    std::vector<std::unique_ptr<std::vector<std::pair<GlobalIndex, GlobalIndex>>>> thread_entries_;
-    std::mutex merge_mutex_;
+    std::vector<std::pair<GlobalIndex, GlobalIndex>> overflow_entries_;
 
     // Statistics
     mutable TwoPassBuildStats stats_;

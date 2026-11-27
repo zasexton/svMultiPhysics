@@ -352,14 +352,15 @@ TEST(GraphSparsityTest, RCMReducesBandwidth) {
     GraphSparsity reordered_graph(reordered);
     GlobalIndex new_bw = reordered_graph.computeBandwidth();
 
-    EXPECT_LE(new_bw, original_bw);
+    EXPECT_EQ(original_bw, 9);
+    EXPECT_EQ(new_bw, 1);
 }
 
 TEST(GraphSparsityTest, FindPseudoPeripheral) {
     auto pattern = createPathGraph(10);
     GraphSparsity graph(pattern);
 
-    GlobalIndex peripheral = graph.findPseudoPeripheral();
+    GlobalIndex peripheral = graph.findPseudoPeripheral(4);
 
     // For path graph, should be one of the endpoints
     EXPECT_TRUE(peripheral == 0 || peripheral == 9);
@@ -493,12 +494,11 @@ TEST(GraphSparsityTest, PredictCholeskyFillIn) {
 
     auto prediction = graph.predictCholeskyFillIn();
 
-    // Path graph should have minimal fill-in since it's already well-ordered
-    EXPECT_EQ(prediction.original_nnz, pattern.getNnz());
-    // Note: total_factor_nnz for lower/upper triangle only, original_nnz is full symmetric pattern
-    // For a symmetric pattern, the Cholesky factor has approximately half the entries (lower or upper)
-    // The prediction is for the factor, which may be less than the full pattern NNZ
-    EXPECT_GT(prediction.total_factor_nnz, 0);
+    EXPECT_EQ(prediction.original_nnz, 13);
+    EXPECT_EQ(prediction.total_factor_nnz, 9);
+    EXPECT_EQ(prediction.predicted_fill, 0);
+    EXPECT_DOUBLE_EQ(prediction.fill_ratio, 1.);
+    EXPECT_EQ(prediction.row_fill, std::vector<GlobalIndex>(5, 0));
 }
 
 TEST(GraphSparsityTest, PredictLUFillIn) {
@@ -521,13 +521,21 @@ TEST(GraphSparsityTest, SymbolicCholesky) {
     EXPECT_EQ(L.numRows(), 4);
     EXPECT_EQ(L.numCols(), 4);
 
-    // Lower triangular
+    EXPECT_EQ(L.getNnz(), 7);
     for (GlobalIndex i = 0; i < 4; ++i) {
-        EXPECT_TRUE(L.hasEntry(i, i));  // Diagonal
-        for (GlobalIndex j = i + 1; j < 4; ++j) {
-            EXPECT_FALSE(L.hasEntry(i, j));  // No upper entries
-        }
+        for (GlobalIndex j = 0; j < 4; ++j) EXPECT_EQ(L.hasEntry(i, j), j == i || j + 1 == i);
     }
+
+    // Eliminating the central vertex first completes the three-leaf clique.
+    auto star = createStarGraph(4);
+    GraphSparsity star_graph(star);
+    const auto filled = star_graph.symbolicCholesky();
+    for (GlobalIndex i = 0; i < 4; ++i) {
+        for (GlobalIndex j = 0; j < 4; ++j) EXPECT_EQ(filled.hasEntry(i, j), j <= i);
+    }
+    const auto prediction = star_graph.predictCholeskyFillIn();
+    EXPECT_EQ(prediction.predicted_fill, 3);
+    EXPECT_EQ(prediction.row_fill, (std::vector<GlobalIndex>{0, 0, 1, 2}));
 }
 
 TEST(GraphSparsityTest, SymbolicLU) {
@@ -576,8 +584,7 @@ TEST(GraphSparsityTest, ApplyRCM) {
     EXPECT_EQ(reordered.numRows(), 5);
     EXPECT_EQ(reordered.getNnz(), pattern.getNnz());
 
-    // Bandwidth should not increase
-    EXPECT_LE(computePatternBandwidth(reordered), computePatternBandwidth(pattern));
+    EXPECT_LT(computePatternBandwidth(reordered), computePatternBandwidth(pattern));
 }
 
 TEST(GraphSparsityTest, GetRCMPermutation) {

@@ -318,7 +318,7 @@ public:
      * from a peripheral vertex.
      *
      * @param start_vertex Starting vertex (-1 for automatic selection)
-     * @return Permutation vector
+     * @return Old vertex to new position, suitable for SparsityPattern::permute
      *
      * Complexity: O(NNZ + n * log(n))
      */
@@ -330,7 +330,7 @@ public:
      * Reversed CM ordering, often gives better results for direct solvers.
      *
      * @param start_vertex Starting vertex (-1 for automatic selection)
-     * @return Permutation vector
+     * @return Old vertex to new position, suitable for SparsityPattern::permute
      */
     [[nodiscard]] std::vector<GlobalIndex> reverseCuthillMcKee(GlobalIndex start_vertex = -1) const;
 
@@ -349,7 +349,7 @@ public:
      *
      * Approximates the minimum degree algorithm for fill-reducing ordering.
      *
-     * @return Permutation vector
+     * @return Old vertex to new position, suitable for SparsityPattern::permute
      *
      * Complexity: O(n^2) worst case
      *

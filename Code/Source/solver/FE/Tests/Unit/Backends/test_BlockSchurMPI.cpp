@@ -63,6 +63,8 @@ private:
     std::optional<std::string> prior_value_{};
 };
 
+constexpr std::array<Real, 9> block_schur_exact{1., -2., 0.5, -0.5, 1.25, 2., -1.5, 0.75, -1.};
+
 SolverOptions makeFsilsBlockSchurOptions(int dof_per_node,
                                          int primary_components,
                                          int constraint_components,
@@ -74,7 +76,7 @@ SolverOptions makeFsilsBlockSchurOptions(int dof_per_node,
     SolverOptions opts;
     opts.method = SolverMethod::BlockSchur;
     opts.preconditioner = PreconditionerType::Diagonal;
-    opts.rel_tol = 0.4;
+    opts.rel_tol = 1e-10;
     opts.abs_tol = 0.0;
     opts.max_iter = 20;
     opts.krylov_dim = 20;
@@ -1263,24 +1265,13 @@ TEST(FsilsBackendMPI, SolveNSBlockSchur3DOF)
     viewA->finalizeAssembly();
     A->finalizeAssembly();
 
-    // RHS = A * 1 = RowSum
     auto viewB = b->createAssemblyView();
     viewB->beginAssemblyPhase();
-    
-    // We want x = all ones.
-    // Row sums:
-    // Node 0 (Rank 0 only): 5 - 1 = 4.
-    // Node 1 (Shared): (5-1) + (5-1) = 8.
-    // Node 2 (Rank 1 only): 5 - 1 = 4.
-    
-    std::vector<Real> be(edof);
-    // Local contribution to row sum
-    for(int i=0; i<edof; ++i) {
-        Real sum = 0.0;
-        for(int j=0; j<edof; ++j) sum += Ke[i*edof + j];
-        be[i] = sum;
-    }
 
+    std::vector<Real> be(edof);
+    for (int i = 0; i < edof; ++i) {
+        for (int j = 0; j < edof; ++j) be[i] += Ke[i * edof + j] * block_schur_exact[rank * dof + j];
+    }
     if (rank == 0) {
         std::vector<GlobalIndex> idx(edof);
         for(int i=0; i<edof; ++i) idx[i] = i;
@@ -1327,34 +1318,12 @@ TEST(FsilsBackendMPI, SolveNSBlockSchur3DOF)
         }
 
         x_case->updateGhosts();
-
-        auto b_acc = factory.createVector(n_global);
-        {
-            auto dst = b_acc->localSpan();
-            const auto src = b->localSpan();
-            ASSERT_EQ(dst.size(), src.size());
-            std::copy(src.begin(), src.end(), dst.begin());
-        }
-        auto* b_fs = dynamic_cast<FsilsVector*>(b_acc.get());
-        ASSERT_NE(b_fs, nullptr);
-        b_fs->updateGhosts();
-
-        auto Ax = factory.createVector(n_global);
-        A->mult(*x_case, *Ax);
-
-        auto r = factory.createVector(n_global);
-        r->zero();
-        auto rs = r->localSpan();
-        const auto bs = b_acc->localSpan();
-        const auto axs = Ax->localSpan();
-        ASSERT_EQ(rs.size(), bs.size());
-        ASSERT_EQ(rs.size(), axs.size());
-        for (std::size_t i = 0; i < rs.size(); ++i) {
-            rs[i] = bs[i] - axs[i];
+        auto solution = x_case->createGhostedReadView();
+        for (auto row = owned.first; row < owned.last; ++row) {
+            EXPECT_NEAR(solution->getVectorEntry(row), block_schur_exact[row], 10 * opts.rel_tol);
         }
 
-        const Real denom = std::max<Real>(b_acc->norm(), 1e-30);
-        const Real rel = r->norm() / denom;
+        const Real rel = fullOperatorRelativeResidual(factory, *A, *x_case, *b, std::span<const RankOneUpdate>{}, MPI_COMM_WORLD);
         EXPECT_LE(rel, opts.rel_tol + 1e-12);
     }
 }
@@ -4224,10 +4193,7 @@ TEST(FsilsBackendMPI, MultiModeNativeRankOneSolversTrackManufacturedModeResponse
     }
 }
 
-// Targeted parity repro for the shared distributed low-rank / coarse-space path.
-// Keep this disabled until BlockSchur recovers near-reference mode response on
-// the near-dependent two-mode outlet system.
-TEST(FsilsBackendMPI, DISABLED_NearDependentNativeRankOneBlockSchurMatchesReferenceModeResponse)
+TEST(FsilsBackendMPI, NearDependentNativeRankOneBlockSchurMatchesReferenceModeResponse)
 {
     int rank = 0;
     int size = 1;
@@ -5246,11 +5212,12 @@ TEST(FsilsBackendMPI, SolveNSBlockSchur3DOFSubcommunicator)
     auto viewB = b->createAssemblyView();
     viewB->beginAssemblyPhase();
 
+    const Real scale = color == 0 ? Real(1) : Real(-2);
     std::vector<Real> be(edof);
     for (int i = 0; i < edof; ++i) {
         Real sum = 0.0;
         for (int j = 0; j < edof; ++j) {
-            sum += Ke[static_cast<std::size_t>(i * edof + j)];
+            sum += Ke[static_cast<std::size_t>(i * edof + j)] * scale * block_schur_exact[rank * dof + j];
         }
         be[static_cast<std::size_t>(i)] = sum;
     }
@@ -5294,33 +5261,12 @@ TEST(FsilsBackendMPI, SolveNSBlockSchur3DOFSubcommunicator)
     EXPECT_TRUE(comm_compare == MPI_IDENT || comm_compare == MPI_CONGRUENT);
 
     x->updateGhosts();
-
-    auto b_acc = factory.createVector(n_global);
-    {
-        auto dst = b_acc->localSpan();
-        const auto src = b->localSpan();
-        ASSERT_EQ(dst.size(), src.size());
-        std::copy(src.begin(), src.end(), dst.begin());
-    }
-    auto* b_fs = dynamic_cast<FsilsVector*>(b_acc.get());
-    ASSERT_NE(b_fs, nullptr);
-    b_fs->updateGhosts();
-
-    auto Ax = factory.createVector(n_global);
-    A->mult(*x, *Ax);
-
-    auto r = factory.createVector(n_global);
-    auto rs = r->localSpan();
-    const auto bs = b_acc->localSpan();
-    const auto axs = Ax->localSpan();
-    ASSERT_EQ(rs.size(), bs.size());
-    ASSERT_EQ(rs.size(), axs.size());
-    for (std::size_t i = 0; i < rs.size(); ++i) {
-        rs[i] = bs[i] - axs[i];
+    auto solution = x->createGhostedReadView();
+    for (auto row = owned.first; row < owned.last; ++row) {
+        EXPECT_NEAR(solution->getVectorEntry(row), scale * block_schur_exact[row], 10 * opts.rel_tol);
     }
 
-    const Real denom = std::max<Real>(b_acc->norm(), 1e-30);
-    const Real rel = r->norm() / denom;
+    const Real rel = fullOperatorRelativeResidual(factory, *A, *x, *b, std::span<const RankOneUpdate>{}, subcomm);
     EXPECT_LE(rel, opts.rel_tol + 1e-12);
 
     MPI_Comm_free(&subcomm);

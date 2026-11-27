@@ -33,6 +33,7 @@
 #include <algorithm>
 #include <queue>
 #include <set>
+#include <iterator>
 #include <limits>
 #include <numeric>
 
@@ -405,12 +406,12 @@ std::vector<GlobalIndex> GraphSparsity::cuthillMcKee(GlobalIndex start_vertex) c
         }
     }
 
-    return perm;
+    return invertPermutation(perm);
 }
 
 std::vector<GlobalIndex> GraphSparsity::reverseCuthillMcKee(GlobalIndex start_vertex) const {
     auto perm = cuthillMcKee(start_vertex);
-    std::reverse(perm.begin(), perm.end());
+    for (auto& position : perm) position = pattern_.numRows() - 1 - position;
     return perm;
 }
 
@@ -421,7 +422,8 @@ GlobalIndex GraphSparsity::findPseudoPeripheral(GlobalIndex start) const {
     if (start < 0 || start >= n) start = 0;
 
     GlobalIndex current = start;
-    GlobalIndex current_ecc = computeEccentricity(current);
+    GlobalIndex previous_eccentricity = -1;
+    const auto degrees = computeDegrees();
 
     // Iterate until eccentricity doesn't increase
     while (true) {
@@ -430,7 +432,6 @@ GlobalIndex GraphSparsity::findPseudoPeripheral(GlobalIndex start) const {
 
         GlobalIndex farthest = current;
         GlobalIndex max_dist = 0;
-        auto degrees = computeDegrees();
 
         for (GlobalIndex v = 0; v < n; ++v) {
             GlobalIndex d = distances[static_cast<std::size_t>(v)];
@@ -443,12 +444,12 @@ GlobalIndex GraphSparsity::findPseudoPeripheral(GlobalIndex start) const {
             }
         }
 
-        if (max_dist <= current_ecc) {
+        if (max_dist <= previous_eccentricity) {
             break;
         }
 
         current = farthest;
-        current_ecc = max_dist;
+        previous_eccentricity = max_dist;
     }
 
     return current;
@@ -531,7 +532,7 @@ std::vector<GlobalIndex> GraphSparsity::approximateMinimumDegree() const {
         }
     }
 
-    return perm;
+    return invertPermutation(perm);
 }
 
 std::vector<GlobalIndex> GraphSparsity::naturalOrdering() const {
@@ -691,22 +692,19 @@ FillInPrediction GraphSparsity::predictCholeskyFillIn() const {
     // Symbolic Cholesky factorization
     auto L_pattern = symbolicCholesky();
     result.total_factor_nnz = L_pattern.getNnz();
-    result.predicted_fill = result.total_factor_nnz - result.original_nnz / 2;
-
-    if (result.original_nnz > 0) {
-        result.fill_ratio = static_cast<double>(result.total_factor_nnz) /
-                           (static_cast<double>(result.original_nnz) / 2.0);
-    }
-
-    // Per-row fill-in
+    // Compare the lower factor with the original lower triangle, counting
+    // the diagonal once in both patterns.
+    GlobalIndex original_lower_nnz = 0;
     result.row_fill.resize(static_cast<std::size_t>(n));
     for (GlobalIndex row = 0; row < n; ++row) {
-        GlobalIndex original_row_nnz = 0;
-        for (GlobalIndex col : pattern_.getRowSpan(row)) {
-            if (col <= row) ++original_row_nnz;
-        }
-        result.row_fill[static_cast<std::size_t>(row)] =
-            L_pattern.getRowNnz(row) - original_row_nnz;
+        const auto cols = pattern_.getRowSpan(row);
+        const auto original = std::upper_bound(cols.begin(), cols.end(), row) - cols.begin();
+        result.row_fill[static_cast<std::size_t>(row)] = L_pattern.getRowNnz(row) - original;
+        original_lower_nnz += original;
+    }
+    result.predicted_fill = result.total_factor_nnz - original_lower_nnz;
+    if (original_lower_nnz > 0) {
+        result.fill_ratio = static_cast<double>(result.total_factor_nnz) / original_lower_nnz;
     }
 
     return result;
@@ -735,52 +733,22 @@ FillInPrediction GraphSparsity::predictLUFillIn() const {
 }
 
 SparsityPattern GraphSparsity::symbolicCholesky() const {
-    GlobalIndex n = pattern_.numRows();
-
-    if (n == 0) {
-        return SparsityPattern(0, 0);
-    }
-
-    // Build modifiable adjacency list for elimination
-    std::vector<std::set<GlobalIndex>> adj(static_cast<std::size_t>(n));
+    const auto n = pattern_.numRows();
+    // Store the lower triangle by column. The rows below each pivot form
+    // a clique after eliminating the pivot.
+    std::vector<std::set<GlobalIndex>> columns(static_cast<std::size_t>(n));
     for (GlobalIndex row = 0; row < n; ++row) {
-        for (GlobalIndex col : pattern_.getRowSpan(row)) {
-            if (col <= row) {
-                adj[static_cast<std::size_t>(row)].insert(col);
-            }
+        for (auto col : pattern_.getRowSpan(row)) {
+            if (col <= row) columns[static_cast<std::size_t>(col)].insert(row);
         }
     }
-
-    // Symbolic elimination
-    for (GlobalIndex k = 0; k < n; ++k) {
-        // Get higher-indexed neighbors of k
-        std::vector<GlobalIndex> higher_neighbors;
-        for (GlobalIndex j : adj[static_cast<std::size_t>(k)]) {
-            if (j > k) {
-                higher_neighbors.push_back(j);
-            }
-        }
-
-        // For each pair of higher neighbors, add fill-in
-        for (std::size_t i = 0; i < higher_neighbors.size(); ++i) {
-            GlobalIndex u = higher_neighbors[i];
-            for (std::size_t j = i + 1; j < higher_neighbors.size(); ++j) {
-                GlobalIndex v = higher_neighbors[j];
-                // Add edge (u, v) and (v, u) in lower triangular form
-                if (v < u) {
-                    adj[static_cast<std::size_t>(u)].insert(v);
-                } else {
-                    adj[static_cast<std::size_t>(v)].insert(u);
-                }
-            }
-        }
-    }
-
-    // Build result pattern (lower triangular)
     SparsityPattern result(n, n);
-    for (GlobalIndex row = 0; row < n; ++row) {
-        for (GlobalIndex col : adj[static_cast<std::size_t>(row)]) {
-            result.addEntry(row, col);
+    for (GlobalIndex pivot = 0; pivot < n; ++pivot) {
+        const auto& column = columns[static_cast<std::size_t>(pivot)];
+        for (auto row : column) result.addEntry(row, pivot);
+        for (auto neighbor = column.upper_bound(pivot); neighbor != column.end(); ++neighbor) {
+            auto& target = columns[static_cast<std::size_t>(*neighbor)];
+            target.insert(std::next(neighbor), column.end());
         }
     }
     result.finalize();

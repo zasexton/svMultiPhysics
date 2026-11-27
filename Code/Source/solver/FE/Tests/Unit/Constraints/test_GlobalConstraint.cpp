@@ -117,29 +117,8 @@ TEST(GlobalConstraintTest, ComputeResidual) {
     std::vector<GlobalIndex> dofs = {0, 1, 2};
     GlobalConstraint gc = GlobalConstraint::zeroMean(dofs);
 
-    // Mean of [3, 6, 9] = 6, target = 0
-    // Residual = 6 - 0 = 6 (if weights sum to 1)
-    std::vector<double> vec = {3.0, 6.0, 9.0};
-
-    double residual = gc.computeResidual(vec);
-
-    // With normalized weights summing to 1, residual = mean - target
-    // mean = (3+6+9)/3 = 6, but weights are normalized so sum(w_i * u_i) = 6/3 = 2?
-    // Actually with equal weights summing to 1, each weight = 1/3
-    // sum = 1/3*3 + 1/3*6 + 1/3*9 = 1 + 2 + 3 = 6
-    // Hmm, that's not right. Let me check the implementation...
-    // The weights should be normalized to sum to 1, so:
-    // w_i = 1/N for uniform weights after normalization
-    // Actually the implementation normalizes by dividing by sum
-    // Original weights: [1, 1, 1], sum = 3, normalized = [1/3, 1/3, 1/3]
-    // weighted sum = 1/3*3 + 1/3*6 + 1/3*9 = 1+2+3 = 6
-    // Wait, that equals 6. Let me re-examine...
-    // residual = sum(w_i * u_i) - target = 6 - 0 = 6
-
-    // The implementation normalizes so weights sum to 1
-    // So the "mean" computed is: (1/3)*3 + (1/3)*6 + (1/3)*9 = 6
-    // That's correct if weights are NOT normalized to 1/N each
-    EXPECT_NE(residual, 0.0);
+    const std::vector<double> vec = {3.0, 6.0, 9.0};
+    EXPECT_DOUBLE_EQ(gc.computeResidual(vec), 6.);
 }
 
 TEST(GlobalConstraintTest, ProjectToConstrainedSpace) {
@@ -204,10 +183,10 @@ TEST(GlobalConstraintTest, WeightedMean) {
     auto c = aff.getConstraint(0);
     ASSERT_TRUE(c.has_value());
 
-    // The weight for u_1 should be -w_1/w_0 = -2/1 = -2
-    // But weights are normalized first: [1/3, 2/3], so -w_1/w_0 = -(2/3)/(1/3) = -2
-    EXPECT_EQ(c->entries.size(), 1);
+    ASSERT_EQ(c->entries.size(), 1u);
     EXPECT_EQ(c->entries[0].master_dof, 1);
+    EXPECT_DOUBLE_EQ(c->entries[0].weight, -2.);
+    EXPECT_DOUBLE_EQ(c->inhomogeneity, 30.);
 }
 
 // ============================================================================

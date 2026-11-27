@@ -13,6 +13,9 @@
 #include "Sparsity/SparsityPattern.h"
 
 #include <cmath>
+#include <cstdlib>
+#include <optional>
+#include <string>
 #include <vector>
 
 using namespace svmp::FE;
@@ -181,10 +184,19 @@ TEST(GaugeDiagnostics, FormatReport_ContainsPassFail)
 // Environment variable check
 // ============================================================================
 
-TEST(GaugeDiagnostics, EnvVarCheck_DefaultOff)
+TEST(GaugeDiagnostics, EnvironmentControlsValidation)
 {
-    // The function should not crash regardless of env state
-    [[maybe_unused]] bool result = isNullspaceValidationEnabled();
+    constexpr auto name = "SVMP_GAUGE_VALIDATE";
+    const char* current = std::getenv(name);
+    const auto saved = current ? std::optional<std::string>(current) : std::nullopt;
+    ::unsetenv(name);
+    EXPECT_FALSE(isNullspaceValidationEnabled());
+    ::setenv(name, "on", 1);
+    EXPECT_TRUE(isNullspaceValidationEnabled());
+    ::setenv(name, "off", 1);
+    EXPECT_FALSE(isNullspaceValidationEnabled());
+    if (saved) ::setenv(name, saved->c_str(), 1);
+    else ::unsetenv(name);
 }
 
 // ============================================================================
