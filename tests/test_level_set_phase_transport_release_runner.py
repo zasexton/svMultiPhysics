@@ -2,6 +2,7 @@ import hashlib
 import importlib.util
 import json
 from pathlib import Path
+import subprocess
 import sys
 
 
@@ -60,6 +61,24 @@ def test_frozen_registry_has_exact_release_cartesian_product(capsys):
     assert len(set(points)) == 18
     assert "translating_drop_2d resolution=64 cfl=0.5" in points
     assert "enright_3d resolution=128 cfl=0.125" in points
+
+
+def test_campaign_cli_accepts_the_frozen_release_inputs_and_rejects_changed_gates(tmp_path):
+    scripts = Path(__file__).resolve().parent / "cases" / "fluid"
+    command = [sys.executable, str(scripts / "run_level_set_phase_transport_release_matrix.py"), "validate"]
+    validation = subprocess.run(command, capture_output=True, text=True)
+    assert validation.returncode == 0, validation.stderr
+    report = json.loads(validation.stdout)
+    assert report["outcome"] == "PASS"
+    assert report["expected_point_count"] == 18
+
+    registry = _registry()
+    registry["cases"]["enright_3d"]["gates"]["maximum_interface_l1"] = 1.0
+    changed = tmp_path / "changed.json"
+    changed.write_text(json.dumps(registry), encoding="utf-8")
+    rejected = subprocess.run(command + ["--registry", str(changed)], capture_output=True, text=True)
+    assert rejected.returncode != 0
+    assert "frozen release registry bytes changed" in rejected.stderr
 
 
 def test_temporal_difference_uses_control_volume_weights(tmp_path):

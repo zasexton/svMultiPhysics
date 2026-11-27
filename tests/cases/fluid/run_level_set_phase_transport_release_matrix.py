@@ -29,7 +29,7 @@ DEFAULT_POINT_RUNNER = SCRIPT_PATH.with_name(
     "run_level_set_phase_transport_release.py"
 )
 EXPECTED_REGISTRY_SHA256 = (
-    "69892249dc9ead90ee90ebaf113427506dafe6fb52b8103f1c9497653e35585a"
+    "a9838a7f4008567b2f7902d84d9d0c607149a554a4455eb3a02be60a44dbf01e"
 )
 EXPECTED_POINT_RUNNER_SHA256 = (
     "6244927b6accf7ca0f3acfb8e6fd9b8cc2ac4608d0fc7b4b167d5fd022d2c2d4"
