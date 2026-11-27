@@ -2770,6 +2770,22 @@ protected:
         check_rules(result.domain.volumeQuadratureRules());
     }
 
+    void expectFullZeroCell(const level_set::LevelSetGeneratedInterfaceResult& result) const
+    {
+        ASSERT_TRUE(result.success) << result.diagnostic;
+        EXPECT_EQ(result.summary.active_fragment_count, 0u);
+        EXPECT_TRUE(result.domain.interfaceQuadratureRules().empty());
+        EXPECT_DOUBLE_EQ(result.summary.measure, 0.0);
+        EXPECT_EQ(result.summary.active_volume_region_count, 1u);
+        ASSERT_EQ(result.domain.volumeRegions().size(), 1u);
+        const auto& region = result.domain.volumeRegions().front();
+        EXPECT_TRUE(region.full_cell_equivalent);
+        EXPECT_EQ(region.side, FE::geometry::CutIntegrationSide::Negative);
+        const FE::Real full_measure = mesh_->dimension() == 2 ? 0.5 : 1.0 / 6.0;
+        EXPECT_NEAR(result.summary.negative_volume_measure, full_measure, 1.0e-14);
+        EXPECT_DOUBLE_EQ(result.summary.positive_volume_measure, 0.0);
+    }
+
     void expectCut(const level_set::LevelSetGeneratedInterfaceResult& result) const
     {
         ASSERT_TRUE(result.success) << result.diagnostic;
@@ -2841,12 +2857,7 @@ TEST_P(LevelSetInterfaceLifecycleCoefficientPolicy, LegacyDefaultRetainsAbsolute
         const auto result = lifecycle.build(*system_, options_, solution_);
         expectMetadata(result, Policy::LegacyAbsoluteBand);
         if (scale == 1.0e-14) {
-            EXPECT_FALSE(result.success);
-            EXPECT_EQ(result.summary.active_fragment_count, 0u);
-            EXPECT_EQ(result.summary.active_volume_region_count, 0u);
-            EXPECT_DOUBLE_EQ(result.summary.measure, 0.0);
-            EXPECT_DOUBLE_EQ(result.summary.negative_volume_measure, 0.0);
-            EXPECT_DOUBLE_EQ(result.summary.positive_volume_measure, 0.0);
+            expectFullZeroCell(result);
         } else {
             expectCut(result);
         }
@@ -2913,8 +2924,7 @@ TEST_P(LevelSetInterfaceLifecycleCoefficientPolicy, PolicyTransitionsInvalidateD
             }
             exact_key = result.domain.request().quadrature_policy_key;
         } else {
-            EXPECT_FALSE(result.success);
-            EXPECT_EQ(result.summary.active_volume_region_count, 0u);
+            expectFullZeroCell(result);
             EXPECT_NE(result.domain.request().quadrature_policy_key, exact_key);
         }
         const auto repeated = lifecycle.build(*system_, options_, solution_);

@@ -3629,7 +3629,6 @@ TEST(FreeSurfaceGeometrySnapshot,
     std::uint64_t two_sided_cut_acceptance_count = 0u;
     std::uint64_t one_sided_full_cell_acceptance_count = 0u;
     std::uint64_t one_sided_aligned_cut_acceptance_count = 0u;
-    std::uint64_t empty_full_zero_acceptance_count = 0u;
 
     const auto complete_cut = interfaces::buildLevelSetGeometrySnapshot(
         verticalInterfaceWithVolumes(interface_marker),
@@ -3668,7 +3667,7 @@ TEST(FreeSurfaceGeometrySnapshot,
         bool expect_active_interface;
         std::size_t expected_volume_region_count;
     };
-    const std::array<Scenario, 5> scenarios{{
+    const std::array<Scenario, 4> scenarios{{
         {{{-1.0, 1.0, 1.0, -1.0}},
          "aligned_complete_cut_family",
          true,
@@ -3685,10 +3684,6 @@ TEST(FreeSurfaceGeometrySnapshot,
          "vertex_touch_one_sided_full_cell_family",
          false,
          1u},
-        {{{0.0, 0.0, 0.0, 0.0}},
-         "full_zero_empty_authoritative_family",
-         false,
-         0u},
     }};
     for (const auto& scenario : scenarios) {
         SCOPED_TRACE(scenario.domain_id);
@@ -3719,12 +3714,32 @@ TEST(FreeSurfaceGeometrySnapshot,
         ++acceptance_count;
         if (scenario.expect_active_interface) {
             ++two_sided_cut_acceptance_count;
-        } else if (scenario.expected_volume_region_count == 0u) {
-            ++empty_full_zero_acceptance_count;
         } else {
             ++one_sided_full_cell_acceptance_count;
         }
     }
+
+    constexpr std::array<FE::Real, 4> zero_values{};
+    auto zero_domain = linearQuadCutDomain(interface_marker, zero_values);
+    EXPECT_TRUE(zero_domain.cutCells().empty());
+    EXPECT_TRUE(zero_domain.interfaceQuadratureRules().empty());
+    ASSERT_EQ(zero_domain.volumeRegions().size(), 1u);
+    const auto& zero_region = zero_domain.volumeRegions().front();
+    EXPECT_TRUE(zero_region.full_cell_equivalent);
+    EXPECT_EQ(zero_region.side, FE::geometry::CutIntegrationSide::Negative);
+    EXPECT_DOUBLE_EQ(zero_region.measure, 4.0);
+    EXPECT_THROW((void)interfaces::buildLevelSetGeometrySnapshot(
+                     zero_domain, {}, {}, mesh, snapshotPolicyWithoutBoundary(), {},
+                     "full_zero_without_scalar"),
+                 std::invalid_argument);
+    const auto zero_snapshot = interfaces::buildLevelSetGeometrySnapshot(
+        std::move(zero_domain), {}, {}, mesh, snapshotPolicyWithoutBoundary(),
+        bilinearQuadScalar(zero_values), "full_zero_negative_cell");
+    ASSERT_TRUE(zero_snapshot);
+    EXPECT_NEAR(zero_snapshot->ledger().retained_negative_physical_volume, 1.0, 1.0e-14);
+    EXPECT_DOUBLE_EQ(zero_snapshot->ledger().retained_positive_physical_volume, 0.0);
+    ++acceptance_count;
+    ++one_sided_full_cell_acceptance_count;
 
     constexpr std::array<FE::geometry::CutIntegrationSide, 2>
         aligned_parent_sides{{
@@ -3773,9 +3788,8 @@ TEST(FreeSurfaceGeometrySnapshot,
 
     EXPECT_EQ(acceptance_count, 9u);
     EXPECT_EQ(two_sided_cut_acceptance_count, 3u);
-    EXPECT_EQ(one_sided_full_cell_acceptance_count, 3u);
+    EXPECT_EQ(one_sided_full_cell_acceptance_count, 4u);
     EXPECT_EQ(one_sided_aligned_cut_acceptance_count, 2u);
-    EXPECT_EQ(empty_full_zero_acceptance_count, 1u);
     RecordProperty("authoritative_cut_family_valid_acceptance_count",
                    acceptance_count);
     RecordProperty("authoritative_two_sided_cut_acceptance_count",
@@ -3784,8 +3798,6 @@ TEST(FreeSurfaceGeometrySnapshot,
                    one_sided_full_cell_acceptance_count);
     RecordProperty("authoritative_one_sided_aligned_cut_acceptance_count",
                    one_sided_aligned_cut_acceptance_count);
-    RecordProperty("authoritative_empty_full_zero_acceptance_count",
-                   empty_full_zero_acceptance_count);
 }
 
 TEST(FreeSurfaceGeometrySnapshot,
