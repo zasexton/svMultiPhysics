@@ -12,6 +12,7 @@
 #include <array>
 #include <cmath>
 #include <initializer_list>
+#include <limits>
 #include <numeric>
 #include <optional>
 #include <span>
@@ -214,7 +215,6 @@ struct SignedPoint {
     Real denominator,
     Real quotient,
     Real clamped,
-    bool helper_denominator_guard,
     bool division_taken) noexcept
 {
     if (a.value == Real{0.0} && b.value != Real{0.0}) {
@@ -246,7 +246,6 @@ struct SignedPoint {
         b.original.canonicalization_changed ||
         a.original.isovalue != b.original.isovalue ||
         a.original.signed_band != b.original.signed_band;
-    input.helper_denominator_guard = helper_denominator_guard;
     input.division_taken = division_taken;
     return detail::assessOriginalEdge(input);
 }
@@ -591,6 +590,21 @@ void addUniqueCandidate(StrictConstructionObservation& observation, std::vector<
     return true;
 }
 
+// A positive rescaling of all signed values leaves the interface normal
+// unchanged. Keep the usual least-squares arithmetic for ordinary fields.
+[[nodiscard]] Real gradientValueScale(std::span<const Real> values) noexcept
+{
+    Real magnitude = 0;
+    for (const Real value : values) {
+        magnitude = std::max(magnitude, std::abs(value));
+    }
+    if (magnitude > 0 && (magnitude < std::sqrt(std::numeric_limits<Real>::min()) ||
+                          magnitude > std::sqrt(std::numeric_limits<Real>::max()))) {
+        return magnitude;
+    }
+    return Real{1};
+}
+
 [[nodiscard]] std::array<Real, 3> estimateGradient2D(
     const std::vector<std::array<Real, 3>>& points,
     const std::vector<Real>& signed_values,
@@ -601,10 +615,12 @@ void addUniqueCandidate(StrictConstructionObservation& observation, std::vector<
         {{0.0, 0.0, 0.0}},
         {{0.0, 0.0, 0.0}}}};
     std::array<Real, 3> rhs{{0.0, 0.0, 0.0}};
+    const Real value_scale = gradientValueScale(std::span(signed_values).first(count));
     for (std::size_t i = 0; i < count; ++i) {
         const std::array<Real, 3> row{{points[i][0], points[i][1], 1.0}};
+        const Real value = signed_values[i] / value_scale;
         for (std::size_t r = 0; r < 3u; ++r) {
-            rhs[r] += row[r] * signed_values[i];
+            rhs[r] += row[r] * value;
             for (std::size_t c = 0; c < 3u; ++c) {
                 normal_matrix[r][c] += row[r] * row[c];
             }
@@ -616,8 +632,7 @@ void addUniqueCandidate(StrictConstructionObservation& observation, std::vector<
         return {{1.0, 0.0, 0.0}};
     }
     const Real len = std::hypot(solution[0], solution[1]);
-    if (observation && !std::isfinite(len)) observation->unresolved();
-    if (len <= Real{1.0e-30}) {
+    if (!(len > 0) || !std::isfinite(len)) {
         if (observation) observation->unresolved();
         return {{1.0, 0.0, 0.0}};
     }
@@ -635,10 +650,12 @@ void addUniqueCandidate(StrictConstructionObservation& observation, std::vector<
         {{0.0, 0.0, 0.0, 0.0}},
         {{0.0, 0.0, 0.0, 0.0}}}};
     std::array<Real, 4> rhs{{0.0, 0.0, 0.0, 0.0}};
+    const Real value_scale = gradientValueScale(std::span(signed_values).first(count));
     for (std::size_t i = 0; i < count; ++i) {
         const std::array<Real, 4> row{{points[i][0], points[i][1], points[i][2], 1.0}};
+        const Real value = signed_values[i] / value_scale;
         for (std::size_t r = 0; r < 4u; ++r) {
-            rhs[r] += row[r] * signed_values[i];
+            rhs[r] += row[r] * value;
             for (std::size_t c = 0; c < 4u; ++c) {
                 matrix[r][c] += row[r] * row[c];
             }
@@ -649,8 +666,18 @@ void addUniqueCandidate(StrictConstructionObservation& observation, std::vector<
         if (observation) observation->unresolved();
         return {{1.0, 0.0, 0.0}};
     }
-    return unitOrDefault({{solution[0], solution[1], solution[2]}},
-                         {{1.0, 0.0, 0.0}}, observation);
+    const std::array<Real, 3> gradient{{solution[0], solution[1], solution[2]}};
+    const Real length = norm3(gradient);
+    if (!(length > 0) || !std::isfinite(length)) {
+        if (observation) observation->unresolved();
+        return {{1.0, 0.0, 0.0}};
+    }
+    // Normalize even a small finite gradient. The signed-field magnitude
+    // has no geometric significance for this direction.
+    if (length < std::numeric_limits<Real>::min()) {
+        return {{gradient[0] / length, gradient[1] / length, gradient[2] / length}};
+    }
+    return scale(gradient, Real{1.0} / length);
 }
 
 [[nodiscard]] std::array<Real, 3> centroid(
@@ -748,16 +775,15 @@ void orderPolygonPoints(StrictConstructionObservation& observation, std::vector<
     Real t = Real{0.0};
     Real quotient = Real{0.0};
     bool division_taken = false;
-    if (std::abs(denominator) > Real{1.0e-30}) {
-        quotient = a.value / denominator;
+    if (denominator != Real{0.0}) {
+        quotient = levelSetEdgeFraction(a.value, b.value);
         division_taken = true;
         t = clampFraction(observation, quotient);
     } else {
         observation.unresolved();
     }
     auto origin = crossingOrigin(a, b, observation);
-    if (!(std::abs(denominator) > Real{1.0e-30}) ||
-        !std::isfinite(denominator) || !std::isfinite(t) ||
+    if (!division_taken || !std::isfinite(denominator) || !std::isfinite(t) ||
         (a.value != 0 && b.value != 0 && !(t > 0 && t < 1))) {
         observation.unresolved();
         origin = {};
@@ -765,7 +791,7 @@ void orderPolygonPoints(StrictConstructionObservation& observation, std::vector<
     const auto point = interpolate(a.point, b.point, t);
     return SignedPoint{point, Real{0.0}, origin, {},
                        assessCrossing(a, b, point, denominator, quotient, t,
-                                      true, division_taken)};
+                                      division_taken)};
 }
 
 [[nodiscard]] std::vector<SignedPoint> clipPolygonToNegativeLevelSet(StrictConstructionObservation& observation,
@@ -1948,7 +1974,7 @@ LevelSetCellCutResult cutLinearLevelSetCell2D(const CutInterfaceDomainRequest& r
             (di > Real{0.0} && dj < Real{0.0})) {
             ++boundary_intersections;
             const Real denominator = di - dj;
-            const Real t = di / denominator;
+            const Real t = levelSetEdgeFraction(di, dj);
             if (!std::isfinite(denominator) || !std::isfinite(t) || !(t > 0 && t < 1)) observation.unresolved();
             const auto point = interpolate(input.node_coordinates[i], input.node_coordinates[j], t);
             addUniqueCandidate(observation, cut_points,
@@ -2382,7 +2408,7 @@ LevelSetCellCutResult cutLinearLevelSetCell3DImpl(const CutInterfaceDomainReques
         if ((di < Real{0.0} && dj > Real{0.0}) ||
             (di > Real{0.0} && dj < Real{0.0})) {
             const Real denominator = di - dj;
-            const Real t = di / denominator;
+            const Real t = levelSetEdgeFraction(di, dj);
             if (!std::isfinite(denominator) || !std::isfinite(t) || !(t > 0 && t < 1)) observation.unresolved();
             const auto point = interpolate(input.node_coordinates[i], input.node_coordinates[j], t);
             addUniqueCandidate(observation, cut_points,

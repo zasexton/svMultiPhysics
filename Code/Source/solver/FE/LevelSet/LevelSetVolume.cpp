@@ -368,7 +368,7 @@ struct PhaseVolumes {
         if (std::abs(signed_values[a]) <= tolerance) {
             return coordinates[a];
         }
-        const Real t = signed_values[a] / (signed_values[a] - signed_values[b]);
+        const Real t = interfaces::levelSetEdgeFraction(signed_values[a], signed_values[b]);
         return interpolatePoint(coordinates[a], coordinates[b], t);
     };
     const auto prism = [&](const std::array<Point, 3>& a, const std::array<Point, 3>& b) {

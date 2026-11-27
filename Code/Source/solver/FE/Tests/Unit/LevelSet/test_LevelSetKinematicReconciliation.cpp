@@ -378,6 +378,31 @@ TEST(LevelSetKinematicReconciliation, FluxAndVolumeUseTheSameCoefficientBand)
     check({-0.5, 2, 2}, 0.0, 0.02, 0.2);
 }
 
+TEST(LevelSetKinematicReconciliation, FiniteGradientMagnitudePreservesFluxAcrossFieldScalings)
+{
+    SimplexSystem system(buildUnitTriangle(), 2);
+    const auto velocity = system.vector([](const Point&) { return Point{1, 0, 0}; });
+    for (const auto scale : {1.0, 1.0e180, 1.0e-180}) {
+        SCOPED_TRACE(scale);
+        const auto phi = system.scalar([&](const Point& x) { return scale * (x[0] - 0.25); });
+        const auto endpoint = level_set::measureLevelSetKinematicEndpoint(
+            system.system.meshAccess(), system.phiDofs(), system.velocityDofs(),
+            *system.system.fieldRecord(system.velocity).space, 0, 0, phi, velocity);
+        EXPECT_TRUE(endpoint.success) << endpoint.diagnostic;
+        if (endpoint.success) {
+            EXPECT_NEAR(endpoint.negative_volume, 7.0 / 32.0, 5.0e-15);
+            EXPECT_NEAR(endpoint.interface_flux, 0.75, 5.0e-15);
+        }
+        const auto doubled = system.scalar([&](const Point& x) { return 2.0 * scale * (x[0] - 0.25); });
+        const auto slope = level_set::levelSetRepresentationSlope(
+            system.system.meshAccess(), system.phiDofs(), phi, doubled);
+        ASSERT_EQ(slope.size(), phi.size());
+        for (const auto value : slope) {
+            EXPECT_NEAR(value, 2.0, 1.0e-14);
+        }
+    }
+}
+
 TEST(LevelSetKinematicReconciliation, CollapsedTriangleHasNoInterfaceFlux)
 {
     SimplexSystem s(buildUnitTriangle(), 2);

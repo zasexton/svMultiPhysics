@@ -9,6 +9,7 @@
 
 #include "Basis/NodeOrderingConventions.h"
 #include "Geometry/CutQuadratureMapping.h"
+#include "Interfaces/LevelSetInterfaceDomain.h"
 #include "Spaces/FunctionSpace.h"
 
 #include <algorithm>
@@ -109,21 +110,26 @@ std::vector<EdgeIntersection> edgeIntersections(const geometry::CutQuadratureRul
             continue;
         }
         const auto &b = corners[last];
-        const Real slope = b.signed_value - a.signed_value;
         if ((a.signed_value < 0) == (b.signed_value < 0)) {
             unsupported("source no longer crosses the retained parent edge");
         }
-        const Real t = -a.signed_value / slope;
+        const Real t = interfaces::levelSetEdgeFraction(a.signed_value, b.signed_value);
+        const Real slope = b.signed_value - a.signed_value;
+        const Real scale = std::isfinite(slope) ? Real{1} : Real{0.5};
+        const Real scaled_slope = std::isfinite(slope) ? slope
+            : scale * b.signed_value - scale * a.signed_value;
         const Vector edge = b.point - a.point;
         auto &root = intersections.emplace_back();
         root.point = a.point + t * edge;
-        if ((!active_wall && normal.dot(edge) * slope <= 0) || std::abs(normal.dot(root.point - sample)) > reference_tolerance) {
+        const Real normal_component = normal.dot(edge);
+        const bool outward = normal_component != 0 && (normal_component > 0) == (scaled_slope > 0);
+        if ((!active_wall && !outward) || std::abs(normal.dot(root.point - sample)) > reference_tolerance) {
             unsupported("source coefficients are stale for the retained edge intersections");
         }
         for (std::size_t j = 0; j < dof_count; ++j) {
             // Differentiate (1-t) phi_a + t phi_b = isovalue on the fixed parent edge.
             const Real level_set_seed = (1 - t) * a.trial_values[j] + t * b.trial_values[j];
-            root.motion.emplace_back((-level_set_seed / slope) * edge);
+            root.motion.emplace_back(((-scale * level_set_seed) / scaled_slope) * edge);
         }
     }
     return intersections;

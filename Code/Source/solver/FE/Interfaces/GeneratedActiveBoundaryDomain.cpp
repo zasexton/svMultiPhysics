@@ -140,7 +140,6 @@ struct SignedPoint {
         b.original.canonicalization_changed ||
         a.original.isovalue != b.original.isovalue ||
         a.original.signed_band != b.original.signed_band;
-    input.helper_denominator_guard = true;
     input.division_taken = division_taken;
     return detail::assessOriginalEdge(input);
 }
@@ -347,10 +346,9 @@ struct SignedPoint {
                                    StrictConstructionObservation& observation) noexcept
 {
     const Real denominator = a.value - b.value;
-    const bool division_taken =
-        std::abs(denominator) > Real{1.0e-30};
+    const bool division_taken = denominator != Real{0.0};
     const Real quotient =
-        division_taken ? a.value / denominator : Real{0.0};
+        division_taken ? levelSetEdgeFraction(a.value, b.value) : Real{0.0};
     const Real t = division_taken
                        ? std::clamp(quotient, Real{0.0}, Real{1.0})
                        : Real{0.5};
@@ -362,7 +360,7 @@ struct SignedPoint {
              ((a.value < 0 && b.value > 0) || (a.value > 0 && b.value < 0))) {
         origin = PointOrigin::root(a.origin.first, b.origin.first);
     }
-    if (!(std::abs(denominator) > Real{1.0e-30}) || !std::isfinite(denominator)) {
+    if (!division_taken || !std::isfinite(denominator)) {
         observation.unresolved();
         origin = {};
     } else {

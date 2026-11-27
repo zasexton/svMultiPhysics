@@ -242,7 +242,7 @@ TEST(CoefficientClassificationPolicy, TriangleCellCutIsScaleInvariant)
     request.aligned_zero_interface_parent_side =
         geometry::CutIntegrationSide::Positive;
     std::array<std::uint64_t, 2> reference_topology_keys{{0, 0}};
-    for (const Real scale : {1.0, 1.0e14, 1.0e-14}) {
+    for (const Real scale : {1.0, 1.0e14, 1.0e-14, 1.0e180, 1.0e-180, 1.0e308}) {
         for (const Real sign : {-1.0, 1.0}) {
             SCOPED_TRACE(::testing::Message() << "scale=" << scale
                                               << " sign=" << sign);
@@ -287,7 +287,7 @@ TEST(CoefficientClassificationPolicy, TetrahedronCellCutIsScaleInvariant)
         LevelSetCoefficientClassificationPolicy::ExactRepresentedZero;
     request.aligned_zero_interface_parent_side =
         geometry::CutIntegrationSide::Positive;
-    for (const Real scale : {1.0, 1.0e14, 1.0e-14}) {
+    for (const Real scale : {1.0, 1.0e14, 1.0e-14, 1.0e180, 1.0e-180, 1.0e308}) {
         for (const Real sign : {-1.0, 1.0}) {
             SCOPED_TRACE(::testing::Message() << "scale=" << scale
                                               << " sign=" << sign);

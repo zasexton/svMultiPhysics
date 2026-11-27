@@ -91,6 +91,19 @@ enum class LevelSetCoefficientClassificationPolicy : std::uint8_t {
                : legacy_absolute_band;
 }
 
+/// Fraction from the first vertex to the zero of a linear signed field on
+/// a crossing edge. The endpoints are finite and distinct. Halving both
+/// values keeps the ratio representable when their difference overflows.
+[[nodiscard]] inline Real levelSetEdgeFraction(Real first, Real second) noexcept
+{
+    const Real difference = first - second;
+    if (std::isfinite(difference)) {
+        return first / difference;
+    }
+    const Real half_first = Real{0.5} * first;
+    return half_first / (half_first - Real{0.5} * second);
+}
+
 struct LevelSetInterfaceSource {
     CutInterfaceSourceKind kind{CutInterfaceSourceKind::Field};
     FieldId field_id{INVALID_FIELD_ID};

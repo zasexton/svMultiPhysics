@@ -6354,7 +6354,7 @@ TEST(CoefficientClassificationPolicy,
     const SingleQuadBoundaryMesh mesh(
         wall, 0, 1, 0, true, FE::ElementType::Triangle3,
         {{{0, 0, 0}}, {{1, 0, 0}}, {{0, 1, 0}}});
-    for (const FE::Real scale : {1.0, 1.0e14, 1.0e-14}) {
+    for (const FE::Real scale : {1.0, 1.0e14, 1.0e-14, 1.0e180, 1.0e-180, 1.0e308}) {
         for (const FE::Real sign : {-1.0, 1.0}) {
             SCOPED_TRACE(::testing::Message() << "scale=" << scale
                                               << " sign=" << sign);

@@ -1,4 +1,5 @@
 #include "Forms/CutCellForms.h"
+#include "Forms/CutSurfaceGeometry.h"
 #include "Forms/IntegrationDomain.h"
 
 #include <gtest/gtest.h>
@@ -2397,6 +2398,30 @@ void checkRegeneratedSurfaceTangent(const svmp::FE::assembly::IMeshAccess &mesh,
                 << "row " << i << " column " << j;
         }
     }
+}
+
+TEST(CutCellForms, CutFractionDerivativeTracksRepresentableMotionAcrossALargeCoefficientJump)
+{
+    namespace fe = svmp::FE;
+    namespace it = fe::interfaces;
+    constexpr Real magnitude = 1.0e308;
+    it::CutInterfaceDomainRequest request;
+    request.source = it::LevelSetInterfaceSource::fromField(fe::FieldId{0});
+    request.interface_marker = 24;
+    request.coefficient_classification_policy = it::LevelSetCoefficientClassificationPolicy::ExactRepresentedZero;
+    const it::LevelSetCellCutInput input{
+        .parent_cell = 0, .element_type = fe::ElementType::Triangle3,
+        .node_coordinates = {{{0, 0, 0}}, {{1, 0, 0}}, {{0, 1, 0}}},
+        .level_set_values = {magnitude, -magnitude, magnitude}};
+    const auto cut = it::cutLinearLevelSetCell2D(request, input);
+    ASSERT_EQ(cut.fragments.size(), 1u);
+    const auto rule = cut.fragments.front().toCutQuadratureRule(request);
+    fe::spaces::H1Space field(input.element_type, 1);
+    const auto derivative = cut_surface::referenceFractionDerivative(
+        rule, input.element_type, 0, field, input.level_set_values, field, 2.0);
+    // A uniform coefficient increment moves x = 1/2 right by 1/(2M);
+    // the negative fraction (1-x)^2 has slope -1 there.
+    EXPECT_NEAR(magnitude * std::accumulate(derivative.begin(), derivative.end(), 0.0), -0.5, 2.0e-14);
 }
 
 TEST(CutCellForms, GeneratedTetrahedralTractionDifferentiatesTheMovingEdgeIntersections)

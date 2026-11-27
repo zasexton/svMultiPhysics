@@ -4,6 +4,7 @@
 #include "Basis/NodeOrderingConventions.h"
 #include "Dofs/EntityDofMap.h"
 #include "Elements/ReferenceElement.h"
+#include "Interfaces/LevelSetInterfaceDomain.h"
 #include "LevelSet/LevelSetVolume.h"
 #include "Quadrature/QuadratureFactory.h"
 #include "Spaces/FunctionSpace.h"
@@ -150,7 +151,9 @@ void sumInPlace(const Collective& context, std::vector<Real>& values)
 
 [[nodiscard]] Real norm(const Point& a) noexcept
 {
-    return std::sqrt(dot(a, a));
+    // A finite field or geometry vector can have an unrepresentable square.
+    const Real squared = dot(a, a);
+    return std::isnormal(squared) ? std::sqrt(squared) : std::hypot(a[0], a[1], a[2]);
 }
 
 // One owned affine simplex with its level-set DOFs and nodal velocities.
@@ -290,7 +293,7 @@ bool accumulateCell(const SimplexCell& cell,
     const auto edgePoint = [&](int a, int b) {
         const Real sa = s[static_cast<std::size_t>(a)];
         const Real sb = s[static_cast<std::size_t>(b)];
-        Real t = sa / (sa - sb);
+        Real t = interfaces::levelSetEdgeFraction(sa, sb);
         t = std::clamp(t, Real{0.0}, Real{1.0});
         Bary lambda{};
         lambda[static_cast<std::size_t>(a)] = Real{1.0} - t;
@@ -486,7 +489,7 @@ bool accumulateCell(const SimplexCell& cell,
     }
     const auto fraction = [&](int a, int b) {
         const Real sa = s[static_cast<std::size_t>(a)];
-        return std::clamp(sa / (sa - s[static_cast<std::size_t>(b)]), Real{0.0}, Real{1.0});
+        return std::clamp(interfaces::levelSetEdgeFraction(sa, s[static_cast<std::size_t>(b)]), Real{0.0}, Real{1.0});
     };
     const auto point = [&](int a, int b) {
         const Real t = fraction(a, b);
@@ -1132,7 +1135,7 @@ struct DofSets {
         const Real va = transported[a] - isovalue + trace.delta[a];
         const Real vb = transported[b] - isovalue + trace.delta[b];
         if (!(va * vb < Real{0})) continue;
-        Real t = va / (va - vb);
+        Real t = interfaces::levelSetEdgeFraction(va, vb);
         const auto ta = target.find(a);
         const auto tb = target.find(b);
         if (ta != target.end() && tb != target.end() && ta->second * tb->second < Real{0}) {
