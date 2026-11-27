@@ -20,6 +20,20 @@ bool reassembleEachSample() noexcept
     return environmentRegistry().firstEnabled(names);
 }
 
+const char* rowSummaryOperators() noexcept
+{
+    const auto& names = environmentRegistry();
+    for (const char* key : {"SVMP_FE_ROW_CONTRIBUTION_MATRIX_SUMMARY_OPS",
+                            "SVMP_NS_PRESSURE_ROW_CONTRIBUTION_MATRIX_SUMMARY_OPS",
+                            "SVMP_PRESSURE_ROW_CONTRIBUTION_MATRIX_SUMMARY_OPS"}) {
+        const char* value = names.value(key);
+        if (value && *value) {
+            return value;
+        }
+    }
+    return nullptr;
+}
+
 std::string_view physicalReason(std::string_view numerical) noexcept
 {
     static constexpr std::pair<std::string_view, std::string_view> names[] = {
@@ -86,7 +100,27 @@ const EnvironmentNameRegistry& environmentRegistry()
     // Stored in existing effective_configuration.json records as the
     // numerical service to which the formulation sends the resolved method.
     constexpr auto kCertificate = "FE/Analysis/ConstraintRangeCertificate";
+    constexpr auto kRowObserver = "FE/Analysis/RowContributionObserver";
     static constexpr NameDeclaration aliases[] = {
+        {"SVMP_NS_PRESSURE_ROW_CONTRIBUTION_DIAGNOSTIC", Diagnostic, kRowObserver, Flag, "off", Reference,
+         "logs the declared row-contribution operators per assembly, and the field-residual log"},
+        {"SVMP_NS_PRESSURE_ROW_CONTRIBUTION_MATRIX_DIAGNOSTIC", Diagnostic, kRowObserver, Flag, "off",
+         Reference, "adds the matrix support of the sampled rows to the row-contribution log"},
+        {"SVMP_NS_PRESSURE_ROW_CONTRIBUTION_MATRIX_SUMMARY_DIAGNOSTIC", Diagnostic, kRowObserver, Flag, "off",
+         Reference, "adds matrix summaries of the row-contribution operators"},
+        {"SVMP_NS_PRESSURE_ROW_CONTRIBUTION_MATRIX_SUMMARY_OPS", Diagnostic, kRowObserver, List,
+         "every operator", Reference, "operators of the matrix summaries"},
+        {"SVMP_PRESSURE_ROW_CONTRIBUTION_DIAGNOSTIC", Diagnostic, kRowObserver, Flag, "off", Reference,
+         "second spelling of SVMP_NS_PRESSURE_ROW_CONTRIBUTION_DIAGNOSTIC"},
+        {"SVMP_PRESSURE_ROW_CONTRIBUTION_MATRIX_DIAGNOSTIC", Diagnostic, kRowObserver, Flag, "off", Reference,
+         "second spelling of SVMP_NS_PRESSURE_ROW_CONTRIBUTION_MATRIX_DIAGNOSTIC"},
+        {"SVMP_PRESSURE_ROW_CONTRIBUTION_MATRIX_SUMMARY_DIAGNOSTIC", Diagnostic, kRowObserver, Flag, "off",
+         Reference, "second spelling of SVMP_NS_PRESSURE_ROW_CONTRIBUTION_MATRIX_SUMMARY_DIAGNOSTIC"},
+        {"SVMP_PRESSURE_ROW_CONTRIBUTION_MATRIX_SUMMARY_OPS", Diagnostic, kRowObserver, List,
+         "every operator", Reference, "second spelling of SVMP_NS_PRESSURE_ROW_CONTRIBUTION_MATRIX_SUMMARY_OPS"},
+        {"SVMP_PRESSURE_ROW_CONTRIBUTION_SAMPLE_DOFS", Diagnostic, kRowObserver, List, "none", Reference,
+         "second spelling of SVMP_NEWTON_FIELD_RESIDUAL_SAMPLE_DOFS; setting it also adds the matrix "
+         "support log"},
         {"SVMP_KEEP_DRY_CELL_POINTS", Performance, "FE/LevelSet/LevelSetGeometryService", Flag, "off", Reference,
          "keeps every quadrature point of full cells in the cut snapshot"},
         {"SVMP_FREE_SURFACE_CONSERVATIVE_BALANCE_DIAGNOSTIC", Diagnostic, kCertificate, Flag, "off", Reference,
@@ -132,6 +166,15 @@ bool keepFullCellPointsFromEnvironment()
     return value && value[0] != '\0' && value[0] != '0';
 }
 
+const std::vector<std::string>& rowContributionDiagnosticSwitches()
+{
+    static const std::vector<std::string> names{
+        "SVMP_FE_ROW_CONTRIBUTION_DIAGNOSTIC",
+        "SVMP_NS_PRESSURE_ROW_CONTRIBUTION_DIAGNOSTIC",
+        "SVMP_PRESSURE_ROW_CONTRIBUTION_DIAGNOSTIC"};
+    return names;
+}
+
 const std::vector<std::string>& conservativeBalanceDiagnosticSwitches()
 {
     static const std::vector<std::string> names{
@@ -160,6 +203,31 @@ FE::analysis::NewtonAnalysisMethod newtonAnalysisMethodFromEnvironment()
 
     auto method = FE::analysis::newtonAnalysisMethodFromEnvironment();
     const auto& names = environmentRegistry();
+    // The historical enable flags are ORed for observation. Operator
+    // installation independently follows the first configured switch.
+    for (const auto& key : rowContributionDiagnosticSwitches()) {
+        method.observe_row_contributions |= names.enabled(key);
+    }
+    method.observe_field_residual |= method.observe_row_contributions;
+    auto& rows = method.row_options;
+    if (rows.residual_field.empty()) {
+        rows.residual_field = "Pressure";
+    }
+    const char* explicit_samples = names.value("SVMP_NEWTON_FIELD_RESIDUAL_SAMPLE_DOFS");
+    if (!explicit_samples || !*explicit_samples) {
+        if (const auto* samples = names.value("SVMP_PRESSURE_ROW_CONTRIBUTION_SAMPLE_DOFS")) {
+            rows.residual_samples = FE::analysis::parseRowSampleDofs(samples);
+        }
+    }
+    rows.matrix_summary |= names.enabled("SVMP_NS_PRESSURE_ROW_CONTRIBUTION_MATRIX_SUMMARY_DIAGNOSTIC") ||
+                           names.enabled("SVMP_PRESSURE_ROW_CONTRIBUTION_MATRIX_SUMMARY_DIAGNOSTIC");
+    rows.matrix_support |= rows.matrix_summary ||
+                           names.enabled("SVMP_NS_PRESSURE_ROW_CONTRIBUTION_MATRIX_DIAGNOSTIC") ||
+                           names.enabled("SVMP_PRESSURE_ROW_CONTRIBUTION_MATRIX_DIAGNOSTIC") ||
+                           names.isSet("SVMP_PRESSURE_ROW_CONTRIBUTION_SAMPLE_DOFS");
+    rows.summary_operators = rowSummaryOperators;
+    rows.subject = "pressure";
+    rows.phase_prefix = "pressure_row_contribution";
     method.constraint_range = {
         .observe = names.firstEnabled(conservativeBalanceDiagnosticSwitches()),
         .max_range_distance = names.firstReal(range_names),

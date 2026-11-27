@@ -198,7 +198,7 @@ TEST(SnapshotFieldEvaluator, RejectsIncompatibleFieldsAndShortSolutions)
     } catch (const std::runtime_error& error) {
         EXPECT_EQ(std::string(error.what()),
                   "[svMultiPhysics::Application] unit context velocity field is "
-                  "incompatible with its free-surface declaration.");
+                  "incompatible with its level-set declaration.");
     }
     const auto vector = svmp::FE::systems::snapshotFieldAccess(f.system, f.velocity);
     try {

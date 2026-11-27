@@ -3070,7 +3070,7 @@ TEST(FreeSurfaceGeometrySnapshot,
     const auto expect_stale_source =
         [interface_marker](const FE::assembly::CutIntegrationContext& ctx) {
             const std::string expected =
-                "free-surface geometry snapshot revision does not match the "
+                "level-set geometry snapshot revision does not match the "
                 "current source value revision";
             const auto message_of = [](const auto& check) {
                 try {

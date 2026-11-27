@@ -49,6 +49,7 @@
  */
 
 #include "Analysis/ConstraintRangeRecordVocabulary.h"
+#include "Analysis/RowContributionObserver.h"
 #include "Core/Types.h"
 #include "Systems/DiagnosticRegistry.h"
 #include "TimeStepping/NewtonSolver.h"
@@ -455,6 +456,7 @@ struct NewtonAnalysisMethod {
     /// RowContributionObserver.
     bool observe_row_contributions{false};
     ConstraintRangeMethod constraint_range{};
+    RowObservationOptions row_options{};
 };
 
 /// The method the environment states: the switches of the two residual

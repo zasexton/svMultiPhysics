@@ -50,13 +50,33 @@ struct RowContributionDeclaration {
     friend bool operator==(const RowContributionDeclaration&, const RowContributionDeclaration&) = default;
 };
 
-/// Logs the norm, extremes and samples of one field's rows of the
-/// constrained residual (the field SVMP_NEWTON_FIELD_RESIDUAL_FIELD, by
-/// default Pressure; samples SVMP_NEWTON_FIELD_RESIDUAL_SAMPLE_DOFS).
+/// Resolved inputs to the row diagnostics. The matrix summary operator list
+/// is re-read per observation, so a running application can change its filter.
+struct RowObservationOptions {
+    std::string residual_field{};
+    std::vector<GlobalIndex> residual_samples{};
+    std::vector<GlobalIndex> matrix_samples{};
+    bool matrix_support{false};
+    bool matrix_summary{false};
+    const char* (*summary_operators)() noexcept{nullptr};
+    std::string subject{"observed"};
+    std::string phase_prefix{"row_contribution"};
+};
+
+[[nodiscard]] RowObservationOptions rowObservationOptionsFromEnvironment();
+[[nodiscard]] std::vector<GlobalIndex> parseRowSampleDofs(std::string_view value);
+
+/// Logs the norm, extremes and samples of one field's constrained residual.
 class FieldResidualObserver final : public timestepping::NewtonObserver {
 public:
+    explicit FieldResidualObserver(RowObservationOptions options = rowObservationOptionsFromEnvironment())
+        : options_(std::move(options)) {}
+
     [[nodiscard]] std::string_view id() const override { return "field_residual"; }
     void observe(timestepping::NewtonObservation& observation) override;
+
+private:
+    RowObservationOptions options_;
 };
 
 /// Assembles each declared operator into a scratch vector (and, with a
@@ -67,9 +87,13 @@ public:
 class RowContributionObserver final : public timestepping::NewtonObserver {
 public:
     /// The observer of the rows @p declaration states (none when empty).
-    explicit RowContributionObserver(std::optional<RowContributionDeclaration> declaration)
-        : declaration_(std::move(declaration))
+    explicit RowContributionObserver(std::optional<RowContributionDeclaration> declaration,
+                                     RowObservationOptions options = rowObservationOptionsFromEnvironment())
+        : declaration_(std::move(declaration)), options_(std::move(options))
     {
+        if (options_.residual_field.empty() && declaration_) {
+            options_.residual_field = declaration_->row_field_name;
+        }
     }
 
     [[nodiscard]] std::string_view id() const override { return "row_contribution"; }
@@ -83,15 +107,14 @@ public:
 
 private:
     std::optional<RowContributionDeclaration> declaration_;
+    RowObservationOptions options_;
 };
 
 /// Whether the environment switches on the field-residual observer
 /// (SVMP_NEWTON_FIELD_RESIDUAL_DIAGNOSTIC or a row-contribution switch).
 [[nodiscard]] bool fieldResidualObserverSwitchedOn() noexcept;
 
-/// Whether the environment switches on the row-contribution observer
-/// (SVMP_NS_PRESSURE_ROW_CONTRIBUTION_DIAGNOSTIC or
-/// SVMP_PRESSURE_ROW_CONTRIBUTION_DIAGNOSTIC).
+/// Whether the numerical row-contribution observer was requested.
 [[nodiscard]] bool rowContributionObserverSwitchedOn() noexcept;
 
 } // namespace analysis

@@ -524,8 +524,7 @@ inline void declareDiagnosticSets(FE::systems::DiagnosticRegistry& registry, FE:
 {
     registry.declareSet(
         std::string(kPressureRowContributionDiagnostics),
-        {"SVMP_NS_PRESSURE_ROW_CONTRIBUTION_DIAGNOSTIC",
-         "SVMP_PRESSURE_ROW_CONTRIBUTION_DIAGNOSTIC"});
+        free_surface::rowContributionDiagnosticSwitches(), free_surface::environmentRegistry());
     // The equilibrium spellings remain explicit compatibility aliases for
     // qualification scripts written while the diagnostic was being designed.
     registry.declareSet(

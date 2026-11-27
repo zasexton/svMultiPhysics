@@ -112,6 +112,42 @@ TEST_F(FreeSurfaceCertificateEnvironment, KeepsAliasPrecedenceAndReadsCachePolic
     EXPECT_FALSE(fs::newtonAnalysisMethodFromEnvironment().constraint_range.observe);
 }
 
+TEST(RowObservationEnvironment, BindsCanonicalAndLegacyControlsAtTheirOwners)
+{
+    namespace fs = formulations::navier_stokes::free_surface;
+    constexpr auto canonical = "SVMP_FE_ROW_CONTRIBUTION_DIAGNOSTIC";
+    constexpr auto primary = "SVMP_NS_PRESSURE_ROW_CONTRIBUTION_DIAGNOSTIC";
+    constexpr auto alias = "SVMP_PRESSURE_ROW_CONTRIBUTION_DIAGNOSTIC";
+    ScopedEnvVar canonical_row(canonical, "1");
+    ScopedEnvVar primary_row(primary, "off");
+    ScopedEnvVar alias_row(alias, "true");
+    EXPECT_TRUE(FE::analysis::newtonAnalysisMethodFromEnvironment().observe_row_contributions);
+    EXPECT_EQ(FE::environment::EnvironmentNameRegistry::solver().find(alias), nullptr);
+    EXPECT_TRUE(fs::newtonAnalysisMethodFromEnvironment().observe_row_contributions);
+    ScopedEnvVar canonical_off(canonical, "0");
+    EXPECT_FALSE(FE::analysis::newtonAnalysisMethodFromEnvironment().observe_row_contributions);
+    // These legacy flags have always combined by logical OR.
+    EXPECT_TRUE(fs::newtonAnalysisMethodFromEnvironment().observe_row_contributions);
+
+    ScopedEnvVar field("SVMP_NEWTON_FIELD_RESIDUAL_FIELD", std::nullopt);
+    ScopedEnvVar samples("SVMP_NEWTON_FIELD_RESIDUAL_SAMPLE_DOFS", "");
+    ScopedEnvVar legacy_samples("SVMP_PRESSURE_ROW_CONTRIBUTION_SAMPLE_DOFS", "9,8-7|bad");
+    ScopedEnvVar primary_ops("SVMP_NS_PRESSURE_ROW_CONTRIBUTION_MATRIX_SUMMARY_OPS", "");
+    ScopedEnvVar alias_ops("SVMP_PRESSURE_ROW_CONTRIBUTION_MATRIX_SUMMARY_OPS", "continuity");
+    ScopedEnvVar generic_ops("SVMP_FE_ROW_CONTRIBUTION_MATRIX_SUMMARY_OPS", std::nullopt);
+    const auto rows = fs::newtonAnalysisMethodFromEnvironment().row_options;
+    EXPECT_EQ(rows.residual_field, "Pressure");
+    EXPECT_EQ(rows.residual_samples, (std::vector<FE::GlobalIndex>{7, 8, 9}));
+    EXPECT_TRUE(rows.matrix_support);
+    ASSERT_NE(rows.summary_operators, nullptr);
+    EXPECT_STREQ(rows.summary_operators(), "continuity");
+    ScopedEnvVar preferred_ops("SVMP_FE_ROW_CONTRIBUTION_MATRIX_SUMMARY_OPS", "other");
+    EXPECT_STREQ(rows.summary_operators(), "other");
+    ScopedEnvVar explicit_samples("SVMP_NEWTON_FIELD_RESIDUAL_SAMPLE_DOFS", "3");
+    EXPECT_EQ(fs::newtonAnalysisMethodFromEnvironment().row_options.residual_samples,
+              (std::vector<FE::GlobalIndex>{3}));
+}
+
 TEST(FreeSurfaceGeometryEnvironment, PreservesFullCellPointRetentionFlag)
 {
     namespace fs = formulations::navier_stokes::free_surface;

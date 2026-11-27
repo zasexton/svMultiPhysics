@@ -43,53 +43,7 @@ namespace svmp {
 namespace FE {
 namespace analysis {
 
-namespace {
-
-#if FE_HAS_MPI
-using NewtonCommunicator = MPI_Comm;
-#else
-using NewtonCommunicator = int;
-constexpr NewtonCommunicator kSerialNewtonCommunicator = 0;
-#endif
-
-using timestepping::stateSynchronizationPointName;
-
-[[nodiscard]] const char* stateSyncPointName(
-    timestepping::NewtonOptions::StateSynchronizationPoint point) noexcept
-{
-    return stateSynchronizationPointName(point);
-}
-
-[[nodiscard]] bool newtonFieldResidualDiagnosticEnabled() noexcept
-{
-    static const bool enabled =
-        environment::enabled("SVMP_NEWTON_FIELD_RESIDUAL_DIAGNOSTIC") ||
-        environment::enabled("SVMP_NS_PRESSURE_ROW_CONTRIBUTION_DIAGNOSTIC") ||
-        environment::enabled("SVMP_PRESSURE_ROW_CONTRIBUTION_DIAGNOSTIC");
-    return enabled;
-}
-
-[[nodiscard]] bool pressureRowContributionDiagnosticEnabled() noexcept
-{
-    static const bool enabled =
-        environment::enabled("SVMP_NS_PRESSURE_ROW_CONTRIBUTION_DIAGNOSTIC") ||
-        environment::enabled("SVMP_PRESSURE_ROW_CONTRIBUTION_DIAGNOSTIC");
-    return enabled;
-}
-
-[[nodiscard]] const std::string& newtonFieldResidualDiagnosticFieldName()
-{
-    static const std::string field_name = [] {
-        const char* env = environment::value("SVMP_NEWTON_FIELD_RESIDUAL_FIELD");
-        if (env != nullptr && env[0] != '\0') {
-            return std::string(env);
-        }
-        return std::string("Pressure");
-    }();
-    return field_name;
-}
-
-std::vector<GlobalIndex> parseGlobalIndexList(std::string_view text)
+std::vector<GlobalIndex> parseRowSampleDofs(std::string_view text)
 {
     std::vector<GlobalIndex> out;
     std::string normalized(text);
@@ -132,63 +86,31 @@ std::vector<GlobalIndex> parseGlobalIndexList(std::string_view text)
     return out;
 }
 
-[[nodiscard]] const std::vector<GlobalIndex>& newtonFieldResidualDiagnosticSampleDofs()
+namespace {
+
+#if FE_HAS_MPI
+using NewtonCommunicator = MPI_Comm;
+#else
+using NewtonCommunicator = int;
+constexpr NewtonCommunicator kSerialNewtonCommunicator = 0;
+#endif
+
+using timestepping::stateSynchronizationPointName;
+
+[[nodiscard]] const char* stateSyncPointName(
+    timestepping::NewtonOptions::StateSynchronizationPoint point) noexcept
 {
-    static const std::vector<GlobalIndex> dofs = [] {
-        const char* env = environment::value("SVMP_NEWTON_FIELD_RESIDUAL_SAMPLE_DOFS");
-        if (env == nullptr || env[0] == '\0') {
-            env = environment::value("SVMP_PRESSURE_ROW_CONTRIBUTION_SAMPLE_DOFS");
-        }
-        if (env == nullptr || env[0] == '\0') {
-            return std::vector<GlobalIndex>{};
-        }
-        return parseGlobalIndexList(env);
-    }();
-    return dofs;
+    return stateSynchronizationPointName(point);
 }
 
-[[nodiscard]] const std::vector<GlobalIndex>& newtonMatrixSupportGlobalSampleDofs()
+[[nodiscard]] const char* numericalSummaryOperators() noexcept
 {
-    static const std::vector<GlobalIndex> dofs = [] {
-        const char* env = environment::value("SVMP_NEWTON_MATRIX_SUPPORT_SAMPLE_DOFS");
-        if (env == nullptr || env[0] == '\0') {
-            return std::vector<GlobalIndex>{};
-        }
-        return parseGlobalIndexList(env);
-    }();
-    return dofs;
+    return environment::value("SVMP_FE_ROW_CONTRIBUTION_MATRIX_SUMMARY_OPS");
 }
 
-[[nodiscard]] bool pressureRowContributionMatrixDiagnosticEnabled() noexcept
+[[nodiscard]] bool rowMatrixSummaryOpSelected(const RowObservationOptions& options, std::string_view op)
 {
-    static const bool enabled =
-        pressureRowContributionDiagnosticEnabled() &&
-        (environment::enabled("SVMP_NS_PRESSURE_ROW_CONTRIBUTION_MATRIX_DIAGNOSTIC") ||
-         environment::enabled("SVMP_PRESSURE_ROW_CONTRIBUTION_MATRIX_DIAGNOSTIC") ||
-         environment::enabled("SVMP_NS_PRESSURE_ROW_CONTRIBUTION_MATRIX_SUMMARY_DIAGNOSTIC") ||
-         environment::enabled("SVMP_PRESSURE_ROW_CONTRIBUTION_MATRIX_SUMMARY_DIAGNOSTIC") ||
-         environment::isSet("SVMP_PRESSURE_ROW_CONTRIBUTION_SAMPLE_DOFS") ||
-         environment::isSet("SVMP_NEWTON_MATRIX_SUPPORT_SAMPLE_DOFS"));
-    return enabled;
-}
-
-[[nodiscard]] bool pressureRowContributionMatrixSummaryDiagnosticEnabled() noexcept
-{
-    static const bool enabled =
-        pressureRowContributionDiagnosticEnabled() &&
-        (environment::enabled("SVMP_NS_PRESSURE_ROW_CONTRIBUTION_MATRIX_SUMMARY_DIAGNOSTIC") ||
-         environment::enabled("SVMP_PRESSURE_ROW_CONTRIBUTION_MATRIX_SUMMARY_DIAGNOSTIC"));
-    return enabled;
-}
-
-[[nodiscard]] bool pressureRowContributionMatrixSummaryOpSelected(
-    std::string_view op)
-{
-    const char* env =
-        environment::value("SVMP_NS_PRESSURE_ROW_CONTRIBUTION_MATRIX_SUMMARY_OPS");
-    if (env == nullptr || env[0] == '\0') {
-        env = environment::value("SVMP_PRESSURE_ROW_CONTRIBUTION_MATRIX_SUMMARY_OPS");
-    }
+    const char* env = options.summary_operators ? options.summary_operators() : nullptr;
     if (env == nullptr || env[0] == '\0') {
         return true;
     }
@@ -292,6 +214,7 @@ struct NewtonMatrixSupportFieldRange {
 }
 
 void logNewtonFieldResidualDiagnostic(
+    const RowObservationOptions& options,
     const systems::FESystem& sys,
     backends::GenericVector& residual,
     std::string_view phase,
@@ -300,12 +223,9 @@ void logNewtonFieldResidualDiagnostic(
     double solve_time,
     double dt)
 {
-    if (!newtonFieldResidualDiagnosticEnabled()) {
-        return;
-    }
     const auto communicator = systemCommunicator(sys);
 
-    const auto& field_name = newtonFieldResidualDiagnosticFieldName();
+    const auto& field_name = options.residual_field;
     const auto field_id = sys.findFieldByName(field_name);
     if (field_id == INVALID_FIELD_ID) {
         if (communicatorRank(communicator) == 0) {
@@ -429,7 +349,7 @@ void logNewtonFieldResidualDiagnostic(
         << " local_worst_value=" << local_worst_value
         << " local_max_abs=" << local_max_abs;
 
-    const auto& sample_dofs = newtonFieldResidualDiagnosticSampleDofs();
+    const auto& sample_dofs = options.residual_samples;
     if (!sample_dofs.empty()) {
         oss << " sampled_dofs=";
         bool emitted = false;
@@ -506,7 +426,7 @@ newtonMatrixSupportFieldRangeByName(const systems::FESystem& sys,
     return dof >= range.begin && dof < range.end;
 }
 
-struct ActivePressureSupportRankRow {
+struct MatrixSupportRow {
     GlobalIndex local_dof = INVALID_GLOBAL_INDEX;
     GlobalIndex global_dof = INVALID_GLOBAL_INDEX;
     double row_abs_sum = 0.0;
@@ -522,15 +442,15 @@ struct ActivePressureSupportRankRow {
     double diag = 0.0;
 };
 
-struct ActivePressureSupportRankSummary {
-    std::string pressure_field;
+struct MatrixSupportSummary {
+    std::string observed_field;
     std::string coupling_field;
-    GlobalIndex pressure_offset = INVALID_GLOBAL_INDEX;
-    GlobalIndex pressure_dofs = 0;
+    GlobalIndex observed_offset = INVALID_GLOBAL_INDEX;
+    GlobalIndex observed_dofs = 0;
     GlobalIndex coupling_offset = INVALID_GLOBAL_INDEX;
     GlobalIndex coupling_dofs = 0;
-    GlobalIndex constrained_pressure_rows = 0;
-    GlobalIndex unconstrained_pressure_rows = 0;
+    GlobalIndex constrained_observed_rows = 0;
+    GlobalIndex unconstrained_observed_rows = 0;
     GlobalIndex zero_row_count = 0;
     GlobalIndex zero_col_count = 0;
     GlobalIndex zero_diag_count = 0;
@@ -540,8 +460,8 @@ struct ActivePressureSupportRankSummary {
     GlobalIndex zero_self_col_block_count = 0;
     GlobalIndex positive_coupling_row_block_count = 0;
     GlobalIndex positive_self_row_block_count = 0;
-    GlobalIndex pressure_only_row_block_count = 0;
-    GlobalIndex pressure_only_col_block_count = 0;
+    GlobalIndex observed_only_row_block_count = 0;
+    GlobalIndex observed_only_col_block_count = 0;
     double min_positive_coupling_row_abs_sum =
         std::numeric_limits<double>::infinity();
     double max_coupling_row_abs_sum = 0.0;
@@ -549,14 +469,14 @@ struct ActivePressureSupportRankSummary {
         std::numeric_limits<double>::infinity();
     double max_self_row_abs_sum = 0.0;
     std::vector<GlobalIndex> zero_coupling_row_global_dofs;
-    std::vector<ActivePressureSupportRankRow> zero_coupling_row_samples;
-    std::vector<ActivePressureSupportRankRow> zero_row_samples;
-    std::vector<ActivePressureSupportRankRow> weakest_coupling_row_samples;
-    std::vector<ActivePressureSupportRankRow> weakest_self_row_samples;
+    std::vector<MatrixSupportRow> zero_coupling_row_samples;
+    std::vector<MatrixSupportRow> zero_row_samples;
+    std::vector<MatrixSupportRow> weakest_coupling_row_samples;
+    std::vector<MatrixSupportRow> weakest_self_row_samples;
 };
 
-[[nodiscard]] std::string formatActivePressureSupportRankDofSamples(
-    std::span<const ActivePressureSupportRankRow> rows,
+[[nodiscard]] std::string formatMatrixSupportDofSamples(
+    std::span<const MatrixSupportRow> rows,
     bool local)
 {
     if (rows.empty()) {
@@ -572,12 +492,12 @@ struct ActivePressureSupportRankSummary {
     return oss.str();
 }
 
-[[nodiscard]] std::vector<GlobalIndex> pressureOperatorMatrixSupportSampleDofs()
+[[nodiscard]] std::vector<GlobalIndex> operatorMatrixSupportSampleDofs(const RowObservationOptions& options)
 {
     std::vector<GlobalIndex> sample_dofs =
-        newtonFieldResidualDiagnosticSampleDofs();
+        options.residual_samples;
 
-    const auto& matrix_sample_dofs = newtonMatrixSupportGlobalSampleDofs();
+    const auto& matrix_sample_dofs = options.matrix_samples;
     sample_dofs.insert(sample_dofs.end(),
                        matrix_sample_dofs.begin(),
                        matrix_sample_dofs.end());
@@ -588,7 +508,8 @@ struct ActivePressureSupportRankSummary {
     return sample_dofs;
 }
 
-void logPressureRowOperatorMatrixSupportDiagnostic(
+void logRowOperatorMatrixSupportDiagnostic(
+    const RowObservationOptions& options,
     const systems::FESystem& sys,
     const backends::GenericMatrix& matrix,
     std::string_view row_field,
@@ -599,27 +520,27 @@ void logPressureRowOperatorMatrixSupportDiagnostic(
     double solve_time,
     double dt)
 {
-    if (!pressureRowContributionMatrixDiagnosticEnabled()) {
+    if (!options.matrix_support) {
         return;
     }
 
-    const auto pressure_range =
+    const auto observed_range =
         newtonMatrixSupportFieldRangeByName(sys, row_field);
     const auto coupling_range =
         newtonMatrixSupportFieldRangeByName(sys, coupling_field);
-    if (!pressure_range.has_value() || !coupling_range.has_value()) {
+    if (!observed_range.has_value() || !coupling_range.has_value()) {
         if (mpiRank() == 0) {
             FE_LOG_INFO(
-                "NewtonSolver: pressure row operator matrix support diagnostic "
-                "diagnostic=pressure_row_operator_matrix_support status=field_missing "
-                "pressure_field='" + std::string(row_field) + "' coupling_field='" +
+                "NewtonSolver: " + options.subject + " row operator matrix support diagnostic diagnostic=" +
+                options.subject + "_row_operator_matrix_support status=field_missing " +
+                options.subject + "_field='" + std::string(row_field) + "' coupling_field='" +
                 std::string(coupling_field) + "' op='" +
                 std::string(op) + "' phase='" + std::string(phase) + "'");
         }
         return;
     }
 
-    const auto sample_dofs = pressureOperatorMatrixSupportSampleDofs();
+    const auto sample_dofs = operatorMatrixSupportSampleDofs(options);
     if (sample_dofs.empty()) {
         return;
     }
@@ -628,8 +549,8 @@ void logPressureRowOperatorMatrixSupportDiagnostic(
     for (const auto dof : sample_dofs) {
         std::ostringstream oss;
         oss << std::setprecision(17);
-        oss << "NewtonSolver: pressure row operator matrix support diagnostic"
-            << " diagnostic=pressure_row_operator_matrix_support"
+        oss << "NewtonSolver: " << options.subject << " row operator matrix support diagnostic"
+            << " diagnostic=" << options.subject << "_row_operator_matrix_support"
             << " rank=" << mpiRank()
             << " iteration=" << iteration
             << " phase='" << phase << "'"
@@ -637,10 +558,10 @@ void logPressureRowOperatorMatrixSupportDiagnostic(
             << " backend=" << backends::backendKindToString(matrix.backendKind())
             << " solve_time=" << solve_time
             << " dt=" << dt
-            << " pressure_field='" << row_field << "'"
+            << " " << options.subject << "_field='" << row_field << "'"
             << " coupling_field='" << coupling_field << "'"
-            << " pressure_offset=" << pressure_range->begin
-            << " pressure_dofs=" << (pressure_range->end - pressure_range->begin)
+            << " " << options.subject << "_offset=" << observed_range->begin
+            << " " << options.subject << "_dofs=" << (observed_range->end - observed_range->begin)
             << " coupling_offset=" << coupling_range->begin
             << " coupling_dofs=" << (coupling_range->end - coupling_range->begin)
             << " dof=" << dof;
@@ -652,15 +573,15 @@ void logPressureRowOperatorMatrixSupportDiagnostic(
             FE_LOG_INFO(oss.str());
             continue;
         }
-        if (!dofInFieldRange(dof, *pressure_range)) {
-            oss << " status=non_pressure_row";
+        if (!dofInFieldRange(dof, *observed_range)) {
+            oss << " status=non_" << options.subject << "_row";
             FE_LOG_INFO(oss.str());
             continue;
         }
 
-        ActivePressureSupportRankRow row;
+        MatrixSupportRow row;
         row.global_dof = dof;
-        row.local_dof = dof - pressure_range->begin;
+        row.local_dof = dof - observed_range->begin;
         int row_numeric_entries = 0;
         int row_self_numeric_entries = 0;
         int row_coupling_numeric_entries = 0;
@@ -684,7 +605,7 @@ void logPressureRowOperatorMatrixSupportDiagnostic(
                     ++row_coupling_numeric_entries;
                 }
             }
-            if (dofInFieldRange(col, *pressure_range)) {
+            if (dofInFieldRange(col, *observed_range)) {
                 row.row_self_abs_sum += abs_value;
                 row.row_self_sum += static_cast<double>(value);
                 if (abs_value > static_cast<double>(tiny)) {
@@ -708,7 +629,7 @@ void logPressureRowOperatorMatrixSupportDiagnostic(
                     ++col_coupling_numeric_entries;
                 }
             }
-            if (dofInFieldRange(matrix_row, *pressure_range)) {
+            if (dofInFieldRange(matrix_row, *observed_range)) {
                 row.col_self_abs_sum += abs_value;
                 if (abs_value > static_cast<double>(tiny)) {
                     ++col_self_numeric_entries;
@@ -729,7 +650,7 @@ void logPressureRowOperatorMatrixSupportDiagnostic(
         oss << " status=ok"
             << " field='" << row_field << "'"
             << " field_local_dof=" << row.local_dof
-            << " pressure_local_dof=" << row.local_dof
+            << " " << options.subject << "_local_dof=" << row.local_dof
             << " row_abs_sum=" << row.row_abs_sum
             << " row_numeric_entries=" << row_numeric_entries
             << " row_self_abs_sum=" << row.row_self_abs_sum
@@ -756,29 +677,29 @@ void logPressureRowOperatorMatrixSupportDiagnostic(
     }
 }
 
-[[nodiscard]] ActivePressureSupportRankSummary scanActivePressureSupportRank(
+[[nodiscard]] MatrixSupportSummary scanMatrixSupport(
     const systems::FESystem& sys,
     const backends::GenericMatrix& matrix,
     std::span<const GlobalIndex> constrained_dofs,
-    std::string_view pressure_field_name,
+    std::string_view observed_field_name,
     std::string_view coupling_field_name,
     double tolerance,
     int sample_limit)
 {
-    ActivePressureSupportRankSummary summary;
-    summary.pressure_field = std::string(pressure_field_name);
+    MatrixSupportSummary summary;
+    summary.observed_field = std::string(observed_field_name);
     summary.coupling_field = std::string(coupling_field_name);
 
-    const auto pressure_range =
-        newtonMatrixSupportFieldRangeByName(sys, pressure_field_name);
+    const auto observed_range =
+        newtonMatrixSupportFieldRangeByName(sys, observed_field_name);
     const auto coupling_range =
         newtonMatrixSupportFieldRangeByName(sys, coupling_field_name);
-    if (!pressure_range.has_value() || !coupling_range.has_value()) {
+    if (!observed_range.has_value() || !coupling_range.has_value()) {
         return summary;
     }
 
-    summary.pressure_offset = pressure_range->begin;
-    summary.pressure_dofs = pressure_range->end - pressure_range->begin;
+    summary.observed_offset = observed_range->begin;
+    summary.observed_dofs = observed_range->end - observed_range->begin;
     summary.coupling_offset = coupling_range->begin;
     summary.coupling_dofs = coupling_range->end - coupling_range->begin;
 
@@ -787,15 +708,15 @@ void logPressureRowOperatorMatrixSupportDiagnostic(
                static_cast<int>(samples.size()) < sample_limit;
     };
     const auto add_weakest_coupling_sample =
-        [sample_limit](std::vector<ActivePressureSupportRankRow>& samples,
-                       const ActivePressureSupportRankRow& row) {
+        [sample_limit](std::vector<MatrixSupportRow>& samples,
+                       const MatrixSupportRow& row) {
             if (sample_limit == 0) {
                 return;
             }
             samples.push_back(row);
             std::sort(samples.begin(), samples.end(),
-                      [](const ActivePressureSupportRankRow& a,
-                         const ActivePressureSupportRankRow& b) {
+                      [](const MatrixSupportRow& a,
+                         const MatrixSupportRow& b) {
                           if (a.row_coupling_abs_sum == b.row_coupling_abs_sum) {
                               return a.global_dof < b.global_dof;
                           }
@@ -807,15 +728,15 @@ void logPressureRowOperatorMatrixSupportDiagnostic(
             }
         };
     const auto add_weakest_self_sample =
-        [sample_limit](std::vector<ActivePressureSupportRankRow>& samples,
-                       const ActivePressureSupportRankRow& row) {
+        [sample_limit](std::vector<MatrixSupportRow>& samples,
+                       const MatrixSupportRow& row) {
             if (sample_limit == 0) {
                 return;
             }
             samples.push_back(row);
             std::sort(samples.begin(), samples.end(),
-                      [](const ActivePressureSupportRankRow& a,
-                         const ActivePressureSupportRankRow& b) {
+                      [](const MatrixSupportRow& a,
+                         const MatrixSupportRow& b) {
                           if (a.row_self_abs_sum == b.row_self_abs_sum) {
                               return a.global_dof < b.global_dof;
                           }
@@ -827,16 +748,16 @@ void logPressureRowOperatorMatrixSupportDiagnostic(
             }
         };
 
-    for (GlobalIndex local_dof = 0; local_dof < summary.pressure_dofs; ++local_dof) {
-        const auto global_dof = summary.pressure_offset + local_dof;
+    for (GlobalIndex local_dof = 0; local_dof < summary.observed_dofs; ++local_dof) {
+        const auto global_dof = summary.observed_offset + local_dof;
         if (std::binary_search(
                 constrained_dofs.begin(), constrained_dofs.end(), global_dof)) {
-            ++summary.constrained_pressure_rows;
+            ++summary.constrained_observed_rows;
             continue;
         }
 
-        ++summary.unconstrained_pressure_rows;
-        ActivePressureSupportRankRow row;
+        ++summary.unconstrained_observed_rows;
+        MatrixSupportRow row;
         row.local_dof = local_dof;
         row.global_dof = global_dof;
         if (global_dof < 0 ||
@@ -865,7 +786,7 @@ void logPressureRowOperatorMatrixSupportDiagnostic(
             if (dofInFieldRange(col, *coupling_range)) {
                 row.row_coupling_abs_sum += abs_value;
             }
-            if (dofInFieldRange(col, *pressure_range)) {
+            if (dofInFieldRange(col, *observed_range)) {
                 row.row_self_abs_sum += abs_value;
                 row.row_self_sum += static_cast<double>(value);
             }
@@ -880,7 +801,7 @@ void logPressureRowOperatorMatrixSupportDiagnostic(
             if (dofInFieldRange(matrix_row, *coupling_range)) {
                 row.col_coupling_abs_sum += abs_value;
             }
-            if (dofInFieldRange(matrix_row, *pressure_range)) {
+            if (dofInFieldRange(matrix_row, *observed_range)) {
                 row.col_self_abs_sum += abs_value;
             }
         }
@@ -951,17 +872,18 @@ void logPressureRowOperatorMatrixSupportDiagnostic(
             ++summary.zero_self_col_block_count;
         }
         if (zero_coupling_row && !zero_self_row) {
-            ++summary.pressure_only_row_block_count;
+            ++summary.observed_only_row_block_count;
         }
         if (zero_coupling_col && !zero_self_col) {
-            ++summary.pressure_only_col_block_count;
+            ++summary.observed_only_col_block_count;
         }
     }
 
     return summary;
 }
 
-void logPressureRowOperatorMatrixSummaryDiagnostic(
+void logRowOperatorMatrixSummaryDiagnostic(
+    const RowObservationOptions& options,
     const systems::FESystem& sys,
     const backends::GenericMatrix& matrix,
     std::span<const GlobalIndex> constrained_dofs,
@@ -973,41 +895,40 @@ void logPressureRowOperatorMatrixSummaryDiagnostic(
     double solve_time,
     double dt)
 {
-    if (!pressureRowContributionMatrixSummaryDiagnosticEnabled() ||
-        !pressureRowContributionMatrixSummaryOpSelected(op)) {
+    if (!options.matrix_summary || !rowMatrixSummaryOpSelected(options, op)) {
         return;
     }
 
-    const std::string pressure_field{row_field};
+    const std::string observed_field{row_field};
     const std::string coupling_field{coupling_field_name};
     constexpr double tolerance = 1.0e-14;
     constexpr int sample_limit = 16;
-    const auto summary = scanActivePressureSupportRank(
+    const auto summary = scanMatrixSupport(
         sys,
         matrix,
         constrained_dofs,
-        pressure_field,
+        observed_field,
         coupling_field,
         tolerance,
         sample_limit);
 
-    if (summary.pressure_dofs <= 0 || summary.coupling_dofs <= 0) {
+    if (summary.observed_dofs <= 0 || summary.coupling_dofs <= 0) {
         FE_LOG_INFO(
-            "NewtonSolver: pressure row operator matrix summary"
-            " diagnostic=pressure_row_operator_matrix_summary"
+            "NewtonSolver: " + options.subject + " row operator matrix summary" +
+            " diagnostic=" + options.subject + "_row_operator_matrix_summary" +
             " status=field_missing"
             " op='" +
             std::string(op) +
             "' phase='" + std::string(phase) + "'"
-            " pressure_field='" + pressure_field + "'"
+            " " + options.subject + "_field='" + observed_field + "'"
             " coupling_field='" + coupling_field + "'");
         return;
     }
 
     std::ostringstream oss;
     oss << std::setprecision(17);
-    oss << "NewtonSolver: pressure row operator matrix summary"
-        << " diagnostic=pressure_row_operator_matrix_summary"
+    oss << "NewtonSolver: " << options.subject << " row operator matrix summary"
+        << " diagnostic=" << options.subject << "_row_operator_matrix_summary"
         << " status=ok"
         << " rank=" << mpiRank()
         << " iteration=" << iteration
@@ -1016,14 +937,14 @@ void logPressureRowOperatorMatrixSummaryDiagnostic(
         << " backend=" << backends::backendKindToString(matrix.backendKind())
         << " solve_time=" << solve_time
         << " dt=" << dt
-        << " pressure_field='" << summary.pressure_field << "'"
+        << " " << options.subject << "_field='" << summary.observed_field << "'"
         << " coupling_field='" << summary.coupling_field << "'"
-        << " pressure_offset=" << summary.pressure_offset
-        << " pressure_dofs=" << summary.pressure_dofs
+        << " " << options.subject << "_offset=" << summary.observed_offset
+        << " " << options.subject << "_dofs=" << summary.observed_dofs
         << " coupling_offset=" << summary.coupling_offset
         << " coupling_dofs=" << summary.coupling_dofs
-        << " constrained_pressure_rows=" << summary.constrained_pressure_rows
-        << " unconstrained_pressure_rows=" << summary.unconstrained_pressure_rows
+        << " constrained_" << options.subject << "_rows=" << summary.constrained_observed_rows
+        << " unconstrained_" << options.subject << "_rows=" << summary.unconstrained_observed_rows
         << " zero_row_count=" << summary.zero_row_count
         << " zero_col_count=" << summary.zero_col_count
         << " zero_diag_count=" << summary.zero_diag_count
@@ -1049,35 +970,35 @@ void logPressureRowOperatorMatrixSummaryDiagnostic(
                 : 0.0)
         << " max_self_row_abs_sum="
         << summary.max_self_row_abs_sum
-        << " pressure_only_row_block_count="
-        << summary.pressure_only_row_block_count
-        << " pressure_only_col_block_count="
-        << summary.pressure_only_col_block_count
+        << " " << options.subject << "_only_row_block_count="
+        << summary.observed_only_row_block_count
+        << " " << options.subject << "_only_col_block_count="
+        << summary.observed_only_col_block_count
         << " tolerance=" << tolerance
         << " sample_limit=" << sample_limit
         << " zero_coupling_row_local_dofs="
-        << formatActivePressureSupportRankDofSamples(
+        << formatMatrixSupportDofSamples(
                summary.zero_coupling_row_samples, /*local=*/true)
         << " zero_coupling_row_global_dofs="
-        << formatActivePressureSupportRankDofSamples(
+        << formatMatrixSupportDofSamples(
                summary.zero_coupling_row_samples, /*local=*/false)
         << " zero_row_local_dofs="
-        << formatActivePressureSupportRankDofSamples(
+        << formatMatrixSupportDofSamples(
                summary.zero_row_samples, /*local=*/true)
         << " zero_row_global_dofs="
-        << formatActivePressureSupportRankDofSamples(
+        << formatMatrixSupportDofSamples(
                summary.zero_row_samples, /*local=*/false)
         << " weakest_coupling_row_local_dofs="
-        << formatActivePressureSupportRankDofSamples(
+        << formatMatrixSupportDofSamples(
                summary.weakest_coupling_row_samples, /*local=*/true)
         << " weakest_coupling_row_global_dofs="
-        << formatActivePressureSupportRankDofSamples(
+        << formatMatrixSupportDofSamples(
                summary.weakest_coupling_row_samples, /*local=*/false)
         << " weakest_self_row_local_dofs="
-        << formatActivePressureSupportRankDofSamples(
+        << formatMatrixSupportDofSamples(
                summary.weakest_self_row_samples, /*local=*/true)
         << " weakest_self_row_global_dofs="
-        << formatActivePressureSupportRankDofSamples(
+        << formatMatrixSupportDofSamples(
                summary.weakest_self_row_samples, /*local=*/false);
     FE_LOG_INFO(oss.str());
 }
@@ -1117,6 +1038,7 @@ public:
 void FieldResidualObserver::observe(timestepping::NewtonObservation& observation)
 {
     logNewtonFieldResidualDiagnostic(
+        options_,
         observation.transient.system(),
         observation.residual,
         observation.phase != nullptr ? std::string_view(observation.phase)
@@ -1130,7 +1052,7 @@ void FieldResidualObserver::observe(timestepping::NewtonObservation& observation
 std::unique_ptr<timestepping::NewtonExtensionStorage> RowContributionObserver::allocate(
     const timestepping::NewtonStorageContext& context) const
 {
-    if (!pressureRowContributionMatrixDiagnosticEnabled()) {
+    if (!options_.matrix_support) {
         return nullptr;
     }
     auto storage = std::make_unique<RowContributionStorage>();
@@ -1185,9 +1107,6 @@ void RowContributionObserver::refreshStorage(const timestepping::NewtonStorageCo
 
 void RowContributionObserver::observe(timestepping::NewtonObservation& observation)
 {
-    if (!pressureRowContributionDiagnosticEnabled()) {
-        return;
-    }
     auto& transient = observation.transient;
     if (!declaration_.has_value()) {
         return;
@@ -1202,8 +1121,8 @@ void RowContributionObserver::observe(timestepping::NewtonObservation& observati
             if (mpiRank() == 0) {
                 std::ostringstream skipped;
                 skipped
-                    << "NewtonSolver: pressure row contribution diagnostic skipped"
-                    << " diagnostic=pressure_row_contribution_skipped"
+                    << "NewtonSolver: " << options_.subject << " row contribution diagnostic skipped"
+                    << " diagnostic=" << options_.subject << "_row_contribution_skipped"
                     << " reason=operator_not_installed"
                     << " op='" << op << "'"
                     << " phase='" << (phase != nullptr ? phase : "unknown") << "'"
@@ -1217,7 +1136,7 @@ void RowContributionObserver::observe(timestepping::NewtonObservation& observati
         auto scratch_view = residual_scratch.createAssemblyView();
         FE_CHECK_NOT_NULL(
             scratch_view.get(),
-            "NewtonSolver: pressure row contribution diagnostic view");
+            "NewtonSolver: row contribution diagnostic view");
         std::unique_ptr<assembly::GlobalSystemView> matrix_scratch_view;
         // A state-sync callback can re-augment constraint sparsity and
         // replace the distributed diagnostic matrix.  Resolve the pointer
@@ -1227,14 +1146,14 @@ void RowContributionObserver::observe(timestepping::NewtonObservation& observati
         auto* diagnostic_jacobian_scratch =
             row_storage != nullptr ? row_storage->matrix.get() : nullptr;
         const bool want_matrix_diagnostic =
-            pressureRowContributionMatrixDiagnosticEnabled() &&
+            options_.matrix_support &&
             diagnostic_jacobian_scratch != nullptr;
         if (want_matrix_diagnostic) {
             matrix_scratch_view =
                 diagnostic_jacobian_scratch->createAssemblyView();
             FE_CHECK_NOT_NULL(
                 matrix_scratch_view.get(),
-                "NewtonSolver: pressure row contribution matrix diagnostic view");
+                "NewtonSolver: row contribution matrix diagnostic view");
         }
         systems::AssemblyRequest req;
         req.op = op;
@@ -1244,21 +1163,22 @@ void RowContributionObserver::observe(timestepping::NewtonObservation& observati
         req.suppress_auxiliary_coupling_assembly = true;
         req.is_nonlinear_iteration = true;
         const auto ar = observation.assemble(
-            "pressure_row_contribution",
+            options_.phase_prefix,
             req,
             matrix_scratch_view.get(),
             scratch_view.get());
         FE_THROW_IF(
             !ar.success,
             FEException,
-            "NewtonSolver: pressure row contribution diagnostic assembly failed for op '" +
+            "NewtonSolver: " + options_.subject + " row contribution diagnostic assembly failed for op '" +
                 op + "': " + ar.error_message);
 
         if (want_matrix_diagnostic) {
             const std::string matrix_phase =
-                std::string("pressure_row_contribution_matrix:") +
+                options_.phase_prefix + "_matrix:" +
                 (phase != nullptr ? phase : "unknown");
-            logPressureRowOperatorMatrixSupportDiagnostic(
+            logRowOperatorMatrixSupportDiagnostic(
+                options_,
                 transient.system(),
                 *diagnostic_jacobian_scratch,
                 rows->row_field_name,
@@ -1268,7 +1188,8 @@ void RowContributionObserver::observe(timestepping::NewtonObservation& observati
                 observation.iteration,
                 observation.solve_time,
                 observation.dt);
-            logPressureRowOperatorMatrixSummaryDiagnostic(
+            logRowOperatorMatrixSummaryDiagnostic(
+                options_,
                 transient.system(),
                 *diagnostic_jacobian_scratch,
                 observation.constrained_dofs,
@@ -1282,8 +1203,9 @@ void RowContributionObserver::observe(timestepping::NewtonObservation& observati
         }
 
         const std::string pre_phase =
-            std::string("pressure_row_contribution_pre_constraints:") + op;
+            options_.phase_prefix + "_pre_constraints:" + op;
         logNewtonFieldResidualDiagnostic(
+            options_,
             transient.system(),
             residual_scratch,
             pre_phase,
@@ -1295,8 +1217,9 @@ void RowContributionObserver::observe(timestepping::NewtonObservation& observati
         zeroVectorEntries(observation.constrained_dofs, residual_scratch);
 
         const std::string post_phase =
-            std::string("pressure_row_contribution_post_constraints:") + op;
+            options_.phase_prefix + "_post_constraints:" + op;
         logNewtonFieldResidualDiagnostic(
+            options_,
             transient.system(),
             residual_scratch,
             post_phase,
@@ -1307,14 +1230,34 @@ void RowContributionObserver::observe(timestepping::NewtonObservation& observati
     }
 }
 
-bool fieldResidualObserverSwitchedOn() noexcept
-{
-    return newtonFieldResidualDiagnosticEnabled();
-}
-
 bool rowContributionObserverSwitchedOn() noexcept
 {
-    return pressureRowContributionDiagnosticEnabled();
+    return environment::enabled("SVMP_FE_ROW_CONTRIBUTION_DIAGNOSTIC");
+}
+
+bool fieldResidualObserverSwitchedOn() noexcept
+{
+    return environment::enabled("SVMP_NEWTON_FIELD_RESIDUAL_DIAGNOSTIC") || rowContributionObserverSwitchedOn();
+}
+
+RowObservationOptions rowObservationOptionsFromEnvironment()
+{
+    RowObservationOptions options;
+    if (const auto* field = environment::value("SVMP_NEWTON_FIELD_RESIDUAL_FIELD")) {
+        options.residual_field = field;
+    }
+    if (const auto* samples = environment::value("SVMP_NEWTON_FIELD_RESIDUAL_SAMPLE_DOFS")) {
+        options.residual_samples = parseRowSampleDofs(samples);
+    }
+    if (const auto* samples = environment::value("SVMP_NEWTON_MATRIX_SUPPORT_SAMPLE_DOFS")) {
+        options.matrix_samples = parseRowSampleDofs(samples);
+    }
+    options.matrix_summary = environment::enabled("SVMP_FE_ROW_CONTRIBUTION_MATRIX_SUMMARY_DIAGNOSTIC");
+    options.matrix_support = options.matrix_summary ||
+        environment::enabled("SVMP_FE_ROW_CONTRIBUTION_MATRIX_DIAGNOSTIC") ||
+        environment::isSet("SVMP_NEWTON_MATRIX_SUPPORT_SAMPLE_DOFS");
+    options.summary_operators = numericalSummaryOperators;
+    return options;
 }
 
 } // namespace analysis

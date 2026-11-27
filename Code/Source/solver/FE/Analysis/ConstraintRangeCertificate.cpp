@@ -2710,6 +2710,7 @@ NewtonAnalysisMethod newtonAnalysisMethodFromEnvironment()
     NewtonAnalysisMethod method;
     method.observe_field_residual = fieldResidualObserverSwitchedOn();
     method.observe_row_contributions = rowContributionObserverSwitchedOn();
+    method.row_options = rowObservationOptionsFromEnvironment();
     method.constraint_range = constraintRangeMethodFromEnvironment();
     return method;
 }
@@ -2733,12 +2734,19 @@ NewtonAnalysisExtensions buildNewtonAnalysisExtensions(
 {
     NewtonAnalysisExtensions analysis;
     auto& extensions = analysis.extensions;
-    if (method.observe_field_residual) {
-        extensions.observers.push_back(std::make_shared<FieldResidualObserver>());
-    }
-    if (method.observe_row_contributions) {
-        extensions.observers.push_back(std::make_shared<RowContributionObserver>(
-            declarationOf<RowContributionDeclaration>(system)));
+    if (method.observe_field_residual || method.observe_row_contributions) {
+        auto declaration = declarationOf<RowContributionDeclaration>(system);
+        auto options = method.row_options;
+        if (options.residual_field.empty() && declaration) {
+            options.residual_field = declaration->row_field_name;
+        }
+        if (method.observe_field_residual) {
+            extensions.observers.push_back(std::make_shared<FieldResidualObserver>(options));
+        }
+        if (method.observe_row_contributions) {
+            extensions.observers.push_back(std::make_shared<RowContributionObserver>(
+                std::move(declaration), std::move(options)));
+        }
     }
     if (constraintRangeMethodRequested(method.constraint_range)) {
         auto certificate = std::make_shared<ConstraintRangeCertificate>(
