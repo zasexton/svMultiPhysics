@@ -7626,6 +7626,16 @@ void ApplicationDriver::runTransient(SimulationComponents& sim, const Parameters
   // Seed wet-volume drift diagnostics from the actual initialized level-set
   // state.  Waiting until the first accepted step silently made that state
   // the reference and hid all first-step volume loss.
+  struct IslandPinHistory {
+    std::size_t accepted_steps{0};
+    int first_step{0};
+    int last_step{0};
+    std::size_t max_islands{0};
+    std::size_t max_pinned_dofs{0};
+    svmp::FE::Real max_physical_volume{0};
+  };
+  using IslandPinKey = std::tuple<svmp::FE::FieldId, int, svmp::FE::geometry::CutIntegrationSide>;
+  std::map<IslandPinKey, IslandPinHistory> island_pin_history;
   std::map<std::string, svmp::FE::Real> initial_wet_volume_by_key;
   (void)cut_geometry->refreshCached(sim.time_history->u(), "initial");
   if (initializeDiscreteStaticCapillaryEquilibrium(
@@ -10009,6 +10019,19 @@ void ApplicationDriver::runTransient(SimulationComponents& sim, const Parameters
     auto vtk_start = std::chrono::steady_clock::now();
     outputResults(sim, params, h.stepIndex(), h.time(), pvd, opts.scheme);
     vtk_total_time += std::chrono::duration<double>(std::chrono::steady_clock::now() - vtk_start).count();
+    if (svmp::MeshComm::world().rank() == 0) {
+      for (const auto& pins : sim.fe_system->rootlessIslandPins()) {
+        auto& history = island_pin_history[{pins.field, pins.interface_marker, pins.active_side}];
+        if (history.accepted_steps == 0) {
+          history.first_step = h.stepIndex();
+        }
+        ++history.accepted_steps;
+        history.last_step = h.stepIndex();
+        history.max_islands = std::max(history.max_islands, pins.islands);
+        history.max_pinned_dofs = std::max(history.max_pinned_dofs, pins.pinned_dofs);
+        history.max_physical_volume = std::max(history.max_physical_volume, pins.physical_volume);
+      }
+    }
   };
   callbacks.on_step_rejected = [&](const svmp::FE::timestepping::TimeHistory& h,
                                   svmp::FE::timestepping::StepRejectReason reason,
@@ -10140,6 +10163,21 @@ void ApplicationDriver::runTransient(SimulationComponents& sim, const Parameters
   if (svmp::MeshComm::world().size() > 1 && svmp::MeshComm::world().rank() == 0) {
     oopCout() << "[svMultiPhysics::Application] Halo correctness "
               << svmp::FE::diagnostics::haloCorrectnessSummary() << std::endl;
+  }
+  for (const auto& [key, history] : island_pin_history) {
+    const auto& [field, marker, side] = key;
+    svmp::FE::logRecord(svmp::FE::LogRecord("ApplicationDriver", "rootless island pins")
+        .diagnostic("accepted_rootless_island_pins")
+        .rootOnly()
+        .quoted("field", sim.fe_system->fieldRecord(field).name)
+        .value("marker", marker)
+        .text("active_side", side == svmp::FE::geometry::CutIntegrationSide::Negative ? "Negative" : "Positive")
+        .value("accepted_steps", history.accepted_steps)
+        .value("first_step", history.first_step)
+        .value("last_step", history.last_step)
+        .value("max_islands", history.max_islands)
+        .value("max_pinned_dofs", history.max_pinned_dofs)
+        .value("max_pinned_physical_volume", history.max_physical_volume));
   }
   // Small-cut aggregation candidates that had no root inside the aggregation
   // guards and received the rootless-island policy (opt-in

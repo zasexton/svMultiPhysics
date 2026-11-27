@@ -674,6 +674,17 @@ smallCutAggregationLazyReportVerificationForTesting() noexcept;
 void injectSmallCutAggregationReportBuildFailureForTesting(
     int rank) noexcept;
 
+/// Canonical homogeneous aggregation pins on disconnected active features
+/// with no fully active cell. Each feature and scalar DOF is counted once.
+struct SmallCutIslandPins {
+    FieldId field{INVALID_FIELD_ID};
+    int interface_marker{-1};
+    geometry::CutIntegrationSide active_side{geometry::CutIntegrationSide::Negative};
+    std::size_t islands{0};
+    std::size_t pinned_dofs{0};
+    Real physical_volume{0};
+};
+
 class SmallCutAggregationConstraint final : public ISystemConstraint {
 public:
     class LifecycleCheckpoint {
@@ -737,6 +748,10 @@ public:
 
 private:
     friend class systems::FESystem;
+
+    [[nodiscard]] static std::optional<SmallCutIslandPins> rootlessIslandPins(
+        const detail::SmallCutAggregationClosedProlongation& closed);
+
 
     /**
      * Collective over the system communicator. Validates a fully closed

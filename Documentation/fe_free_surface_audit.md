@@ -106,6 +106,8 @@ The solver’s FSILS assembly path with precomputed entry locations had similar 
 
 **A89 · BDF step-size history.** The accepted-step PI controller uses a positive exponent on the previous same-order error. For BDF2 with a normalized error dropping from ½ to ¼, the step factor is 1.133928944905386. A backward Euler integration of y′ = −100y reproduced the independently computed sequence of one rejected trial and six accepted steps. Startup and rejection retain their existing current-error rule. All 16 step-controller tests passed. [Controller](../Code/Source/solver/FE/TimeStepping/VSVO_BDF_Controller.cpp) · [Step sequence regression](../Code/Source/solver/FE/Tests/Unit/TimeStepping/test_StepControllers.cpp) · [PI stepsize control](https://portal.research.lu.se/en/publications/a-pi-stepsize-control-for-the-numerical-solution-of-ordinary-diff/)
 
+**A91 · Rootless active islands (partially addressed).** Accepted time steps now report each affected field, its interface marker and side, the pin and island counts, and the retained physical measure. Rejected trial state rolls back. A two-rank replay and an independent reconstruction from its accepted VTK output both found pins at steps 101, 102, 104 and 105, affecting four pressure DOFs and six velocity DOFs. The peak retained area was 1.84963387142 × 10⁻⁵. These records expose the physical extent of the issue. The transport behavior of a genuinely detached island remains open. [Aggregation diagnostics](../Code/Source/solver/FE/Constraints/SmallCutAggregationConstraint.cpp) · [Accepted history](../Code/Source/solver/Application/Core/ApplicationDriver.cpp)
+
 ## Index of the original findings
 
 | Problem or observable | What the evidence establishes | First discriminating check |

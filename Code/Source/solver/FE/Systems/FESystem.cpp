@@ -12774,6 +12774,20 @@ void FESystem::addSystemConstraint(std::unique_ptr<constraints::ISystemConstrain
     bumpConstraintLayoutRevision();
 }
 
+std::vector<constraints::SmallCutIslandPins> FESystem::rootlessIslandPins() const
+{
+    requireSetup();
+    std::vector<constraints::SmallCutIslandPins> pins;
+    for (const auto& closed : closed_small_cut_aggregation_prolongations_) {
+        if (closed) {
+            if (auto field = constraints::SmallCutAggregationConstraint::rootlessIslandPins(*closed)) {
+                pins.push_back(*field);
+            }
+        }
+    }
+    return pins;
+}
+
 std::vector<constraints::SmallCutAggregationRefreshReport>
 FESystem::completedSmallCutAggregationRefreshReports() const
 {

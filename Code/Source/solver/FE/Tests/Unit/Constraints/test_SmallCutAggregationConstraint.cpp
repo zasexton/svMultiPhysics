@@ -2030,6 +2030,7 @@ TEST(SmallCutAggregationConstraint, RootlessFallbackPinsCandidatesBeyondRootPath
               std::string::npos);
     EXPECT_NE(log_output.find("maximum_allowed_path=1"), std::string::npos);
     EXPECT_NE(log_output.find("feature_cells=3"), std::string::npos);
+    EXPECT_TRUE(system.rootlessIslandPins().empty());
     const auto totals_after = diagnostics::aggregationGuardRootlessTotals();
     EXPECT_EQ(totals_after.root_path_guard_candidates_total -
                   totals_before.root_path_guard_candidates_total,
@@ -2684,6 +2685,15 @@ TEST(SmallCutAggregationConstraint, NoRootIslandCandidatesArePinnedHomogeneously
     EXPECT_EQ(island->canonical_cut_cell_count, 1u);
     EXPECT_NEAR(island->canonical_retained_physical_volume, 0.3, 1.0e-14);
 
+    const auto pins = system.rootlessIslandPins();
+    ASSERT_EQ(pins.size(), 1u);
+    EXPECT_EQ(pins.front().field, pressure);
+    EXPECT_EQ(pins.front().interface_marker, kInterfaceMarker);
+    EXPECT_EQ(pins.front().active_side, geometry::CutIntegrationSide::Negative);
+    EXPECT_EQ(pins.front().islands, 1u);
+    EXPECT_EQ(pins.front().pinned_dofs, 4u);
+    EXPECT_NEAR(pins.front().physical_volume, 0.3, 1.0e-14);
+
     const auto prolongations = system.finalizedSmallCutAggregationProlongations();
     ASSERT_EQ(prolongations.size(), 1u);
     ASSERT_NE(prolongations.front(), nullptr);
@@ -2709,6 +2719,22 @@ TEST(SmallCutAggregationConstraint, NoRootIslandCandidatesArePinnedHomogeneously
     ASSERT_NE(rootless_patch, rootless.patches.end());
     EXPECT_EQ(rootless_patch->member_cell_gids.size(), 1u);
     EXPECT_EQ(rootless_patch->slave_dofs.size(), 4u);
+
+    // A rejected geometry trial must restore the physical measure sampled by
+    // the accepted-step diagnostics, including on the cached refresh path.
+    system.beginCutIntegrationContextTransaction();
+    auto trial = makeCutContext({{0, 0.45}, {2, 1.0, true}});
+    addCellRule(*trial, {1, 1.0, true}, geometry::CutIntegrationSide::Positive);
+    system.setCutIntegrationContext(std::move(trial));
+    system.rebuildConstraintState();
+    const auto trial_pins = system.rootlessIslandPins();
+    ASSERT_EQ(trial_pins.size(), 1u);
+    EXPECT_NEAR(trial_pins.front().physical_volume, 0.45, 1.0e-14);
+    system.rollbackCutIntegrationContextTransaction();
+    const auto restored_pins = system.rootlessIslandPins();
+    ASSERT_EQ(restored_pins.size(), 1u);
+    EXPECT_EQ(restored_pins.front().physical_volume, pins.front().physical_volume);
+
 #endif
 }
 

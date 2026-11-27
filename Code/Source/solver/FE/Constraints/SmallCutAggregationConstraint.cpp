@@ -10999,6 +10999,69 @@ SmallCutAggregationConstraint::closeProlongation(
     return closed;
 }
 
+std::optional<SmallCutIslandPins> SmallCutAggregationConstraint::rootlessIslandPins(
+    const detail::SmallCutAggregationClosedProlongation& closed)
+{
+    const auto& pending = *closed.pending;
+    const auto is_pin_patch = [](const auto& patch) {
+        return patch.kind == SmallCutAggregationPatchKind::Rootless;
+    };
+    if (std::none_of(pending.patches.begin(), pending.patches.end(), is_pin_patch)) {
+        return std::nullopt;
+    }
+
+    // A guard fallback in a physically rooted feature and an ordinary island
+    // can have the same provisional row kind. Use the actual cell membership.
+    std::set<GlobalIndex> rooted_features;
+    for (const auto& cell : pending.active_cells) {
+        if (cell.kind == SmallCutAggregationActiveCellKind::FullActive) {
+            rooted_features.insert(cell.active_feature_id);
+        }
+    }
+    std::set<GlobalIndex> installed_pins;
+    for (const auto& row : pending.rows) {
+        if (row.provisional_kind == SmallCutAggregationProvisionalRowKind::RootlessHomogeneousPin &&
+            !row.preconstrained_at_apply) {
+            const auto& final = closed.canonical_closed_rows.at(row.slave_dof);
+            if (final.constrained && final.entries.empty() && final.inhomogeneity == 0) {
+                installed_pins.insert(row.slave_dof);
+            }
+        }
+    }
+    for (const auto& patch : pending.patches) {
+        if (is_pin_patch(patch) && rooted_features.contains(patch.active_feature_ids.front())) {
+            for (const auto dof : patch.slave_dofs) {
+                installed_pins.erase(dof);
+            }
+        }
+    }
+
+    std::set<GlobalIndex> pinned_features;
+    std::set<GlobalIndex> pinned_dofs;
+    for (const auto& patch : pending.patches) {
+        if (!is_pin_patch(patch)) {
+            continue;
+        }
+        for (const auto dof : patch.slave_dofs) {
+            if (installed_pins.contains(dof)) {
+                pinned_features.insert(patch.active_feature_ids.front());
+                pinned_dofs.insert(dof);
+            }
+        }
+    }
+    if (pinned_dofs.empty()) {
+        return std::nullopt;
+    }
+    long double volume = 0;
+    for (const auto& cell : pending.active_cells) {
+        if (pinned_features.contains(cell.active_feature_id)) {
+            volume += cell.retained_physical_volume;
+        }
+    }
+    return SmallCutIslandPins{pending.field, pending.interface_marker, pending.active_side,
+                              pinned_features.size(), pinned_dofs.size(), static_cast<Real>(volume)};
+}
+
 namespace {
 
 // The prolongation report of a closure record: a pure function of the

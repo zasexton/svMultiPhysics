@@ -985,6 +985,11 @@ public:
     [[nodiscard]] std::vector<
         constraints::SmallCutAggregationRefreshReport>
     completedSmallCutAggregationRefreshReports() const;
+
+    /// Fields with numerical pins on genuinely rootless islands in the current
+    /// closed constraints. The counts and physical measures are already global.
+    [[nodiscard]] std::vector<constraints::SmallCutIslandPins> rootlessIslandPins() const;
+
     /**
      * Prolongation reports of the current constraint closure, one per
      * small-cut aggregation constraint that has one, in constraint order.
