@@ -1351,6 +1351,25 @@ TEST(SmallCutAggregationConstraintMPI, ConditionedSimplexDonorUsesTheSameMateria
         EXPECT_NEAR(constant_and_position[0], 1, 1.0e-13);
         EXPECT_NEAR(constant_and_position[1], 0, 1.0e-13);
         EXPECT_NEAR(constant_and_position[2], 3, 1.0e-13);
+        // Only the donor owner has this pre-existing affine row. Its veto
+        // is a retryable geometry result on both sides of the partition.
+        AffineConstraints existing;
+        if (rank == row->root_cell_owner_rank) {
+            const auto donor_dof = row->final_entries.front().master_dof;
+            existing.addLine(donor_dof);
+            existing.addEntry(donor_dof, top, Real{1});
+        }
+        SmallCutAggregationConstraint constrained_donor(
+            trace, side, kInterfaceMarker, {}, {}, guards);
+        bool inadmissible = false;
+        try {
+            constrained_donor.apply(system, existing);
+        } catch (const InadmissibleGeneratedGeometry&) {
+            inadmissible = true;
+        } catch (const std::exception& error) {
+            ADD_FAILURE() << "rank " << rank << " received a structural error: " << error.what();
+        }
+        EXPECT_TRUE(inadmissible) << "rank " << rank;
         root_owners.push_back(row->root_cell_owner_rank);
     }
     EXPECT_NE(root_owners[0], root_owners[1]);

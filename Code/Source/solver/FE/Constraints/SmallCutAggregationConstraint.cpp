@@ -605,7 +605,18 @@ void coordinateDistributedLocalFailure(
     const std::exception_ptr& local_exception,
     std::string_view phase)
 {
-    bool any_failed = local_exception != nullptr;
+    enum FailureKind : int { none, inadmissible_geometry, structural };
+    int local_kind = none;
+    if (local_exception) {
+        try {
+            std::rethrow_exception(local_exception);
+        } catch (const InadmissibleGeneratedGeometry&) {
+            local_kind = inadmissible_geometry;
+        } catch (...) {
+            local_kind = structural;
+        }
+    }
+    int kind = local_kind;
 #if FE_HAS_MPI
     int initialized = 0;
     MPI_Initialized(&initialized);
@@ -614,29 +625,23 @@ void coordinateDistributedLocalFailure(
         int world_size = 1;
         MPI_Comm_size(comm, &world_size);
         if (world_size > 1) {
-            const int local_ok = local_exception == nullptr ? 1 : 0;
-            int all_ok = 0;
-            MPI_Allreduce(&local_ok,
-                          &all_ok,
-                          1,
-                          MPI_INT,
-                          MPI_MIN,
-                          comm);
-            any_failed = all_ok == 0;
+            // A structural error supersedes a retryable candidate veto.
+            MPI_Allreduce(&local_kind, &kind, 1, MPI_INT, MPI_MAX, comm);
         }
     }
 #endif
-    if (!any_failed) {
+    if (kind == none) {
         return;
     }
-    if (local_exception != nullptr) {
+    if (local_kind == kind) {
         std::rethrow_exception(local_exception);
     }
-    throw std::runtime_error(
-        "SmallCutAggregationConstraint: diagnostic="
-        "distributed_local_phase_failure phase='" +
-        std::string(phase) +
-        "' another communicator rank rejected its local aggregation data");
+    const auto context = "SmallCutAggregationConstraint: diagnostic="
+        "distributed_local_phase_failure phase='" + std::string(phase) + "' ";
+    if (kind == inadmissible_geometry) {
+        throw InadmissibleGeneratedGeometry(context + "another rank rejected the generated geometry");
+    }
+    throw std::runtime_error(context + "another communicator rank rejected its local aggregation data");
 }
 
 enum class DistributedAggregationValidation {
