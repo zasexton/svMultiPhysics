@@ -518,57 +518,41 @@ TEST(Phase9, PartiallyConstrainedVector) {
 // Vector-basis field — no per-component nullspace claims
 // ============================================================================
 
-TEST(Phase9, VectorBasisField_FieldWideClaim) {
+TEST(Phase9, HDivMassAnchorsConstantFieldsAndDivergenceLeavesOneFieldWideClaim) {
+    const spaces::HDivSpace space(ElementType::Tetra4, 0);
+    ASSERT_EQ(space.continuity(), Continuity::H_div);
+    const auto u = FormExpr::stateField(0, space, "u");
+    const auto v = FormExpr::testFunction(space, "v");
+    FieldDescriptor field;
+    field.field_id = 0;
+    field.name = "sigma";
+    field.field_type = FieldType::Vector;
+    field.value_dimension = space.value_dimension();
+    field.continuity = space.continuity();
+    field.component_extractable = false;
+
     auto analyzer = ProblemAnalyzer::createDefault();
-    ProblemAnalysisContext ctx;
+    const auto analyze = [&](const FormExpr& integrand) {
+        ProblemAnalysisContext context;
+        context.addFieldDescriptor(field);
+        FormulationRecord record;
+        record.operator_tag = "equations";
+        record.active_fields = {0};
+        record.active_variables.push_back(VariableKey::field(0));
+        record.residual_expr = integrand.dx().nodeShared();
+        context.addFormulationRecord(record);
+        return analyzer.analyze(context);
+    };
 
-    // Use a real HDivSpace — its continuity() returns H_div,
-    // which triggers component_extractable = false.
-    auto hdiv_space = std::make_shared<spaces::HDivSpace>(ElementType::Tetra4, 0);
-    ASSERT_EQ(hdiv_space->continuity(), Continuity::H_div);
+    const auto mass = analyze(inner(u, v));
+    EXPECT_TRUE(mass.claimsOfKind(PropertyKind::Nullspace).empty());
 
-    // Build a FormExpr using the HDiv space. The space has value_dimension > 1
-    // but DOFs are on vector-valued basis functions (not per-component).
-    auto u = FormExpr::stateField(0, *hdiv_space, "u");
-    auto v = FormExpr::testFunction(*hdiv_space, "v");
-    auto residual = inner(u, v).dx();  // L2 inner product on HDiv
-
-    FormulationRecord rec;
-    rec.operator_tag = "equations";
-    rec.active_fields = {0};
-    rec.residual_expr = residual.nodeShared();
-    rec.active_variables.push_back(VariableKey::field(0));
-    ctx.addFormulationRecord(rec);
-
-    // Derive component_extractable from the space continuity,
-    // simulating what FESystem::runProblemAnalysis() does.
-    FieldDescriptor fd;
-    fd.field_id = 0;
-    fd.name = "sigma";
-    fd.field_type = FieldType::Vector;
-    fd.value_dimension = hdiv_space->value_dimension();
-    fd.continuity = hdiv_space->continuity();
-    // Pre-setup derivation: H_div → not component-extractable
-    fd.component_extractable = (fd.continuity != Continuity::H_div &&
-                                fd.continuity != Continuity::H_curl);
-    ctx.addFieldDescriptor(fd);
-
-    EXPECT_FALSE(fd.component_extractable);
-
-    auto report = analyzer.analyze(ctx);
-
-    // Should get a single field-wide nullspace claim, NOT per-component claims.
-    // (The L2 inner product u·v has has_absolute_value=true, so actually
-    //  no nullspace is detected for this mass-like form. Use a gradient form.)
-    // Actually for mass-like form, KernelAnalyzer skips it (has_absolute_value).
-    // Let's just verify no per-component claims are emitted.
-    auto nullspace = report.claimsOfKind(PropertyKind::Nullspace);
-    for (const auto* c : nullspace) {
-        if (c->field == 0) {
-            // Any nullspace claim for this field must be field-wide, not per-component
-            EXPECT_EQ(c->component, -1) << "HDiv field should not have per-component claims";
-        }
-    }
+    const auto divergence = analyze(div(u) * div(v));
+    const auto kernel = divergence.claimsOfKind(PropertyKind::Nullspace);
+    ASSERT_EQ(kernel.size(), 1u);
+    EXPECT_EQ(kernel.front()->field, FieldId{0});
+    EXPECT_EQ(kernel.front()->component, -1);
+    EXPECT_EQ(kernel.front()->nullspace_family, NullspaceFamily::VectorConstant);
 }
 
 TEST(Phase9, VectorBasisField_GradientForm_FieldWideClaim) {

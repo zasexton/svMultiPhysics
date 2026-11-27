@@ -13,7 +13,6 @@
 
 #include <gtest/gtest.h>
 
-#include "FE/Elements/VectorElement.h"
 #include "FE/Elements/LagrangeElement.h"
 #include "FE/Elements/ElementTransform.h"
 #include "FE/Elements/ReferenceElement.h"
@@ -56,14 +55,27 @@ std::vector<math::Vector<Real, 3>> evaluate_rt_basis(
     return values;
 }
 
-// Helper: evaluate Nedelec basis at a point
-std::vector<math::Vector<Real, 3>> evaluate_ned_basis(
-    ElementType type, int order, const math::Vector<Real, 3>& xi) {
+math::Vector<Real, 3> nedelecOutwardTrace(const geometry::GeometryMapping& mapping,
+                                         ElementType type, const math::Vector<Real, 3>& xi,
+                                         int facet, int edge) {
+    basis::NedelecBasis basis(type, 0);
+    std::vector<math::Vector<Real, 3>> reference, physical;
+    basis.evaluate_vector_values(xi, reference);
+    ElementTransform::hcurl_vectors_to_physical(mapping, xi, reference, physical);
+    EXPECT_EQ(physical.size(), ReferenceElement::shared(type).num_edges());
+    const auto frame = ElementTransform::compute_facet_frame(mapping, xi, facet, type);
+    return ElementTransform::hcurl_tangential_trace_3d(physical, frame).at(edge);
+}
 
-    basis::NedelecBasis ned(type, order);
-    std::vector<math::Vector<Real, 3>> values;
-    ned.evaluate_vector_values(xi, values);
-    return values;
+// One reference flux moment has value one on its facet and zero on all
+// others. Its constant outward RT0 trace on an affine facet is 1 / area.
+void expectUnitNormalTrace(const std::vector<Real>& trace, ElementType type, std::size_t facet,
+                           Real expected) {
+    ASSERT_EQ(trace.size(), ReferenceElement::shared(type).num_faces());
+    ASSERT_LT(facet, trace.size());
+    for (std::size_t i = 0; i < trace.size(); ++i) {
+        EXPECT_NEAR(trace[i], i == facet ? expected : 0.0, kTolerance);
+    }
 }
 
 } // anonymous namespace
@@ -125,10 +137,6 @@ TEST_F(InterfaceContinuityTest, RT0QuadNormalContinuityTwoElements) {
     auto mapping0 = create_mapping(ElementType::Quad4, nodes0);
     auto mapping1 = create_mapping(ElementType::Quad4, nodes1);
 
-    // Create RT0 elements
-    VectorElement elem0(ElementType::Quad4, 0, Continuity::H_div);
-    VectorElement elem1(ElementType::Quad4, 0, Continuity::H_div);
-
     // Test at several points along the shared edge
     for (int i = 0; i < 5; ++i) {
         Real t = Real(0.1) + Real(0.2) * Real(i);  // t in [0.1, 0.9]
@@ -162,20 +170,11 @@ TEST_F(InterfaceContinuityTest, RT0QuadNormalContinuityTwoElements) {
         auto trace0 = ElementTransform::hdiv_normal_trace(vals_phys0, frame0.normal);
         auto trace1 = ElementTransform::hdiv_normal_trace(vals_phys1, frame1.normal);
 
-        // For RT0 on Quad4, there are 4 DOFs (one per edge)
-        // The DOF associated with edge 1 of E0 should have non-zero normal trace on that edge
-        // The DOF associated with edge 3 of E1 should have non-zero normal trace on that edge
-        // Since the elements share this edge, we need to check that the traces from both
-        // elements are compatible (sign depends on relative orientation)
-
-        // The normals from opposite sides should be antiparallel
-        Real n_dot = frame0.normal[0] * frame1.normal[0] + frame0.normal[1] * frame1.normal[1];
-        EXPECT_NEAR(n_dot, Real(-1), kTolerance) << "Normals should be antiparallel on shared edge";
-
-        // DOF 1 of elem0 (edge 1) and DOF 3 of elem1 (edge 3) are the face DOFs
-        // for the shared edge. Their normal traces should sum to zero when considering
-        // outward normals from each element.
-        // For a unit normal DOF, trace0[1] + trace1[3] = 0 in the limit of matching orientations
+        // A global unit flux to the right has local outward moments +1 and -1.
+        expectUnitNormalTrace(trace0, ElementType::Quad4, 1, 0.5);
+        expectUnitNormalTrace(trace1, ElementType::Quad4, 3, 0.5);
+        EXPECT_NEAR(frame0.normal.dot(frame1.normal), -1.0, kTolerance);
+        EXPECT_NEAR(trace0[1] - trace1[3], 0.0, kTolerance);
     }
 }
 
@@ -193,12 +192,9 @@ TEST_F(InterfaceContinuityTest, RT0TetraNormalContinuityTwoElements) {
         {Real(0), Real(0), Real(1)}
     };
 
-    // Second tet shares face (1,0,0)-(0,1,0)-(0,0,1) but extends in opposite direction
+    // Swap two shared vertices to keep the neighboring map positively oriented.
     std::vector<math::Vector<Real, 3>> nodes1 = {
-        {Real(1), Real(1), Real(1)},  // apex outside first tet
-        {Real(1), Real(0), Real(0)},
-        {Real(0), Real(1), Real(0)},
-        {Real(0), Real(0), Real(1)}
+        {1.0, 1.0, 1.0}, {0.0, 1.0, 0.0}, {1.0, 0.0, 0.0}, {0.0, 0.0, 1.0}
     };
 
     auto mapping0 = create_mapping(ElementType::Tetra4, nodes0);
@@ -228,10 +224,15 @@ TEST_F(InterfaceContinuityTest, RT0TetraNormalContinuityTwoElements) {
     ElementTransform::hdiv_vectors_to_physical(*mapping0, xi0, vals_ref0, vals_phys0);
     ElementTransform::hdiv_vectors_to_physical(*mapping1, xi1, vals_ref1, vals_phys1);
 
-    // The RT0 basis on tetrahedra has 4 DOFs (one per face)
-    // Verify we have the right number
-    EXPECT_EQ(vals_phys0.size(), 4u);
-    EXPECT_EQ(vals_phys1.size(), 4u);
+    const auto frame0 = ElementTransform::compute_facet_frame(*mapping0, xi0, 2, ElementType::Tetra4);
+    const auto frame1 = ElementTransform::compute_facet_frame(*mapping1, xi1, 2, ElementType::Tetra4);
+    const auto trace0 = ElementTransform::hdiv_normal_trace(vals_phys0, frame0.normal);
+    const auto trace1 = ElementTransform::hdiv_normal_trace(vals_phys1, frame1.normal);
+    const Real inverse_area = 2.0 / std::sqrt(3.0);
+    expectUnitNormalTrace(trace0, ElementType::Tetra4, 2, inverse_area);
+    expectUnitNormalTrace(trace1, ElementType::Tetra4, 2, inverse_area);
+    EXPECT_NEAR(frame0.normal.dot(frame1.normal), -1.0, kTolerance);
+    EXPECT_NEAR(trace0[2] - trace1[2], 0.0, kTolerance);
 }
 
 TEST_F(InterfaceContinuityTest, RT0HexNormalContinuity) {
@@ -286,9 +287,11 @@ TEST_F(InterfaceContinuityTest, RT0HexNormalContinuity) {
                  frame0.normal[2] * frame1.normal[2];
     EXPECT_NEAR(n_dot, Real(-1), kTolerance);
 
-    // RT0 on hex has 6 DOFs
-    EXPECT_EQ(vals_phys0.size(), 6u);
-    EXPECT_EQ(vals_phys1.size(), 6u);
+    const auto trace0 = ElementTransform::hdiv_normal_trace(vals_phys0, frame0.normal);
+    const auto trace1 = ElementTransform::hdiv_normal_trace(vals_phys1, frame1.normal);
+    expectUnitNormalTrace(trace0, ElementType::Hex8, 3, 0.25);
+    expectUnitNormalTrace(trace1, ElementType::Hex8, 5, 0.25);
+    EXPECT_NEAR(trace0[3] - trace1[5], 0.0, kTolerance);
 }
 
 // =============================================================================
@@ -296,61 +299,43 @@ TEST_F(InterfaceContinuityTest, RT0HexNormalContinuity) {
 // =============================================================================
 
 TEST_F(InterfaceContinuityTest, Ned0TetraTangentialContinuity) {
-    // Two adjacent tetrahedra sharing an edge
-
-    std::vector<math::Vector<Real, 3>> nodes0 = {
-        {Real(0), Real(0), Real(0)},
-        {Real(1), Real(0), Real(0)},
-        {Real(0), Real(1), Real(0)},
-        {Real(0), Real(0), Real(1)}
-    };
-
-    auto mapping0 = create_mapping(ElementType::Tetra4, nodes0);
-
-    // Test at midpoint of edge 0 (vertices 0-1)
-    math::Vector<Real, 3> xi0{Real(0.5), Real(0), Real(0)};
-
-    auto vals_ref = evaluate_ned_basis(ElementType::Tetra4, 0, xi0);
-
-    std::vector<math::Vector<Real, 3>> vals_phys;
-    ElementTransform::hcurl_vectors_to_physical(*mapping0, xi0, vals_ref, vals_phys);
-
-    // Nedelec edge element on tetrahedron has 6 DOFs (one per edge)
-    EXPECT_EQ(vals_phys.size(), 6u);
-
-    // At the midpoint of edge 0, the basis function for DOF 0 should have
-    // a tangential component along the edge direction
-    math::Vector<Real, 3> edge_tangent{Real(1), Real(0), Real(0)};
-    Real tangent_component = vals_phys[0][0] * edge_tangent[0] +
-                             vals_phys[0][1] * edge_tangent[1] +
-                             vals_phys[0][2] * edge_tangent[2];
-
-    // DOF 0 should be the "active" DOF on edge 0
-    EXPECT_GT(std::abs(tangent_component), kTolerance);
+    // The unit edge moment from A=(0,0,0) to B=(2,0,0) has tangential
+    // Whitney field ((1-y)/2, x/2, 0) on triangle ABC with C=(0,1,0).
+    // The edge is local 0 on both cells, with opposite directions.
+    constexpr auto type = ElementType::Tetra4;
+    const auto left = create_mapping(type, {{0, 0, 0}, {2, 0, 0}, {0, 1, 0}, {0, 0, 1}});
+    const auto right = create_mapping(type, {{2, 0, 0}, {0, 0, 0}, {0, 1, 0}, {0.7, 0.3, -2}});
+    for (const math::Vector<Real, 3> point : {math::Vector<Real, 3>{0.5, 0.125, 0},
+                                               math::Vector<Real, 3>{0.25, 0.5, 0}}) {
+        const auto left_trace = nedelecOutwardTrace(*left, type, left->map_to_reference(point), 0, 0);
+        const auto right_trace = nedelecOutwardTrace(*right, type, right->map_to_reference(point), 0, 0);
+        const math::Vector<Real, 3> expected{point[0] / 2, -(1 - point[1]) / 2, 0}; // -e_z cross v
+        for (int i = 0; i < 3; ++i) {
+            EXPECT_NEAR(left_trace[i], expected[i], kTolerance);
+            EXPECT_NEAR(left_trace[i] - right_trace[i], 0.0, kTolerance);
+        }
+    }
 }
 
 TEST_F(InterfaceContinuityTest, Ned0HexTangentialContinuity) {
-    // Test Nedelec basis on hex element
-
-    std::vector<math::Vector<Real, 3>> nodes0 = {
-        {Real(-1), Real(-1), Real(-1)}, {Real(1), Real(-1), Real(-1)},
-        {Real(1), Real(1), Real(-1)}, {Real(-1), Real(1), Real(-1)},
-        {Real(-1), Real(-1), Real(1)}, {Real(1), Real(-1), Real(1)},
-        {Real(1), Real(1), Real(1)}, {Real(-1), Real(1), Real(1)}
-    };
-
-    auto mapping0 = create_mapping(ElementType::Hex8, nodes0);
-
-    // Test at center of element
-    math::Vector<Real, 3> xi{Real(0), Real(0), Real(0)};
-
-    auto vals_ref = evaluate_ned_basis(ElementType::Hex8, 0, xi);
-
-    std::vector<math::Vector<Real, 3>> vals_phys;
-    ElementTransform::hcurl_vectors_to_physical(*mapping0, xi, vals_ref, vals_phys);
-
-    // Nedelec lowest-order on hex has 12 DOFs (one per edge)
-    EXPECT_EQ(vals_phys.size(), 12u);
+    constexpr auto type = ElementType::Hex8;
+    const std::vector<math::Vector<Real, 3>> nodes{
+        {-1, -1, -1}, {1, -1, -1}, {1, 1, -1}, {-1, 1, -1},
+        {-1, -1, 1}, {1, -1, 1}, {1, 1, 1}, {-1, 1, 1}};
+    auto neighbor_nodes = nodes;
+    for (auto& p : neighbor_nodes) p[0] += 2.0;
+    const auto left = create_mapping(type, nodes);
+    const auto right = create_mapping(type, neighbor_nodes);
+    // On x=1 the edge (1,-1,-1) to (1,1,-1) has tangential field (1-z)/4 e_y.
+    // It is forward edge 1 on the left and reversed edge 3 on the right.
+    for (Real z : {-0.4, 0.6}) {
+        const auto left_trace = nedelecOutwardTrace(*left, type, {1, 0.2, z}, 3, 1);
+        const auto right_trace = nedelecOutwardTrace(*right, type, {-1, 0.2, z}, 5, 3);
+        for (int i = 0; i < 3; ++i) {
+            EXPECT_NEAR(left_trace[i], i == 2 ? (1 - z) / 4 : 0.0, kTolerance);
+            EXPECT_NEAR(left_trace[i] - right_trace[i], 0.0, kTolerance);
+        }
+    }
 }
 
 // =============================================================================
