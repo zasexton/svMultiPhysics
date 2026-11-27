@@ -8,6 +8,8 @@
 
 #include "Spaces/AdaptiveSpace.h"
 
+#include <algorithm>
+
 namespace svmp {
 namespace FE {
 namespace spaces {
@@ -19,6 +21,12 @@ const AdaptiveSpace::Level* AdaptiveSpace::find_level(int order) const noexcept 
         }
     }
     return nullptr;
+}
+
+bool AdaptiveSpace::has_basis_type(BasisType type) const {
+    return std::any_of(levels_.begin(), levels_.end(), [type](const Level& level) {
+        return level.space->element().basis().basis_type() == type;
+    });
 }
 
 void AdaptiveSpace::add_level(int order,

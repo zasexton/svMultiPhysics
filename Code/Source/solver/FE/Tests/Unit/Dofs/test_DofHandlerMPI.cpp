@@ -22,6 +22,7 @@
 #include <cstdint>
 #include <numeric>
 #include <optional>
+#include <set>
 #include <stdexcept>
 #include <unordered_map>
 #include <utility>
@@ -531,6 +532,34 @@ MeshTopologyInfo makeTwoRankFourTriangleMeshP2Sparse(int rank) {
 }
 
 } // namespace
+
+TEST(DofHandlerMPI, CubicBernsteinControlPolygonAcrossReversedRankBoundary) {
+    const auto comm = MPI_COMM_WORLD;
+    if (mpiSize(comm) != 2) GTEST_SKIP() << "requires two MPI ranks";
+    const auto rank = mpiRank(comm);
+    auto mesh = makeTwoRankTriangleP2(rank, 400 + rank);
+    if (rank == 1) std::swap(mesh.vertex_gids[0], mesh.vertex_gids[1]);
+    DofDistributionOptions opts;
+    opts.my_rank = rank;
+    opts.world_size = 2;
+    opts.mpi_comm = comm;
+    auto cubic = std::make_shared<H1Space>(ElementType::Triangle3, 3, svmp::FE::BasisType::Bernstein);
+    AdaptiveSpace adaptive;
+    adaptive.add_level(3, cubic);
+    adaptive.resize_element_orders(1, 3);
+    for (const svmp::FE::spaces::FunctionSpace* space :
+         std::array<const svmp::FE::spaces::FunctionSpace*, 2>{cubic.get(), &adaptive}) {
+        DofHandler handler;
+        handler.distributeDofs(mesh, *space, opts);
+        handler.finalize();
+        const auto cell = handler.getCellDofs(0);
+        std::array<GlobalIndex, 4> controls{cell[9], cell[8], cell[6], cell[3]};
+        if (rank == 1) std::reverse(controls.begin(), controls.end());
+        const auto gathered = allgatherGlobalIndices(controls, comm);
+        EXPECT_TRUE(std::equal(gathered.begin(), gathered.begin() + 4, gathered.begin() + 4));
+        EXPECT_EQ(std::set<GlobalIndex>(controls.begin(), controls.end()).size(), 4u);
+    }
+}
 
 TEST(DofHandlerMPI, DistributedCG_P1_TwoRank_GlobalIDsAndOwnershipLowestRank) {
     const MPI_Comm comm = MPI_COMM_WORLD;

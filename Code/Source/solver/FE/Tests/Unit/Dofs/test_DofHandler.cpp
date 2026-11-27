@@ -535,6 +535,36 @@ TEST(DofHandler, EntityDofMapIsPopulated) {
     }
 }
 
+TEST(DofHandler, BernsteinSharedEdgeHasOneOrientedControlPolygon) {
+    const auto mesh = makeTwoTriangleMeshWithEdges();
+    const H1Space space(ElementType::Triangle3, 3, svmp::FE::BasisType::Bernstein);
+    DofHandler handler;
+    handler.distributeDofs(mesh, space);
+    handler.finalize();
+    ASSERT_EQ(handler.getNumDofs(), 16);
+    const auto left = handler.getCellDofs(0), right = handler.getCellDofs(1);
+    ASSERT_EQ(left.size(), 10u);
+    ASSERT_EQ(right.size(), 10u);
+    const auto* entities = handler.getEntityDofMap();
+    ASSERT_NE(entities, nullptr);
+    const auto edge = entities->getEdgeDofs(0);
+    ASSERT_EQ(edge.size(), 2u);
+    const std::array<GlobalIndex, 4> expected{entities->getVertexDofs(0)[0], edge[0], edge[1],
+                                               entities->getVertexDofs(1)[0]};
+    // The native simplex exponent order puts (lambda_0)^3 in slot 9.
+    EXPECT_EQ((std::array<GlobalIndex, 4>{left[9], left[8], left[6], left[3]}), expected);
+    EXPECT_EQ((std::array<GlobalIndex, 4>{right[9], right[7], right[4], right[0]}), expected);
+
+    std::vector<Real> left_coefficients(left.begin(), left.end()), right_coefficients(right.begin(), right.end());
+    for (Real t : {0., 0.2, 0.5, 0.8, 1.}) {
+        const Real s = 1 - t;
+        const Real value = s*s*s*expected[0] + 3*s*s*t*expected[1] +
+                           3*s*t*t*expected[2] + t*t*t*expected[3];
+        EXPECT_NEAR(space.evaluate({t, 0, 0}, left_coefficients)[0], value, 2e-13);
+        EXPECT_NEAR(space.evaluate({0, t, 0}, right_coefficients)[0], value, 2e-13);
+    }
+}
+
 TEST(DofHandler, LagrangeP3TriangleEdgeOrientationReversesInteriorEdgeDofs) {
     DofHandler handler;
     auto topo = makeTwoTriangleMeshWithEdges();
@@ -1277,6 +1307,80 @@ TEST(DofHandler, MixedOrderVectorAdaptiveSpaceUsesPerCellOrders) {
     EXPECT_TRUE(handler.hasCellOrientations());
     EXPECT_FALSE(handler.cellEdgeOrientations(0).empty());
     EXPECT_FALSE(handler.cellEdgeOrientations(1).empty());
+}
+
+TEST(DofHandler, MixedOrderBernsteinInterfaceElevatesEveryInteriorControl) {
+    const auto mesh = makeTwoQuadMeshWithEdges();
+    AdaptiveSpace adaptive;
+    for (const auto order : {2, 3}) {
+        adaptive.add_level(order, std::make_shared<H1Space>(ElementType::Quad4, order, svmp::FE::BasisType::Bernstein));
+    }
+    adaptive.resize_element_orders(2, 2);
+    adaptive.set_element_order(1, 3);
+    DofHandler handler;
+    handler.distributeDofs(mesh, adaptive);
+    svmp::FE::constraints::AffineConstraints constraints;
+    handler.buildVariableOrderConstraints(mesh, adaptive, constraints);
+    constraints.close();
+
+    const auto coarse = handler.getCellDofs(0), fine = handler.getCellDofs(1);
+    std::vector<double> coefficients(handler.getNumDofs(), 0);
+    coefficients[coarse[2]] = 2;
+    coefficients[coarse[5]] = -1;
+    coefficients[coarse[8]] = 5;
+    constraints.distribute(coefficients);
+    // Degree elevation of a quadratic Bezier edge (2,-1,5), in increasing y.
+    EXPECT_EQ(coarse[2], fine[0]);
+    EXPECT_EQ(coarse[8], fine[12]);
+    EXPECT_NEAR(coefficients[fine[4]], 0., 1e-13);
+    EXPECT_NEAR(coefficients[fine[8]], 1., 1e-13);
+}
+
+TEST(DofHandler, BernsteinHexFaceRotatesItsWholeControlNet) {
+    const auto mesh = makeTwoHexMeshWithSharedFaceFlipped();
+    auto cubic = std::make_shared<H1Space>(ElementType::Hex8, 3, svmp::FE::BasisType::Bernstein);
+    AdaptiveSpace adaptive;
+    adaptive.add_level(3, cubic);
+    adaptive.resize_element_orders(2, 3);
+    const std::array<const FunctionSpace*, 2> spaces{cubic.get(), &adaptive};
+    for (const auto* space : spaces) {
+        DofHandler handler;
+        handler.distributeDofs(mesh, *space);
+        const auto left = handler.getCellDofs(0), right = handler.getCellDofs(1);
+        ASSERT_EQ(left.size(), 64u);
+        ASSERT_EQ(right.size(), 64u);
+        // On the shared face, (s,t) of cell 0 is (t,-s) of cell 1.
+        for (int j = 0; j < 4; ++j) {
+            for (int k = 0; k < 4; ++k) {
+                EXPECT_EQ(left[3 + 4*(j + 4*k)], right[4*((3-k) + 4*j)]);
+            }
+        }
+    }
+}
+
+TEST(DofHandler, BernsteinHexFaceElevatesAQuadraticInteriorControl) {
+    const auto mesh = makeTwoHexMeshWithSharedFaceFlipped();
+    AdaptiveSpace adaptive;
+    for (int p : {2, 3}) {
+        adaptive.add_level(p, std::make_shared<H1Space>(ElementType::Hex8, p, svmp::FE::BasisType::Bernstein));
+    }
+    adaptive.resize_element_orders(2, 2);
+    adaptive.set_element_order(1, 3);
+    DofHandler handler;
+    handler.distributeDofs(mesh, adaptive);
+    svmp::FE::constraints::AffineConstraints constraints;
+    handler.buildVariableOrderConstraints(mesh, adaptive, constraints);
+    constraints.close();
+    const auto left = handler.getCellDofs(0), right = handler.getCellDofs(1);
+    std::vector<double> coefficients(handler.getNumDofs(), 0);
+    coefficients[left[2 + 3*(1 + 3*1)]] = 1;
+    constraints.distribute(coefficients);
+    for (int j = 0; j < 4; ++j) {
+        for (int k = 0; k < 4; ++k) {
+            const Real expected = j > 0 && j < 3 && k > 0 && k < 3 ? 4./9 : 0.;
+            EXPECT_NEAR(coefficients[right[4*(j + 4*k)]], expected, 2e-13);
+        }
+    }
 }
 
 TEST(DofHandler, MixedOrderScalarConstraintsMatchLowerOrderEdgeTrace) {

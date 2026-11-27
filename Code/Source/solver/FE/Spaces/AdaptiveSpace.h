@@ -45,6 +45,9 @@ public:
     /// Number of available levels
     std::size_t num_levels() const noexcept { return levels_.size(); }
 
+    /// Whether any active or available order uses the specified coefficient basis.
+    bool has_basis_type(BasisType type) const;
+
     /// Set active level by index
     void set_active_level(std::size_t index);
 

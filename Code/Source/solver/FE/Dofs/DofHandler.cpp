@@ -19,6 +19,7 @@
 #include "Spaces/SpaceInterpolation.h"
 #include "Spaces/TraceSpace.h"
 #include "Basis/LagrangeBasis.h"
+#include "Basis/BernsteinBasis.h"
 #include "Basis/VectorBasis.h"
 
 // Mesh convenience overloads require the Mesh library to be linked, not just headers present.
@@ -3786,6 +3787,7 @@ DofLayoutInfo continuousScalarLayoutForSpace(const spaces::FunctionSpace& space,
         auto layout = DofLayoutInfo::Lagrange(space.polynomial_order(), dim, n_verts);
         layout.total_dofs_per_element = total_dofs;
         layout.num_components = space.value_dimension();
+        if (basis_type == BasisType::Bernstein) layout.bernstein_order = space.polynomial_order();
         return layout;
     }
 
@@ -3830,6 +3832,23 @@ enum class VariableLocalDofKind : std::uint8_t {
     Cell
 };
 
+template<class Entry>
+void apply_basis_ordering(std::vector<Entry>& entity_entries,
+                          const std::vector<std::size_t>& entity_slots) {
+    if (entity_slots.empty()) return;
+    FE_CHECK_ARG(entity_entries.size() == entity_slots.size(), "DOF count differs from control lattice");
+    auto ordered = entity_entries;
+    for (std::size_t i = 0; i < ordered.size(); ++i) ordered[i] = entity_entries[entity_slots[i]];
+    entity_entries.swap(ordered);
+}
+
+std::vector<std::size_t> uniform_control_ordering(const MeshTopologyView& topology,
+                                                  const DofLayoutInfo& layout) {
+    if (layout.bernstein_order == 0 || topology.n_cells == 0) return {};
+    const auto type = infer_element_type_from_cell(topology.dim, topology.getCellVertices(0).size());
+    return basis::BernsteinBasis(type, layout.bernstein_order).control_layout().entity_slots;
+}
+
 struct VariableLocalDofTag {
     VariableLocalDofKind kind{VariableLocalDofKind::Cell};
     int local_entity_id{-1};
@@ -3848,6 +3867,13 @@ struct VariableCellLayout {
     std::vector<LocalIndex> edge_counts;
     std::vector<LocalIndex> face_counts;
     std::vector<VariableLocalDofTag> dof_tags;
+    bool has_bernstein_levels{false};
+
+    LocalIndex shared_interior_count(LocalIndex local, LocalIndex common) const {
+        // Different degree Bezier polygons share their endpoints. Their other
+        // coefficients are related by the trace transfer, not by ordinal.
+        return has_bernstein_levels && local != common ? 0 : common;
+    }
 };
 
 static bool variable_order_scalar_basis_supported(BasisType basis_type) noexcept {
@@ -3864,7 +3890,7 @@ static bool variable_order_scalar_basis_supported(BasisType basis_type) noexcept
 
 static VariableCellLayout build_variable_cell_layout(const spaces::FunctionSpace& space,
                                                      const MeshTopologyView& topology,
-                                                     GlobalIndex cell_id) {
+                                                     GlobalIndex cell_id, bool canonical_ordering) {
     const auto cell_verts = topology.getCellVertices(cell_id);
     const ElementType cell_type =
         infer_element_type_from_cell(topology.dim, cell_verts.size());
@@ -3887,6 +3913,8 @@ static VariableCellLayout build_variable_cell_layout(const spaces::FunctionSpace
     layout.face_counts.assign(topology.dim >= 3 ? ref.num_faces() : 0u, 0);
 
     if (layout.continuity == Continuity::C0 || layout.continuity == Continuity::C1) {
+        const auto* adaptive = dynamic_cast<const spaces::AdaptiveSpace*>(&space);
+        layout.has_bernstein_levels = adaptive && adaptive->has_basis_type(BasisType::Bernstein);
         FE_CHECK_ARG(variable_order_scalar_basis_supported(layout.basis_type),
                      "DofHandler::distributeVariableOrderDofs: mixed-order scalar numbering currently supports only Lagrange-like scalar bases");
 
@@ -3912,15 +3940,34 @@ static VariableCellLayout build_variable_cell_layout(const spaces::FunctionSpace
             }
         }
         for (std::size_t le = 0; le < layout.edge_counts.size(); ++le) {
+            bool reverse = false;
+            if (layout.has_bernstein_levels && canonical_ordering && layout.edge_counts[le] > 1) {
+                const auto& edge = ref.edge_nodes(le);
+                const std::array<MeshIndex, 2> local{cell_verts[edge[0]], cell_verts[edge[1]]};
+                reverse = canonical_cycle_vertices(local, topology.vertex_gids).front() != local[0];
+            }
             for (LocalIndex d = 0; d < layout.edge_counts[le]; ++d) {
                 layout.dof_tags.push_back(
-                    VariableLocalDofTag{VariableLocalDofKind::Edge, static_cast<int>(le), d});
+                    VariableLocalDofTag{VariableLocalDofKind::Edge, static_cast<int>(le),
+                                        reverse ? layout.edge_counts[le] - 1 - d : d});
             }
         }
         for (std::size_t lf = 0; lf < layout.face_counts.size(); ++lf) {
+            std::vector<int> order;
+            if (layout.has_bernstein_levels && canonical_ordering && layout.face_counts[lf] > 1) {
+                std::vector<MeshIndex> local;
+                for (const auto v : ref.face_nodes(lf)) local.push_back(cell_verts[v]);
+                const auto canonical = canonical_cycle_vertices(local, topology.vertex_gids);
+                std::vector<int> vertices;
+                for (const auto v : canonical) {
+                    vertices.push_back(static_cast<int>(std::find(local.begin(), local.end(), v) - local.begin()));
+                }
+                const auto face_type = local.size() == 3 ? ElementType::Triangle3 : ElementType::Quad4;
+                order = compute_scalar_face_interior_local_to_global(face_type, layout.polynomial_order, vertices);
+            }
             for (LocalIndex d = 0; d < layout.face_counts[lf]; ++d) {
                 layout.dof_tags.push_back(
-                    VariableLocalDofTag{VariableLocalDofKind::Face, static_cast<int>(lf), d});
+                    VariableLocalDofTag{VariableLocalDofKind::Face, static_cast<int>(lf), order.empty() ? d : order[d]});
             }
         }
         for (LocalIndex d = 0; d < layout.cell_interior_dofs; ++d) {
@@ -3931,6 +3978,10 @@ static VariableCellLayout build_variable_cell_layout(const spaces::FunctionSpace
             static_cast<LocalIndex>(layout.dof_tags.size());
         FE_CHECK_ARG(layout.scalar_dofs_per_element == static_cast<LocalIndex>(elem.num_dofs()),
                      "DofHandler::distributeVariableOrderDofs: scalar cell layout does not match element DOF count");
+        if (layout.basis_type == BasisType::Bernstein) {
+            const auto& bernstein = dynamic_cast<const basis::BernsteinBasis&>(cell_basis);
+            apply_basis_ordering(layout.dof_tags, bernstein.control_layout().entity_slots);
+        }
         return layout;
     }
 
@@ -4105,6 +4156,7 @@ struct DofHandler::MeshCacheState : MeshObserver {
                    a.num_components == b.num_components &&
                    a.is_continuous == b.is_continuous &&
                    a.oriented_edge_moments == b.oriented_edge_moments &&
+                   a.bernstein_order == b.bernstein_order &&
                    a.tensor_face_dof_layout == b.tensor_face_dof_layout &&
                    a.total_dofs_per_element == b.total_dofs_per_element;
         }
@@ -4890,7 +4942,7 @@ void DofHandler::distributeVariableOrderDofs(const MeshTopologyView& topology,
     std::size_t max_cell_total_dofs = 0;
 
     for (GlobalIndex c = 0; c < topology.n_cells; ++c) {
-        cell_layouts.push_back(build_variable_cell_layout(space, topology, c));
+        cell_layouts.push_back(build_variable_cell_layout(space, topology, c, options.use_canonical_ordering));
         const auto& layout = cell_layouts.back();
         need_edges = need_edges || std::any_of(layout.edge_counts.begin(),
                                                layout.edge_counts.end(),
@@ -4943,7 +4995,7 @@ void DofHandler::distributeVariableOrderDofs(const MeshTopologyView& topology,
         cell_layouts.clear();
         cell_layouts.reserve(static_cast<std::size_t>(std::max<GlobalIndex>(topo->n_cells, 0)));
         for (GlobalIndex c = 0; c < topo->n_cells; ++c) {
-            cell_layouts.push_back(build_variable_cell_layout(space, *topo, c));
+            cell_layouts.push_back(build_variable_cell_layout(space, *topo, c, options.use_canonical_ordering));
         }
     }
 
@@ -5071,12 +5123,12 @@ void DofHandler::distributeVariableOrderDofs(const MeshTopologyView& topology,
         for (std::size_t le = 0; le < layout.edge_counts.size(); ++le) {
             const auto ge = static_cast<std::size_t>(cell_edges[le]);
             private_count += std::max<LocalIndex>(
-                0, layout.edge_counts[le] - static_cast<LocalIndex>(shared_edge_count[ge]));
+                0, layout.edge_counts[le] - layout.shared_interior_count(layout.edge_counts[le], static_cast<LocalIndex>(shared_edge_count[ge])));
         }
         for (std::size_t lf = 0; lf < layout.face_counts.size(); ++lf) {
             const auto gf = static_cast<std::size_t>(cell_faces[lf]);
             private_count += std::max<LocalIndex>(
-                0, layout.face_counts[lf] - static_cast<LocalIndex>(shared_face_count[gf]));
+                0, layout.face_counts[lf] - layout.shared_interior_count(layout.face_counts[lf], static_cast<LocalIndex>(shared_face_count[gf])));
         }
 
         cell_private_count[sc] = private_count;
@@ -5120,7 +5172,8 @@ void DofHandler::distributeVariableOrderDofs(const MeshTopologyView& topology,
                 }
                 case VariableLocalDofKind::Edge: {
                     const auto ge = static_cast<std::size_t>(cell_edges[static_cast<std::size_t>(tag.local_entity_id)]);
-                    const auto shared = static_cast<LocalIndex>(shared_edge_count[ge]);
+                    const auto shared = layout.shared_interior_count(layout.edge_counts[tag.local_entity_id],
+                        static_cast<LocalIndex>(shared_edge_count[ge]));
                     if (tag.ordinal < shared) {
                         dof = edge_first_dof[ge] + static_cast<GlobalIndex>(tag.ordinal);
                     }
@@ -5128,7 +5181,8 @@ void DofHandler::distributeVariableOrderDofs(const MeshTopologyView& topology,
                 }
                 case VariableLocalDofKind::Face: {
                     const auto gf = static_cast<std::size_t>(cell_faces[static_cast<std::size_t>(tag.local_entity_id)]);
-                    const auto shared = static_cast<LocalIndex>(shared_face_count[gf]);
+                    const auto shared = layout.shared_interior_count(layout.face_counts[tag.local_entity_id],
+                        static_cast<LocalIndex>(shared_face_count[gf]));
                     if (tag.ordinal < shared) {
                         dof = face_first_dof[gf] + static_cast<GlobalIndex>(tag.ordinal);
                     }
@@ -5548,7 +5602,7 @@ void DofHandler::distributeVariableOrderDofsParallel(const MeshTopologyView& top
     bool need_face_orientations = false;
     std::size_t max_cell_total_dofs = 0;
     for (GlobalIndex c = 0; c < topology.n_cells; ++c) {
-        cell_layouts.push_back(build_variable_cell_layout(space, topology, c));
+        cell_layouts.push_back(build_variable_cell_layout(space, topology, c, options.use_canonical_ordering));
         const auto& layout = cell_layouts.back();
         has_edge_entities = has_edge_entities || !layout.edge_counts.empty();
         has_face_entities = has_face_entities || !layout.face_counts.empty();
@@ -5607,7 +5661,7 @@ void DofHandler::distributeVariableOrderDofsParallel(const MeshTopologyView& top
         cell_layouts.clear();
         cell_layouts.reserve(static_cast<std::size_t>(std::max<GlobalIndex>(topo->n_cells, 0)));
         for (GlobalIndex c = 0; c < topo->n_cells; ++c) {
-            cell_layouts.push_back(build_variable_cell_layout(space, *topo, c));
+            cell_layouts.push_back(build_variable_cell_layout(space, *topo, c, options.use_canonical_ordering));
         }
     }
 
@@ -5969,11 +6023,11 @@ void DofHandler::distributeVariableOrderDofsParallel(const MeshTopologyView& top
         }
         for (std::size_t le = 0; le < layout.edge_counts.size(); ++le) {
             private_count += std::max<LocalIndex>(
-                0, layout.edge_counts[le] - edge_shared_count[static_cast<std::size_t>(cell_edges[le])]);
+                0, layout.edge_counts[le] - layout.shared_interior_count(layout.edge_counts[le], edge_shared_count[static_cast<std::size_t>(cell_edges[le])]));
         }
         for (std::size_t lf = 0; lf < layout.face_counts.size(); ++lf) {
             private_count += std::max<LocalIndex>(
-                0, layout.face_counts[lf] - face_shared_count[static_cast<std::size_t>(cell_faces[lf])]);
+                0, layout.face_counts[lf] - layout.shared_interior_count(layout.face_counts[lf], face_shared_count[static_cast<std::size_t>(cell_faces[lf])]));
         }
         cell_private_count[sc] = private_count;
     }
@@ -6230,7 +6284,7 @@ void DofHandler::distributeVariableOrderDofsParallel(const MeshTopologyView& top
                 }
                 case VariableLocalDofKind::Edge: {
                     const auto ge = static_cast<std::size_t>(cell_edges[static_cast<std::size_t>(tag.local_entity_id)]);
-                    if (tag.ordinal < edge_shared_count[ge]) {
+                    if (tag.ordinal < layout.shared_interior_count(layout.edge_counts[tag.local_entity_id], edge_shared_count[ge])) {
                         const auto idx = edge_dof_offsets[ge] + static_cast<std::size_t>(tag.ordinal);
                         scalar_dof = static_cast<GlobalIndex>(edge_offset + edge_dof_global_id[idx]);
                         record_scalar_owner(scalar_dof, edge_dof_owner_rank[idx]);
@@ -6239,7 +6293,7 @@ void DofHandler::distributeVariableOrderDofsParallel(const MeshTopologyView& top
                 }
                 case VariableLocalDofKind::Face: {
                     const auto gf = static_cast<std::size_t>(cell_faces[static_cast<std::size_t>(tag.local_entity_id)]);
-                    if (tag.ordinal < face_shared_count[gf]) {
+                    if (tag.ordinal < layout.shared_interior_count(layout.face_counts[tag.local_entity_id], face_shared_count[gf])) {
                         if (tri_face_slot[gf] >= 0) {
                             const auto slot = static_cast<std::size_t>(tri_face_slot[gf]);
                             const auto idx = tri_face_dof_offsets[slot] + static_cast<std::size_t>(tag.ordinal);
@@ -6375,6 +6429,7 @@ void DofHandler::distributeCGDofs(const MeshTopologyView& topology,
     const auto n_faces = static_cast<std::size_t>(std::max<GlobalIndex>(topology.n_faces, 0));
     const auto n_cells = static_cast<std::size_t>(std::max<GlobalIndex>(topology.n_cells, 0));
 
+    const auto control_ordering = uniform_control_ordering(topology, layout);
     const bool has_edge_dofs = (layout.dofs_per_edge > 0);
     const bool has_face_dofs = layout.has_face_dofs();
     const bool has_cell_dofs = (layout.dofs_per_cell > 0);
@@ -6744,6 +6799,7 @@ void DofHandler::distributeCGDofs(const MeshTopologyView& topology,
             }
         }
 
+        apply_basis_ordering(cell_dofs, control_ordering);
         if (nc > 1) {
             std::vector<GlobalIndex> expanded;
             expanded.reserve(cell_dofs.size() * static_cast<std::size_t>(nc));
@@ -6882,6 +6938,7 @@ void DofHandler::distributeCGDofsParallel(const MeshTopologyView& topology,
         throw FEException("DofHandler::distributeCGDofsParallel: vertex_gids are required for distributed CG numbering");
     }
 
+    const auto control_ordering = uniform_control_ordering(topology, layout);
     const bool has_edge_dofs = (layout.dofs_per_edge > 0);
     const bool has_face_dofs = layout.has_face_dofs();
     const bool has_cell_dofs = (layout.dofs_per_cell > 0);
@@ -8035,6 +8092,7 @@ void DofHandler::distributeCGDofsParallel(const MeshTopologyView& topology,
 	            }
 	        }
 
+        apply_basis_ordering(cell_dofs, control_ordering);
         if (nc > 1) {
             std::vector<GlobalIndex> expanded;
             expanded.reserve(cell_dofs.size() * static_cast<std::size_t>(nc));
@@ -8634,6 +8692,7 @@ struct DofHandler::MeshCacheState : MeshObserver {
                    a.num_components == b.num_components &&
                    a.is_continuous == b.is_continuous &&
                    a.oriented_edge_moments == b.oriented_edge_moments &&
+                   a.bernstein_order == b.bernstein_order &&
                    a.tensor_face_dof_layout == b.tensor_face_dof_layout &&
                    a.total_dofs_per_element == b.total_dofs_per_element;
         }
