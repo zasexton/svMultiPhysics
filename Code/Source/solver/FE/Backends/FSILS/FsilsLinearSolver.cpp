@@ -3929,18 +3929,6 @@ SolverReport FsilsLinearSolver::solveOnOperatorLayout(const GenericMatrix& A_in,
         return stats;
     };
 
-    auto subtractConstraintMeanFromReturnedSolution = [&](Real mean_shift) {
-        if (mean_shift == Real(0.0)) {
-            return;
-        }
-        for (int old = 0; old < lhs.nNo; ++old) {
-            const std::size_t idx =
-                static_cast<std::size_t>(old) * static_cast<std::size_t>(dof) +
-                static_cast<std::size_t>(con_start);
-            x_data[idx] -= mean_shift;
-        }
-    };
-
     auto subtractLocalConstraintMeanFromReturnedSolution = [&](Real mean_shift) {
         if (mean_shift == Real(0.0)) {
             return;
@@ -3955,45 +3943,6 @@ SolverReport FsilsLinearSolver::solveOnOperatorLayout(const GenericMatrix& A_in,
                 static_cast<std::size_t>(con_start);
             x_data[idx] -= mean_shift;
         }
-    };
-
-    auto centerReturnedSolutionConstraintMean = [&](std::string_view phase,
-                                                    Real dominance_threshold,
-                                                    bool force) -> bool {
-        if (!(has_native_rank_one_updates && has_saddle_point && con_ncomp == 1)) {
-            return false;
-        }
-
-        const auto before = computeReturnedSolutionConstraintMeanStats();
-        if (!before.valid || before.count == 0u) {
-            return false;
-        }
-
-        const Real fluctuation_floor =
-            std::max<Real>(before.rms * static_cast<Real>(1e-12), static_cast<Real>(1e-14));
-        const Real fluctuation = std::max(before.fluctuation_rms, fluctuation_floor);
-        const Real dominance = std::abs(before.mean) / fluctuation;
-        const bool should_center =
-            force || (dominance >= dominance_threshold && std::abs(before.mean) > static_cast<Real>(1e-14));
-        if (!should_center) {
-            return false;
-        }
-
-        subtractConstraintMeanFromReturnedSolution(before.mean);
-        if (oopTraceEnabled()) {
-            const auto after = computeReturnedSolutionConstraintMeanStats();
-            std::ostringstream oss;
-            oss << "FsilsLinearSolver::solve: centered returned constraint mean"
-                << " phase='" << phase << "'"
-                << " mean_before=" << before.mean
-                << " rms_before=" << before.rms
-                << " fluct_before=" << before.fluctuation_rms
-                << " dominance=" << dominance
-                << " mean_after=" << after.mean
-                << " rms_after=" << after.rms;
-            traceLog(oss.str());
-        }
-        return true;
     };
 
     auto logInternalBlockSolutionStats = [&](std::string_view phase) {
@@ -4801,71 +4750,6 @@ SolverReport FsilsLinearSolver::solveOnOperatorLayout(const GenericMatrix& A_in,
         return result;
     };
 
-    auto maybeRecenterConstraintMeanAndValidate =
-        [&](std::string_view phase,
-            const FsilsResidualCheckResult& baseline_check) -> FsilsResidualCheckResult {
-        if (!(has_native_rank_one_updates && has_saddle_point && con_ncomp == 1)) {
-            return baseline_check;
-        }
-
-        const auto before = computeReturnedSolutionConstraintMeanStats();
-        if (!before.valid || before.count == 0u) {
-            return baseline_check;
-        }
-        if (!(std::abs(before.mean) > static_cast<Real>(1e-14))) {
-            return baseline_check;
-        }
-
-        const Real fluctuation_floor =
-            std::max<Real>(before.rms * static_cast<Real>(1e-12), static_cast<Real>(1e-14));
-        const Real fluctuation = std::max(before.fluctuation_rms, fluctuation_floor);
-        const Real dominance = std::abs(before.mean) / fluctuation;
-
-        std::vector<Real> backup = x_data;
-        subtractConstraintMeanFromReturnedSolution(before.mean);
-        auto recentered_check = validateOriginalResidual(std::string(phase) + "_recentered");
-        const auto after = computeReturnedSolutionConstraintMeanStats();
-
-        const bool baseline_finite = std::isfinite(static_cast<double>(baseline_check.residual_norm));
-        const bool recentered_finite = std::isfinite(static_cast<double>(recentered_check.residual_norm));
-        const Real target = std::max<Real>(
-            options_.abs_tol, options_.rel_tol * std::max<Real>(recentered_check.rhs_norm, Real(1e-30)));
-        const bool residual_not_worse =
-            recentered_finite &&
-            (!baseline_finite ||
-             recentered_check.residual_norm <=
-                 std::max<Real>(baseline_check.residual_norm * static_cast<Real>(1.05),
-                                baseline_check.residual_norm + target));
-        const bool mean_removed =
-            after.valid &&
-            std::abs(after.mean) <= std::max<Real>(std::abs(before.mean) * static_cast<Real>(1e-6),
-                                                   static_cast<Real>(1e-10));
-        const bool accept = mean_removed && (recentered_check.ok || residual_not_worse);
-
-        if (oopTraceEnabled()) {
-            std::ostringstream oss;
-            oss << "FsilsLinearSolver::solve: constraint recenter"
-                << " phase='" << phase << "'"
-                << " mean_before=" << before.mean
-                << " rms_before=" << before.rms
-                << " fluct_before=" << before.fluctuation_rms
-                << " dominance=" << dominance
-                << " mean_after=" << after.mean
-                << " rms_after=" << after.rms
-                << " residual_before=" << baseline_check.residual_norm
-                << " residual_after=" << recentered_check.residual_norm
-                << " accept=" << (accept ? 1 : 0);
-            traceLog(oss.str());
-        }
-
-        if (accept) {
-            return recentered_check;
-        }
-
-        x_data = std::move(backup);
-        return baseline_check;
-    };
-
     auto undoStageScalingOnSolution = [&](bool blockschur_preparation) {
         if (!blockschur_preparation || stage_scale == 1.0 || solution_stage_scaling_undone) {
             return;
@@ -5196,7 +5080,6 @@ SolverReport FsilsLinearSolver::solveOnOperatorLayout(const GenericMatrix& A_in,
                                    /*recovery_phase=*/false));
         if (validate_initial_residual) {
             initial_check = validateOriginalResidual(phase);
-            initial_check = maybeRecenterConstraintMeanAndValidate(phase, initial_check);
             if (phase == "blockschur") {
                 initial_check =
                     maybeAcceptNearTargetTrueResidualReplay(initial_internal_check,
@@ -5230,8 +5113,6 @@ SolverReport FsilsLinearSolver::solveOnOperatorLayout(const GenericMatrix& A_in,
                                                /*recovery_phase=*/false));
                 if (validate_retry_residual) {
                     initial_check = validateOriginalResidual(retry_phase);
-                    initial_check =
-                        maybeRecenterConstraintMeanAndValidate(retry_phase, initial_check);
                     initial_check =
                         maybeAcceptNearTargetTrueResidualReplay(initial_internal_check,
                                                                initial_check,
@@ -5305,7 +5186,6 @@ SolverReport FsilsLinearSolver::solveOnOperatorLayout(const GenericMatrix& A_in,
         if (validate_final_residual) {
             const std::string phase = "fsils_final";
             final_check = validateOriginalResidual(phase);
-            final_check = maybeRecenterConstraintMeanAndValidate(phase, final_check);
             final_check = maybeAcceptNearTargetTrueResidualReplay(final_internal_check,
                                                                  final_check,
                                                                  phase);

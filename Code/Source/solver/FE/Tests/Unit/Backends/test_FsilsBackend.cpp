@@ -2699,6 +2699,58 @@ TEST(FsilsBackend, BlockSchurRejectsNonFinalPressureWithoutAuxiliaryGrouping)
                  NotImplementedException);
 }
 
+TEST(FsilsBackend, BlockSchurPreservesWeaklyAnchoredConstraintMean)
+{
+    FsilsFactory factory(/*dof_per_node=*/3);
+    auto A = factory.createMatrix(make_dense_pattern(3));
+    auto b = factory.createVector(3);
+    auto exact = factory.createVector(3);
+    auto x = factory.createVector(3);
+    // The third coordinate is uniquely determined. Scaling its units makes
+    // shifting it to zero fit inside the relative tolerance on the full RHS.
+    constexpr Real scale = 1e-5;
+    const GlobalIndex dofs[] = {0, 1, 2};
+    const Real values[] = {4, 1, 0, 1, 3, 0, 0, 0, scale};
+    auto view = A->createAssemblyView();
+    view->beginAssemblyPhase();
+    view->addMatrixEntries(dofs, values, assembly::AddMode::Insert);
+    view->finalizeAssembly();
+    A->finalizeAssembly();
+
+    RankOneUpdate update{};
+    update.sigma = 80;
+    update.active_components = {0, 1};
+    update.v = {{0, 0.20}, {1, -0.10}};
+    const std::span<const RankOneUpdate> updates(&update, 1);
+    auto xs = exact->localSpan();
+    xs[0] = 1;
+    xs[1] = -0.5;
+    xs[2] = 3;
+    A->mult(*exact, *b);
+    addRankOneContributionSerial(factory, *b, *exact, updates);
+
+    SolverOptions options;
+    options.method = SolverMethod::BlockSchur;
+    options.preconditioner = PreconditionerType::Diagonal;
+    options.rel_tol = 1e-5;
+    options.abs_tol = 1e-14;
+    options.fsils_blockschur_gm_rel_tol = 1e-13;
+    options.fsils_blockschur_cg_rel_tol = 1e-13;
+    options.fsils_residual_check_policy = FsilsResidualCheckPolicy::Always;
+    BlockLayout layout;
+    layout.blocks = {{"primary", 0, 2, BlockRole::PrimaryField},
+                     {"multiplier", 2, 1, BlockRole::ConstraintField}};
+    layout.primary_block = 0;
+    layout.constraint_block = 1;
+    options.block_layout = layout;
+    auto solver = factory.createLinearSolver(options);
+    solver->setRankOneUpdates(updates);
+    const auto report = solver->solve(*A, *x, *b);
+    ASSERT_TRUE(report.converged) << report.message;
+    EXPECT_NEAR(x->localSpan()[2], xs[2], 1e-7);
+    EXPECT_LE(fullOperatorRelativeResidualSerial(factory, *A, *x, *b, updates), options.rel_tol);
+}
+
 TEST(FsilsBackend, RankOneUpdateSolversConverge)
 {
     FsilsFactory factory(/*dof_per_node=*/3);
