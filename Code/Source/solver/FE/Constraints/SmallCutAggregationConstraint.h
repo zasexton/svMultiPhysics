@@ -43,6 +43,14 @@
  * not mesh nodes, so candidate discovery could never slave them and the
  * emitted corner extensions would not be a partition of unity.
  *
+ * Full-active cells are preferred roots. If a strict path guard would
+ * reject an affine simplex P1 candidate, an authoritative LinearCorner cut
+ * can instead supply a terminal basis with at least half of its uncut mass
+ * norm. Every candidate support cell must reach this donor on material
+ * faces within the guard. Each donor basis function must have connected
+ * material support, and the component must contain a genuine full cell.
+ * The selected donor remains a cut cell in geometry and integration reports.
+ *
  * Under-aggregation policy: candidates without a reachable full-active root
  * are isolated cut ISLANDS — a routine geometric condition in breaking
  * moving-interface problems (the 312-step d18 gate sees up to ~48 per refresh once
@@ -569,7 +577,7 @@ struct SmallCutAggregationProlongationRow {
 /**
  * Nonpartitioning patch induced by candidate rows with a common root.
  *
- * A rooted patch contains its full-active root and every cut cell containing
+ * A rooted patch contains its full or conditioned simplex root and every cut cell containing
  * one of its canonical slaves. Support cells additionally include active
  * cells carrying terminal masters introduced by constraint closure. A
  * supported-cut patch covers a cut cell with no candidate-induced patch and
@@ -588,6 +596,14 @@ struct SmallCutAggregationProlongationPatch {
     std::vector<GlobalIndex> member_cell_gids{};
     std::vector<GlobalIndex> support_cell_gids{};
     std::vector<GlobalIndex> slave_dofs{};
+};
+
+/** Conditioning of a partial affine P1 simplex used as a terminal aggregation root. */
+struct SmallCutAggregationSimplexRootSupport {
+    GlobalIndex cell_gid{INVALID_GLOBAL_INDEX};
+    Real retained_volume_fraction{0};
+    Real minimum_relative_mass{0};
+    bool operator==(const SmallCutAggregationSimplexRootSupport&) const = default;
 };
 
 struct SmallCutAggregationProlongationRevision {
@@ -633,6 +649,7 @@ struct SmallCutAggregationProlongationReport {
     std::vector<SmallCutAggregationProlongationRow> rows{};
     std::vector<SmallCutAggregationProlongationCell> active_cells{};
     std::vector<SmallCutAggregationProlongationPatch> patches{};
+    std::vector<SmallCutAggregationSimplexRootSupport> conditioned_simplex_roots{};
 };
 
 /**

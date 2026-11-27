@@ -85,6 +85,7 @@ struct SmallCutAggregationPendingProlongation {
     std::vector<SmallCutAggregationProlongationRow> rows{};
     std::vector<SmallCutAggregationProlongationCell> active_cells{};
     std::vector<SmallCutAggregationProlongationPatch> patches{};
+    std::vector<SmallCutAggregationSimplexRootSupport> conditioned_simplex_roots{};
 
     // Sorted (DOF, active cell GID) incidences and (cell GID, feature) pairs
     // of `active_cells`, built by the first prolongation report of a
@@ -716,6 +717,7 @@ enum class AggregationProfileExchange : std::size_t {
     ProposalOutcomes,
     PreferredProposals,
     ResolutionVisibility,
+    SimplexRootSupport,
     Count,
 };
 
@@ -770,6 +772,7 @@ constexpr std::array<const char*,
         "proposal_outcomes",
         "preferred_proposals",
         "resolution_visibility",
+        "simplex_root_support",
     }};
 
 constexpr std::array<const char*,
@@ -5764,7 +5767,146 @@ void buildActiveFeatureLedger(const AggregationCellGraph& graph,
         " covers every root path the guard admits (" + std::to_string(root_path_guard) + ").");
 }
 
+// The corner DOFs identify strictly material vertices. On an affine P1
+// simplex, a shared face containing such a vertex has positive material area
+// (length in 2D). A vertex that merely touches the interface is insufficient.
+struct MaterialSimplex {
+    SmallCutAggregationSimplexRootSupport conditioning{};
+    std::array<GlobalIndex, 4> material_vertices{
+        INVALID_GLOBAL_INDEX, INVALID_GLOBAL_INDEX, INVALID_GLOBAL_INDEX, INVALID_GLOBAL_INDEX};
+};
+using MaterialSimplexMap = std::map<GlobalIndex, MaterialSimplex>;
+
+// A supported donor requires an authoritative single affine cut of the parent.
+// Its source decomposition carries the signed values used by that very cut.
+// Missing/subdivided geometry cannot certify a donor or a material face.
+template <class RetainedFraction, class CornerDof>
+std::vector<std::int64_t> localMaterialSimplexWords(
+    const assembly::CutIntegrationContext& context,
+    const assembly::IMeshAccess& mesh,
+    const basis::BasisFunction& field_basis,
+    int marker,
+    geometry::CutIntegrationSide side,
+    const RetainedFraction& retained_fraction,
+    const CornerDof& corner_dof)
+{
+    std::vector<std::int64_t> words;
+    if (field_basis.order() != 1 || field_basis.basis_type() != BasisType::Lagrange) {
+        return words;
+    }
+    for (const auto& snapshot : context.levelSetGeometrySnapshots()) {
+        const auto& domain = snapshot->interfaceDomain();
+        if (domain.marker() != marker ||
+            domain.request().frame != geometry::CutGeometryFrame::Reference ||
+            domain.request().implicit_geometry_mode != "LinearCorner") {
+            continue;
+        }
+        std::set<MeshIndex> original_parent_cuts;
+        for (const auto& fragment : domain.fragments()) {
+            if (fragment.linear_corner_surface && fragment.active()) {
+                original_parent_cuts.insert(fragment.parent_cell);
+            }
+        }
+        for (const auto& region : domain.volumeRegions()) {
+            const auto cell = region.parent_cell;
+            if (region.side != side || !original_parent_cuts.contains(cell) ||
+                region.full_cell_equivalent || !mesh.isOwnedCell(cell) ||
+                region.reference_subcells.empty()) {
+                continue;
+            }
+            const auto type = mesh.getCellType(cell);
+            if ((type != ElementType::Triangle3 && type != ElementType::Tetra4) ||
+                mesh.getCellGeometryOrder(cell) != 1 || field_basis.element_type() != type) {
+                continue;
+            }
+            const auto fraction = retained_fraction(region);
+            if (!fraction || !std::isfinite(*fraction) || *fraction <= 0 || *fraction > 1) {
+                continue;
+            }
+            const auto n = type == ElementType::Triangle3 ? 3u : 4u;
+            MaterialSimplex simplex;
+            bool certified = true;
+            for (const auto& subcell : region.reference_subcells) {
+                if (!subcell.has_represented_signed_values || subcell.vertex_count != n) {
+                    certified = false;
+                    break;
+                }
+                for (std::size_t vertex = 0; vertex < n; ++vertex) {
+                    const auto signed_value = subcell.represented_signed_values[vertex];
+                    const bool interior = side == geometry::CutIntegrationSide::Negative
+                        ? signed_value < 0 : signed_value > 0;
+                    if (!interior) {
+                        continue;
+                    }
+                    for (std::size_t i = 0; i < n; ++i) {
+                        const auto x = basis::ReferenceNodeLayout::get_node_coords(type, i);
+                        const auto& y = subcell.vertices[vertex];
+                        if (x[0] == y[0] && x[1] == y[1] && x[2] == y[2]) {
+                            simplex.material_vertices[i] = corner_dof(cell, i);
+                        }
+                    }
+                }
+            }
+            if (!certified ||
+                std::none_of(simplex.material_vertices.begin(), simplex.material_vertices.end(),
+                             [](GlobalIndex vertex) { return vertex >= 0; })) {
+                continue;
+            }
+            // M = V (I + 11^T) / [n(n+1)]. On the parent simplex the
+            // maximum of N^T M^-1 N is n^2/V (at a vertex). Removing
+            // fraction e can therefore remove at most n^2 e of any P1
+            // mass norm. Its affine stiffness retains exactly fraction f.
+            const Real lower_bound = std::nextafter(
+                std::fma(-Real(n * n), Real{1} - *fraction, Real{1}),
+                -std::numeric_limits<Real>::infinity());
+            std::sort(simplex.material_vertices.begin(), simplex.material_vertices.end());
+            words.push_back(region.parent_cell_global_id);
+            words.push_back(std::bit_cast<std::int64_t>(static_cast<double>(*fraction)));
+            words.push_back(std::bit_cast<std::int64_t>(static_cast<double>(lower_bound)));
+            words.insert(words.end(), simplex.material_vertices.begin(), simplex.material_vertices.end());
+        }
+    }
+    return words;
+}
+
+MaterialSimplexMap gatherMaterialSimplexSupport(const systems::FESystem& system,
+                                                 std::vector<std::int64_t> local)
+{
+#if FE_HAS_MPI
+    int initialized = 0;
+    MPI_Initialized(&initialized);
+    if (initialized) {
+        const auto comm = system.dofHandler().mpiComm();
+        int ranks = 1;
+        MPI_Comm_size(comm, &ranks);
+        if (ranks > 1) {
+            local = allGatherInt64Words(comm, local, AggregationProfileExchange::SimplexRootSupport).words;
+        }
+    }
+#endif
+    constexpr std::size_t stride = 7; // physical cell, fraction, bound, four corner DOFs
+    if (local.size() % stride != 0) {
+        throw std::logic_error("SmallCutAggregationConstraint: malformed material simplex support");
+    }
+    MaterialSimplexMap support;
+    for (std::size_t i = 0; i < local.size(); i += stride) {
+        MaterialSimplex cell;
+        cell.conditioning.cell_gid = local[i];
+        cell.conditioning.retained_volume_fraction = std::bit_cast<double>(local[i + 1]);
+        cell.conditioning.minimum_relative_mass = std::bit_cast<double>(local[i + 2]);
+        std::copy_n(local.begin() + i + 3, cell.material_vertices.size(), cell.material_vertices.begin());
+        const auto [it, added] = support.try_emplace(local[i], cell);
+        if (!added && (it->second.conditioning != cell.conditioning ||
+                       it->second.material_vertices != cell.material_vertices)) {
+            throw std::runtime_error("SmallCutAggregationConstraint: inconsistent distributed "
+                                     "material simplex support");
+        }
+    }
+    return support;
+}
+
 struct CandidateRootTraversal {
+    std::map<GlobalIndex, std::vector<std::size_t>> exhausted_seeds;
     std::map<GlobalIndex, std::vector<GlobalRootCandidate>>
         roots_by_candidate{};
     std::size_t maximum_observed_root_path{0u};
@@ -5772,6 +5914,179 @@ struct CandidateRootTraversal {
     std::size_t root_path_search_cell_visits{0u};
     std::size_t root_path_seed_index_entries{0u};
 };
+
+using ConditionedRoots = std::map<GlobalIndex, SmallCutAggregationSimplexRootSupport>;
+
+[[noreturn]] void throwExhaustedRootPath(GlobalIndex dof, std::size_t limit, const char* hint)
+{
+    const auto observed = limit == std::numeric_limits<std::size_t>::max() ? limit : limit + 1;
+    throw InadmissibleGeneratedGeometry(
+        "SmallCutAggregationConstraint: diagnostic=root_path_guard_rejection candidate_dof=" +
+        std::to_string(dof) + " maximum_observed_path=" + std::to_string(observed) +
+        " maximum_allowed_path=" + std::to_string(limit) + ": " + hint + ".");
+}
+
+ConditionedRoots resolveGuardedSimplexRoots(const AggregationCellGraph& graph,
+                                           const MaterialSimplexMap& support,
+                                           GlobalCandidateMap& candidates,
+                                           CandidateRootTraversal& traversal,
+                                           std::size_t limit,
+                                           const char* rootless_hint)
+{
+    ConditionedRoots selected;
+    std::set<GlobalIndex> anchor_dofs;
+    std::map<GlobalIndex, std::size_t> star_sizes;
+    std::vector<const MaterialSimplex*> cut(graph.cells.size(), nullptr);
+    for (std::size_t cell = 0; cell < graph.cells.size(); ++cell) {
+        if (!graph.klass[cell].full_active && !graph.klass[cell].cut) {
+            continue;
+        }
+        if (const auto it = support.find(graph.physical_gid[cell]); it != support.end()) {
+            cut[cell] = &it->second;
+        }
+        for (const auto dof : graph.cells.key(cell)) {
+            ++star_sizes[dof];
+        }
+    }
+    const auto contains_dof = [&](std::size_t cell, GlobalIndex dof) {
+        const auto& key = graph.cells.key(cell);
+        return std::binary_search(key.begin(), key.end(), dof);
+    };
+    const auto material_face = [&](std::size_t a, std::size_t b) {
+        if (graph.klass[a].full_active && graph.klass[b].full_active) {
+            return true;
+        }
+        if (graph.klass[a].full_active) {
+            std::swap(a, b);
+        }
+        if (!cut[a]) {
+            return false;
+        }
+        for (const auto dof : cut[a]->material_vertices) {
+            if (dof < 0) {
+                continue;
+            }
+            if (graph.klass[b].full_active && contains_dof(b, dof)) {
+                return true;
+            }
+            if (cut[b] && std::binary_search(cut[b]->material_vertices.begin(),
+                                             cut[b]->material_vertices.end(), dof)) {
+                return true;
+            }
+        }
+        return false;
+    };
+    // A detached component has its own constraint and pressure treatment. A
+    // background face connection to a full cell alone cannot change it.
+    std::vector<bool> reaches_full_cell(graph.cells.size(), false);
+    std::vector<std::size_t> connected;
+    for (std::size_t cell = 0; cell < graph.cells.size(); ++cell) {
+        if (graph.klass[cell].full_active) {
+            reaches_full_cell[cell] = true;
+            connected.push_back(cell);
+        }
+    }
+    for (std::size_t i = 0; i < connected.size(); ++i) {
+        const auto at = connected[i];
+        for (const auto next : graph.neighbors[at]) {
+            if (!reaches_full_cell[next] && material_face(at, next)) {
+                reaches_full_cell[next] = true;
+                connected.push_back(next);
+            }
+        }
+    }
+    const auto distances = [&](std::size_t seed, GlobalIndex restrict_to_star) {
+        std::map<std::size_t, std::size_t> distance{{seed, 0u}};
+        std::vector<std::size_t> queue{seed};
+        for (std::size_t i = 0; i < queue.size(); ++i) {
+            const auto at = queue[i];
+            const auto d = distance.at(at);
+            if (d >= limit) {
+                continue;
+            }
+            for (const auto next : graph.neighbors[at]) {
+                if (distance.contains(next) || !material_face(at, next) ||
+                    (restrict_to_star >= 0 && !contains_dof(next, restrict_to_star))) {
+                    continue;
+                }
+                distance.emplace(next, d + 1);
+                queue.push_back(next);
+            }
+        }
+        return distance;
+    };
+    std::map<std::size_t, bool> admissible_stars;
+    const auto has_connected_anchor_support = [&](std::size_t root) {
+        if (const auto old = admissible_stars.find(root); old != admissible_stars.end()) {
+            return old->second;
+        }
+        // Releasing a donor coefficient affects its entire C0 star. A dry
+        // face may split that star into distinct material components.
+        bool connected = true;
+        for (const auto dof : graph.cells.key(root)) {
+            if (distances(root, dof).size() != star_sizes.at(dof)) {
+                connected = false;
+                break;
+            }
+        }
+        admissible_stars.emplace(root, connected);
+        return connected;
+    };
+    for (const auto& [dof, seeds] : traversal.exhausted_seeds) {
+        // Every incident cut side must reach the same terminal donor without
+        // crossing a dry face. The longest of these paths must fit the guard.
+        std::map<std::size_t, std::size_t> common;
+        for (std::size_t i = 0; i < seeds.size(); ++i) {
+            const auto reached = distances(seeds[i], INVALID_GLOBAL_INDEX);
+            if (i == 0) {
+                common = reached;
+                continue;
+            }
+            for (auto it = common.begin(); it != common.end();) {
+                const auto found = reached.find(it->first);
+                if (found == reached.end()) {
+                    it = common.erase(it);
+                } else {
+                    it->second = std::max(it->second, found->second);
+                    ++it;
+                }
+            }
+        }
+        std::optional<GlobalRootCandidate> best;
+        const auto ordering = [&](const GlobalRootCandidate& root) {
+            return std::tuple{root.distance, -cut[root.cell]->conditioning.minimum_relative_mass,
+                              graph.physical_gid[root.cell]};
+        };
+        for (const auto& [cell, distance] : common) {
+            if (!cut[cell] || !reaches_full_cell[cell] ||
+                cut[cell]->conditioning.minimum_relative_mass < Real{0.5} ||
+                !has_connected_anchor_support(cell)) {
+                continue;
+            }
+            const GlobalRootCandidate candidate{cell, distance};
+            if (!best || ordering(candidate) < ordering(*best)) {
+                best = candidate;
+            }
+        }
+        if (!best) {
+            throwExhaustedRootPath(dof, limit, rootless_hint);
+        }
+        candidates.at(dof).globally_rooted = true;
+        traversal.roots_by_candidate[dof] = {*best};
+        traversal.maximum_observed_root_path =
+            std::max(traversal.maximum_observed_root_path, best->distance);
+        selected.emplace(graph.physical_gid[best->cell], cut[best->cell]->conditioning);
+        const auto& key = graph.cells.key(best->cell);
+        anchor_dofs.insert(key.begin(), key.end());
+    }
+    // The certified simplex carries its nodal basis independently. All other
+    // candidates which already had a full root keep the original selection.
+    for (const auto dof : anchor_dofs) {
+        candidates.erase(dof);
+        traversal.roots_by_candidate.erase(dof);
+    }
+    return selected;
+}
 
 // Bounded breadth-first root search of every candidate over the graph: the
 // full-active cells reachable through cut cells within the root-path guard,
@@ -5786,7 +6101,8 @@ void traverseCandidateRoots(const AggregationCellGraph& graph,
                             const char* rootless_hint,
                             bool slave_all_cut,
                             const GuardRootlessLogger& log_guard_rootless,
-                            CandidateRootTraversal& traversal)
+                            CandidateRootTraversal& traversal,
+                            bool defer_exhausted = false)
 {
     const auto& classified_cells = graph.cells;
     const auto& global_cell_class_of = graph.klass;
@@ -5959,6 +6275,10 @@ void traverseCandidateRoots(const AggregationCellGraph& graph,
             // guard: no admissible extension.  Fail closed unless the
             // opt-in fallback gives the candidate the rootless-island
             // policy (D33).
+            if (defer_exhausted && !guards_.rootless_fallback && !slave_all_cut) {
+                traversal.exhausted_seeds.emplace(dof, seed_it->second);
+                continue;
+            }
             ++root_path_guard_rejections;
             maximum_observed_root_path = std::max(
                 maximum_observed_root_path,
@@ -5967,14 +6287,7 @@ void traverseCandidateRoots(const AggregationCellGraph& graph,
                     ? guards_.maximum_root_path_length
                     : guards_.maximum_root_path_length + 1u);
             if (!guards_.rootless_fallback) {
-                throw InadmissibleGeneratedGeometry(
-                    "SmallCutAggregationConstraint: diagnostic="
-                    "root_path_guard_rejection candidate_dof=" +
-                    std::to_string(dof) + " maximum_observed_path=" +
-                    std::to_string(maximum_observed_root_path) +
-                    " maximum_allowed_path=" +
-                    std::to_string(guards_.maximum_root_path_length) +
-                    ": " + rootless_hint + ".");
+                throwExhaustedRootPath(dof, guards_.maximum_root_path_length, rootless_hint);
             }
             log_guard_rootless(
                 "root_path_guard",
@@ -6883,6 +7196,7 @@ void SmallCutAggregationConstraint::apply(const systems::FESystem& system,
     std::size_t root_path_seed_index_entries = 0u;
     std::size_t constrained_vertex_count = 0u;
     std::size_t aggregated = 0u;
+    ConditionedRoots conditioned_simplex_roots;
     std::size_t no_root = 0u;
     std::size_t island_pinned_dofs = 0u;
     std::size_t inversion_failed = 0u;
@@ -9578,20 +9892,20 @@ void SmallCutAggregationConstraint::apply(const systems::FESystem& system,
 
     std::map<GlobalIndex, std::vector<GlobalRootCandidate>>
         global_roots_by_candidate;
+    const AggregationCellGraph graph{
+        .cells = classified_cells,
+        .klass = global_cell_class_of,
+        .physical_gid = global_physical_cell_gid_of,
+        .volume = global_active_cell_physical_volume_of,
+        .rule_ids = global_active_cell_rule_ids_of,
+        .provider_rank = global_active_cell_measure_provider_rank_of,
+        .owner_rank = global_cell_owner_rank_of,
+        .neighbors = global_neighbors,
+    };
+    CandidateRootTraversal traversal;
     std::exception_ptr local_global_graph_exception;
     try {
-    CandidateRootTraversal traversal;
-    traverseCandidateRoots(
-        AggregationCellGraph{
-            .cells = classified_cells,
-            .klass = global_cell_class_of,
-            .physical_gid = global_physical_cell_gid_of,
-            .volume = global_active_cell_physical_volume_of,
-            .rule_ids = global_active_cell_rule_ids_of,
-            .provider_rank = global_active_cell_measure_provider_rank_of,
-            .owner_rank = global_cell_owner_rank_of,
-            .neighbors = global_neighbors,
-        },
+    traverseCandidateRoots(graph,
         active_feature_of,
         global_candidates,
         guards_,
@@ -9609,17 +9923,78 @@ void SmallCutAggregationConstraint::apply(const systems::FESystem& system,
                                       support.feature_cells,
                                       detail);
         },
-        traversal);
-    global_roots_by_candidate = std::move(traversal.roots_by_candidate);
-    maximum_observed_root_path = traversal.maximum_observed_root_path;
-    root_path_guard_rejections = traversal.root_path_guard_rejections;
-    root_path_search_cell_visits = traversal.root_path_search_cell_visits;
-    root_path_seed_index_entries = traversal.root_path_seed_index_entries;
+        traversal, /*defer_exhausted=*/!allow_unaggregated &&
+            max_lines == std::numeric_limits<std::size_t>::max());
     } catch (...) {
         local_global_graph_exception = std::current_exception();
     }
     coordinateLocalPhaseFailure(local_global_graph_exception,
                                 "global_candidate_root_traversal");
+    // The ordinary path uses exactly the original roots and exchanges. Only
+    // a replicated, otherwise rejected band needs certified simplex support.
+    if (!traversal.exhausted_seeds.empty()) {
+        std::vector<std::int64_t> words;
+        std::exception_ptr error;
+        try {
+            std::vector<GlobalIndex> nodes;
+            words = localMaterialSimplexWords(
+                *cut_context, mesh, field_basis, interface_marker_, active_side_,
+                [&](const interfaces::CutInterfaceVolumeRegion& region) -> std::optional<Real> {
+                    const auto measure = local_active_cell_measures.find(region.parent_cell);
+                    if (measure == local_active_cell_measures.end() || measure->second.rule_count != 1 ||
+                        !measure->second.stable_rule_ids.contains(region.stable_id)) {
+                        return std::nullopt;
+                    }
+                    const Real parent = geometry::physicalCellMeasureFromMapping(mesh, region.parent_cell);
+                    const Real fraction = measure->second.physical_volume / parent;
+                    // Parent and cut rules integrate the same constant Jacobian.
+                    if (!std::isfinite(fraction) || std::abs(fraction - region.volume_fraction) >
+                        Real{128} * std::numeric_limits<Real>::epsilon()) {
+                        return std::nullopt;
+                    }
+                    return std::min(fraction, region.volume_fraction);
+                },
+                [&](GlobalIndex cell, std::size_t corner) {
+                    mesh.getCellNodes(cell, nodes);
+                    const auto vdofs = entity_map->getVertexDofs(nodes.at(corner));
+                    return vdofs.empty() ? INVALID_GLOBAL_INDEX : offset + vdofs.front();
+                });
+        } catch (...) {
+            error = std::current_exception();
+        }
+        coordinateLocalPhaseFailure(error, "partial_simplex_root_support");
+        try {
+            const auto material = gatherMaterialSimplexSupport(system, std::move(words));
+            conditioned_simplex_roots = resolveGuardedSimplexRoots(
+                graph, material, global_candidates, traversal, guards_.maximum_root_path_length,
+                level_set::levelSetRecordLabels(system).aggregation_rootless_hint);
+            // An existing tie could extend a donor to masters outside its
+            // certified support. Prescribed values restrict its tangent space.
+            for (const auto& cell : canonical_active_cells) {
+                if (!conditioned_simplex_roots.contains(cell.cell_gid)) {
+                    continue;
+                }
+                for (const auto dof : cell.field_dofs) {
+                    const auto line = constraints.getConstraint(dof);
+                    if (line && !line->entries.empty()) {
+                        throw InadmissibleGeneratedGeometry(
+                            "SmallCutAggregationConstraint: diagnostic="
+                            "conditioned_simplex_root_has_external_master cell=" +
+                            std::to_string(cell.cell_gid) + " dof=" + std::to_string(dof));
+                    }
+                }
+            }
+        } catch (...) {
+            error = std::current_exception();
+        }
+        coordinateLocalPhaseFailure(error, "conditioned_simplex_root_traversal");
+        profile.setCount(AggregationProfileCount::CommunicatorCandidates, global_candidates.size());
+    }
+    global_roots_by_candidate = std::move(traversal.roots_by_candidate);
+    maximum_observed_root_path = traversal.maximum_observed_root_path;
+    root_path_guard_rejections = traversal.root_path_guard_rejections;
+    root_path_search_cell_visits = traversal.root_path_search_cell_visits;
+    root_path_seed_index_entries = traversal.root_path_seed_index_entries;
     profile.mark(AggregationProfilePhase::RootTraversal);
 
     std::exception_ptr local_proposal_exception;
@@ -10010,12 +10385,11 @@ void SmallCutAggregationConstraint::apply(const systems::FESystem& system,
                 const auto root = active_cell_by_gid.find(
                     row.root_cell_gid);
                 if (root == active_cell_by_gid.end() ||
-                    root->second->kind !=
-                        SmallCutAggregationActiveCellKind::FullActive) {
+                    (root->second->kind != SmallCutAggregationActiveCellKind::FullActive &&
+                     !conditioned_simplex_roots.contains(row.root_cell_gid))) {
                     throw std::logic_error(
                         "SmallCutAggregationConstraint: selected physical "
-                        "root is absent from the canonical full-active cell "
-                        "ledger");
+                        "root has no full cell or certified affine simplex support");
                 }
                 row.root_cell_owner_rank = root->second->owner_rank;
                 auto& accumulator = patch_accumulators[{
@@ -10188,6 +10562,15 @@ void SmallCutAggregationConstraint::apply(const systems::FESystem& system,
         Logger::instance().get_level() <= LogLevel::DEBUG;
     // Built only when printed, quoted by the fail-open warning or kept for reuse.
     svmp::FE::LogRecord summary("SmallCutAggregationConstraint", "small-cut aggregation");
+    if (!conditioned_simplex_roots.empty()) {
+        const auto least_mass = std::min_element(
+            conditioned_simplex_roots.begin(), conditioned_simplex_roots.end(),
+            [](const auto& a, const auto& b) {
+                return a.second.minimum_relative_mass < b.second.minimum_relative_mass;
+            });
+        summary.value("conditioned_simplex_roots", conditioned_simplex_roots.size())
+               .value("minimum_conditioned_relative_mass", least_mass->second.minimum_relative_mass);
+    }
     if (log_aggregation_diagnostics || allow_unaggregated || reuse_inputs.has_value()) {
         summary.diagnostic("small_cut_aggregation")
             .quoted("field", rec.name)
@@ -10461,12 +10844,16 @@ void SmallCutAggregationConstraint::apply(const systems::FESystem& system,
             pending->rows =
                 std::move(distributed_result.canonical_rows);
             pending->active_cells = std::move(canonical_active_cells);
+            for (const auto& [cell, certificate] : conditioned_simplex_roots) {
+                pending->conditioned_simplex_roots.push_back(certificate);
+            }
             pending->patches =
                 std::move(canonical_prolongation_patches);
             next_pending_prolongation = std::move(pending);
     }
-    if (reuse_inputs.has_value() && next_completed_report.has_value() &&
-        next_pending_prolongation) {
+    // A deformation with unchanged cut topology can change the donor mass.
+    if (conditioned_simplex_roots.empty() && reuse_inputs.has_value() &&
+        next_completed_report.has_value() && next_pending_prolongation) {
         next_reuse_record = makeAggregationReuseRecord(
             reuse_inputs->key,
             rec.name,
@@ -11105,6 +11492,7 @@ buildProlongationReport(
         pending.source_value_revision;
     report->rows = pending.rows;
     report->active_cells = pending.active_cells;
+    report->conditioned_simplex_roots = pending.conditioned_simplex_roots;
     report->patches = pending.patches;
 
     for (auto& row : report->rows) {
@@ -11515,6 +11903,14 @@ buildProlongationReport(
         mix_indices(patch.support_cell_gids);
         mix_indices(patch.slave_dofs);
     }
+    if (!report->conditioned_simplex_roots.empty()) {
+        aggregationDigestMix(digest, static_cast<std::uint64_t>(report->conditioned_simplex_roots.size()));
+    }
+    for (const auto& root : report->conditioned_simplex_roots) {
+        aggregationDigestMix(digest, static_cast<std::uint64_t>(root.cell_gid));
+        aggregationDigestMix(digest, aggregationDigestReal(root.retained_volume_fraction));
+        aggregationDigestMix(digest, aggregationDigestReal(root.minimum_relative_mass));
+    }
     report->canonical_content_digest = digest;
     } catch (...) {
         local_report_exception = std::current_exception();
@@ -11640,6 +12036,18 @@ bool smallCutAggregationProlongationReportsBitwiseEqual(
     const auto& rg = rhs.guards;
     const auto& lr = lhs.revision;
     const auto& rr = rhs.revision;
+    if (lhs.conditioned_simplex_roots.size() != rhs.conditioned_simplex_roots.size()) {
+        return false;
+    }
+    for (std::size_t i = 0; i < lhs.conditioned_simplex_roots.size(); ++i) {
+        const auto& a = lhs.conditioned_simplex_roots[i];
+        const auto& b = rhs.conditioned_simplex_roots[i];
+        if (a.cell_gid != b.cell_gid ||
+            !sameFloatBits(a.retained_volume_fraction, b.retained_volume_fraction) ||
+            !sameFloatBits(a.minimum_relative_mass, b.minimum_relative_mass)) {
+            return false;
+        }
+    }
     if (lhs.field != rhs.field || lhs.active_side != rhs.active_side ||
         lhs.interface_marker != rhs.interface_marker ||
         lhs.slave_all_cut != rhs.slave_all_cut ||

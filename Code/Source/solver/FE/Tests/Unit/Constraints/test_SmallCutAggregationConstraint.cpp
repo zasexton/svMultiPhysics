@@ -27,6 +27,8 @@
  */
 
 #include <gtest/gtest.h>
+#include "SimplexAggregationFixture.h"
+
 
 #include <span>
 
@@ -1926,6 +1928,213 @@ TEST(SmallCutAggregationConstraint, SubRoundoffCutCellIsClassifiedAsCut)
         [vertex2_dof](const auto& entry) { return entry.first == vertex2_dof; });
     ASSERT_NE(weight_on_vertex2, rounded[1].second.end());
     EXPECT_NEAR(weight_on_vertex2->second, 2.0, 1e-9);
+#endif
+}
+
+#if defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH
+std::shared_ptr<Mesh> buildTetrahedralChain()
+{
+    // Each new vertex adds the next coordinate direction. Consecutive unit
+    // tetrahedra share a face and nonconsecutive ones share at most an edge.
+    std::vector<real_t> coordinates;
+    std::array<real_t, 3> point{};
+    for (std::size_t i = 0; i < 9; ++i) {
+        coordinates.insert(coordinates.end(), point.begin(), point.end());
+        ++point[i % 3];
+    }
+    std::vector<index_t> nodes;
+    std::vector<offset_t> offsets{0};
+    for (index_t cell = 0; cell < 6; ++cell) {
+        for (index_t corner = 0; corner < 4; ++corner) {
+            nodes.push_back(cell + corner);
+        }
+        offsets.push_back(nodes.size());
+    }
+    auto base = std::make_shared<MeshBase>();
+    CellShape shape{};
+    shape.family = CellFamily::Tetra;
+    shape.num_corners = 4;
+    shape.order = 1;
+    base->build_from_arrays(3, coordinates, offsets, nodes, std::vector<CellShape>(6, shape));
+    base->finalize();
+    return create_mesh(std::move(base));
+}
+
+void expectSimplexRootGuard(systems::FESystem& system)
+{
+    try {
+        system.rebuildConstraintState();
+        FAIL() << "an unsupported partial cell supplied an aggregation root";
+    } catch (const std::exception& error) {
+        EXPECT_NE(std::string(error.what()).find("root_path_guard_rejection"), std::string::npos)
+            << error.what();
+    }
+}
+#endif
+
+TEST(SmallCutAggregationConstraint, BoundedSimplexDonorRequiresMaterialFacesAndMassSupport)
+{
+    SVMP_AGG_TEST_BODY
+#if defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH
+    using Side = geometry::CutIntegrationSide;
+    const std::array<Real, 8> wet_path{-1, -1, -1, -1, -1, 0.1, 5, 5};
+    const std::array<Real, 8> sliver{-1, -1, -1, -1, -1, 5, 5, 5};
+    for (auto side : {Side::Negative, Side::Positive}) {
+        systems::FESystem system(buildTriangleColumn(3));
+        auto space = std::make_shared<spaces::H1Space>(ElementType::Triangle3, 1);
+        const auto trace = system.addField({.name = "trace", .space = space});
+        const auto phi = system.addField({.name = "phi", .space = space});
+        system.addOperator("trace");
+        SmallCutAggregationGuardOptions guards;
+        guards.maximum_root_path_length = 2;
+        system.addSystemConstraint(std::make_unique<SmallCutAggregationConstraint>(
+            trace, side, kInterfaceMarker, std::vector<int>{}, std::vector<GlobalIndex>{}, guards));
+        system.setup();
+        level_set::LevelSetGeneratedInterfaceLifecycle lifecycle;
+        publishSimplexBand(system, phi, wet_path, lifecycle, side, kInterfaceMarker);
+        ASSERT_NO_THROW(system.rebuildConstraintState());
+        const auto reports = system.finalizedSmallCutAggregationProlongations();
+        ASSERT_EQ(reports.size(), 1u);
+        const auto& report = *reports.front();
+        EXPECT_EQ(std::count_if(report.active_cells.begin(), report.active_cells.end(),
+            [](const auto& cell) { return cell.kind == SmallCutAggregationActiveCellKind::FullActive; }), 2);
+        // The upper-left vertex is two wetted faces from cell 3 and four from a full cell.
+        const auto top = cellNodeDof(system, trace, 5, 2);
+        const auto* row = findFinalizedProlongationRow(report, top);
+        ASSERT_NE(row, nullptr);
+        EXPECT_EQ(row->root_cell_gid, 3);
+        EXPECT_EQ(row->root_distance, 2u);
+        const auto root = std::find_if(report.active_cells.begin(), report.active_cells.end(),
+                                      [](const auto& cell) { return cell.cell_gid == 3; });
+        ASSERT_NE(root, report.active_cells.end());
+        EXPECT_EQ(root->kind, SmallCutAggregationActiveCellKind::Cut);
+        EXPECT_NEAR(root->retained_physical_volume, 0.5 * (1.0 - 1.0 / 121.0), 1.0e-14);
+        for (auto master : root->field_dofs) {
+            EXPECT_FALSE(system.constraints().isConstrained(master));
+        }
+        const auto certificate = std::find_if(report.conditioned_simplex_roots.begin(),
+            report.conditioned_simplex_roots.end(), [](const auto& c) { return c.cell_gid == 3; });
+        ASSERT_NE(certificate, report.conditioned_simplex_roots.end());
+        EXPECT_NEAR(certificate->minimum_relative_mass, 1.0 - 9.0 / 121.0, 2.0e-14);
+        expectEntries(lineEntries(system, top), {{cellNodeDof(system, trace, 3, 0), -1},
+                                                {cellNodeDof(system, trace, 3, 2), 2}});
+        // Same corner-sign topology, different mass. A prior conditioning
+        // certificate must not be reused after this deformation.
+        publishSimplexBand(system, phi, sliver, lifecycle, side, kInterfaceMarker);
+        expectSimplexRootGuard(system);
+        // The two positive vertices form a strictly dry separator.
+        const std::array<Real, 8> dry_face{-1, -1, -100, -1, 0.1, 0.1, 5, -0.001};
+        publishSimplexBand(system, phi, dry_face, lifecycle, side, kInterfaceMarker);
+        expectSimplexRootGuard(system);
+    }
+#endif
+}
+
+TEST(SmallCutAggregationConstraint, TetrahedralDonorKeepsTheAffineTraceAndCutMeasure)
+{
+    SVMP_AGG_TEST_BODY
+#if defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH
+    constexpr auto side = geometry::CutIntegrationSide::Negative;
+    systems::FESystem system(buildTetrahedralChain());
+    auto space = std::make_shared<spaces::H1Space>(ElementType::Tetra4, 1);
+    const auto trace = system.addField({.name = "trace", .space = space});
+    const auto phi = system.addField({.name = "phi", .space = space});
+    system.addOperator("trace");
+    SmallCutAggregationGuardOptions guards;
+    guards.maximum_root_path_length = 3;
+    system.addSystemConstraint(std::make_unique<SmallCutAggregationConstraint>(
+        trace, side, kInterfaceMarker, std::vector<int>{}, std::vector<GlobalIndex>{}, guards));
+    system.setup();
+    const std::array<Real, 9> values{-1, -1, -1, -1, 0.05, -1, 5, 5, 5};
+    level_set::LevelSetGeneratedInterfaceLifecycle lifecycle;
+    publishSimplexBand(system, phi, values, lifecycle, side, kInterfaceMarker);
+    ASSERT_NO_THROW(system.rebuildConstraintState());
+    const auto reports = system.finalizedSmallCutAggregationProlongations();
+    ASSERT_EQ(reports.size(), 1u);
+    const auto& report = *reports.front();
+    const auto top = cellNodeDof(system, trace, 5, 3);
+    const auto* row = findFinalizedProlongationRow(report, top);
+    ASSERT_NE(row, nullptr);
+    EXPECT_EQ(row->root_cell_gid, 2);
+    EXPECT_EQ(row->root_distance, 3u);
+    const auto c = std::find_if(report.conditioned_simplex_roots.begin(), report.conditioned_simplex_roots.end(),
+                                [](const auto& root) { return root.cell_gid == 2; });
+    ASSERT_NE(c, report.conditioned_simplex_roots.end());
+    EXPECT_NEAR(c->retained_volume_fraction, 1.0 - 1.0 / 9261.0, 2.0e-14);
+    EXPECT_NEAR(c->minimum_relative_mass, 1.0 - 16.0 / 9261.0, 4.0e-14);
+    expectEntries(lineEntries(system, top), {{cellNodeDof(system, trace, 2, 0), -1},
+                                           {cellNodeDof(system, trace, 2, 3), 2}});
+#endif
+}
+
+TEST(SmallCutAggregationConstraint, DetachedNearFullDonorAndExternallyTiedDonorRemainInadmissible)
+{
+    SVMP_AGG_TEST_BODY
+#if defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH
+    constexpr auto side = geometry::CutIntegrationSide::Negative;
+    for (const bool tied : {false, true}) {
+        systems::FESystem system(buildTriangleColumn(tied ? 3 : 4));
+        const auto space = std::make_shared<spaces::H1Space>(ElementType::Triangle3, 1);
+        const auto trace = system.addField({.name = "trace", .space = space});
+        const auto phi = system.addField({.name = "phi", .space = space});
+        system.addOperator("trace");
+        if (tied) {
+            system.addSystemConstraint(std::make_unique<VertexAffineTie>(trace, 4, 0));
+        }
+        SmallCutAggregationGuardOptions guards;
+        guards.maximum_root_path_length = 2;
+        system.addSystemConstraint(std::make_unique<SmallCutAggregationConstraint>(
+            trace, side, kInterfaceMarker, std::vector<int>{}, std::vector<GlobalIndex>{}, guards));
+        system.setup();
+        level_set::LevelSetGeneratedInterfaceLifecycle lifecycle;
+        if (tied) {
+            const std::array<Real, 8> connected{-1, -1, -1, -1, -1, 0.1, 5, 5};
+            publishSimplexBand(system, phi, connected, lifecycle, side, kInterfaceMarker);
+            try {
+                system.rebuildConstraintState();
+                FAIL() << "the proposed simplex had a tied basis coefficient";
+            } catch (const std::exception& error) {
+                EXPECT_NE(std::string(error.what()).find("conditioned_simplex_root_has_external_master"),
+                          std::string::npos) << error.what();
+            }
+        } else {
+            // A nearly full donor on each side of the dry face at y=2. Only
+            // the lower material component actually contains a full cell.
+            const std::array<Real, 10> detached{-1, -1, -1, -1, 0.1, 0.1, -100, -100, 5, 5};
+            publishSimplexBand(system, phi, detached, lifecycle, side, kInterfaceMarker);
+            expectSimplexRootGuard(system);
+        }
+    }
+#endif
+}
+
+TEST(SmallCutAggregationConstraint, ReachableFullRootPrecedesCloserConditionedSimplex)
+{
+    SVMP_AGG_TEST_BODY
+#if defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH
+    constexpr auto side = geometry::CutIntegrationSide::Negative;
+    systems::FESystem system(buildTriangleColumn(3));
+    const auto space = std::make_shared<spaces::H1Space>(ElementType::Triangle3, 1);
+    const auto trace = system.addField({.name = "trace", .space = space});
+    const auto phi = system.addField({.name = "phi", .space = space});
+    system.addOperator("trace");
+    system.addSystemConstraint(std::make_unique<SmallCutAggregationConstraint>(trace, side, kInterfaceMarker));
+    system.setup();
+    const std::array<Real, 8> values{-1, -1, -1, -1, -1, 0.1, 5, 5};
+    level_set::LevelSetGeneratedInterfaceLifecycle lifecycle;
+    publishSimplexBand(system, phi, values, lifecycle, side, kInterfaceMarker);
+    ASSERT_NO_THROW(system.rebuildConstraintState());
+    const auto reports = system.finalizedSmallCutAggregationProlongations();
+    ASSERT_EQ(reports.size(), 1u);
+    const auto& report = *reports.front();
+    EXPECT_TRUE(report.conditioned_simplex_roots.empty());
+    const auto top = cellNodeDof(system, trace, 5, 2);
+    const auto* row = findFinalizedProlongationRow(report, top);
+    ASSERT_NE(row, nullptr);
+    EXPECT_EQ(row->root_cell_gid, 1);
+    EXPECT_EQ(row->root_distance, 4u);
+    expectEntries(lineEntries(system, top), {{cellNodeDof(system, trace, 1, 0), -2},
+                                            {cellNodeDof(system, trace, 1, 2), 3}});
 #endif
 }
 

@@ -11,6 +11,12 @@
  */
 
 #include <gtest/gtest.h>
+#include "SimplexAggregationFixture.h"
+#if defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH
+#include "Mesh/Mesh.h"
+#endif
+#include <map>
+
 
 #include "Assembly/Assembler.h"
 #include "Assembly/CutIntegrationContext.h"
@@ -1246,6 +1252,112 @@ void expectEveryMasterLineFiniteAndPartitionOfUnity(
 }
 
 } // namespace
+
+TEST(SmallCutAggregationConstraintMPI, ConditionedSimplexDonorUsesTheSameMaterialSupportAcrossOwners)
+{
+#if defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH
+    int size, rank;
+    MPI_Comm_size(MPI_COMM_WORLD, &size);
+    MPI_Comm_rank(MPI_COMM_WORLD, &rank);
+    if (size != 2) {
+        GTEST_SKIP() << "uses two owners";
+    }
+    constexpr auto side = geometry::CutIntegrationSide::Negative;
+    std::vector<int> root_owners;
+    for (const bool reverse : {false, true}) {
+        std::vector<real_t> coordinates;
+        std::vector<std::array<index_t, 3>> triangles;
+        for (index_t row = 0; row <= 3; ++row) {
+            coordinates.insert(coordinates.end(), {0, Real(row), 1, Real(row)});
+            if (row < 3) {
+                const auto v = 2 * row;
+                triangles.push_back({v, v + 1, v + 3});
+                triangles.push_back({v, v + 3, v + 2});
+            }
+        }
+        if (reverse) {
+            std::reverse(triangles.begin(), triangles.end());
+        }
+        std::vector<index_t> vertices;
+        std::vector<offset_t> offsets{0};
+        for (const auto& triangle : triangles) {
+            vertices.insert(vertices.end(), triangle.begin(), triangle.end());
+            offsets.push_back(vertices.size());
+        }
+        CellShape shape{};
+        shape.family = CellFamily::Triangle;
+        shape.num_corners = 3;
+        shape.order = 1;
+        auto mesh = std::make_shared<Mesh>(MeshComm(MPI_COMM_WORLD));
+        mesh->build_from_arrays_global_and_partition(2, coordinates, offsets, vertices,
+            std::vector<CellShape>(triangles.size(), shape), PartitionHint::Cells, 6,
+            {{"partition_method", "block"}});
+        systems::FESystem system(mesh);
+        const auto space = std::make_shared<spaces::H1Space>(ElementType::Triangle3, 1);
+        const auto trace = system.addField({.name = "trace", .space = space});
+        const auto phi = system.addField({.name = "phi", .space = space});
+        system.addOperator("trace");
+        SmallCutAggregationGuardOptions guards;
+        guards.maximum_root_path_length = 2;
+        system.addSystemConstraint(std::make_unique<SmallCutAggregationConstraint>(
+            trace, side, kInterfaceMarker, std::vector<int>{}, std::vector<GlobalIndex>{}, guards));
+        systems::SetupOptions options;
+        options.dof_options.my_rank = rank;
+        options.dof_options.world_size = size;
+        options.dof_options.mpi_comm = MPI_COMM_WORLD;
+        options.dof_options.global_numbering = dofs::GlobalNumberingMode::OwnerContiguous;
+        options.dof_options.ownership = dofs::OwnershipStrategy::LowestRank;
+        options.assembly_options.ghost_policy = assembly::GhostPolicy::ReverseScatter;
+        options.use_backend_row_ownership_for_assembly = true;
+        system.setup(options);
+        // Local vertex numbering changes with the block partition. Recover the
+        // prescribed continuous field and physical slave from their positions.
+        const std::array<Real, 8> prescribed{-1, -1, -1, -1, -1, 0.1, 5, 5};
+        const auto& access = system.meshAccess();
+        std::vector<Real> values(access.numVertices());
+        std::map<GlobalIndex, std::array<Real, 3>> locations;
+        GlobalIndex top = INVALID_GLOBAL_INDEX;
+        for (GlobalIndex vertex = 0; vertex < access.numVertices(); ++vertex) {
+            const auto x = access.getNodeCoordinates(vertex);
+            locations.emplace(vertexDof(system, trace, vertex), x);
+            values[vertex] = prescribed[2 * std::lround(x[1]) + std::lround(x[0])];
+            if (x[0] == 0 && x[1] == 3) {
+                top = vertexDof(system, trace, vertex);
+            }
+        }
+        ASSERT_GE(top, 0);
+        level_set::LevelSetGeneratedInterfaceLifecycle lifecycle;
+        publishSimplexBand(system, phi, values, lifecycle, side, kInterfaceMarker);
+        ASSERT_NO_THROW(system.rebuildConstraintState());
+        const auto reports = system.finalizedSmallCutAggregationProlongations();
+        ASSERT_EQ(reports.size(), 1u);
+        const auto& report = *reports.front();
+        const auto row = std::find_if(report.rows.begin(), report.rows.end(),
+                                      [top](const auto& r) { return r.slave_dof == top; });
+        ASSERT_NE(row, report.rows.end());
+        EXPECT_EQ(row->root_cell_gid, reverse ? 2 : 3);
+        EXPECT_EQ(row->root_distance, 2u);
+        const auto donor = std::find_if(report.conditioned_simplex_roots.begin(),
+            report.conditioned_simplex_roots.end(), [&](const auto& c) { return c.cell_gid == row->root_cell_gid; });
+        ASSERT_NE(donor, report.conditioned_simplex_roots.end());
+        EXPECT_NEAR(donor->minimum_relative_mass, 1.0 - 9.0 / 121.0, 2.0e-14);
+        std::array<Real, 3> constant_and_position{};
+        for (const auto& entry : row->final_entries) {
+            const auto& point = locations.at(entry.master_dof);
+            constant_and_position[0] += entry.weight;
+            constant_and_position[1] += entry.weight * point[0];
+            constant_and_position[2] += entry.weight * point[1];
+        }
+        EXPECT_NEAR(constant_and_position[0], 1, 1.0e-13);
+        EXPECT_NEAR(constant_and_position[1], 0, 1.0e-13);
+        EXPECT_NEAR(constant_and_position[2], 3, 1.0e-13);
+        root_owners.push_back(row->root_cell_owner_rank);
+    }
+    EXPECT_NE(root_owners[0], root_owners[1]);
+#else
+    GTEST_SKIP() << "requires the native mesh partitioner";
+#endif
+}
 
 TEST(SmallCutAggregationConstraintMPI,
      MissingGlobalCellIdsFailsCollectivelyBeforeRootSelection)
