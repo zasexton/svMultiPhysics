@@ -3940,7 +3940,6 @@ TEST(NavierStokesPostProcessing, StatesTheContactLineChannelsWithTheRuleWallNorm
     // Young walls 3 (Ren-E with Navier slip), 5 (prescribed angle with Navier
     // slip) and 9 (prescribed angle only).
     namespace post = svmp::Physics::formulations::navier_stokes::post;
-    namespace fs = svmp::FE::interfaces;
     using Kind = svmp::FE::systems::FunctionalKind;
     auto scalar = std::make_shared<svmp::FE::spaces::H1Space>(ElementType::Tetra4, 1);
     auto vector = std::make_shared<svmp::FE::spaces::ProductSpace>(scalar, 3);
@@ -3953,12 +3952,12 @@ TEST(NavierStokesPostProcessing, StatesTheContactLineChannelsWithTheRuleWallNorm
                                                       {.boundary_marker = 3, .equilibrium_contact_angle_radians = 1.0},
                                                       {.boundary_marker = 5, .equilibrium_contact_angle_radians = 2.0}};
     declaration.parameters.dynamic_contact_coefficients = {
-        {.boundary_marker = 3, .equilibrium_contact_angle_radians = 1.0, .law = fs::FreeSurfaceContactLaw::DynamicRenE,
+        {.boundary_marker = 3, .equilibrium_contact_angle_radians = 1.0, .law = free_surface::FreeSurfaceContactLaw::DynamicRenE,
          .mobility = 4.0, .slip_length = 0.1, .dynamic_viscosity = 1.0e-3},
         {.boundary_marker = 5, .equilibrium_contact_angle_radians = 2.0,
-         .law = fs::FreeSurfaceContactLaw::PrescribedAngle, .mobility = 0.0, .slip_length = 0.2,
+         .law = free_surface::FreeSurfaceContactLaw::PrescribedAngle, .mobility = 0.0, .slip_length = 0.2,
          .dynamic_viscosity = 1.0e-3}};
-    declaration.active_volume_energy_parameters = fs::FreeSurfaceActiveVolumeEnergyParameters{
+    declaration.active_volume_energy_parameters = free_surface::FreeSurfaceActiveVolumeEnergyParameters{
         .active_side = svmp::FE::geometry::CutIntegrationSide::Positive,
         .density = 1000.0,
         .gravitational_acceleration = {{0.0, 0.0, -9.81}},
@@ -4045,7 +4044,6 @@ TEST(NavierStokesPostProcessing, DeclaresSelectedEnergiesFromRegisteredFunctiona
 {
     namespace ns = svmp::Physics::formulations::navier_stokes;
     namespace post = ns::post;
-    namespace fs = svmp::FE::interfaces;
     using Side = svmp::FE::geometry::CutIntegrationSide;
     auto mesh = std::make_shared<svmp::FE::forms::test::SingleTetraMeshAccess>();
     auto scalar = std::make_shared<svmp::FE::spaces::H1Space>(ElementType::Tetra4, 1);
@@ -4068,12 +4066,12 @@ TEST(NavierStokesPostProcessing, DeclaresSelectedEnergiesFromRegisteredFunctiona
         record.parameters.surface_tension = 0.25;
         if (optional_channels) {
             // The registry permits one owner of the bulk energy/dissipation.
-            record.active_volume_energy_parameters = fs::FreeSurfaceActiveVolumeEnergyParameters{
+            record.active_volume_energy_parameters = free_surface::FreeSurfaceActiveVolumeEnergyParameters{
                 .active_side = side, .density = 2.5,
                 .gravitational_acceleration = gravity, .gravitational_reference_point = reference};
-            record.active_volume_dissipation_parameters = fs::FreeSurfaceActiveVolumeDissipationParameters{
+            record.active_volume_dissipation_parameters = free_surface::FreeSurfaceActiveVolumeDissipationParameters{
                 .active_side = side, .dynamic_viscosity = 0.125};
-            record.external_pressure_power_parameters = fs::FreeSurfaceExternalPressurePowerParameters{
+            record.external_pressure_power_parameters = free_surface::FreeSurfaceExternalPressurePowerParameters{
                 .active_side = side, .external_pressure = 3.0};
             record.endpoint_functional_power_enabled = true;
             record.capillary_balance_method = free_surface::FreeSurfaceCapillaryBalanceMethod::DiscreteEnergyVolumeStationarity;
