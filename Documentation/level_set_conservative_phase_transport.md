@@ -98,10 +98,40 @@ forward-Euler stage is accepted only when
 \sum_{j\ne i}\left(d_{ij}-C_{ij}\cdot u_j\right)\le 1.
 \]
 
-The low-order edge transfer adds `d_ij(q_j-q_i)`. The raw antidiffusive
-transfer removes exactly that addition, so the unlimited target is the
-lumped central operator and the accepted correction remains pairwise
-conservative.
+Each low-order edge transfer includes graph diffusion
+\(\Delta t\,d_{ij}(q_j-q_i)\). For the high-order target, define
+\(a_{ij}=C_{ij}\cdot u_j\), or use the integrated endpoint convection
+coefficient when supplied. The central and graph-upwind nodal rates are
+
+\[
+r_i^C = m_i^{-1}\sum_{j\ne i} a_{ij}(q_i-q_j),\qquad
+r_i^L = m_i^{-1}\sum_{j\ne i}(d_{ij}-a_{ij})(q_j-q_i).
+\]
+
+The initial slope estimate is
+\(b_i=\mathrm{minmod}(r_i^C,2r_i^L)\). The minmod returns zero for
+opposite signs and otherwise selects the smaller magnitude. Let
+\(V_i=\sum_{j\ne i}|r_i^C-r_j^C|\) over the algebraic edges at node \(i\).
+The predicted increment is
+\(z_i=\Delta t\,\mathrm{clamp}(b_i,r_i^C-V_i,r_i^C+V_i)\).
+This bound preserves a spatially constant derivative even when unequal
+cell widths give different graph-upwind rates. Let \(\nu_i\) be the local graph
+Courant number. The raw correction into node \(i\) from \(j\) is
+
+\[
+F_{ij}=-\Delta t\,d_{ij}(q_j-q_i)
++\max(0,1-\max(\nu_i,\nu_j))\,M_{ij}(z_i-z_j),\qquad
+M_{ij}=\int_\Omega N_i N_j\,dx.
+\]
+
+The second term applies an explicit consistent-mass defect correction to
+the fraction of the two endpoint control volumes retained by the low-order
+step. Its symmetric coefficient gives equal and opposite transfers, with
+zero correction for a spatially constant increment. If the chosen gradient
+rule underintegrates the mapped basis product, the graph evaluates the
+off-diagonal mass with a separate quadrature rule. The existing nodal
+flux limiter enforces the supplied bounds. External boundary flux and the
+discrete-divergence source retain their original time level.
 
 The graph builder validates partition of unity, the zero gradient sum,
 positive mapped quadrature and control volumes, the global row-sum identity,

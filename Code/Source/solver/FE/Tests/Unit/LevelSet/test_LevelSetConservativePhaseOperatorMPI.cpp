@@ -228,6 +228,7 @@ private:
     for (std::size_t e = 0; e < graph.edges.size(); ++e) {
         const auto& edge = graph.edges[e];
         const FE::Real weight = static_cast<FE::Real>(e + 17u);
+        checksum += weight * edge.consistent_mass;
         checksum += weight * static_cast<FE::Real>(edge.first_node + 1);
         checksum += (weight + 1.0) *
                     static_cast<FE::Real>(edge.second_node + 1);
@@ -464,6 +465,16 @@ TEST(LevelSetConservativePhaseOperatorMPI,
         }
     }
 
+    // Each unit Q1 quad contributes (1/6)*(1/3) to the shared side.
+    const auto lower_seam = vertexDof(dofs, 1);
+    const auto upper_seam = vertexDof(dofs, 4);
+    const auto seam = std::find_if(graph.edges.begin(), graph.edges.end(),
+        [&](const auto& edge) {
+            return edge.first_node == std::min(lower_seam, upper_seam) &&
+                   edge.second_node == std::max(lower_seam, upper_seam);
+        });
+    ASSERT_NE(seam, graph.edges.end());
+    EXPECT_NEAR(seam->consistent_mass, 1.0 / 9.0, 2e-14);
     std::size_t cross_owner_edges = 0u;
     for (const auto& edge : graph.edges) {
         EXPECT_GE(edge.owner_rank, 0);

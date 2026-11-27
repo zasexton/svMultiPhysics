@@ -42,10 +42,13 @@ struct LevelSetP1PhaseGradientEdge {
     int owner_rank{-1};
     std::array<Real, 3> first_test_second_gradient{};
     std::array<Real, 3> second_test_first_gradient{};
+    Real consistent_mass{0.0}; ///< Symmetric off-diagonal integral of N_i N_j.
 };
 
 struct LevelSetP1PhaseGraphOptions {
-    /// Zero selects a geometry-order-aware rule independently on each cell.
+    /// Control-volume and gradient rule. Zero selects a geometry-aware
+    /// order per cell. The consistent mass always integrates the mapped
+    /// product of both basis functions.
     int quadrature_order{0};
     Real invariant_tolerance{1.0e-12};
 };
@@ -70,7 +73,7 @@ struct LevelSetP1PhaseTransportGraph {
     int dimension{0};
     int parallel_rank{0};
     int parallel_size{1};
-    int maximum_quadrature_order{0};
+    int maximum_quadrature_order{0}; ///< Selected control-volume/gradient order.
     std::size_t cells{0u};
     std::size_t local_owned_cells{0u};
     std::size_t nodes{0u};
@@ -279,8 +282,9 @@ struct LevelSetP1PhaseSplitStageValidationResult {
  *
  *     d_ij = max(abs(C_ij dot u_j), abs(C_ji dot u_i)).
  *
- * The raw antidiffusive transfer removes this viscosity, recovering the
- * lumped strong-CG advective target. Boundary and discrete-divergence terms
+ * The raw transfer removes this viscosity and adds a symmetric, Courant-
+ * weighted consistent-mass correction from the slope-limited central rate.
+ * Boundary and discrete-divergence terms
  * are retained separately in the returned ledger. A distributed graph makes
  * this a collective call: nodal inputs, the time step, and every stage option
  * must be identical on its field communicator. Constant-state validation

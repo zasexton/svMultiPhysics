@@ -11,7 +11,6 @@
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
-#include <cstring>
 #include <exception>
 #include <initializer_list>
 #include <iomanip>
@@ -65,6 +64,7 @@ using Vector3 = std::array<Real, 3>;
 struct MutableGradientEdge {
     Vector3 first_test_second_gradient{};
     Vector3 second_test_first_gradient{};
+    Real consistent_mass{0.0};
 };
 
 struct PhaseGraphCollectiveContext {
@@ -82,11 +82,27 @@ struct PackedGradientEdge {
     std::int64_t second_node{-1};
     std::array<Real, 3> first_test_second_gradient{};
     std::array<Real, 3> second_test_first_gradient{};
+    Real consistent_mass{0.0};
 };
 
 static_assert(std::is_trivially_copyable_v<PackedGradientEdge>);
-static_assert(sizeof(PackedGradientEdge) ==
-              2u * sizeof(std::int64_t) + 6u * sizeof(Real));
+
+struct EdgeRecordDatatype {
+    MPI_Datatype value{MPI_DATATYPE_NULL};
+    ~EdgeRecordDatatype()
+    {
+        if (value != MPI_DATATYPE_NULL) MPI_Type_free(&value);
+    }
+};
+
+constexpr bool fitsMpiEdgeRecordCount(std::size_t offset, std::size_t count)
+{
+    constexpr auto limit = static_cast<std::size_t>(std::numeric_limits<int>::max());
+    return offset <= limit && count <= limit - offset;
+}
+
+static_assert(fitsMpiEdgeRecordCount(0, std::numeric_limits<int>::max()));
+static_assert(!fitsMpiEdgeRecordCount(std::numeric_limits<int>::max(), 1));
 
 [[nodiscard]] MPI_Datatype mpiRealType() noexcept
 {
@@ -712,13 +728,7 @@ globalizeGradientEdges(
 {
 #if FE_HAS_MPI
     if (context.active) {
-        const int local_capacity_valid =
-            local_edges.size() <=
-                    static_cast<std::size_t>(
-                        std::numeric_limits<int>::max()) /
-                        sizeof(PackedGradientEdge)
-                ? 1
-                : 0;
+        const int local_capacity_valid = fitsMpiEdgeRecordCount(0, local_edges.size());
         int global_capacity_valid = 0;
         MPI_Allreduce(&local_capacity_valid, &global_capacity_valid, 1,
                       MPI_INT, MPI_MIN, context.communicator);
@@ -742,6 +752,7 @@ globalizeGradientEdges(
                         edge.first_test_second_gradient,
                     .second_test_first_gradient =
                         edge.second_test_first_gradient,
+                    .consistent_mass = edge.consistent_mass,
                 });
             }
             counts.assign(static_cast<std::size_t>(context.size), 0);
@@ -759,34 +770,42 @@ globalizeGradientEdges(
             throw std::runtime_error(
                 collective_snapshot_preparation_diagnostic);
         }
-        const std::size_t local_bytes_size =
-            packed.size() * sizeof(PackedGradientEdge);
-        const int local_bytes = static_cast<int>(local_bytes_size);
-        MPI_Allgather(&local_bytes, 1, MPI_INT, counts.data(), 1,
-                      MPI_INT, context.communicator);
+        const auto require_gather_success = [&](int status, const char* operation) {
+            std::string diagnostic;
+            if (!synchronizeLocalFailure(context, status == MPI_SUCCESS,
+                    "MPI returned error code " + std::to_string(status),
+                    diagnostic, operation)) {
+                throw std::runtime_error(diagnostic);
+            }
+        };
+        const int local_count = static_cast<int>(packed.size());
+        const int count_status = MPI_Allgather(
+            &local_count, 1, MPI_INT, counts.data(), 1, MPI_INT, context.communicator);
+        require_gather_success(count_status, "graph edge-count MPI_Allgather");
         std::vector<int> displacements;
-        std::vector<std::byte> gathered;
-        std::size_t total_bytes = 0u;
+        std::vector<PackedGradientEdge> gathered;
+        EdgeRecordDatatype record_type;
         bool local_gather_preparation_success = true;
         std::string local_gather_preparation_diagnostic;
         try {
-            displacements.assign(counts.size(), 0);
+            std::size_t total = 0;
+            displacements.resize(counts.size());
             for (std::size_t rank = 0; rank < counts.size(); ++rank) {
                 if (counts[rank] < 0 ||
-                    counts[rank] %
-                            static_cast<int>(sizeof(PackedGradientEdge)) !=
-                        0 ||
-                    total_bytes >
-                        static_cast<std::size_t>(
-                            std::numeric_limits<int>::max()) -
-                            static_cast<std::size_t>(counts[rank])) {
+                    !fitsMpiEdgeRecordCount(total, static_cast<std::size_t>(counts[rank]))) {
                     throw std::overflow_error(
-                        "P1 conservative phase graph aggregate edge snapshot exceeds MPI displacement capacity");
+                        "P1 conservative phase graph aggregate edge count exceeds MPI displacement capacity");
                 }
-                displacements[rank] = static_cast<int>(total_bytes);
-                total_bytes += static_cast<std::size_t>(counts[rank]);
+                displacements[rank] = static_cast<int>(total);
+                total += static_cast<std::size_t>(counts[rank]);
             }
-            gathered.resize(total_bytes);
+            gathered.resize(total);
+            if (MPI_Type_contiguous(static_cast<int>(sizeof(PackedGradientEdge)),
+                                    MPI_BYTE, &record_type.value) != MPI_SUCCESS ||
+                MPI_Type_commit(&record_type.value) != MPI_SUCCESS) {
+                throw std::runtime_error(
+                    "P1 conservative phase graph could not create its MPI edge record type");
+            }
         } catch (const std::exception& exception) {
             local_gather_preparation_success = false;
             local_gather_preparation_diagnostic = exception.what();
@@ -801,18 +820,15 @@ globalizeGradientEdges(
             throw std::runtime_error(
                 collective_gather_preparation_diagnostic);
         }
-        MPI_Allgatherv(
-            packed.empty() ? nullptr : packed.data(), local_bytes, MPI_BYTE,
-            gathered.empty() ? nullptr : gathered.data(), counts.data(),
-            displacements.data(), MPI_BYTE, context.communicator);
+        const int gather_status = MPI_Allgatherv(
+            packed.data(), local_count, record_type.value,
+            gathered.data(), counts.data(), displacements.data(),
+            record_type.value, context.communicator);
+        require_gather_success(gather_status, "graph edge-record MPI_Allgatherv");
 
         std::map<std::pair<GlobalIndex, GlobalIndex>, MutableGradientEdge>
             global_edges;
-        for (std::size_t offset = 0u; offset < gathered.size();
-             offset += sizeof(PackedGradientEdge)) {
-            PackedGradientEdge packed_edge{};
-            std::memcpy(&packed_edge, gathered.data() + offset,
-                        sizeof(PackedGradientEdge));
+        for (const auto& packed_edge : gathered) {
             const GlobalIndex first =
                 static_cast<GlobalIndex>(packed_edge.first_node);
             const GlobalIndex second =
@@ -822,6 +838,7 @@ globalizeGradientEdges(
                     "P1 conservative phase graph received a malformed distributed edge record");
             }
             auto& edge = global_edges[{first, second}];
+            edge.consistent_mass += packed_edge.consistent_mass;
             for (std::size_t d = 0; d < 3u; ++d) {
                 edge.first_test_second_gradient[d] +=
                     packed_edge.first_test_second_gradient[d];
@@ -1179,7 +1196,9 @@ void mixPhaseFluxEdgeLedger(
             edge.raw_pair_cancellation_residual,
             edge.limited_pair_cancellation_residual,
         }};
-        if (graph_edge.first_node < 0 || graph_edge.second_node < 0 ||
+        if (!std::isfinite(graph_edge.consistent_mass) ||
+            graph_edge.consistent_mass < Real{0.0} ||
+            graph_edge.first_node < 0 || graph_edge.second_node < 0 ||
             graph_edge.first_node >= graph_edge.second_node ||
             static_cast<std::size_t>(graph_edge.second_node) >=
                 graph.nodes ||
@@ -1293,7 +1312,7 @@ void mixPhaseFluxEdgeLedger(
         {"endpoint velocity role", 2u},
         {"fixed mesh role", 3u},
         {"clamped one-ring bounds role", 4u},
-        {"graph identity version", 1u},
+        {"graph identity version", 2u},
         {"content revision version", 1u},
         {"flux ledger version", 2u},
         {"real bytes", sizeof(Real)},
@@ -1342,6 +1361,62 @@ void mixPhaseFluxEdgeLedger(
     return integrated.empty() ? dot(gradient, velocity, dimension) : integrated[index];
 }
 
+struct PhaseRatePredictor {
+    Real central_rate{0.0};
+    Real monotone_rate{0.0};
+
+    void add(Real convection, Real diffusion, Real neighbor_minus_self)
+    {
+        central_rate -= convection * neighbor_minus_self;
+        monotone_rate += (diffusion - convection) * neighbor_minus_self;
+    }
+
+    [[nodiscard]] Real limitedIncrement(Real dt, Real mass) const
+    {
+        // minmod(central rate, twice the graph-upwind rate).
+        const Real twice_monotone = Real{2.0} * monotone_rate;
+        const Real limited = std::clamp(central_rate,
+            std::min(Real{0.0}, twice_monotone),
+            std::max(Real{0.0}, twice_monotone));
+        return dt * (limited / mass);
+    }
+};
+
+[[nodiscard]] std::vector<Real> limitedMassIncrements(
+    const LevelSetP1PhaseTransportGraph& graph, Real dt,
+    std::span<const PhaseRatePredictor> rates)
+{
+    std::vector<Real> centered(graph.nodes);
+    std::vector<Real> variation(graph.nodes, Real{0.0});
+    for (std::size_t i = 0; i < graph.nodes; ++i) {
+        centered[i] = dt * (rates[i].central_rate / graph.lumped_control_volume[i]);
+    }
+    for (const auto& edge : graph.edges) {
+        const auto i = static_cast<std::size_t>(edge.first_node);
+        const auto j = static_cast<std::size_t>(edge.second_node);
+        const Real jump = std::abs(centered[i] - centered[j]);
+        variation[i] += jump;
+        variation[j] += jump;
+    }
+    for (std::size_t i = 0; i < graph.nodes; ++i) {
+        const Real bounded = rates[i].limitedIncrement(dt, graph.lumped_control_volume[i]);
+        // Graph upwinding can give different rates for an affine field on
+        // unequal cells. It may only change the centered prediction by as
+        // much as the centered rate itself varies over this node's edges.
+        centered[i] = std::clamp(bounded, centered[i] - variation[i],
+                                 centered[i] + variation[i]);
+    }
+    return centered;
+}
+
+[[nodiscard]] Real consistentMassCorrection(
+    Real mass, Real first_courant, Real second_courant,
+    Real first_increment, Real second_increment)
+{
+    const Real retained_fraction = std::max(
+        Real{0.0}, Real{1.0} - std::max(first_courant, second_courant));
+    return retained_fraction * mass * (first_increment - second_increment);
+}
 
 struct PhaseStageVerificationNode {
     Real row_divergence{0.0};
@@ -1458,6 +1533,7 @@ struct PhaseStageVerificationNode {
             -diagonal_velocity * previous_phase_indicator[node];
     }
 
+    std::vector<PhaseRatePredictor> predictors(node_count);
     Real minimum_low_order_coefficient =
         std::numeric_limits<Real>::infinity();
     bool low_order_coefficients_nonnegative = true;
@@ -1511,15 +1587,16 @@ struct PhaseStageVerificationNode {
             diffusion * (second_indicator - first_indicator);
         const Real low_order_transfer =
             stage.time_step * (central_rate + diffusive_rate);
-        const Real raw_transfer = -stage.time_step * diffusive_rate;
+        predictors[first].add(first_to_second_speed, diffusion,
+                                     second_indicator - first_indicator);
+        predictors[second].add(second_to_first_speed, diffusion,
+                                      first_indicator - second_indicator);
         const auto& input_edge = stage.flux_edges[edge_index];
+        const Real raw_transfer = input_edge.raw_antidiffusive_mass_transfer;
         const auto& edge = correction.edges[edge_index];
         if (!same_real(
                 input_edge.low_order_mass_transfer,
                 low_order_transfer) ||
-            !same_real(
-                input_edge.raw_antidiffusive_mass_transfer,
-                raw_transfer) ||
             !same_real(edge.low_order_mass_transfer, low_order_transfer) ||
             !same_real(
                 edge.raw_antidiffusive_mass_transfer, raw_transfer) ||
@@ -1561,6 +1638,31 @@ struct PhaseStageVerificationNode {
             first_to_second_speed * second_indicator;
         scratch[second].direct_strong_rate -=
             second_to_first_speed * first_indicator;
+    }
+    const auto increments = limitedMassIncrements(graph, stage.time_step, predictors);
+    for (std::size_t e = 0; e < graph.edges.size(); ++e) {
+        const auto& edge = graph.edges[e];
+        const auto i = static_cast<std::size_t>(edge.first_node);
+        const auto j = static_cast<std::size_t>(edge.second_node);
+        const Real aij = convectionEntry(
+            stage.integrated_velocity_couplings, 2 * (node_count + e),
+            edge.first_test_second_gradient,
+            stage.sampled_nodal_velocity[j], graph.dimension);
+        const Real aji = convectionEntry(
+            stage.integrated_velocity_couplings, 2 * (node_count + e) + 1,
+            edge.second_test_first_gradient,
+            stage.sampled_nodal_velocity[i], graph.dimension);
+        const Real diffusion = std::max(std::abs(aij), std::abs(aji));
+        const Real diffusive_rate =
+            diffusion * (previous_phase_indicator[j] - previous_phase_indicator[i]);
+        const Real raw_transfer = -stage.time_step * diffusive_rate +
+            consistentMassCorrection(edge.consistent_mass,
+                scratch[i].nodal_courant, scratch[j].nodal_courant,
+                increments[i], increments[j]);
+        if (!same_real(stage.flux_edges[e].raw_antidiffusive_mass_transfer,
+                       raw_transfer)) {
+            return fail("found an edge transfer equation mismatch");
+        }
     }
     if (graph.edges.empty()) {
         minimum_low_order_coefficient = Real{0.0};
@@ -2503,7 +2605,7 @@ LevelSetP1PhaseGraphIdentity levelSetP1PhaseGraphIdentity(
     const LevelSetP1PhaseTransportGraph& graph) noexcept
 {
     std::uint64_t hash = kPhaseStageHashOffset;
-    mixPhaseStageHashWord(hash, UINT64_C(0x4752415048315631));
+    mixPhaseStageHashWord(hash, UINT64_C(0x4752415048315632));
     mixPhaseStageHashWord(hash, 1u);
     mixPhaseStageHashBool(hash, graph.success);
     mixPhaseStageHashBool(hash, graph.partition_of_unity_satisfied);
@@ -2549,6 +2651,7 @@ LevelSetP1PhaseGraphIdentity levelSetP1PhaseGraphIdentity(
         mixPhaseStageHashSigned(hash, edge.first_node);
         mixPhaseStageHashSigned(hash, edge.second_node);
         mixPhaseStageHashSigned(hash, edge.owner_rank);
+        mixPhaseStageHashReal(hash, edge.consistent_mass);
         for (const Real component : edge.first_test_second_gradient) {
             mixPhaseStageHashReal(hash, component);
         }
@@ -3015,9 +3118,9 @@ LevelSetP1PhaseTransportGraph buildLevelSetP1PhaseTransportGraph(
                     throw std::invalid_argument(
                         "P1 conservative phase graph found an incompatible geometry mapping");
                 }
-                const int quadrature_order = resolvedQuadratureOrder(
-                    options.quadrature_order,
-                    mesh.getCellGeometryOrder(cell));
+                const int geometry_order = std::max(1, mesh.getCellGeometryOrder(cell));
+                const int quadrature_order =
+                    resolvedQuadratureOrder(options.quadrature_order, geometry_order);
                 result.maximum_quadrature_order = std::max(
                     result.maximum_quadrature_order, quadrature_order);
                 const auto quadrature = quadrature::QuadratureFactory::create(
@@ -3029,9 +3132,27 @@ LevelSetP1PhaseTransportGraph buildLevelSetP1PhaseTransportGraph(
 
                 const std::size_t local_size = cell_dofs.size();
                 std::vector<Real> local_mass(local_size, Real{0.0});
+                std::vector<Real> local_consistent_mass(
+                    local_size * local_size, Real{0.0});
                 std::vector<Vector3> local_gradient(
                     local_size * local_size, Vector3{});
                 std::vector<Real> values;
+                // On a simplex det(J) has degree dim*(g-1). On tensor and
+                // product cells its degree per axis is at most dim*g-1.
+                // The two linear trial/test functions add degree two.
+                const int min_mass_order =
+                    local_size == static_cast<std::size_t>(result.dimension + 1)
+                    ? 2 + result.dimension * (geometry_order - 1)
+                    : 1 + result.dimension * geometry_order;
+                const bool reuse_gradient_rule = quadrature->order() >= min_mass_order;
+                const auto accumulate_mass = [&](Real weight) {
+                    for (std::size_t i = 0; i < local_size; ++i) {
+                        for (std::size_t j = i + 1; j < local_size; ++j) {
+                            local_consistent_mass[i * local_size + j] +=
+                                weight * values[i] * values[j];
+                        }
+                    }
+                };
                 std::vector<basis::Gradient> reference_gradients;
                 for (std::size_t q = 0; q < quadrature->num_points(); ++q) {
                     const auto xi = quadrature->point(q);
@@ -3098,12 +3219,36 @@ LevelSetP1PhaseTransportGraph buildLevelSetP1PhaseTransportGraph(
                         result.maximum_gradient_partition_residual,
                         norm(gradient_sum, result.dimension));
 
+                    if (reuse_gradient_rule) accumulate_mass(weight);
                     for (std::size_t i = 0; i < local_size; ++i) {
+                        const Real weighted_test = weight * values[i];
                         for (std::size_t j = 0; j < local_size; ++j) {
                             addScaled(local_gradient[i * local_size + j],
                                       physical_gradients[j],
-                                      weight * values[i], result.dimension);
+                                      weighted_test, result.dimension);
                         }
+                    }
+                }
+
+                if (!reuse_gradient_rule) {
+                    const auto mass_rule = quadrature::QuadratureFactory::create(
+                        mesh.getCellType(cell), min_mass_order);
+                    if (!mass_rule || mass_rule->num_points() == 0u) {
+                        throw std::invalid_argument(
+                            "P1 conservative phase graph received an empty mass quadrature rule");
+                    }
+                    for (std::size_t q = 0; q < mass_rule->num_points(); ++q) {
+                        const auto xi = mass_rule->point(q);
+                        const Real weight = mass_rule->weight(q) * mapping->jacobian_determinant(xi);
+                        basis.evaluate_values(xi, values);
+                        if (!(weight > Real{0.0}) || !std::isfinite(weight) ||
+                            values.size() != local_size ||
+                            !std::all_of(values.begin(), values.end(),
+                                [](Real v) { return std::isfinite(v); })) {
+                            throw std::invalid_argument(
+                                "P1 conservative phase graph found an invalid mapped mass quadrature sample");
+                        }
+                        accumulate_mass(weight);
                     }
                 }
 
@@ -3137,6 +3282,8 @@ LevelSetP1PhaseTransportGraph buildLevelSetP1PhaseTransportGraph(
                         auto& edge = assembled_edges[{endpoints.first,
                                                       endpoints.second}];
                         if (global_i == endpoints.first) {
+                            const auto [lo, hi] = std::minmax(i, j);
+                            edge.consistent_mass += local_consistent_mass[lo * local_size + hi];
                             add(edge.first_test_second_gradient, coefficient,
                                 result.dimension);
                         } else {
@@ -3373,6 +3520,7 @@ LevelSetP1PhaseTransportGraph buildLevelSetP1PhaseTransportGraph(
                         edge.first_test_second_gradient,
                     .second_test_first_gradient =
                         edge.second_test_first_gradient,
+                    .consistent_mass = edge.consistent_mass,
                 });
                 if (owner_rank == collective.rank) {
                     ++result.locally_owned_edges;
@@ -3538,6 +3686,7 @@ advanceLevelSetP1ConservativePhaseStage(
             node_count, Real{0.0});
         result.discrete_divergence_mass_source.assign(
             node_count, Real{0.0});
+        std::vector<PhaseRatePredictor> predictors(node_count);
         std::vector<Real> row_divergence(node_count, Real{0.0});
         std::vector<Real> direct_strong_rate(node_count, Real{0.0});
         std::vector<Real> decomposed_strong_rate(node_count, Real{0.0});
@@ -3560,6 +3709,8 @@ advanceLevelSetP1ConservativePhaseStage(
             const auto& edge = graph.edges[edge_index];
             if (edge.first_node < 0 || edge.second_node < 0 ||
                 edge.first_node >= edge.second_node ||
+                !std::isfinite(edge.consistent_mass) ||
+                edge.consistent_mass < Real{0.0} ||
                 static_cast<std::size_t>(edge.second_node) >= node_count) {
                 result.diagnostic =
                     "P1 conservative phase stage found a malformed graph edge";
@@ -3603,6 +3754,10 @@ advanceLevelSetP1ConservativePhaseStage(
 
             const Real first_indicator = previous_phase_indicator[first];
             const Real second_indicator = previous_phase_indicator[second];
+            predictors[first].add(first_to_second_speed, diffusion,
+                                  second_indicator - first_indicator);
+            predictors[second].add(second_to_first_speed, diffusion,
+                                   first_indicator - second_indicator);
             const Real central_rate =
                 second_to_first_speed * first_indicator -
                 first_to_second_speed * second_indicator;
@@ -3697,6 +3852,16 @@ advanceLevelSetP1ConservativePhaseStage(
             return result;
         }
 
+        const auto increments = limitedMassIncrements(graph, time_step, predictors);
+        for (std::size_t e = 0; e < graph.edges.size(); ++e) {
+            const auto& edge = graph.edges[e];
+            const auto first = static_cast<std::size_t>(edge.first_node);
+            const auto second = static_cast<std::size_t>(edge.second_node);
+            result.flux_edges[e].raw_antidiffusive_mass_transfer +=
+                consistentMassCorrection(edge.consistent_mass,
+                    result.nodal_courant[first], result.nodal_courant[second],
+                    increments[first], increments[second]);
+        }
         result.correction =
             applyLevelSetConservativePhaseFluxCorrection(
                 LevelSetPhaseFluxStageView{

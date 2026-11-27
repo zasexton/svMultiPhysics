@@ -42,9 +42,11 @@ public:
 
     explicit StructuredQuadPhaseMeshAccess(
         std::size_t cells_per_axis,
-        FE::Real distortion_amplitude = FE::Real{0.0})
+        FE::Real distortion_amplitude = FE::Real{0.0},
+        FE::Real odd_column_shift = FE::Real{0.0})
         : cells_per_axis_(cells_per_axis)
         , distortion_amplitude_(distortion_amplitude)
+        , odd_column_shift_(odd_column_shift)
     {
     }
 
@@ -110,7 +112,8 @@ public:
         const auto j = index / nodes_per_axis;
         const FE::Real spacing = FE::Real{1.0} /
                                  static_cast<FE::Real>(cells_per_axis_);
-        const FE::Real xi = spacing * static_cast<FE::Real>(i);
+        const FE::Real xi = spacing * (static_cast<FE::Real>(i) +
+            (i % 2u == 1u ? odd_column_shift_ : FE::Real{0.0}));
         const FE::Real eta = spacing * static_cast<FE::Real>(j);
         const FE::Real pi = std::numbers::pi_v<FE::Real>;
         return {
@@ -186,6 +189,7 @@ private:
 
     std::size_t cells_per_axis_{0u};
     FE::Real distortion_amplitude_{0.0};
+    FE::Real odd_column_shift_{0.0};
 };
 
 class StructuredTriLevelSetMeshAccess final
@@ -672,9 +676,10 @@ struct StructuredPhaseFixture {
 
     explicit StructuredPhaseFixture(
         std::size_t cells_per_axis,
-        FE::Real distortion_amplitude = FE::Real{0.0})
+        FE::Real distortion_amplitude = FE::Real{0.0},
+        FE::Real odd_column_shift = FE::Real{0.0})
         : mesh(std::make_shared<StructuredQuadPhaseMeshAccess>(
-              cells_per_axis, distortion_amplitude)),
+              cells_per_axis, distortion_amplitude, odd_column_shift)),
           system(mesh)
     {
         phase = system.addField(FE::systems::FieldSpec{
@@ -1554,6 +1559,47 @@ void expectConservativeRun(const TransportRun& run)
     EXPECT_LE(run.maximum_courant, 0.8 + 2.0e-12);
     EXPECT_LE(run.maximum_local_balance_residual, 2.0e-12);
     EXPECT_LE(run.maximum_component_balance_residual, 2.0e-12);
+}
+
+TEST(LevelSetConservativePhaseBenchmarks,
+     ReproducesAffineInteriorTransportOnAlternatingWidthCells)
+{
+    for (const FE::Real distortion : {0.0, 0.025}) {
+        for (const std::size_t n : {8u, 16u, 32u}) {
+            StructuredPhaseFixture fixture(n, distortion, -0.75);
+            ASSERT_TRUE(fixture.graph.success) << fixture.graph.diagnostic;
+            std::vector<FE::Real> q(fixture.graph.nodes);
+            for (std::size_t i = 0; i < q.size(); ++i) {
+                q[i] = 0.2 + 0.5 * fixture.node_coordinates[i][0];
+            }
+            const auto [lower, upper] = oneRingBounds(fixture.graph, q);
+            const FE::Real dt = 0.02 / static_cast<FE::Real>(n);
+            for (const FE::Real speed : {-1.0, 1.0}) {
+                const std::vector<std::array<FE::Real, 3>> velocity(
+                    q.size(), {speed, 0.0, 0.0});
+                const auto stage = level_set::advanceLevelSetP1ConservativePhaseStage(
+                    fixture.graph, q, lower, upper, velocity, dt);
+                ASSERT_TRUE(stage.success) << stage.diagnostic;
+                FE::Real raw_error = 0.0;
+                FE::Real limited_error = 0.0;
+                for (std::size_t i = 0; i < q.size(); ++i) {
+                    const auto& point = fixture.node_coordinates[i];
+                    if (point[0] < 0.375 || point[0] > 0.625 ||
+                        point[1] < 0.25 || point[1] > 0.75) {
+                        continue;
+                    }
+                    const FE::Real exact = q[i] - dt * speed * 0.5;
+                    const auto& node = stage.correction.nodes[i];
+                    raw_error = std::max(raw_error,
+                        std::abs(node.raw_target_phase_indicator - exact) / dt);
+                    limited_error = std::max(limited_error,
+                        std::abs(node.limited_phase_indicator - exact) / dt);
+                }
+                EXPECT_LE(raw_error, 1e-12) << n << " cells/axis, speed " << speed;
+                EXPECT_LE(limited_error, 1e-12) << n << " cells/axis, speed " << speed;
+            }
+        }
+    }
 }
 
 TEST(LevelSetConservativePhaseBenchmarks,

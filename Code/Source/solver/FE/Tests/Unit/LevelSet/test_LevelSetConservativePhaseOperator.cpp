@@ -210,7 +210,7 @@ makeBackwardEulerSplitStageProvenance(
             level_set::levelSetP1PhaseScalarContentRevision(previous_q),
         .nodal_velocity_revision =
             level_set::levelSetP1PhaseVelocityContentRevision(
-                stage.sampled_nodal_velocity),
+                stage.sampled_nodal_velocity, stage.integrated_velocity_couplings),
         .previous_graph_identity = graph_identity,
         .operator_graph_identity = graph_identity,
         .final_flux_ledger_digest =
@@ -240,6 +240,7 @@ TEST(LevelSetConservativePhaseOperator,
     const auto& edge01 = graph.edges[0];
     EXPECT_EQ(edge01.first_node, 0);
     EXPECT_EQ(edge01.second_node, 1);
+    EXPECT_NEAR(edge01.consistent_mass, 1.0 / 24.0, 2e-14);
     EXPECT_NEAR(edge01.first_test_second_gradient[0], 1.0 / 6.0,
                 2.0e-14);
     EXPECT_NEAR(edge01.first_test_second_gradient[1], 0.0, 2.0e-14);
@@ -262,6 +263,22 @@ TEST(LevelSetConservativePhaseOperator,
 }
 
 TEST(LevelSetConservativePhaseOperator,
+     IntegratesTheQuadraticMassProductWithALinearGradientRule)
+{
+    auto fixture = makeUnitTriangleFixture();
+    level_set::LevelSetP1PhaseGraphOptions options;
+    options.quadrature_order = 1;
+    const auto graph = level_set::buildLevelSetP1PhaseTransportGraph(
+        fixture.system, fixture.indicator, options);
+    ASSERT_TRUE(graph.success) << graph.diagnostic;
+    ASSERT_EQ(graph.edges.size(), 3u);
+    EXPECT_EQ(graph.maximum_quadrature_order, 1);
+    for (const auto& edge : graph.edges) {
+        EXPECT_NEAR(edge.consistent_mass, 1.0 / 24.0, 2e-14);
+    }
+}
+
+TEST(LevelSetConservativePhaseOperator,
      UsesPointwiseMappingAndClosesIdentitiesOnADistortedQuadrilateral)
 {
     const std::vector<std::array<FE::Real, 3>> coordinates{
@@ -276,7 +293,27 @@ TEST(LevelSetConservativePhaseOperator,
         fixture.system, fixture.indicator);
 
     ASSERT_TRUE(graph.success) << graph.diagnostic;
-    EXPECT_EQ(graph.edges.size(), 6u);
+    ASSERT_EQ(graph.edges.size(), 6u);
+    // On [0,1]^2 the mapped determinant is 1.6 + 0.8*s. The two
+    // opposite edges therefore have different consistent masses.
+    EXPECT_EQ(graph.edges[2].first_node, 0);
+    EXPECT_EQ(graph.edges[2].second_node, 3);
+    EXPECT_NEAR(graph.edges[2].consistent_mass, 1.0 / 10.0, 2e-14);
+    EXPECT_EQ(graph.edges[3].first_node, 1);
+    EXPECT_EQ(graph.edges[3].second_node, 2);
+    EXPECT_NEAR(graph.edges[3].consistent_mass, 11.0 / 90.0, 2e-14);
+    level_set::LevelSetP1PhaseGraphOptions reduced;
+    reduced.quadrature_order = 1;
+    const auto low_order = level_set::buildLevelSetP1PhaseTransportGraph(
+        fixture.system, fixture.indicator, reduced);
+    ASSERT_TRUE(low_order.success) << low_order.diagnostic;
+    ASSERT_EQ(low_order.edges.size(), 6u);
+    EXPECT_EQ(low_order.maximum_quadrature_order, 1);
+    EXPECT_NEAR(low_order.edges[2].consistent_mass, 1.0 / 10.0, 2e-14);
+    EXPECT_NEAR(low_order.edges[3].consistent_mass, 11.0 / 90.0, 2e-14);
+    // The selected midpoint rule still gives its original C_03.
+    EXPECT_NEAR(low_order.edges[2].first_test_second_gradient[0], -0.15, 2e-14);
+    EXPECT_NEAR(low_order.edges[2].first_test_second_gradient[1], 0.2125, 2e-14);
     EXPECT_NEAR(graph.physical_measure, polygonArea(coordinates), 2.0e-13);
     EXPECT_NEAR(graph.total_lumped_control_volume,
                 polygonArea(coordinates), 2.0e-13);
@@ -383,7 +420,79 @@ TEST(LevelSetConservativePhaseOperator,
 }
 
 TEST(LevelSetConservativePhaseOperator,
-     LimitsTheLumpedCentralTargetWithoutChangingExternalPhaseBalance)
+     LimitsTheConsistentMassIncrementOnThePhysicalUnitTriangle)
+{
+    auto fixture = makeUnitTriangleFixture();
+    const auto graph = level_set::buildLevelSetP1PhaseTransportGraph(
+        fixture.system, fixture.indicator);
+    ASSERT_TRUE(graph.success) << graph.diagnostic;
+
+    const std::array<FE::Real, 3> lower{0.0, 0.0, 0.0};
+    const std::array<FE::Real, 3> upper{1.0, 1.0, 1.0};
+    const std::array<std::array<FE::Real, 3>, 3> velocity{{
+        {1.0, 0.0, 0.0}, {2.0, 0.0, 0.0}, {1.0, 0.0, 0.0}}};
+    // The basis gradients are (-1,-1), (1,0), (0,1). Each lumped
+    // mass is 1/6, each off-diagonal mass is 1/24, and the Courant
+    // rates of the three nodes are 1, 5, 2.
+    for (const FE::Real dt : {1.0 / 16.0, 1.0 / 8.0}) {
+        const auto advance = [&](FE::Real third_value) {
+            const std::array<FE::Real, 3> q{0.5, 0.75, third_value};
+            return level_set::advanceLevelSetP1ConservativePhaseStage(
+                graph, q, lower, upper, velocity, dt);
+        };
+        const auto stage = advance(0.0);
+        ASSERT_TRUE(stage.success) << stage.diagnostic;
+        ASSERT_EQ(stage.flux_edges.size(), 3u);
+        // The central rates are (-1/2,-1/4,-1) and the monotone rates
+        // are (-1/2,-9/4,1). The third rate changes sign, so it
+        // contributes zero to the consistent-mass defect.
+        EXPECT_NEAR(stage.flux_edges[0].raw_antidiffusive_mass_transfer,
+                    -dt / 12.0 - dt * (1.0 - 5.0 * dt) / 96.0, 2e-16);
+        EXPECT_NEAR(stage.flux_edges[1].raw_antidiffusive_mass_transfer,
+                    dt / 12.0 - dt * (1.0 - 2.0 * dt) / 48.0, 2e-16);
+        // At node 0 the doubled monotone rate is -1/8. Its centered
+        // rate -1/2 differs from the two others by 1/4 and 1/16, so
+        // the variation bound limits the change to 5/16, giving -3/16.
+        const auto capped = advance(7.0 / 16.0);
+        ASSERT_TRUE(capped.success) << capped.diagnostic;
+        EXPECT_NEAR(capped.flux_edges[0].raw_antidiffusive_mass_transfer,
+                    -dt / 12.0 + dt * (1.0 - 5.0 * dt) / 384.0, 2e-16);
+    }
+}
+
+TEST(LevelSetConservativePhaseOperator,
+     UsesIntegratedQuadraticBubbleVelocityForTheMassCorrection)
+{
+    auto fixture = makeUnitTriangleFixture();
+    const auto graph = level_set::buildLevelSetP1PhaseTransportGraph(
+        fixture.system, fixture.indicator);
+    ASSERT_TRUE(graph.success) << graph.diagnostic;
+    // u = (4*N0*N1,0) vanishes at all vertices and has zero normal
+    // flux. The moments integral(N_i*u_x) are (1/15,1/15,1/30).
+    const std::array<std::array<FE::Real, 3>, 3> velocity{};
+    const std::array<FE::Real, 12> convection{
+        0.1, 0.0, -0.1, 0.0, 0.0, 0.0,
+        1.0 / 15.0, -1.0 / 15.0, 0.0, -1.0 / 30.0, 0.0, 1.0 / 30.0};
+    const std::array<FE::Real, 3> q{0.5, 0.75, 0.0};
+    const std::array<FE::Real, 3> lower{0.0, 0.0, 0.0};
+    const std::array<FE::Real, 3> upper{0.75, 0.75, 0.75};
+    constexpr FE::Real dt = 0.125;
+    const auto stage = level_set::advanceLevelSetP1ConservativePhaseStage(
+        graph, q, lower, upper, velocity, dt, {}, convection);
+    ASSERT_TRUE(stage.success) << stage.diagnostic;
+    ASSERT_EQ(stage.flux_edges.size(), 3u);
+    // The limited rates at 0 and 2 are -1/10 and 0. The larger
+    // of their two Courant numbers is 2*dt/5.
+    EXPECT_NEAR(stage.flux_edges[1].raw_antidiffusive_mass_transfer,
+                dt / 60.0 - dt * (1.0 - 0.4 * dt) / 240.0, 2e-16);
+    const auto provenance = makeBackwardEulerSplitStageProvenance(graph, q, stage);
+    const auto check = level_set::validateLevelSetP1PhaseSplitStage(
+        graph, q, stage, provenance);
+    EXPECT_TRUE(check.valid) << check.diagnostic;
+}
+
+TEST(LevelSetConservativePhaseOperator,
+     LimitsTheCentralTargetWithoutChangingExternalPhaseBalance)
 {
     auto fixture = makeUnitTriangleFixture();
     const auto graph = level_set::buildLevelSetP1PhaseTransportGraph(
@@ -818,6 +927,13 @@ TEST(LevelSetConservativePhaseOperator,
     EXPECT_FALSE(level_set::validateLevelSetP1PhaseSplitStage(
                      changed_graph, previous_q, stage, provenance)
                      .valid);
+    changed_graph = graph;
+    changed_graph.edges.front().consistent_mass = std::nextafter(
+        changed_graph.edges.front().consistent_mass,
+        std::numeric_limits<FE::Real>::infinity());
+    EXPECT_NE(level_set::levelSetP1PhaseGraphIdentity(changed_graph)
+                  .content_revision,
+              provenance.operator_graph_identity.content_revision);
 }
 
 TEST(LevelSetConservativePhaseOperator,
