@@ -899,10 +899,10 @@ void collectScaleUsages(const forms::FormExprNode& node,
     }
 
     ScanContext child_context = context;
-    if (type == FT::CellIntegral) {
+    if (type == FT::CellIntegral || type == FT::CutVolumeIntegral) {
         child_context.domain = DomainKind::Cell;
         child_context.boundary_marker = -1;
-        child_context.interface_marker = -1;
+        child_context.interface_marker = node.interfaceMarker().value_or(-1);
     } else if (type == FT::BoundaryIntegral) {
         child_context.domain = DomainKind::Boundary;
         child_context.boundary_marker = node.boundaryMarker().value_or(-1);
@@ -984,10 +984,11 @@ void scanNode(const forms::FormExprNode& node,
             result.has_average = true;
             break;
         case FT::CellIntegral:
+        case FT::CutVolumeIntegral:
             result.has_cell_integral = true;
             child_context.domain = DomainKind::Cell;
             child_context.boundary_marker = -1;
-            child_context.interface_marker = -1;
+            child_context.interface_marker = node.interfaceMarker().value_or(-1);
             break;
         case FT::BoundaryIntegral: {
             result.has_boundary_integral = true;

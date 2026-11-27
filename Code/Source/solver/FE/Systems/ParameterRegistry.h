@@ -88,6 +88,8 @@ public:
     /// references retain the compact public layout; cut rules own its low lanes
     /// during cut integration. Named terminals always use the protected copy.
     [[nodiscard]] std::optional<std::uint32_t> kernelSlotOf(std::string_view key) const;
+    /// A low slot can also hold cut-rule data. Use keyForSlot() when the
+    /// integration measure explicitly selects ordinary positional parameters.
     [[nodiscard]] std::optional<std::string_view> keyForKernelSlot(std::uint32_t slot) const;
     [[nodiscard]] std::vector<Real> evaluateKernelSlots(const SystemStateView& state) const;
 

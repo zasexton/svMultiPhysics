@@ -335,6 +335,7 @@ std::optional<std::uint32_t> ParameterRegistry::kernelSlotOf(std::string_view ke
 
 std::optional<std::string_view> ParameterRegistry::keyForKernelSlot(std::uint32_t slot) const
 {
+    if (slot < forms::cutCellParameterCount()) return std::nullopt;
     const auto base = namedKernelSlotBase(slotCount());
     if (slot < base) return keyForSlot(slot);
     return keyForSlot(static_cast<std::uint32_t>(slot - base));

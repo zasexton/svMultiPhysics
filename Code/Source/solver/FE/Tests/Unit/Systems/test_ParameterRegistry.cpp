@@ -5,6 +5,8 @@
 
 #include <gtest/gtest.h>
 
+#include "Analysis/FormExprScanner.h"
+#include "Backends/Eigen/EigenFactory.h"
 #include "Systems/FESystem.h"
 #include "Systems/FormsInstaller.h"
 #include "Systems/FunctionalFormEvaluator.h"
@@ -465,6 +467,16 @@ TEST(TimeFunction, NamedValueAndCutMetadataReachTheSameVolumeKernel)
     }
     const auto metadata = 2.0 * forms::cutVolumeFraction() + forms::cutSideIndicator()
                         + forms::cutMeasureSensitivity().component(0);
+    const auto slot_zero = forms::FormExpr::parameterRef(0);
+    const auto both_measures = slot_zero.dx() + slot_zero.dx(side.volume());
+    const auto usages = analysis::scanFormExpr(*both_measures.node()).parameter_usages;
+    std::vector<int> usage_markers;
+    for (const auto& usage : usages) {
+        EXPECT_EQ(usage.slot, 0u);
+        usage_markers.push_back(usage.interface_marker);
+    }
+    std::sort(usage_markers.begin(), usage_markers.end());
+    EXPECT_EQ(usage_markers, (std::vector<int>{-1, geometry.interface().marker()}));
     const auto residual = ((1.0 + u) * (load + metadata) * v).dx(side.volume());
     system.addOperator("cut");
     (void)installFormulation(system, "cut", {field}, residual);
@@ -475,6 +487,33 @@ TEST(TimeFunction, NamedValueAndCutMetadataReachTheSameVolumeKernel)
     system.setPrescribedFieldCoefficients(phi, coefficients);
     const auto cut_context = geometry.refresh().installed_context.lock();
     ASSERT_NE(cut_context, nullptr);
+
+#if defined(FE_HAS_EIGEN) && FE_HAS_EIGEN
+    backends::EigenFactory factory;
+    auto matrix = factory.createMatrix(system.sparsity("cut"));
+    std::vector<Real> initial(system.dofHandler().getNumDofs(), 0.0);
+    SystemStateView measured;
+    measured.time = 0.5;
+    measured.u = initial;
+    auto view = matrix->createAssemblyView();
+    AssemblyRequest jacobian;
+    jacobian.op = "cut";
+    jacobian.want_matrix = true;
+    ASSERT_TRUE(system.assemble(jacobian, measured, view.get(), nullptr).success);
+    matrix->finalizeAssembly();
+    ASSERT_TRUE(system.updateAnalysisSummariesFromAssembledOperator(*matrix, "cut", &measured));
+    const auto& properties = system.latestAnalysisSummaries()->coefficient_properties;
+    const auto property = [&](std::string_view label) {
+        return std::find_if(properties.begin(), properties.end(),
+            [&](const auto& entry) { return entry.coefficient == label; });
+    };
+    const auto fraction = property("parameter_slot:0");
+    ASSERT_NE(fraction, properties.end());
+    EXPECT_FALSE(fraction->local_spectrum_coverage_present);
+    const auto named = property("parameter:load");
+    ASSERT_NE(named, properties.end());
+    EXPECT_DOUBLE_EQ(named->min_eigenvalue, 3.5);
+#endif
 
     // A second system acquires just the snapshot for a post-setup functional.
     // Its compact named parameter is evaluated through the functional's getter.
@@ -506,6 +545,8 @@ TEST(TimeFunction, NamedValueAndCutMetadataReachTheSameVolumeKernel)
         ASSERT_TRUE(slot.has_value());
         EXPECT_EQ(registry.keyForSlot(*slot), "load");
         ASSERT_EQ(*slot, 0u);
+        // Without a measure, slot zero can also be the rule's cut fraction.
+        EXPECT_FALSE(registry.keyForKernelSlot(*slot).has_value());
         const auto compiled_slot = registry.kernelSlotOf("load");
         ASSERT_TRUE(compiled_slot);
         EXPECT_GE(*compiled_slot, forms::cutCellParameterCount());

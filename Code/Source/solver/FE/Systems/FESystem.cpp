@@ -4051,19 +4051,39 @@ makeCoefficientSummaryFromConstitutiveLaw(
     return summary;
 }
 
+[[nodiscard]] std::optional<std::string_view> formParameterKey(
+    const FESystem& system, std::uint32_t slot, analysis::DomainKind domain, int marker)
+{
+    const auto& parameters = system.parameterRegistry();
+    if (const auto key = parameters.keyForKernelSlot(slot)) return key;
+    if (marker >= 0) {
+        const auto* cut = system.cutIntegrationContext();
+        const bool generated_face = domain == analysis::DomainKind::InterfaceFace &&
+            (system.isGeneratedEmbeddedInterfaceMarkerRegistered(marker) ||
+             (cut && (cut->hasGeneratedInterfaceMarker(marker) ||
+                      cut->hasGeneratedActiveBoundaryMarker(marker) ||
+                      cut->findGeneratedInterfaceBoundaryPublicationProvenance(marker))));
+        if (domain == analysis::DomainKind::Cell || domain == analysis::DomainKind::Boundary || generated_face) {
+            return std::nullopt;
+        }
+    }
+    return parameters.keyForSlot(slot);
+}
+
 [[nodiscard]] analysis::CoefficientPropertySummary
 makeCoefficientSummaryFromParameterUsage(
     const analysis::FormParameterUsage& usage,
     const analysis::ContributionDescriptor& contribution,
     const OperatorTag& fallback_op,
-    const ParameterRegistry& parameter_registry,
+    const FESystem& system,
     const SystemStateView* state)
 {
     constexpr Real tolerance = static_cast<Real>(1.0e-12);
+    const auto& parameter_registry = system.parameterRegistry();
 
     std::string key = usage.name;
     if (key.empty() && usage.slot.has_value()) {
-        if (auto slot_key = parameter_registry.keyForKernelSlot(*usage.slot)) {
+        if (auto slot_key = formParameterKey(system, *usage.slot, usage.domain, usage.interface_marker)) {
             key = std::string(*slot_key);
         }
     }
@@ -4260,7 +4280,7 @@ buildRuntimeCoefficientSummaries(
     const std::vector<analysis::ContributionDescriptor>& contributions,
     const std::vector<analysis::FormulationRecord>& formulations,
     const OperatorTag& op,
-    const ParameterRegistry& parameter_registry,
+    const FESystem& system,
     const assembly::IMeshAccess* mesh,
     const SystemStateView* state,
     AnalysisCommunicator communicator)
@@ -4312,7 +4332,7 @@ buildRuntimeCoefficientSummaries(
                 makeCoefficientSummaryFromParameterUsage(usage,
                                                          contribution,
                                                          op,
-                                                         parameter_registry,
+                                                         system,
                                                          state));
         }
     }
@@ -4573,13 +4593,14 @@ void applyPowerRange(Real& min_value,
     std::vector<analysis::VariableKey> variables,
     const analysis::FormScaleUsage& usage,
     const FieldRegistry& field_registry,
-    const ParameterRegistry& parameter_registry,
+    const FESystem& system,
     const std::unordered_map<std::string, std::pair<Real, Real>>&
         coefficient_abs_ranges,
     const assembly::IMeshAccess* mesh,
     const SystemStateView* state,
     AnalysisCommunicator communicator)
 {
+    const auto& parameter_registry = system.parameterRegistry();
     analysis::ParameterScaleSummary summary;
     summary.nondimensional_parameter_id = std::move(id);
     summary.role = role;
@@ -4638,7 +4659,7 @@ void applyPowerRange(Real& min_value,
         }
     }
     for (auto slot : usage.parameter_slots) {
-        if (auto key = parameter_registry.keyForKernelSlot(slot)) {
+        if (auto key = formParameterKey(system, slot, usage.domain, usage.interface_marker)) {
             if (const auto value =
                     realParameterValue(parameter_registry, state, *key)) {
                 const Real abs_value = std::abs(*value);
@@ -7390,7 +7411,7 @@ bool FESystem::updateAnalysisSummariesFromAssembledOperator(
             contributions_,
             formulation_records_,
             op,
-            parameter_registry_,
+            *this,
             mesh_access_.get(),
             state,
             analysis_communicator);
@@ -7463,7 +7484,7 @@ bool FESystem::updateAnalysisSummariesFromAssembledOperator(
                             std::move(scale_variables),
                             scale,
                             field_registry_,
-                            parameter_registry_,
+                            *this,
                             coefficient_abs_ranges,
                             mesh_access_.get(),
                             state,
