@@ -255,12 +255,13 @@ math::Vector<Real, 3> InverseMapping::solve_with_options(
             }
         }
 
-        // Check step size convergence
+        // The update lies in the reference chart. It can vanish at the
+        // projection of a point that is still off an embedded element.
         Real delta_norm_sq = Real(0);
         for (std::size_t i = 0; i < sdim; ++i) {
             delta_norm_sq += delta[i] * delta[i];
         }
-        if (delta_norm_sq < tol_sq) {
+        if (delta_norm_sq < tol_sq && residual_norm_sq(mapping, xi, x_phys) < tol_sq) {
             if (opts.require_inside && !is_inside_reference_element(mapping.element_type(), xi, opts.inside_tol)) {
                 throw FEException("InverseMapping converged outside reference element for type " +
                                       std::string(element_type_name(mapping.element_type())),
@@ -268,6 +269,7 @@ math::Vector<Real, 3> InverseMapping::solve_with_options(
             }
             return xi;
         }
+        if (delta_norm_sq == Real(0)) break;
     }
 
     throw FEException("InverseMapping failed to converge for type " +

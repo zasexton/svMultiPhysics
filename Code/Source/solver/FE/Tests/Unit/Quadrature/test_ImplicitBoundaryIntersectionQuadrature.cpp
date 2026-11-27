@@ -1,6 +1,7 @@
 #include "Quadrature/ImplicitBoundaryIntersectionQuadrature.h"
 
 #include <gtest/gtest.h>
+#include <cmath>
 
 #include <array>
 #include <utility>
@@ -157,6 +158,23 @@ TEST(ImplicitBoundaryIntersectionQuadrature, UsesReferenceLengthOnStretchedHexFa
     EXPECT_NEAR(fragment.quadrature_points[0].weight, 1.0, 1.0e-12);
     EXPECT_NEAR(fragment.quadrature_points[1].weight, 1.0, 1.0e-12);
     EXPECT_NEAR(result.measure(), 2.0, 1.0e-12);
+}
+
+TEST(ImplicitBoundaryIntersectionQuadrature, SegmentIntegratesTheRequestedPolynomialDegree)
+{
+    const std::vector<std::array<Real, 3>> nodes{{0.,0.,0.}, {1.,0.,0.}, {0.,1.,0.}, {0.,0.,1.}};
+    for (int order : {0, 1, 2, 3, 4, 5, 6, 7, 12}) {
+        const auto request = makeRequest(ElementType::Tetra4, 3, 1, nodes, xMinus(nodes, 0.5), order);
+        const auto result = buildImplicitBoundaryIntersectionQuadrature(request);
+        ASSERT_EQ(result.fragments.size(), 1u);
+        // The segment is (1/2, 0, z), 0 <= z <= 1/2.
+        for (int power = 0; power <= order; ++power) {
+            Real integral = 0.;
+            for (const auto& p : result.fragments.front().quadrature_points)
+                integral += p.weight * std::pow(2. * p.physical_coordinate[2], power);
+            EXPECT_NEAR(integral, 0.5 / (power + 1), 2e-14) << "order=" << order << " power=" << power;
+        }
+    }
 }
 
 TEST(ImplicitBoundaryIntersectionQuadrature, SupportsWedgeFaceSegment)

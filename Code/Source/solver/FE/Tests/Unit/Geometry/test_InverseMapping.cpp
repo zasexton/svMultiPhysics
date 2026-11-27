@@ -82,6 +82,24 @@ TEST(InverseMapping, RequireInsideRejectsOutsidePoint) {
     EXPECT_THROW((void)InverseMapping::solve_with_options(map, x_out, math::Vector<Real,3>{}, opts), FEException);
 }
 
+TEST(InverseMapping, AnInteriorProjectionDoesNotInvertAnOffSurfacePoint) {
+    const std::vector<math::Vector<Real, 3>> nodes{{0.,0.,0.}, {1.,0.,0.}, {0.,1.,0.}};
+    LinearMapping map(ElementType::Triangle3, nodes);
+    const math::Vector<Real, 3> outside{0.25, 0.25, 1.};
+    EXPECT_THROW((void)map.map_to_reference(outside), FEException);
+    for (bool line_search : {false, true}) {
+        for (bool inside : {false, true}) {
+            InverseMappingOptions options;
+            options.use_line_search = line_search;
+            options.require_inside = inside;
+            EXPECT_THROW((void)InverseMapping::solve_with_options(map, outside, {}, options), FEException);
+            const auto near = InverseMapping::solve_with_options(map, {0.25, 0.25, 0.5 * options.tol}, {}, options);
+            EXPECT_NEAR(near[0], 0.25, options.tol);
+            EXPECT_NEAR(near[1], 0.25, options.tol);
+        }
+    }
+}
+
 TEST(InverseMapping, RequireInsideAcceptsBoundaryPoint) {
     std::vector<math::Vector<Real, 3>> nodes = {
         {Real(0), Real(0), Real(0)},

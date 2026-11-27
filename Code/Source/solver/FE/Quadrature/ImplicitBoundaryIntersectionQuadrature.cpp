@@ -9,6 +9,7 @@
 
 #include "Basis/NodeOrderingConventions.h"
 #include "Elements/ReferenceElement.h"
+#include "Quadrature/QuadratureFactory.h"
 
 #include <algorithm>
 #include <cmath>
@@ -443,17 +444,9 @@ void appendSegmentQuadrature(
                       gradient_norm));
     };
 
-    if (requested_order <= 1) {
-        add_point(Real{0.5}, Real{1.0});
-    } else if (requested_order <= 3) {
-        constexpr Real offset = Real{0.28867513459481288225};
-        add_point(Real{0.5} - offset, Real{0.5});
-        add_point(Real{0.5} + offset, Real{0.5});
-    } else {
-        constexpr Real offset = Real{0.38729833462074168852};
-        add_point(Real{0.5} - offset, Real{5.0} / Real{18.0});
-        add_point(Real{0.5}, Real{4.0} / Real{9.0});
-        add_point(Real{0.5} + offset, Real{5.0} / Real{18.0});
+    const auto rule = QuadratureFactory::create(ElementType::Line2, std::max(1, requested_order));
+    for (std::size_t q = 0; q < rule->num_points(); ++q) {
+        add_point((1. + rule->point(q)[0]) * 0.5, rule->weight(q) * 0.5);
     }
 }
 
