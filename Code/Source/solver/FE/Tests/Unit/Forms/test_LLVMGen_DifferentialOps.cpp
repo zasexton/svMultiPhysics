@@ -100,6 +100,36 @@ TEST(LLVMGenDifferentialOps, Gradient_ComputesCorrectly)
     EXPECT_NEAR(jit / volume, Real(1.0), 1e-12);
 }
 
+TEST(LLVMGenDifferentialOps, PowerGradientWithFixedAndSpatialExponents)
+{
+    requireLLVMJITOrSkip();
+    SingleTetraMeshAccess mesh;
+    const auto dofs = createSingleTetraDofMap();
+    spaces::H1Space space(ElementType::Tetra4, 1);
+    const std::vector<Real> values{-2.0, -1.0, -2.0, -2.0}; // u = x - 2
+    assembly::FunctionalAssembler assembler;
+    assembler.setMesh(mesh);
+    assembler.setDofMap(dofs);
+    assembler.setSpace(space);
+    assembler.setPrimaryField(0);
+    assembler.setSolution(values);
+    const auto u = FormExpr::discreteField(0, space, "u");
+    const auto dx = [](const FormExpr& term) { return term.grad().component(0); };
+    const auto integrate = [&](const FormExpr& term) { return assembleJIT(term, assembler, true, false); };
+    const auto two = FormExpr::constant(2.0);
+    EXPECT_NEAR(integrate(dx(pow(u, two))), -3.5 / 6.0, 1e-12);
+    const auto p = FormExpr::parameterRef(0);
+    for (const auto [power, mean] : std::array<std::array<Real, 2>, 3>{{{0, 0}, {1, 1}, {2, -3.5}}}) {
+        const std::array<Real, 1> parameters{power};
+        assembler.setJITConstants(parameters);
+        EXPECT_NEAR(integrate(dx(pow(u, p))), mean / 6.0, 1e-12);
+        EXPECT_NEAR(integrate(dx(pow(u, p * FormExpr::constant(1.0)))), mean / 6.0, 1e-12);
+        EXPECT_NEAR(integrate(dx(pow(two, p))), 0.0, 1e-12);
+    }
+    const auto exponential = pow(two, u);
+    EXPECT_NEAR(integrate(dx(exponential) - FormExpr::constant(std::log(2.0)) * exponential), 0.0, 1e-12);
+}
+
 TEST(LLVMGenDifferentialOps, Divergence_ComputesCorrectly)
 {
     requireLLVMJITOrSkip();

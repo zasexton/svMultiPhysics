@@ -395,6 +395,56 @@ struct ImmPayload {
     }
 }
 
+bool spatiallyConstantScalar(const FormExprNode& node)
+{
+    switch (node.type()) {
+        case FormExprType::Constant:
+        case FormExprType::TypedZero:
+        case FormExprType::ParameterRef:
+        case FormExprType::Time:
+        case FormExprType::TimeStep:
+        case FormExprType::EffectiveTimeStep:
+            return true;
+        case FormExprType::Negate:
+        case FormExprType::Add:
+        case FormExprType::Subtract:
+        case FormExprType::Multiply:
+        case FormExprType::Divide:
+        case FormExprType::Power:
+        case FormExprType::Sqrt:
+        case FormExprType::Exp:
+        case FormExprType::Log: {
+            const auto children = node.childrenShared();
+            return std::all_of(children.begin(), children.end(),
+                               [](const auto& child) { return child && spatiallyConstantScalar(*child); });
+        }
+        default:
+            return false;
+    }
+}
+
+std::optional<FormExpr> expandPowerGradient(const FormExprNode& node)
+{
+    if (node.type() != FormExprType::Gradient) return std::nullopt;
+    const auto children = node.childrenShared();
+    if (children.size() != 1 || !children[0] || children[0]->type() != FormExprType::Power) return std::nullopt;
+    const auto operands = children[0]->childrenShared();
+    if (operands.size() != 2 || !operands[0] || !operands[1]) return std::nullopt;
+
+    const FormExpr base(operands[0]), exponent(operands[1]);
+    const auto zero = FormExpr::constant(0.0);
+    const bool fixed_base = spatiallyConstantScalar(*operands[0]);
+    const bool fixed_exponent = spatiallyConstantScalar(*operands[1]);
+    if (fixed_base && fixed_exponent) return zero * FormExpr::coordinate();
+    const auto base_slope = eq(exponent, zero).conditional(
+        zero, exponent * pow(base, exponent - FormExpr::constant(1.0)));
+    if (fixed_exponent) return base_slope * base.grad();
+    const auto zero_base = eq(base, zero) * gt(exponent, zero);
+    const auto exponent_slope = zero_base.conditional(zero, pow(base, exponent) * log(base));
+    const auto exponent_term = exponent_slope * exponent.grad();
+    return fixed_base ? exponent_term : base_slope * base.grad() + exponent_term;
+}
+
 struct Builder {
     KernelIRBuildOptions options{};
     KernelIRBuildResult result{};
@@ -464,6 +514,10 @@ struct Builder {
         if (const auto rate = rateOfDivergenceLoweredAsGradientTrace(node)) {
             const auto rate_gradient_trace = FormExpr(rate).grad().trace();
             return lower(*rate_gradient_trace.node());
+        }
+
+        if (const auto gradient = expandPowerGradient(node)) {
+            return lower(*gradient->node());
         }
 
         std::vector<std::uint32_t> kid_indices;
