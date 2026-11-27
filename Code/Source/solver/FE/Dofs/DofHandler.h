@@ -892,6 +892,7 @@ public:
 private:
     // Internal helpers
     void checkNotFinalized() const;
+    void renumberDofs(DofNumberingStrategy strategy, bool initial_component_blocks);
 
     // Mesh-independent DOF distribution (primary implementation)
     void distributeDofsCore(const MeshTopologyView& topology,

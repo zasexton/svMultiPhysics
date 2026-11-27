@@ -4649,7 +4649,7 @@ void DofHandler::distributeDofsCore(const MeshTopologyView& topology,
     }
 
     if (options.numbering != DofNumberingStrategy::Sequential) {
-        renumberDofs(options.numbering);
+        renumberDofs(options.numbering, /*initial_component_blocks=*/true);
     } else if (apply_default_spatial) {
         const auto curve_strategy = (options.spatial_curve == SpatialCurveType::Hilbert)
                                         ? DofNumberingStrategy::Hilbert
@@ -10134,6 +10134,10 @@ void DofHandler::cacheSpatialDofCoordinates(const MeshTopologyView& topology,
 }
 
 void DofHandler::renumberDofs(DofNumberingStrategy strategy) {
+    renumberDofs(strategy, /*initial_component_blocks=*/false);
+}
+
+void DofHandler::renumberDofs(DofNumberingStrategy strategy, bool initial_component_blocks) {
     checkNotFinalized();
     const GlobalIndex n_dofs = dof_map_.getNumDofs();
     if (n_dofs <= 0) {
@@ -10191,31 +10195,72 @@ void DofHandler::renumberDofs(DofNumberingStrategy strategy) {
         case DofNumberingStrategy::Sequential:
             break; // identity
 
+        case DofNumberingStrategy::Block:
         case DofNumberingStrategy::Interleaved: {
-            if (num_components_ <= 1) {
+            const GlobalIndex nc = num_components_;
+            if (nc <= 1) break;
+            FE_THROW_IF(n_dofs % nc != 0, FEException,
+                        "DofHandler::renumberDofs: component numbering requires equal component sizes");
+            const bool block = strategy == DofNumberingStrategy::Block;
+            if (initial_component_blocks) {
+                // The CG and DG distributors assign every scalar index plus a component offset.
+                if (!block) perm = InterleavedNumbering(num_components_).computeNumbering(n_dofs, {}, {});
                 break;
             }
-            const auto nc = static_cast<GlobalIndex>(num_components_);
-            if (nc <= 0 || (n_dofs % nc) != 0) {
-                throw FEException("DofHandler::renumberDofs: Interleaved numbering requires n_dofs divisible by num_components");
-            }
-            const InterleavedNumbering strat(num_components_);
-            perm = strat.computeNumbering(n_dofs, {}, {});
-            break;
-        }
 
-        case DofNumberingStrategy::Block: {
-            if (num_components_ <= 1) {
-                break;
+            // Local shape order is component major for every global numbering. Recover
+            // the scalar nodes from the actual first-component rows, including after a
+            // previous block, interleaved or spatial permutation.
+            const GlobalIndex n_nodes = n_dofs / nc;
+            std::vector<std::uint8_t> roles(static_cast<std::size_t>(n_dofs), 0);
+            for (GlobalIndex cell = 0; cell < dof_map_.getNumCells(); ++cell) {
+                const auto rows = dof_map_.getCellDofs(cell);
+                const auto count = rows.size() / nc;
+                for (std::size_t i = 0; i < rows.size(); ++i) roles[rows[i]] = i < count ? 2u : 1u;
             }
-            const auto nc = static_cast<GlobalIndex>(num_components_);
-            if (nc <= 0 || (n_dofs % nc) != 0) {
-                throw FEException("DofHandler::renumberDofs: Block numbering requires n_dofs divisible by num_components");
+#if FE_HAS_MPI
+            if (world_size_ > 1) {
+                for (GlobalIndex first = 0; first < n_dofs;) {
+                    const auto count = static_cast<int>(std::min<GlobalIndex>(
+                        n_dofs - first, std::numeric_limits<int>::max()));
+                    if (no_global_collectives_) {
+                        mpi_allreduce_max_u8_no_collectives(mpi_comm_, my_rank_, world_size_,
+                                                            roles.data() + first, count, 43922);
+                    } else {
+                        fe_mpi_check(MPI_Allreduce(MPI_IN_PLACE, roles.data() + first, count,
+                                                   MPI_UNSIGNED_CHAR, MPI_MAX, mpi_comm_),
+                                     "MPI_Allreduce (component rows) in DofHandler::renumberDofs");
+                    }
+                    first += count;
+                }
             }
-            const GlobalIndex block = n_dofs / nc;
-            std::vector<GlobalIndex> sizes(static_cast<std::size_t>(nc), block);
-            const BlockNumbering strat(std::move(sizes));
-            perm = strat.computeNumbering(n_dofs, {}, {});
+#endif
+            const GlobalIndex active = std::count(roles.begin(), roles.end(), std::uint8_t{2});
+            const GlobalIndex inactive = std::count(roles.begin(), roles.end(), std::uint8_t{0});
+            FE_THROW_IF(active > n_nodes || active * nc != n_dofs - inactive, FEException,
+                        "DofHandler::renumberDofs: cell rows do not define complete vector components");
+            const auto index = [=](GlobalIndex node, GlobalIndex component) {
+                return block ? component * n_nodes + node : node * nc + component;
+            };
+            // Unreferenced global IDs occupy the remaining slots (sparse GID layouts).
+            GlobalIndex next = 0, unused = 0;
+            for (GlobalIndex row = 0; row < n_dofs; ++row) {
+                if (roles[row] == 2) perm[row] = index(next++, 0);
+                if (roles[row] == 0) {
+                    perm[row] = index(active + unused / nc, unused % nc);
+                    ++unused;
+                }
+            }
+            for (GlobalIndex cell = 0; cell < dof_map_.getNumCells(); ++cell) {
+                const auto rows = dof_map_.getCellDofs(cell);
+                const auto count = rows.size() / nc;
+                for (std::size_t i = 0; i < count; ++i) {
+                    const auto first = perm[rows[i]];
+                    for (GlobalIndex c = 1; c < nc; ++c) {
+                        perm[rows[c * count + i]] = first + (block ? c * n_nodes : c);
+                    }
+                }
+            }
             break;
         }
 
@@ -10644,6 +10689,13 @@ void DofHandler::renumberDofs(DofNumberingStrategy strategy) {
     }
 #endif
     if (identity) {
+#if FE_HAS_MPI
+        if (world_size_ > 1 && global_numbering_ == GlobalNumberingMode::OwnerContiguous &&
+            initial_component_blocks) {
+            dof_map_.setDofOwnership(renumbered_owner_lookup(
+                partition_.locallyOwned(), n_dofs, mpi_comm_, my_rank_, world_size_, no_global_collectives_));
+        }
+#endif
         ghost_cache_valid_ = false;
         return;
     }

@@ -651,6 +651,17 @@ static void checkNaturalRigidGauges(bool full_halo, int order = 1)
         for (int cell = 0; cell < cells; ++cell) {
             const auto cell_dofs = handler.getCellDofs(cell);
             ASSERT_EQ(cell_dofs.size(), 3*nodes.size());
+            // The x, y and z element rows of a scalar basis function must
+            // refer to the same physical node in the public component map.
+            for (std::size_t i = 0; i < nodes.size(); ++i) {
+                const auto x = cell_dofs[i];
+                const auto node = numbering == dofs::DofNumberingStrategy::Block ? x : x / 3;
+                EXPECT_LT(node, static_cast<GlobalIndex>(n / 3));
+                if (node >= static_cast<GlobalIndex>(n / 3)) continue;
+                for (int c = 0; c < 3; ++c) {
+                    EXPECT_EQ(system.fieldMap().componentToGlobal(0, c, node), cell_dofs[c*nodes.size() + i]);
+                }
+            }
             for (int c = 0; c < 3; ++c) {
                 for (std::size_t i = 0; i < nodes.size(); ++i) {
                     const auto d = cell_dofs[nodes.size()*c + i];

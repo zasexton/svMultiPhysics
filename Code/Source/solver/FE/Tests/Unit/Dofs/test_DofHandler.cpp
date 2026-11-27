@@ -1102,6 +1102,42 @@ TEST(DofHandler, DGDistributionInterleavedRenumberingUsesOptions) {
               (std::vector<GlobalIndex>{0, 2, 1, 3}));
 }
 
+TEST(DofHandler, RequestedVectorOrderingPreservesEachPhysicalComponent)
+{
+    const auto topo = makeLineMesh(2);
+    using svmp::FE::dofs::DofNumberingStrategy;
+    for (const bool continuous : {true, false}) {
+        const auto layout = continuous ? DofLayoutInfo::Lagrange(1, 1, 2, 2)
+                                       : DofLayoutInfo::DG(1, 2, 2);
+        for (const auto initial : {DofNumberingStrategy::Block, DofNumberingStrategy::Interleaved}) {
+            DofHandler handler;
+            svmp::FE::dofs::DofDistributionOptions opts;
+            opts.numbering = initial;
+            handler.distributeDofs(topo, layout, opts);
+            const auto check = [&](DofNumberingStrategy target) {
+                const GlobalIndex nodes = continuous ? 3 : 4;
+                for (int cell = 0; cell < 2; ++cell) {
+                    const auto rows = handler.getCellDofs(cell);
+                    ASSERT_EQ(rows.size(), 4u);
+                    for (int c = 0; c < 2; ++c) {
+                        for (int i = 0; i < 2; ++i) {
+                            const auto node = (continuous ? cell : 2*cell) + i;
+                            const auto expected = target == DofNumberingStrategy::Block ? c*nodes + node : 2*node + c;
+                            EXPECT_EQ(rows[2*c + i], expected);
+                        }
+                    }
+                }
+            };
+            check(initial);
+            for (const auto target : {DofNumberingStrategy::Block, DofNumberingStrategy::Interleaved,
+                                      DofNumberingStrategy::Interleaved, DofNumberingStrategy::Block}) {
+                handler.renumberDofs(target);
+                check(target);
+            }
+        }
+    }
+}
+
 TEST(DofHandler, CGDistributionVectorComponentsBlockLayout) {
     DofHandler handler;
     auto topo = makeLineMesh(1);
