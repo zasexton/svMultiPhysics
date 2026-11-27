@@ -185,7 +185,7 @@ TEST(ValueTest, Tensor3ResizeInlineStorage)
 
     EXPECT_TRUE(val.t3_dyn.empty());
     EXPECT_EQ(val.tensor3Size(), 27u);
-    EXPECT_EQ(val.tensor3Span().data(), val.t3.data());
+    EXPECT_EQ(&val.tensor3At(0, 0, 0), val.t3.data());
 
     val.tensor3At(2, 1, 0) = 6.0;
     const std::size_t idx = (2u * 3u + 1u) * 3u + 0u;
@@ -200,50 +200,26 @@ TEST(ValueTest, Tensor3ResizeDynamicStorage)
 
     EXPECT_EQ(val.t3_dyn.size(), 64u);
     EXPECT_EQ(val.tensor3Size(), 64u);
-    EXPECT_EQ(val.tensor3Span().data(), val.t3_dyn.data());
+    EXPECT_EQ(&val.tensor3At(0, 0, 0), val.t3_dyn.data());
 }
 
 TEST(ValueTest, Tensor3AtIndexing)
 {
-    {
+    for (const int first_dimension : {3, 4}) {
         Value<Real> val;
         val.kind = Value<Real>::Kind::Tensor3;
-        val.resizeTensor3(3, 2, 3);
-
-        auto span = val.tensor3Span();
-        for (std::size_t idx = 0; idx < span.size(); ++idx) {
-            span[idx] = static_cast<Real>(idx);
-        }
-
-        const std::size_t d1 = val.tensor3Dim1();
-        const std::size_t d2 = val.tensor3Dim2();
+        val.resizeTensor3(first_dimension, 2, 3);
+        const bool uses_inline_storage = first_dimension == 3;
+        const std::size_t row_stride = uses_inline_storage ? 3u : 2u;
+        const auto& read_only = val;
         for (std::size_t i = 0; i < val.tensor3Dim0(); ++i) {
-            for (std::size_t j = 0; j < val.tensor3Dim1(); ++j) {
-                for (std::size_t k = 0; k < val.tensor3Dim2(); ++k) {
-                    const std::size_t idx = (i * d1 + j) * d2 + k;
-                    EXPECT_DOUBLE_EQ(val.tensor3At(i, j, k), static_cast<Real>(idx));
-                }
-            }
-        }
-    }
-
-    {
-        Value<Real> val;
-        val.kind = Value<Real>::Kind::Tensor3;
-        val.resizeTensor3(4, 2, 3);
-
-        auto span = val.tensor3Span();
-        for (std::size_t idx = 0; idx < span.size(); ++idx) {
-            span[idx] = static_cast<Real>(100.0 + static_cast<Real>(idx));
-        }
-
-        const std::size_t d1 = val.tensor3Dim1();
-        const std::size_t d2 = val.tensor3Dim2();
-        for (std::size_t i = 0; i < val.tensor3Dim0(); ++i) {
-            for (std::size_t j = 0; j < val.tensor3Dim1(); ++j) {
-                for (std::size_t k = 0; k < val.tensor3Dim2(); ++k) {
-                    const std::size_t idx = (i * d1 + j) * d2 + k;
-                    EXPECT_DOUBLE_EQ(val.tensor3At(i, j, k), 100.0 + static_cast<Real>(idx));
+            for (std::size_t j = 0; j < 2; ++j) {
+                for (std::size_t k = 0; k < 3; ++k) {
+                    const std::size_t offset = (i * row_stride + j) * 3 + k;
+                    const auto* storage = uses_inline_storage ? val.t3.data() : val.t3_dyn.data();
+                    val.tensor3At(i, j, k) = static_cast<Real>(100 + offset);
+                    EXPECT_DOUBLE_EQ(storage[offset], 100 + offset);
+                    EXPECT_EQ(&read_only.tensor3At(i, j, k), storage + offset);
                 }
             }
         }
@@ -272,6 +248,23 @@ TEST(ValueTest, ZeroSizedVector)
     EXPECT_EQ(val.vectorSize(), 0u);
     EXPECT_TRUE(val.v_dyn.empty());
     EXPECT_TRUE(val.vectorSpan().empty());
+}
+
+TEST(ValueTest, ExplicitEmptyAxesAndLegacyUnspecifiedShapes)
+{
+    Value<Real> value;
+    value.kind = Value<Real>::Kind::Vector;
+    EXPECT_EQ(value.vectorSize(), 3u);
+    value.kind = Value<Real>::Kind::Matrix;
+    EXPECT_EQ(value.matrixRows(), 3u);
+    value.resizeMatrix(0, 4);
+    EXPECT_EQ(value.matrixRows(), 0u);
+    EXPECT_EQ(value.matrixCols(), 4u);
+    value.kind = Value<Real>::Kind::Tensor3;
+    EXPECT_EQ(value.tensor3Size(), 27u);
+    value.resizeTensor3(2, 0, 3);
+    EXPECT_EQ(value.tensor3Dim1(), 0u);
+    EXPECT_EQ(value.tensor3Size(), 0u);
 }
 
 TEST(ValueTest, DimensionQueryConsistency)

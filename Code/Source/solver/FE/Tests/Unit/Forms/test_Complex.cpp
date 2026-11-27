@@ -13,12 +13,11 @@
 #include <gtest/gtest.h>
 
 #include "Assembly/AssemblyContext.h"
-#include "Assembly/JIT/KernelArgs.h"
 #include "Assembly/StandardAssembler.h"
 #include "Forms/Complex.h"
 #include "Forms/FormCompiler.h"
 #include "Forms/FormKernels.h"
-#include "Forms/JIT/JITCompiler.h"
+#include "Forms/JIT/JITKernelWrapper.h"
 #include "Spaces/H1Space.h"
 #include "Tests/Unit/Forms/FormsTestHelpers.h"
 
@@ -91,16 +90,6 @@ assembly::DenseMatrixView assembleCellBilinear(const FormExpr& bilinear_form,
 #if SVMP_FE_ENABLE_LLVM_JIT
 namespace {
 
-using JITFn = void (*)(const void*);
-
-inline void callJIT(std::uintptr_t addr, const void* args) noexcept
-{
-    if (addr == 0 || args == nullptr) {
-        return;
-    }
-    reinterpret_cast<JITFn>(addr)(args);
-}
-
 static void setupTwoDofTwoQptScalarContext(assembly::AssemblyContext& ctx)
 {
     std::vector<assembly::AssemblyContext::Point3D> quad_pts = {{0.0, 0.0, 0.0}, {1.0, 0.0, 0.0}};
@@ -123,6 +112,7 @@ static void setupTwoDofTwoQptScalarContext(assembly::AssemblyContext& ctx)
     ctx.setTestBasisData(n_dofs,
                          std::span<const Real>(values.data(), values.size()),
                          std::span<const assembly::AssemblyContext::Vector3D>(grads.data(), grads.size()));
+    ctx.setTrialBasisData(n_dofs, values, grads);
     ctx.setPhysicalGradients(std::span<const assembly::AssemblyContext::Vector3D>(grads.data(), grads.size()),
                              std::span<const assembly::AssemblyContext::Vector3D>(grads.data(), grads.size()));
 
@@ -156,33 +146,14 @@ static assembly::KernelOutput evalCellMatrixInterpreter(const FormIR& ir,
     return out;
 }
 
-static assembly::KernelOutput evalCellMatrixJIT(const FormIR& ir,
-                                                const assembly::AssemblyContext& ctx,
-                                                const forms::JITOptions& jit_opts)
+static void evalCellMatrixJIT(const FormIR& ir, const assembly::AssemblyContext& ctx,
+                              const forms::JITOptions& options, assembly::KernelOutput& out)
 {
-    auto compiler = forms::jit::JITCompiler::getOrCreate(jit_opts);
-    const auto r = compiler->compile(ir);
-    ASSERT_TRUE(r.ok) << r.message;
-    ASSERT_FALSE(r.kernels.empty());
-
-    std::uintptr_t addr = 0;
-    for (const auto& k : r.kernels) {
-        if (k.domain == IntegralDomain::Cell) {
-            addr = k.address;
-            break;
-        }
-    }
-    ASSERT_NE(addr, 0u);
-
-    assembly::KernelOutput out;
+    auto fallback = std::make_shared<FormKernel>(ir.clone());
+    forms::jit::JITKernelWrapper kernel(fallback, options);
     out.reserve(ctx.numTestDofs(), ctx.numTrialDofs(), /*need_matrix=*/true, /*need_vector=*/false);
-    out.clear();
-
-    assembly::jit::PackingChecks checks;
-    checks.validate_alignment = true;
-    const auto args = assembly::jit::packCellKernelArgsV6(ctx, out, checks);
-    callJIT(addr, &args);
-    return out;
+    kernel.computeCell(ctx, out);
+    ASSERT_TRUE(kernel.isJITReady());
 }
 
 } // namespace
@@ -395,8 +366,14 @@ TEST(ComplexTest, ToRealBlock2x2JITMatchesInterpreter)
         const auto ir = form_compiler.compileBilinear(expr);
 
         const auto interp = evalCellMatrixInterpreter(ir, ctx);
-        const auto jit = evalCellMatrixJIT(ir, ctx, jit_opts);
+        assembly::KernelOutput jit;
+        ASSERT_NO_FATAL_FAILURE(evalCellMatrixJIT(ir, ctx, jit_opts, jit));
         expectKernelMatrixNear(jit, interp, 1e-12);
+        const Real scale = (i == j) ? 1.0 : (i == 0 ? -2.0 : 2.0);
+        const std::array<Real, 4> mass{0.3125, 0.0625, 0.0625, 0.0625};
+        for (std::size_t k = 0; k < mass.size(); ++k) {
+            EXPECT_NEAR(jit.local_matrix[k], scale * mass[k], 1e-12);
+        }
     }
 }
 #endif // SVMP_FE_ENABLE_LLVM_JIT

@@ -234,8 +234,8 @@ TEST_F(MatrixExprTest, TransposeInExpression) {
     // Compute A^T * B (should be 2x2)
     Matrix<double, 2, 2> result = transpose(A) * B;
 
-    EXPECT_DOUBLE_EQ(result(0, 0), 95.0);   // 1*7 + 3*9 + 5*11
-    EXPECT_DOUBLE_EQ(result(0, 1), 106.0);  // 1*8 + 3*10 + 5*12
+    EXPECT_DOUBLE_EQ(result(0, 0), 89.0);   // 1*7 + 3*9 + 5*11
+    EXPECT_DOUBLE_EQ(result(0, 1), 98.0);  // 1*8 + 3*10 + 5*12
     EXPECT_DOUBLE_EQ(result(1, 0), 116.0);  // 2*7 + 4*9 + 6*11
     EXPECT_DOUBLE_EQ(result(1, 1), 128.0);  // 2*8 + 4*10 + 6*12
 }
@@ -587,8 +587,8 @@ TEST_F(MatrixExprTest, MatrixVectorMixedExpression) {
 
 TEST_F(MatrixExprTest, ConstexprEvaluation) {
     // Test compile-time evaluation
-    constexpr Matrix<double, 2, 2> M1{{1.0, 2.0}, {3.0, 4.0}};
-    constexpr Matrix<double, 2, 2> M2{{5.0, 6.0}, {7.0, 8.0}};
+    static constexpr Matrix<double, 2, 2> M1{{1.0, 2.0}, {3.0, 4.0}};
+    static constexpr Matrix<double, 2, 2> M2{{5.0, 6.0}, {7.0, 8.0}};
 
     // These operations should be evaluable at compile time
     constexpr auto expr = M1 + M2;

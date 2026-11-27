@@ -34,24 +34,8 @@ include_directories(
 )
 
 # Define test sources
-set(MATH_TEST_SOURCES
-    test_TypeTraits.cpp
-    test_Vector.cpp
-    test_Matrix.cpp
-    test_VoigtNotation.cpp
-    test_Rotations.cpp
-    test_Eigensolvers.cpp
-    test_Interpolation.cpp
-    test_QuadratureSupport.cpp
-    test_SIMD.cpp
-    test_ExpressionOps.cpp
-    test_VectorExpr.cpp
-    test_MatrixExpr.cpp
-    test_Tensor.cpp
-    test_MathUtils.cpp
-    test_MathConstants.cpp
-    test_LU.cpp
-)
+file(GLOB MATH_TEST_SOURCES CONFIGURE_DEPENDS RELATIVE "${CMAKE_CURRENT_SOURCE_DIR}" test_*.cpp)
+list(REMOVE_ITEM MATH_TEST_SOURCES test_main.cpp)
 
 # Create test executable for each test file
 foreach(test_source ${MATH_TEST_SOURCES})

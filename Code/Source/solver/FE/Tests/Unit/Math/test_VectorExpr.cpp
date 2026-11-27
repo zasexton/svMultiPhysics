@@ -245,9 +245,7 @@ TEST_F(VectorExprTest, DotProductOfExpressions) {
     // Dot product of expressions
     double result = dot(a + b, c);
 
-    EXPECT_DOUBLE_EQ(result, 30.0);  // (5,7,9) . (2,2,2) = 10+14+18 = 42
-    // Correction: (5,7,9) . (2,2,2) = 10+14+18 = 42, not 30
-    // Let me recalculate: a+b = (5,7,9), dot with c = 5*2 + 7*2 + 9*2 = 10+14+18 = 42
+    EXPECT_DOUBLE_EQ(result, 42.0);  // (5, 7, 9) · (2, 2, 2)
 }
 
 TEST_F(VectorExprTest, NormOfExpression) {
@@ -425,8 +423,8 @@ TEST_F(VectorExprTest, LargeVectorExpression) {
 
 TEST_F(VectorExprTest, ConstexprEvaluation) {
     // Test compile-time evaluation
-    constexpr Vector<double, 2> v1{1.0, 2.0};
-    constexpr Vector<double, 2> v2{3.0, 4.0};
+    static constexpr Vector<double, 2> v1{1.0, 2.0};
+    static constexpr Vector<double, 2> v2{3.0, 4.0};
 
     // These operations should be evaluable at compile time
     constexpr auto expr = v1 + v2;
