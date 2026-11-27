@@ -27,6 +27,7 @@
 #include <mpi.h>
 
 #include "Constraints/AffineConstraints.h"
+#include "Constraints/GaugeRegistry.h"
 #include "Constraints/NormalComponentConstraint.h"
 #include "Constraints/StrongDirichletConstraint.h"
 #include "Elements/ReferenceElement.h"
@@ -413,6 +414,91 @@ void checkTranslatedPeriodicField(MPI_Comm comm, double shear) {
 
 TEST(FieldPeriodicBCMPI, ProductFieldMatchesTranslatedNodesAcrossOwnedBoundaryFaces) {
     checkTranslatedPeriodicField(MPI_COMM_WORLD, 0.);
+}
+
+TEST(NormalComponentConstraintMPI, ConstantMultiplierGaugeUsesTheFreeNormalFlux)
+{
+    int rank = 0, size = 1;
+    MPI_Comm_rank(MPI_COMM_WORLD, &rank);
+    MPI_Comm_size(MPI_COMM_WORLD, &size);
+    auto data = std::make_shared<StructuredMesh>(structuredMesh(2, 2, false, false, true));
+    for (auto& x : data->x) {
+        const auto [a, b, z] = x;
+        x = {0.6 * a - 0.8 * b, 0.8 * a + 0.6 * b, z};
+    }
+    auto mesh = std::make_shared<ReplicatedMeshAccess>(data, rank, size);
+    auto scalar = std::make_shared<spaces::H1Space>(ElementType::Quad4, 1);
+    auto vector = std::make_shared<spaces::ProductSpace>(scalar, 2);
+    for (const auto [closed, weighted] : {std::pair{false, false}, {true, false}, {true, true}}) {
+        SCOPED_TRACE(::testing::Message() << "closed=" << closed << " weighted=" << weighted);
+        for (auto& face : data->faces) {
+            if (face.marker != kWall) face.marker = closed ? kSide : -1;
+        }
+        systems::FESystem sys(mesh);
+        const auto m = sys.addField({.name = "m", .space = scalar, .components = 1});
+        const auto u = sys.addField({.name = "u", .space = vector, .components = 2});
+        sys.addOperator("op");
+        auto v = forms::TestField(u, *vector, "v");
+        auto q = forms::TestField(m, *scalar, "q");
+        auto state = forms::StateField(u, *vector, "u");
+        auto multiplier = forms::StateField(m, *scalar, "m");
+        if (weighted) multiplier = forms::x().component(0) * multiplier;
+        systems::installFormulation(sys, "op", {u, m},
+            (forms::inner(forms::grad(state), forms::grad(v)) -
+             multiplier * forms::div(v) + q * forms::div(state)).dx());
+        std::vector<int> markers{kWall};
+        if (closed) markers.push_back(kSide);
+        sys.addSystemConstraint(std::make_unique<NormalComponentConstraint>(u, markers, FormExpr::constant(2.)));
+        systems::SetupOptions options;
+        options.dof_options.global_numbering = dofs::GlobalNumberingMode::GlobalIds;
+        options.dof_options.ownership = dofs::OwnershipStrategy::VertexGID;
+        options.dof_options.my_rank = rank;
+        options.dof_options.world_size = size;
+        options.dof_options.mpi_comm = MPI_COMM_WORLD;
+        systems::SetupInputs inputs;
+        inputs.topology_override = mesh->topology();
+        sys.setup(options, inputs);
+
+        // Independent Q1 edge integral. Each endpoint contributes half the
+        // rotated edge to the flux. Apply homogeneous test constraints to
+        // the row even though the prescribed trial data is nonzero.
+        const auto& owned = sys.dofHandler().getPartition().locallyOwned();
+        const auto& map = sys.fieldDofHandler(u).getDofMap();
+        std::vector<Real> flux(sys.dofHandler().getNumDofs(), 0.);
+        for (const auto& face : data->faces) {
+            const auto& vertices = data->cells[face.cell];
+            const int a = face.local, b = (a + 1) % 4;
+            const auto& x = data->x[vertices[a]];
+            const auto& y = data->x[vertices[b]];
+            const auto dofs = map.getCellDofs(face.cell);
+            const std::array<Real, 2> moment{(y[1] - x[1]) / 2., (x[0] - y[0]) / 2.};
+            for (int c = 0; c < 2; ++c) {
+                for (const int i : {a, b}) {
+                    const auto d = sys.fieldDofOffset(u) + dofs[4 * c + i];
+                    if (!owned.contains(d)) continue;
+                    if (auto line = sys.constraints().getConstraint(d)) {
+                        for (const auto& e : line->entries) flux[e.master_dof] += e.weight * moment[c];
+                    } else {
+                        flux[d] += moment[c];
+                    }
+                }
+            }
+        }
+        MPI_Allreduce(MPI_IN_PLACE, flux.data(), static_cast<int>(flux.size()), MPI_DOUBLE, MPI_SUM, MPI_COMM_WORLD);
+        Real largest = 0.;
+        for (const Real x : flux) largest = std::max(largest, std::abs(x));
+        EXPECT_NEAR(largest, closed ? 0. : 0.8, 1e-13);
+
+        ASSERT_NE(sys.gaugeRegistryIfPresent(), nullptr);
+        const auto& modes = sys.gaugeRegistryIfPresent()->resolvedModes();
+        const auto mode = std::find_if(modes.begin(), modes.end(), [m](const auto& entry) {
+            return entry.candidate.field == m;
+        });
+        ASSERT_NE(mode, modes.end());
+        // With coefficient x the volume term against the unconstrained
+        // interior nodal test e_x N_center is -integral(N_center) = -1.
+        EXPECT_EQ(mode->status, closed && !weighted ? gauge::GaugeStatus::ExactNullspace : gauge::GaugeStatus::Anchored);
+    }
 }
 
 TEST(FieldPeriodicBCMPI, IndependentCommunicatorsUseTheirOwnPeriodicGeometry) {

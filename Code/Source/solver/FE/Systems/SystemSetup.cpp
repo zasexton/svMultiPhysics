@@ -37,6 +37,7 @@
 
 #include "Constraints/GaugeDiagnostics.h"
 #include "Constraints/GlobalConstraint.h"
+#include "Constraints/NormalComponentConstraint.h"
 #include "Constraints/ParallelConstraints.h"
 
 #include "Constraints/SupportRestrictionConstraint.h"
@@ -60,6 +61,7 @@
 #include "Dofs/EntityDofMap.h"
 
 #include "Elements/ReferenceElement.h"
+#include "Elements/LagrangeElement.h"
 
 #include "Quadrature/QuadratureFactory.h"
 
@@ -2498,6 +2500,44 @@ LocalIndex maxInteriorFaceQuadraturePoints(const assembly::IMeshAccess& mesh,
     return false;
 }
 
+// Strip literal factors when recognizing a spatially uniform multiplier of
+// div(v). A spatially varying coefficient also has a volume term under IBP.
+const forms::FormExprNode& withoutConstantFactors(const forms::FormExprNode& node)
+{
+    using Type = forms::FormExprType;
+    const auto children = node.children();
+    if (node.type() == Type::Negate) return withoutConstantFactors(*children[0]);
+    if (node.type() == Type::Multiply) {
+        if (children[0]->type() == Type::Constant) return withoutConstantFactors(*children[1]);
+        if (children[1]->type() == Type::Constant) return withoutConstantFactors(*children[0]);
+    }
+    return node;
+}
+
+bool constantShiftOnlyTestsDivergence(const forms::FormExprNode& expr, FieldId scalar,
+                                      FieldId test, bool in_cell = false)
+{
+    using Type = forms::FormExprType;
+    const auto& node = withoutConstantFactors(expr);
+    if (!occursUndifferentiatedIn(node, scalar)) return true;
+    const auto children = node.children();
+    if (node.type() == Type::CellIntegral)
+        return constantShiftOnlyTestsDivergence(*children[0], scalar, test, true);
+    if (node.type() == Type::Add || node.type() == Type::Subtract)
+        return constantShiftOnlyTestsDivergence(*children[0], scalar, test, in_cell) &&
+               constantShiftOnlyTestsDivergence(*children[1], scalar, test, in_cell);
+    if (!in_cell || node.type() != Type::Multiply) return false;
+    auto product = [&](const forms::FormExprNode& left, const forms::FormExprNode& right) {
+        const auto& field = withoutConstantFactors(left);
+        const auto& div = withoutConstantFactors(right);
+        if (field.type() != Type::StateField || field.fieldId() != scalar ||
+            div.type() != Type::Divergence) return false;
+        const auto* v = div.children().front();
+        return v->type() == Type::TestFunction && v->fieldId().value_or(test) == test;
+    };
+    return product(*children[0], *children[1]) || product(*children[1], *children[0]);
+}
+
 /**
  * Whether the rows of a test field fix the constant of @p field: @p row is the
  * residual of one test field (its rows); with the test function set to 1 it
@@ -4013,6 +4053,7 @@ void FESystem::setup(const SetupOptions& user_opts, const SetupInputs& inputs)
         // a DOF back to a region.  Connectivity itself is mesh-based so mixed or
         // vector-valued field ordering does not distort region detection.
         gauge::GaugeRegistry::RegionProvider region_provider;
+        std::vector<int> flux_cell_regions;
         std::shared_ptr<std::map<int, std::vector<int>>> marker_regions;
         bool allow_local_region_scoping = true;
 #if FE_HAS_MPI
@@ -4082,6 +4123,9 @@ void FESystem::setup(const SetupOptions& user_opts, const SetupInputs& inputs)
                         };
                         marker_regions = std::make_shared<std::map<int, std::vector<int>>>(
                             topo.boundary_mapping.marker_to_regions);
+                        flux_cell_regions.resize(mesh_ref.numCells());
+                        for (const auto& region : topo.components)
+                            for (auto cell : region.cell_indices) flux_cell_regions[cell] = region.region_id;
                         std::fprintf(stderr,
                             "[GaugeRegistry] Mesh has %lld connected components — "
                             "enabling per-region gauge scoping\n",
@@ -4339,11 +4383,9 @@ void FESystem::setup(const SetupOptions& user_opts, const SetupInputs& inputs)
         // where a Lagrange multiplier field enters algebraically into the
         // coupled equation (Stokes, mixed Darcy, electromagnetics, etc.).
         //
-        // Limitation: periodic BCs on field V constrain slave DOFs but
-        // leave master DOFs unconstrained.  The IBP boundary terms on
-        // periodic face pairs cancel (opposite normals), so they do NOT
-        // anchor P.  Currently periodic markers are not excluded; a future
-        // refinement could detect periodic constraints and skip those markers.
+        // For a scalar multiplying the divergence of a nodal vector test,
+        // resolve the integrated boundary flux on the actual free test space.
+        // Other coupling descriptors use the marker-based evidence below.
         // -----------------------------------------------------------------
         if (mesh_access_) {
             // Step 1: Collect nullspace candidate fields and their families.
@@ -4360,10 +4402,10 @@ void FESystem::setup(const SetupOptions& user_opts, const SetupInputs& inputs)
                     FieldId nullspace_field;   // P
                     FieldId coupled_field;     // V
                     gauge::NullspaceModeFamily family;
+                    bool constant_divergence;
                 };
                 std::vector<CouplingPair> couplings;
 
-                std::size_t total_pairings = 0;
                 for (const auto& contrib : contributions_) {
                     for (const auto& pairing : contrib.pairings) {
                         // The trial field must appear undifferentiated in the
@@ -4391,17 +4433,14 @@ void FESystem::setup(const SetupOptions& user_opts, const SetupInputs& inputs)
                         auto it = candidate_fields.find(trial_fid);
                         if (it == candidate_fields.end()) continue;
 
-                        // Avoid duplicates
-                        bool already = false;
-                        for (const auto& cp : couplings) {
-                            if (cp.nullspace_field == trial_fid && cp.coupled_field == test_fid) {
-                                already = true;
-                                break;
-                            }
-                        }
-                        if (!already) {
-                            couplings.push_back({trial_fid, test_fid, it->second});
-                        }
+                        const bool divergence = it->second == gauge::NullspaceModeFamily::ScalarConstant &&
+                            contrib.source_expression && constantShiftOnlyTestsDivergence(
+                                *contrib.source_expression, trial_fid, test_fid);
+                        auto existing = std::find_if(couplings.begin(), couplings.end(), [&](const auto& cp) {
+                            return cp.nullspace_field == trial_fid && cp.coupled_field == test_fid;
+                        });
+                        if (existing == couplings.end()) couplings.push_back({trial_fid, test_fid, it->second, divergence});
+                        else existing->constant_divergence &= divergence;
                     }
                 }
 
@@ -4426,10 +4465,41 @@ void FESystem::setup(const SetupOptions& user_opts, const SetupInputs& inputs)
                     }
 #endif
 
+                    std::optional<constraints::AffineConstraints> closed_test_rows;
+#if FE_HAS_MPI
+                    const bool has_constraints = collectiveAnyTrue(affine_constraints_.numConstraints() != 0, gauge_comm);
+#endif
                     for (const auto& cp : couplings) {
                         const auto v_idx = static_cast<std::size_t>(cp.coupled_field);
                         if (v_idx >= field_dof_handlers_.size()) continue;
 
+                        const auto& space = *field_registry_.get(cp.coupled_field).space;
+                        const auto* product = dynamic_cast<const spaces::ProductSpace*>(&space);
+                        if (cp.constant_divergence && product && meshAccess().dimension() >= 2 &&
+                            space.value_dimension() == meshAccess().dimension() &&
+                            space.continuity() == Continuity::C0 &&
+                            dynamic_cast<const elements::LagrangeElement*>(&product->base_space()->element())) {
+                            if (!closed_test_rows) {
+                                closed_test_rows.emplace(affine_constraints_);
+#if FE_HAS_MPI
+                                if (gauge_comm.isParallel() && has_constraints) {
+                                    const auto total = dof_handler_.getNumDofs();
+                                    const auto& owned = dof_handler_.getPartition().locallyOwned();
+                                    dofs::DofPartition all_rows(owned, dofs::IndexSet(0, total).difference(owned));
+                                    all_rows.setGlobalSize(total);
+                                    constraints::ParallelConstraints(gauge_comm.native(), all_rows).synchronize(*closed_test_rows);
+                                }
+#endif
+                                closed_test_rows->close();
+                            }
+                            for (int region : constraints::regionsWithFreeNormalFlux(
+                                     *this, cp.coupled_field, *closed_test_rows, flux_cell_regions)) {
+                                gauge_registry_->addAnchoring({cp.nullspace_field, -1, region, cp.family,
+                                    gauge::AnchoringVerdict::Anchored,
+                                    "IBP coupling: a free test function has nonzero integrated normal flux"});
+                            }
+                            continue;
+                        }
                         const GlobalIndex v_offset = field_dof_offsets_[v_idx];
                         const GlobalIndex v_end    = v_offset + field_dof_handlers_[v_idx].getNumDofs();
 

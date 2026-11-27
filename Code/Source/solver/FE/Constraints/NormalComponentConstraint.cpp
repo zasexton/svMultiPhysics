@@ -19,9 +19,11 @@
 #include "Spaces/ProductSpace.h"
 #include "Spaces/FaceRestriction.h"
 #include "Systems/FESystem.h"
+#include "Systems/SystemCollectives.h"
 #include "Systems/SystemsExceptions.h"
 
 #include <algorithm>
+#include <bit>
 #include <cmath>
 #include <cstdint>
 #include <limits>
@@ -54,6 +56,7 @@ constexpr Real kPi = 3.14159265358979323846;
 /// normal there, its measure, and the point as the facet's cell maps it.
 struct FacetContribution {
     std::int64_t facet{-1};                    ///< global facet id
+    GlobalIndex local_cell{-1};                ///< used before exchanging facet data
     std::array<GlobalIndex, 3> dofs{-1, -1, -1};  ///< the point's DOF of each component
     std::array<Real, 3> normal{0.0, 0.0, 0.0};
     Real moment_scale{};                       ///< integral of the absolute trace basis
@@ -208,7 +211,7 @@ std::vector<NormalMoment> normalFluxMoments(
 /// components) there.
 std::vector<FacetContribution> collectContributions(const FESystem& system,
                                                     FieldId field,
-                                                    std::span<const forms::ExteriorBoundaryMeasure> boundaries,
+                                                    std::optional<std::span<const forms::ExteriorBoundaryMeasure>> boundaries,
                                                     int components, bool normal_flux)
 {
     const auto& rec = system.fieldRecord(field);
@@ -225,10 +228,9 @@ std::vector<FacetContribution> collectContributions(const FESystem& system,
     std::vector<std::array<Real, 3>> corners;
     std::vector<FacetContribution> out;
 
-    for (const auto& boundary : boundaries) {
-        const int marker = boundary.physicalBoundaryMarker();
+    const auto collect_marker = [&](int marker, int active_marker) {
         CutRulesByFace active_rules;
-        const bool restricted = visitActiveBoundaryRules(system, marker, boundary.generatedActiveBoundaryMarker(),
+        const bool restricted = visitActiveBoundaryRules(system, marker, active_marker,
             [&](GlobalIndex face, const auto& rule) { active_rules[face].push_back(&rule); });
         mesh.forEachBoundaryFace(marker, [&](GlobalIndex face_id, GlobalIndex cell_id) {
             if (restricted && !active_rules.contains(face_id)) {
@@ -296,6 +298,7 @@ std::vector<FacetContribution> collectContributions(const FESystem& system,
                             "NormalComponentConstraint: local DOF index out of range");
                 FacetContribution c;
                 c.facet = facet;
+                c.local_cell = cell_id;
                 c.measure = measure;
 
                 for (int d = 0; d < components; ++d) {
@@ -320,6 +323,12 @@ std::vector<FacetContribution> collectContributions(const FESystem& system,
                 out.push_back(c);
             }
         });
+    };
+    if (boundaries) {
+        for (const auto& boundary : *boundaries)
+            collect_marker(boundary.physicalBoundaryMarker(), boundary.generatedActiveBoundaryMarker());
+    } else {
+        collect_marker(-1, -1); // The whole exterior, including unlabelled facets.
     }
     return out;
 }
@@ -662,6 +671,63 @@ std::vector<forms::ExteriorBoundaryMeasure> fullBoundaries(std::span<const int> 
 }
 
 } // namespace
+
+std::vector<int> regionsWithFreeNormalFlux(
+    const FESystem& system, FieldId field,
+    const AffineConstraints& test_constraints, std::span<const int> cell_regions)
+{
+#if FE_HAS_MPI
+    const systems::CollectiveCommunicator comm(system.dofHandler().mpiComm());
+#else
+    const systems::CollectiveCommunicator comm;
+#endif
+    // For a constant scalar multiplier the divergence row is the boundary
+    // functional l. Its coefficient on an independent test DOF is (P^T l)_i.
+    struct Coefficient { Real value{}, scale{}; };
+    std::map<std::pair<int, GlobalIndex>, Coefficient> coefficients;
+    std::vector<std::uint64_t> words;
+    std::exception_ptr failure;
+    try {
+        const auto dim = system.meshAccess().dimension();
+        for (const auto& c : collectContributions(system, field, std::nullopt, dim, true)) {
+            if (!system.meshAccess().isOwnedCell(c.local_cell)) continue;
+            const int region = cell_regions.empty() ? -1 : cell_regions[c.local_cell];
+            for (int d = 0; d < dim; ++d) {
+                auto add = [&](GlobalIndex master, Real weight) {
+                    auto& coefficient = coefficients[{region, master}];
+                    coefficient.value += weight * c.flux_moment[d];
+                    coefficient.scale += std::abs(weight) * c.moment_scale;
+                };
+                if (const auto line = test_constraints.getConstraint(c.dofs[d])) {
+                    for (const auto& e : line->entries) add(e.master_dof, e.weight);
+                } else {
+                    add(c.dofs[d], Real{1});
+                }
+            }
+        }
+        for (const auto& [key, w] : coefficients) {
+            words.insert(words.end(), {static_cast<std::uint64_t>(key.first + 1),
+                static_cast<std::uint64_t>(key.second), std::bit_cast<std::uint64_t>(w.value),
+                std::bit_cast<std::uint64_t>(w.scale)});
+        }
+    } catch (...) {
+        failure = std::current_exception();
+    }
+    systems::requireCollectivePhasePreparation(failure, comm, "boundary normal test flux");
+    const auto all = systems::collectiveGatherWords(words, comm, "boundary normal test flux");
+    coefficients.clear();
+    for (std::size_t i = 0; i < all.size(); i += 4) {
+        auto& w = coefficients[{static_cast<int>(all[i]) - 1, static_cast<GlobalIndex>(all[i + 1])}];
+        w.value += std::bit_cast<Real>(all[i + 2]);
+        w.scale += std::bit_cast<Real>(all[i + 3]);
+    }
+    std::vector<int> regions;
+    for (const auto& [key, w] : coefficients) {
+        if (std::abs(w.value) > 64 * std::numeric_limits<Real>::epsilon() * w.scale &&
+            (regions.empty() || regions.back() != key.first)) regions.push_back(key.first);
+    }
+    return regions;
+}
 
 std::optional<std::unordered_set<GlobalIndex>>
 activeBoundaryFaces(const FESystem& system, int boundary_marker, int active_boundary_marker)

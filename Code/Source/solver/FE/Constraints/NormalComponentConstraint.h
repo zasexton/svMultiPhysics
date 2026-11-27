@@ -145,6 +145,13 @@ boundaryPointNormals(const systems::FESystem& system,
                      std::span<const int> boundary_markers,
                      Real feature_angle_degrees = NormalComponentOptions{}.feature_angle_degrees);
 
+/// Regions where some admissible vector Lagrange test function has nonzero
+/// integrated normal flux. The supplied affine rows are closed and include
+/// remote masters. An empty cell-region map represents one global region (-1).
+[[nodiscard]] std::vector<int> regionsWithFreeNormalFlux(
+    const systems::FESystem& system, FieldId field,
+    const AffineConstraints& test_constraints, std::span<const int> cell_regions);
+
 /**
  * @brief The faces of @p boundary_marker that its generated active subset
  *        @p active_boundary_marker covers
