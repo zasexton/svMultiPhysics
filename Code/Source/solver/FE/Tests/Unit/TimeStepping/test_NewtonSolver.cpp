@@ -6914,11 +6914,14 @@ TEST(NewtonSolver, ReusesJacobianWhenRebuildPeriodGreaterThanOne)
     svmp::FE::timestepping::NewtonWorkspace ws;
     newton.allocateWorkspace(*problem.sys, *problem.factory, ws);
     problem.history.repack(*problem.factory);
+    const auto initial_counts = counts;
 
     const auto rep = newton.solveStep(*problem.transient, *problem.linear, /*solve_time=*/problem.history.dt(), problem.history, ws);
     EXPECT_FALSE(rep.converged);
     EXPECT_EQ(rep.iterations, nopt.max_iterations);
-
+    // The nonlinear tangent is rebuilt at iterations 0 and 3.
+    EXPECT_EQ(counts.matrix_only - initial_counts.matrix_only, 2);
+    EXPECT_EQ(counts.matrix_and_vector - initial_counts.matrix_and_vector, 0);
 }
 
 // Without line search the residual after the last update is evaluated only

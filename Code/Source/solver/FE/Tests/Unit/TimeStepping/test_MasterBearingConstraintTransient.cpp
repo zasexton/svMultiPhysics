@@ -410,23 +410,32 @@ TEST(MasterBearingConstraintTransient, BackwardEulerMpcConvergesAndTracksExact)
 #endif
 }
 
+[[maybe_unused]] void checkSecondOrderMpcReaction(
+    svmp::FE::timestepping::SchemeKind scheme, double source)
+{
+    const auto run = [&](double dt) {
+        return runMpcReactionProblem(scheme, /*rho_inf=*/0.5, dt,
+                                     /*t_end=*/0.5, /*lambda=*/2.0, source);
+    };
+    const auto coarse = run(0.05);
+    const auto fine = run(0.025);
+    for (const auto* result : {&coarse, &fine}) {
+        ASSERT_TRUE(result->ran);
+        ASSERT_TRUE(result->success);
+        EXPECT_LE(result->max_newton_iterations, 3);
+        EXPECT_LT(result->max_constraint_violation, 1e-10);
+    }
+    EXPECT_LT(coarse.max_solution_error, 7e-4);
+    ASSERT_GT(fine.max_solution_error, 0.0);
+    EXPECT_NEAR(coarse.max_solution_error / fine.max_solution_error, 4.0, 0.4);
+}
+
 TEST(MasterBearingConstraintTransient, GeneralizedAlphaMpcConvergesAndTracksExact)
 {
 #if !defined(FE_HAS_EIGEN) || !FE_HAS_EIGEN
     GTEST_SKIP() << "This transient solve requires the Eigen backend.";
 #else
-    const auto result = runMpcReactionProblem(
-        svmp::FE::timestepping::SchemeKind::GeneralizedAlpha,
-        /*rho_inf=*/0.5,
-        /*dt=*/0.05,
-        /*t_end=*/0.5,
-        /*lambda=*/2.0,
-        /*source=*/0.0);
-    ASSERT_TRUE(result.ran);
-    EXPECT_TRUE(result.success);
-    EXPECT_LE(result.max_newton_iterations, 3);
-    EXPECT_LT(result.max_solution_error, 2e-2);
-    EXPECT_LT(result.max_constraint_violation, 1e-10);
+    checkSecondOrderMpcReaction(svmp::FE::timestepping::SchemeKind::GeneralizedAlpha, 0.0);
 #endif
 }
 
@@ -435,20 +444,7 @@ TEST(MasterBearingConstraintTransient, GeneralizedAlphaMpcWithConstantSource)
 #if !defined(FE_HAS_EIGEN) || !FE_HAS_EIGEN
     GTEST_SKIP() << "This transient solve requires the Eigen backend.";
 #else
-    // Constant source mimics the body-force/gravity path of the dam-break
-    // configuration where the aggregation blocker was observed.
-    const auto result = runMpcReactionProblem(
-        svmp::FE::timestepping::SchemeKind::GeneralizedAlpha,
-        /*rho_inf=*/0.5,
-        /*dt=*/0.05,
-        /*t_end=*/0.5,
-        /*lambda=*/2.0,
-        /*source=*/3.0);
-    ASSERT_TRUE(result.ran);
-    EXPECT_TRUE(result.success);
-    EXPECT_LE(result.max_newton_iterations, 3);
-    EXPECT_LT(result.max_solution_error, 2e-2);
-    EXPECT_LT(result.max_constraint_violation, 1e-10);
+    checkSecondOrderMpcReaction(svmp::FE::timestepping::SchemeKind::GeneralizedAlpha, 3.0);
 #endif
 }
 

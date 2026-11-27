@@ -541,10 +541,9 @@ TEST(AuxiliaryStateStepper, BDF2_WithHistory)
     auto result = stepper->advance(model, deriv, x, x_committed,
                                    history, {}, {}, 0.1, 0.1);
 
-    EXPECT_TRUE(result.converged);
-    // BDF2 should give a different (more accurate) result than BE
-    EXPECT_GT(x[0], 0.0);
-    EXPECT_LT(x[0], x_n_val);
+    ASSERT_TRUE(result.converged);
+    // For x' = -x, (3 + 2 dt) x_{n+1} = 4 x_n - x_{n-1}.
+    EXPECT_NEAR(x[0], 145.0 / 176.0, 1e-12);
 }
 
 // ============================================================================

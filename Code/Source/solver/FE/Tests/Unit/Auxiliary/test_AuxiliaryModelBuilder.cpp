@@ -1422,13 +1422,7 @@ public:
 
     void evaluateResidual(const AuxiliaryLocalContext& ctx,
                           AuxiliaryResidualRequest& req) const override {
-        // dx/dt = inputs[0]*params[0] + inputs[1]*params[1] - x
-        // With sig order: B*Z + A*M - x
-        const Real B = ctx.inputs.size() > 0 ? ctx.inputs[0] : 0.0;
-        const Real A = ctx.inputs.size() > 1 ? ctx.inputs[1] : 0.0;
-        const Real Z = ctx.params.size() > 0 ? ctx.params[0] : 0.0;
-        const Real M = ctx.params.size() > 1 ? ctx.params[1] : 0.0;
-        req.residual[0] = ctx.xdot[0] - B*Z - A*M + ctx.x[0];
+        req.residual[0] = ctx.xdot[0] - forcing(ctx) + ctx.x[0];
     }
     bool hasAnalyticJacobian() const override { return true; }
     void evaluateJacobian(const AuxiliaryLocalContext&,
@@ -1440,11 +1434,15 @@ public:
     std::vector<std::string> outputNames() const override { return {"result"}; }
     void evaluateOutputs(const AuxiliaryLocalContext& ctx,
                           std::span<Real> output) const override {
+        output[0] = forcing(ctx);
+    }
+private:
+    static Real forcing(const AuxiliaryLocalContext& ctx) {
         const Real B = ctx.inputs.size() > 0 ? ctx.inputs[0] : 0.0;
         const Real A = ctx.inputs.size() > 1 ? ctx.inputs[1] : 0.0;
         const Real Z = ctx.params.size() > 0 ? ctx.params[0] : 0.0;
         const Real M = ctx.params.size() > 1 ? ctx.params[1] : 0.0;
-        output[0] = B*Z + A*M;
+        return B * Z + 2 * A * M;
     }
 };
 } // namespace
@@ -1476,28 +1474,19 @@ TEST(AuxiliaryModelBuilder, EndToEnd_SignatureOrdering)
     system.finalizeAuxiliaryLayout();
     system.beginTimeStep();
 
-    // With signature order: inputs=[B=3, A=2], params=[Z=10, M=100]
-    // RHS = B*Z + A*M - x = 3*10 + 2*100 - 0 = 230
-    // FE: x = 0 + 0.1 * 230 = 23.0
+    // B*Z + 2*A*M = 430. Reversing just the inputs gives 620,
+    // just the parameters gives 340, and reversing both gives 260.
     system.advanceAuxiliaryState(0.0, 0.1);
     auto* mgr = system.auxiliaryStateManagerIfPresent();
     ASSERT_NE(mgr, nullptr);
-    EXPECT_NEAR(mgr->getBlock("sig_inst").work()[0], 23.0, 1e-12);
+    EXPECT_NEAR(mgr->getBlock("sig_inst").work()[0], 43.0, 1e-12);
 
-    // Output: B*Z + A*M = 3*10 + 2*100 = 230
     systems::SystemStateView state;
     state.time = 0.1; state.dt = 0.1;
     system.prepareAuxiliaryForAssembly(state);
     auto outputs = system.auxiliaryOutputValues();
     ASSERT_EQ(outputs.size(), 1u);
-    EXPECT_NEAR(outputs[0], 230.0, 1e-12);
-
-    // If ordering were lexicographic (A before B, M before Z):
-    // inputs=[A=2, B=3], params=[M=100, Z=10]
-    // RHS would be = 2*100 + 3*10 = 230 (same value by coincidence)
-    // But the model reads inputs[0]=B, inputs[1]=A, so with lex order
-    // it would get inputs[0]=A=2, inputs[1]=B=3 → 2*10 + 3*100 = 320 ≠ 230
-    // The test value 23.0 proves signature ordering is being used.
+    EXPECT_NEAR(outputs[0], 430.0, 1e-12);
 }
 
 TEST(AuxiliaryModelBuilder, EndToEnd_CustomModel_MultiComponentInput)
