@@ -1795,7 +1795,9 @@ std::optional<std::vector<svmp::FE::Real>> evaluateDeclaredFreeSurfaceFunctional
     const FESystemHandle& sim,
     int interface_marker,
     std::span<const std::vector<std::string_view>> sums,
-    std::span<const svmp::FE::Real> solution)
+    std::span<const svmp::FE::Real> solution,
+    svmp::FE::Real time,
+    svmp::FE::Real dt)
 {
   if (!sim.fe_system) {
     throw std::runtime_error(
@@ -1825,6 +1827,8 @@ std::optional<std::vector<svmp::FE::Real>> evaluateDeclaredFreeSurfaceFunctional
     return std::nullopt;
   }
   systems::SystemStateView state;
+  state.time = time;
+  state.dt = dt;
   state.u = solution;
   const auto values = systems::evaluateFunctionalForms(system, forms, state, comm);
   std::vector<svmp::FE::Real> out;
@@ -1838,7 +1842,9 @@ std::optional<std::vector<svmp::FE::Real>> evaluateDeclaredFreeSurfaceFunctional
 std::vector<AcceptedFreeSurfaceDiscreteFunctionalState>
 evaluateDeclaredAcceptedFunctionals(
     const FESystemHandle& sim,
-    std::span<const svmp::FE::Real> solution)
+    std::span<const svmp::FE::Real> solution,
+    svmp::FE::Real time,
+    svmp::FE::Real dt)
 {
   auto states = currentAcceptedFunctionalLayouts(sim);
   if (states.empty()) {
@@ -1850,7 +1856,7 @@ evaluateDeclaredAcceptedFunctionals(
     attachAcceptedFreeSurfaceActiveVolumeDissipation(sim, solution, states);
     attachAcceptedFreeSurfaceExternalPressurePowers(sim, solution, states);
   }
-  (void)applyDeclaredFunctionalForms(sim, solution, {}, states, svmp::FE::Real{0.0}, svmp::FE::Real{0.0});
+  (void)applyDeclaredFunctionalForms(sim, solution, {}, states, time, dt);
   return states;
 }
 
@@ -1858,7 +1864,9 @@ std::vector<LevelSetAuthoritativeFunctionalValue>
 levelSetMaintenanceFunctionalValues(
     const FESystemHandle& sim,
     std::span<const AcceptedFreeSurfaceDiscreteFunctionalState> states,
-    std::span<const svmp::FE::Real> solution)
+    std::span<const svmp::FE::Real> solution,
+    svmp::FE::Real time,
+    svmp::FE::Real dt)
 {
   std::vector<LevelSetAuthoritativeFunctionalValue>
       values;
@@ -1923,7 +1931,7 @@ levelSetMaintenanceFunctionalValues(
         sim, solution, enriched_states);
   }
   (void)applyDeclaredFunctionalForms(
-      sim, solution, {}, enriched_states, svmp::FE::Real{0.0}, svmp::FE::Real{0.0});
+      sim, solution, {}, enriched_states, time, dt);
   const auto& snapshots = context->levelSetGeometrySnapshots();
   for (const auto& state : enriched_states) {
     const auto marker = static_cast<double>(state.interface_marker);

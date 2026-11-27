@@ -5918,6 +5918,11 @@ TEST(ApplicationDriverLevelSetWorkflows,
             interface_marker, svmp::FE::forms::CutVolumeSide::Negative);
         time_scaled = true;
       }
+      if (declaration.name == "free_surface.707.gravitational_energy") {
+        using svmp::FE::forms::FormExpr;
+        declaration.form = (FormExpr::time() + 2.0 * FormExpr::timeStep()).dCutVolume(
+            interface_marker, svmp::FE::forms::CutVolumeSide::Negative);
+      }
       svmp::FE::systems::declareFunctionalForm(*system, std::move(declaration));
     }
     ASSERT_TRUE(time_scaled);
@@ -6035,6 +6040,23 @@ TEST(ApplicationDriverLevelSetWorkflows,
   EXPECT_NEAR(record.active_volume_energy->gravitational_potential_power,
               svmp::FE::Real{2.0} * record.state.owned_liquid_volume,
               1.0e-12);
+  const std::array<std::vector<std::string_view>, 1> energy{{{"gravitational_energy"}}};
+  const double volume = record.state.owned_liquid_volume;
+  for (const auto& [time, dt] : {std::pair{3.0, 0.25}, std::pair{1.0, 0.5}}) {
+    const auto expected = (time + 2.0 * dt) * volume;
+    const auto candidate = evaluateDeclaredFreeSurfaceFunctionals(sim, interface_marker, energy, solution, time, dt);
+    ASSERT_TRUE(candidate);
+    ASSERT_EQ(candidate->size(), 1u);
+    EXPECT_NEAR(candidate->front(), expected, 1e-12);
+    const auto endpoint = evaluateDeclaredAcceptedFunctionals(sim, solution, time, dt);
+    ASSERT_EQ(endpoint.size(), 1u);
+    ASSERT_TRUE(endpoint.front().active_volume_energy);
+    EXPECT_NEAR(endpoint.front().active_volume_energy->gravitational_energy, expected, 1e-12);
+    const auto maintenance = levelSetMaintenanceFunctionalValues(sim, endpoint, solution, time, dt);
+    ASSERT_EQ(maintenance.size(), 1u);
+    ASSERT_TRUE(maintenance.front().gravitational_energy);
+    EXPECT_NEAR(*maintenance.front().gravitational_energy, expected, 1e-12);
+  }
 #endif
 }
 

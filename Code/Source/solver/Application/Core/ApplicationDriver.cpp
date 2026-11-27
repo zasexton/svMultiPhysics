@@ -5520,7 +5520,7 @@ evaluateStaticCapillaryFunctionalCandidate(
       {"liquid_gas_surface_energy", "young_wall_energy"},
       {"gravitational_energy"}}};
   const auto declared_values = evaluateDeclaredFreeSurfaceFunctionals(
-      sim, marker, declared_quantities, candidate);
+      sim, marker, declared_quantities, candidate, history.time(), history.dt());
   if (!declared_values.has_value()) {
     evaluation.diagnostic =
         "candidate_declared_functional_unavailable";
@@ -5906,7 +5906,7 @@ bool initializeDiscreteStaticCapillaryEquilibrium(
   const std::array<std::vector<std::string_view>, 1> volume_quantity{{
       {"liquid_volume"}}};
   const auto declared_volume = evaluateDeclaredFreeSurfaceFunctionals(
-      sim, *marker, volume_quantity, {});
+      sim, *marker, volume_quantity, {}, history.time(), history.dt());
   if (!declared_volume.has_value()) {
     throw std::runtime_error(
         "[svMultiPhysics::Application] Static capillary initialization requires the declared liquid volume free_surface." +
@@ -7691,14 +7691,14 @@ void ApplicationDriver::runTransient(SimulationComponents& sim, const Parameters
   const auto velocity_extension_artifact_comm =
       activeFESystemCommunicator(*sim.fe_system);
   // What a maintenance work row records of a candidate state.
-  const svmp::Physics::formulations::navier_stokes::free_surface::LevelSetMaintenanceWorkRowSource
-      maintenance_work_rows{
+  const auto maintenance_rows_at = [&](svmp::FE::Real time, svmp::FE::Real dt) {
+    return svmp::Physics::formulations::navier_stokes::free_surface::LevelSetMaintenanceWorkRowSource{
           .functional_values =
-              [&](std::span<const svmp::FE::Real> candidate) {
+              [&, time, dt](std::span<const svmp::FE::Real> candidate) {
                 return levelSetMaintenanceFunctionalValues(
                     sim,
                     currentAcceptedFunctionalLayouts(sim),
-                    candidate);
+                    candidate, time, dt);
               },
           .algebraic_state_revision =
               [&](std::span<const svmp::FE::Real> candidate) {
@@ -7711,6 +7711,7 @@ void ApplicationDriver::runTransient(SimulationComponents& sim, const Parameters
                     *sim.fe_system, level_set_advection_velocity);
               },
       };
+  };
   const bool local_has_conservative_phase = std::any_of(
       level_set_maintenance.begin(),
       level_set_maintenance.end(),
@@ -8181,6 +8182,7 @@ void ApplicationDriver::runTransient(SimulationComponents& sim, const Parameters
   callbacks.on_before_step_accept =
       [&](svmp::FE::timestepping::TimeHistory& h,
           const svmp::FE::timestepping::NewtonReport& nr) {
+        const auto maintenance_work_rows = maintenance_rows_at(h.time() + h.dt(), h.dt());
         requireCollectiveLevelSetMaintenanceRequestSchedule(
             level_set_maintenance,
             LevelSetMaintenanceScheduleStage::
@@ -8948,6 +8950,7 @@ void ApplicationDriver::runTransient(SimulationComponents& sim, const Parameters
   };
   double vtk_total_time = 0.0;
   callbacks.on_step_accepted = [&](svmp::FE::timestepping::TimeHistory& h) {
+    const auto maintenance_work_rows = maintenance_rows_at(h.time(), h.dt());
     requireCollectiveLevelSetMaintenanceRequestSchedule(
         level_set_maintenance,
         LevelSetMaintenanceScheduleStage::
@@ -9086,7 +9089,7 @@ void ApplicationDriver::runTransient(SimulationComponents& sim, const Parameters
         levelSetMaintenanceFunctionalValues(
             sim,
             pre_maintenance_functionals,
-            pre_maintenance_solution);
+            pre_maintenance_solution, h.time(), h.dt());
     std::vector<LevelSetMaintenanceRequest>
         maintenance_requests_before_transaction;
     std::vector<svmp::FE::Real>

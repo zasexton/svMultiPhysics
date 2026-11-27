@@ -74,7 +74,9 @@ currentAcceptedFunctionalLayouts(const FE::systems::FESystemHandle& sim);
 std::vector<AcceptedFreeSurfaceDiscreteFunctionalState>
 evaluateDeclaredAcceptedFunctionals(
     const FE::systems::FESystemHandle& sim,
-    std::span<const FE::Real> solution);
+    std::span<const FE::Real> solution,
+    FE::Real time = 0.0,
+    FE::Real dt = 0.0);
 
 /**
  * @brief One free-surface functional of an interface as a measured 0-form
@@ -110,7 +112,9 @@ std::optional<std::vector<FE::Real>> evaluateDeclaredFreeSurfaceFunctionals(
     const FE::systems::FESystemHandle& sim,
     int interface_marker,
     std::span<const std::vector<std::string_view>> sums,
-    std::span<const FE::Real> solution);
+    std::span<const FE::Real> solution,
+    FE::Real time = 0.0,
+    FE::Real dt = 0.0);
 
 /// A communicator-consistent revision of one field's values.
 std::uint64_t collectiveFieldRevision(
@@ -126,7 +130,9 @@ levelSetMaintenanceFunctionalValues(
     const FE::systems::FESystemHandle& sim,
     std::span<const AcceptedFreeSurfaceDiscreteFunctionalState>
         states,
-    std::span<const FE::Real> solution);
+    std::span<const FE::Real> solution,
+    FE::Real time = 0.0,
+    FE::Real dt = 0.0);
 
 /// Which accepted functionals the declarations require on every rank.
 struct AcceptedFunctionalCoverage {
