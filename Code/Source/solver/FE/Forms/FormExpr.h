@@ -409,7 +409,7 @@ enum class CutSurfaceComponent : int {
     InverseJacobianXX, InverseJacobianXY, InverseJacobianXZ,
     InverseJacobianYX, InverseJacobianYY, InverseJacobianYZ,
     InverseJacobianZX, InverseJacobianZY, InverseJacobianZZ,
-    NormalSpeed
+    NormalSpeed, NegativePhaseFraction, PositivePhaseFraction, VolumeFractionDerivative
 };
 
 /**

@@ -1527,6 +1527,9 @@ private:
     [[nodiscard]] bool beginCutVolumeEpochCacheWithKey(const detail::CutVolumeEpochKey& key);
     /// Key of the last beginCutVolumeEpochCache call.
     detail::CutVolumeEpochKey last_cut_volume_epoch_key_{};
+    [[nodiscard]] std::pair<FieldId, std::vector<Real>> cutFractionDerivative(
+        const IMeshAccess& mesh, GlobalIndex cell, const geometry::CutQuadratureRule& volume,
+        const geometry::CutQuadratureRule* surface, const spaces::FunctionSpace& trial);
     [[nodiscard]] detail::CutVolumeEpochRuleEntry* cutVolumeEpochRuleEntry(
         const geometry::CutQuadratureRule& rule,
         GlobalIndex cell_id,

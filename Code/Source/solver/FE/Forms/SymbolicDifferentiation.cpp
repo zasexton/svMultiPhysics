@@ -597,6 +597,7 @@ enum class DiffWrtKind : std::uint8_t {
     ActiveTrialFunction,
     SpecificTrialFunction,
     FieldId,
+    ParameterSlot,
     AuxiliaryOutputSlot,     ///< Differentiate w.r.t. AuxiliaryOutputRef(slot)
     NormalTerminal,          ///< Differentiate w.r.t. the geometric normal() terminal
     SpatialCoordinate        ///< Differentiate w.r.t. physical quadrature point motion
@@ -619,6 +620,9 @@ struct DiffTargetConfig {
     std::optional<FieldId> field_id{};
     std::optional<FormExprNode::SpaceSignature> field_sig{};
     std::optional<std::string> field_name{};
+
+    std::optional<std::uint32_t> parameter_slot{};
+    FormExpr parameter_direction{};
 
     // AuxiliaryOutputSlot target.
     std::optional<std::uint32_t> aux_output_slot{};
@@ -1614,7 +1618,6 @@ FormExpr differentiateResidualImpl(const FormExpr& residual_form,
             // ---- Terminals (treated as constants) ----
             case FormExprType::Constant:
             case FormExprType::ParameterSymbol:
-            case FormExprType::ParameterRef:
             case FormExprType::BoundaryIntegralSymbol:
             case FormExprType::BoundaryIntegralRef:
             case FormExprType::AuxiliaryStateSymbol:
@@ -1643,6 +1646,12 @@ FormExpr differentiateResidualImpl(const FormExpr& residual_form,
             case FormExprType::BoundaryNormal:
                 out.primal = FormExpr(node);
                 out.deriv = zeroOf(out.primal);
+                break;
+
+            case FormExprType::ParameterRef:
+                out.primal = FormExpr(node);
+                out.deriv = cfg.kind == DiffWrtKind::ParameterSlot && !node->symbolName() &&
+                            node->slotIndex() == cfg.parameter_slot ? cfg.parameter_direction : zeroOf(out.primal);
                 break;
 
             case FormExprType::PreviousSolutionRef:
@@ -3449,6 +3458,16 @@ FormExpr directionalDerivativeWrtField(const FormExpr& expr,
         deriv = tensor::postprocessTensorDerivative(deriv);
     }
     return deriv;
+}
+
+FormExpr directionalDerivativeWrtParameterSlot(const FormExpr& expr, std::uint32_t slot, const FormExpr& direction)
+{
+    if (!direction.isValid()) throw std::invalid_argument("directionalDerivativeWrtParameterSlot: invalid direction");
+    DiffTargetConfig cfg;
+    cfg.kind = DiffWrtKind::ParameterSlot;
+    cfg.parameter_slot = slot;
+    cfg.parameter_direction = direction;
+    return differentiateResidualImpl(expr, cfg);
 }
 
 FormExpr directionalDerivativeWrtNormal(const FormExpr& expr,

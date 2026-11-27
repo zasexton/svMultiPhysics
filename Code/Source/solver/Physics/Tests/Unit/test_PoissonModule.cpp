@@ -804,6 +804,13 @@ TEST(PoissonModule, LevelSetCutDomainRestrictionAssemblesScalarCutVolume)
     EXPECT_GT(result.matrix_entries_inserted, 0);
     EXPECT_GT(result.vector_entries_inserted, 0);
     EXPECT_GT(result.interface_faces_assembled, 0);
+    // The polygon sample and the volume were supplied independently of the
+    // uniformly positive phi. They contribute no shape derivative w.r.t. phi.
+    const auto row_start = system.fieldDofOffset(temperature_field);
+    const auto col_start = system.fieldDofOffset(phi_field);
+    for (int i = 0; i < 4; ++i) {
+        for (int j = 0; j < 4; ++j) EXPECT_DOUBLE_EQ(matrix.getMatrixEntry(row_start + i, col_start + j), 0.);
+    }
 }
 
 TEST(PoissonModule,

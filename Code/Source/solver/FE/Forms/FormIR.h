@@ -130,6 +130,8 @@ public:
 	    [[nodiscard]] bool hasInterfaceFaceTerms() const noexcept;
         [[nodiscard]] bool hasCutVolumeTerms() const noexcept;
 
+    [[nodiscard]] assembly::RequiredData cutDomainRequiredData(int marker, geometry::CutIntegrationSide side) const noexcept;
+
     /** Cut-geometry sources, in kernel-table order, for exactly this marker
      *  (-1 denotes the all-marker kernel) and optional generated-side group. */
     [[nodiscard]] std::span<const FieldId> cutSurfaceFields(

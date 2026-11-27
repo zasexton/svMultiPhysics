@@ -145,6 +145,7 @@ public:
     [[nodiscard]] bool hasInteriorFace() const noexcept override;
     [[nodiscard]] bool hasInterfaceFace() const noexcept override;
     [[nodiscard]] bool requiresTwoSidedInterfaceFace() const noexcept override;
+    [[nodiscard]] assembly::RequiredData cutDomainRequiredData(int marker, geometry::CutIntegrationSide side) const override;
     [[nodiscard]] bool differentiatesCutDomain(FieldId field, int marker, geometry::CutIntegrationSide side) const noexcept override;
     [[nodiscard]] bool requiresTwoSidedInterfaceFaceOnMarker(int interface_marker) const noexcept override;
     [[nodiscard]] bool supportsCellBatch() const noexcept override { return true; }
@@ -225,6 +226,8 @@ public:
     LinearFormKernel(const LinearFormKernel&) = delete;
     LinearFormKernel& operator=(const LinearFormKernel&) = delete;
 
+    [[nodiscard]] bool differentiatesCutDomain(FieldId field, int marker, geometry::CutIntegrationSide side) const noexcept override;
+    [[nodiscard]] assembly::RequiredData cutDomainRequiredData(int marker, geometry::CutIntegrationSide side) const override;
     [[nodiscard]] assembly::RequiredData getRequiredData() const noexcept override;
     [[nodiscard]] std::vector<assembly::FieldRequirement> fieldRequirements() const override;
     [[nodiscard]] assembly::MaterialStateSpec materialStateSpec() const noexcept override;
@@ -325,6 +328,7 @@ public:
     NonlinearFormKernel(const NonlinearFormKernel&) = delete;
     NonlinearFormKernel& operator=(const NonlinearFormKernel&) = delete;
 
+    [[nodiscard]] assembly::RequiredData cutDomainRequiredData(int marker, geometry::CutIntegrationSide side) const override;
     [[nodiscard]] assembly::RequiredData getRequiredData() const noexcept override;
     [[nodiscard]] std::vector<assembly::FieldRequirement> fieldRequirements() const override;
     [[nodiscard]] assembly::MaterialStateSpec materialStateSpec() const noexcept override;
@@ -436,6 +440,7 @@ public:
     [[nodiscard]] bool hasInteriorFace() const noexcept override;
     [[nodiscard]] bool hasInterfaceFace() const noexcept override;
     [[nodiscard]] bool requiresTwoSidedInterfaceFace() const noexcept override;
+    [[nodiscard]] assembly::RequiredData cutDomainRequiredData(int marker, geometry::CutIntegrationSide side) const override;
     [[nodiscard]] bool differentiatesCutDomain(FieldId field, int marker, geometry::CutIntegrationSide side) const noexcept override;
     [[nodiscard]] bool requiresTwoSidedInterfaceFaceOnMarker(int interface_marker) const noexcept override;
     [[nodiscard]] bool supportsCellBatch() const noexcept override { return true; }

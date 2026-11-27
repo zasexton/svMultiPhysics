@@ -766,6 +766,14 @@ struct CutInterfaceFragment {
                                              : (kind == CutInterfaceFragmentKind::Polygon
                                                     ? "quadratic-planar-polygon-level-set-interface"
                                                     : "gauss-segment-level-set-interface")));
+        // An explicitly supplied planar sample set, with no producer or vertices
+        // from which to regenerate it, is independent of the scalar coefficients.
+        if (vertices.empty() && !quadrature_points.empty() && !linear_corner_surface &&
+            kind != CutInterfaceFragmentKind::CurvedPatch && implicit_quadrature_backend.empty() &&
+            request.implicit_geometry_mode.empty() && request.implicit_quadrature_backend.empty()) {
+            rule.policy.kind = geometry::CutQuadratureConstructionKind::PrescribedInterfaceSamples;
+            rule.policy.name = "prescribed-interface-samples";
+        }
         rule.provenance.embedded_geometry_id = request.source.identifier();
         rule.provenance.cut_topology_id = topology_id;
         rule.provenance.parent_entity = parent_cell;

@@ -709,6 +709,47 @@ struct CutFaceStabilizationConstants {
     return constants;
 }
 
+// Index source rules once per differentiated assembly call. A shape boundary
+// uses the same parent and phase as the primal volume. A subdivided volume
+// needs its own fragment correspondence before its rule-local fraction can vary.
+struct CutPhaseRules {
+    std::array<const geometry::CutQuadratureRule*, 2> volume{};
+    const geometry::CutQuadratureRule* surface{};
+    bool ambiguous{};
+};
+
+class CutPhaseRuleIndex {
+public:
+    CutPhaseRuleIndex(const CutIntegrationContext& context, int marker, bool needed) {
+        if (!needed) return;
+        const auto include = [&](const auto& rule) { return marker < 0 || rule.provenance.marker == marker; };
+        for (const auto& rule : context.volumeRules()) {
+            if (!include(rule)) continue;
+            auto& entry = entries_[{rule.provenance.marker, rule.provenance.parent_entity}];
+            auto& bind = entry.volume[rule.side == geometry::CutIntegrationSide::Positive];
+            if (bind) entry.ambiguous = true;
+            bind = &rule;
+        }
+        for (const auto& rule : context.interfaceRules()) {
+            if (!include(rule) || rule.side != geometry::CutIntegrationSide::Interface ||
+                rule.provenance.parent_boundary_entity >= 0) continue;
+            auto& entry = entries_[{rule.provenance.marker, rule.provenance.parent_entity}];
+            if (entry.surface) entry.ambiguous = true;
+            entry.surface = &rule;
+        }
+    }
+
+    const CutPhaseRules& get(int marker, GlobalIndex cell) const {
+        const auto found = entries_.find({marker, cell});
+        if (found == entries_.end() || found->second.ambiguous)
+            throw std::invalid_argument("cut fraction differentiation requires one source volume per phase and a matched interface");
+        return found->second;
+    }
+
+private:
+    std::map<std::pair<int, GlobalIndex>, CutPhaseRules> entries_;
+};
+
 // A system's dense aliases are positional constants on ordinary cells. A cut
 // volume fills these lanes from its rule; unspecified sensitivities are zero.
 // Explicit constants supplied by low-level callers have no such aliases.
@@ -9824,6 +9865,30 @@ void logCutVolumeEpochCacheTiming(int rank,
 
 } // namespace
 
+std::pair<FieldId, std::vector<Real>> StandardAssembler::cutFractionDerivative(
+    const IMeshAccess& mesh, GlobalIndex cell, const geometry::CutQuadratureRule& volume,
+    const geometry::CutQuadratureRule* surface, const spaces::FunctionSpace& trial)
+{
+    if ((!surface && isFullSideVolumeRule(volume)) ||
+        (surface && surface->policy.kind == geometry::CutQuadratureConstructionKind::PrescribedInterfaceSamples))
+        return {INVALID_FIELD_ID, std::vector<Real>(trial.dofs_per_element(cell), Real{0})};
+    if (!surface || !surface->linear_corner_surface || !(volume.parent_measure > 0))
+        throw std::invalid_argument("cut fraction derivative requires the original parent and its moving LinearCorner surface");
+    const auto match = std::find_if(field_solution_access_.begin(), field_solution_access_.end(), [&](const auto& access) {
+        return interfaces::LevelSetInterfaceSource::fromField(access.field).identifier() ==
+               surface->provenance.embedded_geometry_id;
+    });
+    if (match == field_solution_access_.end()) throw std::invalid_argument("cut fraction derivative has no source field");
+    const auto* source = findFieldAccessPlan(match->field);
+    FE_THROW_IF(!source || !source->space || !source->dof_map, FEException, "cut fraction derivative requires its source space");
+    CellCoefficientCache cache;
+    const auto dofs = getCellDofsCached(mesh, cell, source->dof_map, source->dof_offset);
+    const auto coefficients = gatherCachedCellFieldCoefficients(cache, mesh, cell, *source, dofs, 0, false, "cut fraction derivative");
+    const Real sign = volume.side == geometry::CutIntegrationSide::Negative ? Real{1} : Real{-1};
+    return {match->field, forms::cut_surface::referenceFractionDerivative(*surface, mesh.getCellType(cell), cell,
+        *source->space, coefficients, trial, sign / volume.parent_measure)};
+}
+
 AssemblyResult StandardAssembler::assembleCutVolumes(
     const IMeshAccess& mesh,
     const CutIntegrationContext& cut_context,
@@ -9890,6 +9955,9 @@ AssemblyResult StandardAssembler::assembleCutVolumes(
     }
 
     const auto required_data = kernel.getRequiredData();
+    const bool need_fraction_derivative = assemble_matrix && hasFlag(required_data, RequiredData::CutFractionDerivative) &&
+        hasFlag(kernel.cutDomainRequiredData(interface_marker, side), RequiredData::CutFractionDerivative);
+    const CutPhaseRuleIndex phase_rules(cut_context, interface_marker, need_fraction_derivative);
     const auto kernel_field_requirements = kernel.fieldRequirements();
     const auto field_requirements = effectiveFieldRequirements(required_data, kernel_field_requirements);
     const bool need_field_solutions = !field_requirements.empty();
@@ -10243,6 +10311,12 @@ AssemblyResult StandardAssembler::assembleCutVolumes(
                                    context_.numTrialDofs(),
                                    assemble_matrix,
                                    assemble_vector);
+        std::optional<forms::cut_surface::Binding> fraction_binding;
+        if (need_fraction_derivative) {
+            auto [field, derivative] = cutFractionDerivative(mesh, cell_id, rule,
+                phase_rules.get(rule.provenance.marker, cell_id).surface, trial_space);
+            fraction_binding.emplace(context_, field, std::move(derivative));
+        }
         kernel.computeCell(context_, kernel_output_);
         cut_kernel_time += cut_now() - stage_start;
 
@@ -10344,6 +10418,7 @@ AssemblyResult StandardAssembler::assembleCutVolumes(
 struct StandardAssembler::CutVolumeFusedLoop {
     struct TermData {
         RequiredData required_data{RequiredData::None};
+        bool need_fraction_derivative{false};
         std::vector<FieldRequirement> field_requirements;
         bool need_solution{false};
         bool need_field_solutions{false};
@@ -10357,6 +10432,7 @@ struct StandardAssembler::CutVolumeFusedLoop {
 
     const IMeshAccess& mesh;
     const CutIntegrationContext& cut_context;
+    const CutPhaseRuleIndex& phase_rules;
     int interface_marker;
     geometry::CutIntegrationSide side;
     std::span<const FusedCellTerm> terms;
@@ -10552,6 +10628,8 @@ AssemblyResult StandardAssembler::assembleCutVolumesFused(
         any_has_cell = true;
         auto& td = term_data[ti];
         td.required_data = t.kernel->getRequiredData();
+        td.need_fraction_derivative = t.assemble_matrix && hasFlag(td.required_data, RequiredData::CutFractionDerivative) &&
+            hasFlag(t.kernel->cutDomainRequiredData(interface_marker, side), RequiredData::CutFractionDerivative);
         td.field_requirements =
             effectiveFieldRequirements(td.required_data, t.kernel->fieldRequirements());
         td.need_field_solutions = !td.field_requirements.empty();
@@ -10658,8 +10736,13 @@ AssemblyResult StandardAssembler::assembleCutVolumesFused(
         term_targets[ti].insert_matrix = term_scratch[ti].insert_matrix;
         term_targets[ti].insert_vector = term_scratch[ti].insert_vector;
     }
+    const CutPhaseRuleIndex phase_rules(cut_context, interface_marker,
+        std::any_of(term_data.begin(), term_data.end(), [](const auto& data) {
+            return data.need_fraction_derivative;
+        }));
     const CutVolumeFusedLoop loop{mesh,
                                   cut_context,
+                                  phase_rules,
                                   interface_marker,
                                   side,
                                   terms,
@@ -11193,6 +11276,12 @@ void StandardAssembler::assembleCutVolumeFusedRule(const CutVolumeFusedLoop& loo
                                    context_.numTrialDofs(),
                                    want_matrix,
                                    want_vector);
+        std::optional<forms::cut_surface::Binding> fraction_binding;
+        if (td.need_fraction_derivative) {
+            auto [field, derivative] = cutFractionDerivative(mesh, cell_id, rule,
+                loop.phase_rules.get(rule.provenance.marker, cell_id).surface, *t.trial_space);
+            fraction_binding.emplace(context_, field, std::move(derivative));
+        }
         t.kernel->computeCell(context_, kernel_output_);
         cut_kernel_time += cut_now() - stage_start;
 
@@ -11235,6 +11324,7 @@ void StandardAssembler::assembleCutVolumeFusedRule(const CutVolumeFusedLoop& loo
 struct StandardAssembler::CutInterfaceLoop {
     const IMeshAccess& mesh;
     const CutIntegrationContext& cut_context;
+    const CutPhaseRuleIndex& phase_rules;
     int interface_marker;
     const spaces::FunctionSpace& test_space;
     const spaces::FunctionSpace& trial_space;
@@ -11410,8 +11500,11 @@ AssemblyResult StandardAssembler::assembleCutInterfaces(
         }
     }
 
+    const CutPhaseRuleIndex phase_rules(cut_context, interface_marker,
+        assemble_matrix && hasFlag(required_data, RequiredData::CutPhaseFractions));
     const CutInterfaceLoop loop{mesh,
                                 cut_context,
+                                phase_rules,
                                 interface_marker,
                                 test_space,
                                 trial_space,
@@ -11583,6 +11676,7 @@ void StandardAssembler::assembleCutInterfaceItem(const CutInterfaceLoop& loop,
     std::optional<forms::cut_surface::Binding> plus_variations;
     if (assemble_matrix && hasFlag(required_data, RequiredData::CutSurfaceVariations)) {
         const auto build_variations = [&](FieldId field) {
+            const auto local_data = kernel.cutDomainRequiredData(active_marker, geometry::CutIntegrationSide::Interface);
             const auto source_id = interfaces::LevelSetInterfaceSource::fromField(field).identifier();
             if (const auto* boundary = cut_context.findGeneratedActiveBoundaryProvenance(active_marker)) {
                 if (source_id != boundary->owner.source.identifier() ||
@@ -11591,13 +11685,28 @@ void StandardAssembler::assembleCutInterfaceItem(const CutInterfaceLoop& loop,
                         std::vector<CutSurfaceSampleVariation>(rule.points.size()));
                 }
             }
+            if (rule.policy.kind == geometry::CutQuadratureConstructionKind::PrescribedInterfaceSamples &&
+                !hasFlag(local_data, RequiredData::FullCutSurfaceVariations)) {
+                return forms::cut_surface::Table(trial_space.dofs_per_element(cell_id),
+                    std::vector<CutSurfaceSampleVariation>(rule.points.size()));
+            }
             const bool implicit_speed = !rule.linear_corner_surface &&
-                rule.curved_geometry && rule.policy.kind == geometry::CutQuadratureConstructionKind::MomentFittedImplicit &&
-                !hasFlag(required_data, RequiredData::FullCutSurfaceVariations);
+                rule.policy.kind == geometry::CutQuadratureConstructionKind::MomentFittedImplicit &&
+                !hasFlag(local_data, RequiredData::FullCutSurfaceVariations);
             if (!rule.linear_corner_surface && !implicit_speed) {
                 throw std::invalid_argument("differentiated cut surface requires a generated LinearCorner edge binding");
             }
-            if (implicit_speed) return forms::cut_surface::implicitNormalSpeed(context_, field);
+            const auto bind_fractions = [&](forms::cut_surface::Table table) {
+                if (hasFlag(local_data, RequiredData::CutPhaseFractions) &&
+                    rule.side == geometry::CutIntegrationSide::Interface) {
+                    const auto& regions = loop.phase_rules.get(active_marker, cell_id).volume;
+                    const std::array fractions{regions[0] ? regions[0]->volume_fraction : 0.,
+                                                regions[1] ? regions[1]->volume_fraction : 0.};
+                    for (auto& column : table) for (auto& sample : column) sample.phase_fractions = fractions;
+                }
+                return table;
+            };
+            if (implicit_speed) return bind_fractions(forms::cut_surface::implicitNormalSpeed(context_, field));
             FE_THROW_IF(rule.provenance.embedded_geometry_id != source_id, FEException,
                         "differentiated cut surface does not match its configured source field");
             const auto* source = findFieldAccessPlan(field);
@@ -11607,8 +11716,8 @@ void StandardAssembler::assembleCutInterfaceItem(const CutInterfaceLoop& loop,
             const auto dofs = getCellDofsCached(mesh, cell_id, source->dof_map, source->dof_offset);
             const auto coefficients = gatherCachedCellFieldCoefficients(
                 source_cache, mesh, cell_id, *source, dofs, 0, false, "differentiated cut surface");
-            return forms::cut_surface::differentiateRule(
-                mesh, cell_id, rule, *source->space, coefficients, trial_space);
+            return bind_fractions(forms::cut_surface::differentiateRule(
+                mesh, cell_id, rule, *source->space, coefficients, trial_space));
         };
         const auto positive = interfaces::CutInterfaceSideTag::Positive;
         minus_variations.emplace(context_, build_variations,

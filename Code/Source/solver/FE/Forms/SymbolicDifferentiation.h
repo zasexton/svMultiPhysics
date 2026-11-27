@@ -134,6 +134,10 @@ struct SymbolicDiffResult {
                                                      const FormExpr& direction,
                                                      bool discrete_fields_vary = true);
 
+// Directional derivative of an anonymous positional parameter. Named parameters have their own binding.
+[[nodiscard]] FormExpr directionalDerivativeWrtParameterSlot(const FormExpr& expr, std::uint32_t slot,
+                                                            const FormExpr& direction);
+
 /**
  * @brief Directional derivative of an expression w.r.t. the geometric normal terminal.
  *

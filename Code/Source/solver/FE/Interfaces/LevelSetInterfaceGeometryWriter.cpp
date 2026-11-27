@@ -508,6 +508,8 @@ template <typename T>
         return "moment_fitted_implicit";
     case geometry::CutQuadratureConstructionKind::CurvedTopologySubdivision:
         return "curved_topology_subdivision";
+    case geometry::CutQuadratureConstructionKind::PrescribedInterfaceSamples:
+        return "prescribed_interface_samples";
     }
     return "unknown";
 }

@@ -72,6 +72,7 @@ std::vector<EdgeIntersection> edgeIntersections(const geometry::CutQuadratureRul
         std::vector<Real> trial_values;
     };
     const auto &source = *rule.linear_corner_surface;
+    if (source.count > source.edges.size()) unsupported("retained surface exceeds its edge storage");
     const bool active_wall = rule.provenance.parent_boundary_entity >= 0;
     const auto &field_basis = field.getElement(type, cell).basis();
     const auto &trial_basis = trial.getElement(type, cell).basis();
@@ -353,6 +354,40 @@ Table implicitNormalSpeed(const assembly::AssemblyContext& context, FieldId fiel
         }
     }
     return result;
+}
+
+std::vector<Real> referenceFractionDerivative(const geometry::CutQuadratureRule& surface,
+    ElementType type, GlobalIndex cell, const spaces::FunctionSpace& field, std::span<const Real> coefficients,
+    const spaces::FunctionSpace& trial, Real signed_inverse_parent_measure)
+{
+    if (!surface.linear_corner_surface || surface.curved_geometry ||
+        surface.frame != geometry::CutGeometryFrame::Reference || surface.points.empty()) {
+        unsupported("cut fraction requires an original reference LinearCorner surface");
+    }
+    const Vector normal = vectorOf(surface.points.front().normal);
+    if (std::abs(normal.norm() - 1) > reference_tolerance) unsupported("cut fraction requires a unit reference normal");
+    const bool tet = type == ElementType::Tetra4 || type == ElementType::Tetra10;
+    const auto count = surface.linear_corner_surface->count;
+    if (tet ? (count != 3 && count != 4) : count != 2) unsupported("cut fraction surface has the wrong dimension");
+    const auto roots = edgeIntersections(surface, type, cell, field, coefficients, trial, normal);
+    std::vector<Real> derivative(trial.dofs_per_element(cell), Real{0});
+    // The root velocities interpolate linearly on each segment or fan triangle. Their
+    // mean normal component integrates exactly, independently of the physical mapping.
+    if (roots.size() == 2) {
+        const Real half_length = Vector(roots[1].point - roots[0].point).norm() / 2;
+        for (std::size_t j = 0; j < derivative.size(); ++j) {
+            derivative[j] = half_length * normal.dot(roots[0].motion[j] + roots[1].motion[j]);
+        }
+    } else {
+        for (const auto& triangle : triangleFan(roots)) {
+            for (std::size_t j = 0; j < derivative.size(); ++j) {
+                derivative[j] += (triangle.area / 3) * normal.dot(
+                    roots[0].motion[j] + roots[triangle.second].motion[j] + roots[triangle.second + 1].motion[j]);
+            }
+        }
+    }
+    for (auto& entry : derivative) entry *= signed_inverse_parent_measure;
+    return derivative;
 }
 
 Table differentiateRule(const assembly::IMeshAccess &mesh, GlobalIndex cell,

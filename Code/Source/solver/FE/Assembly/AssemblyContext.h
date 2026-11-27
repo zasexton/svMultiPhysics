@@ -160,6 +160,12 @@ struct CutSurfaceSampleVariation {
     Real relative_weight{};  // dw / w for this physical quadrature weight.
     Real facet_measure{};    // Absolute derivative of the entire physical facet measure.
     Real normal_speed{};     // Sample velocity along the negative-to-positive physical normal.
+    std::array<Real, 2> phase_fractions{}; // Source volume-rule values on a shape boundary term.
+};
+
+struct CutFractionDerivativeView {
+    FieldId field{INVALID_FIELD_ID};
+    std::span<const Real> columns{};
 };
 
 class CutSurfaceVariationProvider {
@@ -169,6 +175,7 @@ public:
     // A provider may expose its immutable q-contiguous trial column for a
     // compiled kernel. Otherwise the packer copies this column through sample().
     virtual std::span<const CutSurfaceSampleVariation> column(FieldId, LocalIndex) const { return {}; }
+    virtual CutFractionDerivativeView fractionDerivative() const noexcept { return {}; }
 
 };
 
@@ -1496,6 +1503,11 @@ public:
     {
         cut_surface_variations_ = provider;
     }
+    [[nodiscard]] CutFractionDerivativeView cutFractionDerivative() const noexcept
+    {
+        return cut_surface_variations_ ? cut_surface_variations_->fractionDerivative() : CutFractionDerivativeView{};
+    }
+
     [[nodiscard]] const CutSurfaceSampleVariation& cutSurfaceVariation(FieldId field, LocalIndex j, LocalIndex q) const
     {
         if (!cut_surface_variations_) throw std::invalid_argument("cut surface variation requires generated quadrature");

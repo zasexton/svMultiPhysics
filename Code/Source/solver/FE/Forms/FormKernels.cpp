@@ -5,6 +5,7 @@
  * See Copyright-SimVascular.txt for additional details.
  */
 
+#include "Forms/CutCellForms.h"
 #include "Forms/FormKernels.h"
 #include "Forms/ParameterBinding.h"
 
@@ -1319,8 +1320,17 @@ struct EvalEnvDual;
 Real cutSurfaceComponent(const assembly::AssemblyContext &ctx, const FormExprNode &node, LocalIndex j,
                          LocalIndex q)
 {
-    const auto &geometry = ctx.cutSurfaceVariation(*node.fieldId(), j, q);
     const int component = *node.componentIndex0();
+    if (component == static_cast<int>(CutSurfaceComponent::VolumeFractionDerivative)) {
+        const auto derivative = ctx.cutFractionDerivative();
+        if (derivative.columns.size() != ctx.numTrialDofs()) {
+            throw std::invalid_argument("cut fraction derivative requires the originating volume rule");
+        }
+        return derivative.field == *node.fieldId() ? derivative.columns[j] : Real{0};
+    }
+    const auto &geometry = ctx.cutSurfaceVariation(*node.fieldId(), j, q);
+    if (component == static_cast<int>(CutSurfaceComponent::NegativePhaseFraction)) return geometry.phase_fractions[0];
+    if (component == static_cast<int>(CutSurfaceComponent::PositivePhaseFraction)) return geometry.phase_fractions[1];
     if (component == static_cast<int>(CutSurfaceComponent::NormalSpeed)) return geometry.normal_speed;
     const int first_jacobian = static_cast<int>(CutSurfaceComponent::JacobianXX);
     const int first_inverse = static_cast<int>(CutSurfaceComponent::InverseJacobianXX);
@@ -13367,6 +13377,11 @@ bool differentiatesDomain(const FormIR& ir, FieldId field, int marker, geometry:
 }
 }
 
+assembly::RequiredData FormKernel::cutDomainRequiredData(int marker, geometry::CutIntegrationSide side) const
+{
+    return ir_.cutDomainRequiredData(marker, side);
+}
+
 bool FormKernel::differentiatesCutDomain(FieldId field, int marker, geometry::CutIntegrationSide side) const noexcept
 {
     return differentiatesDomain(ir_, field, marker, side);
@@ -14340,6 +14355,18 @@ LinearFormKernel::~LinearFormKernel() = default;
 LinearFormKernel::LinearFormKernel(LinearFormKernel&&) noexcept = default;
 LinearFormKernel& LinearFormKernel::operator=(LinearFormKernel&&) noexcept = default;
 
+bool LinearFormKernel::differentiatesCutDomain(FieldId field, int marker, geometry::CutIntegrationSide side) const noexcept
+{
+    return differentiatesDomain(bilinear_ir_, field, marker, side);
+}
+
+assembly::RequiredData LinearFormKernel::cutDomainRequiredData(int marker, geometry::CutIntegrationSide side) const
+{
+    auto required = bilinear_ir_.cutDomainRequiredData(marker, side);
+    if (linear_ir_) required |= linear_ir_->cutDomainRequiredData(marker, side);
+    return required;
+}
+
 assembly::RequiredData LinearFormKernel::getRequiredData() const noexcept
 {
     auto req = bilinear_ir_.requiredData();
@@ -15034,6 +15061,11 @@ NonlinearFormKernel::NonlinearFormKernel(FormIR residual_ir, ADMode ad_mode, Non
 NonlinearFormKernel::~NonlinearFormKernel() = default;
 NonlinearFormKernel::NonlinearFormKernel(NonlinearFormKernel&&) noexcept = default;
 NonlinearFormKernel& NonlinearFormKernel::operator=(NonlinearFormKernel&&) noexcept = default;
+
+assembly::RequiredData NonlinearFormKernel::cutDomainRequiredData(int marker, geometry::CutIntegrationSide side) const
+{
+    return residual_ir_.cutDomainRequiredData(marker, side);
+}
 
 assembly::RequiredData NonlinearFormKernel::getRequiredData() const noexcept
 {
@@ -16465,14 +16497,42 @@ void SymbolicNonlinearFormKernel::rebuildTangentIR()
                                            value.field == candidate.field;
                                 }) != emitted.end();
         };
+    const auto sample_variation = [&](const LevelSetCutDomainSensitivity &domain, int component) {
+        const auto &space = level_set_space_signature(domain);
+        const auto phi = FormExpr::stateField(domain.level_set_field, space, "level_set");
+        const auto trial = FormExpr::trialFunction(space, geometry_trial_symbol);
+        return FormExpr::cutSurfaceVariation(phi, trial, component);
+    };
+    const auto volume_integrand_derivative = [&](const IntegralTerm& term, const LevelSetCutDomainSensitivity& domain) {
+        auto derivative = level_set_integrand_derivative(term, domain);
+        const auto contains_fraction = [&](const auto& self, const FormExprNode& node) -> bool {
+            if (node.type() == FormExprType::ParameterRef && !node.symbolName() &&
+                node.slotIndex() == CutCellParameterSlots{}.volume_fraction) return true;
+            for (const auto& child : node.children()) if (child && self(self, *child)) return true;
+            return false;
+        };
+        if (!contains_fraction(contains_fraction, *term.integrand.node())) return derivative;
+        const auto primal = rewriteTrialFunctionsToState(term.integrand, trial_state_field);
+        const auto direction = sample_variation(domain, static_cast<int>(CutSurfaceComponent::VolumeFractionDerivative));
+        return derivative + directionalDerivativeWrtParameterSlot(primal, CutCellParameterSlots{}.volume_fraction, direction);
+    };
     const auto shape_tangent_integrand =
         [&](const IntegralTerm& term,
             const LevelSetCutDomainSensitivity& domain) -> FormExpr {
             if (!residual_ir_.trialSpace().has_value()) {
                 return FormExpr{};
             }
-            const auto primal_integrand =
-                rewriteTrialFunctionsToState(term.integrand, trial_state_field);
+            const auto phase_fraction = domain.side == CutVolumeSide::Negative
+                ? CutSurfaceComponent::NegativePhaseFraction : CutSurfaceComponent::PositivePhaseFraction;
+            const auto primal_integrand = rewriteTrialFunctionsToState(term.integrand, trial_state_field).transformNodes(
+                [&](const FormExprNode& node) -> std::optional<FormExpr> {
+                    if (node.type() != FormExprType::ParameterRef || node.symbolName()) return std::nullopt;
+                    if (node.slotIndex() == CutCellParameterSlots{}.volume_fraction)
+                        return sample_variation(domain, static_cast<int>(phase_fraction));
+                    if (node.slotIndex() == CutCellParameterSlots{}.side_indicator)
+                        return FormExpr::constant(domain.side == CutVolumeSide::Negative ? -1. : 1.);
+                    return std::nullopt;
+                });
             const auto& phi_space = level_set_space_signature(domain);
             const auto phi = FormExpr::stateField(
                 domain.level_set_field, phi_space, "level_set");
@@ -16483,12 +16543,6 @@ void SymbolicNonlinearFormKernel::rebuildTangentIR()
             const Real sign = domain.side == CutVolumeSide::Negative ? 1. : -1.;
             return sign * primal_integrand * normal_speed;
         };
-    const auto sample_variation = [&](const LevelSetCutDomainSensitivity &domain, int component) {
-        const auto &space = level_set_space_signature(domain);
-        const auto phi = FormExpr::stateField(domain.level_set_field, space, "level_set");
-        const auto trial = FormExpr::trialFunction(space, geometry_trial_symbol);
-        return FormExpr::cutSurfaceVariation(phi, trial, component);
-    };
     const auto sample_vector = [&](const LevelSetCutDomainSensitivity &domain, int first) {
         std::vector<FormExpr> components;
         for (int d = 0; d < level_set_space_signature(domain).topological_dimension; ++d) {
@@ -16598,15 +16652,11 @@ void SymbolicNonlinearFormKernel::rebuildTangentIR()
                             emitted_derivatives.push_back(emitted);
                             append_term(
                                 tangent_form,
-                                level_set_integrand_derivative(
-                                    term,
-                                    domain)
+                                volume_integrand_derivative(term, domain)
                                     .dCutVolume(domain.interface_marker,
                                                 domain.side));
+                            append_term(tangent_form, shape_tangent_integrand(term, domain).dI(domain.interface_marker));
                         }
-                        append_term(tangent_form,
-                                    shape_tangent_integrand(term, domain)
-                                        .dI(domain.interface_marker));
                     }
                 } else {
                     append_term(tangent_form, dI.dx());
@@ -16753,15 +16803,11 @@ void SymbolicNonlinearFormKernel::rebuildTangentIR()
                             emitted_derivatives.push_back(emitted);
                             append_term(
                                 tangent_form,
-                                level_set_integrand_derivative(
-                                    term,
-                                    domain)
+                                volume_integrand_derivative(term, domain)
                                     .dCutVolume(term.interface_marker,
                                                 term.cut_volume_side));
+                            append_term(tangent_form, shape_tangent_integrand(term, domain).dI(domain.interface_marker));
                         }
-                        append_term(tangent_form,
-                                    shape_tangent_integrand(term, domain)
-                                        .dI(domain.interface_marker));
                     }
                 } else {
                     append_term(tangent_form,
@@ -16934,6 +16980,15 @@ bool SymbolicNonlinearFormKernel::requiresTwoSidedInterfaceFace() const noexcept
 {
     return formIRRequiresTwoSidedInterfaceFace(residual_ir_) ||
            formIRRequiresTwoSidedInterfaceFace(tangent_ir_);
+}
+
+assembly::RequiredData SymbolicNonlinearFormKernel::cutDomainRequiredData(int marker, geometry::CutIntegrationSide side) const
+{
+    auto required = residual_ir_.cutDomainRequiredData(marker, side);
+    if (output_ != NonlinearKernelOutput::VectorOnly && tangent_ready_ && tangent_ir_.isCompiled()) {
+        required |= tangent_ir_.cutDomainRequiredData(marker, side);
+    }
+    return required;
 }
 
 bool SymbolicNonlinearFormKernel::differentiatesCutDomain(FieldId field, int marker, geometry::CutIntegrationSide side) const noexcept

@@ -5,6 +5,7 @@
  * See Copyright-SimVascular.txt for additional details.
  */
 
+#include "Geometry/CutQuadrature.h"
 #include "Forms/FormIR.h"
 
 #include <algorithm>
@@ -248,6 +249,22 @@ void FormIR::setTerms(std::vector<IntegralTerm> terms)
 {
     impl_->terms = std::move(terms);
     impl_->indexCutSurfaceFields();
+}
+
+assembly::RequiredData FormIR::cutDomainRequiredData(int marker, geometry::CutIntegrationSide side) const noexcept
+{
+    auto result = assembly::RequiredData::None;
+    for (const auto& term : impl_->terms) {
+        if (term.interface_marker >= 0 && marker >= 0 && term.interface_marker != marker) continue;
+        if (side == geometry::CutIntegrationSide::Interface) {
+            if (term.domain == IntegralDomain::InterfaceFace) result |= term.required_data;
+        } else {
+            const auto phase = side == geometry::CutIntegrationSide::Negative ? CutVolumeSide::Negative : CutVolumeSide::Positive;
+            if (term.domain == IntegralDomain::Cell || (term.domain == IntegralDomain::CutVolume && term.cut_volume_side == phase))
+                result |= term.required_data;
+        }
+    }
+    return result;
 }
 
 std::span<const FieldId> FormIR::cutSurfaceFields(int marker, std::optional<bool> two_sided) const noexcept

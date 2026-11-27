@@ -43,7 +43,7 @@ inline constexpr std::uint32_t kKernelArgsABIVersionV6 = 6u;
 inline constexpr std::uint32_t kCellKernelBatchArgsABIV1 = 0xCB01'0001u;
 // Bump whenever any V6 argument/view struct layout changes. This is mixed into
 // JIT cache keys so disk-cached object code cannot outlive ABI layout edits.
-inline constexpr std::uint32_t kKernelArgsABILayoutRevisionV6 = 9u;
+inline constexpr std::uint32_t kKernelArgsABILayoutRevisionV6 = 10u;
 
 /// Maximum number of previous solution coefficient vectors passed to kernels.
 /// Indexing convention: k=1 corresponds to u^{n-1}.
@@ -997,6 +997,9 @@ struct CellKernelArgsV6 {
     std::uint32_t abi_version{kKernelArgsABIVersionV6};
     KernelSideArgsV6 side{};
     KernelOutputViewV6 output{};
+    // Optional derivative of the current rule's reference-volume fraction, one entry per trial DOF.
+    const Real* cut_fraction_derivative{nullptr};
+    std::uint32_t cut_fraction_field{INVALID_FIELD_ID};
 };
 
 struct BoundaryFaceKernelArgsV6 {
@@ -2636,6 +2639,9 @@ inline void packAuxiliaryAndFrameV6(const AssemblyContext& ctx, KernelSideArgsV6
     CellKernelArgsV6 out;
     out.side = detail::packSideArgsV6(ctx, std::nullopt, std::nullopt, checks);
     out.output = detail::packOutputViewV6(output);
+    const auto fraction = ctx.cutFractionDerivative();
+    out.cut_fraction_derivative = fraction.columns.data();
+    out.cut_fraction_field = fraction.field;
     return out;
 }
 

@@ -878,6 +878,11 @@ public:
     {
         return primary_->requiresTwoSidedInterfaceFace();
     }
+    [[nodiscard]] assembly::RequiredData cutDomainRequiredData(int marker, geometry::CutIntegrationSide side) const override
+    {
+        return primary_->cutDomainRequiredData(marker, side) | reference_->cutDomainRequiredData(marker, side);
+    }
+
     [[nodiscard]] bool differentiatesCutDomain(FieldId field, int marker, geometry::CutIntegrationSide side) const noexcept override
     {
         return primary_->differentiatesCutDomain(field, marker, side);

@@ -1877,13 +1877,20 @@ TEST(CutCellForms, HighOrderCutInterfaceTangentMatchesFixedGeometryFiniteDiffere
 }
 
 namespace {
-enum class MovingMeasure { ChordArea, VolumeFraction, ActiveWall };
+enum class MovingMeasure { ChordArea, VolumeFraction, SquaredFraction, ActiveWall };
 
 enum class CutSelection { Matching, OtherMarker, OppositeSide };
 
-void checkMovingCutMeasure(MovingMeasure measure, bool positive, bool compiled = false,
-                            CutSelection selection = CutSelection::Matching, int tetra_wall_order = 0)
+struct MovingCutOptions {
+    bool compiled{};
+    CutSelection selection{CutSelection::Matching};
+    int tetra_order{};
+    bool fused_volume{};
+};
+
+void checkMovingCutMeasure(MovingMeasure measure, bool positive, const MovingCutOptions& settings = {})
 {
+    const auto [compiled, selection, tetra_order, fused_volume] = settings;
     using namespace svmp::FE;
     namespace a = assembly;
     namespace it = interfaces;
@@ -1902,7 +1909,7 @@ void checkMovingCutMeasure(MovingMeasure measure, bool positive, bool compiled =
         }
     } tetra;
     fixture::SingleQuadBoundaryMesh quad(wall_marker);
-    const a::IMeshAccess& mesh = tetra_wall_order ? static_cast<const a::IMeshAccess&>(tetra) : quad;
+    const a::IMeshAccess& mesh = tetra_order ? static_cast<const a::IMeshAccess&>(tetra) : quad;
     const auto type = mesh.getCellType(0);
     spaces::H1Space space(type, 1);
     auto dofs = createSingleCellDofMap(4);
@@ -1910,11 +1917,13 @@ void checkMovingCutMeasure(MovingMeasure measure, bool positive, bool compiled =
     // The zero source slot makes the primal integrand exactly 1, while the
     // residual retains its declared nonlinear field and test space.
     auto integrand = (1. + FormExpr::parameterRef(9) * u) * v;
-    if (measure == MovingMeasure::VolumeFraction) integrand = cutVolumeFraction() * integrand;
+    const int fraction_power = measure == MovingMeasure::VolumeFraction ? 1 : measure == MovingMeasure::SquaredFraction ? 2 : 0;
+    if (fraction_power != 0) integrand = pow(cutVolumeFraction(), fraction_power) * integrand;
     const bool wall = measure == MovingMeasure::ActiveWall;
-    const auto residual = wall ? integrand.dExteriorBoundary(
+    auto residual = wall ? integrand.dExteriorBoundary(
         ExteriorBoundaryMeasure::generatedActiveSubset(wall_marker, subset_marker))
                                : integrand.dCutVolume(cut_marker, form_side);
+    if (fraction_power) residual = residual + v.dCutVolume(cut_marker + 1, form_side);
     FormCompiler compiler, frozen;
     auto options = compiler.options();
     options.geometry_sensitivity.mode = GeometrySensitivityMode::LevelSetCutDomainUnknowns;
@@ -1949,7 +1958,7 @@ void checkMovingCutMeasure(MovingMeasure measure, bool positive, bool compiled =
             input.node_coordinates.push_back({xi[0], xi[1], xi[2]});
         }
         input.level_set_values.assign(phi.begin(), phi.end());
-        if (tetra_wall_order) it::appendLinearLevelSetCellCut3D(domain, input);
+        if (tetra_order) it::appendLinearLevelSetCellCut3D(domain, input);
         else it::appendLinearLevelSetCellCut2D(domain, input);
         a::CutIntegrationContext context;
         context.addGeneratedInterfaceDomain(domain);
@@ -1958,7 +1967,7 @@ void checkMovingCutMeasure(MovingMeasure measure, bool positive, bool compiled =
                 fixture::contactRequest(cut_marker, wall_marker), domain, mesh);
             auto active = fixture::activeRequest(cut_marker, wall_marker, side);
             active.active_boundary_marker = subset_marker;
-            if (tetra_wall_order) active.quadrature_order = tetra_wall_order;
+            if (tetra_order) active.quadrature_order = tetra_order;
             it::GeneratedActiveBoundaryScalarField source;
             source.value_at_node = [&](GlobalIndex node) { return phi.at(node); };
             context.addGeneratedActiveBoundaryDomain(it::buildGeneratedActiveBoundaryDomain(
@@ -1978,18 +1987,49 @@ void checkMovingCutMeasure(MovingMeasure measure, bool positive, bool compiled =
         a::DenseVectorView load(4);
         a::AssemblyKernel& kernel = matrix ? derivative : primal;
         if (!wall) {
-            assembler.assembleCutVolumes(mesh, context, cut_marker, side, space, space, kernel,
-                                         matrix ? &jac : nullptr, &load, matrix, true);
+            if (fused_volume) {
+                const std::array<a::FusedCellTerm, 1> terms{{{
+                    .test_space = &space, .trial_space = &space, .kernel = &kernel,
+                    .row_dof_map = &dofs, .col_dof_map = &dofs, .matrix_view = matrix ? &jac : nullptr,
+                    .vector_view = &load, .assemble_matrix = matrix, .assemble_vector = true}}};
+                assembler.assembleCutVolumesFused(mesh, context, cut_marker, side, terms);
+            } else {
+                assembler.assembleCutVolumes(mesh, context, cut_marker, side, space, space, kernel,
+                                             matrix ? &jac : nullptr, &load, matrix, true);
+            }
         }
         if (matrix || wall) {
             assembler.assembleCutInterfaces(mesh, context, wall ? subset_marker : cut_marker,
                                             space, space, kernel, matrix ? &jac : nullptr,
                                             wall ? &load : nullptr, matrix, wall);
         }
-        std::array<Real, 5> result{};
+        if (matrix && fraction_power) {
+            // The same kernel has a constant source on a different, held-fixed rule.
+            // That marker has no source interface and needs no fraction derivative.
+            a::CutIntegrationContext fixed;
+            const auto& rules = context.volumeRules();
+            auto rule = *std::find_if(rules.begin(), rules.end(), [&](const auto& r) { return r.side == side; });
+            rule.provenance.marker = cut_marker + 1;
+            a::CutCellAssemblyMetadata metadata;
+            metadata.parent_entity = 0;
+            metadata.side = side;
+            metadata.volume_fraction = rule.volume_fraction;
+            fixed.addGeneratedVolumeRule(cut_marker + 1, metadata, rule);
+            a::DenseMatrixView fixed_matrix(4);
+            a::DenseVectorView fixed_load(4);
+            assembler.assembleCutVolumes(mesh, fixed, cut_marker + 1, side, space, space, kernel,
+                                         &fixed_matrix, &fixed_load, true, true);
+            Real total = 0.;
+            for (int i = 0; i < 4; ++i) {
+                total += fixed_load.getVectorEntry(i);
+                for (int j = 0; j < 4; ++j) EXPECT_DOUBLE_EQ(fixed_matrix.getMatrixEntry(i, j), 0.);
+            }
+            EXPECT_NEAR(total, rule.volume_fraction / (tetra_order ? 6. : 1.), 2.e-14);
+        }
+        struct Result { std::array<Real, 4> load{}; std::array<std::array<Real, 4>, 4> jacobian{}; } result;
         for (int i = 0; i < 4; ++i) {
-            result[0] += load.getVectorEntry(i);
-            for (int j = 0; j < 4; ++j) result[1+j] += jac.getMatrixEntry(i,j);
+            result.load[i] = load.getVectorEntry(i);
+            for (int j = 0; j < 4; ++j) result.jacobian[i][j] = jac.getMatrixEntry(i, j);
         }
         return result;
     };
@@ -1999,12 +2039,17 @@ void checkMovingCutMeasure(MovingMeasure measure, bool positive, bool compiled =
     // For x-1/4+t, the negative area and bottom-edge length both equal 1/4-t.
     const bool chord = measure == MovingMeasure::ChordArea;
     auto phi = chord ? std::array{-.5, .5, 1.5, .5} : std::array{-.25, .75, .75, -.25};
-    if (tetra_wall_order) phi = {-.25, .75, -.25, -.25};
+    if (tetra_order) phi = {-.25, .75, -.25, -.25};
     const auto direction = chord ? std::array{0., 0., 1., 0.} : std::array{1., 1., 1., 1.};
-    const Real fraction = positive ? .75 : .25;
     const Real sign = positive ? 1. : -1.;
-    const Real expected_value = tetra_wall_order ? (positive ? 9./32 : 7./32) : chord ? (positive ? .875 : .125) : (wall ? fraction : fraction * fraction);
-    const Real expected_derivative = tetra_wall_order ? .75 * sign : chord ? 0. : (wall ? sign : 2. * fraction * sign);
+    const Real fraction = tetra_order && !wall ? (positive ? 27./64 : 37./64) : (positive ? .75 : .25);
+    // Tet4 has reference volume 1/6. Its positive phase is a tetrahedron of side 3/4+t.
+    const Real parent_volume = tetra_order ? 1./6 : 1.;
+    const Real fraction_rate = sign * (tetra_order && !wall ? 27./16 : 1.);
+    const Real expected_value = tetra_order && wall ? (positive ? 9./32 : 7./32) :
+        chord ? (positive ? .875 : .125) : parent_volume * std::pow(fraction, fraction_power + 1);
+    const Real expected_derivative = tetra_order && wall ? .75 * sign : chord ? 0. :
+        parent_volume * (fraction_power + 1) * std::pow(fraction, fraction_power) * fraction_rate;
     const auto base = evaluate(phi, true);
     constexpr Real h = 1.e-6;
     auto plus = phi, minus = phi;
@@ -2012,11 +2057,18 @@ void checkMovingCutMeasure(MovingMeasure measure, bool positive, bool compiled =
         plus[j] += h * direction[j];
         minus[j] -= h * direction[j];
     }
-    EXPECT_NEAR(base[0], expected_value, 2.e-14);
-    EXPECT_NEAR((evaluate(plus, false)[0] - evaluate(minus, false)[0]) / (2*h), expected_derivative, 2.e-9);
-    EXPECT_NEAR(std::inner_product(base.begin()+1, base.end(), direction.begin(), 0.),
-                selection == CutSelection::Matching ? expected_derivative : 0., 2.e-12);
+    const auto plus_load = evaluate(plus, false).load, minus_load = evaluate(minus, false).load;
+    Real sum_derivative = 0;
+    for (int i = 0; i < 4; ++i) {
+        const Real difference = (plus_load[i] - minus_load[i]) / (2*h);
+        const Real action = std::inner_product(base.jacobian[i].begin(), base.jacobian[i].end(), direction.begin(), 0.);
+        EXPECT_NEAR(action, selection == CutSelection::Matching ? difference : 0., 2.e-9) << "test row " << i;
+        sum_derivative += action;
+    }
+    EXPECT_NEAR(std::accumulate(base.load.begin(), base.load.end(), 0.), expected_value, 2.e-14);
+    EXPECT_NEAR(sum_derivative, selection == CutSelection::Matching ? expected_derivative : 0., 2.e-12);
     if (compiled_tangent) {
+        if (fraction_power) EXPECT_TRUE(compiled_tangent->hasCompiledTangentDispatch(IntegralDomain::CutVolume, cut_marker));
         EXPECT_TRUE(compiled_tangent->hasCompiledTangentDispatch(IntegralDomain::InterfaceFace, wall ? subset_marker : cut_marker));
     }
 }
@@ -2026,10 +2078,36 @@ TEST(CutCellForms, CutVolumeTangentUsesRetainedChordMotion) {
     for (const bool positive : {false, true}) checkMovingCutMeasure(MovingMeasure::ChordArea, positive);
 }
 
+TEST(CutCellForms, CutVolumeTangentDifferentiatesItsRuleLocalFraction) {
+    for (const bool positive : {false, true}) {
+        for (const bool fused : {false, true}) {
+            for (auto measure : {MovingMeasure::VolumeFraction, MovingMeasure::SquaredFraction}) {
+                checkMovingCutMeasure(measure, positive, {.fused_volume = fused});
+            }
+        }
+    }
+}
+
+TEST(CutCellForms, TetrahedralRuleLocalFractionUsesTheReferenceParentVolume) {
+    for (const bool positive : {false, true}) {
+        checkMovingCutMeasure(MovingMeasure::VolumeFraction, positive, {.tetra_order = 2});
+        checkMovingCutMeasure(MovingMeasure::SquaredFraction, positive, {.tetra_order = 2, .fused_volume = true});
+    }
+}
+
+TEST(CutCellForms, CompiledCutVolumeFractionIncludesItsInteriorAndBoundaryTerms) {
+    requireLLVMJITOrSkip();
+    for (const bool positive : {false, true}) {
+        for (auto measure : {MovingMeasure::VolumeFraction, MovingMeasure::SquaredFraction}) {
+            checkMovingCutMeasure(measure, positive, {.compiled = true});
+        }
+    }
+}
+
 TEST(CutCellForms, ActiveWallTangentUsesItsSourceInterfaceAcrossDistinctMarkers) {
     for (const bool positive : {false, true}) {
         for (const auto selection : {CutSelection::Matching, CutSelection::OtherMarker, CutSelection::OppositeSide}) {
-            checkMovingCutMeasure(MovingMeasure::ActiveWall, positive, false, selection);
+            checkMovingCutMeasure(MovingMeasure::ActiveWall, positive, {.selection = selection});
         }
     }
 }
@@ -2037,7 +2115,7 @@ TEST(CutCellForms, ActiveWallTangentUsesItsSourceInterfaceAcrossDistinctMarkers)
 TEST(CutCellForms, TetrahedralClippedWallTangentTracksEveryFanTriangleAtEachRuleOrder) {
     for (const bool positive : {false, true}) {
         for (int order = 1; order <= 5; ++order) {
-            checkMovingCutMeasure(MovingMeasure::ActiveWall, positive, false, CutSelection::Matching, order);
+            checkMovingCutMeasure(MovingMeasure::ActiveWall, positive, {.tetra_order = order});
         }
     }
 }
@@ -2045,8 +2123,8 @@ TEST(CutCellForms, TetrahedralClippedWallTangentTracksEveryFanTriangleAtEachRule
 TEST(CutCellForms, CompiledCutVolumeChordAndActiveWallFollowRegeneratedGeometry) {
     requireLLVMJITOrSkip();
     for (const bool positive : {false, true}) {
-        checkMovingCutMeasure(MovingMeasure::ChordArea, positive, true);
-        checkMovingCutMeasure(MovingMeasure::ActiveWall, positive, true);
+        checkMovingCutMeasure(MovingMeasure::ChordArea, positive, {.compiled = true});
+        checkMovingCutMeasure(MovingMeasure::ActiveWall, positive, {.compiled = true});
     }
 }
 

@@ -591,6 +591,11 @@ bool JITKernelWrapper::requiresTwoSidedInterfaceFace() const noexcept
 {
     return fallback_->requiresTwoSidedInterfaceFace();
 }
+assembly::RequiredData JITKernelWrapper::cutDomainRequiredData(int marker, geometry::CutIntegrationSide side) const
+{
+    return fallback_->cutDomainRequiredData(marker, side);
+}
+
 bool JITKernelWrapper::differentiatesCutDomain(FieldId field, int marker, geometry::CutIntegrationSide side) const noexcept
 {
     return fallback_->differentiatesCutDomain(field, marker, side);
@@ -616,6 +621,15 @@ void JITKernelWrapper::computeCell(const assembly::AssemblyContext& ctx,
         const auto active_domain =
             cut_volume_context ? IntegralDomain::CutVolume : IntegralDomain::Cell;
         const auto active_cut_side = toFormsCutVolumeSide(ctx.cutVolumeSide());
+
+        const auto requireFractionDerivative = [&](const FormIR& ir) {
+            if (!cut_volume_context || !assembly::hasFlag(ir.requiredData(), assembly::RequiredData::CutFractionDerivative) ||
+                ctx.cutFractionDerivative().columns.size() == ctx.numTrialDofs()) return;
+            if (assembly::hasFlag(ir.cutDomainRequiredData(ctx.cutVolumeMarker(), ctx.cutVolumeSide()),
+                                  assembly::RequiredData::CutFractionDerivative)) {
+                throw std::invalid_argument("cut fraction derivative requires the originating volume rule");
+            }
+        };
 
         // When vectorize=true, JIT kernels expect CellKernelBatchArgsV1 (batch ABI).
         // Wrap callJIT to pack a batch-of-1 with stack-local scratch so computeCell
@@ -699,6 +713,7 @@ void JITKernelWrapper::computeCell(const assembly::AssemblyContext& ctx,
         }
 
         const bool want_matrix = (k->ir().kind() == FormKind::Bilinear);
+        if (want_matrix) requireFractionDerivative(k->ir());
         const bool want_vector = (k->ir().kind() == FormKind::Linear);
 
         output.reserve(ctx.numTestDofs(), ctx.numTrialDofs(), want_matrix, want_vector);
@@ -735,6 +750,7 @@ void JITKernelWrapper::computeCell(const assembly::AssemblyContext& ctx,
         }
 
         const bool want_matrix = !k->isVectorOnly();
+        if (want_matrix) requireFractionDerivative(k->bilinearIR());
         const bool want_vector = !k->isMatrixOnly();
 
         output.reserve(ctx.numTestDofs(), ctx.numTrialDofs(), want_matrix, want_vector);
@@ -844,6 +860,7 @@ void JITKernelWrapper::computeCell(const assembly::AssemblyContext& ctx,
         // after it regressed instruction-cache pressure and is no longer part
         // of the production dispatch path.
         if (want_matrix) {
+            if (k_sym) requireFractionDerivative(k_sym->tangentIR());
             if (!hasCellLikeDispatch(compiled_tangent_)) {
                 fallback_->computeCell(ctx, output);
                 return;

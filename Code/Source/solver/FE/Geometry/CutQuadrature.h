@@ -51,7 +51,8 @@ enum class CutQuadratureConstructionKind : std::uint8_t {
     TopologySubdivision,
     CurvedInterface,
     MomentFittedImplicit,
-    CurvedTopologySubdivision
+    CurvedTopologySubdivision,
+    PrescribedInterfaceSamples
 };
 
 enum class CutGeometryFrame : std::uint8_t {

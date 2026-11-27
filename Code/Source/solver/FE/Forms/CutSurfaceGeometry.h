@@ -28,6 +28,11 @@ using Table = std::vector<std::vector<assembly::CutSurfaceSampleVariation>>;
                                       std::span<const Real> coefficients,
                                       const spaces::FunctionSpace& trial);
 
+// Integral of the reference outward-normal speed, divided by the parent reference measure.
+[[nodiscard]] std::vector<Real> referenceFractionDerivative(const geometry::CutQuadratureRule& surface,
+    ElementType type, GlobalIndex cell, const spaces::FunctionSpace& field, std::span<const Real> coefficients,
+    const spaces::FunctionSpace& trial, Real signed_inverse_parent_measure);
+
 [[nodiscard]] Table implicitNormalSpeed(const assembly::AssemblyContext& context, FieldId field);
 
 // Each active field builds its geometry table once per assembly of a retained rule.
@@ -39,6 +44,17 @@ public:
         : context_(context), build_(std::move(build)), positive_side_(positive_side)
     {
         context_.setCutSurfaceVariations(this);
+    }
+
+    Binding(assembly::AssemblyContext& context, FieldId field, std::vector<Real> derivative)
+        : context_(context), positive_side_(false), fraction_field_(field), fraction_derivative_(std::move(derivative))
+    {
+        context_.setCutSurfaceVariations(this);
+    }
+
+    assembly::CutFractionDerivativeView fractionDerivative() const noexcept override
+    {
+        return {fraction_field_, fraction_derivative_};
     }
 
     ~Binding() override { context_.setCutSurfaceVariations(nullptr); }
@@ -79,6 +95,8 @@ private:
     assembly::AssemblyContext& context_;
     Build build_;
     bool positive_side_;
+    FieldId fraction_field_{INVALID_FIELD_ID};
+    std::vector<Real> fraction_derivative_{};
     mutable std::map<FieldId, Table> tables_;
 };
 

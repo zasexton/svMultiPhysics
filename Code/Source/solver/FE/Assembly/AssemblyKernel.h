@@ -192,6 +192,8 @@ enum class RequiredData : std::uint64_t {
     PreviousMeshVelocityGradient= 1ull << 49, ///< Spatial Jacobian of previous mesh velocity at quadrature points
     PredictedMeshVelocityGradient=1ull << 50, ///< Spatial Jacobian of predicted mesh velocity at quadrature points
     FullCutSurfaceVariations    = 1ull << 53, ///< Point, normal or weight derivatives of the retained surface rule
+    CutPhaseFractions           = 1ull << 54, ///< Source volume fractions on a generated shape boundary
+    CutFractionDerivative       = 1ull << 55, ///< Per-trial derivative of the current cut volume rule's fraction
     CutSurfaceVariations        = 1ull << 52, ///< Differentiated generated level-set surface quadrature
     EntityMeasureDerivatives    = 1ull << 51, ///< Derivatives of h, vol (and area) in the cell's geometry nodes (complete shape derivatives)
 
@@ -861,6 +863,12 @@ public:
     [[nodiscard]] virtual bool differentiatesCutDomain(FieldId, int, geometry::CutIntegrationSide) const noexcept
     {
         return false;
+    }
+
+    // Geometry dependencies of the terms that can run on this cut marker and side.
+    [[nodiscard]] virtual RequiredData cutDomainRequiredData(int, geometry::CutIntegrationSide) const
+    {
+        return getRequiredData();
     }
 
 private:

@@ -701,12 +701,20 @@ assembly::RequiredData analyzeRequiredData(const FormExprNode& node, FormKind ki
             case FormExprType::FacetArea:
                 required |= RequiredData::EntityMeasures;
                 break;
-            case FormExprType::CutSurfaceVariation:
-                required |= RequiredData::CutSurfaceVariations;
-                if (n.componentIndex0() != static_cast<int>(CutSurfaceComponent::NormalSpeed)) {
-                    required |= RequiredData::FullCutSurfaceVariations;
+            case FormExprType::CutSurfaceVariation: {
+                const auto component = static_cast<CutSurfaceComponent>(*n.componentIndex0());
+                if (component == CutSurfaceComponent::VolumeFractionDerivative) {
+                    required |= RequiredData::CutFractionDerivative;
+                } else {
+                    required |= RequiredData::CutSurfaceVariations;
+                    if (component == CutSurfaceComponent::NegativePhaseFraction || component == CutSurfaceComponent::PositivePhaseFraction) {
+                        required |= RequiredData::CutPhaseFractions;
+                    } else if (component != CutSurfaceComponent::NormalSpeed) {
+                        required |= RequiredData::FullCutSurfaceVariations;
+                    }
                 }
                 break;
+            }
             case FormExprType::CellDiameterVariation:
             case FormExprType::CellVolumeVariation:
             case FormExprType::FacetAreaVariation:

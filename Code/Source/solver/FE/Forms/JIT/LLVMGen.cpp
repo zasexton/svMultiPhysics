@@ -76,6 +76,8 @@ std::size_t cutSurfaceOffset(std::uint64_t component)
         return member + (component - static_cast<std::uint64_t>(first)) * sizeof(Real);
     };
     using C = CutSurfaceComponent;
+    if (component == static_cast<unsigned>(C::NegativePhaseFraction)) return offsetof(Sample, phase_fractions);
+    if (component == static_cast<unsigned>(C::PositivePhaseFraction)) return offsetof(Sample, phase_fractions) + sizeof(Real);
     if (component == static_cast<unsigned>(C::NormalSpeed)) return offsetof(Sample, normal_speed);
     if (component >= static_cast<unsigned>(C::InverseJacobianXX)) {
         return offset(C::InverseJacobianXX, offsetof(Sample, inverse_jacobian));
@@ -6782,6 +6784,20 @@ LLVMGenResult LLVMGen::compileAndAddKernelImpl(JITEngine& engine,
                     case FormExprType::Constant: {
                         const double v = std::bit_cast<double>(op.imm0);
                         values[op_idx] = makeScalar(rc(v));
+                        break;
+                    }
+
+                    case FormExprType::CutSurfaceVariation: {
+                        if (domain != IntegralDomain::CutVolume ||
+                            op.imm1 != static_cast<unsigned>(CutSurfaceComponent::VolumeFractionDerivative)) {
+                            throw std::invalid_argument("cut volume supports only the rule fraction variation");
+                        }
+                        using Args = assembly::jit::CellKernelArgsV6;
+                        const auto field = loadU32(args_ptr, offsetof(Args, cut_fraction_field));
+                        const auto columns = loadPtr(args_ptr, offsetof(Args, cut_fraction_derivative));
+                        const auto value = loadRealPtrAt(columns, builder.CreateZExtOrTrunc(j_index, i64));
+                        values[op_idx] = makeScalar(builder.CreateSelect(
+                            builder.CreateICmpEQ(field, builder.getInt32(op.imm0)), value, rc(0)));
                         break;
                     }
 

@@ -1582,6 +1582,13 @@ ValidationResult canCompile(const FormIR& ir, const ValidationOptions& options)
             return out;
         }
 
+        if (assembly::hasFlag(term.required_data, assembly::RequiredData::CutFractionDerivative) &&
+            (term.domain != IntegralDomain::CutVolume || ir.kind() != FormKind::Bilinear)) {
+            out.ok = false;
+            out.first_issue = issue(*term.integrand.node(), "cut fraction variation requires a bilinear cut-volume form");
+            return out;
+        }
+
         if (term.exterior_boundary_measure.has_value()) {
             const auto& measure =
                 *term.exterior_boundary_measure;
