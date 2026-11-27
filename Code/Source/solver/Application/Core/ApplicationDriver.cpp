@@ -158,7 +158,7 @@ using svmp::Physics::formulations::navier_stokes::free_surface::buildUnstagedFre
 using svmp::Physics::formulations::navier_stokes::free_surface::freeSurfaceEnergyRejectionReasonForStepReject;
 using svmp::Physics::formulations::navier_stokes::free_surface::FreeSurfaceAggregationEnergyClassification;
 using svmp::Physics::formulations::navier_stokes::free_surface::classifyAcceptedAggregationEnergy;
-using svmp::FE::level_set::logLevelSetMaintenanceWorkPublishedSince;
+using svmp::Physics::formulations::navier_stokes::free_surface::logLevelSetMaintenanceWorkPublishedSince;
 using svmp::Physics::formulations::navier_stokes::free_surface::logLevelSetMaintenancePhysicalEndpointChannels;
 
 } // namespace application::core
@@ -7680,7 +7680,7 @@ void ApplicationDriver::runTransient(SimulationComponents& sim, const Parameters
   const auto velocity_extension_artifact_comm =
       activeFESystemCommunicator(*sim.fe_system);
   // What a maintenance work row records of a candidate state.
-  const svmp::FE::level_set::LevelSetMaintenanceWorkRowSource
+  const svmp::Physics::formulations::navier_stokes::free_surface::LevelSetMaintenanceWorkRowSource
       maintenance_work_rows{
           .functional_values =
               [&](std::span<const svmp::FE::Real> candidate) {
@@ -8060,7 +8060,7 @@ void ApplicationDriver::runTransient(SimulationComponents& sim, const Parameters
   bool pending_phase_geometry_commit_required{false};
   bool pending_phase_geometry_commit_returned{false};
   bool pending_phase_ledger_transaction_inactive{false};
-  svmp::FE::level_set::LevelSetMaintenanceWorkMark pending_phase_work_mark{};
+  svmp::Physics::formulations::navier_stokes::free_surface::LevelSetMaintenanceWorkMark pending_phase_work_mark{};
   const auto clear_pending_contact_provenance = [&] {
     contact_stage.clearPendingProvenance();
     energy.clearPendingAccount();
@@ -8328,7 +8328,7 @@ void ApplicationDriver::runTransient(SimulationComponents& sim, const Parameters
                       substage,
                   std::span<const svmp::FE::Real> before_candidate,
                   std::span<const svmp::FE::Real> after_candidate) {
-                svmp::FE::level_set::stageLevelSetMaintenanceWorkRow(
+                svmp::Physics::formulations::navier_stokes::free_surface::stageLevelSetMaintenanceWorkRow(
                     level_set_maintenance_work,
                     maintenance_work_rows,
                     staged_phase_functionals,
@@ -9570,7 +9570,7 @@ void ApplicationDriver::runTransient(SimulationComponents& sim, const Parameters
             ensure_maintenance_geometry_transaction();
             cut_report = maintenance_geometry_transaction->refresh(
                 params, after_candidate);
-            svmp::FE::level_set::stageLevelSetMaintenanceWorkRow(
+            svmp::Physics::formulations::navier_stokes::free_surface::stageLevelSetMaintenanceWorkRow(
                 level_set_maintenance_work,
                 maintenance_work_rows,
                 staged_maintenance_functionals,

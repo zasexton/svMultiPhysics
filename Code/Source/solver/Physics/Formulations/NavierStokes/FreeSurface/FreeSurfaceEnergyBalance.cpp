@@ -160,7 +160,7 @@ evaluateFreeSurfaceResidualWorkChannels(
 
 LevelSetMaintenancePhysicalEndpointChannels
 evaluateLevelSetMaintenancePhysicalEndpointChannels(
-    const svmp::FE::level_set::LevelSetMaintenanceAcceptedStepEnergyAccount&
+    const LevelSetMaintenanceAcceptedStepEnergyAccount&
         account,
     std::optional<double> preceding_gravitational_energy,
     std::optional<double> preceding_surface_wall_energy)
@@ -240,7 +240,7 @@ evaluateLevelSetMaintenancePhysicalEndpointChannels(
 }
 
 void logLevelSetMaintenancePhysicalEndpointChannels(
-    const svmp::FE::level_set::LevelSetMaintenanceAcceptedStepEnergyAccount&
+    const LevelSetMaintenanceAcceptedStepEnergyAccount&
         account,
     const LevelSetMaintenancePhysicalEndpointChannels& channels,
     std::uint64_t preceding_accepted_step,

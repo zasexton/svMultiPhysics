@@ -1854,13 +1854,13 @@ evaluateDeclaredAcceptedFunctionals(
   return states;
 }
 
-std::vector<svmp::FE::level_set::LevelSetAuthoritativeFunctionalValue>
+std::vector<LevelSetAuthoritativeFunctionalValue>
 levelSetMaintenanceFunctionalValues(
     const FESystemHandle& sim,
     std::span<const AcceptedFreeSurfaceDiscreteFunctionalState> states,
     std::span<const svmp::FE::Real> solution)
 {
-  std::vector<svmp::FE::level_set::LevelSetAuthoritativeFunctionalValue>
+  std::vector<LevelSetAuthoritativeFunctionalValue>
       values;
   values.reserve(states.size());
   if (!sim.fe_system) {
@@ -1968,7 +1968,7 @@ levelSetMaintenanceFunctionalValues(
                   static_cast<double>(state.state.young_wall_energy)}
             : std::nullopt;
     values.push_back(
-        svmp::FE::level_set::LevelSetAuthoritativeFunctionalValue{
+        LevelSetAuthoritativeFunctionalValue{
             .interface_marker = state.interface_marker,
             .snapshot_revision =
                 state.geometry_revision.snapshot_revision_key,

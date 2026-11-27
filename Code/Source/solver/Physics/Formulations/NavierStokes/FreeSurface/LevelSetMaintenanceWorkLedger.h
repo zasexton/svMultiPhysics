@@ -9,7 +9,7 @@
 
 /**
  * @file LevelSetMaintenanceWorkLedger.h
- * @ingroup fe_level_set
+ * @ingroup physics
  * @brief The work of level-set maintenance on the declared functionals: the
  *        transactional ledger of maintenance substages, the accepted-step
  *        maintenance account and their logs.
@@ -20,13 +20,11 @@
  * Transport is kept apart from the numerical maintenance substages
  * (limiting, reinitialization, geometry reconciliation, global correction).
  *
- * The types, the ledger, the accepted-step aggregation and the log formats
- * were moved from Physics/Formulations/NavierStokes/FreeSurface/
- * FreeSurfaceEnergyAccount with bodies, messages and log text unchanged.
+ * The free-surface formulation owns the energies and record formats.
  */
 
-#include "Core/Types.h"
-#include "LevelSet/LevelSetMaintenanceSubstage.h"
+#include "FE/Core/Types.h"
+#include "FE/LevelSet/LevelSetMaintenanceSubstage.h"
 
 #include <cstddef>
 #include <cstdint>
@@ -35,12 +33,11 @@
 #include <span>
 #include <vector>
 
-namespace svmp {
-namespace FE {
-
+namespace svmp::FE {
 class LogRecord;
+}
 
-namespace level_set {
+namespace svmp::Physics::formulations::navier_stokes::free_surface {
 
 enum class LevelSetMaintenanceWorkStatus : std::uint8_t {
   Trial,
@@ -48,7 +45,7 @@ enum class LevelSetMaintenanceWorkStatus : std::uint8_t {
   Rejected
 };
 
-using LevelSetMaintenanceWorkSubstage = MaintenanceSubstage;
+using LevelSetMaintenanceWorkSubstage = FE::level_set::MaintenanceSubstage;
 
 enum class LevelSetMaintenanceDeclaredStage : std::uint8_t {
   ProspectiveAcceptedEndpoint,
@@ -340,7 +337,7 @@ void mixMaintenanceRevision(
  * row's transaction_id, substage, step and attempt, then the interface's
  * before/after values).
  */
-[[nodiscard]] LogRecord levelSetMaintenanceWorkRowRecord(
+[[nodiscard]] FE::LogRecord levelSetMaintenanceWorkRowRecord(
     const LevelSetMaintenanceWorkRow& row);
 
 /** Log one record per maintenance work row (levelSetMaintenanceWorkRowRecord). */
@@ -369,10 +366,10 @@ void logLevelSetMaintenanceWorkPublishedSince(
 struct LevelSetMaintenanceWorkRowSource {
   /// The functional values of a candidate state (collective).
   std::function<std::vector<LevelSetAuthoritativeFunctionalValue>(
-      std::span<const Real>)>
+      std::span<const FE::Real>)>
       functional_values{};
   /// The algebraic state revision of a candidate state (collective).
-  std::function<std::uint64_t(std::span<const Real>)>
+  std::function<std::uint64_t(std::span<const FE::Real>)>
       algebraic_state_revision{};
   /// The extension-map revision after the substage (collective).
   std::function<std::optional<std::uint64_t>()> extension_map_revision{};
@@ -392,10 +389,8 @@ void stageLevelSetMaintenanceWorkRow(
     LevelSetMaintenanceWorkLedger& ledger,
     const LevelSetMaintenanceWorkRowSource& source,
     std::vector<LevelSetAuthoritativeFunctionalValue>& current,
-    MaintenanceSubstage substage,
-    std::span<const Real> before_candidate,
-    std::span<const Real> after_candidate);
+    FE::level_set::MaintenanceSubstage substage,
+    std::span<const FE::Real> before_candidate,
+    std::span<const FE::Real> after_candidate);
 
-} // namespace level_set
-} // namespace FE
-} // namespace svmp
+} // namespace svmp::Physics::formulations::navier_stokes::free_surface

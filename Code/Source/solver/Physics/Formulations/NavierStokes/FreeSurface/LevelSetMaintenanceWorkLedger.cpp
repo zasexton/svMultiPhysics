@@ -5,10 +5,10 @@
  * See Copyright-SimVascular.txt for additional details.
  */
 
-#include "LevelSet/Maintenance/LevelSetMaintenanceWorkLedger.h"
+#include "Physics/Formulations/NavierStokes/FreeSurface/LevelSetMaintenanceWorkLedger.h"
 
-#include "Core/LogRecord.h"
-#include "Core/RankLog.h"
+#include "FE/Core/LogRecord.h"
+#include "FE/Core/RankLog.h"
 
 #include <algorithm>
 #include <array>
@@ -22,9 +22,11 @@
 #include <string_view>
 #include <utility>
 
-namespace svmp {
-namespace FE {
-namespace level_set {
+namespace svmp::Physics::formulations::navier_stokes::free_surface {
+
+using FE::LogRecord;
+using FE::Real;
+using FE::level_set::MaintenanceSubstage;
 
 void mixMaintenanceRevision(
     std::uint64_t& revision,
@@ -1598,6 +1600,4 @@ void stageLevelSetMaintenanceWorkRow(
   current = std::move(after_values);
 }
 
-} // namespace level_set
-} // namespace FE
-} // namespace svmp
+} // namespace svmp::Physics::formulations::navier_stokes::free_surface

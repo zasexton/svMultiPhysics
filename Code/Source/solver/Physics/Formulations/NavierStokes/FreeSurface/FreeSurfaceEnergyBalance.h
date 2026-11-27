@@ -21,7 +21,7 @@
  *
  * The level-set maintenance work ledger and the accepted-step maintenance
  * account are FE services
- * (FE/LevelSet/Maintenance/LevelSetMaintenanceWorkLedger.h).
+ * (Physics/Formulations/NavierStokes/FreeSurface/LevelSetMaintenanceWorkLedger.h).
  */
 
 #include "Physics/Formulations/NavierStokes/FreeSurface/SnapshotFunctionals.h"
@@ -30,7 +30,7 @@
 #include "FE/Constraints/SmallCutAggregationConstraint.h"
 #include "FE/Core/Types.h"
 #include "FE/Interfaces/LevelSetGeometrySnapshot.h"
-#include "FE/LevelSet/Maintenance/LevelSetMaintenanceWorkLedger.h"
+#include "Physics/Formulations/NavierStokes/FreeSurface/LevelSetMaintenanceWorkLedger.h"
 #include "FE/Systems/EnergyBalanceLedger.h"
 #include "FE/Systems/FESystem.h"
 #include "Physics/Formulations/NavierStokes/FreeSurface/FreeSurfaceRecordTypes.h"
@@ -113,7 +113,7 @@ struct LevelSetMaintenancePhysicalEndpointChannels {
  */
 [[nodiscard]] LevelSetMaintenancePhysicalEndpointChannels
 evaluateLevelSetMaintenancePhysicalEndpointChannels(
-    const svmp::FE::level_set::LevelSetMaintenanceAcceptedStepEnergyAccount&
+    const LevelSetMaintenanceAcceptedStepEnergyAccount&
         account,
     std::optional<double>
         preceding_gravitational_energy,
@@ -122,7 +122,7 @@ evaluateLevelSetMaintenancePhysicalEndpointChannels(
 
 /** Log the physical-endpoint channels of an accepted-step account. */
 void logLevelSetMaintenancePhysicalEndpointChannels(
-    const svmp::FE::level_set::LevelSetMaintenanceAcceptedStepEnergyAccount&
+    const LevelSetMaintenanceAcceptedStepEnergyAccount&
         account,
     const LevelSetMaintenancePhysicalEndpointChannels& channels,
     std::uint64_t preceding_accepted_step,

@@ -32,7 +32,7 @@ Use specific headers when compile time or dependency clarity matters:
 | `FE/LevelSet/Maintenance/LevelSetMaintenanceConfiguration.h` | configuration, run state and declaration bindings of a maintained level-set field |
 | `FE/LevelSet/Maintenance/LevelSetMaintenancePipeline.h` | accepted-step maintenance pipeline |
 | `FE/LevelSet/Maintenance/LevelSetWallAwareMaintenance.h` | accepted wall-contact cells of a maintained field from the host's plain wall input |
-| `FE/LevelSet/Maintenance/LevelSetMaintenanceWorkLedger.h` | work of maintenance on the declared functionals by substage and transaction, and the accepted-step maintenance account |
+| `Physics/Formulations/NavierStokes/FreeSurface/LevelSetMaintenanceWorkLedger.h` | The free-surface formulation uses the FE stage observer to account for kinetic, gravitational, surface and Young-wall energies during maintenance. |
 | `FE/LevelSet/LevelSetDiagnostics.h` | scalar diagnostics for the cut-cell volume |
 | `FE/LevelSet/LevelSetRestart.h` | restart records for level-set fields and generated interfaces |
 

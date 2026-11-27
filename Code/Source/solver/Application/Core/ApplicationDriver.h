@@ -1,6 +1,7 @@
 #pragma once
 
 #include "Physics/Formulations/NavierStokes/FreeSurface/FreeSurfaceEnergyBalance.h"
+#include "Physics/Formulations/NavierStokes/FreeSurface/LevelSetMaintenanceWorkLedger.h"
 
 #include <cstddef>
 #include <cstdint>
@@ -19,27 +20,23 @@ namespace core {
 struct SimulationComponents;
 struct VtkTimeSeriesCollection;
 
-// The level-set maintenance work ledger and the accepted-step maintenance
-// account are FE services
-// (FE/LevelSet/Maintenance/LevelSetMaintenanceWorkLedger.h); the physical
-// endpoint channels and the residual-work channels are part of the energy
-// record of a level-set run (Physics/Formulations/NavierStokes/FreeSurface/FreeSurfaceEnergyBalance.h).
-using svmp::FE::level_set::LevelSetMaintenanceWorkStatus;
-using svmp::FE::level_set::LevelSetMaintenanceWorkSubstage;
-using svmp::FE::level_set::LevelSetMaintenanceDeclaredStage;
-using svmp::FE::level_set::LevelSetAuthoritativeFunctionalValue;
-using svmp::FE::level_set::LevelSetMaintenanceWorkTransaction;
-using svmp::FE::level_set::LevelSetMaintenanceWorkRow;
-using svmp::FE::level_set::LevelSetMaintenanceModeledEnergySubstage;
-using svmp::FE::level_set::LevelSetMaintenanceModeledEnergyBreakdown;
-using svmp::FE::level_set::LevelSetMaintenanceWorkAttempt;
-using svmp::FE::level_set::LevelSetMaintenanceAcceptedStepEnergyAccount;
-using svmp::FE::level_set::aggregateLevelSetMaintenanceAcceptedStepEnergy;
+// The free-surface formulation owns the maintenance energy ledger and endpoint channels.
+using svmp::Physics::formulations::navier_stokes::free_surface::LevelSetMaintenanceWorkStatus;
+using svmp::Physics::formulations::navier_stokes::free_surface::LevelSetMaintenanceWorkSubstage;
+using svmp::Physics::formulations::navier_stokes::free_surface::LevelSetMaintenanceDeclaredStage;
+using svmp::Physics::formulations::navier_stokes::free_surface::LevelSetAuthoritativeFunctionalValue;
+using svmp::Physics::formulations::navier_stokes::free_surface::LevelSetMaintenanceWorkTransaction;
+using svmp::Physics::formulations::navier_stokes::free_surface::LevelSetMaintenanceWorkRow;
+using svmp::Physics::formulations::navier_stokes::free_surface::LevelSetMaintenanceModeledEnergySubstage;
+using svmp::Physics::formulations::navier_stokes::free_surface::LevelSetMaintenanceModeledEnergyBreakdown;
+using svmp::Physics::formulations::navier_stokes::free_surface::LevelSetMaintenanceWorkAttempt;
+using svmp::Physics::formulations::navier_stokes::free_surface::LevelSetMaintenanceAcceptedStepEnergyAccount;
+using svmp::Physics::formulations::navier_stokes::free_surface::aggregateLevelSetMaintenanceAcceptedStepEnergy;
 using svmp::Physics::formulations::navier_stokes::free_surface::LevelSetMaintenancePhysicalEndpointChannels;
 using svmp::Physics::formulations::navier_stokes::free_surface::FreeSurfaceResidualWorkChannels;
 using svmp::Physics::formulations::navier_stokes::free_surface::evaluateFreeSurfaceResidualWorkChannels;
 using svmp::Physics::formulations::navier_stokes::free_surface::evaluateLevelSetMaintenancePhysicalEndpointChannels;
-using svmp::FE::level_set::LevelSetMaintenanceWorkLedger;
+using svmp::Physics::formulations::navier_stokes::free_surface::LevelSetMaintenanceWorkLedger;
 
 class ApplicationDriver {
 public:

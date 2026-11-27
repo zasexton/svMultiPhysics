@@ -300,6 +300,7 @@ if(PHYSICS_BUILD_TESTS)
         Tests/Unit/test_NavierStokesOutletFactory.cpp
         Tests/Unit/test_IncompressibleTwoFluidInterface.cpp
         Tests/Unit/test_TwoFluidStageRecords.cpp
+        Tests/Unit/test_LevelSetMaintenanceWorkLedger.cpp
         Tests/Unit/test_FunctionalRecords.cpp
         Tests/Unit/test_FreeSurfaceSnapshotFunctionals.cpp
         Tests/Unit/test_OperatorStageCapture.cpp

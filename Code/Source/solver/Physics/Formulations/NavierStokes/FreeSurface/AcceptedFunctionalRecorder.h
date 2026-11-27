@@ -29,7 +29,7 @@
 
 #include "FE/Core/Types.h"
 #include "FE/Forms/FormExpr.h"
-#include "FE/LevelSet/Maintenance/LevelSetMaintenanceWorkLedger.h"
+#include "Physics/Formulations/NavierStokes/FreeSurface/LevelSetMaintenanceWorkLedger.h"
 #include "FE/Systems/FESystem.h"
 #include "FE/Systems/FESystemHandle.h"
 #include "Physics/Formulations/NavierStokes/FreeSurface/FreeSurfaceRecordTypes.h"
@@ -121,7 +121,7 @@ std::uint64_t collectiveFieldRevision(
     std::string_view diagnostic_context);
 
 /// The functional values that the level-set maintenance ledger reads.
-std::vector<FE::level_set::LevelSetAuthoritativeFunctionalValue>
+std::vector<LevelSetAuthoritativeFunctionalValue>
 levelSetMaintenanceFunctionalValues(
     const FE::systems::FESystemHandle& sim,
     std::span<const AcceptedFreeSurfaceDiscreteFunctionalState>

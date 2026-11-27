@@ -107,7 +107,7 @@ public:
   /// maintenance work ledger and evaluates its physical-endpoint channels.
   void recordAcceptedStepMaintenanceAccount(
       const svmp::FE::timestepping::TimeHistory& h,
-      const svmp::FE::level_set::LevelSetMaintenanceWorkLedger&
+      const LevelSetMaintenanceWorkLedger&
           level_set_maintenance_work,
       std::size_t pending_phase_accepted_attempt_begin,
       std::size_t pending_phase_accepted_row_begin,
@@ -155,7 +155,7 @@ public:
   bool initial_free_surface_functional_baseline_recorded{true};
 
   std::uint64_t pending_pre_maintenance_endpoint_state_revision{0u};
-  std::optional<svmp::FE::level_set::LevelSetMaintenanceAcceptedStepEnergyAccount>
+  std::optional<LevelSetMaintenanceAcceptedStepEnergyAccount>
       pending_accepted_step_maintenance_energy_account;
   std::optional<LevelSetMaintenancePhysicalEndpointChannels>
       pending_accepted_step_physical_endpoint_channels;

@@ -5,9 +5,9 @@
  * See Copyright-SimVascular.txt for additional details.
  */
 
-#include "LevelSet/Maintenance/LevelSetMaintenanceWorkLedger.h"
+#include "Physics/Formulations/NavierStokes/FreeSurface/LevelSetMaintenanceWorkLedger.h"
 
-#include "Core/LogRecord.h"
+#include "FE/Core/LogRecord.h"
 
 #include <gtest/gtest.h>
 
@@ -18,16 +18,16 @@
 #include <string>
 #include <vector>
 
-namespace level_set = svmp::FE::level_set;
+namespace ledger = svmp::Physics::formulations::navier_stokes::free_surface;
 
 namespace {
 
-using level_set::LevelSetAuthoritativeFunctionalValue;
-using level_set::LevelSetMaintenanceDeclaredStage;
-using level_set::LevelSetMaintenanceWorkLedger;
-using level_set::LevelSetMaintenanceWorkStatus;
-using level_set::LevelSetMaintenanceWorkTransaction;
-using Substage = level_set::MaintenanceSubstage;
+using ledger::LevelSetAuthoritativeFunctionalValue;
+using ledger::LevelSetMaintenanceDeclaredStage;
+using ledger::LevelSetMaintenanceWorkLedger;
+using ledger::LevelSetMaintenanceWorkStatus;
+using ledger::LevelSetMaintenanceWorkTransaction;
+using Substage = svmp::FE::level_set::MaintenanceSubstage;
 
 /// One interface with surface energy 3, Young-wall energy -0.25 and the
 /// volume-constraint potential that closes the total.
@@ -251,7 +251,7 @@ TEST(LevelSetMaintenanceWorkLedger, AccountKeepsPhysicalTransportApartFromNumeri
                     {corrected});
     ledger.commitTransaction();
 
-    const auto account = level_set::aggregateLevelSetMaintenanceAcceptedStepEnergy(
+    const auto account = ledger::aggregateLevelSetMaintenanceAcceptedStepEnergy(
         ledger.acceptedAttempts(), ledger.acceptedRows());
     ASSERT_TRUE(account.has_value());
     EXPECT_EQ(account->transaction_count, 1u);
@@ -280,16 +280,16 @@ TEST(LevelSetMaintenanceWorkLedger, AccountKeepsPhysicalTransportApartFromNumeri
     EXPECT_NEAR(*account->physical_transport_endpoint_residual, 0.0, 1.0e-15);
 
     // No published transaction, no account; rows without an attempt fail.
-    EXPECT_FALSE(level_set::aggregateLevelSetMaintenanceAcceptedStepEnergy({}, {})
+    EXPECT_FALSE(ledger::aggregateLevelSetMaintenanceAcceptedStepEnergy({}, {})
                      .has_value());
-    EXPECT_THROW((void)level_set::aggregateLevelSetMaintenanceAcceptedStepEnergy(
+    EXPECT_THROW((void)ledger::aggregateLevelSetMaintenanceAcceptedStepEnergy(
                      {}, ledger.acceptedRows()),
                  std::invalid_argument);
     // A rejected attempt is not part of an accepted-step account.
     LevelSetMaintenanceWorkLedger rejected;
     rejected.beginTransaction(transaction(108u));
     rejected.rejectTransaction();
-    EXPECT_THROW((void)level_set::aggregateLevelSetMaintenanceAcceptedStepEnergy(
+    EXPECT_THROW((void)ledger::aggregateLevelSetMaintenanceAcceptedStepEnergy(
                      rejected.rejectedAttempts(), {}),
                  std::invalid_argument);
 }
@@ -299,7 +299,7 @@ TEST(LevelSetMaintenanceWorkLedger, StageObserverRowEvaluatesTheAfterStateAndAdv
     LevelSetMaintenanceWorkLedger ledger;
     ledger.beginTransaction(transaction(109u));
     std::vector<std::string> calls;
-    level_set::LevelSetMaintenanceWorkRowSource source;
+    ledger::LevelSetMaintenanceWorkRowSource source;
     source.functional_values = [&](std::span<const svmp::FE::Real> state) {
         calls.push_back("functionals");
         return std::vector<LevelSetAuthoritativeFunctionalValue>{
@@ -318,7 +318,7 @@ TEST(LevelSetMaintenanceWorkLedger, StageObserverRowEvaluatesTheAfterStateAndAdv
         functionalValue(2.0, 11u)};
     const std::vector<svmp::FE::Real> before{2.0, 11.0};
     const std::vector<svmp::FE::Real> after{2.5, 12.0};
-    level_set::stageLevelSetMaintenanceWorkRow(
+    ledger::stageLevelSetMaintenanceWorkRow(
         ledger, source, current, Substage::GeometryReconciliation, before,
         after);
     EXPECT_EQ(calls, (std::vector<std::string>{"functionals", "revision",
@@ -337,14 +337,14 @@ TEST(LevelSetMaintenanceWorkLedger, StageObserverRowEvaluatesTheAfterStateAndAdv
     // A rejected row leaves the current values in place.
     std::vector<LevelSetAuthoritativeFunctionalValue> stale{
         functionalValue(9.0, 99u)};
-    EXPECT_THROW(level_set::stageLevelSetMaintenanceWorkRow(
+    EXPECT_THROW(ledger::stageLevelSetMaintenanceWorkRow(
                      ledger, source, stale, Substage::GlobalCorrection, after,
                      before),
                  std::invalid_argument);
     EXPECT_EQ(stale.front(), functionalValue(9.0, 99u));
 
-    level_set::LevelSetMaintenanceWorkRowSource incomplete;
-    EXPECT_THROW(level_set::stageLevelSetMaintenanceWorkRow(
+    ledger::LevelSetMaintenanceWorkRowSource incomplete;
+    EXPECT_THROW(ledger::stageLevelSetMaintenanceWorkRow(
                      ledger, incomplete, current, Substage::GlobalCorrection,
                      after, after),
                  std::invalid_argument);
@@ -365,9 +365,9 @@ TEST(LevelSetMaintenanceWorkLedger, PublicationLogsNameOnlyTheNewOutcome)
     ledger.commitTransaction();
 
     testing::internal::CaptureStdout();
-    level_set::logLevelSetMaintenanceWorkPublishedSince(
+    ledger::logLevelSetMaintenanceWorkPublishedSince(
         ledger, mark, LevelSetMaintenanceWorkStatus::Accepted);
-    level_set::logLevelSetMaintenanceWorkPublishedSince(
+    ledger::logLevelSetMaintenanceWorkPublishedSince(
         ledger, mark, LevelSetMaintenanceWorkStatus::Rejected);
     const auto output = testing::internal::GetCapturedStdout();
     if (output.empty()) {
@@ -386,7 +386,7 @@ TEST(LevelSetMaintenanceWorkLedger, PublicationLogsNameOnlyTheNewOutcome)
     ASSERT_NE(attempt, std::string::npos);
     ASSERT_NE(row, std::string::npos);
     EXPECT_LT(attempt, row);
-    EXPECT_THROW(level_set::logLevelSetMaintenanceWorkPublishedSince(
+    EXPECT_THROW(ledger::logLevelSetMaintenanceWorkPublishedSince(
                      ledger, mark, LevelSetMaintenanceWorkStatus::Trial),
                  std::invalid_argument);
 }
@@ -397,7 +397,7 @@ TEST(LevelSetMaintenanceWorkLedger, PublicationLogsNameOnlyTheNewOutcome)
 // here.
 TEST(LevelSetMaintenanceWorkLedger, RowRecordHasOneChildLinePerInterface)
 {
-    level_set::LevelSetMaintenanceWorkRow row;
+    ledger::LevelSetMaintenanceWorkRow row;
     row.transaction_id = 121u;
     row.status = LevelSetMaintenanceWorkStatus::Accepted;
     row.substage = Substage::Reinitialization;
@@ -421,7 +421,7 @@ TEST(LevelSetMaintenanceWorkLedger, RowRecordHasOneChildLinePerInterface)
     row.numerical_work = 0.375;
     row.accepted_numerical_work = 0.375;
 
-    const auto lines = level_set::levelSetMaintenanceWorkRowRecord(row).lines();
+    const auto lines = ledger::levelSetMaintenanceWorkRowRecord(row).lines();
     const std::string head = "LevelSetMaintenanceWorkLedger: work row ";
     const std::string row_keys = "transaction_id=121 substage=reinitialization step=8 attempt=2 ";
     const std::vector<std::string> expected{
@@ -465,5 +465,5 @@ TEST(LevelSetMaintenanceWorkLedger, RowRecordHasOneChildLinePerInterface)
             "before_modeled_stored_energy=3.5 after_modeled_stored_energy=3.75",
     };
     EXPECT_EQ(lines, expected);
-    EXPECT_TRUE(level_set::levelSetMaintenanceWorkRowRecord(row).isRootOnly());
+    EXPECT_TRUE(ledger::levelSetMaintenanceWorkRowRecord(row).isRootOnly());
 }
