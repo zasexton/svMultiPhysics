@@ -610,9 +610,11 @@ TransientTimeIntegrationSelection resolveTransientTimeIntegrationSelection(
   return selection;
 }
 
-double parseDoubleEnv(const char* name, double default_value)
+double parseDoubleEnv(const char* name, double default_value,
+                      const svmp::FE::environment::EnvironmentNameRegistry& registry =
+                          svmp::FE::environment::EnvironmentNameRegistry::solver())
 {
-  const char* env = svmp::FE::environment::value(name);
+  const char* env = registry.value(name);
   if (!env) {
     return default_value;
   }
@@ -2316,8 +2318,9 @@ void logWetVolumeDiagnostics(
   const auto diagnostics =
       collectWetVolumeDiagnostics(
           requests, cut_context, mesh, n_cells, comm);
-  const double drift_warning_threshold =
-      parseDoubleEnv("SVMP_WET_VOLUME_DRIFT_WARNING", 1.0e-3);
+  namespace free_surface = svmp::Physics::formulations::navier_stokes::free_surface;
+  const double drift_warning_threshold = parseDoubleEnv(
+      free_surface::wetVolumeDriftWarningControl, 1.0e-3, free_surface::environmentRegistry());
   for (const auto& diagnostic : diagnostics) {
     const std::string key = diagnostic.level_set_field_name + "|" +
                             diagnostic.domain_id + "|" +

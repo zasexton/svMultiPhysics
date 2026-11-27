@@ -26,6 +26,12 @@ struct LevelSetRecordLabels {
     const char* active_volume{"active_volume"};
     const char* cut_cell_active_volume{"cut_cell_active_volume"};
     const char* full_cell_active_volume{"full_cell_active_volume"};
+    const char* snapshot{"level-set snapshot"};
+    const char* snapshot_validation{"level_set_snapshot_validation"};
+    const char* aggregation_rootless_hint{
+        "the candidate's cut feature has full cells only beyond the aggregation guards; "
+        "SmallCutAggregationGuardOptions::rootless_fallback permits a homogeneous pin for "
+        "each such candidate; every case is logged and counted in the run summary"};
 };
 
 inline constexpr LevelSetRecordLabels defaultLevelSetRecordLabels{};

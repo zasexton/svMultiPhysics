@@ -24,7 +24,17 @@ inline constexpr FE::level_set::LevelSetRecordLabels levelSetRecordLabels{
     .snapshot_revision = "free_surface_snapshot_revision",
     .active_volume = "active_wet_volume",
     .cut_cell_active_volume = "cut_cell_active_wet_volume",
-    .full_cell_active_volume = "full_cell_active_wet_volume"};
+    .full_cell_active_volume = "full_cell_active_wet_volume",
+    .snapshot = "free-surface snapshot",
+    .snapshot_validation = "free_surface_snapshot_validation",
+    .aggregation_rootless_hint =
+        "the candidate's cut feature has full cells only beyond the aggregation "
+        "guards (for example a wetting film or wedge at a wall); set "
+        "<Small_cut_aggregation_rootless_fallback>true</Small_cut_aggregation_rootless_fallback> "
+        "on the free-surface boundary condition to continue with the "
+        "rootless-island policy (opt-in: it pins velocity and pressure of those "
+        "candidates, which degrades results inside connected liquid; every case "
+        "is logged and counted in the run summary)"};
 
 inline constexpr FE::level_set::ConservativePhaseRecordSchema conservativePhaseRecordSchema{
     .version = 3,

@@ -10,6 +10,8 @@
 
 namespace svmp::Physics::formulations::navier_stokes::free_surface {
 
+inline constexpr char wetVolumeDriftWarningControl[] = "SVMP_WET_VOLUME_DRIFT_WARNING";
+
 /// The solver catalogue extended by the free-surface formulation.
 [[nodiscard]] const FE::environment::EnvironmentNameRegistry& environmentRegistry();
 [[nodiscard]] bool keepFullCellPointsFromEnvironment();

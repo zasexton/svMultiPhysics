@@ -114,8 +114,6 @@ std::span<const NameDeclaration> solverCatalogue() noexcept
          "remainder, as a fraction of the step, absorbed into the last step"},
         {"SVMP_VTK_OUTPUT_FINAL_TIME", Diagnostic, kDriver, Flag, "off", Reference,
          "also writes VTK output at the final time"},
-        {"SVMP_WET_VOLUME_DRIFT_WARNING", Diagnostic, kDriver, Real, "1e-3", Reference,
-         "relative wet-volume drift above which a warning is logged"},
 
         // Application: the simulation builder and the cut configuration.
         {"SVMP_CUT_RETENTION_FORCE", TestHook, kCutConfiguration, Text, "the request's retention", NonReference,

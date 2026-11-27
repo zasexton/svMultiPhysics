@@ -30,6 +30,7 @@
 
 #include <span>
 
+#include "LevelSet/LevelSetRecordLabels.h"
 #include "Assembly/CutIntegrationContext.h"
 #include "Basis/NodeOrderingConventions.h"
 #include "Constraints/AffineConstraints.h"
@@ -1964,7 +1965,7 @@ TEST(SmallCutAggregationConstraint, RootPathGuardRejectsLongCutBand)
         EXPECT_NE(std::string(error.what()).find("maximum_allowed_path=1"),
                   std::string::npos);
         EXPECT_NE(std::string(error.what()).find(
-                      "Small_cut_aggregation_rootless_fallback"),
+                      "SmallCutAggregationGuardOptions::rootless_fallback"),
                   std::string::npos);
     }
     EXPECT_EQ(system.constraints().numConstraints(), 0u);
@@ -2116,6 +2117,7 @@ TEST(SmallCutAggregationConstraint,
         auto space = std::make_shared<spaces::H1Space>(
             ElementType::Quad4, /*order=*/1);
         systems::FESystem system(mesh);
+        system.attachment<level_set::LevelSetRecordLabels>().aggregation_rootless_hint = "configured guard hint";
         const auto pressure = system.addField(systems::FieldSpec{
             .name = "p", .space = space, .components = 1});
         system.addOperator("pressure");
@@ -2147,7 +2149,7 @@ TEST(SmallCutAggregationConstraint,
             EXPECT_EQ(message.find("incomplete_distributed_aggregation_halo"),
                       std::string::npos)
                 << message;
-            EXPECT_NE(message.find("Small_cut_aggregation_rootless_fallback"),
+            EXPECT_NE(message.find("configured guard hint"),
                       std::string::npos);
         }
         EXPECT_EQ(system.constraints().numConstraints(), 0u);

@@ -211,13 +211,8 @@ struct SmallCutAggregationGuardOptions {
     Real maximum_reference_extrapolation_distance{4.0};
     Real maximum_absolute_coefficient{16.0};
     Real maximum_row_l1_norm{32.0};
-    /// Opt-in fail-safe (deck key Small_cut_aggregation_rootless_fallback,
-    /// default off).  A candidate whose cut feature holds full cells only
-    /// beyond the root-path guard, or whose every root proposal fails the
-    /// guards, stops the run by default.  With the fallback it receives the
-    /// rootless-island policy (homogeneous pin), which degrades results
-    /// inside connected the active region; every case is logged and counted in the
-    /// run summary so that such results are flagged.
+    /// If no root proposal meets the guards, apply a homogeneous pin to the
+    /// candidate and count it in the refresh report. By default the refresh fails.
     bool rootless_fallback{false};
 };
 

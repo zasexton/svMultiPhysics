@@ -23,6 +23,7 @@
  * The physical laws and the Forms consuming those declarations stay here.
  */
 
+#include "Physics/Formulations/NavierStokes/FreeSurface/LevelSetRecords.h"
 #include "Physics/Formulations/NavierStokes/IncompressibleNavierStokesVMSModule.h"
 #include "Physics/Formulations/NavierStokes/NavierStokesBCFactories.h"
 #include "FE/Basis/BasisTraits.h"
@@ -432,6 +433,9 @@ void IncompressibleNavierStokesVMSModule::registerOn(fs::FESystem& system) const
     const bool liquid_constraints = cut_liquid && hasNativeMeshOrWarn(system);
     const bool aggregated = liquid_constraints && liquid->small_cut_aggregation;
     if (liquid_constraints) {
+        if (!system.findAttachment<FE::level_set::LevelSetRecordLabels>()) {
+            system.attachment<FE::level_set::LevelSetRecordLabels>() = free_surface::levelSetRecordLabels;
+        }
         const auto L =
             preflight.surface_identities[*preflight.active_boundary_index].geometry.value()
                 .side(activeDomainSide(liquid->active_domain));

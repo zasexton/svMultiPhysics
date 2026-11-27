@@ -25,6 +25,7 @@
 #include "Geometry/MappingFactory.h"
 #include "Geometry/CutQuadratureMapping.h"
 #include "Interfaces/LevelSetGeometrySnapshot.h"
+#include "LevelSet/LevelSetRecordLabels.h"
 #include "Systems/FESystem.h"
 #include "Core/EnvironmentNames.h"
 
@@ -499,24 +500,6 @@ struct AggregationRuntimeOptions {
     bool flags_valid{true};
     bool max_lines_valid{true};
 };
-
-// A candidate whose cut feature holds full cells only beyond the root-path
-// guard, or whose every root proposal fails the extrapolation or coefficient
-// guards, has no admissible extension.  By default the refresh fails closed
-// and names the opt-in.  With SmallCutAggregationGuardOptions::
-// rootless_fallback the candidate receives the rootless-island policy of a
-// feature without full cells (decision D33); every such case is logged once
-// per refresh (by the first rank) and counted in the run summary
-// (diagnostics::aggregationGuardRootlessSummary), so a result that relies on
-// it is flagged.
-constexpr const char* kGuardRootlessOptInHint =
-    "the candidate's cut feature has full cells only beyond the aggregation "
-    "guards (for example a wetting film or wedge at a wall); set "
-    "<Small_cut_aggregation_rootless_fallback>true</Small_cut_aggregation_rootless_fallback> "
-    "on the free-surface boundary condition to continue with the "
-    "rootless-island policy (opt-in: it pins velocity and pressure of those "
-    "candidates, which degrades results inside connected liquid; every case "
-    "is logged and counted in the run summary)";
 
 [[nodiscard]] std::string coordinateTripleText(const Real* x)
 {
@@ -2187,7 +2170,8 @@ void selectCanonicalAggregationLines(
 
 }
 
-void throwCanonicalSelectionFailures(std::string_view field_name,
+void throwCanonicalSelectionFailures(const systems::FESystem& system,
+                                     std::string_view field_name,
                                      const CanonicalSelection& selection)
 {
     if (selection.failure_count > 0u) {
@@ -2215,7 +2199,7 @@ void throwCanonicalSelectionFailures(std::string_view field_name,
             " Every root proposal of these globally rooted candidates fails "
             "the aggregation guards or the reference-coordinate inversion "
             "(the aggregation_root_proposal_outcomes lines name each "
-            "proposal and why it failed): " + kGuardRootlessOptInHint + ".");
+            "proposal and why it failed): " + level_set::levelSetRecordLabels(system).aggregation_rootless_hint + ".");
     }
 }
 
@@ -3320,7 +3304,7 @@ resolveDistributedAggregationDeclarations(
         selection.halo_limited_root_choices;
     result.canonical_guard_rootless_candidate_vertices =
         selection.guard_rootless_candidate_vertices;
-    throwCanonicalSelectionFailures(field_name, selection);
+    throwCanonicalSelectionFailures(system, field_name, selection);
 
     // Every rank now knows the same canonical lines.  Before installing them,
     // prove that each slave has exactly one owner and that every rank on which
@@ -3629,7 +3613,7 @@ resolveDistributedAggregationDeclarations(
                 "aggregation_no_root_inside_guards field='" +
                 std::string(field_name) + "' candidates=1 dof=" +
                 std::to_string(dof) +
-                " reason=no_valid_root_proposal: " + kGuardRootlessOptInHint +
+                " reason=no_valid_root_proposal: " + level_set::levelSetRecordLabels(system).aggregation_rootless_hint +
                 ".");
         } else if (slave_all_cut && support.has_full_support) {
             if (support.globally_rooted) {
@@ -4285,8 +4269,8 @@ prepareRefreshProvenance(
                     bound_revision) {
                 if (selected != nullptr) {
                     throw std::logic_error(
-                        "SmallCutAggregationConstraint: authoritative "
-                        "free-surface snapshot identity is ambiguous");
+                        std::string("SmallCutAggregationConstraint: authoritative ") +
+                        level_set::levelSetRecordLabels(system).snapshot + " identity is ambiguous");
                 }
                 selected = snapshot.get();
             }
@@ -4294,8 +4278,8 @@ prepareRefreshProvenance(
         if (selected == nullptr || !selected->revision().complete() ||
             selected->revision().interface_marker != interface_marker) {
             throw std::runtime_error(
-                "SmallCutAggregationConstraint: authoritative free-surface "
-                "snapshot identity is unavailable or incomplete");
+                std::string("SmallCutAggregationConstraint: authoritative ") +
+                level_set::levelSetRecordLabels(system).snapshot + " identity is unavailable or incomplete");
         }
         const auto& revision = selected->revision();
         identity.kind = SmallCutAggregationGeometryIdentityKind::
@@ -5799,6 +5783,7 @@ void traverseCandidateRoots(const AggregationCellGraph& graph,
                             const std::vector<GlobalIndex>& active_feature_of,
                             GlobalCandidateMap& global_candidates,
                             const SmallCutAggregationGuardOptions& guards,
+                            const char* rootless_hint,
                             bool slave_all_cut,
                             const GuardRootlessLogger& log_guard_rootless,
                             CandidateRootTraversal& traversal)
@@ -5989,7 +5974,7 @@ void traverseCandidateRoots(const AggregationCellGraph& graph,
                     std::to_string(maximum_observed_root_path) +
                     " maximum_allowed_path=" +
                     std::to_string(guards_.maximum_root_path_length) +
-                    ": " + kGuardRootlessOptInHint + ".");
+                    ": " + rootless_hint + ".");
             }
             log_guard_rootless(
                 "root_path_guard",
@@ -6200,7 +6185,7 @@ void SmallCutAggregationConstraint::apply(const systems::FESystem& system,
     coordinateDistributedLocalFailure(
         system,
         local_snapshot_exception,
-        "free_surface_snapshot_validation");
+        level_set::levelSetRecordLabels(system).snapshot_validation);
 
     // Contexts may be ownership-filtered, so an empty-work rank need not
     // retain this marker locally. At least one rank in the field communicator
@@ -8272,6 +8257,7 @@ void SmallCutAggregationConstraint::apply(const systems::FESystem& system,
                                    feature_ledger.feature_of,
                                    candidates,
                                    guards_,
+                                   level_set::levelSetRecordLabels(system).aggregation_rootless_hint,
                                    /*slave_all_cut=*/false,
                                    defer_log,
                                    traversal);
@@ -9609,6 +9595,7 @@ void SmallCutAggregationConstraint::apply(const systems::FESystem& system,
         active_feature_of,
         global_candidates,
         guards_,
+        level_set::levelSetRecordLabels(system).aggregation_rootless_hint,
         slave_all_cut,
         [&](std::string_view reason,
             GlobalIndex dof,
@@ -10624,8 +10611,8 @@ SmallCutAggregationConstraint::closeProlongation(
                          pending.interface_marker) !=
                  pending.level_set_snapshot_revision)) {
             throw std::runtime_error(
-                "SmallCutAggregationConstraint: free-surface snapshot "
-                "revision changed during prolongation finalization");
+                std::string("SmallCutAggregationConstraint: ") + level_set::levelSetRecordLabels(system).snapshot +
+                " revision changed during prolongation finalization");
         }
         const bool has_source_revision =
             cut_context->hasExpectedGeneratedSourceValueRevision(

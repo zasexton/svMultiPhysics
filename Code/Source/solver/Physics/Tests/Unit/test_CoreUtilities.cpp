@@ -148,6 +148,18 @@ TEST(RowObservationEnvironment, BindsCanonicalAndLegacyControlsAtTheirOwners)
               (std::vector<FE::GlobalIndex>{3}));
 }
 
+TEST(FreeSurfaceGeometryEnvironment, OwnsTheWetVolumeDriftWarningControl)
+{
+    namespace fs = formulations::navier_stokes::free_surface;
+    constexpr auto name = "SVMP_WET_VOLUME_DRIFT_WARNING";
+    EXPECT_EQ(FE::environment::EnvironmentNameRegistry::solver().find(name), nullptr);
+    const auto* control = fs::environmentRegistry().find(name);
+    ASSERT_NE(control, nullptr);
+    EXPECT_EQ(control->type, FE::environment::ValueType::Real);
+    ScopedEnvVar value(name, "0.25");
+    EXPECT_STREQ(fs::environmentRegistry().value(name), "0.25");
+}
+
 TEST(FreeSurfaceGeometryEnvironment, PreservesFullCellPointRetentionFlag)
 {
     namespace fs = formulations::navier_stokes::free_surface;

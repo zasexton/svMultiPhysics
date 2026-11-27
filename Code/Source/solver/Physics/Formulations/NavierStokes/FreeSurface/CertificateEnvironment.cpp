@@ -102,6 +102,8 @@ const EnvironmentNameRegistry& environmentRegistry()
     constexpr auto kCertificate = "FE/Analysis/ConstraintRangeCertificate";
     constexpr auto kRowObserver = "FE/Analysis/RowContributionObserver";
     static constexpr NameDeclaration aliases[] = {
+        {wetVolumeDriftWarningControl, Diagnostic, "Application/Core/ApplicationDriver", Real, "1e-3", Reference,
+         "relative wet-volume drift above which a warning is logged"},
         {"SVMP_NS_PRESSURE_ROW_CONTRIBUTION_DIAGNOSTIC", Diagnostic, kRowObserver, Flag, "off", Reference,
          "logs the declared row-contribution operators per assembly, and the field-residual log"},
         {"SVMP_NS_PRESSURE_ROW_CONTRIBUTION_MATRIX_DIAGNOSTIC", Diagnostic, kRowObserver, Flag, "off",
