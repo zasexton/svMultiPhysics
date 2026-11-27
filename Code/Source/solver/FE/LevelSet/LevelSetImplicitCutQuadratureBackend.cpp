@@ -46,9 +46,7 @@ namespace {
 
 [[nodiscard]] Real norm3(const std::array<Real, 3>& values) noexcept
 {
-    return std::sqrt(values[0] * values[0] +
-                     values[1] * values[1] +
-                     values[2] * values[2]);
+    return std::hypot(values[0], values[1], values[2]);
 }
 
 [[nodiscard]] Real dot3(const std::array<Real, 3>& a,
@@ -1766,8 +1764,7 @@ boxReferenceSubcells(const Box3D& box)
 [[nodiscard]] std::array<Real, 3> normalizedOrDefault(
     const std::array<Real, 3>& value) noexcept
 {
-    const Real norm =
-        std::sqrt(value[0] * value[0] + value[1] * value[1] + value[2] * value[2]);
+    const Real norm = norm3(value);
     if (norm <= Real{1.0e-30}) {
         return {{1.0, 0.0, 0.0}};
     }
@@ -5523,7 +5520,8 @@ void appendLinearizedTriangleCut(
     const ImplicitCutQuadratureBackendCellInput& input,
     const Triangle2D& tri,
     Real parent_measure,
-    SayeHyperrectangleDiagnostics& diagnostics)
+    SayeHyperrectangleDiagnostics& diagnostics,
+    const std::optional<std::array<Real, 3>>& chord_values)
 {
     ++diagnostics.linearized_leaf_count;
 
@@ -5539,13 +5537,34 @@ void appendLinearizedTriangleCut(
                 .value);
     }
 
-    auto leaf_cut = interfaces::cutLinearLevelSetCell2D(request, leaf);
+    auto leaf_request = request;
+    const auto [minimum, maximum] =
+        std::minmax_element(leaf.level_set_values.begin(), leaf.level_set_values.end());
+    const Real minimum_signed_value = *minimum - input.isovalue;
+    const Real maximum_signed_value = *maximum - input.isovalue;
+    if (chord_values) {
+        // This affine function describes the chord through the two quadratic
+        // edge roots. The original classification band has already been applied.
+        leaf.level_set_values.assign(chord_values->begin(), chord_values->end());
+        leaf_request.isovalue = 0;
+        leaf_request.implicit_geometry_mode = "LinearCorner";
+        leaf_request.implicit_quadrature_backend = "LinearCorner";
+        leaf_request.coefficient_classification_policy =
+            interfaces::LevelSetCoefficientClassificationPolicy::ExactRepresentedZero;
+    }
+    auto leaf_cut = interfaces::cutLinearLevelSetCell2D(leaf_request, leaf);
+    for (auto& region : leaf_cut.volume_regions) {
+        region.min_level_set_value = minimum_signed_value;
+        region.max_level_set_value = maximum_signed_value;
+    }
     alignLeafCutNormalsWithEvaluator(leaf_cut, input);
     diagnostics.interface_fragment_count +=
         static_cast<int>(leaf_cut.fragments.size());
     for (auto& fragment : leaf_cut.fragments) {
         (void)replaceWithRootPolishedTriangleFragment(
             fragment, request, input, tri, diagnostics);
+        fragment.min_level_set_value = minimum_signed_value;
+        fragment.max_level_set_value = maximum_signed_value;
         fragment.parent_cell = input.linearized_input.parent_cell;
         fragment.interface_marker = request.interface_marker;
         stampGeneratedInterfaceFragmentMetadata(
@@ -6407,6 +6426,7 @@ void appendAdaptiveBoxCut(
 }
 
 struct SimplexSignSamples {
+    std::array<Real, 10> nodal_values{};
     Real minimum{std::numeric_limits<Real>::infinity()};
     Real maximum{-std::numeric_limits<Real>::infinity()};
     bool possible_hidden_phase{false};
@@ -6469,7 +6489,7 @@ using SimplexQuadraticControls = std::array<std::array<long double, 4>, 4>;
 {
     SimplexSignSamples result;
     // Three or four corners plus one midpoint per edge (at most ten nodes).
-    std::array<Real, 10> nodal_values{};
+    auto& nodal_values = result.nodal_values;
     const auto node_count = vertex_count * (vertex_count + 1) / 2;
     Real min_corner = result.minimum;
     Real max_corner = result.maximum;
@@ -6537,6 +6557,79 @@ using SimplexQuadraticControls = std::array<std::array<long double, 4>, 4>;
     return roundUp(128.L * std::numeric_limits<Real>::epsilon() * scale);
 }
 
+struct QuadraticTriangleChord {
+    bool needs_refinement{false};
+    std::optional<std::array<Real, 3>> corner_values;
+};
+
+// A mixed-sign P2 triangle may still have two roots on its same-sign edge.
+// Its neighbour must resolve the same pair, including when the two triangles
+// reach different subdivision depths.
+[[nodiscard]] QuadraticTriangleChord quadraticTriangleChord(
+    const SimplexSignSamples& samples, Real band, long double evaluation_error)
+{
+    const auto& values = samples.nodal_values;
+    std::array<int, 3> signs{};
+    std::array<long double, 3> controls{};
+    for (std::size_t i = 0; i < 3; ++i) {
+        signs[i] = values[i] > band ? 1 : (values[i] < -band ? -1 : 0);
+        const auto j = (i + 1) % 3;
+        const long double a = values[i], b = values[j];
+        controls[i] = 2.L * values[3 + i] - (a + b) / 2;
+    }
+    // Entirely one-sided corners are covered by the simplex Bernstein test.
+    const auto negative_count = std::ranges::count(signs, -1);
+    const auto positive_count = std::ranges::count(signs, 1);
+    if (negative_count == 0 || positive_count == 0) {
+        return {};
+    }
+    for (std::size_t i = 0; i < 3; ++i) {
+        const auto j = (i + 1) % 3;
+        if (signs[i] * signs[j] < 0) {
+            continue;
+        }
+        const int sign = signs[i] != 0 ? signs[i] : signs[j];
+        const long double a = sign * static_cast<long double>(values[i]);
+        const long double b = sign * static_cast<long double>(values[j]);
+        const long double c = sign * controls[i];
+        if (c < std::min(a, b)) {
+            const long double t = (a - c) / ((a - c) + (b - c));
+            const long double minimum = std::lerp(std::lerp(a, c, t), std::lerp(c, b, t), t);
+            if (minimum < 3 * evaluation_error - band) {
+                return {.needs_refinement = true};
+            }
+        }
+    }
+
+    // Pick the vertex on one side of both crossings. On each incident edge
+    // t is the true root fraction from that vertex. An affine value of -a there
+    // and a*(1-t)/t at the other end retains exactly this root. In Bernstein
+    // form, the latter is c + sqrt(c*c + a*b); rationalize when c is negative.
+    const int singleton_sign = negative_count == 1 ? -1 : 1;
+    const auto anchor = static_cast<std::size_t>(
+        std::ranges::find(signs, singleton_sign) - signs.begin());
+    const int orientation = -singleton_sign;
+    const long double a = std::abs(static_cast<long double>(values[anchor]));
+    std::array<long double, 3> chord{};
+    chord[anchor] = -a;
+    for (const auto j : {(anchor + 1) % 3, (anchor + 2) % 3}) {
+        if (signs[j] == 0) {
+            continue;
+        }
+        const auto edge = j == (anchor + 1) % 3 ? anchor : j;
+        const long double b = std::abs(static_cast<long double>(values[j]));
+        const long double c = orientation * controls[edge];
+        const long double discriminant = std::hypot(c, std::sqrt(a) * std::sqrt(b));
+        chord[j] = c >= 0 ? c + discriminant : a * (b / (discriminant - c));
+    }
+    const long double scale = std::max({a, chord[(anchor + 1) % 3], chord[(anchor + 2) % 3]});
+    std::array<Real, 3> result{};
+    for (std::size_t i = 0; i < 3; ++i) {
+        result[i] = static_cast<Real>(orientation * chord[i] / scale);
+    }
+    return {.corner_values = result};
+}
+
 void appendAdaptiveTriangleCut(
     interfaces::LevelSetCellCutResult& cut,
     const interfaces::CutInterfaceDomainRequest& request,
@@ -6570,14 +6663,20 @@ void appendAdaptiveTriangleCut(
         return;
     }
 
-    if (signs.possible_hidden_phase && depth - max_depth >= kCertifiedRangeExtraSubdivisionDepth) {
-        throw std::invalid_argument("P2 simplex cut could not exclude a hidden phase within the subdivision limit; samples=" +
+    QuadraticTriangleChord chord;
+    if (evaluation_error && depth >= max_depth && !signs.possible_hidden_phase) {
+        chord = quadraticTriangleChord(signs, request.resolvedCoefficientClassificationBand(),
+                                      *evaluation_error);
+    }
+    const bool needs_refinement = signs.possible_hidden_phase || chord.needs_refinement;
+    if (needs_refinement && depth - max_depth >= kCertifiedRangeExtraSubdivisionDepth) {
+        throw std::invalid_argument("P2 simplex cut could not isolate a hidden phase or multiple edge crossings within the subdivision limit; samples=" +
                                         formatPointList(samples) + "; min=" + formatReal(signs.minimum) +
                                         "; max=" + formatReal(signs.maximum));
     }
-    if (depth >= max_depth && !signs.possible_hidden_phase) {
+    if (depth >= max_depth && !needs_refinement) {
         appendLinearizedTriangleCut(
-            cut, request, input, tri, parent_measure, diagnostics);
+            cut, request, input, tri, parent_measure, diagnostics, chord.corner_values);
         return;
     }
 

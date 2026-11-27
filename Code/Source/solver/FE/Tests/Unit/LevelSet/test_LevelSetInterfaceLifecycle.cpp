@@ -2357,7 +2357,8 @@ level_set::LevelSetGeneratedInterfaceResult buildSingleTriangleHighOrderSubcellC
     int interface_order = 1,
     int volume_order = 2,
     FE::ElementType element_type = FE::ElementType::Triangle6,
-    int level_set_order = 2)
+    int level_set_order = 2,
+    FE::Real isovalue = 0.0)
 {
     const auto mesh =
         std::make_shared<SingleTriangleMeshAccess>(element_type);
@@ -2388,6 +2389,7 @@ level_set::LevelSetGeneratedInterfaceResult buildSingleTriangleHighOrderSubcellC
 
     level_set::LevelSetGeneratedInterfaceOptions options{};
     options.level_set_field_name = "phi";
+    options.isovalue = isovalue;
     options.requested_interface_marker = interface_marker;
     options.domain_id = "water-air";
     options.geometry_mode =
@@ -8083,6 +8085,34 @@ TEST(LevelSetInterfaceLifecycle,
                    ::testing::PrintToString(maximum_radial_surface_error));
 }
 
+TEST(LevelSetInterfaceLifecycle, LargeFiniteGradientsOrientReevaluatedSimplexNormals)
+{
+    const FE::Real magnitude = std::ldexp(1.0, 600);
+    for (const FE::Real sign : {-1.0, 1.0}) {
+        const auto field = [=](const std::array<FE::Real, 3>& x) {
+            return sign * magnitude * (x[0] - 0.5);
+        };
+        for (const int dimension : {2, 3}) {
+            SCOPED_TRACE(dimension);
+            SCOPED_TRACE(sign);
+            const auto cut = dimension == 2
+                ? buildSingleTriangleHighOrderSubcellCut(field, 1972, 0, 1, 2)
+                : buildSingleTetraHighOrderSubcellCut(field, 1973, 0, 1, 2);
+            ASSERT_TRUE(cut.success) << cut.diagnostic;
+            ASSERT_FALSE(cut.domain.fragments().empty());
+            EXPECT_NEAR(cut.summary.measure, dimension == 2 ? 0.5 : 0.125, 1.0e-13);
+            for (const auto& fragment : cut.domain.fragments()) {
+                EXPECT_NEAR(fragment.normal[0], sign, 1.0e-14);
+                EXPECT_NEAR(fragment.normal[1], 0.0, 1.0e-14);
+                EXPECT_NEAR(fragment.normal[2], 0.0, 1.0e-14);
+                for (const auto& point : fragment.quadrature_points) {
+                    EXPECT_NEAR(point.normal[0], sign, 1.0e-14);
+                }
+            }
+        }
+    }
+}
+
 TEST(LevelSetInterfaceLifecycle, HighOrderSubcellP1LineMatchesLinearTriangleMeasures)
 {
     constexpr int interface_marker = 87;
@@ -10379,6 +10409,61 @@ TEST(LevelSetInterfaceLifecycle, SayeHyperrectangleEllipseErrorsDecreaseUnderHRe
               coarse.summary.active_fragment_count);
 }
 
+TEST(LevelSetInterfaceLifecycle, QuadraticTriangleLeavesShareBothCrossingsOfAnEdge)
+{
+    constexpr FE::Real radius = 0.05;
+    constexpr FE::Real isovalue = 0.25;
+    const FE::Real exact_arc = std::acos(-1.0) * radius / 2.0;
+    using Point = std::array<FE::Real, 3>;
+    for (const FE::Real sign : {-1.0, 1.0}) {
+        SCOPED_TRACE(sign);
+        const auto cut = buildSingleTriangleHighOrderSubcellCut(
+            [=](const Point& x) {
+                return isovalue + sign * (x[0] * x[0] + x[1] * x[1] - radius * radius);
+            },
+            1913, /*subdivision_depth=*/7, /*interface_order=*/1, /*volume_order=*/2,
+            FE::ElementType::Triangle6, 2, isovalue);
+        ASSERT_TRUE(cut.success) << cut.diagnostic;
+        EXPECT_NEAR(cut.summary.measure, exact_arc, 3.0e-4);
+        EXPECT_LE(cut.summary.measure, exact_arc + 1.0e-12);
+        if (sign > 0.0) {
+            RecordProperty("quarter_circle_chord_length", ::testing::PrintToString(cut.summary.measure));
+            RecordProperty("quarter_disk_area", ::testing::PrintToString(cut.summary.negative_volume_measure));
+        }
+
+        // The three quarter-disk boundary pieces form a polygon. Both straight
+        // sides pass through the origin, so only the interface chords contribute
+        // to its shoelace area. Every interior endpoint has exactly two neighbours.
+        std::vector<std::array<Point, 2>> chords;
+        FE::Real area = 0;
+        for (const auto& fragment : cut.domain.fragments()) {
+            ASSERT_EQ(fragment.vertices.size(), 2u);
+            auto a = fragment.vertices[0].point;
+            auto b = fragment.vertices[1].point;
+            if (a[1] > b[1]) {
+                std::swap(a, b);
+            }
+            EXPECT_NEAR(std::hypot(a[0], a[1]), radius, 1.0e-11);
+            EXPECT_NEAR(std::hypot(b[0], b[1]), radius, 1.0e-11);
+            area += (a[0] * b[1] - a[1] * b[0]) / 2.0;
+            chords.push_back({a, b});
+        }
+        ASSERT_FALSE(chords.empty());
+        std::sort(chords.begin(), chords.end(), [](const auto& a, const auto& b) {
+            return a[0][1] < b[0][1];
+        });
+        EXPECT_NEAR(chords.front()[0][1], 0.0, 1.0e-12);
+        EXPECT_NEAR(chords.back()[1][0], 0.0, 1.0e-12);
+        for (std::size_t i = 1; i < chords.size(); ++i) {
+            const auto& a = chords[i - 1][1];
+            const auto& b = chords[i][0];
+            EXPECT_NEAR(std::hypot(a[0] - b[0], a[1] - b[1]), 0.0, 1.0e-11);
+        }
+        EXPECT_NEAR(sign > 0.0 ? cut.summary.negative_volume_measure
+                               : cut.summary.positive_volume_measure, area, 1.0e-12);
+    }
+}
+
 TEST(LevelSetInterfaceLifecycle, SmallVolumeCutsReturnFinitePositiveRules)
 {
     constexpr FE::Real radius = 0.05;
@@ -10428,7 +10513,7 @@ TEST(LevelSetInterfaceLifecycle, SmallVolumeCutsReturnFinitePositiveRules)
                 2.0e-5);
     EXPECT_NEAR(subcell_circle.summary.measure,
                 pi * radius / 2.0,
-                1.0e-2);
+                3.0e-4);
     expectSingleParentVolumeRulesPartitionMeasure(subcell_circle.domain, 1.0e-10);
     expectGeneratedCutRulesAreFinite(subcell_circle.domain);
 }
