@@ -20,6 +20,62 @@ bool reassembleEachSample() noexcept
     return environmentRegistry().firstEnabled(names);
 }
 
+std::string_view physicalReason(std::string_view numerical) noexcept
+{
+    static constexpr std::pair<std::string_view, std::string_view> names[] = {
+        {"constant_field_action_nonfinite", "constant_pressure_action_nonfinite"},
+        {"constant_field_action_outside_primary_trace", "constant_pressure_action_outside_velocity_trace"},
+        {"constant_field_direction_zero_or_nonfinite", "constant_pressure_direction_zero_or_nonfinite"},
+        {"constant_field_kkt_unavailable", "constant_pressure_kkt_unavailable"},
+        {"constant_field_metrics_nonfinite", "constant_pressure_metrics_nonfinite"},
+        {"constant_field_multiplier_nonfinite", "constant_pressure_multiplier_nonfinite"},
+        {"constant_field_projection_nonfinite", "constant_pressure_projection_nonfinite"},
+        {"constant_field_residual_nonfinite", "constant_pressure_residual_nonfinite"},
+        {"invalid_primary_or_constraint_range", "invalid_velocity_or_pressure_range"},
+        {"mixed_primary_constraint_fields_not_identifiable", "mixed_velocity_pressure_fields_not_identifiable"},
+        {"nonzero_constraint_field_inhomogeneity", "nonzero_pressure_constraint_inhomogeneity"},
+        {"field_constraints_do_not_preserve_constants", "pressure_constraints_do_not_preserve_constants"},
+        {"constraint_correction_breakdown", "pressure_correction_breakdown"},
+        {"constraint_correction_increased_residual", "pressure_correction_increased_residual"},
+        {"constraint_correction_nonfinite", "pressure_correction_nonfinite"},
+        {"constraint_correction_not_stationary", "pressure_correction_not_stationary"},
+        {"constraint_pair_or_load_unavailable", "pressure_pair_or_load_unavailable"},
+        {"constraint_solution_storage_unavailable", "pressure_solution_storage_unavailable"},
+        {"constraint_space_unit_coefficients_do_not_represent_constant", "pressure_space_unit_coefficients_do_not_represent_constant"},
+        {"solution_outside_constraint_subspace", "solution_outside_pressure_subspace"},
+        {"unit_constraint_field_nonfinite", "unit_pressure_field_nonfinite"},
+    };
+    for (const auto& [key, name] : names) {
+        if (key == numerical) {
+            return name;
+        }
+    }
+    return numerical;
+}
+
+constexpr FE::analysis::ConstraintRangeRecordVocabulary certificate_records{
+    .sample_heading = "NewtonSolver: free-surface conservative balance diagnostic=free_surface_conservative_balance",
+    .range_gate_heading = "NewtonSolver: accepted static pressure-representability distance gate diagnostic=free_surface_pressure_representability_distance_gate",
+    .constant_gate_heading = "NewtonSolver: accepted static constant-pressure KKT distance gate diagnostic=free_surface_constant_pressure_kkt_distance_gate",
+    .initializer_heading = "NewtonSolver: static compatible free-surface pressure initializer diagnostic=free_surface_static_compatible_pressure_initializer",
+    .assembly_source = "free_surface_conservative_balance",
+    .initializer_phase = "static_compatible_pressure_initializer",
+    .range = "pressure_representability",
+    .constant = "constant_pressure",
+    .field = "pressure",
+    .multiplier = "volume_multiplier",
+    .normalization = "pressure_plus_physical_potential_norms",
+    .constant_fit = "closed_form_one_dimensional_pressure_trace",
+    .load = "prescribed_external_pressure_plus_surface_area_variation_plus_young_wall_energy_plus_gravitational_potential",
+    .scope = " scope=pressure_and_physical_potential_first_variations_only contract=instantaneous_constrained_velocity_test_virtual_work",
+    .exclusions = " excludes=line_friction_and_wetted_wall_navier_dissipation",
+    .sample_claims = " total_momentum_equilibrium_claimed=0 discrete_energy_theorem_claimed=0",
+    .initializer_scope = " force_projection_applied=0 balanced_force_evidence=0 total_momentum_equilibrium_claimed=0 production_capillary_operator_changed=0",
+    .work_norms = {"pressure_virtual_work_norm", "surface_energy_virtual_work_norm",
+                   "gravitational_potential_virtual_work_norm", "physical_potential_virtual_work_norm",
+                   "pressure_representability_load_virtual_work_norm", "conservative_balance_norm"},
+    .reason_name = physicalReason};
+
 } // namespace
 
 const EnvironmentNameRegistry& environmentRegistry()
@@ -101,7 +157,8 @@ FE::analysis::NewtonAnalysisMethod newtonAnalysisMethodFromEnvironment()
         .max_range_distance = names.firstReal(range_names),
         .max_constant_field_kkt_distance = names.firstReal(kkt_names),
         .initialize_constraint_field = names.firstEnabled(initialize_names),
-        .reassemble_each_sample = reassembleEachSample};
+        .reassemble_each_sample = reassembleEachSample,
+        .record_vocabulary = &certificate_records};
     return method;
 }
 

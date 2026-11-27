@@ -7442,21 +7442,21 @@ TEST(NewtonSolver,
     // One pair assembly executes the two off-diagonal cell kernels.  The
     // second state and accepted refresh are geometry/exact-load cache hits.
     EXPECT_EQ(diagnostic_counts.pressure_representability_pair.total, 2);
-    EXPECT_NE(telemetry.find("pressure_representability_cache_hit=1"),
+    EXPECT_NE(telemetry.find("constraint_range_cache_hit=1"),
               std::string::npos);
     EXPECT_NE(
         telemetry.find(
-            "pressure_representability_pair_matrix_state_independent=1"),
+            "constraint_range_pair_matrix_state_independent=1"),
         std::string::npos);
     EXPECT_NE(
         telemetry.find(
-            "pressure_representability_cache_rejection_reason=no_prior_sample"),
+            "constraint_range_cache_rejection_reason=no_prior_sample"),
         std::string::npos);
     EXPECT_NE(
         telemetry.find(
-            "pressure_representability_cache_rejection_reason=none"),
+            "constraint_range_cache_rejection_reason=none"),
         std::string::npos);
-    EXPECT_NE(telemetry.find("pressure_representability_pair_every_assembly=0"),
+    EXPECT_NE(telemetry.find("constraint_range_pair_every_assembly=0"),
               std::string::npos);
     EXPECT_NE(telemetry.find("phase='line_search_accepted_refresh'"),
               std::string::npos);
@@ -7545,13 +7545,13 @@ TEST(NewtonSolver,
     }
     EXPECT_NE(
         telemetry.find(
-            "pressure_representability_pair_matrix_state_independent=1"),
+            "constraint_range_pair_matrix_state_independent=1"),
         std::string::npos);
-    EXPECT_NE(telemetry.find("pressure_representability_cache_hit=1"),
+    EXPECT_NE(telemetry.find("constraint_range_cache_hit=1"),
               std::string::npos);
     EXPECT_NE(
         telemetry.find(
-            "pressure_representability_cache_rejection_reason=none"),
+            "constraint_range_cache_rejection_reason=none"),
         std::string::npos);
 }
 
@@ -7634,17 +7634,17 @@ TEST(NewtonSolver,
         EXPECT_EQ(counts.total, 3);
     }
     EXPECT_EQ(diagnostic_counts.pressure_representability_pair.total, 6);
-    EXPECT_EQ(telemetry.find("pressure_representability_cache_hit=1"),
+    EXPECT_EQ(telemetry.find("constraint_range_cache_hit=1"),
               std::string::npos);
     EXPECT_NE(
         telemetry.find(
-            "pressure_representability_cache_revision_key_available=0"),
+            "constraint_range_cache_revision_key_available=0"),
         std::string::npos);
     EXPECT_NE(
         telemetry.find(
-            "pressure_representability_cache_rejection_reason=revision_key_unavailable"),
+            "constraint_range_cache_rejection_reason=revision_key_unavailable"),
         std::string::npos);
-    EXPECT_NE(telemetry.find("pressure_representability_pair_every_assembly=0"),
+    EXPECT_NE(telemetry.find("constraint_range_pair_every_assembly=0"),
               std::string::npos);
 }
 
@@ -7727,13 +7727,13 @@ TEST(NewtonSolver,
     // Initial, line-search trial, and accepted refresh each assemble both
     // off-diagonal pair kernels when exhaustive qualification is requested.
     EXPECT_EQ(diagnostic_counts.pressure_representability_pair.total, 6);
-    EXPECT_EQ(telemetry.find("pressure_representability_cache_hit=1"),
+    EXPECT_EQ(telemetry.find("constraint_range_cache_hit=1"),
               std::string::npos);
     EXPECT_NE(
         telemetry.find(
-            "pressure_representability_cache_rejection_reason=every_assembly_policy"),
+            "constraint_range_cache_rejection_reason=every_assembly_policy"),
         std::string::npos);
-    EXPECT_NE(telemetry.find("pressure_representability_pair_every_assembly=1"),
+    EXPECT_NE(telemetry.find("constraint_range_pair_every_assembly=1"),
               std::string::npos);
 }
 
@@ -7833,17 +7833,17 @@ TEST(NewtonSolver,
     EXPECT_GT(std::abs(pair.getEntry(velocity_dof, pressure_dof)), 1.0e-14);
     EXPECT_NE(
         telemetry.find(
-            "pressure_representability_convergence=normal_equation_stationarity"),
+            "constraint_range_convergence=normal_equation_stationarity"),
         std::string::npos);
     EXPECT_NE(
-        telemetry.find("pressure_representability_distance_gate_applied=0"),
+        telemetry.find("constraint_range_distance_gate_applied=0"),
         std::string::npos);
-    EXPECT_NE(telemetry.find("pressure_representability_claimed=0"),
+    EXPECT_NE(telemetry.find("constraint_range_claimed=0"),
               std::string::npos);
     EXPECT_NE(
-        telemetry.find("pressure_representability_active_pressure_dofs=1"),
+        telemetry.find("constraint_range_active_constraint_field_dofs=1"),
         std::string::npos);
-    EXPECT_NE(telemetry.find("pressure_representability_iteration_cap=4"),
+    EXPECT_NE(telemetry.find("constraint_range_iteration_cap=4"),
               std::string::npos);
     EXPECT_NEAR(
         certificate->record(report).range.residual_norm, 0.0, 1.0e-13);
@@ -7863,14 +7863,14 @@ TEST(NewtonSolver,
     EXPECT_LE(
         certificate->record(report).constant_field_kkt.relative_orthogonality, 1.0e-12);
     EXPECT_EQ(certificate->record(report).constant_field_kkt.reason, "available");
-    EXPECT_NE(telemetry.find("constant_pressure_kkt_available=1"),
+    EXPECT_NE(telemetry.find("constant_field_kkt_available=1"),
               std::string::npos);
     EXPECT_NE(
         telemetry.find(
-            "constant_pressure_kkt_method=closed_form_one_dimensional_pressure_trace"),
+            "constant_field_kkt_method=closed_form_one_dimensional_constant_trace"),
         std::string::npos);
     EXPECT_NE(
-        telemetry.find("constant_pressure_kkt_force_projection_applied=0"),
+        telemetry.find("constant_field_kkt_force_projection_applied=0"),
         std::string::npos);
     for (const std::string op : {
              "equations_diagnostic_ns_free_surface_pressure_representability_load_virtual_work",
@@ -8025,10 +8025,10 @@ TEST(NewtonSolver,
     EXPECT_EQ(certificate->record(report).constant_field_kkt.constraint_scope_reason,
               "available");
     EXPECT_NE(
-        telemetry.find("constant_pressure_constraint_scope=retained_volume"),
+        telemetry.find("constant_field_constraint_scope=retained_volume"),
         std::string::npos);
     EXPECT_NE(
-        telemetry.find("constant_pressure_constraint_scope_reason=available"),
+        telemetry.find("constant_field_constraint_scope_reason=available"),
         std::string::npos);
 #endif
 }
@@ -8085,7 +8085,7 @@ TEST(NewtonSolver,
               "available");
     EXPECT_EQ(
         captured.certificate->record(captured.report).constant_field_kkt.reason,
-        "pressure_constraints_do_not_preserve_constants");
+        "field_constraints_do_not_preserve_constants");
 #endif
 }
 
@@ -8302,17 +8302,17 @@ TEST(NewtonSolver,
         certificate->record(report).constant_field_kkt.jump, 3.0, 1.0e-12);
     EXPECT_NE(
         telemetry.find(
-            "pressure_representability_load=prescribed_external_pressure_plus_surface_area_variation_plus_young_wall_energy_plus_gravitational_potential"),
+            "constraint_range_load=declared_constraint_independent_load"),
         std::string::npos);
     EXPECT_NE(
-        telemetry.find("gravitational_potential_virtual_work_norm="),
+        telemetry.find("second_potential_work_norm="),
         std::string::npos);
     EXPECT_NE(
-        telemetry.find("physical_potential_virtual_work_norm="),
+        telemetry.find("potential_work_norm="),
         std::string::npos);
     EXPECT_NE(
         telemetry.find(
-            "pressure_representability_load_virtual_work_norm="),
+            "load_norm="),
         std::string::npos);
 }
 
@@ -8455,10 +8455,10 @@ TEST(NewtonSolver,
         certificate->record(report).constant_field_kkt.relative_orthogonality, 1.0e-13);
     EXPECT_GT(certificate->record(report).constant_field_kkt.residual_norm, 0.0);
     EXPECT_GT(certificate->record(report).constant_field_kkt.relative_distance, 0.4);
-    EXPECT_NE(telemetry.find("constant_pressure_kkt_available=1"),
+    EXPECT_NE(telemetry.find("constant_field_kkt_available=1"),
               std::string::npos);
     EXPECT_NE(
-        telemetry.find("constant_pressure_kkt_force_projection_applied=0"),
+        telemetry.find("constant_field_kkt_force_projection_applied=0"),
         std::string::npos);
     RecordProperty(
         "constant_pressure_kkt_nonconstant_remainder_relative_distance",
@@ -8527,15 +8527,15 @@ TEST(NewtonSolver,
         certificate->record(report).constant_field_kkt_gate.max_relative_distance, 1.0e-10, 0.0);
     EXPECT_NE(
         telemetry.find(
-            "diagnostic=free_surface_constant_pressure_kkt_distance_gate"),
+            "diagnostic=constant_field_kkt_distance_gate"),
         std::string::npos);
     EXPECT_NE(
-        telemetry.find("constant_pressure_kkt_distance_gate_passed=1"),
+        telemetry.find("constant_field_kkt_distance_gate_passed=1"),
         std::string::npos);
-    EXPECT_NE(telemetry.find("constant_pressure_kkt_claimed=1"),
+    EXPECT_NE(telemetry.find("constant_field_kkt_claimed=1"),
               std::string::npos);
     EXPECT_NE(
-        telemetry.find("constant_pressure_kkt_force_projection_applied=0"),
+        telemetry.find("constant_field_kkt_force_projection_applied=0"),
         std::string::npos);
     RecordProperty(
         "constant_pressure_kkt_distance_gate_in_range_accept_count", 1);
@@ -8740,9 +8740,9 @@ TEST(NewtonSolver,
         telemetry.find("reason=relative_distance_exceeds_threshold"),
         std::string::npos);
     EXPECT_NE(
-        telemetry.find("constant_pressure_kkt_distance_gate_passed=0"),
+        telemetry.find("constant_field_kkt_distance_gate_passed=0"),
         std::string::npos);
-    EXPECT_NE(telemetry.find("constant_pressure_kkt_claimed=0"),
+    EXPECT_NE(telemetry.find("constant_field_kkt_claimed=0"),
               std::string::npos);
     RecordProperty(
         "constant_pressure_kkt_distance_gate_nonconstant_reject_count", 1);
@@ -8807,14 +8807,14 @@ TEST(NewtonSolver,
         certificate->record(report).constant_field_kkt.constraints_preserve_constants);
     EXPECT_EQ(
         certificate->record(report).constant_field_kkt.reason,
-        "pressure_constraints_do_not_preserve_constants");
+        "field_constraints_do_not_preserve_constants");
     EXPECT_TRUE(certificate->record(report).constant_field_kkt_gate.applied);
     EXPECT_FALSE(certificate->record(report).constant_field_kkt_gate.passed);
     EXPECT_NE(
-        telemetry.find("reason=constant_pressure_kkt_unavailable"),
+        telemetry.find("reason=constant_field_kkt_unavailable"),
         std::string::npos);
     EXPECT_NE(
-        telemetry.find("constant_pressure_kkt_distance_gate_passed=0"),
+        telemetry.find("constant_field_kkt_distance_gate_passed=0"),
         std::string::npos);
     RecordProperty(
         "constant_pressure_kkt_distance_gate_removed_mode_reject_count", 1);
@@ -8944,23 +8944,23 @@ TEST(NewtonSolver,
     };
 
     EXPECT_EQ(
-        telemetry_value("pressure_representability_active_pressure_dofs"),
+        telemetry_value("constraint_range_active_constraint_field_dofs"),
         4.0);
     EXPECT_EQ(
-        telemetry_value("pressure_representability_iteration_cap"), 16.0);
+        telemetry_value("constraint_range_iteration_cap"), 16.0);
     const double iterations =
-        telemetry_value("pressure_representability_iterations");
+        telemetry_value("constraint_range_iterations");
     EXPECT_EQ(iterations, 16.0);
     EXPECT_EQ(
         telemetry_value(
-            "pressure_representability_normal_residual_refinements"),
+            "constraint_range_normal_residual_refinements"),
         1.0);
     EXPECT_EQ(
-        telemetry_value("pressure_representability_converged"), 1.0);
+        telemetry_value("constraint_range_converged"), 1.0);
     EXPECT_EQ(
-        telemetry_value("pressure_representability_breakdown"), 0.0);
+        telemetry_value("constraint_range_breakdown"), 0.0);
     const double relative_normal_residual = telemetry_value(
-        "pressure_representability_relative_normal_residual");
+        "constraint_range_relative_normal_residual");
     EXPECT_TRUE(std::isfinite(relative_normal_residual));
     EXPECT_LE(relative_normal_residual, 1.0e-10);
 }
@@ -9084,7 +9084,7 @@ TEST(NewtonSolver,
     EXPECT_LE(certificate->record(report).range.relative_distance, 1.0e-9);
 
     const auto iteration_token =
-        std::string{"pressure_representability_iterations="};
+        std::string{"constraint_range_iterations="};
     const auto iteration_position = telemetry.find(iteration_token);
     ASSERT_NE(iteration_position, std::string::npos);
     const auto iteration_begin =
@@ -9178,20 +9178,20 @@ TEST(NewtonSolver,
     // normal-equation stationarity immediately even though the entire load is
     // irreducible.  Telemetry must therefore make explicit that no physical
     // distance gate or representability claim has been applied.
-    EXPECT_NE(telemetry.find("pressure_representability_relative_residual=1"),
+    EXPECT_NE(telemetry.find("constraint_range_relative_residual=1"),
               std::string::npos);
-    EXPECT_NE(telemetry.find("pressure_representability_iterations=0"),
+    EXPECT_NE(telemetry.find("constraint_range_iterations=0"),
               std::string::npos);
-    EXPECT_NE(telemetry.find("pressure_representability_converged=1"),
+    EXPECT_NE(telemetry.find("constraint_range_converged=1"),
               std::string::npos);
     EXPECT_NE(
         telemetry.find(
-            "pressure_representability_convergence=normal_equation_stationarity"),
+            "constraint_range_convergence=normal_equation_stationarity"),
         std::string::npos);
     EXPECT_NE(
-        telemetry.find("pressure_representability_distance_gate_applied=0"),
+        telemetry.find("constraint_range_distance_gate_applied=0"),
         std::string::npos);
-    EXPECT_NE(telemetry.find("pressure_representability_claimed=0"),
+    EXPECT_NE(telemetry.find("constraint_range_claimed=0"),
               std::string::npos);
     EXPECT_FALSE(certificate->record(report).constant_field_kkt.available);
     EXPECT_TRUE(
@@ -9200,12 +9200,12 @@ TEST(NewtonSolver,
         certificate->record(report).constant_field_kkt.constraints_preserve_constants);
     EXPECT_EQ(
         certificate->record(report).constant_field_kkt.reason,
-        "pressure_constraints_do_not_preserve_constants");
-    EXPECT_NE(telemetry.find("constant_pressure_kkt_available=0"),
+        "field_constraints_do_not_preserve_constants");
+    EXPECT_NE(telemetry.find("constant_field_kkt_available=0"),
               std::string::npos);
     EXPECT_NE(
         telemetry.find(
-            "constant_pressure_kkt_reason=pressure_constraints_do_not_preserve_constants"),
+            "constant_field_kkt_reason=field_constraints_do_not_preserve_constants"),
         std::string::npos);
 }
 
@@ -9260,12 +9260,12 @@ TEST(NewtonSolver,
     EXPECT_LE(certificate->record(report).range.relative_distance, 1.0e-10);
     EXPECT_NE(
         telemetry.find(
-            "diagnostic=free_surface_pressure_representability_distance_gate"),
+            "diagnostic=constraint_range_distance_gate"),
         std::string::npos);
     EXPECT_NE(
-        telemetry.find("pressure_representability_distance_gate_passed=1"),
+        telemetry.find("constraint_range_distance_gate_passed=1"),
         std::string::npos);
-    EXPECT_NE(telemetry.find("pressure_representability_claimed=1"),
+    EXPECT_NE(telemetry.find("constraint_range_claimed=1"),
               std::string::npos);
     RecordProperty(
         "pressure_representability_distance_gate_in_range_accept_count", 1);
@@ -9336,9 +9336,9 @@ TEST(NewtonSolver,
         telemetry.find("reason=relative_distance_exceeds_threshold"),
         std::string::npos);
     EXPECT_NE(
-        telemetry.find("pressure_representability_distance_gate_passed=0"),
+        telemetry.find("constraint_range_distance_gate_passed=0"),
         std::string::npos);
-    EXPECT_NE(telemetry.find("pressure_representability_claimed=0"),
+    EXPECT_NE(telemetry.find("constraint_range_claimed=0"),
               std::string::npos);
     RecordProperty(
         "pressure_representability_distance_gate_out_of_range_reject_count",
@@ -9403,7 +9403,7 @@ TEST(NewtonSolver,
     EXPECT_TRUE(certificate->record(report).range_gate.applied);
     EXPECT_FALSE(certificate->record(report).range_gate.passed);
     EXPECT_EQ(certificate->record(report).range.reason,
-              "nonzero_pressure_constraint_inhomogeneity");
+              "nonzero_constraint_field_inhomogeneity");
     // The veto is one decision, for missing evidence.
     ASSERT_EQ(report.certificates.size(), 1u);
     EXPECT_EQ(report.certificates.front().id, "constraint_range.range_distance");
@@ -9414,10 +9414,10 @@ TEST(NewtonSolver,
     EXPECT_NE(telemetry.find("reason=diagnostic_unavailable"),
               std::string::npos);
     EXPECT_NE(
-        telemetry.find("pressure_representability_available=0"),
+        telemetry.find("constraint_range_available=0"),
         std::string::npos);
     EXPECT_NE(
-        telemetry.find("pressure_representability_distance_gate_passed=0"),
+        telemetry.find("constraint_range_distance_gate_passed=0"),
         std::string::npos);
     RecordProperty(
         "pressure_representability_distance_gate_unavailable_reject_count",
@@ -9594,27 +9594,27 @@ TEST(NewtonSolver,
     EXPECT_LE(certificate->record(report).range.relative_distance, 1.0e-10);
     EXPECT_NE(
         telemetry.find(
-            "diagnostic=free_surface_static_compatible_pressure_initializer"),
+            "diagnostic=constraint_field_initializer"),
         std::string::npos);
     EXPECT_NE(telemetry.find("force_projection_applied=0"),
               std::string::npos);
-    EXPECT_NE(telemetry.find("production_capillary_operator_changed=0"),
+    EXPECT_NE(telemetry.find("production_operator_changed=0"),
               std::string::npos);
-    EXPECT_NE(telemetry.find("balanced_force_evidence=0"),
+    EXPECT_NE(telemetry.find("committed_history_or_rate_slots_mutated=0"),
               std::string::npos);
-    EXPECT_NE(telemetry.find("pressure_update=additive"),
+    EXPECT_NE(telemetry.find("constraint_field_update=additive"),
               std::string::npos);
     EXPECT_NE(
         telemetry.find(
-            "pressure_increment=conservative_balance_residual_correction"),
+            "constraint_field_increment=conservative_balance_residual_correction"),
         std::string::npos);
     EXPECT_NE(
         telemetry.find(
-            "pressure_correction_method=direct_balance_residual_lsqr"),
+            "constraint_field_correction_method=direct_balance_residual_lsqr"),
         std::string::npos);
-    EXPECT_NE(telemetry.find("pressure_correction_iterations="),
+    EXPECT_NE(telemetry.find("constraint_field_correction_iterations="),
               std::string::npos);
-    EXPECT_NE(telemetry.find("existing_pressure_baseline_preserved=1"),
+    EXPECT_NE(telemetry.find("existing_constraint_field_baseline_preserved=1"),
               std::string::npos);
     EXPECT_NE(telemetry.find("committed_history_or_rate_slots_mutated=0"),
               std::string::npos);
@@ -9795,9 +9795,9 @@ TEST(NewtonSolver,
     ASSERT_NE(testCertificateStorage(workspace).vectors.correction_load, nullptr);
     EXPECT_DOUBLE_EQ(
         testCertificateStorage(workspace).vectors.correction_load->norm(), 0.0);
-    EXPECT_NE(telemetry.find("pressure_correction_load_norm=0"),
+    EXPECT_NE(telemetry.find("constraint_field_correction_load_norm=0"),
               std::string::npos);
-    EXPECT_NE(telemetry.find("pressure_correction_iterations=0"),
+    EXPECT_NE(telemetry.find("constraint_field_correction_iterations=0"),
               std::string::npos);
     RecordProperty(
         "static_compatible_pressure_initializer_nullspace_representative_preserved",
@@ -10739,19 +10739,19 @@ TEST(NewtonSolver,
     EXPECT_EQ(diagnostic_counts.pressure_representability_pair.total, 0);
     EXPECT_NE(
         (stdout_text + stderr_text).find(
-            "pressure_representability_reason=nonzero_pressure_constraint_inhomogeneity"),
+            "constraint_range_reason=nonzero_constraint_field_inhomogeneity"),
         std::string::npos);
     EXPECT_NE(
         (stdout_text + stderr_text).find(
-            "pressure_representability_convergence=normal_equation_stationarity"),
+            "constraint_range_convergence=normal_equation_stationarity"),
         std::string::npos);
     EXPECT_NE(
         (stdout_text + stderr_text).find(
-            "pressure_representability_distance_gate_applied=0"),
+            "constraint_range_distance_gate_applied=0"),
         std::string::npos);
     EXPECT_NE(
         (stdout_text + stderr_text).find(
-            "pressure_representability_claimed=0"),
+            "constraint_range_claimed=0"),
         std::string::npos);
 }
 
@@ -10798,20 +10798,20 @@ TEST(NewtonSolver,
     const auto telemetry = stdout_text + stderr_text;
     EXPECT_TRUE(report.converged);
     EXPECT_GT(diagnostic_counts.pressure_representability_pair.total, 0);
-    EXPECT_NE(telemetry.find("pressure_representability_iterations=0"),
+    EXPECT_NE(telemetry.find("constraint_range_iterations=0"),
               std::string::npos);
-    EXPECT_NE(telemetry.find("pressure_representability_converged=1"),
+    EXPECT_NE(telemetry.find("constraint_range_converged=1"),
               std::string::npos);
-    EXPECT_NE(telemetry.find("pressure_representability_breakdown=0"),
+    EXPECT_NE(telemetry.find("constraint_range_breakdown=0"),
               std::string::npos);
     EXPECT_NE(
         telemetry.find(
-            "pressure_representability_convergence=normal_equation_stationarity"),
+            "constraint_range_convergence=normal_equation_stationarity"),
         std::string::npos);
     EXPECT_NE(
-        telemetry.find("pressure_representability_distance_gate_applied=0"),
+        telemetry.find("constraint_range_distance_gate_applied=0"),
         std::string::npos);
-    EXPECT_NE(telemetry.find("pressure_representability_claimed=0"),
+    EXPECT_NE(telemetry.find("constraint_range_claimed=0"),
               std::string::npos);
     EXPECT_NEAR(
         testCertificateStorage(workspace).vectors.load->norm(), 0.0, 1.0e-14);
@@ -10978,11 +10978,11 @@ TEST(NewtonSolver,
         testCertificateStorage(workspace).vectors.normal_residual->norm(),
         0.0,
         1.0e-12);
-    EXPECT_NE(telemetry.find("pressure_representability_available=1"),
+    EXPECT_NE(telemetry.find("constraint_range_available=1"),
               std::string::npos);
     EXPECT_NE(
         telemetry.find(
-            "pressure_representability_convergence=normal_equation_stationarity"),
+            "constraint_range_convergence=normal_equation_stationarity"),
         std::string::npos);
 }
 

@@ -711,6 +711,7 @@ set(FE_ANALYSIS_HEADERS
     Analysis/KernelAnalyzer.h
     Analysis/CouplingGraphAnalyzer.h
     Analysis/ConstraintRangeCertificate.h
+    Analysis/ConstraintRangeRecordVocabulary.h
     Analysis/RowContributionObserver.h
     Analysis/ConstraintRankAnalyzer.h
     Analysis/MixedOperatorAnalyzer.h

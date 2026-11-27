@@ -48,6 +48,7 @@
  * certificate.
  */
 
+#include "Analysis/ConstraintRangeRecordVocabulary.h"
 #include "Core/Types.h"
 #include "Systems/DiagnosticRegistry.h"
 #include "TimeStepping/NewtonSolver.h"
@@ -256,6 +257,9 @@ struct ConstraintRangeMethod {
     /// Read before each sample. An explicit method without a reader uses
     /// the base catalogue's cache policy.
     bool (*reassemble_each_sample)() noexcept{nullptr};
+    /// Static record labels supplied by the owner of the observed balance.
+    const ConstraintRangeRecordVocabulary* record_vocabulary{nullptr};
+    [[nodiscard]] const ConstraintRangeRecordVocabulary& vocabulary() const noexcept;
 };
 
 /// Whether @p method samples at all.
@@ -516,16 +520,19 @@ struct ConstraintRangeCacheTrace {
 // the text of its log lines, written by the rank the certificate chooses.
 
 /// A sample not taken: the communicator disagrees on whether to sample.
-void logConstraintRangeEnablementDiffers();
+void logConstraintRangeEnablementDiffers(const ConstraintRangeRecordVocabulary& labels);
 /// A sample not taken: the system declares no certificate.
-void logConstraintRangeNotDeclared(const timestepping::NewtonObservation& observation);
+void logConstraintRangeNotDeclared(const ConstraintRangeRecordVocabulary& labels,
+                                   const timestepping::NewtonObservation& observation);
 /// A sample not taken: the declared operator @p op is not installed on every rank.
-void logConstraintRangeOperatorNotInstalled(const timestepping::NewtonObservation& observation,
+void logConstraintRangeOperatorNotInstalled(const ConstraintRangeRecordVocabulary& labels,
+                                            const timestepping::NewtonObservation& observation,
                                             std::string_view op);
 /// A sample: the norms of the six sampled loads, the cache, and the range
 /// and constant-field KKT parts of @p record (@p range, the LSQR solve, when
 /// the range is available).
-void logConstraintRangeSample(const timestepping::NewtonObservation& observation,
+void logConstraintRangeSample(const ConstraintRangeRecordVocabulary& labels,
+                              const timestepping::NewtonObservation& observation,
                               int rank,
                               const std::array<double, 6>& norms,
                               const ConstraintRangeCacheTrace& cache,
@@ -534,19 +541,22 @@ void logConstraintRangeSample(const timestepping::NewtonObservation& observation
                               std::uint64_t active_constraint_dofs,
                               int iteration_cap);
 /// The range-distance gate at an acceptance event.
-void logConstraintRangeDistanceGate(const timestepping::NewtonAcceptance& acceptance,
+void logConstraintRangeDistanceGate(const ConstraintRangeRecordVocabulary& labels,
+                                    const timestepping::NewtonAcceptance& acceptance,
                                     const ConstraintRangeReport& candidate,
                                     double threshold,
                                     bool passed,
                                     std::string_view reason);
 /// The constant-field KKT distance gate at an acceptance event.
-void logConstantFieldKktDistanceGate(const timestepping::NewtonAcceptance& acceptance,
+void logConstantFieldKktDistanceGate(const ConstraintRangeRecordVocabulary& labels,
+                                     const timestepping::NewtonAcceptance& acceptance,
                                      const ConstraintRangeReport& candidate,
                                      double threshold,
                                      bool passed,
                                      std::string_view reason);
 /// The initializer: applied, refused, or consumed earlier.
-void logConstraintRangeInitializer(const ConstraintRangeReport& record,
+void logConstraintRangeInitializer(const ConstraintRangeRecordVocabulary& labels,
+                                   const ConstraintRangeReport& record,
                                    double threshold,
                                    const ConstraintRangeLsqrResult& correction,
                                    double correction_load_norm,

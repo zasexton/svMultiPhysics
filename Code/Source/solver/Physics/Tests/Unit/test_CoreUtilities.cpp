@@ -112,6 +112,17 @@ TEST_F(FreeSurfaceCertificateEnvironment, KeepsAliasPrecedenceAndReadsCachePolic
     EXPECT_FALSE(fs::newtonAnalysisMethodFromEnvironment().constraint_range.observe);
 }
 
+TEST_F(FreeSurfaceCertificateEnvironment, SuppliesThePhysicalRecordVocabulary)
+{
+    namespace fs = formulations::navier_stokes::free_surface;
+    const auto method = fs::newtonAnalysisMethodFromEnvironment();
+    const auto& records = method.constraint_range.vocabulary();
+    EXPECT_EQ(records.range, "pressure_representability");
+    EXPECT_EQ(records.work_norms[2], "gravitational_potential_virtual_work_norm");
+    EXPECT_EQ(records.reason("constant_field_action_nonfinite"), "constant_pressure_action_nonfinite");
+    EXPECT_EQ(FE::analysis::ConstraintRangeMethod{}.vocabulary().range, "constraint_range");
+}
+
 TEST_F(FreeSurfaceCertificateEnvironment, PreservesThresholdValidationAndEffectiveConfiguration)
 {
     namespace fs = formulations::navier_stokes::free_surface;

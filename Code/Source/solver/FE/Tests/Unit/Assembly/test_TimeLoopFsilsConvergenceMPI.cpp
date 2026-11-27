@@ -3471,16 +3471,16 @@ TEST(TimeLoopFsilsConvergenceMPI,
         require_collective_rejection(
             std::move(method),
             /*initialized=*/false,
-            "constant-pressure KKT threshold presence differs");
+            "constant-field KKT threshold presence differs");
     }
     require_collective_rejection(
         {.max_constant_field_kkt_distance = rank == 0 ? 1.0e-10 : 2.0e-10},
         /*initialized=*/false,
-        "constant-pressure KKT threshold value differs");
+        "constant-field KKT threshold value differs");
     require_collective_rejection(
         {.max_constant_field_kkt_distance = rank == 0 ? -1.0 : 1.0e-10},
         /*initialized=*/false,
-        "constant-pressure KKT threshold validity differs");
+        "constant-field KKT threshold validity differs");
     {
         constexpr const char* threshold_environment =
             "SVMP_FE_CONSTRAINT_RANGE_CONSTANT_FIELD_KKT_MAX_RELATIVE_DISTANCE";
@@ -3494,7 +3494,7 @@ TEST(TimeLoopFsilsConvergenceMPI,
         require_collective_rejection(
             std::move(method),
             /*initialized=*/false,
-            "constant-pressure KKT threshold validity differs");
+            "constant-field KKT threshold validity differs");
     }
     require_collective_rejection(
         {.max_range_distance = 1.0e-10,

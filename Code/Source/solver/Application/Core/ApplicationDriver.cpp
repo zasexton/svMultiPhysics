@@ -4911,7 +4911,8 @@ evaluateStaticCapillaryPressureCertificate(
                 certificate_options
                     .pressure_representability_max_relative_distance),
             .initialize_constraint_field = initialize_compatible_pressure,
-            .reassemble_each_sample = analysis_method.constraint_range.reassemble_each_sample};
+            .reassemble_each_sample = analysis_method.constraint_range.reassemble_each_sample,
+            .record_vocabulary = analysis_method.constraint_range.record_vocabulary};
     const auto analysis =
         svmp::FE::analysis::buildNewtonAnalysisExtensions(
             system, analysis_method);

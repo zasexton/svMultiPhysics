@@ -92,15 +92,15 @@ constantFieldCutVolumeBinding(
     const systems::OperatorDefinition& pair,
     FieldId constraint_field)
 {
-    bool unsupported_pressure_term = !pair.global.empty();
-    const auto pressure_bearing = [constraint_field](const auto& term) {
+    bool unsupported_constraint_field_term = !pair.global.empty();
+    const auto constraint_field_bearing = [constraint_field](const auto& term) {
         return term.test_field == constraint_field ||
                term.trial_field == constraint_field;
     };
     const auto inspect_nonvolume = [&](const auto& terms) {
-        unsupported_pressure_term =
-            unsupported_pressure_term ||
-            std::any_of(terms.begin(), terms.end(), pressure_bearing);
+        unsupported_constraint_field_term =
+            unsupported_constraint_field_term ||
+            std::any_of(terms.begin(), terms.end(), constraint_field_bearing);
     };
     inspect_nonvolume(pair.cells);
     inspect_nonvolume(pair.boundary);
@@ -109,12 +109,12 @@ constantFieldCutVolumeBinding(
 
     std::optional<ConstantFieldCutVolumeBinding> binding;
     for (const auto& term : pair.cut_volumes) {
-        if (!pressure_bearing(term)) {
+        if (!constraint_field_bearing(term)) {
             continue;
         }
         if (term.marker < 0 ||
             term.side == geometry::CutIntegrationSide::Interface) {
-            unsupported_pressure_term = true;
+            unsupported_constraint_field_term = true;
             continue;
         }
         const ConstantFieldCutVolumeBinding candidate{
@@ -123,10 +123,10 @@ constantFieldCutVolumeBinding(
             binding = candidate;
         } else if (binding->marker != candidate.marker ||
                    binding->side != candidate.side) {
-            unsupported_pressure_term = true;
+            unsupported_constraint_field_term = true;
         }
     }
-    if (unsupported_pressure_term || !binding.has_value()) {
+    if (unsupported_constraint_field_term || !binding.has_value()) {
         return std::nullopt;
     }
     return binding;
@@ -513,29 +513,29 @@ ConstraintRangeLsqrResult solveConstraintRangeLsqr(
 }
 
 bool unitCoefficientsRepresentConstant(
-    const spaces::FunctionSpace& pressure_space)
+    const spaces::FunctionSpace& constraint_field_space)
 {
     try {
-        if (pressure_space.field_type() != FieldType::Scalar ||
-            pressure_space.value_dimension() != 1 ||
-            pressure_space.dofs_per_element() == 0u ||
-            pressure_space.is_variable_order()) {
+        if (constraint_field_space.field_type() != FieldType::Scalar ||
+            constraint_field_space.value_dimension() != 1 ||
+            constraint_field_space.dofs_per_element() == 0u ||
+            constraint_field_space.is_variable_order()) {
             return false;
         }
-        const auto quadrature = pressure_space.element().quadrature();
+        const auto quadrature = constraint_field_space.element().quadrature();
         if (!quadrature || quadrature->num_points() == 0u) {
             return false;
         }
         const std::vector<Real> unit_coefficients(
-            pressure_space.dofs_per_element(), Real{1.0});
+            constraint_field_space.dofs_per_element(), Real{1.0});
         const Real tolerance =
             Real{1000.0} * std::numeric_limits<Real>::epsilon() *
             std::max(Real{1.0},
-                     static_cast<Real>(pressure_space.dofs_per_element()));
+                     static_cast<Real>(constraint_field_space.dofs_per_element()));
         for (std::size_t point = 0;
              point < quadrature->num_points();
              ++point) {
-            const auto value = pressure_space.evaluate(
+            const auto value = constraint_field_space.evaluate(
                 quadrature->point(point), unit_coefficients);
             if (!std::isfinite(value[0]) ||
                 std::abs(value[0] - Real{1.0}) > tolerance) {
@@ -557,34 +557,34 @@ bool constraintsPreserveUnitField(
     if (constraint_begin < 0 || constraint_count <= 0) {
         return false;
     }
-    const GlobalIndex pressure_end = constraint_begin + constraint_count;
+    const GlobalIndex constraint_field_end = constraint_begin + constraint_count;
     bool compatible = true;
     affine_constraints.forEach(
         [&](const constraints::AffineConstraints::ConstraintView& line) {
-            const bool pressure_slave =
+            const bool constraint_field_slave =
                 line.slave_dof >= constraint_begin &&
-                line.slave_dof < pressure_end;
-            bool has_pressure_master = false;
-            bool has_nonpressure_master = false;
+                line.slave_dof < constraint_field_end;
+            bool has_constraint_field_master = false;
+            bool has_other_field_master = false;
             double weight_sum = 0.0;
             double absolute_weight_sum = 0.0;
             for (const auto& entry : line.entries) {
-                const bool pressure_master =
+                const bool constraint_field_master =
                     entry.master_dof >= constraint_begin &&
-                    entry.master_dof < pressure_end;
-                has_pressure_master =
-                    has_pressure_master || pressure_master;
-                has_nonpressure_master =
-                    has_nonpressure_master || !pressure_master;
+                    entry.master_dof < constraint_field_end;
+                has_constraint_field_master =
+                    has_constraint_field_master || constraint_field_master;
+                has_other_field_master =
+                    has_other_field_master || !constraint_field_master;
                 weight_sum += entry.weight;
                 absolute_weight_sum += std::abs(entry.weight);
             }
 
-            // A pressure Dirichlet line removes the freely variable constant
+            // A constraint_field Dirichlet line removes the freely variable constant
             // mode.  A cross-field relation cannot be interpreted as a unit
-            // scalar pressure trace.  Homogeneous pressure MPCs preserve the
+            // scalar constraint_field trace.  Homogeneous constraint_field MPCs preserve the
             // mode only when their weights form a partition of unity.
-            if (pressure_slave) {
+            if (constraint_field_slave) {
                 if (retained_support != nullptr &&
                     !retained_support->contains(line.slave_dof) &&
                     line.entries.empty() &&
@@ -598,11 +598,11 @@ bool constraintsPreserveUnitField(
                 compatible =
                     compatible && !line.entries.empty() &&
                     line.inhomogeneity == 0.0 &&
-                    !has_nonpressure_master &&
+                    !has_other_field_master &&
                     std::isfinite(weight_sum) &&
                     std::isfinite(absolute_weight_sum) &&
                     std::abs(weight_sum - 1.0) <= tolerance;
-            } else if (has_pressure_master) {
+            } else if (has_constraint_field_master) {
                 compatible = false;
             }
         });
@@ -748,7 +748,7 @@ RetainedFieldSupportResult retainedFieldSupport(
         return result;
     }
 
-    const GlobalIndex pressure_end = constraint_begin + constraint_count;
+    const GlobalIndex constraint_field_end = constraint_begin + constraint_count;
     bool local_cells_valid = true;
     GlobalIndex previous_cell = INVALID_GLOBAL_INDEX;
     std::set<GlobalIndex> support;
@@ -778,7 +778,7 @@ RetainedFieldSupportResult retainedFieldSupport(
             break;
         }
         for (const auto dof : cell.field_dofs) {
-            if (dof < constraint_begin || dof >= pressure_end) {
+            if (dof < constraint_begin || dof >= constraint_field_end) {
                 local_cells_valid = false;
                 break;
             }
@@ -817,7 +817,7 @@ ConstantFieldKktResult evaluateConstantFieldKkt(
     ConstantFieldKktResult result;
     if (constraint_begin < 0 || constraint_count <= 0 ||
         primary_begin < 0 || primary_count <= 0) {
-        result.reason = "invalid_velocity_or_pressure_range";
+        result.reason = "invalid_primary_or_constraint_range";
         return result;
     }
 
@@ -835,67 +835,67 @@ ConstantFieldKktResult evaluateConstantFieldKkt(
     };
 
     unit_field.zero();
-    std::vector<GlobalIndex> owned_active_pressure_dofs;
-    owned_active_pressure_dofs.reserve(vector_owned_dofs.size());
-    const GlobalIndex pressure_end = constraint_begin + constraint_count;
+    std::vector<GlobalIndex> owned_active_constraint_field_dofs;
+    owned_active_constraint_field_dofs.reserve(vector_owned_dofs.size());
+    const GlobalIndex constraint_field_end = constraint_begin + constraint_count;
     for (const auto dof : vector_owned_dofs) {
-        if (dof >= constraint_begin && dof < pressure_end &&
+        if (dof >= constraint_begin && dof < constraint_field_end &&
             !std::binary_search(
                 constrained_dofs.begin(), constrained_dofs.end(), dof)) {
-            owned_active_pressure_dofs.push_back(dof);
+            owned_active_constraint_field_dofs.push_back(dof);
         }
     }
     std::vector<Real> unit_values(
-        owned_active_pressure_dofs.size(), Real{1.0});
+        owned_active_constraint_field_dofs.size(), Real{1.0});
     auto unit_view = unit_field.createAssemblyView();
     FE_CHECK_NOT_NULL(
         unit_view.get(), "evaluateConstantFieldKkt: unit-field view");
     unit_view->beginAssemblyPhase();
-    if (!owned_active_pressure_dofs.empty()) {
+    if (!owned_active_constraint_field_dofs.empty()) {
         unit_view->setVectorEntries(
-            owned_active_pressure_dofs, unit_values);
+            owned_active_constraint_field_dofs, unit_values);
     }
     unit_view->finalizeAssembly();
     unit_field.updateGhosts();
     if (!vector_is_finite(unit_field)) {
-        result.reason = "unit_pressure_field_nonfinite";
+        result.reason = "unit_constraint_field_nonfinite";
         return result;
     }
 
     pair.mult(unit_field, constraint_action);
     constraint_action.markModified();
     if (!vector_is_finite(constraint_action)) {
-        result.reason = "constant_pressure_action_nonfinite";
+        result.reason = "constant_field_action_nonfinite";
         return result;
     }
     result.direction_norm = constraint_action.norm();
     if (!finite_nonnegative(result.direction_norm) ||
         !(result.direction_norm > 0.0)) {
-        result.reason = "constant_pressure_direction_zero_or_nonfinite";
+        result.reason = "constant_field_direction_zero_or_nonfinite";
         return result;
     }
 
-    // K*c must lie exclusively in the velocity-test rows of the constrained
+    // K*c must lie exclusively in the primary-test rows of the constrained
     // system. Check that invariant before interpreting its coefficient as a
-    // pressure jump.
+    // constraint coefficient.
     unit_field.copyFrom(constraint_action);
-    const GlobalIndex velocity_end = primary_begin + primary_count;
-    std::vector<GlobalIndex> owned_velocity_dofs;
-    owned_velocity_dofs.reserve(vector_owned_dofs.size());
+    const GlobalIndex primary_end = primary_begin + primary_count;
+    std::vector<GlobalIndex> owned_primary_dofs;
+    owned_primary_dofs.reserve(vector_owned_dofs.size());
     for (const auto dof : vector_owned_dofs) {
-        if (dof >= primary_begin && dof < velocity_end) {
-            owned_velocity_dofs.push_back(dof);
+        if (dof >= primary_begin && dof < primary_end) {
+            owned_primary_dofs.push_back(dof);
         }
     }
-    zeroVectorEntries(owned_velocity_dofs, unit_field);
+    zeroVectorEntries(owned_primary_dofs, unit_field);
     unit_field.updateGhosts();
-    const double nonvelocity_action_norm = unit_field.norm();
+    const double off_primary_action_norm = unit_field.norm();
     const double subspace_tolerance =
         100.0 * std::numeric_limits<Real>::epsilon() *
         std::max(1.0, result.direction_norm);
-    if (!finite_nonnegative(nonvelocity_action_norm) ||
-        !all_ranks(nonvelocity_action_norm <= subspace_tolerance)) {
-        result.reason = "constant_pressure_action_outside_velocity_trace";
+    if (!finite_nonnegative(off_primary_action_norm) ||
+        !all_ranks(off_primary_action_norm <= subspace_tolerance)) {
+        result.reason = "constant_field_action_outside_primary_trace";
         return result;
     }
 
@@ -906,7 +906,7 @@ ConstantFieldKktResult evaluateConstantFieldKkt(
         !all_ranks(std::isfinite(direction_squared) &&
                    direction_squared > 0.0 &&
                    std::isfinite(direction_load))) {
-        result.reason = "constant_pressure_projection_nonfinite";
+        result.reason = "constant_field_projection_nonfinite";
         return result;
     }
 
@@ -914,7 +914,7 @@ ConstantFieldKktResult evaluateConstantFieldKkt(
     result.multiplier = -result.jump;
     if (!all_ranks(std::isfinite(result.jump) &&
                    std::isfinite(result.multiplier))) {
-        result.reason = "constant_pressure_multiplier_nonfinite";
+        result.reason = "constant_field_multiplier_nonfinite";
         return result;
     }
 
@@ -925,7 +925,7 @@ ConstantFieldKktResult evaluateConstantFieldKkt(
     result.residual_norm = kkt_residual.norm();
     if (!vector_is_finite(kkt_residual) ||
         !finite_nonnegative(result.residual_norm)) {
-        result.reason = "constant_pressure_residual_nonfinite";
+        result.reason = "constant_field_residual_nonfinite";
         return result;
     }
 
@@ -953,7 +953,7 @@ ConstantFieldKktResult evaluateConstantFieldKkt(
                    result.relative_distance >= 0.0 &&
                    std::isfinite(result.relative_orthogonality) &&
                    result.relative_orthogonality >= 0.0)) {
-        result.reason = "constant_pressure_metrics_nonfinite";
+        result.reason = "constant_field_metrics_nonfinite";
         return result;
     }
 
@@ -1185,7 +1185,7 @@ void transferOwnedEntries(backends::GenericVector& destination,
     FE_THROW_IF(
         anyRankOf(communicator, !local_layout_compatible),
         systems::InvalidStateException,
-        "NewtonSolver: static compatible pressure initializer cannot transfer between vectors with different owned-row layouts");
+        "NewtonSolver: static compatible constraint-field initializer cannot transfer between vectors with different owned-row layouts");
     backends::copyOwnedEntriesBetweenLayouts(destination, source, destination_owned);
 }
 
@@ -1195,7 +1195,7 @@ void transferOwnedEntries(backends::GenericVector& destination,
         return CertificateStatus::Passed;
     }
     return reason == "diagnostic_not_sampled" || reason == "diagnostic_unavailable" ||
-                   reason == "constant_pressure_kkt_unavailable"
+                   reason == "constant_field_kkt_unavailable"
                ? CertificateStatus::Unavailable
                : CertificateStatus::Failed;
 }
@@ -1269,6 +1269,12 @@ bool constraintRangeMethodRequested(const ConstraintRangeMethod& method) noexcep
            method.max_constant_field_kkt_distance.has_value();
 }
 
+const ConstraintRangeRecordVocabulary& ConstraintRangeMethod::vocabulary() const noexcept
+{
+    static constexpr ConstraintRangeRecordVocabulary defaults;
+    return record_vocabulary ? *record_vocabulary : defaults;
+}
+
 ConstraintRangeMethod constraintRangeMethodFromEnvironment()
 {
     namespace controls = constraint_range_environment;
@@ -1304,21 +1310,21 @@ ConstraintRangeCertificate::ConstraintRangeCertificate(
         FE_THROW_IF(
             threshold < 0.0 || !std::isfinite(threshold),
             InvalidArgumentException,
-            "NewtonSolver: accepted static pressure-representability maximum relative distance must be finite and >= 0");
+            "NewtonSolver: accepted static constraint-range maximum relative distance must be finite and >= 0");
     }
     if (method_.max_constant_field_kkt_distance.has_value() && !defer_threshold_validation) {
         const double threshold = *method_.max_constant_field_kkt_distance;
         FE_THROW_IF(
             threshold < 0.0 || !std::isfinite(threshold),
             InvalidArgumentException,
-            "NewtonSolver: accepted static constant-pressure KKT maximum relative distance must be finite and >= 0");
+            "NewtonSolver: accepted static constant-field KKT maximum relative distance must be finite and >= 0");
     }
     FE_THROW_IF(
         method_.initialize_constraint_field &&
             !method_.max_range_distance.has_value() &&
             !defer_threshold_validation,
         InvalidArgumentException,
-        "NewtonSolver: the static compatible free-surface pressure initializer requires an accepted static pressure-representability maximum relative distance");
+        "NewtonSolver: the static compatible constraint-field initializer requires an accepted static constraint-range maximum relative distance");
 }
 
 ConstraintRangeCertificate::~ConstraintRangeCertificate() = default;
@@ -1361,7 +1367,7 @@ std::unique_ptr<timestepping::NewtonExtensionStorage> ConstraintRangeCertificate
     storage->pair = createPairMatrix(context, declaration_->pair.tag);
     storage->vectors.recreate(context.factory, system.dofHandler().getNumDofs());
     FE_CHECK_NOT_NULL(storage->pair.get(),
-                      "NewtonSolver workspace.pressure_representability_pair_matrix");
+                      "NewtonSolver workspace.range_pair_matrix");
     return storage;
 }
 
@@ -1384,7 +1390,7 @@ void ConstraintRangeCertificate::refreshStorage(const timestepping::NewtonStorag
     FE_THROW_IF(
         !declaration_.has_value() || !declaration_->pair.installedOn(system),
         systems::InvalidStateException,
-        "NewtonSolver: pressure-representability pair operator disappeared during a sparsity refresh");
+        "NewtonSolver: constraint-range pair operator disappeared during a sparsity refresh");
     const std::string& pair_op = declaration_->pair.tag;
     const auto* pair_dist = system.distributedSparsityIfAvailable(pair_op);
     const bool use_pair_distributed =
@@ -1405,11 +1411,11 @@ void ConstraintRangeCertificate::refreshStorage(const timestepping::NewtonStorag
     FE_THROW_IF(
         !pair_in_place && factory.backendKind() == backends::BackendKind::FSILS,
         systems::InvalidStateException,
-        "NewtonSolver: FSILS pressure-representability matrix sparsity refresh changed its vector layout; rebuild the nonlinear workspace at a time-step boundary");
+        "NewtonSolver: FSILS constraint-range matrix sparsity refresh changed its vector layout; rebuild the nonlinear workspace at a time-step boundary");
     if (!pair_in_place) {
         pair_storage->pair = createPairMatrix(context, pair_op);
         FE_CHECK_NOT_NULL(pair_storage->pair.get(),
-                          "NewtonSolver: pressure-representability matrix sparsity refresh");
+                          "NewtonSolver: constraint-range matrix sparsity refresh");
         // The replacement may carry a different PETSc/Trilinos owned and
         // ghost map even when its global dimensions are unchanged.  The
         // factory cache currently describes the refreshed pair pattern;
@@ -1418,7 +1424,7 @@ void ConstraintRangeCertificate::refreshStorage(const timestepping::NewtonStorag
         pair_storage->vectors.recreate(factory, system.dofHandler().getNumDofs());
     }
     FE_CHECK_NOT_NULL(pair_storage->pair.get(),
-                      "NewtonSolver: pressure-representability matrix sparsity refresh");
+                      "NewtonSolver: constraint-range matrix sparsity refresh");
 }
 
 void ConstraintRangeCertificate::validateCommunicatorPolicy(const systems::FESystem& system) const
@@ -1469,58 +1475,58 @@ void ConstraintRangeCertificate::validateCommunicatorPolicy(const systems::FESys
     FE_THROW_IF(
         differs(0),
         systems::InvalidStateException,
-        "NewtonSolver: static compatible pressure initializer enablement "
+        "NewtonSolver: static compatible constraint-field initializer enablement "
         "differs across the active system communicator");
     FE_THROW_IF(
         differs(1),
         systems::InvalidStateException,
-        "NewtonSolver: accepted static pressure-representability threshold "
+        "NewtonSolver: accepted static constraint-range threshold "
         "presence differs across the active system communicator");
     FE_THROW_IF(
         differs(2),
         systems::InvalidStateException,
-        "NewtonSolver: accepted static pressure-representability threshold "
+        "NewtonSolver: accepted static constraint-range threshold "
         "validity differs across the active system communicator");
     FE_THROW_IF(
         threshold_present && maximum_flags[2] == 0,
         InvalidArgumentException,
-        "NewtonSolver: accepted static pressure-representability maximum "
+        "NewtonSolver: accepted static constraint-range maximum "
         "relative distance must be finite and >= 0");
     FE_THROW_IF(
         threshold_present && !threshold_value_agrees,
         systems::InvalidStateException,
-        "NewtonSolver: accepted static pressure-representability threshold "
+        "NewtonSolver: accepted static constraint-range threshold "
         "value differs across the active system communicator");
     FE_THROW_IF(
         differs(3),
         systems::InvalidStateException,
-        "NewtonSolver: accepted static constant-pressure KKT threshold "
+        "NewtonSolver: accepted static constant-field KKT threshold "
         "presence differs across the active system communicator");
     FE_THROW_IF(
         differs(4),
         systems::InvalidStateException,
-        "NewtonSolver: accepted static constant-pressure KKT threshold "
+        "NewtonSolver: accepted static constant-field KKT threshold "
         "validity differs across the active system communicator");
     FE_THROW_IF(
         constant_threshold_present && maximum_flags[4] == 0,
         InvalidArgumentException,
-        "NewtonSolver: accepted static constant-pressure KKT maximum "
+        "NewtonSolver: accepted static constant-field KKT maximum "
         "relative distance must be finite and >= 0");
     FE_THROW_IF(
         constant_threshold_present && !constant_threshold_value_agrees,
         systems::InvalidStateException,
-        "NewtonSolver: accepted static constant-pressure KKT threshold "
+        "NewtonSolver: accepted static constant-field KKT threshold "
         "value differs across the active system communicator");
     FE_THROW_IF(
         differs(5),
         systems::InvalidStateException,
-        "NewtonSolver: free-surface conservative-balance diagnostic "
+        "NewtonSolver: constraint-range diagnostic "
         "enablement differs across the active system communicator");
     FE_THROW_IF(
         maximum_flags[0] != 0 && maximum_flags[1] == 0,
         InvalidArgumentException,
-        "NewtonSolver: the static compatible free-surface pressure "
-        "initializer requires an accepted static pressure-representability "
+        "NewtonSolver: the static compatible constraint-field "
+        "initializer requires an accepted static constraint-range "
         "maximum relative distance");
 #else
     (void)system;
@@ -1589,7 +1595,7 @@ void ConstraintRangeCertificate::observe(timestepping::NewtonObservation& observ
             "diagnostic_enablement_differs_across_communicator";
         if (!state_->unavailable_logged &&
             communicatorRank(system_communicator) == 0) {
-            detail::logConstraintRangeEnablementDiffers();
+            detail::logConstraintRangeEnablementDiffers(method_.vocabulary());
         }
         state_->unavailable_logged = true;
         return;
@@ -1600,11 +1606,11 @@ void ConstraintRangeCertificate::observe(timestepping::NewtonObservation& observ
     // complete residual-state key: supported forms may also depend on
     // solution/time-step history, auxiliary state/inputs, user data,
     // or runtime parameter callbacks.  Suppressing a full sample on a
-    // partial fingerprint could therefore hide a changed pressure or
-    // pressure-independent load and would lose accepted-state
+    // partial fingerprint could therefore hide a changed constraint_field or
+    // constraint-independent load and would lose accepted-state
     // provenance.  Only the
-    // mixed pressure pair/LSQR work below is cached, after the current
-    // constrained pressure-independent load has been reassembled and
+    // mixed constraint pair/LSQR work below is cached, after the current
+    // constrained constraint-independent load has been reassembled and
     // compared exactly.  The qualification switch forces even that
     // safe cache off so every pair matrix and LSQR solve is repeated.
     const bool every_assembly_on_any_rank = anyRank(
@@ -1624,7 +1630,7 @@ void ConstraintRangeCertificate::observe(timestepping::NewtonObservation& observ
             "conservative_balance_operator_unavailable";
         if (!state_->unavailable_logged &&
             communicatorRank(system_communicator) == 0) {
-            detail::logConstraintRangeNotDeclared(observation);
+            detail::logConstraintRangeNotDeclared(method_.vocabulary(), observation);
         }
         state_->unavailable_logged = true;
         return;
@@ -1644,7 +1650,7 @@ void ConstraintRangeCertificate::observe(timestepping::NewtonObservation& observ
                 "conservative_balance_operator_unavailable";
             if (!state_->unavailable_logged &&
                 communicatorRank(system_communicator) == 0) {
-                detail::logConstraintRangeOperatorNotInstalled(observation, op);
+                detail::logConstraintRangeOperatorNotInstalled(method_.vocabulary(), observation, op);
             }
             state_->unavailable_logged = true;
             return;
@@ -1738,55 +1744,55 @@ void ConstraintRangeCertificate::observe(timestepping::NewtonObservation& observ
         representability_workspace_available &&
         representability_layout_compatible;
 
-    const bool pressure_pair_matrix_state_independent =
+    const bool constraint_field_pair_matrix_state_independent =
         pair_operator_available &&
         allRanks(transient.system().operatorMatrixStateIndependent(
             pair_op));
-    const bool local_pressure_representability_cache_prior_sample =
+    const bool local_range_cache_prior_sample =
         state_->cache.valid;
-    const bool local_pressure_representability_cache_geometry_match =
-        local_pressure_representability_cache_prior_sample &&
+    const bool local_range_cache_geometry_match =
+        local_range_cache_prior_sample &&
         state_->cache.geometry ==
             geometry_key;
-    const bool local_pressure_representability_cache_candidate =
+    const bool local_range_cache_candidate =
         !every_assembly_on_any_rank &&
         geometry_key.revision_tracking_available &&
         representability_storage_usable &&
-        pressure_pair_matrix_state_independent &&
-        local_pressure_representability_cache_geometry_match;
-    const bool pressure_representability_cache_candidate =
+        constraint_field_pair_matrix_state_independent &&
+        local_range_cache_geometry_match;
+    const bool range_cache_candidate =
         allRanks(
-            local_pressure_representability_cache_candidate);
-    std::string pressure_representability_cache_rejection_reason;
+            local_range_cache_candidate);
+    std::string range_cache_rejection_reason;
     if (every_assembly_on_any_rank) {
-        pressure_representability_cache_rejection_reason =
+        range_cache_rejection_reason =
             "every_assembly_policy";
     } else if (!pair_operator_available) {
-        pressure_representability_cache_rejection_reason =
+        range_cache_rejection_reason =
             "pair_operator_unavailable";
     } else if (!geometry_key.revision_tracking_available) {
-        pressure_representability_cache_rejection_reason =
+        range_cache_rejection_reason =
             "revision_key_unavailable";
     } else if (!representability_storage_usable) {
-        pressure_representability_cache_rejection_reason =
+        range_cache_rejection_reason =
             "storage_or_layout_unusable";
-    } else if (!pressure_pair_matrix_state_independent) {
-        pressure_representability_cache_rejection_reason =
+    } else if (!constraint_field_pair_matrix_state_independent) {
+        range_cache_rejection_reason =
             "pair_matrix_state_dependent";
-    } else if (!local_pressure_representability_cache_prior_sample) {
-        pressure_representability_cache_rejection_reason =
+    } else if (!local_range_cache_prior_sample) {
+        range_cache_rejection_reason =
             "no_prior_sample";
-    } else if (!local_pressure_representability_cache_geometry_match) {
-        pressure_representability_cache_rejection_reason =
+    } else if (!local_range_cache_geometry_match) {
+        range_cache_rejection_reason =
             "geometry_or_constraints_changed";
-    } else if (!pressure_representability_cache_candidate) {
-        pressure_representability_cache_rejection_reason =
+    } else if (!range_cache_candidate) {
+        range_cache_rejection_reason =
             "candidate_unavailable_on_another_rank";
     } else {
-        pressure_representability_cache_rejection_reason =
+        range_cache_rejection_reason =
             "exact_load_check_pending";
     }
-    if (pressure_representability_cache_candidate) {
+    if (range_cache_candidate) {
         // Preserve the previous constrained physical-potential load
         // in an LSQR
         // work vector before the current state reassembles it below.
@@ -1799,7 +1805,7 @@ void ConstraintRangeCertificate::observe(timestepping::NewtonObservation& observ
 
     std::array<double, 6> norms{};
     for (std::size_t i = 0; i < ops.size(); ++i) {
-        // Assemble the pressure-independent exterior-pressure plus
+        // Assemble the constraint-independent exterior-constraint_field plus
         // physical-potential load directly into its pair-owned RHS.
         // Production-layout and pair-layout vectors may have
         // different ghost sets or FSILS shared orderings, so
@@ -1812,7 +1818,7 @@ void ConstraintRangeCertificate::observe(timestepping::NewtonObservation& observ
         auto scratch_view = diagnostic_vector.createAssemblyView();
         FE_CHECK_NOT_NULL(
             scratch_view.get(),
-            "NewtonSolver: free-surface conservative balance diagnostic view");
+            "NewtonSolver: constraint-range diagnostic view");
         systems::AssemblyRequest req;
         req.op = ops[i];
         req.want_vector = true;
@@ -1820,15 +1826,15 @@ void ConstraintRangeCertificate::observe(timestepping::NewtonObservation& observ
         req.suppress_auxiliary_coupling_assembly = true;
         req.is_nonlinear_iteration = true;
         const auto ar = observation.assemble(
-                "free_surface_conservative_balance", req, nullptr, scratch_view.get());
+                method_.vocabulary().assembly_source, req, nullptr, scratch_view.get());
         FE_THROW_IF(
             !ar.success,
             FEException,
-            "NewtonSolver: free-surface conservative balance diagnostic assembly failed for op '" +
+            "NewtonSolver: constraint-range diagnostic assembly failed for op '" +
                 std::string(ops[i]) + "': " + ar.error_message);
 
         // Match the constrained residual space used by Newton.  The
-        // diagnostic operators contain velocity-test rows only; the
+        // diagnostic operators contain primary-test rows only; the
         // vector norm therefore is exactly their global constrained
         // virtual-work coefficient norm.
         zeroVectorEntries(constrained_dofs, diagnostic_vector);
@@ -1838,27 +1844,27 @@ void ConstraintRangeCertificate::observe(timestepping::NewtonObservation& observ
         }
     }
 
-    bool pressure_representability_available = false;
-    std::string pressure_representability_reason;
-    analysis::ConstraintRangeLsqrResult pressure_representability{};
-    analysis::ConstantFieldKktResult constant_pressure_kkt{};
-    std::uint64_t active_pressure_dofs = 0u;
-    int pressure_representability_iteration_cap = 0;
-    bool pressure_unit_coefficients_represent_constant = false;
-    bool pressure_constraints_preserve_constants = false;
-    std::string pressure_constraint_scope{"full_field"};
-    std::string pressure_constraint_scope_reason{"not_attempted"};
+    bool range_available = false;
+    std::string range_reason;
+    analysis::ConstraintRangeLsqrResult range{};
+    analysis::ConstantFieldKktResult constant_field_kkt{};
+    std::uint64_t active_constraint_field_dofs = 0u;
+    int range_iteration_cap = 0;
+    bool constraint_field_unit_coefficients_represent_constant = false;
+    bool constraints_preserve_constants = false;
+    std::string constraint_scope{"full_field"};
+    std::string constraint_scope_reason{"not_attempted"};
 
-    std::optional<FieldId> velocity_field;
+    std::optional<FieldId> primary_field;
     std::optional<FieldId> constraint_field;
     if (!pair_operator_available) {
-        pressure_representability_reason =
+        range_reason =
             "pair_operator_not_installed_on_all_ranks";
     } else if (!representability_workspace_available) {
-        pressure_representability_reason =
+        range_reason =
             "workspace_not_allocated_on_all_ranks";
     } else if (!representability_layout_compatible) {
-        pressure_representability_reason =
+        range_reason =
             "pair_matrix_vector_layout_mismatch";
     } else {
         const auto& load_definition =
@@ -1878,7 +1884,7 @@ void ConstraintRangeCertificate::observe(timestepping::NewtonObservation& observ
         collect_test_fields(load_definition.interface_faces);
         collect_test_fields(load_definition.cut_volumes);
         if (load_test_fields.size() == 1u) {
-            velocity_field = *load_test_fields.begin();
+            primary_field = *load_test_fields.begin();
         }
 
         const auto& pair_definition =
@@ -1900,16 +1906,16 @@ void ConstraintRangeCertificate::observe(timestepping::NewtonObservation& observ
         collect_pair_fields(pair_definition.interior);
         collect_pair_fields(pair_definition.interface_faces);
         collect_pair_fields(pair_definition.cut_volumes);
-        if (velocity_field.has_value()) {
-            pair_fields.erase(*velocity_field);
+        if (primary_field.has_value()) {
+            pair_fields.erase(*primary_field);
         }
         if (pair_fields.size() == 1u) {
             constraint_field = *pair_fields.begin();
         }
         // The operator terms must confirm the declared fields.
-        if (velocity_field.has_value() &&
-            *velocity_field != declaration->primary_field) {
-            velocity_field.reset();
+        if (primary_field.has_value() &&
+            *primary_field != declaration->primary_field) {
+            primary_field.reset();
         }
         if (constraint_field.has_value() &&
             *constraint_field != declaration->constraint_field) {
@@ -1917,10 +1923,10 @@ void ConstraintRangeCertificate::observe(timestepping::NewtonObservation& observ
         }
 
         const bool fields_identified_on_all_ranks = allRanks(
-            velocity_field.has_value() && constraint_field.has_value());
+            primary_field.has_value() && constraint_field.has_value());
         if (!fields_identified_on_all_ranks) {
-            pressure_representability_reason =
-                "mixed_velocity_pressure_fields_not_identifiable";
+            range_reason =
+                "mixed_primary_constraint_fields_not_identifiable";
         } else {
             state_->constraint_field =
                 *constraint_field;
@@ -1929,34 +1935,34 @@ void ConstraintRangeCertificate::observe(timestepping::NewtonObservation& observ
         }
     }
 
-    if (pressure_representability_reason.empty()) {
+    if (range_reason.empty()) {
         const auto constraint_begin =
             transient.system().fieldDofOffset(*constraint_field);
         const auto constraint_count =
             transient.system()
                 .fieldDofHandler(*constraint_field)
                 .getNumDofs();
-        const auto pressure_end = constraint_begin + constraint_count;
-        const auto& pressure_record =
+        const auto constraint_field_end = constraint_begin + constraint_count;
+        const auto& constraint_field_record =
             transient.system().fieldRecord(*constraint_field);
         const bool local_unit_coefficients_represent_constant =
-            pressure_record.components == 1 &&
-            pressure_record.space != nullptr &&
+            constraint_field_record.components == 1 &&
+            constraint_field_record.space != nullptr &&
             analysis::unitCoefficientsRepresentConstant(
-                *pressure_record.space);
-        pressure_unit_coefficients_represent_constant = allRanks(
+                *constraint_field_record.space);
+        constraint_field_unit_coefficients_represent_constant = allRanks(
             local_unit_coefficients_represent_constant);
-        if (pressure_unit_coefficients_represent_constant) {
-            pressure_constraints_preserve_constants = allRanks(
+        if (constraint_field_unit_coefficients_represent_constant) {
+            constraints_preserve_constants = allRanks(
                 analysis::constraintsPreserveUnitField(
                     constraints,
                     constraint_begin,
                     constraint_count));
-            pressure_constraint_scope_reason =
-                pressure_constraints_preserve_constants
+            constraint_scope_reason =
+                constraints_preserve_constants
                     ? "available"
                     : "pair_support_unavailable";
-            if (!pressure_constraints_preserve_constants) {
+            if (!constraints_preserve_constants) {
                 const auto support = analysis::retainedFieldSupport(
                     transient.system(),
                     transient.system().operatorDefinition(pair_op),
@@ -1973,11 +1979,11 @@ void ConstraintRangeCertificate::observe(timestepping::NewtonObservation& observ
                             },
                         .rank = communicatorRank(system_communicator),
                         .size = communicatorSize(system_communicator)});
-                pressure_constraint_scope_reason = support.reason;
+                constraint_scope_reason = support.reason;
                 if (support.support.has_value()) {
-                    pressure_constraint_scope = "retained_volume";
-                    pressure_constraint_scope_reason = "available";
-                    pressure_constraints_preserve_constants =
+                    constraint_scope = "retained_volume";
+                    constraint_scope_reason = "available";
+                    constraints_preserve_constants =
                         allRanks(
                             analysis::constraintsPreserveUnitField(
                                 constraints,
@@ -1988,37 +1994,37 @@ void ConstraintRangeCertificate::observe(timestepping::NewtonObservation& observ
             }
         }
 
-        bool local_nonzero_pressure_inhomogeneity = false;
+        bool local_nonzero_constraint_field_inhomogeneity = false;
         constraints.forEach(
             [&](const constraints::AffineConstraints::ConstraintView&
                     line) {
                 if (line.slave_dof >= constraint_begin &&
-                    line.slave_dof < pressure_end &&
+                    line.slave_dof < constraint_field_end &&
                     (!std::isfinite(line.inhomogeneity) ||
                      line.inhomogeneity != 0.0)) {
-                    local_nonzero_pressure_inhomogeneity = true;
+                    local_nonzero_constraint_field_inhomogeneity = true;
                 }
             });
-        if (anyRank(local_nonzero_pressure_inhomogeneity)) {
-            pressure_representability_reason =
-                "nonzero_pressure_constraint_inhomogeneity";
+        if (anyRank(local_nonzero_constraint_field_inhomogeneity)) {
+            range_reason =
+                "nonzero_constraint_field_inhomogeneity";
         }
 
         const auto& owned = transient.system()
                                 .dofHandler()
                                 .getPartition()
                                 .locallyOwned();
-        std::uint64_t local_active_pressure_dofs = 0u;
-        for (GlobalIndex dof = constraint_begin; dof < pressure_end;
+        std::uint64_t local_active_constraint_field_dofs = 0u;
+        for (GlobalIndex dof = constraint_begin; dof < constraint_field_end;
              ++dof) {
             if (owned.contains(dof) &&
                 !std::binary_search(constrained_dofs.begin(),
                                     constrained_dofs.end(),
                                     dof)) {
-                ++local_active_pressure_dofs;
+                ++local_active_constraint_field_dofs;
             }
         }
-        active_pressure_dofs = local_active_pressure_dofs;
+        active_constraint_field_dofs = local_active_constraint_field_dofs;
 #if FE_HAS_MPI
         {
             int initialized = 0;
@@ -2026,77 +2032,77 @@ void ConstraintRangeCertificate::observe(timestepping::NewtonObservation& observ
             MPI_Initialized(&initialized);
             MPI_Finalized(&finalized);
             if (initialized != 0 && finalized == 0) {
-                std::uint64_t global_active_pressure_dofs = 0u;
-                MPI_Allreduce(&local_active_pressure_dofs,
-                              &global_active_pressure_dofs,
+                std::uint64_t global_active_constraint_field_dofs = 0u;
+                MPI_Allreduce(&local_active_constraint_field_dofs,
+                              &global_active_constraint_field_dofs,
                               1,
                               MPI_UINT64_T,
                               MPI_SUM,
                               system_communicator);
-                active_pressure_dofs =
-                    global_active_pressure_dofs;
+                active_constraint_field_dofs =
+                    global_active_constraint_field_dofs;
             }
         }
 #endif
         // In exact arithmetic Golub--Kahan LSQR terminates within the
-        // pressure-space dimension.  Finite-precision loss of Krylov
+        // constraint space dimension.  Finite-precision loss of Krylov
         // orthogonality can require more than n iterations, however;
         // Algorithm 583 recommends 4*n when the operator is not known
         // to be well conditioned.  Retain the existing hard ceiling so
         // this diagnostic cannot acquire unbounded solve cost.
-        pressure_representability_iteration_cap =
+        range_iteration_cap =
             static_cast<int>(
                 4u * std::min<std::uint64_t>(
-                         active_pressure_dofs, 250u));
+                         active_constraint_field_dofs, 250u));
     }
 
-    bool pressure_representability_cache_hit = false;
-    bool pressure_representability_cache_load_equality_checked = false;
-    bool pressure_representability_cache_load_equal = false;
-    double pressure_representability_cache_load_difference_norm =
+    bool range_cache_hit = false;
+    bool range_cache_load_equality_checked = false;
+    bool range_cache_load_equal = false;
+    double range_cache_load_difference_norm =
         std::numeric_limits<double>::quiet_NaN();
-    if (pressure_representability_reason.empty() &&
-        pressure_representability_cache_candidate) {
+    if (range_reason.empty() &&
+        range_cache_candidate) {
         axpy(*storage.vectors.work,
              static_cast<Real>(-1.0),
              *storage.vectors.load);
-        pressure_representability_cache_load_difference_norm =
+        range_cache_load_difference_norm =
             storage.vectors.work->norm();
-        pressure_representability_cache_load_equality_checked = true;
-        pressure_representability_cache_load_equal = allRanks(
+        range_cache_load_equality_checked = true;
+        range_cache_load_equal = allRanks(
             std::isfinite(
-                pressure_representability_cache_load_difference_norm) &&
-            pressure_representability_cache_load_difference_norm ==
+                range_cache_load_difference_norm) &&
+            range_cache_load_difference_norm ==
                 0.0);
-        pressure_representability_cache_hit =
-            pressure_representability_cache_load_equal;
-        pressure_representability_cache_rejection_reason =
-            pressure_representability_cache_hit
+        range_cache_hit =
+            range_cache_load_equal;
+        range_cache_rejection_reason =
+            range_cache_hit
                 ? "none"
                 : "load_changed_or_nonfinite";
-        if (pressure_representability_cache_hit) {
-            pressure_representability =
+        if (range_cache_hit) {
+            range =
                 state_->cache.result;
-            pressure_representability_available = true;
+            range_available = true;
         }
     }
 
-    if (pressure_representability_cache_rejection_reason ==
+    if (range_cache_rejection_reason ==
             "exact_load_check_pending" &&
-        !pressure_representability_cache_load_equality_checked) {
-        pressure_representability_cache_rejection_reason =
+        !range_cache_load_equality_checked) {
+        range_cache_rejection_reason =
             "diagnostic_unavailable_before_load_check";
     }
 
-    if (pressure_representability_reason.empty() &&
-        !pressure_representability_cache_hit) {
+    if (range_reason.empty() &&
+        !range_cache_hit) {
         auto& pair_matrix =
             *storage.pair;
         pair_matrix.zero();
         auto pair_view = pair_matrix.createAssemblyView();
         FE_CHECK_NOT_NULL(
             pair_view.get(),
-            "NewtonSolver: pressure-representability pair matrix view");
+            "NewtonSolver: constraint-range pair matrix view");
         systems::AssemblyRequest pair_request;
         pair_request.op = pair_op;
         pair_request.want_matrix = true;
@@ -2105,23 +2111,23 @@ void ConstraintRangeCertificate::observe(timestepping::NewtonObservation& observ
         pair_request.suppress_auxiliary_coupling_assembly = true;
         pair_request.is_nonlinear_iteration = true;
         const auto pair_assembly = observation.assemble(
-                "free_surface_conservative_balance", pair_request, pair_view.get(), nullptr);
+                method_.vocabulary().assembly_source, pair_request, pair_view.get(), nullptr);
         FE_THROW_IF(
             !pair_assembly.success,
             FEException,
-            "NewtonSolver: pressure-representability pair assembly failed for op '" +
+            "NewtonSolver: constraint-range pair assembly failed for op '" +
                 pair_op + "': " + pair_assembly.error_message);
 
         // Affine substitution has already moved slave-column and
         // slave-test effects onto masters.  The only remaining slave
         // matrix entries are artificial identity diagonals stamped by
         // constrained assembly; remove them instead of allowing LSQR
-        // to interpret constraints as physical pressure work.
+        // to interpret constraints as physical constraint_field work.
         auto constrained_pair_view =
             pair_matrix.createAssemblyView();
         FE_CHECK_NOT_NULL(
             constrained_pair_view.get(),
-            "NewtonSolver: pressure-representability constrained pair view");
+            "NewtonSolver: constraint-range constrained pair view");
         constrained_pair_view->beginAssemblyPhase();
         constrained_pair_view->zeroRows(
             constrained_dofs, /*set_diagonal=*/false);
@@ -2131,7 +2137,7 @@ void ConstraintRangeCertificate::observe(timestepping::NewtonObservation& observ
             *storage.vectors.load);
         storage.vectors.load->updateGhosts();
 
-        pressure_representability =
+        range =
             analysis::solveConstraintRangeLsqr(
                 pair_matrix,
                 *storage.vectors.load,
@@ -2142,36 +2148,36 @@ void ConstraintRangeCertificate::observe(timestepping::NewtonObservation& observ
                 *storage.vectors.work,
                 *storage.vectors.residual,
                 *storage.vectors.normal_residual,
-                pressure_representability_iteration_cap,
+                range_iteration_cap,
                 method_.max_range_distance,
                 allRanks);
-        pressure_representability_available = true;
+        range_available = true;
         if (geometry_key.revision_tracking_available &&
-            pressure_pair_matrix_state_independent) {
+            constraint_field_pair_matrix_state_independent) {
             state_->cache.valid =
                 true;
             state_->cache.geometry =
                 geometry_key;
             state_->cache.result =
-                pressure_representability;
+                range;
         }
     }
 
-    if (!pressure_representability_available) {
-        constant_pressure_kkt.reason =
-            pressure_representability_reason.empty()
-                ? "pressure_pair_or_load_unavailable"
-                : pressure_representability_reason;
-    } else if (!pressure_unit_coefficients_represent_constant) {
-        constant_pressure_kkt.reason =
-            "pressure_space_unit_coefficients_do_not_represent_constant";
-    } else if (!pressure_constraints_preserve_constants) {
-        constant_pressure_kkt.reason =
-            "pressure_constraints_do_not_preserve_constants";
-    } else if (!velocity_field.has_value() ||
+    if (!range_available) {
+        constant_field_kkt.reason =
+            range_reason.empty()
+                ? "constraint_pair_or_load_unavailable"
+                : std::string(method_.vocabulary().reason(range_reason));
+    } else if (!constraint_field_unit_coefficients_represent_constant) {
+        constant_field_kkt.reason =
+            "constraint_space_unit_coefficients_do_not_represent_constant";
+    } else if (!constraints_preserve_constants) {
+        constant_field_kkt.reason =
+            "field_constraints_do_not_preserve_constants";
+    } else if (!primary_field.has_value() ||
                !constraint_field.has_value()) {
-        constant_pressure_kkt.reason =
-            "mixed_velocity_pressure_fields_not_identifiable";
+        constant_field_kkt.reason =
+            "mixed_primary_constraint_fields_not_identifiable";
     } else {
         const auto constraint_begin =
             transient.system().fieldDofOffset(*constraint_field);
@@ -2180,12 +2186,12 @@ void ConstraintRangeCertificate::observe(timestepping::NewtonObservation& observ
                 .fieldDofHandler(*constraint_field)
                 .getNumDofs();
         const auto primary_begin =
-            transient.system().fieldDofOffset(*velocity_field);
+            transient.system().fieldDofOffset(*primary_field);
         const auto primary_count =
             transient.system()
-                .fieldDofHandler(*velocity_field)
+                .fieldDofHandler(*primary_field)
                 .getNumDofs();
-        constant_pressure_kkt = analysis::evaluateConstantFieldKkt(
+        constant_field_kkt = analysis::evaluateConstantFieldKkt(
             *storage.pair,
             *storage.vectors.load,
             *storage.vectors.left_basis,
@@ -2206,71 +2212,71 @@ void ConstraintRangeCertificate::observe(timestepping::NewtonObservation& observ
     }
 
     report.range.available =
-        pressure_representability_available;
+        range_available;
     report.range.converged =
-        pressure_representability_available &&
-        pressure_representability.converged;
+        range_available &&
+        range.converged;
     report.range.breakdown =
-        pressure_representability_available &&
-        pressure_representability.breakdown;
+        range_available &&
+        range.breakdown;
     report.range.residual_norm =
-        pressure_representability_available
-            ? pressure_representability.residual_norm
+        range_available
+            ? range.residual_norm
             : std::numeric_limits<double>::quiet_NaN();
     report.range.relative_distance =
-        pressure_representability_available
-            ? pressure_representability.relative_residual
+        range_available
+            ? range.relative_residual
             : std::numeric_limits<double>::quiet_NaN();
     report.range.reason =
-        pressure_representability_available
+        range_available
             ? "available"
-            : pressure_representability_reason;
+            : std::string(method_.vocabulary().reason(range_reason));
     report.constant_field_kkt.available =
-        constant_pressure_kkt.available;
+        constant_field_kkt.available;
     report.constant_field_kkt.unit_coefficients_represent_constant =
-        pressure_unit_coefficients_represent_constant;
+        constraint_field_unit_coefficients_represent_constant;
     report.constant_field_kkt.constraints_preserve_constants =
-        pressure_constraints_preserve_constants;
+        constraints_preserve_constants;
     report.constant_field_kkt.constraint_scope =
-        pressure_constraint_scope;
+        constraint_scope;
     report.constant_field_kkt.constraint_scope_reason =
-        pressure_constraint_scope_reason;
+        constraint_scope_reason;
     report.constant_field_kkt.jump =
-        constant_pressure_kkt.jump;
+        constant_field_kkt.jump;
     report.constant_field_kkt.multiplier =
-        constant_pressure_kkt.multiplier;
+        constant_field_kkt.multiplier;
     report.constant_field_kkt.direction_norm =
-        constant_pressure_kkt.direction_norm;
+        constant_field_kkt.direction_norm;
     report.constant_field_kkt.residual_norm =
-        constant_pressure_kkt.residual_norm;
+        constant_field_kkt.residual_norm;
     report.constant_field_kkt.relative_distance =
-        constant_pressure_kkt.relative_distance;
+        constant_field_kkt.relative_distance;
     report.constant_field_kkt.relative_orthogonality =
-        constant_pressure_kkt.relative_orthogonality;
+        constant_field_kkt.relative_orthogonality;
     report.constant_field_kkt.reason =
-        constant_pressure_kkt.reason;
+        method_.vocabulary().reason(constant_field_kkt.reason);
 
     if (communicatorRank(system_communicator) == 0) {
-        detail::logConstraintRangeSample(
+        detail::logConstraintRangeSample(method_.vocabulary(),
             observation,
             communicatorRank(system_communicator),
             norms,
             detail::ConstraintRangeCacheTrace{
                 .revision_key_available = geometry_key.revision_tracking_available,
                 .every_assembly = every_assembly_on_any_rank,
-                .pair_matrix_state_independent = pressure_pair_matrix_state_independent,
-                .prior_sample = local_pressure_representability_cache_prior_sample,
-                .geometry_match = local_pressure_representability_cache_geometry_match,
-                .candidate = pressure_representability_cache_candidate,
-                .load_equality_checked = pressure_representability_cache_load_equality_checked,
-                .load_equal = pressure_representability_cache_load_equal,
-                .hit = pressure_representability_cache_hit,
-                .load_difference_norm = pressure_representability_cache_load_difference_norm,
-                .rejection_reason = pressure_representability_cache_rejection_reason},
+                .pair_matrix_state_independent = constraint_field_pair_matrix_state_independent,
+                .prior_sample = local_range_cache_prior_sample,
+                .geometry_match = local_range_cache_geometry_match,
+                .candidate = range_cache_candidate,
+                .load_equality_checked = range_cache_load_equality_checked,
+                .load_equal = range_cache_load_equal,
+                .hit = range_cache_hit,
+                .load_difference_norm = range_cache_load_difference_norm,
+                .rejection_reason = range_cache_rejection_reason},
             report,
-            pressure_representability,
-            active_pressure_dofs,
-            pressure_representability_iteration_cap);
+            range,
+            active_constraint_field_dofs,
+            range_iteration_cap);
     }
 }
 
@@ -2287,7 +2293,7 @@ std::vector<CertificateDecision> ConstraintRangeCertificate::assess(
     const auto system_communicator = systemCommunicator(acceptance.system);
     std::vector<CertificateDecision> decisions;
 
-    // The constrained pressure-space distance of the accepted static state.
+    // The constrained constraint space distance of the accepted static state.
     if (const auto threshold = method_.max_range_distance; threshold.has_value()) {
         bool local_passed = true;
         const char* reason = "within_threshold";
@@ -2319,12 +2325,13 @@ std::vector<CertificateDecision> ConstraintRangeCertificate::assess(
         candidate.range_gate.passed = passed;
         candidate.range_gate.max_relative_distance = *threshold;
         if (communicatorRank(system_communicator) == 0) {
-            detail::logConstraintRangeDistanceGate(acceptance, candidate, *threshold, passed, reason);
+            detail::logConstraintRangeDistanceGate(method_.vocabulary(), acceptance, candidate, *threshold,
+                                                    passed, method_.vocabulary().reason(reason));
         }
         decisions.push_back(CertificateDecision{
             .id = "constraint_range.range_distance",
             .status = gateStatus(passed, reason),
-            .reason = reason,
+            .reason = std::string(method_.vocabulary().reason(reason)),
             .value = candidate.range.relative_distance,
             .threshold = *threshold});
     }
@@ -2338,7 +2345,7 @@ std::vector<CertificateDecision> ConstraintRangeCertificate::assess(
             reason = "diagnostic_not_sampled";
         } else if (!candidate.constant_field_kkt.available) {
             local_passed = false;
-            reason = "constant_pressure_kkt_unavailable";
+            reason = "constant_field_kkt_unavailable";
         } else if (!std::isfinite(candidate.constant_field_kkt.relative_distance)) {
             local_passed = false;
             reason = "relative_distance_nonfinite";
@@ -2355,12 +2362,13 @@ std::vector<CertificateDecision> ConstraintRangeCertificate::assess(
         candidate.constant_field_kkt_gate.passed = passed;
         candidate.constant_field_kkt_gate.max_relative_distance = *threshold;
         if (communicatorRank(system_communicator) == 0) {
-            detail::logConstantFieldKktDistanceGate(acceptance, candidate, *threshold, passed, reason);
+            detail::logConstantFieldKktDistanceGate(method_.vocabulary(), acceptance, candidate, *threshold,
+                                                     passed, method_.vocabulary().reason(reason));
         }
         decisions.push_back(CertificateDecision{
             .id = "constraint_range.constant_field_kkt_distance",
             .status = gateStatus(passed, reason),
-            .reason = reason,
+            .reason = std::string(method_.vocabulary().reason(reason)),
             .value = candidate.constant_field_kkt.relative_distance,
             .threshold = *threshold});
     }
@@ -2376,15 +2384,15 @@ void ConstraintRangeCertificate::logInitializer(const systems::FESystem& system,
     auto& record = mutableRecord(newton_report);
     record.initializer.applied = applied;
     record.initializer.passed = passed;
-    record.initializer.reason = std::string(reason);
+    record.initializer.reason = method_.vocabulary().reason(reason);
     if (communicatorRank(systemCommunicator(system)) == 0) {
-        detail::logConstraintRangeInitializer(record,
+        detail::logConstraintRangeInitializer(method_.vocabulary(), record,
                                               *method_.max_range_distance,
                                               state_->correction.lsqr,
                                               state_->correction.load_norm,
                                               applied,
                                               passed,
-                                              reason);
+                                              record.initializer.reason);
     }
 }
 
@@ -2416,7 +2424,7 @@ bool ConstraintRangeCertificate::propose(timestepping::NewtonInitialization& ini
 
     // The certificate of the synchronized current guess.
     auto sample = observation;
-    sample.phase = "static_compatible_pressure_initializer";
+    sample.phase = method_.vocabulary().initializer_phase;
     observe(sample);
 
     auto* storage = dynamic_cast<ConstraintRangeStorage*>(observation.storage);
@@ -2447,7 +2455,7 @@ bool ConstraintRangeCertificate::propose(timestepping::NewtonInitialization& ini
     } else if (report.range.relative_distance > threshold) {
         failure_reason = "relative_distance_exceeds_threshold";
     } else if (!allRanks(local_storage_available)) {
-        failure_reason = "pressure_solution_storage_unavailable";
+        failure_reason = "constraint_solution_storage_unavailable";
     }
     if (!failure_reason.empty()) {
         logInitializer(transient.system(), newton_report, /*applied=*/false, /*passed=*/false, failure_reason);
@@ -2462,26 +2470,26 @@ bool ConstraintRangeCertificate::propose(timestepping::NewtonInitialization& ini
         constraint_begin < 0 || constraint_count <= 0 ||
             constraint_begin + constraint_count > current.size(),
         systems::InvalidStateException,
-        "NewtonSolver: static compatible pressure initializer found an invalid pressure DOF range");
-    std::vector<GlobalIndex> pressure_dofs(static_cast<std::size_t>(constraint_count));
-    std::iota(pressure_dofs.begin(), pressure_dofs.end(), constraint_begin);
+        "NewtonSolver: static compatible constraint-field initializer found an invalid constraint-field DOF range");
+    std::vector<GlobalIndex> constraint_field_dofs(static_cast<std::size_t>(constraint_count));
+    std::iota(constraint_field_dofs.begin(), constraint_field_dofs.end(), constraint_begin);
 
-    auto& compatible_pressure = *storage->vectors.solution;
+    auto& compatible_constraint_field = *storage->vectors.solution;
     auto& pair_layout_work = *storage->vectors.work;
-    compatible_pressure.updateGhosts();
+    compatible_constraint_field.updateGhosts();
 
     // The representability solve above certifies the complete
-    // pressure-independent physical load.  The one-shot initializer is
+    // constraint-independent physical load.  The one-shot initializer is
     // additive, so solve a second LSQR problem for the balance remaining
-    // after the pressure already present at entry.  This retains the
-    // current representative of a compatible pressure space, avoids
-    // counting exterior or hydrostatic pressure twice, and leaves an
+    // after the constraint_field already present at entry.  This retains the
+    // current representative of a compatible constraint space, avoids
+    // counting exterior or existing constraint load twice, and leaves an
     // already compatible state unchanged.
     auto& correction_load = *storage->vectors.correction_load;
 
     transferOwnedEntries(pair_layout_work, current, system_communicator);
     correction_load.copyFrom(pair_layout_work);
-    zeroVectorEntries(pressure_dofs, correction_load);
+    zeroVectorEntries(constraint_field_dofs, correction_load);
     axpy(pair_layout_work, Real{-1.0}, correction_load);
     pair_layout_work.updateGhosts();
 
@@ -2497,7 +2505,7 @@ bool ConstraintRangeCertificate::propose(timestepping::NewtonInitialization& ini
     const auto correction = solveConstraintRangeLsqr(
         pair_matrix,
         correction_load,
-        compatible_pressure,
+        compatible_constraint_field,
         *storage->vectors.left_basis,
         *storage->vectors.right_basis,
         *storage->vectors.direction,
@@ -2509,18 +2517,18 @@ bool ConstraintRangeCertificate::propose(timestepping::NewtonInitialization& ini
         allRanks);
     correction_state.lsqr = correction;
     if (correction.breakdown) {
-        logInitializer(transient.system(), newton_report, false, false, "pressure_correction_breakdown");
+        logInitializer(transient.system(), newton_report, false, false, "constraint_correction_breakdown");
         return false;
     }
     if (!correction.converged) {
-        logInitializer(transient.system(), newton_report, false, false, "pressure_correction_not_stationary");
+        logInitializer(transient.system(), newton_report, false, false, "constraint_correction_not_stationary");
         return false;
     }
     if (!allRanks(std::isfinite(correction_state.load_norm) &&
                   std::isfinite(correction.residual_norm) &&
                   std::isfinite(correction.normal_residual_norm) &&
                   std::isfinite(correction.solution_norm))) {
-        logInitializer(transient.system(), newton_report, false, false, "pressure_correction_nonfinite");
+        logInitializer(transient.system(), newton_report, false, false, "constraint_correction_nonfinite");
         return false;
     }
     const double nonincrease_tolerance =
@@ -2528,30 +2536,30 @@ bool ConstraintRangeCertificate::propose(timestepping::NewtonInitialization& ini
         std::max({1.0, correction_state.load_norm, correction.residual_norm});
     if (!allRanks(correction.residual_norm <=
                   correction_state.load_norm + nonincrease_tolerance)) {
-        logInitializer(transient.system(), newton_report, false, false, "pressure_correction_increased_residual");
+        logInitializer(transient.system(), newton_report, false, false, "constraint_correction_increased_residual");
         return false;
     }
 
     // A valid mixed-pair LSQR recurrence places the solution entirely in
-    // the pressure block.  Check that invariant explicitly before the
+    // the constraint block.  Check that invariant explicitly before the
     // monolithic state is touched; this prevents an accidentally polluted
-    // diagnostic pair from changing velocity or any auxiliary field.
-    pair_layout_work.copyFrom(compatible_pressure);
-    zeroVectorEntries(pressure_dofs, pair_layout_work);
-    const double nonpressure_solution_norm = pair_layout_work.norm();
-    const double pressure_solution_norm = compatible_pressure.norm();
+    // diagnostic pair from changing primary or any auxiliary field.
+    pair_layout_work.copyFrom(compatible_constraint_field);
+    zeroVectorEntries(constraint_field_dofs, pair_layout_work);
+    const double other_field_solution_norm = pair_layout_work.norm();
+    const double constraint_field_solution_norm = compatible_constraint_field.norm();
     const double subspace_tolerance =
-        100.0 * std::numeric_limits<Real>::epsilon() * std::max(1.0, pressure_solution_norm);
-    if (!allRanks(std::isfinite(nonpressure_solution_norm) &&
-                  nonpressure_solution_norm <= subspace_tolerance)) {
-        logInitializer(transient.system(), newton_report, false, false, "solution_outside_pressure_subspace");
+        100.0 * std::numeric_limits<Real>::epsilon() * std::max(1.0, constraint_field_solution_norm);
+    if (!allRanks(std::isfinite(other_field_solution_norm) &&
+                  other_field_solution_norm <= subspace_tolerance)) {
+        logInitializer(transient.system(), newton_report, false, false, "solution_outside_constraint_subspace");
         return false;
     }
 
-    // Remove the verified roundoff-sized non-pressure component before
+    // Remove the verified roundoff-sized non-constraint_field component before
     // the addition so every other field remains bitwise unchanged.
-    axpy(compatible_pressure, Real{-1.0}, pair_layout_work);
-    compatible_pressure.updateGhosts();
+    axpy(compatible_constraint_field, Real{-1.0}, pair_layout_work);
+    compatible_constraint_field.updateGhosts();
     state_->proposal_storage = storage;
     return true;
 }
@@ -2564,7 +2572,7 @@ void ConstraintRangeCertificate::apply(const systems::FESystem& system,
     FE_CHECK_NOT_NULL(storage, "ConstraintRangeCertificate: no proposed correction");
     // Pair and production vectors may have different ghost maps.  Transfer
     // their common authoritative owned rows in public numbering, then add
-    // the verified residual-correction pressure block to the existing
+    // the verified residual-correction constraint block to the existing
     // current state.  Committed history and rate slots are not touched.
     auto& pair_layout_work = *storage->vectors.work;
     transferOwnedEntries(pair_layout_work, current, communicator);
