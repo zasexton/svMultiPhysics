@@ -2371,6 +2371,16 @@ TEST(SmallCutAggregationConstraint,
     auto coefficient_guards = SmallCutAggregationGuardOptions{};
     coefficient_guards.maximum_absolute_coefficient = 1.5;
     run_rejection(coefficient_guards);
+
+    // The extrapolated P1 row has coefficients (-1, 2) and L1 norm 3.
+    // Relaxing the row-sum limit must still reject the coefficient 2 > 1.5.
+    coefficient_guards.maximum_row_l1_norm = 1e16;
+    run_rejection(coefficient_guards);
+
+    auto row_guards = SmallCutAggregationGuardOptions{};
+    row_guards.maximum_absolute_coefficient = 2.0;
+    row_guards.maximum_row_l1_norm = 2.5;
+    run_rejection(row_guards);
 #endif
 }
 

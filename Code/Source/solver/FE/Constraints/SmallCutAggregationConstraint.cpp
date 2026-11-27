@@ -387,17 +387,14 @@ struct AggregationLineGuardValidation {
             std::max(result.maximum_absolute_coefficient, magnitude);
         result.row_l1_norm += magnitude;
     }
-    const auto tolerance =
-        Real{128.0} * std::numeric_limits<Real>::epsilon() *
-        std::max({Real{1.0},
-                  guards.maximum_absolute_coefficient,
-                  guards.maximum_row_l1_norm});
-    if (result.maximum_absolute_coefficient >
-        guards.maximum_absolute_coefficient + tolerance) {
+    const auto exceeds_limit = [](Real value, Real limit) {
+        const Real tolerance = Real{128} * std::numeric_limits<Real>::epsilon() * limit;
+        return value > limit && value - limit > tolerance;
+    };
+    if (exceeds_limit(result.maximum_absolute_coefficient, guards.maximum_absolute_coefficient)) {
         result.valid = false;
         result.reason = "maximum_absolute_coefficient";
-    } else if (result.row_l1_norm >
-               guards.maximum_row_l1_norm + tolerance) {
+    } else if (exceeds_limit(result.row_l1_norm, guards.maximum_row_l1_norm)) {
         result.valid = false;
         result.reason = "maximum_row_l1_norm";
     }
