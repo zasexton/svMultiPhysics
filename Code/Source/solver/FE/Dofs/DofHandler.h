@@ -437,6 +437,7 @@ struct DofLayoutInfo {
 
     // Total DOFs per element (convenience, computed from other fields and element type)
     LocalIndex total_dofs_per_element{0};
+    bool oriented_edge_moments{false}; ///< The vector-basis transform orients edge moments during assembly.
 
     [[nodiscard]] bool has_face_dofs() const noexcept {
         return dofs_per_face > 0 || dofs_per_tri_face > 0 || dofs_per_quad_face > 0;

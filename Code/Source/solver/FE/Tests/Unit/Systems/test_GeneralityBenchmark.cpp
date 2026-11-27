@@ -19,11 +19,8 @@
  * theoretical ones.  The problems are those of section 5 of the vocabulary
  * review of 2026-11-24 that the vocabulary expresses today: 1, 3, 4, 5, 6,
  * 7, 8, 10 and 11; test_GeneralityBenchmarkGaps.cpp holds those it expresses
- * only in part.  Where the expressed problem cannot be solved today because
- * of a defect this benchmark found (problems 5, 6 and 7, and one quantity of
- * 11), the test is disabled (DISABLED_) with a comment that names the
- * defect; --gtest_also_run_disabled_tests runs them (except the RT1/DG1
- * Darcy case, which corrupts the heap).
+ * only in part.  Disabled cases document their outstanding qualification in their
+ * test bodies and can be run with --gtest_also_run_disabled_tests.
  */
 
 #include "Tests/Unit/Systems/GeneralityBenchmark.h"
@@ -991,15 +988,8 @@ TEST(GeneralityBenchmark, P05_MixedDarcyWithStrongNormalMomentsOnEveryFamily)
                           /*strong_normal_flux=*/true);
 }
 
-TEST(GeneralityBenchmark, DISABLED_P05_MixedDarcyRT1DG1)
+TEST(GeneralityBenchmark, P05_MixedDarcyRT1DG1)
 {
-    // Found by this benchmark (reported; not a vocabulary gap): an RT1 field
-    // (two DOFs on each edge) of a Tri3 mesh built from arrays does not
-    // reproduce a linear flux: the L2 projection of (x + 2y, -x) has error
-    // 0.21 and divergence error 10 (div = 1 exactly), so the RT1/DG1 flux and
-    // pressure do not converge (rates 0.00), while RT0 converges on every
-    // family.  The DOFs of an edge seem not to be permuted between the two
-    // cells that see the edge in opposite directions.
     expectMixedDarcyRates({{Cell::Tri3, 1, 4}, {Cell::Tet4, 1, 1}}, /*strong_normal_flux=*/false);
     expectMixedDarcyRates({{Cell::Tri3, 1, 4}, {Cell::Tet4, 1, 1}}, /*strong_normal_flux=*/true);
 }

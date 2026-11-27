@@ -78,11 +78,9 @@ public:
     /**
      * @brief Orient H(curl) edge DOFs for an oriented edge
      *
-     * For Nédélec-type edge DOFs (moments of tangential component), a reversed
-     * edge orientation flips the tangent direction and reverses the ordering
-     * of higher-order edge modes. This helper applies:
-     *   - sign * reverse(edge_dofs)  when sign < 0
-     *   - identity                  when sign > 0
+     * For tangential or normal moments against a line Lagrange basis, a
+     * reversed edge negates the trace, exchanges the two endpoint weights,
+     * and reverses the interior weights. A constant moment only changes sign.
      */
     static std::vector<Real> orient_hcurl_edge_dofs(
         const std::vector<Real>& edge_dofs,

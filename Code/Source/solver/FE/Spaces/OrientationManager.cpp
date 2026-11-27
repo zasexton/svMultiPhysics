@@ -258,9 +258,15 @@ std::vector<Real> OrientationManager::orient_hcurl_edge_dofs(
         return edge_dofs;
     }
 
-    std::vector<Real> result(edge_dofs.rbegin(), edge_dofs.rend());
-    for (auto& v : result) {
-        v = -v;
+    // The line Lagrange basis stores its two endpoints first, followed
+    // by the interior nodes in increasing reference coordinate.
+    auto result = edge_dofs;
+    if (result.size() >= 2) {
+        std::swap(result[0], result[1]);
+        std::reverse(result.begin() + 2, result.end());
+    }
+    for (auto& value : result) {
+        value = -value;
     }
     return result;
 }

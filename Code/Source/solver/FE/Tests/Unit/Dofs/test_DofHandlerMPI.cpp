@@ -13,6 +13,7 @@
 #include "FE/Spaces/AdaptiveSpace.h"
 #include "FE/Spaces/H1Space.h"
 #include "FE/Spaces/HCurlSpace.h"
+#include "FE/Spaces/HDivSpace.h"
 
 #include <mpi.h>
 
@@ -2041,6 +2042,48 @@ TEST(DofHandlerMPI, DistributedVariableOrderH1_TwoRank_SharedVerticesAndGhostOwn
         ASSERT_EQ(ghost_dofs.size(), 2u);
         EXPECT_EQ(ghost_dofs[0], local_shared[0]);
         EXPECT_EQ(ghost_dofs[1], local_shared[1]);
+    }
+}
+
+TEST(DofHandlerMPI, OppositeEdgeOrientationsKeepCanonicalVectorMomentIndices)
+{
+    const auto comm = MPI_COMM_WORLD;
+    if (mpiSize(comm) != 2) GTEST_SKIP() << "Requires two ranks";
+    const int rank = mpiRank(comm);
+    const auto topology = makeTwoRankQuadWithSharedEdge(rank, 550 + rank);
+    const int shared_edge = rank == 0 ? 1 : 3;
+    DofDistributionOptions options;
+    options.my_rank = rank;
+    options.world_size = 2;
+    options.mpi_comm = comm;
+    options.ownership = OwnershipStrategy::LowestRank;
+    options.global_numbering = GlobalNumberingMode::OwnerContiguous;
+
+    const std::array<std::shared_ptr<const svmp::FE::spaces::FunctionSpace>, 2> spaces{
+        std::make_shared<svmp::FE::spaces::HDivSpace>(ElementType::Quad4, 1),
+        std::make_shared<HCurlSpace>(ElementType::Quad4, 1)};
+    for (const auto& space : spaces) {
+        DofHandler handler;
+        handler.distributeDofs(topology, *space, options);
+        handler.finalize();
+        const auto directions = handler.cellEdgeOrientations(0);
+        ASSERT_EQ(directions.size(), 4u);
+        EXPECT_EQ(directions[shared_edge], rank == 0 ? 1 : -1);
+        const auto canonical = handler.getEntityDofMap()->getEdgeDofs(shared_edge);
+        ASSERT_EQ(canonical.size(), 2u);
+        const auto cell = handler.getCellDofs(0);
+        const auto& basis = dynamic_cast<const svmp::FE::basis::VectorBasisFunction&>(space->element().basis());
+        const auto associations = basis.dof_associations();
+        ASSERT_EQ(cell.size(), associations.size());
+        int checked = 0;
+        for (std::size_t i = 0; i < cell.size(); ++i) {
+            const auto& dof = associations[i];
+            if (dof.entity_type == svmp::FE::basis::DofEntity::Edge && dof.entity_id == shared_edge) {
+                EXPECT_EQ(cell[i], canonical[dof.moment_index]) << "moment " << dof.moment_index;
+                ++checked;
+            }
+        }
+        EXPECT_EQ(checked, 2);
     }
 }
 

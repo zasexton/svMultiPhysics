@@ -3678,6 +3678,7 @@ DofLayoutInfo DofLayoutInfo::DG(int order, int num_verts_per_cell, int num_compo
 DofLayoutInfo conformingVectorLayoutForSpace(const spaces::FunctionSpace& space,
                                              int dim, int n_verts, LocalIndex total_dofs) {
     DofLayoutInfo layout{};
+    layout.oriented_edge_moments = true;
     const auto& elem = space.element();
     const auto& b = elem.basis();
     FE_THROW_IF(!b.is_vector_valued(), FEException,
@@ -4103,6 +4104,7 @@ struct DofHandler::MeshCacheState : MeshObserver {
                    a.dofs_per_cell == b.dofs_per_cell &&
                    a.num_components == b.num_components &&
                    a.is_continuous == b.is_continuous &&
+                   a.oriented_edge_moments == b.oriented_edge_moments &&
                    a.tensor_face_dof_layout == b.tensor_face_dof_layout &&
                    a.total_dofs_per_element == b.total_dofs_per_element;
         }
@@ -6569,10 +6571,11 @@ void DofHandler::distributeCGDofs(const MeshTopologyView& topology,
                         break;
                     }
 
-                    // For scalar Lagrange edge-interior DOFs, reverse ordering when the
-                    // reference edge direction opposes the canonical (min-GID→max-GID) direction.
                     bool forward = true;
-                    if (layout.dofs_per_edge > 1 && options.use_canonical_ordering) {
+                    // The assembler applies the signed permutation to vector moments.
+                    // Scalar nodal interior DOFs are permuted in the map itself.
+                    if (layout.dofs_per_edge > 1 && options.use_canonical_ordering &&
+                        !layout.oriented_edge_moments) {
                         if (gv0 >= 0 && gv1 >= 0) {
                             auto get_gid = [&](GlobalIndex v) -> gid_t {
                                 const auto vv = static_cast<std::size_t>(v);
@@ -7859,7 +7862,10 @@ void DofHandler::distributeCGDofsParallel(const MeshTopologyView& topology,
                     }
 
                     bool forward = true;
-                    if (layout.dofs_per_edge > 1 && options.use_canonical_ordering) {
+                    // The assembler applies the signed permutation to vector moments.
+                    // Scalar nodal interior DOFs are permuted in the map itself.
+                    if (layout.dofs_per_edge > 1 && options.use_canonical_ordering &&
+                        !layout.oriented_edge_moments) {
                         const auto gid0 = topology.vertex_gids[static_cast<std::size_t>(gv0)];
                         const auto gid1 = topology.vertex_gids[static_cast<std::size_t>(gv1)];
                         forward = (gid0 <= gid1);
@@ -8627,6 +8633,7 @@ struct DofHandler::MeshCacheState : MeshObserver {
                    a.dofs_per_cell == b.dofs_per_cell &&
                    a.num_components == b.num_components &&
                    a.is_continuous == b.is_continuous &&
+                   a.oriented_edge_moments == b.oriented_edge_moments &&
                    a.tensor_face_dof_layout == b.tensor_face_dof_layout &&
                    a.total_dofs_per_element == b.total_dofs_per_element;
         }

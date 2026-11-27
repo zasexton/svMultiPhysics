@@ -4,6 +4,8 @@
  */
 
 #include <gtest/gtest.h>
+#include "FE/Basis/LagrangeBasis.h"
+#include "FE/Quadrature/QuadratureFactory.h"
 #include "FE/Spaces/OrientationManager.h"
 #include <algorithm>
 #include <numeric>
@@ -60,14 +62,26 @@ TEST_F(OrientationManagerTest, OrientEdgeDofsFlipped) {
     EXPECT_NEAR(result[1], 1.0, tol);
 }
 
-TEST_F(OrientationManagerTest, OrientHCurlEdgeDofsReversesAndFlipsSign) {
-    std::vector<Real> edge_dofs = {1.0, 2.0, 3.0, 4.0};
-    auto result = OrientationManager::orient_hcurl_edge_dofs(edge_dofs, -1);
-    ASSERT_EQ(result.size(), edge_dofs.size());
-    EXPECT_NEAR(result[0], -4.0, tol);
-    EXPECT_NEAR(result[1], -3.0, tol);
-    EXPECT_NEAR(result[2], -2.0, tol);
-    EXPECT_NEAR(result[3], -1.0, tol);
+TEST_F(OrientationManagerTest, ReversedEdgeMomentsIntegrateTheOppositeTrace) {
+    for (int order = 0; order <= 4; ++order) {
+        const basis::LagrangeBasis edge_basis(ElementType::Line2, order);
+        const auto quad = quadrature::QuadratureFactory::create(ElementType::Line2, order + 3);
+        std::vector<Real> moments(edge_basis.size()), opposite(edge_basis.size()), shape;
+        const auto trace = [](Real s) { return 1 + s + 0.37*s*s + 0.12*s*s*s; };
+        for (std::size_t q = 0; q < quad->num_points(); ++q) {
+            const auto xi = quad->point(q);
+            edge_basis.evaluate_values(xi, shape);
+            for (std::size_t i = 0; i < shape.size(); ++i) {
+                moments[i] += quad->weight(q) * trace(xi[0]) * shape[i];
+                opposite[i] -= quad->weight(q) * trace(-xi[0]) * shape[i];
+            }
+        }
+        const auto transformed = OrientationManager::orient_hcurl_edge_dofs(moments, -1);
+        ASSERT_EQ(transformed.size(), opposite.size());
+        for (std::size_t i = 0; i < opposite.size(); ++i) {
+            EXPECT_NEAR(transformed[i], opposite[i], 1.e-13) << "order " << order << ", moment " << i;
+        }
+    }
 }
 
 // =============================================================================
