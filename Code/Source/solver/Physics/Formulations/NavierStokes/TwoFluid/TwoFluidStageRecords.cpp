@@ -1197,6 +1197,8 @@ void TwoFluidStageRecords::stageTwoFluidAcceptedStageDiagnostics(
                 !metadata.generalized_alpha.has_value() ||
                     !std::isfinite(metadata.generalized_alpha->alpha_f) ||
                     !std::isfinite(metadata.generalized_alpha->alpha_m) ||
+                    !std::isfinite(metadata.generalized_alpha->effectiveGamma()) ||
+                    metadata.generalized_alpha->effectiveGamma() <= Real{0.0} ||
                     !operatorStageTimesMatch(
                         metadata.state_time,
                         metadata.step_start_time +

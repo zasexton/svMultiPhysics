@@ -54,6 +54,28 @@ TEST(TimeSteppingUtils, GeneralizedAlphaFirstOrderFromRhoInfMatchesReferenceEndp
     EXPECT_THROW(generalizedAlphaFirstOrderFromRhoInf(std::numeric_limits<double>::quiet_NaN()), svmp::FE::InvalidArgumentException);
 }
 
+TEST(TimeSteppingUtils, NonuniformGeneralizedAlphaHasTheBDF2AndMidpointLimits)
+{
+    namespace utils = svmp::FE::timestepping::utils;
+    for (const int exponent : {-900, 0, 900}) {
+        const double previous_dt = std::ldexp(1.0, exponent);
+        const double dt = 0.5 * previous_dt;
+        // At rho=0 the injected old rate is the previous backward difference.
+        // The new difference has weight (2*dt + previous_dt)/(dt + previous_dt).
+        const auto bdf = utils::generalizedAlphaFirstOrderForStep(0.0, previous_dt, dt);
+        EXPECT_DOUBLE_EQ(bdf.alpha_m, 4.0 / 3.0);
+        EXPECT_DOUBLE_EQ(bdf.alpha_f, 1.0);
+        EXPECT_DOUBLE_EQ(bdf.gamma, 1.0);
+        EXPECT_EQ(utils::generalizedAlphaFirstOrderForStep(1.0, previous_dt, dt),
+                  utils::generalizedAlphaFirstOrderFromRhoInf(1.0));
+        EXPECT_EQ(utils::generalizedAlphaFirstOrderForStep(0.25, dt, dt),
+                  utils::generalizedAlphaFirstOrderFromRhoInf(0.25));
+    }
+    EXPECT_THROW((void)utils::generalizedAlphaFirstOrderForStep(0.5, 0.0, 1.0), svmp::FE::InvalidArgumentException);
+    EXPECT_THROW((void)utils::generalizedAlphaFirstOrderForStep(
+                     0.5, 1.0, std::numeric_limits<double>::infinity()), svmp::FE::InvalidArgumentException);
+}
+
 TEST(TimeSteppingUtils, GeneralizedAlphaSecondOrderFromRhoInfMatchesReferenceEndpoints)
 {
     using svmp::FE::timestepping::utils::generalizedAlphaSecondOrderFromRhoInf;

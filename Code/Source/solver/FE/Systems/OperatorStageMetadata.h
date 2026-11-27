@@ -35,10 +35,18 @@ namespace systems {
 struct OperatorStageGeneralizedAlphaMetadata {
     Real alpha_f{1.0};
     Real alpha_m{1.0};
+    // Older fixed-step records carry only alpha_f and alpha_m.
+    std::optional<Real> gamma{};
 
-    [[nodiscard]] friend bool operator==(
-        const OperatorStageGeneralizedAlphaMetadata&,
-        const OperatorStageGeneralizedAlphaMetadata&) = default;
+    [[nodiscard]] Real effectiveGamma() const noexcept {
+        return gamma.value_or(Real{0.5} + alpha_m - alpha_f);
+    }
+
+    [[nodiscard]] friend bool operator==(const OperatorStageGeneralizedAlphaMetadata& lhs,
+                                         const OperatorStageGeneralizedAlphaMetadata& rhs) noexcept {
+        return lhs.alpha_f == rhs.alpha_f && lhs.alpha_m == rhs.alpha_m &&
+               lhs.effectiveGamma() == rhs.effectiveGamma();
+    }
 };
 
 /** Rank-local mesh stamp captured with an operator-stage state snapshot. */
@@ -60,8 +68,8 @@ struct OperatorStageGeometryMetadata {
 /**
  * @brief Time-integrator-neutral provenance for a prospective accepted stage.
  *
- * `state_time` and `rate_time` are the exact converged operator sampling
- * times.  For generalized-alpha they are generally not the step endpoint.
+ * `state_time` is the operator time. For first-order generalized-alpha,
+ * `rate_time` records the alpha_m coordinate of the interpolated algorithmic rate.
  * `derivative_fields` states which entries of the supplied exact-rate vector
  * are meaningful time derivatives.
  */
@@ -103,7 +111,7 @@ struct OperatorStageMeasurementMetadata {
  *
  * This is the effective time step of dt(u) in the operator: the step for an
  * endpoint scheme and gamma alpha_f dt / alpha_m for first-order
- * generalized-alpha, whose gamma = 1/2 + alpha_m - alpha_f.
+ * generalized-alpha.
  */
 [[nodiscard]] inline Real operatorStageRateStencilTime(
     const OperatorStageMeasurementMetadata& metadata) noexcept
@@ -112,8 +120,7 @@ struct OperatorStageMeasurementMetadata {
         return metadata.state_time - metadata.step_start_time;
     }
     const auto& alpha = *metadata.generalized_alpha;
-    return (Real{0.5} + alpha.alpha_m - alpha.alpha_f) * alpha.alpha_f *
-           metadata.dt / alpha.alpha_m;
+    return alpha.effectiveGamma() * alpha.alpha_f * metadata.dt / alpha.alpha_m;
 }
 
 } // namespace systems

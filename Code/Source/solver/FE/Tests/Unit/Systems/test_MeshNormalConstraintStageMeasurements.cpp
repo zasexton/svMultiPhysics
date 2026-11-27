@@ -11,6 +11,7 @@
 #include "Spaces/H1Space.h"
 #include "Spaces/ProductSpace.h"
 #include "Systems/FESystem.h"
+#include "Systems/MeshBoundaryRecordSupport.h"
 #include "Systems/MeshNormalConstraintStageMeasurements.h"
 #include "TimeStepping/MeshNormalStageParticipant.h"
 
@@ -98,6 +99,27 @@ TEST(MeshNormalConstraintStageMeasurements, RecordsAreOneAttachmentOfTheSystem)
     EXPECT_EQ(system.findAttachment<MeshNormalConstraintStageMeasurementStore>(), store);
     EXPECT_FALSE(store->declarations_frozen);
     EXPECT_FALSE(store->transaction_active);
+}
+
+TEST(MeshNormalConstraintStageMeasurements, StageConsensusIncludesTheEffectiveGamma)
+{
+    namespace systems = svmp::FE::systems;
+    const auto tokens = [](const auto& stage) {
+        systems::record_support::MeshBoundaryConsensusTokens result;
+        systems::record_support::appendOperatorStageMeasurementMetadata(result, stage);
+        return result;
+    };
+    systems::OperatorStageMeasurementMetadata old_record;
+    old_record.generalized_alpha = systems::OperatorStageGeneralizedAlphaMetadata{
+        .alpha_f = 0.75, .alpha_m = 1.0};
+    auto new_record = old_record;
+    new_record.generalized_alpha->gamma = 0.75;
+    EXPECT_EQ(old_record, new_record);
+    EXPECT_EQ(tokens(old_record), tokens(new_record));
+
+    new_record.generalized_alpha->gamma = 0.8;
+    EXPECT_NE(old_record, new_record);
+    EXPECT_NE(tokens(old_record), tokens(new_record));
 }
 
 TEST(MeshNormalConstraintStageMeasurements, RegistrationRequiresANormalRateRelation)

@@ -269,6 +269,8 @@ void appendOperatorStageMeasurementMetadata(
             tokens,
             generatedBoundaryTraceRealBits(
                 metadata.generalized_alpha->alpha_m));
+        appendMeshBoundaryToken(tokens, generatedBoundaryTraceRealBits(
+            metadata.generalized_alpha->effectiveGamma()));
     }
     // expected_stage_geometry is a rank-local observation-vector stamp.  It
     // is validated against the live adapter but excluded from MPI consensus.

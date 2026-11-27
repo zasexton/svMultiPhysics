@@ -199,6 +199,7 @@ void MeshNormalStageParticipant::onCandidateStage(
           systems::OperatorStageGeneralizedAlphaMetadata{
               .alpha_f = observation.generalized_alpha->alpha_f,
               .alpha_m = observation.generalized_alpha->alpha_m,
+              .gamma = observation.generalized_alpha->gamma,
           };
     }
     stage_metadata.emplace(std::move(metadata));

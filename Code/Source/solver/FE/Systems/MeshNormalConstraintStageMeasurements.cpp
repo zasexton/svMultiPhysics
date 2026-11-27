@@ -573,10 +573,12 @@ void MeshNormalConstraintStageMeasurements::stageFittedALENormalOperatorStageMea
                 (!std::isfinite(
                      metadata.generalized_alpha->alpha_f) ||
                  !std::isfinite(
-                     metadata.generalized_alpha->alpha_m)),
+                     metadata.generalized_alpha->alpha_m) ||
+                 !std::isfinite(metadata.generalized_alpha->effectiveGamma()) ||
+                 metadata.generalized_alpha->effectiveGamma() <= Real{0.0}),
             InvalidArgumentException,
             "FESystem::stageFittedALENormalOperatorStageMeasurements: "
-            "generalized-alpha coordinates must be finite");
+            "generalized-alpha coordinates must be finite and gamma must be positive");
         FE_THROW_IF(
             !operatorStageTimesMatch(
                 metadata.step_end_time,

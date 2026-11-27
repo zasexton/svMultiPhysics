@@ -2231,6 +2231,15 @@ TEST(IncompressibleTwoFluidModule,
   };
   EXPECT_TRUE(stage_with(gamma * alpha_f * dt / alpha_m));
   EXPECT_FALSE(stage_with(alpha_f * dt));
+
+  // At alpha_f=3/4, alpha_m=1 for every step ratio. The actual gamma
+  // distinguishes the rate stencil on a half step from its uniform-grid value.
+  metadata.state_time = 0.75 * dt;
+  metadata.rate_time = dt;
+  metadata.generalized_alpha = FE::systems::OperatorStageGeneralizedAlphaMetadata{
+      .alpha_f = 0.75, .alpha_m = 1.0, .gamma = 0.8};
+  EXPECT_TRUE(stage_with(0.6 * dt));
+  EXPECT_FALSE(stage_with(0.5625 * dt));
 }
 
 // The prescribed-pressure-jump identity compares the directly accumulated

@@ -54,12 +54,11 @@ struct GeneralizedAlphaSecondOrderIntegratorOptions {
  * - the stage increment (u_{n+α_f} - u_n), and
  * - a reconstructed u̇_n from solution history.
  *
- * Accuracy is second order for a fixed step.  The parameters (α_m, α_f, γ)
- * do not depend on the ratio of successive steps, so a step that changes the
- * step size has a local error O(H^2) instead of O(H^3): steps alternating
- * between H and H/2 make the scheme first order (errors 3.10e-4, 1.50e-4 and
- * 7.36e-5 on a linear reaction problem as H halves).  A bounded number of
- * step changes, or step ratios 1 + O(H), keep second order.
+ * TimeLoop injects its carried algorithmic rate (history_rate_order=0) and
+ * uses generalizedAlphaFirstOrderForStep to retain second-order accuracy for
+ * smooth solutions on nonuniform steps. At a restart the algorithmic rate
+ * and its previous accepted step length belong to the same spectral radius.
+ * Direct callers supply the stage coefficients to this stencil explicitly.
  */
 class GeneralizedAlphaFirstOrderIntegrator final : public systems::TimeIntegrator {
 public:

@@ -1241,13 +1241,8 @@ TimeLoopReport TimeLoop::run(systems::TransientSystem& transient,
     std::shared_ptr<const GeneralizedAlphaSecondOrderIntegrator> generalized_alpha_so;
     std::shared_ptr<const NewmarkBetaIntegrator> newmark_beta;
     if (options_.scheme == SchemeKind::GeneralizedAlpha) {
+        // Structural generalized-alpha also finalizes first-order monolithic auxiliary rates.
         ga1_params = utils::generalizedAlphaFirstOrderFromRhoInf(options_.generalized_alpha_rho_inf);
-        generalized_alpha_fo = std::make_shared<const GeneralizedAlphaFirstOrderIntegrator>(
-            GeneralizedAlphaFirstOrderIntegratorOptions{
-                .alpha_m = ga1_params->alpha_m,
-                .alpha_f = ga1_params->alpha_f,
-                .gamma = ga1_params->gamma,
-                .history_rate_order = 0});
     }
     if (options_.scheme == SchemeKind::Newmark) {
         newmark_beta = std::make_shared<const NewmarkBetaIntegrator>(NewmarkBetaIntegratorOptions{
@@ -2970,9 +2965,22 @@ TimeLoopReport TimeLoop::run(systems::TransientSystem& transient,
                 } else if (options_.scheme == SchemeKind::GeneralizedAlpha) {
                     const int temporal_order = transient.system().temporalOrder();
 	                    if (temporal_order <= 1) {
-	                        FE_CHECK_NOT_NULL(generalized_alpha_fo.get(), "TimeLoop: generalized-alpha(1st-order) integrator");
-	                        FE_THROW_IF(!ga1_params.has_value(), systems::InvalidStateException,
-	                                    "TimeLoop: generalized-alpha parameters not initialized");
+                        // A continued algorithmic rate carries the clock of its last accepted step.
+                        // A new rate estimate starts at the current accepted state.
+                        const bool continuing_rate = history.stepIndex() > 0 && history.hasUDotState();
+                        const double previous_step = continuing_rate ? dt_prev_step : dt;
+                        const auto step_params = utils::generalizedAlphaFirstOrderForStep(
+                            options_.generalized_alpha_rho_inf, previous_step, dt);
+                        if (!generalized_alpha_fo || *ga1_params != step_params) {
+                            ga1_params = step_params;
+                            generalized_alpha_fo = std::make_shared<const GeneralizedAlphaFirstOrderIntegrator>(
+                                GeneralizedAlphaFirstOrderIntegratorOptions{
+                                    .alpha_m = step_params.alpha_m,
+                                    .alpha_f = step_params.alpha_f,
+                                    .gamma = step_params.gamma,
+                                    .history_rate_order = 0,
+                                });
+                        }
 
 	                        auto& sys = transient.system();
 	                        const auto& constraints = sys.constraints();

@@ -37,6 +37,8 @@ struct GeneralizedAlphaFirstOrderParams {
     double alpha_m{0.0};
     double alpha_f{0.0};
     double gamma{0.0};
+    friend bool operator==(const GeneralizedAlphaFirstOrderParams&,
+                           const GeneralizedAlphaFirstOrderParams&) = default;
 };
 
 /**
@@ -58,6 +60,31 @@ generalizedAlphaFirstOrderFromRhoInf(double rho_inf)
     p.alpha_m = (3.0 - rho_inf) / (2.0 * (1.0 + rho_inf));
     p.alpha_f = 1.0 / (1.0 + rho_inf);
     p.gamma = 0.5 + p.alpha_m - p.alpha_f;
+    return p;
+}
+
+/** Stage weights of the injected-rate first-order scheme on a nonuniform grid.
+ *  The stored rate at t_n is filtered at t_n - lag * previous_step. The next
+ *  rate is filtered at t_{n+1} - lag * step. Interpolating between these two
+ *  times gives alpha_m at the operator time and gamma at the step midpoint.
+ */
+[[nodiscard]] inline GeneralizedAlphaFirstOrderParams generalizedAlphaFirstOrderForStep(
+    double rho_inf, double previous_step, double step)
+{
+    auto p = generalizedAlphaFirstOrderFromRhoInf(rho_inf);
+    FE_THROW_IF(!std::isfinite(previous_step) || previous_step <= 0.0 ||
+                    !std::isfinite(step) || step <= 0.0,
+                InvalidArgumentException, "generalized-alpha step lengths must be finite and positive");
+    const double lag = p.alpha_f - 0.5;
+    if (previous_step == step || lag == 0.0) {
+        return p;
+    }
+    const double scale = std::max(step, previous_step);
+    const double h = step / scale;
+    const double previous_lag = lag * (previous_step / scale);
+    const double span = (1.0 - lag) * h + previous_lag;
+    p.alpha_m = (p.alpha_f * h + previous_lag) / span;
+    p.gamma = (0.5 * h + previous_lag) / span;
     return p;
 }
 

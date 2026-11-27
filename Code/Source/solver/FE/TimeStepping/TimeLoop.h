@@ -52,9 +52,9 @@ enum class CollocationSolveStrategy : std::uint8_t {
 /**
  * @brief Generalized-alpha parameters attached to an operator-stage observation.
  *
- * The state is evaluated at @f$t_{n+\alpha_f}@f$ and its first time
- * derivative at @f$t_{n+\alpha_m}@f$.  The metadata is absent for schemes
- * whose state and rate are both evaluated at the endpoint.
+ * The operator samples explicit time dependence at state_time = t_n + alpha_f*dt.
+ * rate_time = t_n + alpha_m*dt records the interpolation weight of the carried
+ * algorithmic rates. gamma gives the rate weight in the endpoint update.
  */
 struct GeneralizedAlphaStageMetadata {
     double alpha_f{1.0};
@@ -132,7 +132,8 @@ struct TimeLoopOptions {
     double trbdf2_gamma{0.5857864376269049}; // 2 - sqrt(2)
 
     // Generalized-α parameterization via spectral radius at infinity (ρ∞).
-    // - For systems with temporalOrder()==1: Jansen–Whiting–Hulbert (first-order generalized-α).
+    // - For temporalOrder()==1, alpha_f sets the Jansen–Whiting–Hulbert state stage.
+    //   The carried rate uses alpha_m and gamma for the previous and proposed step lengths.
     // - For systems with temporalOrder()==2: Chung–Hulbert generalized-α for structural dynamics.
     double generalized_alpha_rho_inf{1.0};
     // If uDot storage is missing for a first-order generalized-alpha solve,

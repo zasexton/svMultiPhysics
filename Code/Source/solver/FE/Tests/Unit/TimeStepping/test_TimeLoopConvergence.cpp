@@ -6749,6 +6749,127 @@ TEST(TimeLoopConvergence,
     EXPECT_NEAR(observations.accepted_endpoint_rate, 0.15, 1.0e-12);
 }
 
+TEST(TimeLoopConvergence, GeneralizedAlphaFirstOrderRetainsOrderOnAlternatingAcceptedSteps)
+{
+#if !defined(FE_HAS_EIGEN) || !FE_HAS_EIGEN
+    GTEST_SKIP() << "Requires the Eigen backend";
+#endif
+    namespace ts = svmp::FE::timestepping;
+    class AlternatingSteps final : public ts::StepController {
+    public:
+        explicit AlternatingSteps(double maximum) : maximum_(maximum) {}
+        int maxRetries() const noexcept override { return 0; }
+        ts::StepDecision onAccepted(const ts::StepAttemptInfo& info) override {
+            ++accepted;
+            const double next_dt = accepted % 2 == 0 ? maximum_ : 0.5 * maximum_;
+            return {.accept = true, .next_dt = next_dt, .next_order = info.scheme_order};
+        }
+        ts::StepDecision onRejected(const ts::StepAttemptInfo&, ts::StepRejectReason) override {
+            return {.accept = false, .retry = false};
+        }
+        int accepted{};
+    private:
+        double maximum_;
+    };
+    // u'=-u, u(0)=1. Each refinement preserves the 2:1 mesh and ends after a complete pair.
+    constexpr double end = 0.75;
+    for (const double rho : {0.0, 0.5, 1.0}) {
+        double previous_error = 0.0;
+        for (const int steps_per_unit : {16, 32, 64}) {
+            const double maximum = 1.0 / steps_per_unit;
+            const auto controller = std::make_shared<AlternatingSteps>(maximum);
+            const auto values = runReactionProblem(
+                ts::SchemeKind::GeneralizedAlpha, maximum, end, 1.0, 2, controller, rho);
+            ASSERT_EQ(values.size(), 4u);
+            EXPECT_EQ(controller->accepted, steps_per_unit);
+            const double error = std::abs(values.front() - std::exp(-end));
+            RecordProperty("error_rho" + std::to_string(static_cast<int>(100 * rho)) +
+                           "_N" + std::to_string(steps_per_unit), testing::PrintToString(error));
+            if (previous_error > 0.0) {
+                EXPECT_GT(previous_error / error, 3.6) << "rho=" << rho << " H=" << maximum;
+            }
+            previous_error = error;
+        }
+    }
+}
+
+TEST(TimeLoopConvergence, GeneralizedAlphaRetriedContinuationIntegratesTimeForcingAtItsStateStage)
+{
+#if !defined(FE_HAS_EIGEN) || !FE_HAS_EIGEN
+    GTEST_SKIP() << "Requires the Eigen backend";
+#endif
+    namespace ts = svmp::FE::timestepping;
+    namespace forms = svmp::FE::forms;
+    constexpr double start = 1.0;
+    constexpr double previous_dt = 0.25;
+    constexpr double end = start + previous_dt;
+    constexpr double alpha_f = 2.0 / 3.0;
+    constexpr double lag = 1.0 / 6.0;
+    auto controller = std::make_shared<RecordingAcceptanceGateController>();
+    auto rate_factory = createTestFactory();
+    ASSERT_TRUE(rate_factory);
+    std::vector<double> attempted_steps;
+    const auto add_forcing = [](auto& sys, auto field) {
+        const auto& space = *sys.fieldRecord(field).space;
+        const auto v = forms::FormExpr::testFunction(field, space, "v");
+        const auto u = forms::FormExpr::trialFunction(space, "u");
+        auto ir = forms::FormCompiler{}.compileResidual(
+            (forms::dt(u) * v - forms::FormExpr::time() * v).dx());
+        sys.addOperator("forced");
+        sys.addCellKernel("forced", field, field, std::make_shared<forms::NonlinearFormKernel>(
+            std::move(ir), forms::ADMode::Forward));
+    };
+    const auto setup = [&](ts::TimeLoopCallbacks& cb, ts::TimeHistory& h) {
+        // Exact continuation of u=t^2/2, with its algorithmic rate from the previous step.
+        h.setStepIndex(4);
+        h.setPrevDt(previous_dt);
+        for (int k = 1; k <= h.historyDepth(); ++k) {
+            const double tk = start - (k - 1) * previous_dt;
+            setVectorByDof(h.uPrevK(k), std::vector<Real>(4, 0.5 * tk * tk));
+        }
+        h.resetCurrentToPrevious();
+        h.ensureSecondOrderState(*rate_factory);
+        setVectorByDof(h.uDot(), std::vector<Real>(4, start - lag * previous_dt));
+        cb.on_candidate_stage = [&](const ts::CandidateStageObservation& observation) {
+            attempted_steps.push_back(observation.dt);
+            ASSERT_TRUE(observation.generalized_alpha);
+            // Only the retry has previous_dt / dt = 2. The rejected proposal
+            // is followed by two equal accepted steps.
+            const bool retry = observation.attempt_index == 1;
+            const double m = retry ? 6.0 / 7.0 : 5.0 / 6.0;
+            const double gamma = retry ? 5.0 / 7.0 : 2.0 / 3.0;
+            const double state_time = observation.step_start_time + alpha_f * observation.dt;
+            EXPECT_NEAR(observation.generalized_alpha->gamma, gamma, 1.e-14);
+            EXPECT_NEAR(observation.generalized_alpha->alpha_m, m, 1.e-14);
+            EXPECT_NEAR(observation.state_time, state_time, 1.e-14);
+            EXPECT_NEAR(observation.rate_time, observation.step_start_time + m * observation.dt, 1.e-14);
+            ASSERT_NE(observation.rate_vector, nullptr);
+            for (const Real rate : observation.rate_vector->localSpan()) {
+                EXPECT_NEAR(rate, state_time, 2.e-13);
+            }
+        };
+        cb.on_step_candidate_ready = [&](auto& h, const auto&) -> std::optional<ts::StepRejectReason> {
+            if (h.dt() == previous_dt) return ts::StepRejectReason::ErrorTooLarge;
+            return std::nullopt;
+        };
+        cb.on_step_accepted = [&](auto& h) {
+            for (const Real value : h.uPrevSpan()) EXPECT_NEAR(value, 0.5 * h.time() * h.time(), 2.e-13);
+            for (const Real rate : h.uDotSpan()) EXPECT_NEAR(rate, h.time() - lag * h.dtPrev(), 2.e-13);
+        };
+    };
+    const auto options = [](ts::TimeLoopOptions& opts, auto) {
+        opts.t0 = start;
+        opts.newton.residual_op = "forced";
+        opts.newton.jacobian_op = "forced";
+    };
+    const auto values = runReactionProblem(ts::SchemeKind::GeneralizedAlpha, previous_dt, end,
+        0.0, 2, controller, 0.5, 1, 2, ts::CollocationSolveStrategy::Monolithic,
+        4, 0.0, false, 0.5, 8, 1.e-12, 0.0, setup, {}, options, add_forcing);
+    EXPECT_EQ(attempted_steps, (std::vector<double>{0.25, 0.125, 0.125}));
+    ASSERT_EQ(values.size(), 4u);
+    for (const Real value : values) EXPECT_NEAR(value, 0.5 * end * end, 2.e-13);
+}
+
 TEST(TimeLoopConvergence, GeneralizedAlpha_FirstOrder_RhoInfSweep_IsSecondOrderOnReaction)
 {
 #if !defined(FE_HAS_EIGEN) || !FE_HAS_EIGEN

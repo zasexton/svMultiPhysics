@@ -133,36 +133,28 @@ void applyDeclaredStageWallSlipDissipation(
 bool firstOrderGeneralizedAlphaContactProvenanceValid(
     const FreeSurfaceFirstOrderGeneralizedAlphaProvenance& provenance) noexcept
 {
-  if (!std::isfinite(provenance.alpha_m) ||
-      !std::isfinite(provenance.alpha_f) ||
-      !std::isfinite(provenance.gamma) ||
-      !std::isfinite(provenance.dt) ||
-      provenance.alpha_f < svmp::FE::Real{0.5} ||
-      provenance.alpha_f > svmp::FE::Real{1.0} ||
-      provenance.alpha_m < svmp::FE::Real{0.5} ||
-      provenance.alpha_m > svmp::FE::Real{1.5} ||
-      !(provenance.gamma > svmp::FE::Real{0.0}) ||
-      !(provenance.dt > svmp::FE::Real{0.0})) {
+  const Real m = provenance.alpha_m;
+  const Real f = provenance.alpha_f;
+  const Real gamma = provenance.gamma;
+  if (!std::isfinite(m) || !std::isfinite(f) || !std::isfinite(gamma) ||
+      !std::isfinite(provenance.dt) || provenance.dt <= 0.0 || f < 0.5 || f > 1.0) {
     return false;
   }
-  // This tuple records the exact Jansen--Whiting--Hulbert rho-infinity family
-  // produced by TimeLoop, not arbitrary generalized-alpha coefficients.
-  // alpha_m is not a convex weight: it exceeds one for rho_inf < 1/3.
-  const auto expected_alpha_m =
-      svmp::FE::Real{2.0} * provenance.alpha_f - svmp::FE::Real{0.5};
-  const auto expected_gamma = provenance.alpha_f;
-  const auto scale = std::max(
-      {svmp::FE::Real{1.0},
-       std::abs(provenance.alpha_m),
-       std::abs(provenance.alpha_f),
-       std::abs(provenance.gamma),
-       std::abs(expected_alpha_m),
-       std::abs(expected_gamma)});
-  const auto tolerance = svmp::FE::Real{512.0} *
-                         std::numeric_limits<svmp::FE::Real>::epsilon() *
-                         scale;
-  return std::abs(provenance.alpha_m - expected_alpha_m) <= tolerance &&
-         std::abs(provenance.gamma - expected_gamma) <= tolerance;
+  if (f == 0.5) {
+    return contactStageRealValuesMatch(m, 0.5) && contactStageRealValuesMatch(gamma, 0.5);
+  }
+
+  // For lag = f - 1/2 and r = previous_dt/dt, s = 1/(1-lag+lag*r).
+  // Both recorded coordinates must correspond to the same positive step ratio.
+  const Real m_slope = 2.0 * f - 1.5;
+  const Real gamma_slope = f - 1.0;
+  const Real s = std::abs(m_slope) > std::abs(gamma_slope)
+                     ? (m - 1.0) / m_slope
+                     : (gamma - 1.0) / gamma_slope;
+  const Real tolerance = 512.0 * std::numeric_limits<Real>::epsilon();
+  return s >= -tolerance && s <= 1.0 / (1.5 - f) + tolerance &&
+         contactStageRealValuesMatch(m, 1.0 + m_slope * s) &&
+         contactStageRealValuesMatch(gamma, 1.0 + gamma_slope * s);
 }
 
 bool contactStageRealValuesMatch(

@@ -8,6 +8,7 @@
 #include "Physics/Formulations/NavierStokes/FreeSurface/SnapshotFunctionals.h"
 
 #include "Physics/Formulations/NavierStokes/FreeSurface/FunctionalRecords.h"
+#include "Physics/Formulations/NavierStokes/FreeSurface/ContactLineStageObservables.h"
 
 #include "FE/Core/FEException.h"
 #include "FE/Core/LogRecord.h"
@@ -395,36 +396,6 @@ bool sameFreeSurfaceDynamicContactWallState(
            lhs.mean_contact_line_tangent ==
                rhs.mean_contact_line_tangent &&
            lhs.motion == rhs.motion;
-}
-
-bool validFreeSurfaceFirstOrderGeneralizedAlphaProvenance(
-    const FreeSurfaceFirstOrderGeneralizedAlphaProvenance& provenance) noexcept
-{
-    if (!std::isfinite(provenance.alpha_m) ||
-        !std::isfinite(provenance.alpha_f) ||
-        !std::isfinite(provenance.gamma) ||
-        !std::isfinite(provenance.dt) ||
-        provenance.alpha_f < Real{0.5} || provenance.alpha_f > Real{1.0} ||
-        provenance.alpha_m < Real{0.5} || provenance.alpha_m > Real{1.5} ||
-        !(provenance.gamma > Real{0.0}) || !(provenance.dt > Real{0.0})) {
-        return false;
-    }
-    // Retain exactly the first-order rho-infinity family produced by TimeLoop.
-    // alpha_m may exceed one and reaches 1.5 at rho_inf == 0.
-    const Real expected_alpha_m =
-        Real{2.0} * provenance.alpha_f - Real{0.5};
-    const Real expected_gamma = provenance.alpha_f;
-    const Real scale = std::max(
-        {Real{1.0},
-         std::abs(provenance.alpha_m),
-         std::abs(provenance.alpha_f),
-         std::abs(provenance.gamma),
-         std::abs(expected_alpha_m),
-         std::abs(expected_gamma)});
-    const Real tolerance =
-        Real{512.0} * std::numeric_limits<Real>::epsilon() * scale;
-    return std::abs(provenance.alpha_m - expected_alpha_m) <= tolerance &&
-           std::abs(provenance.gamma - expected_gamma) <= tolerance;
 }
 
 bool sameFreeSurfaceAcceptedContactStageState(
@@ -1772,7 +1743,7 @@ void FunctionalRecords::recordAcceptedFunctionals(
                 const auto& generalized_alpha =
                     *contact_stage.first_order_generalized_alpha;
                 FE_THROW_IF(
-                    !validFreeSurfaceFirstOrderGeneralizedAlphaProvenance(
+                    !firstOrderGeneralizedAlphaContactProvenanceValid(
                         generalized_alpha),
                     InvalidArgumentException,
                     "FESystem::recordAcceptedFreeSurfaceDiscreteFunctionals: "

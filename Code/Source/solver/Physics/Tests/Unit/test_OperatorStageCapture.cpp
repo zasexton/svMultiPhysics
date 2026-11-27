@@ -97,6 +97,28 @@ TEST(OperatorStageCapture, GeneralizedAlphaProvenanceIsTheRhoInfinityFamily)
         1.0, std::numeric_limits<Real>::quiet_NaN()));
 }
 
+TEST(OperatorStageCapture, NonuniformGeneralizedAlphaStagesRequireOneConsistentStepRatio)
+{
+    using svmp::Physics::formulations::navier_stokes::free_surface::firstOrderGeneralizedAlphaContactProvenanceValid;
+    for (const auto stage : {
+             Provenance{.alpha_m = 6.0/7, .alpha_f = 2.0/3, .gamma = 5.0/7, .dt = 0.1},
+             Provenance{.alpha_m = 9.0/11, .alpha_f = 2.0/3, .gamma = 7.0/11, .dt = 0.2},
+             Provenance{.alpha_m = 1.0, .alpha_f = 0.75, .gamma = 0.8, .dt = 0.1},
+             Provenance{.alpha_m = 5.0/3, .alpha_f = 1.0, .gamma = 1.0, .dt = 0.2},
+         }) {
+        EXPECT_TRUE(firstOrderGeneralizedAlphaContactProvenanceValid(stage));
+    }
+    // Inconsistent coordinates, including a consistent straight-line extension
+    // outside the positive step-ratio interval, and an invalid midpoint tuple.
+    for (const auto stage : {
+             Provenance{.alpha_m = 6.0/7, .alpha_f = 2.0/3, .gamma = 7.0/11, .dt = 0.1},
+             Provenance{.alpha_m = 1.0, .alpha_f = 0.75, .gamma = 0.5, .dt = 0.1},
+             Provenance{.alpha_m = 0.6, .alpha_f = 0.5, .gamma = 0.6, .dt = 0.1},
+         }) {
+        EXPECT_FALSE(firstOrderGeneralizedAlphaContactProvenanceValid(stage));
+    }
+}
+
 TEST(OperatorStageCapture, AcceptedStageRevisionCoversItsInputsAndNotTheSignOfZero)
 {
     const std::vector<Real> solution{0.0, 1.5, -2.0};

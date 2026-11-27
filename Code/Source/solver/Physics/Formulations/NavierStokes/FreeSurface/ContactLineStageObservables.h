@@ -50,7 +50,7 @@ class FESystem;
 namespace svmp::Physics::formulations::navier_stokes::free_surface {
 
 /// True for the exact first-order generalized-alpha parameter family of the
-/// time loop (alpha_m = 2 alpha_f - 1/2, gamma = alpha_f) with finite,
+/// time loop on constant or nonuniform steps, with finite,
 /// admissible values.
 [[nodiscard]] bool firstOrderGeneralizedAlphaContactProvenanceValid(
     const FreeSurfaceFirstOrderGeneralizedAlphaProvenance&
