@@ -3909,6 +3909,83 @@ TEST(LevelSetInterfaceLifecycle,
 }
 
 TEST(LevelSetInterfaceLifecycle,
+     FlatQuadraticBranchUsesItsPolishedRootsForVolumeAndFlux)
+{
+    constexpr int interface_marker = 888;
+    const auto mesh =
+        std::make_shared<SingleQuadMeshAccess>(FE::ElementType::Quad4);
+    auto scalar_space = FE::spaces::Space(
+        FE::spaces::SpaceType::H1, mesh, /*order=*/2, /*components=*/1);
+
+    FE::systems::FESystem system(mesh);
+    const auto phi = system.addField(FE::systems::FieldSpec{
+        .name = "phi",
+        .space = scalar_space,
+        .components = 1,
+    });
+    ASSERT_NO_THROW(system.setup({}, makeSingleQuadSetupInputs()));
+
+    std::vector<FE::Real> solution(
+        static_cast<std::size_t>(system.dofHandler().getNumDofs()), 0.0);
+    const auto& field_dofs = system.fieldDofHandler(phi);
+    const auto cell_dofs = field_dofs.getCellDofs(0);
+    const auto dof_coordinates =
+        FE::basis::ReferenceNodeLayout::get_lagrange_node_coords(
+            FE::ElementType::Quad4, 2);
+    ASSERT_EQ(cell_dofs.size(), dof_coordinates.size());
+    level_set::LevelSetGeneratedInterfaceOptions options{};
+    options.level_set_field_name = "phi";
+    options.requested_interface_marker = interface_marker;
+    options.domain_id = "cut";
+    options.isovalue = 0.375;
+    options.geometry_mode =
+        level_set::GeneratedInterfaceGeometryMode::HighOrderImplicit;
+    options.implicit_cut_quadrature_backend =
+        level_set::ImplicitCutQuadratureBackend::SayeHyperrectangle;
+    options.implicit_cut_fallback_policy =
+        level_set::ImplicitCutFallbackPolicy::Fail;
+    options.interface_quadrature_order = 2;
+    options.volume_quadrature_order = 2;
+    options.implicit_cut_max_subdivision_depth = 0;
+    options.require_production_qualified_implicit_cut_backend = true;
+
+    // The positive factor changes corner interpolation of the zero without
+    // changing the liquid boundary x=1/3+s*y on the square [-1,1]^2.
+    constexpr FE::Real intercept = 1.0 / 3.0;
+    for (const FE::Real slope : {0.0, 0.25}) {
+        SCOPED_TRACE(slope);
+        for (std::size_t i = 0; i < cell_dofs.size(); ++i) {
+            const auto x = dof_coordinates[i][0];
+            const auto y = dof_coordinates[i][1];
+            solution.at(static_cast<std::size_t>(cell_dofs[i])) =
+                options.isovalue + (x - intercept - slope * y) * (x + 13.0 / 4.0);
+        }
+        level_set::LevelSetGeneratedInterfaceLifecycle lifecycle;
+        const auto cut = lifecycle.build(system, options, solution);
+        ASSERT_TRUE(cut.success) << cut.diagnostic;
+        FE::Real flux = 0;
+        for (const auto& fragment : cut.domain.fragments()) {
+            for (const auto& q : fragment.quadrature_points) {
+                flux += (q.parent_coordinate[0] + 1.0) * q.normal[0] * q.weight;
+            }
+        }
+        FE::Real first_moment = 0;
+        for (const auto& rule : cut.domain.volumeQuadratureRules()) {
+            if (rule.side == FE::geometry::CutIntegrationSide::Negative) {
+                for (const auto& q : rule.points) {
+                    first_moment += q.parent_coordinate[0] * q.weight;
+                }
+            }
+        }
+        const FE::Real area = 2.0 * (1.0 + intercept);
+        EXPECT_NEAR(first_moment, intercept * intercept + slope * slope / 3.0 - 1.0, 2.0e-11);
+        EXPECT_NEAR(flux, area, 2.0e-11);
+        EXPECT_NEAR(cut.summary.negative_volume_measure, flux, 2.0e-11);
+        EXPECT_NEAR(cut.summary.positive_volume_measure, 4.0 - area, 2.0e-11);
+    }
+}
+
+TEST(LevelSetInterfaceLifecycle,
      ProductionQualifiedQ2AlignedGraphHasSingleInterfaceOwnership)
 {
     constexpr int interface_marker = 888;

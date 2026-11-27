@@ -3701,8 +3701,17 @@ template <typename SampleBuilder>
         return false;
     };
 
+    auto polishing_request = request;
+    polishing_request.tolerance =
+        std::min(polishing_request.tolerance, Real{1.0e-14});
+    polishing_request.implicit_cut_root_tolerance =
+        std::min(polishing_request.implicit_cut_root_tolerance,
+                 Real{1.0e-14});
+    polishing_request.implicit_cut_root_coordinate_tolerance =
+        std::min(polishing_request.implicit_cut_root_coordinate_tolerance,
+                 Real{1.0e-14});
     int local_iterations = 0;
-    auto roots = rectangleEdgeRoots(input, request, rect, local_iterations);
+    auto roots = rectangleEdgeRoots(input, polishing_request, rect, local_iterations);
     if (roots.size() != 2u) {
         if (diagnostics.first_curved_fragment_failure_detail.empty()) {
             const std::array<std::array<Real, 3>, 4> corners{{
@@ -3749,15 +3758,6 @@ template <typename SampleBuilder>
     }};
     const std::array<Real, 3> transverse{{-tangent[1], tangent[0], 0.0}};
     const bool solve_y_as_function_of_x = std::abs(dx) >= std::abs(dy);
-    auto polishing_request = request;
-    polishing_request.tolerance =
-        std::min(polishing_request.tolerance, Real{1.0e-14});
-    polishing_request.implicit_cut_root_tolerance =
-        std::min(polishing_request.implicit_cut_root_tolerance,
-                 Real{1.0e-14});
-    polishing_request.implicit_cut_root_coordinate_tolerance =
-        std::min(polishing_request.implicit_cut_root_coordinate_tolerance,
-                 Real{1.0e-14});
     const auto build_sample =
         [&](Real t,
             interfaces::CutInterfaceQuadraturePoint& output,
@@ -5086,6 +5086,73 @@ void appendCertifiedAlignedRectangleFragment(
     ++diagnostics.curved_fragment_count;
 }
 
+// A non-affine level-set polynomial can have a straight zero set. In that
+// case the polished chord, not interpolation of the corner values, bounds
+// the two phases. The field restricted to a line in a Qp leaf has degree at
+// most 2p. Check that restriction to the root accuracy before using the
+// existing polygon cutter and its independent simplex moment certificates.
+void usePolishedStraightBranchForVolumes(
+    const interfaces::CutInterfaceDomainRequest& request,
+    const ImplicitCutQuadratureBackendCellInput& input,
+    const interfaces::LevelSetCellCutInput& leaf,
+    interfaces::CutInterfaceFragment& fragment,
+    std::vector<interfaces::CutInterfaceVolumeRegion>& regions)
+{
+    const auto cell = leaf.parent_cell;
+    const int order = input.evaluator->interpolationOrder(cell);
+    if (fragment.vertices.size() != 2u || regions.size() != 2u || order < 1 ||
+        (!input.evaluator->usesCompleteTensorLagrangeBasis(cell) &&
+         !input.evaluator->usesTensorSerendipityBasis(cell))) {
+        return;
+    }
+    const auto& a = fragment.vertices[0].parent_coordinate;
+    const auto& b = fragment.vertices[1].parent_coordinate;
+    const auto tangent = subtract(b, a);
+    auto normal = normalizedOrDefault({-tangent[1], tangent[0], 0});
+    if (dot3(normal, fragment.normal) < Real{0}) {
+        for (auto& component : normal) {
+            component = -component;
+        }
+    }
+
+    const int degree = 2 * order;
+    const Real coordinate_tolerance = rootCoordinateTolerance(request);
+    for (int i = 0; i <= degree; ++i) {
+        const Real t = static_cast<Real>(i) / static_cast<Real>(degree);
+        const std::array<Real, 3> point{a[0] + t * tangent[0], a[1] + t * tangent[1], 0};
+        const auto sample = input.evaluator->evaluate(cell, point);
+        const Real slope = dot3(sample.reference_gradient, normal);
+        const Real residual = std::abs(sample.value - input.isovalue);
+        if (!(slope > Real{0}) || !std::isfinite(residual) ||
+            residual > coordinate_tolerance * slope) {
+            return;
+        }
+    }
+
+    // Keep this local plane centred at zero even if the FE field uses a
+    // large, nonzero isovalue. Its signs represent the original phase labels.
+    auto plane = leaf;
+    for (std::size_t i = 0; i < plane.node_coordinates.size(); ++i) {
+        plane.level_set_values[i] = dot3(normal, subtract(plane.node_coordinates[i], a));
+    }
+    auto plane_request = request;
+    plane_request.isovalue = 0;
+    auto cut = interfaces::cutLinearLevelSetCell2D(plane_request, plane);
+    if (!cut.supported || cut.fragments.size() != 1u || cut.volume_regions.size() != 2u) {
+        return;
+    }
+    const auto [minimum, maximum] =
+        std::minmax_element(leaf.level_set_values.begin(), leaf.level_set_values.end());
+    for (auto& region : cut.volume_regions) {
+        region.min_level_set_value = *minimum - input.isovalue;
+        region.max_level_set_value = *maximum - input.isovalue;
+    }
+    alignLeafCutNormalsWithEvaluator(cut, input);
+    fragment.negative_volume_fraction = cut.fragments.front().negative_volume_fraction;
+    fragment.positive_volume_fraction = cut.fragments.front().positive_volume_fraction;
+    regions = std::move(cut.volume_regions);
+}
+
 void appendLinearizedRectangleCut(
     interfaces::LevelSetCellCutResult& cut,
     const interfaces::CutInterfaceDomainRequest& request,
@@ -5123,8 +5190,11 @@ void appendLinearizedRectangleCut(
         diagnostics.interface_fragment_count +=
             static_cast<int>(leaf_cut.fragments.size());
         for (auto& fragment : leaf_cut.fragments) {
-            (void)replaceWithRootPolishedRectangleFragment(
-                fragment, request, input, rect, diagnostics);
+            if (replaceWithRootPolishedRectangleFragment(
+                    fragment, request, input, rect, diagnostics)) {
+                usePolishedStraightBranchForVolumes(
+                    request, input, leaf, fragment, leaf_cut.volume_regions);
+            }
             fragment.parent_cell = input.linearized_input.parent_cell;
             fragment.interface_marker = request.interface_marker;
             stampGeneratedInterfaceFragmentMetadata(
