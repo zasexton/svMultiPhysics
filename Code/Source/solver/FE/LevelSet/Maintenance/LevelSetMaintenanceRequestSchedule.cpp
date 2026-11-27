@@ -381,6 +381,14 @@ bool appendLevelSetMaintenanceConfigurationScheduleWords(
   appendMaintenanceScheduleBool(
       words,
       configuration.transport.kinematic_reconciliation.enabled);
+  if (const auto& handoff = configuration.transport.kinematic_reconciliation.component_handoff;
+      handoff.enabled) {
+    // Appended only when enabled so that existing schedules keep their words.
+    appendMaintenanceScheduleBool(words, true);
+    appendMaintenanceScheduleReal(words, handoff.maximum_measure_factor);
+    appendMaintenanceScheduleReal(words, handoff.maximum_diameter_factor);
+    appendMaintenanceScheduleReal(words, handoff.maximum_recipient_distance_factor);
+  }
   appendMaintenanceScheduleBool(
       words,
       configuration.transport.sign_definite_patch_bounds.enabled);

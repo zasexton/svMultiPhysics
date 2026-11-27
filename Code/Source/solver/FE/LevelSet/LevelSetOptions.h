@@ -84,6 +84,28 @@ struct LevelSetInterfaceKinematicOptions {
 };
 
 /**
+ * @brief Optional topology model for components below mesh resolution, part
+ *        of the kinematic reconciliation (off by default).
+ *
+ * During reconciliation a compact component whose interface vanished during
+ * the step hands its volume to the nearest surviving interface, so the
+ * transfers sum to zero (LevelSetKinematicReconciliation.h).  The factors
+ * bound the vanished region relative to h_C = min |K|^(1/d) over its cells.
+ * With remove_rootless_features, every active-side feature that small-cut
+ * aggregation pinned for lack of a root is first removed from the candidate
+ * (its active-side coefficients are reflected across the isovalue).  That
+ * changes the cut topology, which accepted-step maintenance rolls back, so it
+ * stays off until the removal is part of the candidate step.
+ */
+struct LevelSetComponentHandoffOptions {
+    bool enabled{false};
+    bool remove_rootless_features{false};
+    Real maximum_measure_factor{1.0};
+    Real maximum_diameter_factor{2.0};
+    Real maximum_recipient_distance_factor{4.0};
+};
+
+/**
  * @brief Accepted-step reconciliation of the transported P1 level set with
  * the kinematic interface flux of its own transport velocity.
  *
@@ -97,6 +119,7 @@ struct LevelSetInterfaceKinematicOptions {
  */
 struct LevelSetKinematicReconciliationOptions {
     bool enabled{false};
+    LevelSetComponentHandoffOptions component_handoff{};
 };
 
 /**

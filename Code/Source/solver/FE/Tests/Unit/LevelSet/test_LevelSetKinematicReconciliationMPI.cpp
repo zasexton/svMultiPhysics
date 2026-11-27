@@ -10,6 +10,7 @@
 
 #include <mpi.h>
 
+#include <algorithm>
 #include <array>
 #include <cmath>
 #include <cstddef>
@@ -403,5 +404,67 @@ TEST(LevelSetKinematicReconciliationMPI, FrozenShareRedistributionMatchesSerialR
     const auto sv = serial.byVertex(serial_values);
     for (std::size_t v = 0; v < pv.size(); ++v) {
         EXPECT_NEAR(pv[v], sv[v], 1.0e-14) << "vertex " << v;
+    }
+}
+
+TEST(LevelSetKinematicReconciliationMPI, ComponentHandoffMatchesSerialReferenceAcrossThePartition)
+{
+    int rank = 0;
+    int size = 1;
+    MPI_Comm_rank(MPI_COMM_WORLD, &rank);
+    MPI_Comm_size(MPI_COMM_WORLD, &size);
+
+    // The block partition puts the rows below y = 1/2 on the first rank. A
+    // one-vertex region at (0.5, 7/12) disappears 2.2 h above the straight
+    // interface y = 0.4, so donor and recipient lie on different ranks.
+    constexpr int n = 12;
+    constexpr FE::Real r = 0.04;
+    const Layout parallel(n, MPI_COMM_WORLD, rank, size);
+    const Layout serial(n, MPI_COMM_SELF, 0, 1);
+    const auto zero = [](const std::array<FE::Real, 3>&) { return std::array<FE::Real, 2>{0.0, 0.0}; };
+    const level_set::LevelSetComponentHandoffOptions handoff{.enabled = true};
+    for (const FE::Real sign : {1.0, -1.0}) {
+        SCOPED_TRACE(sign);
+        const auto previous_field = [&](const std::array<FE::Real, 3>& x) {
+            const FE::Real region = std::abs(x[0] - 0.5) + std::abs(x[1] - 7.0 / 12.0) - r;
+            return sign > 0 ? std::min(x[1] - 0.4, region) : std::max(x[1] - 0.8, -region);
+        };
+        const auto run = [&](const Layout& layout, std::vector<FE::Real>& reconciled) {
+            const auto previous = layout.scalar(previous_field);
+            auto transported = previous;
+            for (auto& value : transported) {
+                if (std::abs(value + sign * r) < 1.0e-14) value = -value;
+            }
+            return level_set::reconcileLevelSetWithKinematicFlux(
+                layout.mesh, layout.phi, layout.velocity, 0.0, 1.0e-12, 0.01, previous, transported,
+                layout.vector(zero), layout.vector(zero), reconciled, nullptr, &handoff);
+        };
+        std::vector<FE::Real> parallel_values;
+        std::vector<FE::Real> serial_values;
+        const auto p = run(parallel, parallel_values);
+        const auto s = run(serial, serial_values);
+        ASSERT_TRUE(s.success) << s.diagnostic;
+        ASSERT_TRUE(p.success) << p.diagnostic;
+        EXPECT_EQ(s.handed_off_components, 1u);
+        EXPECT_EQ(p.handed_off_components, s.handed_off_components);
+        EXPECT_GT(sign * s.handed_off_volume, 0.0);
+        EXPECT_NEAR(p.handed_off_volume, s.handed_off_volume, 1.0e-15);
+        EXPECT_NEAR(p.reconciled_negative_volume, s.reconciled_negative_volume, 1.0e-14);
+        EXPECT_NEAR(s.reconciled_negative_volume, s.previous_negative_volume, 1.0e-14);
+        const auto pv = parallel.byVertex(parallel_values);
+        const auto sv = serial.byVertex(serial_values);
+        ASSERT_EQ(pv.size(), sv.size());
+        for (std::size_t v = 0; v < pv.size(); ++v) {
+            EXPECT_NEAR(pv[v], sv[v], 1.0e-14) << "vertex " << v;
+        }
+        std::vector<FE::Real> maximum(pv);
+        std::vector<FE::Real> minimum(pv);
+        MPI_Allreduce(MPI_IN_PLACE, maximum.data(), static_cast<int>(maximum.size()), MPI_DOUBLE, MPI_MAX,
+                      MPI_COMM_WORLD);
+        MPI_Allreduce(MPI_IN_PLACE, minimum.data(), static_cast<int>(minimum.size()), MPI_DOUBLE, MPI_MIN,
+                      MPI_COMM_WORLD);
+        for (std::size_t v = 0; v < pv.size(); ++v) {
+            EXPECT_EQ(maximum[v], minimum[v]) << "vertex " << v;
+        }
     }
 }

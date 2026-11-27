@@ -479,7 +479,160 @@ TEST(LevelSetKinematicReconciliation, ReportsWhenAnAdvectedPocketFallsBetweenAll
         EXPECT_NEAR(result.reconciled_volume_error, sign * area, 1.0e-15);
         EXPECT_NE(result.diagnostic.find("previously cut component has no retained P1 endpoint interface"),
                   std::string::npos) << result.diagnostic;
+
+        // With nowhere to hand its volume, the optional handoff fails the same way.
+        const level_set::LevelSetComponentHandoffOptions handoff{.enabled = true};
+        std::vector<FE::Real> handed = previous;
+        const auto alone = level_set::reconcileLevelSetWithKinematicFlux(
+            system.system.meshAccess(), system.phiDofs(), system.velocityDofs(), 0.0, 1.0e-12, displacement,
+            previous, transported, velocity, velocity, handed,
+            system.system.fieldRecord(system.velocity).space.get(), &handoff);
+        EXPECT_FALSE(alone.success);
+        EXPECT_EQ(alone.handed_off_components, 0u);
+        EXPECT_EQ(handed, previous);
     }
+}
+
+TEST(LevelSetKinematicReconciliation, HandsAVanishedCompactComponentToTheNearestInterface)
+{
+    // On the 8 x 8 grid (h = 1/8) a one-vertex region of either sign lies
+    // 2.2 h from a straight interface. Removing its vertex, as a topology
+    // cleanup does, loses its whole area at rest. Without the handoff the
+    // budget cannot be met; with it the straight interface takes the area and
+    // the total negative measure is unchanged.
+    SimplexSystem s(buildStructuredTriangleMesh(8), 2);
+    const auto zero = s.vector([](const Point&) { return Point{}; });
+    constexpr FE::Real r = 0.05;
+    const auto* map = s.phiDofs().getEntityDofMap();
+    const auto dof_at = [&](FE::Real x0, FE::Real y0) {
+        for (FE::GlobalIndex v = 0; v < map->numVertices(); ++v) {
+            const auto p = s.system.meshAccess().getNodeCoordinates(v);
+            if (std::abs(p[0] - x0) < 1.0e-12 && std::abs(p[1] - y0) < 1.0e-12) {
+                return static_cast<std::size_t>(map->getVertexDofs(v).front());
+            }
+        }
+        ADD_FAILURE() << "no vertex at (" << x0 << ", " << y0 << ")";
+        return std::size_t{0};
+    };
+    const auto run = [&](const std::vector<FE::Real>& previous, const std::vector<FE::Real>& transported,
+                         const level_set::LevelSetComponentHandoffOptions* handoff,
+                         std::vector<FE::Real>& endpoint) {
+        return level_set::reconcileLevelSetWithKinematicFlux(
+            s.system.meshAccess(), s.phiDofs(), s.velocityDofs(), 0.0, 1.0e-12, 0.01, previous, transported,
+            zero, zero, endpoint, s.system.fieldRecord(s.velocity).space.get(), handoff);
+    };
+    struct Case {
+        const char* name;
+        std::vector<FE::Real> previous;
+        std::size_t vertex;
+        FE::Real sign;  // +1 when negative measure is lost, -1 when it is gained
+    };
+    const std::vector<Case> cases{
+        {"negative island above y = 0.3",
+         s.scalar([](const Point& x) {
+             return std::min(x[1] - 0.3, std::abs(x[0] - 0.5) + std::abs(x[1] - 0.625) - r);
+         }),
+         dof_at(0.5, 0.625), 1.0},
+        {"positive pocket below y = 0.8",
+         s.scalar([](const Point& x) {
+             return std::max(x[1] - 0.8, r - std::abs(x[0] - 0.5) - std::abs(x[1] - 0.5));
+         }),
+         dof_at(0.5, 0.5), -1.0},
+    };
+    for (const auto& c : cases) {
+        SCOPED_TRACE(c.name);
+        auto transported = c.previous;
+        transported[c.vertex] = -c.previous[c.vertex];
+        const FE::Real lost = s.negativeVolume(c.previous) - s.negativeVolume(transported);
+        ASSERT_GT(c.sign * lost, 0.0);
+        ASSERT_LT(std::abs(lost), 1.0 / 128.0);
+
+        std::vector<FE::Real> sentinel{7.0};
+        auto endpoint = sentinel;
+        const auto without = run(c.previous, transported, nullptr, endpoint);
+        EXPECT_FALSE(without.success);
+        EXPECT_NE(without.diagnostic.find("previously cut component has no retained P1 endpoint interface"),
+                  std::string::npos) << without.diagnostic;
+        EXPECT_EQ(endpoint, sentinel);
+
+        const level_set::LevelSetComponentHandoffOptions handoff{.enabled = true};
+        const auto with = run(c.previous, transported, &handoff, endpoint);
+        ASSERT_TRUE(with.success) << with.diagnostic;
+        EXPECT_EQ(with.handed_off_components, 1u);
+        EXPECT_NEAR(with.handed_off_volume, lost, 1.0e-15);
+        EXPECT_NEAR(with.handed_off_absolute_volume, std::abs(lost), 1.0e-15);
+        EXPECT_NEAR(s.negativeVolume(endpoint), s.negativeVolume(c.previous), 1.0e-14);
+        EXPECT_EQ(endpoint[c.vertex], transported[c.vertex]);
+        EXPECT_EQ(builderCutClasses(s, endpoint), builderCutClasses(s, transported));
+
+        // A recipient farther than the configured distance leaves the failure.
+        auto near_only = handoff;
+        near_only.maximum_recipient_distance_factor = 1.0;
+        endpoint = sentinel;
+        const auto far = run(c.previous, transported, &near_only, endpoint);
+        EXPECT_FALSE(far.success);
+        EXPECT_EQ(far.handed_off_components, 0u);
+        EXPECT_EQ(endpoint, sentinel);
+
+        // So does a region larger than the configured measure.
+        auto tiny = handoff;
+        tiny.maximum_measure_factor = std::abs(lost) / 1024.0;
+        const auto large = run(c.previous, transported, &tiny, endpoint);
+        EXPECT_FALSE(large.success);
+        EXPECT_EQ(large.handed_off_components, 0u);
+    }
+}
+
+TEST(LevelSetKinematicReconciliation, RemovesAFeatureOnlyWhenItsVolumeFindsARecipient)
+{
+    // A frozen one-vertex island above a straight interface, as a rootless
+    // aggregation pin leaves it. Removing it moves its area to the interface.
+    SimplexSystem s(buildStructuredTriangleMesh(8), 2);
+    const auto zero = s.vector([](const Point&) { return Point{}; });
+    constexpr FE::Real r = 0.05;
+    const auto previous = s.scalar([](const Point& x) {
+        return std::min(x[1] - 0.3, std::abs(x[0] - 0.5) + std::abs(x[1] - 0.625) - r);
+    });
+    std::vector<std::size_t> island;
+    const auto* map = s.phiDofs().getEntityDofMap();
+    for (FE::GlobalIndex v = 0; v < map->numVertices(); ++v) {
+        const auto p = s.system.meshAccess().getNodeCoordinates(v);
+        if (std::abs(p[0] - 0.5) < 1.0e-12 && std::abs(p[1] - 0.625) < 1.0e-12) {
+            island.push_back(static_cast<std::size_t>(map->getVertexDofs(v).front()));
+        }
+    }
+    ASSERT_EQ(island.size(), 1u);
+    ASSERT_LT(previous[island.front()], 0.0);
+    const auto run = [&](const level_set::LevelSetComponentHandoffOptions* handoff, std::vector<FE::Real>& endpoint) {
+        return level_set::reconcileLevelSetWithKinematicFlux(
+            s.system.meshAccess(), s.phiDofs(), s.velocityDofs(), 0.0, 1.0e-12, 0.01, previous, previous, zero,
+            zero, endpoint, s.system.fieldRecord(s.velocity).space.get(), handoff, island);
+    };
+
+    level_set::LevelSetComponentHandoffOptions handoff{.enabled = true};
+    std::vector<FE::Real> endpoint;
+    const auto removed = run(&handoff, endpoint);
+    ASSERT_TRUE(removed.success) << removed.diagnostic;
+    EXPECT_TRUE(removed.applied);
+    EXPECT_EQ(removed.removed_feature_dofs, 1u);
+    EXPECT_EQ(removed.handed_off_components, 1u);
+    EXPECT_EQ(endpoint[island.front()], -previous[island.front()]);
+    EXPECT_NEAR(s.negativeVolume(endpoint), s.negativeVolume(previous), 1.0e-14);
+    EXPECT_GT(removed.handed_off_volume, 0.0);
+
+    // Without a recipient in reach the stationary candidate is reconciled as is.
+    handoff.maximum_recipient_distance_factor = 1.0;
+    const auto kept = run(&handoff, endpoint);
+    ASSERT_TRUE(kept.success) << kept.diagnostic;
+    EXPECT_EQ(kept.removed_feature_dofs, 0u);
+    EXPECT_EQ(kept.handed_off_components, 0u);
+    EXPECT_EQ(endpoint[island.front()], previous[island.front()]);
+
+    // The coefficients are ignored without an enabled handoff.
+    const auto ignored = run(nullptr, endpoint);
+    ASSERT_TRUE(ignored.success) << ignored.diagnostic;
+    EXPECT_EQ(ignored.removed_feature_dofs, 0u);
+    EXPECT_EQ(endpoint[island.front()], previous[island.front()]);
 }
 
 TEST(LevelSetKinematicReconciliation, UncutCoefficientsCannotCertifyAnInexactStationaryTrace)
@@ -1605,6 +1758,19 @@ TEST(LevelSetKinematicReconciliation, KeepsTheVolumeOfEachDisconnectedRegion)
     EXPECT_NEAR(tip(endpoint, 1.0), area, 1.0e-12);
     EXPECT_NEAR(tip(endpoint, -1.0), area, 1.0e-12);
     EXPECT_LT(result.volume_tolerance, 1.0e-10);
+
+    // Without a vanished component the optional handoff takes the same path bit for bit.
+    const level_set::LevelSetComponentHandoffOptions handoff{.enabled = true};
+    std::vector<FE::Real> handed;
+    const auto same = level_set::reconcileLevelSetWithKinematicFlux(
+        s.system.meshAccess(), s.phiDofs(), s.velocityDofs(), 0.0, 1.0e-12, 1.0, previous, transported, zero,
+        zero, handed, s.system.fieldRecord(s.velocity).space.get(), &handoff);
+    ASSERT_TRUE(same.success) << same.diagnostic;
+    EXPECT_EQ(same.handed_off_components, 0u);
+    EXPECT_EQ(handed, endpoint);
+    EXPECT_EQ(same.iterations, result.iterations);
+    EXPECT_EQ(same.reconciled_volume_error, result.reconciled_volume_error);
+    EXPECT_EQ(same.volume_tolerance, result.volume_tolerance);
 }
 
 TEST(LevelSetKinematicReconciliation, RejectsNonSimplexCellsAndBadInput)

@@ -208,6 +208,7 @@ bool is_oop_equation_extension_parameter(const std::string& name)
     "Interface_kinematic_marker",
     "Interface_kinematic_weight_scale",
     "Enable_kinematic_reconciliation",
+    "Enable_subresolution_component_handoff",
     "Enable_sign_definite_patch_bounds",
     "Enable_interface_preserving_redistancing",
     "Enable_static_capillary_equilibrium_initialization",

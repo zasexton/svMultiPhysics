@@ -2926,6 +2926,16 @@ TEST(SmallCutAggregationConstraint, NoRootIslandCandidatesArePinnedHomogeneously
     EXPECT_EQ(pins.front().islands, 1u);
     EXPECT_EQ(pins.front().pinned_dofs, 4u);
     EXPECT_NEAR(pins.front().physical_volume, 0.3, 1.0e-14);
+    // Each pinned feature lists its cells and its pinned DOFs.
+    ASSERT_EQ(pins.front().features.size(), 1u);
+    const auto& pinned_feature = pins.front().features.front();
+    EXPECT_EQ(pinned_feature.feature_id, island->stable_feature_id);
+    EXPECT_EQ(pinned_feature.cell_gids.size(), 1u);
+    EXPECT_NEAR(pinned_feature.physical_volume, 0.3, 1.0e-14);
+    std::vector<GlobalIndex> expected_pins;
+    for (const auto vertex : {0, 1, 4, 5}) expected_pins.push_back(vertexDof(system, pressure, vertex));
+    std::sort(expected_pins.begin(), expected_pins.end());
+    EXPECT_EQ(pinned_feature.pinned_dofs, expected_pins);
 
     const auto prolongations = system.finalizedSmallCutAggregationProlongations();
     ASSERT_EQ(prolongations.size(), 1u);

@@ -11405,7 +11405,7 @@ std::optional<SmallCutIslandPins> SmallCutAggregationConstraint::rootlessIslandP
         }
     }
 
-    std::set<GlobalIndex> pinned_features;
+    std::map<GlobalIndex, SmallCutIslandPins::Feature> features;
     std::set<GlobalIndex> pinned_dofs;
     for (const auto& patch : pending.patches) {
         if (!is_pin_patch(patch)) {
@@ -11413,7 +11413,10 @@ std::optional<SmallCutIslandPins> SmallCutAggregationConstraint::rootlessIslandP
         }
         for (const auto dof : patch.slave_dofs) {
             if (installed_pins.contains(dof)) {
-                pinned_features.insert(patch.active_feature_ids.front());
+                const auto id = patch.active_feature_ids.front();
+                auto& feature = features[id];
+                feature.feature_id = id;
+                feature.pinned_dofs.push_back(dof);
                 pinned_dofs.insert(dof);
             }
         }
@@ -11422,13 +11425,26 @@ std::optional<SmallCutIslandPins> SmallCutAggregationConstraint::rootlessIslandP
         return std::nullopt;
     }
     long double volume = 0;
+    std::map<GlobalIndex, long double> feature_volume;
     for (const auto& cell : pending.active_cells) {
-        if (pinned_features.contains(cell.active_feature_id)) {
+        const auto found = features.find(cell.active_feature_id);
+        if (found != features.end()) {
             volume += cell.retained_physical_volume;
+            feature_volume[cell.active_feature_id] += cell.retained_physical_volume;
+            found->second.cell_gids.push_back(cell.cell_gid);
         }
     }
-    return SmallCutIslandPins{pending.field, pending.interface_marker, pending.active_side,
-                              pinned_features.size(), pinned_dofs.size(), static_cast<Real>(volume)};
+    SmallCutIslandPins pins{pending.field, pending.interface_marker, pending.active_side,
+                            features.size(), pinned_dofs.size(), static_cast<Real>(volume), {}};
+    for (auto& [id, feature] : features) {
+        for (auto* list : {&feature.cell_gids, &feature.pinned_dofs}) {
+            std::sort(list->begin(), list->end());
+            list->erase(std::unique(list->begin(), list->end()), list->end());
+        }
+        feature.physical_volume = static_cast<Real>(feature_volume[id]);
+        pins.features.push_back(std::move(feature));
+    }
+    return pins;
 }
 
 namespace {

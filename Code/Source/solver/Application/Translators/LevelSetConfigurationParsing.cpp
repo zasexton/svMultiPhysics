@@ -240,6 +240,12 @@ opt::OptionSchema<Keys> makeLevelSetEquationSchema() {
              return keys.transport.kinematic_reconciliation.enabled;
            },
            relaxedBool(), setting("accepted-step kinematic reconciliation"))
+      .key("Enable_subresolution_component_handoff",
+           [](Keys &keys) -> auto & {
+             return keys.transport.kinematic_reconciliation.component_handoff.enabled;
+           },
+           relaxedBool(),
+           setting("removal of rootless features and volume handoff of vanished components"))
       .key("Enable_sign_definite_patch_bounds",
            [](Keys &keys) -> auto & {
              return keys.transport.sign_definite_patch_bounds.enabled;

@@ -487,7 +487,11 @@ make_level_set_effective_configuration(const ls::LevelSetTransportOptions& optio
   // Present only when enabled, so existing configurations keep their
   // artifact unchanged.
   if (options.kinematic_reconciliation.enabled) {
-    out << ",\"kinematic_reconciliation\":{\"enabled\":true}";
+    out << ",\"kinematic_reconciliation\":{\"enabled\":true";
+    if (options.kinematic_reconciliation.component_handoff.enabled) {
+      out << ",\"component_handoff\":{\"enabled\":true}";
+    }
+    out << "}";
   }
   if (options.sign_definite_patch_bounds.enabled) {
     out << ",\"sign_definite_patch_bounds\":{\"enabled\":true}";

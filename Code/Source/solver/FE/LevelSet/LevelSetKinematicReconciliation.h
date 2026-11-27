@@ -10,6 +10,7 @@
 #include "Assembly/Assembler.h"
 #include "Core/Types.h"
 #include "Dofs/DofHandler.h"
+#include "LevelSet/LevelSetOptions.h"
 
 #include <cstddef>
 #include <span>
@@ -87,7 +88,33 @@ struct LevelSetKinematicReconciliationResult {
     // A finite candidate exhausted the nonlinear correction or could not
     // attain the physical budget subject to the transported cut topology.
     bool retryable_failure{false};
+    // Components handed to a surviving interface (LevelSetComponentHandoffOptions)
+    // and the signed negative-side volume their recipients took, summed.
+    std::size_t handed_off_components{0u};
+    Real handed_off_volume{0.0};
+    Real handed_off_absolute_volume{0.0};
+    // Removable coefficients reflected across the isovalue before reconciling.
+    std::size_t removed_feature_dofs{0u};
 };
+
+/*
+ * Optional volume handoff of compact components whose interface vanished
+ * during the step (LevelSetComponentHandoffOptions, off by default).
+ *
+ * A component has vanished when it had a cut cell before the step and none
+ * at the transported endpoint on any rank, and its cells all lie on one side.
+ * It qualifies when the region that disappeared is compact relative to
+ * h_C = min |K|^(1/d) over its cells: measure at most
+ * maximum_measure_factor * h_C^d and diameter (over its vertices and cut
+ * points) at most maximum_diameter_factor * h_C, no node of it was swept by a
+ * cell outside every component, and a surviving component has a transported
+ * interface point within maximum_recipient_distance_factor * h_C.  The
+ * nearest such component (the smaller label on a tie) then takes
+ * T = K_d - dV_d, the donor's trapezoidal flux volume minus its actual volume
+ * change, in addition to its own budget, so the transfers sum to zero.  The
+ * donor's nodes keep their values.  A recipient that cannot place T, and a
+ * vanished component that does not qualify, fail as without the handoff.
+ */
 
 /// Physical endpoint of a candidate representation, measured with its actual
 /// transport velocity. Measuring never performs a level-set correction.
@@ -200,6 +227,12 @@ struct LevelSetKinematicEndpoint {
  * @param tolerance   sign-class tolerance (values within it count as zero)
  * @param dt          accepted time-step size
  * @param velocity_space space associated with the supplied velocity DOFs
+ * @param handoff     optional handoff of vanished compact components
+ * @param removable_dofs with an enabled handoff, coefficients of features to
+ *                    remove (identical on every rank): they are reflected
+ *                    across the isovalue first, and the result is kept only
+ *                    if it reconciles with at least one component handed off;
+ *                    otherwise the transported candidate is reconciled as is
  */
 [[nodiscard]] LevelSetKinematicReconciliationResult
 reconcileLevelSetWithKinematicFlux(
@@ -214,6 +247,8 @@ reconcileLevelSetWithKinematicFlux(
     std::span<const Real> previous_velocity,
     std::span<const Real> transported_velocity,
     std::vector<Real>& reconciled_level_set,
-    const spaces::FunctionSpace* velocity_space = nullptr);
+    const spaces::FunctionSpace* velocity_space = nullptr,
+    const LevelSetComponentHandoffOptions* handoff = nullptr,
+    std::span<const std::size_t> removable_dofs = {});
 
 } // namespace svmp::FE::level_set

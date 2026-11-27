@@ -684,12 +684,21 @@ void injectSmallCutAggregationReportBuildFailureForTesting(
 /// Canonical homogeneous aggregation pins on disconnected active features
 /// with no fully active cell. Each feature and scalar DOF is counted once.
 struct SmallCutIslandPins {
+    /// One pinned feature: its sorted cell GIDs, sorted pinned system DOFs and
+    /// retained physical measure.
+    struct Feature {
+        GlobalIndex feature_id{INVALID_GLOBAL_INDEX};
+        std::vector<GlobalIndex> cell_gids{};
+        std::vector<GlobalIndex> pinned_dofs{};
+        Real physical_volume{0};
+    };
     FieldId field{INVALID_FIELD_ID};
     int interface_marker{-1};
     geometry::CutIntegrationSide active_side{geometry::CutIntegrationSide::Negative};
     std::size_t islands{0};
     std::size_t pinned_dofs{0};
     Real physical_volume{0};
+    std::vector<Feature> features{};
 };
 
 class SmallCutAggregationConstraint final : public ISystemConstraint {

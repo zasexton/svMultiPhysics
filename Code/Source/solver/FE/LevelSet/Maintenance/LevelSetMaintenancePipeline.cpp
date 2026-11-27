@@ -11,6 +11,7 @@
 #include "Core/LogRecord.h"
 #include "Core/RankLog.h"
 #include "Dofs/DofHandler.h"
+#include "Dofs/EntityDofMap.h"
 #include "LevelSet/LevelSetGeometry.h"
 #include "LevelSet/LevelSetInterfacePreservingRedistancing.h"
 #include "LevelSet/LevelSetInterfacePreservingRedistancing3D.h"
@@ -241,6 +242,54 @@ namespace {
 
 using RepresentationCheck = std::function<bool(MaintenanceSubstage, std::span<const Real>)>;
 
+// Active-side level-set coefficients at the vertices whose DOFs small-cut
+// aggregation pinned on a feature without a root, for the cut-volume marker
+// of this field. Identical on every rank (collective).
+std::vector<std::size_t> rootlessFeatureCoefficients(
+    const systems::FESystem& system, const LevelSetMaintenanceConfiguration& configuration,
+    FieldId field, std::span<const Real> level_set, Real isovalue)
+{
+  std::vector<std::size_t> local;
+  std::exception_ptr failure;
+  try {
+    const auto marker = configuration.volume_cut_request
+                            ? resolvedActiveCutVolumeInterfaceMarker(system, *configuration.volume_cut_request)
+                            : std::nullopt;
+    const auto* phi_map = system.fieldDofHandler(field).getEntityDofMap();
+    if (marker && phi_map) {
+      for (const auto& pins : system.rootlessIslandPins()) {
+        if (pins.interface_marker != *marker) continue;
+        const auto* map = system.fieldDofHandler(pins.field).getEntityDofMap();
+        if (map == nullptr) continue;
+        const auto offset = system.fieldDofOffset(pins.field);
+        std::set<GlobalIndex> pinned;
+        for (const auto& feature : pins.features) {
+          for (const auto dof : feature.pinned_dofs) pinned.insert(dof - offset);
+        }
+        const bool negative_active = pins.active_side == geometry::CutIntegrationSide::Negative;
+        for (GlobalIndex v = 0; v < map->numVertices(); ++v) {
+          const auto dofs = map->getVertexDofs(v);
+          if (std::none_of(dofs.begin(), dofs.end(), [&](GlobalIndex dof) { return pinned.contains(dof); })) {
+            continue;
+          }
+          const auto phi = phi_map->getVertexDofs(v);
+          if (phi.size() != 1u || phi.front() < 0 || static_cast<std::size_t>(phi.front()) >= level_set.size()) {
+            continue;
+          }
+          const auto i = static_cast<std::size_t>(phi.front());
+          const Real value = level_set[i] - isovalue;
+          if (negative_active ? value < 0 : value > 0) local.push_back(i);
+        }
+      }
+    }
+  } catch (...) {
+    failure = std::current_exception();
+  }
+  const auto comm = activeFESystemCommunicator(system);
+  requireCollectivePhasePreparation(failure, comm, "rootless_feature_coefficients");
+  return systems::collectiveIndexUnion(std::move(local), level_set.size(), comm, "rootless feature coefficients");
+}
+
 // One physical correction for both the reversible gate and accepted publication.
 LevelSetKinematicReconciliationResult solveKinematicCandidate(
     const systems::FESystem& system, const LevelSetMaintenanceConfiguration& configuration,
@@ -275,10 +324,15 @@ LevelSetKinematicReconciliationResult solveKinematicCandidate(
   }
   requireCollectivePhasePreparation(preparation_failure, activeFESystemCommunicator(system),
                                     "kinematic_candidate_inputs");
+  const auto& handoff = configuration.transport.kinematic_reconciliation.component_handoff;
+  std::vector<std::size_t> removable;
+  if (handoff.enabled && handoff.remove_rootless_features) {
+    removable = rootlessFeatureCoefficients(system, configuration, field, transported, volume_options.isovalue);
+  }
   return reconcileLevelSetWithKinematicFlux(system.meshAccess(), system.fieldDofHandler(field),
       system.fieldDofHandler(baseline->velocity_field), volume_options.isovalue, volume_options.tolerance,
       dt, baseline->level_set, transported, baseline->velocity, velocity, reconciled,
-      system.fieldRecord(baseline->velocity_field).space.get());
+      system.fieldRecord(baseline->velocity_field).space.get(), handoff.enabled ? &handoff : nullptr, removable);
 }
 
 // Stage 1, kinematic reconciliation of the transport step.
@@ -349,8 +403,14 @@ LevelSetKinematicReconciliationResult reconcileMaintainedLevelSetStep(
       .value("transported_volume_error", result.transported_volume_error)
       .value("reconciled_volume_error", result.reconciled_volume_error)
       .value("volume_balance_tolerance", result.volume_tolerance)
-      .value("max_abs_correction", result.max_abs_correction)
-      .quoted("status", result.diagnostic);
+      .value("max_abs_correction", result.max_abs_correction);
+  if (request.configuration->transport.kinematic_reconciliation.component_handoff.enabled) {
+    record.value("removed_feature_dofs", result.removed_feature_dofs)
+        .value("handed_off_components", result.handed_off_components)
+        .value("handed_off_volume", result.handed_off_volume)
+        .value("handed_off_absolute_volume", result.handed_off_absolute_volume);
+  }
+  record.quoted("status", result.diagnostic);
   staged_commit_logs.push_back(std::move(record));
   return result;
 }

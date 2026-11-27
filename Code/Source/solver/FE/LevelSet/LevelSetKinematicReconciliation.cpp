@@ -1264,6 +1264,7 @@ LevelSetKinematicReconciliationResult integrateKinematicStep(
     std::span<const Real> transported_velocity,
     std::vector<Real>* reconciled_level_set,
     const spaces::FunctionSpace* velocity_space,
+    const LevelSetComponentHandoffOptions* handoff = nullptr,
     bool* used_connected_shared_patch = nullptr,
     bool* stopped_above_nodal_roundoff = nullptr)
 {
@@ -1542,6 +1543,179 @@ LevelSetKinematicReconciliationResult integrateKinematicStep(
         transported_cut_class[c] = cutClass(
             cells[c], transported_level_set, isovalue, geometry_tolerance, minimum_fraction);
     }
+
+    // ---- vanished compact components (LevelSetComponentHandoffOptions) ------
+    // A donor had a cut before the step and has none at the transported
+    // endpoint on any rank. Its nodes keep their values; the nearest
+    // surviving component takes its volume in addition to its own budget.
+    std::vector<char> donor(component.count, 0);
+    std::vector<long long> recipient_of(component.count, -1);
+    std::vector<char> donor_node(n, 0);
+    std::vector<Real> received(component.count, 0);
+    bool any_donor = false;
+    if (handoff && handoff->enabled && component.count > 1u) {
+        const std::size_t count = component.count;
+        // Per label: previous cut, transported cut, transported negative and
+        // positive measure.
+        std::vector<Real> presence(4u * count, 0);
+        for (std::size_t c = 0; c < cells.size(); ++c) {
+            const auto label = component.cell[c];
+            if (label < 0) continue;
+            Real fraction = 0;
+            (void)cutClass(cells[c], transported_level_set, isovalue, geometry_tolerance, minimum_fraction,
+                           &fraction);
+            Real* p = &presence[4u * static_cast<std::size_t>(label)];
+            p[0] = std::max(p[0], cells[c].previous_has_surface ? Real{1} : Real{0});
+            p[1] = std::max(p[1], hasCutSurface(transported_cut_class[c]) ? Real{1} : Real{0});
+            p[2] = std::max(p[2], fraction > 0 ? Real{1} : Real{0});
+            p[3] = std::max(p[3], fraction < 1 ? Real{1} : Real{0});
+        }
+        maxInPlace(context, presence);
+        std::vector<char> candidate(count, 0), erased_negative(count, 0);
+        bool any_candidate = false;
+        for (std::size_t c = 0; c < count; ++c) {
+            const Real* p = &presence[4u * c];
+            if (p[0] > 0 && !(p[1] > 0) && ((p[2] > 0) != (p[3] > 0))) {
+                candidate[c] = 1;
+                erased_negative[c] = p[3] > 0;
+                any_candidate = true;
+            }
+        }
+        if (any_candidate) {
+            const auto previous_negative = [&](std::size_t i) { return previous_level_set[i] - isovalue < 0; };
+            const auto crossing = [&](const SimplexCell& cell, int a, int b, std::span<const Real> phi) {
+                const Real va = phi[cell.dof[a]] - isovalue;
+                const Real vb = phi[cell.dof[b]] - isovalue;
+                const Real t = va / (va - vb);
+                const auto& xa = cell.x[a];
+                const auto& xb = cell.x[b];
+                return Point{xa[0] + t * (xb[0] - xa[0]), xa[1] + t * (xb[1] - xa[1]), xa[2] + t * (xb[2] - xa[2])};
+            };
+            // A node swept by a cell outside every component means the region
+            // moved by a whole cell; its erased measure is then not compact.
+            std::vector<Real> swept_outside(n, 0);
+            for (std::size_t c = 0; c < cells.size(); ++c) {
+                if (component.cell[c] >= 0) continue;
+                const auto& cell = cells[c];
+                bool swept = false;
+                for (int a = 0; a < cell.corners; ++a) {
+                    const auto i = cell.dof[a];
+                    swept = swept || previous_negative(i) != (transported_level_set[i] - isovalue < 0);
+                }
+                if (!swept) continue;
+                for (int a = 0; a < cell.corners; ++a) swept_outside[cell.dof[a]] = 1;
+            }
+            maxInPlace(context, swept_outside);
+            // Erased measure, -h_C and swept flag per label; erased points as (label, x, y, z).
+            std::vector<Real> erased(count, 0);
+            std::vector<Real> extent(2u * count, -std::numeric_limits<Real>::infinity());
+            std::vector<Real> local_points;
+            for (std::size_t c = 0; c < cells.size(); ++c) {
+                const auto label = component.cell[c];
+                if (label < 0 || !candidate[static_cast<std::size_t>(label)]) continue;
+                const auto& cell = cells[c];
+                const auto d = static_cast<std::size_t>(label);
+                const bool negative_side = erased_negative[d];
+                erased[d] += cell.measure * (negative_side ? cell.previous_fraction
+                                                           : Real{1} - cell.previous_fraction);
+                extent[2u * d] = std::max(extent[2u * d], -std::pow(cell.measure, Real{1} / dimension));
+                const auto append = [&](const Point& x) {
+                    local_points.insert(local_points.end(), {static_cast<Real>(label), x[0], x[1], x[2]});
+                };
+                for (int a = 0; a < cell.corners; ++a) {
+                    const auto i = cell.dof[a];
+                    if (swept_outside[i] > 0) extent[2u * d + 1u] = 1;
+                    if (previous_negative(i) == negative_side) append(cell.x[a]);
+                    for (int b = a + 1; b < cell.corners; ++b) {
+                        if (previous_negative(i) != previous_negative(cell.dof[b])) {
+                            append(crossing(cell, a, b, previous_level_set));
+                        }
+                    }
+                }
+            }
+            sumInPlace(context, erased);
+            maxInPlace(context, extent);
+            const auto points = gatherAll(context, local_points);
+            std::vector<std::vector<Point>> region(count);
+            for (std::size_t r = 0; r + 3u < points.size(); r += 4u) {
+                region[static_cast<std::size_t>(points[r])].push_back({points[r + 1u], points[r + 2u], points[r + 3u]});
+            }
+            // Distance from each candidate to the transported interface points
+            // of every surviving component, as (donor, recipient, distance).
+            std::map<std::pair<long long, long long>, Real> local_best;
+            for (std::size_t c = 0; c < cells.size(); ++c) {
+                const auto label = component.cell[c];
+                if (label < 0 || candidate[static_cast<std::size_t>(label)] ||
+                    !hasCutSurface(transported_cut_class[c])) continue;
+                const auto& cell = cells[c];
+                for (int a = 0; a < cell.corners; ++a) {
+                    for (int b = a + 1; b < cell.corners; ++b) {
+                        const auto i = cell.dof[a];
+                        const auto j = cell.dof[b];
+                        if ((transported_level_set[i] - isovalue < 0) == (transported_level_set[j] - isovalue < 0)) {
+                            continue;
+                        }
+                        const auto q = crossing(cell, a, b, transported_level_set);
+                        for (std::size_t d = 0; d < count; ++d) {
+                            if (!candidate[d]) continue;
+                            Real nearest = std::numeric_limits<Real>::infinity();
+                            for (const auto& p : region[d]) nearest = std::min(nearest, norm(sub(p, q)));
+                            auto [it, inserted] = local_best.try_emplace({static_cast<long long>(d), label}, nearest);
+                            if (!inserted) it->second = std::min(it->second, nearest);
+                        }
+                    }
+                }
+            }
+            std::vector<Real> local_triples;
+            for (const auto& [key, distance] : local_best) {
+                local_triples.insert(local_triples.end(),
+                                     {static_cast<Real>(key.first), static_cast<Real>(key.second), distance});
+            }
+            const auto triples = gatherAll(context, local_triples);
+            std::vector<Real> best_distance(count, std::numeric_limits<Real>::infinity());
+            std::vector<long long> best_label(count, -1);
+            for (std::size_t r = 0; r + 2u < triples.size(); r += 3u) {
+                const auto d = static_cast<std::size_t>(triples[r]);
+                const auto s = static_cast<long long>(triples[r + 1u]);
+                const Real distance = triples[r + 2u];
+                if (distance < best_distance[d] || (distance == best_distance[d] && s < best_label[d])) {
+                    best_distance[d] = distance;
+                    best_label[d] = s;
+                }
+            }
+            for (std::size_t d = 0; d < count; ++d) {
+                if (!candidate[d] || best_label[d] < 0 || extent[2u * d + 1u] > 0) continue;
+                const Real h = -extent[2u * d];
+                Real diameter = 0;
+                for (std::size_t a = 0; a < region[d].size(); ++a) {
+                    for (std::size_t b = a + 1u; b < region[d].size(); ++b) {
+                        diameter = std::max(diameter, norm(sub(region[d][a], region[d][b])));
+                    }
+                }
+                if (!(h > 0) || !std::isfinite(h) ||
+                    !(erased[d] <= handoff->maximum_measure_factor * std::pow(h, dimension)) ||
+                    !(diameter <= handoff->maximum_diameter_factor * h) ||
+                    !(best_distance[d] <= handoff->maximum_recipient_distance_factor * h)) {
+                    continue;
+                }
+                donor[d] = 1;
+                recipient_of[d] = best_label[d];
+                any_donor = true;
+            }
+            for (std::size_t i = 0; any_donor && i < n; ++i) {
+                const auto label = component.node[i];
+                if (label < 0) continue;
+                bool all_donors = donor[static_cast<std::size_t>(label)] != 0;
+                if (component.shared[i]) {
+                    for (auto it = component.splits.lower_bound({i, -1});
+                         it != component.splits.end() && it->first.first == i; ++it) {
+                        all_donors = all_donors && donor[static_cast<std::size_t>(it->first.second)] != 0;
+                    }
+                }
+                donor_node[i] = all_donors ? 1 : 0;
+            }
+        }
+    }
     std::size_t skipped = 0u;
     std::size_t redistributed = 0u;
     std::size_t frozen = 0u;
@@ -1685,6 +1859,22 @@ LevelSetKinematicReconciliationResult integrateKinematicStep(
     std::map<long long, Real> unplaced_by_interface;
     std::vector<char> limited(n, 0);
     std::set<std::size_t> projected_groups;
+    if (any_donor) {
+        // T = K_d - dV_d is fixed: the donor's cells keep their uncut classes.
+        InterfaceSums probe(n);
+        if (!evaluate_endpoint(iterate, probe, true)) {
+            return result;
+        }
+        for (std::size_t d = 0; d < component.count; ++d) {
+            if (!donor[d]) continue;
+            const Real* terms = &budget[kBudgetTerms * d];
+            const Real transfer = Real{0.5} * dt * (terms[1] + terms[2]) - terms[0];
+            received[static_cast<std::size_t>(recipient_of[d])] += transfer;
+            ++result.handed_off_components;
+            result.handed_off_volume += transfer;
+            result.handed_off_absolute_volume += std::abs(transfer);
+        }
+    }
     for (int iteration = 0; iteration < kMaxGeometryIterations; ++iteration) {
         InterfaceSums current(n);
         if (!evaluate_endpoint(iterate, current, false)) {
@@ -1705,14 +1895,33 @@ LevelSetKinematicReconciliationResult integrateKinematicStep(
         std::vector<char> eligible(n, 0);
         std::vector<Real> free_step(n, std::numeric_limits<Real>::quiet_NaN());
         bool any_limited = false;
+        // A recipient's unshared trace nodes take its received volume as an
+        // extra flux, in proportion to their weights.
+        std::vector<Real> source(any_donor ? n : 0u, 0);
+        if (any_donor) {
+            std::vector<Real> weight(component.count, 0);
+            for (std::size_t i = 0; i < n; ++i) {
+                const Real g = Real{0.5} * (previous.g[i] + current.g[i]);
+                const auto label = component.node[i];
+                if (label >= 0 && !component.shared[i] && g > 0) weight[static_cast<std::size_t>(label)] += g;
+            }
+            for (std::size_t i = 0; i < n; ++i) {
+                const Real g = Real{0.5} * (previous.g[i] + current.g[i]);
+                const auto label = component.node[i];
+                if (label < 0 || component.shared[i] || !(g > 0)) continue;
+                const auto s = static_cast<std::size_t>(label);
+                if (received[s] != 0 && weight[s] > 0) source[i] = received[s] / dt * g / weight[s];
+            }
+        }
         for (std::size_t i = 0; i < n; ++i) {
             gbar[i] = Real{0.5} * (previous.g[i] + current.g[i]);
             delta[i] = wall_delta[i];
-            if (!(gbar[i] > Real{0.0})) {
+            if (!(gbar[i] > Real{0.0}) || (any_donor && donor_node[i])) {
                 continue;
             }
             const Real residual = Real{0.5} * (previous.m[i] + current.m[i]) +
-                                  Real{0.5} * (previous.f[i] + current.f[i]);
+                                  Real{0.5} * (previous.f[i] + current.f[i]) +
+                                  (any_donor ? source[i] : Real{0});
             const Real step = -dt * residual / gbar[i];
             if (!std::isfinite(step)) {
                 unplaced_volume = std::numeric_limits<Real>::infinity();
@@ -1883,7 +2092,7 @@ LevelSetKinematicReconciliationResult integrateKinematicStep(
         // in that component, so no correction moves volume between them.
         std::vector<Real> split_deficit(splits, 0), split_dropped(splits, 0);
         for (const auto& [key, k] : component.splits) {
-            if (!(gbar[key.first] > Real{0.0})) continue;
+            if (!(gbar[key.first] > Real{0.0}) || (any_donor && donor[static_cast<std::size_t>(key.second)])) continue;
             split_deficit[k] = -dt * split_r[k] - split_g[k] * delta[key.first];
             any_limited = any_limited || split_deficit[k] != 0;
         }
@@ -2221,11 +2430,14 @@ LevelSetKinematicReconciliationResult integrateKinematicStep(
     Real worst_component = 0;
     std::size_t worst_component_index = component.count;
     for (std::size_t c = 0; c < component.count; ++c) {
+        // A donor's volume is booked on its recipient.
+        if (any_donor && donor[c]) continue;
         const Real* terms = &budget[kBudgetTerms * c];
-        const Real error = terms[0] - Real{0.5} * dt * (terms[1] + terms[2]);
+        const Real error = terms[0] - Real{0.5} * dt * (terms[1] + terms[2]) - received[c];
         const Real allowed = std::abs(terms[3]) + kGeometryRelativeTolerance * correction_volume +
                              Real{128} * std::numeric_limits<Real>::epsilon() *
-                                 (terms[4] + dt * (std::abs(terms[1]) + std::abs(terms[2])));
+                                 (terms[4] + dt * (std::abs(terms[1]) + std::abs(terms[2])) +
+                                  std::abs(received[c]));
         if (!(std::abs(error) <= allowed) && std::abs(error) > worst_component) {
             worst_component = std::abs(error);
             worst_component_index = c;
@@ -2289,33 +2501,58 @@ LevelSetKinematicReconciliationResult reconcileLevelSetWithKinematicFlux(
     const dofs::DofHandler& velocity_dofs, Real isovalue, Real tolerance, Real dt,
     std::span<const Real> previous_level_set, std::span<const Real> transported_level_set,
     std::span<const Real> previous_velocity, std::span<const Real> transported_velocity,
-    std::vector<Real>& reconciled_level_set, const spaces::FunctionSpace* velocity_space)
+    std::vector<Real>& reconciled_level_set, const spaces::FunctionSpace* velocity_space,
+    const LevelSetComponentHandoffOptions* handoff, std::span<const std::size_t> removable_dofs)
 {
-    const auto reconcile = [&](bool* used_connected_shared_patch) {
-        const auto attempt = [&](bool* stopped_above_nodal_roundoff) {
-            return integrateKinematicStep(mesh, level_set_dofs, velocity_dofs, isovalue, tolerance, dt,
-                previous_level_set, transported_level_set, previous_velocity, transported_velocity,
-                &reconciled_level_set, velocity_space, used_connected_shared_patch, stopped_above_nodal_roundoff);
+    const auto solve = [&](std::span<const Real> endpoint) {
+        const auto reconcile = [&](bool* used_connected_shared_patch) {
+            const auto attempt = [&](bool* stopped_above_nodal_roundoff) {
+                return integrateKinematicStep(mesh, level_set_dofs, velocity_dofs, isovalue, tolerance, dt,
+                    previous_level_set, endpoint, previous_velocity, transported_velocity,
+                    &reconciled_level_set, velocity_space, handoff, used_connected_shared_patch,
+                    stopped_above_nodal_roundoff);
+            };
+            bool stopped_above_nodal_roundoff = false;
+            auto result = attempt(&stopped_above_nodal_roundoff);
+            if (result.retryable_failure && stopped_above_nodal_roundoff) {
+                // A remote large coefficient need not limit a cut node's precision.
+                // Retry only when the measured candidate actually fails its balance.
+                result = attempt(nullptr);
+            }
+            return result;
         };
-        bool stopped_above_nodal_roundoff = false;
-        auto result = attempt(&stopped_above_nodal_roundoff);
-        if (result.retryable_failure && stopped_above_nodal_roundoff) {
-            // A remote large coefficient need not limit a cut node's precision.
-            // Retry only when the measured candidate actually fails its balance.
-            result = attempt(nullptr);
+        bool used_connected_shared_patch = false;
+        auto result = reconcile(&used_connected_shared_patch);
+        if (!result.success && used_connected_shared_patch) {
+            // A distant trace can carry a linearized share yet approach its maximum
+            // swept volume before the nonlinear budget closes. The one-ring solve
+            // can then release its component's wall constraints. Restart it from
+            // the transported field so the failed geometry cannot bias the solve.
+            result = reconcile(nullptr);
         }
         return result;
     };
-    bool used_connected_shared_patch = false;
-    auto result = reconcile(&used_connected_shared_patch);
-    if (!result.success && used_connected_shared_patch) {
-        // A distant trace can carry a linearized share yet approach its maximum
-        // swept volume before the nonlinear budget closes. The one-ring solve
-        // can then release its component's wall constraints. Restart it from
-        // the transported field so the failed geometry cannot bias the solve.
-        result = reconcile(nullptr);
+    if (handoff && handoff->enabled && !removable_dofs.empty()) {
+        // Remove the features and keep the result only if their volume found a
+        // recipient; otherwise reconcile the candidate as it was transported.
+        std::vector<Real> cleaned(transported_level_set.begin(), transported_level_set.end());
+        std::size_t removed = 0u;
+        for (const auto i : removable_dofs) {
+            if (i < cleaned.size() && cleaned[i] != isovalue) {
+                cleaned[i] = Real{2} * isovalue - cleaned[i];
+                ++removed;
+            }
+        }
+        const auto output = reconciled_level_set;
+        auto result = solve(cleaned);
+        if (result.success && result.handed_off_components > 0u) {
+            result.removed_feature_dofs = removed;
+            result.applied = true;
+            return result;
+        }
+        reconciled_level_set = output;
     }
-    return result;
+    return solve(transported_level_set);
 }
 
 std::vector<Real> levelSetRepresentationSlope(const assembly::IMeshAccess& mesh,
