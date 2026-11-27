@@ -22,6 +22,7 @@
 
 #include "FE/Backends/FSILS/FsilsFactory.h"
 #include "FE/Analysis/FormExprScanner.h"
+#include "Physics/Formulations/NavierStokes/FreeSurface/FunctionalRecords.h"
 #include "Physics/Formulations/NavierStokes/NavierStokesBCFactories.h"
 #include "Physics/Formulations/NavierStokes/IncompressibleNavierStokesVMSModule.h"
 
@@ -57,6 +58,7 @@ using namespace svmp::FE::systems;
 using namespace svmp::FE::forms;
 using Opts = svmp::Physics::formulations::navier_stokes::IncompressibleNavierStokesVMSOptions;
 namespace Factories = svmp::Physics::formulations::navier_stokes::Factories;
+namespace free_surface = svmp::Physics::formulations::navier_stokes::free_surface;
 
 namespace {
 
@@ -3942,7 +3944,7 @@ TEST(NavierStokesPostProcessing, StatesTheContactLineChannelsWithTheRuleWallNorm
     using Kind = svmp::FE::systems::FunctionalKind;
     auto scalar = std::make_shared<svmp::FE::spaces::H1Space>(ElementType::Tetra4, 1);
     auto vector = std::make_shared<svmp::FE::spaces::ProductSpace>(scalar, 3);
-    FreeSurfaceDiscreteFunctionalDeclaration declaration;
+    free_surface::FreeSurfaceDiscreteFunctionalDeclaration declaration;
     declaration.interface_marker = 7;
     declaration.velocity_field = 0;
     declaration.parameters.active_side = svmp::FE::geometry::CutIntegrationSide::Positive;
@@ -4056,7 +4058,7 @@ TEST(NavierStokesPostProcessing, DeclaresSelectedEnergiesFromRegisteredFunctiona
     for (const int marker : {7, 8, 9}) {
         const bool optional_channels = marker == 9;
         const auto side = optional_channels ? Side::Positive : Side::Negative;
-        FreeSurfaceDiscreteFunctionalDeclaration record;
+        free_surface::FreeSurfaceDiscreteFunctionalDeclaration record;
         record.interface_marker = marker;
         record.level_set_field = phi;
         record.velocity_field = velocity;
@@ -4074,10 +4076,10 @@ TEST(NavierStokesPostProcessing, DeclaresSelectedEnergiesFromRegisteredFunctiona
             record.external_pressure_power_parameters = fs::FreeSurfaceExternalPressurePowerParameters{
                 .active_side = side, .external_pressure = 3.0};
             record.endpoint_functional_power_enabled = true;
-            record.capillary_balance_method = FreeSurfaceCapillaryBalanceMethod::DiscreteEnergyVolumeStationarity;
-            record.capillary_balance_qualification = FreeSurfaceCapillaryBalanceQualification::PrerequisiteOnly;
+            record.capillary_balance_method = free_surface::FreeSurfaceCapillaryBalanceMethod::DiscreteEnergyVolumeStationarity;
+            record.capillary_balance_qualification = free_surface::FreeSurfaceCapillaryBalanceQualification::PrerequisiteOnly;
         }
-        functionalRecords(system).declareFunctional(std::move(record));
+        free_surface::functionalRecords(system).declareFunctional(std::move(record));
     }
     const auto boundary = [](int marker) {
         ns::FreeSurfaceBoundary selected;
