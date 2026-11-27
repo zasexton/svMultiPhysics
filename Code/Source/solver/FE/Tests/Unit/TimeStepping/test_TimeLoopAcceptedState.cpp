@@ -193,9 +193,6 @@ std::optional<RunResult> runMassRow(const RunSetup& setup)
     return RunResult{ts_test::getVectorByDof(history.u()), ts_test::getVectorByDof(history.uDot())};
 }
 
-// rho_inf = 0.5: alpha_m = 5/6, alpha_f = 2/3, gamma = 2/3.
-constexpr double kAlphaM = 5.0 / 6.0;
-
 TEST(TimeLoopAcceptedState, GeneralizedAlphaStageImposesTheInterpolantOfEndpointData)
 {
     // b = t^2 on the mass row 2 a_dot + b_dot = 0.  Imposing g(t_n + alpha_f dt)
@@ -220,8 +217,9 @@ TEST(TimeLoopAcceptedState, GeneralizedAlphaStartupGivesConstrainedRatesTheirDat
     const auto result = runMassRow({.g = [](double t) { return t; }, .dt = 0.1, .t_end = 0.1});
     ASSERT_TRUE(result.has_value());
     EXPECT_NEAR(result->u_dot[1], 1.0, 1e-12);
-    // The free row has a_dot(alpha_m) = -b_dot(alpha_m) / 2 = -1/2 from a_dot_0 = 0.
-    EXPECT_NEAR(result->u_dot[0], -0.5 / kAlphaM, 1e-12);
+    // The free equation 2 a_dot + b_dot = 0 holds from the initial instant.
+    EXPECT_NEAR(result->u_dot[0], -0.5, 1e-12);
+    EXPECT_NEAR(result->u[0], -0.05, 1e-12);
 }
 
 TEST(TimeLoopAcceptedState, GeneralizedAlphaRestartUsesConstraintsAtTheRestoredTime)

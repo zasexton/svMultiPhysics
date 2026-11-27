@@ -3213,6 +3213,85 @@ TEST(TimeLoopFsilsConvergenceMPI,
 #endif
 }
 
+TEST(TimeLoopFsilsConvergenceMPI, StartupMassIncludesAPrescribedRateOnOneRank)
+{
+#if !defined(FE_HAS_FSILS)
+    GTEST_SKIP() << "FSILS backend is not enabled in this build";
+#else
+    const auto rank = mpiRank(MPI_COMM_WORLD);
+    const auto ranks = mpiSize(MPI_COMM_WORLD);
+    auto mesh = std::make_shared<RankLocalOwnedQuadMeshAccess>(rank);
+    auto space = spaces::Space(spaces::SpaceType::H1, ElementType::Quad4, 1, 1);
+    systems::FESystem system(mesh);
+    const auto field = system.addField({.name = "u", .space = space, .components = 1});
+    const auto u = forms::FormExpr::stateField(field, *space, "u");
+    const auto v = forms::TestFunction(*space, "v");
+    system.addOperator("op");
+    systems::installFormulation(system, "op", {field}, (u.dt(1) * v).dx());
+    class Ramp final : public constraints::ISystemConstraint {
+    public:
+        explicit Ramp(bool owns_row) : owns_row_(owns_row) {}
+        void apply(const systems::FESystem&, constraints::AffineConstraints& lines) override
+        {
+            if (owns_row_) {
+                lines.addDirichlet(0, 0.0);
+            }
+        }
+        bool updateValues(const systems::FESystem&, constraints::AffineConstraints& lines, double t, double) override
+        {
+            if (owns_row_) {
+                lines.updateInhomogeneity(0, t);
+            }
+            return true;
+        }
+        bool isTimeDependent() const noexcept override { return true; }
+        systems::SetupStorageRequirements storageRequirements() const noexcept override { return {}; }
+    private:
+        bool owns_row_;
+    };
+    system.addSystemConstraint(std::make_unique<Ramp>(rank == 0));
+    systems::SetupOptions setup;
+    setup.assembler_name = "StandardAssembler";
+    setup.assembly_options.ghost_policy = GhostPolicy::ReverseScatter;
+    setup.dof_options.global_numbering = dofs::GlobalNumberingMode::OwnerContiguous;
+    setup.dof_options.ownership = dofs::OwnershipStrategy::CellOwner;
+    setup.dof_options.my_rank = rank;
+    setup.dof_options.world_size = ranks;
+    setup.dof_options.mpi_comm = MPI_COMM_WORLD;
+    systems::SetupInputs inputs;
+    inputs.topology_override = buildRankLocalOwnedQuadTopology(rank);
+    system.setup(setup, inputs);
+    backends::FsilsFactory factory(1);
+    auto solver = factory.createLinearSolver(fsilsGmresDiagOptions());
+    auto history = timestepping::TimeHistory::allocate(factory, system.dofHandler().getNumDofs(), 2);
+    timestepping::TimeLoopOptions options;
+    options.dt = options.t_end = 0.125;
+    options.scheme = timestepping::SchemeKind::GeneralizedAlpha;
+    options.generalized_alpha_rho_inf = 0.5;
+    options.newton.residual_op = options.newton.jacobian_op = "op";
+    systems::TransientSystem transient(system, std::make_shared<systems::BackwardDifferenceIntegrator>());
+    const auto report = timestepping::TimeLoop(options).run(transient, factory, *solver, history);
+    ASSERT_TRUE(report.success) << report.message;
+    auto rate = history.uDot().createGhostedReadView();
+    // On the constrained quad, the three free rows of the Q1 mass matrix
+    // require two -1/2 edge neighbours and a +1/4 diagonally opposite value.
+    std::vector<Real> observed;
+    for (auto row : history.uDot().ownedGlobalRows()) {
+        if (row == 0) {
+            EXPECT_NEAR(rate->getVectorEntry(row), 1.0, 1e-12);
+        } else {
+            observed.push_back(rate->getVectorEntry(row));
+        }
+    }
+    std::sort(observed.begin(), observed.end());
+    const std::vector<Real> expected = rank == 0 ? std::vector<Real>{-0.5, -0.5, 0.25} : std::vector<Real>(4, 0.0);
+    ASSERT_EQ(observed.size(), expected.size());
+    for (std::size_t i = 0; i < expected.size(); ++i) {
+        EXPECT_NEAR(observed[i], expected[i], 1e-11);
+    }
+#endif
+}
+
 TEST(TimeLoopFsilsConvergenceMPI, AdaptiveBdfEstimatesCountEachGlobalDofOnce)
 {
 #if !defined(FE_HAS_FSILS)

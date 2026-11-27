@@ -441,7 +441,7 @@ void addConstraintInhomogeneityRates(systems::FESystem& system,
                                      double t,
                                      double dt)
 {
-    if (!system.constraintDependencyDeclaration().value.time) {
+    if (!candidateStageBooleanMinMax(system, system.constraintDependencyDeclaration().value.time).second) {
         return;
     }
     const auto values_at = [&system, dt](double time) {
@@ -462,18 +462,61 @@ void addConstraintInhomogeneityRates(systems::FESystem& system,
 
     auto view = rate.createAssemblyView();
     FE_CHECK_NOT_NULL(view.get(), "TimeLoop: constraint rate view");
+    const auto& owned = system.dofHandler().getPartition().locallyOwned();
     view->beginAssemblyPhase();
     for (std::size_t i = 0; i < g_begin.size(); ++i) {
         const auto slave = g_begin[i].first;
         FE_THROW_IF(g_end[i].first != slave || g_mid[i].first != slave, systems::InvalidStateException,
                     "TimeLoop: time-dependent constraint values changed the constrained DOFs over the first step");
         const double g_dot = (-3.0 * g_begin[i].second + 4.0 * g_mid[i].second - g_end[i].second) / dt;
-        if (g_dot != 0.0 && slave >= 0 && slave < rate.size()) {
+        if (g_dot != 0.0 && owned.contains(slave)) {
             view->addVectorEntry(slave, view->getVectorEntry(slave) + static_cast<Real>(g_dot),
                                  assembly::AddMode::Insert);
         }
     }
     view->finalizeAssembly();
+}
+
+/// Add the rate residual induced by prescribed data before eliminating its
+/// columns. For a mass operator this adds M_fc g_dot to the free equations.
+void addPrescribedRateResidual(systems::FESystem& system, const backends::BackendFactory& factory,
+                               const systems::AssemblyRequest& request, const systems::SystemStateView& initial,
+                               const assembly::TimeIntegrationContext& mass_context, backends::GenericVector& residual)
+{
+    auto lift = factory.createVector(residual.size());
+    lift->zero();
+    addConstraintInhomogeneityRates(system, *lift, initial.time, initial.dt);
+    if (lift->norm() == 0.0) {
+        return;
+    }
+    lift->updateGhosts();
+    auto response = factory.createVector(residual.size());
+    auto context = mass_context;
+    // The current state and its previous value coincide at startup. Slot two
+    // supplies the physical rate, independently of the generalized-alpha parameters.
+    context.dt1->a = {context.dt1->coeff(0), -context.dt1->coeff(0), Real{1}};
+    auto state = initial;
+    state.time_integration = &context;
+    std::vector<std::span<const Real>> history(initial.u_history.begin(), initial.u_history.end());
+    state.u_history = history;
+    const auto evaluate = [&](const backends::GenericVector& rate) {
+        state.u_prev2 = rate.localSpan();
+        state.u_prev2_vector = &rate;
+        history[1] = state.u_prev2;
+        auto view = response->createAssemblyView();
+        const auto result = system.assemble(request, state, nullptr, view.get());
+        FE_THROW_IF(!result.success, FEException, "TimeLoop: prescribed rate assembly failed: " + result.error_message);
+        return std::as_const(*response).localSpan();
+    };
+    const auto at_zero = evaluate(*initial.u_prev2_vector);
+    const std::vector<Real> baseline(at_zero.begin(), at_zero.end());
+    const auto at_lift = evaluate(*lift);
+    auto target = residual.localSpan();
+    FE_CHECK_ARG(target.size() == at_lift.size() && baseline.size() == at_lift.size(),
+                 "TimeLoop: inconsistent prescribed rate residual layout");
+    for (std::size_t i = 0; i < target.size(); ++i) {
+        target[i] += at_lift[i] - baseline[i];
+    }
 }
 
 /// Imposes the interpolant of the endpoint constraint values at a one-step
@@ -3014,6 +3057,10 @@ TimeLoopReport TimeLoop::run(systems::TransientSystem& transient,
                                     assembly::TimeIntegrationContext ctx_dt_only = ctx_base;
                                     ctx_dt_only.time_derivative_term_weight = 1.0;
                                     ctx_dt_only.non_time_derivative_term_weight = 0.0;
+                                    if (!zeroConstrainedRatesRequested() &&
+                                        candidateStageBooleanMinMax(sys, sys.constraintDependencyDeclaration().value.time).second) {
+                                        addPrescribedRateResidual(sys, factory, req_r, init_state, ctx_dt_only, r_non_dt);
+                                    }
 
                                     auto& A = *workspace.jacobian;
                                     A.zero();
