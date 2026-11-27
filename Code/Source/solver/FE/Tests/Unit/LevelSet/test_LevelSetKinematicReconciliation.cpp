@@ -457,6 +457,33 @@ TEST(LevelSetKinematicReconciliation, ReportsWhenAnAdvectedPocketFallsBetweenAll
     }
 }
 
+TEST(LevelSetKinematicReconciliation, UncutCoefficientsCannotCertifyAnInexactStationaryTrace)
+{
+    auto mesh = std::make_shared<svmp::MeshBase>();
+    const svmp::CellShape triangle{svmp::CellFamily::Triangle, 3, 1};
+    mesh->build_from_arrays(2, {0., 0., 1., 0., 0., 1., 2., 0., 3., 0., 2., 1.},
+                            {0, 3, 6}, {0, 1, 2, 3, 4, 5}, {triangle, triangle});
+    mesh->finalize();
+    SimplexSystem system(svmp::create_mesh(std::move(mesh)), 2);
+    const auto velocity = system.vector([](const Point&) { return Point{}; });
+    for (const auto uncut_value : {1.0, 1.0e14}) {
+        SCOPED_TRACE(uncut_value);
+        const auto previous = system.scalar([&](const Point& x) {
+            return x[0] < 1.5 ? -0.5 + 1.1 * x[0] + 0.74 * x[1] : uncut_value;
+        });
+        const auto transported = system.scalar([&](const Point& x) {
+            return x[0] < 1.5 ? -0.1 + 0.5 * x[0] + 0.16 * x[1] : uncut_value;
+        });
+        std::vector<FE::Real> endpoint;
+        const auto result = system.reconcile(0.05, previous, transported, velocity, velocity, endpoint);
+        ASSERT_TRUE(result.success) << result.diagnostic;
+        EXPECT_EQ(result.kinematic_volume_change, 0.0);
+        // Intercepts of the original stationary interface are 0.5/1.1 and 0.5/0.74.
+        const double exact_area = 0.5 * (0.5 / 1.1) * (0.5 / 0.74);
+        EXPECT_NEAR(system.negativeVolume(endpoint), exact_area, 1.0e-12);
+    }
+}
+
 TEST(LevelSetKinematicReconciliation, RedistributesTheFluxShareOfAnInterfaceVertex)
 {
     SimplexSystem s(buildUnitTriangle(), 2);
@@ -1280,6 +1307,28 @@ TEST(LevelSetKinematicReconciliation, KeepsTheWallCharacteristicUnderAnInteriorT
     EXPECT_LE(std::abs(result.reconciled_volume_error), result.volume_tolerance);
     EXPECT_NEAR(wallRoot(s, endpoint, 1, 0), 0.5 * std::exp(dt), 1.0e-12);
     EXPECT_NEAR(wallRoot(s, endpoint, 0, 1), 0.5 * std::exp(-dt), 1.0e-12);
+}
+
+TEST(LevelSetKinematicReconciliation, DistantFlowCannotTurnAnOpenFacetIntoAWall)
+{
+    SimplexSystem system(buildStructuredTriangleMesh(4), 2);
+    constexpr FE::Real dt = 0.05;
+    const auto previous = system.scalar([](const Point& x) { return x[0] + x[1] - 0.3; });
+    const auto transported = system.scalar([](const Point& x) { return x[0] + x[1] - 0.355; });
+    for (const auto far_speed : {1.0, 1.0e7}) {
+        SCOPED_TRACE(far_speed);
+        const auto velocity = system.vector([&](const Point& x) {
+            return x[0] > 0.5 ? Point{far_speed, 0.3 * far_speed, 0.0} : Point{1.0, 0.1, 0.0};
+        });
+        std::vector<FE::Real> endpoint;
+        const auto result = system.reconcile(dt, previous, transported, velocity, velocity, endpoint);
+        ASSERT_TRUE(result.success) << result.diagnostic;
+        EXPECT_EQ(result.wall_trace_dofs, 0u);
+        // Both coordinate boundaries carry flow. The translated plane has
+        // intercept 0.3 + dt * (1 + 0.1) on each of them.
+        EXPECT_NEAR(system.negativeVolume(endpoint), 0.5 * 0.355 * 0.355, 1.0e-13);
+        EXPECT_NEAR(result.current_interface_flux, 1.1 * 0.355, 1.0e-13);
+    }
 }
 
 TEST(LevelSetKinematicReconciliation, KeepsAnExactWallTraceOnTetrahedra)

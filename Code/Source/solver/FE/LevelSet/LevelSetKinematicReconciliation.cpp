@@ -245,14 +245,20 @@ struct InterfaceSums {
     }
 };
 
+struct NodalKinematicRate {
+    Real value{};
+    Real difference_roundoff{};
+    Real transported_roundoff{};
+};
+
 // Accumulate the interface integrals of one cell.  Returns true when the
 // cell is cut by {phi = c}.
 bool accumulateCell(const SimplexCell& cell,
                     std::span<const Real> phi,
-                    std::span<const Real> rate,
+                    std::span<const NodalKinematicRate> rate,
                     bool previous,
                     Real isovalue,
-                    Real rate_roundoff,
+                    Real dt,
                     InterfaceSums& sums,
                     CellTrace& trace)
 {
@@ -304,11 +310,14 @@ bool accumulateCell(const SimplexCell& cell,
         const Real scaled = weight / gradient_norm;
         Real advective = 0.0;
         Real rate_value = 0.0;
+        Real coefficient_roundoff = 0.0;
         const auto& velocity = previous ? cell.previous_velocity : cell.transported_velocity;
         for (int j = 0; j < n; ++j) {
             const auto lj = lambda[static_cast<std::size_t>(j)];
             advective += lj * dot(velocity[static_cast<std::size_t>(j)], gradient);
-            rate_value += lj * rate[cell.dof[static_cast<std::size_t>(j)]];
+            const auto& node = rate[cell.dof[static_cast<std::size_t>(j)]];
+            rate_value += lj * node.value;
+            coefficient_roundoff += lj * node.difference_roundoff;
         }
         if (cell.higher_order_velocity != nullptr) {
             const spaces::FunctionSpace::Value xi{lambda[1], lambda[2], lambda[3]};
@@ -319,7 +328,9 @@ bool accumulateCell(const SimplexCell& cell,
         if (!std::isfinite(advective) || !std::isfinite(rate_value)) {
             throw std::runtime_error("non-finite interface velocity or level-set rate");
         }
-        const Real evaluation_roundoff = rate_roundoff +
+        // The P1 trace uses these barycentric weights at this point. Distant
+        // coefficients cannot certify an error in its material derivative.
+        const Real evaluation_roundoff = coefficient_roundoff / dt +
             Real{64} * std::numeric_limits<Real>::epsilon() * (std::abs(advective) + std::abs(rate_value));
         trace.kinematically_exact = trace.kinematically_exact &&
                                     std::abs(advective + rate_value) <= evaluation_roundoff;
@@ -782,7 +793,7 @@ struct LocalWallTrace {
 };
 
 void collectWallFacet(const SimplexCell& cell, const std::vector<LocalIndex>& face_nodes, int order,
-                      Real isovalue, Real velocity_tolerance, std::span<const Real> previous,
+                      Real isovalue, std::span<const Real> previous,
                       std::span<const Real> transported, LocalWallTrace& local)
 {
     const int m = cell.corners - 1;
@@ -831,6 +842,27 @@ void collectWallFacet(const SimplexCell& cell, const std::vector<LocalIndex>& fa
             }
         }
     }
+    // Normal flow is relative to this facet's velocity trace at each time
+    // level. A large velocity elsewhere cannot make an open facet impermeable.
+    struct FacetVelocity {
+        Real maximum_component{};
+        Real maximum_normal_speed{};
+
+        void sample(const Point& velocity, const Point& normal)
+        {
+            for (const Real value : velocity) {
+                maximum_component = std::max(maximum_component, std::abs(value));
+            }
+            maximum_normal_speed = std::max(maximum_normal_speed, std::abs(dot(velocity, normal)));
+        }
+
+        [[nodiscard]] bool permeable() const
+        {
+            return maximum_normal_speed > std::sqrt(std::numeric_limits<Real>::epsilon()) * maximum_component;
+        }
+    };
+    FacetVelocity previous_trace, transported_trace;
+    Real facet_speed = 0;
     std::vector<std::array<Real, kWallPieceValues>> samples(mu.size());
     for (std::size_t q = 0; q < mu.size(); ++q) {
         Point position{}, reference{}, w_previous{}, w_transported{};
@@ -853,17 +885,19 @@ void collectWallFacet(const SimplexCell& cell, const std::vector<LocalIndex>& fa
             w_previous = {{a[0], a[1], cell.corners == 4 ? a[2] : Real{0}}};
             w_transported = {{b[0], b[1], cell.corners == 4 ? b[2] : Real{0}}};
         }
-        if (std::abs(dot(w_previous, normal)) > velocity_tolerance ||
-            std::abs(dot(w_transported, normal)) > velocity_tolerance) {
-            return;  // a permeable facet carries no wall characteristic
-        }
+        previous_trace.sample(w_previous, normal);
+        transported_trace.sample(w_transported, normal);
         Point mean{};
         for (std::size_t d = 0; d < 3u; ++d) mean[d] = Real{0.5} * (w_previous[d] + w_transported[d]);
         const Real normal_part = dot(mean, normal);
         for (std::size_t d = 0; d < 3u; ++d) mean[d] -= normal_part * normal[d];
-        local.speed = std::max(local.speed, norm(mean));
+        facet_speed = std::max(facet_speed, norm(mean));
         samples[q] = {{position[0], position[1], position[2], phi, mean[0], mean[1], mean[2]}};
     }
+    if (previous_trace.permeable() || transported_trace.permeable()) {
+        return;
+    }
+    local.speed = std::max(local.speed, facet_speed);
     for (const auto& piece : pieces) {
         for (int k = 0; k < m; ++k) {
             const auto& sample = samples[piece[static_cast<std::size_t>(k)]];
@@ -1212,6 +1246,8 @@ struct InterfaceComponents {
 // A read-only endpoint measurement stops after the first trace integration.
 // A supplied flag enables the connected-patch search for a shared node and
 // records whether any of its volume was distributed beyond the first ring.
+// The first attempt can measure a candidate at field-scale roundoff; when that
+// fails its volume tests, a second attempt can resolve changes at each node.
 LevelSetKinematicReconciliationResult integrateKinematicStep(
     const assembly::IMeshAccess& mesh,
     const dofs::DofHandler& level_set_dofs,
@@ -1225,7 +1261,8 @@ LevelSetKinematicReconciliationResult integrateKinematicStep(
     std::span<const Real> transported_velocity,
     std::vector<Real>* reconciled_level_set,
     const spaces::FunctionSpace* velocity_space,
-    bool* used_connected_shared_patch = nullptr)
+    bool* used_connected_shared_patch = nullptr,
+    bool* stopped_above_nodal_roundoff = nullptr)
 {
     LevelSetKinematicReconciliationResult result;
     const auto context = collectiveFor(level_set_dofs);
@@ -1400,26 +1437,24 @@ LevelSetKinematicReconciliationResult integrateKinematicStep(
     }
 
     // ---- previous geometry and transported rate -----------------------------
-    std::vector<Real> rate(n, 0.0);
+    constexpr Real roundoff_factor = Real{64} * std::numeric_limits<Real>::epsilon();
+    std::vector<NodalKinematicRate> rate(n);
+    std::vector<Real> field_roundoff(1, 0);
     for (std::size_t i = 0; i < n; ++i) {
-        rate[i] = (transported_level_set[i] - previous_level_set[i]) / dt;
+        auto& node = rate[i];
+        node.value = (transported_level_set[i] - previous_level_set[i]) / dt;
+        node.transported_roundoff = roundoff_factor * std::abs(transported_level_set[i] - isovalue);
+        const Real previous_roundoff = roundoff_factor * std::abs(previous_level_set[i] - isovalue);
+        node.difference_roundoff = std::max(previous_roundoff, node.transported_roundoff);
+        field_roundoff.front() = std::max(field_roundoff.front(), node.transported_roundoff);
     }
-    Real coefficient_scale = 0;
-    for (const auto value : transported_level_set) {
-        coefficient_scale = std::max(coefficient_scale, std::abs(value - isovalue));
-    }
-    // Field slices are replicated. Use the communicator maximum explicitly so
-    // every rank takes the same stopping and damping decisions.
-    std::vector<Real> scales{coefficient_scale};
-    maxInPlace(context, scales);
-    const Real rounding_floor = Real{64} * std::numeric_limits<Real>::epsilon() * scales.front();
-    const Real rate_roundoff = rounding_floor / dt;
+    maxInPlace(context, field_roundoff);
     InterfaceSums previous(n);
     unsigned long long previous_cut_cells = 0u;
     try {
         for (auto& cell : cells) {
             if (cell.previous_has_surface && accumulateCell(cell, previous_level_set, rate,
-                               true, isovalue, rate_roundoff, previous, cell.previous_trace)) {
+                               true, isovalue, dt, previous, cell.previous_trace)) {
                 ++previous_cut_cells;
             }
         }
@@ -1458,10 +1493,6 @@ LevelSetKinematicReconciliationResult integrateKinematicStep(
     // ---- wall-trace kinematics (collective) ----------------------------------
     LocalWallTrace local_wall;
     try {
-        Real velocity_scale = 0;
-        for (const auto value : previous_velocity) velocity_scale = std::max(velocity_scale, std::abs(value));
-        for (const auto value : transported_velocity) velocity_scale = std::max(velocity_scale, std::abs(value));
-        const Real velocity_tolerance = std::sqrt(std::numeric_limits<Real>::epsilon()) * velocity_scale;
         std::unordered_map<GlobalIndex, std::size_t> owned;
         for (std::size_t c = 0; c < cells.size(); ++c) owned.emplace(cells[c].id, c);
         const auto& reference = elements::ReferenceElement::shared(
@@ -1476,7 +1507,7 @@ LevelSetKinematicReconciliationResult integrateKinematicStep(
             }
             const int order = cell.higher_order_velocity ? std::max(1, velocity_space->polynomial_order(cell_id)) : 1;
             collectWallFacet(cell, reference.face_nodes(static_cast<std::size_t>(local_face)), order, isovalue,
-                             velocity_tolerance, previous_level_set, transported_level_set, local_wall);
+                             previous_level_set, transported_level_set, local_wall);
         });
     } catch (const std::exception& error) {
         local_failure = error.what();
@@ -1537,7 +1568,7 @@ LevelSetKinematicReconciliationResult integrateKinematicStep(
                 Real fraction = 0;
                 const auto classification = cutClass(cell, endpoint, isovalue, geometry_tolerance, minimum_fraction, &fraction);
                 if (hasCutSurface(classification) &&
-                    accumulateCell(cell, endpoint, rate, false, isovalue, rate_roundoff, current, trace)) {
+                    accumulateCell(cell, endpoint, rate, false, isovalue, dt, current, trace)) {
                     ++local_cut_cells;
                 }
                 Real defect = cell.measure * (fraction - cell.previous_fraction);
@@ -1547,8 +1578,9 @@ LevelSetKinematicReconciliationResult integrateKinematicStep(
                     const Real g = Real{0.5} * (cell.previous_trace.g[j] + trace.g[j]);
                     defect += g * (endpoint[cell.dof[j]] - previous_level_set[cell.dof[j]]);
                     weight += g;
+                    const auto dof = cell.dof[j];
                     corrected = corrected ||
-                                std::abs(endpoint[cell.dof[j]] - transported_level_set[cell.dof[j]]) > rounding_floor;
+                                std::abs(endpoint[dof] - transported_level_set[dof]) > rate[dof].transported_roundoff;
                 }
                 supported_cell[c] = weight > 0;
                 const bool exact = !corrected && trace.kinematically_exact &&
@@ -2068,11 +2100,16 @@ LevelSetKinematicReconciliationResult integrateKinematicStep(
             }
         }
         Real change = 0.0;
+        Real change_above_roundoff = 0.0;
         Real correction = 0.0;
         for (std::size_t i = 0; i < n; ++i) {
             const Real value = transported_level_set[i] + delta[i];
             candidate[i] = value;
-            change = std::max(change, std::abs(value - iterate[i]));
+            const Real node_change = std::abs(value - iterate[i]);
+            change = std::max(change, node_change);
+            if (node_change > rate[i].transported_roundoff) {
+                change_above_roundoff = std::max(change_above_roundoff, node_change);
+            }
             correction = std::max(correction, std::abs(delta[i]));
         }
         correction_volume = 0;
@@ -2096,7 +2133,8 @@ LevelSetKinematicReconciliationResult integrateKinematicStep(
         prior_change = change;
         iterate.swap(candidate);
         result.iterations = iteration + 1;
-        if (change <= std::max(kGeometryRelativeTolerance * correction, rounding_floor)) {
+        const bool nodal_convergence = change_above_roundoff <= kGeometryRelativeTolerance * correction;
+        if (nodal_convergence || (stopped_above_nodal_roundoff && change <= field_roundoff.front())) {
             // The volume budget takes precedence: wall-trace nodes of a connected
             // interface that cannot otherwise meet it join the interior correction.
             const auto measured = computeLevelSetCutCellVolume(
@@ -2116,6 +2154,9 @@ LevelSetKinematicReconciliationResult integrateKinematicStep(
                 }
             }
             if (!released) {
+                if (stopped_above_nodal_roundoff) {
+                    *stopped_above_nodal_roundoff = !nodal_convergence && unplaced_volume <= limit;
+                }
                 result.converged = true;
                 break;
             }
@@ -2248,9 +2289,19 @@ LevelSetKinematicReconciliationResult reconcileLevelSetWithKinematicFlux(
     std::vector<Real>& reconciled_level_set, const spaces::FunctionSpace* velocity_space)
 {
     const auto reconcile = [&](bool* used_connected_shared_patch) {
-        return integrateKinematicStep(mesh, level_set_dofs, velocity_dofs, isovalue, tolerance, dt,
-            previous_level_set, transported_level_set, previous_velocity, transported_velocity,
-            &reconciled_level_set, velocity_space, used_connected_shared_patch);
+        const auto attempt = [&](bool* stopped_above_nodal_roundoff) {
+            return integrateKinematicStep(mesh, level_set_dofs, velocity_dofs, isovalue, tolerance, dt,
+                previous_level_set, transported_level_set, previous_velocity, transported_velocity,
+                &reconciled_level_set, velocity_space, used_connected_shared_patch, stopped_above_nodal_roundoff);
+        };
+        bool stopped_above_nodal_roundoff = false;
+        auto result = attempt(&stopped_above_nodal_roundoff);
+        if (result.retryable_failure && stopped_above_nodal_roundoff) {
+            // A remote large coefficient need not limit a cut node's precision.
+            // Retry only when the measured candidate actually fails its balance.
+            result = attempt(nullptr);
+        }
+        return result;
     };
     bool used_connected_shared_patch = false;
     auto result = reconcile(&used_connected_shared_patch);
