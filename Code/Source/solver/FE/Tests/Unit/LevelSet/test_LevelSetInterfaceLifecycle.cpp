@@ -2207,7 +2207,8 @@ level_set::LevelSetGeneratedInterfaceResult buildSingleQuadSayeCut(
     int interface_marker,
     level_set::ImplicitCutFallbackPolicy fallback_policy =
         level_set::ImplicitCutFallbackPolicy::Fail,
-    bool require_production_qualified = false)
+    bool require_production_qualified = false,
+    FE::geometry::CutIntegrationSide aligned_parent_side = FE::geometry::CutIntegrationSide::Interface)
 {
     const auto mesh = std::make_shared<SingleQuadMeshAccess>(FE::ElementType::Quad9);
     auto scalar_space =
@@ -2241,6 +2242,7 @@ level_set::LevelSetGeneratedInterfaceResult buildSingleQuadSayeCut(
     options.implicit_cut_quadrature_backend =
         level_set::ImplicitCutQuadratureBackend::SayeHyperrectangle;
     options.require_production_qualified_implicit_cut_backend = require_production_qualified;
+    options.aligned_zero_interface_parent_side = aligned_parent_side;
     options.implicit_cut_max_subdivision_depth = subdivision_depth;
     options.interface_quadrature_order = interface_order;
     options.volume_quadrature_order = volume_order;
@@ -3991,6 +3993,35 @@ TEST(LevelSetInterfaceLifecycle,
         EXPECT_NEAR(cut.summary.negative_volume_measure, flux, 2.0e-11);
         EXPECT_NEAR(cut.summary.positive_volume_measure, 4.0 - area, 2.0e-11);
     }
+}
+
+TEST(LevelSetInterfaceLifecycle, QualifiedAlignedFacetDoesNotHideASecondRoot)
+{
+    // The touch-only parent facet at x=1 also bounds a parent cut at x=0.
+    const auto cut = buildSingleQuadSayeCut(
+        [](const auto& x) { return x[0] * (x[0] - 1.0); },
+        0, 2, 2, 926, level_set::ImplicitCutFallbackPolicy::Fail, true);
+    ASSERT_TRUE(cut.success) << cut.diagnostic;
+    EXPECT_NEAR(cut.summary.measure, 2.0, 1.0e-12);
+    EXPECT_NEAR(cut.summary.negative_volume_measure, 2.0, 1.0e-12);
+    EXPECT_NEAR(cut.summary.positive_volume_measure, 2.0, 1.0e-12);
+    for (const auto& rule : cut.domain.interfaceQuadratureRules()) {
+        for (const auto& point : rule.points) {
+            EXPECT_NEAR(point.parent_coordinate[0], 0.0, 1.0e-12);
+        }
+    }
+}
+
+TEST(LevelSetInterfaceLifecycle, StrictlyPositiveParentDoesNotPublishANearbyZeroFacet)
+{
+    const auto cut = buildSingleQuadSayeCut(
+        [](const auto& x) { return (x[0] + 1.0) * (x[0] + 3.0) + 1.0e-15; },
+        0, 2, 2, 927, level_set::ImplicitCutFallbackPolicy::Fail, true,
+        FE::geometry::CutIntegrationSide::Positive);
+    ASSERT_TRUE(cut.success) << cut.diagnostic;
+    EXPECT_DOUBLE_EQ(cut.summary.measure, 0.0);
+    EXPECT_DOUBLE_EQ(cut.summary.negative_volume_measure, 0.0);
+    EXPECT_NEAR(cut.summary.positive_volume_measure, 4.0, 1.0e-12);
 }
 
 TEST(LevelSetInterfaceLifecycle,

@@ -6,6 +6,7 @@
 #include "Basis/NodeOrderingConventions.h"
 #include "Dofs/DofHandler.h"
 #include "Dofs/EntityDofMap.h"
+#include "Geometry/CutQuadratureMapping.h"
 #include "Interfaces/LevelSetGeometrySnapshot.h"
 #include "LevelSet/LevelSetDiagnostics.h"
 #include "LevelSet/LevelSetGeometryService.h"
@@ -457,6 +458,107 @@ TEST(LevelSetVolume, CutCellVolumeSupportsLinearHexWedgeAndPyramidCuts)
         EXPECT_NEAR(result.positive_volume,
                     c.total_volume - c.negative_volume,
                     1.0e-12);
+    }
+#endif
+}
+
+TEST(LevelSetVolume, QualifiedAdjacentQuadrilateralsPublishTheSharedInterfaceOnce)
+{
+#if !(defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH)
+    GTEST_SKIP() << "Requires FE built with Mesh integration.";
+#else
+    // Two unit quads share the zero edge x=1. The Q2 field turns in x, and
+    // its strictly positive quadratic factor in y has a negative Bernstein control.
+    auto base = std::make_shared<svmp::MeshBase>();
+    svmp::CellShape shape{};
+    shape.family = svmp::CellFamily::Quad;
+    shape.num_corners = 4;
+    shape.order = 1;
+    base->build_from_arrays(2, {0, 0, 1, 0, 2, 0, 0, 1, 1, 1, 2, 1},
+                            {0, 4, 8}, {0, 1, 4, 3, 1, 2, 5, 4}, {shape, shape});
+    base->finalize();
+    FE::systems::FESystem system(svmp::create_mesh(std::move(base)));
+    const auto phi = system.addField({
+        .name = "phi",
+        .space = std::make_shared<FE::spaces::H1Space>(FE::ElementType::Quad4, 2),
+        .components = 1,
+    });
+    system.setup();
+    const auto& field = system.fieldDofHandler(phi);
+    const auto nodes = FE::basis::ReferenceNodeLayout::get_lagrange_node_coords(
+        FE::ElementType::Quad4, 2);
+    const auto physical_x = [](FE::GlobalIndex cell, const auto& xi) {
+        return static_cast<FE::Real>(cell) + (xi[0] + 1.0) / 2.0;
+    };
+    using Side = FE::geometry::CutIntegrationSide;
+    level_set::LevelSetGeneratedInterfaceOptions options;
+    options.level_set_field_name = "phi";
+    options.requested_interface_marker = 928;
+    options.geometry_mode = level_set::GeneratedInterfaceGeometryMode::HighOrderImplicit;
+    options.implicit_cut_quadrature_backend =
+        level_set::ImplicitCutQuadratureBackend::SayeHyperrectangle;
+    options.require_production_qualified_implicit_cut_backend = true;
+    options.implicit_cut_max_subdivision_depth = 0;
+    options.interface_quadrature_order = 2;
+    options.volume_quadrature_order = 2;
+    for (const FE::Real sign : {1.0, -1.0}) {
+        SCOPED_TRACE(sign);
+        const auto value = [sign, physical_x](FE::GlobalIndex cell, const auto& xi) {
+            const auto x = physical_x(cell, xi);
+            return sign * (x - 1.0) * (x + 0.25) * (xi[1] * xi[1] + 0.125);
+        };
+        FE::interfaces::LevelSetGeometryScalarEvaluator scalar;
+        scalar.value = [value](FE::GlobalIndex cell, const auto& xi, const auto&) {
+            return value(cell, xi);
+        };
+        scalar.reference_gradient =
+            [sign, physical_x](FE::GlobalIndex cell, const auto& xi, const auto&) {
+                const auto x = physical_x(cell, xi);
+                return std::array<FE::Real, 3>{
+                    sign * (x - 0.375) * (xi[1] * xi[1] + 0.125),
+                    sign * (x - 1.0) * (x + 0.25) * 2.0 * xi[1], 0.0};
+            };
+        std::vector<FE::Real> solution(static_cast<std::size_t>(field.getNumDofs()));
+        for (FE::GlobalIndex cell = 0; cell < 2; ++cell) {
+            const auto dofs = field.getCellDofs(cell);
+            ASSERT_EQ(dofs.size(), nodes.size());
+            for (std::size_t i = 0; i < dofs.size(); ++i) {
+                solution.at(static_cast<std::size_t>(dofs[i])) = value(cell, nodes[i]);
+            }
+        }
+        for (const auto side : {Side::Interface, Side::Negative, Side::Positive}) {
+            SCOPED_TRACE(static_cast<int>(side));
+            options.aligned_zero_interface_parent_side = side;
+            level_set::LevelSetGeneratedInterfaceLifecycle lifecycle;
+            const auto cut = lifecycle.build(system, options, solution);
+            ASSERT_TRUE(cut.success) << cut.diagnostic;
+            const FE::Real expected_length = side == Side::Interface ? 0.0 : 1.0;
+            FE::Real length = 0.0;
+            FE::Real normal_flux = 0.0;
+            for (const auto& rule : cut.domain.interfaceQuadratureRules()) {
+                const auto mapped = FE::geometry::mapCutQuadratureRuleToPhysical(system.meshAccess(), rule);
+                length += mapped.physical_measure;
+                for (const auto& point : mapped.points) {
+                    normal_flux += point.physical_weight * point.normal[0];
+                }
+                const FE::GlobalIndex negative_parent = sign > 0.0 ? 0 : 1;
+                EXPECT_EQ(rule.provenance.parent_entity,
+                          side == Side::Negative ? negative_parent : 1 - negative_parent);
+            }
+            EXPECT_NEAR(length, expected_length, 1.0e-12);
+            EXPECT_NEAR(normal_flux, sign * expected_length, 1.0e-12);
+            FE::interfaces::LevelSetGeometrySnapshotPolicy policy;
+            policy.require_complete_exterior_boundary_partition = false;
+            if (side != Side::Interface) {
+                policy.interface_retention_side = side;
+            }
+            const auto snapshot = FE::interfaces::buildLevelSetGeometrySnapshot(
+                cut.domain, {}, {}, system.meshAccess(), policy, scalar, "aligned-quads");
+            ASSERT_TRUE(snapshot);
+            EXPECT_NEAR(snapshot->ledger().interface_physical_measure, expected_length, 1.0e-12);
+            EXPECT_NEAR(snapshot->ledger().retained_negative_physical_volume, 1.0, 1.0e-12);
+            EXPECT_NEAR(snapshot->ledger().retained_positive_physical_volume, 1.0, 1.0e-12);
+        }
     }
 #endif
 }

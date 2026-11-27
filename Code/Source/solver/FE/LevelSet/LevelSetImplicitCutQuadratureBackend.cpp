@@ -942,8 +942,59 @@ struct CertifiedRegularGraph {
     int axis{-1};
     bool lower_face_zero{false};
     bool upper_face_zero{false};
+    geometry::CutIntegrationSide aligned_interior_side{geometry::CutIntegrationSide::Interface};
     bool coordinatewise_monotone{false};
 };
+
+constexpr int kCertifiedRangeExtraSubdivisionDepth = 6;
+
+// All Bernstein basis functions are positive in the open cell. Strict sign
+// of every off-face coefficient also certifies a nonzero normal derivative
+// along the zero face. Subdivide ambiguous control hulls before giving up.
+[[nodiscard]] std::optional<geometry::CutIntegrationSide> certifiedSignOffRectangleFace(
+    const std::vector<OutwardInterval>& control,
+    const TensorBernsteinCertificate& certificate,
+    int face_axis,
+    std::optional<std::size_t> face_index,
+    int depth = 0)
+{
+    const auto n = certificate.axis_size;
+    const auto stride = integerPower(n, face_axis);
+    bool positive = true;
+    bool negative = true;
+    for (std::size_t i = 0; i < control.size(); ++i) {
+        if (face_index == (i / stride) % n) {
+            continue;
+        }
+        positive = positive && control[i].lower > 0.0L;
+        negative = negative && control[i].upper < 0.0L;
+    }
+    if (positive || negative) {
+        return positive ? geometry::CutIntegrationSide::Positive
+                        : geometry::CutIntegrationSide::Negative;
+    }
+    if (depth == kCertifiedRangeExtraSubdivisionDepth) {
+        return std::nullopt;
+    }
+    const int axis = depth % 2;
+    const auto lower = certificate.reference_min[axis];
+    const auto upper = certificate.reference_max[axis];
+    const auto middle = std::midpoint(lower, upper);
+    const auto half_sign = [&](bool upper_half) {
+        auto child = control;
+        // Restrict the current control polygon to its lower or upper half.
+        restrictTensorControlAxis(child, certificate, axis,
+                                  upper_half ? middle : lower,
+                                  upper_half ? upper : middle);
+        auto child_face = face_index;
+        if (axis == face_axis && child_face && upper_half != (*child_face != 0u)) {
+            child_face.reset();
+        }
+        return certifiedSignOffRectangleFace(child, certificate, face_axis, child_face, depth + 1);
+    };
+    const auto left = half_sign(false);
+    return left && left == half_sign(true) ? left : std::nullopt;
+}
 
 [[nodiscard]] long double certifiedControlRoundoffZeroBound(
     const std::vector<OutwardInterval>& control) noexcept
@@ -1078,6 +1129,13 @@ struct CertifiedRegularGraph {
     const auto total = integerPower(n, certificate.dimension);
     const long double roundoff_zero_bound =
         certifiedControlRoundoffZeroBound(control);
+    const auto is_zero_face_control = [&](const OutwardInterval& value, bool parent_facet) {
+        // Adjacent subdivision leaves may snap the same rounded interior root.
+        // Publishing a physical parent facet requires the represented face to admit zero.
+        return (!parent_facet || (value.lower <= 0.0L && value.upper >= 0.0L)) &&
+               isCertifiedRoundoffZero(value, std::min(
+                   static_cast<long double>(root_tolerance), roundoff_zero_bound));
+    };
     std::optional<CertifiedRegularGraph> face_bracketed_graph;
     int strictly_monotone_axis_count = 0;
     int first_strictly_monotone_axis = -1;
@@ -1111,14 +1169,10 @@ struct CertifiedRegularGraph {
                 upper_face_positive =
                     upper_face_positive &&
                     upper_face_value.lower > tolerance;
-                lower_face_zero =
-                    lower_face_zero &&
-                    lower_face_value.lower >= -tolerance &&
-                    lower_face_value.upper <= tolerance;
-                upper_face_zero =
-                    upper_face_zero &&
-                    upper_face_value.lower >= -tolerance &&
-                    upper_face_value.upper <= tolerance;
+                lower_face_zero = lower_face_zero && is_zero_face_control(
+                    lower_face_value, lower[axis] == certificate.reference_min[axis]);
+                upper_face_zero = upper_face_zero && is_zero_face_control(
+                    upper_face_value, upper[axis] == certificate.reference_max[axis]);
                 for (std::size_t i = 0u; i + 1u < n; ++i) {
                     const auto difference = subtractIntervals(
                         control[base + inner + (i + 1u) * stride],
@@ -1128,6 +1182,18 @@ struct CertifiedRegularGraph {
                     strictly_decreasing =
                         strictly_decreasing && difference.upper < 0.0L;
                 }
+            }
+        }
+        if (certificate.dimension == 2 && lower_face_zero != upper_face_zero) {
+            const auto interior = certifiedSignOffRectangleFace(
+                control, certificate, axis, lower_face_zero ? 0u : n - 1u);
+            if (interior) {
+                return CertifiedRegularGraph{
+                    .axis = axis,
+                    .lower_face_zero = lower_face_zero,
+                    .upper_face_zero = upper_face_zero,
+                    .aligned_interior_side = *interior,
+                };
             }
         }
         const bool increasing_graph_bracket = strictly_increasing &&
@@ -1186,6 +1252,9 @@ struct CertifiedRegularGraph {
                 .axis = axis,
                 .lower_face_zero = lower_face_zero,
                 .upper_face_zero = upper_face_zero,
+                .aligned_interior_side = lower_face_zero == strictly_increasing
+                    ? geometry::CutIntegrationSide::Positive
+                    : geometry::CutIntegrationSide::Negative,
                 .coordinatewise_monotone = false,
             };
         }
@@ -1397,13 +1466,22 @@ certifiedOneSidedBoundaryTouch(
 [[nodiscard]] bool certifiedGraphLeafOwnsInterface(
     const TensorBernsteinCertificate& certificate,
     const CertifiedRegularGraph& graph,
-    const std::array<Real, 3>& lower) noexcept
+    const std::array<Real, 3>& lower,
+    const std::array<Real, 3>& upper,
+    geometry::CutIntegrationSide requested_parent_side) noexcept
 {
-    if (!graph.lower_face_zero || graph.upper_face_zero) {
+    if (!graph.lower_face_zero && !graph.upper_face_zero) {
         return true;
     }
     const auto axis = static_cast<std::size_t>(graph.axis);
-    return lower[axis] <= certificate.reference_min[axis];
+    const bool on_parent_facet = graph.lower_face_zero
+        ? lower[axis] == certificate.reference_min[axis]
+        : upper[axis] == certificate.reference_max[axis];
+    if (!on_parent_facet) {
+        // Interior subdivision faces belong to the leaf on their lower side.
+        return graph.upper_face_zero;
+    }
+    return requested_parent_side == graph.aligned_interior_side;
 }
 
 [[nodiscard]] Real intervalLowerAsReal(long double value) noexcept
@@ -1476,7 +1554,6 @@ struct SayeHyperrectangleDiagnostics {
 };
 
 constexpr int kTerminalTopologyExtraSubdivisionDepth = 2;
-constexpr int kCertifiedRangeExtraSubdivisionDepth = 6;
 
 [[nodiscard]] Real rectangleMeasure(const Rectangle2D& rect) noexcept
 {
@@ -4990,6 +5067,7 @@ void appendCertifiedAlignedRectangleFragment(
     const ImplicitCutQuadratureBackendCellInput& input,
     const Rectangle2D& rect,
     const CertifiedRegularGraph& graph,
+    const interfaces::CutInterfaceVolumeRegion& interior,
     SayeHyperrectangleDiagnostics& diagnostics)
 {
     const bool lower_face = graph.lower_face_zero;
@@ -5020,8 +5098,14 @@ void appendCertifiedAlignedRectangleFragment(
     const Real dx = b[0] - a[0];
     const Real dy = b[1] - a[1];
     fragment.measure = std::sqrt(dx * dx + dy * dy);
-    fragment.min_level_set_value = -request.implicit_cut_root_tolerance;
-    fragment.max_level_set_value = request.implicit_cut_root_tolerance;
+    fragment.min_level_set_value = interior.min_level_set_value;
+    fragment.max_level_set_value = interior.max_level_set_value;
+    if (interior.full_cell_equivalent) {
+        fragment.degeneracy = interfaces::CutInterfaceDegeneracy::EdgeTouch;
+        fragment.negative_volume_fraction =
+            interior.side == geometry::CutIntegrationSide::Negative ? Real{1} : Real{0};
+        fragment.positive_volume_fraction = Real{1} - fragment.negative_volume_fraction;
+    }
     fragment.conditioning_diagnostic =
         "certified-aligned-regular-graph";
     fragment.max_root_residual = std::abs(evaluation.value - input.isovalue);
@@ -5921,12 +6005,11 @@ void appendAdaptiveRectangleCut(
     if (certificate != nullptr) {
         certified_range = certifiedRectangleRange(*certificate, rect);
         ++diagnostics.certified_range_query_count;
-        certified_negative =
-            certified_range->upper <
-            -static_cast<long double>(request.implicit_cut_root_tolerance);
-        certified_positive =
-            certified_range->lower >
-            static_cast<long double>(request.implicit_cut_root_tolerance);
+        // A strict sign over the whole parent excludes every zero. Within
+        // the parent retain the root band shared by adjacent subdivision leaves.
+        const long double sign_band = depth == 0 ? 0.0L : request.implicit_cut_root_tolerance;
+        certified_negative = certified_range->upper < -sign_band;
+        certified_positive = certified_range->lower > sign_band;
         min_signed = std::min(
             min_signed, intervalLowerAsReal(certified_range->lower));
         max_signed = std::max(
@@ -5961,37 +6044,32 @@ void appendAdaptiveRectangleCut(
             *certificate,
             rect,
             request.implicit_cut_root_tolerance);
-        const bool topology_resolution_sufficient =
-            regular_graph.has_value() &&
-            depth >= max_depth + 3;
-        if (topology_resolution_sufficient) {
+        if (regular_graph &&
+            (regular_graph->lower_face_zero || regular_graph->upper_face_zero)) {
+            // A certified zero face bounds a single full-volume phase. Zero
+            // is the sharp range endpoint even if the original control hull
+            // reached into the other phase before subdivision.
             ++diagnostics.certified_regular_graph_leaf_count;
-            const bool retain_interface =
-                certifiedGraphLeafOwnsInterface(
-                    *certificate,
-                    *regular_graph,
-                    {{rect.xmin, rect.ymin, 0.0}});
-            const auto first_fragment = cut.fragments.size();
-            appendLinearizedRectangleCut(
-                cut,
-                request,
-                input,
-                rect,
-                parent_measure,
-                diagnostics,
-                retain_interface, regular_graph->axis);
-            if (retain_interface &&
-                cut.fragments.size() == first_fragment &&
-                (regular_graph->lower_face_zero ||
-                 regular_graph->upper_face_zero)) {
+            const auto side = regular_graph->aligned_interior_side;
+            appendFullRectangleRegion(cut, request, input, rect,
+                                      side, parent_measure,
+                                      side == geometry::CutIntegrationSide::Negative ? min_signed : Real{0},
+                                      side == geometry::CutIntegrationSide::Positive ? max_signed : Real{0},
+                                      diagnostics);
+            if (certifiedGraphLeafOwnsInterface(*certificate, *regular_graph,
+                    {{rect.xmin, rect.ymin, 0.0}},
+                    {{rect.xmax, rect.ymax, 0.0}},
+                    request.aligned_zero_interface_parent_side)) {
                 appendCertifiedAlignedRectangleFragment(
-                    cut,
-                    request,
-                    input,
-                    rect,
-                    *regular_graph,
-                    diagnostics);
+                    cut, request, input, rect, *regular_graph,
+                    cut.volume_regions.back(), diagnostics);
             }
+            return;
+        }
+        if (regular_graph && depth >= max_depth + 3) {
+            ++diagnostics.certified_regular_graph_leaf_count;
+            appendLinearizedRectangleCut(cut, request, input, rect, parent_measure,
+                                         diagnostics, true, regular_graph->axis);
             return;
         }
     }
@@ -6230,7 +6308,9 @@ void appendAdaptiveBoxCut(
                     certifiedGraphLeafOwnsInterface(
                         *certificate,
                         *regular_graph,
-                        {{box.xmin, box.ymin, box.zmin}});
+                        {{box.xmin, box.ymin, box.zmin}},
+                        {{box.xmax, box.ymax, box.zmax}},
+                        request.aligned_zero_interface_parent_side);
                 appendLinearizedBoxCut(
                     cut,
                     request,
