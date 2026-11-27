@@ -11,32 +11,13 @@
 #include "FE/Quadrature/QuadrilateralQuadrature.h"
 #include "FE/Quadrature/HexahedronQuadrature.h"
 #include "FE/Quadrature/WedgeQuadrature.h"
+#include "FE/Quadrature/ReferenceMonomialIntegrals.h"
+#include <limits>
 #include <numeric>
 #include <cmath>
 #include <vector>
 
 using namespace svmp::FE::quadrature;
-
-namespace {
-[[maybe_unused]] double factorial_int(int n) {
-    double v = 1.0;
-    for (int i = 2; i <= n; ++i) v *= static_cast<double>(i);
-    return v;
-}
-
-double triangle_monomial_integral(int a, int b) {
-    // Reference triangle (0,0)-(1,0)-(0,1): ∫ x^a y^b dA = a! b! / (a+b+2)!
-    return factorial_int(a) * factorial_int(b) / factorial_int(a + b + 2);
-}
-
-double line_monomial_integral(int k) {
-    // Reference line [-1,1]: ∫ z^k dz = 0 for odd k, 2/(k+1) for even k.
-    if ((k % 2) != 0) {
-        return 0.0;
-    }
-    return 2.0 / static_cast<double>(k + 1);
-}
-}
 
 TEST(PolynomialSweep, Gauss1DOrders) {
     for (int n = 1; n <= 5; ++n) {
@@ -78,50 +59,42 @@ TEST(PolynomialSweep, GaussLobattoOrders) {
 }
 
 TEST(PolynomialSweep, TriangleMonomials) {
-    // Integrate x^a y^b using a high-order reference for comparison
-    TriangleQuadrature ref(8);
-    for (int order = 2; order <= 5; ++order) {
+    for (int order = 1; order <= 6; ++order) {
         TriangleQuadrature quad(order);
-        // Limit to total degree within quadratic for robustness
-        for (int a = 0; a <= 2; ++a) {
-            for (int b = 0; b + a <= 2; ++b) {
-                double acc = 0.0;
-                double ref_acc = 0.0;
+        ASSERT_GE(quad.order(), order);
+        for (int a = 0; a <= quad.order(); ++a) {
+            for (int b = 0; a + b <= quad.order(); ++b) {
+                long double sum = 0.0L;
                 for (std::size_t i = 0; i < quad.num_points(); ++i) {
                     const auto& p = quad.point(i);
-                    acc += quad.weight(i) * std::pow(p[0], a) * std::pow(p[1], b);
+                    sum += quad.weight(i) * std::pow(static_cast<long double>(p[0]), a) *
+                           std::pow(static_cast<long double>(p[1]), b);
                 }
-                for (std::size_t i = 0; i < ref.num_points(); ++i) {
-                    const auto& p = ref.point(i);
-                    ref_acc += ref.weight(i) * std::pow(p[0], a) * std::pow(p[1], b);
-                }
-                EXPECT_NEAR(acc, ref_acc, 1e-4);
+                const double exact = reference_integrals::integral_triangle_monomial(a, b);
+                EXPECT_NEAR(static_cast<double>(sum), exact, 64 * std::numeric_limits<double>::epsilon() * exact)
+                    << "order " << order << ", exponents " << a << "," << b;
             }
         }
     }
 }
 
 TEST(PolynomialSweep, TetrahedronMonomials) {
-    TetrahedronQuadrature ref(10);
-    for (int order = 3; order <= 6; ++order) {
+    for (int order = 1; order <= 6; ++order) {
         TetrahedronQuadrature quad(order);
-        for (int a = 0; a <= 2; ++a) {
-            for (int b = 0; b + a <= 2; ++b) {
-                for (int c = 0; c + a + b <= 2; ++c) {
-                    double acc = 0.0;
-                    double ref_acc = 0.0;
+        ASSERT_GE(quad.order(), order);
+        for (int a = 0; a <= quad.order(); ++a) {
+            for (int b = 0; a + b <= quad.order(); ++b) {
+                for (int c = 0; a + b + c <= quad.order(); ++c) {
+                    long double sum = 0.0L;
                     for (std::size_t i = 0; i < quad.num_points(); ++i) {
                         const auto& p = quad.point(i);
-                        acc += quad.weight(i) *
-                               std::pow(p[0], a) * std::pow(p[1], b) * std::pow(p[2], c);
+                        sum += quad.weight(i) * std::pow(static_cast<long double>(p[0]), a) *
+                               std::pow(static_cast<long double>(p[1]), b) *
+                               std::pow(static_cast<long double>(p[2]), c);
                     }
-                    for (std::size_t i = 0; i < ref.num_points(); ++i) {
-                        const auto& p = ref.point(i);
-                        ref_acc += ref.weight(i) *
-                                   std::pow(p[0], a) * std::pow(p[1], b) * std::pow(p[2], c);
-                    }
-                    double tol = std::abs(ref_acc) * 0.2 + 1e-6; // allow modest relative error
-                    EXPECT_NEAR(acc, ref_acc, tol);
+                    const double exact = reference_integrals::integral_tetra_monomial(a, b, c);
+                    EXPECT_NEAR(static_cast<double>(sum), exact, 64 * std::numeric_limits<double>::epsilon() * exact)
+                        << "order " << order << ", exponents " << a << "," << b << "," << c;
                 }
             }
         }
@@ -186,7 +159,7 @@ TEST(PolynomialSweep, WedgeMonomialsIsotropic) {
                                std::pow(p[2], c);
                     }
 
-                    const double exact = triangle_monomial_integral(a, b) * line_monomial_integral(c);
+                    const double exact = reference_integrals::integral_wedge_monomial(a, b, c);
                     const double tol = std::max(1e-12, std::abs(exact) * 1e-11);
                     EXPECT_NEAR(acc, exact, tol)
                         << "Order " << order << " failed for x^" << a
@@ -226,7 +199,7 @@ TEST(PolynomialSweep, WedgeMonomialsAnisotropic) {
                                std::pow(p[2], pz);
                     }
 
-                    const double exact = triangle_monomial_integral(a, b) * line_monomial_integral(pz);
+                    const double exact = reference_integrals::integral_triangle_monomial(a, b) * reference_integrals::integral_monomial_1d(pz);
                     const double tol = std::max(1e-12, std::abs(exact) * 1e-11);
                     EXPECT_NEAR(acc, exact, tol)
                         << "Anisotropic (" << c.tri_order << "," << c.line_order

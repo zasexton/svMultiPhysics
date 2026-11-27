@@ -10,6 +10,7 @@
 #include "SymmetricTetrahedronQuadrature.h"
 #include "SymmetricTriangleQuadrature.h"
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <cstdint>
 #include <cstring>
@@ -89,6 +90,51 @@ std::shared_ptr<QuadratureRule> positive_interior_symmetric_rule(int order, int 
     return nullptr;
 }
 
+// A radial Gauss rule from one apex times a symmetric facet rule is exact
+// on the simplex. Averaging over all apex choices makes the weighted point
+// set invariant under every vertex permutation and preserves positive weights.
+class SymmetricConicalQuadrature final : public QuadratureRule {
+public:
+    SymmetricConicalQuadrature(int order, const QuadratureRule& facet)
+        : QuadratureRule(facet.dimension() == 1 ? CellFamily::Triangle : CellFamily::Tetra,
+                         facet.dimension() + 1)
+    {
+        const int dim = dimension();
+        // The radial Jacobian r^(dim-1) raises the required degree by dim-1.
+        GaussQuadrature1D radial(order / 2 + (order % 2 + dim + 1) / 2);
+        set_order(std::min(facet.order(), radial.order() - dim + 1));
+        const Real facet_scale = dim == 2 ? 0.5 : 1.0;  // line [-1,1] to [0,1]
+        std::vector<QuadPoint> points;
+        std::vector<Real> weights;
+        const auto count = (dim + 1) * radial.num_points() * facet.num_points();
+        points.reserve(count);
+        weights.reserve(count);
+        for (std::size_t i = 0; i < radial.num_points(); ++i) {
+            const Real r = 0.5 * (1.0 + radial.point(i)[0]);
+            const Real jacobian = dim == 2 ? r : r * r;
+            const Real weight = 0.5 * radial.weight(i) * jacobian * facet_scale / (dim + 1);
+            for (std::size_t q = 0; q < facet.num_points(); ++q) {
+                std::array<Real, 3> base{1.0, 0.0, 0.0};
+                for (int j = 1; j < dim; ++j) {
+                    const Real x = facet.point(q)[j - 1];
+                    base[j] = dim == 2 ? 0.5 * (1.0 + x) : x;
+                    base[0] -= base[j];
+                }
+                for (int apex = 0; apex <= dim; ++apex) {
+                    std::array<Real, 4> lambda{};
+                    lambda[apex] = 1.0 - r;
+                    for (int j = 0; j < dim; ++j) {
+                        lambda[j < apex ? j : j + 1] = r * base[j];
+                    }
+                    points.push_back({lambda[1], lambda[2], lambda[3]});
+                    weights.push_back(weight * facet.weight(q));
+                }
+            }
+        }
+        set_data(std::move(points), std::move(weights));
+    }
+};
+
 /**
  * @brief Build an order-based quadrature rule
  */
@@ -118,7 +164,8 @@ std::shared_ptr<QuadratureRule> build_rule(ElementType element_type,
                     effective_order, SymmetricTriangleQuadrature::max_order())) {
                 return rule;
             }
-            return std::make_shared<TriangleQuadrature>(effective_order);
+            return std::make_shared<SymmetricConicalQuadrature>(
+                effective_order, GaussQuadrature1D(effective_order / 2 + 1));
         case ElementType::Quad4:
             return std::make_shared<QuadrilateralQuadrature>(order, type);
         case ElementType::Tetra4:
@@ -126,7 +173,8 @@ std::shared_ptr<QuadratureRule> build_rule(ElementType element_type,
                     effective_order, SymmetricTetrahedronQuadrature::max_tabulated_order())) {
                 return rule;
             }
-            return std::make_shared<TetrahedronQuadrature>(effective_order);
+            return std::make_shared<SymmetricConicalQuadrature>(
+                effective_order, *build_rule(ElementType::Triangle3, effective_order, QuadratureType::GaussLegendre));
         case ElementType::Hex8:
             return std::make_shared<HexahedronQuadrature>(order, type);
         case ElementType::Wedge6:

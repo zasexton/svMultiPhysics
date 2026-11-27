@@ -63,8 +63,8 @@ public:
      * Triangles and tetrahedra take the permutation-symmetric tabulated rule
      * of the lowest degree >= order with positive weights and interior points
      * (its order() may exceed the request), so that results do not depend on
-     * the vertex numbering; they take the collapsed Gauss product when no such
-     * rule is tabulated.
+     * the vertex numbering. Higher degrees use a positive radial Gauss product
+     * with a symmetric facet rule, averaged over all simplex vertices.
      *
      * @param element_type The element type (higher-order elements are mapped to their linear base)
      * @param order Desired polynomial exactness

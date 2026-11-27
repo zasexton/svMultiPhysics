@@ -6,6 +6,8 @@
 #include <gtest/gtest.h>
 #include "FE/Quadrature/QuadratureFactory.h"
 #include "FE/Quadrature/GaussLobattoQuadrature.h"
+#include "Tests/Unit/Quadrature/SimplexSymmetryTestHelpers.h"
+#include "FE/Quadrature/ReferenceMonomialIntegrals.h"
 #include "FE/Core/FEException.h"
 #include "FE/Core/Types.h"
 #include <algorithm>
@@ -241,9 +243,7 @@ TEST(QuadratureFactory, DefaultSimplexRulesDoNotDependOnVertexOrdering) {
             }
         }
         const auto [low, high] = std::minmax_element(integrals.begin(), integrals.end());
-        if (order < 20) {
-            EXPECT_NEAR(*low, *high, 1e-14) << "order " << order;
-        }
+        EXPECT_NEAR(*low, *high, 1e-14) << "order " << order;
     }
 
     // On the unit tetrahedron the even vertex permutations move every point
@@ -253,7 +253,7 @@ TEST(QuadratureFactory, DefaultSimplexRulesDoNotDependOnVertexOrdering) {
     };
     const std::array<std::array<Real, 3>, 4> tet{{{0, 0, 0}, {1, 0, 0}, {0, 1, 0}, {0, 0, 1}}};
     const std::array<std::array<int, 4>, 3> orderings{{{0, 1, 2, 3}, {1, 2, 0, 3}, {2, 3, 0, 1}}};
-    for (int order = 1; order <= 6; ++order) {
+    for (int order = 1; order <= 9; ++order) {
         const auto rule = QuadratureFactory::create(ElementType::Tetra4, order);
         ASSERT_TRUE(rule);
         EXPECT_GE(rule->order(), order);
@@ -278,5 +278,32 @@ TEST(QuadratureFactory, DefaultSimplexRulesDoNotDependOnVertexOrdering) {
         }
         const auto [low, high] = std::minmax_element(integrals.begin(), integrals.end());
         EXPECT_NEAR(*low, *high, 1e-14) << "order " << order;
+    }
+}
+
+
+TEST(QuadratureFactory, PositiveInteriorSimplexFallbackPreservesSymmetryAndPolynomialExactness) {
+    for (const auto& [cell, degree] : {std::pair{ElementType::Triangle3, 20},
+                                      {ElementType::Triangle3, 21}, {ElementType::Tetra4, 7},
+                                      {ElementType::Tetra4, 8}, {ElementType::Tetra4, 14}}) {
+        const auto rule = QuadratureFactory::create(cell, degree);
+        SCOPED_TRACE(::testing::Message() << "dimension " << rule->dimension() << ", degree " << degree);
+        test::expectPermutationInvariantSamples(*rule);
+        long double moment = 0.0L;
+        for (std::size_t q = 0; q < rule->num_points(); ++q) {
+            const auto& x = rule->point(q);
+            ASSERT_GT(rule->weight(q), 0.0);
+            Real lambda0 = 1.0;
+            for (int k = 0; k < rule->dimension(); ++k) {
+                ASSERT_GT(x[k], 0.0);
+                lambda0 -= x[k];
+            }
+            ASSERT_GT(lambda0, 0.0);
+            moment += rule->weight(q) * std::pow(static_cast<long double>(x[0]), degree-2) * x[1] * x[1];
+        }
+        const auto exact = cell == ElementType::Triangle3
+            ? reference_integrals::integral_triangle_monomial(degree-2, 2)
+            : reference_integrals::integral_tetra_monomial(degree-2, 2, 0);
+        EXPECT_NEAR(static_cast<Real>(moment), exact, 256.0 * std::numeric_limits<Real>::epsilon() * exact);
     }
 }

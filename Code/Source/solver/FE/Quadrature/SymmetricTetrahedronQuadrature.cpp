@@ -6,7 +6,7 @@
  */
 
 #include "SymmetricTetrahedronQuadrature.h"
-#include "TetrahedronQuadrature.h"
+#include "QuadratureFactory.h"
 
 #include <utility>
 
@@ -26,13 +26,12 @@ SymmetricTetrahedronQuadrature::SymmetricTetrahedronQuadrature(int requested_ord
                           __FILE__, __LINE__, __func__, FEStatus::InvalidArgument);
     }
 
-    // Tabulated symmetric tetra rules are only validated up to max_tabulated_order().
-    // For higher orders we fall back to the (robust) Duffy-based tensor rule.
     if (requested_order > max_tabulated_order()) {
-        TetrahedronQuadrature fallback(requested_order);
-        set_order(fallback.order());
-        set_data(std::vector<QuadPoint>(fallback.points().begin(), fallback.points().end()),
-                 std::vector<Real>(fallback.weights().begin(), fallback.weights().end()));
+        // Above the last table the factory constructs the symmetric conical rule.
+        const auto fallback = QuadratureFactory::create(
+            ElementType::Tetra4, requested_order, QuadratureType::GaussLegendre, false);
+        set_order(fallback->order());
+        set_data(fallback->points(), fallback->weights());
         return;
     }
 

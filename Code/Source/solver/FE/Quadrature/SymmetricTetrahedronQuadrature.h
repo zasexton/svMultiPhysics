@@ -28,16 +28,10 @@ namespace FE {
 namespace quadrature {
 
 /**
- * @brief Symmetric quadrature rules for tetrahedra with optimal point counts
+ * @brief Tetrahedral rules invariant under all 24 vertex permutations.
  *
- * These rules exploit the 24-fold symmetry of the reference tetrahedron to
- * minimize the number of quadrature points while maintaining full polynomial
- * exactness. Much more efficient than Duffy-transformed tensor product rules.
- *
- * Notes on high orders:
  * - Orders 1-8 use tabulated Keast rules (compact point sets).
- * - Orders 9-14 are accepted for API completeness but currently fall back to
- *   `TetrahedronQuadrature` to guarantee correctness.
+ * - Orders 9-14 use the positive, permutation-symmetric conical product rule.
  */
 class SymmetricTetrahedronQuadrature : public QuadratureRule {
 public:
@@ -57,7 +51,7 @@ public:
 
     /**
      * @brief Highest order with a tabulated symmetric rule; higher orders
-     *        use the Duffy-based TetrahedronQuadrature points
+     *        use the symmetric conical product rule
      */
     static constexpr int max_tabulated_order() { return 8; }
 

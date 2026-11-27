@@ -15,6 +15,7 @@
 #include <gtest/gtest.h>
 #include "FE/Quadrature/SymmetricTetrahedronQuadrature.h"
 #include "FE/Quadrature/TetrahedronQuadrature.h"
+#include "Tests/Unit/Quadrature/SimplexSymmetryTestHelpers.h"
 #include "FE/Core/FEException.h"
 #include <cmath>
 #include <numeric>
@@ -64,7 +65,7 @@ bool point_in_tetrahedron(const QuadPoint& p, double tol = 1e-12) {
  * @brief Expected point counts for tabulated symmetric rules
  *
  * Orders 1-8 use tabulated Keast rules (compact symmetric point sets).
- * Orders 9-14 fall back to `TetrahedronQuadrature` for correctness.
+ * Orders 9-14 use a generated symmetric rule.
  */
 const std::map<int, std::size_t> expected_tabulated_point_counts = {
     {1, 1},    // centroid
@@ -129,14 +130,6 @@ TEST(SymmetricTetrahedronQuadrature, HasExpectedPointCounts) {
         EXPECT_EQ(quad.num_points(), expected)
             << "Order " << order << " has " << quad.num_points()
             << " points, expected " << expected;
-    }
-
-    // Orders 9-14 currently fall back to the Duffy tensor-product rule.
-    for (int order = max_tabulated_order + 1; order <= max_supported_order; ++order) {
-        SymmetricTetrahedronQuadrature quad(order);
-        TetrahedronQuadrature tensor_quad(order);
-        EXPECT_EQ(quad.num_points(), tensor_quad.num_points())
-            << "Order " << order << " should fall back to tensor-product rule";
     }
 }
 
@@ -370,21 +363,9 @@ TEST(SymmetricTetrahedronQuadrature, Order2HasFourSymmetricPoints) {
     EXPECT_NEAR(sum_y, sum_z, 1e-14) << "Asymmetry in y vs z";
 }
 
-TEST(SymmetricTetrahedronQuadrature, IntegralSymmetricUnderCoordinatePermutation) {
-    // A symmetric function f(x,y,z) = x + y + z should integrate correctly
+TEST(SymmetricTetrahedronQuadrature, WeightedSamplesAreClosedUnderVertexPermutations) {
     for (int order = 1; order <= max_supported_order; ++order) {
-        SymmetricTetrahedronQuadrature quad(order);
-
-        double integral = 0.0;
-        for (std::size_t i = 0; i < quad.num_points(); ++i) {
-            const auto& p = quad.point(i);
-            integral += quad.weight(i) * (p[0] + p[1] + p[2]);
-        }
-
-        // Should equal 3 * integral of x = 3 * 1/24 = 1/8
-        double expected = 3.0 * tetrahedron_monomial_integral(1, 0, 0);
-        EXPECT_NEAR(integral, expected, 1e-12)
-            << "Symmetric integral failed at order " << order;
+        test::expectPermutationInvariantSamples(SymmetricTetrahedronQuadrature(order));
     }
 }
 
@@ -532,17 +513,18 @@ TEST(SymmetricTetrahedronQuadrature, VerifyOrbitStructure) {
     SymmetricTetrahedronQuadrature quad2(2);
     EXPECT_EQ(quad2.num_points(), 4u);
 
-    // All points in a 4-point orbit have the same barycentric structure
-    // They should be permutations of (a, b, b, b) where a + 3b = 1
-
-    // Check that barycentric coordinates sum to 1 for each point
-    for (std::size_t i = 0; i < quad2.num_points(); ++i) {
-        const auto& p = quad2.point(i);
-        double sum = p[0] + p[1] + p[2];
-        double lambda1 = 1.0 - sum;  // First barycentric coordinate
-        double total = lambda1 + p[0] + p[1] + p[2];
-        EXPECT_NEAR(total, 1.0, 1e-14) << "Barycentric sum != 1 at point " << i;
+    const double a = (5.0 + 3.0 * std::sqrt(5.0)) / 20.0;
+    const double b = (5.0 - std::sqrt(5.0)) / 20.0;
+    std::array<unsigned, 4> count{};
+    for (std::size_t q = 0; q < quad2.num_points(); ++q) {
+        const auto& x = quad2.point(q);
+        const std::array<double, 4> lambda{1.0 - x[0] - x[1] - x[2], x[0], x[1], x[2]};
+        const auto maximum = std::max_element(lambda.begin(), lambda.end()) - lambda.begin();
+        ++count[maximum];
+        for (int i = 0; i < 4; ++i) EXPECT_NEAR(lambda[i], i == maximum ? a : b, 1.e-15);
+        EXPECT_DOUBLE_EQ(quad2.weight(q), 1.0 / 24.0);
     }
+    EXPECT_EQ(count, (std::array<unsigned, 4>{1, 1, 1, 1}));
 }
 
 TEST(SymmetricTetrahedronQuadrature, OrbitWeightsAreEqual) {
