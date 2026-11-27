@@ -13656,6 +13656,11 @@ TEST(ApplicationDriverConservativePhaseVelocity,
 class ApplicationDriverConservativePhaseCandidatesTest
     : public ::testing::Test {
 protected:
+  virtual std::shared_ptr<svmp::Mesh> makePhaseMesh()
+  {
+    return makeWorkflowTriangleMesh();
+  }
+
   void SetUp() override
   {
     const auto *test_info = ::testing::UnitTest::GetInstance()->current_test_info();
@@ -13664,7 +13669,7 @@ protected:
             "LaterRejectionRestoresTheRawCandidateAndEveryGeometryRevision") {
       lifecycle_capture_gate_ = lifecycle_capture::captureGate();
     }
-    mesh_ = makeWorkflowTriangleMesh();
+    mesh_ = makePhaseMesh();
     (void)svmp::MeshFields::attach_field(
         mesh_->local_mesh(),
         svmp::EntityKind::Vertex,
@@ -15167,6 +15172,81 @@ TEST_F(ApplicationDriverConservativePhaseCandidatesTest,
   ASSERT_NE(result.geometry_transaction, nullptr);
   ASSERT_NO_THROW(result.geometry_transaction->commit());
   result.geometry_transaction.reset();
+}
+
+class ApplicationDriverConservativePhaseSquareTest
+    : public ApplicationDriverConservativePhaseCandidatesTest {
+  std::shared_ptr<svmp::Mesh> makePhaseMesh() override
+  {
+    auto base = std::make_shared<svmp::MeshBase>();
+    const svmp::CellShape triangle{svmp::CellFamily::Triangle, 3, 1};
+    base->build_from_arrays(
+        2, {0., 0., 1., 0., 1., 1., 0., 1., 0.5, 0.5},
+        {0, 3, 6, 9, 12}, {0, 1, 4, 1, 2, 4, 2, 3, 4, 3, 0, 4},
+        {triangle, triangle, triangle, triangle});
+    base->finalize();
+    return svmp::create_mesh(std::move(base));
+  }
+};
+
+TEST_F(ApplicationDriverConservativePhaseSquareTest,
+       RecordsSignedStationaryProjectionTransferAtEveryNode)
+{
+  requests_.front() = withMaintenanceConfiguration(
+      requests_.front(), [&](auto& configured) {
+        configured.transport.conservative_phase.reconcile_geometry = true;
+        configured.transport.conservative_phase.enforce_courant_limit = false;
+        configured.transport.conservative_phase.write_flux_artifacts = true;
+        configured.transport.conservative_phase.boundary_flux_policy =
+            svmp::FE::level_set::
+            LevelSetConservativePhaseBoundaryFluxPolicy::
+            GloballyBalancedDiscreteQFlux;
+        configured.transport.velocity.constant_value = {
+            svmp::FE::Real{0.0}, svmp::FE::Real{3.2}, svmp::FE::Real{0.0}};
+      });
+
+  auto result = applyPreparedConservativePhaseCandidate();
+
+  ASSERT_TRUE(result.accept_step);
+  ASSERT_EQ(result.maintenance_ledgers.size(), 1u);
+  const auto& ledger = result.maintenance_ledgers.front();
+  ASSERT_EQ(ledger.reconciliation.diagnostic,
+            "stationary_geometry_equilibrium_projection");
+  ASSERT_NE(result.geometry_transaction, nullptr);
+  result.geometry_transaction->commit();
+  result.geometry_transaction.reset();
+  const auto unique = std::chrono::steady_clock::now().time_since_epoch().count();
+  const auto directory = std::filesystem::temp_directory_path() /
+      ("svmp-phase-stationary-transfer-" + std::to_string(unique));
+  params_->general_simulation_parameters.save_results_in_folder.set(directory.string());
+  writeAcceptedConservativePhaseArtifacts(
+      *params_, requests_, result, 1u, 0.05, 0.05,
+      history().u().valueRevision(), svmp::MeshComm::world());
+  std::ifstream artifact(directory / "conservative_phase_flux" /
+      "conservative_phase_flux_phase_step_00000001.json");
+  ASSERT_TRUE(artifact);
+  const std::string contents{std::istreambuf_iterator<char>{artifact}, {}};
+  artifact.close();
+  std::filesystem::remove_all(directory);
+
+  const auto accepted = fieldSlice(gatherFeOrderedSolution(history().u()), phase_);
+  const std::string key = "\"stationary_projection_mass_transfer\":";
+  std::size_t position = 0u;
+  svmp::FE::Real sum = 0.0;
+  svmp::FE::Real largest = 0.0;
+  for (const auto& node : ledger.transport_stage.correction.nodes) {
+    position = contents.find(key, position);
+    ASSERT_NE(position, std::string::npos) << "missing transfer for node " << node.node;
+    position += key.size();
+    const auto transfer = std::stod(contents.substr(position));
+    const auto final_mass = node.lumped_control_volume * accepted.at(node.node);
+    EXPECT_NEAR(node.lumped_control_volume * node.limited_phase_indicator + transfer,
+                final_mass, 1.e-14) << "node " << node.node;
+    sum += transfer;
+    largest = std::max(largest, std::abs(transfer));
+  }
+  EXPECT_NEAR(largest, 1.0 / 160.0, 1.e-14);
+  EXPECT_NEAR(sum, 0.0, 1.e-14);
 }
 
 TEST_F(ApplicationDriverConservativePhaseCandidatesTest,

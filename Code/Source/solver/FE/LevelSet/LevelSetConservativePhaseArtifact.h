@@ -108,6 +108,8 @@ struct LevelSetConservativePhaseArtifactContext {
     LevelSetConservativePhaseMismatchArtifact post_correction_mismatch{};
     Real retained_assembly_geometry_measure{0.0};
     std::optional<LevelSetPhaseRegionLedgerResult> region_ledger{};
+    /// Per-node mass added after flux limiting by the stationary projection.
+    std::vector<Real> stationary_projection_mass_transfer{};
 };
 
 struct LevelSetConservativePhaseArtifactResult {

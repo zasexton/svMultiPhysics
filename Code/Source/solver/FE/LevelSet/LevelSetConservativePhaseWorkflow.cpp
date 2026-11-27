@@ -1565,6 +1565,11 @@ std::uint64_t conservativePhaseArtifactFingerprint(
   mixConservativePhaseArtifactFingerprint(
       fingerprint, ledger.post_limit_phase_measure);
   mixConservativePhaseArtifactFingerprint(
+      fingerprint, ledger.stationary_projection_mass_transfer.size());
+  for (const auto transfer : ledger.stationary_projection_mass_transfer) {
+    mixConservativePhaseArtifactFingerprint(fingerprint, transfer);
+  }
+  mixConservativePhaseArtifactFingerprint(
       fingerprint, ledger.post_correction_phase_measure);
   mixConservativePhaseArtifactFingerprint(
       fingerprint, ledger.raw_post_transport_geometry_measure);
@@ -2072,6 +2077,8 @@ void writeAcceptedConservativePhaseArtifacts(
         context.retained_assembly_geometry_measure =
             ledger.post_correction_geometry_measure;
         context.region_ledger = ledger.region_ledger;
+        context.stationary_projection_mass_transfer =
+            ledger.stationary_projection_mass_transfer;
         artifact =
             svmp::FE::level_set::writeLevelSetConservativePhaseArtifact(
                 output_directory, context, ledger.transport_stage, schema);
@@ -2900,18 +2907,25 @@ ConservativePhaseCandidateResult applyConservativePhaseCandidates(
         }
         assignConservativePhaseSlice(
             system, phase_field, projection.phase_indicator, candidate);
-        accepted_phase_masses[request_index] =
-            projection.active_phase_mass;
-        accepted_phase_measures[request_index] =
-            projection.retained_active_measure;
+        auto& transported_masses = accepted_phase_masses[request_index];
+        auto& transfers = maintenance_ledger.stationary_projection_mass_transfer;
+        transfers.resize(graph.nodes);
+        for (std::size_t node = 0; node < graph.nodes; ++node) {
+          transfers[node] = projection.active_phase_mass[node] - transported_masses[node];
+          transported_masses[node] += transfers[node];
+        }
+        accepted_phase_measures[request_index] = std::accumulate(
+            transported_masses.begin(), transported_masses.end(), Real{0.0});
+        const auto projected_mismatch = conservativePhaseMomentMismatch(
+            projection.active_phase_mass, transported_masses);
         reconciliation.success = true;
         reconciliation.target_reached = true;
         reconciliation.initial_residual_norm =
             transported_geometry_mismatch.residual_norm;
-        reconciliation.final_residual_norm = svmp::FE::Real{0.0};
+        reconciliation.final_residual_norm = projected_mismatch.residual_norm;
         reconciliation.maximum_final_nodal_residual =
-            svmp::FE::Real{0.0};
-        reconciliation.final_total_residual = svmp::FE::Real{0.0};
+            projected_mismatch.maximum_nodal_residual;
+        reconciliation.final_total_residual = projected_mismatch.total_residual;
         reconciliation.diagnostic =
             "stationary_geometry_equilibrium_projection";
         svmp::FE::logRecord(

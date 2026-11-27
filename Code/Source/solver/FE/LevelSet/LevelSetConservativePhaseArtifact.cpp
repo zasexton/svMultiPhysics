@@ -192,6 +192,11 @@ template <typename... Values>
            finiteMismatch(context.post_correction_mismatch) &&
            (!context.region_ledger.has_value() ||
             finiteRegionLedgerResult(*context.region_ledger)) &&
+           (context.stationary_projection_mass_transfer.empty() ||
+            (context.stationary_projection_mass_transfer.size() == context.graph_nodes &&
+             std::all_of(context.stationary_projection_mass_transfer.begin(),
+                         context.stationary_projection_mass_transfer.end(),
+                         [](Real transfer) { return std::isfinite(transfer); }))) &&
            finiteValues(context.raw_post_transport_phase_measure,
                         context.post_limit_phase_measure,
                         context.raw_post_transport_geometry_measure,
@@ -1095,6 +1100,9 @@ void writeArtifact(
                << node.lower_phase_indicator
                << ",\"upper_" << columns.indicator
                << node.upper_phase_indicator
+               << ",\"stationary_projection_mass_transfer\":"
+               << (context.stationary_projection_mass_transfer.empty() ? Real{0} :
+                   context.stationary_projection_mass_transfer[index])
                << ",\"physical_boundary_mass_transfer\":"
                << node.physical_boundary_mass_transfer
                << ",\"discrete_divergence_mass_source\":"

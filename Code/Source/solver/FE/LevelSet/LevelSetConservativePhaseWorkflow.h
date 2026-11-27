@@ -290,6 +290,9 @@ struct ConservativePhaseMaintenanceStageLedger {
       transport_stage{};
   svmp::FE::level_set::LevelSetPhaseRegionLedgerResult region_ledger{};
   ConservativePhaseGeometryReconciliationResult reconciliation{};
+  /// Signed mass added to each limited transport node by a stationary
+  /// geometry projection. Empty when no projection was applied.
+  std::vector<Real> stationary_projection_mass_transfer{};
   std::optional<svmp::FE::level_set::LevelSetP1PhaseSplitStageProvenance>
       split_stage_provenance{};
 };
