@@ -57,6 +57,9 @@ public:
     Value evaluate(const Value& xi,
                    const std::vector<Real>& coefficients) const override;
 
+    Jacobian evaluate_jacobian(const Value& xi,
+                               const std::vector<Real>& coefficients) const override;
+
     /// Interpolate by projecting into base space and zero-enriching by default
     void interpolate(const ValueFunction& function,
                      std::vector<Real>& coefficients) const override;

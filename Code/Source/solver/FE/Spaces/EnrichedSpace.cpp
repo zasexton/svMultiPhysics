@@ -24,25 +24,30 @@ EnrichedSpace::EnrichedSpace(std::shared_ptr<FunctionSpace> base_space,
                  "EnrichedSpace requires matching field types");
 }
 
+namespace {
+
+template<typename Operation>
+auto evaluate_sum(const FunctionSpace& base, const FunctionSpace& enrichment,
+                  const FunctionSpace::Value& xi, const std::vector<Real>& coefficients,
+                  Operation operation) {
+    const auto n = base.dofs_per_element();
+    FE_CHECK_ARG(coefficients.size() == n + enrichment.dofs_per_element(),
+                 "EnrichedSpace: coefficient size mismatch");
+    const auto split = coefficients.begin() + static_cast<std::ptrdiff_t>(n);
+    return (base.*operation)(xi, std::vector<Real>(coefficients.begin(), split)) +
+           (enrichment.*operation)(xi, std::vector<Real>(split, coefficients.end()));
+}
+
+} // namespace
+
 FunctionSpace::Value EnrichedSpace::evaluate(const Value& xi,
                                              const std::vector<Real>& coefficients) const {
-    const std::size_t base_dofs = base_->dofs_per_element();
-    const std::size_t enr_dofs  = enrichment_->dofs_per_element();
-    FE_CHECK_ARG(coefficients.size() == base_dofs + enr_dofs,
-                 "EnrichedSpace::evaluate: coefficient size mismatch");
+    return evaluate_sum(*base_, *enrichment_, xi, coefficients, &FunctionSpace::evaluate);
+}
 
-    std::vector<Real> base_coeffs(base_dofs);
-    std::vector<Real> enr_coeffs(enr_dofs);
-    for (std::size_t i = 0; i < base_dofs; ++i) {
-        base_coeffs[i] = coefficients[i];
-    }
-    for (std::size_t i = 0; i < enr_dofs; ++i) {
-        enr_coeffs[i] = coefficients[base_dofs + i];
-    }
-
-    Value u_base = base_->evaluate(xi, base_coeffs);
-    Value u_enr  = enrichment_->evaluate(xi, enr_coeffs);
-    return u_base + u_enr;
+FunctionSpace::Jacobian EnrichedSpace::evaluate_jacobian(
+    const Value& xi, const std::vector<Real>& coefficients) const {
+    return evaluate_sum(*base_, *enrichment_, xi, coefficients, &FunctionSpace::evaluate_jacobian);
 }
 
 void EnrichedSpace::interpolate(const ValueFunction& function,

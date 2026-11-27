@@ -7,6 +7,11 @@
  */
 
 #include "Spaces/SpaceInterpolation.h"
+#include "Math/DenseLinearAlgebra.h"
+#include "Quadrature/QuadratureFactory.h"
+
+#include <algorithm>
+#include <utility>
 
 namespace svmp {
 namespace FE {
@@ -22,17 +27,24 @@ FunctionSpace::Value identity_value_transform(const FunctionSpace::Value& value)
     return value;
 }
 
+// Unit coefficient vectors expose the represented basis of a product or
+// enriched space as well as that of an ordinary scalar or vector element.
+void evaluate_space_basis(const FunctionSpace& space, const FunctionSpace::Value& point,
+                          std::vector<Real>& unit, std::vector<FunctionSpace::Value>& values) {
+    for (std::size_t i = 0; i < unit.size(); ++i) {
+        unit[i] = 1.;
+        values[i] = space.evaluate(point, unit);
+        unit[i] = 0.;
+    }
+}
+
 } // namespace
 
 void SpaceInterpolation::l2_projection(const FunctionSpace& src_space,
                                        const std::vector<Real>& src_coeffs,
                                        const FunctionSpace& dst_space,
                                        std::vector<Real>& dst_coeffs) {
-    // Define reference-space function via source evaluation
-    FunctionSpace::ValueFunction f = [&src_space, &src_coeffs](const FunctionSpace::Value& xi) {
-        return src_space.evaluate(xi, src_coeffs);
-    };
-    dst_space.interpolate(f, dst_coeffs);
+    restrict_coefficients(src_space, src_coeffs, dst_space, dst_coeffs);
 }
 
 void SpaceInterpolation::nodal_interpolation(const FunctionSpace& src_space,
@@ -108,20 +120,55 @@ SpaceInterpolation::TransferOperator SpaceInterpolation::build_transfer_operator
     return op;
 }
 
+SpaceInterpolation::TransferOperator SpaceInterpolation::restriction_operator(
+    const FunctionSpace& fine_space, const FunctionSpace& coarse_space,
+    const ReferencePointMap& point_map, const ValueTransform& value_transform) {
+    const auto rows = coarse_space.dofs_per_element();
+    const auto cols = fine_space.dofs_per_element();
+    TransferOperator cross_mass{rows, cols, std::vector<Real>(rows * cols, 0.)};
+    if (!rows || !cols) return cross_mass;
+
+    const int order = std::max(fine_space.polynomial_order(), coarse_space.polynomial_order());
+    const int exactness = std::max({quadrature::QuadratureFactory::recommended_order(order, true),
+                                   fine_space.element().quadrature()->order(),
+                                   coarse_space.element().quadrature()->order()});
+    const auto rule = quadrature::QuadratureFactory::create(coarse_space.element_type(), exactness);
+    std::vector<Real> mass(rows * rows, 0.), coarse_unit(rows, 0.), fine_unit(cols, 0.);
+    std::vector<FunctionSpace::Value> coarse(rows), fine(cols);
+    for (std::size_t q = 0; q < rule->num_points(); ++q) {
+        const auto point = rule->point(q);
+        evaluate_space_basis(coarse_space, point, coarse_unit, coarse);
+        evaluate_space_basis(fine_space, point_map ? point_map(point) : point, fine_unit, fine);
+        if (value_transform) {
+            for (auto& value : fine) value = value_transform(value);
+        }
+        for (std::size_t i = 0; i < rows; ++i) {
+            for (std::size_t j = 0; j < rows; ++j)
+                mass[i * rows + j] += rule->weight(q) * coarse[i].dot(coarse[j]);
+            for (std::size_t j = 0; j < cols; ++j)
+                cross_mass(i, j) += rule->weight(q) * coarse[i].dot(fine[j]);
+        }
+    }
+    const auto solver = math::factor_dense_matrix(std::move(mass), rows, "reference L2 restriction");
+    solver.solve_in_place(cross_mass.values, cols);
+    return cross_mass;
+}
+
 void SpaceInterpolation::apply_transfer(const TransferOperator& op,
                                         std::span<const Real> src_coeffs,
                                         std::vector<Real>& dst_coeffs) {
     FE_CHECK_ARG(src_coeffs.size() == op.cols,
                  "SpaceInterpolation::apply_transfer: source coefficient size mismatch");
 
-    dst_coeffs.assign(op.rows, Real(0));
+    std::vector<Real> transferred(op.rows, Real(0));
     for (std::size_t row = 0; row < op.rows; ++row) {
         Real sum = Real(0);
         for (std::size_t col = 0; col < op.cols; ++col) {
             sum += op(row, col) * src_coeffs[col];
         }
-        dst_coeffs[row] = sum;
+        transferred[row] = sum;
     }
+    dst_coeffs = std::move(transferred);
 }
 
 void SpaceInterpolation::prolongate(const FunctionSpace& coarse_space,

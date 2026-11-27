@@ -316,6 +316,34 @@ TEST(FunctionSpaces, EnrichedSpaceCombinesBaseAndEnrichment) {
     }
 }
 
+TEST(FunctionSpaces, EnrichedGradientIncludesTheInteriorBubble) {
+    auto linear = std::make_shared<H1Space>(ElementType::Triangle3, 1);
+    SpaceRequest request;
+    request.space_type = SpaceType::GenericBasis;
+    request.element.element_type = ElementType::Triangle3;
+    request.element.basis_type = BasisType::Bubble;
+    request.element.field_type = FieldType::Scalar;
+    request.element.continuity = Continuity::L2;
+    auto bubble = SpaceFactory::create(request);
+    EnrichedSpace scalar(linear, bubble);
+    const FunctionSpace::Value p{0.25, 0.125, 0.};
+    // u=1+2x-y+2*27xy(1-x-y).
+    const std::vector<Real> u{1., 3., 0., 2.};
+    const auto grad = scalar.evaluate_gradient(p, u);
+    const Real dx = 2. + 54. * p[1] * (1. - 2. * p[0] - p[1]);
+    const Real dy = -1. + 54. * p[0] * (1. - p[0] - 2. * p[1]);
+    EXPECT_DOUBLE_EQ(grad[0], dx);
+    EXPECT_DOUBLE_EQ(grad[1], dy);
+    EnrichedSpace vector(std::make_shared<ProductSpace>(linear, 2),
+                         std::make_shared<ProductSpace>(bubble, 2));
+    const auto jacobian = vector.evaluate_jacobian(p, {1., 3., 0., -1., -3., 0., 2., -2.});
+    EXPECT_DOUBLE_EQ(jacobian(0, 0), dx);
+    EXPECT_DOUBLE_EQ(jacobian(0, 1), dy);
+    EXPECT_DOUBLE_EQ(jacobian(1, 0), -dx);
+    EXPECT_DOUBLE_EQ(jacobian(1, 1), -dy);
+    EXPECT_THROW((void)scalar.evaluate_gradient(p, {1., 3., 0.}), FEException);
+}
+
 TEST(FunctionSpaces, AdaptiveSpaceSelectsActiveLevel) {
     AdaptiveSpace adaptive;
     auto p1 = std::make_shared<H1Space>(ElementType::Line2, 1);

@@ -7,6 +7,7 @@
 
 #include "FE/Spaces/H1Space.h"
 #include "FE/Spaces/L2Space.h"
+#include "FE/Spaces/ProductSpace.h"
 #include "FE/Spaces/SpaceInterpolation.h"
 #include "FE/Basis/LagrangeBasis.h"
 
@@ -58,6 +59,41 @@ TEST(SpaceInterpolation, NodalInterpolationLagrangeToLagrange) {
         const Real dst_val = dst.evaluate_scalar(xi, dst_coeffs);
         EXPECT_NEAR(dst_val, src_val, 1e-12);
     }
+}
+
+TEST(SpaceInterpolation, RestrictionSatisfiesReferenceMassMoments) {
+    H1Space fine(ElementType::Line2, 3);
+    L2Space constant(ElementType::Line2, 0);
+    H1Space linear(ElementType::Line2, 1);
+    std::vector<Real> field, out;
+    fine.interpolate_scalar([](const auto& p) { return p[0] * p[0] * (1. + p[0]); }, field);
+    // On [-1,1], x^2 projects to 1/3 and x^3 projects to 3x/5.
+    SpaceInterpolation::l2_projection(fine, field, constant, out);
+    EXPECT_NEAR(constant.evaluate_scalar({}, out), 1. / 3., 2e-14);
+    SpaceInterpolation::conservative_interpolation(fine, field, linear, out);
+    for (Real x : {-1., 0., 1.})
+        EXPECT_NEAR(linear.evaluate_scalar({x, 0., 0.}, out), 1. / 3. + 0.6 * x, 3e-14);
+
+    const auto reverse = [](const FunctionSpace::Value& p) { return FunctionSpace::Value{-p[0], 0., 0.}; };
+    const auto scale = [](const FunctionSpace::Value& value) { return value * 2.; };
+    const auto restriction = SpaceInterpolation::restriction_operator(fine, linear, reverse, scale);
+    SpaceInterpolation::apply_transfer(restriction, field, out);
+    EXPECT_NEAR(linear.evaluate_scalar({0.5, 0., 0.}, out), 2. * (1. / 3. - 0.3), 4e-14);
+    SpaceInterpolation::restrict_coefficients(fine, field, constant, field);
+    EXPECT_NEAR(constant.evaluate_scalar({}, field), 1. / 3., 2e-14);
+}
+
+TEST(SpaceInterpolation, L2ProjectionPreservesSeparateVectorMeans) {
+    ProductSpace fine(std::make_shared<H1Space>(ElementType::Line2, 2), 2);
+    ProductSpace coarse(std::make_shared<L2Space>(ElementType::Line2, 0), 2);
+    std::vector<Real> field, out;
+    fine.interpolate([](const auto& p) {
+        return FunctionSpace::Value{p[0] * p[0], 1. - 3. * p[0] * p[0], 0.};
+    }, field);
+    SpaceInterpolation::l2_projection(fine, field, coarse, out);
+    const auto mean = coarse.evaluate({}, out);
+    EXPECT_NEAR(mean[0], 1. / 3., 3e-14);
+    EXPECT_NEAR(mean[1], 0., 3e-14);
 }
 
 TEST(SpaceInterpolation, L2ProjectionH1ToL2PreservesCoefficientsForSameOrder) {

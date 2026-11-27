@@ -60,8 +60,8 @@ public:
      * @brief L² projection of a field between spaces on the same element
      *
      * Projects the field represented by (src_space, src_coeffs) into the
-     * target space dst_space using the mass-matrix based interpolation
-     * implemented by FunctionSpace::interpolate.
+     * target space dst_space by enforcing the reference-element mass moments
+     * against every destination basis function.
      */
     static void l2_projection(const FunctionSpace& src_space,
                               const std::vector<Real>& src_coeffs,
@@ -84,7 +84,7 @@ public:
      * @brief Build a dense element-local transfer operator from src_space to dst_space
      *
      * The operator maps source coefficients to destination coefficients using
-     * the same interpolation machinery as @ref l2_projection. An optional
+     * the destination space's interpolation functionals. An optional
      * reference-point map can be provided to evaluate the source space in a
      * different face/edge orientation than the destination space.
      */
@@ -103,14 +103,13 @@ public:
         return build_transfer_operator(coarse_space, fine_space, point_map, value_transform);
     }
 
-    /// Dense restriction operator from fine to coarse
+    /// Reference L² restriction, with mass and cross-mass integrals on the
+    /// coarse chart. The optional value transform acts linearly on the source.
     static TransferOperator restriction_operator(
         const FunctionSpace& fine_space,
         const FunctionSpace& coarse_space,
         const ReferencePointMap& point_map = {},
-        const ValueTransform& value_transform = {}) {
-        return build_transfer_operator(fine_space, coarse_space, point_map, value_transform);
-    }
+        const ValueTransform& value_transform = {});
 
     /// Apply a dense transfer operator to a coefficient vector
     static void apply_transfer(const TransferOperator& op,
