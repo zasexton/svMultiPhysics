@@ -15428,22 +15428,29 @@ TEST_F(ApplicationDriverConservativePhaseSquareTest,
   std::filesystem::remove_all(directory);
 
   const auto accepted = fieldSlice(gatherFeOrderedSolution(history().u()), phase_);
+  // Integrating the five vertex hats over x <= 3/4 gives wet masses
+  // (21, 9, 9, 21, 36)/128. For dt = 1/20 and vertical speed 16/5,
+  // the bounded consistent-mass step changes them by the opposite of these transfers.
+  constexpr std::array<svmp::FE::Real, 5> vertex_transfers{
+      31343.0 / 4960000.0, 0.0, -35199.0 / 4960000.0, 0.0, 241.0 / 310000.0};
+  const auto expected_transfers = projectWorkflowVertexValues(
+      *sim_.fe_system, phase_, vertex_transfers, 1u, "stationary projection transfer");
+  ASSERT_EQ(ledger.transport_stage.correction.nodes.size(), expected_transfers.size());
   const std::string key = "\"stationary_projection_mass_transfer\":";
   std::size_t position = 0u;
   svmp::FE::Real sum = 0.0;
-  svmp::FE::Real largest = 0.0;
   for (const auto& node : ledger.transport_stage.correction.nodes) {
     position = contents.find(key, position);
     ASSERT_NE(position, std::string::npos) << "missing transfer for node " << node.node;
     position += key.size();
     const auto transfer = std::stod(contents.substr(position));
+    EXPECT_NEAR(transfer, expected_transfers.at(node.node), 1.e-14) << "node " << node.node;
     const auto final_mass = node.lumped_control_volume * accepted.at(node.node);
     EXPECT_NEAR(node.lumped_control_volume * node.limited_phase_indicator + transfer,
                 final_mass, 1.e-14) << "node " << node.node;
     sum += transfer;
-    largest = std::max(largest, std::abs(transfer));
   }
-  EXPECT_NEAR(largest, 1.0 / 160.0, 1.e-14);
+  EXPECT_EQ(contents.find(key, position), std::string::npos);
   EXPECT_NEAR(sum, 0.0, 1.e-14);
 }
 
