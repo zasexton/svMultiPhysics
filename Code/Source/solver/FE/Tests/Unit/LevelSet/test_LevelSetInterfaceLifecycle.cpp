@@ -7892,16 +7892,37 @@ TEST(LevelSetInterfaceLifecycle,
     expectGeneratedCutRulesAreFinite(rotated_plane.domain);
 
     struct RadialCase {
-        std::array<FE::Real, 3> center{{0.0, 0.0, 0.0}};
-        FE::Real radius{0.5};
-        const char* feature{nullptr};
+        std::array<FE::Real, 3> center;
+        FE::Real radius;
+        const char* feature;
+        FE::Real inside_measure;
+        FE::Real interface_measure;
     };
+    const auto check_radial = [&](const auto& result, const RadialCase& entry,
+                                  FE::Real volume_relative_tolerance,
+                                  FE::Real surface_relative_tolerance) {
+        const FE::Real volume_error =
+            std::abs(result.summary.negative_volume_measure - entry.inside_measure);
+        const FE::Real surface_error =
+            std::abs(result.summary.measure - entry.interface_measure);
+        EXPECT_LT(volume_error, volume_relative_tolerance * entry.inside_measure);
+        EXPECT_LT(surface_error, surface_relative_tolerance * entry.interface_measure);
+        maximum_radial_volume_error = std::max(maximum_radial_volume_error, volume_error);
+        maximum_radial_surface_error = std::max(maximum_radial_surface_error, surface_error);
+    };
+    const auto disk = [&](std::array<FE::Real, 3> center, FE::Real r, const char* feature) {
+        return RadialCase{center, r, feature, pi * r * r, 2.0 * pi * r};
+    };
+    // The vertex disk loses two disjoint circular segments outside the parent.
+    constexpr FE::Real disk_face_distance = 0.25;
+    const FE::Real disk_vertex_radius = std::sqrt(2.0) * disk_face_distance;
     const std::array<RadialCase, 5> circle_cases{{
-        {{{0.0, 0.0, 0.0}}, 0.5, "interior"},
-        {{{-0.75, -0.75, 0.0}}, std::sqrt(FE::Real{0.125}), "vertex"},
-        {{{0.0, -0.6, 0.0}}, 0.4, "edge"},
-        {{{0.0, 0.0, 0.0}}, 1.0, "face_tangent"},
-        {{{0.0, 0.0, 0.0}}, 1.0 - 1.0e-7, "near_tangent"},
+        disk({0.0, 0.0, 0.0}, 0.5, "interior"),
+        {{-0.75, -0.75, 0.0}, disk_vertex_radius, "vertex",
+         (pi + 2.0) * disk_face_distance * disk_face_distance, pi * disk_vertex_radius},
+        disk({0.0, -0.6, 0.0}, 0.4, "edge"),
+        disk({0.0, 0.0, 0.0}, 1.0, "face_tangent"),
+        disk({0.0, 0.0, 0.0}, 1.0 - 1.0e-7, "near_tangent"),
     }};
     for (const auto& entry : circle_cases) {
         SCOPED_TRACE(entry.feature);
@@ -7927,28 +7948,28 @@ TEST(LevelSetInterfaceLifecycle,
                 expectSingleParentVolumeRulesPartitionMeasure(circle.domain,
                                                                2.0e-9);
                 expectGeneratedCutRulesAreFinite(circle.domain);
-                if (std::string(entry.feature) == "interior") {
-                    maximum_radial_volume_error = std::max(
-                        maximum_radial_volume_error,
-                        std::abs(circle.summary.negative_volume_measure -
-                                 pi * entry.radius * entry.radius));
-                    maximum_radial_surface_error = std::max(
-                        maximum_radial_surface_error,
-                        std::abs(circle.summary.measure -
-                                 FE::Real{2.0} * pi * entry.radius));
-                }
+                check_radial(circle, entry, 2.5e-3, 1.3e-3);
             }
         } catch (const std::exception& error) {
             ADD_FAILURE() << entry.feature << ": " << error.what();
         }
     }
 
+    const auto ball = [&](std::array<FE::Real, 3> center, FE::Real r, const char* feature) {
+        return RadialCase{center, r, feature, 4.0 * pi * r * r * r / 3.0, 4.0 * pi * r * r};
+    };
+    // For the clipped spheres, subtract the spherical caps outside the box,
+    // adding back their pairwise lenses for the three-face vertex cut. With
+    // face distance d, the divergence theorem gives 3V = r A_sphere + d A_faces.
+    constexpr FE::Real d = 0.3;
     const std::array<RadialCase, 5> sphere_cases{{
-        {{{0.0, 0.0, 0.0}}, 0.5, "interior"},
-        {{{-0.7, -0.7, -0.7}}, std::sqrt(FE::Real{0.27}), "vertex"},
-        {{{-0.7, -0.7, 0.0}}, std::sqrt(FE::Real{0.18}), "edge"},
-        {{{0.0, 0.0, -0.6}}, 0.4, "face"},
-        {{{0.0, 0.0, 0.0}}, 1.0 - 1.0e-7, "near_tangent"},
+        ball({0.0, 0.0, 0.0}, 0.5, "interior"),
+        {{-0.7, -0.7, -0.7}, std::sqrt(3.0) * d, "vertex",
+         (4.0 * pi + 2.0) * d * d * d, 3.0 * std::sqrt(3.0) * pi * d * d},
+        {{-0.7, -0.7, 0.0}, std::sqrt(2.0) * d, "edge",
+         10.0 * pi * d * d * d / 3.0, 4.0 * std::sqrt(2.0) * pi * d * d},
+        ball({0.0, 0.0, -0.6}, 0.4, "face"),
+        ball({0.0, 0.0, 0.0}, 1.0 - 1.0e-7, "near_tangent"),
     }};
     for (const auto& entry : sphere_cases) {
         SCOPED_TRACE(entry.feature);
@@ -7976,19 +7997,7 @@ TEST(LevelSetInterfaceLifecycle,
                 expectSingleParentVolumeRulesPartitionMeasure(sphere.domain,
                                                                5.0e-9);
                 expectGeneratedCutRulesAreFinite(sphere.domain);
-                if (std::string(entry.feature) == "interior") {
-                    maximum_radial_volume_error = std::max(
-                        maximum_radial_volume_error,
-                        std::abs(sphere.summary.negative_volume_measure -
-                                 FE::Real{4.0} * pi * entry.radius *
-                                     entry.radius * entry.radius /
-                                     FE::Real{3.0}));
-                    maximum_radial_surface_error = std::max(
-                        maximum_radial_surface_error,
-                        std::abs(sphere.summary.measure -
-                                 FE::Real{4.0} * pi * entry.radius *
-                                     entry.radius));
-                }
+                check_radial(sphere, entry, 2.4e-2, 1.3e-2);
             }
         } catch (const std::exception& error) {
             ADD_FAILURE() << entry.feature << ": " << error.what();
@@ -8060,8 +8069,7 @@ TEST(LevelSetInterfaceLifecycle,
          std::abs(sphere_positive.summary.negative_volume_measure +
                   sphere_positive.summary.positive_volume_measure -
                   FE::Real{8.0})});
-    EXPECT_LT(maximum_radial_volume_error, FE::Real{5.0e-2});
-    EXPECT_LT(maximum_radial_surface_error, FE::Real{2.5e-1});
+    EXPECT_LT(maximum_partition_error, 5.0e-12);
 
     RecordProperty("analytic_cut_sweep_fraction_count",
                    static_cast<int>(fractions.size()));
@@ -8183,13 +8191,13 @@ TEST(LevelSetInterfaceLifecycle, HighOrderSubcellP2CircleSegmentApproximatesArea
     EXPECT_GT(result.summary.active_fragment_count, 1u);
     EXPECT_NEAR(result.summary.negative_volume_measure,
                 pi * radius * radius / 4.0,
-                2.0e-2);
+                8.0e-5);
     EXPECT_NEAR(result.summary.positive_volume_measure,
                 0.5 - pi * radius * radius / 4.0,
-                2.0e-2);
+                8.0e-5);
     EXPECT_NEAR(result.summary.measure,
                 pi * radius / 2.0,
-                5.0e-2);
+                1.0e-9);
 
     const auto interface_rules = result.domain.interfaceQuadratureRules();
     ASSERT_FALSE(interface_rules.empty());
@@ -9597,13 +9605,13 @@ TEST(LevelSetInterfaceLifecycle, HighOrderSubcellP2SphereCapApproximatesVolumeAn
     EXPECT_GT(result.summary.active_fragment_count, 1u);
     EXPECT_NEAR(result.summary.negative_volume_measure,
                 pi * radius * radius * radius / 6.0,
-                1.5e-2);
+                5.0e-4);
     EXPECT_NEAR(result.summary.positive_volume_measure,
                 1.0 / 6.0 - pi * radius * radius * radius / 6.0,
-                1.5e-2);
+                5.0e-4);
     EXPECT_NEAR(result.summary.measure,
                 pi * radius * radius / 2.0,
-                8.0e-2) << result.diagnostic;
+                1.5e-2) << result.diagnostic;
 
     const auto interface_rules = result.domain.interfaceQuadratureRules();
     ASSERT_FALSE(interface_rules.empty());
@@ -10022,10 +10030,10 @@ TEST(LevelSetInterfaceLifecycle, SayeHyperrectangleP2CircleApproximatesAreaAndLe
     EXPECT_GT(result.summary.active_fragment_count, 1u);
     EXPECT_NEAR(result.summary.negative_volume_measure,
                 pi * radius * radius,
-                6.0e-2);
+                1.2e-3);
     EXPECT_NEAR(result.summary.measure,
                 2.0 * pi * radius,
-                1.2e-1);
+                1.0e-9);
 
     const auto x_moment = [](const std::array<FE::Real, 3>& x) { return x[0]; };
     const auto y_moment = [](const std::array<FE::Real, 3>& x) { return x[1]; };
@@ -10036,22 +10044,22 @@ TEST(LevelSetInterfaceLifecycle, SayeHyperrectangleP2CircleApproximatesAreaAndLe
                                       FE::geometry::CutIntegrationSide::Negative,
                                       x_moment),
                 0.0,
-                2.0e-2);
+                1.0e-12);
     EXPECT_NEAR(integrateVolumeMoment(result.domain,
                                       FE::geometry::CutIntegrationSide::Negative,
                                       y_moment),
                 0.0,
-                2.0e-2);
+                1.0e-12);
     EXPECT_NEAR(integrateVolumeMoment(result.domain,
                                       FE::geometry::CutIntegrationSide::Negative,
                                       r2_moment),
                 pi * radius * radius * radius * radius / 2.0,
-                3.0e-2);
-    EXPECT_NEAR(integrateInterfaceMoment(result.domain, x_moment), 0.0, 2.0e-2);
-    EXPECT_NEAR(integrateInterfaceMoment(result.domain, y_moment), 0.0, 2.0e-2);
+                3.0e-4);
+    EXPECT_NEAR(integrateInterfaceMoment(result.domain, x_moment), 0.0, 1.0e-12);
+    EXPECT_NEAR(integrateInterfaceMoment(result.domain, y_moment), 0.0, 1.0e-12);
     EXPECT_NEAR(integrateInterfaceMoment(result.domain, r2_moment),
                 2.0 * pi * radius * radius * radius,
-                6.0e-2);
+                1.0e-9);
 
     const auto interface_rules = result.domain.interfaceQuadratureRules();
     ASSERT_FALSE(interface_rules.empty());
@@ -10223,11 +10231,11 @@ TEST(LevelSetInterfaceLifecycle, SayeHyperrectangleP2EllipseIntegratesAreaAndArc
     const FE::Real expected_area = pi * semi_major * semi_minor;
     const FE::Real expected_length =
         ellipsePerimeterReference(semi_major, semi_minor);
-    EXPECT_NEAR(result.summary.negative_volume_measure, expected_area, 2.0e-2);
+    EXPECT_NEAR(result.summary.negative_volume_measure, expected_area, 4.0e-4);
     EXPECT_NEAR(result.summary.positive_volume_measure,
                 4.0 - expected_area,
-                2.0e-2);
-    EXPECT_NEAR(result.summary.measure, expected_length, 8.0e-2);
+                4.0e-4);
+    EXPECT_NEAR(result.summary.measure, expected_length, 6.0e-4);
 
     const auto x2_moment = [](const std::array<FE::Real, 3>& x) {
         return x[0] * x[0];
@@ -10239,12 +10247,12 @@ TEST(LevelSetInterfaceLifecycle, SayeHyperrectangleP2EllipseIntegratesAreaAndArc
                                       FE::geometry::CutIntegrationSide::Negative,
                                       x2_moment),
                 pi * semi_major * semi_major * semi_major * semi_minor / 4.0,
-                1.5e-2);
+                8.0e-5);
     EXPECT_NEAR(integrateVolumeMoment(result.domain,
                                       FE::geometry::CutIntegrationSide::Negative,
                                       y2_moment),
                 pi * semi_major * semi_minor * semi_minor * semi_minor / 4.0,
-                1.5e-2);
+                3.0e-5);
 
     const auto interface_rules = result.domain.interfaceQuadratureRules();
     ASSERT_FALSE(interface_rules.empty());
@@ -10392,10 +10400,10 @@ TEST(LevelSetInterfaceLifecycle, SmallVolumeCutsReturnFinitePositiveRules)
     EXPECT_LT(saye_circle.summary.negative_volume_measure, 0.01);
     EXPECT_NEAR(saye_circle.summary.negative_volume_measure,
                 pi * radius * radius,
-                2.0e-3);
+                3.0e-4);
     EXPECT_NEAR(saye_circle.summary.measure,
                 2.0 * pi * radius,
-                2.0e-2);
+                4.0e-3);
     expectSingleParentVolumeRulesPartitionMeasure(saye_circle.domain, 1.0e-10);
     expectGeneratedCutRulesAreFinite(saye_circle.domain);
 
@@ -10417,7 +10425,7 @@ TEST(LevelSetInterfaceLifecycle, SmallVolumeCutsReturnFinitePositiveRules)
     EXPECT_LT(subcell_circle.summary.negative_volume_measure, 0.003);
     EXPECT_NEAR(subcell_circle.summary.negative_volume_measure,
                 pi * radius * radius / 4.0,
-                8.0e-4);
+                2.0e-5);
     EXPECT_NEAR(subcell_circle.summary.measure,
                 pi * radius / 2.0,
                 1.0e-2);
@@ -10495,10 +10503,10 @@ TEST(LevelSetInterfaceLifecycle, MultipleComponentsInSingleParentCellProduceSepa
         EXPECT_GT(result.summary.active_fragment_count, 1u);
         EXPECT_NEAR(result.summary.negative_volume_measure,
                     0.5 * pi * radius * radius,
-                    3.0e-2);
+                    1.5e-4);
         EXPECT_NEAR(result.summary.measure,
                     pi * radius,
-                    8.0e-2);
+                    3.0e-4);
 
         const auto left_component = [](const std::array<FE::Real, 3>& x) {
             return x[0] < 0.0 ? FE::Real{1.0} : FE::Real{0.0};
@@ -10508,10 +10516,10 @@ TEST(LevelSetInterfaceLifecycle, MultipleComponentsInSingleParentCellProduceSepa
         };
         EXPECT_NEAR(integrateInterfaceMoment(result.domain, left_component),
                     0.5 * pi * radius,
-                    5.0e-2);
+                    1.5e-4);
         EXPECT_NEAR(integrateInterfaceMoment(result.domain, right_component),
                     0.5 * pi * radius,
-                    5.0e-2);
+                    1.5e-4);
         expectSingleParentVolumeRulesPartitionMeasure(result.domain, 1.0e-10);
         expectGeneratedCutRulesAreFinite(result.domain);
     }
@@ -10581,10 +10589,10 @@ TEST(LevelSetInterfaceLifecycle, MultipleComponentsInSingleParentCellProduceSepa
         EXPECT_GT(result.summary.active_fragment_count, 1u);
         EXPECT_NEAR(result.summary.negative_volume_measure,
                     3.0 * pi * radius * radius / 8.0,
-                    1.5e-2);
+                    2.5e-5);
         EXPECT_NEAR(result.summary.measure,
                     3.0 * pi * radius / 4.0,
-                    8.0e-2);
+                    9.0e-5);
 
         const auto left_component = [](const std::array<FE::Real, 3>& x) {
             return x[0] < 0.5 ? FE::Real{1.0} : FE::Real{0.0};
@@ -10594,10 +10602,10 @@ TEST(LevelSetInterfaceLifecycle, MultipleComponentsInSingleParentCellProduceSepa
         };
         EXPECT_NEAR(integrateInterfaceMoment(result.domain, left_component),
                     0.5 * pi * radius,
-                    5.0e-2);
+                    7.0e-5);
         EXPECT_NEAR(integrateInterfaceMoment(result.domain, right_component),
                     0.25 * pi * radius,
-                    5.0e-2);
+                    2.5e-5);
         expectSingleParentVolumeRulesPartitionMeasure(result.domain, 1.0e-10);
         expectGeneratedCutRulesAreFinite(result.domain);
     }
@@ -10808,10 +10816,10 @@ TEST(LevelSetInterfaceLifecycle, SayeHyperrectangleP2SphereApproximatesVolumeAnd
     EXPECT_GT(result.summary.active_fragment_count, 1u);
     EXPECT_NEAR(result.summary.negative_volume_measure,
                 4.0 * pi * radius * radius * radius / 3.0,
-                8.0e-2);
+                3.0e-2);
     EXPECT_NEAR(result.summary.measure,
                 4.0 * pi * radius * radius,
-                2.5e-1) << result.diagnostic;
+                1.0e-1) << result.diagnostic;
 
     const auto interface_rules = result.domain.interfaceQuadratureRules();
     ASSERT_FALSE(interface_rules.empty());
@@ -10895,8 +10903,8 @@ TEST(LevelSetInterfaceLifecycle, SayeHyperrectangleP2EllipsoidApproximatesVolume
     EXPECT_NE(result.diagnostic.find("SayeHyperrectangle"), std::string::npos);
     EXPECT_NE(result.diagnostic.find("max_depth_reached="), std::string::npos);
     EXPECT_GT(result.summary.active_fragment_count, 1u);
-    EXPECT_NEAR(result.summary.negative_volume_measure, expected_volume, 5.0e-2);
-    EXPECT_NEAR(result.summary.measure, expected_area, 2.0e-1);
+    EXPECT_NEAR(result.summary.negative_volume_measure, expected_volume, 8.0e-3);
+    EXPECT_NEAR(result.summary.measure, expected_area, 3.0e-2);
 }
 
 TEST(LevelSetInterfaceLifecycle, SayeHyperrectangleSphereAndEllipsoidErrorsDecreaseUnderHRefinement)
@@ -11068,7 +11076,7 @@ TEST(LevelSetInterfaceLifecycle, SayeHyperrectangleRulesAssembleFixedGeometryMea
                 1.0e-12);
     EXPECT_NEAR(volume_summary.total_output.local_vector[0],
                 pi * radius * radius,
-                6.0e-2);
+                1.2e-3);
 
     FE::assembly::CutDomainAssemblyOptions interface_options;
     interface_options.include_volume_rules = false;
@@ -11085,7 +11093,7 @@ TEST(LevelSetInterfaceLifecycle, SayeHyperrectangleRulesAssembleFixedGeometryMea
                 1.0e-12);
     EXPECT_NEAR(interface_summary.total_output.local_vector[0],
                 2.0 * pi * radius,
-                1.2e-1);
+                1.0e-9);
 }
 
 TEST(LevelSetInterfaceLifecycle, BackendFactoryReturnsFailClosedDrivers)
