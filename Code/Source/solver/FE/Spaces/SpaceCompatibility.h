@@ -32,7 +32,8 @@ public:
     static Result check_conformity(const FunctionSpace& a,
                                    const FunctionSpace& b);
 
-    /// Heuristic inf-sup stability check for vector-field/multiplier pairs
+    /// Recognizes reference divergence-compatible mixed pairs. A mesh-dependent
+    /// pair requires a separate check of the assembled operator and constraints.
     static Result check_inf_sup(const FunctionSpace& vector_field_space,
                                 const FunctionSpace& multiplier_space);
 };

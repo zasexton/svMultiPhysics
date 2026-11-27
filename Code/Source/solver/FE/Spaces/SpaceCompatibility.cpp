@@ -8,6 +8,8 @@
 
 #include "Spaces/SpaceCompatibility.h"
 
+#include "Basis/BasisTraits.h"
+
 namespace svmp {
 namespace FE {
 namespace spaces {
@@ -46,50 +48,36 @@ SpaceCompatibility::check_conformity(const FunctionSpace& a,
 SpaceCompatibility::Result
 SpaceCompatibility::check_inf_sup(const FunctionSpace& vector_field_space,
                                   const FunctionSpace& multiplier_space) {
-    Result r;
-
-    const int dim_v = vector_field_space.topological_dimension();
-    const int dim_p = multiplier_space.topological_dimension();
-
-    if (dim_v != dim_p) {
-        r.ok = false;
-        r.message = "Vector field and multiplier have different spatial dimensions";
-        return r;
+    const auto type = vector_field_space.element_type();
+    if (basis::topology(type) != basis::topology(multiplier_space.element_type()) ||
+        vector_field_space.topological_dimension() != multiplier_space.topological_dimension()) {
+        return {false, "Vector field and multiplier have different reference cells"};
+    }
+    if (vector_field_space.field_type() != FieldType::Vector ||
+        multiplier_space.field_type() != FieldType::Scalar ||
+        multiplier_space.continuity() != Continuity::L2) {
+        return {false, "Unrecognized vector-field/multiplier pair"};
+    }
+    if (vector_field_space.continuity() == Continuity::C0) {
+        return {false, "A continuous vector field with a discontinuous multiplier requires a mesh-dependent inf-sup check"};
     }
 
-    // Vector-valued H1 field paired with a scalar L2 multiplier
-    if (vector_field_space.field_type() == FieldType::Vector &&
-        vector_field_space.continuity() == Continuity::C0 &&
-        multiplier_space.field_type() == FieldType::Scalar &&
-        multiplier_space.continuity() == Continuity::L2) {
-
-        const int pv = vector_field_space.polynomial_order();
-        const int pp = multiplier_space.polynomial_order();
-
-        if (pv >= pp && pv > 0) {
-            r.ok = true;
-            r.message = "Heuristically inf-sup stable H1-L2 pair";
-        } else {
-            r.ok = false;
-            r.message = "Vector field order too low relative to multiplier for stable H1-L2 pair";
+    if (vector_field_space.continuity() == Continuity::H_div &&
+        multiplier_space.element().basis().basis_type() == BasisType::Lagrange) {
+        const auto family = vector_field_space.element().basis().basis_type();
+        const int order = vector_field_space.polynomial_order();
+        int divergence_order = -1;
+        if (family == BasisType::RaviartThomas &&
+            (basis::is_simplex(type) || basis::is_quadrilateral(type) || basis::is_hexahedron(type))) {
+            divergence_order = order;
+        } else if (family == BasisType::BDM && basis::is_simplex(type)) {
+            divergence_order = order - 1;
         }
-        return r;
+        if (multiplier_space.polynomial_order() <= divergence_order) {
+            return {true, "The reference divergence space contains the multiplier polynomials"};
+        }
     }
-
-    // Mixed H(div)-L2 pair
-    if (vector_field_space.field_type() == FieldType::Vector &&
-        vector_field_space.continuity() == Continuity::H_div &&
-        multiplier_space.field_type() == FieldType::Scalar &&
-        multiplier_space.continuity() == Continuity::L2) {
-
-        r.ok = true;
-        r.message = "Heuristically compatible H(div)-L2 mixed pair";
-        return r;
-    }
-
-    r.ok = false;
-    r.message = "Unknown or unsupported mixed pair; unable to assess inf-sup stability";
-    return r;
+    return {false, "Reference divergence compatibility has not been established for this pair"};
 }
 
 } // namespace spaces
