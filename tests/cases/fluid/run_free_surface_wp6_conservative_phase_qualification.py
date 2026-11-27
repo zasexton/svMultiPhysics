@@ -673,10 +673,7 @@ def validate_wp6_production_source_contract(
     attempt_guard_start = time_loop_source.find(
         "class AttemptStateGuard {"
     )
-    attempt_guard_end = time_loop_source.find(
-        "class DiscardedStaticPressureInitializationGuard {",
-        attempt_guard_start,
-    )
+    attempt_guard_end = time_loop_source.find("\n};", attempt_guard_start)
     if attempt_guard_start < 0 or attempt_guard_end < 0:
         raise ValueError(
             "WP-6 production source contract cannot isolate the TimeLoop "
@@ -685,27 +682,38 @@ def validate_wp6_production_source_contract(
     attempt_guard = time_loop_source[
         attempt_guard_start:attempt_guard_end
     ]
-    guarded_restore_block = (
-        "        if (!committed_) {\n"
-        "            history_.restoreRateState(snapshot_);\n"
-        "            workspace_.static_compatible_pressure_initialized =\n"
-        "                static_pressure_initialized_;\n"
-        "        }"
+    guard_contract = "TimeLoop attempt guard rollback"
+    _require_tokens_in_order(
+        attempt_guard,
+        (
+            "initializer_ledger_(workspace.initializer_ledger)",
+            "mesh_snapshot_ = system_.captureMeshCoordinateSnapshot();",
+            "history_.snapshotRateState(snapshot_, factory);",
+            "copy->copyFrom(stored);",
+            "~AttemptStateGuard() noexcept",
+            "restore();",
+            "void restore()",
+            "void commit() noexcept { committed_ = true; }",
+        ),
+        guard_contract,
     )
-    commit_disarm = (
-        "    void commit() noexcept { committed_ = true; }"
+    restore_start = attempt_guard.index("void restore()")
+    restore_end = attempt_guard.index("\n    }", restore_start)
+    _require_tokens_in_order(
+        attempt_guard[restore_start:restore_end],
+        (
+            "if (committed_ || restored_) {\n            return;\n        }",
+            "restored_ = true;",
+            "history_.restoreRateState(snapshot_);",
+            "workspace_.initializer_ledger = initializer_ledger_;",
+            "history_.uPrevK(static_cast<int>(k + 1u))"
+            ".copyFrom(*solution_snapshot_[k]);",
+            "if (mesh_snapshot_)",
+            "history_.resetCurrentToPrevious();",
+            "system_.restoreMeshCoordinateSnapshot(std::move(*mesh_snapshot_));",
+        ),
+        guard_contract,
     )
-    if (
-        attempt_guard.count(guarded_restore_block) != 1
-        or attempt_guard.count(commit_disarm) != 1
-        or attempt_guard.find(guarded_restore_block)
-        >= attempt_guard.find(commit_disarm)
-    ):
-        raise ValueError(
-            "WP-6 production source contract failed for TimeLoop attempt "
-            "guard rate and workspace state domains: both restores must "
-            "remain inside the !committed_ guard and commit must disarm it"
-        )
 
     return {
         "collective_graph_staleness_gates": 1,
@@ -715,7 +723,7 @@ def validate_wp6_production_source_contract(
         "live_geometry_consensus_sites": 2,
         "publication_ordering_sites": 2,
         "timeloop_fail_stop_disarm_sites": 1,
-        "timeloop_attempt_guard_state_domains": 2,
+        "timeloop_attempt_guard_state_domains": 4,
     }
 
 

@@ -8196,13 +8196,13 @@ void ApplicationDriver::runTransient(SimulationComponents& sim, const Parameters
   callbacks.on_before_step_accept =
       [&](svmp::FE::timestepping::TimeHistory& h,
           const svmp::FE::timestepping::NewtonReport& nr) {
-        const auto maintenance_work_rows = maintenance_rows_at(h.time() + h.dt(), h.dt());
         requireCollectiveLevelSetMaintenanceRequestSchedule(
             level_set_maintenance,
             LevelSetMaintenanceScheduleStage::
                 ProspectiveAcceptedEndpoint,
             h.stepIndex() + 1,
             velocity_extension_artifact_comm);
+        const auto maintenance_work_rows = maintenance_rows_at(h.time() + h.dt(), h.dt());
         (void)nr;
         std::optional<ConservativePhaseCandidateStageSnapshot>
             consumed_conservative_phase_stage;
@@ -8966,13 +8966,13 @@ void ApplicationDriver::runTransient(SimulationComponents& sim, const Parameters
   };
   double vtk_total_time = 0.0;
   callbacks.on_step_accepted = [&](svmp::FE::timestepping::TimeHistory& h) {
-    const auto maintenance_work_rows = maintenance_rows_at(h.time(), h.dt());
     requireCollectiveLevelSetMaintenanceRequestSchedule(
         level_set_maintenance,
         LevelSetMaintenanceScheduleStage::
             AcceptedEndpointPostStep,
         h.stepIndex(),
         velocity_extension_artifact_comm);
+    const auto maintenance_work_rows = maintenance_rows_at(h.time(), h.dt());
     energy.requireAcceptedResidualWorkStage(h);
     fitted_ale_stage.commitAccepted(h);
     two_fluid_stage.commitAccepted(h);

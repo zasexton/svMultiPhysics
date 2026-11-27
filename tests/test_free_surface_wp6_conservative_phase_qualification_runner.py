@@ -332,7 +332,7 @@ def test_wp6_production_source_contract_is_fail_closed(tmp_path):
         "live_geometry_consensus_sites": 2,
         "publication_ordering_sites": 2,
         "timeloop_fail_stop_disarm_sites": 1,
-        "timeloop_attempt_guard_state_domains": 2,
+        "timeloop_attempt_guard_state_domains": 4,
     }
 
     source = APPLICATION_DRIVER_SOURCE_PATH.read_text(encoding="utf-8")
@@ -567,59 +567,42 @@ def test_wp6_production_source_contract_is_fail_closed(tmp_path):
             missing_timeloop_disarm,
         )
 
-    workspace_restore = (
-        "            workspace_.static_compatible_pressure_initialized =\n"
-        "                static_pressure_initialized_;"
-    )
-    assert time_loop_source.count(workspace_restore) == 1
-    missing_workspace_restore = (
-        tmp_path / "TimeLoop-missing-workspace-restore.cpp"
-    )
-    missing_workspace_restore.write_text(
-        time_loop_source.replace(
-            workspace_restore,
-            "            /* removed one-shot workspace restore */",
-            1,
+    ledger_restore = "workspace_.initializer_ledger = initializer_ledger_;"
+    for domain, restore in (
+        ("rates", "history_.restoreRateState(snapshot_);"),
+        ("initializer", ledger_restore),
+        (
+            "history",
+            "history_.uPrevK(static_cast<int>(k + 1u))"
+            ".copyFrom(*solution_snapshot_[k]);",
         ),
-        encoding="utf-8",
-    )
-    with pytest.raises(
-        ValueError, match="attempt guard rate and workspace"
+        (
+            "mesh",
+            "system_.restoreMeshCoordinateSnapshot(std::move(*mesh_snapshot_));",
+        ),
     ):
-        runner.validate_wp6_production_source_contract(
-            APPLICATION_DRIVER_SOURCE_PATH,
-            missing_workspace_restore,
+        assert time_loop_source.count(restore) == 1
+        missing_restore = tmp_path / f"TimeLoop-missing-{domain}-restore.cpp"
+        missing_restore.write_text(
+            time_loop_source.replace(restore, "", 1), encoding="utf-8"
         )
+        with pytest.raises(ValueError, match="attempt guard rollback"):
+            runner.validate_wp6_production_source_contract(
+                APPLICATION_DRIVER_SOURCE_PATH, missing_restore
+            )
 
-    guarded_restore_block = (
-        "        if (!committed_) {\n"
-        "            history_.restoreRateState(snapshot_);\n"
-        "            workspace_.static_compatible_pressure_initialized =\n"
-        "                static_pressure_initialized_;\n"
-        "        }"
-    )
-    assert time_loop_source.count(guarded_restore_block) == 1
-    workspace_restore_outside_guard = (
-        tmp_path / "TimeLoop-workspace-restore-outside-guard.cpp"
-    )
-    workspace_restore_outside_guard.write_text(
-        time_loop_source.replace(
-            guarded_restore_block,
-            "        if (!committed_) {\n"
-            "            history_.restoreRateState(snapshot_);\n"
-            "        }\n"
-            "        workspace_.static_compatible_pressure_initialized =\n"
-            "            static_pressure_initialized_;",
-            1,
+    disarm_check = "if (committed_ || restored_) {"
+    assert time_loop_source.count(disarm_check) == 1
+    unguarded_restore = tmp_path / "TimeLoop-unguarded-workspace-restore.cpp"
+    unguarded_restore.write_text(
+        time_loop_source.replace(ledger_restore, "", 1).replace(
+            disarm_check, ledger_restore + "\n        " + disarm_check, 1
         ),
         encoding="utf-8",
     )
-    with pytest.raises(
-        ValueError, match="attempt guard rate and workspace"
-    ):
+    with pytest.raises(ValueError, match="attempt guard rollback"):
         runner.validate_wp6_production_source_contract(
-            APPLICATION_DRIVER_SOURCE_PATH,
-            workspace_restore_outside_guard,
+            APPLICATION_DRIVER_SOURCE_PATH, unguarded_restore
         )
 
 
@@ -673,5 +656,5 @@ def test_wp6_validate_only_reports_prerequisite_without_closure():
         "live_geometry_consensus_sites": 2,
         "publication_ordering_sites": 2,
         "timeloop_fail_stop_disarm_sites": 1,
-        "timeloop_attempt_guard_state_domains": 2,
+        "timeloop_attempt_guard_state_domains": 4,
     }
