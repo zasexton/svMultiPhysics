@@ -1958,7 +1958,7 @@ TEST(SmallCutAggregationConstraint, RootPathGuardRejectsLongCutBand)
     try {
         system.rebuildConstraintState();
         FAIL() << "a root beyond the fixed path guard must fail closed";
-    } catch (const std::runtime_error& error) {
+    } catch (const svmp::FE::InadmissibleGeneratedGeometry& error) {
         EXPECT_NE(std::string(error.what()).find(
                       "root_path_guard_rejection"),
                   std::string::npos);

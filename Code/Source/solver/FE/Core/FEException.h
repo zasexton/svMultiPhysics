@@ -476,6 +476,17 @@ private:
 };
 
 /**
+ * A generated configuration of a trial state violates a numerical admissibility
+ * condition. A time integrator may retry from its accepted state when a
+ * smaller step can give a different configuration. Failures of the accepted
+ * state, invalid input, and insufficient mesh overlap are separate errors.
+ */
+class InadmissibleGeneratedGeometry : public std::runtime_error {
+public:
+    using std::runtime_error::runtime_error;
+};
+
+/**
  * @brief The ghost (overlap) layers of the mesh partition do not cover a
  * distributed stencil, e.g. a small-cut aggregation line whose masters are
  * missing on a rank that assembles with its slave.

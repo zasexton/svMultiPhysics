@@ -5967,7 +5967,7 @@ void traverseCandidateRoots(const AggregationCellGraph& graph,
                     ? guards_.maximum_root_path_length
                     : guards_.maximum_root_path_length + 1u);
             if (!guards_.rootless_fallback) {
-                throw std::runtime_error(
+                throw InadmissibleGeneratedGeometry(
                     "SmallCutAggregationConstraint: diagnostic="
                     "root_path_guard_rejection candidate_dof=" +
                     std::to_string(dof) + " maximum_observed_path=" +

@@ -122,6 +122,7 @@ struct RunSetup {
     std::optional<RestartState> restart{};
     std::function<void(ts::TimeLoopCallbacks&)> callbacks{};
     std::shared_ptr<ts::StepController> controller{};
+    std::function<void(ts::NewtonOptions&)> configure_newton{};
 };
 
 struct RunResult {
@@ -187,6 +188,9 @@ std::optional<RunResult> runMassRow(const RunSetup& setup)
     opts.newton.abs_tolerance = 1e-14;
     opts.newton.rel_tolerance = 0.0;
     opts.step_controller = setup.controller;
+    if (setup.configure_newton) {
+        setup.configure_newton(opts.newton);
+    }
 
     ts::TimeLoopCallbacks callbacks;
     if (setup.callbacks) {
@@ -257,6 +261,83 @@ TEST(TimeLoopAcceptedState, GeneralizedAlphaRestartUsesConstraintsAtTheRestoredT
     EXPECT_NEAR(result->u[1], 1.1, 1e-12);
     ASSERT_TRUE(b_nm1_at_gate.has_value());
     EXPECT_DOUBLE_EQ(*b_nm1_at_gate, 0.9);
+}
+
+TEST(TimeLoopAcceptedState, InadmissibleTrialRetriesFromTheAcceptedGeometry)
+{
+    using Point = ts::NewtonOptions::StateSynchronizationPoint;
+    for (const auto inadmissible_point : {Point::OuterFixedPointState,
+                                           Point::EndpointCandidateState,
+                                           Point::ProjectedEndpointCandidateState}) {
+        SCOPED_TRACE(static_cast<int>(inadmissible_point));
+        const bool stage_failure = inadmissible_point == Point::OuterFixedPointState;
+        ts::SimpleStepControllerOptions options;
+        options.increase_factor = 1.0;
+        int rejected = 0;
+        int restored = 0;
+        int gated = 0;
+        const auto result = runMassRow({
+            .g = [](double t) { return t; },
+            .callbacks = [&](ts::TimeLoopCallbacks& callbacks) {
+                callbacks.on_step_rejected = [&](const ts::TimeHistory& history,
+                                                 ts::StepRejectReason reason,
+                                                 const ts::NewtonReport& report) {
+                    ++rejected;
+                    EXPECT_EQ(reason, ts::StepRejectReason::CutTopologyChanged);
+                    EXPECT_EQ(report.converged, !stage_failure);
+                    EXPECT_EQ(report.external_state_discontinuity, stage_failure);
+                    EXPECT_EQ(restored, 1);
+                    EXPECT_EQ(history.stepIndex(), 0);
+                    EXPECT_DOUBLE_EQ(history.time(), 0.0);
+                    EXPECT_DOUBLE_EQ(history.uSpan()[1], 0.0);
+                    EXPECT_DOUBLE_EQ(history.uPrevSpan()[1], 0.0);
+                };
+                callbacks.on_step_candidate_ready = [&](ts::TimeHistory&, const ts::NewtonReport&)
+                    -> std::optional<ts::StepRejectReason> {
+                    ++gated;
+                    return std::nullopt;
+                };
+            },
+            .controller = std::make_shared<ts::SimpleStepController>(options),
+            .configure_newton = [&](ts::NewtonOptions& newton) {
+                newton.external_state_fixed_point.enabled = stage_failure;
+                newton.synchronize_state = [&](const svmp::FE::systems::SystemStateView& state,
+                                                Point point) {
+                    if (point == Point::RestoredProjectedTimeStepState) {
+                        ++restored;
+                    }
+                    if (point == inadmissible_point && state.dt > 0.075) {
+                        throw svmp::FE::InadmissibleGeneratedGeometry("trial cut support exceeds its path bound");
+                    }
+                };
+            }});
+        ASSERT_TRUE(result.has_value());
+        EXPECT_EQ(rejected, 1);
+        EXPECT_EQ(gated, 2);
+        EXPECT_NEAR(result->u[0], -0.05, 1e-12);
+        EXPECT_NEAR(result->u[1], 0.1, 1e-12);
+        EXPECT_NEAR(result->u_dot[0], -0.5, 1e-12);
+    }
+}
+
+TEST(TimeLoopAcceptedState, FixedStepRetainsTheEndpointGeometryDiagnostic)
+{
+    const RunSetup setup{
+        .g = [](double t) { return t; },
+        .configure_newton = [](ts::NewtonOptions& newton) {
+            newton.synchronize_state = [](const svmp::FE::systems::SystemStateView&,
+                                          ts::NewtonOptions::StateSynchronizationPoint point) {
+                if (point == ts::NewtonOptions::StateSynchronizationPoint::EndpointCandidateState) {
+                    throw svmp::FE::InadmissibleGeneratedGeometry("trial support exceeds eight links");
+                }
+            };
+        }};
+    try {
+        static_cast<void>(runMassRow(setup));
+        FAIL() << "The fixed step must reject inadmissible support";
+    } catch (const svmp::FE::InadmissibleGeneratedGeometry& error) {
+        EXPECT_STREQ(error.what(), "trial support exceeds eight links");
+    }
 }
 
 TEST(TimeLoopAcceptedState, RejectedCandidateRestoresStoredSolutionsAndRatesBeforeObservers)

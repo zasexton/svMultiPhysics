@@ -1259,6 +1259,10 @@ TimeLoopReport TimeLoop::run(systems::TransientSystem& transient,
     const auto n_dofs = transient.system().dofHandler().getNumDofs();
     FE_THROW_IF(n_dofs <= 0, systems::InvalidStateException, "TimeLoop: system has no DOFs");
 
+    // An endpoint callback may be installed only on ranks that have local
+    // geometry. Those without one still participate in the endpoint decision.
+    const bool has_endpoint_synchronization = candidateCallbackBitwiseOr(
+        transient.system(), options_.newton.synchronize_state ? 1 : 0) != 0;
     const bool candidate_stage_observer_enabled =
         static_cast<bool>(callbacks.on_candidate_stage);
     const bool candidate_acceptance_gate_enabled =
@@ -3895,6 +3899,15 @@ TimeLoopReport TimeLoop::run(systems::TransientSystem& transient,
                 } else {
                     FE_THROW(NotImplementedException, "TimeLoop: unsupported scheme");
                 }
+            } catch (const InadmissibleGeneratedGeometry& error) {
+                // A collectively inadmissible stage is a rejected nonlinear
+                // attempt. The accepted-state restore still runs before retry.
+                threw = true;
+                caught_exception = std::current_exception();
+                nr = NewtonReport{};
+                nr.converged = false;
+                nr.external_state_discontinuity = true;
+                nr.failure_message = error.what();
             } catch (const FEException& error) {
                 threw = true;
                 caught_exception = std::current_exception();
@@ -4401,7 +4414,49 @@ TimeLoopReport TimeLoop::run(systems::TransientSystem& transient,
                     (options_.scheme == SchemeKind::GeneralizedAlpha) ||
                     (used_collocation && collocation_family_used == CollocationFamily::Gauss);
 
-                if (needs_endpoint_finalization) {
+                std::exception_ptr inadmissible_endpoint;
+                const auto synchronize_endpoint = [&](StateSyncPoint point) {
+                    if (!has_endpoint_synchronization) {
+                        return true;
+                    }
+                    std::exception_ptr local_failure;
+                    bool inadmissible = false;
+                    if (options_.newton.synchronize_state) {
+                        try {
+                            const auto endpoint = makeAcceptedTimeStepStateView(history, t + dt);
+                            options_.newton.synchronize_state(endpoint, point);
+                        } catch (const InadmissibleGeneratedGeometry&) {
+                            local_failure = std::current_exception();
+                            inadmissible = true;
+                        } catch (...) {
+                            local_failure = std::current_exception();
+                        }
+                    }
+                    // A structural error on any rank must propagate on every
+                    // rank before any peer projects the candidate or retries.
+                    constexpr int admissible = 0;
+                    constexpr int retryable = 1;
+                    constexpr int fatal = 2;
+                    const int local_status = local_failure ? (inadmissible ? retryable : fatal) : admissible;
+                    const int status = candidateCallbackBitwiseOr(transient.system(), local_status);
+                    if ((status & fatal) != 0) {
+                        const auto failure = local_failure && !inadmissible
+                            ? local_failure
+                            : std::make_exception_ptr(systems::InvalidStateException(
+                                  "TimeLoop: endpoint synchronization failed on another rank"));
+                        restoreAcceptedGeneratedStateAndRethrow(failure);
+                    }
+                    if ((status & retryable) != 0) {
+                        inadmissible_endpoint = local_failure
+                            ? local_failure
+                            : std::make_exception_ptr(InadmissibleGeneratedGeometry(
+                                  "TimeLoop: trial endpoint geometry was inadmissible on another rank"));
+                    }
+                    return status == admissible;
+                };
+
+                if (needs_endpoint_finalization &&
+                    synchronize_endpoint(StateSyncPoint::EndpointCandidateState)) {
                     // The nonlinear solve for generalized-alpha (and
                     // non-endpoint Gauss collocation) leaves generated
                     // state at an intermediate stage.  Refresh endpoint
@@ -4411,21 +4466,6 @@ TimeLoopReport TimeLoop::run(systems::TransientSystem& transient,
                     // and before the adaptive controller records acceptance,
                     // so a topology-sensitive gate can still restore and
                     // retry the projected endpoint transactionally.
-                    if (options_.newton.synchronize_state) {
-                        try {
-                            const auto endpoint_state =
-                                makeAcceptedTimeStepStateView(
-                                    history, t + dt);
-                            options_.newton.synchronize_state(
-                                endpoint_state,
-                                StateSyncPoint::EndpointCandidateState);
-                        } catch (...) {
-                            const auto endpoint_failure =
-                                std::current_exception();
-                            restoreAcceptedGeneratedStateAndRethrow(endpoint_failure);
-                        }
-                    }
-
                     transient.system().updateConstraints(t + dt, dt);
                     ensure_workspace_matches_sparsity();
                     history.updateGhosts();
@@ -4465,26 +4505,14 @@ TimeLoopReport TimeLoop::run(systems::TransientSystem& transient,
                         zeroVectorEntries(algebraic_dofs.all, history.uDot());
                     }
 
-                    if (options_.newton.synchronize_state) {
-                        try {
-                            const auto projected_endpoint_state =
-                                makeAcceptedTimeStepStateView(
-                                    history, t + dt);
-                            options_.newton.synchronize_state(
-                                projected_endpoint_state,
-                                StateSyncPoint::
-                                    ProjectedEndpointCandidateState);
-                        } catch (...) {
-                            const auto endpoint_failure =
-                                std::current_exception();
-                            restoreAcceptedGeneratedStateAndRethrow(endpoint_failure);
-                        }
-                    }
+                    synchronize_endpoint(StateSyncPoint::ProjectedEndpointCandidateState);
                 }
 
                 std::optional<StepRejectReason>
                     final_candidate_rejection{};
-                if (candidate_acceptance_gate_enabled) {
+                if (inadmissible_endpoint) {
+                    final_candidate_rejection = StepRejectReason::CutTopologyChanged;
+                } else if (candidate_acceptance_gate_enabled) {
                     candidate_rollback_guard.arm();
                     std::exception_ptr local_gate_failure;
                     try {
@@ -4575,6 +4603,9 @@ TimeLoopReport TimeLoop::run(systems::TransientSystem& transient,
                             history, rejection_reason, nr);
                     }
                     if (!adaptive) {
+                        if (inadmissible_endpoint) {
+                            std::rethrow_exception(inadmissible_endpoint);
+                        }
                         FE_THROW(
                             FEException,
                             "TimeLoop: projected candidate rejected by the "
@@ -4586,7 +4617,7 @@ TimeLoopReport TimeLoop::run(systems::TransientSystem& transient,
                     const auto decision =
                         options_.step_controller->onRejected(
                             info, rejection_reason);
-                    if (!decision.retry) {
+                    if (!decision.retry || (inadmissible_endpoint && attempt == max_retries)) {
                         report.success = false;
                         report.steps_taken = step;
                         report.final_time = history.time();
@@ -4608,6 +4639,9 @@ TimeLoopReport TimeLoop::run(systems::TransientSystem& transient,
                                 base + " (dt=" +
                                 std::to_string(info.dt) + ", order=" +
                                 std::to_string(info.scheme_order) + ")";
+                        }
+                        if (inadmissible_endpoint) {
+                            report.message += " (" + failedAttemptMessage(inadmissible_endpoint) + ")";
                         }
                         return report;
                     }

@@ -1658,6 +1658,158 @@ TEST(TimeLoopFsilsConvergenceMPI,
 #endif
 }
 
+#if defined(FE_HAS_FSILS)
+void setupCandidateStrip(systems::FESystem& sys, MPI_Comm comm, systems::SetupOptions& setup_opts)
+{
+    const int rank = mpiRank(comm);
+    const int size = mpiSize(comm);
+    const int n_cells = size;
+    const auto space = spaces::Space(
+        spaces::SpaceType::H1,
+        ElementType::Quad4,
+        /*order=*/1,
+        /*components=*/1);
+    ASSERT_TRUE(space);
+
+    const auto u_field = sys.addField(
+        systems::FieldSpec{.name = "u",
+                           .space = space,
+                           .components = 1});
+    sys.addOperator("op");
+
+    const auto u = forms::FormExpr::stateField(
+        u_field, *space, "u");
+    const auto v = forms::TestFunction(*space, "v");
+    (void)systems::installFormulation(
+        sys, "op", {u_field}, (u.dt(1) * v + u * v).dx());
+
+    setup_opts.assembler_name = "StandardAssembler";
+    setup_opts.assembly_options.ghost_policy =
+        GhostPolicy::ReverseScatter;
+    setup_opts.assembly_options.deterministic = true;
+    setup_opts.assembly_options.overlap_communication = false;
+    setup_opts.dof_options.global_numbering =
+        dofs::GlobalNumberingMode::DenseGlobalIds;
+    setup_opts.dof_options.ownership =
+        dofs::OwnershipStrategy::LowestRank;
+    setup_opts.dof_options.my_rank = rank;
+    setup_opts.dof_options.world_size = size;
+    setup_opts.dof_options.mpi_comm = comm;
+
+    systems::SetupInputs inputs;
+    inputs.topology_override =
+        buildStripTopology(n_cells, rank, size);
+    sys.setup(setup_opts, inputs);
+}
+#endif
+
+TEST(TimeLoopFsilsConvergenceMPI, RankLocalInadmissibleEndpointRestoresAllRanks)
+{
+#if !defined(FE_HAS_FSILS)
+    GTEST_SKIP() << "FSILS backend is not enabled";
+#else
+    const auto comm = MPI_COMM_WORLD;
+    const int rank = mpiRank(comm);
+    const int size = mpiSize(comm);
+    if (size < 2) {
+        GTEST_SKIP() << "Run with at least two MPI ranks";
+    }
+    const int n_cells = size;
+    auto mesh = std::make_shared<StripQuadMeshAccess>(
+        n_cells, rank, size);
+    systems::FESystem sys(mesh);
+    systems::SetupOptions setup_opts;
+    setupCandidateStrip(sys, comm, setup_opts);
+    ASSERT_TRUE(sys.isSetup());
+
+    const GlobalIndex n_dofs = sys.dofHandler().getNumDofs();
+    auto permutation = getFsilsDofPermutation(
+        sys, /*dof_per_node=*/1, setup_opts.dof_options);
+    ASSERT_TRUE(static_cast<bool>(permutation));
+
+    backends::FsilsFactory factory(
+        /*dof_per_node=*/1, permutation, comm);
+    auto linear = factory.createLinearSolver(
+        fsilsGmresDiagOptions());
+    ASSERT_TRUE(static_cast<bool>(linear));
+
+    auto history = timestepping::TimeHistory::allocate(
+        factory,
+        n_dofs,
+        /*history_depth=*/2,
+        /*allocate_second_order_state=*/false);
+    constexpr double dt = 0.1;
+    history.setTime(0.0);
+    history.setDt(dt);
+    history.setPrevDt(dt);
+    history.setStepIndex(0);
+    history.uPrev().zero();
+    history.uPrev2().zero();
+    history.resetCurrentToPrevious();
+
+    auto integrator =
+        std::make_shared<systems::BackwardDifferenceIntegrator>();
+    systems::TransientSystem transient(sys, std::move(integrator));
+
+    using Point = timestepping::NewtonOptions::StateSynchronizationPoint;
+    timestepping::TimeLoopOptions options;
+    options.scheme = timestepping::SchemeKind::GeneralizedAlpha;
+    options.t_end = dt;
+    options.dt = dt;
+    options.newton.residual_op = "op";
+    options.newton.jacobian_op = "op";
+    options.step_controller = std::make_shared<RecordingFinalCandidateGateController>();
+    int endpoint_calls = 0;
+    int restored = 0;
+    options.newton.synchronize_state =
+        [&](const systems::SystemStateView&, Point point) {
+            if (point == Point::RestoredProjectedTimeStepState) {
+                ++restored;
+            }
+            if (point == Point::EndpointCandidateState && ++endpoint_calls == 1 && rank == 0) {
+                throw InadmissibleGeneratedGeometry("trial cut support exceeds its path bound");
+            }
+        };
+    int rejected = 0;
+    timestepping::TimeLoopCallbacks callbacks;
+    callbacks.on_step_rejected = [&](const timestepping::TimeHistory& state,
+                                     timestepping::StepRejectReason reason,
+                                     const timestepping::NewtonReport&) {
+        ++rejected;
+        EXPECT_EQ(reason, timestepping::StepRejectReason::CutTopologyChanged);
+        EXPECT_EQ(restored, 1);
+        EXPECT_EQ(state.stepIndex(), 0);
+    };
+    const auto report = timestepping::TimeLoop(options).run(transient, factory, *linear, history, callbacks);
+    EXPECT_TRUE(report.success) << report.message;
+    EXPECT_EQ(report.steps_taken, 1);
+    EXPECT_EQ(rejected, 1);
+    EXPECT_EQ(endpoint_calls, 2);
+
+    // A structural error on a peer takes precedence over a locally
+    // retryable geometry. Every rank restores the accepted endpoint first.
+    options.t0 = dt;
+    options.t_end = 2 * dt;
+    options.newton.synchronize_state = [&](const systems::SystemStateView&, Point point) {
+        if (point == Point::RestoredProjectedTimeStepState) {
+            ++restored;
+        }
+        if (point == Point::EndpointCandidateState) {
+            if (rank == 0) {
+                throw InadmissibleGeneratedGeometry("trial cut support exceeds its path bound");
+            }
+            throw std::runtime_error("invalid endpoint configuration");
+        }
+    };
+    EXPECT_THROW(timestepping::TimeLoop(options).run(transient, factory, *linear, history, callbacks),
+                 std::exception);
+    EXPECT_EQ(restored, 2);
+    EXPECT_EQ(rejected, 1);
+    EXPECT_EQ(history.stepIndex(), 1);
+    EXPECT_DOUBLE_EQ(history.time(), dt);
+#endif
+}
+
 TEST(TimeLoopFsilsConvergenceMPI,
      FinalCandidateGateRankLocalCutRetriesCollectivelyBeforeCommit)
 {
@@ -1690,44 +1842,9 @@ TEST(TimeLoopFsilsConvergenceMPI,
     const int n_cells = size;
     auto mesh = std::make_shared<StripQuadMeshAccess>(
         n_cells, rank, size);
-    const auto space = spaces::Space(
-        spaces::SpaceType::H1,
-        ElementType::Quad4,
-        /*order=*/1,
-        /*components=*/1);
-    ASSERT_TRUE(all_ranks_ready(static_cast<bool>(space)));
-
     systems::FESystem sys(mesh);
-    const auto u_field = sys.addField(
-        systems::FieldSpec{.name = "u",
-                           .space = space,
-                           .components = 1});
-    sys.addOperator("op");
-
-    const auto u = forms::FormExpr::stateField(
-        u_field, *space, "u");
-    const auto v = forms::TestFunction(*space, "v");
-    (void)systems::installFormulation(
-        sys, "op", {u_field}, (u.dt(1) * v + u * v).dx());
-
     systems::SetupOptions setup_opts;
-    setup_opts.assembler_name = "StandardAssembler";
-    setup_opts.assembly_options.ghost_policy =
-        GhostPolicy::ReverseScatter;
-    setup_opts.assembly_options.deterministic = true;
-    setup_opts.assembly_options.overlap_communication = false;
-    setup_opts.dof_options.global_numbering =
-        dofs::GlobalNumberingMode::DenseGlobalIds;
-    setup_opts.dof_options.ownership =
-        dofs::OwnershipStrategy::LowestRank;
-    setup_opts.dof_options.my_rank = rank;
-    setup_opts.dof_options.world_size = size;
-    setup_opts.dof_options.mpi_comm = comm;
-
-    systems::SetupInputs inputs;
-    inputs.topology_override =
-        buildStripTopology(n_cells, rank, size);
-    sys.setup(setup_opts, inputs);
+    setupCandidateStrip(sys, comm, setup_opts);
     ASSERT_TRUE(all_ranks_ready(sys.isSetup()));
 
     const GlobalIndex n_dofs = sys.dofHandler().getNumDofs();
