@@ -667,20 +667,33 @@ TEST(TraceSpace, SerendipityQuadFaceInterpolationRecoversCoefficients) {
 
 TEST(TraceSpace, OrientedHDivNormalTraceMapReversesHigherOrderEdgeTrace)
 {
-    const auto map = TraceSpace::orientedHDivNormalTraceMap(ElementType::Line2,
-                                                            /*trace_polynomial_order=*/2,
-                                                            /*edge_orientation=*/-1);
-
-    ASSERT_EQ(map.source_indices.size(), 3u);
-    ASSERT_EQ(map.weights.size(), 3u);
-
-    EXPECT_EQ(map.source_indices[0], 2);
-    EXPECT_EQ(map.source_indices[1], 1);
-    EXPECT_EQ(map.source_indices[2], 0);
-
-    EXPECT_DOUBLE_EQ(map.weights[0], -1.0);
-    EXPECT_DOUBLE_EQ(map.weights[1], -1.0);
-    EXPECT_DOUBLE_EQ(map.weights[2], -1.0);
+    // On [-1,1] the P2 edge weights for the two endpoints and midpoint are
+    // (s*s-s)/2, (s*s+s)/2 and 1-s*s. Integrating flux=1+2s+3s*s and its
+    // oppositely oriented normal flux -flux(-s) against them gives these moments.
+    const std::array<Real, 3> moments{4.0 / 15.0, 8.0 / 5.0, 32.0 / 15.0};
+    const std::array<Real, 3> opposite{-8.0 / 5.0, -4.0 / 15.0, -32.0 / 15.0};
+    const auto flux = [](Real s) { return 1 + 2*s + 3*s*s; };
+    const auto hdiv = std::make_shared<HDivSpace>(ElementType::Quad4, 2);
+    TraceSpace trace(hdiv, 0);
+    std::vector<Real> local;
+    trace.interpolate([&](const FunctionSpace::Value& xi) { return xi2(flux(xi[0]), 0); }, local);
+    ASSERT_EQ(local.size(), moments.size());
+    for (const int orientation : {1, -1}) {
+        const auto map = TraceSpace::orientedHDivNormalTraceMap(ElementType::Line2, 2, orientation);
+        ASSERT_EQ(map.source_indices.size(), moments.size());
+        ASSERT_EQ(map.weights.size(), moments.size());
+        std::vector<Real> aligned(local.size());
+        for (std::size_t i = 0; i < aligned.size(); ++i) {
+            const int source = map.source_indices[i];
+            ASSERT_GE(source, 0);
+            ASSERT_LT(static_cast<std::size_t>(source), moments.size());
+            EXPECT_DOUBLE_EQ(map.weights[i] * moments[source], orientation == 1 ? moments[i] : opposite[i]);
+            aligned[i] = map.weights[i] * local[source];
+        }
+        for (const Real s : {-0.7, 0.0, 0.3}) {
+            EXPECT_NEAR(trace.evaluate_scalar(xi2(s, 0), aligned), orientation * flux(orientation*s), 1e-12);
+        }
+    }
 }
 
 TEST(TraceSpace, OrientedHDivNormalTraceMapRotatesQuadrilateralFaceTrace)
