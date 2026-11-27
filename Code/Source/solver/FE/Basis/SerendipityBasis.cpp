@@ -818,7 +818,7 @@ void SerendipityBasis::evaluate_hessians(const math::Vector<Real, 3>& xi,
         return;
     }
 
-    if (element_type_ == ElementType::Hex8 && order_ == 1) {
+    if (dimension_ == 3 && order_ == 1) {
         static const LagrangeBasis parent(ElementType::Hex8, 1);
         parent.evaluate_hessians(xi, hessians);
         return;

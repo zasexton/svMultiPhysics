@@ -526,6 +526,38 @@ TEST(BasisHessians, PyramidNearApexHessianShowsDirectionalSpread) {
     }
 }
 
+TEST(BasisHessians, LinearSerendipityHexUsesAllTrilinearCornerHessians) {
+    const math::Vector<Real, 3> xi{Real(0.2), Real(-0.3), Real(0.4)};
+    const int corners[8][3] = {
+        {-1, -1, -1}, {1, -1, -1}, {1, 1, -1}, {-1, 1, -1},
+        {-1, -1,  1}, {1, -1,  1}, {1, 1,  1}, {-1, 1,  1}
+    };
+    for (const auto type : {ElementType::Hex8, ElementType::Hex20}) {
+        for (const bool geometry_mode : {false, true}) {
+            SCOPED_TRACE(::testing::Message() << "cell " << static_cast<int>(type)
+                                               << ", geometry mode " << geometry_mode);
+            const SerendipityBasis basis(type, 1, geometry_mode);
+            std::vector<Hessian> hessians;
+            basis.evaluate_hessians(xi, hessians);
+            ASSERT_EQ(hessians.size(), 8u);
+            for (std::size_t node = 0; node < 8; ++node) {
+                for (std::size_t i = 0; i < 3; ++i) {
+                    for (std::size_t j = 0; j < 3; ++j) {
+                        Real expected = 0;
+                        if (i != j) {
+                            const auto k = 3 - i - j;
+                            expected = corners[node][i] * corners[node][j] *
+                                       (1 + corners[node][k] * xi[k]) / 8;
+                        }
+                        EXPECT_NEAR(hessians[node](i, j), expected, 1e-14)
+                            << "node " << node << ", entry " << i << ',' << j;
+                    }
+                }
+            }
+        }
+    }
+}
+
 TEST(BasisHessians, SerendipityHessiansSumToZero) {
     const struct Case {
         ElementType type;
