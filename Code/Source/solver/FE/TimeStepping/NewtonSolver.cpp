@@ -3811,7 +3811,7 @@ makeValidatedNativeRankOneSolveOptions(const backends::SolverOptions& base,
     // Native face/reduced outlet updates do need tighter inner BlockSchur
     // sub-solves than the XML 1e-3 defaults, but they do not need the much
     // harsher bordered 1e-8/200 regime. A moderate tightening restores the
-    // pipe-case robustness while avoiding most of the extra Schur/momentum
+    // pipe-case robustness while avoiding most of the extra Schur/primary
     // work seen with the explicit bordered settings.
     if (base.method == backends::SolverMethod::BlockSchur) {
         (void)native_direct_face_mode_count;
@@ -10377,6 +10377,7 @@ NewtonReport NewtonSolver::solveStepFrozenExternalState(
                     const Real rhs_norm = linear_rhs->norm();
                     if (mpiRank() == 0) {
                         std::ostringstream oss;
+                        const auto primary_short_name = base_linear_options.primarySolveRecordName().substr(0, 3);
                         oss << "NewtonSolver: linear solve history"
                             << " call=" << primary_linear_solve_call_index
                             << " newton_it=" << it
@@ -10391,8 +10392,8 @@ NewtonReport NewtonSolver::solveStepFrozenExternalState(
                             << " rn=" << report.linear.final_residual_norm
                             << " rel=" << report.linear.relative_residual
                             << " outer=" << report.linear.blockschur_outer_iterations
-                            << " mom_solves=" << report.linear.blockschur_momentum_solve_calls
-                            << " mom_iters=" << report.linear.blockschur_momentum_iterations
+                            << " " << primary_short_name << "_solves=" << report.linear.blockschur_primary_solve_calls
+                            << " " << primary_short_name << "_iters=" << report.linear.blockschur_primary_iterations
                             << " schur_solves=" << report.linear.blockschur_schur_solve_calls
                             << " schur_iters=" << report.linear.blockschur_schur_iterations
                             << " native_rank_one=" << native_direct_face_mode_count

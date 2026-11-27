@@ -70,8 +70,8 @@ SolverOptions makeFsilsBlockSchurOptions(int dof_per_node,
                                          int constraint_components,
                                          FsilsBlockSchurSchurPreconditioner schur_pc =
                                              FsilsBlockSchurSchurPreconditioner::DiagL,
-                                         FsilsBlockSchurMomentumApproximation momentum_hat =
-                                             FsilsBlockSchurMomentumApproximation::DiagK)
+                                         FsilsBlockSchurPrimaryApproximation momentum_hat =
+                                             FsilsBlockSchurPrimaryApproximation::DiagK)
 {
     SolverOptions opts;
     opts.method = SolverMethod::BlockSchur;
@@ -86,7 +86,7 @@ SolverOptions makeFsilsBlockSchurOptions(int dof_per_node,
     opts.fsils_blockschur_cg_rel_tol = 1e-10;
     opts.fsils_residual_check_policy = FsilsResidualCheckPolicy::RetryOnly;
     opts.fsils_blockschur_schur_preconditioner = schur_pc;
-    opts.fsils_blockschur_momentum_approximation = momentum_hat;
+    opts.fsils_blockschur_primary_approximation = momentum_hat;
 
     BlockLayout layout;
     layout.blocks.push_back({"u", 0, primary_components, BlockRole::PrimaryField});
@@ -113,10 +113,10 @@ void expectBlockSchurMetricsPresent(const SolverReport& rep)
 {
     EXPECT_GT(rep.blockschur_outer_iterations, 0);
     EXPECT_EQ(rep.iterations, rep.blockschur_outer_iterations);
-    EXPECT_GT(rep.blockschur_momentum_solve_calls, 0);
-    EXPECT_GT(rep.blockschur_momentum_iterations, 0);
-    EXPECT_GE(rep.blockschur_momentum_restart_cycles, 0);
-    EXPECT_GE(rep.blockschur_momentum_solve_time_seconds, 0.0);
+    EXPECT_GT(rep.blockschur_primary_solve_calls, 0);
+    EXPECT_GT(rep.blockschur_primary_iterations, 0);
+    EXPECT_GE(rep.blockschur_primary_restart_cycles, 0);
+    EXPECT_GE(rep.blockschur_primary_solve_time_seconds, 0.0);
     if (rep.blockschur_schur_solve_calls == 0) {
         EXPECT_EQ(rep.blockschur_schur_iterations, 0);
     } else {
@@ -1289,16 +1289,16 @@ TEST(FsilsBackendMPI, SolveNSBlockSchur3DOF)
 
     struct Variant {
         FsilsBlockSchurSchurPreconditioner schur_pc;
-        FsilsBlockSchurMomentumApproximation momentum_hat;
+        FsilsBlockSchurPrimaryApproximation momentum_hat;
         const char* label;
     };
 
     const std::array<Variant, 5> variants{{
-        {FsilsBlockSchurSchurPreconditioner::DiagL, FsilsBlockSchurMomentumApproximation::DiagK, "diag-l"},
-        {FsilsBlockSchurSchurPreconditioner::ILUL, FsilsBlockSchurMomentumApproximation::DiagK, "ilu-l"},
-        {FsilsBlockSchurSchurPreconditioner::AlgebraicSchur, FsilsBlockSchurMomentumApproximation::BlockDiagK, "algebraic-shat-blockdiag-k"},
-        {FsilsBlockSchurSchurPreconditioner::AlgebraicSchur, FsilsBlockSchurMomentumApproximation::ILUK, "algebraic-shat-ilu-k"},
-        {FsilsBlockSchurSchurPreconditioner::AlgebraicSchur, FsilsBlockSchurMomentumApproximation::ASM, "algebraic-shat-asm-k"},
+        {FsilsBlockSchurSchurPreconditioner::DiagL, FsilsBlockSchurPrimaryApproximation::DiagK, "diag-l"},
+        {FsilsBlockSchurSchurPreconditioner::ILUL, FsilsBlockSchurPrimaryApproximation::DiagK, "ilu-l"},
+        {FsilsBlockSchurSchurPreconditioner::AlgebraicSchur, FsilsBlockSchurPrimaryApproximation::BlockDiagK, "algebraic-shat-blockdiag-k"},
+        {FsilsBlockSchurSchurPreconditioner::AlgebraicSchur, FsilsBlockSchurPrimaryApproximation::ILUK, "algebraic-shat-ilu-k"},
+        {FsilsBlockSchurSchurPreconditioner::AlgebraicSchur, FsilsBlockSchurPrimaryApproximation::ASM, "algebraic-shat-asm-k"},
     }};
 
     for (const auto& variant : variants) {
@@ -1502,7 +1502,7 @@ TEST(FsilsBackendMPI, DirichletNativeFaceSetupIsCollectiveWhenOnlyOneRankHasDofs
                                            /*primary_components=*/2,
                                            /*constraint_components=*/1,
                                            FsilsBlockSchurSchurPreconditioner::DiagL,
-                                           FsilsBlockSchurMomentumApproximation::DiagK);
+                                           FsilsBlockSchurPrimaryApproximation::DiagK);
     opts.rel_tol = 1e-8;
     opts.abs_tol = 1e-12;
     opts.max_iter = 20;
@@ -1571,16 +1571,16 @@ TEST(FsilsBackendMPI, SolveBlockSchur4DOFMultiConstraintPreconditioners)
     viewB->addVectorEntries(dofs, rhs, assembly::AddMode::Insert);
     viewB->finalizeAssembly();
 
-    const std::array<std::pair<FsilsBlockSchurSchurPreconditioner, FsilsBlockSchurMomentumApproximation>, 4> variants{{
-        {FsilsBlockSchurSchurPreconditioner::BlockDiagL, FsilsBlockSchurMomentumApproximation::DiagK},
-        {FsilsBlockSchurSchurPreconditioner::ILUL, FsilsBlockSchurMomentumApproximation::DiagK},
-        {FsilsBlockSchurSchurPreconditioner::AlgebraicSchur, FsilsBlockSchurMomentumApproximation::BlockDiagK},
-        {FsilsBlockSchurSchurPreconditioner::AlgebraicSchur, FsilsBlockSchurMomentumApproximation::ILUK},
+    const std::array<std::pair<FsilsBlockSchurSchurPreconditioner, FsilsBlockSchurPrimaryApproximation>, 4> variants{{
+        {FsilsBlockSchurSchurPreconditioner::BlockDiagL, FsilsBlockSchurPrimaryApproximation::DiagK},
+        {FsilsBlockSchurSchurPreconditioner::ILUL, FsilsBlockSchurPrimaryApproximation::DiagK},
+        {FsilsBlockSchurSchurPreconditioner::AlgebraicSchur, FsilsBlockSchurPrimaryApproximation::BlockDiagK},
+        {FsilsBlockSchurSchurPreconditioner::AlgebraicSchur, FsilsBlockSchurPrimaryApproximation::ILUK},
     }};
 
     for (const auto& [schur_pc, momentum_hat] : variants) {
         SCOPED_TRACE(std::string(fsilsBlockSchurPreconditionerToString(schur_pc)) + "/" +
-                     std::string(fsilsBlockSchurMomentumApproximationToString(momentum_hat)));
+                     std::string(fsilsBlockSchurPrimaryApproximationToString(momentum_hat)));
         auto x = factory.createVector(n_global);
         auto opts = makeFsilsBlockSchurOptions(/*dof_per_node=*/4, /*primary_components=*/2, /*constraint_components=*/2,
                                                schur_pc, momentum_hat);
@@ -1752,7 +1752,7 @@ TEST(FsilsBackendMPI,
         /*primary_components=*/7,
         /*constraint_components=*/1,
         FsilsBlockSchurSchurPreconditioner::DiagL,
-        FsilsBlockSchurMomentumApproximation::DiagK);
+        FsilsBlockSchurPrimaryApproximation::DiagK);
     opts.rel_tol = 1e-9;
     opts.abs_tol = 1e-12;
     opts.max_iter = 60;
@@ -1942,7 +1942,7 @@ TEST(FsilsBackendMPI, RankOneUpdateSolversConvergeComparable)
         if (method == SolverMethod::BlockSchur) {
             opts = makeFsilsBlockSchurOptions(/*dof_per_node=*/3, /*primary_components=*/2, /*constraint_components=*/1,
                                               FsilsBlockSchurSchurPreconditioner::DiagL,
-                                              FsilsBlockSchurMomentumApproximation::DiagK);
+                                              FsilsBlockSchurPrimaryApproximation::DiagK);
             opts.rel_tol = 1e-8;
             opts.abs_tol = 1e-12;
             opts.max_iter = 20;
@@ -2173,7 +2173,7 @@ TEST(FsilsBackendMPI, ReducedFieldUpdateSolversConvergeComparable)
         if (method == SolverMethod::BlockSchur) {
             opts = makeFsilsBlockSchurOptions(/*dof_per_node=*/3, /*primary_components=*/2, /*constraint_components=*/1,
                                               FsilsBlockSchurSchurPreconditioner::DiagL,
-                                              FsilsBlockSchurMomentumApproximation::DiagK);
+                                              FsilsBlockSchurPrimaryApproximation::DiagK);
             opts.rel_tol = 1e-8;
             opts.abs_tol = 1e-12;
             opts.max_iter = 20;
@@ -2355,7 +2355,7 @@ TEST(FsilsBackendMPI, ReducedFieldUpdateEmptyActiveComponentsMeansAllComponents)
                                                     /*primary_components=*/2,
                                                     /*constraint_components=*/1,
                                                     FsilsBlockSchurSchurPreconditioner::DiagL,
-                                                    FsilsBlockSchurMomentumApproximation::DiagK);
+                                                    FsilsBlockSchurPrimaryApproximation::DiagK);
     opts.rel_tol = 1e-8;
     opts.abs_tol = 1e-12;
     opts.max_iter = 20;
@@ -2530,7 +2530,7 @@ TEST(FsilsBackendMPI, ReducedFieldUpdateFaceCacheAddBcMulMatchesSparse)
                                                     /*primary_components=*/2,
                                                     /*constraint_components=*/1,
                                                     FsilsBlockSchurSchurPreconditioner::DiagL,
-                                                    FsilsBlockSchurMomentumApproximation::DiagK);
+                                                    FsilsBlockSchurPrimaryApproximation::DiagK);
     opts.rel_tol = 1e-8;
     opts.abs_tol = 1e-12;
     opts.max_iter = 20;
@@ -2986,7 +2986,7 @@ TEST(FsilsBackendMPI, ReducedFieldUpdateDistributedShapeConverges)
                                                     /*primary_components=*/2,
                                                     /*constraint_components=*/1,
                                                     FsilsBlockSchurSchurPreconditioner::DiagL,
-                                                    FsilsBlockSchurMomentumApproximation::DiagK);
+                                                    FsilsBlockSchurPrimaryApproximation::DiagK);
     opts.rel_tol = 1e-8;
     opts.abs_tol = 1e-12;
     opts.max_iter = 20;
@@ -3161,7 +3161,7 @@ TEST(FsilsBackendMPI, ReducedFieldUpdateDistributedShapeConvergesWithPartitionLo
                                                     /*primary_components=*/2,
                                                     /*constraint_components=*/1,
                                                     FsilsBlockSchurSchurPreconditioner::DiagL,
-                                                    FsilsBlockSchurMomentumApproximation::DiagK);
+                                                    FsilsBlockSchurPrimaryApproximation::DiagK);
     opts.rel_tol = 1e-8;
     opts.abs_tol = 1e-12;
     opts.max_iter = 20;
@@ -3543,7 +3543,7 @@ TEST(FsilsBackendMPI, GroupedBorderedFieldCouplingSolversConvergeComparable)
                                               /*primary_components=*/2,
                                               /*constraint_components=*/1,
                                               FsilsBlockSchurSchurPreconditioner::DiagL,
-                                              FsilsBlockSchurMomentumApproximation::DiagK);
+                                              FsilsBlockSchurPrimaryApproximation::DiagK);
             opts.rel_tol = 1e-8;
             opts.abs_tol = 1e-12;
             opts.max_iter = 20;
@@ -3754,7 +3754,7 @@ TEST(FsilsBackendMPI, GroupedBorderedFieldCouplingSingleModeConvergesComparable)
                                               /*primary_components=*/2,
                                               /*constraint_components=*/1,
                                               FsilsBlockSchurSchurPreconditioner::DiagL,
-                                              FsilsBlockSchurMomentumApproximation::DiagK);
+                                              FsilsBlockSchurPrimaryApproximation::DiagK);
             opts.rel_tol = 1e-8;
             opts.abs_tol = 1e-12;
             opts.max_iter = 20;
@@ -3828,7 +3828,7 @@ TEST(FsilsBackendMPI, RankOneUpdateSolversConvergeComparable4DOF)
         if (method == SolverMethod::BlockSchur) {
             opts = makeFsilsBlockSchurOptions(/*dof_per_node=*/4, /*primary_components=*/3, /*constraint_components=*/1,
                                               FsilsBlockSchurSchurPreconditioner::DiagL,
-                                              FsilsBlockSchurMomentumApproximation::DiagK);
+                                              FsilsBlockSchurPrimaryApproximation::DiagK);
             opts.rel_tol = 1e-8;
             opts.abs_tol = 1e-12;
             opts.max_iter = 30;
@@ -3896,7 +3896,7 @@ TEST(FsilsBackendMPI, NativeRankOneBlockSchurOuterToleranceControlsWorkAndTrueRe
             /*primary_components=*/3,
             /*constraint_components=*/1,
             FsilsBlockSchurSchurPreconditioner::DiagL,
-            FsilsBlockSchurMomentumApproximation::DiagK);
+            FsilsBlockSchurPrimaryApproximation::DiagK);
         options.rel_tol = outer_relative_tolerance;
         options.abs_tol = 0.0;
         options.max_iter = 30;
@@ -4150,7 +4150,7 @@ TEST(FsilsBackendMPI, MultiModeNativeRankOneSolversTrackManufacturedModeResponse
                                               /*primary_components=*/3,
                                               /*constraint_components=*/1,
                                               FsilsBlockSchurSchurPreconditioner::DiagL,
-                                              FsilsBlockSchurMomentumApproximation::DiagK);
+                                              FsilsBlockSchurPrimaryApproximation::DiagK);
     bs_opts.rel_tol = 1e-8;
     bs_opts.abs_tol = 1e-12;
     bs_opts.max_iter = 30;
@@ -4380,7 +4380,7 @@ TEST(FsilsBackendMPI, NearDependentNativeRankOneBlockSchurMatchesReferenceModeRe
                                               /*primary_components=*/3,
                                               /*constraint_components=*/1,
                                               FsilsBlockSchurSchurPreconditioner::DiagL,
-                                              FsilsBlockSchurMomentumApproximation::DiagK);
+                                              FsilsBlockSchurPrimaryApproximation::DiagK);
     bs_opts.rel_tol = 1e-8;
     bs_opts.abs_tol = 1e-14;
     bs_opts.max_iter = 20;
@@ -4612,7 +4612,7 @@ TEST(FsilsBackendMPI, DISABLED_DistributedRankOneLooseBlockSchurTracksReferenceM
                                               /*primary_components=*/3,
                                               /*constraint_components=*/1,
                                               FsilsBlockSchurSchurPreconditioner::DiagL,
-                                              FsilsBlockSchurMomentumApproximation::DiagK);
+                                              FsilsBlockSchurPrimaryApproximation::DiagK);
     bs_opts.rel_tol = 1e-3;
     bs_opts.abs_tol = 1e-14;
     bs_opts.max_iter = 15;
@@ -5239,7 +5239,7 @@ TEST(FsilsBackendMPI, SolveNSBlockSchur3DOFSubcommunicator)
 
     auto opts = makeFsilsBlockSchurOptions(/*dof_per_node=*/3, /*primary_components=*/2, /*constraint_components=*/1,
                                            FsilsBlockSchurSchurPreconditioner::AlgebraicSchur,
-                                           FsilsBlockSchurMomentumApproximation::BlockDiagK);
+                                           FsilsBlockSchurPrimaryApproximation::BlockDiagK);
 
     auto solver = factory.createLinearSolver(opts);
     const auto rep = solver->solve(*A, *x, *b);

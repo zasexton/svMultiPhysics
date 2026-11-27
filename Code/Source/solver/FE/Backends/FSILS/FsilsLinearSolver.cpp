@@ -977,15 +977,15 @@ to_fsils_blockschur_preconditioner(FsilsBlockSchurSchurPreconditioner pc)
 }
 
 fe_fsi_linear_solver::SchurMomentumApproximationType
-to_fsils_blockschur_momentum_approximation(FsilsBlockSchurMomentumApproximation approx)
+to_fsils_blockschur_primary_approximation(FsilsBlockSchurPrimaryApproximation approx)
 {
     using fe_fsi_linear_solver::SchurMomentumApproximationType;
     switch (approx) {
-        case FsilsBlockSchurMomentumApproximation::Auto: return SchurMomentumApproximationType::ILU_K;
-        case FsilsBlockSchurMomentumApproximation::DiagK: return SchurMomentumApproximationType::DIAG_K;
-        case FsilsBlockSchurMomentumApproximation::BlockDiagK: return SchurMomentumApproximationType::BLOCKDIAG_K;
-        case FsilsBlockSchurMomentumApproximation::ILUK: return SchurMomentumApproximationType::ILU_K;
-        case FsilsBlockSchurMomentumApproximation::ASM: return SchurMomentumApproximationType::ASM_K;
+        case FsilsBlockSchurPrimaryApproximation::Auto: return SchurMomentumApproximationType::ILU_K;
+        case FsilsBlockSchurPrimaryApproximation::DiagK: return SchurMomentumApproximationType::DIAG_K;
+        case FsilsBlockSchurPrimaryApproximation::BlockDiagK: return SchurMomentumApproximationType::BLOCKDIAG_K;
+        case FsilsBlockSchurPrimaryApproximation::ILUK: return SchurMomentumApproximationType::ILU_K;
+        case FsilsBlockSchurPrimaryApproximation::ASM: return SchurMomentumApproximationType::ASM_K;
     }
     return SchurMomentumApproximationType::DIAG_K;
 }
@@ -1296,13 +1296,13 @@ SolverReport FsilsLinearSolver::solveOnOperatorLayout(const GenericMatrix& A_in,
         saddle_point_blocks.constraint != nullptr;
 
     // Saddle-point block indices (only meaningful when has_saddle_point is true).
-    int mom_start = 0, mom_ncomp = 0;
+    int primary_start = 0, primary_ncomp = 0;
     int con_start = 0, con_ncomp = 0;
     if (has_saddle_point) {
         const auto& mb = *saddle_point_blocks.primary;
         const auto& cb = *saddle_point_blocks.constraint;
-        mom_start = mb.start_component;
-        mom_ncomp = mb.n_components;
+        primary_start = mb.start_component;
+        primary_ncomp = mb.n_components;
         con_start = cb.start_component;
         con_ncomp = cb.n_components;
     }
@@ -1319,6 +1319,7 @@ SolverReport FsilsLinearSolver::solveOnOperatorLayout(const GenericMatrix& A_in,
     const bool requested_blockschur = (options_.method == SolverMethod::BlockSchur);
     const bool use_blockschur = requested_blockschur;
 
+    const auto primary_label = options_.primarySolveRecordName();
     if (oopTraceEnabled()) {
         std::ostringstream oss;
         oss << "FsilsLinearSolver::solve: n=" << A->numRows()
@@ -1334,9 +1335,9 @@ SolverReport FsilsLinearSolver::solveOnOperatorLayout(const GenericMatrix& A_in,
         if (requested_blockschur) {
             oss << " schur_pc="
                 << fsilsBlockSchurPreconditionerToString(options_.fsils_blockschur_schur_preconditioner)
-                << " momentum_hat="
-                << fsilsBlockSchurMomentumApproximationToString(
-                       options_.fsils_blockschur_momentum_approximation);
+                << " " << primary_label << "_hat="
+                << fsilsBlockSchurPrimaryApproximationToString(
+                       options_.fsils_blockschur_primary_approximation);
         }
         traceLog(oss.str());
     }
@@ -1368,7 +1369,7 @@ SolverReport FsilsLinearSolver::solveOnOperatorLayout(const GenericMatrix& A_in,
                     NotImplementedException,
                     "FsilsLinearSolver::solve: BlockSchur saddle-point blocks "
                     "must form a disjoint, in-range partition covering all DOFs "
-                    "(momentum=" + std::to_string(mb.start_component) + ":" +
+                    "(" + std::string(primary_label) + "=" + std::to_string(mb.start_component) + ":" +
                     std::to_string(mb.n_components) + ", constraint=" +
                     std::to_string(cb.start_component) + ":" +
                     std::to_string(cb.n_components) + ", dof=" +
@@ -1506,10 +1507,10 @@ SolverReport FsilsLinearSolver::solveOnOperatorLayout(const GenericMatrix& A_in,
         const Real s = static_cast<Real>(stage_scale);
         const Real inv_s = static_cast<Real>(1.0 / stage_scale);
 
-        // Left-scale momentum rows.
+        // Left-scale primary rows.
         for (GlobalIndex bi = 0; bi < nnz; ++bi) {
             Real* blk = values_work_.data() + static_cast<std::size_t>(bi) * block_size;
-            for (int r = mom_start; r < mom_start + mom_ncomp; ++r) {
+            for (int r = primary_start; r < primary_start + primary_ncomp; ++r) {
                 for (int c = 0; c < dof; ++c) {
                     blk[static_cast<std::size_t>(r * dof + c)] *= s;
                 }
@@ -1581,10 +1582,10 @@ SolverReport FsilsLinearSolver::solveOnOperatorLayout(const GenericMatrix& A_in,
 
                 Real* blk = values_work_.data() + static_cast<std::size_t>(idx) * block_size;
                 Real* blk_t = values_work_.data() + static_cast<std::size_t>(idx_t) * block_size;
-                for (int vc = 0; vc < mom_ncomp; ++vc) {
+                for (int vc = 0; vc < primary_ncomp; ++vc) {
                     for (int cc = 0; cc < con_ncomp; ++cc) {
-                        const Real g_val = blk[static_cast<std::size_t>((mom_start + vc) * dof + (con_start + cc))];
-                        blk_t[static_cast<std::size_t>((con_start + cc) * dof + (mom_start + vc))] = -g_val;
+                        const Real g_val = blk[static_cast<std::size_t>((primary_start + vc) * dof + (con_start + cc))];
+                        blk_t[static_cast<std::size_t>((con_start + cc) * dof + (primary_start + vc))] = -g_val;
                     }
                 }
             }
@@ -2221,7 +2222,7 @@ SolverReport FsilsLinearSolver::solveOnOperatorLayout(const GenericMatrix& A_in,
         }
 
         if (has_native_rank_one_updates) {
-            // On the exact coupled BlockSchur path, letting the nested momentum
+            // On the exact coupled BlockSchur path, letting the nested primary
             // and Schur solves stop at the same absolute floor as the outer
             // solve makes the final solve depth sensitive to decomposition once
             // the RHS becomes small. Keep the policy rank-agnostic and only
@@ -2239,15 +2240,15 @@ SolverReport FsilsLinearSolver::solveOnOperatorLayout(const GenericMatrix& A_in,
         ls.CG.schur_preconditioner =
             to_fsils_blockschur_preconditioner(options_.fsils_blockschur_schur_preconditioner);
         ls.CG.schur_momentum_approximation =
-            to_fsils_blockschur_momentum_approximation(options_.fsils_blockschur_momentum_approximation);
+            to_fsils_blockschur_primary_approximation(options_.fsils_blockschur_primary_approximation);
         ls.blockschur_min_outer_iterations =
             std::max(0, options_.fsils_blockschur_min_outer_iterations);
         ls.use_coupled_outer_fgmres_scalar =
             options_.fsils_blockschur_use_coupled_outer_fgmres;
 
         if (has_saddle_point) {
-            ls.mom_start = mom_start;
-            ls.mom_ncomp = mom_ncomp;
+            ls.mom_start = primary_start;
+            ls.mom_ncomp = primary_ncomp;
             ls.con_start = con_start;
             ls.con_ncomp = con_ncomp;
         }
@@ -2555,8 +2556,8 @@ SolverReport FsilsLinearSolver::solveOnOperatorLayout(const GenericMatrix& A_in,
             if (!upd.active_components.empty()) {
                 face_comps = upd.active_components;
             } else if (has_saddle_point) {
-                // Default: momentum block components only (skip constraint).
-                for (int c = mom_start; c < mom_start + mom_ncomp; ++c) {
+                // Default: primary block components only (skip constraint).
+                for (int c = primary_start; c < primary_start + primary_ncomp; ++c) {
                     face_comps.push_back(c);
                 }
             } else {
@@ -2576,7 +2577,7 @@ SolverReport FsilsLinearSolver::solveOnOperatorLayout(const GenericMatrix& A_in,
             const bool use_primary_face_coordinates =
                 use_blockschur && has_saddle_point;
             const int face_dof =
-                use_primary_face_coordinates ? mom_ncomp : dof;
+                use_primary_face_coordinates ? primary_ncomp : dof;
 
             // Build a fast lookup from full-system component to the row used by
             // the native face.  BlockSchur faces are expressed in K-local
@@ -2584,7 +2585,7 @@ SolverReport FsilsLinearSolver::solveOnOperatorLayout(const GenericMatrix& A_in,
             std::vector<int> comp_to_face_idx(static_cast<std::size_t>(dof), -1);
             for (const int c : face_comps) {
                 const int face_component =
-                    use_primary_face_coordinates ? c - mom_start : c;
+                    use_primary_face_coordinates ? c - primary_start : c;
                 FE_THROW_IF(c < 0 || c >= dof || face_component < 0 ||
                                 face_component >= face_dof,
                             NotImplementedException,
@@ -2747,7 +2748,7 @@ SolverReport FsilsLinearSolver::solveOnOperatorLayout(const GenericMatrix& A_in,
             std::vector<int> comps;
             // ReducedFieldUpdate.active_components uses interface-level semantics:
             // empty means all field components participate. Do not silently narrow
-            // generic reduced updates to the momentum block on saddle-point systems.
+            // generic reduced updates to the primary block on saddle-point systems.
             comps.reserve(static_cast<std::size_t>(dof));
             for (int c = 0; c < dof; ++c) {
                 comps.push_back(c);
@@ -3349,8 +3350,8 @@ SolverReport FsilsLinearSolver::solveOnOperatorLayout(const GenericMatrix& A_in,
         if (blockschur_preparation && stage_scale != 1.0) {
             const Real s = static_cast<Real>(stage_scale);
             for (int a = 0; a < lhs.nNo; ++a) {
-                // Scale momentum rows of the RHS.
-                for (int c = mom_start; c < mom_start + mom_ncomp; ++c) {
+                // Scale primary rows of the RHS.
+                for (int c = primary_start; c < primary_start + primary_ncomp; ++c) {
                     Ri(c, a) *= s;
                 }
             }
@@ -3953,7 +3954,7 @@ SolverReport FsilsLinearSolver::solveOnOperatorLayout(const GenericMatrix& A_in,
         long double local_mom_sq = 0.0L;
         long double local_con_sq = 0.0L;
         for (int a = 0; a < lhs.mynNo; ++a) {
-            for (int c = mom_start; c < mom_start + mom_ncomp; ++c) {
+            for (int c = primary_start; c < primary_start + primary_ncomp; ++c) {
                 const long double v = static_cast<long double>(Ri(c, a));
                 local_mom_sq += v * v;
             }
@@ -5581,13 +5582,13 @@ SolverReport FsilsLinearSolver::solveOnOperatorLayout(const GenericMatrix& A_in,
         ls.blockschur_stats.collective_calls_max_per_outer;
     report.blockschur_collective_time_max_per_outer =
         ls.blockschur_stats.collective_time_max_per_outer;
-    report.blockschur_momentum_solve_calls = ls.GM.stats.solve_calls;
-    report.blockschur_momentum_iterations = ls.GM.stats.iterations_total;
-    report.blockschur_momentum_restart_cycles = ls.GM.stats.restart_cycles_total;
-    report.blockschur_momentum_solve_time_seconds = ls.GM.stats.solve_time;
-    report.blockschur_momentum_collective_calls = ls.GM.stats.collective_calls;
-    report.blockschur_momentum_collective_words = ls.GM.stats.collective_words;
-    report.blockschur_momentum_collective_time_seconds = ls.GM.stats.collective_time;
+    report.blockschur_primary_solve_calls = ls.GM.stats.solve_calls;
+    report.blockschur_primary_iterations = ls.GM.stats.iterations_total;
+    report.blockschur_primary_restart_cycles = ls.GM.stats.restart_cycles_total;
+    report.blockschur_primary_solve_time_seconds = ls.GM.stats.solve_time;
+    report.blockschur_primary_collective_calls = ls.GM.stats.collective_calls;
+    report.blockschur_primary_collective_words = ls.GM.stats.collective_words;
+    report.blockschur_primary_collective_time_seconds = ls.GM.stats.collective_time;
     report.blockschur_schur_solve_calls = ls.CG.stats.solve_calls;
     report.blockschur_schur_iterations = ls.CG.stats.iterations_total;
     report.blockschur_schur_setup_time_seconds = ls.CG.stats.setup_time;
@@ -5622,16 +5623,16 @@ SolverReport FsilsLinearSolver::solveOnOperatorLayout(const GenericMatrix& A_in,
             << " true_residual_retries=" << blockschur_true_residual_retries
             << " blockschur_outer_iterations="
             << report.blockschur_outer_iterations
-            << " blockschur_momentum_solve_calls="
-            << report.blockschur_momentum_solve_calls
-            << " blockschur_momentum_iterations="
-            << report.blockschur_momentum_iterations
-            << " blockschur_momentum_restart_cycles="
-            << report.blockschur_momentum_restart_cycles
-            << " blockschur_momentum_mitr=" << ls.GM.mItr
-            << " blockschur_momentum_sd=" << ls.GM.sD
-            << " blockschur_momentum_rel_tol=" << ls.GM.relTol
-            << " blockschur_momentum_abs_tol=" << ls.GM.absTol
+            << " blockschur_" << primary_label << "_solve_calls="
+            << report.blockschur_primary_solve_calls
+            << " blockschur_" << primary_label << "_iterations="
+            << report.blockschur_primary_iterations
+            << " blockschur_" << primary_label << "_restart_cycles="
+            << report.blockschur_primary_restart_cycles
+            << " blockschur_" << primary_label << "_mitr=" << ls.GM.mItr
+            << " blockschur_" << primary_label << "_sd=" << ls.GM.sD
+            << " blockschur_" << primary_label << "_rel_tol=" << ls.GM.relTol
+            << " blockschur_" << primary_label << "_abs_tol=" << ls.GM.absTol
             << " blockschur_schur_solve_calls="
             << report.blockschur_schur_solve_calls
             << " blockschur_schur_iterations="
@@ -5666,17 +5667,19 @@ SolverReport FsilsLinearSolver::solveOnOperatorLayout(const GenericMatrix& A_in,
                           static_cast<double>(report.blockschur_outer_iterations)
                     : 0.0;
             const double calls_per_restart =
-                (report.blockschur_momentum_restart_cycles > 0)
-                    ? static_cast<double>(report.blockschur_momentum_collective_calls) /
-                          static_cast<double>(report.blockschur_momentum_restart_cycles)
+                (report.blockschur_primary_restart_cycles > 0)
+                    ? static_cast<double>(report.blockschur_primary_collective_calls) /
+                          static_cast<double>(report.blockschur_primary_restart_cycles)
                     : 0.0;
+            std::string primary_heading(primary_label);
+            primary_heading.front() = static_cast<char>(std::toupper(static_cast<unsigned char>(primary_heading.front())));
             std::fprintf(stderr,
                          "  BlockSchur outer iters: %8d\n"
                          "  Calls / outer iter:     %10.3f\n"
                          "  Max calls / outer:      %10llu\n"
-                         "  Momentum solves:        %8d  iters=%d  restarts=%d\n"
-                         "  Momentum solve time:    %10.6f s\n"
-                         "  Momentum allreduces:    %10llu  words=%llu  time=%10.6f s\n"
+                         "  %s solves:        %8d  iters=%d  restarts=%d\n"
+                         "  %s solve time:    %10.6f s\n"
+                         "  %s allreduces:    %10llu  words=%llu  time=%10.6f s\n"
                          "  Calls / GMRES restart:  %10.3f\n"
                          "  Schur solves:           %8d  iters=%d\n"
                          "  Schur setup time:       %10.6f s\n"
@@ -5686,13 +5689,16 @@ SolverReport FsilsLinearSolver::solveOnOperatorLayout(const GenericMatrix& A_in,
                          report.blockschur_outer_iterations,
                          calls_per_outer,
                          static_cast<unsigned long long>(report.blockschur_collective_calls_max_per_outer),
-                         report.blockschur_momentum_solve_calls,
-                         report.blockschur_momentum_iterations,
-                         report.blockschur_momentum_restart_cycles,
-                         report.blockschur_momentum_solve_time_seconds,
-                         static_cast<unsigned long long>(report.blockschur_momentum_collective_calls),
-                         static_cast<unsigned long long>(report.blockschur_momentum_collective_words),
-                         report.blockschur_momentum_collective_time_seconds,
+                         primary_heading.c_str(),
+                         report.blockschur_primary_solve_calls,
+                         report.blockschur_primary_iterations,
+                         report.blockschur_primary_restart_cycles,
+                         primary_heading.c_str(),
+                         report.blockschur_primary_solve_time_seconds,
+                         primary_heading.c_str(),
+                         static_cast<unsigned long long>(report.blockschur_primary_collective_calls),
+                         static_cast<unsigned long long>(report.blockschur_primary_collective_words),
+                         report.blockschur_primary_collective_time_seconds,
                          calls_per_restart,
                          report.blockschur_schur_solve_calls,
                          report.blockschur_schur_iterations,

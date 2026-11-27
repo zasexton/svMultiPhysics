@@ -1,6 +1,7 @@
 #include "Physics/Formulations/NavierStokes/FreeSurface/SnapshotFunctionals.h"
 
 #include "Application/Core/ApplicationDriver.h"
+#include "Application/Core/BackendEnvironment.h"
 #include "FE/Core/LogRecord.h"
 
 #include "Application/Core/ActiveDomainOutput.h"
@@ -234,7 +235,7 @@ void writeEffectiveConfigurationArtifact(
       output << artifacts[i].json;
     }
     output << "]";
-    if (const auto environment_names = svmp::Physics::formulations::navier_stokes::free_surface::environmentRegistry().configurationRecord();
+    if (const auto environment_names = application::core::applicationEnvironmentRegistry().configurationRecord();
         !environment_names.empty()) {
       output << ',' << environment_names;
     }

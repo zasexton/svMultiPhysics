@@ -199,7 +199,7 @@ void PetscLinearSolver::applyBaseOptionsToKsp(const SolverOptions& options)
     }
 
     for (const auto& [key_raw, val] : options.passthrough) {
-        if (key_raw.empty()) continue;
+        if (key_raw.empty() || key_raw == SolverOptions::primary_solve_record_option) continue;
         std::string key = key_raw;
         if (key.front() != '-') {
             key = "-" + prefix + key;

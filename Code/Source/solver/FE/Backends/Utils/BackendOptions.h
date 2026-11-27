@@ -63,7 +63,7 @@ enum class FsilsBlockSchurSchurPreconditioner : std::uint8_t {
     AlgebraicSchur
 };
 
-enum class FsilsBlockSchurMomentumApproximation : std::uint8_t {
+enum class FsilsBlockSchurPrimaryApproximation : std::uint8_t {
     Auto,
     DiagK,
     BlockDiagK,
@@ -88,7 +88,7 @@ struct FieldSplitOptions {
 /**
  * @brief Generic solver role that a block can play
  *
- * Replaces physics-specific names like "momentum" and "constraint" with
+ * Replaces physics-specific names with
  * generic roles that apply to any saddle-point or multi-field formulation.
  * The mapping from physics-specific names to roles is done by backend-specific
  * adapters, not by the FE public API.
@@ -491,13 +491,13 @@ struct SolverOptions {
     /// This can describe blocks that are not representable as per-node components.
     std::optional<MixedBlockLayout> mixed_block_layout{};
 
-    /// Explicit saddle-point block names (optional). If set, used to identify momentum/constraint
-    /// blocks by name instead of the auto-detection heuristic (first multi-component = momentum,
+    /// Explicit saddle-point block names (optional). If set, used to identify primary/constraint
+    /// blocks by name instead of the auto-detection heuristic (first multi-component = primary,
     /// first single-component = constraint). Set from solver XML configuration.
     std::string primary_block_name{};    ///< formulation-declared primary field
     std::string constraint_block_name{};  ///< e.g., "pressure"
 
-    /// Generic role-to-name mapping (takes precedence over momentum/constraint names when set).
+    /// Generic role-to-name mapping (takes precedence over primary/constraint names when set).
     /// Maps BlockRole -> block name. Used by backend adapters to resolve role-based queries.
     std::vector<std::pair<BlockRole, std::string>> block_role_names{};
 
@@ -567,7 +567,7 @@ struct SolverOptions {
     FsilsResidualCheckPolicy fsils_residual_check_policy{FsilsResidualCheckPolicy::RetryOnly};
 
     // FSILS: BlockSchur sub-solver parameters.
-    // GM: field-A (momentum) solve, CG: Schur complement (constraint) solve.
+    // GM: primary-block solve, CG: Schur complement (constraint) solve.
     std::optional<int> fsils_blockschur_gm_max_iter{};
     std::optional<int> fsils_blockschur_cg_max_iter{};
     std::optional<Real> fsils_blockschur_gm_rel_tol{};
@@ -582,10 +582,10 @@ struct SolverOptions {
     /// approximation unless the user requests a cheaper concrete option.
     FsilsBlockSchurSchurPreconditioner fsils_blockschur_schur_preconditioner{
         FsilsBlockSchurSchurPreconditioner::Auto};
-    /// `Auto` resolves to a physics-agnostic momentum inverse approximation
+    /// `Auto` resolves to a primary-block inverse approximation
     /// selected from backend metadata and runtime algebraic scoring.
-    FsilsBlockSchurMomentumApproximation fsils_blockschur_momentum_approximation{
-        FsilsBlockSchurMomentumApproximation::Auto};
+    FsilsBlockSchurPrimaryApproximation fsils_blockschur_primary_approximation{
+        FsilsBlockSchurPrimaryApproximation::Auto};
 
     /// Right preconditioner inside the Krylov iteration (opt-in; FSILS GMRES).
     RightPreconditionerType right_preconditioner{RightPreconditionerType::None};
@@ -607,6 +607,15 @@ struct SolverOptions {
     /// Newton iterations, because the scaled-residual test otherwise
     /// over-solves the absolute-tolerance regime.
     bool fsils_gmres_unscaled_residual_estimate{false};
+
+    /// Adapter-owned record label. Foreign solver libraries receive only their own options.
+    static constexpr std::string_view primary_solve_record_option = "svmp.primary_solve_record";
+    [[nodiscard]] std::string_view primarySolveRecordName() const noexcept {
+        for (const auto& [name, value] : passthrough) {
+            if (name == primary_solve_record_option && !value.empty()) return value;
+        }
+        return "primary";
+    }
 
     // Backend-specific pass-through key/value list (optional).
     // - PETSc: key maps to an option name (with or without '-' prefix).
@@ -633,13 +642,13 @@ struct SolverReport {
     int blockschur_outer_iterations{0};
     std::uint64_t blockschur_collective_calls_max_per_outer{0};
     double blockschur_collective_time_max_per_outer{0.0};
-    int blockschur_momentum_solve_calls{0};
-    int blockschur_momentum_iterations{0};
-    int blockschur_momentum_restart_cycles{0};
-    double blockschur_momentum_solve_time_seconds{0.0};
-    std::uint64_t blockschur_momentum_collective_calls{0};
-    std::uint64_t blockschur_momentum_collective_words{0};
-    double blockschur_momentum_collective_time_seconds{0.0};
+    int blockschur_primary_solve_calls{0};
+    int blockschur_primary_iterations{0};
+    int blockschur_primary_restart_cycles{0};
+    double blockschur_primary_solve_time_seconds{0.0};
+    std::uint64_t blockschur_primary_collective_calls{0};
+    std::uint64_t blockschur_primary_collective_words{0};
+    double blockschur_primary_collective_time_seconds{0.0};
     int blockschur_schur_solve_calls{0};
     int blockschur_schur_iterations{0};
     int blockschur_true_residual_retries{0};
@@ -658,7 +667,7 @@ struct SolverReport {
 [[nodiscard]] std::string_view
 fsilsBlockSchurPreconditionerToString(FsilsBlockSchurSchurPreconditioner pc) noexcept;
 [[nodiscard]] std::string_view
-fsilsBlockSchurMomentumApproximationToString(FsilsBlockSchurMomentumApproximation approx) noexcept;
+fsilsBlockSchurPrimaryApproximationToString(FsilsBlockSchurPrimaryApproximation approx) noexcept;
 
 /**
  * @brief Validate the FSILS mixed-layout contract.

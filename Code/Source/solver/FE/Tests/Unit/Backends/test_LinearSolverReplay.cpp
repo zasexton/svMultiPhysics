@@ -250,8 +250,8 @@ std::vector<ReplayConfig> allConfigs()
                            o.fsils_blockschur_cg_rel_tol = 1e-2;
                            o.fsils_blockschur_schur_preconditioner =
                                FsilsBlockSchurSchurPreconditioner::AlgebraicSchur;
-                           o.fsils_blockschur_momentum_approximation =
-                               FsilsBlockSchurMomentumApproximation::ILUK;
+                           o.fsils_blockschur_primary_approximation =
+                               FsilsBlockSchurPrimaryApproximation::ILUK;
                            return o;
                        }});
 #if defined(FE_HAS_EIGEN)

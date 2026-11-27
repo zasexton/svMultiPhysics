@@ -59,6 +59,7 @@ TEST(TrilinosBackend, SolveCG2x2)
     viewb->finalizeAssembly();
 
     SolverOptions opts;
+    opts.passthrough.emplace_back(SolverOptions::primary_solve_record_option, "displacement");
     opts.method = SolverMethod::CG;
     opts.preconditioner = PreconditionerType::Diagonal;
     opts.rel_tol = 1e-12;

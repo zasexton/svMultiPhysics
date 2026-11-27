@@ -520,8 +520,8 @@ svmp::FE::backends::SolverOptions resistiveOutletBlockSchurOptions(Real outer_re
     opts.fsils_residual_check_policy = svmp::FE::backends::FsilsResidualCheckPolicy::Always;
     opts.fsils_blockschur_schur_preconditioner =
         svmp::FE::backends::FsilsBlockSchurSchurPreconditioner::AlgebraicSchur;
-    opts.fsils_blockschur_momentum_approximation =
-        svmp::FE::backends::FsilsBlockSchurMomentumApproximation::ILUK;
+    opts.fsils_blockschur_primary_approximation =
+        svmp::FE::backends::FsilsBlockSchurPrimaryApproximation::ILUK;
 
     svmp::FE::backends::BlockLayout layout;
     layout.blocks.push_back({"Velocity", 0, 3, svmp::FE::backends::BlockRole::PrimaryField});

@@ -470,15 +470,15 @@ makeTwoFluidAcceptedStageSolveTelemetry(
               .blockschur_collective_calls_max_per_outer =
                   report.linear.blockschur_collective_calls_max_per_outer,
               .blockschur_momentum_solve_calls =
-                  report.linear.blockschur_momentum_solve_calls,
+                  report.linear.blockschur_primary_solve_calls,
               .blockschur_momentum_iterations =
-                  report.linear.blockschur_momentum_iterations,
+                  report.linear.blockschur_primary_iterations,
               .blockschur_momentum_restart_cycles =
-                  report.linear.blockschur_momentum_restart_cycles,
+                  report.linear.blockschur_primary_restart_cycles,
               .blockschur_momentum_collective_calls =
-                  report.linear.blockschur_momentum_collective_calls,
+                  report.linear.blockschur_primary_collective_calls,
               .blockschur_momentum_collective_words =
-                  report.linear.blockschur_momentum_collective_words,
+                  report.linear.blockschur_primary_collective_words,
               .blockschur_schur_solve_calls =
                   report.linear.blockschur_schur_solve_calls,
               .blockschur_schur_iterations =

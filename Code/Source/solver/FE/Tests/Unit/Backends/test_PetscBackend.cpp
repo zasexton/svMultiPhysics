@@ -15,6 +15,7 @@
 #include "Backends/Interfaces/BlockMatrix.h"
 #include "Backends/Interfaces/BlockVector.h"
 #include "Backends/PETSc/PetscFactory.h"
+#include <petscsys.h>
 #endif
 
 namespace svmp::FE::backends {
@@ -61,6 +62,7 @@ TEST(PetscBackend, SolveCG2x2)
     viewb->finalizeAssembly();
 
     SolverOptions opts;
+    opts.passthrough.emplace_back(SolverOptions::primary_solve_record_option, "displacement");
     opts.method = SolverMethod::CG;
     opts.preconditioner = PreconditionerType::Diagonal;
     opts.rel_tol = 1e-14;
@@ -69,6 +71,10 @@ TEST(PetscBackend, SolveCG2x2)
     auto solver = factory.createLinearSolver(opts);
     const auto rep = solver->solve(*A, *x, *b);
     EXPECT_TRUE(rep.converged);
+    PetscBool in_petsc_options = PETSC_FALSE;
+    const auto record_key = "-" + std::string(SolverOptions::primary_solve_record_option);
+    ASSERT_EQ(PetscOptionsHasName(nullptr, nullptr, record_key.c_str(), &in_petsc_options), 0);
+    EXPECT_EQ(in_petsc_options, PETSC_FALSE);
 
     // A = [[4,1],[1,3]], b = [1,2] => x = [1/11, 7/11]
     const auto xs = x->localSpan();

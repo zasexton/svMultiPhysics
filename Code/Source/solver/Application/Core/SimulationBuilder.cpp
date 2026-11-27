@@ -1,5 +1,6 @@
 #include "Application/Core/SimulationBuilder.h"
 
+#include "Application/Core/BackendEnvironment.h"
 #include "Application/Core/LevelSetCutConfiguration.h"
 #include "Application/Core/OopMpiLog.h"
 #include "Application/Translators/EquationTranslator.h"
@@ -536,23 +537,23 @@ bool hasUnfittedLevelSetFreeSurface(const EquationParameters& eq)
   return false;
 }
 
-svmp::FE::backends::FsilsBlockSchurMomentumApproximation
-toFsilsBlockSchurMomentumApproximation(const std::string& value)
+svmp::FE::backends::FsilsBlockSchurPrimaryApproximation
+toFsilsBlockSchurPrimaryApproximation(const std::string& value)
 {
-  using svmp::FE::backends::FsilsBlockSchurMomentumApproximation;
+  using svmp::FE::backends::FsilsBlockSchurPrimaryApproximation;
   const auto v = lower_copy(value);
 
   if (v.empty() || v == "diag-k" || v == "diagk" || v == "diag") {
-    return FsilsBlockSchurMomentumApproximation::DiagK;
+    return FsilsBlockSchurPrimaryApproximation::DiagK;
   }
   if (v == "blockdiag-k" || v == "blockdiagk" || v == "blockdiag") {
-    return FsilsBlockSchurMomentumApproximation::BlockDiagK;
+    return FsilsBlockSchurPrimaryApproximation::BlockDiagK;
   }
   if (v == "ilu-k" || v == "iluk" || v == "ilu") {
-    return FsilsBlockSchurMomentumApproximation::ILUK;
+    return FsilsBlockSchurPrimaryApproximation::ILUK;
   }
   if (v == "asm-k" || v == "asm") {
-    return FsilsBlockSchurMomentumApproximation::ASM;
+    return FsilsBlockSchurPrimaryApproximation::ASM;
   }
 
   throw std::runtime_error("[svMultiPhysics::Application] Unsupported FSILS BlockSchur momentum approximation '" +
@@ -743,6 +744,7 @@ svmp::FE::backends::SolverOptions translateSolverOptions(const Parameters& param
   using svmp::FE::backends::SolverOptions;
 
   SolverOptions opts{};
+  opts.passthrough.emplace_back(SolverOptions::primary_solve_record_option, "momentum");
 
   const EquationParameters* eq = selectSolverEquation(params);
 
@@ -879,17 +881,21 @@ svmp::FE::backends::SolverOptions translateSolverOptions(const Parameters& param
     opts.fsils_blockschur_cg_rel_tol = static_cast<svmp::FE::Real>(eq->linear_solver.ns_cg_tolerance.value());
     opts.fsils_blockschur_schur_preconditioner =
         svmp::FE::backends::FsilsBlockSchurSchurPreconditioner::AlgebraicSchur;
-    opts.fsils_blockschur_momentum_approximation =
-        svmp::FE::backends::FsilsBlockSchurMomentumApproximation::ILUK;
+    opts.fsils_blockschur_primary_approximation =
+        svmp::FE::backends::FsilsBlockSchurPrimaryApproximation::ILUK;
 
     const char* schur_pc_env = svmp::FE::environment::value("SVMP_FSILS_BLOCKSCHUR_SCHUR_PC");
     if (schur_pc_env && schur_pc_env[0]) {
       opts.fsils_blockschur_schur_preconditioner = toFsilsBlockSchurPreconditioner(schur_pc_env);
     }
-    const char* momentum_hat_env = svmp::FE::environment::value("SVMP_FSILS_BLOCKSCHUR_MOMENTUM_HAT");
+    const char* momentum_hat_env = svmp::FE::environment::value("SVMP_FSILS_BLOCKSCHUR_PRIMARY_HAT");
+    if (!momentum_hat_env || !momentum_hat_env[0]) {
+      momentum_hat_env = application::core::applicationEnvironmentRegistry().value(
+          application::core::legacyPrimaryApproximationControl);
+    }
     if (momentum_hat_env && momentum_hat_env[0]) {
-      opts.fsils_blockschur_momentum_approximation =
-          toFsilsBlockSchurMomentumApproximation(momentum_hat_env);
+      opts.fsils_blockschur_primary_approximation =
+          toFsilsBlockSchurPrimaryApproximation(momentum_hat_env);
     }
   }
 

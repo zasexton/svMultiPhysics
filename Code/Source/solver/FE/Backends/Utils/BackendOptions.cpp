@@ -76,14 +76,14 @@ std::string_view fsilsBlockSchurPreconditionerToString(FsilsBlockSchurSchurPreco
 }
 
 std::string_view
-fsilsBlockSchurMomentumApproximationToString(FsilsBlockSchurMomentumApproximation approx) noexcept
+fsilsBlockSchurPrimaryApproximationToString(FsilsBlockSchurPrimaryApproximation approx) noexcept
 {
     switch (approx) {
-        case FsilsBlockSchurMomentumApproximation::Auto: return "auto";
-        case FsilsBlockSchurMomentumApproximation::DiagK: return "diag-k";
-        case FsilsBlockSchurMomentumApproximation::BlockDiagK: return "blockdiag-k";
-        case FsilsBlockSchurMomentumApproximation::ILUK: return "ilu-k";
-        case FsilsBlockSchurMomentumApproximation::ASM: return "asm-k";
+        case FsilsBlockSchurPrimaryApproximation::Auto: return "auto";
+        case FsilsBlockSchurPrimaryApproximation::DiagK: return "diag-k";
+        case FsilsBlockSchurPrimaryApproximation::BlockDiagK: return "blockdiag-k";
+        case FsilsBlockSchurPrimaryApproximation::ILUK: return "ilu-k";
+        case FsilsBlockSchurPrimaryApproximation::ASM: return "asm-k";
         default: return "unknown";
     }
 }
@@ -390,14 +390,14 @@ void addMetadataRoleMappings(SolverOptions& options)
     return FsilsBlockSchurSchurPreconditioner::AlgebraicSchur;
 }
 
-[[nodiscard]] FsilsBlockSchurMomentumApproximation chooseAutoFsilsMomentumApproximation(
+[[nodiscard]] FsilsBlockSchurPrimaryApproximation chooseAutoFsilsPrimaryApproximation(
     const SolverOptions& options) noexcept
 {
     if (hasSpecialPreconditionBlocks(options)) {
-        return FsilsBlockSchurMomentumApproximation::ASM;
+        return FsilsBlockSchurPrimaryApproximation::ASM;
     }
 
-    return FsilsBlockSchurMomentumApproximation::ILUK;
+    return FsilsBlockSchurPrimaryApproximation::ILUK;
 }
 
 } // namespace
@@ -458,10 +458,10 @@ SolverOptions normalizeSolverOptionsForBackend(const SolverOptions& options,
                         chooseAutoFsilsSchurPreconditioner(normalized);
                 }
 
-                if (normalized.fsils_blockschur_momentum_approximation ==
-                    FsilsBlockSchurMomentumApproximation::Auto) {
-                    normalized.fsils_blockschur_momentum_approximation =
-                        chooseAutoFsilsMomentumApproximation(normalized);
+                if (normalized.fsils_blockschur_primary_approximation ==
+                    FsilsBlockSchurPrimaryApproximation::Auto) {
+                    normalized.fsils_blockschur_primary_approximation =
+                        chooseAutoFsilsPrimaryApproximation(normalized);
                 }
             }
             break;

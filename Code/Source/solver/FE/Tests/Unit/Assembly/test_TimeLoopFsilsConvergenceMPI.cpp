@@ -998,8 +998,8 @@ backends::SolverOptions fsilsGmresDiagOptions()
 backends::SolverOptions fsilsBlockSchurOptions(
     backends::FsilsBlockSchurSchurPreconditioner schur_pc =
         backends::FsilsBlockSchurSchurPreconditioner::DiagL,
-    backends::FsilsBlockSchurMomentumApproximation momentum_hat =
-        backends::FsilsBlockSchurMomentumApproximation::DiagK)
+    backends::FsilsBlockSchurPrimaryApproximation momentum_hat =
+        backends::FsilsBlockSchurPrimaryApproximation::DiagK)
 {
     backends::SolverOptions o;
     o.method = backends::SolverMethod::BlockSchur;
@@ -1014,7 +1014,7 @@ backends::SolverOptions fsilsBlockSchurOptions(
     o.fsils_blockschur_cg_rel_tol = 1e-10;
     o.fsils_residual_check_policy = backends::FsilsResidualCheckPolicy::RetryOnly;
     o.fsils_blockschur_schur_preconditioner = schur_pc;
-    o.fsils_blockschur_momentum_approximation = momentum_hat;
+    o.fsils_blockschur_primary_approximation = momentum_hat;
 
     backends::BlockLayout layout;
     layout.blocks.push_back({"u", 0, 2, backends::BlockRole::PrimaryField});
@@ -1359,16 +1359,16 @@ TEST(TimeLoopFsilsConvergenceMPI, GeneralizedAlphaConvergesWithAlgebraicField)
         }
 
         const std::array<std::pair<backends::FsilsBlockSchurSchurPreconditioner,
-                                   backends::FsilsBlockSchurMomentumApproximation>, 2> variants{{
+                                   backends::FsilsBlockSchurPrimaryApproximation>, 2> variants{{
             {backends::FsilsBlockSchurSchurPreconditioner::DiagL,
-             backends::FsilsBlockSchurMomentumApproximation::DiagK},
+             backends::FsilsBlockSchurPrimaryApproximation::DiagK},
             {backends::FsilsBlockSchurSchurPreconditioner::AlgebraicSchur,
-             backends::FsilsBlockSchurMomentumApproximation::BlockDiagK},
+             backends::FsilsBlockSchurPrimaryApproximation::BlockDiagK},
         }};
 
         for (const auto& [schur_pc, momentum_hat] : variants) {
             SCOPED_TRACE(std::string(backends::fsilsBlockSchurPreconditionerToString(schur_pc)) + "/" +
-                         std::string(backends::fsilsBlockSchurMomentumApproximationToString(momentum_hat)));
+                         std::string(backends::fsilsBlockSchurPrimaryApproximationToString(momentum_hat)));
 
             backends::FsilsFactory factory(dof_per_node, perm);
             auto linear = factory.createLinearSolver(fsilsBlockSchurOptions(schur_pc, momentum_hat));
@@ -1455,13 +1455,13 @@ TEST(TimeLoopFsilsConvergenceMPI, GeneralizedAlphaConvergesWithAlgebraicField)
 
                 if (nr.linear.blockschur_outer_iterations > 0) {
                     saw_blockschur_report = true;
-                    EXPECT_GT(nr.linear.blockschur_momentum_solve_calls, 0);
-                    EXPECT_GE(nr.linear.blockschur_momentum_iterations, 0);
+                    EXPECT_GT(nr.linear.blockschur_primary_solve_calls, 0);
+                    EXPECT_GE(nr.linear.blockschur_primary_iterations, 0);
                     EXPECT_GT(nr.linear.blockschur_schur_solve_calls, 0);
                     EXPECT_GE(nr.linear.blockschur_schur_iterations, 0);
                     // This is a cumulative cycle count: one momentum solve
                     // can execute more than one restarted GMRES cycle.
-                    EXPECT_GE(nr.linear.blockschur_momentum_restart_cycles, 0);
+                    EXPECT_GE(nr.linear.blockschur_primary_restart_cycles, 0);
                     EXPECT_GE(nr.linear.blockschur_schur_setup_time_seconds, 0.0);
                     EXPECT_GE(nr.linear.blockschur_schur_solve_time_seconds, 0.0);
                     EXPECT_GE(nr.linear.blockschur_collective_calls_max_per_outer, 0u);
@@ -2925,7 +2925,7 @@ TEST(TimeLoopFsilsConvergenceMPI, DISABLED_GeneralizedAlphaMonolithicResistanceO
                   << " linear_rel=" << nr.linear.relative_residual
                   << " outer=" << nr.linear.blockschur_outer_iterations
                   << " schur_iters=" << nr.linear.blockschur_schur_iterations
-                  << " momentum_iters=" << nr.linear.blockschur_momentum_iterations
+                  << " momentum_iters=" << nr.linear.blockschur_primary_iterations
                   << " residual=" << nr.residual_norm
                   << " message=\"" << rep.message << "\""
                   << " caught_message=\"" << caught_message << "\""
@@ -3052,7 +3052,7 @@ TEST(TimeLoopFsilsConvergenceMPI, DISABLED_GeneralizedAlphaMonolithicRCROutletsP
                   << " linear_rel=" << nr.linear.relative_residual
                   << " outer=" << nr.linear.blockschur_outer_iterations
                   << " schur_iters=" << nr.linear.blockschur_schur_iterations
-                  << " momentum_iters=" << nr.linear.blockschur_momentum_iterations
+                  << " momentum_iters=" << nr.linear.blockschur_primary_iterations
                   << " residual=" << nr.residual_norm
                   << " caught_message=\"" << caught_message << "\""
                   << std::endl;

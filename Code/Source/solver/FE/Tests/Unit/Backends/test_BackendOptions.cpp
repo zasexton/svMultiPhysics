@@ -35,8 +35,8 @@ TEST(BackendOptions, ToString)
     EXPECT_EQ(fieldSplitKindToString(FieldSplitKind::Schur), "schur");
 
     EXPECT_EQ(fsilsBlockSchurPreconditionerToString(FsilsBlockSchurSchurPreconditioner::Auto), "auto");
-    EXPECT_EQ(fsilsBlockSchurMomentumApproximationToString(
-                  FsilsBlockSchurMomentumApproximation::Auto),
+    EXPECT_EQ(fsilsBlockSchurPrimaryApproximationToString(
+                  FsilsBlockSchurPrimaryApproximation::Auto),
               "auto");
     EXPECT_EQ(mixedBlockAssemblyModeToString(MixedBlockAssemblyMode::BorderedReduced),
               "bordered-reduced");
@@ -469,6 +469,15 @@ TEST(SolverOptions, ResolveBlockNameForRoleFallsBackToMixedLayout)
     EXPECT_EQ(opts.resolveBlockNameForRole(BlockRole::ConstraintField), "lambda");
 }
 
+TEST(SolverOptions, ReportsTheCallerSuppliedPrimaryRoleWhenPresent)
+{
+    SolverOptions options;
+    EXPECT_EQ(options.primarySolveRecordName(), "primary");
+    options.passthrough.emplace_back("unrelated", "value");
+    options.passthrough.emplace_back(SolverOptions::primary_solve_record_option, "displacement");
+    EXPECT_EQ(options.primarySolveRecordName(), "displacement");
+}
+
 TEST(SolverOptions, NormalizeFsilsBlockSchurPolicyFromAuxiliaryMetadata)
 {
     SolverOptions opts{};
@@ -508,8 +517,8 @@ TEST(SolverOptions, NormalizeFsilsBlockSchurPolicyFromAuxiliaryMetadata)
     EXPECT_TRUE(normalized.fsils_use_rcs);
     EXPECT_EQ(normalized.fsils_blockschur_schur_preconditioner,
               FsilsBlockSchurSchurPreconditioner::AlgebraicSchur);
-    EXPECT_EQ(normalized.fsils_blockschur_momentum_approximation,
-              FsilsBlockSchurMomentumApproximation::ASM);
+    EXPECT_EQ(normalized.fsils_blockschur_primary_approximation,
+              FsilsBlockSchurPrimaryApproximation::ASM);
     EXPECT_EQ(normalized.resolveBlockNameForRole(BlockRole::PrimaryField), "velocity");
     EXPECT_EQ(normalized.resolveBlockNameForRole(BlockRole::ConstraintField), "pressure");
 }

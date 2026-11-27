@@ -110,7 +110,7 @@ void traceLog(const std::string& msg)
     params->set("Convergence Tolerance", options.rel_tol);
 
     for (const auto& [k, v] : options.passthrough) {
-        if (k.empty()) continue;
+        if (k.empty() || k == SolverOptions::primary_solve_record_option) continue;
         params->set(k, v);
     }
 

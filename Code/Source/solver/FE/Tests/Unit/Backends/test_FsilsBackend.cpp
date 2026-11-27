@@ -2176,8 +2176,8 @@ TEST(FsilsBackend, CreateLinearSolverNormalizesMetadataDrivenBlockSchurOptions)
     EXPECT_TRUE(stored.fsils_use_rcs);
     EXPECT_EQ(stored.fsils_blockschur_schur_preconditioner,
               FsilsBlockSchurSchurPreconditioner::AlgebraicSchur);
-    EXPECT_EQ(stored.fsils_blockschur_momentum_approximation,
-              FsilsBlockSchurMomentumApproximation::ASM);
+    EXPECT_EQ(stored.fsils_blockschur_primary_approximation,
+              FsilsBlockSchurPrimaryApproximation::ASM);
 }
 
 TEST(FsilsBackend, CreateLinearSolverRejectsInvalidNativeAuxiliaryPartition)
@@ -3918,8 +3918,8 @@ TEST(FsilsBackend, GroupedBorderedFieldCouplingAsmMomentumConverges)
     opts.fsils_blockschur_cg_rel_tol = 1e-10;
     opts.fsils_blockschur_schur_preconditioner =
         FsilsBlockSchurSchurPreconditioner::AlgebraicSchur;
-    opts.fsils_blockschur_momentum_approximation =
-        FsilsBlockSchurMomentumApproximation::ASM;
+    opts.fsils_blockschur_primary_approximation =
+        FsilsBlockSchurPrimaryApproximation::ASM;
     BlockLayout layout;
     layout.blocks.push_back({"u", 0, 2, BlockRole::PrimaryField});
     layout.blocks.push_back({"p", 2, 1, BlockRole::ConstraintField});
