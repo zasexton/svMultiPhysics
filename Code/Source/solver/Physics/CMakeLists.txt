@@ -397,7 +397,7 @@ if(PHYSICS_BUILD_TESTS)
         svmp_add_gtest(Physics_Tests_MPI_2
             TARGET test_physics
             MPI_RANKS 2
-            FILTER "PoissonSquareSteadyMPI.*:PoissonModuleMPI.*:MovingDomainPhysicsMPI.*:NavierStokesLegacyBCsMPI.*"
+            FILTER "PoissonSquareSteadyMPI.*:PoissonModuleMPI.*:MovingDomainPhysicsMPI.*:NavierStokesLegacyBCsMPI.*:NavierStokesVMSManufacturedMPI.*"
             TIMEOUT 180
             LABELS MPI physics
         )

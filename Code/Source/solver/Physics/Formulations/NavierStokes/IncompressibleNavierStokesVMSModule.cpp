@@ -92,6 +92,32 @@ using FE::FieldId;
 using FE::Real;
 using Options = IncompressibleNavierStokesVMSOptions;
 
+int convectionCellQuadratureDegree(const fs::FESystem& system, const FE::spaces::FunctionSpace& velocity_space)
+{
+    const auto* product = dynamic_cast<const FE::spaces::ProductSpace*>(&velocity_space);
+    const auto& basis_space = product ? *product->base_space() : velocity_space;
+    if (!basis_space.is_variable_order() && basis_space.polynomial_order() <= 1) {
+        return 0;
+    }
+    int degree = 0;
+    const auto& mesh = system.meshAccess();
+    mesh.forEachCell([&](FE::GlobalIndex cell) {
+        const int p = basis_space.polynomial_order(cell);
+        if (p <= 1) return;
+        // A derivative reduces total degree on a simplex. On a tensor
+        // cell a transverse coordinate can still have degree 3p.
+        const int cell_degree = 3 * p - (FE::basis::is_simplex(mesh.getCellType(cell)) ? 1 : 0);
+        degree = std::max(degree, cell_degree);
+    });
+#if FE_HAS_MPI
+    // A rank holding only simplices would otherwise integrate its cells
+    // differently from one that also holds a tensor cell.
+    degree = static_cast<int>(
+        fs::collectiveMaxDouble(degree, fs::CollectiveCommunicator(system.activeMpiCommunicator())));
+#endif
+    return degree;
+}
+
 IncompressibleNavierStokesVMSModule::IncompressibleNavierStokesVMSModule(
     std::shared_ptr<const FE::spaces::FunctionSpace> velocity_space,
     std::shared_ptr<const FE::spaces::FunctionSpace> pressure_space,
@@ -514,20 +540,7 @@ void IncompressibleNavierStokesVMSModule::registerOn(fs::FESystem& system) const
     bcs.install(o.velocity_dirichlet_weak, Factories::reserveMarker);   // Nitsche below; reserve the marker
     F.options() = physicsInstallOptions(o.jit_policy);
     if (o.enable_convection) {
-        const auto* product = dynamic_cast<const FE::spaces::ProductSpace*>(velocity_space_.get());
-        const auto& basis_space = product ? *product->base_space() : *velocity_space_;
-        if (basis_space.is_variable_order() || basis_space.polynomial_order() > 1) {
-            system.meshAccess().forEachCell([&](FE::GlobalIndex cell) {
-                const int p = basis_space.polynomial_order(cell);
-                if (p <= 1) return;
-                // A derivative reduces total degree on a simplex. On a tensor
-                // cell a transverse coordinate can still have degree 3p.
-                const auto type = system.meshAccess().getCellType(cell);
-                const int degree = 3 * p - (FE::basis::is_simplex(type) ? 1 : 0);
-                auto& minimum = F.options().minimum_cell_quadrature_order;
-                minimum = std::max(minimum, degree);
-            });
-        }
+        F.options().minimum_cell_quadrature_order = convectionCellQuadratureDegree(system, *velocity_space_);
     }
     F.symbolicTangent();
     // The energies, powers and measures of the free surfaces as forms (E3; NavierStokesPostProcessing.h).

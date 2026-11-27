@@ -1075,7 +1075,8 @@ computeLinearFullCellFastPath(
 [[nodiscard]] std::uint64_t generatedInterfaceQuadraturePolicyKey(
     const LevelSetGeneratedInterfaceOptions& options,
     int interface_quadrature_order,
-    int volume_quadrature_order) noexcept
+    int volume_quadrature_order,
+    int clipped_volume_quadrature_order) noexcept
 {
     std::uint64_t h = 1469598103934665603ull;
     const auto mix = [&h](std::uint64_t value) noexcept {
@@ -1113,6 +1114,10 @@ computeLinearFullCellFastPath(
         // Preserve existing legacy keys while separating the opt-in policy.
         mix(0x4c53434f45465031ull); // "LSCOEFP1"
         mix(static_cast<std::uint64_t>(options.coefficient_classification_policy));
+    }
+    if (clipped_volume_quadrature_order >= 0) {
+        mix(0x4c53434c49505631ull); // "LSCLIPV1"
+        mix(static_cast<std::uint64_t>(clipped_volume_quadrature_order));
     }
     return h;
 }
@@ -2686,7 +2691,7 @@ LevelSetGeneratedInterfaceResult LevelSetGeneratedInterfaceLifecycle::build(
     const int interface_quadrature_order =
         options.interface_quadrature_order >= 0 ? options.interface_quadrature_order
                                                 : options.quadrature_order;
-    const int volume_quadrature_order =
+    int volume_quadrature_order =
         options.volume_quadrature_order >= 0 ? options.volume_quadrature_order
                                              : options.quadrature_order;
     if (interface_quadrature_order < 0) {
@@ -2734,6 +2739,16 @@ LevelSetGeneratedInterfaceResult LevelSetGeneratedInterfaceLifecycle::build(
     marker_key.requested_marker = options.requested_interface_marker;
     const int marker = marker_registry_.assign(marker_key);
 
+    // The cut-volume kernels over this interface may ask for a cell rule of
+    // higher polynomial exactness than the configured volume order; the
+    // generated rules reach it.  A clipped region of a cell that is not a
+    // simplex is a union of simplices and needs the dimension times that
+    // degree to match the cell's own rule.
+    const int form_volume_order = system.cutVolumeMinimumQuadratureOrder(marker);
+    volume_quadrature_order = std::max(volume_quadrature_order, form_volume_order);
+    const int clipped_volume_quadrature_order =
+        form_volume_order > 0 ? mesh.dimension() * form_volume_order : -1;
+
     const auto revision = ++value_revision_;
     interfaces::CutInterfaceDomainRequest request{};
     request.source = interfaces::LevelSetInterfaceSource::fromField(
@@ -2749,12 +2764,14 @@ LevelSetGeneratedInterfaceResult LevelSetGeneratedInterfaceLifecycle::build(
     request.quadrature_order = options.quadrature_order;
     request.interface_quadrature_order = interface_quadrature_order;
     request.volume_quadrature_order = volume_quadrature_order;
+    request.clipped_volume_quadrature_order = clipped_volume_quadrature_order;
     request.mesh_geometry_revision = mesh.geometryRevision();
     request.mesh_topology_revision = mesh.topologyRevision();
     request.ownership_revision = mesh.ownershipRevision();
     request.quadrature_policy_key =
         generatedInterfaceQuadraturePolicyKey(
-            options, interface_quadrature_order, volume_quadrature_order);
+            options, interface_quadrature_order, volume_quadrature_order,
+            clipped_volume_quadrature_order);
     request.implicit_geometry_mode =
         generatedInterfaceGeometryModeName(options.geometry_mode);
     request.implicit_quadrature_backend =

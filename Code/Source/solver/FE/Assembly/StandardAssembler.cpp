@@ -591,6 +591,31 @@ void orientGeneratedInterfaceContextForSide(
            std::abs(rule.measure - rule.parent_measure) <= measure_tol;
 }
 
+// A cut-volume rule must be as exact as the cell rule its kernel requests.
+// A rule of the whole cell is a rule of the cell's own family; a clipped
+// region is a union of simplices, which on a cell that is not a simplex must
+// reach QuadratureFactory::simplex_subdivision_order.
+void requireCutVolumeRuleOrder(const quadrature::QuadratureRule& active_rule,
+                               bool whole_cell,
+                               int minimum_order,
+                               ElementType cell_type,
+                               GlobalIndex cell_id,
+                               const char* caller)
+{
+    if (minimum_order <= 0) {
+        return;
+    }
+    const int required =
+        whole_cell ? minimum_order
+                   : quadrature::QuadratureFactory::simplex_subdivision_order(cell_type, minimum_order);
+    FE_THROW_IF(active_rule.order() < required, FEException,
+                std::string(caller) + ": the " + (whole_cell ? "whole-cell" : "clipped") +
+                    " cut-volume rule of cell " + std::to_string(cell_id) +
+                    " is exact to polynomial degree " + std::to_string(active_rule.order()) +
+                    ", below the degree " + std::to_string(required) +
+                    " its kernel requests; the generated volume rules must be built at that order");
+}
+
 [[nodiscard]] LocalIndex qpointReserveCountAtLeastOne(std::size_t count)
 {
     count = std::max<std::size_t>(count, 1u);
@@ -10156,6 +10181,12 @@ AssemblyResult StandardAssembler::assembleCutVolumes(
             active_rule = &full_side_snapshot_rules.intern(*active_rule);
         }
         FE_CHECK_NOT_NULL(active_rule, "StandardAssembler::assembleCutVolumes: active quadrature rule");
+        requireCutVolumeRuleOrder(*active_rule,
+                                  !active_rule_is_partial_cut ||
+                                      (rule.full_cell_equivalent &&
+                                       rule.provenance.level_set_snapshot_revision_key != 0u),
+                                  kernel.minimumCellQuadratureOrder(), cell_type, cell_id,
+                                  "StandardAssembler::assembleCutVolumes");
         cut_quadrature_points += active_rule->num_points();
         cut_rule_time += cut_now() - stage_start;
 
@@ -11098,6 +11129,12 @@ void StandardAssembler::assembleCutVolumeFusedRule(const CutVolumeFusedLoop& loo
                                                        cell_type, t.kernel->minimumCellQuadratureOrder());
             term_rule = term_full_cell_rule.get();
         }
+        requireCutVolumeRuleOrder(*term_rule,
+                                  active_rule_is_full_side ||
+                                      (rule.full_cell_equivalent &&
+                                       rule.provenance.level_set_snapshot_revision_key != 0u),
+                                  t.kernel->minimumCellQuadratureOrder(), cell_type, cell_id,
+                                  "StandardAssembler::assembleCutVolumesFused");
         if (active_rule_is_full_side &&
             !term_rule->same_cache_identity(*current_geometry_rule)) {
             stage_start = cut_now();

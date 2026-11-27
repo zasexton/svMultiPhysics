@@ -5902,9 +5902,10 @@ TEST(LevelSetInterfaceLifecycle, LinearBackendDriverReportsSupportAndOrders)
     EXPECT_EQ(backend.achievedInterfaceQuadratureOrder(
                   3, FE::ElementType::Tetra4, request),
               2);
+    // The tetrahedral cutter integrates its simplices at the requested degree.
     EXPECT_EQ(backend.achievedVolumeQuadratureOrder(
                   3, FE::ElementType::Tetra4, request),
-              2);
+              3);
     EXPECT_EQ(backend.achievedInterfaceQuadratureOrder(
                   3, FE::ElementType::Hex8, request),
               -1);
@@ -6026,7 +6027,9 @@ TEST(LevelSetInterfaceLifecycle, BackendCapabilityReportsMilestoneContract)
     EXPECT_EQ(linear_quad.minimum_level_set_order, 1);
     EXPECT_EQ(linear_quad.validation_level_set_order, 1);
     EXPECT_EQ(linear_quad.maximum_reported_interface_order, 5);
-    EXPECT_EQ(linear_quad.maximum_reported_volume_order, 5);
+    // The linear cutters integrate their simplices at the requested degree.
+    EXPECT_EQ(linear_quad.maximum_reported_volume_order,
+              FE::interfaces::kMaximumSimplexSubdivisionCutVolumeOrder);
     EXPECT_TRUE(linear_quad.returns_reference_frame_rules);
     EXPECT_TRUE(linear_quad.requires_positive_volume_weights);
     EXPECT_TRUE(linear_quad.requires_deterministic_rule_order);
@@ -6041,7 +6044,8 @@ TEST(LevelSetInterfaceLifecycle, BackendCapabilityReportsMilestoneContract)
             FE::ElementType::Tetra4);
     EXPECT_TRUE(linear_tet.supports_element_type);
     EXPECT_EQ(linear_tet.maximum_reported_interface_order, 2);
-    EXPECT_EQ(linear_tet.maximum_reported_volume_order, 2);
+    EXPECT_EQ(linear_tet.maximum_reported_volume_order,
+              FE::interfaces::kMaximumSimplexSubdivisionCutVolumeOrder);
 
     const auto linear_hex =
         level_set::implicitCutQuadratureBackendCapability(
@@ -6308,7 +6312,7 @@ TEST(LevelSetInterfaceLifecycle, BackendCapabilityCoversAllElementFamilies)
                       supported ? max_interface_order : -1);
             EXPECT_EQ(driver.achievedVolumeQuadratureOrder(
                           mesh_dimension, type, request),
-                      supported ? max_volume_order : -1);
+                      supported ? std::min(max_volume_order, request.volume_quadrature_order) : -1);
         };
 
     for (const auto& expected : expectations) {
@@ -6317,13 +6321,13 @@ TEST(LevelSetInterfaceLifecycle, BackendCapabilityCoversAllElementFamilies)
                       expected.type,
                       expected.linear_2d,
                       5,
-                      5);
+                      FE::interfaces::kMaximumSimplexSubdivisionCutVolumeOrder);
         check_backend(level_set::ImplicitCutQuadratureBackend::LinearCorner,
                       3,
                       expected.type,
                       expected.linear_3d,
                       2,
-                      2);
+                      FE::interfaces::kMaximumSimplexSubdivisionCutVolumeOrder);
         check_backend(level_set::ImplicitCutQuadratureBackend::SayeHyperrectangle,
                       2,
                       expected.type,

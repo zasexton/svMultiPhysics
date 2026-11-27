@@ -7981,8 +7981,10 @@ implicitCutQuadratureBackendCapability(ImplicitCutQuadratureBackend backend,
         }
         capability.maximum_reported_interface_order =
             mesh_dimension == 2 ? 5 : 2;
+        // The linear cutters integrate their simplices with rules of the
+        // requested degree.
         capability.maximum_reported_volume_order =
-            mesh_dimension == 2 ? 5 : 2;
+            interfaces::kMaximumSimplexSubdivisionCutVolumeOrder;
         return capability;
     case ImplicitCutQuadratureBackend::SayeHyperrectangle:
         capability.implemented = true;

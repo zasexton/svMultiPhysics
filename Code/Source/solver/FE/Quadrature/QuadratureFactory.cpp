@@ -274,6 +274,21 @@ std::shared_ptr<const QuadratureRule> QuadratureFactory::cell_rule(
     return upgraded;
 }
 
+int QuadratureFactory::simplex_subdivision_order(ElementType type, int order) {
+    if (order <= 0) {
+        return order;
+    }
+    switch (canonical(type)) {
+        case ElementType::Point1:
+        case ElementType::Line2:
+        case ElementType::Triangle3:
+        case ElementType::Tetra4:
+            return order;
+        default:
+            return element_dimension(type) * order;
+    }
+}
+
 int QuadratureFactory::recommended_order(int basis_order, bool is_mass_matrix) {
     int order = std::max(1, 2 * basis_order);
     if (is_mass_matrix) {

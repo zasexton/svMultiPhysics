@@ -14675,6 +14675,19 @@ std::size_t FESystem::cutVolumeKernelCount(
     return count;
 }
 
+int FESystem::cutVolumeMinimumQuadratureOrder(int interface_marker) const
+{
+    int order = 0;
+    for (const auto& op : operator_registry_.list()) {
+        for (const auto& term : operator_registry_.get(op).cut_volumes) {
+            if (term.kernel && (term.marker == interface_marker || term.marker < 0)) {
+                order = std::max(order, term.kernel->minimumCellQuadratureOrder());
+            }
+        }
+    }
+    return order;
+}
+
 void FESystem::addGlobalKernel(OperatorTag op, std::shared_ptr<GlobalKernel> kernel)
 {
     invalidateSetup();

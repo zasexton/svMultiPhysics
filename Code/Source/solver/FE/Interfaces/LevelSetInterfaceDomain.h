@@ -182,6 +182,18 @@ struct LevelSetInterfaceSource {
     return requested_order > 5 ? 5 : (requested_order > 0 ? requested_order : 0);
 }
 
+/// Highest volume order of the piecewise-planar cutters.  They split a
+/// clipped region into simplices and integrate each with a simplex rule of
+/// the requested degree; the bound only keeps a request finite.
+inline constexpr int kMaximumSimplexSubdivisionCutVolumeOrder = 30;
+
+[[nodiscard]] constexpr int implementedSimplexSubdivisionCutVolumeExactOrder(
+    int requested_order) noexcept {
+    return requested_order > kMaximumSimplexSubdivisionCutVolumeOrder
+               ? kMaximumSimplexSubdivisionCutVolumeOrder
+               : (requested_order > 0 ? requested_order : 0);
+}
+
 struct CutInterfaceDomainRequest {
     LevelSetInterfaceSource source{};
     // Durable logical identity for generated domains. Legacy and low-level
@@ -196,6 +208,12 @@ struct CutInterfaceDomainRequest {
     int quadrature_order{1};
     int interface_quadrature_order{-1};
     int volume_quadrature_order{-1};
+    // Total degree to which a clipped volume region of a cell that is not a
+    // simplex must be integrated, or -1 for the volume order.  A clipped
+    // region is a union of simplices, which match an order-k rule of a
+    // tensor-product cell only when exact to its dimension times k.  A
+    // region that is the whole cell takes the cell's own rule instead.
+    int clipped_volume_quadrature_order{-1};
     geometry::CutGeometryFrame frame{geometry::CutGeometryFrame::Reference};
     std::uint64_t mesh_geometry_revision{0};
     std::uint64_t mesh_topology_revision{0};
@@ -230,6 +248,13 @@ struct CutInterfaceDomainRequest {
     [[nodiscard]] int resolvedVolumeQuadratureOrder() const noexcept {
         return volume_quadrature_order >= 0 ? volume_quadrature_order
                                             : quadrature_order;
+    }
+
+    /// The order of a clipped volume region of a cell that is not a simplex.
+    [[nodiscard]] int resolvedClippedVolumeQuadratureOrder() const noexcept {
+        const int order = resolvedVolumeQuadratureOrder();
+        return clipped_volume_quadrature_order > order ? clipped_volume_quadrature_order
+                                                       : order;
     }
 
     [[nodiscard]] Real resolvedCoefficientClassificationBand() const noexcept {
@@ -514,9 +539,13 @@ struct CutInterfaceVolumeRegion {
         if (volume_order < 0) {
             throw std::invalid_argument("cut-volume quadrature order must be nonnegative");
         }
+        // A clipped region of a cell that is not a simplex can be requested
+        // at a higher order than the whole cell.
+        const int requested_order =
+            full_cell_equivalent ? volume_order : request.resolvedClippedVolumeQuadratureOrder();
         int exact_order =
             achieved_quadrature_order >= 0
-                ? std::min(volume_order, achieved_quadrature_order)
+                ? std::min(requested_order, achieved_quadrature_order)
                 : implementedLevelSetCutVolumeExactOrder(volume_order);
         if (quadrature_points.empty() && !full_cell_equivalent) {
             exact_order = std::min(exact_order, 1);
@@ -583,7 +612,7 @@ struct CutInterfaceVolumeRegion {
             request.implicit_cut_root_coordinate_tolerance;
         rule.provenance.implicit_cut_root_max_iterations =
             request.implicit_cut_root_max_iterations;
-        rule.provenance.requested_quadrature_order = volume_order;
+        rule.provenance.requested_quadrature_order = requested_order;
         rule.provenance.achieved_quadrature_order = exact_order;
         rule.provenance_id = request.source.identifier();
         rule.frame = request.frame;

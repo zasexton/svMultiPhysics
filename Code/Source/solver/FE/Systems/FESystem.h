@@ -2427,6 +2427,12 @@ public:
         int interface_marker,
         geometry::CutIntegrationSide side) const;
 
+    /// The largest minimum cell quadrature order of the kernels that
+    /// integrate over either cut volume of @p interface_marker (or of every
+    /// marker), zero when none asks for one.  The generated rules of that
+    /// interface must reach it.
+    [[nodiscard]] int cutVolumeMinimumQuadratureOrder(int interface_marker) const;
+
     void addCutIntegrationContextUpdateCallback(
         CutIntegrationContextUpdateCallback hook);
 

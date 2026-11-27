@@ -913,6 +913,174 @@ TEST(CutStructureKey, HighOrderActiveBoundaryRestrictsTheLevelSetToTheWall)
     }
 }
 
+// ---------------------------------------------------------------------------
+// Generated cut-volume rules at the quadrature degree of the forms over them
+// ---------------------------------------------------------------------------
+
+/// The integral of x^a y^b over {x0 < x < x1, 0 < y < 1 - x}, a strip of the
+/// reference triangle: the sum over k of C(b+1, k) (-1)^k x^(a+k+1) / (a+k+1),
+/// divided by b + 1.
+Real referenceTriangleStripMoment(int a, int b, Real x0, Real x1)
+{
+    const int n = b + 1;
+    Real sum = 0.0;
+    Real binomial = 1.0;
+    for (int k = 0; k <= n; ++k) {
+        const int e = a + k + 1;
+        sum += (k % 2 == 0 ? 1.0 : -1.0) * binomial * (std::pow(x1, e) - std::pow(x0, e)) / e;
+        binomial = binomial * (n - k) / (k + 1);
+    }
+    return sum / n;
+}
+
+/// The triangle (0,0), (1,0), (0,1), whose reference coordinates are its
+/// coordinates, cut by the level set x - 1/2, and the triangle (-1/2,0),
+/// (0,0), (0,1) on its negative side; a P2 velocity u whose kernels over
+/// both cut volumes integrate (u . grad u) . v with a degree-5 rule, which
+/// the convection of a quadratic velocity on a simplex needs.
+struct QuadraticConvectionCut {
+    static constexpr int kDegree = 5;
+    std::shared_ptr<svmp::Mesh> mesh;
+    std::shared_ptr<spaces::ProductSpace> velocity;
+    std::unique_ptr<systems::FESystem> system;
+    std::optional<CutGeometry> geometry;
+    FieldId phi{INVALID_FIELD_ID};
+    FieldId u{INVALID_FIELD_ID};
+
+    QuadraticConvectionCut()
+    {
+        auto base = std::make_shared<svmp::MeshBase>();
+        const svmp::CellShape triangle{svmp::CellFamily::Triangle, 3, 1};
+        base->build_from_arrays(2, {0.0, 0.0, 1.0, 0.0, 0.0, 1.0, -0.5, 0.0}, {0, 3, 6}, {0, 1, 2, 3, 0, 2},
+                                {triangle, triangle});
+        base->finalize();
+        mesh = svmp::create_mesh(std::move(base));
+        const auto p1 = std::make_shared<spaces::H1Space>(ElementType::Triangle3, 1);
+        velocity = std::make_shared<spaces::ProductSpace>(std::make_shared<spaces::H1Space>(ElementType::Triangle3, 2), 2);
+        system = std::make_unique<systems::FESystem>(mesh);
+        phi = system->addField(
+            systems::FieldSpec{.name = "phi", .space = p1, .source_kind = systems::FieldSourceKind::PrescribedData});
+        u = system->addField(systems::FieldSpec{.name = "u", .space = velocity, .components = 2});
+        geometry.emplace(cutGeometry(*system, *mesh, {.level_set_field_name = "phi", .domain_id = "strip"}));
+        const auto U = forms::StateField(u, *velocity, "u");
+        const auto V = forms::TestField(u, *velocity, "v");
+        systems::FormInstallOptions options;
+        options.minimum_cell_quadrature_order = kDegree;
+        for (const auto side : {CutVolumeSide::Negative, CutVolumeSide::Positive}) {
+            const auto op = side == CutVolumeSide::Negative ? "negative" : "positive";
+            system->addOperator(op);
+            (void)systems::installFormulation(*system, op, {u},
+                                              forms::inner(forms::advect(U, U), V).dx(geometry->side(side).volume()),
+                                              options);
+        }
+        system->setup();
+        std::vector<Real> values(mesh->n_vertices());
+        for (std::size_t v = 0; v < values.size(); ++v) {
+            values[v] = static_cast<Real>(mesh->local_mesh().get_vertex_coords(static_cast<svmp::index_t>(v))[0]) - 0.5;
+        }
+        std::vector<Real> coefficients(static_cast<std::size_t>(system->fieldDofHandler(phi).getNumDofs()), 0.0);
+        (void)system->projectMeshVertexValuesToFieldCoefficients(phi, values, 1u, coefficients);
+        system->setPrescribedFieldCoefficients(phi, coefficients);
+        (void)geometry->refresh();
+    }
+};
+
+// A rule of either side of the cut cell and the full-cell rule of the uncut
+// cell are exact for every monomial of degree 5 (in reference coordinates).
+// The configured volume order is 2, which the rules kept before.
+TEST(CutGeometry, CutVolumeRulesReachTheQuadratureDegreeOfTheirForms)
+{
+    QuadraticConvectionCut cut;
+    const auto* context = cut.system->cutIntegrationContext();
+    ASSERT_NE(context, nullptr);
+    std::size_t clipped = 0u;
+    std::size_t whole = 0u;
+    for (std::size_t index = 0; index < context->volumeRules().size(); ++index) {
+        const auto rule = context->materializedVolumeRule(index);
+        if (rule.kind != geometry::CutQuadratureKind::Volume || rule.points.empty()) {
+            continue;
+        }
+        const auto cell = static_cast<GlobalIndex>(rule.provenance.parent_entity);
+        const bool negative = rule.side == geometry::CutIntegrationSide::Negative;
+        SCOPED_TRACE(::testing::Message() << "cell=" << cell << " negative=" << negative);
+        EXPECT_GE(rule.exact_polynomial_order, QuadraticConvectionCut::kDegree);
+        if (cell == 0) {
+            ++clipped;
+            EXPECT_FALSE(rule.full_cell_equivalent);
+        } else {
+            ++whole;
+            EXPECT_TRUE(negative);
+            EXPECT_TRUE(rule.full_cell_equivalent);
+        }
+        for (int a = 0; a <= QuadraticConvectionCut::kDegree; ++a) {
+            for (int b = 0; a + b <= QuadraticConvectionCut::kDegree; ++b) {
+                Real integral = 0.0;
+                for (const auto& point : rule.points) {
+                    integral += point.weight * std::pow(point.point[0], a) * std::pow(point.point[1], b);
+                }
+                const Real exact = cell != 0 ? referenceTriangleStripMoment(a, b, 0.0, 1.0)
+                                   : negative ? referenceTriangleStripMoment(a, b, 0.0, 0.5)
+                                              : referenceTriangleStripMoment(a, b, 0.5, 1.0);
+                EXPECT_NEAR(integral, exact, 1e-14) << "x^" << a << " y^" << b;
+            }
+        }
+    }
+    EXPECT_EQ(clipped, 2u);
+    EXPECT_EQ(whole, 1u);
+}
+
+// The assembled convective work of u = (x^2, -2xy) on v = (x^2, 0) is the
+// integral of 2x^5: 1/336 - 1/1344 = 1/448 on the negative side (a clipped
+// and a full cell) and 5/112 on the positive side.
+TEST(CutGeometry, CutVolumeAssemblyIntegratesQuadraticConvectionExactly)
+{
+    QuadraticConvectionCut cut;
+    auto& system = *cut.system;
+    const auto n = system.dofHandler().getNumDofs();
+    std::vector<Real> state(static_cast<std::size_t>(n), 0.0);
+    std::vector<Real> test(static_cast<std::size_t>(n), 0.0);
+    const auto offset = system.fieldDofOffset(cut.u);
+    for (GlobalIndex cell = 0; cell < 2; ++cell) {
+        const auto& vertices = cut.mesh->local_mesh().cell_vertices(static_cast<svmp::index_t>(cell));
+        std::array<std::array<Real, 2>, 3> x{};
+        for (std::size_t i = 0; i < 3; ++i) {
+            const auto c = cut.mesh->local_mesh().get_vertex_coords(vertices[i]);
+            x[i] = {static_cast<Real>(c[0]), static_cast<Real>(c[1])};
+        }
+        std::vector<Real> local;
+        using Value = spaces::FunctionSpace::Value;
+        cut.velocity->interpolate([&](const Value& xi) {
+            const Real px = x[0][0] + xi[0] * (x[1][0] - x[0][0]) + xi[1] * (x[2][0] - x[0][0]);
+            const Real py = x[0][1] + xi[0] * (x[1][1] - x[0][1]) + xi[1] * (x[2][1] - x[0][1]);
+            return Value{px * px, -2.0 * px * py, 0.0};
+        }, local);
+        const auto dofs = system.fieldDofHandler(cut.u).getCellDofs(cell);
+        ASSERT_EQ(local.size(), dofs.size());
+        for (std::size_t i = 0; i < local.size(); ++i) {
+            const auto row = static_cast<std::size_t>(offset + dofs[i]);
+            state[row] = local[i];
+            test[row] = i < local.size() / 2 ? local[i] : 0.0;
+        }
+    }
+    for (const auto& [op, exact] : {std::pair{"negative", 1.0 / 448.0}, std::pair{"positive", 5.0 / 112.0}}) {
+        SCOPED_TRACE(op);
+        systems::SystemStateView view;
+        view.u = state;
+        systems::AssemblyRequest request;
+        request.op = op;
+        request.want_vector = true;
+        assembly::DenseVectorView residual(n);
+        residual.zero();
+        const auto result = system.assemble(request, view, nullptr, &residual);
+        ASSERT_TRUE(result.success) << result.error_message;
+        Real work = 0.0;
+        for (GlobalIndex i = 0; i < n; ++i) {
+            work += test[static_cast<std::size_t>(i)] * residual.data()[static_cast<std::size_t>(i)];
+        }
+        EXPECT_NEAR(work, exact, 1e-14);
+    }
+}
+
 #endif // SVMP_FE_WITH_MESH && FE_HAS_EIGEN
 
 } // namespace

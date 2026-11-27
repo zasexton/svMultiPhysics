@@ -926,8 +926,8 @@ TEST(LevelSetInterfaceDomain, CutVolumeRulesConserveConstantsForSupportedElement
         Real weight_sum = 0.0;
         for (const auto& rule : rules) {
             EXPECT_TRUE(rule.exact_for_constants);
-            EXPECT_EQ(rule.exact_polynomial_order,
-                      c.three_dimensional ? 2 : 3);
+            // Both cutters reach the requested degree 3.
+            EXPECT_EQ(rule.exact_polynomial_order, 3);
             EXPECT_NEAR(rule.parent_measure, c.parent_measure, 1.0e-14);
             measure_sum += rule.measure;
             for (const auto& point : rule.points) {

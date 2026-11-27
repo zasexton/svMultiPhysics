@@ -1939,3 +1939,145 @@ TEST(LevelSetCellCut3DInterface, MatchesFullCutFragmentsWithoutVolumeRegions)
         }
     }
 }
+
+namespace {
+
+// int_{x0}^{x1} x^a (1 - x)^n dx, by the binomial expansion of (1 - x)^n.
+Real weightedPowerIntegral(int a, int n, Real x0, Real x1)
+{
+    Real sum = 0.0;
+    Real binomial = 1.0;
+    for (int k = 0; k <= n; ++k) {
+        const int e = a + k + 1;
+        sum += (k % 2 == 0 ? 1.0 : -1.0) * binomial * (std::pow(x1, e) - std::pow(x0, e)) / e;
+        binomial = binomial * (n - k) / (k + 1);
+    }
+    return sum;
+}
+
+Real factorial(int n)
+{
+    Real value = 1.0;
+    for (int k = 2; k <= n; ++k) {
+        value *= k;
+    }
+    return value;
+}
+
+// The integral of x^a y^b z^c over the part x0 < x < x1 of the reference
+// triangle (c = 0) or tetrahedron: the cross-section at x is a scaled
+// simplex of size 1 - x.
+Real referenceSimplexSlabMoment(int dimension, int a, int b, int c, Real x0, Real x1)
+{
+    if (dimension == 2) {
+        return weightedPowerIntegral(a, b + 1, x0, x1) / (b + 1);
+    }
+    return factorial(b) * factorial(c) / factorial(b + c + 2) * weightedPowerIntegral(a, b + c + 2, x0, x1);
+}
+
+// The largest error of the monomials of total degree <= degree of a volume
+// rule against an exact moment function.
+template <class Exact>
+Real largestMomentError(const geometry::CutQuadratureRule& rule, int dimension, int degree, Exact exact)
+{
+    Real error = 0.0;
+    for (int a = 0; a <= degree; ++a) {
+        for (int b = 0; a + b <= degree; ++b) {
+            for (int c = 0; a + b + c <= degree && (dimension == 3 || c == 0); ++c) {
+                Real integral = 0.0;
+                for (const auto& point : rule.points) {
+                    integral += point.weight * std::pow(point.point[0], a) * std::pow(point.point[1], b) *
+                                std::pow(point.point[2], c);
+                }
+                error = std::max(error, std::abs(integral - exact(a, b, c)));
+            }
+        }
+    }
+    return error;
+}
+
+} // namespace
+
+// A request above the tabulated triangle (degree 5) and tetrahedron
+// (degree 2) rules is met on both sides of a straight cut, which the cut
+// then advertises.
+TEST(LevelSetInterfaceBuilder, CutVolumeRulesReachOrdersAboveTheTabulatedSimplexRules)
+{
+    struct Case {
+        ElementType type;
+        int dimension;
+        int order;
+    };
+    constexpr Real cut = 0.35;
+    for (const auto& [type, dimension, order] : {Case{ElementType::Triangle3, 2, 8}, Case{ElementType::Tetra4, 3, 4}}) {
+        SCOPED_TRACE(static_cast<int>(type));
+        auto request = make_request(/*marker=*/71);
+        request.volume_quadrature_order = order;
+        LevelSetCellCutInput input{.parent_cell = 0, .element_type = type};
+        for (int corner = 0; corner <= dimension; ++corner) {
+            std::array<Real, 3> x{0.0, 0.0, 0.0};
+            if (corner > 0) {
+                x[static_cast<std::size_t>(corner - 1)] = 1.0;
+            }
+            input.node_coordinates.push_back(x);
+            input.level_set_values.push_back(x[0] - cut);
+        }
+        const auto result =
+            dimension == 2 ? cutLinearLevelSetCell2D(request, input) : cutLinearLevelSetCell3D(request, input);
+        ASSERT_TRUE(result.supported) << result.diagnostic;
+        ASSERT_EQ(result.volume_regions.size(), 2u);
+        for (const auto& region : result.volume_regions) {
+            const bool negative = region.side == geometry::CutIntegrationSide::Negative;
+            const auto rule = region.toCutQuadratureRule(request);
+            EXPECT_EQ(rule.exact_polynomial_order, order);
+            EXPECT_LT(largestMomentError(rule, dimension, order,
+                                         [&](int a, int b, int c) {
+                                             return negative ? referenceSimplexSlabMoment(dimension, a, b, c, 0.0, cut)
+                                                             : referenceSimplexSlabMoment(dimension, a, b, c, cut, 1.0);
+                                         }),
+                      1e-14);
+        }
+    }
+}
+
+// A clipped region of a quadrilateral is a union of triangles; it reaches
+// the requested clipped order, while the whole cell keeps the volume order of
+// its own tensor-product rule.
+TEST(LevelSetInterfaceBuilder, ClippedQuadrilateralRegionsReachTheClippedOrder)
+{
+    auto request = make_request(/*marker=*/72);
+    request.volume_quadrature_order = 3;
+    request.clipped_volume_quadrature_order = 6;
+    const std::array<std::array<Real, 3>, 4> corners{{
+        {-1.0, -1.0, 0.0}, {1.0, -1.0, 0.0}, {1.0, 1.0, 0.0}, {-1.0, 1.0, 0.0}}};
+    constexpr Real cut = 0.2;
+    for (const Real shift : {0.0, 2.0}) {
+        LevelSetCellCutInput input{.parent_cell = 0, .element_type = ElementType::Quad4};
+        for (const auto& x : corners) {
+            input.node_coordinates.push_back(x);
+            input.level_set_values.push_back(x[0] - cut - shift);
+        }
+        const auto result = cutLinearLevelSetCell2D(request, input);
+        ASSERT_TRUE(result.supported) << result.diagnostic;
+        ASSERT_EQ(result.volume_regions.size(), shift == 0.0 ? 2u : 1u);
+        for (const auto& region : result.volume_regions) {
+            const auto rule = region.toCutQuadratureRule(request);
+            if (shift != 0.0) {
+                EXPECT_TRUE(rule.full_cell_equivalent);
+                EXPECT_EQ(rule.exact_polynomial_order, 3);
+                continue;
+            }
+            const bool negative = region.side == geometry::CutIntegrationSide::Negative;
+            EXPECT_FALSE(rule.full_cell_equivalent);
+            EXPECT_EQ(rule.exact_polynomial_order, 6);
+            EXPECT_LT(largestMomentError(rule, 2, 6,
+                                         [&](int a, int b, int) {
+                                             const Real x0 = negative ? -1.0 : cut;
+                                             const Real x1 = negative ? cut : 1.0;
+                                             return (std::pow(x1, a + 1) - std::pow(x0, a + 1)) / (a + 1) *
+                                                    (1.0 - std::pow(-1.0, b + 1)) / (b + 1);
+                                         }),
+                      1e-13);
+        }
+    }
+}

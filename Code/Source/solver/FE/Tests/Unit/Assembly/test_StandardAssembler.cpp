@@ -4820,6 +4820,60 @@ TEST(StandardAssemblerCutVolumes,
     EXPECT_NEAR(system.matrix()[5], Real(0.02) * scale, Real(1.0e-22));
 }
 
+// A kernel that asks for a cell rule of higher polynomial exactness than a
+// clipped cut-volume rule advertises (degree 1) is not integrated with it, on
+// the single-kernel and on the fused path.
+TEST(StandardAssemblerCutVolumes, RejectsARuleLessExactThanTheKernelRequests)
+{
+    constexpr int marker = 412;
+    ConfigurableSingleTetraMeshAccess mesh(
+        std::array<std::array<Real, 3>, 4>{
+            std::array<Real, 3>{0.0, 0.0, 0.0},
+            std::array<Real, 3>{1.0, 0.0, 0.0},
+            std::array<Real, 3>{0.0, 1.0, 0.0},
+            std::array<Real, 3>{0.0, 0.0, 1.0},
+        },
+        std::array<GlobalIndex, 4>{0, 1, 2, 3});
+    spaces::H1Space space(ElementType::Tetra4, /*order=*/1);
+    auto dof_map = createSingleCellDofMap(4);
+    const auto cut_context = makeSingleCellReferenceCutVolumeContext(marker);
+    for (const bool fused : {false, true}) {
+        for (const int minimum_order : {1, 2}) {
+            SCOPED_TRACE(::testing::Message() << "fused=" << fused << " minimum_order=" << minimum_order);
+            TestDenseSystemView system(4);
+            StiffnessKernel kernel;
+            kernel.setMinimumCellQuadratureOrder(minimum_order);
+            StandardAssembler assembler;
+            assembler.setDofMap(dof_map);
+            const auto assemble = [&] {
+                if (!fused) {
+                    return assembler.assembleCutVolumes(mesh, cut_context, marker,
+                                                        geometry::CutIntegrationSide::Negative, space, space,
+                                                        kernel, &system, &system, true, true);
+                }
+                FusedCellTerm term;
+                term.test_space = &space;
+                term.trial_space = &space;
+                term.kernel = &kernel;
+                term.row_dof_map = &dof_map;
+                term.col_dof_map = &dof_map;
+                term.matrix_view = &system;
+                term.vector_view = &system;
+                term.assemble_matrix = true;
+                term.assemble_vector = true;
+                return assembler.assembleCutVolumesFused(mesh, cut_context, marker,
+                                                         geometry::CutIntegrationSide::Negative,
+                                                         std::span<const FusedCellTerm>(&term, 1));
+            };
+            if (minimum_order <= 1) {
+                EXPECT_TRUE(assemble().success);
+            } else {
+                EXPECT_THROW((void)assemble(), FEException);
+            }
+        }
+    }
+}
+
 TEST(StandardAssemblerCutVolumes, ReusesCutVolumeBasisCacheWithinEntryCap)
 {
     constexpr int marker = 411;

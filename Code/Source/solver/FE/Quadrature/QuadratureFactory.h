@@ -112,6 +112,13 @@ public:
     static std::shared_ptr<const QuadratureRule> cell_rule(
         ElementType type, const elements::Element& element, int minimum_order = 0);
 
+    /// Total degree to which a rule on simplices that subdivide a cell of
+    /// @p type must be exact to match the cell's own rule of polynomial order
+    /// @p order: the order itself on a simplex or a segment, and the cell
+    /// dimension times the order on other cells, whose rules are exact to
+    /// that order in each coordinate.
+    static int simplex_subdivision_order(ElementType type, int order);
+
     // =========================================================================
     // Position-based quadrature (legacy compatible approach)
     // =========================================================================

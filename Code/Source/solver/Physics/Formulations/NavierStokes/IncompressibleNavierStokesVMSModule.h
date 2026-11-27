@@ -1135,6 +1135,15 @@ struct NavierStokesVMSIntegrands {
     const NavierStokesTerms& terms,
     const NavierStokesVMSSettings& settings);
 
+/// The cell quadrature degree of the convective work (u . grad u) . v of a
+/// velocity space on the mesh of @p system: 3p - 1 on an affine simplex and
+/// 3p on other cells, where a transverse coordinate keeps degree 3p; zero for
+/// a linear velocity.  The maximum over the cells of every rank of the
+/// system's communicator, so the rule does not depend on the partition.
+/// Collective.
+[[nodiscard]] int convectionCellQuadratureDegree(const FE::systems::FESystem& system,
+                                                 const FE::spaces::FunctionSpace& velocity_space);
+
 class IncompressibleNavierStokesVMSModule final : public PhysicsModule {
 public:
     IncompressibleNavierStokesVMSModule(std::shared_ptr<const FE::spaces::FunctionSpace> velocity_space,

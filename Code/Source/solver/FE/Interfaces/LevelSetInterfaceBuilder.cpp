@@ -7,6 +7,7 @@
 
 #include "Interfaces/LevelSetInterfaceBuilder.h"
 #include "Interfaces/detail/ProducerArithmeticAssessment.h"
+#include "Quadrature/QuadratureFactory.h"
 
 #include <algorithm>
 #include <array>
@@ -1002,6 +1003,29 @@ referenceTrianglesFromPolygon(StrictConstructionObservation& observation, const 
     return triangles;
 }
 
+// The exactness the cutters below reach for a requested volume order: the
+// tabulated three- and seven-point triangle rules and the four-point
+// tetrahedron rule serve the orders they always served, and a simplex rule of
+// the requested degree serves the higher ones.
+constexpr int kTabulatedTriangleVolumeOrder = 5;
+constexpr int kTabulatedTetrahedronVolumeOrder = 2;
+
+[[nodiscard]] int planarVolumeExactOrder(int requested_order) noexcept
+{
+    return requested_order > kTabulatedTriangleVolumeOrder
+               ? implementedSimplexSubdivisionCutVolumeExactOrder(requested_order)
+               : implementedPlanarLevelSetCutVolumeExactOrder(requested_order);
+}
+
+// The achieved order a tetrahedral region reports, or -1 for the four-point
+// rule, whose order the request resolves (implementedLevelSetCutVolumeExactOrder).
+[[nodiscard]] int tetrahedronVolumeAchievedOrder(int requested_order) noexcept
+{
+    return requested_order > kTabulatedTetrahedronVolumeOrder
+               ? implementedSimplexSubdivisionCutVolumeExactOrder(requested_order)
+               : -1;
+}
+
 [[nodiscard]] std::vector<geometry::CutQuadraturePoint> polygonQuadrature2D(StrictConstructionObservation& observation,
     const std::vector<SignedPoint>& polygon,
     Real tolerance,
@@ -1012,10 +1036,14 @@ referenceTrianglesFromPolygon(StrictConstructionObservation& observation, const 
         return points;
     }
 
-    const int achieved_order =
-        implementedPlanarLevelSetCutVolumeExactOrder(requested_order);
+    const int achieved_order = planarVolumeExactOrder(requested_order);
+    const auto simplex_rule =
+        achieved_order > kTabulatedTriangleVolumeOrder
+            ? quadrature::QuadratureFactory::create_pinned(ElementType::Triangle3, achieved_order)
+            : std::shared_ptr<const quadrature::QuadratureRule>{};
     const auto& origin = polygon.front().point;
-    const std::size_t points_per_triangle = achieved_order > 2 ? 7u : 3u;
+    const std::size_t points_per_triangle =
+        simplex_rule ? simplex_rule->num_points() : (achieved_order > 2 ? 7u : 3u);
     points.reserve((polygon.size() - 2u) * points_per_triangle);
     const Real minimum_area = std::max(Real{1.0e-30}, tolerance * tolerance);
     for (std::size_t i = 1u; i + 1u < polygon.size(); ++i) {
@@ -1036,7 +1064,13 @@ referenceTrianglesFromPolygon(StrictConstructionObservation& observation, const 
                     barycentricPoint(origin, b, c, l0, l1, l2),
                 .reference_measure_factor = area});
         };
-        if (achieved_order <= 2) {
+        if (simplex_rule) {
+            // The reference triangle has area 1/2.
+            for (std::size_t q = 0; q < simplex_rule->num_points(); ++q) {
+                const auto xi = simplex_rule->point(q);
+                add_point(Real{1.0} - xi[0] - xi[1], xi[0], xi[1], Real{2.0} * simplex_rule->weight(q));
+            }
+        } else if (achieved_order <= 2) {
             constexpr Real high = Real{2.0} / Real{3.0};
             constexpr Real low = Real{1.0} / Real{6.0};
             constexpr Real weight = Real{1.0} / Real{3.0};
@@ -1331,11 +1365,17 @@ void addUniquePoint(StrictConstructionObservation& observation, std::vector<Iden
 [[nodiscard]] std::vector<geometry::CutQuadraturePoint> polyhedronQuadratureFromFaces(StrictConstructionObservation& observation,
     const IdentifiedFaces& faces,
     const std::vector<IdentifiedPoint>& unique_points,
-    Real tolerance)
+    Real tolerance,
+    int requested_order)
 {
     if (unique_points.empty()) {
         return {};
     }
+    const int achieved_order = tetrahedronVolumeAchievedOrder(requested_order);
+    const auto simplex_rule =
+        achieved_order > 0
+            ? quadrature::QuadratureFactory::create_pinned(ElementType::Tetra4, achieved_order)
+            : std::shared_ptr<const quadrature::QuadratureRule>{};
 
     std::array<Real, 3> center{{0.0, 0.0, 0.0}};
     for (const auto& point : unique_points) {
@@ -1363,6 +1403,17 @@ void addUniquePoint(StrictConstructionObservation& observation, std::vector<Iden
                 if (!(volume == 0 && structuralZero(face[0], face[i], face[i + 1u]))) observation.unresolved();
                 continue;
             }
+            if (simplex_rule) {
+                // The reference tetrahedron has volume 1/6.
+                for (std::size_t q = 0; q < simplex_rule->num_points(); ++q) {
+                    const auto xi = simplex_rule->point(q);
+                    points.push_back(geometry::CutQuadraturePoint{
+                        .point = barycentricPoint(a, b, c, d, Real{1.0} - xi[0] - xi[1] - xi[2],
+                                                  xi[0], xi[1], xi[2]),
+                        .weight = Real{6.0} * volume * simplex_rule->weight(q)});
+                }
+                continue;
+            }
             const Real weight = volume / Real{4.0};
             points.push_back(geometry::CutQuadraturePoint{
                 .point = barycentricPoint(a, b, c, d, high, low, low, low),
@@ -1383,10 +1434,11 @@ void addUniquePoint(StrictConstructionObservation& observation, std::vector<Iden
 
 [[nodiscard]] std::vector<geometry::CutQuadraturePoint> polyhedronQuadratureFromFaces(StrictConstructionObservation& observation,
     const IdentifiedFaces& faces,
-    Real tolerance)
+    Real tolerance,
+    int requested_order)
 {
     const auto unique_points = uniqueFacePoints(observation, faces, tolerance);
-    return polyhedronQuadratureFromFaces(observation, faces, unique_points, tolerance);
+    return polyhedronQuadratureFromFaces(observation, faces, unique_points, tolerance, requested_order);
 }
 
 [[nodiscard]] std::vector<CutInterfaceReferenceSimplex>
@@ -1818,8 +1870,13 @@ LevelSetCellCutResult cutLinearLevelSetCell2D(const CutInterfaceDomainRequest& r
               geometry::CutIntegrationSide::Positive &&
           positive_count > 0u && negative_count == 0u));
     const int planar_volume_order =
-        implementedPlanarLevelSetCutVolumeExactOrder(
-            request.resolvedVolumeQuadratureOrder());
+        planarVolumeExactOrder(request.resolvedVolumeQuadratureOrder());
+    // A clipped region of a quadrilateral is a union of triangles.
+    const bool simplex_parent = input.element_type == ElementType::Triangle3 ||
+                                input.element_type == ElementType::Triangle6;
+    const int clipped_volume_order =
+        simplex_parent ? planar_volume_order
+                       : planarVolumeExactOrder(request.resolvedClippedVolumeQuadratureOrder());
     const auto append_collapsed_full_region =
         [&](CutInterfaceDegeneracy degeneracy, const char* reason) {
             observation.unresolved();
@@ -2086,10 +2143,16 @@ LevelSetCellCutResult cutLinearLevelSetCell2D(const CutInterfaceDomainRequest& r
                       : Real{0.0}}
             : sideVolumeFractions(observation,
                   negative_moments.measure, positive_moments.measure);
+    const auto side_volume_order = [&](geometry::CutIntegrationSide side) {
+        return publish_aligned_zero_edge && aligned_parent_side == side ? planar_volume_order
+                                                                        : clipped_volume_order;
+    };
+    const int negative_volume_order = side_volume_order(geometry::CutIntegrationSide::Negative);
+    const int positive_volume_order = side_volume_order(geometry::CutIntegrationSide::Positive);
     auto negative_quadrature = polygonQuadrature2D(observation,
-        negative_polygon, request.tolerance, planar_volume_order);
+        negative_polygon, request.tolerance, negative_volume_order);
     auto positive_quadrature = polygonQuadrature2D(observation,
-        positive_polygon, request.tolerance, planar_volume_order);
+        positive_polygon, request.tolerance, positive_volume_order);
     auto negative_reference_subcells = referenceTrianglesFromPolygon(observation,
         negative_polygon, request.tolerance);
     auto positive_reference_subcells = referenceTrianglesFromPolygon(observation,
@@ -2150,7 +2213,7 @@ LevelSetCellCutResult cutLinearLevelSetCell2D(const CutInterfaceDomainRequest& r
                          publish_aligned_zero_edge &&
                              aligned_parent_side ==
                                  geometry::CutIntegrationSide::Negative,
-                         planar_volume_order,
+                         negative_volume_order,
                          std::move(negative_reference_subcells)));
     appendSideVolumeRegion(observation,
         result,
@@ -2170,7 +2233,7 @@ LevelSetCellCutResult cutLinearLevelSetCell2D(const CutInterfaceDomainRequest& r
                          publish_aligned_zero_edge &&
                              aligned_parent_side ==
                                  geometry::CutIntegrationSide::Positive,
-                         planar_volume_order,
+                         positive_volume_order,
                          std::move(positive_reference_subcells)));
     result.fragments.push_back(std::move(fragment));
     observation.stamp(result);
@@ -2236,6 +2299,9 @@ LevelSetCellCutResult cutLinearLevelSetCell3DImpl(const CutInterfaceDomainReques
     const auto parent_moments = parentMoments3D(input.node_coordinates);
     const Real parent_measure = parent_moments.measure;
     const auto parent_centroid = parent_moments.centroid;
+    const int tetrahedron_volume_order = request.resolvedVolumeQuadratureOrder();
+    const int tetrahedron_achieved_order =
+        tetrahedronVolumeAchievedOrder(tetrahedron_volume_order);
     const auto gradient_normal =
         estimateGradient3D(input.node_coordinates, signed_values, count,
                            negative_count > 0 && positive_count > 0 ? &observation : nullptr);
@@ -2277,7 +2343,8 @@ LevelSetCellCutResult cutLinearLevelSetCell3DImpl(const CutInterfaceDomainReques
                 coefficient_band,
                 request.tolerance);
             const auto full_quadrature =
-                polyhedronQuadratureFromFaces(observation, full_faces, request.tolerance);
+                polyhedronQuadratureFromFaces(observation, full_faces, request.tolerance,
+                                              tetrahedron_volume_order);
             appendSideVolumeRegion(observation,
                 result,
                 makeVolumeRegion(observation, request,
@@ -2291,7 +2358,8 @@ LevelSetCellCutResult cutLinearLevelSetCell3DImpl(const CutInterfaceDomainReques
                                  0u,
                                  "collapsed-small-fragment-volume",
                                  full_quadrature,
-                                 true));
+                                 true,
+                                 tetrahedron_achieved_order));
             result.degeneracy = degeneracy;
             result.diagnostic = reason;
         };
@@ -2305,7 +2373,8 @@ LevelSetCellCutResult cutLinearLevelSetCell3DImpl(const CutInterfaceDomainReques
                                  coefficient_band,
                                  request.tolerance);
         const auto full_quadrature =
-            polyhedronQuadratureFromFaces(observation, full_faces, request.tolerance);
+            polyhedronQuadratureFromFaces(observation, full_faces, request.tolerance,
+                                          tetrahedron_volume_order);
         appendSideVolumeRegion(observation,
             result,
             makeVolumeRegion(observation, request,
@@ -2319,7 +2388,8 @@ LevelSetCellCutResult cutLinearLevelSetCell3DImpl(const CutInterfaceDomainReques
                              0u,
                              "full-negative-volume",
                              full_quadrature,
-                             true));
+                             true,
+                             tetrahedron_achieved_order));
         if (zero_count == count) {
             result.degeneracy = CutInterfaceDegeneracy::FullZeroCell;
             result.diagnostic = "all corner level-set values are on the requested isovalue; "
@@ -2340,7 +2410,8 @@ LevelSetCellCutResult cutLinearLevelSetCell3DImpl(const CutInterfaceDomainReques
                                  coefficient_band,
                                  request.tolerance);
         const auto full_quadrature =
-            polyhedronQuadratureFromFaces(observation, full_faces, request.tolerance);
+            polyhedronQuadratureFromFaces(observation, full_faces, request.tolerance,
+                                          tetrahedron_volume_order);
         appendSideVolumeRegion(observation,
             result,
             makeVolumeRegion(observation, request,
@@ -2354,7 +2425,8 @@ LevelSetCellCutResult cutLinearLevelSetCell3DImpl(const CutInterfaceDomainReques
                              0u,
                              "full-positive-volume",
                              full_quadrature,
-                             true));
+                             true,
+                             tetrahedron_achieved_order));
         result.degeneracy =
             classifyZeroContactTetrahedron(signed_values, coefficient_band);
         observation.stamp(result);
@@ -2534,10 +2606,12 @@ LevelSetCellCutResult cutLinearLevelSetCell3DImpl(const CutInterfaceDomainReques
                       negative_moments.measure, positive_moments.measure);
         negative_quadrature =
             polyhedronQuadratureFromFaces(observation, negative_faces,
-                                          negative_unique_points, request.tolerance);
+                                          negative_unique_points, request.tolerance,
+                                          tetrahedron_volume_order);
         positive_quadrature =
             polyhedronQuadratureFromFaces(observation, positive_faces,
-                                          positive_unique_points, request.tolerance);
+                                          positive_unique_points, request.tolerance,
+                                          tetrahedron_volume_order);
         negative_reference_subcells =
             referenceTetrahedraFromFaces(observation,
                 negative_faces,
@@ -2608,7 +2682,7 @@ LevelSetCellCutResult cutLinearLevelSetCell3DImpl(const CutInterfaceDomainReques
                              publish_aligned_zero_face &&
                                  aligned_parent_side ==
                                      geometry::CutIntegrationSide::Negative,
-                             -1,
+                             tetrahedron_achieved_order,
                              std::move(negative_reference_subcells)));
         appendSideVolumeRegion(observation,
             result,
@@ -2628,7 +2702,7 @@ LevelSetCellCutResult cutLinearLevelSetCell3DImpl(const CutInterfaceDomainReques
                              publish_aligned_zero_face &&
                                  aligned_parent_side ==
                                      geometry::CutIntegrationSide::Positive,
-                             -1,
+                             tetrahedron_achieved_order,
                              std::move(positive_reference_subcells)));
     }
     result.fragments.push_back(std::move(fragment));

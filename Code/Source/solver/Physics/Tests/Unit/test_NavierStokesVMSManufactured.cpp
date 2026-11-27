@@ -563,6 +563,52 @@ TEST(NavierStokesVMSManufactured, QuadraticConvectionIntegratesPolynomialWork)
     }
 }
 
+// Four triangles and a quadrilateral in a row, split in blocks over two ranks:
+// the rank holding only triangles takes the degree 3p = 6 of the
+// quadrilateral, so every cell of either rank is integrated alike.
+TEST(NavierStokesVMSManufacturedMPI, ConvectionDegreeDoesNotDependOnThePartition)
+{
+#if !FE_HAS_MPI
+    GTEST_SKIP() << "Requires MPI";
+#else
+    int initialized = 0;
+    MPI_Initialized(&initialized);
+    int size = 1;
+    if (initialized) {
+        MPI_Comm_size(MPI_COMM_WORLD, &size);
+    }
+    if (size != 2) {
+        GTEST_SKIP() << "Requires two MPI ranks";
+    }
+    // [0,3] x [0,1]: vertices 0-3 along y = 0 and 4-7 along y = 1.
+    const std::vector<real_t> coordinates{0, 0, 1, 0, 2, 0, 3, 0, 0, 1, 1, 1, 2, 1, 3, 1};
+    const std::vector<index_t> vertices{0, 1, 5, 0, 5, 4, 1, 2, 6, 1, 6, 5, 2, 3, 7, 6};
+    const std::vector<offset_t> offsets{0, 3, 6, 9, 12, 16};
+    const CellShape triangle{CellFamily::Triangle, 3, 1};
+    const CellShape quad{CellFamily::Quad, 4, 1};
+    auto mesh = std::make_shared<Mesh>(MeshComm(MPI_COMM_WORLD));
+    mesh->build_from_arrays_global_and_partition(2, coordinates, offsets, vertices,
+                                                 {triangle, triangle, triangle, triangle, quad},
+                                                 PartitionHint::Cells, /*ghost_layers=*/0,
+                                                 {{"partition_method", "block"}});
+    FE::systems::FESystem system(mesh);
+    int holds_quad = 0;
+    system.meshAccess().forEachCell([&](FE::GlobalIndex cell) {
+        holds_quad |= system.meshAccess().getCellType(cell) == FE::ElementType::Quad4 ? 1 : 0;
+    });
+    int ranks_with_quad = 0;
+    MPI_Allreduce(&holds_quad, &ranks_with_quad, 1, MPI_INT, MPI_SUM, MPI_COMM_WORLD);
+    ASSERT_EQ(ranks_with_quad, 1);
+
+    const auto velocity = [](int order) {
+        return std::make_shared<FE::spaces::ProductSpace>(
+            std::make_shared<FE::spaces::H1Space>(FE::ElementType::Triangle3, order), 2);
+    };
+    EXPECT_EQ(ns::convectionCellQuadratureDegree(system, *velocity(2)), 6);
+    EXPECT_EQ(ns::convectionCellQuadratureDegree(system, *velocity(1)), 0);
+#endif
+}
+
 // On a coordinate-axis simplex with leg lengths h_i, the unit-determinant
 // regular-simplex metric has G_ij = (1 + delta_ij) / ((dim+1)^(1/dim) h_i h_j).
 // The two tau_C values use this closed form and the 1 ms physical step.
