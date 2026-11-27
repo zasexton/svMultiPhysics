@@ -57,18 +57,21 @@ void BDMBasis::evaluate_vector_values(const math::Vector<Real, 3>& xi,
     values.resize(8);
     const Real half = Real(0.5);
     const Real one = Real(1);
+    // Transverse components of the two curl enrichments vanish on the other edges.
+    const Real x_bubble = (one - x * x) / Real(4);
+    const Real y_bubble = (one - y * y) / Real(4);
     // Edge 0-1 (bottom, y=-1): outward normal -y
     values[0] = math::Vector<Real, 3>{Real(0), half * (y - one), Real(0)};                  // flux = 1
-    values[1] = math::Vector<Real, 3>{Real(0), half * x * (y - one), Real(0)};              // flux = x
+    values[1] = math::Vector<Real, 3>{x_bubble, half * x * (y - one), Real(0)};             // flux = x
     // Edge 1-2 (right, x=+1): outward normal +x
     values[2] = math::Vector<Real, 3>{half * (one + x), Real(0), Real(0)};                  // flux = 1
-    values[3] = math::Vector<Real, 3>{half * y * (one + x), Real(0), Real(0)};              // flux = y
+    values[3] = math::Vector<Real, 3>{half * y * (one + x), y_bubble, Real(0)};             // flux = y
     // Edge 2-3 (top, y=+1): outward normal +y
     values[4] = math::Vector<Real, 3>{Real(0), half * (one + y), Real(0)};                  // flux = 1
-    values[5] = math::Vector<Real, 3>{Real(0), half * x * (one + y), Real(0)};              // flux = x
+    values[5] = math::Vector<Real, 3>{x_bubble, half * x * (one + y), Real(0)};             // flux = x
     // Edge 3-0 (left, x=-1): outward normal -x
     values[6] = math::Vector<Real, 3>{half * (x - one), Real(0), Real(0)};                  // flux = 1
-    values[7] = math::Vector<Real, 3>{half * y * (x - one), Real(0), Real(0)};              // flux = y
+    values[7] = math::Vector<Real, 3>{half * y * (x - one), y_bubble, Real(0)};             // flux = y
 }
 
 void BDMBasis::evaluate_vector_jacobians(const math::Vector<Real, 3>& xi,
@@ -105,17 +108,21 @@ void BDMBasis::evaluate_vector_jacobians(const math::Vector<Real, 3>& xi,
 
     jacobians.assign(8, VectorJacobian{});
     jacobians[0](1, 1) = half;
+    jacobians[1](0, 0) = -half * x;
     jacobians[1](1, 0) = half * (y - one);
     jacobians[1](1, 1) = half * x;
     jacobians[2](0, 0) = half;
     jacobians[3](0, 0) = half * y;
     jacobians[3](0, 1) = half * (one + x);
+    jacobians[3](1, 1) = -half * y;
     jacobians[4](1, 1) = half;
+    jacobians[5](0, 0) = -half * x;
     jacobians[5](1, 0) = half * (one + y);
     jacobians[5](1, 1) = half * x;
     jacobians[6](0, 0) = half;
     jacobians[7](0, 0) = half * y;
     jacobians[7](0, 1) = half * (x - one);
+    jacobians[7](1, 1) = -half * y;
 }
 
 void BDMBasis::evaluate_divergence(const math::Vector<Real, 3>& xi,
@@ -138,19 +145,8 @@ void BDMBasis::evaluate_divergence(const math::Vector<Real, 3>& xi,
         return;
     }
 
-    const Real x = xi[0];
-    const Real y = xi[1];
-
-    divergence.resize(8);
     const Real half = Real(0.5);
-    divergence[0] = half;
-    divergence[1] = half * x;
-    divergence[2] = half;
-    divergence[3] = half * y;
-    divergence[4] = half;
-    divergence[5] = half * x;
-    divergence[6] = half;
-    divergence[7] = half * y;
+    divergence = {half, 0, half, 0, half, 0, half, 0};
 }
 
 void BDMBasis::evaluate_vector_at_quadrature_points_strided(

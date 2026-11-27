@@ -163,27 +163,19 @@ TEST(FunctionSpaceGradients, BDMJacobianMatchesAnalyticReferenceFormula) {
     HDivSpace space(ElementType::Quad4, 1, BasisType::BDM);
     std::vector<Real> coeffs(space.dofs_per_element(), Real(0));
     ASSERT_EQ(coeffs.size(), 8u);
-    coeffs[1] = Real(2.0);
-    coeffs[3] = Real(-0.5);
-    coeffs[5] = Real(1.5);
-    coeffs[7] = Real(-3.0);
+    // The normal traces of curl(x²y) = (x²,-2xy) on bottom, right,
+    // top and left are -2x, 1, -2x and -1 in the reference edge charts.
+    coeffs[1] = -2;
+    coeffs[2] = 1;
+    coeffs[5] = -2;
+    coeffs[6] = -1;
 
     const FunctionSpace::Value xi{Real(0.25), Real(-0.4), Real(0)};
     const auto J = space.evaluate_jacobian(xi, coeffs);
-
-    const Real x = xi[0];
-    const Real y = xi[1];
-    const Real expected_x_x = coeffs[3] * Real(0.5) * y + coeffs[7] * Real(0.5) * y;
-    const Real expected_x_y = coeffs[3] * Real(0.5) * (Real(1) + x) +
-                              coeffs[7] * Real(0.5) * (x - Real(1));
-    const Real expected_y_x = coeffs[1] * Real(0.5) * (y - Real(1)) +
-                              coeffs[5] * Real(0.5) * (Real(1) + y);
-    const Real expected_y_y = coeffs[1] * Real(0.5) * x + coeffs[5] * Real(0.5) * x;
-
-    EXPECT_NEAR(J(0, 0), expected_x_x, 1e-15);
-    EXPECT_NEAR(J(0, 1), expected_x_y, 1e-15);
-    EXPECT_NEAR(J(1, 0), expected_y_x, 1e-15);
-    EXPECT_NEAR(J(1, 1), expected_y_y, 1e-15);
+    EXPECT_NEAR(J(0, 0), 2*xi[0], 1e-15);
+    EXPECT_NEAR(J(0, 1), 0, 1e-15);
+    EXPECT_NEAR(J(1, 0), -2*xi[1], 1e-15);
+    EXPECT_NEAR(J(1, 1), -2*xi[0], 1e-15);
     EXPECT_NEAR(J(2, 0), 0.0, 1e-15);
     EXPECT_NEAR(J(2, 1), 0.0, 1e-15);
 }

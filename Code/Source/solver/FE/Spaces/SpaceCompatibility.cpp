@@ -70,7 +70,8 @@ SpaceCompatibility::check_inf_sup(const FunctionSpace& vector_field_space,
         if (family == BasisType::RaviartThomas &&
             (basis::is_simplex(type) || basis::is_quadrilateral(type) || basis::is_hexahedron(type))) {
             divergence_order = order;
-        } else if (family == BasisType::BDM && basis::is_simplex(type)) {
+        } else if (family == BasisType::BDM &&
+                   (basis::is_simplex(type) || (basis::is_quadrilateral(type) && order == 1))) {
             divergence_order = order - 1;
         }
         if (multiplier_space.polynomial_order() <= divergence_order) {

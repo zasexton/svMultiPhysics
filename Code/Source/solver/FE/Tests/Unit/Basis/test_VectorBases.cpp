@@ -793,20 +793,46 @@ TEST(VectorBasisJacobians, CompatibleTensorJacobiansMatchComponentGradientsAndOp
     }
 }
 
-TEST(BDMBasis, DivergenceLinear) {
+TEST(BDMBasis, QuadDivergenceIsConstantAndTheEdgeMomentsReproduceTheSpace) {
+    using Vec = math::Vector<Real, 3>;
+    const auto fields = [](Real x, Real y) {
+        // P1 squared, then curl(x²y) and curl(xy²).
+        return std::array<Vec, 8>{{{1,0,0}, {x,0,0}, {y,0,0}, {0,1,0}, {0,x,0}, {0,y,0},
+                                   {x*x,-2*x*y,0}, {2*x*y,-y*y,0}}};
+    };
+    const std::array<Vec, 4> normals{{{0,-1,0}, {1,0,0}, {0,1,0}, {-1,0,0}}};
+    const std::array<Vec, 4> tangents{{{1,0,0}, {0,1,0}, {1,0,0}, {0,1,0}}};
+    std::array<std::array<Real, 8>, 8> coefficients{};
+    for (std::size_t edge = 0; edge < 4; ++edge) {
+        const Vec a = normals[edge] - tangents[edge], b = normals[edge] + tangents[edge];
+        const auto left = fields(a[0], a[1]), right = fields(b[0], b[1]);
+        for (std::size_t f = 0; f < left.size(); ++f) {
+            // Constant and linear coefficients of the affine normal trace.
+            const Real plus = right[f].dot(normals[edge]), minus = left[f].dot(normals[edge]);
+            coefficients[f][2 * edge] = (plus + minus) / 2;
+            coefficients[f][2 * edge + 1] = (plus - minus) / 2;
+        }
+    }
     BDMBasis basis(ElementType::Quad4, 1);
-    svmp::FE::math::Vector<Real, 3> xi{0.3, -0.4, 0.0};
-    std::vector<Real> div;
-    basis.evaluate_divergence(xi, div);
-    ASSERT_EQ(div.size(), 8u);
-    EXPECT_NEAR(div[0], 0.5, 1e-12);
-    EXPECT_NEAR(div[1], 0.5 * xi[0], 1e-12);
-    EXPECT_NEAR(div[2], 0.5, 1e-12);
-    EXPECT_NEAR(div[3], 0.5 * xi[1], 1e-12);
-    EXPECT_NEAR(div[4], 0.5, 1e-12);
-    EXPECT_NEAR(div[5], 0.5 * xi[0], 1e-12);
-    EXPECT_NEAR(div[6], 0.5, 1e-12);
-    EXPECT_NEAR(div[7], 0.5 * xi[1], 1e-12);
+    for (const Vec& point : {Vec{-0.7,0.1,0}, Vec{0.3,-0.4,0}, Vec{0.8,0.6,0}}) {
+        std::vector<Real> divergence;
+        std::vector<Vec> values;
+        basis.evaluate_divergence(point, divergence);
+        basis.evaluate_vector_values(point, values);
+        ASSERT_EQ(divergence.size(), 8u);
+        ASSERT_EQ(values.size(), 8u);
+        for (std::size_t j = 0; j < values.size(); ++j) {
+            EXPECT_NEAR(divergence[j], j % 2 == 0 ? 0.5 : 0.0, 1e-14);
+        }
+        const auto exact = fields(point[0], point[1]);
+        for (std::size_t f = 0; f < exact.size(); ++f) {
+            Vec actual{};
+            for (std::size_t j = 0; j < values.size(); ++j) {
+                actual += coefficients[f][j] * values[j];
+            }
+            for (int d = 0; d < 2; ++d) EXPECT_NEAR(actual[d], exact[f][d], 1e-14);
+        }
+    }
 }
 
 TEST(BDMBasis, TriangleDivergenceLinear) {

@@ -95,4 +95,7 @@ TEST(SpaceCompatibility, MultiplierFitsTheReferenceDivergenceSpace)
     EXPECT_FALSE(SpaceCompatibility::check_inf_sup(rt0, linear).ok);
     EXPECT_FALSE(SpaceCompatibility::check_inf_sup(bdm1, linear).ok);
     EXPECT_FALSE(SpaceCompatibility::check_inf_sup(rt0, L2Space(ElementType::Quad4, 0)).ok);
+    const HDivSpace quad_bdm1(ElementType::Quad4, 1, BasisType::BDM);
+    EXPECT_TRUE(SpaceCompatibility::check_inf_sup(quad_bdm1, L2Space(ElementType::Quad4, 0)).ok);
+    EXPECT_FALSE(SpaceCompatibility::check_inf_sup(quad_bdm1, L2Space(ElementType::Quad4, 1)).ok);
 }
