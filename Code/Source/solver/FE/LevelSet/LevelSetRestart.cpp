@@ -81,6 +81,12 @@ captureLevelSetGeneratedInterfaceRestartRecord(
     record.interface_marker = result.interface_marker;
     record.isovalue = options.isovalue;
     record.tolerance = options.tolerance;
+    record.coefficient_classification_policy =
+        options.coefficient_classification_policy;
+    record.allow_corner_linearized_geometry =
+        options.allow_corner_linearized_geometry;
+    record.require_production_qualified_implicit_cut_backend =
+        options.require_production_qualified_implicit_cut_backend;
     record.quadrature_order = options.quadrature_order;
     record.interface_quadrature_order = options.interface_quadrature_order;
     record.volume_quadrature_order = options.volume_quadrature_order;
@@ -126,6 +132,12 @@ optionsFromLevelSetGeneratedInterfaceRestartRecord(
     options.requested_interface_marker = record.interface_marker;
     options.isovalue = record.isovalue;
     options.tolerance = record.tolerance;
+    options.coefficient_classification_policy =
+        record.coefficient_classification_policy;
+    options.allow_corner_linearized_geometry =
+        record.allow_corner_linearized_geometry;
+    options.require_production_qualified_implicit_cut_backend =
+        record.require_production_qualified_implicit_cut_backend;
     options.quadrature_order = record.quadrature_order;
     options.interface_quadrature_order = record.interface_quadrature_order;
     options.volume_quadrature_order = record.volume_quadrature_order;

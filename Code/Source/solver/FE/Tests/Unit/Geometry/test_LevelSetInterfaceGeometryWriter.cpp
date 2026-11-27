@@ -4,6 +4,8 @@
 #include <gtest/gtest.h>
 
 #include <array>
+#include <cstdint>
+#include <limits>
 #include <string>
 #include <utility>
 #include <vector>
@@ -120,6 +122,25 @@ TEST(LevelSetInterfaceGeometryWriter, WritesPlaneCutDiagnosticOutput)
     EXPECT_NE(xml.find("NumberOfVerts=\"1\""), std::string::npos);
     EXPECT_NE(xml.find("NumberOfPolys=\"1\""), std::string::npos);
     EXPECT_TRUE(contains_common_diagnostic_arrays(xml));
+}
+
+TEST(LevelSetInterfaceGeometryWriter, PreservesDistinctUnsignedFragmentIdentifiers)
+{
+    LevelSetInterfaceDomain domain(writer_request());
+    constexpr auto highest = std::numeric_limits<std::uint64_t>::max();
+    for (const auto id : {highest - 1, highest}) {
+        CutInterfaceFragment segment;
+        segment.parent_cell = 7;
+        segment.stable_id = id;
+        segment.measure = 1;
+        segment.vertices = {{.point = {0, 0, 0}}, {.point = {1, 0, 0}}};
+        domain.addFragment(std::move(segment));
+    }
+
+    const auto xml = levelSetInterfaceGeometryVtpString(domain);
+    EXPECT_NE(xml.find("type=\"UInt64\" Name=\"fragment_stable_id\" format=\"ascii\">"
+                       " 18446744073709551614 18446744073709551615 </DataArray>"),
+              std::string::npos);
 }
 
 TEST(LevelSetInterfaceGeometryWriter, WritesCircleCutDiagnosticOutput)

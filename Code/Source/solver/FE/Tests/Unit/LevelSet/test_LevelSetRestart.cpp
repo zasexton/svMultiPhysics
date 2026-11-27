@@ -177,7 +177,7 @@ TEST(LevelSetRestart, CapturesFieldAndGeneratedInterfaceRecords)
     for (FE::GlobalIndex vertex = 0; vertex < 4; ++vertex) {
         const auto x = mesh->getNodeCoordinates(vertex);
         setFieldValue(solution, system, phi, vertex,
-                      x[0] + x[1] + x[2] - FE::Real{0.5});
+                      FE::Real{1e-14} * (x[0] + x[1] + x[2] - FE::Real{0.5}));
     }
 
     level_set::LevelSetTransportOptions transport_options{};
@@ -200,6 +200,10 @@ TEST(LevelSetRestart, CapturesFieldAndGeneratedInterfaceRecords)
     interface_options.domain_id = "water-air";
     interface_options.isovalue = 0.0;
     interface_options.tolerance = 1.0e-12;
+    interface_options.coefficient_classification_policy =
+        FE::interfaces::LevelSetCoefficientClassificationPolicy::ExactRepresentedZero;
+    interface_options.allow_corner_linearized_geometry = true;
+    interface_options.require_production_qualified_implicit_cut_backend = true;
     interface_options.quadrature_order = 1;
     interface_options.interface_quadrature_order = 0;
     interface_options.volume_quadrature_order = 1;
@@ -221,6 +225,8 @@ TEST(LevelSetRestart, CapturesFieldAndGeneratedInterfaceRecords)
     level_set::LevelSetGeneratedInterfaceLifecycle lifecycle;
     const auto built = lifecycle.build(system, interface_options, solution);
     ASSERT_TRUE(built.success) << built.diagnostic;
+
+    EXPECT_NEAR(built.summary.negative_volume_measure, 1.0 / 48.0, 1e-15);
 
     const auto interface_record =
         level_set::captureLevelSetGeneratedInterfaceRestartRecord(
@@ -284,6 +290,10 @@ TEST(LevelSetRestart, CapturesFieldAndGeneratedInterfaceRecords)
 
     const auto restored_options =
         level_set::optionsFromLevelSetGeneratedInterfaceRestartRecord(interface_record);
+    EXPECT_EQ(restored_options.coefficient_classification_policy,
+              interface_options.coefficient_classification_policy);
+    EXPECT_TRUE(restored_options.allow_corner_linearized_geometry);
+    EXPECT_TRUE(restored_options.require_production_qualified_implicit_cut_backend);
     EXPECT_EQ(restored_options.requested_interface_marker,
               built.interface_marker);
     EXPECT_EQ(restored_options.domain_id, interface_options.domain_id);
@@ -313,6 +323,7 @@ TEST(LevelSetRestart, CapturesFieldAndGeneratedInterfaceRecords)
     const auto rebuilt = restored_lifecycle.build(
         system, restored_options, solution);
     ASSERT_TRUE(rebuilt.success) << rebuilt.diagnostic;
+    EXPECT_NEAR(rebuilt.summary.negative_volume_measure, 1.0 / 48.0, 1e-15);
     EXPECT_EQ(rebuilt.interface_marker, built.interface_marker);
     EXPECT_EQ(rebuilt.value_revision, interface_record.value_revision + 1u);
 }

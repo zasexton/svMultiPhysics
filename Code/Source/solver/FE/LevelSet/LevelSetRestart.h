@@ -61,6 +61,10 @@ struct LevelSetGeneratedInterfaceRestartRecord {
     std::uint64_t mesh_topology_revision{0};
     std::uint64_t ownership_revision{0};
     interfaces::CutInterfaceDomainSummary summary{};
+    interfaces::LevelSetCoefficientClassificationPolicy coefficient_classification_policy{
+        interfaces::LevelSetCoefficientClassificationPolicy::LegacyAbsoluteBand};
+    bool allow_corner_linearized_geometry{false};
+    bool require_production_qualified_implicit_cut_backend{false};
 };
 
 struct LevelSetRestartSnapshot {

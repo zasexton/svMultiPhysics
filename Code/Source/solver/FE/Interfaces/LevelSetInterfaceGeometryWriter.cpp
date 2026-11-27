@@ -10,7 +10,7 @@
 #include <array>
 #include <cstdint>
 #include <iomanip>
-#include <limits>
+#include <type_traits>
 #include <ostream>
 #include <sstream>
 #include <string>
@@ -35,7 +35,7 @@ struct InterfaceGeometryVtpData {
     std::vector<Real> vertex_positive_volume_fractions{};
     std::vector<std::int64_t> vertex_interface_markers{};
     std::vector<std::int64_t> vertex_parent_cells{};
-    std::vector<std::int64_t> vertex_fragment_stable_ids{};
+    std::vector<std::uint64_t> vertex_fragment_stable_ids{};
     std::vector<std::int64_t> vertex_fragment_kind_ids{};
     std::vector<std::int64_t> vertex_curved_patch_flags{};
     std::vector<std::int64_t> vertex_local_fragment_indices{};
@@ -60,7 +60,7 @@ struct InterfaceGeometryVtpData {
     std::vector<Real> line_positive_volume_fractions{};
     std::vector<std::int64_t> line_interface_markers{};
     std::vector<std::int64_t> line_parent_cells{};
-    std::vector<std::int64_t> line_fragment_stable_ids{};
+    std::vector<std::uint64_t> line_fragment_stable_ids{};
     std::vector<std::int64_t> line_fragment_kind_ids{};
     std::vector<std::int64_t> line_curved_patch_flags{};
     std::vector<std::int64_t> line_local_fragment_indices{};
@@ -85,7 +85,7 @@ struct InterfaceGeometryVtpData {
     std::vector<Real> polygon_positive_volume_fractions{};
     std::vector<std::int64_t> polygon_interface_markers{};
     std::vector<std::int64_t> polygon_parent_cells{};
-    std::vector<std::int64_t> polygon_fragment_stable_ids{};
+    std::vector<std::uint64_t> polygon_fragment_stable_ids{};
     std::vector<std::int64_t> polygon_fragment_kind_ids{};
     std::vector<std::int64_t> polygon_curved_patch_flags{};
     std::vector<std::int64_t> polygon_local_fragment_indices{};
@@ -103,14 +103,6 @@ struct InterfaceGeometryVtpData {
     std::vector<Real> polygon_level_set_residuals{};
     std::vector<Real> polygon_gradient_norms{};
 };
-
-[[nodiscard]] std::int64_t signedStableId(std::uint64_t id) noexcept
-{
-    constexpr auto max_signed =
-        static_cast<std::uint64_t>(std::numeric_limits<std::int64_t>::max());
-    return id > max_signed ? std::numeric_limits<std::int64_t>::max()
-                           : static_cast<std::int64_t>(id);
-}
 
 [[nodiscard]] std::int64_t signedLocalIndex(LocalIndex index) noexcept
 {
@@ -185,7 +177,7 @@ void appendFragmentCellData(const CutInterfaceFragment& fragment,
                             std::vector<Real>& positive_volume_fractions,
                             std::vector<std::int64_t>& interface_markers,
                             std::vector<std::int64_t>& parent_cells,
-                            std::vector<std::int64_t>& fragment_stable_ids,
+                            std::vector<std::uint64_t>& fragment_stable_ids,
                             std::vector<std::int64_t>& fragment_kind_ids,
                             std::vector<std::int64_t>& curved_patch_flags,
                             std::vector<std::int64_t>& local_fragment_indices,
@@ -217,7 +209,7 @@ void appendFragmentCellData(const CutInterfaceFragment& fragment,
     positive_volume_fractions.push_back(fragment.positive_volume_fraction);
     interface_markers.push_back(static_cast<std::int64_t>(fragment.interface_marker));
     parent_cells.push_back(static_cast<std::int64_t>(fragment.parent_cell));
-    fragment_stable_ids.push_back(signedStableId(fragment.stable_id));
+    fragment_stable_ids.push_back(fragment.stable_id);
     fragment_kind_ids.push_back(fragmentKindId(fragment.kind));
     curved_patch_flags.push_back(
         fragment.kind == CutInterfaceFragmentKind::CurvedPatch ? 1 : 0);
@@ -431,11 +423,14 @@ void writeVectorArray(std::ostream& out,
     out << " </DataArray>\n";
 }
 
-void writeSignedIndexArray(std::ostream& out,
-                           const char* name,
-                           const std::vector<std::int64_t>& values)
+template <typename Integer>
+void writeIntegerArray(std::ostream& out,
+                       const char* name,
+                       const std::vector<Integer>& values)
 {
-    out << "        <DataArray type=\"Int64\" Name=\"" << name
+    static_assert(std::is_same_v<Integer, std::int64_t> || std::is_same_v<Integer, std::uint64_t>);
+    constexpr const char* type = std::is_signed_v<Integer> ? "Int64" : "UInt64";
+    out << "        <DataArray type=\"" << type << "\" Name=\"" << name
         << "\" format=\"ascii\">";
     for (const auto value : values) {
         out << ' ' << value;
@@ -726,7 +721,7 @@ void writeLevelSetInterfaceGeometryVtp(const LevelSetInterfaceDomain& domain,
     writeRealArray(out, "level_set_value", data.point_level_set_values);
     writeRealArray(out, "level_set_residual", data.point_level_set_residuals);
     writeVectorArray(out, "parent_coordinate", data.point_parent_coordinates);
-    writeSignedIndexArray(out, "quadrature_point", data.point_quadrature_flags);
+    writeIntegerArray(out, "quadrature_point", data.point_quadrature_flags);
     out << "      </PointData>\n";
     out << "      <CellData>\n";
     writeVectorArray(out,
@@ -749,62 +744,62 @@ void writeLevelSetInterfaceGeometryVtp(const LevelSetInterfaceDomain& domain,
                    concatenate(data.vertex_positive_volume_fractions,
                                data.line_positive_volume_fractions,
                                data.polygon_positive_volume_fractions));
-    writeSignedIndexArray(out,
+    writeIntegerArray(out,
                           "interface_marker",
                           concatenate(data.vertex_interface_markers,
                                       data.line_interface_markers,
                                       data.polygon_interface_markers));
-    writeSignedIndexArray(out,
+    writeIntegerArray(out,
                           "parent_cell",
                           concatenate(data.vertex_parent_cells,
                                       data.line_parent_cells,
                                       data.polygon_parent_cells));
-    writeSignedIndexArray(out,
+    writeIntegerArray(out,
                           "fragment_stable_id",
                           concatenate(data.vertex_fragment_stable_ids,
                                       data.line_fragment_stable_ids,
                                       data.polygon_fragment_stable_ids));
-    writeSignedIndexArray(out,
+    writeIntegerArray(out,
                           "fragment_kind",
                           concatenate(data.vertex_fragment_kind_ids,
                                       data.line_fragment_kind_ids,
                                       data.polygon_fragment_kind_ids));
-    writeSignedIndexArray(out,
+    writeIntegerArray(out,
                           "curved_patch",
                           concatenate(data.vertex_curved_patch_flags,
                                       data.line_curved_patch_flags,
                                       data.polygon_curved_patch_flags));
-    writeSignedIndexArray(out,
+    writeIntegerArray(out,
                           "local_fragment_index",
                           concatenate(data.vertex_local_fragment_indices,
                                       data.line_local_fragment_indices,
                                       data.polygon_local_fragment_indices));
-    writeSignedIndexArray(out,
+    writeIntegerArray(out,
                           "conditioning_status",
                           concatenate(data.vertex_conditioning_status_ids,
                                       data.line_conditioning_status_ids,
                                       data.polygon_conditioning_status_ids));
-    writeSignedIndexArray(out,
+    writeIntegerArray(out,
                           "requested_quadrature_order",
                           concatenate(data.vertex_requested_quadrature_orders,
                                       data.line_requested_quadrature_orders,
                                       data.polygon_requested_quadrature_orders));
-    writeSignedIndexArray(out,
+    writeIntegerArray(out,
                           "achieved_quadrature_order",
                           concatenate(data.vertex_achieved_quadrature_orders,
                                       data.line_achieved_quadrature_orders,
                                       data.polygon_achieved_quadrature_orders));
-    writeSignedIndexArray(out,
+    writeIntegerArray(out,
                           "fallback_status",
                           concatenate(data.vertex_fallback_status_ids,
                                       data.line_fallback_status_ids,
                                       data.polygon_fallback_status_ids));
-    writeSignedIndexArray(out,
+    writeIntegerArray(out,
                           "root_polished",
                           concatenate(data.vertex_root_polished_flags,
                                       data.line_root_polished_flags,
                                       data.polygon_root_polished_flags));
-    writeSignedIndexArray(out,
+    writeIntegerArray(out,
                           "root_finder_iterations",
                           concatenate(data.vertex_root_finder_iterations,
                                       data.line_root_finder_iterations,
@@ -819,7 +814,7 @@ void writeLevelSetInterfaceGeometryVtp(const LevelSetInterfaceDomain& domain,
                    concatenate(data.vertex_min_gradient_norms,
                                data.line_min_gradient_norms,
                                data.polygon_min_gradient_norms));
-    writeSignedIndexArray(out,
+    writeIntegerArray(out,
                           "quadrature_point",
                           concatenate(data.vertex_quadrature_point_flags,
                                       data.line_quadrature_point_flags,
