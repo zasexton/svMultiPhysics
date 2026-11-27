@@ -28,6 +28,9 @@ public:
     using BackendFactory::createVector;
 
     [[nodiscard]] BackendKind backendKind() const noexcept override { return BackendKind::Trilinos; }
+#if defined(FE_HAS_MPI) && FE_HAS_MPI
+    [[nodiscard]] MPI_Comm vectorCommunicator() const override;
+#endif
 
     [[nodiscard]] std::unique_ptr<GenericMatrix>
     createMatrix(const sparsity::SparsityPattern& sparsity) const override;

@@ -9,9 +9,11 @@
 
 #include "Assembly/GlobalSystemView.h"
 #include "Core/FEException.h"
+#include "Systems/SystemCollectives.h"
 
 #include <algorithm>
 #include <cmath>
+#include <exception>
 #include <string>
 
 namespace svmp {
@@ -26,12 +28,36 @@ void copySpan(std::span<Real> dst, std::span<const Real> src)
     std::copy(src.begin(), src.end(), dst.begin());
 }
 
-void repackVector(backends::GenericVector& dst, const backends::GenericVector& src)
+void repackVector(backends::GenericVector& dst, backends::GenericVector& src,
+                  const systems::CollectiveCommunicator& comm)
 {
     FE_CHECK_ARG(dst.size() == src.size(), "TimeHistory: size mismatch in repackVector");
 
+    if (comm.size() > 1) {
+        std::vector<GlobalIndex> destination_rows;
+        bool need_remote_rows = false;
+        std::exception_ptr layout_error;
+        try {
+            destination_rows = dst.ownedGlobalRows();
+            const auto source_rows = src.ownedGlobalRows();
+            need_remote_rows = !std::includes(source_rows.begin(), source_rows.end(),
+                                              destination_rows.begin(), destination_rows.end());
+        } catch (...) {
+            layout_error = std::current_exception();
+        }
+        systems::requireCollectivePhase(layout_error, comm, "failed to read vector ownership for", "history repack");
+        if (systems::collectiveAnyTrue(need_remote_rows, comm)) {
+            const auto values = systems::captureFeOrderedVectorCollectively(src, comm);
+            systems::assignFeOrderedVectorCollectively(dst, values, comm);
+        } else {
+            backends::copyOwnedEntriesBetweenLayouts(dst, src, destination_rows);
+            dst.updateGhosts();
+        }
+        return;
+    }
+
     auto dst_view = dst.createAssemblyView();
-    auto src_view = const_cast<backends::GenericVector&>(src).createAssemblyView();
+    auto src_view = src.createAssemblyView();
     if (!dst_view || !src_view) {
         dst.copyFrom(src);
         return;
@@ -58,6 +84,7 @@ void repackVector(backends::GenericVector& dst, const backends::GenericVector& s
                                    assembly::AddMode::Insert);
     }
     dst_view->finalizeAssembly();
+    dst.updateGhosts();
 }
 
 } // namespace
@@ -165,10 +192,8 @@ void TimeHistory::snapshotRateState(RateStateSnapshot& snapshot,
         // The time loop repacks history once after the backend matrix has
         // established its distributed layout. Snapshot vectors come from that
         // same factory, so backend-native copyFrom preserves the local/overlap
-        // layout and costs O(local_dofs). Do not use repackVector here: its
-        // global-DOF gather/insert path is intended for an actual layout
-        // conversion and is invalid or prohibitively expensive on distributed
-        // PETSc/Trilinos/FSILS vectors.
+        // layout and costs O(local_dofs). Global row transfers are only
+        // needed when the backend layout changes.
         snapshot.u_dot->copyFrom(*u_dot_);
     }
     if (u_ddot_) {
@@ -396,6 +421,11 @@ void TimeHistory::primeDtHistory(double dt_default) noexcept
 
 void TimeHistory::repack(const backends::BackendFactory& factory)
 {
+#if defined(FE_HAS_MPI) && FE_HAS_MPI
+    const systems::CollectiveCommunicator comm(factory.vectorCommunicator());
+#else
+    const systems::CollectiveCommunicator comm;
+#endif
     const auto size = u().size();
     for (std::size_t i = 0; i < history_.size(); ++i) {
         FE_THROW_IF(size != history_[i]->size(),
@@ -404,7 +434,7 @@ void TimeHistory::repack(const backends::BackendFactory& factory)
     }
 
     auto new_u = cloneLike(factory, size);
-    repackVector(*new_u, u());
+    repackVector(*new_u, u(), comm);
 
     std::unique_ptr<backends::GenericVector> new_u_dot{};
     std::unique_ptr<backends::GenericVector> new_u_ddot{};
@@ -413,21 +443,21 @@ void TimeHistory::repack(const backends::BackendFactory& factory)
                     InvalidArgumentException,
                     "TimeHistory::repack: uDot size must match u size");
         new_u_dot = cloneLike(factory, size);
-        repackVector(*new_u_dot, *u_dot_);
+        repackVector(*new_u_dot, *u_dot_, comm);
     }
     if (u_ddot_) {
         FE_THROW_IF(size != u_ddot_->size(),
                     InvalidArgumentException,
                     "TimeHistory::repack: uDDot size must match u size");
         new_u_ddot = cloneLike(factory, size);
-        repackVector(*new_u_ddot, *u_ddot_);
+        repackVector(*new_u_ddot, *u_ddot_, comm);
     }
 
     std::vector<std::unique_ptr<backends::GenericVector>> new_hist;
     new_hist.reserve(history_.size());
     for (std::size_t i = 0; i < history_.size(); ++i) {
         auto v = cloneLike(factory, size);
-        repackVector(*v, *history_[i]);
+        repackVector(*v, *history_[i], comm);
         new_hist.push_back(std::move(v));
     }
 

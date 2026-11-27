@@ -10,10 +10,12 @@
 #include "Assembly/GlobalSystemView.h"
 #include "Backends/Interfaces/BlockMatrix.h"
 #include "Backends/Interfaces/BlockVector.h"
+#include "Backends/PETSc/PetscFactory.h"
 #include "Backends/PETSc/PetscLinearSolver.h"
 #include "Backends/PETSc/PetscMatrix.h"
 #include "Backends/PETSc/PetscVector.h"
 #include "Sparsity/DistributedSparsityPattern.h"
+#include "Tests/Support/DistributedTimeHistory.h"
 
 #include <gtest/gtest.h>
 
@@ -149,6 +151,16 @@ void checkSolve(Problem& problem, const std::vector<std::vector<double>>& basis)
     EXPECT_TRUE(solver.solve(problem.matrix, problem.x, problem.rhs).converged);
     FE_PETSC_CALL(MatGetNullSpace(problem.matrix.petsc(), &space));
     EXPECT_EQ(space, nullptr);
+}
+
+TEST(PetscDistributedField, HistoryRepackTransfersAcceptedValuesAndRatesAcrossRowLayouts)
+{
+    int rank = 0;
+    int ranks = 0;
+    MPI_Comm_rank(PETSC_COMM_WORLD, &rank);
+    MPI_Comm_size(PETSC_COMM_WORLD, &ranks);
+    PetscFactory factory;
+    svmp::FE::test::checkDistributedHistoryRepack(factory, rank, ranks);
 }
 
 TEST(PetscNullspace, ConstantModeOnAnUnevenPartition)

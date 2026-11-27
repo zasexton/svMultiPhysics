@@ -18,6 +18,13 @@ namespace svmp {
 namespace FE {
 namespace backends {
 
+#if defined(FE_HAS_MPI) && FE_HAS_MPI
+MPI_Comm PetscFactory::vectorCommunicator() const
+{
+    return PETSC_COMM_WORLD;
+}
+#endif
+
 std::unique_ptr<GenericMatrix>
 PetscFactory::createMatrix(const sparsity::SparsityPattern& sparsity) const
 {

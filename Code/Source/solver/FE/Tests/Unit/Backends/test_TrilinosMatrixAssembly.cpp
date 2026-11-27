@@ -6,9 +6,11 @@
  */
 
 #include "Analysis/SparseMatrixSummaryScanner.h"
+#include "Backends/Trilinos/TrilinosFactory.h"
 #include "Backends/Trilinos/TrilinosMatrix.h"
 #include "Core/FEException.h"
 #include "Sparsity/DistributedSparsityPattern.h"
+#include "Tests/Support/DistributedTimeHistory.h"
 
 #include <gtest/gtest.h>
 #include <array>
@@ -53,6 +55,12 @@ TEST_F(TrilinosMatrixAssembly, AssemblesHistoryAndInitializesOwnedVertices)
         });
 }
 #endif
+
+TEST_F(TrilinosMatrixAssembly, HistoryRepackTransfersAcceptedValuesAndRatesAcrossRowLayouts)
+{
+    TrilinosFactory factory;
+    test::checkDistributedHistoryRepack(factory, rank, ranks);
+}
 
 TEST_F(TrilinosMatrixAssembly, MissingOwnedCoefficientsFailOnEveryRank)
 {

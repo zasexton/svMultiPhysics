@@ -68,6 +68,11 @@ namespace backends {
     [[nodiscard]] static std::unique_ptr<BackendFactory> create(std::string_view name);
     [[nodiscard]] static std::unique_ptr<BackendFactory> create(BackendKind kind, const CreateOptions& options);
     [[nodiscard]] static std::unique_ptr<BackendFactory> create(std::string_view name, const CreateOptions& options);
+
+#if defined(FE_HAS_MPI) && FE_HAS_MPI
+    /// Communicator over which the factory distributes its vector rows.
+    [[nodiscard]] virtual MPI_Comm vectorCommunicator() const { return MPI_COMM_SELF; }
+#endif
 };
 
 } // namespace backends

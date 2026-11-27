@@ -41,6 +41,9 @@ public:
     }
 
     [[nodiscard]] BackendKind backendKind() const noexcept override { return BackendKind::FSILS; }
+#if defined(FE_HAS_MPI) && FE_HAS_MPI
+    [[nodiscard]] MPI_Comm vectorCommunicator() const override { return comm_; }
+#endif
 
     [[nodiscard]] std::unique_ptr<GenericMatrix>
     createMatrix(const sparsity::SparsityPattern& sparsity) const override;

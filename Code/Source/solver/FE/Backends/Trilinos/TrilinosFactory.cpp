@@ -13,10 +13,26 @@
 #include "Backends/Trilinos/TrilinosMatrix.h"
 #include "Backends/Trilinos/TrilinosVector.h"
 #include "Sparsity/DistributedSparsityPattern.h"
+#if defined(FE_HAS_MPI) && FE_HAS_MPI && defined(HAVE_TEUCHOS_MPI)
+#include <Teuchos_DefaultMpiComm.hpp>
+#endif
 
 namespace svmp {
 namespace FE {
 namespace backends {
+
+#if defined(FE_HAS_MPI) && FE_HAS_MPI
+MPI_Comm TrilinosFactory::vectorCommunicator() const
+{
+#if defined(HAVE_TEUCHOS_MPI)
+    const auto comm = Tpetra::getDefaultComm();
+    if (comm->getSize() > 1) {
+        return Teuchos::getRawMpiComm(*comm);
+    }
+#endif
+    return MPI_COMM_SELF;
+}
+#endif
 
 std::unique_ptr<GenericMatrix>
 TrilinosFactory::createMatrix(const sparsity::SparsityPattern& sparsity) const
