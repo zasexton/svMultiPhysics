@@ -78,6 +78,7 @@ namespace svmp {
 namespace FE {
 
 // Forward declarations
+namespace geometry { enum class CutIntegrationSide : std::uint8_t; }
 namespace assembly {
 class AssemblyContext;
 }
@@ -855,6 +856,12 @@ public:
     /// Minimum polynomial exactness requested by this form on whole cells.
     void setMinimumCellQuadratureOrder(int order) noexcept { minimum_cell_quadrature_order_ = order; }
     [[nodiscard]] int minimumCellQuadratureOrder() const noexcept { return minimum_cell_quadrature_order_; }
+
+    // A generated exterior subset is keyed separately from the cut domain that moves it.
+    [[nodiscard]] virtual bool differentiatesCutDomain(FieldId, int, geometry::CutIntegrationSide) const noexcept
+    {
+        return false;
+    }
 
 private:
     int minimum_cell_quadrature_order_{0};

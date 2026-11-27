@@ -1102,6 +1102,7 @@ GeneratedActiveBoundaryFragment::toCutQuadratureRule(
     rule.side = side;
     rule.geometric_dimension = -1;
     rule.points = quadrature_points;
+    rule.linear_corner_surface = linear_corner_surface;
     rule.measure = measure;
     rule.parent_measure = parent_measure;
     rule.volume_fraction = parent_measure > Real{0.0}
@@ -1427,6 +1428,17 @@ GeneratedActiveBoundaryDomain buildGeneratedActiveBoundaryDomain(
                     std::to_string(fragment.parent_face_global_id) + ":" +
                     std::to_string(static_cast<int>(req.side));
                 fragment.vertices = clipped;
+                geometry::LinearCornerSurfaceSource source;
+                if (represented.backend == "LinearCorner" && origins.size() <= source.edges.size() &&
+                    std::all_of(origins.begin(), origins.end(), [](const PointOrigin& p) { return p.known(); })) {
+                    source.isovalue = req.isovalue;
+                    source.count = static_cast<std::uint8_t>(origins.size());
+                    for (std::size_t i = 0; i < origins.size(); ++i) {
+                        source.edges[i] = {static_cast<std::uint8_t>(origins[i].first),
+                                           static_cast<std::uint8_t>(origins[i].second)};
+                    }
+                    fragment.linear_corner_surface = source;
+                }
                 for (const auto* contact : contacts) {
                     if ((contact->parent_cell_global_id != INVALID_GLOBAL_INDEX &&
                          contact->parent_cell_global_id !=
@@ -1765,7 +1777,7 @@ template <std::size_t N>
 
 // Every field, values bit for bit.  The size guard fails when a field is
 // added without extending the comparison.
-static_assert(sizeof(GeneratedActiveBoundaryFragment) == 336u,
+static_assert(sizeof(GeneratedActiveBoundaryFragment) == 368u,
               "compare every GeneratedActiveBoundaryFragment field");
 static_assert(sizeof(geometry::CutQuadraturePoint) == 152u,
               "compare every CutQuadraturePoint field");
@@ -1812,6 +1824,7 @@ static_assert(sizeof(geometry::CutQuadraturePoint) == 152u,
     if (a.full_face_equivalent != b.full_face_equivalent) return "full_face_equivalent";
     if (a.achieved_quadrature_order != b.achieved_quadrature_order) return "achieved_quadrature_order";
     if (a.topology_id != b.topology_id) return "topology_id";
+    if (a.linear_corner_surface != b.linear_corner_surface) return "linear_corner_surface";
     if (a.vertices.size() != b.vertices.size()) return "vertex count";
     for (std::size_t i = 0; i < a.vertices.size(); ++i) {
         if (!sameRealBitsValue(a.vertices[i], b.vertices[i])) return "vertex " + std::to_string(i);

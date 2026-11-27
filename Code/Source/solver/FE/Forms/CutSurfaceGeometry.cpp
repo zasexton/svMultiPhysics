@@ -72,6 +72,7 @@ std::vector<EdgeIntersection> edgeIntersections(const geometry::CutQuadratureRul
         std::vector<Real> trial_values;
     };
     const auto &source = *rule.linear_corner_surface;
+    const bool active_wall = rule.provenance.parent_boundary_entity >= 0;
     const auto &field_basis = field.getElement(type, cell).basis();
     const auto &trial_basis = trial.getElement(type, cell).basis();
     const auto dof_count = trial.dofs_per_element(cell);
@@ -96,10 +97,16 @@ std::vector<EdgeIntersection> edgeIntersections(const geometry::CutQuadratureRul
     std::vector<EdgeIntersection> intersections;
     for (std::size_t index = 0; index < source.count; ++index) {
         const auto [first, last] = source.edges[index];
-        if (first >= corners.size() || last >= corners.size() || first == last) {
+        if (first >= corners.size() || last >= corners.size() || (first == last && !active_wall)) {
             unsupported("retained vertex has no transverse parent edge");
         }
         const auto &a = corners[first];
+        if (first == last) {
+            const bool negative = rule.side == geometry::CutIntegrationSide::Negative;
+            if ((a.signed_value < 0) != negative) unsupported("fixed wall corner no longer belongs to its phase");
+            intersections.push_back({a.point, std::vector<Vector>(dof_count)});
+            continue;
+        }
         const auto &b = corners[last];
         const Real slope = b.signed_value - a.signed_value;
         if ((a.signed_value < 0) == (b.signed_value < 0)) {
@@ -109,7 +116,7 @@ std::vector<EdgeIntersection> edgeIntersections(const geometry::CutQuadratureRul
         const Vector edge = b.point - a.point;
         auto &root = intersections.emplace_back();
         root.point = a.point + t * edge;
-        if (normal.dot(edge) * slope <= 0 || std::abs(normal.dot(root.point - sample)) > reference_tolerance) {
+        if ((!active_wall && normal.dot(edge) * slope <= 0) || std::abs(normal.dot(root.point - sample)) > reference_tolerance) {
             unsupported("source coefficients are stale for the retained edge intersections");
         }
         for (std::size_t j = 0; j < dof_count; ++j) {
@@ -172,13 +179,13 @@ ReferenceVariation polygonVariation(const geometry::CutQuadratureRule &rule, con
                                     const std::vector<EdgeIntersection> &roots,
                                     const std::vector<Triangle> &triangles, std::size_t q, std::size_t j)
 {
-    const bool centroid = rule.points.size() == 1;
-    if (!centroid && rule.points.size() != 3 * triangles.size()) {
+    const bool centroid = rule.points.size() == 1 && rule.provenance.parent_boundary_entity < 0;
+    if (!centroid && (rule.points.size() % triangles.size() != 0 || rule.points.size() < triangles.size())) {
         unsupported("unsupported retained polygon quadrature");
     }
     const Vector sample = vectorOf(rule.points[q].point);
     const auto faces = std::span<const Triangle>(triangles);
-    const auto active = centroid ? faces : faces.subspan(q / 3, 1);
+    const auto active = centroid ? faces : faces.subspan(q / (rule.points.size() / triangles.size()), 1);
     const auto &a = roots[0];
     ReferenceVariation variation;
     Real total_area = 0;
@@ -201,10 +208,23 @@ ReferenceVariation polygonVariation(const geometry::CutQuadratureRule &rule, con
             expected_point += face.area * triangle_center;
             variation.point += face.area * center_motion + area_rate * (triangle_center - sample);
         } else {
-            // The degree-two triangle rule has permutations of (2/3, 1/6, 1/6).
-            const auto &vertex = *std::array{&a, &b, &c}[q % 3];
-            expected_point = (a.point + b.point + c.point) / 6. + vertex.point / 2.;
-            variation.point = (a.motion[j] + b.motion[j] + c.motion[j]) / 6. + vertex.motion[j] / 2.;
+            // Each retained sample has fixed barycentric coordinates in its moving fan triangle.
+            if (rule.provenance.parent_boundary_entity < 0) {
+                if (rule.points.size() != 3 * triangles.size()) unsupported("unsupported interior polygon quadrature");
+                const auto& vertex = *std::array{&a, &b, &c}[q % 3];
+                const Vector degree_two_sample = (a.point + b.point + c.point) / 6. + vertex.point / 2.;
+                if (Vector(degree_two_sample - sample).norm() > reference_tolerance) {
+                    unsupported("sample disagrees with retained polygon quadrature");
+                }
+            }
+            const Vector offset = sample - a.point;
+            const Real beta = math::cross(offset, ac).dot(face.normal) / (2 * face.area);
+            const Real gamma = math::cross(ab, offset).dot(face.normal) / (2 * face.area);
+            if (beta < -reference_tolerance || gamma < -reference_tolerance || beta + gamma > 1 + reference_tolerance) {
+                unsupported("sample lies outside its retained fan triangle");
+            }
+            expected_point = a.point + beta * ab + gamma * ac;
+            variation.point = a.motion[j] + beta * dab + gamma * dac;
         }
     }
     variation.relative_weight /= total_area;

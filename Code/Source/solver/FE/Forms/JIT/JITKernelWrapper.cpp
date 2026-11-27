@@ -591,6 +591,11 @@ bool JITKernelWrapper::requiresTwoSidedInterfaceFace() const noexcept
 {
     return fallback_->requiresTwoSidedInterfaceFace();
 }
+bool JITKernelWrapper::differentiatesCutDomain(FieldId field, int marker, geometry::CutIntegrationSide side) const noexcept
+{
+    return fallback_->differentiatesCutDomain(field, marker, side);
+}
+
 bool JITKernelWrapper::requiresTwoSidedInterfaceFaceOnMarker(int interface_marker) const noexcept
 {
     return fallback_->requiresTwoSidedInterfaceFaceOnMarker(interface_marker);

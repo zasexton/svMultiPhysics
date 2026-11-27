@@ -1879,7 +1879,10 @@ TEST(CutCellForms, HighOrderCutInterfaceTangentMatchesFixedGeometryFiniteDiffere
 namespace {
 enum class MovingMeasure { ChordArea, VolumeFraction, ActiveWall };
 
-void checkMovingQuadMeasure(MovingMeasure measure, bool positive)
+enum class CutSelection { Matching, OtherMarker, OppositeSide };
+
+void checkMovingCutMeasure(MovingMeasure measure, bool positive, bool compiled = false,
+                            CutSelection selection = CutSelection::Matching, int tetra_wall_order = 0)
 {
     using namespace svmp::FE;
     namespace a = assembly;
@@ -1889,8 +1892,19 @@ void checkMovingQuadMeasure(MovingMeasure measure, bool positive)
     constexpr FieldId field = 4;
     const auto side = positive ? CutIntegrationSide::Positive : CutIntegrationSide::Negative;
     const auto form_side = positive ? CutVolumeSide::Positive : CutVolumeSide::Negative;
-    fixture::SingleQuadBoundaryMesh mesh(wall_marker);
-    spaces::H1Space space(ElementType::Quad4, 1);
+    class TetraWall final : public test::SingleTetraMeshAccess {
+    public:
+        GlobalIndex numBoundaryFaces() const override { return 1; }
+        LocalIndex getLocalFaceIndex(GlobalIndex, GlobalIndex) const override { return 0; }
+        int getBoundaryFaceMarker(GlobalIndex) const override { return 7; }
+        void forEachBoundaryFace(int marker, std::function<void(GlobalIndex, GlobalIndex)> callback) const override {
+            if (marker < 0 || marker == 7) callback(0, 0);
+        }
+    } tetra;
+    fixture::SingleQuadBoundaryMesh quad(wall_marker);
+    const a::IMeshAccess& mesh = tetra_wall_order ? static_cast<const a::IMeshAccess&>(tetra) : quad;
+    const auto type = mesh.getCellType(0);
+    spaces::H1Space space(type, 1);
     auto dofs = createSingleCellDofMap(4);
     const auto u = TrialFunction(space, "phi"), v = TestFunction(space, "v");
     // The zero source slot makes the primal integrand exactly 1, while the
@@ -1905,25 +1919,38 @@ void checkMovingQuadMeasure(MovingMeasure measure, bool positive)
     auto options = compiler.options();
     options.geometry_sensitivity.mode = GeometrySensitivityMode::LevelSetCutDomainUnknowns;
     options.geometry_sensitivity.level_set_cut_domains.push_back(
-        {.level_set_field = field, .interface_marker = cut_marker, .side = form_side});
+        {.level_set_field = field, .interface_marker = cut_marker + (selection == CutSelection::OtherMarker),
+         .side = selection == CutSelection::OppositeSide
+             ? (positive ? CutVolumeSide::Negative : CutVolumeSide::Positive) : form_side});
     compiler.setOptions(options);
-    SymbolicNonlinearFormKernel tangent(compiler.compileResidual(residual), NonlinearKernelOutput::Both);
+    auto tangent = std::make_shared<SymbolicNonlinearFormKernel>(compiler.compileResidual(residual), NonlinearKernelOutput::Both);
     SymbolicNonlinearFormKernel primal(frozen.compileResidual(residual), NonlinearKernelOutput::VectorOnly);
-    tangent.resolveInlinableConstitutives();
+    tangent->resolveInlinableConstitutives();
     primal.resolveInlinableConstitutives();
+    std::unique_ptr<jit::JITKernelWrapper> compiled_tangent;
+    if (compiled) {
+        JITOptions options;
+        options.enable = true;
+        options.specialization.enable = false;
+        compiled_tangent = std::make_unique<jit::JITKernelWrapper>(tangent, options);
+        const auto eligibility = jit::canCompile(tangent->tangentIR());
+        ASSERT_TRUE(eligibility.ok) << (eligibility.first_issue ? eligibility.first_issue->message : "");
+    }
+    a::AssemblyKernel& derivative = compiled_tangent ? static_cast<a::AssemblyKernel&>(*compiled_tangent) : *tangent;
 
     const auto evaluate = [&](const std::array<Real, 4>& phi, bool matrix) {
         auto request = fixture::interfaceRequest(cut_marker);
         it::LevelSetInterfaceDomain domain(request);
         it::LevelSetCellCutInput input;
-        input.element_type = ElementType::Quad4;
+        input.element_type = type;
         input.parent_cell = 0;
         for (int i = 0; i < 4; ++i) {
-            const auto xi = basis::ReferenceNodeLayout::get_node_coords(ElementType::Quad4, i);
+            const auto xi = basis::ReferenceNodeLayout::get_node_coords(type, i);
             input.node_coordinates.push_back({xi[0], xi[1], xi[2]});
         }
         input.level_set_values.assign(phi.begin(), phi.end());
-        it::appendLinearLevelSetCellCut2D(domain, input);
+        if (tetra_wall_order) it::appendLinearLevelSetCellCut3D(domain, input);
+        else it::appendLinearLevelSetCellCut2D(domain, input);
         a::CutIntegrationContext context;
         context.addGeneratedInterfaceDomain(domain);
         if (wall) {
@@ -1931,6 +1958,7 @@ void checkMovingQuadMeasure(MovingMeasure measure, bool positive)
                 fixture::contactRequest(cut_marker, wall_marker), domain, mesh);
             auto active = fixture::activeRequest(cut_marker, wall_marker, side);
             active.active_boundary_marker = subset_marker;
+            if (tetra_wall_order) active.quadrature_order = tetra_wall_order;
             it::GeneratedActiveBoundaryScalarField source;
             source.value_at_node = [&](GlobalIndex node) { return phi.at(node); };
             context.addGeneratedActiveBoundaryDomain(it::buildGeneratedActiveBoundaryDomain(
@@ -1948,7 +1976,7 @@ void checkMovingQuadMeasure(MovingMeasure measure, bool positive)
         assembler.setJITConstants(globals);
         a::DenseMatrixView jac(4);
         a::DenseVectorView load(4);
-        a::AssemblyKernel& kernel = matrix ? static_cast<a::AssemblyKernel&>(tangent) : primal;
+        a::AssemblyKernel& kernel = matrix ? derivative : primal;
         if (!wall) {
             assembler.assembleCutVolumes(mesh, context, cut_marker, side, space, space, kernel,
                                          matrix ? &jac : nullptr, &load, matrix, true);
@@ -1971,11 +1999,12 @@ void checkMovingQuadMeasure(MovingMeasure measure, bool positive)
     // For x-1/4+t, the negative area and bottom-edge length both equal 1/4-t.
     const bool chord = measure == MovingMeasure::ChordArea;
     auto phi = chord ? std::array{-.5, .5, 1.5, .5} : std::array{-.25, .75, .75, -.25};
+    if (tetra_wall_order) phi = {-.25, .75, -.25, -.25};
     const auto direction = chord ? std::array{0., 0., 1., 0.} : std::array{1., 1., 1., 1.};
     const Real fraction = positive ? .75 : .25;
     const Real sign = positive ? 1. : -1.;
-    const Real expected_value = chord ? (positive ? .875 : .125) : (wall ? fraction : fraction * fraction);
-    const Real expected_derivative = chord ? 0. : (wall ? sign : 2. * fraction * sign);
+    const Real expected_value = tetra_wall_order ? (positive ? 9./32 : 7./32) : chord ? (positive ? .875 : .125) : (wall ? fraction : fraction * fraction);
+    const Real expected_derivative = tetra_wall_order ? .75 * sign : chord ? 0. : (wall ? sign : 2. * fraction * sign);
     const auto base = evaluate(phi, true);
     constexpr Real h = 1.e-6;
     auto plus = phi, minus = phi;
@@ -1986,12 +2015,39 @@ void checkMovingQuadMeasure(MovingMeasure measure, bool positive)
     EXPECT_NEAR(base[0], expected_value, 2.e-14);
     EXPECT_NEAR((evaluate(plus, false)[0] - evaluate(minus, false)[0]) / (2*h), expected_derivative, 2.e-9);
     EXPECT_NEAR(std::inner_product(base.begin()+1, base.end(), direction.begin(), 0.),
-                expected_derivative, 2.e-12);
+                selection == CutSelection::Matching ? expected_derivative : 0., 2.e-12);
+    if (compiled_tangent) {
+        EXPECT_TRUE(compiled_tangent->hasCompiledTangentDispatch(IntegralDomain::InterfaceFace, wall ? subset_marker : cut_marker));
+    }
 }
 } // namespace
 
 TEST(CutCellForms, CutVolumeTangentUsesRetainedChordMotion) {
-    for (const bool positive : {false, true}) checkMovingQuadMeasure(MovingMeasure::ChordArea, positive);
+    for (const bool positive : {false, true}) checkMovingCutMeasure(MovingMeasure::ChordArea, positive);
+}
+
+TEST(CutCellForms, ActiveWallTangentUsesItsSourceInterfaceAcrossDistinctMarkers) {
+    for (const bool positive : {false, true}) {
+        for (const auto selection : {CutSelection::Matching, CutSelection::OtherMarker, CutSelection::OppositeSide}) {
+            checkMovingCutMeasure(MovingMeasure::ActiveWall, positive, false, selection);
+        }
+    }
+}
+
+TEST(CutCellForms, TetrahedralClippedWallTangentTracksEveryFanTriangleAtEachRuleOrder) {
+    for (const bool positive : {false, true}) {
+        for (int order = 1; order <= 5; ++order) {
+            checkMovingCutMeasure(MovingMeasure::ActiveWall, positive, false, CutSelection::Matching, order);
+        }
+    }
+}
+
+TEST(CutCellForms, CompiledCutVolumeChordAndActiveWallFollowRegeneratedGeometry) {
+    requireLLVMJITOrSkip();
+    for (const bool positive : {false, true}) {
+        checkMovingCutMeasure(MovingMeasure::ChordArea, positive, true);
+        checkMovingCutMeasure(MovingMeasure::ActiveWall, positive, true);
+    }
 }
 
 enum class TractionLoad { Pressure, PlanarSum, NormalSize, PositiveNormal, History, TestGradient };

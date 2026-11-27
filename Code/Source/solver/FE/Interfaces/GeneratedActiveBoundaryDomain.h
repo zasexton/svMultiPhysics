@@ -21,6 +21,7 @@
 #include <array>
 #include <cstdint>
 #include <functional>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -114,6 +115,8 @@ struct GeneratedActiveBoundaryFragment {
     int achieved_quadrature_order{0};
     std::string topology_id{};
     std::vector<std::array<Real, 3>> vertices{};
+    // Original parent corners or crossing edges, in clipped-vertex order.
+    std::optional<geometry::LinearCornerSurfaceSource> linear_corner_surface{};
     std::vector<geometry::CutQuadraturePoint> quadrature_points{};
 
     [[nodiscard]] bool active() const noexcept;

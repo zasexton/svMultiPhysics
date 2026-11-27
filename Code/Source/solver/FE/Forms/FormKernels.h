@@ -145,6 +145,7 @@ public:
     [[nodiscard]] bool hasInteriorFace() const noexcept override;
     [[nodiscard]] bool hasInterfaceFace() const noexcept override;
     [[nodiscard]] bool requiresTwoSidedInterfaceFace() const noexcept override;
+    [[nodiscard]] bool differentiatesCutDomain(FieldId field, int marker, geometry::CutIntegrationSide side) const noexcept override;
     [[nodiscard]] bool requiresTwoSidedInterfaceFaceOnMarker(int interface_marker) const noexcept override;
     [[nodiscard]] bool supportsCellBatch() const noexcept override { return true; }
 
@@ -435,6 +436,7 @@ public:
     [[nodiscard]] bool hasInteriorFace() const noexcept override;
     [[nodiscard]] bool hasInterfaceFace() const noexcept override;
     [[nodiscard]] bool requiresTwoSidedInterfaceFace() const noexcept override;
+    [[nodiscard]] bool differentiatesCutDomain(FieldId field, int marker, geometry::CutIntegrationSide side) const noexcept override;
     [[nodiscard]] bool requiresTwoSidedInterfaceFaceOnMarker(int interface_marker) const noexcept override;
     [[nodiscard]] bool supportsCellBatch() const noexcept override { return true; }
 

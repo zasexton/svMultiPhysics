@@ -878,6 +878,11 @@ public:
     {
         return primary_->requiresTwoSidedInterfaceFace();
     }
+    [[nodiscard]] bool differentiatesCutDomain(FieldId field, int marker, geometry::CutIntegrationSide side) const noexcept override
+    {
+        return primary_->differentiatesCutDomain(field, marker, side);
+    }
+
     [[nodiscard]] bool requiresTwoSidedInterfaceFaceOnMarker(int interface_marker) const noexcept override
     {
         return primary_->requiresTwoSidedInterfaceFaceOnMarker(interface_marker);

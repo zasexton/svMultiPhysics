@@ -13356,6 +13356,22 @@ bool FormKernel::requiresTwoSidedInterfaceFace() const noexcept
     return formIRRequiresTwoSidedInterfaceFace(ir_);
 }
 
+namespace {
+bool differentiatesDomain(const FormIR& ir, FieldId field, int marker, geometry::CutIntegrationSide side) noexcept
+{
+    const auto& domains = ir.geometrySensitivityOptions().level_set_cut_domains;
+    const auto cut_side = side == geometry::CutIntegrationSide::Negative ? CutVolumeSide::Negative : CutVolumeSide::Positive;
+    return std::any_of(domains.begin(), domains.end(), [&](const auto& domain) {
+        return domain.level_set_field == field && domain.interface_marker == marker && domain.side == cut_side;
+    });
+}
+}
+
+bool FormKernel::differentiatesCutDomain(FieldId field, int marker, geometry::CutIntegrationSide side) const noexcept
+{
+    return differentiatesDomain(ir_, field, marker, side);
+}
+
 bool FormKernel::requiresTwoSidedInterfaceFaceOnMarker(int interface_marker) const noexcept
 {
     return formIRRequiresTwoSidedInterfaceFaceOnMarker(ir_, interface_marker);
@@ -16648,8 +16664,11 @@ void SymbolicNonlinearFormKernel::rebuildTangentIR()
                     std::vector<std::pair<int, FieldId>> emitted_shape_terms;
                     for (const auto& domain :
                          geometry_sensitivity.level_set_cut_domains) {
-                        if (!interface_domain_matches(domain,
-                                                      term.interface_marker)) {
+                        // A generated exterior selector has its own assembly marker.
+                        // The boundary provenance resolves its parent cut marker and phase at assembly.
+                        const bool active_subset = term.exterior_boundary_measure &&
+                            term.exterior_boundary_measure->isGeneratedActiveSubset();
+                        if (!active_subset && !interface_domain_matches(domain, term.interface_marker)) {
                             continue;
                         }
                         const int emitted_marker =
@@ -16915,6 +16934,11 @@ bool SymbolicNonlinearFormKernel::requiresTwoSidedInterfaceFace() const noexcept
 {
     return formIRRequiresTwoSidedInterfaceFace(residual_ir_) ||
            formIRRequiresTwoSidedInterfaceFace(tangent_ir_);
+}
+
+bool SymbolicNonlinearFormKernel::differentiatesCutDomain(FieldId field, int marker, geometry::CutIntegrationSide side) const noexcept
+{
+    return differentiatesDomain(residual_ir_, field, marker, side);
 }
 
 bool SymbolicNonlinearFormKernel::requiresTwoSidedInterfaceFaceOnMarker(int interface_marker) const noexcept

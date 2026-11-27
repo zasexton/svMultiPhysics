@@ -122,6 +122,7 @@ struct CutQuadratureConstructionPolicy {
 /// Ordered parent edge endpoints of a retained LinearCorner segment or tetrahedral polygon.
 struct LinearCornerSurfaceSource {
     Real isovalue{};
+    // Equal endpoints identify a fixed corner on a clipped exterior face.
     std::array<std::array<std::uint8_t, 2>, 4> edges{};
     std::uint8_t count{};
 
