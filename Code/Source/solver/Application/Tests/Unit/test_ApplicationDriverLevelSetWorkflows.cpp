@@ -8986,6 +8986,21 @@ TEST(ApplicationDriverLevelSetWorkflows,
       },
       velocity_space.get(),
       /*dimension=*/2);
+  using svmp::FE::forms::FormExpr;
+  const auto stage_velocity = FormExpr::discreteField(velocity, *velocity_space, "u");
+  const auto wall_normal = FormExpr::boundaryNormal();
+  const auto slip = stage_velocity - inner(stage_velocity, wall_normal) * wall_normal;
+  // The extra term probes the stage clock and vanishes at the two recorded
+  // endpoint times, where the ordinary slip-dissipation identity also holds.
+  const auto clock = FormExpr::time();
+  const auto clock_term = (clock - 0.10) * (clock - 0.15) * (clock + 2.0 * FormExpr::timeStep());
+  svmp::FE::systems::declareWallFunctionalForm(*system, {
+      .prefix = "free_surface." + std::to_string(interface_marker) + ".",
+      .quantity = "wall_slip_dissipation",
+      .kind = svmp::FE::systems::FunctionalKind::DissipationRate,
+      .measure = svmp::FE::systems::WallMeasure::ActiveBoundarySubset,
+      .integrand = 2.0 * inner(slip, slip) + clock_term,
+      .owner = "stage-clock-test"});
 
   svmp::FE::interfaces::GeneratedInterfaceBoundaryIntersectionMarkerKey key{};
   key.source = svmp::FE::interfaces::LevelSetInterfaceSource::fromField(phi);
@@ -9290,6 +9305,7 @@ TEST(ApplicationDriverLevelSetWorkflows,
           active_cut_requests,
           svmp::FE::Real{0.075},
           svmp::FE::Real{0.5},
+          svmp::FE::Real{0.05},
           previous_state_revision,
           endpoint_state_revision,
           candidate_ready_previous_solution,
@@ -9324,6 +9340,12 @@ TEST(ApplicationDriverLevelSetWorkflows,
            finalized_endpoint_solution[*retained_phi_entry]));
   ASSERT_EQ(contact_stages.front().state.walls.size(), 1u);
   EXPECT_GT(contact_stages.front().state.owned_contact_measure, 0.0);
+  const auto& stage_wall = contact_stages.front().state.walls.front();
+  ASSERT_GT(stage_wall.owned_wetted_wall_measure, 0.);
+  EXPECT_NEAR(stage_wall.wall_slip_dissipation,
+              2. * stage_wall.wall_slip_speed_squared_integral +
+                  (0.075 - 0.10) * (0.075 - 0.15) * (0.075 + 2. * 0.05) *
+                  stage_wall.owned_wetted_wall_measure, 1e-13);
   EXPECT_GT(contact_stages.front().state.line_friction_dissipation, 0.0);
   EXPECT_NEAR(
       contact_stages.front().state.walls.front().mean_contact_position[0],
@@ -9435,11 +9457,24 @@ TEST(ApplicationDriverLevelSetWorkflows,
           svmp::Physics::formulations::navier_stokes::free_surface::functionalRecords(*sim.fe_system).functionalDeclarations(),
           svmp::FE::Real{0.10},
           svmp::FE::Real{1.0},
+          svmp::FE::Real{0.05},
           previous_state_revision,
           pre_maintenance_endpoint_state_revision,
           endpoint_solution);
   ASSERT_EQ(endpoint_contact_stages.size(), 1u);
   ASSERT_EQ(endpoint_contact_stages.front().state.walls.size(), 1u);
+  for (const auto step : {0.025, 0.075}) {
+    const auto stages = evaluateAcceptedFreeSurfaceContactStages(
+        *sim.fe_system, contact_stage_declarations, 0.20, 1., step,
+        previous_state_revision, pre_maintenance_endpoint_state_revision, endpoint_solution);
+    ASSERT_EQ(stages.size(), 1u);
+    ASSERT_EQ(stages.front().state.walls.size(), 1u);
+    const auto& wall = stages.front().state.walls.front();
+    EXPECT_NEAR(wall.wall_slip_dissipation,
+                2. * wall.wall_slip_speed_squared_integral +
+                    (0.20 - 0.10) * (0.20 - 0.15) * (0.20 + 2. * step) *
+                    wall.owned_wetted_wall_measure, 1e-13);
+  }
   EXPECT_NEAR(
       endpoint_contact_stages.front()
           .state.walls.front()
@@ -9476,6 +9511,7 @@ TEST(ApplicationDriverLevelSetWorkflows,
           active_cut_requests,
           svmp::FE::Real{0.10},
           svmp::FE::Real{1.0},
+          svmp::FE::Real{0.05},
           previous_state_revision,
           pre_maintenance_endpoint_state_revision,
           previous_solution,
@@ -9584,6 +9620,7 @@ TEST(ApplicationDriverLevelSetWorkflows,
           svmp::Physics::formulations::navier_stokes::free_surface::functionalRecords(*sim.fe_system).functionalDeclarations(),
           svmp::FE::Real{0.15},
           svmp::FE::Real{1.0},
+          svmp::FE::Real{0.05},
           accepted_state_revision,
           next_state_revision,
           next_solution);

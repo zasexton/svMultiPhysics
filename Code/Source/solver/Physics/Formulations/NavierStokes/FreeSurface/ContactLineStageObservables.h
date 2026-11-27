@@ -75,7 +75,8 @@ namespace svmp::Physics::formulations::navier_stokes::free_surface {
 
 /// The accepted contact stages of the @p declarations with a dynamic contact
 /// law, on the current authoritative geometry snapshots of @p system at
-/// @p stage_solution.  Collective over the FE system's communicator.
+/// @p stage_solution. This overload uses the generalized-alpha step when
+/// supplied and zero for an initial or steady observation.
 [[nodiscard]] std::vector<FreeSurfaceAcceptedContactStageState>
 evaluateAcceptedFreeSurfaceContactStages(
     const FE::systems::FESystem& system,
@@ -88,6 +89,18 @@ evaluateAcceptedFreeSurfaceContactStages(
     std::span<const FE::Real> stage_solution,
     const std::optional<
         FreeSurfaceFirstOrderGeneralizedAlphaProvenance>&
+        first_order_generalized_alpha = std::nullopt);
+
+/// Evaluate the declared wall forms at the physical stage time and step
+/// length of this attempt. Collective over the system communicator.
+[[nodiscard]] std::vector<FreeSurfaceAcceptedContactStageState>
+evaluateAcceptedFreeSurfaceContactStages(
+    const FE::systems::FESystem& system,
+    std::span<const FreeSurfaceDiscreteFunctionalDeclaration> declarations,
+    FE::Real stage_time, FE::Real stage_alpha_f, FE::Real step_length,
+    std::uint64_t previous_state_revision, std::uint64_t endpoint_state_revision,
+    std::span<const FE::Real> stage_solution,
+    const std::optional<FreeSurfaceFirstOrderGeneralizedAlphaProvenance>&
         first_order_generalized_alpha = std::nullopt);
 
 /// Binds @p stages to the accepted endpoint @p endpoint_state_revision:

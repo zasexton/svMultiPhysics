@@ -5314,11 +5314,18 @@ TEST(ApplicationDriverLevelSetWorkflowsMPI,
               accepted_endpoint.data(),
               accepted_endpoint.size()),
           activeFESystemCommunicator(*sim.fe_system));
+  const auto declarations =
+      svmp::Physics::formulations::navier_stokes::free_surface::functionalRecords(*sim.fe_system)
+          .functionalDeclarations();
+  EXPECT_THROW((void)evaluateAcceptedFreeSurfaceContactStages(
+      *sim.fe_system, declarations, 0.10, 1., rank == 0 ? 0.05 : 0.025,
+      previous_state_revision, endpoint_state_revision, solution), std::runtime_error);
   auto contact_stages = evaluateAcceptedFreeSurfaceContactStages(
       *sim.fe_system,
-      svmp::Physics::formulations::navier_stokes::free_surface::functionalRecords(*sim.fe_system).functionalDeclarations(),
+      declarations,
       svmp::FE::Real{0.10},
       svmp::FE::Real{1.0},
+      svmp::FE::Real{0.05},
       previous_state_revision,
       endpoint_state_revision,
       std::span<const svmp::FE::Real>(solution.data(), solution.size()));

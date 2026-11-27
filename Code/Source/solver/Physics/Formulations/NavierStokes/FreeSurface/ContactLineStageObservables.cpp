@@ -76,6 +76,7 @@ void applyDeclaredStageWallSlipDissipation(
     const LevelSetGeometrySnapshot& snapshot,
     std::span<const svmp::FE::Real> stage_solution,
     FreeSurfaceAcceptedContactStageState& stage,
+    svmp::FE::Real step_length,
     const svmp::FE::systems::CollectiveCommunicator& comm)
 {
   auto& state = stage.state;
@@ -108,6 +109,8 @@ void applyDeclaredStageWallSlipDissipation(
   }
   svmp::FE::systems::SystemStateView view;
   view.u = stage_solution;
+  view.time = stage.stage_time;
+  view.dt = step_length;
   const auto values =
       svmp::FE::systems::evaluateFunctionalForms(system, forms, view, comm);
   for (std::size_t k = 0; k < declared.size(); ++k) {
@@ -228,6 +231,21 @@ evaluateAcceptedFreeSurfaceContactStages(
     const std::optional<FreeSurfaceFirstOrderGeneralizedAlphaProvenance>&
         first_order_generalized_alpha)
 {
+  const auto dt = first_order_generalized_alpha ? first_order_generalized_alpha->dt : 0.;
+  return evaluateAcceptedFreeSurfaceContactStages(
+      system, declarations, stage_time, stage_alpha_f, dt, previous_state_revision,
+      endpoint_state_revision, stage_solution, first_order_generalized_alpha);
+}
+
+std::vector<FreeSurfaceAcceptedContactStageState>
+evaluateAcceptedFreeSurfaceContactStages(
+    const svmp::FE::systems::FESystem& system,
+    std::span<const FreeSurfaceDiscreteFunctionalDeclaration> declarations,
+    svmp::FE::Real stage_time, svmp::FE::Real stage_alpha_f, svmp::FE::Real step_length,
+    std::uint64_t previous_state_revision, std::uint64_t endpoint_state_revision,
+    std::span<const svmp::FE::Real> stage_solution,
+    const std::optional<FreeSurfaceFirstOrderGeneralizedAlphaProvenance>& first_order_generalized_alpha)
+{
   const auto comm = activeSystemCommunicator(system);
   const auto dynamic_count = static_cast<std::size_t>(std::count_if(
       declarations.begin(),
@@ -259,6 +277,7 @@ evaluateAcceptedFreeSurfaceContactStages(
   }
   const bool local_provenance_incomplete =
       !std::isfinite(stage_time) || !std::isfinite(stage_alpha_f) ||
+      !std::isfinite(step_length) || step_length < 0. ||
       !(stage_alpha_f > svmp::FE::Real{0.0}) ||
       stage_alpha_f > svmp::FE::Real{1.0} ||
       previous_state_revision == 0u || endpoint_state_revision == 0u ||
@@ -267,10 +286,15 @@ evaluateAcceptedFreeSurfaceContactStages(
             *first_order_generalized_alpha) ||
         !contactStageRealValuesMatch(
             stage_alpha_f,
-            first_order_generalized_alpha->alpha_f)));
+            first_order_generalized_alpha->alpha_f) ||
+        !contactStageRealValuesMatch(step_length, first_order_generalized_alpha->dt)));
   if (collectiveAnyTrue(local_provenance_incomplete, comm)) {
     throw std::runtime_error(
         "[svMultiPhysics::Application] Accepted contact-stage provenance is incomplete.");
+  }
+  if (collectiveMinDouble(stage_time, comm) != collectiveMaxDouble(stage_time, comm) ||
+      collectiveMinDouble(step_length, comm) != collectiveMaxDouble(step_length, comm)) {
+    throw std::runtime_error("Contact-stage evaluation clocks differ across the FE communicator.");
   }
   const double local_solution_size =
       static_cast<double>(stage_solution.size());
@@ -492,7 +516,7 @@ evaluateAcceptedFreeSurfaceContactStages(
         comm,
         "accepted_contact_stage_evaluation_completion");
     applyDeclaredStageWallSlipDissipation(
-        system, declaration, snapshot, stage_solution, stages.back(), comm);
+        system, declaration, snapshot, stage_solution, stages.back(), step_length, comm);
   }
   return stages;
 }
