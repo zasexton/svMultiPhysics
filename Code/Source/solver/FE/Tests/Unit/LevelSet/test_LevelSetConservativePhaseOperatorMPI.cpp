@@ -393,7 +393,7 @@ TEST(LevelSetConservativePhaseOperatorMPI,
         matrix_increment[second] +=
             edge.coefficient * expected_increment[first];
     }
-    auto target_mass = projection.liquid_phase_mass;
+    auto target_mass = projection.active_phase_mass;
     for (std::size_t node = 0u; node < graph.nodes; ++node) {
         target_mass[node] -= matrix_increment[node];
     }
@@ -402,18 +402,18 @@ TEST(LevelSetConservativePhaseOperatorMPI,
             sensitivity,
             FE::geometry::CutIntegrationSide::Negative,
             phi,
-            projection.liquid_phase_mass,
+            projection.active_phase_mass,
             target_mass);
     ASSERT_TRUE(geometry_correction.success)
         << geometry_correction.diagnostic;
     EXPECT_TRUE(geometry_correction.linear_solve_converged);
     EXPECT_EQ(geometry_correction.interface_components, 1u);
     ASSERT_EQ(geometry_correction.level_set_increment.size(), graph.nodes);
-    ASSERT_EQ(geometry_correction.predicted_liquid_mass_change.size(),
+    ASSERT_EQ(geometry_correction.predicted_active_mass_change.size(),
               graph.nodes);
     for (std::size_t node = 0u; node < graph.nodes; ++node) {
-        EXPECT_NEAR(geometry_correction.predicted_liquid_mass_change[node],
-                    target_mass[node] - projection.liquid_phase_mass[node],
+        EXPECT_NEAR(geometry_correction.predicted_active_mass_change[node],
+                    target_mass[node] - projection.active_phase_mass[node],
                     3.0e-12);
     }
     std::vector<FE::Real> minimum_increment(graph.nodes, 0.0);
@@ -816,7 +816,7 @@ TEST(LevelSetConservativePhaseOperatorMPI,
             level_set::advanceLevelSetP1ConservativePhaseStage(
                 graph, indicator, base_lower, base_upper,
                 base_velocity, 0.02, base_options),
-            "previous liquid indicator");
+            "previous phase indicator");
     }
     {
         auto lower = base_lower;
@@ -827,7 +827,7 @@ TEST(LevelSetConservativePhaseOperatorMPI,
             level_set::advanceLevelSetP1ConservativePhaseStage(
                 graph, base_indicator, lower, base_upper,
                 base_velocity, 0.02, base_options),
-            "lower liquid-indicator bound");
+            "lower phase-indicator bound");
     }
     {
         auto upper = base_upper;
@@ -838,7 +838,7 @@ TEST(LevelSetConservativePhaseOperatorMPI,
             level_set::advanceLevelSetP1ConservativePhaseStage(
                 graph, base_indicator, base_lower, upper,
                 base_velocity, 0.02, base_options),
-            "upper liquid-indicator bound");
+            "upper phase-indicator bound");
     }
     {
         auto velocity = base_velocity;

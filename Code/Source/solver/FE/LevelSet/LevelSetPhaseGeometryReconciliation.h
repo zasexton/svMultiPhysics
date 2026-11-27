@@ -11,9 +11,9 @@
 /**
  * @file LevelSetPhaseGeometryReconciliation.h
  * @brief Moves a P1 level set until its cut geometry carries given nodal
- *        liquid moments.
+ *        active-side moments.
  *
- * After a conservative transport stage the liquid moments that the cut
+ * After a conservative transport stage the active-side moments that the cut
  * geometry projects onto the phase graph differ from the transported ones.
  * reconcileConservativePhaseGeometry corrects the level set by
  * sensitivity-based steps on those moments (solveLevelSetP1PhaseGeometry-
@@ -81,7 +81,7 @@ struct ConservativePhaseGeometryReconciliationResult {
 
 /**
  * @brief Corrects the level-set slice of @p candidate until the projected
- *        nodal liquid moments match @p target_liquid_phase_mass.
+ *        nodal active-side moments match @p target_active_phase_mass.
  *
  * Uses host.fe_system.  Every trial refreshes the cut geometry through
  * @p transaction; on return the transaction holds the geometry of the
@@ -93,7 +93,7 @@ struct ConservativePhaseGeometryReconciliationResult {
 reconcileConservativePhaseGeometry(
     const ConservativePhaseWorkflowHost& host,
     ConservativePhaseRequest& request,
-    std::span<const svmp::FE::Real> target_liquid_phase_mass,
+    std::span<const svmp::FE::Real> target_active_phase_mass,
     std::vector<svmp::FE::Real>& candidate,
     ConservativePhaseGeometryTransaction& transaction,
     std::span<const std::uint8_t> contact_protected_nodes = {});

@@ -503,9 +503,9 @@ template <typename ValueAt>
 {
     const std::array<std::pair<std::string_view, std::size_t>, 4>
         replicated_sizes{{
-            {"previous liquid indicator", previous_phase_indicator.size()},
-            {"lower liquid-indicator bound", lower_phase_indicator.size()},
-            {"upper liquid-indicator bound", upper_phase_indicator.size()},
+            {"previous phase indicator", previous_phase_indicator.size()},
+            {"lower phase-indicator bound", lower_phase_indicator.size()},
+            {"upper phase-indicator bound", upper_phase_indicator.size()},
             {"nodal velocity", nodal_velocity.size()},
         }};
     for (const auto& [name, size] : replicated_sizes) {
@@ -540,11 +540,11 @@ template <typename ValueAt>
             return false;
         };
     if (!require_nodal_values(previous_phase_indicator,
-                              "previous liquid indicator") ||
+                              "previous phase indicator") ||
         !require_nodal_values(lower_phase_indicator,
-                              "lower liquid-indicator bound") ||
+                              "lower phase-indicator bound") ||
         !require_nodal_values(upper_phase_indicator,
-                              "upper liquid-indicator bound")) {
+                              "upper phase-indicator bound")) {
         return false;
     }
 

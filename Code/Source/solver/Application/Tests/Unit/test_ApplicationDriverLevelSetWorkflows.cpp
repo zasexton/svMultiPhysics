@@ -15209,9 +15209,9 @@ TEST_F(ApplicationDriverConservativePhaseCandidatesTest,
       *sim_.fe_system, requests_.front());
   const auto accepted_phase = fieldSlice(
       gatherFeOrderedSolution(history().u()), phase_);
-  ASSERT_EQ(projection.liquid_phase_mass.size(), graph.nodes);
+  ASSERT_EQ(projection.active_phase_mass.size(), graph.nodes);
   for (std::size_t node = 0u; node < graph.nodes; ++node) {
-    EXPECT_NEAR(projection.liquid_phase_mass[node],
+    EXPECT_NEAR(projection.active_phase_mass[node],
                 graph.lumped_control_volume[node] * accepted_phase[node],
                 svmp::FE::Real{1.0e-10});
   }
@@ -15284,6 +15284,11 @@ TEST_F(ApplicationDriverConservativePhaseCandidatesTest,
   EXPECT_NE(contents.find(
                 "\"maintenance_ordering\":\"conservative_phase_transport_then_raw_geometry_rebuild_then_local_geometry_reconciliation_then_validation_then_commit\""),
             std::string::npos);
+  EXPECT_NE(contents.find("\"artifact_schema_version\":3"), std::string::npos);
+  for (const auto* key : {"previous_liquid_measure", "total_limited_liquid_measure",
+                          "minimum_low_order_liquid_indicator", "limited_liquid_indicator"}) {
+    EXPECT_NE(contents.find(std::string("\"") + key + "\":"), std::string::npos) << key;
+  }
   EXPECT_NE(contents.find("\"raw_post_transport_phase_measure\":"),
             std::string::npos);
   EXPECT_NE(contents.find("\"post_reinitialization_phase_measure\":"),
@@ -15585,10 +15590,10 @@ TEST_F(ApplicationDriverConservativePhaseCandidatesTest,
   auto& graph = requireCurrentConservativePhaseGraph(
       *sim_.fe_system, requests_.front());
   const auto staged_phase = fieldSlice(staged_solution, phase_);
-  ASSERT_EQ(staged_projection.liquid_phase_mass.size(), graph.nodes);
+  ASSERT_EQ(staged_projection.active_phase_mass.size(), graph.nodes);
   ASSERT_EQ(staged_phase.size(), graph.nodes);
   for (std::size_t node = 0u; node < graph.nodes; ++node) {
-    EXPECT_NEAR(staged_projection.liquid_phase_mass[node],
+    EXPECT_NEAR(staged_projection.active_phase_mass[node],
                 graph.lumped_control_volume[node] * staged_phase[node],
                 svmp::FE::Real{1.0e-10});
   }
@@ -15774,7 +15779,7 @@ TEST_F(ApplicationDriverConservativePhaseCandidatesTest,
                 {"ordering", lifecycle_capture::jsonString("graph_node_equals_phase_field_local_row")},
                 {"graph_node_map", lifecycle_capture::jsonArray(graph_node_map)},
                 {"identity", lifecycle_capture::phaseGraphIdentityJson(graph_identity)},
-                {"liquid_phase_mass", lifecycle_capture::jsonRealArray(std::span<const svmp::FE::Real>(staged_projection.liquid_phase_mass))},
+                {"active_phase_mass", lifecycle_capture::jsonRealArray(std::span<const svmp::FE::Real>(staged_projection.active_phase_mass))},
                 {"lumped_control_volume", lifecycle_capture::jsonRealArray(std::span<const svmp::FE::Real>(staged_lumped_control_volume))},
                 {"comparison_tolerance", lifecycle_capture::jsonReal(1.0e-10)},
             })},

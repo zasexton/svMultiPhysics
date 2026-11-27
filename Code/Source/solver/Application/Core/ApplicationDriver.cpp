@@ -4537,6 +4537,7 @@ conservativePhaseWorkflowHost(
     const ConservativePhaseContactStageCandidate* contact = nullptr)
 {
   svmp::FE::level_set::ConservativePhaseWorkflowHost host;
+  host.record_schema = svmp::Physics::formulations::navier_stokes::free_surface::conservativePhaseRecordSchema;
   host.fe_system = sim.fe_system.get();
   host.time_history = sim.time_history.get();
   if (sim.fe_system && sim.primary_mesh) {
@@ -4738,7 +4739,8 @@ void writeAcceptedConservativePhaseArtifacts(
       accepted_time,
       time_step,
       state_revision,
-      feCollectiveCommunicator(comm));
+      feCollectiveCommunicator(comm),
+      svmp::Physics::formulations::navier_stokes::free_surface::conservativePhaseRecordSchema);
 }
 
 ConservativePhaseGeometryReconciliationResult
@@ -4746,7 +4748,7 @@ reconcileConservativePhaseGeometry(
     application::core::SimulationComponents& sim,
     LevelSetMaintenanceRequest& request,
     const Parameters& params,
-    std::span<const svmp::FE::Real> target_liquid_phase_mass,
+    std::span<const svmp::FE::Real> target_active_phase_mass,
     std::vector<svmp::FE::Real>& candidate,
     LevelSetMaintenanceGeometryTransaction& transaction,
     std::span<const std::uint8_t> contact_protected_nodes = {})
@@ -4759,7 +4761,7 @@ reconcileConservativePhaseGeometry(
   return svmp::FE::level_set::reconcileConservativePhaseGeometry(
       conservativePhaseWorkflowHost(sim),
       views.front(),
-      target_liquid_phase_mass,
+      target_active_phase_mass,
       candidate,
       transaction,
       contact_protected_nodes);

@@ -330,8 +330,8 @@ TEST(LevelSetConservativePhaseState,
         EXPECT_NEAR(negative.phase_indicator[i] +
                         positive.phase_indicator[i],
                     1.0, 3.0e-14);
-        EXPECT_NEAR(negative.liquid_phase_mass[i] +
-                        positive.liquid_phase_mass[i],
+        EXPECT_NEAR(negative.active_phase_mass[i] +
+                        positive.active_phase_mass[i],
                     graph.lumped_control_volume[i], 3.0e-14);
     }
     EXPECT_NEAR(negative.retained_active_measure +
@@ -405,8 +405,8 @@ TEST(LevelSetConservativePhaseState,
         EXPECT_NEAR(negative.phase_indicator[i] +
                         positive.phase_indicator[i],
                     1.0, 2.0e-13);
-        EXPECT_NEAR(negative.liquid_phase_mass[i] +
-                        positive.liquid_phase_mass[i],
+        EXPECT_NEAR(negative.active_phase_mass[i] +
+                        positive.active_phase_mass[i],
                     graph.lumped_control_volume[i], 2.0e-13);
     }
 }
@@ -472,8 +472,8 @@ TEST(LevelSetConservativePhaseState,
         ASSERT_TRUE(perturbed.success) << perturbed.diagnostic;
         for (std::size_t row = 0u; row < graph.nodes; ++row) {
             const FE::Real finite_difference =
-                (perturbed.liquid_phase_mass[row] -
-                 baseline.liquid_phase_mass[row]) /
+                (perturbed.active_phase_mass[row] -
+                 baseline.active_phase_mass[row]) /
                 epsilon;
             EXPECT_NEAR(finite_difference, -matrix[row][column],
                         8.0e-7);
@@ -508,7 +508,7 @@ TEST(LevelSetConservativePhaseState, ScalingNullModeIsTheLevelSetRelativeToItsIs
         norm2 += phi[node] * phi[node];
     }
     for (std::size_t node = 0u; node < graph.nodes; ++node) increment[node] -= along / norm2 * phi[node];
-    auto target = projection.liquid_phase_mass;
+    auto target = projection.active_phase_mass;
     for (std::size_t node = 0u; node < graph.nodes; ++node) target[node] -= sensitivity.diagonal[node] * increment[node];
     for (const auto& edge : sensitivity.edges) {
         const auto first = static_cast<std::size_t>(edge.first_node);
@@ -522,7 +522,7 @@ TEST(LevelSetConservativePhaseState, ScalingNullModeIsTheLevelSetRelativeToItsIs
     // increment (or is refused).
     const auto raw = level_set::solveLevelSetP1PhaseGeometryCorrection(
         sensitivity, FE::geometry::CutIntegrationSide::Negative, shifted,
-        projection.liquid_phase_mass, target, {});
+        projection.active_phase_mass, target, {});
     FE::Real raw_error = raw.success ? 0.0 : 1.0;
     for (std::size_t node = 0u; raw.success && node < graph.nodes; ++node) {
         raw_error = std::max(raw_error, std::abs(raw.level_set_increment[node] - increment[node]));
@@ -532,7 +532,7 @@ TEST(LevelSetConservativePhaseState, ScalingNullModeIsTheLevelSetRelativeToItsIs
     signed_options.isovalue = 3.0;
     const auto correction = level_set::solveLevelSetP1PhaseGeometryCorrection(
         sensitivity, FE::geometry::CutIntegrationSide::Negative, shifted,
-        projection.liquid_phase_mass, target, signed_options);
+        projection.active_phase_mass, target, signed_options);
     ASSERT_TRUE(correction.success) << correction.diagnostic;
     for (std::size_t node = 0u; node < graph.nodes; ++node) {
         EXPECT_NEAR(correction.level_set_increment[node], increment[node], 2.0e-11);
@@ -589,7 +589,7 @@ TEST(LevelSetConservativePhaseState,
         matrix_increment[second] +=
             edge.coefficient * expected_increment[first];
     }
-    auto target_mass = projection.liquid_phase_mass;
+    auto target_mass = projection.active_phase_mass;
     for (std::size_t node = 0u; node < graph.nodes; ++node) {
         target_mass[node] -= matrix_increment[node];
     }
@@ -599,19 +599,19 @@ TEST(LevelSetConservativePhaseState,
             sensitivity,
             FE::geometry::CutIntegrationSide::Negative,
             phi,
-            projection.liquid_phase_mass,
+            projection.active_phase_mass,
             target_mass);
     ASSERT_TRUE(correction.success) << correction.diagnostic;
     EXPECT_TRUE(correction.target_compatible);
     EXPECT_TRUE(correction.linear_solve_converged);
     EXPECT_EQ(correction.interface_components, 1u);
     ASSERT_EQ(correction.level_set_increment.size(), graph.nodes);
-    ASSERT_EQ(correction.predicted_liquid_mass_change.size(), graph.nodes);
+    ASSERT_EQ(correction.predicted_active_mass_change.size(), graph.nodes);
     for (std::size_t node = 0u; node < graph.nodes; ++node) {
         EXPECT_NEAR(correction.level_set_increment[node],
                     expected_increment[node], 2.0e-11);
-        EXPECT_NEAR(correction.predicted_liquid_mass_change[node],
-                    target_mass[node] - projection.liquid_phase_mass[node],
+        EXPECT_NEAR(correction.predicted_active_mass_change[node],
+                    target_mass[node] - projection.active_phase_mass[node],
                     2.0e-12);
     }
     EXPECT_LT(correction.maximum_predicted_mass_residual, 2.0e-12);
@@ -624,7 +624,7 @@ TEST(LevelSetConservativePhaseState,
             fixture.system, fixture.indicator, graph, positive_options);
     ASSERT_TRUE(positive_projection.success)
         << positive_projection.diagnostic;
-    auto positive_target = positive_projection.liquid_phase_mass;
+    auto positive_target = positive_projection.active_phase_mass;
     for (std::size_t node = 0u; node < graph.nodes; ++node) {
         positive_target[node] += matrix_increment[node];
     }
@@ -633,7 +633,7 @@ TEST(LevelSetConservativePhaseState,
             sensitivity,
             FE::geometry::CutIntegrationSide::Positive,
             phi,
-            positive_projection.liquid_phase_mass,
+            positive_projection.active_phase_mass,
             positive_target);
     ASSERT_TRUE(positive_correction.success)
         << positive_correction.diagnostic;
@@ -641,13 +641,13 @@ TEST(LevelSetConservativePhaseState,
         EXPECT_NEAR(positive_correction.level_set_increment[node],
                     expected_increment[node], 2.0e-11);
         EXPECT_NEAR(
-            positive_correction.predicted_liquid_mass_change[node],
+            positive_correction.predicted_active_mass_change[node],
             positive_target[node] -
-                positive_projection.liquid_phase_mass[node],
+                positive_projection.active_phase_mass[node],
             2.0e-12);
     }
 
-    auto incompatible_target = projection.liquid_phase_mass;
+    auto incompatible_target = projection.active_phase_mass;
     for (std::size_t node = 0u; node < graph.nodes; ++node) {
         incompatible_target[node] += FE::Real{1.0e-3} * phi[node];
     }
@@ -656,7 +656,7 @@ TEST(LevelSetConservativePhaseState,
             sensitivity,
             FE::geometry::CutIntegrationSide::Negative,
             phi,
-            projection.liquid_phase_mass,
+            projection.active_phase_mass,
             incompatible_target);
     EXPECT_FALSE(incompatible.success);
     EXPECT_FALSE(incompatible.target_compatible);

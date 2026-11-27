@@ -143,7 +143,7 @@ void requireConservativePhaseGeometryBinding(
       request.configuration->volume_cut_request->active_side);
   if (requested_side != active_side) {
     throw std::runtime_error(
-        "[svMultiPhysics::Application] Conservative phase liquid side disagrees with the active cut-volume side for level-set field '" +
+        "[svMultiPhysics::Application] Conservative phase active side disagrees with the active cut-volume side for level-set field '" +
         request.configuration->transport.level_set.field_name + "'.");
   }
   const auto marker = generatedCutContextMarkerForMaintenance(
@@ -350,7 +350,7 @@ void initializeConservativePhaseStates(
             .rootOnly()
             .quoted("field", request.configuration->transport.conservative_phase.phase_indicator.field_name)
             .quoted("level_set_field", request.configuration->transport.level_set.field_name)
-            .text("liquid_side", request.configuration->transport.conservative_phase.active_side == svmp::FE::level_set::LevelSetPhaseSide::Negative ? "negative" : "positive")
+            .text(host.record_schema.get().active_side, request.configuration->transport.conservative_phase.active_side == svmp::FE::level_set::LevelSetPhaseSide::Negative ? "negative" : "positive")
             .value("retained_measure", projection.retained_active_measure)
             .value("projected_measure", projection.projected_active_measure)
             .value("cut_context_revision", projection.cut_context_revision)
@@ -1689,7 +1689,8 @@ void writeAcceptedConservativePhaseArtifacts(
     svmp::FE::Real accepted_time,
     svmp::FE::Real time_step,
     std::uint64_t state_revision,
-    const svmp::FE::systems::CollectiveCommunicator& comm)
+    const svmp::FE::systems::CollectiveCommunicator& comm,
+    const ConservativePhaseRecordSchema& schema)
 {
   const bool locally_any_artifact_configured =
       std::any_of(
@@ -2070,7 +2071,7 @@ void writeAcceptedConservativePhaseArtifacts(
         context.region_ledger = ledger.region_ledger;
         artifact =
             svmp::FE::level_set::writeLevelSetConservativePhaseArtifact(
-                output_directory, context, ledger.transport_stage);
+                output_directory, context, ledger.transport_stage, schema);
         if (artifact.success) {
           published_artifacts.push_back(
               PublishedConservativePhaseArtifact{
@@ -2347,7 +2348,7 @@ ConservativePhaseCandidateResult applyConservativePhaseCandidates(
           request.configuration->transport.conservative_phase.phase_indicator.field_name);
       if (phase_field == svmp::FE::INVALID_FIELD_ID) {
         throw std::runtime_error(
-            "[svMultiPhysics::Application] Conservative phase candidate could not resolve its liquid-indicator field.");
+            "[svMultiPhysics::Application] Conservative phase candidate could not resolve its phase-indicator field.");
       }
       const auto raw_phase_offset = system.fieldDofOffset(phase_field);
       const auto raw_phase_count =
@@ -2584,7 +2585,7 @@ ConservativePhaseCandidateResult applyConservativePhaseCandidates(
           phase_measure < -measure_tolerance ||
           phase_measure > graph.physical_measure + measure_tolerance) {
         throw std::runtime_error(
-            "[svMultiPhysics::Application] Conservative phase stage produced an invalid liquid measure.");
+            "[svMultiPhysics::Application] Conservative phase stage produced an invalid active measure.");
       }
       accepted_phase_measures[request_index] = phase_measure;
       maintenance_ledger.split_stage_provenance =
@@ -2803,7 +2804,7 @@ ConservativePhaseCandidateResult applyConservativePhaseCandidates(
           projection.retained_active_measure;
       maintenance_ledger.post_reinitialization_mismatch =
           conservativePhaseMomentMismatch(
-              projection.liquid_phase_mass,
+              projection.active_phase_mass,
               accepted_phase_masses[request_index]);
     }
 
@@ -2830,7 +2831,7 @@ ConservativePhaseCandidateResult applyConservativePhaseCandidates(
       const auto& transport_nodes =
           maintenance_ledger.transport_stage.correction.nodes;
       if (transport_nodes.size() != graph.nodes ||
-          projection.liquid_phase_mass.size() != graph.nodes ||
+          projection.active_phase_mass.size() != graph.nodes ||
           projection.phase_indicator.size() != graph.nodes) {
         throw std::runtime_error(
             "[svMultiPhysics::Application] Conservative phase stationary-equilibrium reconciliation found incompatible transport and geometry layouts.");
@@ -2851,10 +2852,10 @@ ConservativePhaseCandidateResult applyConservativePhaseCandidates(
       }
       const auto stationary_geometry_mismatch =
           conservativePhaseMomentMismatch(
-              projection.liquid_phase_mass, previous_phase_masses);
+              projection.active_phase_mass, previous_phase_masses);
       const auto transported_geometry_mismatch =
           conservativePhaseMomentMismatch(
-              projection.liquid_phase_mass,
+              projection.active_phase_mass,
               accepted_phase_masses[request_index]);
       const auto equilibrium_tolerance =
           request.configuration->transport.conservative_phase.geometry_measure_tolerance *
@@ -2897,7 +2898,7 @@ ConservativePhaseCandidateResult applyConservativePhaseCandidates(
         assignConservativePhaseSlice(
             system, phase_field, projection.phase_indicator, candidate);
         accepted_phase_masses[request_index] =
-            projection.liquid_phase_mass;
+            projection.active_phase_mass;
         accepted_phase_measures[request_index] =
             projection.retained_active_measure;
         reconciliation.success = true;
@@ -2991,7 +2992,7 @@ ConservativePhaseCandidateResult applyConservativePhaseCandidates(
                     std::abs(projection.retained_active_measure),
                     std::abs(phase_measure)});
       const auto local_mismatch = conservativePhaseMomentMismatch(
-          projection.liquid_phase_mass,
+          projection.active_phase_mass,
           accepted_phase_masses[request_index]);
       auto& maintenance_ledger =
           result.maintenance_ledgers[request_index];
@@ -3052,7 +3053,7 @@ ConservativePhaseCandidateResult applyConservativePhaseCandidates(
       // The stream line this record replaced left std::cout at 17 digits.
       // Stream lines printed after it inherit that precision (the time
       // loop's step_start, nonlinear_done, step_accepted and loop.run()
-      // lines and the wet-volume line), so it is set as before; it can go
+      // lines and the active-volume line), so it is set as before; it can go
       // once those lines set their own.
       svmp::FE::rank_log::oopCout() << std::setprecision(17);
       svmp::FE::logRecord(
@@ -3127,10 +3128,10 @@ ConservativePhaseCandidateResult applyConservativePhaseCandidates(
                 .value("classification", classification)
                 .value("component_id", component.component_id)
                 .value("nodes", component.nodes)
-                .value("previous_liquid_measure", component.previous_active_measure)
-                .value("low_order_liquid_measure", component.low_order_active_measure)
-                .value("raw_target_liquid_measure", component.raw_target_active_measure)
-                .value("limited_liquid_measure", component.limited_active_measure)
+                .value(std::string("previous_") + host.record_schema.get().measure, component.previous_active_measure)
+                .value(std::string("low_order_") + host.record_schema.get().measure, component.low_order_active_measure)
+                .value(std::string("raw_target_") + host.record_schema.get().measure, component.raw_target_active_measure)
+                .value(std::string("limited_") + host.record_schema.get().measure, component.limited_active_measure)
                 .value("physical_boundary_mass_transfer", component.physical_boundary_mass_transfer)
                 .value("discrete_divergence_mass_source", component.discrete_divergence_mass_source)
                 .value("low_order_interior_mass_transfer", component.low_order_interior_mass_transfer)
@@ -3162,10 +3163,10 @@ ConservativePhaseCandidateResult applyConservativePhaseCandidates(
                 .value("nodes", region.member_nodes.size())
                 .value("internal_edges", region.internal_edges)
                 .value("crossing_edges", region.crossing_edges.size())
-                .value("previous_liquid_measure", region.previous_active_measure)
-                .value("low_order_liquid_measure", region.low_order_active_measure)
-                .value("raw_target_liquid_measure", region.raw_target_active_measure)
-                .value("limited_liquid_measure", region.limited_active_measure)
+                .value(std::string("previous_") + host.record_schema.get().measure, region.previous_active_measure)
+                .value(std::string("low_order_") + host.record_schema.get().measure, region.low_order_active_measure)
+                .value(std::string("raw_target_") + host.record_schema.get().measure, region.raw_target_active_measure)
+                .value(std::string("limited_") + host.record_schema.get().measure, region.limited_active_measure)
                 .value("physical_boundary_mass_transfer", region.physical_boundary_mass_transfer)
                 .value("discrete_divergence_mass_source", region.discrete_divergence_mass_source)
                 .value("low_order_crossing_mass_transfer", region.low_order_crossing_mass_transfer)

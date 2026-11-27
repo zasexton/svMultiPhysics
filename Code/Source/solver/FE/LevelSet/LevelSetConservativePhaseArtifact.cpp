@@ -611,21 +611,36 @@ template <typename... Values>
     return true;
 }
 
+// Fixed prefixes in the JSON writer share these escaped endings. Construct
+// each suffix once per artifact, including for very large nodal arrays.
+std::string jsonMemberSuffix(std::string_view name)
+{
+    std::ostringstream quoted;
+    writeJsonString(quoted, name);
+    return quoted.str().substr(1) + ':';
+}
+
+struct PhaseColumnSuffixes {
+    std::string measure;
+    std::string indicator;
+};
+
 void writeComponent(std::ostream& output,
                     const LevelSetPhaseFluxComponentLedger& component,
-                    std::string_view classification)
+                    std::string_view classification,
+                    const PhaseColumnSuffixes& columns)
 {
     output << '{' << "\"classification\":";
     writeJsonString(output, classification);
     output << ",\"component_id\":" << component.component_id
            << ",\"nodes\":" << component.nodes
-           << ",\"previous_liquid_measure\":"
+           << ",\"previous_" << columns.measure
            << component.previous_active_measure
-           << ",\"low_order_liquid_measure\":"
+           << ",\"low_order_" << columns.measure
            << component.low_order_active_measure
-           << ",\"raw_target_liquid_measure\":"
+           << ",\"raw_target_" << columns.measure
            << component.raw_target_active_measure
-           << ",\"limited_liquid_measure\":"
+           << ",\"limited_" << columns.measure
            << component.limited_active_measure
            << ",\"physical_boundary_mass_transfer\":"
            << component.physical_boundary_mass_transfer
@@ -646,7 +661,8 @@ void writeComponent(std::ostream& output,
 }
 
 void writeRegion(std::ostream& output,
-                 const LevelSetPhaseRegionLedger& region)
+                 const LevelSetPhaseRegionLedger& region,
+                 const PhaseColumnSuffixes& columns)
 {
     output << '{' << "\"name\":";
     writeJsonString(output, region.name);
@@ -681,13 +697,13 @@ void writeRegion(std::ostream& output,
                << '}';
     }
     output << "]"
-           << ",\"previous_liquid_measure\":"
+           << ",\"previous_" << columns.measure
            << region.previous_active_measure
-           << ",\"low_order_liquid_measure\":"
+           << ",\"low_order_" << columns.measure
            << region.low_order_active_measure
-           << ",\"raw_target_liquid_measure\":"
+           << ",\"raw_target_" << columns.measure
            << region.raw_target_active_measure
-           << ",\"limited_liquid_measure\":"
+           << ",\"limited_" << columns.measure
            << region.limited_active_measure
            << ",\"physical_boundary_mass_transfer\":"
            << region.physical_boundary_mass_transfer
@@ -741,12 +757,14 @@ void writeGraphIdentity(
 void writeArtifact(
     std::ostream& output,
     const LevelSetConservativePhaseArtifactContext& context,
-    const LevelSetP1PhaseTransportStageResult& stage)
+    const LevelSetP1PhaseTransportStageResult& stage,
+    const ConservativePhaseRecordSchema& schema)
 {
+    const PhaseColumnSuffixes columns{jsonMemberSuffix(schema.measure), jsonMemberSuffix(schema.indicator)};
     const auto& correction = stage.correction;
     output << std::setprecision(std::numeric_limits<Real>::max_digits10);
     const auto& split_stage = *context.split_stage_provenance;
-    output << "{\"artifact_schema_version\":3"
+    output << "{\"artifact_schema_version\":" << schema.version
            << ",\"artifact\":\"conservative_phase_flux_ledger\""
            << ",\"phase_field\":";
     writeJsonString(output, context.phase_field_name);
@@ -876,13 +894,13 @@ void writeArtifact(
     output << ",\"limited_edges\":" << correction.limited_edges
            << ",\"component_activity_tolerance\":"
            << correction.component_activity_tolerance
-           << ",\"total_previous_liquid_measure\":"
+           << ",\"total_previous_" << columns.measure
            << correction.total_previous_active_measure
-           << ",\"total_low_order_liquid_measure\":"
+           << ",\"total_low_order_" << columns.measure
            << correction.total_low_order_active_measure
-           << ",\"total_raw_target_liquid_measure\":"
+           << ",\"total_raw_target_" << columns.measure
            << correction.total_raw_target_active_measure
-           << ",\"total_limited_liquid_measure\":"
+           << ",\"total_limited_" << columns.measure
            << correction.total_limited_active_measure
            << ",\"total_physical_boundary_mass_transfer\":"
            << correction.total_physical_boundary_mass_transfer
@@ -930,17 +948,17 @@ void writeArtifact(
            << correction.raw_target_global_mass_balance_residual
            << ",\"maximum_constant_preservation_error\":"
            << correction.maximum_constant_preservation_error
-           << ",\"minimum_low_order_liquid_indicator\":"
+           << ",\"minimum_low_order_" << columns.indicator
            << correction.minimum_low_order_phase_indicator
-           << ",\"maximum_low_order_liquid_indicator\":"
+           << ",\"maximum_low_order_" << columns.indicator
            << correction.maximum_low_order_phase_indicator
-           << ",\"minimum_raw_target_liquid_indicator\":"
+           << ",\"minimum_raw_target_" << columns.indicator
            << correction.minimum_raw_target_phase_indicator
-           << ",\"maximum_raw_target_liquid_indicator\":"
+           << ",\"maximum_raw_target_" << columns.indicator
            << correction.maximum_raw_target_phase_indicator
-           << ",\"minimum_limited_liquid_indicator\":"
+           << ",\"minimum_limited_" << columns.indicator
            << correction.minimum_limited_phase_indicator
-           << ",\"maximum_limited_liquid_indicator\":"
+           << ",\"maximum_limited_" << columns.indicator
            << correction.maximum_limited_phase_indicator
            << ",\"nodes\":" << correction.nodes.size()
            << ",\"edges\":" << correction.edges.size()
@@ -1072,11 +1090,11 @@ void writeArtifact(
                << stage.sampled_nodal_velocity[index][2] << ']'
                << ",\"lumped_control_volume\":"
                << node.lumped_control_volume
-               << ",\"previous_liquid_indicator\":"
+               << ",\"previous_" << columns.indicator
                << node.previous_phase_indicator
-               << ",\"lower_liquid_indicator\":"
+               << ",\"lower_" << columns.indicator
                << node.lower_phase_indicator
-               << ",\"upper_liquid_indicator\":"
+               << ",\"upper_" << columns.indicator
                << node.upper_phase_indicator
                << ",\"physical_boundary_mass_transfer\":"
                << node.physical_boundary_mass_transfer
@@ -1096,11 +1114,11 @@ void writeArtifact(
                << node.positive_correction_factor
                << ",\"negative_correction_factor\":"
                << node.negative_correction_factor
-               << ",\"low_order_liquid_indicator\":"
+               << ",\"low_order_" << columns.indicator
                << node.low_order_phase_indicator
-               << ",\"raw_target_liquid_indicator\":"
+               << ",\"raw_target_" << columns.indicator
                << node.raw_target_phase_indicator
-               << ",\"limited_liquid_indicator\":"
+               << ",\"limited_" << columns.indicator
                << node.limited_phase_indicator
                << ",\"low_order_local_mass_balance_residual\":"
                << node.low_order_local_mass_balance_residual
@@ -1137,7 +1155,7 @@ void writeArtifact(
         if (!first_component) {
             output << ',';
         }
-        writeComponent(output, component, "resolved");
+        writeComponent(output, component, "resolved", columns);
         first_component = false;
     }
     if (correction.subthreshold_component_present) {
@@ -1146,7 +1164,7 @@ void writeArtifact(
         }
         writeComponent(output,
                        correction.subthreshold_component,
-                       "subthreshold");
+                       "subthreshold", columns);
     }
     output << "],\"regions\":[";
     if (context.region_ledger.has_value()) {
@@ -1155,7 +1173,7 @@ void writeArtifact(
             if (index != 0u) {
                 output << ',';
             }
-            writeRegion(output, context.region_ledger->regions[index]);
+            writeRegion(output, context.region_ledger->regions[index], columns);
         }
     }
     output << "]}\n";
@@ -1167,7 +1185,8 @@ LevelSetConservativePhaseArtifactResult
 writeLevelSetConservativePhaseArtifact(
     const std::filesystem::path& output_directory,
     const LevelSetConservativePhaseArtifactContext& context,
-    const LevelSetP1PhaseTransportStageResult& stage)
+    const LevelSetP1PhaseTransportStageResult& stage,
+    const ConservativePhaseRecordSchema& schema)
 {
     LevelSetConservativePhaseArtifactResult result;
     result.nodes = stage.correction.nodes.size();
@@ -1226,7 +1245,7 @@ writeLevelSetConservativePhaseArtifact(
                     "conservative phase artifact could not open its temporary file";
                 return result;
             }
-            writeArtifact(output, context, stage);
+            writeArtifact(output, context, stage, schema);
             output.flush();
             output.close();
             if (!output.good()) {

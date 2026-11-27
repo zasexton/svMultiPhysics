@@ -64,7 +64,7 @@ ConservativePhaseGeometryReconciliationResult
 reconcileConservativePhaseGeometry(
     const ConservativePhaseWorkflowHost& host,
     ConservativePhaseRequest& request,
-    std::span<const svmp::FE::Real> target_liquid_phase_mass,
+    std::span<const svmp::FE::Real> target_active_phase_mass,
     std::vector<svmp::FE::Real>& candidate,
     ConservativePhaseGeometryTransaction& transaction,
     std::span<const std::uint8_t> contact_protected_nodes)
@@ -78,7 +78,7 @@ reconcileConservativePhaseGeometry(
   auto& system = *host.fe_system;
   auto& graph = requireCurrentConservativePhaseGraph(
       system, request, /*allow_graph_rebuild=*/false);
-  if (target_liquid_phase_mass.size() != graph.nodes) {
+  if (target_active_phase_mass.size() != graph.nodes) {
     result.diagnostic =
         "Conservative phase geometry reconciliation target does not match the phase graph";
     return result;
@@ -133,8 +133,8 @@ reconcileConservativePhaseGeometry(
   const auto moment_tolerance =
       request.configuration->transport.conservative_phase.geometry_measure_tolerance *
       std::max({svmp::FE::Real{1.0}, graph.physical_measure,
-                std::accumulate(target_liquid_phase_mass.begin(),
-                                target_liquid_phase_mass.end(),
+                std::accumulate(target_active_phase_mass.begin(),
+                                target_active_phase_mass.end(),
                                 svmp::FE::Real{0.0})});
   if (!std::isfinite(moment_tolerance) ||
       !(moment_tolerance > svmp::FE::Real{0.0})) {
@@ -158,7 +158,7 @@ reconcileConservativePhaseGeometry(
           projection.diagnostic);
     }
     const auto mismatch = conservativePhaseMomentMismatch(
-        projection.liquid_phase_mass, target_liquid_phase_mass);
+        projection.active_phase_mass, target_active_phase_mass);
     if (iteration == 0) {
       result.initial_residual_norm = mismatch.residual_norm;
     }
@@ -209,8 +209,8 @@ reconcileConservativePhaseGeometry(
             sensitivity,
             projection_options.active_side,
             current_level_set,
-            projection.liquid_phase_mass,
-            target_liquid_phase_mass,
+            projection.active_phase_mass,
+            target_active_phase_mass,
             correction_options);
     if (!correction.success) {
       result.diagnostic =
@@ -329,8 +329,8 @@ reconcileConservativePhaseGeometry(
         continue;
       }
       const auto trial_mismatch = conservativePhaseMomentMismatch(
-          trial_projection.liquid_phase_mass,
-          target_liquid_phase_mass);
+          trial_projection.active_phase_mass,
+          target_active_phase_mass);
       const bool trial_reached =
           trial_mismatch.maximum_nodal_residual <= moment_tolerance &&
           std::abs(trial_mismatch.total_residual) <= moment_tolerance;

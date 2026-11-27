@@ -169,8 +169,11 @@ TEST(LevelSetConservativePhaseArtifact,
     const std::string contents{
         std::istreambuf_iterator<char>{input},
         std::istreambuf_iterator<char>{}};
-    EXPECT_NE(contents.find("\"artifact_schema_version\":3"),
-              std::string::npos);
+    EXPECT_NE(contents.find("\"artifact_schema_version\":4"), std::string::npos);
+    for (const auto* key : {"previous_active_measure", "total_limited_active_measure",
+                            "minimum_low_order_phase_indicator", "limited_phase_indicator"}) {
+        EXPECT_NE(contents.find(std::string("\"") + key + "\":"), std::string::npos) << key;
+    }
     EXPECT_NE(contents.find(
                   "\"artifact\":\"conservative_phase_flux_ledger\""),
               std::string::npos);

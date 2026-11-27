@@ -449,7 +449,7 @@ projectLevelSetP1PhaseIndicatorFromCutContext(
             return result;
         }
         result.nodes = graph.nodes;
-        result.liquid_phase_mass.assign(result.nodes, Real{0.0});
+        result.active_phase_mass.assign(result.nodes, Real{0.0});
 
         bool local_success = true;
         std::string local_diagnostic;
@@ -485,7 +485,7 @@ projectLevelSetP1PhaseIndicatorFromCutContext(
                 }
                 if (!owned_parent_cells.insert(cell).second) {
                     throw std::invalid_argument(
-                        "P1 phase projection found duplicate liquid rules for one owned cell");
+                        "P1 phase projection found duplicate active-side rules for one owned cell");
                 }
                 if (!rule->full_cell_equivalent &&
                     rule->exact_polynomial_order < 1) {
@@ -623,7 +623,7 @@ projectLevelSetP1PhaseIndicatorFromCutContext(
                         throw std::invalid_argument(
                             "P1 phase projection produced a non-finite phase moment");
                     }
-                    result.liquid_phase_mass[
+                    result.active_phase_mass[
                         static_cast<std::size_t>(cell_dofs[i])] += moment;
                     moment_sum += moment;
                 }
@@ -649,7 +649,7 @@ projectLevelSetP1PhaseIndicatorFromCutContext(
             return result;
         }
 
-        allReduceRealBufferSum(collective, result.liquid_phase_mass);
+        allReduceRealBufferSum(collective, result.active_phase_mass);
         result.retained_active_measure =
             allReduceRealSum(collective, local_measure);
         result.maximum_rule_moment_closure_residual =
@@ -668,7 +668,7 @@ projectLevelSetP1PhaseIndicatorFromCutContext(
         result.complement_bounds_satisfied = true;
         for (std::size_t node = 0; node < result.nodes; ++node) {
             const Real mass = graph.lumped_control_volume[node];
-            const Real phase_mass = result.liquid_phase_mass[node];
+            const Real phase_mass = result.active_phase_mass[node];
             if (!std::isfinite(mass) || !(mass > Real{0.0}) ||
                 !std::isfinite(phase_mass)) {
                 result.diagnostic =
@@ -1212,8 +1212,8 @@ solveLevelSetP1PhaseGeometryCorrection(
     const LevelSetP1PhaseGeometrySensitivityResult& sensitivity,
     geometry::CutIntegrationSide active_side,
     std::span<const Real> current_level_set,
-    std::span<const Real> current_liquid_phase_mass,
-    std::span<const Real> target_liquid_phase_mass,
+    std::span<const Real> current_active_phase_mass,
+    std::span<const Real> target_active_phase_mass,
     const LevelSetP1PhaseGeometryCorrectionOptions& options)
 {
     LevelSetP1PhaseGeometryCorrectionResult result;
@@ -1222,8 +1222,8 @@ solveLevelSetP1PhaseGeometryCorrection(
         if (!sensitivity.success || nodes == 0u ||
             sensitivity.diagonal.size() != nodes ||
             current_level_set.size() != nodes ||
-            current_liquid_phase_mass.size() != nodes ||
-            target_liquid_phase_mass.size() != nodes ||
+            current_active_phase_mass.size() != nodes ||
+            target_active_phase_mass.size() != nodes ||
             active_side == geometry::CutIntegrationSide::Interface) {
             result.diagnostic =
                 "P1 phase geometry correction received incompatible sensitivity, side, or state spans";
@@ -1399,8 +1399,8 @@ solveLevelSetP1PhaseGeometryCorrection(
         Real inactive_residual{0.0};
         Real mass_scale = std::max(Real{1.0}, sensitivity.interface_measure);
         for (std::size_t node = 0u; node < nodes; ++node) {
-            const Real current = current_liquid_phase_mass[node];
-            const Real target = target_liquid_phase_mass[node];
+            const Real current = current_active_phase_mass[node];
+            const Real target = target_active_phase_mass[node];
             if (!std::isfinite(current) || !std::isfinite(target)) {
                 result.diagnostic =
                     "P1 phase geometry correction found a non-finite phase moment";
@@ -1437,7 +1437,7 @@ solveLevelSetP1PhaseGeometryCorrection(
             result.target_compatible = true;
             result.linear_solve_converged = true;
             result.level_set_increment.assign(nodes, Real{0.0});
-            result.predicted_liquid_mass_change.assign(nodes, Real{0.0});
+            result.predicted_active_mass_change.assign(nodes, Real{0.0});
             result.success = true;
             result.diagnostic = "ok";
             return result;
@@ -1526,13 +1526,13 @@ solveLevelSetP1PhaseGeometryCorrection(
         std::vector<Real> matrix_increment;
         apply_matrix(increment, matrix_increment);
         result.level_set_increment = std::move(increment);
-        result.predicted_liquid_mass_change.resize(nodes, Real{0.0});
+        result.predicted_active_mass_change.resize(nodes, Real{0.0});
         for (std::size_t node = 0u; node < nodes; ++node) {
             const Real predicted = side_derivative * matrix_increment[node];
-            result.predicted_liquid_mass_change[node] = predicted;
+            result.predicted_active_mass_change[node] = predicted;
             const Real target_change =
-                target_liquid_phase_mass[node] -
-                current_liquid_phase_mass[node];
+                target_active_phase_mass[node] -
+                current_active_phase_mass[node];
             result.maximum_predicted_mass_residual = std::max(
                 result.maximum_predicted_mass_residual,
                 std::abs(target_change - predicted));

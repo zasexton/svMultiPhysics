@@ -32,10 +32,10 @@ struct LevelSetP1PhaseProjectionOptions {
 };
 
 /**
- * @brief Lumped projection of the retained liquid characteristic function.
+ * @brief Lumped projection of the retained active-side characteristic function.
  *
- * `liquid_phase_mass[i]` is the assembled moment
- * `integral_liquid N_i dx`. The bounded indicator is that moment divided by
+ * `active_phase_mass[i]` is the assembled moment
+ * `integral_active N_i dx`. The bounded indicator is that moment divided by
  * the graph control volume. Both vectors use the phase field's global DOF
  * numbering and are replicated after communicator reduction.
  */
@@ -61,7 +61,7 @@ struct LevelSetP1PhaseProjectionResult {
     Real maximum_phase_indicator{0.0};
     Real maximum_lower_bound_violation{0.0};
     Real maximum_upper_bound_violation{0.0};
-    std::vector<Real> liquid_phase_mass{};
+    std::vector<Real> active_phase_mass{};
     std::vector<Real> phase_indicator{};
     std::string diagnostic{};
 };
@@ -169,7 +169,7 @@ struct LevelSetP1PhaseGeometryCorrectionResult {
     Real linear_residual_norm{0.0};
     Real maximum_predicted_mass_residual{0.0};
     std::vector<Real> level_set_increment{};
-    std::vector<Real> predicted_liquid_mass_change{};
+    std::vector<Real> predicted_active_mass_change{};
     std::string diagnostic{};
 };
 
@@ -178,8 +178,8 @@ solveLevelSetP1PhaseGeometryCorrection(
     const LevelSetP1PhaseGeometrySensitivityResult& sensitivity,
     geometry::CutIntegrationSide active_side,
     std::span<const Real> current_level_set,
-    std::span<const Real> current_liquid_phase_mass,
-    std::span<const Real> target_liquid_phase_mass,
+    std::span<const Real> current_active_phase_mass,
+    std::span<const Real> target_active_phase_mass,
     const LevelSetP1PhaseGeometryCorrectionOptions& options = {});
 
 } // namespace svmp::FE::level_set

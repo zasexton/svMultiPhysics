@@ -35,6 +35,7 @@
  */
 
 #include "Core/Types.h"
+#include "LevelSet/ConservativePhaseRecordSchema.h"
 #include "LevelSet/LevelSetConservativePhaseOperator.h"
 #include "LevelSet/LevelSetConservativePhaseRegions.h"
 #include "LevelSet/LevelSetConservativePhaseState.h"
@@ -206,6 +207,9 @@ struct ConservativePhaseWorkflowHost {
     /// revision helpers, S9).
     std::function<std::uint64_t(const backends::GenericVector& state)>
         operator_state_fingerprint{};
+
+    std::reference_wrapper<const ConservativePhaseRecordSchema> record_schema{
+        defaultConservativePhaseRecordSchema};
 };
 
 // ---------------------------------------------------------------------------
@@ -375,7 +379,7 @@ inline void mixConservativePhaseArtifactFingerprint(
     ConservativePhaseRequest& request,
     bool allow_graph_rebuild = true);
 
-/// Projection options of @p request: its generated interface marker, liquid
+/// Projection options of @p request: its generated interface marker, active
 /// side and invariant tolerance.  Rank-local.
 [[nodiscard]] LevelSetP1PhaseProjectionOptions conservativePhaseProjectionOptions(
     const systems::FESystem& system,
@@ -484,7 +488,8 @@ void writeAcceptedConservativePhaseArtifacts(
     Real accepted_time,
     Real time_step,
     std::uint64_t state_revision,
-    const systems::CollectiveCommunicator& comm);
+    const systems::CollectiveCommunicator& comm,
+    const ConservativePhaseRecordSchema& schema = defaultConservativePhaseRecordSchema);
 
 /**
  * @brief Applies the conservative-phase candidate of the step attempt staged

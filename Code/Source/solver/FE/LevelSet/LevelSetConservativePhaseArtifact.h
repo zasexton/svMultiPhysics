@@ -7,6 +7,7 @@
  */
 
 #include "Core/Types.h"
+#include "LevelSet/ConservativePhaseRecordSchema.h"
 #include "LevelSet/LevelSetConservativePhaseOperator.h"
 #include "LevelSet/LevelSetConservativePhaseRegions.h"
 #include "LevelSet/LevelSetOptions.h"
@@ -73,7 +74,7 @@ struct LevelSetConservativePhaseArtifactContext {
     /// coefficients, communicator layout, and logical edge ownership.
     std::uint64_t graph_content_revision{0u};
     /**
-     * Operator-stage binding for the accepted phase update.  Schema-3
+     * Operator-stage binding for the accepted phase update.  Published
      * artifacts require the fixed-background, endpoint-velocity
      * Backward-Euler split and exact clamped q^n one-ring bounds implemented
      * by the production application. The lower-level advance API remains
@@ -134,6 +135,7 @@ struct LevelSetConservativePhaseArtifactResult {
 writeLevelSetConservativePhaseArtifact(
     const std::filesystem::path& output_directory,
     const LevelSetConservativePhaseArtifactContext& context,
-    const LevelSetP1PhaseTransportStageResult& stage);
+    const LevelSetP1PhaseTransportStageResult& stage,
+    const ConservativePhaseRecordSchema& schema = defaultConservativePhaseRecordSchema);
 
 } // namespace svmp::FE::level_set
