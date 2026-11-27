@@ -703,6 +703,9 @@ assembly::RequiredData analyzeRequiredData(const FormExprNode& node, FormKind ki
                 break;
             case FormExprType::CutSurfaceVariation:
                 required |= RequiredData::CutSurfaceVariations;
+                if (n.componentIndex0() != static_cast<int>(CutSurfaceComponent::NormalSpeed)) {
+                    required |= RequiredData::FullCutSurfaceVariations;
+                }
                 break;
             case FormExprType::CellDiameterVariation:
             case FormExprType::CellVolumeVariation:
@@ -847,6 +850,13 @@ std::vector<assembly::FieldRequirement> analyzeFieldRequirements(const FormExprN
     const auto visit = [&](const auto& self, const FormExprNode& n, int order) -> void {
         order = std::clamp(order, 0, 2);
         switch (n.type()) {
+            case FormExprType::CutSurfaceVariation:
+                // A supplied smooth implicit quadrature uses the level-set
+                // gradient for its physical normal speed.
+                if (n.componentIndex0() == static_cast<int>(CutSurfaceComponent::NormalSpeed)) {
+                    add(*n.fieldId(), RequiredData::SolutionGradients);
+                }
+                break;
             case FormExprType::DiscreteField:
             case FormExprType::StateField: {
                 const auto fid = n.fieldId();

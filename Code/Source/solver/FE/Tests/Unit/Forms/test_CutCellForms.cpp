@@ -20,6 +20,7 @@
 #include "Forms/Vocabulary.h"
 #include "Interfaces/LevelSetInterfaceBuilder.h"
 #include "Spaces/H1Space.h"
+#include "Tests/Support/QuadCutSnapshotFixture.h"
 #include "Spaces/ProductSpace.h"
 #include "Tests/Unit/Forms/FormsTestHelpers.h"
 #include "Tests/Unit/Forms/JITTestHelpers.h"
@@ -1873,6 +1874,124 @@ TEST(CutCellForms, HighOrderCutInterfaceTangentMatchesFixedGeometryFiniteDiffere
         deterministicScalarCoefficients(space.dofs_per_element()),
         /*eps=*/Real(2.0e-6),
         /*tol=*/Real(2.0e-6));
+}
+
+namespace {
+enum class MovingMeasure { ChordArea, VolumeFraction, ActiveWall };
+
+void checkMovingQuadMeasure(MovingMeasure measure, bool positive)
+{
+    using namespace svmp::FE;
+    namespace a = assembly;
+    namespace it = interfaces;
+    namespace fixture = svmp::FE::testing::quad_cut;
+    constexpr int cut_marker = 43, wall_marker = 7, subset_marker = 61;
+    constexpr FieldId field = 4;
+    const auto side = positive ? CutIntegrationSide::Positive : CutIntegrationSide::Negative;
+    const auto form_side = positive ? CutVolumeSide::Positive : CutVolumeSide::Negative;
+    fixture::SingleQuadBoundaryMesh mesh(wall_marker);
+    spaces::H1Space space(ElementType::Quad4, 1);
+    auto dofs = createSingleCellDofMap(4);
+    const auto u = TrialFunction(space, "phi"), v = TestFunction(space, "v");
+    // The zero source slot makes the primal integrand exactly 1, while the
+    // residual retains its declared nonlinear field and test space.
+    auto integrand = (1. + FormExpr::parameterRef(9) * u) * v;
+    if (measure == MovingMeasure::VolumeFraction) integrand = cutVolumeFraction() * integrand;
+    const bool wall = measure == MovingMeasure::ActiveWall;
+    const auto residual = wall ? integrand.dExteriorBoundary(
+        ExteriorBoundaryMeasure::generatedActiveSubset(wall_marker, subset_marker))
+                               : integrand.dCutVolume(cut_marker, form_side);
+    FormCompiler compiler, frozen;
+    auto options = compiler.options();
+    options.geometry_sensitivity.mode = GeometrySensitivityMode::LevelSetCutDomainUnknowns;
+    options.geometry_sensitivity.level_set_cut_domains.push_back(
+        {.level_set_field = field, .interface_marker = cut_marker, .side = form_side});
+    compiler.setOptions(options);
+    SymbolicNonlinearFormKernel tangent(compiler.compileResidual(residual), NonlinearKernelOutput::Both);
+    SymbolicNonlinearFormKernel primal(frozen.compileResidual(residual), NonlinearKernelOutput::VectorOnly);
+    tangent.resolveInlinableConstitutives();
+    primal.resolveInlinableConstitutives();
+
+    const auto evaluate = [&](const std::array<Real, 4>& phi, bool matrix) {
+        auto request = fixture::interfaceRequest(cut_marker);
+        it::LevelSetInterfaceDomain domain(request);
+        it::LevelSetCellCutInput input;
+        input.element_type = ElementType::Quad4;
+        input.parent_cell = 0;
+        for (int i = 0; i < 4; ++i) {
+            const auto xi = basis::ReferenceNodeLayout::get_node_coords(ElementType::Quad4, i);
+            input.node_coordinates.push_back({xi[0], xi[1], xi[2]});
+        }
+        input.level_set_values.assign(phi.begin(), phi.end());
+        it::appendLinearLevelSetCellCut2D(domain, input);
+        a::CutIntegrationContext context;
+        context.addGeneratedInterfaceDomain(domain);
+        if (wall) {
+            const auto contact = it::buildGeneratedInterfaceBoundaryIntersectionDomain(
+                fixture::contactRequest(cut_marker, wall_marker), domain, mesh);
+            auto active = fixture::activeRequest(cut_marker, wall_marker, side);
+            active.active_boundary_marker = subset_marker;
+            it::GeneratedActiveBoundaryScalarField source;
+            source.value_at_node = [&](GlobalIndex node) { return phi.at(node); };
+            context.addGeneratedActiveBoundaryDomain(it::buildGeneratedActiveBoundaryDomain(
+                active, domain, contact, mesh, source));
+        }
+        const std::array<a::FieldSolutionAccess, 1> access{{{
+            .field = field, .space = &space, .dof_map = &dofs,
+            .coefficient_source = a::FieldSolutionAccess::CoefficientSource::PrescribedData,
+            .prescribed_coefficients = phi, .prescribed_revision = 1}}};
+        const std::array<Real, 10> globals{};
+        a::StandardAssembler assembler;
+        assembler.setDofMap(dofs);
+        assembler.setFieldSolutionAccess(access);
+        assembler.setCurrentSolution(phi);
+        assembler.setJITConstants(globals);
+        a::DenseMatrixView jac(4);
+        a::DenseVectorView load(4);
+        a::AssemblyKernel& kernel = matrix ? static_cast<a::AssemblyKernel&>(tangent) : primal;
+        if (!wall) {
+            assembler.assembleCutVolumes(mesh, context, cut_marker, side, space, space, kernel,
+                                         matrix ? &jac : nullptr, &load, matrix, true);
+        }
+        if (matrix || wall) {
+            assembler.assembleCutInterfaces(mesh, context, wall ? subset_marker : cut_marker,
+                                            space, space, kernel, matrix ? &jac : nullptr,
+                                            wall ? &load : nullptr, matrix, wall);
+        }
+        std::array<Real, 5> result{};
+        for (int i = 0; i < 4; ++i) {
+            result[0] += load.getVectorEntry(i);
+            for (int j = 0; j < 4; ++j) result[1+j] += jac.getMatrixEntry(i,j);
+        }
+        return result;
+    };
+
+    // On the unit square, x+y-1/2 cuts a triangle of area 1/8. The
+    // perturbation xy vanishes on both cut edges, so its chord is unchanged.
+    // For x-1/4+t, the negative area and bottom-edge length both equal 1/4-t.
+    const bool chord = measure == MovingMeasure::ChordArea;
+    auto phi = chord ? std::array{-.5, .5, 1.5, .5} : std::array{-.25, .75, .75, -.25};
+    const auto direction = chord ? std::array{0., 0., 1., 0.} : std::array{1., 1., 1., 1.};
+    const Real fraction = positive ? .75 : .25;
+    const Real sign = positive ? 1. : -1.;
+    const Real expected_value = chord ? (positive ? .875 : .125) : (wall ? fraction : fraction * fraction);
+    const Real expected_derivative = chord ? 0. : (wall ? sign : 2. * fraction * sign);
+    const auto base = evaluate(phi, true);
+    constexpr Real h = 1.e-6;
+    auto plus = phi, minus = phi;
+    for (int j = 0; j < 4; ++j) {
+        plus[j] += h * direction[j];
+        minus[j] -= h * direction[j];
+    }
+    EXPECT_NEAR(base[0], expected_value, 2.e-14);
+    EXPECT_NEAR((evaluate(plus, false)[0] - evaluate(minus, false)[0]) / (2*h), expected_derivative, 2.e-9);
+    EXPECT_NEAR(std::inner_product(base.begin()+1, base.end(), direction.begin(), 0.),
+                expected_derivative, 2.e-12);
+}
+} // namespace
+
+TEST(CutCellForms, CutVolumeTangentUsesRetainedChordMotion) {
+    for (const bool positive : {false, true}) checkMovingQuadMeasure(MovingMeasure::ChordArea, positive);
 }
 
 enum class TractionLoad { Pressure, PlanarSum, NormalSize, PositiveNormal, History, TestGradient };

@@ -190,6 +190,7 @@ enum class RequiredData : std::uint64_t {
     MeshAccelerationGradient    = 1ull << 48, ///< Spatial Jacobian of mesh acceleration at quadrature points
     PreviousMeshVelocityGradient= 1ull << 49, ///< Spatial Jacobian of previous mesh velocity at quadrature points
     PredictedMeshVelocityGradient=1ull << 50, ///< Spatial Jacobian of predicted mesh velocity at quadrature points
+    FullCutSurfaceVariations    = 1ull << 53, ///< Point, normal or weight derivatives of the retained surface rule
     CutSurfaceVariations        = 1ull << 52, ///< Differentiated generated level-set surface quadrature
     EntityMeasureDerivatives    = 1ull << 51, ///< Derivatives of h, vol (and area) in the cell's geometry nodes (complete shape derivatives)
 

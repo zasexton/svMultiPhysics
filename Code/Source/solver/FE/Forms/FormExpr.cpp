@@ -2575,7 +2575,7 @@ FormExpr FormExpr::cutSurfaceVariation(const FormExpr &phi, const FormExpr &tria
 {
     if (!phi.isValid() || !phi.node()->fieldId() || !trial.isValid() ||
         trial.node()->type() != FormExprType::TrialFunction || component < 0 ||
-        component > static_cast<int>(CutSurfaceComponent::InverseJacobianZZ)) {
+        component > static_cast<int>(CutSurfaceComponent::NormalSpeed)) {
         throw std::invalid_argument(
             "cutSurfaceVariation requires a source field, a trial function and a valid geometry component");
     }

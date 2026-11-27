@@ -76,6 +76,7 @@ std::size_t cutSurfaceOffset(std::uint64_t component)
         return member + (component - static_cast<std::uint64_t>(first)) * sizeof(Real);
     };
     using C = CutSurfaceComponent;
+    if (component == static_cast<unsigned>(C::NormalSpeed)) return offsetof(Sample, normal_speed);
     if (component >= static_cast<unsigned>(C::InverseJacobianXX)) {
         return offset(C::InverseJacobianXX, offsetof(Sample, inverse_jacobian));
     }

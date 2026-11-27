@@ -159,6 +159,7 @@ struct CutSurfaceSampleVariation {
     std::array<Real, 3> normal{};
     Real relative_weight{};  // dw / w for this physical quadrature weight.
     Real facet_measure{};    // Absolute derivative of the entire physical facet measure.
+    Real normal_speed{};     // Sample velocity along the negative-to-positive physical normal.
 };
 
 class CutSurfaceVariationProvider {

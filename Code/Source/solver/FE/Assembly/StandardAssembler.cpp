@@ -11583,9 +11583,13 @@ void StandardAssembler::assembleCutInterfaceItem(const CutInterfaceLoop& loop,
     std::optional<forms::cut_surface::Binding> plus_variations;
     if (assemble_matrix && hasFlag(required_data, RequiredData::CutSurfaceVariations)) {
         const auto build_variations = [&](FieldId field) {
-            if (!rule.linear_corner_surface) {
+            const bool implicit_speed = !rule.linear_corner_surface &&
+                rule.curved_geometry && rule.policy.kind == geometry::CutQuadratureConstructionKind::MomentFittedImplicit &&
+                !hasFlag(required_data, RequiredData::FullCutSurfaceVariations);
+            if (!rule.linear_corner_surface && !implicit_speed) {
                 throw std::invalid_argument("differentiated cut surface requires a generated LinearCorner edge binding");
             }
+            if (implicit_speed) return forms::cut_surface::implicitNormalSpeed(context_, field);
             const auto source_id = interfaces::LevelSetInterfaceSource::fromField(field).identifier();
             FE_THROW_IF(rule.provenance.embedded_geometry_id != source_id, FEException,
                         "differentiated cut surface does not match its configured source field");

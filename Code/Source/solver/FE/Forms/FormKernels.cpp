@@ -1321,6 +1321,7 @@ Real cutSurfaceComponent(const assembly::AssemblyContext &ctx, const FormExprNod
 {
     const auto &geometry = ctx.cutSurfaceVariation(*node.fieldId(), j, q);
     const int component = *node.componentIndex0();
+    if (component == static_cast<int>(CutSurfaceComponent::NormalSpeed)) return geometry.normal_speed;
     const int first_jacobian = static_cast<int>(CutSurfaceComponent::JacobianXX);
     const int first_inverse = static_cast<int>(CutSurfaceComponent::InverseJacobianXX);
     if (component >= first_inverse) {
@@ -16461,13 +16462,10 @@ void SymbolicNonlinearFormKernel::rebuildTangentIR()
                 domain.level_set_field, phi_space, "level_set");
             const auto dphi =
                 FormExpr::trialFunction(phi_space, geometry_trial_symbol);
-            const auto grad_phi = grad(phi);
-            const auto grad_norm =
-                sqrt(inner(grad_phi, grad_phi) + FormExpr::constant(Real{1.0e-30}));
-            const auto sign = domain.side == CutVolumeSide::Negative
-                                  ? Real{-1.0}
-                                  : Real{1.0};
-            return FormExpr::constant(sign) * primal_integrand * dphi / grad_norm;
+            const auto normal_speed = FormExpr::cutSurfaceVariation(
+                phi, dphi, static_cast<int>(CutSurfaceComponent::NormalSpeed));
+            const Real sign = domain.side == CutVolumeSide::Negative ? 1. : -1.;
+            return sign * primal_integrand * normal_speed;
         };
     const auto sample_variation = [&](const LevelSetCutDomainSensitivity &domain, int component) {
         const auto &space = level_set_space_signature(domain);

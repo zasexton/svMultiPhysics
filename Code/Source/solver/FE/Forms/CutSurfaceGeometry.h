@@ -28,6 +28,8 @@ using Table = std::vector<std::vector<assembly::CutSurfaceSampleVariation>>;
                                       std::span<const Real> coefficients,
                                       const spaces::FunctionSpace& trial);
 
+[[nodiscard]] Table implicitNormalSpeed(const assembly::AssemblyContext& context, FieldId field);
+
 // Each active field builds its geometry table once per assembly of a retained rule.
 class Binding final : public assembly::CutSurfaceVariationProvider {
 public:

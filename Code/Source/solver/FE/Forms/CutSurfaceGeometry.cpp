@@ -262,7 +262,9 @@ class PhysicalSample {
     {
         assembly::CutSurfaceSampleVariation result;
         result.reference_point = arrayOf(variation.point);
-        result.point = arrayOf(jacobian * variation.point);
+        const Vector physical_motion = jacobian * variation.point;
+        result.point = arrayOf(physical_motion);
+        result.normal_speed = normal.dot(physical_motion);
         result.field_point = result.point;
         const Matrix jacobian_rate = mappingJacobianRate(hessian, jacobian, dimension, variation.point);
         const Matrix inverse_rate = (inverse * jacobian_rate * inverse) * Real{-1};
@@ -316,6 +318,22 @@ class PhysicalSample {
 };
 
 } // namespace
+
+// Explicit quadrature on a smooth implicit zero set uses the physical
+// level-set speed. A clipped linear-corner chord has its own retained motion.
+Table implicitNormalSpeed(const assembly::AssemblyContext& context, FieldId field)
+{
+    Table result(context.numTrialDofs(), std::vector<assembly::CutSurfaceSampleVariation>(context.numQuadraturePoints()));
+    for (LocalIndex q = 0; q < context.numQuadraturePoints(); ++q) {
+        const auto gradient = context.fieldGradient(field, q);
+        const Real magnitude = std::hypot(gradient[0], gradient[1], gradient[2]);
+        if (!(magnitude > 0)) unsupported("implicit interface has zero level-set gradient");
+        for (LocalIndex j = 0; j < context.numTrialDofs(); ++j) {
+            result[j][q].normal_speed = -context.trialBasisValue(j, q) / magnitude;
+        }
+    }
+    return result;
+}
 
 Table differentiateRule(const assembly::IMeshAccess &mesh, GlobalIndex cell,
                         const geometry::CutQuadratureRule &rule, const spaces::FunctionSpace &field,
