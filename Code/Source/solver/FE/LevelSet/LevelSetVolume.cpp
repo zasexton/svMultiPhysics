@@ -170,17 +170,6 @@ void globalizeVolumeResult(LevelSetVolumeResult& result,
     return add(scale(a, Real{1.0} - t), scale(b, t));
 }
 
-[[nodiscard]] Real clampVolume(Real value, Real measure) noexcept
-{
-    if (value <= Real{0.0}) {
-        return Real{0.0};
-    }
-    if (value >= measure) {
-        return measure;
-    }
-    return value;
-}
-
 [[nodiscard]] std::size_t cornerCount(ElementType type)
 {
     switch (type) {
@@ -319,124 +308,90 @@ using Point = std::array<Real, 3>;
     return Real{-1.0};
 }
 
-[[nodiscard]] Real negativeVolumeForLinearTetra(
+struct PhaseVolumes {
+    Real negative{};
+    Real positive{};
+};
+
+[[nodiscard]] PhaseVolumes phaseVolumesForLinearTetra(
     const CutInterfaceDomainRequest& request,
     GlobalIndex parent_cell,
-    std::span<const std::array<Real, 3>, 4> coordinates,
+    std::span<const Point, 4> coordinates,
     std::span<const Real, 4> signed_values,
     Real tolerance,
     const geometry::GeometryMapping* mapping,
     const quadrature::QuadratureRule* quadrature_rule)
 {
-    const auto measure_tet = [&](const Point& a, const Point& b,
-                                 const Point& c, const Point& d) {
+    const auto measure_tet = [&](const Point& a, const Point& b, const Point& c, const Point& d) {
         if (!mapping) {
             return tetraVolume(a, b, c, d);
         }
         const std::array<Point, 4> vertices{a, b, c, d};
         return mappedSimplexMeasure(*mapping, *quadrature_rule, vertices);
     };
-    const Real measure = measure_tet(
-        coordinates[0], coordinates[1], coordinates[2], coordinates[3]);
-    const Real simple_fraction =
-        negativeFractionFromValues(signed_values, tolerance);
-    if (simple_fraction >= Real{0.0}) {
-        return simple_fraction * measure;
+    const Real measure = measure_tet(coordinates[0], coordinates[1], coordinates[2], coordinates[3]);
+    const Real full_side = negativeFractionFromValues(signed_values, tolerance);
+    if (full_side >= 0) {
+        return {full_side * measure, (1 - full_side) * measure};
     }
-
-    auto clipped_volume = [&]() {
-        std::array<std::size_t, 4> inside{};
-        std::array<std::size_t, 4> outside{};
-        std::size_t inside_count = 0u;
-        std::size_t outside_count = 0u;
-        for (std::size_t i = 0; i < signed_values.size(); ++i) {
-            if (signed_values[i] <= tolerance) {
-                inside[inside_count++] = i;
-            } else {
-                outside[outside_count++] = i;
+    if (!mapping) {
+        LevelSetCellCutInput input{};
+        input.parent_cell = parent_cell;
+        input.element_type = ElementType::Tetra4;
+        input.node_coordinates.assign(coordinates.begin(), coordinates.end());
+        for (const Real value : signed_values) {
+            input.level_set_values.push_back(value + request.isovalue);
+        }
+        const auto cut = interfaces::cutLinearLevelSetCell3D(request, input);
+        for (const auto& fragment : cut.fragments) {
+            if (fragment.active()) {
+                return {fragment.negative_volume_fraction * measure,
+                        fragment.positive_volume_fraction * measure};
             }
         }
-        if (inside_count == 0u) {
-            return Real{0.0};
+    }
+    // Mapped tetrahedra and cuts with no active surface still have a volume
+    // on each side. Integrate both clipped regions so a thin phase survives.
+    std::array<std::size_t, 4> negative{}, positive{};
+    std::size_t num_negative = 0, num_positive = 0;
+    for (std::size_t i = 0; i < signed_values.size(); ++i) {
+        if (signed_values[i] <= tolerance) {
+            negative[num_negative++] = i;
+        } else {
+            positive[num_positive++] = i;
         }
-        if (outside_count == 0u) {
-            return measure;
+    }
+    const auto intersection = [&](std::size_t a, std::size_t b) {
+        if (std::abs(signed_values[b]) < std::abs(signed_values[a])) {
+            std::swap(a, b);
         }
-
-        auto interface_point = [&](std::size_t inside_index,
-                                   std::size_t outside_index) {
-            const Real vi = signed_values[inside_index];
-            const Real vj = signed_values[outside_index];
-            if (std::abs(vi) <= tolerance) {
-                return coordinates[inside_index];
-            }
-            if (std::abs(vj) <= tolerance) {
-                return coordinates[outside_index];
-            }
-            const Real denom = vi - vj;
-            Real t = denom != Real{0.0} ? vi / denom : Real{0.0};
-            t = std::clamp(t, Real{0.0}, Real{1.0});
-            return interpolatePoint(coordinates[inside_index],
-                                    coordinates[outside_index],
-                                    t);
-        };
-
-        if (inside_count == 1u) {
-            const auto a = inside[0];
-            const auto p0 = interface_point(a, outside[0]);
-            const auto p1 = interface_point(a, outside[1]);
-            const auto p2 = interface_point(a, outside[2]);
-            return clampVolume(
-                measure_tet(coordinates[a], p0, p1, p2),
-                measure);
+        if (std::abs(signed_values[a]) <= tolerance) {
+            return coordinates[a];
         }
-        if (inside_count == 3u) {
-            const auto p = outside[0];
-            const auto q0 = interface_point(inside[0], p);
-            const auto q1 = interface_point(inside[1], p);
-            const auto q2 = interface_point(inside[2], p);
-            return clampVolume(
-                measure - measure_tet(coordinates[p], q0, q1, q2),
-                measure);
-        }
-
-        const auto a = inside[0];
-        const auto b = inside[1];
-        const auto c = outside[0];
-        const auto d = outside[1];
-        const auto p_ac = interface_point(a, c);
-        const auto p_ad = interface_point(a, d);
-        const auto p_bc = interface_point(b, c);
-        const auto p_bd = interface_point(b, d);
-        const Real volume =
-            measure_tet(coordinates[a], coordinates[b], p_bd, p_bc) +
-            measure_tet(coordinates[a], p_ac, p_bc, p_bd) +
-            measure_tet(coordinates[a], p_ac, p_bd, p_ad);
-        return clampVolume(volume, measure);
+        const Real t = signed_values[a] / (signed_values[a] - signed_values[b]);
+        return interpolatePoint(coordinates[a], coordinates[b], t);
     };
-
-    if (mapping) {
-        return clipped_volume();
+    const auto prism = [&](const std::array<Point, 3>& a, const std::array<Point, 3>& b) {
+        return measure_tet(a[0], a[1], a[2], b[2]) + measure_tet(a[0], a[1], b[1], b[2]) +
+               measure_tet(a[0], b[0], b[1], b[2]);
+    };
+    if (num_negative == 1 || num_positive == 1) {
+        const auto lone = num_negative == 1 ? negative[0] : positive[0];
+        const auto& others = num_negative == 1 ? positive : negative;
+        std::array<Point, 3> roots{}, opposite{};
+        for (std::size_t i = 0; i < roots.size(); ++i) {
+            roots[i] = intersection(lone, others[i]);
+            opposite[i] = coordinates[others[i]];
+        }
+        const Real corner = measure_tet(coordinates[lone], roots[0], roots[1], roots[2]);
+        const Real rest = prism(opposite, roots);
+        return num_negative == 1 ? PhaseVolumes{corner, rest} : PhaseVolumes{rest, corner};
     }
-
-    LevelSetCellCutInput input{};
-    input.parent_cell = parent_cell;
-    input.element_type = ElementType::Tetra4;
-    input.node_coordinates.assign(coordinates.begin(), coordinates.end());
-    input.level_set_values.reserve(signed_values.size());
-    for (const auto value : signed_values) {
-        input.level_set_values.push_back(value + request.isovalue);
-    }
-
-    auto cut_result = interfaces::cutLinearLevelSetCell3D(request, input);
-    auto active = std::find_if(
-        cut_result.fragments.begin(),
-        cut_result.fragments.end(),
-        [](const auto& fragment) { return fragment.active(); });
-    if (active == cut_result.fragments.end()) {
-        return clipped_volume();
-    }
-    return active->negative_volume_fraction * measure;
+    const auto a = negative[0], b = negative[1], c = positive[0], d = positive[1];
+    const auto ac = intersection(a, c), ad = intersection(a, d);
+    const auto bc = intersection(b, c), bd = intersection(b, d);
+    return {prism({coordinates[a], ac, ad}, {coordinates[b], bc, bd}),
+            prism({coordinates[c], ac, bc}, {coordinates[d], ad, bd})};
 }
 
 [[nodiscard]] LevelSetGeneratedInterfaceOptions generatedInterfaceOptionsForVolume(
@@ -787,9 +742,8 @@ LevelSetVolumeResult computeLevelSetCutCellVolume(
 
         const Real simple_fraction =
             negativeFractionFromValues(signed_values, options.tolerance);
-        Real negative = simple_fraction * measure;
+        PhaseVolumes phase{};
         if (simple_fraction < Real{0.0}) {
-            negative = Real{0};
             const auto mapping = affine_triangle || affine_tetra
                 ? nullptr : geometry::makeCutCellGeometryMapping(mesh, cell_id);
             const auto simplex_type = dimension == 2 ? ElementType::Triangle3 : ElementType::Tetra4;
@@ -825,15 +779,17 @@ LevelSetVolumeResult computeLevelSetCutCellVolume(
                                                 ": " + cut_result.diagnostic);
                 }
                 for (const auto& region : cut_result.volume_regions) {
-                    if (!region.active() || region.side != geometry::CutIntegrationSide::Negative) {
+                    if (!region.active()) {
                         continue;
                     }
+                    auto& side_measure = region.side == geometry::CutIntegrationSide::Negative
+                        ? phase.negative : phase.positive;
                     if (!mapping || region.full_cell_equivalent) {
-                        negative += measure * region.volume_fraction;
+                        side_measure += measure * region.volume_fraction;
                         continue;
                     }
                     for (const auto& triangle : region.reference_subcells) {
-                        negative += triangle.measure_scale *
+                        side_measure += triangle.measure_scale *
                             mappedSimplexMeasure(*mapping, *simplex_rule,
                                 std::span(triangle.vertices).first(triangle.vertex_count));
                     }
@@ -859,12 +815,14 @@ LevelSetVolumeResult computeLevelSetCutCellVolume(
                         signed_values[tet[2]],
                         signed_values[tet[3]],
                     }};
-                    negative += negativeVolumeForLinearTetra(
+                    const auto clipped = phaseVolumesForLinearTetra(
                         request,
                         cell_id,
                         tet_coordinates,
                         tet_values,
                         options.tolerance, mapping.get(), simplex_rule.get());
+                    phase.negative += clipped.negative;
+                    phase.positive += clipped.positive;
                 }
                 ++result.cut_cells;
             } else {
@@ -872,13 +830,15 @@ LevelSetVolumeResult computeLevelSetCutCellVolume(
                     "level-set volume calculation requires a 2D or 3D mesh");
             }
         } else if (simple_fraction >= Real{1.0}) {
+            phase.negative = measure;
             ++result.full_negative_cells;
         } else {
+            phase.positive = measure;
             ++result.full_positive_cells;
         }
 
-        result.negative_volume += negative;
-        result.positive_volume += measure - negative;
+        result.negative_volume += phase.negative;
+        result.positive_volume += phase.positive;
     };
 
     std::exception_ptr local_failure;

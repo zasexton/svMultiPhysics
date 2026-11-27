@@ -857,6 +857,44 @@ TEST(LevelSetVolume, MergedRootsTakeTheCollapsedPhase)
 #endif
 }
 
+TEST(LevelSetVolume, TinySimplexPhaseIsMeasuredForEitherSign)
+{
+#if defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH
+    const std::array<std::array<FE::Real, 3>, 4> vertices{{
+        {{0, 0, 0}}, {{1, 0, 0}}, {{0, 1, 0}}, {{0, 0, 1}}}};
+    for (const int dimension : {2, 3}) {
+        SCOPED_TRACE(dimension);
+        const auto type = dimension == 2 ? FE::ElementType::Triangle3 : FE::ElementType::Tetra4;
+        const auto family = dimension == 2 ? svmp::CellFamily::Triangle : svmp::CellFamily::Tetra;
+        const auto width = dimension == 2 ? 0x1p-28 : 0x1p-19;
+        const FE::Real parent_measure = dimension == 2 ? 0.5 : 1.0 / 6.0;
+        const auto expected = parent_measure * std::pow(width, dimension);
+        const auto mesh = buildSingleCellMesh(dimension, std::span(vertices).first(dimension + 1), family);
+        FE::systems::FESystem system(mesh);
+        const auto field = system.addField({.name = "phi",
+            .space = std::make_shared<FE::spaces::H1Space>(type, 1), .components = 1});
+        system.setup();
+        for (const FE::Real sign : {-1.0, 1.0}) {
+            SCOPED_TRACE(sign);
+            std::vector<FE::Real> nodal(dimension + 1, sign * (1.0 - width));
+            nodal[0] = -sign * width;
+            std::vector<FE::Real> values(nodal.size());
+            system.projectMeshVertexValuesToFieldCoefficients(field, nodal, 1, values);
+            for (const bool generated : {false, true}) {
+                SCOPED_TRACE(generated);
+                level_set::LevelSetVolumeOptions options;
+                options.use_generated_interface_quadrature = generated;
+                const auto measured = level_set::computeLevelSetCutCellVolume(system, field, options, values);
+                ASSERT_TRUE(measured.success) << measured.diagnostic;
+                EXPECT_NEAR(sign > 0 ? measured.negative_volume : measured.positive_volume,
+                            expected, 1.0e-10 * expected);
+                EXPECT_NEAR(measured.negative_volume + measured.positive_volume, parent_measure, 1.0e-15);
+            }
+        }
+    }
+#endif
+}
+
 TEST(LevelSetVolume, FESystemOverloadUsesFieldSlice)
 {
     const ScalarFieldFixture fixture;
