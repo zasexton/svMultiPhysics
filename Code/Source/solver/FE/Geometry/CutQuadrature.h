@@ -173,13 +173,15 @@ struct CutQuadratureRule {
 using CutGeometryJacobian = std::array<std::array<Real, 3>, 3>;
 
 /** Physical geometry obtained by mapping one reference codimension-two point. */
-struct MappedCutCodimensionTwoGeometry {
+struct MappedCutFacetGeometry {
     std::array<Real, 3> interface_normal{{1.0, 0.0, 0.0}};
     std::array<Real, 3> boundary_normal{{0.0, 1.0, 0.0}};
     std::array<Real, 3> tangent{{1.0, 0.0, 0.0}};
     Real measure_scale{1.0};
     Real weight{0.0};
 };
+
+using MappedCutCodimensionTwoGeometry = MappedCutFacetGeometry;
 
 /**
  * Map a strict reference-frame d-2 quadrature point to physical geometry.

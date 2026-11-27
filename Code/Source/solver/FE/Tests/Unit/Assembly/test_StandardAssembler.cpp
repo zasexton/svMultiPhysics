@@ -51,6 +51,7 @@
 #include "Constraints/AffineConstraints.h"
 #include "Elements/LagrangeElement.h"
 #include "Basis/LagrangeBasis.h"
+#include "Basis/NodeOrderingConventions.h"
 #include "Geometry/MappingFactory.h"
 #include "Interfaces/GeneratedActiveBoundaryDomain.h"
 #include "Mesh/Mesh.h"
@@ -5914,6 +5915,81 @@ TEST(StandardAssemblerCutInterfaces,
     EXPECT_EQ(result.interface_faces_assembled, 1);
     ASSERT_EQ(kernel.last_values.size(), 1u);
     EXPECT_EQ(kernel.last_values.front(), 2);
+}
+
+TEST(StandardAssemblerFaces, FittedHexNormalLengthUsesTheGeometryOrder)
+{
+    class CurvedHex final : public SingleTetraBoundaryMeshAccess {
+    public:
+        ElementType getCellType(GlobalIndex) const override { return ElementType::Hex27; }
+        int getCellGeometryOrder(GlobalIndex) const override { return 2; }
+        void getCellNodes(GlobalIndex, std::vector<GlobalIndex>& ids) const override {
+            ids.resize(27);
+            std::iota(ids.begin(),ids.end(),0);
+        }
+        std::array<Real,3> getNodeCoordinates(GlobalIndex id) const override {
+            const auto x = basis::ReferenceNodeLayout::get_node_coords(ElementType::Hex27,id);
+            return {x[0]*(1+x[2]*x[2]), x[1]*(1+x[2]*x[2]), x[2]};
+        }
+        void getCellCoordinates(GlobalIndex, std::vector<std::array<Real,3>>& x) const override {
+            x.resize(27);
+            for (int i=0; i<27; ++i) x[i] = getNodeCoordinates(i);
+        }
+    } mesh;
+    for (int p : {1,2}) {
+        spaces::H1Space space(ElementType::Hex8,p);
+        auto dofs = createSingleCellDofMap(space.dofs_per_element());
+        StandardAssembler assembler;
+        assembler.setDofMap(dofs);
+        DenseVectorView rhs(dofs.getNumDofs());
+        const auto v = forms::TestFunction(space,"v");
+        forms::FormKernel kernel(forms::FormCompiler{}.compileLinear((v*forms::hNormal()).ds(1)));
+        ASSERT_TRUE(assembler.assembleBoundaryFaces(mesh,1,space,kernel,nullptr,&rhs).success);
+        Real total = 0.;
+        for (GlobalIndex i=0; i<dofs.getNumDofs(); ++i) total += rhs.getVectorEntry(i);
+        // For F=(x(1+z²),y(1+z²),z), volume=4 ∫(1+z²)² dz=224/15; end area=16.
+        EXPECT_NEAR(total/16., 28./15., 1e-11) << p;
+    }
+}
+
+TEST(StandardAssemblerCutInterfaces, GeneratedFaceMeasuresReferToThePhysicalFacetInEachFrame)
+{
+    MovingTetraBoundaryMeshAccess mesh;
+    spaces::H1Space space(ElementType::Tetra4,1);
+    auto dofs = createSingleCellDofMap(4);
+    StandardAssembler assembler;
+    assembler.setDofMap(dofs);
+    constexpr int marker = 317;
+    interfaces::CutInterfaceDomainRequest request;
+    request.source = interfaces::LevelSetInterfaceSource::fromField(FieldId{1},0u,1u);
+    request.interface_marker = marker;
+    request.quadrature_order = 2;
+    interfaces::LevelSetInterfaceDomain domain(request);
+    interfaces::appendLinearLevelSetCellCut3D(domain,{
+        .parent_cell=0, .element_type=ElementType::Tetra4,
+        .node_coordinates={{0,0,0},{1,0,0},{0,1,0},{0,0,1}},
+        .level_set_values={-.25,.75,-.25,-.25}});
+    CutIntegrationContext context;
+    context.addGeneratedInterfaceDomain(domain);
+    const auto v = forms::TestFunction(space,"v");
+    const auto integrated = [&](const forms::FormExpr& value, bool plus = false) {
+        const auto test = plus ? v.plus() : v;
+        forms::FormKernel kernel(forms::FormCompiler{}.compileLinear((test * value).dI(marker)));
+        DenseVectorView rhs(4);
+        const auto result = assembler.assembleCutInterfaces(mesh,context,marker,space,space,kernel,nullptr,&rhs,false,true);
+        EXPECT_TRUE(result.success);
+        Real total=0.;
+        for (GlobalIndex i=0; i<4; ++i) total+=rhs.getVectorEntry(i);
+        return total;
+    };
+    // The face x=1/4 is stretched by 3 in y. Stretch by 2 in x changes cell volume only.
+    constexpr Real current_area = 3.*.75*.75/2.;
+    EXPECT_NEAR(integrated(forms::currentMeasure()/forms::referenceMeasure()), 3.*current_area, 1e-12);
+    EXPECT_NEAR(integrated(forms::referenceNormal().component(0)),current_area,1e-12);
+    EXPECT_NEAR(integrated(forms::currentNormal().component(0)),current_area,1e-12);
+    EXPECT_NEAR(integrated(forms::det(forms::surfaceJacobian())), 3.*current_area, 1e-12);
+    EXPECT_NEAR(integrated(forms::component(forms::surfaceJacobian(),0,2)), current_area, 1e-12);
+    EXPECT_NEAR(integrated(forms::currentNormal().plus().component(0), true), -current_area, 1e-12);
 }
 
 TEST(StandardAssemblerCutInterfaces, InternalInterfaceNormalLengthUsesFullPhysicalTetrahedronOnBothSides)

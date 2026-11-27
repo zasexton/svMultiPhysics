@@ -477,143 +477,31 @@ void mixCutVolumeBasisCacheHash(std::uint64_t& h, Real value) noexcept
     return max_entries;
 }
 
-[[nodiscard]] Real norm3(const AssemblyContext::Vector3D& v) noexcept
+void mapCutFacetFrame(
+    const geometry::CutQuadratureRule& rule, int dimension,
+    std::span<const AssemblyContext::Matrix3x3> jacobians,
+    std::span<const AssemblyContext::Matrix3x3> inverses,
+    std::span<const Real> determinants, std::vector<Real>& measures,
+    std::vector<AssemblyContext::Vector3D>& normals,
+    std::vector<AssemblyContext::Vector3D>* boundary_normals,
+    std::vector<AssemblyContext::Matrix3x3>* surface_jacobians)
 {
-    return std::sqrt(v[0] * v[0] + v[1] * v[1] + v[2] * v[2]);
-}
-
-[[nodiscard]] AssemblyContext::Vector3D normalizeOr(
-    const AssemblyContext::Vector3D& v,
-    const AssemblyContext::Vector3D& fallback) noexcept
-{
-    const Real n = norm3(v);
-    if (n <= Real{1.0e-30}) {
-        return fallback;
+    const auto n = rule.points.size();
+    FE_THROW_IF(jacobians.size() != n || inverses.size() != n || determinants.size() != n,
+                FEException, "generated facet and cell frame quadrature sizes differ");
+    measures.resize(n);
+    normals.resize(n);
+    if (boundary_normals) boundary_normals->resize(n);
+    if (surface_jacobians) surface_jacobians->resize(n);
+    const int facet_dim = rule.geometric_dimension < 0 ? dimension - 1 : rule.geometric_dimension;
+    for (std::size_t q = 0; q < n; ++q) {
+        const auto mapped = geometry::mapReferenceCutFacetGeometry(
+            rule.points[q], dimension, facet_dim, jacobians[q], inverses[q], determinants[q],
+            surface_jacobians ? &(*surface_jacobians)[q] : nullptr);
+        normals[q] = mapped.interface_normal;
+        measures[q] = mapped.measure_scale;
+        if (boundary_normals) (*boundary_normals)[q] = mapped.boundary_normal;
     }
-    return {{v[0] / n, v[1] / n, v[2] / n}};
-}
-
-[[nodiscard]] AssemblyContext::Vector3D referenceToPhysicalVector(
-    const AssemblyContext::Matrix3x3& J,
-    const AssemblyContext::Vector3D& v) noexcept
-{
-    return {{
-        J[0][0] * v[0] + J[0][1] * v[1] + J[0][2] * v[2],
-        J[1][0] * v[0] + J[1][1] * v[1] + J[1][2] * v[2],
-        J[2][0] * v[0] + J[2][1] * v[1] + J[2][2] * v[2],
-    }};
-}
-
-[[nodiscard]] AssemblyContext::Vector3D inverseTransposeReferenceNormal(
-    const AssemblyContext::Matrix3x3& J_inv,
-    const AssemblyContext::Vector3D& n) noexcept
-{
-    return {{
-        J_inv[0][0] * n[0] + J_inv[1][0] * n[1] + J_inv[2][0] * n[2],
-        J_inv[0][1] * n[0] + J_inv[1][1] * n[1] + J_inv[2][1] * n[2],
-        J_inv[0][2] * n[0] + J_inv[1][2] * n[1] + J_inv[2][2] * n[2],
-    }};
-}
-
-void remapCutInterfaceGeometry(AssemblyContext& context,
-                               const geometry::CutQuadratureRule& rule,
-                               int dimension,
-                               const char* error_prefix)
-{
-    const auto n_qpts = context.numQuadraturePoints();
-    FE_THROW_IF(rule.points.size() != static_cast<std::size_t>(n_qpts), FEException,
-                std::string(error_prefix) + ": cut-interface rule/context quadrature mismatch");
-
-    auto integration_weights = context.integrationWeightsWritable();
-    const auto jacobians = context.jacobians();
-    const auto inverse_jacobians = context.inverseJacobians();
-    const auto jacobian_dets = context.jacobianDets();
-    std::vector<AssemblyContext::Vector3D> normals;
-    normals.reserve(rule.points.size());
-    // A generated rule on the physical boundary (a contact line or an active
-    // boundary subset) also carries the boundary's outward normal (boundaryNormal()).
-    const bool on_physical_boundary = rule.provenance.parent_boundary_entity >= 0;
-    std::vector<AssemblyContext::Vector3D> boundary_normals;
-    if (on_physical_boundary) {
-        boundary_normals.reserve(rule.points.size());
-    }
-
-    const int geometric_dimension =
-        rule.geometric_dimension >= 0 ? rule.geometric_dimension
-                                      : dimension - 1;
-    FE_THROW_IF(geometric_dimension < 0 ||
-                    geometric_dimension >= dimension,
-                FEException,
-                std::string(error_prefix) +
-                    ": invalid generated-interface geometric dimension");
-    FE_THROW_IF(geometric_dimension != dimension - 1 &&
-                    geometric_dimension != dimension - 2,
-                FEException,
-                std::string(error_prefix) +
-                    ": only codimension-one and codimension-two generated-interface rules are supported");
-
-    for (LocalIndex q = 0; q < n_qpts; ++q) {
-        const auto& qp = rule.points[static_cast<std::size_t>(q)];
-        if (geometric_dimension == dimension - 2) {
-            geometry::MappedCutCodimensionTwoGeometry mapped;
-            try {
-                mapped = geometry::mapReferenceCutCodimensionTwoGeometry(
-                    qp, dimension, jacobians[q], inverse_jacobians[q]);
-            } catch (const std::invalid_argument& error) {
-                FE_THROW(FEException,
-                         std::string(error_prefix) + ": " + error.what());
-            }
-            normals.push_back(mapped.interface_normal);
-            if (on_physical_boundary) {
-                boundary_normals.push_back(mapped.boundary_normal);
-            }
-            integration_weights[q] = mapped.weight;
-            continue;
-        }
-
-        AssemblyContext::Vector3D n_ref{{qp.normal[0], qp.normal[1], qp.normal[2]}};
-        n_ref = normalizeOr(n_ref, AssemblyContext::Vector3D{{Real{1.0}, Real{0.0}, Real{0.0}}});
-
-        const auto n_phys_raw = inverseTransposeReferenceNormal(inverse_jacobians[q], n_ref);
-        const auto n_phys = normalizeOr(n_phys_raw, n_ref);
-        normals.push_back(n_phys);
-        if (on_physical_boundary) {
-            // As the cut-quadrature mapping: the point's boundary normal when
-            // it carries one, else its (boundary facet) normal.
-            const AssemblyContext::Vector3D n_boundary_ref{
-                {qp.boundary_normal[0], qp.boundary_normal[1], qp.boundary_normal[2]}};
-            boundary_normals.push_back(
-                norm3(n_boundary_ref) > Real{0.0}
-                    ? normalizeOr(inverseTransposeReferenceNormal(inverse_jacobians[q], n_boundary_ref), n_phys)
-                    : n_phys);
-        }
-
-        Real measure_scale = Real{1.0};
-        if (geometric_dimension == dimension - 1 && dimension == 3) {
-            measure_scale = std::abs(jacobian_dets[q]) * norm3(n_phys_raw);
-        } else if (geometric_dimension == dimension - 1 && dimension == 2) {
-            const AssemblyContext::Vector3D tangent_ref{
-                {-n_ref[1], n_ref[0], Real{0.0}}};
-            const auto tangent_phys =
-                referenceToPhysicalVector(jacobians[q], tangent_ref);
-            measure_scale = norm3(tangent_phys);
-        } else {
-            FE_THROW(FEException,
-                     std::string(error_prefix) +
-                         ": generated cut-interface assembly requires a 2D or 3D mesh");
-        }
-
-        FE_THROW_IF(!std::isfinite(measure_scale) ||
-                        measure_scale <= Real{0.0},
-                    FEException,
-                    std::string(error_prefix) +
-                        ": invalid cut-interface measure Jacobian");
-        integration_weights[q] = qp.weight * measure_scale;
-    }
-
-    context.setNormals(normals);
-    context.setBoundaryNormals(boundary_normals);
-    context.markGeometryDirty();
 }
 
 /// The positive side's context of a two-sided generated rule takes the
@@ -651,6 +539,14 @@ void orientGeneratedInterfaceContextForSide(
     if (!context.currentNormals().empty()) {
         const auto current_normals = flip(context.currentNormals());
         context.setCurrentNormals(current_normals);
+    }
+    if (!context.surfaceJacobians().empty()) {
+        const auto source = context.surfaceJacobians();
+        std::vector<AssemblyContext::Matrix3x3> oriented(source.begin(), source.end());
+        for (auto& matrix : oriented) {
+            for (auto& row : matrix) row[2] = -row[2];
+        }
+        context.setSurfaceJacobians(oriented);
     }
     context.markGeometryDirty();
 }
@@ -9786,18 +9682,38 @@ void StandardAssembler::prepareFrameExplicitGeometry(
     GlobalIndex cell_id,
     ElementType cell_type,
     const quadrature::QuadratureRule& quad_rule,
-    RequiredData required_data)
+    RequiredData required_data,
+    const geometry::CutQuadratureRule* cut_facet)
 {
     const bool need_reference =
         hasFlag(required_data, RequiredData::ReferencePhysicalPoints) ||
         hasFlag(required_data, RequiredData::ReferenceJacobians) ||
         hasFlag(required_data, RequiredData::ReferenceMeasures) ||
+        (cut_facet && hasFlag(required_data, RequiredData::ReferenceNormals)) ||
         hasFlag(required_data, RequiredData::ConfigurationTransforms);
     const bool need_current =
         hasFlag(required_data, RequiredData::CurrentPhysicalPoints) ||
         hasFlag(required_data, RequiredData::CurrentJacobians) ||
         hasFlag(required_data, RequiredData::CurrentMeasures) ||
+        (cut_facet && hasFlag(required_data, RequiredData::CurrentNormals)) ||
         hasFlag(required_data, RequiredData::ConfigurationTransforms);
+
+    const bool need_surface_jacobians = hasFlag(required_data, RequiredData::SurfaceJacobians);
+    if (cut_facet) {
+        auto& active = scratch_active_face_geometry_;
+        std::vector<AssemblyContext::Vector3D> boundary_normals;
+        mapCutFacetFrame(*cut_facet, mesh.dimension(), context.jacobians(), context.inverseJacobians(),
+                         context.jacobianDets(), active.surface_measures, active.normals,
+                         cut_facet->provenance.parent_boundary_entity >= 0 ? &boundary_normals : nullptr,
+                         need_surface_jacobians && !need_current && !need_reference ? &active.surface_jacobians : nullptr);
+        auto weights = context.integrationWeightsWritable();
+        for (std::size_t q = 0; q < weights.size(); ++q) {
+            weights[q] = cut_facet->points[q].weight * active.surface_measures[q];
+        }
+        context.setNormals(active.normals);
+        context.setBoundaryNormals(boundary_normals);
+        context.markGeometryDirty();
+    }
 
     if (!need_reference && !need_current &&
         !hasFlag(required_data, RequiredData::SurfaceJacobians)) {
@@ -9809,6 +9725,14 @@ void StandardAssembler::prepareFrameExplicitGeometry(
                     "StandardAssembler::prepareFrameExplicitGeometry: mesh adapter cannot provide reference coordinates");
         mesh.getCellCoordinates(cell_id, CoordinateFrame::Reference, scratch_reference_geometry_.cell_coords);
         computeFrameGeometry(cell_type, quad_rule, scratch_reference_geometry_);
+        if (cut_facet) {
+            auto& face = scratch_reference_face_geometry_;
+            auto& cell = scratch_reference_geometry_;
+            mapCutFacetFrame(*cut_facet, mesh.dimension(), cell.jacobians, cell.inverse_jacobians,
+                             cell.jacobian_determinants, cell.measures, face.normals, nullptr,
+                             need_surface_jacobians && !need_current ? &face.surface_jacobians : nullptr);
+            context.setReferenceNormals(face.normals);
+        }
         context.setReferenceGeometry(scratch_reference_geometry_.points,
                                      scratch_reference_geometry_.jacobians,
                                      scratch_reference_geometry_.inverse_jacobians,
@@ -9820,6 +9744,14 @@ void StandardAssembler::prepareFrameExplicitGeometry(
                     "StandardAssembler::prepareFrameExplicitGeometry: mesh adapter cannot provide current coordinates");
         mesh.getCellCoordinates(cell_id, CoordinateFrame::Current, scratch_current_geometry_.cell_coords);
         computeFrameGeometry(cell_type, quad_rule, scratch_current_geometry_);
+        if (cut_facet) {
+            auto& face = scratch_current_face_geometry_;
+            auto& cell = scratch_current_geometry_;
+            mapCutFacetFrame(*cut_facet, mesh.dimension(), cell.jacobians, cell.inverse_jacobians,
+                             cell.jacobian_determinants, cell.measures, face.normals, nullptr,
+                             need_surface_jacobians ? &face.surface_jacobians : nullptr);
+            context.setCurrentNormals(face.normals);
+        }
         context.setCurrentGeometry(scratch_current_geometry_.points,
                                    scratch_current_geometry_.jacobians,
                                    scratch_current_geometry_.inverse_jacobians,
@@ -9840,11 +9772,14 @@ void StandardAssembler::prepareFrameExplicitGeometry(
 
     if (hasFlag(required_data, RequiredData::SurfaceJacobians)) {
         if (need_current) {
-            context.setSurfaceJacobians(scratch_current_geometry_.jacobians);
+            context.setSurfaceJacobians(cut_facet ? scratch_current_face_geometry_.surface_jacobians
+                                                  : scratch_current_geometry_.jacobians);
         } else if (need_reference) {
-            context.setSurfaceJacobians(scratch_reference_geometry_.jacobians);
+            context.setSurfaceJacobians(cut_facet ? scratch_reference_face_geometry_.surface_jacobians
+                                                  : scratch_reference_geometry_.jacobians);
         } else {
-            context.setSurfaceJacobians(context.jacobians());
+            context.setSurfaceJacobians(cut_facet ? std::span<const AssemblyContext::Matrix3x3>(scratch_active_face_geometry_.surface_jacobians)
+                                                  : context.jacobians());
         }
     }
 }
@@ -11676,9 +11611,7 @@ void StandardAssembler::assembleCutInterfaceItem(const CutInterfaceLoop& loop,
 
     prepareGeometry(context_, mesh, cell_id, cut_rule);
     prepareBasis(context_, mesh, cell_id, test_space, trial_space, required_data, cut_rule);
-    prepareFrameExplicitGeometry(context_, mesh, cell_id, cell_type, cut_rule, required_data);
-    remapCutInterfaceGeometry(
-        context_, rule, mesh.dimension(), "StandardAssembler::assembleCutInterfaces");
+    prepareFrameExplicitGeometry(context_, mesh, cell_id, cell_type, cut_rule, required_data, &rule);
     context_.markEmbeddedBoundaryFace(cell_id, LocalIndex{0}, active_marker);
 
     BackgroundEntityMeasures parent_measures;
@@ -11703,10 +11636,7 @@ void StandardAssembler::assembleCutInterfaceItem(const CutInterfaceLoop& loop,
                 parent_measures.physical_cell_measure = std::abs(context_.jacobianDet(0)) *
                     elements::ReferenceElement::shared(cell_type).reference_measure();
             } else {
-                const int order = std::max(1, mesh.getCellGeometryOrder(cell_id));
-                // A tensor-product Jacobian determinant can have degree d*p-1 in each coordinate.
-                parent_measures.physical_cell_measure = geometry::physicalCellMeasureFromMapping(
-                    mesh, cell_id, std::max(2 * order, mesh.dimension() * order - 1));
+                parent_measures.physical_cell_measure = geometry::physicalCellMeasureFromMapping(mesh, cell_id);
             }
             parent_measures.physical_parent_face_measure =
                 std::accumulate(
@@ -11740,9 +11670,7 @@ void StandardAssembler::assembleCutInterfaceItem(const CutInterfaceLoop& loop,
     if (use_two_sided_kernel) {
         prepareGeometry(context_plus, mesh, cell_id, cut_rule);
         prepareBasis(context_plus, mesh, cell_id, test_space, trial_space, required_data, cut_rule);
-        prepareFrameExplicitGeometry(context_plus, mesh, cell_id, cell_type, cut_rule, required_data);
-        remapCutInterfaceGeometry(
-            context_plus, rule, mesh.dimension(), "StandardAssembler::assembleCutInterfaces");
+        prepareFrameExplicitGeometry(context_plus, mesh, cell_id, cell_type, cut_rule, required_data, &rule);
         context_plus.markEmbeddedBoundaryFace(cell_id, LocalIndex{0}, active_marker);
         if (parent_measures.physical_parent_face_measure >
             Real{0.0}) {
@@ -18266,7 +18194,8 @@ void StandardAssembler::prepareContextFace(
         }
 
         Real cell_volume = 0.0;
-        const auto cell_quad_rule = resolveQuadratureRule(test_space, cell_id, cell_type);
+        const auto cell_quad_rule = quadrature::QuadratureFactory::create_pinned(cell_type,
+            geometry::cellMeasureQuadratureOrder(mesh.getCellGeometryOrder(cell_id), mesh.dimension()));
         const auto& cell_quad_points = cell_quad_rule->points();
         const auto& cell_quad_weights = cell_quad_rule->weights();
         for (std::size_t q = 0; q < cell_quad_points.size(); ++q) {

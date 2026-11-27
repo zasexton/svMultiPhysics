@@ -694,7 +694,8 @@ private:
         GlobalIndex cell_id,
         ElementType cell_type,
         const quadrature::QuadratureRule& quad_rule,
-        RequiredData required_data);
+        RequiredData required_data,
+        const geometry::CutQuadratureRule* cut_facet = nullptr);
 
     void computeFrameGeometry(
         ElementType cell_type,

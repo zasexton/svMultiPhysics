@@ -60,6 +60,17 @@ struct MappedCutQuadratureRule {
     const assembly::IMeshAccess& mesh,
     GlobalIndex cell_id);
 
+/** Degree needed for a tensor-product geometry determinant in d dimensions. */
+[[nodiscard]] int cellMeasureQuadratureOrder(int geometry_order, int dimension) noexcept;
+
+/** Map a generated facet or boundary intersection. If requested, the surface
+ *  Jacobian maps an orthonormal reference tangent frame and stores the outward
+ *  unit normal in its last column, as on fitted faces. */
+[[nodiscard]] MappedCutFacetGeometry mapReferenceCutFacetGeometry(
+    const CutQuadraturePoint& point, int parent_dimension, int geometric_dimension,
+    const CutGeometryJacobian& jacobian, const CutGeometryJacobian& inverse_jacobian,
+    Real determinant, CutGeometryJacobian* surface_jacobian = nullptr);
+
 [[nodiscard]] Real physicalCellMeasureFromMapping(
     const assembly::IMeshAccess& mesh,
     GlobalIndex cell_id,

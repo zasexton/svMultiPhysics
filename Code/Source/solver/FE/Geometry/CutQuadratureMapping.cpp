@@ -177,6 +177,72 @@ std::shared_ptr<GeometryMapping> makeCutCellGeometryMapping(
     return MappingFactory::create(request, nodes);
 }
 
+int cellMeasureQuadratureOrder(int geometry_order, int dimension) noexcept
+{
+    const int p = std::max(1, geometry_order);
+    return std::max(2 * p, dimension * p - 1);
+}
+
+MappedCutFacetGeometry mapReferenceCutFacetGeometry(
+    const CutQuadraturePoint& point, int parent_dimension, int geometric_dimension,
+    const CutGeometryJacobian& jacobian, const CutGeometryJacobian& inverse_jacobian,
+    Real determinant, CutGeometryJacobian* surface_jacobian)
+{
+    MappedCutFacetGeometry mapped;
+    Point tangent0{}, tangent1{};
+    const auto map_tangent = [&](const Point& t) {
+        Point mapped_t{};
+        for (std::size_t d = 0; d < 3; ++d) {
+            for (std::size_t k = 0; k < 3; ++k) mapped_t[d] += jacobian[d][k] * t[k];
+        }
+        return mapped_t;
+    };
+    if (geometric_dimension == parent_dimension - 2) {
+        mapped = mapReferenceCutCodimensionTwoGeometry(point, parent_dimension, jacobian, inverse_jacobian);
+        if (surface_jacobian && geometric_dimension == 1) {
+            for (std::size_t d = 0; d < 3; ++d) tangent0[d] = mapped.measure_scale * mapped.tangent[d];
+        }
+    } else if (geometric_dimension == parent_dimension - 1) {
+        const auto n = normalized(norm(point.boundary_normal) > 0 ? point.boundary_normal : point.normal);
+        const auto covector = mapCovector(inverse_jacobian, n);
+        mapped.boundary_normal = normalized(covector);
+        mapped.interface_normal = normalized(mapCovector(inverse_jacobian, point.normal));
+        if (parent_dimension == 2) {
+            tangent0 = map_tangent({-n[1], n[0], 0});
+            mapped.measure_scale = norm(tangent0);
+        } else {
+            mapped.measure_scale = std::abs(determinant) * norm(covector);
+            if (surface_jacobian && parent_dimension == 3) {
+                // The cut rule's weights already carry reference area. Choose
+                // orthonormal tangents, starting perpendicular to the least aligned axis.
+                const auto cross = [](const Point& a, const Point& b) -> Point {
+                    return {a[1]*b[2]-a[2]*b[1], a[2]*b[0]-a[0]*b[2], a[0]*b[1]-a[1]*b[0]};
+                };
+                Point axis{};
+                const auto least = std::min_element(n.begin(), n.end(), [](Real a, Real b) {
+                    return std::abs(a) < std::abs(b);
+                });
+                axis[static_cast<std::size_t>(least - n.begin())] = Real{1};
+                const auto t = normalized(cross(axis, n));
+                tangent0 = map_tangent(t);
+                tangent1 = map_tangent(cross(n, t));
+            }
+        }
+        mapped.weight = point.weight * mapped.measure_scale;
+        if (!(mapped.measure_scale > 0) || !std::isfinite(mapped.measure_scale)) {
+            throw std::invalid_argument("cut facet has an invalid mapped measure");
+        }
+    } else {
+        throw std::invalid_argument("cut facet mapping requires codimension one or two");
+    }
+    if (surface_jacobian) {
+        for (std::size_t d = 0; d < 3; ++d) {
+            (*surface_jacobian)[d] = {tangent0[d], tangent1[d], mapped.interface_normal[d]};
+        }
+    }
+    return mapped;
+}
+
 Real physicalCellMeasureFromMapping(const assembly::IMeshAccess& mesh,
                                     GlobalIndex cell_id,
                                     int quadrature_order)
@@ -185,7 +251,7 @@ Real physicalCellMeasureFromMapping(const assembly::IMeshAccess& mesh,
     const int geometry_order = std::max(1, mesh.getCellGeometryOrder(cell_id));
     const int resolved_order = quadrature_order >= 0
                                    ? quadrature_order
-                                   : std::max(2, 2 * geometry_order);
+                                   : cellMeasureQuadratureOrder(geometry_order, mesh.dimension());
     const auto quadrature = quadrature::QuadratureFactory::create_pinned(
         mesh.getCellType(cell_id), resolved_order);
     Real measure{0.0};
@@ -288,38 +354,14 @@ MappedCutQuadratureRule mapCutQuadratureRuleToPhysical(
                 point.weight * output.absolute_jacobian_determinant;
             output.normal = normalized(
                 mapCovector(output.inverse_jacobian, point.normal));
-        } else if (geometric_dimension == parent_dimension - 1) {
-            const Point reference_normal =
-                norm(point.boundary_normal) > Real{0.0}
-                    ? point.boundary_normal
-                    : point.normal;
-            const auto mapped_normal =
-                mapCovector(output.inverse_jacobian, reference_normal);
-            const Real normal_scale = norm(mapped_normal);
-            if (!(normal_scale > Real{0.0}) || !std::isfinite(normal_scale)) {
-                throw std::invalid_argument(
-                    "retained cut boundary has an invalid mapped normal");
-            }
-            output.physical_weight = point.weight *
-                                     output.absolute_jacobian_determinant *
-                                     normal_scale;
-            output.normal = normalized(
-                mapCovector(output.inverse_jacobian, point.normal));
-            output.boundary_normal = normalized(mapped_normal);
-        } else if (geometric_dimension == parent_dimension - 2) {
-            const auto codimension_two =
-                mapReferenceCutCodimensionTwoGeometry(
-                    point,
-                    parent_dimension,
-                    output.jacobian,
-                    output.inverse_jacobian);
-            output.physical_weight = codimension_two.weight;
-            output.normal = codimension_two.interface_normal;
-            output.boundary_normal = codimension_two.boundary_normal;
-            output.tangent = codimension_two.tangent;
         } else {
-            throw std::invalid_argument(
-                "retained cut quadrature mapping supports only codimension zero, one, or two");
+            const auto facet = mapReferenceCutFacetGeometry(
+                point, parent_dimension, geometric_dimension, output.jacobian,
+                output.inverse_jacobian, output.absolute_jacobian_determinant);
+            output.physical_weight = facet.weight;
+            output.normal = facet.interface_normal;
+            output.boundary_normal = facet.boundary_normal;
+            if (geometric_dimension == parent_dimension - 2) output.tangent = facet.tangent;
         }
         if (!std::isfinite(output.physical_weight) ||
             !(output.physical_weight > Real{0.0})) {
