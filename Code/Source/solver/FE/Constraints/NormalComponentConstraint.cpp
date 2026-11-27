@@ -128,9 +128,9 @@ std::vector<FacetContribution> collectContributions(const FESystem& system,
 
     for (const auto& boundary : boundaries) {
         const int marker = boundary.physicalBoundaryMarker();
-        const auto wetted = activeBoundaryFaces(system, marker, boundary.generatedActiveBoundaryMarker());
+        const auto active_faces = activeBoundaryFaces(system, marker, boundary.generatedActiveBoundaryMarker());
         mesh.forEachBoundaryFace(marker, [&](GlobalIndex face_id, GlobalIndex cell_id) {
-            if (wetted && !wetted->contains(face_id)) {
+            if (active_faces && !active_faces->contains(face_id)) {
                 return;
             }
             const ElementType cell_type = mesh.getCellType(cell_id);
@@ -724,12 +724,17 @@ systems::SetupStorageRequirements NormalComponentConstraint::storageRequirements
 
 std::string NormalComponentConstraint::manifestDescription() const
 {
+    return manifestDescription("active");
+}
+
+std::string NormalComponentConstraint::manifestDescription(std::string_view active_subset_label) const
+{
     std::ostringstream oss;
     oss << "field=" << field_ << " markers=";
     for (std::size_t i = 0; i < boundaries_.size(); ++i) {
         oss << (i > 0 ? "," : "") << boundaries_[i].physicalBoundaryMarker();
         if (boundaries_[i].isGeneratedActiveSubset()) {
-            oss << "(wetted " << boundaries_[i].generatedActiveBoundaryMarker() << ")";
+            oss << "(" << active_subset_label << " " << boundaries_[i].generatedActiveBoundaryMarker() << ")";
         }
     }
     oss << " feature_angle=" << options_.feature_angle_degrees

@@ -2404,6 +2404,8 @@ public:
      * definition-time data; defined in SystemManifest.cpp.
      */
     [[nodiscard]] std::vector<std::string> constraintManifestLines() const;
+    /// Use the caller's name for generated boundary subsets in the manifest.
+    [[nodiscard]] std::vector<std::string> constraintManifestLines(std::string_view active_subset_label) const;
 
     [[nodiscard]] std::size_t cutVolumeKernelCount(
         int interface_marker,

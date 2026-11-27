@@ -31,6 +31,7 @@
 #include <array>
 #include <optional>
 #include <string>
+#include <string_view>
 #include <unordered_map>
 #include <vector>
 
@@ -71,6 +72,7 @@ public:
     [[nodiscard]] systems::SetupStorageRequirements storageRequirements() const noexcept override;
 
     [[nodiscard]] std::string manifestDescription() const override;
+    [[nodiscard]] std::string manifestDescription(std::string_view active_subset_label) const;
 
 private:
     /// The value of each parameter of the value at @p time.

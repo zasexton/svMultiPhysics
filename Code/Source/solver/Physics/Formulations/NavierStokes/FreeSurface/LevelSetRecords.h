@@ -9,6 +9,8 @@
 
 namespace svmp::Physics::formulations::navier_stokes::free_surface {
 
+inline constexpr char activeBoundarySubsetLabel[] = "wetted";
+
 inline constexpr FE::level_set::LevelSetRecordLabels levelSetRecordLabels{
     .snapshot_heading = "authoritative free-surface geometry",
     .snapshot_diagnostic = "free_surface_geometry_snapshot",

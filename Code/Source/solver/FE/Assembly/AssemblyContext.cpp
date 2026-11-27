@@ -785,7 +785,7 @@ AssemblyContext::Vector3D AssemblyContext::boundaryNormal(LocalIndex q) const
     if (q >= n_qpts_ || static_cast<std::size_t>(q) >= boundary_normals_.size()) {
         throw std::logic_error(
             "AssemblyContext::boundaryNormal: the boundary normal is defined on generated contact-line and "
-            "wetted-boundary rules only");
+            "active-boundary rules only");
     }
     return boundary_normals_[static_cast<std::size_t>(q)];
 }

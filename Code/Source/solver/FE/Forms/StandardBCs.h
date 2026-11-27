@@ -787,11 +787,11 @@ public:
         }
         std::vector<StrongDirichlet> out;
         out.reserve(components_.size());
-        const int wetted = targetMeasure().isGeneratedActiveSubset() ? measure_->generatedActiveBoundaryMarker() : -1;
+        const int active_marker = targetMeasure().isGeneratedActiveSubset() ? measure_->generatedActiveBoundaryMarker() : -1;
         const auto declare = [&](FormExpr value, int component) {
             out.push_back(strongDirichlet(field_id, boundary_marker_, std::move(value), symbol_, component));
             out.back().precedence = std::get<Strong>(how_).precedence;
-            out.back().active_boundary_marker = wetted;
+            out.back().active_boundary_marker = active_marker;
         };
         for (const auto& [component, value] : components_) {
             // A whole-field vector value as_vector({g0, g1, ...}) states

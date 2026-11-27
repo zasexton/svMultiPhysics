@@ -11,7 +11,9 @@
 #include "Assembly/JIT/KernelArgs.h"
 #include "Constraints/Constraint.h"
 #include "Constraints/GaugeRegistry.h"
+#include "Constraints/NormalComponentConstraint.h"
 #include "Constraints/SmallCutAggregationConstraint.h"
+#include "Constraints/StrongDirichletConstraint.h"
 #include "Forms/FormIR.h"
 #include "Forms/FormKernels.h"
 #include "Forms/JIT/JITCacheKey.h"
@@ -802,6 +804,11 @@ InstalledRow installedRow(const FESystem& system, const std::string& op, FieldId
 
 std::vector<std::string> FESystem::constraintManifestLines() const
 {
+    return constraintManifestLines("active");
+}
+
+std::vector<std::string> FESystem::constraintManifestLines(std::string_view active_subset_label) const
+{
     std::vector<std::string> lines;
     for (std::size_t i = 0; i < constraint_defs_.size(); ++i) {
         const auto& c = constraint_defs_[i];
@@ -818,8 +825,12 @@ std::vector<std::string> FESystem::constraintManifestLines() const
             continue;
         }
         oss << demangledTypeName(typeid(*c)) << " time_dependent=" << (c->isTimeDependent() ? 1 : 0);
-        std::string description = c->manifestDescription();
-        if (const auto* aggregation =
+        std::string description;
+        if (const auto* strong = dynamic_cast<const constraints::StrongDirichletConstraint*>(c.get())) {
+            description = strong->manifestDescription(active_subset_label);
+        } else if (const auto* normal = dynamic_cast<const constraints::NormalComponentConstraint*>(c.get())) {
+            description = normal->manifestDescription(active_subset_label);
+        } else if (const auto* aggregation =
                 dynamic_cast<const constraints::SmallCutAggregationConstraint*>(c.get())) {
             // The aggregation constraint is described here (FESystem is its
             // friend) so that its files stay untouched.
@@ -841,6 +852,8 @@ std::vector<std::string> FESystem::constraintManifestLines() const
                 << " max_row_l1=" << guards.maximum_row_l1_norm
                 << " rootless_fallback=" << (guards.rootless_fallback ? 1 : 0);
             description = agg.str();
+        } else {
+            description = c->manifestDescription();
         }
         if (!description.empty()) {
             oss << " " << description;

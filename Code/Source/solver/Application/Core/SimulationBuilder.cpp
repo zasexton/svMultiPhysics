@@ -1563,7 +1563,8 @@ void SimulationBuilder::setupSystem()
     for (const auto& line : svmp::FE::systems::kernelManifestLines(*components_.fe_system)) {
       std::cout << "[svMultiPhysics::Application] manifest " << line << '\n';
     }
-    for (const auto& line : svmp::FE::systems::constraintManifestLines(*components_.fe_system)) {
+    for (const auto& line : components_.fe_system->constraintManifestLines(
+             svmp::Physics::formulations::navier_stokes::free_surface::activeBoundarySubsetLabel)) {
       std::cout << "[svMultiPhysics::Application] manifest " << line << '\n';
     }
     std::cout << std::flush;

@@ -58,6 +58,7 @@
 #include <optional>
 #include <span>
 #include <string>
+#include <string_view>
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
@@ -101,6 +102,7 @@ public:
     [[nodiscard]] systems::SetupStorageRequirements storageRequirements() const noexcept override;
 
     [[nodiscard]] std::string manifestDescription() const override;
+    [[nodiscard]] std::string manifestDescription(std::string_view active_subset_label) const;
 
     /// One constrained component: slave = sum(weight * master) + g(x) * value_factor.
     struct Line {

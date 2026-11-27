@@ -656,13 +656,13 @@ struct StrongDirichlet {
         return field != INVALID_FIELD_ID && component >= -1 && value.isValid();
     }
 
-    [[nodiscard]] std::string toString() const
+    [[nodiscard]] std::string toString(std::string_view active_subset_label = "active") const
     {
         const std::string sym = (component >= 0) ? (symbol + "[" + std::to_string(component) + "]") : symbol;
         const std::string where = (boundary_marker >= 0)
                                       ? ("ds(" + std::to_string(boundary_marker) +
                                          (active_boundary_marker >= 0
-                                              ? ", wetted " + std::to_string(active_boundary_marker)
+                                              ? ", " + std::string(active_subset_label) + " " + std::to_string(active_boundary_marker)
                                               : std::string()) +
                                          ")")
                                       : "ds(*)";

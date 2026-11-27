@@ -252,6 +252,26 @@ TEST(SystemManifest, ConstraintsAreListedInRegistrationOrder)
               system_lines);
 }
 
+TEST(SystemManifest, GeneratedBoundaryDescriptionsIdentifyTheActiveSubset)
+{
+    auto s = buildSystem([](const FormExpr& u, const FormExpr& v) { return (u * v).dx(); });
+    auto bc = forms::bc::strongDirichlet(s.u_id, 7, FormExpr::constant(0.0));
+    bc.active_boundary_marker = 17;
+    EXPECT_NE(bc.toString().find("ds(7, active 17)"), std::string::npos);
+    installStrongDirichlet(*s.system, std::span(&bc, 1));
+    s.system->addSystemConstraint(std::make_unique<constraints::NormalComponentConstraint>(
+        s.u_id, std::vector{forms::ExteriorBoundaryMeasure::generatedActiveSubset(7, 17)}));
+    const auto lines = linesContaining(constraintManifestLines(*s.system), "constraint system#");
+    ASSERT_EQ(lines.size(), 2u);
+    EXPECT_NE(lines[0].find("marker=7 active=17"), std::string::npos);
+    EXPECT_NE(lines[1].find("markers=7(active 17)"), std::string::npos);
+    EXPECT_NE(bc.toString("conducting").find("ds(7, conducting 17)"), std::string::npos);
+    const auto named = linesContaining(s.system->constraintManifestLines("conducting"), "constraint system#");
+    ASSERT_EQ(named.size(), 2u);
+    EXPECT_NE(named[0].find("marker=7 conducting=17"), std::string::npos);
+    EXPECT_NE(named[1].find("markers=7(conducting 17)"), std::string::npos);
+}
+
 TEST(SystemManifest, BoundaryDataFactoriesGiveTheManifestsOfTheSpelledOutConditions)
 {
     namespace bc = forms::bc;

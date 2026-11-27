@@ -512,9 +512,9 @@ void StrongDirichletConstraint::apply(const FESystem& system, constraints::Affin
         throw std::invalid_argument("StrongDirichletConstraint: value expression must not contain test/trial functions");
     }
 
-    const auto wetted = activeBoundaryFaces(system, boundary_marker_, active_boundary_marker_);
+    const auto active_faces = activeBoundaryFaces(system, boundary_marker_, active_boundary_marker_);
     auto extracted = boundaryDofsWithCoordsByMarker(system, field_, boundary_marker_, component_, sampled_fields_,
-                                                    /*require_coefficients=*/false, wetted ? &*wetted : nullptr);
+                                                    /*require_coefficients=*/false, active_faces ? &*active_faces : nullptr);
     dropYieldedPoints(system, extracted.dofs, extracted.coords, extracted.samples);
     dofs_ = std::move(extracted.dofs);
     coords_ = std::move(extracted.coords);
@@ -596,9 +596,9 @@ bool StrongDirichletConstraint::updateValues(const FESystem& system,
                                              double time,
                                              double dt)
 {
-    const auto wetted = activeBoundaryFaces(system, boundary_marker_, active_boundary_marker_);
+    const auto active_faces = activeBoundaryFaces(system, boundary_marker_, active_boundary_marker_);
     auto extracted = boundaryDofsWithCoordsByMarker(system, field_, boundary_marker_, component_, sampled_fields_,
-                                                    /*require_coefficients=*/true, wetted ? &*wetted : nullptr);
+                                                    /*require_coefficients=*/true, active_faces ? &*active_faces : nullptr);
     dropYieldedPoints(system, extracted.dofs, extracted.coords, extracted.samples);
     FE_THROW_IF(extracted.dofs.size() != dofs_.size(), InvalidStateException,
                 "StrongDirichletConstraint::updateValues: geometry-dependent update changed constrained DOF count; rebuild constraints instead");
@@ -720,10 +720,10 @@ void StrongDirichletConstraint::dropYieldedPoints(const FESystem& system,
     }
     std::unordered_set<GlobalIndex> held;
     for (const auto& yield : yields_) {
-        const auto wetted = activeBoundaryFaces(system, yield.boundary_marker, yield.active_boundary_marker);
+        const auto active_faces = activeBoundaryFaces(system, yield.boundary_marker, yield.active_boundary_marker);
         for (const auto dof : boundaryDofsWithCoordsByMarker(system, field_, yield.boundary_marker, yield.component,
                                                              {}, /*require_coefficients=*/false,
-                                                             wetted ? &*wetted : nullptr)
+                                                             active_faces ? &*active_faces : nullptr)
                                   .dofs) {
             held.insert(dof);
         }
@@ -747,10 +747,15 @@ void StrongDirichletConstraint::dropYieldedPoints(const FESystem& system,
 
 std::string StrongDirichletConstraint::manifestDescription() const
 {
+    return manifestDescription("active");
+}
+
+std::string StrongDirichletConstraint::manifestDescription(std::string_view active_subset_label) const
+{
     std::ostringstream oss;
     oss << "field=" << field_ << " marker=" << boundary_marker_;
     if (active_boundary_marker_ >= 0) {
-        oss << " wetted=" << active_boundary_marker_;
+        oss << " " << active_subset_label << "=" << active_boundary_marker_;
     }
     oss << " component=" << component_
         << " time_dependent=" << (is_time_dependent_ ? 1 : 0)
