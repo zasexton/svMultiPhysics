@@ -242,9 +242,8 @@ struct LevelSetConservativePhaseOptions {
     Real maximum_courant{1.0};
     bool enforce_courant_limit{true};
     bool require_constant_preservation{true};
-    // Relative phasewise momentum gate applied after geometry reconciliation.
-    // The current policy is fail-closed and never changes velocity implicitly.
-    Real momentum_relative_tolerance{1.0e-10};
+    // Relative tolerance for the host's phasewise integral after reconciling geometry.
+    Real phase_integral_relative_tolerance{1.0e-10};
     bool write_flux_artifacts{false};
     int flux_artifact_cadence_steps{1};
     bool track_nonprimary_components{false};

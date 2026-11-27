@@ -348,10 +348,10 @@ void validateConservativePhaseOptions(
         throw std::invalid_argument(
             "installLevelSetTransport: conservative phase flux artifact cadence must be positive");
     }
-    if (!std::isfinite(phase.momentum_relative_tolerance) ||
-        !(phase.momentum_relative_tolerance > Real{0.0})) {
+    if (!std::isfinite(phase.phase_integral_relative_tolerance) ||
+        !(phase.phase_integral_relative_tolerance > Real{0.0})) {
         throw std::invalid_argument(
-            "installLevelSetTransport: conservative phase momentum relative tolerance must be positive and finite");
+            "installLevelSetTransport: conservative phase integral relative tolerance must be positive and finite");
     }
     try {
         static_cast<void>(makeAxisAlignedBoxPhaseRegions(

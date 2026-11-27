@@ -331,7 +331,7 @@ buildCurrentTwoFluidMomentumReconciliations(
       const auto request = std::find_if(
           maintenance_requests.begin(), maintenance_requests.end(), matches);
       const auto tolerance =
-          request->configuration->transport.conservative_phase.momentum_relative_tolerance;
+          request->configuration->transport.conservative_phase.phase_integral_relative_tolerance;
       if (!std::isfinite(tolerance) ||
           !(tolerance > svmp::FE::Real{0.0})) {
         throw std::runtime_error(

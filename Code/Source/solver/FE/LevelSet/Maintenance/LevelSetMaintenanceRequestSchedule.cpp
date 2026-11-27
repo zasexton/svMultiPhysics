@@ -315,7 +315,7 @@ bool appendLevelSetMaintenanceConfigurationScheduleWords(
       configuration.transport.conservative_phase.require_constant_preservation);
   appendMaintenanceScheduleReal(
       words,
-      configuration.transport.conservative_phase.momentum_relative_tolerance);
+      configuration.transport.conservative_phase.phase_integral_relative_tolerance);
   appendMaintenanceScheduleBool(
       words, configuration.transport.conservative_phase.write_flux_artifacts);
   appendMaintenanceScheduleSigned(

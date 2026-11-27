@@ -3884,7 +3884,7 @@ TEST(ApplicationDriverLevelSetWorkflows,
   EXPECT_EQ(first_phase.flux_artifact_cadence_steps, -1);
   EXPECT_EQ(
       requests[0].configuration->static_capillary_equilibrium.max_iterations, 2);
-  EXPECT_DOUBLE_EQ(first_phase.momentum_relative_tolerance, 1.25);
+  EXPECT_DOUBLE_EQ(first_phase.phase_integral_relative_tolerance, 1.25);
   EXPECT_FALSE(
       requests[0].configuration->transport.sign_definite_patch_bounds.enabled);
   EXPECT_TRUE(std::isnan(

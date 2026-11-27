@@ -235,7 +235,7 @@ TEST(LevelSetMaintenanceConfiguration,
     EXPECT_EQ(transport.conservative_phase.flux_artifact_cadence_steps,
               test_case.expected_cadence);
     EXPECT_EQ((*resolved)->static_capillary_equilibrium.max_iterations, 2);
-    EXPECT_DOUBLE_EQ(transport.conservative_phase.momentum_relative_tolerance,
+    EXPECT_DOUBLE_EQ(transport.conservative_phase.phase_integral_relative_tolerance,
                      1.25);
     EXPECT_FALSE(transport.sign_definite_patch_bounds.enabled);
     EXPECT_TRUE(std::isnan(

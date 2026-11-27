@@ -1544,7 +1544,7 @@ TEST(LevelSetTransport,
     const auto mesh = std::make_shared<SingleTetraMeshAccess>();
     auto phi_space = scalarSpace(mesh);
 
-    const auto expect_rejected_without_fields = [&](auto configure) {
+    const auto expect_rejected_without_fields = [&](auto configure, std::string_view expected = {}) {
         FE::systems::FESystem system(mesh);
         level_set::LevelSetTransportOptions options{};
         options.level_set.field_name = "phi";
@@ -1552,10 +1552,12 @@ TEST(LevelSetTransport,
             level_set::LevelSetVelocitySource::ConstantVector;
         options.conservative_phase.enabled = true;
         configure(options);
-        EXPECT_THROW(
-            (void)level_set::installLevelSetTransport(
-                system, phi_space, options),
-            std::invalid_argument);
+        try {
+            (void)level_set::installLevelSetTransport(system, phi_space, options);
+            ADD_FAILURE() << "invalid conservative phase options were accepted";
+        } catch (const std::invalid_argument& error) {
+            if (!expected.empty()) EXPECT_EQ(std::string_view(error.what()), expected);
+        }
         EXPECT_EQ(system.findFieldByName("phi"), FE::INVALID_FIELD_ID);
         EXPECT_EQ(system.findFieldByName("liquid_indicator"),
                   FE::INVALID_FIELD_ID);
@@ -1579,8 +1581,8 @@ TEST(LevelSetTransport,
         options.conservative_phase.flux_artifact_cadence_steps = 0;
     });
     expect_rejected_without_fields([](auto& options) {
-        options.conservative_phase.momentum_relative_tolerance = 0.0;
-    });
+        options.conservative_phase.phase_integral_relative_tolerance = 0.0;
+    }, "installLevelSetTransport: conservative phase integral relative tolerance must be positive and finite");
     expect_rejected_without_fields([](auto& options) {
         options.conservative_phase.boundary_flux_policy =
             static_cast<level_set::

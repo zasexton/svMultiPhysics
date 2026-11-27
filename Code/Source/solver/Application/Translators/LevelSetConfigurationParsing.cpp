@@ -147,7 +147,7 @@ opt::OptionSchema<Keys> makeLevelSetEquationSchema() {
       .key("Conservative_phase_momentum_relative_tolerance",
            [](Keys &keys) -> auto & {
              return keys.transport.conservative_phase
-                 .momentum_relative_tolerance;
+                 .phase_integral_relative_tolerance;
            },
            opt::RealCodec{},
            setting("relative phasewise momentum gate after reconciliation"))

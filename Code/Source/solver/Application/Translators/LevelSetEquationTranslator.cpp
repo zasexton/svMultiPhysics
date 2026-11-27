@@ -415,7 +415,7 @@ make_level_set_effective_configuration(const ls::LevelSetTransportOptions& optio
       << json_bool(
              options.conservative_phase.require_constant_preservation)
       << ",\"momentum_relative_tolerance\":"
-      << json_real(options.conservative_phase.momentum_relative_tolerance)
+      << json_real(options.conservative_phase.phase_integral_relative_tolerance)
       << ",\"momentum_reconciliation_policy\":\"phasewise_fail_closed_no_hidden_velocity_update\""
       << ",\"write_flux_artifacts\":"
       << json_bool(options.conservative_phase.write_flux_artifacts)
