@@ -14,7 +14,7 @@
  * Regenerates the cut integration context of an FE system from a level-set
  * state for every resolved cut-volume request (ActiveCutVolumeRequest): the
  * generated interface domains, the interface-boundary intersections and sharp
- * active boundaries, the authoritative free-surface geometry snapshots, the
+ * active boundaries, the authoritative level-set geometry snapshots, the
  * cut-adjacent facet sets, the constraint state and the communicator-wide
  * diagnostics.  A refresh cache keyed on a content signature keeps, resyncs
  * or reinstalls an installed context when the generating input is provably
@@ -37,6 +37,7 @@
  * service (CutGeometry).
  */
 
+#include "LevelSet/LevelSetRecordLabels.h"
 #include "Core/Types.h"
 #include "LevelSet/LevelSetConservativePhaseWorkflow.h"
 #include "LevelSet/LevelSetCutTopology.h"
@@ -101,7 +102,7 @@ struct LevelSetGeometryHost {
   /// checkpointed from, its vertex field of the level-set field's name.
   svmp::Mesh* primary_mesh{nullptr};
 
-  /// Free-surface geometry snapshots by revision key (created on first use).
+  /// Level-set geometry snapshots by revision key (created on first use).
   std::unique_ptr<svmp::FE::interfaces::LevelSetGeometrySnapshotCache>&
       level_set_geometry_snapshot_cache;
 
@@ -126,10 +127,11 @@ struct LevelSetGeometryHost {
   std::function<bool(const std::vector<ActiveCutVolumeRequest>&)>
       generated_cut_needs_every_ghost_layer{};
 
-  /// True when the FE system declares two-fluid accepted-stage diagnostics,
-  /// which integrate over the volume points of full-cell snapshot records
-  /// without the mesh: the snapshot then keeps those points.
-  bool two_fluid_accepted_stage_diagnostics_declared{false};
+  /// Retain explicit quadrature when a consumer integrates full-cell volume
+  /// records without access to the parent mesh.
+  bool consumer_requires_full_cell_volume_points{false};
+
+  const LevelSetRecordLabels& record_labels{defaultLevelSetRecordLabels};
 };
 
 // ---------------------------------------------------------------------------
@@ -235,7 +237,7 @@ struct ActiveCutContextRefreshCache {
   // RestoredTimeStepState when the accepted state has the same level set)
   // reinstalls it instead of rebuilding an identical context; see
   // reinstallRetainedActiveCutContextForRestoredState. It keeps one extra
-  // context, including its free-surface snapshot, alive from the second
+  // context, including its level-set snapshot, alive from the second
   // rebuild of the attempt until the attempt ends, so it is opt-in
   // (SVMP_RETAIN_RESTORED_CUT_CONTEXT=1): the peak memory of a 3D run grows
   // by one snapshot while only failed attempts can use it.

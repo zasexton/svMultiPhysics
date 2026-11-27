@@ -40,12 +40,12 @@ namespace FE {
 namespace interfaces {
 
 // The evaluators were the velocity and scalar evaluators of the Navier-Stokes
-// free-surface physics (FreeSurface/FreeSurfaceFieldEvaluators.cpp); they
+// level-set physics (FreeSurface/FreeSurfaceFieldEvaluators.cpp); they
 // read the field through a SnapshotFieldAccess and are otherwise unchanged.
 
 namespace {
 
-// The cell geometry mapping of the free-surface physics
+// The cell geometry mapping of the level-set physics
 // (FreeSurfaceRunSupport.cpp createCellGeometryMapping), unchanged.
 std::shared_ptr<svmp::FE::geometry::GeometryMapping> createCellGeometryMapping(
     const svmp::FE::assembly::IMeshAccess& mesh,
@@ -96,7 +96,7 @@ makeSnapshotVectorFieldEvaluator(
     throw std::runtime_error(
         "[svMultiPhysics::Application] " +
         std::string(diagnostic_context) +
-        " velocity field is incompatible with its free-surface declaration.");
+        " velocity field is incompatible with its level-set declaration.");
   }
 
   const auto cell_dofs_of = velocity_record.cell_dofs;

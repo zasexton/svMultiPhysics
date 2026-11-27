@@ -533,7 +533,7 @@ activeBoundaryFaces(const FESystem& system, int boundary_marker, int active_boun
     const auto* provenance = context->findGeneratedActiveBoundaryProvenance(active_boundary_marker);
     FE_THROW_IF(provenance == nullptr || provenance->physicalBoundaryMarker() != boundary_marker,
                 InvalidArgumentException,
-                "wettedBoundaryFaces: generated active-boundary marker " + std::to_string(active_boundary_marker) +
+                "activeBoundaryFaces: generated active-boundary marker " + std::to_string(active_boundary_marker) +
                     " is not a subset of boundary marker " + std::to_string(boundary_marker));
     std::unordered_set<GlobalIndex> faces;
     const auto& rules = context->interfaceRules();

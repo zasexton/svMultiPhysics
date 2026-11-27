@@ -40,7 +40,7 @@ CutVolumeMeasureSummary collectCutVolumeMeasures(
     if ((snapshot_revision_key == 0u) != (source_value_revision == 0u)) {
       throw std::invalid_argument(
           "[svMultiPhysics::Application] Cut-volume measure rule has an "
-          "incomplete free-surface snapshot revision.");
+          "incomplete level-set snapshot revision.");
     }
     if (snapshot_revision_key != 0u) {
       found_revisioned_rule = true;
@@ -52,7 +52,7 @@ CutVolumeMeasureSummary collectCutVolumeMeasures(
                  summary.source_value_revision != source_value_revision) {
         throw std::invalid_argument(
             "[svMultiPhysics::Application] Cut-volume measure rules mix "
-            "free-surface snapshot revisions.");
+            "level-set snapshot revisions.");
       }
     } else {
       found_unrevisioned_rule = true;

@@ -739,7 +739,7 @@ public:
      * volume rules of that side keep their classification but release their
      * points (see volumeRuleIsClassificationOnly()); the domain must then
      * outlive this context and its copies, which a context guarantees for
-     * the domain of an imported free-surface snapshot.  Interface rules whose
+     * the domain of an imported level-set snapshot.  Interface rules whose
      * source fragment stable id is in pruned_interface_sources are skipped.
      */
     void addGeneratedInterfaceDomain(
@@ -1107,7 +1107,7 @@ public:
         auto rules = domain.interfaceQuadratureRules();
         {
             // Register the marker even when this rank holds no interface
-            // rules (a fully wet or fully dry partition), as the
+            // rules (a wholly active or inactive partition), as the
             // interface-boundary and active-boundary imports do.  A
             // registered marker with no local rules is an empty local set;
             // an unregistered one is a missing interface and makes
@@ -1498,7 +1498,7 @@ public:
             classification_only_full_cell_side = std::nullopt) {
         if (!snapshot || !snapshot->revision().complete()) {
             throw std::invalid_argument(
-                "cut integration requires a complete free-surface geometry snapshot");
+                "cut integration requires a complete level-set geometry snapshot");
         }
         const Real threshold_error = std::abs(
             snapshot->policy().minimum_retained_volume_fraction -
@@ -1508,11 +1508,11 @@ public:
             std::max(Real{1.0}, minGeneratedCutVolumeFraction());
         if (threshold_error > threshold_tolerance) {
             throw std::invalid_argument(
-                "free-surface snapshot and cut context use different volume-retention policies");
+                "level-set snapshot and cut context use different volume-retention policies");
         }
         if (volume_side_filter == geometry::CutIntegrationSide::Interface) {
             throw std::invalid_argument(
-                "free-surface snapshot volume filter requires Negative or Positive side");
+                "level-set snapshot volume filter requires Negative or Positive side");
         }
         const auto revision_key =
             snapshot->revision().snapshot_revision_key;
@@ -1520,12 +1520,12 @@ public:
         const auto preflight_marker = [&](int marker) {
             if (marker < 0) {
                 throw std::invalid_argument(
-                    "free-surface snapshot contains a negative generated marker");
+                    "level-set snapshot contains a negative generated marker");
             }
             if (std::find(snapshot_markers.begin(), snapshot_markers.end(),
                           marker) != snapshot_markers.end()) {
                 throw std::invalid_argument(
-                    "free-surface snapshot reuses a generated marker");
+                    "level-set snapshot reuses a generated marker");
             }
             if (level_set_snapshot_revision_by_marker_.contains(marker) ||
                 hasGeneratedLevelSetInterfaceMarker(marker) ||
@@ -1534,7 +1534,7 @@ public:
                 generated_active_boundary_provenance_by_marker_.contains(marker) ||
                 generated_interface_boundary_provenance_by_marker_.contains(marker)) {
                 throw std::invalid_argument(
-                    "free-surface snapshot marker is already imported");
+                    "level-set snapshot marker is already imported");
             }
             snapshot_markers.push_back(marker);
         };
@@ -1655,14 +1655,14 @@ public:
         const auto bind_marker = [&](int marker) {
             if (marker < 0) {
                 throw std::invalid_argument(
-                    "free-surface snapshot contains a negative generated marker");
+                    "level-set snapshot contains a negative generated marker");
             }
             const auto [stored, inserted] =
                 level_set_snapshot_revision_by_marker_.emplace(
                     marker, revision_key);
             if (!inserted) {
                 throw std::invalid_argument(
-                    "generated marker is already bound to a free-surface snapshot revision");
+                    "generated marker is already bound to a level-set snapshot revision");
             }
             (void)stored;
         };
@@ -1795,7 +1795,7 @@ public:
                             fragment.stable_id});
                     if (found == first_active_boundary_records.end()) {
                         throw std::invalid_argument(
-                            "free-surface active-boundary fragment has no snapshot rule record");
+                            "level-set active-boundary fragment has no snapshot rule record");
                     }
                     const auto* record = found->second;
                     if (side_is_imported &&
@@ -1930,7 +1930,7 @@ public:
             level_set_snapshot_revision_by_marker_.find(marker);
         if (found == level_set_snapshot_revision_by_marker_.end()) {
             throw std::invalid_argument(
-                "generated marker is not bound to an authoritative free-surface geometry snapshot");
+                "generated marker is not bound to an authoritative level-set geometry snapshot");
         }
         return found->second;
     }
@@ -1983,21 +1983,21 @@ private:
                             .level_set_snapshot_revision_key != 0u;
                 if (keyed_rule || keyed_metadata || keyed_binding) {
                     throw std::invalid_argument(
-                        "cut-volume data declares a free-surface snapshot revision without an authoritative snapshot");
+                        "cut-volume data declares a level-set snapshot revision without an authoritative snapshot");
                 }
             }
             for (const auto& rule : interface_rules_) {
                 if (rule_matches_marker(rule) &&
                     rule.provenance.level_set_snapshot_revision_key != 0u) {
                     throw std::invalid_argument(
-                        "cut-interface data declares a free-surface snapshot revision without an authoritative snapshot");
+                        "cut-interface data declares a level-set snapshot revision without an authoritative snapshot");
                 }
             }
             for (const auto& binding : bindings_) {
                 if ((inspect_all || binding.marker == marker) &&
                     binding.level_set_snapshot_revision_key != 0u) {
                     throw std::invalid_argument(
-                        "cut-integration binding declares a free-surface snapshot revision without an authoritative snapshot");
+                        "cut-integration binding declares a level-set snapshot revision without an authoritative snapshot");
                 }
             }
             return;
@@ -2012,7 +2012,7 @@ private:
         }
         if (snapshot == nullptr || !snapshot->revision().complete()) {
             throw std::invalid_argument(
-                "generated marker references an unavailable free-surface geometry snapshot");
+                "generated marker references an unavailable level-set geometry snapshot");
         }
         const auto expected_source_revision =
             snapshot->revision().source_value_revision;
@@ -2023,7 +2023,7 @@ private:
             (current_source_revision->second == 0u ||
              current_source_revision->second != expected_source_revision)) {
             throw std::invalid_argument(
-                "free-surface geometry snapshot revision does not match the current source value revision");
+                "level-set geometry snapshot revision does not match the current source value revision");
         }
         const auto interface_rules =
             generated_interface_rule_indices_by_marker_.find(marker);
@@ -2051,7 +2051,7 @@ private:
                             .level_set_snapshot_revision_key !=
                         bound->second) {
                     throw std::invalid_argument(
-                        "generated interface rule does not declare its complete free-surface snapshot revision");
+                        "generated interface rule does not declare its complete level-set snapshot revision");
                 }
             };
         if (interface_rules !=
@@ -2103,7 +2103,7 @@ private:
                             .level_set_snapshot_revision_key !=
                         bound->second) {
                     throw std::invalid_argument(
-                        "generated volume rule, metadata, or binding does not declare its complete free-surface snapshot revision");
+                        "generated volume rule, metadata, or binding does not declare its complete level-set snapshot revision");
                 }
             };
         if (volume_rules != generated_volume_rule_indices_by_marker_.end()) {
@@ -2121,7 +2121,7 @@ private:
                 (binding.source_value_revision != expected_source_revision ||
                  binding.level_set_snapshot_revision_key != bound->second)) {
                 throw std::invalid_argument(
-                    "generated cut-integration binding does not declare its complete free-surface snapshot revision");
+                    "generated cut-integration binding does not declare its complete level-set snapshot revision");
             }
         }
     }
@@ -2163,21 +2163,21 @@ private:
             if ((rule_is_keyed || metadata_is_keyed || binding_is_keyed) &&
                 !marker_is_bound(volume_rules_[index].provenance.marker)) {
                 throw std::invalid_argument(
-                    "cut-volume data declares an orphan free-surface snapshot revision");
+                    "cut-volume data declares an orphan level-set snapshot revision");
             }
         }
         for (std::size_t index = volume_rules_.size();
              index < metadata_.size(); ++index) {
             if (metadata_[index].level_set_snapshot_revision_key != 0u) {
                 throw std::invalid_argument(
-                    "cut-volume metadata declares an orphan free-surface snapshot revision");
+                    "cut-volume metadata declares an orphan level-set snapshot revision");
             }
         }
         for (const auto& rule : interface_rules_) {
             if (rule.provenance.level_set_snapshot_revision_key != 0u &&
                 !marker_is_bound(rule.provenance.marker)) {
                 throw std::invalid_argument(
-                    "cut-interface data declares an orphan free-surface snapshot revision");
+                    "cut-interface data declares an orphan level-set snapshot revision");
             }
         }
         for (std::size_t index = 0u; index < bindings_.size(); ++index) {
@@ -2190,7 +2190,7 @@ private:
                 binding.marker == volume_rules_[index].provenance.marker;
             if (!aligned || !marker_is_bound(binding.marker)) {
                 throw std::invalid_argument(
-                    "cut-integration binding declares an orphan free-surface snapshot revision");
+                    "cut-integration binding declares an orphan level-set snapshot revision");
             }
         }
     }
@@ -2210,7 +2210,7 @@ public:
         for (const auto& snapshot : level_set_geometry_snapshots_) {
             if (!snapshot) {
                 throw std::invalid_argument(
-                    "free-surface geometry snapshot storage is incomplete");
+                    "level-set geometry snapshot storage is incomplete");
             }
             const auto& revision = snapshot->localMeshRevision();
             if (revision.mesh_geometry_revision != mesh.geometryRevision() ||
@@ -2237,7 +2237,7 @@ public:
                 level_set_geometry_snapshots_[snapshot_index];
             if (!snapshot) {
                 throw std::invalid_argument(
-                    "free-surface geometry snapshot storage is incomplete");
+                    "level-set geometry snapshot storage is incomplete");
             }
             const auto& revision = snapshot->localMeshRevision();
             if (revision.mesh_geometry_revision != mesh.geometryRevision() ||
@@ -2245,7 +2245,7 @@ public:
                 revision.ownership_revision != mesh.ownershipRevision() ||
                 revision.numbering_revision != mesh.numberingRevision()) {
                 throw std::invalid_argument(
-                    "free-surface geometry snapshot does not match the current "
+                    "level-set geometry snapshot does not match the current "
                     "mesh revision: snapshot_index=" +
                     std::to_string(snapshot_index) +
                     " snapshot_revision_key=" +
@@ -3684,7 +3684,7 @@ private:
             level_set_snapshot_revision_by_marker_.end()) {
             if (metadata.level_set_snapshot_revision_key != 0u) {
                 throw std::invalid_argument(
-                    "generated volume rule declares a free-surface snapshot revision without an authoritative snapshot");
+                    "generated volume rule declares a level-set snapshot revision without an authoritative snapshot");
             }
             return;
         }

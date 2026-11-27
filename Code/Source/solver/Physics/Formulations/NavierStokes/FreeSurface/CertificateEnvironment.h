@@ -10,8 +10,9 @@
 
 namespace svmp::Physics::formulations::navier_stokes::free_surface {
 
-/// The solver catalogue extended by the static free-surface certificate.
+/// The solver catalogue extended by the free-surface formulation.
 [[nodiscard]] const FE::environment::EnvironmentNameRegistry& environmentRegistry();
+[[nodiscard]] bool keepFullCellPointsFromEnvironment();
 [[nodiscard]] const std::vector<std::string>& conservativeBalanceDiagnosticSwitches();
 [[nodiscard]] FE::analysis::NewtonAnalysisMethod newtonAnalysisMethodFromEnvironment();
 

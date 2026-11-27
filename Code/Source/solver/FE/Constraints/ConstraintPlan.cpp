@@ -314,7 +314,8 @@ ConstraintPlan& ConstraintPlan::contactPointVelocity(FieldId velocity,
                                                      int wall_marker,
                                                      const std::array<Real, 3>& wall_normal,
                                                      std::function<Real(Real)> contact_speed,
-                                                     std::string name)
+                                                     std::string name,
+                                                     std::string active_side_record_label)
 {
     ContactPointVelocityLaw law;
     law.wall_boundary_markers = {wall_marker};
@@ -323,6 +324,7 @@ ConstraintPlan& ConstraintPlan::contactPointVelocity(FieldId velocity,
     law.isovalue = active_region.geometry().isovalue();
     law.active_side = levelSetConstraintSide(active_region.side());
     law.contact_speed = std::move(contact_speed);
+    law.active_side_record_label = std::move(active_side_record_label);
     law.name = std::move(name);
     return contactPointVelocity(velocity, std::move(law));
 }

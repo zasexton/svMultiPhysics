@@ -230,7 +230,7 @@ void mixCoefficientClassificationPolicy(
         return LevelSetGeometryRuleRole::PositiveVolume;
     }
     throw std::invalid_argument(
-        "free-surface snapshot volume rule cannot have Interface side");
+        "level-set snapshot volume rule cannot have Interface side");
 }
 
 [[nodiscard]] bool negativeRole(LevelSetGeometryRuleRole role) noexcept
@@ -452,7 +452,7 @@ void mixRuleIdentities(std::uint64_t& hash,
 {
     if (!record_digests.empty() && record_digests.size() != records.size()) {
         throw std::logic_error(
-            "free-surface snapshot ownership validation received a malformed digest table");
+            "level-set snapshot ownership validation received a malformed digest table");
     }
     const auto digest_of = [&records, record_digests](std::size_t index) {
         return record_digests.empty() ? ruleContentDigest(records[index])
@@ -467,7 +467,7 @@ void mixRuleIdentities(std::uint64_t& hash,
         (collective.size > 1 &&
          !collective.all_gather_owned_rule_identity_values)) {
         throw std::invalid_argument(
-            "free-surface snapshot ownership collective does not match the mesh communicator");
+            "level-set snapshot ownership collective does not match the mesh communicator");
     }
 
     std::vector<std::uint64_t> local_owned_values;
@@ -492,7 +492,7 @@ void mixRuleIdentities(std::uint64_t& hash,
     }
     if (global_owned_values.size() % width != 0u) {
         throw std::invalid_argument(
-            "free-surface snapshot ownership collective returned a malformed identity stream");
+            "level-set snapshot ownership collective returned a malformed identity stream");
     }
 
     // The global owned rules sorted by identity (the order of the former
@@ -521,7 +521,7 @@ void mixRuleIdentities(std::uint64_t& hash,
             globally_owned[index - 1u].identity) {
             ++ledger.duplicate_rule_identity_count;
             throw std::invalid_argument(
-                "free-surface snapshot found a rule owned by more than one rank");
+                "level-set snapshot found a rule owned by more than one rank");
         }
     }
     const auto find_owned = [&globally_owned](
@@ -543,12 +543,12 @@ void mixRuleIdentities(std::uint64_t& hash,
         if (found == nullptr) {
             ++ledger.invalid_global_identity_count;
             throw std::invalid_argument(
-                "free-surface snapshot found a local rule without one global owner");
+                "level-set snapshot found a local rule without one global owner");
         }
         if (found->content_digest != digest_of(index)) {
             ++ledger.invalid_global_identity_count;
             throw std::invalid_argument(
-                "free-surface snapshot found local rule content that differs "
+                "level-set snapshot found local rule content that differs "
                 "from its global owner: rank=" +
                 std::to_string(collective.rank) + " role=" +
                 std::to_string(static_cast<int>(record.role)) +
@@ -611,7 +611,7 @@ void canonicalizeDistributedRevision(
     }
     if (!collective.all_gather_revision_values) {
         throw std::invalid_argument(
-            "distributed free-surface snapshot requires a revision collective");
+            "distributed level-set snapshot requires a revision collective");
     }
 
     constexpr std::size_t common_value_count = 13u;
@@ -644,7 +644,7 @@ void canonicalizeDistributedRevision(
         static_cast<std::size_t>(collective.size) * value_count;
     if (gathered.size() != expected_count) {
         throw std::invalid_argument(
-            "free-surface snapshot revision collective returned a malformed value stream");
+            "level-set snapshot revision collective returned a malformed value stream");
     }
     for (int rank = 1; rank < collective.size; ++rank) {
         const auto offset = static_cast<std::size_t>(rank) * value_count;
@@ -654,7 +654,7 @@ void canonicalizeDistributedRevision(
                         gathered.begin() +
                             static_cast<std::ptrdiff_t>(offset))) {
             throw std::invalid_argument(
-                "free-surface snapshot source or policy differs across ranks");
+                "level-set snapshot source or policy differs across ranks");
         }
     }
 
@@ -696,7 +696,7 @@ void requireContactRevision(
         request.resolvedCoefficientClassificationBand() !=
             revision.coefficient_classification_band) {
         throw std::invalid_argument(
-            "contact domain does not match the free-surface snapshot revision");
+            "contact domain does not match the level-set snapshot revision");
     }
 }
 
@@ -719,7 +719,7 @@ void requireActiveBoundaryRevision(
         request.resolvedCoefficientClassificationBand() !=
             revision.coefficient_classification_band) {
         throw std::invalid_argument(
-            "active-boundary domain does not match the free-surface snapshot revision");
+            "active-boundary domain does not match the level-set snapshot revision");
     }
 }
 
@@ -769,7 +769,7 @@ void validateCompleteContactTrace(
     if (ledger.missing_contact_fragment_count != 0u ||
         ledger.orphan_contact_fragment_count != 0u) {
         throw std::invalid_argument(
-            "free-surface snapshot contact rules do not match the complete authoritative surface trace");
+            "level-set snapshot contact rules do not match the complete authoritative surface trace");
     }
 }
 
@@ -862,12 +862,12 @@ void completeAndValidateRuleIdentity(
     if (local_cell < 0 || local_cell >= mesh.numCells()) {
         ++ledger.invalid_global_identity_count;
         throw std::invalid_argument(
-            "retained free-surface rule has an invalid local parent cell");
+            "retained level-set rule has an invalid local parent cell");
     }
     if (mesh.parallelSize() > 1 && !mesh.globalEntityIdsAvailable()) {
         ++ledger.invalid_global_identity_count;
         throw std::invalid_argument(
-            "distributed free-surface snapshot requires globally unique mesh entity ids");
+            "distributed level-set snapshot requires globally unique mesh entity ids");
     }
     const auto expected_cell_id = mesh.globalEntityIdsAvailable()
                                       ? mesh.getCellGlobalId(local_cell)
@@ -911,7 +911,7 @@ void completeAndValidateRuleIdentity(
          (expected_owner == mesh.parallelRank()))) {
         ++ledger.invalid_global_identity_count;
         throw std::invalid_argument(
-            "retained free-surface rule has stale global identity or ownership metadata");
+            "retained level-set rule has stale global identity or ownership metadata");
     }
 }
 
@@ -925,13 +925,13 @@ void materializeAuthoritativeFullCellPoints(
 {
     if (rule.frame != geometry::CutGeometryFrame::Reference) {
         throw std::invalid_argument(
-            "authoritative full-cell free-surface rules require a reference-frame representation");
+            "authoritative full-cell level-set rules require a reference-frame representation");
     }
     const auto parent =
         static_cast<GlobalIndex>(rule.provenance.parent_entity);
     if (parent < 0 || parent >= mesh.numCells()) {
         throw std::invalid_argument(
-            "authoritative full-cell free-surface rule has an invalid parent cell");
+            "authoritative full-cell level-set rule has an invalid parent cell");
     }
     const int geometry_order =
         std::max(1, mesh.getCellGeometryOrder(parent));
@@ -965,7 +965,7 @@ void materializeAuthoritativeFullCellPoints(
         std::abs(rule.measure - rule.parent_measure) > tolerance ||
         std::abs(rule.volume_fraction - Real{1.0}) > tolerance) {
         throw std::invalid_argument(
-            "authoritative full-cell free-surface rule does not match its parent reference measure");
+            "authoritative full-cell level-set rule does not match its parent reference measure");
     }
 }
 
@@ -998,7 +998,7 @@ void addRule(std::vector<LevelSetGeometryRuleRecord>& records,
         record.role == LevelSetGeometryRuleRole::PositiveExteriorBoundary;
     if (boundary_rule != (physical_boundary_marker >= 0)) {
         throw std::invalid_argument(
-            "free-surface rule has invalid physical-boundary provenance");
+            "level-set rule has invalid physical-boundary provenance");
     }
     record.physical_boundary_marker = physical_boundary_marker;
     record.retention = retention_override.value_or(LevelSetGeometryRetention::Retained);
@@ -1295,7 +1295,7 @@ void validateRule(
         rule.provenance.implicit_quadrature_backend !=
             rule.provenance.selected_implicit_quadrature_backend) {
         throw std::invalid_argument(
-            "retained free-surface rule has incomplete or ambiguous represented-backend provenance");
+            "retained level-set rule has incomplete or ambiguous represented-backend provenance");
     }
     if (rule.provenance.source_value_revision != revision.source_value_revision ||
         rule.provenance.predicate_policy_key != revision.quadrature_policy_key ||
@@ -1305,7 +1305,7 @@ void validateRule(
             revision.coefficient_classification_band) {
         ++ledger.stale_revision_count;
         throw std::invalid_argument(
-            "retained free-surface rule has a stale source revision");
+            "retained level-set rule has a stale source revision");
     }
     if (rule.provenance.achieved_quadrature_order <
             policy.minimum_achieved_quadrature_order ||
@@ -1317,11 +1317,11 @@ void validateRule(
              rule.provenance.requested_quadrature_order)) {
         ++ledger.false_achieved_order_count;
         throw std::invalid_argument(
-            "retained free-surface rule has a false or insufficient achieved order");
+            "retained level-set rule has a false or insufficient achieved order");
     }
     if (rule.points.size() != record.physical_rule.points.size()) {
         throw std::invalid_argument(
-            "retained free-surface rule lost points during physical mapping");
+            "retained level-set rule lost points during physical mapping");
     }
     Real reference_weight_sum{0.0};
     for (std::size_t q = 0; q < rule.points.size(); ++q) {
@@ -1335,7 +1335,7 @@ void validateRule(
             !(physical.physical_weight > Real{0.0})) {
             ++ledger.invalid_weight_count;
             throw std::invalid_argument(
-                "retained free-surface rule has an invalid mapped point or weight");
+                "retained level-set rule has an invalid mapped point or weight");
         }
         const auto parent = static_cast<GlobalIndex>(rule.provenance.parent_entity);
         if (!insideReferenceCell(mesh.getCellType(parent),
@@ -1343,7 +1343,7 @@ void validateRule(
                                  Real{64.0} * policy.tolerance)) {
             ++ledger.outside_parent_point_count;
             throw std::invalid_argument(
-                "retained free-surface point lies outside its parent reference cell");
+                "retained level-set point lies outside its parent reference cell");
         }
         if (interface_or_contact) {
             if (!std::isfinite(point.level_set_residual)) {
@@ -1375,7 +1375,7 @@ void validateRule(
                                          revision.isovalue;
         if (!std::isfinite(level_set)) {
             throw std::invalid_argument(
-                "free-surface snapshot scalar evaluator returned a non-finite value");
+                "level-set snapshot scalar evaluator returned a non-finite value");
         }
         const Real scaled_tolerance = Real{128.0} * policy.tolerance;
         if ((negativeRole(record.role) && level_set > scaled_tolerance) ||
@@ -1390,7 +1390,7 @@ void validateRule(
             } else {
                 ++ledger.invalid_phase_point_count;
                 throw std::invalid_argument(
-                    "retained free-surface point has the wrong declared phase sign"
+                    "retained level-set point has the wrong declared phase sign"
                     "; role=" +
                     std::to_string(static_cast<int>(record.role)) +
                     "; topology_id=" + record.topology_id +
@@ -1481,7 +1481,7 @@ void validateRule(
         std::max(ledger.maximum_constant_moment_error, moment_error);
     if (moment_error > moment_tolerance) {
         throw std::invalid_argument(
-            "retained free-surface quadrature does not integrate constants to its declared measure");
+            "retained level-set quadrature does not integrate constants to its declared measure");
     }
     validateRuleMomentCertificate(record, mesh, policy, ledger);
 }
@@ -1597,7 +1597,7 @@ void accumulateLedger(const LevelSetGeometryRuleRecord& record,
                 factorial(px + py + pz + 3));
     default:
         throw std::invalid_argument(
-            "free-surface volume moment validation does not support the parent cell type");
+            "level-set volume moment validation does not support the parent cell type");
     }
 }
 
@@ -1650,7 +1650,7 @@ constexpr int kTabulatedMonomialOrders = 16;
     if (ambient_dimension < 1 || ambient_dimension > 3 ||
         polynomial_order < 0) {
         throw std::invalid_argument(
-            "free-surface moment certificate has an invalid dimension or order");
+            "level-set moment certificate has an invalid dimension or order");
     }
     if (polynomial_order >= kTabulatedMonomialOrders) {
         untabulated_storage =
@@ -1747,7 +1747,7 @@ makeMomentCertificateFromSamples(
 {
     if (!finitePoint(point)) {
         throw std::invalid_argument(
-            "free-surface source topology has a nonfinite reference vertex");
+            "level-set source topology has a nonfinite reference vertex");
     }
     const Real incidence_tolerance = std::max(
         Real{64.0} * tolerance,
@@ -2540,7 +2540,7 @@ void requireUniqueAuthoritativeSourceIds(
         if (region.active() &&
             !volume_source_ids.insert(region.stable_id).second) {
             throw std::invalid_argument(
-                "free-surface snapshot has duplicate authoritative volume-region stable ids");
+                "level-set snapshot has duplicate authoritative volume-region stable ids");
         }
     }
 
@@ -2550,7 +2550,7 @@ void requireUniqueAuthoritativeSourceIds(
         if (fragment.active() &&
             !interface_source_ids.insert(fragment.stable_id).second) {
             throw std::invalid_argument(
-                "free-surface snapshot has duplicate authoritative interface-fragment stable ids");
+                "level-set snapshot has duplicate authoritative interface-fragment stable ids");
         }
     }
 }
@@ -2598,7 +2598,7 @@ void requireCompleteAuthoritativeCutFamilies(
         }
         if (fragment.interface_marker != interface_domain.marker()) {
             throw std::invalid_argument(
-                "active authoritative free-surface fragment has the wrong interface marker");
+                "active authoritative level-set fragment has the wrong interface marker");
         }
         auto& state = state_of(fragment.parent_cell);
         ++state.fragment_count;
@@ -2631,7 +2631,7 @@ void requireCompleteAuthoritativeCutFamilies(
         }
         if (region.interface_marker != interface_domain.marker()) {
             throw std::invalid_argument(
-                "active authoritative free-surface volume region has the wrong interface marker");
+                "active authoritative level-set volume region has the wrong interface marker");
         }
         auto& state = state_of(region.parent_cell);
         const Real measure_tolerance = std::max(
@@ -2665,7 +2665,7 @@ void requireCompleteAuthoritativeCutFamilies(
             static_cast<std::size_t>(parent) >= volume_state_by_parent.size() ||
             !volume_state_by_parent[static_cast<std::size_t>(parent)].present) {
             throw std::invalid_argument(
-                "authoritative free-surface cut cell is missing an active negative or positive source volume region");
+                "authoritative level-set cut cell is missing an active negative or positive source volume region");
         }
         const auto& state =
             volume_state_by_parent[static_cast<std::size_t>(parent)];
@@ -2693,7 +2693,7 @@ void requireCompleteAuthoritativeCutFamilies(
             !has_complete_aligned_negative_family &&
             !has_complete_aligned_positive_family) {
             throw std::invalid_argument(
-                "authoritative free-surface cut cell is missing an active "
+                "authoritative level-set cut cell is missing an active "
                 "negative or positive source volume region: parent=" +
                 std::to_string(parent) +
                 " negative_regions=" +
@@ -2725,7 +2725,7 @@ void requireCompleteAuthoritativeCutFamilies(
         if (state.present && state.has_negative && state.has_positive &&
             cut_cell_set.find(parent) == cut_cell_set.end()) {
             throw std::invalid_argument(
-                "authoritative two-phase free-surface volume family is missing its active interface source fragment");
+                "authoritative two-phase level-set volume family is missing its active interface source fragment");
         }
     }
 }
@@ -2770,7 +2770,7 @@ makeVolumeRegionMomentCertificate(
             LevelSetGeometryMomentCertificateSource::RegionMeasureCentroid);
     }
     throw std::invalid_argument(
-        "free-surface volume rule lacks independent source geometry for its polynomial-moment certificate");
+        "level-set volume rule lacks independent source geometry for its polynomial-moment certificate");
 }
 
 [[nodiscard]] LevelSetGeometryMomentCertificate
@@ -2798,7 +2798,7 @@ makeInterfaceFragmentMomentCertificate(
             ambient_dimension);
     }
     throw std::invalid_argument(
-        "curved free-surface interface rule lacks independent backend reference quadrature");
+        "curved level-set interface rule lacks independent backend reference quadrature");
 }
 
 [[nodiscard]] LevelSetGeometryMomentCertificate
@@ -2819,7 +2819,7 @@ makeContactFragmentMomentCertificate(
             ambient_dimension);
     }
     throw std::invalid_argument(
-        "free-surface contact rule lacks independent source geometry for its polynomial-moment certificate");
+        "level-set contact rule lacks independent source geometry for its polynomial-moment certificate");
 }
 
 [[nodiscard]] LevelSetGeometryMomentCertificate
@@ -2837,7 +2837,7 @@ makeActiveBoundaryFragmentMomentCertificate(
             ambient_dimension);
     }
     throw std::invalid_argument(
-        "free-surface active-boundary rule lacks independent source geometry for its polynomial-moment certificate");
+        "level-set active-boundary rule lacks independent source geometry for its polynomial-moment certificate");
 }
 
 void validateRuleMomentCertificate(
@@ -2856,7 +2856,7 @@ void validateRuleMomentCertificate(
         certificate.moments.size() != expected_exponents.size()) {
         ++ledger.false_achieved_order_count;
         throw std::invalid_argument(
-            "retained free-surface rule has an incomplete polynomial-moment certificate");
+            "retained level-set rule has an incomplete polynomial-moment certificate");
     }
     ++ledger.certified_rule_count;
     switch (certificate.source) {
@@ -2885,7 +2885,7 @@ void validateRuleMomentCertificate(
             !std::isfinite(certified.value)) {
             ++ledger.false_achieved_order_count;
             throw std::invalid_argument(
-                "retained free-surface rule has a malformed polynomial-moment certificate");
+                "retained level-set rule has a malformed polynomial-moment certificate");
         }
         Real actual{0.0};
         Real absolute_sum{0.0};
@@ -2914,7 +2914,7 @@ void validateRuleMomentCertificate(
         if (error > tolerance) {
             ++ledger.false_achieved_order_count;
             throw std::invalid_argument(
-                "retained free-surface quadrature does not reproduce its authoritative polynomial-moment certificate"
+                "retained level-set quadrature does not reproduce its authoritative polynomial-moment certificate"
                 "; role=" +
                 std::to_string(static_cast<int>(record.role)) +
                 "; topology_id=" + record.topology_id +
@@ -2943,7 +2943,7 @@ void validateCellPolynomialMoments(
     if (local_parent < 0 || local_parent >= mesh.numCells() ||
         common_exact_order < 0) {
         throw std::invalid_argument(
-            "free-surface volume partition has incomplete polynomial-moment provenance");
+            "level-set volume partition has incomplete polynomial-moment provenance");
     }
     const int dimension = mesh.dimension();
     const auto type = mesh.getCellType(local_parent);
@@ -3043,7 +3043,7 @@ void validateVolumePartition(
                 records[by_cell[k].second].reference_rule.provenance.parent_entity);
             if (local_parent != INVALID_GLOBAL_INDEX && local_parent != parent) {
                 throw std::invalid_argument(
-                    "free-surface volume partition aliases one global cell to multiple local parents");
+                    "level-set volume partition aliases one global cell to multiple local parents");
             }
             local_parent = parent;
         }
@@ -3579,7 +3579,7 @@ struct LedgerFieldClasses {
             [&result](const char* name, std::size_t) {
                 if (result.count_fields >= kMaxLedgerFieldsPerKind) {
                     throw std::logic_error(
-                        "free-surface validation ledger has more count fields than the merge tables hold");
+                        "level-set validation ledger has more count fields than the merge tables hold");
                 }
                 result.rule_validation_count[result.count_fields++] =
                     isRuleValidationCount(name);
@@ -3587,7 +3587,7 @@ struct LedgerFieldClasses {
             [&result](const char* name, Real) {
                 if (result.real_fields >= kMaxLedgerFieldsPerKind) {
                     throw std::logic_error(
-                        "free-surface validation ledger has more value fields than the merge tables hold");
+                        "level-set validation ledger has more value fields than the merge tables hold");
                 }
                 result.rule_validation_maximum[result.real_fields++] =
                     isRuleValidationMaximum(name);
@@ -3615,7 +3615,7 @@ void mergeRuleValidationLedger(LevelSetGeometryValidationLedger& into,
         [&](const char* name, std::size_t value) {
             if (!classes.rule_validation_count[count_index] && value != 0u) {
                 throw std::logic_error(
-                    std::string("free-surface rule validation changed an unexpected ledger count: ") +
+                    std::string("level-set rule validation changed an unexpected ledger count: ") +
                     name);
             }
             counts[count_index++] = value;
@@ -3624,7 +3624,7 @@ void mergeRuleValidationLedger(LevelSetGeometryValidationLedger& into,
             if (!classes.rule_validation_maximum[real_index] &&
                 !sameRealBits(value, Real{0.0})) {
                 throw std::logic_error(
-                    std::string("free-surface rule validation changed an unexpected ledger value: ") +
+                    std::string("level-set rule validation changed an unexpected ledger value: ") +
                     name);
             }
             reals[real_index++] = value;
@@ -3666,7 +3666,7 @@ void mergeScratchLedger(LevelSetGeometryValidationLedger& into,
             if (!classes.rule_validation_maximum[real_index] &&
                 !sameRealBits(value, Real{0.0})) {
                 throw std::logic_error(
-                    std::string("free-surface rule construction changed an unexpected ledger value: ") +
+                    std::string("level-set rule construction changed an unexpected ledger value: ") +
                     name);
             }
             reals[real_index++] = value;
@@ -3811,7 +3811,7 @@ void validateVolumeRecordPhase(
             revision.isovalue;
         if (!std::isfinite(level_set)) {
             throw std::invalid_argument(
-                "free-surface snapshot scalar evaluator returned a non-finite value");
+                "level-set snapshot scalar evaluator returned a non-finite value");
         }
         if ((negativeRole(record.role) && level_set > scaled_tolerance) ||
             (positiveRole(record.role) && level_set < -scaled_tolerance)) {
@@ -3824,7 +3824,7 @@ void validateVolumeRecordPhase(
             } else {
                 ++ledger.invalid_phase_point_count;
                 throw std::invalid_argument(
-                    "retained free-surface point has the wrong declared phase sign"
+                    "retained level-set point has the wrong declared phase sign"
                     "; role=" +
                     std::to_string(static_cast<int>(record.role)) +
                     "; topology_id=" + record.topology_id +
@@ -4252,7 +4252,7 @@ LevelSetGeometryRuleRecord materializeClassificationOnlyRecord(
         record.reference_rule.kind != geometry::CutQuadratureKind::Volume ||
         !record.reference_rule.full_cell_equivalent) {
         throw std::invalid_argument(
-            "classification-only free-surface record is not a full-cell volume rule");
+            "classification-only level-set record is not a full-cell volume rule");
     }
     LevelSetGeometryRuleRecord result = record;
     result.classification_only = false;
@@ -4270,7 +4270,7 @@ LevelSetGeometryRuleRecord materializeClassificationOnlyRecord(
         ruleContentDigest(result) !=
             record.classification_only_content_digest) {
         throw std::invalid_argument(
-            "classification-only free-surface record does not rematerialize on this mesh");
+            "classification-only level-set record does not rematerialize on this mesh");
     }
     return result;
 }
@@ -4467,13 +4467,13 @@ buildLevelSetGeometrySnapshot(
         policy.interface_retention_side ==
             geometry::CutIntegrationSide::Interface) {
         throw std::invalid_argument(
-            "free-surface geometry snapshot received an invalid domain or policy");
+            "level-set geometry snapshot received an invalid domain or policy");
     }
     if (mesh.parallelSize() < 1 || mesh.parallelRank() < 0 ||
         mesh.parallelRank() >= mesh.parallelSize() ||
         (mesh.parallelSize() > 1 && !mesh.globalEntityIdsAvailable())) {
         throw std::invalid_argument(
-            "free-surface geometry snapshot requires valid communicator metadata and distributed global entity ids");
+            "level-set geometry snapshot requires valid communicator metadata and distributed global entity ids");
     }
     if (mesh.revisionTrackingAvailable() &&
         (interface_domain.request().mesh_geometry_revision !=
@@ -4483,7 +4483,7 @@ buildLevelSetGeometrySnapshot(
          interface_domain.request().ownership_revision !=
              mesh.ownershipRevision())) {
         throw std::invalid_argument(
-            "free-surface geometry request does not match the current mesh revision");
+            "level-set geometry request does not match the current mesh revision");
     }
     auto revision = makeRevision(interface_domain, mesh, std::move(domain_id));
     const LevelSetGeometryLocalMeshRevision local_mesh_revision{
@@ -4613,7 +4613,7 @@ buildLevelSetGeometrySnapshot(
             region_by_stable_id, rule.provenance.cut_topology_revision);
         if (region == nullptr) {
             throw std::invalid_argument(
-                "free-surface volume rule has no authoritative source region");
+                "level-set volume rule has no authoritative source region");
         }
         const bool classification_only =
             rule_classification_only[rule_index] != 0u;
@@ -4654,7 +4654,7 @@ buildLevelSetGeometrySnapshot(
                 if (!record.moment_certificate.phase_sign_certified &&
                     !participant_scalar.canEvaluateValue()) {
                     throw std::invalid_argument(
-                        "free-surface snapshot volume validation requires a scalar value evaluator when source geometry does not certify the represented phase");
+                        "level-set snapshot volume validation requires a scalar value evaluator when source geometry does not certify the represented phase");
                 }
                 replayFullCellValidationContribution(counts,
                                                      replay.contribution);
@@ -4698,7 +4698,7 @@ buildLevelSetGeometrySnapshot(
         if (!record.moment_certificate.phase_sign_certified &&
             !participant_scalar.canEvaluateValue()) {
             throw std::invalid_argument(
-                "free-surface snapshot volume validation requires a scalar value evaluator when source geometry does not certify the represented phase");
+                "level-set snapshot volume validation requires a scalar value evaluator when source geometry does not certify the represented phase");
         }
         const LevelSetGeometryRuleRecord* const cell_rules[] = {&record};
         if (reuse && full_cell_volume_rule) {
@@ -4831,7 +4831,7 @@ buildLevelSetGeometrySnapshot(
                         rule.provenance.cut_topology_revision);
                     if (fragment == nullptr) {
                         throw std::invalid_argument(
-                            "free-surface interface rule has no authoritative source fragment");
+                            "level-set interface rule has no authoritative source fragment");
                     }
                     auto moment_certificate =
                         makeInterfaceFragmentMomentCertificate(
@@ -4877,7 +4877,7 @@ buildLevelSetGeometrySnapshot(
         (void)iterator;
         if (!inserted) {
             throw std::invalid_argument(
-                "free-surface snapshot has duplicate contact domains for one boundary marker");
+                "level-set snapshot has duplicate contact domains for one boundary marker");
         }
         const auto provenance =
             validateGeneratedInterfaceBoundaryProvenance(contact,
@@ -4900,7 +4900,7 @@ buildLevelSetGeometrySnapshot(
                 rule.provenance.cut_topology_revision);
             if (fragment == nullptr) {
                 throw std::invalid_argument(
-                    "free-surface contact rule has no authoritative source fragment");
+                    "level-set contact rule has no authoritative source fragment");
             }
             auto moment_certificate =
                 makeContactFragmentMomentCertificate(
@@ -4928,7 +4928,7 @@ buildLevelSetGeometrySnapshot(
         ledger.missing_contact_fragment_count != 0u ||
         ledger.stale_revision_count != 0u) {
         throw std::invalid_argument(
-            "free-surface snapshot rejected stale or orphan contact geometry");
+            "level-set snapshot rejected stale or orphan contact geometry");
     }
 
     struct ActivePair {
@@ -4967,7 +4967,7 @@ buildLevelSetGeometrySnapshot(
                           : pair.positive;
         if (slot != nullptr) {
             throw std::invalid_argument(
-                "free-surface snapshot has duplicate active-boundary phase domains");
+                "level-set snapshot has duplicate active-boundary phase domains");
         }
         slot = &active;
         auto rules = active.boundaryQuadratureRules();
@@ -4979,7 +4979,7 @@ buildLevelSetGeometrySnapshot(
                 rule.provenance.cut_topology_revision);
             if (fragment == nullptr) {
                 throw std::invalid_argument(
-                    "free-surface active-boundary rule has no authoritative source fragment");
+                    "level-set active-boundary rule has no authoritative source fragment");
             }
             const auto role = active.request().side ==
                                       geometry::CutIntegrationSide::Negative
@@ -5028,7 +5028,7 @@ buildLevelSetGeometrySnapshot(
             found->second.positive == nullptr) {
             if (policy.require_complete_exterior_boundary_partition) {
                 throw std::invalid_argument(
-                    "free-surface snapshot is missing a positive/negative exterior-boundary partition");
+                    "level-set snapshot is missing a positive/negative exterior-boundary partition");
             }
             continue;
         }
@@ -5045,7 +5045,7 @@ buildLevelSetGeometrySnapshot(
     if (policy.require_complete_exterior_boundary_partition &&
         active_by_boundary.size() != contact_by_boundary.size()) {
         throw std::invalid_argument(
-            "free-surface snapshot active-boundary/contact marker sets differ");
+            "level-set snapshot active-boundary/contact marker sets differ");
     }
 
     const bool has_interface_or_contact_rules =
@@ -5061,12 +5061,12 @@ buildLevelSetGeometrySnapshot(
     if (has_volume_rule_without_phase_certificate &&
         !scalar.canEvaluateValue()) {
         throw std::invalid_argument(
-            "free-surface snapshot volume validation requires a scalar value evaluator when source geometry does not certify the represented phase");
+            "level-set snapshot volume validation requires a scalar value evaluator when source geometry does not certify the represented phase");
     }
     if (has_interface_or_contact_rules &&
         (!scalar.canEvaluateValue() || !scalar.reference_gradient)) {
         throw std::invalid_argument(
-            "free-surface snapshot interface/contact validation requires a represented scalar value and gradient evaluator");
+            "level-set snapshot interface/contact validation requires a represented scalar value and gradient evaluator");
     }
 
     if (reuse) {
@@ -5169,7 +5169,7 @@ buildLevelSetGeometrySnapshot(
         if (!unique_rules.insert(identity).second) {
             ++ledger.duplicate_rule_identity_count;
             throw std::invalid_argument(
-                "free-surface snapshot contains a duplicate retained rule identity");
+                "level-set snapshot contains a duplicate retained rule identity");
         }
         if (validation_errors[record_index]) {
             std::rethrow_exception(validation_errors[record_index]);
@@ -5207,7 +5207,7 @@ buildLevelSetGeometrySnapshot(
         finalizeRevisionKey(revision, policy, globally_owned_rule_digests);
     if (!revision.complete()) {
         throw std::invalid_argument(
-            "free-surface geometry snapshot revision is incomplete");
+            "level-set geometry snapshot revision is incomplete");
     }
     for (auto& record : records) {
         record.reference_rule.provenance
@@ -5347,7 +5347,7 @@ void LevelSetGeometrySnapshotCache::insert(
 {
     if (!snapshot || !snapshot->revision().complete()) {
         throw std::invalid_argument(
-            "free-surface snapshot cache requires a complete immutable snapshot");
+            "level-set snapshot cache requires a complete immutable snapshot");
     }
     evictExpired();
     const auto resident_bytes = snapshot->residentBytes();

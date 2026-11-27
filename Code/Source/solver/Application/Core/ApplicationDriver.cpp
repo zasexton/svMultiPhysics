@@ -54,6 +54,7 @@
 #include "FE/Interfaces/GeneratedActiveBoundaryDomain.h"
 #include "FE/Core/DeterministicParallel.h"
 #include "Physics/Formulations/NavierStokes/FreeSurface/CertificateEnvironment.h"
+#include "Physics/Formulations/NavierStokes/FreeSurface/LevelSetRecords.h"
 #include "FE/Core/AggregationGuardDiagnostics.h"
 #include "FE/Core/HaloDiagnostics.h"
 #include "Physics/Formulations/NavierStokes/FreeSurface/ContactLineStageObservables.h"
@@ -3808,6 +3809,8 @@ using svmp::FE::level_set::withholdGhostCutLayersBeyond;
 svmp::FE::level_set::LevelSetGeometryHost levelSetGeometryHost(
     application::core::SimulationComponents& sim)
 {
+  namespace free_surface = svmp::Physics::formulations::navier_stokes::free_surface;
+  static const bool keep_full_cell_points = free_surface::keepFullCellPointsFromEnvironment();
   return svmp::FE::level_set::LevelSetGeometryHost{
       .fe_system = sim.fe_system.get(),
       .primary_mesh = sim.primary_mesh.get(),
@@ -3826,11 +3829,12 @@ svmp::FE::level_set::LevelSetGeometryHost levelSetGeometryHost(
           [&sim](const std::vector<ActiveCutVolumeRequest>& requests) {
             return generatedCutNeedsEveryGhostLayer(sim, requests);
           },
-      .two_fluid_accepted_stage_diagnostics_declared =
-          sim.fe_system &&
+      .consumer_requires_full_cell_volume_points =
+          keep_full_cell_points || (sim.fe_system &&
           !svmp::Physics::formulations::navier_stokes::two_fluid::twoFluidStageRecords(std::as_const(*sim.fe_system))
                .twoFluidAcceptedStageDiagnosticDeclarations()
-               .empty(),
+               .empty()),
+      .record_labels = free_surface::levelSetRecordLabels,
   };
 }
 

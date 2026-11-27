@@ -1081,7 +1081,7 @@ interfaces::LevelSetGeometryOwnershipCollective ownershipCollective(
         if (local_values.size() >
             static_cast<std::size_t>(std::numeric_limits<int>::max())) {
           throw std::runtime_error(
-              "Free-surface snapshot ownership stream exceeds MPI limits.");
+              "Level-set snapshot ownership stream exceeds MPI limits.");
         }
         const int local_count = static_cast<int>(local_values.size());
         std::vector<int> counts(static_cast<std::size_t>(comm.size()), 0);
@@ -1099,7 +1099,7 @@ interfaces::LevelSetGeometryOwnershipCollective ownershipCollective(
               counts[rank] >
                   std::numeric_limits<int>::max() - total_values) {
             throw std::runtime_error(
-                "Free-surface snapshot ownership gather exceeds MPI limits.");
+                "Level-set snapshot ownership gather exceeds MPI limits.");
           }
           displacements[rank] = total_values;
           total_values += counts[rank];
@@ -1121,7 +1121,7 @@ interfaces::LevelSetGeometryOwnershipCollective ownershipCollective(
 #else
         if (comm.isParallel()) {
           throw std::runtime_error(
-              "Free-surface snapshot ownership validation requires MPI in a parallel run.");
+              "Level-set snapshot ownership validation requires MPI in a parallel run.");
         }
 #endif
         return gathered;

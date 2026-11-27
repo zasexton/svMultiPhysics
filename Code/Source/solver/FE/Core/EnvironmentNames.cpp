@@ -548,7 +548,7 @@ std::span<const NameDeclaration> solverCatalogue() noexcept
          "evaluates vertex fields by point location instead of nodal reads (changes round-off)"},
         {"SVMP_INCREMENTAL_REBUILD_SELF_CHECK", Diagnostic, kLevelSetGeometry, Flag, "off", Reference,
          "rebuilds each cut snapshot from scratch too and throws unless the two agree"},
-        {"SVMP_KEEP_DRY_CELL_POINTS", Performance, kLevelSetGeometry, Flag, "off", Reference,
+        {"SVMP_KEEP_FULL_CELL_POINTS", Performance, kLevelSetGeometry, Flag, "off", Reference,
          "keeps every quadrature point of full cells in the cut snapshot"},
         {"SVMP_RETAIN_RESTORED_CUT_CONTEXT", Performance, kLevelSetGeometry, Flag, "off", Reference,
          "keeps the attempt-entry cut context for a rollback to reinstall"},

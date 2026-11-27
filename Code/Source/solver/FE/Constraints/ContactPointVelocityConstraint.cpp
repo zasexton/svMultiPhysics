@@ -307,7 +307,7 @@ void ContactPointVelocityConstraint::apply(const systems::FESystem& system,
         if (mesh.dimension() != 2) {
             throw std::invalid_argument("supports only 2D meshes");
         }
-        // The level set oriented by the active side: negative in the liquid.
+        // The level set oriented by the active side: negative in the active region.
         const Real orientation = law_.active_side == LevelSetConstraintSide::Positive ? Real{-1.0} : Real{1.0};
         if (law_.level_set_vertex_value) {
             phi_at = [&, orientation](GlobalIndex vertex) {
@@ -664,7 +664,8 @@ std::string ContactPointVelocityConstraint::manifestDescription() const
         << law_.wall_normal[2]
         << " level_set='" << law_.level_set_field_name << "'"
         << " isovalue=" << law_.isovalue
-        << " liquid_side=" << (law_.active_side == LevelSetConstraintSide::Positive ? "positive" : "negative")
+        << ' ' << law_.active_side_record_label << '='
+        << (law_.active_side == LevelSetConstraintSide::Positive ? "positive" : "negative")
         << " vertex_value_source=" << (law_.level_set_vertex_value ? "callback" : "mesh_field");
     // The contact-speed law is a closure; sample it so that the manifest
     // compares its values exactly.

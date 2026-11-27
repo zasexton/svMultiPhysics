@@ -2941,7 +2941,7 @@ TEST(GeneratedBoundaryAggregateTraceCertificate,
         EXPECT_NE(
             std::string(error.what()).find(
                 "aggregation report lacks authoritative "
-                "free-surface snapshot revisions"),
+                "level-set snapshot revisions"),
             std::string::npos)
             << error.what();
     }

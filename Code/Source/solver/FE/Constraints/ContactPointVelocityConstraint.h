@@ -46,6 +46,7 @@
 #include "Constraints/LevelSetActiveSideVertexDirichletConstraint.h"
 #include "Constraints/SystemConstraint.h"
 #include "Core/Types.h"
+#include "LevelSet/LevelSetRecordLabels.h"
 
 #include <array>
 #include <functional>
@@ -58,7 +59,7 @@ namespace constraints {
 
 struct ContactPointVelocityLaw {
     std::vector<int> wall_boundary_markers{};
-    // Unit wall normal pointing out of the fluid into the solid; must be a
+    // Unit wall normal pointing out of the computational domain; must be a
     // coordinate axis direction.
     std::array<Real, 3> wall_normal{{0.0, -1.0, 0.0}};
     std::string level_set_field_name{};
@@ -72,6 +73,8 @@ struct ContactPointVelocityLaw {
     // cos(theta_cell); positive values advance the contact point.
     std::function<Real(Real)> contact_speed{};
     std::string name{"contact_point_velocity"};
+    // The formulation may supply its public name for this manifest column.
+    std::string active_side_record_label{level_set::defaultLevelSetRecordLabels.active_side};
 };
 
 struct ContactPointVelocitySample {

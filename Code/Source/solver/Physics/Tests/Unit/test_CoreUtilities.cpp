@@ -112,6 +112,23 @@ TEST_F(FreeSurfaceCertificateEnvironment, KeepsAliasPrecedenceAndReadsCachePolic
     EXPECT_FALSE(fs::newtonAnalysisMethodFromEnvironment().constraint_range.observe);
 }
 
+TEST(FreeSurfaceGeometryEnvironment, PreservesFullCellPointRetentionFlag)
+{
+    namespace fs = formulations::navier_stokes::free_surface;
+    constexpr auto legacy = "SVMP_KEEP_DRY_CELL_POINTS";
+    EXPECT_EQ(FE::environment::EnvironmentNameRegistry::solver().find(legacy), nullptr);
+    EXPECT_NE(fs::environmentRegistry().find(legacy), nullptr);
+    EXPECT_NE(FE::environment::EnvironmentNameRegistry::solver().find("SVMP_KEEP_FULL_CELL_POINTS"), nullptr);
+    for (const auto* value : {"", "0", "01"}) {
+        ScopedEnvVar flag(legacy, value);
+        EXPECT_FALSE(fs::keepFullCellPointsFromEnvironment());
+    }
+    for (const auto* value : {"1", "yes", "false"}) {
+        ScopedEnvVar flag(legacy, value);
+        EXPECT_TRUE(fs::keepFullCellPointsFromEnvironment());
+    }
+}
+
 TEST_F(FreeSurfaceCertificateEnvironment, SuppliesThePhysicalRecordVocabulary)
 {
     namespace fs = formulations::navier_stokes::free_surface;
@@ -137,7 +154,15 @@ TEST_F(FreeSurfaceCertificateEnvironment, PreservesThresholdValidationAndEffecti
     EXPECT_EQ(method.max_constant_field_kkt_distance, 1e-4);
     EXPECT_TRUE(method.initialize_constraint_field);
     const auto& names = fs::environmentRegistry();
-    EXPECT_EQ(names.declarations().size(), FE::environment::EnvironmentNameRegistry::solver().declarations().size() + 12);
+    const auto& base = FE::environment::EnvironmentNameRegistry::solver();
+    std::size_t certificate_aliases = 0;
+    for (const auto* declaration : names.declarations()) {
+        if (std::string_view(declaration->owner) == "FE/Analysis/ConstraintRangeCertificate" &&
+            !base.find(declaration->name)) {
+            ++certificate_aliases;
+        }
+    }
+    EXPECT_EQ(certificate_aliases, 12u);
     EXPECT_TRUE(names.declaration(range).marksNonReference());
     EXPECT_STREQ(names.declaration(range).owner, "FE/Analysis/ConstraintRangeCertificate");
     EXPECT_EQ(FE::environment::EnvironmentNameRegistry::solver().find(range), nullptr);

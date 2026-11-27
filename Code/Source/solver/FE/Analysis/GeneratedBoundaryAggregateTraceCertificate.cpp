@@ -1167,14 +1167,14 @@ struct SelectedState {
     if (!report.revision.has_level_set_snapshot_revision ||
         !report.revision.has_source_value_revision) {
         reject(
-            "aggregation report lacks authoritative free-surface "
+            "aggregation report lacks authoritative level-set "
             "snapshot revisions");
     }
     if (!cut.hasLevelSetGeometrySnapshotForMarker(
             options.volume_interface_marker) ||
         !cut.hasLevelSetGeometrySnapshotForMarker(
             options.generated_active_boundary_marker)) {
-        reject("generated markers are not bound to a free-surface snapshot");
+        reject("generated markers are not bound to a level-set snapshot");
     }
     const auto volume_snapshot_revision =
         cut.levelSetGeometrySnapshotRevisionForMarker(
@@ -1194,13 +1194,13 @@ struct SelectedState {
             snapshot->revision().snapshot_revision_key ==
                 volume_snapshot_revision) {
             if (selected.snapshot) {
-                reject("free-surface snapshot revision is ambiguous");
+                reject("level-set snapshot revision is ambiguous");
             }
             selected.snapshot = snapshot;
         }
     }
     if (!selected.snapshot) {
-        reject("authoritative free-surface snapshot is unavailable");
+        reject("authoritative level-set snapshot is unavailable");
     }
     const auto& snapshot_revision =
         selected.snapshot->revision();
@@ -1209,7 +1209,7 @@ struct SelectedState {
             options.volume_interface_marker ||
         snapshot_revision.source_value_revision !=
             report.revision.source_value_revision) {
-        reject("free-surface snapshot does not match the aggregation report");
+        reject("level-set snapshot does not match the aggregation report");
     }
 
     std::size_t active_domain_matches = 0u;

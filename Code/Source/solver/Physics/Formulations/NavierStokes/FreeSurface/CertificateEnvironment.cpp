@@ -87,6 +87,8 @@ const EnvironmentNameRegistry& environmentRegistry()
     // numerical service to which the formulation sends the resolved method.
     constexpr auto kCertificate = "FE/Analysis/ConstraintRangeCertificate";
     static constexpr NameDeclaration aliases[] = {
+        {"SVMP_KEEP_DRY_CELL_POINTS", Performance, "FE/LevelSet/LevelSetGeometryService", Flag, "off", Reference,
+         "keeps every quadrature point of full cells in the cut snapshot"},
         {"SVMP_FREE_SURFACE_CONSERVATIVE_BALANCE_DIAGNOSTIC", Diagnostic, kCertificate, Flag, "off", Reference,
          "second spelling of SVMP_NS_FREE_SURFACE_CONSERVATIVE_BALANCE_DIAGNOSTIC"},
         {"SVMP_FREE_SURFACE_CONSERVATIVE_BALANCE_DIAGNOSTIC_EVERY_ASSEMBLY", Performance, kCertificate, Flag,
@@ -122,6 +124,12 @@ const EnvironmentNameRegistry& environmentRegistry()
     };
     static const EnvironmentNameRegistry registry(EnvironmentNameRegistry::solver(), aliases);
     return registry;
+}
+
+bool keepFullCellPointsFromEnvironment()
+{
+    const char* value = environmentRegistry().value("SVMP_KEEP_DRY_CELL_POINTS");
+    return value && value[0] != '\0' && value[0] != '0';
 }
 
 const std::vector<std::string>& conservativeBalanceDiagnosticSwitches()

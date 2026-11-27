@@ -14,6 +14,7 @@
  * `IncompressibleNavierStokesVMSModule.cpp` the statement of the weak form.
  */
 
+#include "Physics/Formulations/NavierStokes/FreeSurface/LevelSetRecords.h"
 #include "Physics/Formulations/NavierStokes/IncompressibleNavierStokesVMSModule.h"
 #include "Physics/Formulations/NavierStokes/NavierStokesPostProcessing.h"
 #include "Physics/Options/NavierStokesOptionRules.h"
@@ -1372,7 +1373,8 @@ inline void addUnfittedFreeSurface(FE::forms::FormExpr& M, FE::systems::FESystem
         F.log(contactLineLogs(b, *c.line, CL.marker(), wetted_marker));
         if (c.strong) {   // PointLaw phase: registered after the aggregation, so it can expand aggregated DOFs
             plan.contactPointVelocity(u_id, L, c.wall, c.wall_normal, c.contact_speed,
-                                      "ren_e_contact_point:" + std::to_string(c.wall));
+                                      "ren_e_contact_point:" + std::to_string(c.wall),
+                                      free_surface::levelSetRecordLabels.active_side);
             F.log(strongContactPointLog(*c.line));
         }
     }

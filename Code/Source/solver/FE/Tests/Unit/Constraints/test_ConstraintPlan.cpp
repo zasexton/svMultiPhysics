@@ -456,7 +456,7 @@ TEST(ConstraintPlan, ActiveOnWithAggregationRequiresBothCutVolumes)
     }
 }
 
-TEST(ConstraintPlan, ContactPointVelocityFromALiquidSideBuildsTheSameLaw)
+TEST(ConstraintPlan, ContactPointVelocityFromAnActiveSideBuildsTheSameLaw)
 {
     const auto speed = [](Real cos_d) { return Real{0.5} * (Real{0.25} - cos_d); };
     std::vector<std::vector<std::string>> by_side;
@@ -482,9 +482,12 @@ TEST(ConstraintPlan, ContactPointVelocityFromALiquidSideBuildsTheSameLaw)
 
         ASSERT_EQ(explicit_law.registered().size(), 1u);
         EXPECT_EQ(from_geometry.registered(), explicit_law.registered());
+        const auto expected_side = side == forms::CutVolumeSide::Positive
+                                       ? " active_side=positive " : " active_side=negative ";
+        EXPECT_NE(from_geometry.registered().front().find(expected_side), std::string::npos);
         by_side.push_back(explicit_law.registered());
     }
-    EXPECT_NE(by_side[0], by_side[1]);   // the liquid side is part of the law
+    EXPECT_NE(by_side[0], by_side[1]);   // the active side is part of the law
 }
 
 TEST(ConstraintPlan, AnchorGaugeRecordsTheEvidenceOnceAndAddsTheMeasureKernel)

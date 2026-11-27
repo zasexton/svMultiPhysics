@@ -954,6 +954,7 @@ set(FE_LEVELSET_HEADERS
     LevelSet/LevelSetConservativePhaseRegions.h
     LevelSet/LevelSetConservativePhaseWorkflow.h
     LevelSet/LevelSetOptions.h
+    LevelSet/LevelSetRecordLabels.h
     LevelSet/LevelSetTransport.h
     LevelSet/LevelSetVelocityExtensionConstraint.h
     LevelSet/LevelSetCellEvaluator.h

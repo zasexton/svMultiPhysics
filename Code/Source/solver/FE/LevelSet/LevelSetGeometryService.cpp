@@ -376,10 +376,10 @@ struct ActiveSideRegionSummary {
   std::size_t active_volume_regions{0};
   std::size_t pruned_volume_regions{0};
   std::size_t active_quadrature_points{0};
-  std::size_t active_wet_cells{0};
+  std::size_t nonempty_active_cells{0};
   std::size_t cut_cell_count{0};
-  std::size_t full_wet_cell_count{0};
-  std::size_t full_dry_cell_count{0};
+  std::size_t full_active_cell_count{0};
+  std::size_t inactive_cell_count{0};
   std::size_t nonfinite_measure_regions{0};
   std::size_t negative_measure_regions{0};
   std::size_t empty_quadrature_regions{0};
@@ -446,7 +446,7 @@ ActiveSideRegionSummary summarizeActiveSideRegions(
   ActiveSideRegionSummary summary;
   const auto n_cells = static_cast<std::size_t>(
       std::max<svmp::FE::GlobalIndex>(0, mesh.numCells()));
-  std::vector<double> wet_fraction(n_cells, 0.0);
+  std::vector<double> active_fraction(n_cells, 0.0);
   const auto side = cutIntegrationSide(active_side);
   for (const auto& region : domain.volumeRegions()) {
     const auto parent_cell =
@@ -489,9 +489,9 @@ ActiveSideRegionSummary summarizeActiveSideRegions(
           std::max(summary.max_volume_fraction, region.volume_fraction);
     }
     const auto cell = region.parent_cell;
-    if (cell >= 0 && static_cast<std::size_t>(cell) < wet_fraction.size()) {
-      wet_fraction[static_cast<std::size_t>(cell)] = std::clamp(
-          wet_fraction[static_cast<std::size_t>(cell)] +
+    if (cell >= 0 && static_cast<std::size_t>(cell) < active_fraction.size()) {
+      active_fraction[static_cast<std::size_t>(cell)] = std::clamp(
+          active_fraction[static_cast<std::size_t>(cell)] +
               static_cast<double>(region.volume_fraction),
           0.0,
           1.0);
@@ -499,19 +499,19 @@ ActiveSideRegionSummary summarizeActiveSideRegions(
   }
 
   constexpr double fraction_tol = 1.0e-12;
-  for (std::size_t cell = 0; cell < wet_fraction.size(); ++cell) {
+  for (std::size_t cell = 0; cell < active_fraction.size(); ++cell) {
     if (!mesh.isOwnedCell(static_cast<svmp::FE::GlobalIndex>(cell))) {
       continue;
     }
-    const auto fraction = wet_fraction[cell];
+    const auto fraction = active_fraction[cell];
     if (fraction <= fraction_tol) {
-      ++summary.full_dry_cell_count;
+      ++summary.inactive_cell_count;
     } else if (fraction >= 1.0 - fraction_tol) {
-      ++summary.full_wet_cell_count;
-      ++summary.active_wet_cells;
+      ++summary.full_active_cell_count;
+      ++summary.nonempty_active_cells;
     } else {
       ++summary.cut_cell_count;
-      ++summary.active_wet_cells;
+      ++summary.nonempty_active_cells;
     }
   }
   if (!std::isfinite(summary.min_volume_fraction)) {
@@ -1201,22 +1201,16 @@ std::size_t syncActiveLevelSetVertexFieldsFromSolution(
 
 namespace {
 
-// Full-cell snapshot records carry only their classification unless a
-// consumer integrates over their volume points without the mesh: the
-// two-fluid stage diagnostics.  The active-volume energy, dissipation and
-// kinetic-work evaluators rematerialize them from the mesh.  The dry
-// (inactive) side is always eligible; in 3D, where full cells dominate the
-// snapshot, both sides are.  SVMP_KEEP_DRY_CELL_POINTS=1 keeps every point
-// (debugging and memory comparisons).
+// A classified full cell can rematerialize its quadrature from the parent mesh.
 bool snapshotMayStoreFullCellsClassificationOnly(
     const LevelSetGeometryHost& sim)
 {
   static const bool keep_points = [] {
-    const char* value = environment::value("SVMP_KEEP_DRY_CELL_POINTS");
+    const char* value = environment::value("SVMP_KEEP_FULL_CELL_POINTS");
     return value != nullptr && value[0] != '\0' && value[0] != '0';
   }();
   return !keep_points &&
-         !sim.two_fluid_accepted_stage_diagnostics_declared;
+         !sim.consumer_requires_full_cell_volume_points;
 }
 
 // Incremental cut-geometry rebuilds reuse, from one rebuild to the next,
@@ -1671,7 +1665,7 @@ ActiveCutContextRefreshReport refreshActiveCutIntegrationContextFromSolution(
           request.level_set_field_name + "' domain_id='" + request.domain_id +
           "' active_side=" + activeSideName(request.active_side) +
           " isovalue=" + std::to_string(request.isovalue) +
-          " has zero retained active wet volume after generated cut-volume pruning.");
+          " has zero retained active volume after generated cut-volume pruning.");
     }
     const auto topology_key = cutContextTopologyKey(result.domain);
     const auto& domain_request = result.domain.request();
@@ -2135,7 +2129,7 @@ ActiveCutContextRefreshReport refreshActiveCutIntegrationContextFromSolution(
             svmp::FE::interfaces::CutInterfaceSourceKind::Field ||
         domain_request.source.field_id == svmp::FE::INVALID_FIELD_ID) {
       throw std::runtime_error(
-          "[svMultiPhysics::Application] Authoritative free-surface geometry snapshots currently require a registered scalar level-set field source.");
+          "[svMultiPhysics::Application] Authoritative level-set geometry snapshots currently require a registered scalar level-set field source.");
     }
     auto snapshot_cell_evaluator = std::make_shared<
         svmp::FE::level_set::LevelSetCellEvaluator>(
@@ -2165,7 +2159,7 @@ ActiveCutContextRefreshReport refreshActiveCutIntegrationContextFromSolution(
                         "HighOrderSubcell";
                 if (!linear_corner && !high_order_implicit) {
                   throw std::runtime_error(
-                      "Authoritative free-surface geometry rule has an unsupported represented implicit backend '" +
+                      "Authoritative level-set geometry rule has an unsupported represented implicit backend '" +
                       provenance.selected_implicit_quadrature_backend + "'.");
                 }
                 // evaluateLinearCornerValue() is evaluateLinearCorner().value
@@ -2191,7 +2185,7 @@ ActiveCutContextRefreshReport refreshActiveCutIntegrationContextFromSolution(
                         "HighOrderSubcell";
                 if (!linear_corner && !high_order_implicit) {
                   throw std::runtime_error(
-                      "Authoritative free-surface geometry rule has an unsupported represented implicit backend '" +
+                      "Authoritative level-set geometry rule has an unsupported represented implicit backend '" +
                       provenance.selected_implicit_quadrature_backend + "'.");
                 }
                 const auto evaluation = linear_corner
@@ -2276,7 +2270,7 @@ ActiveCutContextRefreshReport refreshActiveCutIntegrationContextFromSolution(
       if (globalAnyBool(!difference.empty(), comm)) {
         throw std::runtime_error(
             "[svMultiPhysics::Application] Incremental rebuild self-check: "
-            "the reused free-surface geometry snapshot differs from a full "
+            "the reused level-set geometry snapshot differs from a full "
             "rebuild (domain_id='" +
             request.domain_id + "' rank=" + std::to_string(comm.rank()) +
             "): " + (difference.empty() ? "differs on another rank"
@@ -2313,8 +2307,8 @@ ActiveCutContextRefreshReport refreshActiveCutIntegrationContextFromSolution(
     const auto& geometry_ledger = geometry_snapshot->ledger();
     if (svmp::FE::rank_log::oopDiagnosticsEnabled(svmp::FE::LogLevel::DEBUG)) {
         svmp::FE::logRecord(
-            svmp::FE::LogRecord("LevelSetGeometryService", "authoritative free-surface geometry")
-                .diagnostic("free_surface_geometry_snapshot")
+            svmp::FE::LogRecord("LevelSetGeometryService", sim.record_labels.snapshot_heading)
+                .diagnostic(sim.record_labels.snapshot_diagnostic)
                 .quoted("domain_id", request.domain_id)
                 .value("interface_marker", result.interface_marker)
                 .value("snapshot_revision", geometry_snapshot->revision().snapshot_revision_key)
@@ -2397,8 +2391,8 @@ ActiveCutContextRefreshReport refreshActiveCutIntegrationContextFromSolution(
       requireCollectivePhasePreparation(
           local_structure_failure, comm, "active_cut_structure_keys");
     }
-    // The context keeps only the classification of the dry full-cell rules
-    // too when no cut-volume kernel integrates over the dry side.
+    // The context keeps only the classification of the inactive full-cell rules
+    // too when no cut-volume kernel integrates over the inactive side.
     const auto classification_only_context_side =
         snapshot_policy.classification_only_full_cell_side.has_value() &&
                 sim.fe_system->cutVolumeKernelCount(
@@ -2503,7 +2497,7 @@ ActiveCutContextRefreshReport refreshActiveCutIntegrationContextFromSolution(
          (global_inactive_skipped_physical_volume_rules != 0u ||
           inactive_constant_one_error > constant_one_tolerance))) {
       throw std::runtime_error(
-          "Authoritative free-surface snapshot and constant-one cut-volume assembly measures disagree.");
+          "Authoritative level-set snapshot and constant-one cut-volume assembly measures disagree.");
     }
     report.negative_physical_volume += global_negative_physical_volume;
     report.positive_physical_volume += global_positive_physical_volume;
@@ -2601,14 +2595,14 @@ ActiveCutContextRefreshReport refreshActiveCutIntegrationContextFromSolution(
     const auto global_cut_adjacent_metadata =
         globalSumSize(facet_scale_summary.metadata_count, comm);
     report.cut_adjacent_facets += global_cut_adjacent_facets;
-    const auto global_active_wet_cells =
-        globalSumSize(active_summary.active_wet_cells, comm);
+    const auto global_nonempty_active_cells =
+        globalSumSize(active_summary.nonempty_active_cells, comm);
     const auto global_cut_cells =
         globalSumSize(active_summary.cut_cell_count, comm);
-    const auto global_full_wet_cells =
-        globalSumSize(active_summary.full_wet_cell_count, comm);
-    const auto global_full_dry_cells =
-        globalSumSize(active_summary.full_dry_cell_count, comm);
+    const auto global_full_active_cells =
+        globalSumSize(active_summary.full_active_cell_count, comm);
+    const auto global_inactive_cells =
+        globalSumSize(active_summary.inactive_cell_count, comm);
     const auto global_active_quadrature_points =
         globalSumSize(active_summary.active_quadrature_points, comm);
     report.active_cut_cells += global_cut_cells;
@@ -2794,10 +2788,10 @@ ActiveCutContextRefreshReport refreshActiveCutIntegrationContextFromSolution(
             .text("generated_pruned_volume_scope", "summed_rank_local_including_ghost_cells")
             .value("generated_pruned_volume_rules", global_generated_pruned_volume_rules)
             .value("generated_pruned_volume", global_generated_pruned_volume)
-            .value("active_wet_cells", global_active_wet_cells)
+            .value(sim.record_labels.nonempty_active_cells, global_nonempty_active_cells)
             .value("active_cut_cells", global_cut_cells)
-            .value("active_full_wet_cells", global_full_wet_cells)
-            .value("active_full_dry_cells", global_full_dry_cells)
+            .value(sim.record_labels.full_active_cells, global_full_active_cells)
+            .value(sim.record_labels.inactive_cells, global_inactive_cells)
             .value("active_quadrature_points", global_active_quadrature_points)
             .value("active_volume_quadrature_point_count", global_active_quadrature_points)
             .value("active_empty_quadrature_regions", global_empty_quadrature_regions)

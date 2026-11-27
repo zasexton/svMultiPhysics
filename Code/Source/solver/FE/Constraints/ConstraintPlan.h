@@ -216,7 +216,7 @@ public:
     /**
      * PointLaw: the contact-point velocity law where the interface bounding
      * the side @p active_region meets the boundary @p wall_marker (unit
-     * @p wall_normal out of the fluid): the law reads the level set of the
+     * @p wall_normal out of the domain): the law reads the level set of the
      * side's geometry at its isovalue, oriented by the side, and
      * @p contact_speed maps cos(theta) of a contact cell (inside the
      * active region) to the outward boundary-tangential contact-point speed.
@@ -226,7 +226,9 @@ public:
                                          int wall_marker,
                                          const std::array<Real, 3>& wall_normal,
                                          std::function<Real(Real)> contact_speed,
-                                         std::string name);
+                                         std::string name,
+                                         std::string active_side_record_label =
+                                             level_set::defaultLevelSetRecordLabels.active_side);
 
     /**
      * Not a phase: records the gauge anchor of a natural condition on a
