@@ -26,6 +26,8 @@
 #include "Forms/MonolithicCellKernel.h"
 #include "Forms/Vocabulary.h"
 #include "Spaces/H1Space.h"
+#include "Spaces/GenericBasisSpace.h"
+#include "Quadrature/QuadratureFactory.h"
 #include "Spaces/ProductSpace.h"
 #include "Systems/ALEBinding.h"
 #include "Systems/FESystem.h"
@@ -322,6 +324,8 @@ struct ProbeSetup {
     bool complete{false};
     bool jit{false};
     bool interface{false};      ///< register the fitted interface kGamma (n even)
+    // An explicit cell rule can exercise a quadrature degree independently of the field basis.
+    std::shared_ptr<const svmp::FE::quadrature::QuadratureRule> cell_rule{};
     bool record_residual{false};
 };
 
@@ -348,10 +352,17 @@ DirectionalDefect directionalDefect(const ProbeSetup& setup, const Probe& probe)
     const auto box = makeBoxMesh(setup.cell, setup.nx > 0 ? setup.nx : setup.n, setup.n, setup.geometry_order,
                                  setup.amplitude / setup.n);
     const int dim = box.dim;
-    auto scalar_u = std::make_shared<svmp::FE::spaces::H1Space>(box.element, setup.u_order);
+    const auto scalar_space = [&](int order) -> std::shared_ptr<svmp::FE::spaces::FunctionSpace> {
+        if (setup.cell_rule) {
+            return std::make_shared<svmp::FE::spaces::GenericBasisSpace>(
+                std::make_shared<svmp::FE::basis::LagrangeBasis>(box.element, order), setup.cell_rule);
+        }
+        return std::make_shared<svmp::FE::spaces::H1Space>(box.element, order);
+    };
+    auto scalar_u = scalar_space(setup.u_order);
     auto vector_u = std::make_shared<svmp::FE::spaces::ProductSpace>(scalar_u, dim);
-    auto scalar_p = std::make_shared<svmp::FE::spaces::H1Space>(box.element, setup.p_order);
-    auto scalar_d = std::make_shared<svmp::FE::spaces::H1Space>(box.element, setup.geometry_order);
+    auto scalar_p = scalar_space(setup.p_order);
+    auto scalar_d = scalar_space(setup.geometry_order);
     auto vector_d = std::make_shared<svmp::FE::spaces::ProductSpace>(scalar_d, dim);
 
     systems::FESystem system(box.mesh, svmp::Configuration::Current);
@@ -508,10 +519,20 @@ DirectionalDefect directionalDefect(const ProbeSetup& setup, const Probe& probe)
         }
         const auto r_plus = residualRows(plus);
         const auto r_minus = residualRows(minus);
+        for (std::size_t i = 0; i < values.size(); ++i) {
+            plus[i] = values[i] + Real(0.5) * eps * direction[i];
+            minus[i] = values[i] - Real(0.5) * eps * direction[i];
+        }
+        const auto r_plus_half = residualRows(plus);
+        const auto r_minus_half = residualRows(minus);
         std::vector<Real> fd(r_plus.size()), jd(r_plus.size()), diff(r_plus.size());
         for (GlobalIndex r = rows.first; r < rows.second; ++r) {
             const auto idx = static_cast<std::size_t>(r - rows.first);
-            fd[idx] = (r_plus[idx] - r_minus[idx]) / (Real(2) * eps);
+            // Richardson extrapolation removes the leading truncation error on
+            // the most strongly distorted curved cells.
+            const Real coarse = (r_plus[idx] - r_minus[idx]) / (Real(2) * eps);
+            const Real fine = (r_plus_half[idx] - r_minus_half[idx]) / eps;
+            fd[idx] = fine + (fine - coarse) / Real(3);
             Real acc = 0.0;
             for (GlobalIndex c = 0; c < n; ++c) {
                 acc += J.getMatrixEntry(r, c) * direction[static_cast<std::size_t>(c)];
@@ -674,6 +695,24 @@ void runProbes(const std::vector<Probe>& probes, const char* label,
 TEST(CompleteShapeDerivative, VolumeTermsMatchDirectionalDifferences)
 {
     runProbes(volumeProbes(), "volume terms", representativeMeshCases());
+}
+
+TEST(CompleteShapeDerivative, CurvedTriangleWithDegreeFiveCellRule)
+{
+    ProbeSetup setup;
+    setup.cell = Cell::Triangle;
+    setup.geometry_order = setup.u_order = setup.p_order = 2;
+    setup.complete = true;
+    setup.cell_rule = svmp::FE::quadrature::QuadratureFactory::create(ElementType::Triangle6, 5);
+    ASSERT_EQ(setup.cell_rule->num_points(), 7u);
+    const Probe probe{"scalar gradient", Rows::Scalar,
+        [](const Symbols& s) { return forms::inner(forms::grad(s.p), forms::grad(s.q)).dx(); }};
+    for (int pass = 0; pass < 2; ++pass) {
+        const auto defect = directionalDefect(setup, probe);
+        EXPECT_GT(defect.fd_norm, 1);
+        EXPECT_LT(defect.mesh, 1e-6);
+        EXPECT_LT(defect.other, 1e-6);
+    }
 }
 
 TEST(CompleteShapeDerivativeSweep, VolumeTermsOnEveryCellAndOrder)
