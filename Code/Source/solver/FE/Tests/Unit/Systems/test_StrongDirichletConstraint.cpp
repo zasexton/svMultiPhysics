@@ -983,6 +983,107 @@ TEST(NormalComponentConstraint, AChangingNormalPreservesHistoryAtItsOwnTime)
     }
 }
 
+TEST(NormalComponentConstraint, HomogeneousRowsCancelIntegratedFluxOnAWarpedQuadrilateral)
+{
+    using namespace svmp::FE;
+    constexpr int top = 71, active = 72;
+    auto base = std::make_shared<MeshBase>();
+    // Unit cube with the top graph z = 1 + xy/2.
+    const CellShape hex{.family = CellFamily::Hex, .num_corners = 8, .order = 1};
+    const CellShape quad{.family = CellFamily::Quad, .num_corners = 4, .order = 1};
+    base->build_from_arrays(3, {0,0,0, 1,0,0, 1,1,0, 0,1,0, 0,0,1, 1,0,1, 1,1,1.5, 0,1,1},
+                            {0, 8}, {0, 1, 2, 3, 4, 5, 6, 7}, {hex});
+    base->set_faces_from_arrays({quad}, {0, 4}, {4, 5, 6, 7},
+        {std::array<svmp::index_t, 2>{0, svmp::INVALID_INDEX}}, svmp::MeshCodim1StorageMode::BoundaryOnly);
+    base->set_boundary_label(0, top);
+    FESystem system(svmp::create_mesh(std::move(base)));
+    const auto field = system.addField({
+        .name = "u", .space = spaces::SpaceFactory::create_vector_h1(ElementType::Hex8, 1, 3), .components = 3});
+    auto condition = std::make_unique<constraints::NormalComponentConstraint>(field,
+        std::vector{forms::ExteriorBoundaryMeasure::generatedActiveSubset(top, active)});
+    const auto* normal = condition.get();
+    system.addSystemConstraint(std::move(condition));
+    system.setup();
+    const auto cell = system.fieldDofHandler(field).getDofMap().getCellDofs(0);
+    ASSERT_EQ(cell.size(), 24u);
+    const auto pointwise = constraints::boundaryPointNormals(system, field, std::array{top});
+    ASSERT_TRUE(pointwise.at(cell[4]).has_value());
+    EXPECT_EQ(*pointwise.at(cell[4]), (std::array<Real, 3>{0, 0, 1}));
+
+    const Real gauss = std::sqrt(Real{1} / 12);
+    const auto verify = [&](Real height, Real expected_corner) {
+        std::vector<Real> u(system.dofHandler().getNumDofs(), 0);
+        u[cell[4]] = u[cell[5]] = 4;  // u_x = 4(1-y), u_y = 0 on the face.
+        system.constraints().distributeMasterBearing(u);
+        // Direct Gauss integration of u_h · (-y/2,-x/2,1) on [0,1] x [0,height].
+        Real flux{};
+        for (Real x : {.5 - gauss, .5 + gauss}) {
+            for (Real y : {height * (.5 - gauss), height * (.5 + gauss)}) {
+                const std::array<Real, 4> n{(1-x) * (1-y), x * (1-y), x*y, (1-x) * y};
+                for (int a = 0; a < 4; ++a) {
+                    flux += height * n[a] * (-.5 * y * u[cell[4 + a]] - .5 * x * u[cell[12 + a]] + u[cell[20 + a]]) / 4;
+                }
+            }
+        }
+        ASSERT_EQ(normal->lines().size(), 4u);
+        EXPECT_NEAR(flux, 0, 1e-13);
+        EXPECT_NEAR(u[cell[20]], expected_corner, 1e-13);
+    };
+    verify(1, 2.0 / 3.0);
+    interfaces::GeneratedActiveBoundaryRequest request;
+    request.source = interfaces::LevelSetInterfaceSource::fromField(field, 1u, 1u);
+    request.generated_domain_id = "half-quadrilateral";
+    request.boundary_marker = top;
+    request.active_boundary_marker = active;
+    request.interface_marker = 73;
+    request.quadrature_order = 2;
+    interfaces::GeneratedActiveBoundaryDomain domain(request);
+    interfaces::GeneratedActiveBoundaryFragment fragment;
+    fragment.parent_cell = 0;
+    fragment.parent_face = 0;
+    fragment.topology_id = "half-quadrilateral";
+    fragment.represented_implicit_geometry_mode = "LinearCorner";
+    fragment.represented_implicit_quadrature_backend = "LinearCorner";
+    fragment.represented_implicit_fallback_status = "None";
+    fragment.achieved_quadrature_order = 2;
+    for (Real x : {.5 - gauss, .5 + gauss}) {
+        for (Real y : {.5 * (.5 - gauss), .5 * (.5 + gauss)}) {
+            geometry::CutQuadraturePoint point;
+            point.parent_coordinate = {2*x - 1, 2*y - 1, 1};
+            point.point = point.parent_coordinate;
+            point.weight = .5;
+            fragment.measure += point.weight;
+            fragment.quadrature_points.push_back(point);
+        }
+    }
+    fragment.parent_measure = 2 * fragment.measure;
+    domain.addFragment(std::move(fragment));
+    auto context = std::make_shared<assembly::CutIntegrationContext>();
+    context->addGeneratedActiveBoundaryDomain(domain);
+    system.setCutIntegrationContext(std::move(context));
+    system.rebuildConstraintState();
+    verify(.5, 4.0 / 9.0);
+}
+
+TEST(NormalComponentConstraint, ZeroQuadraticVertexFluxMomentsKeepTheOutwardPrescribedValue)
+{
+    using namespace svmp::FE;
+    constexpr int wall = 74;
+    FESystem system(build_single_tetra10_mesh_with_boundary_only_face_marker(wall));
+    const auto field = system.addField({
+        .name = "u", .space = spaces::SpaceFactory::create_vector_h1(ElementType::Tetra10, 2, 3), .components = 3});
+    auto condition = std::make_unique<constraints::NormalComponentConstraint>(
+        field, std::vector<int>{wall}, FormExpr::constant(1));
+    const auto* normal = condition.get();
+    system.addSystemConstraint(std::move(condition));
+    system.setup();
+    ASSERT_EQ(normal->lines().size(), 6u);
+    for (const auto& line : normal->lines()) {
+        EXPECT_TRUE(line.masters.empty());
+        EXPECT_DOUBLE_EQ(line.value_factor, -1);  // outward normal of the z=0 face
+    }
+}
+
 TEST(NormalComponentConstraint, AFittedReferenceNormalProjectsStaticHistory)
 {
     using namespace svmp::FE;

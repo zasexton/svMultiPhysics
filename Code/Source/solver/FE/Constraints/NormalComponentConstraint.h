@@ -16,11 +16,13 @@
  * constraint lines after deal.II's compute_nonzero_normal_flux_constraints.
  * At each support point of the field on the boundary:
  *
- *  - every boundary facet of the markers that holds the point gives its unit
- *    outward normal there, weighted by the facet's measure;
- *  - normals that differ by less than the feature angle are one direction
- *    (a smooth or faceted curved wall); the direction is the normalized
- *    weighted sum of its normals;
+ *  - each incident facet gives its outward normal at the support point to
+ *    identify the smooth walls that meet there;
+ *  - on each wall, the normal row uses the integral of the scalar trace
+ *    shape function times the oriented physical area vector, summed over
+ *    its facets. For homogeneous data this annihilates the integrated FE
+ *    flux. A zero moment (e.g. a P2 vertex on a flat triangle) uses the
+ *    local geometric normal. Prescribed values use outward directions;
  *  - with k directions n_1..n_k at the point (k = 1 on a boundary, 2 on a 3D
  *    edge, dim at a corner) the constraint is n_j . u = g for each j: when
  *    k < dim the k components whose submatrix of N = [n_1; ...; n_k] has the

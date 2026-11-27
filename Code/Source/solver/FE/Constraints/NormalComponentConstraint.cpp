@@ -9,9 +9,14 @@
 
 #include "Assembly/CutIntegrationContext.h"
 #include "Elements/ElementTransform.h"
+#include "Elements/LagrangeElement.h"
 #include "Elements/ReferenceElement.h"
 #include "Forms/PointEvaluator.h"
 #include "Geometry/MappingFactory.h"
+#include "Geometry/LinearMapping.h"
+#include "Geometry/FrameGeometry.h"
+#include "Quadrature/QuadratureFactory.h"
+#include "Spaces/ProductSpace.h"
 #include "Spaces/FaceRestriction.h"
 #include "Systems/FESystem.h"
 #include "Systems/SystemsExceptions.h"
@@ -27,6 +32,7 @@
 #include <sstream>
 #include <type_traits>
 #include <unordered_map>
+#include <vector>
 #include <utility>
 
 #if FE_HAS_MPI
@@ -50,6 +56,8 @@ struct FacetContribution {
     std::int64_t facet{-1};                    ///< global facet id
     std::array<GlobalIndex, 3> dofs{-1, -1, -1};  ///< the point's DOF of each component
     std::array<Real, 3> normal{0.0, 0.0, 0.0};
+    Real moment_scale{};                       ///< integral of the absolute trace basis
+    std::array<Real, 3> flux_moment{};       ///< integral of the scalar trace basis times n dS
     Real measure{0.0};
     std::array<Real, 3> x{0.0, 0.0, 0.0};
 };
@@ -90,20 +98,108 @@ struct FacetContribution {
     switch (corners.size()) {
     case 2: {
         const auto d = sub(corners[1], corners[0]);
-        return std::sqrt(dot3(d, d));
+        return std::hypot(d[0], d[1], d[2]);
     }
     case 3: {
         const auto c = cross(sub(corners[1], corners[0]), sub(corners[2], corners[0]));
-        return 0.5 * std::sqrt(dot3(c, c));
+        return 0.5 * std::hypot(c[0], c[1], c[2]);
     }
     case 4: {
         const auto c = cross(sub(corners[2], corners[0]), sub(corners[3], corners[1]));
-        return 0.5 * std::sqrt(dot3(c, c));
+        return 0.5 * std::hypot(c[0], c[1], c[2]);
     }
     default:
         throw InvalidStateException("NormalComponentConstraint: unsupported facet with " +
                                     std::to_string(corners.size()) + " corners");
     }
+}
+
+using CutRulesByFace = std::unordered_map<GlobalIndex, std::vector<const geometry::CutQuadratureRule*>>;
+
+template<class Visit>
+bool visitActiveBoundaryRules(const FESystem& system, int boundary_marker, int active_boundary_marker, Visit visit)
+{
+    if (active_boundary_marker < 0) {
+        return false;
+    }
+    const auto* context = system.cutIntegrationContext();
+    if (context == nullptr || !context->hasGeneratedActiveBoundaryMarker(active_boundary_marker)) {
+        return false;
+    }
+    context->assertAllLevelSetGeometrySnapshotsCurrent(system.meshAccess());
+    const auto* provenance = context->findGeneratedActiveBoundaryProvenance(active_boundary_marker);
+    FE_THROW_IF(provenance == nullptr || provenance->physicalBoundaryMarker() != boundary_marker,
+                InvalidArgumentException,
+                "activeBoundaryFaces: generated active-boundary marker " + std::to_string(active_boundary_marker) +
+                    " is not a subset of boundary marker " + std::to_string(boundary_marker));
+    const auto& rules = context->interfaceRules();
+    for (const auto index : context->generatedInterfaceRuleIndexSpanForMarker(active_boundary_marker)) {
+        if (index >= rules.size()) {
+            continue;
+        }
+        const auto& rule = rules[index];
+        if (std::isfinite(rule.measure) && rule.measure > Real{0.0} &&
+            rule.provenance.parent_boundary_entity >= 0) {
+            visit(static_cast<GlobalIndex>(rule.provenance.parent_boundary_entity), rule);
+        }
+    }
+    return true;
+}
+
+struct NormalMoment {
+    std::array<Real, 3> vector{};
+    Real scale{};
+};
+
+// Coefficient of each nodal velocity in the weak normal flux. For a
+// generated subset the retained points and weights select its physical area.
+std::vector<NormalMoment> normalFluxMoments(
+    const geometry::GeometryMapping& mapping, ElementType cell_type,
+    int local_face, ElementType face_type, int geometry_order, const elements::Element& element,
+    std::span<const int> local_dofs, const std::vector<const geometry::CutQuadratureRule*>* active)
+{
+    std::vector<NormalMoment> moments(local_dofs.size());
+    std::vector<Real> values;
+    const auto accumulate = [&](const math::Vector<Real, 3>& xi, const auto& normal, Real weight) {
+        element.basis().evaluate_values(xi, values);
+        for (std::size_t a = 0; a < local_dofs.size(); ++a) {
+            const Real coefficient = weight * values.at(local_dofs[a]);
+            moments[a].scale += std::abs(coefficient);
+            for (std::size_t d = 0; d < 3; ++d) moments[a].vector[d] += coefficient * normal[d];
+        }
+    };
+    if (active) {
+        // FacetFrame uses the two parent edges as 3D chart tangents. Cut
+        // weights already include their reference metric; retain just the
+        // physical-to-reference area ratio. Its 2D edge tangent has unit length.
+        Real reference_metric{1};
+        if (element.dimension() == 3) {
+            const auto corners = elements::ElementTransform::facet_vertices(cell_type, local_face).second;
+            const math::Vector<Real, 3> t0 = corners[1] - corners[0], t1 = corners[2] - corners[0];
+            reference_metric = t0.cross(t1).norm();
+        }
+        for (const auto* rule : *active) {
+            for (const auto& point : rule->points) {
+                const bool reference = rule->frame == geometry::CutGeometryFrame::Reference;
+                const auto& position = reference ? point.point : point.parent_coordinate;
+                const math::Vector<Real, 3> xi{position[0], position[1], position[2]};
+                const auto frame = elements::ElementTransform::compute_facet_frame(mapping, xi, local_face, cell_type);
+                accumulate(xi, frame.normal, point.weight * (reference ? frame.jacobian_det / reference_metric : Real{1}));
+            }
+        }
+    } else {
+        // A tensor-product trace of degree r times its oriented area vector
+        // has degree at most r + (d-1)*p - 1 in each facet coordinate.
+        const int degree = element.polynomial_order() + (element.dimension() - 1) * geometry_order - 1;
+        const auto quad = quadrature::QuadratureFactory::create_pinned(face_type, std::max(1, degree));
+        geometry::FaceGeometryData frame;
+        geometry::evaluateFaceFrameInto(frame, mapping, cell_type, local_face, face_type, *quad, {}, false, false);
+        for (std::size_t q = 0; q < quad->num_points(); ++q) {
+            const auto& p = frame.cell_reference_points[q];
+            accumulate({p[0], p[1], p[2]}, frame.normals[q], quad->weight(q) * frame.surface_measures[q]);
+        }
+    }
+    return moments;
 }
 
 /// The facet contributions this rank sees: the boundary facets of the
@@ -113,14 +209,17 @@ struct FacetContribution {
 std::vector<FacetContribution> collectContributions(const FESystem& system,
                                                     FieldId field,
                                                     std::span<const forms::ExteriorBoundaryMeasure> boundaries,
-                                                    int components)
+                                                    int components, bool normal_flux)
 {
     const auto& rec = system.fieldRecord(field);
     const auto& mesh = system.meshAccess();
     const auto& dof_map = system.fieldDofHandler(field).getDofMap();
     const GlobalIndex offset = system.fieldDofOffset(field);
 
-    std::unordered_map<int, spaces::FaceRestriction> restrictions;
+    const auto* product = dynamic_cast<const spaces::ProductSpace*>(rec.space.get());
+    const auto& scalar_space = product ? *product->base_space() : *rec.space;
+    std::map<std::pair<ElementType, int>, spaces::FaceRestriction> restrictions;
+    std::map<std::pair<ElementType, int>, elements::LagrangeElement> mixed_elements;
     std::vector<std::array<Real, 3>> cell_coords;
     std::vector<math::Vector<Real, 3>> geom_nodes;
     std::vector<std::array<Real, 3>> corners;
@@ -128,24 +227,25 @@ std::vector<FacetContribution> collectContributions(const FESystem& system,
 
     for (const auto& boundary : boundaries) {
         const int marker = boundary.physicalBoundaryMarker();
-        const auto active_faces = activeBoundaryFaces(system, marker, boundary.generatedActiveBoundaryMarker());
+        CutRulesByFace active_rules;
+        const bool restricted = visitActiveBoundaryRules(system, marker, boundary.generatedActiveBoundaryMarker(),
+            [&](GlobalIndex face, const auto& rule) { active_rules[face].push_back(&rule); });
         mesh.forEachBoundaryFace(marker, [&](GlobalIndex face_id, GlobalIndex cell_id) {
-            if (active_faces && !active_faces->contains(face_id)) {
+            if (restricted && !active_rules.contains(face_id)) {
                 return;
             }
             const ElementType cell_type = mesh.getCellType(cell_id);
-            auto it = restrictions.find(static_cast<int>(cell_type));
+            const auto* element = &scalar_space.getElement(cell_type, cell_id);
+            if (to_mesh_family(element->element_type()) != to_mesh_family(cell_type)) {
+                const auto key = std::pair{cell_type, element->polynomial_order()};
+                element = &mixed_elements.try_emplace(key, cell_type, key.second).first->second;
+            }
+            const auto key = std::pair{element->element_type(), element->polynomial_order()};
+            auto it = restrictions.find(key);
             if (it == restrictions.end()) {
-                // The field's own element on a cell of its family (P1 on a
-                // Tetra10 cell has three DOFs per face).
-                const auto& space = *rec.space;
-                it = restrictions
-                         .emplace(static_cast<int>(cell_type),
-                                  to_mesh_family(space.element_type()) == to_mesh_family(cell_type)
-                                      ? spaces::FaceRestriction(space)
-                                      : spaces::FaceRestriction(cell_type, space.polynomial_order(),
-                                                                space.continuity()))
-                         .first;
+                it = element == &scalar_space.element()
+                         ? restrictions.try_emplace(key, scalar_space).first
+                         : restrictions.try_emplace(key, key.first, key.second, scalar_space.continuity()).first;
             }
             const auto& restriction = it->second;
             const auto face_local = static_cast<int>(mesh.getLocalFaceIndex(face_id, cell_id));
@@ -179,13 +279,25 @@ std::vector<FacetContribution> collectContributions(const FESystem& system,
             const auto facet = static_cast<std::int64_t>(mesh.getBoundaryFaceGlobalId(face_id));
 
             const auto& dof_nodes = restriction.dof_nodes();
-            for (const int ldof : restriction.face_dofs(face_local)) {
+            const auto local_dofs = restriction.face_dofs(face_local);
+            const ElementType face_type = n_corners == 2 ? ElementType::Line2
+                                        : n_corners == 3 ? ElementType::Triangle3 : ElementType::Quad4;
+            const bool linear_simplex = !restricted && element->polynomial_order() == 1 &&
+                dynamic_cast<const geometry::LinearMapping*>(mapping.get()) &&
+                dynamic_cast<const elements::LagrangeElement*>(element);
+            const auto moments = normal_flux && !linear_simplex
+                ? normalFluxMoments(*mapping, cell_type, face_local, face_type, request.geometry_order,
+                                    *element, local_dofs, restricted ? &active_rules.at(face_id) : nullptr)
+                : std::vector<NormalMoment>{};
+            for (std::size_t a = 0; a < local_dofs.size(); ++a) {
+                const int ldof = local_dofs[a];
                 const auto local = static_cast<std::size_t>(ldof);
                 FE_THROW_IF(ldof < 0 || local >= per_component || local >= dof_nodes.size(), InvalidStateException,
                             "NormalComponentConstraint: local DOF index out of range");
                 FacetContribution c;
                 c.facet = facet;
                 c.measure = measure;
+
                 for (int d = 0; d < components; ++d) {
                     c.dofs[static_cast<std::size_t>(d)] =
                         cell_dofs[static_cast<std::size_t>(d) * per_component + local] + offset;
@@ -193,6 +305,16 @@ std::vector<FacetContribution> collectContributions(const FESystem& system,
                 const auto frame = elements::ElementTransform::compute_facet_frame(*mapping, dof_nodes[local],
                                                                                    face_local, cell_type);
                 c.normal = {frame.normal[0], frame.normal[1], frame.normal[2]};
+                if (normal_flux) {
+                    if (linear_simplex) {
+                        // On an affine simplex, each P1 trace has the same integral.
+                        c.moment_scale = measure / static_cast<Real>(local_dofs.size());
+                        for (std::size_t d = 0; d < 3; ++d) c.flux_moment[d] = c.moment_scale * c.normal[d];
+                    } else {
+                        c.flux_moment = moments[a].vector;
+                        c.moment_scale = moments[a].scale;
+                    }
+                }
                 const auto x = mapping->map_to_physical(dof_nodes[local]);
                 c.x = {x[0], x[1], x[2]};
                 out.push_back(c);
@@ -226,7 +348,7 @@ std::vector<FacetContribution> gatherAtOwners(const FESystem& system, std::vecto
                     "rank-independent summation order");
         const auto& dof_map = system.dofHandler().getDofMap();
         constexpr std::size_t kInts = 4;   // facet, three DOFs
-        constexpr std::size_t kReals = 7;  // normal, measure, point
+        constexpr std::size_t kReals = 11;  // nodal normal, facet measure, point, flux moment and scale
         std::vector<std::vector<std::int64_t>> send_ints(static_cast<std::size_t>(size));
         std::vector<std::vector<double>> send_reals(static_cast<std::size_t>(size));
         std::vector<FacetContribution> kept;
@@ -242,7 +364,8 @@ std::vector<FacetContribution> gatherAtOwners(const FESystem& system, std::vecto
             auto& ints = send_ints[static_cast<std::size_t>(owner)];
             ints.insert(ints.end(), {c.facet, c.dofs[0], c.dofs[1], c.dofs[2]});
             auto& reals = send_reals[static_cast<std::size_t>(owner)];
-            reals.insert(reals.end(), {c.normal[0], c.normal[1], c.normal[2], c.measure, c.x[0], c.x[1], c.x[2]});
+            reals.insert(reals.end(), {c.normal[0], c.normal[1], c.normal[2], c.measure, c.x[0], c.x[1], c.x[2],
+                                      c.flux_moment[0], c.flux_moment[1], c.flux_moment[2], c.moment_scale});
         }
 
         std::vector<int> send_counts(static_cast<std::size_t>(size));
@@ -286,6 +409,8 @@ std::vector<FacetContribution> gatherAtOwners(const FESystem& system, std::vecto
             c.normal = {reals[kReals * k], reals[kReals * k + 1], reals[kReals * k + 2]};
             c.measure = reals[kReals * k + 3];
             c.x = {reals[kReals * k + 4], reals[kReals * k + 5], reals[kReals * k + 6]};
+            c.flux_moment = {reals[kReals * k + 7], reals[kReals * k + 8], reals[kReals * k + 9]};
+            c.moment_scale = reals[kReals * k + 10];
             FE_THROW_IF(!owned.contains(c.dofs[0]), InvalidStateException,
                         "NormalComponentConstraint: received a point this rank does not own");
             kept.push_back(c);
@@ -337,10 +462,12 @@ std::vector<Real> solveSmall(std::vector<std::vector<Real>> a, std::vector<Real>
 /// within the feature angle; each direction is the normalized
 /// measure-weighted sum of its normals.
 std::vector<std::array<Real, 3>> pointDirections(std::span<const FacetContribution> contributions,
-                                                 Real cos_feature_angle)
+                                                 Real cos_feature_angle, bool normal_flux)
 {
     std::vector<std::array<Real, 3>> seeds;
     std::vector<std::array<Real, 3>> sums;
+    std::vector<std::array<Real, 3>> moments;
+    std::vector<Real> scales;
     for (const auto& c : contributions) {
         std::size_t g = 0;
         while (g < seeds.size() && dot3(seeds[g], c.normal) < cos_feature_angle) {
@@ -348,18 +475,35 @@ std::vector<std::array<Real, 3>> pointDirections(std::span<const FacetContributi
         }
         if (g == seeds.size()) {
             seeds.push_back(c.normal);
-            sums.push_back({0.0, 0.0, 0.0});
+            sums.push_back({});
+            moments.push_back({});
+            scales.push_back(0);
         }
+        scales[g] += c.moment_scale;
         for (int d = 0; d < 3; ++d) {
+            moments[g][d] += c.flux_moment[d];
             sums[g][static_cast<std::size_t>(d)] += c.measure * c.normal[static_cast<std::size_t>(d)];
         }
     }
-    for (auto& sum : sums) {
-        const Real length = std::sqrt(dot3(sum, sum));
+    for (std::size_t g = 0; g < sums.size(); ++g) {
+        auto& sum = sums[g];
+        const auto& m = moments[g];
+        // A quadratic triangle, for example, has zero integral of each
+        // vertex shape function on an affine face. Its pointwise outward
+        // normal remains a valid constraint on that flux-free coefficient.
+        const Real length = std::hypot(sum[0], sum[1], sum[2]);
         FE_THROW_IF(!(length > 0.0), InvalidStateException, "NormalComponentConstraint: a zero normal direction");
-        for (auto& c : sum) {
-            c /= length;
+        for (auto& c : sum) c /= length;
+        const Real moment_length = std::hypot(m[0], m[1], m[2]);
+        constexpr Real roundoff = 32 * std::numeric_limits<Real>::epsilon();
+        if (!normal_flux || moment_length <= roundoff * scales[g]) continue;
+        std::array<Real, 3> direction{m[0] / moment_length, m[1] / moment_length, m[2] / moment_length};
+        if (dot3(sum, direction) < 0) {
+            for (auto& c : direction) c = -c;
         }
+        // Preserve an exact planar direction when integration perturbs it
+        // only by roundoff, e.g. for unit normal data on a Cartesian box.
+        if (std::hypot(direction[0] - sum[0], direction[1] - sum[1], direction[2] - sum[2]) > roundoff) sum = direction;
     }
     return sums;
 }
@@ -368,9 +512,9 @@ std::vector<std::array<Real, 3>> pointDirections(std::span<const FacetContributi
 std::vector<FacetContribution> ownedPointContributions(const FESystem& system,
                                                        FieldId field,
                                                        std::span<const forms::ExteriorBoundaryMeasure> boundaries,
-                                                       int components)
+                                                       int components, bool normal_flux)
 {
-    auto contributions = gatherAtOwners(system, collectContributions(system, field, boundaries, components));
+    auto contributions = gatherAtOwners(system, collectContributions(system, field, boundaries, components, normal_flux));
     std::sort(contributions.begin(), contributions.end(), [](const FacetContribution& a, const FacetContribution& b) {
         return a.dofs[0] != b.dofs[0] ? a.dofs[0] < b.dofs[0] : a.facet < b.facet;
     });
@@ -396,7 +540,7 @@ std::vector<NormalComponentConstraint::Line> pointLines(std::span<const FacetCon
                                                         int dim,
                                                         Real cos_feature_angle)
 {
-    const auto directions = pointDirections(contributions, cos_feature_angle);
+    const auto directions = pointDirections(contributions, cos_feature_angle, true);
     const std::size_t k = directions.size();
     std::vector<std::vector<Real>> normals(k, std::vector<Real>(static_cast<std::size_t>(dim)));
     for (std::size_t g = 0; g < k; ++g) {
@@ -522,31 +666,9 @@ std::vector<forms::ExteriorBoundaryMeasure> fullBoundaries(std::span<const int> 
 std::optional<std::unordered_set<GlobalIndex>>
 activeBoundaryFaces(const FESystem& system, int boundary_marker, int active_boundary_marker)
 {
-    if (active_boundary_marker < 0) {
-        return std::nullopt;
-    }
-    const auto* context = system.cutIntegrationContext();
-    if (context == nullptr || !context->hasGeneratedActiveBoundaryMarker(active_boundary_marker)) {
-        return std::nullopt;
-    }
-    context->assertAllLevelSetGeometrySnapshotsCurrent(system.meshAccess());
-    const auto* provenance = context->findGeneratedActiveBoundaryProvenance(active_boundary_marker);
-    FE_THROW_IF(provenance == nullptr || provenance->physicalBoundaryMarker() != boundary_marker,
-                InvalidArgumentException,
-                "activeBoundaryFaces: generated active-boundary marker " + std::to_string(active_boundary_marker) +
-                    " is not a subset of boundary marker " + std::to_string(boundary_marker));
     std::unordered_set<GlobalIndex> faces;
-    const auto& rules = context->interfaceRules();
-    for (const auto index : context->generatedInterfaceRuleIndexSpanForMarker(active_boundary_marker)) {
-        if (index >= rules.size()) {
-            continue;
-        }
-        const auto& rule = rules[index];
-        if (std::isfinite(rule.measure) && rule.measure > Real{0.0} &&
-            rule.provenance.parent_boundary_entity >= 0) {
-            faces.insert(static_cast<GlobalIndex>(rule.provenance.parent_boundary_entity));
-        }
-    }
+    if (!visitActiveBoundaryRules(system, boundary_marker, active_boundary_marker,
+            [&](GlobalIndex face, const auto&) { faces.insert(face); })) return std::nullopt;
     return faces;
 }
 
@@ -569,9 +691,9 @@ boundaryPointNormals(const FESystem& system,
     const Real cos_feature_angle = std::cos(feature_angle_degrees * kPi / 180.0);
 
     std::unordered_map<GlobalIndex, std::optional<std::array<Real, 3>>> normals;
-    forEachPoint(ownedPointContributions(system, field, fullBoundaries(boundary_markers), components),
+    forEachPoint(ownedPointContributions(system, field, fullBoundaries(boundary_markers), components, false),
                  [&](std::span<const FacetContribution> point) {
-                     const auto directions = pointDirections(point, cos_feature_angle);
+                     const auto directions = pointDirections(point, cos_feature_angle, false);
                      std::optional<std::array<Real, 3>> normal;
                      if (directions.size() == 1u) {
                          normal = directions.front();
@@ -642,7 +764,7 @@ void NormalComponentConstraint::apply(const FESystem& system, AffineConstraints&
     FE_THROW_IF(dim < 2 || dim > 3 || rec.space->value_dimension() != dim, InvalidArgumentException,
                 "NormalComponentConstraint: field '" + rec.name + "' must have one component per space dimension");
 
-    const auto contributions = ownedPointContributions(system, field_, boundaries_, dim);
+    const auto contributions = ownedPointContributions(system, field_, boundaries_, dim, true);
     const auto revision = system.meshAccess().geometryRevision();
     if (!initial_geometry_revision_) {
         initial_geometry_revision_ = revision;
