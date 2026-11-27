@@ -3820,8 +3820,9 @@ TimeLoopReport TimeLoop::run(systems::TransientSystem& transient,
                         // Restore u^{n-1} as well so deeper history (if present) shifts correctly.
                         copyVector(history.uPrev2(), *scratch_vec2);
 
-                        // Restore dt so acceptStep advances the full step.
+                        // Only full accepted steps belong in the history used by subsequent stencils.
                         history.setDt(dt_saved);
+                        history.setPrevDt(dt_prev_saved);
                         restore_on_exit = false;
                     }
                 } else {

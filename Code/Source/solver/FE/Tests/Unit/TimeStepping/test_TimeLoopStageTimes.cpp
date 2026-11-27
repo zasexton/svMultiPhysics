@@ -35,6 +35,7 @@
 #include <cmath>
 #include <functional>
 #include <memory>
+#include <optional>
 #include <span>
 #include <stdexcept>
 #include <string>
@@ -173,12 +174,14 @@ private:
 struct RunResult {
     RecordedContexts ctxs;
     std::vector<Real> final_u;
+    std::vector<double> accepted_steps;
 };
 
 RunResult runOneStep(svmp::FE::timestepping::SchemeKind scheme,
                      double dt,
                      double lambda,
-                     std::function<void(svmp::FE::timestepping::TimeLoopOptions&)> configure_opts = {})
+                     std::function<void(svmp::FE::timestepping::TimeLoopOptions&)> configure_opts = {},
+                     std::optional<double> previous_step = std::nullopt)
 {
     RunResult out;
 
@@ -222,7 +225,7 @@ RunResult runOneStep(svmp::FE::timestepping::SchemeKind scheme,
         ts_test::setVectorByDof(history.uPrevK(k), u0);
     }
     history.resetCurrentToPrevious();
-    history.setPrevDt(dt);
+    history.setPrevDt(previous_step.value_or(dt));
 
     svmp::FE::timestepping::TimeLoopOptions opts;
     opts.t0 = 0.0;
@@ -245,6 +248,7 @@ RunResult runOneStep(svmp::FE::timestepping::SchemeKind scheme,
     EXPECT_NEAR(rep.final_time, dt, 1e-12);
 
     out.final_u = ts_test::getVectorByDof(history.uPrev());
+    out.accepted_steps.assign(history.dtHistory().begin(), history.dtHistory().end());
     return out;
 }
 
@@ -302,15 +306,19 @@ TEST(TimeLoopStageTimes, TRBDF2UsesExpectedStageTimesAndWeights)
     const double lambda = 1.0;
     const double dt1 = gamma * dt;
     const double dt2 = dt - dt1;
+    const double previous_step = 0.3;
 
     auto res = runOneStep(svmp::FE::timestepping::SchemeKind::TRBDF2,
                           dt,
                           lambda,
                           [&](svmp::FE::timestepping::TimeLoopOptions& o) {
                               o.trbdf2_gamma = gamma;
-                          });
+                          }, previous_step);
 
     ASSERT_FALSE(res.ctxs.snapshots.empty());
+    ASSERT_GE(res.accepted_steps.size(), 2u);
+    EXPECT_DOUBLE_EQ(res.accepted_steps[0], dt);
+    EXPECT_DOUBLE_EQ(res.accepted_steps[1], previous_step);
 
     // Stage 1 TR split: current non-time term weight is 0.5 at t + dt1.
     const auto* stage1 = findSnapshot(res.ctxs, /*time=*/dt1, /*time_weight=*/1.0, /*non_time_weight=*/0.5);
