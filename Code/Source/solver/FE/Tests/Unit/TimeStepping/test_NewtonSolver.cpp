@@ -11092,6 +11092,64 @@ TEST(NewtonSolver, MonolithicAuxiliaryConvergenceRequiresEachResidualComponent)
     EXPECT_GT(rep.field_residual_norm / rep.field_residual_norm0, nopt.rel_tolerance);
 }
 
+TEST(NewtonSolver, StalledFirstFrozenSolveRequiresTheFreshStateAndEveryFieldGate)
+{
+    using Options = svmp::FE::timestepping::NewtonOptions;
+    using Point = Options::StateSynchronizationPoint;
+    // 29/7 lies between two neighboring doubles. Multiplication by seven
+    // on either side leaves opposite residuals of one ulp. No strictly
+    // decreasing line search can advance from either representable neighbor.
+    enum class Case { Unchanged, ChangedCoefficient, TightFieldGate, NoProgress };
+    for (const auto scenario : {Case::Unchanged, Case::ChangedCoefficient,
+                                 Case::TightFieldGate, Case::NoProgress}) {
+        SCOPED_TRACE(static_cast<int>(scenario));
+        const bool has_progress = scenario != Case::NoProgress;
+        const bool accepts = scenario == Case::Unchanged;
+        const double start = has_progress ? 1.0 : 29.0 / 7.0;
+        double coefficient = 7.0;
+        int refreshes = 0;
+        auto problem = makeRefreshedGeometryRootProblem(29.0, 0.1, {start}, &coefficient);
+        Options opts;
+        opts.residual_op = "op";
+        opts.jacobian_op = "op";
+        opts.abs_tolerance = 1e-17;
+        opts.rel_tolerance = has_progress ? 1e-5 : 2.0;
+        opts.step_tolerance = 0.0;
+        opts.line_search_fail_on_no_reduction = true;
+        opts.external_state_fixed_point.enabled = true;
+        opts.external_state_fixed_point.max_iterations = 4;
+        if (scenario == Case::TightFieldGate) {
+            opts.field_residual_criteria.push_back({.field = problem.u_field,
+                                                    .abs_tolerance = 1e-17,
+                                                    .rel_tolerance = 0.0});
+        }
+        opts.synchronize_state = [&](const svmp::FE::systems::SystemStateView&, Point point) {
+            if (point == Point::OuterFixedPointState) {
+                ++refreshes;
+                coefficient = scenario == Case::ChangedCoefficient && refreshes == 2 ? 7.25 : 7.0;
+            } else if (point == Point::RestoredOuterFixedPointState) {
+                coefficient = 7.0;
+            }
+        };
+        svmp::FE::timestepping::NewtonSolver newton(opts);
+        svmp::FE::timestepping::NewtonWorkspace workspace;
+        newton.allocateWorkspace(*problem.sys, *problem.factory, workspace);
+        problem.history.repack(*problem.factory);
+        const auto report = newton.solveStep(*problem.transient, *problem.linear, 0.1,
+                                             problem.history, workspace);
+        EXPECT_EQ(refreshes, has_progress ? 2 : 1);
+        EXPECT_EQ(report.converged, accepts);
+        EXPECT_EQ(report.outer_iterations, has_progress ? 2 : 1);
+        if (accepts) {
+            EXPECT_NEAR(problem.history.uSpan()[0], 29.0 / 7.0, 1e-15);
+            EXPECT_GT(report.residual_norm, opts.abs_tolerance);
+            EXPECT_LE(report.residual_norm, report.outer_gate_residual_tolerance);
+        } else {
+            EXPECT_DOUBLE_EQ(problem.history.uSpan()[0], start);
+        }
+    }
+}
+
 TEST(NewtonSolver, StagnationDoesNotOverrideRequestedTolerances)
 {
 #if !defined(FE_HAS_EIGEN) || !FE_HAS_EIGEN

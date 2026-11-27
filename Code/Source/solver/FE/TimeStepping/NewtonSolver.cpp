@@ -5724,6 +5724,7 @@ NewtonReport NewtonSolver::solveStep(
     const NewtonOptions unscaled_inner_options = inner_options;
     std::optional<NewtonOptions> scaled_inner_options;
     std::optional<NewtonSolver> scaled_inner_solver;
+    std::optional<NewtonSolver> stalled_iterate_certificate;
     ExternalStateOuterGate outer_gate;
     bool outer_gate_derived = false;
     NewtonSolver inner_solver(
@@ -6046,20 +6047,27 @@ NewtonReport NewtonSolver::solveStep(
                 system.borderedGlobalValues().begin(),
                 system.borderedGlobalValues().end());
             const bool residual_first_refresh =
-                residual_first_on_predicted_certificate &&
+                !stalled_iterate_certificate && residual_first_on_predicted_certificate &&
                 !finish_on_frozen_epoch && certificatePredicted();
-            const NewtonSolver& active_inner_solver =
-                residual_first_refresh
-                    ? residualFirstInnerSolver()
-                    : (scaled_inner_solver ? *scaled_inner_solver
-                                           : inner_solver);
-            auto inner_report = active_inner_solver.solveStepFrozenExternalState(
+            if (stalled_iterate_certificate &&
+                (finish_on_frozen_epoch || discontinuity_restart_consumed)) {
+                return stopForExternalStateDiscontinuity(outer + 1);
+            }
+            const NewtonSolver* active_inner_solver = scaled_inner_solver ? &*scaled_inner_solver : &inner_solver;
+            if (stalled_iterate_certificate) {
+                active_inner_solver = &*stalled_iterate_certificate;
+            } else if (residual_first_refresh) {
+                active_inner_solver = &residualFirstInnerSolver();
+            }
+            bool restored_failed_line_search = false;
+            auto inner_report = active_inner_solver->solveStepFrozenExternalState(
                 transient,
                 linear,
                 solve_time,
                 history,
                 workspace,
-                residual_addition);
+                residual_addition,
+                &restored_failed_line_search);
             if (residual_first_refresh) {
                 ++residual_first_refreshes;
                 if (inner_report.converged && inner_report.iterations == 0) {
@@ -6214,7 +6222,32 @@ NewtonReport NewtonSolver::solveStep(
                                                 : "disabled";
 
             if (!inner_report.converged) {
+                // The first frozen solve uses absolute tolerances to establish
+                // the reference residual. It can reach its representable floor
+                // after a strict decrease, with all later line-search trials
+                // rejected. Recheck the restored iterate on regenerated geometry
+                // under the step's scaled gates. This pass takes no Newton step.
+                if (restored_failed_line_search && outer == 0 &&
+                    outer + 1 < max_outer && scaled_inner_options &&
+                    inner_report.iterations > 1 && std::isfinite(inner_report.residual_norm) &&
+                    inner_report.residual_norm < inner_report.residual_norm0 &&
+                    inner_report.residual_norm <= outer_gate.residual_tolerance &&
+                    std::none_of(options_.extensions.initializers.begin(),
+                                 options_.extensions.initializers.end(),
+                                 [](const auto& initializer) {
+                                     return initializer && initializer->enabled();
+                                 })) {
+                    auto certificate_options = *scaled_inner_options;
+                    certificate_options.initial_residual_only_certificate = true;
+                    stalled_iterate_certificate.emplace(NewtonSolver(
+                        std::move(certificate_options), /*defer_acceptance_to_outer_loop=*/true));
+                    continue;
+                }
                 aggregate.converged = false;
+                if (stalled_iterate_certificate) {
+                    aggregate.failure_message =
+                        "The regenerated residual failed the step tolerance after the first frozen line search stalled";
+                }
                 relaxation_reason = "inner_not_converged";
                 if (oopTraceEnabled()) {
                     std::ostringstream oss;
@@ -6608,8 +6641,12 @@ NewtonReport NewtonSolver::solveStepFrozenExternalState(
     double solve_time,
     TimeHistory& history,
     NewtonWorkspace& workspace,
-    const backends::GenericVector* residual_addition) const
+    const backends::GenericVector* residual_addition,
+    bool* restored_failed_line_search) const
 {
+    if (restored_failed_line_search) {
+        *restored_failed_line_search = false;
+    }
     FE_THROW_IF(!workspace.isAllocated(), InvalidArgumentException,
                 "NewtonSolver::solveStep: workspace not allocated");
     for (auto* extension : extensions()) {
@@ -11849,6 +11886,9 @@ NewtonReport NewtonSolver::solveStepFrozenExternalState(
         line_search_history_transaction_active = false;
 
         if (failed_to_reduce && options_.line_search_fail_on_no_reduction) {
+            if (restored_failed_line_search) {
+                *restored_failed_line_search = reverted_to_original && have_residual;
+            }
             report.converged = false;
             report.iterations = it + 1;
             if (have_residual) {

@@ -836,7 +836,8 @@ private:
         double solve_time,
         TimeHistory& history,
         NewtonWorkspace& workspace,
-        const backends::GenericVector* residual_addition) const;
+        const backends::GenericVector* residual_addition,
+        bool* restored_failed_line_search = nullptr) const;
 
     [[nodiscard]] systems::SystemStateView makeStateView(const TimeHistory& history, double solve_time) const;
 
