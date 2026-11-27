@@ -229,7 +229,8 @@ struct CutCellFormTerminals {
  * polynomial order of the space of p, 1 or 2 (otherwise
  * std::invalid_argument).  The stiffness divides each term after its power
  * of h, as in the viscous scaling of Schott and Wall (2014); an invalid
- * stiffness leaves the terms undivided.  Each order is its own facet
+ * stiffness leaves the terms undivided. The arithmetic mean of the one-sided
+ * coefficient-to-stiffness ratios multiplies both jumps on the facet. Each order is its own facet
  * integral.  Typical use: ghostPenalty(p, q, k, gamma, nu, L.cutFacets()).
  */
 [[nodiscard]] inline FormExpr ghostPenalty(const FormExpr& p,
@@ -245,13 +246,10 @@ struct CutCellFormTerminals {
     }
     const auto h = avg(hNormal());
     const auto h3 = h * h * h;
-    const auto weight = [&](const FormExpr& h_power) {
-        const auto scaled = coefficient * h_power;
-        return stiffness.isValid() ? scaled / stiffness : scaled;
-    };
-    auto J = (weight(h3) * inner(cutAdjacentFacetGradientJump(p), cutAdjacentFacetGradientJump(q))).dS(facets);
+    const auto weight = avg(stiffness.isValid() ? coefficient / stiffness : coefficient);
+    auto J = (weight * h3 * inner(cutAdjacentFacetGradientJump(p), cutAdjacentFacetGradientJump(q))).dS(facets);
     if (order > 1) {
-        J = J + (weight(h3 * h * h) * cutAdjacentFacetSecondNormalDerivativeJump(p) *
+        J = J + (weight * (h3 * h * h) * cutAdjacentFacetSecondNormalDerivativeJump(p) *
                  cutAdjacentFacetSecondNormalDerivativeJump(q)).dS(facets);
     }
     return J;

@@ -1398,6 +1398,79 @@ TEST(CutCellForms, CutAdjacentSecondNormalDerivativeJumpRequiresHessians)
     EXPECT_EQ(ir.terms().front().interface_marker, facet_set_marker);
 }
 
+TEST(CutCellForms, GhostPenaltyUsesOnePositiveWeightOnBothTraces)
+{
+    using namespace svmp::FE;
+    constexpr int marker = 39;
+    const auto facets = FacetDomain::cutAdjacent(marker);
+    assembly::CutFacetSetHandle handle;
+    handle.marker = marker;
+    handle.facets = {0};
+    assembly::CutIntegrationContext cut;
+    cut.addFacetSetHandle(std::move(handle));
+    const auto material = FormExpr::cellDomainId();
+    for (const auto ids : {std::array{4, 1}, std::array{1, 4}}) {
+        forms::test::TwoTetraSharedFaceMeshAccess mesh(1.0, ids);
+        for (int order : {1, 2}) {
+            SCOPED_TRACE(::testing::Message() << "order=" << order << ", materials=" << ids[0] << ',' << ids[1]);
+            spaces::H1Space space(ElementType::Tetra4, order);
+            const auto node_type = order == 1 ? ElementType::Tetra4 : ElementType::Tetra10;
+            const auto n = basis::ReferenceNodeLayout::num_nodes(node_type);
+            dofs::DofMap dofs(2, 2 * n, n);
+            std::vector<Real> state(2 * n);
+            for (int cell = 0; cell < 2; ++cell) {
+                std::vector<GlobalIndex> rows(n);
+                std::iota(rows.begin(), rows.end(), cell * n);
+                dofs.setCellDofs(cell, rows);
+                for (std::size_t i = 0; i < n; ++i) {
+                    const auto xi = basis::ReferenceNodeLayout::get_node_coords(node_type, i);
+                    // s = x + y + z - 1 vanishes on the shared face.
+                    const Real s = cell == 0 ? xi[0] + xi[1] + xi[2] - 1 : 2 * xi[2];
+                    state[rows[i]] = (cell == 0 ? 2.0 : 1.0) * (order == 1 ? s : s * s);
+                }
+            }
+            dofs.setNumDofs(2 * n);
+            dofs.setNumLocalDofs(2 * n);
+            dofs.finalize();
+            const auto p = TrialFunction(space, "p");
+            const auto q = TestFunction(space, "q");
+            FormCompiler compiler;
+            assembly::StandardAssembler assembler;
+            assembler.setDofMap(dofs);
+            assembler.setCutIntegrationContext(&cut);
+            const auto check = [&](assembly::AssemblyKernel& kernel, Real expected) {
+                assembly::DenseMatrixView matrix(2 * n);
+                assembler.assembleInteriorFaces(mesh, space, space, kernel, matrix, nullptr, marker);
+                Real work = 0;
+                for (std::size_t i = 0; i < state.size(); ++i) {
+                    for (std::size_t j = 0; j < state.size(); ++j) {
+                        EXPECT_NEAR(matrix.getMatrixEntry(i, j), matrix.getMatrixEntry(j, i), 2e-13);
+                        work += state[i] * matrix.getMatrixEntry(i, j) * state[j];
+                    }
+                }
+                EXPECT_NEAR(work, expected, 2e-13);
+            };
+            // h = 1/sqrt(3), area = sqrt(3)/2. For 2s versus s, |[grad p]|² = 3.
+            // For 2s² versus s² the first derivatives match and [d_nn p]² = 36.
+            const Real geometry = order == 1 ? 0.5 : 2.0;
+            for (const bool divide : {false, true}) {
+                const auto coefficient = divide ? FormExpr::constant(1.0) : material;
+                const auto stiffness = divide ? material : FormExpr{};
+                const Real weight = divide ? (1.0 / 4 + 1.0) / 2 : (4.0 + 1.0) / 2;
+                const auto penalty = ghostPenalty(p, q, order, coefficient, stiffness, facets);
+                FormKernel interpreted(compiler.compileBilinear(penalty));
+                check(interpreted, geometry * weight);
+#if SVMP_FE_ENABLE_LLVM_JIT
+                auto source = std::make_shared<FormKernel>(compiler.compileBilinear(penalty));
+                jit::JITKernelWrapper compiled(source, forms::test::makeUnitTestJITOptions());
+                check(compiled, geometry * weight);
+                ASSERT_TRUE(compiled.isJITReady());
+#endif
+            }
+        }
+    }
+}
+
 TEST(CutCellForms, GhostPenaltyIsTheHandWrittenFacetPenalty)
 {
     constexpr int facet_set_marker = 39;
@@ -1414,15 +1487,15 @@ TEST(CutCellForms, GhostPenaltyIsTheHandWrittenFacetPenalty)
 
             const auto h = avg(hNormal());
             const auto h3 = h * h * h;
-            auto expected = (gamma * h3 / nu * inner(jump(grad(p)), jump(grad(q)))).dS(facets);
-            auto undivided = (gamma * h3 * inner(jump(grad(p)), jump(grad(q)))).dS(facets);
+            auto expected = (avg(gamma / nu) * h3 * inner(jump(grad(p)), jump(grad(q)))).dS(facets);
+            auto undivided = (avg(gamma) * h3 * inner(jump(grad(p)), jump(grad(q)))).dS(facets);
             if (order > 1) {
                 const auto n_minus = FormExpr::normal().minus();
                 const auto dnn = [&](const FormExpr& e) {
                     return inner(jump(hessian(e)), outer(n_minus, n_minus));
                 };
-                expected = expected + (gamma * (h3 * h * h) / nu * dnn(p) * dnn(q)).dS(facets);
-                undivided = undivided + (gamma * (h3 * h * h) * dnn(p) * dnn(q)).dS(facets);
+                expected = expected + (avg(gamma / nu) * (h3 * h * h) * dnn(p) * dnn(q)).dS(facets);
+                undivided = undivided + (avg(gamma) * (h3 * h * h) * dnn(p) * dnn(q)).dS(facets);
             }
             const auto penalty = ghostPenalty(p, q, order, gamma, nu, facets);
             EXPECT_EQ(penalty.toString(), expected.toString());
