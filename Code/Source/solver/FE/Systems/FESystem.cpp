@@ -19151,25 +19151,6 @@ void FESystem::registerBoundaryNodalSumInput(
                 solution_view = vec->createAssemblyView();
             }
 
-            // Face-vertex maps for supported element types.
-            static const std::vector<std::vector<int>> tet_faces =
-                {{1,2,3}, {0,3,2}, {0,1,3}, {0,2,1}};
-            static const std::vector<std::vector<int>> tri_faces =
-                {{0,1}, {1,2}, {2,0}};
-            static const std::vector<std::vector<int>> hex_faces =
-                {{0,3,2,1}, {4,5,6,7}, {0,1,5,4},
-                 {1,2,6,5}, {2,3,7,6}, {3,0,4,7}};
-            static const std::vector<std::vector<int>> quad_faces =
-                {{0,1}, {1,2}, {2,3}, {3,0}};
-
-            auto getFaceMap = [](ElementType et) -> const std::vector<std::vector<int>>* {
-                if (et == ElementType::Tetra4) return &tet_faces;
-                if (et == ElementType::Triangle3) return &tri_faces;
-                if (et == ElementType::Hex8) return &hex_faces;
-                if (et == ElementType::Quad4) return &quad_faces;
-                return nullptr;
-            };
-
             std::unordered_set<GlobalIndex> visited;
             mesh_access_->forEachBoundaryFace(cap_marker,
                 [&](GlobalIndex face_id, GlobalIndex cell_id) {
@@ -19177,13 +19158,11 @@ void FESystem::registerBoundaryNodalSumInput(
                     std::vector<GlobalIndex> cell_nodes;
                     mesh_access_->getCellNodes(cell_id, cell_nodes);
 
-                    const auto* fmap = getFaceMap(mesh_access_->getCellType(cell_id));
-                    if (!fmap || local_face < 0 ||
-                        static_cast<std::size_t>(local_face) >= fmap->size()) {
-                        return; // Skip unsupported element types.
-                    }
-
-                    const auto& local_ids = (*fmap)[static_cast<std::size_t>(local_face)];
+                    const auto type = mesh_access_->getCellType(cell_id);
+                    if (local_face < 0 || element_dimension(type) < 0) return;
+                    const auto& reference = elements::ReferenceElement::shared(type);
+                    if (static_cast<std::size_t>(local_face) >= reference.num_faces()) return;
+                    const auto& local_ids = reference.face_nodes(static_cast<std::size_t>(local_face));
                     for (int li : local_ids) {
                         if (static_cast<std::size_t>(li) >= cell_nodes.size()) continue;
                         const auto node_id = cell_nodes[static_cast<std::size_t>(li)];

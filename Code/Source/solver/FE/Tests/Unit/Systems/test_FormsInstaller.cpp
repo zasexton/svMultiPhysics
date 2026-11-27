@@ -6084,8 +6084,7 @@ TEST(FormsInstaller, RegisterBoundaryNodalSumInput_SumsCorrectNodes)
     using namespace svmp::FE::systems;
 
     // SingleTetraOneBoundaryFaceMeshAccess: 1 Tet4, boundary face 0 with marker 42.
-    // Tet4 face 0 local vertices = {1,2,3}.
-    // Global nodes: 0,1,2,3.  Face nodes = {1,2,3}.
+    // Reference face 0 lies in z=0 and contains vertices 0, 1 and 2.
     auto mesh = std::make_shared<forms::test::SingleTetraOneBoundaryFaceMeshAccess>(42);
     auto space = std::make_shared<spaces::H1Space>(ElementType::Tetra4, /*order=*/1);
 
@@ -6118,7 +6117,6 @@ TEST(FormsInstaller, RegisterBoundaryNodalSumInput_SumsCorrectNodes)
     sys.finalizeAuxiliaryLayout();
 
     // Solution: p = {100, 200, 300, 400} at nodes 0,1,2,3.
-    // Boundary face nodes = {1,2,3} → sum = 200 + 300 + 400 = 900.
     std::vector<Real> U = {100.0, 200.0, 300.0, 400.0};
     SystemStateView state;
     state.u = U; state.time = 0.0; state.dt = 0.1;
@@ -6128,8 +6126,7 @@ TEST(FormsInstaller, RegisterBoundaryNodalSumInput_SumsCorrectNodes)
     ASSERT_TRUE(reg.hasInput("p_bnd"));
     auto vals = reg.valuesOf("p_bnd");
     ASSERT_FALSE(vals.empty());
-    // Node 0 is NOT on the boundary face, so only 200+300+400 = 900.
-    EXPECT_NEAR(vals[0], 900.0, 1e-10);
+    EXPECT_DOUBLE_EQ(vals[0], 100.0 + 200.0 + 300.0);
 }
 
 TEST(FormsInstaller, DynamicAuxiliaryOutputLoweringPreservesMetadataOutputRef)

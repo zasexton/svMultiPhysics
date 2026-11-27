@@ -1177,44 +1177,6 @@ void hashConsistencySpan(std::uint64_t& hash, std::span<const T> values)
 }
 #endif
 
-[[nodiscard]] const std::vector<std::vector<int>>* localBoundaryFaceVertexMap(ElementType type) noexcept
-{
-    static const std::vector<std::vector<int>> tet_faces =
-        {{1, 2, 3}, {0, 3, 2}, {0, 1, 3}, {0, 2, 1}};
-    static const std::vector<std::vector<int>> tri_faces =
-        {{0, 1}, {1, 2}, {2, 0}};
-    static const std::vector<std::vector<int>> hex_faces =
-        {{0, 3, 2, 1}, {4, 5, 6, 7}, {0, 1, 5, 4},
-         {1, 2, 6, 5}, {2, 3, 7, 6}, {3, 0, 4, 7}};
-    static const std::vector<std::vector<int>> quad_faces =
-        {{0, 1}, {1, 2}, {2, 3}, {3, 0}};
-
-    switch (type) {
-        case ElementType::Triangle6:
-            type = ElementType::Triangle3;
-            break;
-        case ElementType::Quad8:
-        case ElementType::Quad9:
-            type = ElementType::Quad4;
-            break;
-        case ElementType::Tetra10:
-            type = ElementType::Tetra4;
-            break;
-        case ElementType::Hex20:
-        case ElementType::Hex27:
-            type = ElementType::Hex8;
-            break;
-        default:
-            break;
-    }
-
-    if (type == ElementType::Tetra4) return &tet_faces;
-    if (type == ElementType::Triangle3) return &tri_faces;
-    if (type == ElementType::Hex8) return &hex_faces;
-    if (type == ElementType::Quad4) return &quad_faces;
-    return nullptr;
-}
-
 [[nodiscard]] std::vector<int> boundaryMarkersFromMeshAccess(
     const assembly::IMeshAccess& mesh)
 {
@@ -1263,11 +1225,10 @@ void hashConsistencySpan(std::uint64_t& hash, std::span<const T> values)
     mesh.forEachBoundaryFace(marker,
         [&](GlobalIndex face_id, GlobalIndex cell_id) {
             const auto local_face = mesh.getLocalFaceIndex(face_id, cell_id);
-            const auto* face_map = localBoundaryFaceVertexMap(mesh.getCellType(cell_id));
-            if (face_map == nullptr ||
-                static_cast<std::size_t>(local_face) >= face_map->size()) {
-                return;
-            }
+            const auto type = mesh.getCellType(cell_id);
+            if (local_face < 0 || element_dimension(type) < 0) return;
+            const auto& reference = elements::ReferenceElement::shared(type);
+            if (static_cast<std::size_t>(local_face) >= reference.num_faces()) return;
 
             cell_nodes.clear();
             mesh.getCellNodes(cell_id, cell_nodes);
@@ -1278,7 +1239,7 @@ void hashConsistencySpan(std::uint64_t& hash, std::span<const T> values)
                 push_span(entity_map->getFaceDofs(face_id));
             }
 
-            for (const int local_vertex : (*face_map)[static_cast<std::size_t>(local_face)]) {
+            for (const int local_vertex : reference.face_nodes(static_cast<std::size_t>(local_face))) {
                 if (local_vertex < 0 ||
                     static_cast<std::size_t>(local_vertex) >= cell_nodes.size()) {
                     continue;
