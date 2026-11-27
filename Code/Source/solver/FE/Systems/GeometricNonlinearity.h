@@ -39,14 +39,6 @@ enum class GeometricNonlinearityStateField : std::uint8_t {
     HistoryState
 };
 
-struct ArcLengthContinuationOptions {
-    bool enabled{false};
-    Real initial_radius{1.0};
-    Real min_radius{1.0e-8};
-    Real max_radius{1.0e8};
-    bool adapt_radius{true};
-};
-
 struct GeometricNonlinearityPolicy {
     bool enabled{false};
     geometry::FiniteDeformationReferencePolicy reference_policy{
@@ -58,7 +50,6 @@ struct GeometricNonlinearityPolicy {
     bool rollback_coupled_state_on_line_search_reject{true};
     bool allow_lagged_kinematics{false};
     bool reset_displacement_after_reference_rebase{true};
-    ArcLengthContinuationOptions arc_length{};
 };
 
 struct GeometricNonlinearityTransactionEvent {

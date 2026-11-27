@@ -6,6 +6,7 @@
 #include <gtest/gtest.h>
 
 #include "Assembly/GlobalSystemView.h"
+#include "Constraints/VertexDirichletConstraint.h"
 #include "Dofs/EntityDofMap.h"
 #include "Forms/JIT/JITKernelWrapper.h"
 #include "Forms/MonolithicCellKernel.h"
@@ -208,215 +209,112 @@ TEST(StokesCouplingJacobianTest, CouplingBlocksMatchCentralDifferencesAndHaveCor
     }
 }
 
-TEST(NonlinearJacobianVerificationTest, ReverseADJacobianMatchesCentralDifferencesAndTaylorRemainderIsQuadratic)
+TEST(NonlinearJacobianVerificationTest, ForwardADMatchesFreeDofDifferencesAndExactConvectionRemainder)
 {
-    auto mesh = std::make_shared<svmp::FE::forms::test::SingleTetraMeshAccess>();
-
-    auto u_space = svmp::FE::spaces::VectorSpace(svmp::FE::spaces::SpaceType::H1,
-                                                 mesh,
-                                                 /*order=*/1,
-                                                 /*components=*/3);
-    auto p_space = svmp::FE::spaces::Space(svmp::FE::spaces::SpaceType::H1,
-                                           mesh,
-                                           /*order=*/1,
-                                           /*components=*/1);
-
-    svmp::FE::systems::FESystem sys(mesh);
-    const auto u_field = sys.addField(svmp::FE::systems::FieldSpec{.name = "u", .space = u_space, .components = 3});
-    const auto p_field = sys.addField(svmp::FE::systems::FieldSpec{.name = "p", .space = p_space, .components = 1});
-    sys.addOperator("ns_reverse");
-
-    const auto u = svmp::FE::forms::FormExpr::stateField(u_field, *u_space, "u");
-    const auto v = svmp::FE::forms::TestFunction(*u_space, "v");
-    const auto p = svmp::FE::forms::FormExpr::stateField(p_field, *p_space, "p");
-    const auto q = svmp::FE::forms::TestFunction(*p_space, "q");
-
-    const Real nu = 0.01;
-    const auto nu_c = svmp::FE::forms::FormExpr::constant(nu);
-
-    const auto residual =
-        (svmp::FE::forms::inner(svmp::FE::forms::grad(u) * u, v) +
-         nu_c * svmp::FE::forms::inner(svmp::FE::forms::grad(u), svmp::FE::forms::grad(v)) -
-         p * svmp::FE::forms::div(v))
-            .dx() +
-        (q * svmp::FE::forms::div(u)).dx();
-
-    (void)svmp::FE::systems::installFormulation(
-        sys, "ns_reverse",
-        {u_field, p_field},
-        residual);
-
-    svmp::FE::systems::SetupInputs inputs;
+    using namespace svmp::FE;
+    auto mesh = std::make_shared<forms::test::SingleTetraMeshAccess>();
+    auto scalar = std::make_shared<spaces::H1Space>(ElementType::Tetra4, 1);
+    auto vector = std::make_shared<spaces::ProductSpace>(scalar, 3);
+    systems::FESystem sys(mesh);
+    const auto u_field = sys.addField({.name = "u", .space = vector, .components = 3});
+    const auto p_field = sys.addField({.name = "p", .space = scalar});
+    sys.addOperator("convection");
+    const auto u = forms::StateField(u_field, *vector, "u");
+    const auto v = forms::TestField(u_field, *vector, "v");
+    const auto p = forms::StateField(p_field, *scalar, "p");
+    const auto q = forms::TestField(p_field, *scalar, "q");
+    const auto residual = (forms::inner(forms::grad(u) * u, v) +
+                           0.01 * forms::inner(forms::grad(u), forms::grad(v)) -
+                           p * forms::div(v) + q * forms::div(u)).dx();
+    systems::FormInstallOptions options;
+    options.ad_mode = forms::ADMode::Forward;
+    options.compiler_options.jit.enable = false;
+    (void)systems::installFormulation(sys, "convection", {u_field, p_field}, residual, options);
+    sys.addSystemConstraint(std::make_unique<constraints::VertexDirichletConstraint>(
+        p_field, std::vector<constraints::VertexDirichletValue>{{0, 0.0}},
+        constraints::VertexIdMode::LocalVertexId));
+    systems::SetupInputs inputs;
     inputs.topology_override = singleTetraTopology();
     sys.setup({}, inputs);
 
-    const auto n_dofs = sys.dofHandler().getNumDofs();
-    ASSERT_EQ(n_dofs, 16);
-
-    std::vector<Real> U(static_cast<std::size_t>(n_dofs), 0.0);
-    for (GlobalIndex i = 0; i < n_dofs; ++i) {
-        U[static_cast<std::size_t>(i)] = static_cast<Real>(0.05) * static_cast<Real>(i + 1);
+    const auto n = sys.dofHandler().getNumDofs();
+    ASSERT_EQ(n, 16);
+    ASSERT_EQ(sys.constraints().numConstraints(), 1u);
+    const auto* vector_dofs = sys.fieldDofHandler(u_field).getEntityDofMap();
+    const auto* scalar_dofs = sys.fieldDofHandler(p_field).getEntityDofMap();
+    ASSERT_NE(vector_dofs, nullptr);
+    ASSERT_NE(scalar_dofs, nullptr);
+    std::vector<Real> state(n, 0.0), direction(n, 0.0), quadratic(n, 0.0);
+    for (GlobalIndex vertex = 0; vertex < 4; ++vertex) {
+        const auto x = mesh->getNodeCoordinates(vertex);
+        const auto udofs = vector_dofs->getVertexDofs(vertex);
+        const auto pdofs = scalar_dofs->getVertexDofs(vertex);
+        ASSERT_EQ(udofs.size(), 3u);
+        ASSERT_EQ(pdofs.size(), 1u);
+        const auto row_x = sys.fieldDofOffset(u_field) + udofs[0];
+        const auto row_y = sys.fieldDofOffset(u_field) + udofs[1];
+        const auto row_p = sys.fieldDofOffset(p_field) + pdofs[0];
+        EXPECT_EQ(sys.constraints().isConstrained(row_p), vertex == 0);
+        // Both U=(1+y,1+x,0) and w=(y,x,0) are divergence-free; p=x-y vanishes at the pin.
+        direction[row_x] = x[1];
+        direction[row_y] = x[0];
+        state[row_x] = 1 + x[1];
+        state[row_y] = 1 + x[0];
+        state[row_p] = x[0] - x[1];
+        // (grad w)w=(x,y,0). On the unit tetrahedron ∫N_i N_j=(1+δ_ij)/120.
+        quadratic[row_x] = (1 + x[0]) / 120;
+        quadratic[row_y] = (1 + x[1]) / 120;
     }
-    distributeConstrainedState(sys, U);
 
-    svmp::FE::systems::SystemStateView state;
-    state.u = U;
+    assembly::DenseSystemView base(n);
+    systems::AssemblyRequest request;
+    request.op = "convection";
+    request.want_matrix = true;
+    request.want_vector = true;
+    systems::SystemStateView base_view;
+    base_view.u = state;
+    const auto result = sys.assemble(request, base_view, &base, &base);
+    ASSERT_TRUE(result.success) << result.error_message;
 
-    svmp::FE::systems::AssemblyRequest req;
-    req.op = "ns_reverse";
-    req.want_matrix = true;
-    req.want_vector = true;
-
-    svmp::FE::assembly::DenseSystemView out(n_dofs);
-    out.zero();
-    auto result = sys.assemble(req, state, &out, &out);
-    EXPECT_TRUE(result.success);
-
-    std::vector<Real> R0(static_cast<std::size_t>(n_dofs), 0.0);
-    for (GlobalIndex i = 0; i < n_dofs; ++i) {
-        R0[static_cast<std::size_t>(i)] = out.getVectorEntry(i);
-    }
-
-    // Central difference check.
-    const Real eps_fd = 1e-6;
-    const Real fd_tol = 2e-6;
-    svmp::FE::systems::AssemblyRequest req_vec;
-    req_vec.op = "ns_reverse";
-    req_vec.want_vector = true;
-
-    if (sys.constraints().numConstraints() > 0u) {
-        const std::array<Real, 3> seeds = {0.29, 0.53, 0.83};
-        for (const Real seed : seeds) {
-            std::vector<Real> dU(static_cast<std::size_t>(n_dofs), 0.0);
-            for (GlobalIndex i = 0; i < n_dofs; ++i) {
-                const Real x = static_cast<Real>(i + 1);
-                dU[static_cast<std::size_t>(i)] =
-                    static_cast<Real>(0.15) * std::sin(static_cast<double>(seed * x)) +
-                    static_cast<Real>(0.06) * std::cos(static_cast<double>((seed + 0.21) * x));
-            }
-            sys.constraints().distributeHomogeneous(dU);
-            ASSERT_GT(l2Norm(dU), 1e-12);
-
-            const auto JdU = matVec(out, dU);
-
-            auto U_plus = U;
-            auto U_minus = U;
-            for (GlobalIndex i = 0; i < n_dofs; ++i) {
-                U_plus[static_cast<std::size_t>(i)] += eps_fd * dU[static_cast<std::size_t>(i)];
-                U_minus[static_cast<std::size_t>(i)] -= eps_fd * dU[static_cast<std::size_t>(i)];
-            }
-            distributeConstrainedState(sys, U_plus);
-            distributeConstrainedState(sys, U_minus);
-
-            svmp::FE::systems::SystemStateView state_plus;
-            state_plus.u = U_plus;
-            svmp::FE::systems::SystemStateView state_minus;
-            state_minus.u = U_minus;
-
-            svmp::FE::assembly::DenseVectorView Rp(n_dofs);
-            svmp::FE::assembly::DenseVectorView Rm(n_dofs);
-            Rp.zero();
-            Rm.zero();
-            (void)sys.assemble(req_vec, state_plus, nullptr, &Rp);
-            (void)sys.assemble(req_vec, state_minus, nullptr, &Rm);
-
-            for (GlobalIndex i = 0; i < n_dofs; ++i) {
-                const Real fd = (Rp.getVectorEntry(i) - Rm.getVectorEntry(i)) / (2.0 * eps_fd);
-                EXPECT_NEAR(JdU[static_cast<std::size_t>(i)], fd, fd_tol);
-            }
+    request.want_matrix = false;
+    auto perturb = [&](const std::vector<Real>& increment, Real step) {
+        auto shifted = state;
+        for (GlobalIndex i = 0; i < n; ++i) {
+            shifted[i] += step * increment[i];
         }
-    } else {
-        for (GlobalIndex j = 0; j < n_dofs; ++j) {
-            auto U_plus = U;
-            auto U_minus = U;
-            U_plus[static_cast<std::size_t>(j)] += eps_fd;
-            U_minus[static_cast<std::size_t>(j)] -= eps_fd;
-            distributeConstrainedState(sys, U_plus);
-            distributeConstrainedState(sys, U_minus);
+        systems::SystemStateView view;
+        view.u = shifted;
+        assembly::DenseVectorView output(n);
+        const auto result = sys.assemble(request, view, nullptr, &output);
+        EXPECT_TRUE(result.success) << result.error_message;
+        return std::vector<Real>(output.data().begin(), output.data().end());
+    };
 
-            svmp::FE::systems::SystemStateView state_plus;
-            state_plus.u = U_plus;
-            svmp::FE::systems::SystemStateView state_minus;
-            state_minus.u = U_minus;
-
-            svmp::FE::assembly::DenseVectorView Rp(n_dofs);
-            svmp::FE::assembly::DenseVectorView Rm(n_dofs);
-            Rp.zero();
-            Rm.zero();
-            (void)sys.assemble(req_vec, state_plus, nullptr, &Rp);
-            (void)sys.assemble(req_vec, state_minus, nullptr, &Rm);
-
-            for (GlobalIndex i = 0; i < n_dofs; ++i) {
-                const Real fd = (Rp.getVectorEntry(i) - Rm.getVectorEntry(i)) / (2.0 * eps_fd);
-                EXPECT_NEAR(out.getMatrixEntry(i, j), fd, fd_tol);
-            }
+    // Central differences are exact for a quadratic. The dyadic step keeps subtraction well resolved.
+    constexpr Real step = 0x1p-5;
+    for (GlobalIndex col = 0; col < n; ++col) {
+        if (sys.constraints().isConstrained(col)) continue;
+        SCOPED_TRACE(col);
+        std::vector<Real> unit(n, 0.0);
+        unit[col] = 1.0;
+        const auto plus = perturb(unit, step), minus = perturb(unit, -step);
+        for (GlobalIndex row = 0; row < n; ++row) {
+            if (sys.constraints().isConstrained(row)) continue;
+            EXPECT_NEAR(base.getMatrixEntry(row, col), (plus[row] - minus[row]) / (2 * step), 2e-14)
+                << "row " << row;
         }
     }
 
-    // Taylor remainder check:
-    //   R(U + eps*dU) = R(U) + eps*J*dU + O(eps^2)
-    //
-    // Auto-enforced gauge constraints make this mixed system a reduced
-    // constrained operator. The central-difference check above already
-    // verifies the assembled Jacobian against that constrained operator.
-    // Leave Taylor remainder coverage to unconstrained nonlinear tests,
-    // where the asymptotic slope is stable and interpretable.
-    if (sys.constraints().numConstraints() > 0u) {
-        return;
-    }
-
-    std::vector<Real> dU(static_cast<std::size_t>(n_dofs), 0.0);
-    for (GlobalIndex i = 0; i < n_dofs; ++i) {
-        const Real x = static_cast<Real>(i + 1);
-        dU[static_cast<std::size_t>(i)] = static_cast<Real>(0.2) * std::sin(static_cast<double>(0.37 * x));
-    }
-    sys.constraints().distributeHomogeneous(dU);
-
-    const auto JdU = matVec(out, dU);
-
-    const std::array<Real, 3> eps = {1e-2, 1e-3, 1e-4};
-    std::array<Real, 3> remainder_norm{};
-    for (std::size_t k = 0; k < eps.size(); ++k) {
-        auto U_eps = U;
-        for (GlobalIndex i = 0; i < n_dofs; ++i) {
-            U_eps[static_cast<std::size_t>(i)] += eps[k] * dU[static_cast<std::size_t>(i)];
+    const auto tangent = matVec(base, direction);
+    for (const Real h : {0.25, 0.125, 0.0625}) {
+        SCOPED_TRACE(h);
+        const auto shifted = perturb(direction, h);
+        for (GlobalIndex row = 0; row < n; ++row) {
+            if (sys.constraints().isConstrained(row)) continue;
+            const Real remainder = shifted[row] - base.getVectorEntry(row) - h * tangent[row];
+            EXPECT_NEAR(remainder, h * h * quadratic[row], 2e-15) << "row " << row;
         }
-        distributeConstrainedState(sys, U_eps);
-
-        svmp::FE::systems::SystemStateView state_eps;
-        state_eps.u = U_eps;
-
-        svmp::FE::assembly::DenseVectorView R_eps(n_dofs);
-        R_eps.zero();
-        (void)sys.assemble(req_vec, state_eps, nullptr, &R_eps);
-
-        std::vector<Real> remainder(static_cast<std::size_t>(n_dofs), 0.0);
-        for (GlobalIndex i = 0; i < n_dofs; ++i) {
-            const auto idx = static_cast<std::size_t>(i);
-            remainder[idx] = (R_eps.getVectorEntry(i) - R0[idx]) - eps[k] * JdU[idx];
-        }
-        remainder_norm[k] = l2Norm(remainder);
     }
-
-    ASSERT_GT(remainder_norm[0], 0.0);
-    ASSERT_GT(remainder_norm[1], 0.0);
-    ASSERT_GT(remainder_norm[2], 0.0);
-
-    // Under the reduced constrained system, the Taylor remainder can drop to
-    // the floating-point floor at these step sizes. The central-difference
-    // check above already validates the Jacobian entries, so only enforce the
-    // asymptotic slope when the remainder is still measurably above roundoff.
-    const Real max_remainder =
-        std::max(remainder_norm[0], std::max(remainder_norm[1], remainder_norm[2]));
-    if (max_remainder < 1e-12) {
-        return;
-    }
-
-    const auto slope01 = std::log(remainder_norm[1] / remainder_norm[0]) / std::log(eps[1] / eps[0]);
-    const auto slope12 = std::log(remainder_norm[2] / remainder_norm[1]) / std::log(eps[2] / eps[1]);
-
-    EXPECT_GT(slope01, 1.8);
-    EXPECT_GT(slope12, 1.8);
 }
 
 TEST(StabilizedConvectionTest, SUPGJacobianMatchesCentralDifferencesAndTaylorRemainderIsQuadratic)

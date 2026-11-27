@@ -93,20 +93,8 @@ TEST(GeometricNonlinearity, LineSearchRejectionRollsBackGeometryAndCoupledState)
     EXPECT_FALSE(requiresCoupledStateRollback(policy, event));
 }
 
-TEST(GeometricNonlinearity, ArcLengthContinuationHooksAreOptIn)
+TEST(GeometricNonlinearity, DiagnosticNamesIdentifyUpdatePointsAndStateFields)
 {
-    GeometricNonlinearityPolicy policy{};
-    policy.enabled = true;
-    EXPECT_FALSE(policy.arc_length.enabled);
-
-    policy.arc_length.enabled = true;
-    policy.arc_length.initial_radius = Real(0.1);
-    policy.arc_length.min_radius = Real(1e-4);
-    policy.arc_length.max_radius = Real(10);
-
-    EXPECT_TRUE(policy.arc_length.enabled);
-    EXPECT_LT(policy.arc_length.min_radius, policy.arc_length.initial_radius);
-    EXPECT_GT(policy.arc_length.max_radius, policy.arc_length.initial_radius);
     EXPECT_STREQ(geometricNonlinearityUpdatePointName(
                      GeometricNonlinearityUpdatePoint::AcceptedTimeStep),
                  "AcceptedTimeStep");
