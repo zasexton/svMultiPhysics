@@ -94,6 +94,8 @@ namespace spaces {
 
 namespace assembly {
 
+class StandardAssembler;
+
 // ============================================================================
 // Loop Options and Configuration
 // ============================================================================
@@ -569,21 +571,9 @@ private:
     /**
      * @brief Prepare context for a cell
      */
-    void prepareContext(
-        AssemblyContext& context,
-        const CellWorkItem& cell,
-        const spaces::FunctionSpace& test_space,
-        const spaces::FunctionSpace& trial_space,
-        RequiredData required_data);
-
-    /**
-     * @brief Prepare context for a face
-     */
-    void prepareContextFace(
-        AssemblyContext& context,
-        const BoundaryFaceWorkItem& face,
-        const spaces::FunctionSpace& space,
-        RequiredData required_data);
+    void prepareContext(StandardAssembler& preparer, AssemblyContext& context,
+                        const CellWorkItem& cell, const spaces::FunctionSpace& test_space,
+                        const spaces::FunctionSpace& trial_space, RequiredData required_data);
 
     /**
      * @brief Get DOFs for a cell

@@ -12,6 +12,7 @@
 
 #include <gtest/gtest.h>
 #include "Assembly/AssemblyLoop.h"
+#include "Tests/Unit/Forms/FormsTestHelpers.h"
 #include "Assembly/GlobalSystemView.h"
 #include "Core/Types.h"
 #include "Dofs/DofMap.h"
@@ -770,10 +771,17 @@ TEST(AssemblyLoopLocalFaces, FaceWorkItemsUseTheMeshLocalFaceIndex) {
     loop.setMesh(mesh);
     loop.setDofMap(dof_map);
     std::vector<std::pair<LocalIndex, LocalIndex>> seen;
+    Real area = 0, first_moment = 0;
     (void)loop.boundaryLoop(
-        1, space, RequiredData::None,
+        1, space, RequiredData::PhysicalPoints | RequiredData::IntegrationWeights,
         [&](const BoundaryFaceWorkItem& face, AssemblyContext& context, KernelOutput& output) {
             seen.emplace_back(face.local_face_id, context.localFaceId());
+            for (LocalIndex q = 0; q < context.numQuadraturePoints(); ++q) {
+                const auto x = context.physicalPoint(q);
+                EXPECT_NEAR(x[0] + x[1], 1.0, 1e-13);
+                area += context.integrationWeight(q);
+                first_moment += x[0] * context.integrationWeight(q);
+            }
             output.clear();
         },
         [](const CellWorkItem&, const KernelOutput&, std::span<const GlobalIndex>,
@@ -781,7 +789,44 @@ TEST(AssemblyLoopLocalFaces, FaceWorkItemsUseTheMeshLocalFaceIndex) {
     ASSERT_EQ(seen.size(), 1u);
     EXPECT_EQ(seen.front().first, 1);
     EXPECT_EQ(seen.front().second, 1);
+    EXPECT_NEAR(area, std::sqrt(2.0), 1e-12);
+    EXPECT_NEAR(first_moment, std::sqrt(2.0) / 2.0, 1e-12);
 }
+
+TEST(AssemblyLoopGeometry, InteriorFacePointsAndNormalsMatchAcrossBothCellCharts)
+{
+    forms::test::TwoTetraSharedFaceMeshAccess mesh;
+    dofs::DofMap dofs(2, 5, 4);
+    dofs.setCellDofs(0, std::vector<GlobalIndex>{0, 1, 2, 3});
+    dofs.setCellDofs(1, std::vector<GlobalIndex>{1, 2, 3, 4});
+    dofs.setNumDofs(5);
+    dofs.setNumLocalDofs(5);
+    dofs.finalize();
+    spaces::H1Space space(ElementType::Tetra4, 1);
+    AssemblyLoop loop;
+    loop.setMesh(mesh);
+    loop.setDofMap(dofs);
+    Real area = 0.0;
+    const auto insert = [](const auto&, const auto&, auto, auto) {};
+    (void)loop.interiorFaceLoop(space, space,
+        RequiredData::PhysicalPoints | RequiredData::IntegrationWeights | RequiredData::Normals,
+        [&](const InteriorFaceWorkItem&, AssemblyContext& minus, AssemblyContext& plus,
+            KernelOutput&, KernelOutput&, KernelOutput&, KernelOutput&) {
+            ASSERT_EQ(minus.numQuadraturePoints(), plus.numQuadraturePoints());
+            for (LocalIndex q = 0; q < minus.numQuadraturePoints(); ++q) {
+                const auto x = minus.physicalPoint(q), y = plus.physicalPoint(q);
+                EXPECT_NEAR(x[0] + x[1] + x[2], 1.0, 1e-13);
+                for (int d = 0; d < 3; ++d) {
+                    EXPECT_NEAR(x[d], y[d], 1e-13);
+                    EXPECT_NEAR(minus.normal(q)[d], -plus.normal(q)[d], 1e-13);
+                }
+                EXPECT_NEAR(minus.integrationWeight(q), plus.integrationWeight(q), 1e-13);
+                area += minus.integrationWeight(q);
+            }
+        }, insert, insert);
+    EXPECT_NEAR(area, std::sqrt(3.0) / 2.0, 1e-12);
+}
+
 
 } // namespace testing
 } // namespace assembly

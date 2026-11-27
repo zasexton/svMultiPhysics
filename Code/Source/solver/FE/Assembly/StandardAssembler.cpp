@@ -1930,19 +1930,17 @@ std::atomic<bool> g_p1_field_derivative_shortcut_enabled{true};
 }
 #endif
 
+} // namespace
+
 // align[j] = i: node j of the plus cell's facet is node i of the minus cell's
 // facet, whose parameterization is the reference (canonicalToFacetCoordinates),
 // matched by mesh vertex.  Each facet is read from its own cell's reference
 // element, so the two cells may differ in type.  Empty unless the facets are
 // line, triangle or quadrilateral faces with the same vertices.
-[[nodiscard]] std::span<const LocalIndex> plusFacetAlignment(const IMeshAccess& mesh,
-                                                             GlobalIndex cell_minus,
-                                                             LocalIndex local_face_minus,
-                                                             GlobalIndex cell_plus,
-                                                             LocalIndex local_face_plus,
-                                                             std::vector<GlobalIndex>& cell_nodes_minus,
-                                                             std::vector<GlobalIndex>& cell_nodes_plus,
-                                                             std::array<LocalIndex, 4>& storage)
+std::span<const LocalIndex> StandardAssembler::plusFacetAlignment(
+    const IMeshAccess& mesh, GlobalIndex cell_minus, LocalIndex local_face_minus,
+    GlobalIndex cell_plus, LocalIndex local_face_plus, std::vector<GlobalIndex>& cell_nodes_minus,
+    std::vector<GlobalIndex>& cell_nodes_plus, std::array<LocalIndex, 4>& storage)
 {
     const auto& ref_minus = elements::ReferenceElement::shared(mesh.getCellType(cell_minus));
     const auto& ref_plus = elements::ReferenceElement::shared(mesh.getCellType(cell_plus));
@@ -1970,8 +1968,6 @@ std::atomic<bool> g_p1_field_derivative_shortcut_enabled{true};
     }
     return std::span<const LocalIndex>(storage.data(), face_nodes_plus.size());
 }
-
-} // namespace
 
 namespace {
 

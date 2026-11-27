@@ -29,6 +29,7 @@
  */
 
 #include "AssemblyLoop.h"
+#include "Assembly/StandardAssembler.h"
 #include "Core/FEException.h"
 #include "Dofs/DofMap.h"
 #include "Spaces/FunctionSpace.h"
@@ -216,6 +217,8 @@ void AssemblyLoop::cellLoopSequential(
         thread_col_dofs_.resize(1);
     }
 
+    StandardAssembler preparer;
+    preparer.setDofMap(*dof_map_);
     AssemblyContext& context = *thread_contexts_[0];
     KernelOutput& output = thread_outputs_[0];
     std::vector<GlobalIndex>& row_dofs = thread_row_dofs_[0];
@@ -243,7 +246,7 @@ void AssemblyLoop::cellLoopSequential(
 #endif
 
         // Prepare context
-        prepareContext(context, cell, test_space, trial_space, required_data);
+        prepareContext(preparer, context, cell, test_space, trial_space, required_data);
 
         // Get DOFs
         getCellDofs(cell.cell_id, test_space, row_dofs);
@@ -299,6 +302,8 @@ void AssemblyLoop::cellLoopOpenMP(
     #pragma omp parallel num_threads(num_threads)
     {
         int tid = omp_get_thread_num();
+        StandardAssembler preparer;
+        preparer.setDofMap(*dof_map_);
         AssemblyContext& context = *thread_contexts_[static_cast<std::size_t>(tid)];
         KernelOutput& output = thread_outputs_[static_cast<std::size_t>(tid)];
         std::vector<GlobalIndex>& row_dofs = thread_row_dofs_[static_cast<std::size_t>(tid)];
@@ -314,7 +319,7 @@ void AssemblyLoop::cellLoopOpenMP(
             }
 
             // Prepare context
-            prepareContext(context, cell, test_space, trial_space, required_data);
+            prepareContext(preparer, context, cell, test_space, trial_space, required_data);
 
             // Get DOFs
             getCellDofs(cell.cell_id, test_space, row_dofs);
@@ -388,6 +393,8 @@ void AssemblyLoop::cellLoopColored(
         #pragma omp parallel num_threads(num_threads)
         {
             int tid = omp_get_thread_num();
+            StandardAssembler preparer;
+            preparer.setDofMap(*dof_map_);
             AssemblyContext& context = *thread_contexts_[static_cast<std::size_t>(tid)];
             KernelOutput& output = thread_outputs_[static_cast<std::size_t>(tid)];
             std::vector<GlobalIndex>& row_dofs = thread_row_dofs_[static_cast<std::size_t>(tid)];
@@ -398,7 +405,7 @@ void AssemblyLoop::cellLoopColored(
                 const auto& cell = items[indices[j]];
 
                 // Prepare context
-                prepareContext(context, cell, test_space, trial_space, required_data);
+                prepareContext(preparer, context, cell, test_space, trial_space, required_data);
 
                 // Get DOFs
                 getCellDofs(cell.cell_id, test_space, row_dofs);
@@ -454,6 +461,8 @@ LoopStatistics AssemblyLoop::boundaryLoop(
         thread_col_dofs_.resize(1);
     }
 
+    StandardAssembler preparer;
+    preparer.setDofMap(*dof_map_);
     AssemblyContext& context = *thread_contexts_[0];
     KernelOutput& output = thread_outputs_[0];
     std::vector<GlobalIndex>& row_dofs = thread_row_dofs_[0];
@@ -464,7 +473,14 @@ LoopStatistics AssemblyLoop::boundaryLoop(
 
     for (const auto& face : items) {
         // Prepare context
-        prepareContextFace(context, face, space, required_data);
+        if (required_data == RequiredData::None) {
+            context.configureFace(face.face_id, face.cell_id, face.local_face_id, space, space,
+                                  required_data, ContextType::BoundaryFace);
+            context.setCellDomainId(mesh_->getCellDomainId(face.cell_id));
+        } else {
+            preparer.prepareContextFace(context, *mesh_, face.face_id, face.cell_id, face.local_face_id,
+                                        space, space, required_data, ContextType::BoundaryFace);
+        }
 
         // Get DOFs
         getCellDofs(face.cell_id, space, row_dofs);
@@ -569,16 +585,19 @@ LoopStatistics AssemblyLoop::interiorFaceLoop(
     std::vector<InteriorFaceWorkItem> items;
     buildInteriorFaceWorkItems(items);
 
-    // Ensure we have contexts for both sides
-    if (thread_contexts_.size() < 2) {
-        while (thread_contexts_.size() < 2) {
-            thread_contexts_.push_back(std::make_unique<AssemblyContext>());
-        }
-        thread_outputs_.resize(6);  // minus, plus, coupling x 2, and 2 extra
-        thread_row_dofs_.resize(2);
-        thread_col_dofs_.resize(2);
+    // Two cell charts and all four blocks must be live during an interior-face callback.
+    while (thread_contexts_.size() < 2) {
+        thread_contexts_.push_back(std::make_unique<AssemblyContext>());
     }
+    if (thread_outputs_.size() < 4) thread_outputs_.resize(4);
+    if (thread_row_dofs_.size() < 2) thread_row_dofs_.resize(2);
+    if (thread_col_dofs_.size() < 2) thread_col_dofs_.resize(2);
 
+    StandardAssembler minus_preparer, plus_preparer;
+    minus_preparer.setDofMap(*dof_map_);
+    plus_preparer.setDofMap(*dof_map_);
+    std::vector<GlobalIndex> minus_nodes, plus_nodes;
+    std::array<LocalIndex, 4> alignment_storage{};
     AssemblyContext& ctx_minus = *thread_contexts_[0];
     AssemblyContext& ctx_plus = *thread_contexts_[1];
     KernelOutput& output_minus = thread_outputs_[0];
@@ -598,8 +617,26 @@ LoopStatistics AssemblyLoop::interiorFaceLoop(
         CellWorkItem minus_cell(face.minus_cell_id, face.minus_cell_type, true);
         CellWorkItem plus_cell(face.plus_cell_id, face.plus_cell_type, true);
 
-        prepareContext(ctx_minus, minus_cell, test_space, trial_space, required_data);
-        prepareContext(ctx_plus, plus_cell, test_space, trial_space, required_data);
+        if (required_data == RequiredData::None) {
+            ctx_minus.configureFace(face.face_id, face.minus_cell_id, face.minus_local_face_id,
+                                    test_space, trial_space, required_data, ContextType::InteriorFace);
+            ctx_plus.configureFace(face.face_id, face.plus_cell_id, face.plus_local_face_id,
+                                   test_space, trial_space, required_data, ContextType::InteriorFace);
+            ctx_minus.setCellDomainId(mesh_->getCellDomainId(face.minus_cell_id));
+            ctx_plus.setCellDomainId(mesh_->getCellDomainId(face.plus_cell_id));
+        } else {
+            const auto order = minus_preparer.twoSidedFacePolynomialOrder(
+                *mesh_, face.minus_cell_id, face.plus_cell_id, test_space, trial_space);
+            const auto alignment = StandardAssembler::plusFacetAlignment(
+                *mesh_, face.minus_cell_id, face.minus_local_face_id, face.plus_cell_id,
+                face.plus_local_face_id, minus_nodes, plus_nodes, alignment_storage);
+            minus_preparer.prepareContextFace(ctx_minus, *mesh_, face.face_id, face.minus_cell_id,
+                face.minus_local_face_id, test_space, trial_space, required_data,
+                ContextType::InteriorFace, {}, false, false, order);
+            plus_preparer.prepareContextFace(ctx_plus, *mesh_, face.face_id, face.plus_cell_id,
+                face.plus_local_face_id, test_space, trial_space, required_data,
+                ContextType::InteriorFace, alignment, false, false, order);
+        }
 
         // Get DOFs for both cells
         getCellDofs(face.minus_cell_id, test_space, row_dofs_minus);
@@ -805,26 +842,16 @@ void AssemblyLoop::buildInteriorFaceWorkItems(std::vector<InteriorFaceWorkItem>&
     );
 }
 
-void AssemblyLoop::prepareContext(
-    AssemblyContext& context,
-    const CellWorkItem& cell,
-    const spaces::FunctionSpace& test_space,
-    const spaces::FunctionSpace& trial_space,
-    RequiredData required_data)
+void AssemblyLoop::prepareContext(StandardAssembler& preparer, AssemblyContext& context,
+                                  const CellWorkItem& cell, const spaces::FunctionSpace& test_space,
+                                  const spaces::FunctionSpace& trial_space, RequiredData required_data)
 {
-    context.configure(cell.cell_id, test_space, trial_space, required_data);
-    context.setCellDomainId(mesh_->getCellDomainId(cell.cell_id));
-}
-
-void AssemblyLoop::prepareContextFace(
-    AssemblyContext& context,
-    const BoundaryFaceWorkItem& face,
-    const spaces::FunctionSpace& space,
-    RequiredData required_data)
-{
-    context.configureFace(face.face_id, face.cell_id, face.local_face_id,
-                         space, space, required_data, ContextType::BoundaryFace);
-    context.setCellDomainId(mesh_->getCellDomainId(face.cell_id));
+    if (required_data == RequiredData::None) {
+        context.configure(cell.cell_id, test_space, trial_space, required_data);
+        context.setCellDomainId(mesh_->getCellDomainId(cell.cell_id));
+    } else {
+        preparer.prepareContext(context, *mesh_, cell.cell_id, test_space, trial_space, required_data, nullptr, 0);
+    }
 }
 
 void AssemblyLoop::getCellDofs(

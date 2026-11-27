@@ -164,7 +164,11 @@ TEST(NonlinearAssemblyDriverEndToEndTest, VerifyJacobianFDPassesForLinearPoisson
     spaces::H1Space space(ElementType::Tetra4, /*order=*/1);
     PoissonKernel kernel;
 
-    NonlinearAssemblyDriver driver;
+    NonlinearAssemblyOptions options;
+    // This residual is linear. A binary-exact step avoids subtraction at the rounding floor.
+    options.fd_perturbation = 1.0 / 1024.0;
+    options.fd_relative_perturbation = false;
+    NonlinearAssemblyDriver driver(options);
     driver.setMesh(mesh);
     driver.setDofMap(dof_map);
     driver.setSpace(space);
@@ -177,8 +181,13 @@ TEST(NonlinearAssemblyDriverEndToEndTest, VerifyJacobianFDPassesForLinearPoisson
     J.zero();
     (void)driver.assembleJacobian(J);
 
+    EXPECT_NEAR(J.getMatrixEntry(0, 0), 0.5, 1e-14);
+    EXPECT_NEAR(J.getMatrixEntry(0, 1), -1.0 / 6.0, 1e-14);
     const auto res = driver.verifyJacobianFD(J, /*tol=*/1e-12);
     EXPECT_TRUE(res.passed) << res.message;
+    EXPECT_EQ(res.num_entries_checked, 16u);
+    J.setDiagonal(0, 0.45);
+    EXPECT_FALSE(driver.verifyJacobianFD(J, 1e-12).passed);
 }
 
 TEST(NonlinearAssemblyDriverEndToEndTest, FiniteDifferenceJacobianMatchesAnalyticForLinearPoisson)
@@ -191,7 +200,7 @@ TEST(NonlinearAssemblyDriverEndToEndTest, FiniteDifferenceJacobianMatchesAnalyti
     NonlinearAssemblyOptions opts;
     opts.jacobian_strategy = JacobianStrategy::FiniteDifference;
     opts.fd_relative_perturbation = false;
-    opts.fd_perturbation = 1e-7;
+    opts.fd_perturbation = 1.0 / 1024.0;
 
     std::vector<Real> U = {0.12, -0.05, 0.08, -0.02};
 
@@ -219,6 +228,7 @@ TEST(NonlinearAssemblyDriverEndToEndTest, FiniteDifferenceJacobianMatchesAnalyti
         (void)driver.assembleJacobian(J_fd);
     }
 
+    EXPECT_NEAR(J_fd.getMatrixEntry(0, 0), 0.5, 1e-12);
     for (GlobalIndex i = 0; i < 4; ++i) {
         for (GlobalIndex j = 0; j < 4; ++j) {
             EXPECT_NEAR(J_fd.getMatrixEntry(i, j), J_analytic.getMatrixEntry(i, j), 1e-12);

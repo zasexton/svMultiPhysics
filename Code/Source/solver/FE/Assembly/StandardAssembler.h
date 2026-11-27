@@ -403,6 +403,7 @@ public:
 
 private:
     friend class ColoredAssembler; // Supplies the cell schedule to the canonical assembly path.
+    friend class AssemblyLoop;
     friend class MatrixFreeAssembler;  // Shares cell geometry, basis and orientation transforms.
 
     /**
@@ -752,6 +753,11 @@ private:
         bool force_test_face_reference_coords = false,
         bool force_trial_face_reference_coords = false,
         int face_polynomial_order = -1);
+
+    static std::span<const LocalIndex> plusFacetAlignment(
+        const IMeshAccess& mesh, GlobalIndex cell_minus, LocalIndex local_face_minus,
+        GlobalIndex cell_plus, LocalIndex local_face_plus, std::vector<GlobalIndex>& cell_nodes_minus,
+        std::vector<GlobalIndex>& cell_nodes_plus, std::array<LocalIndex, 4>& storage);
 
     /// The polynomial order the rule of a face between @p cell_minus and
     /// @p cell_plus integrates: the highest order of either side's test and
