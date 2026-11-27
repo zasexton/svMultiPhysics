@@ -27,6 +27,8 @@
  */
 
 #include "Tests/Unit/Systems/GeneralityBenchmark.h"
+#include "Spaces/FaceRestriction.h"
+#include <unordered_set>
 
 #include "Forms/Authoring.h"
 #include "Constraints/HCurlTangentialConstraint.h"
@@ -444,6 +446,25 @@ StokesRun runStokes(Cell cell, int n, bool check_blocks = false)
     }
     const auto install = defineStokes(system, velocity_space, pressure_space, nu, body_force, walls);
     system.setup();
+    // All velocity components are prescribed on the boundary. An additional
+    // interior velocity pin changes this manufactured problem.
+    const auto& map = system.fieldDofHandler(install.u).getDofMap();
+    const auto offset = system.fieldDofOffset(install.u);
+    const spaces::FaceRestriction faces(*p2);
+    std::unordered_set<GlobalIndex> boundary_dofs;
+    for (int wall : walls) {
+        system.meshAccess().forEachBoundaryFace(wall, [&](GlobalIndex face, GlobalIndex cell_id) {
+            const auto dofs = map.getCellDofs(cell_id);
+            const auto nodes = faces.face_dofs(system.meshAccess().getLocalFaceIndex(face, cell_id));
+            for (int c = 0; c < dim; ++c) {
+                for (int i : nodes) boundary_dofs.insert(offset + dofs[c * p2->dofs_per_element() + i]);
+            }
+        });
+    }
+    for (GlobalIndex d = 0; d < map.getNumDofs(); ++d) {
+        EXPECT_EQ(system.constraints().isConstrained(offset + d), boundary_dofs.contains(offset + d))
+            << cellName(cell) << " n=" << n << " velocity DOF " << d;
+    }
     const auto solved = solveSteady(system, "equations");
     EXPECT_TRUE(solved.converged) << cellName(cell) << " n=" << n;
 
@@ -535,15 +556,15 @@ void expectStokesRates(const std::vector<StokesCase>& cases)
 
 TEST(GeneralityBenchmark, P04_TaylorHoodStokesThroughBoundFieldsConverges)
 {
-    // Three meshes in 2D; two in 3D (n = 2, 4), where the rates are still
-    // pre-asymptotic (Pyr5 at n = 8: velocity L2 2.91, H1 1.95, pressure
-    // 3.07, but 14 s).  The coupling blocks of Wedge6 are checked apart.
+    // Hex and pyramid pressure errors are still pre-asymptotic at n=2,4.
+    // Keep that pair and check their convergence thresholds on n=4,8.
+    // The coupling blocks of Wedge6 are checked apart.
     expectStokesRates({{Cell::Tri3, 4, 3, 1.8},
                        {Cell::Quad4, 4, 3, 1.8},
                        {Cell::Tet4, 2, 2, 1.5},
-                       {Cell::Hex8, 2, 2, 1.5},
+                       {Cell::Hex8, 2, 3, 1.5},
                        {Cell::Wedge6, 2, 2, 1.45, /*check_transpose=*/false},
-                       {Cell::Pyr5, 2, 2, 1.45}});
+                       {Cell::Pyr5, 2, 3, 1.45}});
 }
 
 TEST(GeneralityBenchmark, P04_WedgeCouplingBlocksAreOppositeTransposes)

@@ -9,6 +9,9 @@
 #include <gtest/gtest.h>
 
 #include "Systems/FESystem.h"
+#include "Assembly/MeshAccess.h"
+#include "Basis/LagrangeBasis.h"
+#include "Tests/Unit/Systems/TraceMultiplierTestMeshes.h"
 #include "Systems/FormsInstaller.h"
 #include "Systems/BoundaryConditionManager.h"
 
@@ -777,6 +780,41 @@ TEST(GaugeIntegration, EssentialBC_DescriptorAnchorsConstantAndTranslation)
     EXPECT_EQ(descriptorToVerdict(descs[0], NullspaceModeFamily::ScalarConstant), AnchoringVerdict::Anchored);
     EXPECT_EQ(descriptorToVerdict(descs[0], NullspaceModeFamily::ComponentwiseConstant), AnchoringVerdict::Anchored);
     EXPECT_EQ(descriptorToVerdict(descs[0], NullspaceModeFamily::KernelOfSymGrad), AnchoringVerdict::PartiallyAnchored);
+}
+
+TEST(GaugeIntegration, CurvedQuadraticEdgePinRestrictsPhysicalRotation)
+{
+    const auto mesh = test_trace_multiplier::buildBentQuadraticQuad();
+    const auto access = std::make_shared<assembly::MeshAccess>(*mesh);
+    const auto space = spaces::VectorSpace(spaces::SpaceType::H1, ElementType::Quad4, 2, 2);
+    const auto make = [&](const std::vector<GlobalIndex>& pins) {
+        auto system = std::make_unique<systems::FESystem>(access);
+        const auto field = system->addField({.name="u", .space=space, .components=2});
+        system->addOperator("elasticity");
+        const auto u = FormExpr::stateField(field, *space, "u"), v = TestFunction(*space, "v");
+        systems::installFormulation(*system, "elasticity", {field}, inner(sym(grad(u)), sym(grad(v))).dx());
+        if (!pins.empty()) system->addConstraint(std::make_unique<constraints::DirichletBC>(pins, 0.0));
+        system->setup();
+        return system;
+    };
+    const auto natural = make({});
+    const auto dofs = natural->fieldDofHandler(0).getCellDofs(0);
+    const auto& nodes = dynamic_cast<const basis::LagrangeBasis&>(space->element().basis()).nodes();
+    ASSERT_EQ(dofs.size(), 2*nodes.size());
+    std::vector<GlobalIndex> pins;
+    for (std::size_t i = 0; i < nodes.size(); ++i) {
+        if (nodes[i][1] == -1.0 && nodes[i][0] == -1.0) {
+            pins.push_back(dofs[i]);
+            pins.push_back(dofs[nodes.size()+i]);
+        }
+        if (nodes[i][1] == -1.0 && nodes[i][0] == 0.0) pins.push_back(dofs[i]);
+    }
+    ASSERT_EQ(pins.size(), 3u);
+    // (tx - omega*y, ty + omega*x). The corner and the actual bottom
+    // midpoint have y=1 and -1. The straight chord would give y=1 twice.
+    const auto constrained = make(pins);
+    EXPECT_EQ(constrained->constraints().numConstraints(), 3);
+    for (auto d : pins) EXPECT_TRUE(constrained->constraints().isConstrained(d));
 }
 
 TEST(GaugeIntegration, NaturalBC_Preserves_AllFamilies)

@@ -23,6 +23,10 @@
 #include "Assembly/MatrixFreeAssembler.h"
 
 #include "Basis/BasisCache.h"
+#include "Basis/LagrangeBasis.h"
+#include "Basis/SerendipityBasis.h"
+#include "Basis/SpectralBasis.h"
+#include "Geometry/CutQuadratureMapping.h"
 #include "Basis/VectorBasis.h"
 
 #if defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH
@@ -51,6 +55,7 @@
 #include "Spaces/MixedSpace.h"
 #include "Spaces/GlobalSpace.h"
 #include "Spaces/MortarSpace.h"
+#include "Spaces/ProductSpace.h"
 
 #include "Dofs/EntityDofMap.h"
 
@@ -98,6 +103,29 @@ namespace FE {
 namespace systems {
 
 namespace {
+
+// Return point-evaluation locations in the actual basis order. Modal DOFs
+// have no such location and cannot be used as a nodal gauge restriction.
+std::span<const math::Vector<Real,3>> gaugeInterpolationNodes(
+    const basis::BasisFunction& basis, std::vector<math::Vector<Real,3>>& tensor_nodes)
+{
+    if (const auto* p = dynamic_cast<const basis::LagrangeBasis*>(&basis)) return p->nodes();
+    if (const auto* p = dynamic_cast<const basis::SerendipityBasis*>(&basis)) return p->nodes();
+    const auto* spectral = dynamic_cast<const basis::SpectralBasis*>(&basis);
+    if (!spectral) return {};
+    if (!spectral->interpolation_nodes().empty()) return spectral->interpolation_nodes();
+    const auto& axis = spectral->nodes_1d();
+    if (axis.empty()) return {};
+    tensor_nodes.assign(spectral->size(), {});
+    for (std::size_t i = 0; i < tensor_nodes.size(); ++i) {
+        auto index = i;
+        for (int d = 0; d < spectral->dimension(); ++d) {
+            tensor_nodes[i][d] = axis[index % axis.size()];
+            index /= axis.size();
+        }
+    }
+    return tensor_nodes;
+}
 
 void coordinateConstraintPrepublicationFailure(
     const FESystem& system,
@@ -4599,20 +4627,13 @@ void FESystem::setup(const SetupOptions& user_opts, const SetupInputs& inputs)
                 });
         }
 
-        // Rigid gauges use physical point evaluations. Non-vertex DOFs do
-        // not have a point in the entity map and cannot be selected as pins.
-        gauge::GaugeRegistry::CoordinateProvider coord_provider;
-        const auto* gauge_entities = dof_handler_.getEntityDofMap();
         auto global_points = std::make_shared<std::vector<double>>();
-        if (mesh_access_ && (gauge_entities || !allow_local_region_scoping)) {
-            coord_provider = [this, gauge_entities, global_points](FieldId, GlobalIndex d) -> std::array<double, 3> {
-                if (!global_points->empty()) {
-                    const auto k = 3 * static_cast<std::size_t>(d);
+        gauge::GaugeRegistry::CoordinateProvider coord_provider;
+        if (mesh_access_) {
+            coord_provider = [global_points](FieldId, GlobalIndex d) -> std::array<double, 3> {
+                const auto k = 3 * static_cast<std::size_t>(d);
+                if (k + 2 < global_points->size()) {
                     return {(*global_points)[k], (*global_points)[k + 1], (*global_points)[k + 2]};
-                }
-                if (gauge_entities) {
-                    const auto entity = gauge_entities->getDofEntity(d);
-                    if (entity && entity->kind == dofs::EntityKind::Vertex) return meshAccess().getNodeCoordinates(entity->id);
                 }
                 const auto missing = -std::numeric_limits<double>::infinity();
                 return {missing, missing, missing};
@@ -4633,27 +4654,75 @@ void FESystem::setup(const SetupOptions& user_opts, const SetupInputs& inputs)
         }
 #endif
 
-        [[maybe_unused]] bool distributed_rigid_gauge = false;
         std::set<std::pair<FieldId, int>> point_gauge_components;
-#if FE_HAS_MPI
-        const auto& modes = gauge_registry_->resolvedModes();
-        distributed_rigid_gauge = gauge_comm.isParallel() && std::any_of(modes.begin(), modes.end(), [](const auto& m) {
-            return m.candidate.family == gauge::NullspaceModeFamily::KernelOfSymGrad &&
-                   m.candidate.component < -1 && m.policy == gauge::EnforcementPolicy::PinDof;
-        });
-        if (distributed_rigid_gauge) {
-            const auto total = dof_handler_.getNumDofs();
-            std::vector<double> points(static_cast<std::size_t>(total) * 3, -std::numeric_limits<double>::infinity());
-            if (gauge_entities) {
-                for (GlobalIndex v = 0; v < gauge_entities->numVertices(); ++v) {
-                    const auto dofs = gauge_entities->getVertexDofs(v);
-                    if (dofs.empty()) continue;
-                    const auto x = meshAccess().getNodeCoordinates(v);
-                    for (auto d : dofs) std::copy(x.begin(), x.end(), points.begin() + 3 * d);
-                }
+        std::set<FieldId> rotation_fields;
+        for (const auto& mode : gauge_registry_->resolvedModes()) {
+            if (mode.candidate.family == gauge::NullspaceModeFamily::KernelOfSymGrad &&
+                mode.candidate.component < -1 && rigid_dofs.contains(mode.candidate.field) &&
+                (mode.policy == gauge::EnforcementPolicy::PinDof || mode.policy == gauge::EnforcementPolicy::SolverNullspace)) {
+                rotation_fields.insert(mode.candidate.field);
             }
+        }
+        const auto total = dof_handler_.getNumDofs();
+        if (!rotation_fields.empty()) {
+            auto& points = *global_points;
+            points.assign(3 * static_cast<std::size_t>(total), -std::numeric_limits<double>::infinity());
+            std::exception_ptr point_error;
+            try {
+                if (mesh_access_) {
+                    const auto& mesh = meshAccess();
+                    // Entity maps also identify vertex point DOFs of spaces whose
+                    // other DOFs have no point-evaluation representation.
+                    if (const auto* entities = dof_handler_.getEntityDofMap()) {
+                        for (GlobalIndex v = 0; v < entities->numVertices(); ++v) {
+                            const auto dofs = entities->getVertexDofs(v);
+                            if (dofs.empty()) continue;
+                            const auto x = mesh.getNodeCoordinates(v);
+                            for (auto d : dofs) std::copy(x.begin(), x.end(), points.begin() + 3*d);
+                        }
+                    }
+                    std::vector<math::Vector<Real,3>> tensor_nodes;
+                    for (auto f : rotation_fields) {
+                        const auto& space = *field_registry_.get(f).space;
+                        const auto* product = dynamic_cast<const spaces::ProductSpace*>(&space);
+                        const auto& scalar = product ? *product->base_space() : space;
+                        const auto components = rigid_dofs.at(f).size();
+                        const auto& handler = field_dof_handlers_[f];
+                        for (GlobalIndex cell = 0; cell < handler.getDofMap().getNumCells(); ++cell) {
+                            const auto dofs = handler.getCellDofs(cell);
+                            if (dofs.empty()) continue;
+                            const auto& basis = scalar.getElement(mesh.getCellType(cell), cell).basis();
+                            const auto nodes = gaugeInterpolationNodes(basis, tensor_nodes);
+                            if (nodes.empty()) continue;
+                            FE_THROW_IF(nodes.size() * components != dofs.size(), InvalidStateException,
+                                        "Rigid gauge interpolation nodes do not match field component layout");
+                            const auto offset = field_dof_offsets_[f];
+                            if (std::all_of(dofs.begin(), dofs.end(), [&](auto d) {
+                                    return std::isfinite(points[3*(offset + d)]);
+                                })) continue;
+                            const auto mapping = geometry::makeCutCellGeometryMapping(mesh, cell);
+                            for (std::size_t a = 0; a < nodes.size(); ++a) {
+                                const auto x = mapping->map_to_physical(nodes[a]);
+                                for (std::size_t c = 0; c < components; ++c) {
+                                    const auto k = 3 * (offset + dofs[c * nodes.size() + a]);
+                                    for (int j = 0; j < 3; ++j) points[k+j] = x[j];
+                                }
+                            }
+                        }
+                    }
+                }
+            } catch (...) {
+                point_error = std::current_exception();
+            }
+            coordinateConstraintPrepublicationFailure(*this, point_error, "rigid gauge coordinates");
+#if FE_HAS_MPI
             reduce_gauge_data(points, MPI_DOUBLE, MPI_MAX);
-            *global_points = std::move(points);
+#endif
+        }
+        [[maybe_unused]] bool distributed_rigid_gauge = false;
+#if FE_HAS_MPI
+        distributed_rigid_gauge = gauge_comm.isParallel() && !rotation_fields.empty();
+        if (distributed_rigid_gauge) {
             // Each rank chooses identical pivots, including when an existing
             // affine equation was supplied only on the owner of its slave.
             if (collectiveAnyTrue(affine_constraints_.numConstraints() != 0, gauge_comm)) {

@@ -71,6 +71,21 @@ TEST(AffineConstraintsTest, PrescribedDataScaleDoesNotChangeConstraintSemantics)
     }
 }
 
+TEST(AffineConstraintsTest, CountsExistingRowsBeforeAndAfterClosing)
+{
+    AffineConstraints c;
+    EXPECT_TRUE(c.empty());
+    c.addDirichlet(2, 1.0);
+    c.addPeriodic(4, 5);
+    EXPECT_EQ(c.numConstraints(), 2u);
+    EXPECT_FALSE(c.empty());
+    c.close();
+    EXPECT_EQ(c.numConstraints(), 2u);
+    EXPECT_FALSE(c.empty());
+    c.clear();
+    EXPECT_TRUE(c.empty());
+}
+
 TEST(AffineConstraintsTest, DefaultConstruction) {
     AffineConstraints constraints;
 

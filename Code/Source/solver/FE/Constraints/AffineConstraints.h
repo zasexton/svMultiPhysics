@@ -487,14 +487,14 @@ public:
      * @brief Get number of constraints
      */
     [[nodiscard]] std::size_t numConstraints() const noexcept {
-        return slave_to_index_.size();
+        return is_closed_ ? slave_to_index_.size() : building_lines_.size();
     }
 
     /**
      * @brief Check if there are any constraints
      */
     [[nodiscard]] bool empty() const noexcept {
-        return slave_to_index_.empty();
+        return numConstraints() == 0;
     }
 
     /**
