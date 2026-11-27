@@ -8635,6 +8635,44 @@ TEST(LevelSetInterfaceLifecycle, CurvedTetrahedronVolumeRulesIntegrateTheCubicPh
     }
 }
 
+TEST(LevelSetInterfaceLifecycle, UnsampledQuadraticSimplexIslandsAreNotPublishedAsFullCells)
+{
+    const FE::Real pi = std::acos(-1.0);
+    const auto disk = [pi](const std::array<FE::Real, 3>& x) {
+        const auto dx = x[0] - 0.21, dy = x[1] - 0.18;
+        return dx * dx + dy * dy - 0.0504 / pi;
+    };
+    const auto ball = [](const std::array<FE::Real, 3>& x) {
+        const auto dx = x[0] - 0.20, dy = x[1] - 0.18, dz = x[2] - 0.14;
+        return dx * dx + dy * dy + dz * dz - 0.09 * 0.09;
+    };
+    // The vertices, edge midpoints, face centres and cell barycentres all
+    // see the positive phase of these enclosed quadratic components.
+    const auto triangle = buildSingleTriangleHighOrderSubcellCut(disk, 926, 5, 2, 2);
+    ASSERT_TRUE(triangle.success) << triangle.diagnostic;
+    EXPECT_GT(triangle.summary.active_fragment_count, 0u);
+    EXPECT_NEAR(triangle.summary.negative_volume_measure, 0.0504, 1.6e-3);
+    EXPECT_NEAR(triangle.summary.positive_volume_measure, 0.5 - 0.0504, 1.6e-3);
+
+    const auto tetrahedron = buildSingleTetraHighOrderSubcellCut(ball, 927, 6, 1, 2);
+    ASSERT_TRUE(tetrahedron.success) << tetrahedron.diagnostic;
+    EXPECT_GT(tetrahedron.summary.active_fragment_count, 0u);
+    const auto exact_volume = 4.0 * pi * std::pow(0.09, 3) / 3.0;
+    EXPECT_NEAR(tetrahedron.summary.negative_volume_measure, exact_volume, 7.0e-4);
+    RecordProperty("enclosed_disk_area", ::testing::PrintToString(triangle.summary.negative_volume_measure));
+    RecordProperty("enclosed_ball_volume", ::testing::PrintToString(tetrahedron.summary.negative_volume_measure));
+
+    const auto positive = buildSingleTriangleHighOrderSubcellCut(
+        [](const auto& p) {
+            const auto dx = p[0] - 0.2137, dy = p[1] - 0.1831;
+            return dx * dx + dy * dy + 1.0e-6;
+        }, 929, 0, 1, 2);
+    ASSERT_TRUE(positive.success);
+    EXPECT_DOUBLE_EQ(positive.summary.negative_volume_measure, 0);
+    EXPECT_EQ(positive.summary.active_fragment_count, 0u);
+
+}
+
 TEST(LevelSetInterfaceLifecycle, BackendIndependentValidationFixturesCheckRuleInvariants)
 {
     const auto saye_circle =

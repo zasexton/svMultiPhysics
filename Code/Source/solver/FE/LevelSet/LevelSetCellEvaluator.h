@@ -48,6 +48,9 @@ public:
     [[nodiscard]] bool usesCompleteTensorLagrangeBasis(
         GlobalIndex cell_id) const noexcept;
 
+    /** Whether P2 simplex Bernstein bounds apply to the represented field. */
+    [[nodiscard]] bool usesQuadraticSimplexLagrangeBasis(GlobalIndex cell_id) const noexcept;
+
     /** Whether the cell uses a tensor-product serendipity polynomial basis. */
     [[nodiscard]] bool usesTensorSerendipityBasis(
         GlobalIndex cell_id) const noexcept;

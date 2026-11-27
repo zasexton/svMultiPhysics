@@ -6326,6 +6326,137 @@ void appendAdaptiveBoxCut(
     }
 }
 
+struct SimplexSignSamples {
+    Real minimum{std::numeric_limits<Real>::infinity()};
+    Real maximum{-std::numeric_limits<Real>::infinity()};
+    bool possible_hidden_phase{false};
+};
+
+using SimplexQuadraticControls = std::array<std::array<long double, 4>, 4>;
+
+// Bisect an edge with an inconclusive Bernstein coefficient. De Casteljau
+// subdivision tightens the convex hull without adding quadrature cells. This
+// distinguishes a genuinely hidden component from a positive minimum whose
+// initial (noninterpolatory) edge coefficient happens to be negative.
+[[nodiscard]] bool provesSimplexSign(const SimplexQuadraticControls& controls,
+                                     std::size_t count, long double sign,
+                                     long double threshold, int remaining)
+{
+    long double smallest = std::numeric_limits<long double>::infinity();
+    std::size_t first = 0, second = 0;
+    for (std::size_t i = 0; i < count; ++i) {
+        if (sign * controls[i][i] < threshold) {
+            return false;
+        }
+        for (std::size_t j = i + 1; j < count; ++j) {
+            if (sign * controls[i][j] < smallest) {
+                smallest = sign * controls[i][j];
+                first = i;
+                second = j;
+            }
+        }
+    }
+    if (smallest >= threshold) {
+        return true;
+    }
+    if (remaining == 0) {
+        return false;
+    }
+
+    const long double midpoint_value =
+        (controls[first][first] + 2 * controls[first][second] + controls[second][second]) / 4;
+    for (const auto replaced : {first, second}) {
+        auto child = controls;
+        for (std::size_t i = 0; i < count; ++i) {
+            child[replaced][i] = child[i][replaced] =
+                (controls[first][i] + controls[second][i]) / 2;
+        }
+        child[replaced][replaced] = midpoint_value;
+        if (!provesSimplexSign(child, count, sign, threshold, remaining - 1)) {
+            return false;
+        }
+    }
+    return true;
+}
+
+// A quadratic on a simplex is in the convex hull of its Bernstein
+// coefficients. Its vertex coefficients are nodal values and its edge
+// coefficients are 2*f(midpoint)-(f(vertex_i)+f(vertex_j))/2. Thus a
+// same-sign sample cloud alone cannot prove a full phase.
+[[nodiscard]] SimplexSignSamples simplexSignSamples(
+    const ImplicitCutQuadratureBackendCellInput& input, std::span<const std::array<Real, 3>> samples,
+    std::size_t vertex_count, std::optional<long double> evaluation_error, Real tolerance)
+{
+    SimplexSignSamples result;
+    // Three or four corners plus one midpoint per edge (at most ten nodes).
+    std::array<Real, 10> nodal_values{};
+    const auto node_count = vertex_count * (vertex_count + 1) / 2;
+    Real min_corner = result.minimum;
+    Real max_corner = result.maximum;
+    for (std::size_t i = 0; i < samples.size(); ++i) {
+        const auto value = signedLevelSetValue(input, samples[i]);
+        if (!std::isfinite(value)) {
+            throw std::invalid_argument("simplex cut evaluation returned a non-finite level set");
+        }
+        if (i < node_count) {
+            nodal_values[i] = value;
+        }
+        result.minimum = std::min(result.minimum, value);
+        result.maximum = std::max(result.maximum, value);
+        if (i < vertex_count) {
+            min_corner = result.minimum;
+            max_corner = result.maximum;
+        }
+    }
+    if (!evaluation_error || (min_corner < -tolerance && max_corner > tolerance)) {
+        return result;
+    }
+    SimplexQuadraticControls controls{};
+    for (std::size_t i = 0; i < vertex_count; ++i) {
+        controls[i][i] = nodal_values[i];
+    }
+    const auto include_edge = [&](std::size_t a, std::size_t b, std::size_t mid) {
+        const long double coefficient = 2.L * nodal_values[mid] -
+            (static_cast<long double>(nodal_values[a]) + nodal_values[b]) / 2;
+        controls[a][b] = controls[b][a] = coefficient;
+    };
+    if (vertex_count == 3) {
+        include_edge(0, 1, 3);
+        include_edge(1, 2, 4);
+        include_edge(2, 0, 5);
+    } else {
+        std::size_t mid = vertex_count;
+        for (std::size_t a = 0; a < vertex_count; ++a) {
+            for (std::size_t b = a + 1; b < vertex_count; ++b) {
+                include_edge(a, b, mid++);
+            }
+        }
+    }
+    // Each control value is a linear combination with absolute weight sum
+    // at most 3. Account for evaluation roundoff before accepting one sign.
+    const long double threshold = roundUp(3 * *evaluation_error - tolerance);
+    constexpr int sign_refinements = 8;
+    result.possible_hidden_phase =
+        !(result.minimum >= -tolerance && provesSimplexSign(controls, vertex_count, 1, threshold, sign_refinements)) &&
+        !(result.maximum <= tolerance && provesSimplexSign(controls, vertex_count, -1, threshold, sign_refinements));
+    return result;
+}
+
+[[nodiscard]] std::optional<long double> quadraticSimplexEvaluationError(
+    const ImplicitCutQuadratureBackendCellInput& input)
+{
+    const auto cell = input.linearized_input.parent_cell;
+    if (!input.evaluator->usesQuadraticSimplexLagrangeBasis(cell)) {
+        return std::nullopt;
+    }
+    long double scale = std::abs(static_cast<long double>(input.isovalue));
+    for (Real value : input.evaluator->gatherCellCoefficients(cell)) {
+        scale += std::abs(static_cast<long double>(value));
+    }
+    // The P2 simplex nodal basis is bounded by one on the parent.
+    return roundUp(128.L * std::numeric_limits<Real>::epsilon() * scale);
+}
+
 void appendAdaptiveTriangleCut(
     interfaces::LevelSetCellCutResult& cut,
     const interfaces::CutInterfaceDomainRequest& request,
@@ -6334,24 +6465,17 @@ void appendAdaptiveTriangleCut(
     Real parent_measure,
     int depth,
     int max_depth,
+    std::optional<long double> evaluation_error,
     SayeHyperrectangleDiagnostics& diagnostics)
 {
     diagnostics.max_depth_reached =
         std::max(diagnostics.max_depth_reached, depth);
     const auto samples = triangleSamplePoints(tri);
-    bool has_negative = false;
-    bool has_positive = false;
-    Real min_signed = std::numeric_limits<Real>::infinity();
-    Real max_signed = -std::numeric_limits<Real>::infinity();
-    for (const auto& point : samples) {
-        const Real value = signedLevelSetValue(input, point);
-        min_signed = std::min(min_signed, value);
-        max_signed = std::max(max_signed, value);
-        has_negative = has_negative || value <= request.implicit_cut_root_tolerance;
-        has_positive = has_positive || value >= -request.implicit_cut_root_tolerance;
-    }
-
-    if (!has_negative || !has_positive) {
+    const auto signs = simplexSignSamples(
+        input, samples, 3, evaluation_error, request.implicit_cut_root_tolerance);
+    const bool has_negative = signs.minimum <= request.implicit_cut_root_tolerance;
+    const bool has_positive = signs.maximum >= -request.implicit_cut_root_tolerance;
+    if ((!has_negative || !has_positive) && !signs.possible_hidden_phase) {
         appendFullTriangleRegion(
             cut,
             request,
@@ -6360,13 +6484,18 @@ void appendAdaptiveTriangleCut(
             has_negative ? geometry::CutIntegrationSide::Negative
                          : geometry::CutIntegrationSide::Positive,
             parent_measure,
-            min_signed,
-            max_signed,
+            signs.minimum,
+            signs.maximum,
             diagnostics);
         return;
     }
 
-    if (depth >= max_depth) {
+    if (signs.possible_hidden_phase && depth - max_depth >= kCertifiedRangeExtraSubdivisionDepth) {
+        throw std::invalid_argument("P2 simplex cut could not exclude a hidden phase within the subdivision limit; samples=" +
+                                        formatPointList(samples) + "; min=" + formatReal(signs.minimum) +
+                                        "; max=" + formatReal(signs.maximum));
+    }
+    if (depth >= max_depth && !signs.possible_hidden_phase) {
         appendLinearizedTriangleCut(
             cut, request, input, tri, parent_measure, diagnostics);
         return;
@@ -6391,6 +6520,7 @@ void appendAdaptiveTriangleCut(
             parent_measure,
             depth + 1,
             max_depth,
+            evaluation_error,
             diagnostics);
     }
 }
@@ -6402,22 +6532,15 @@ void appendTopologyAwareLinearizedTetrahedronCut(
     const Tetrahedron3D& tet,
     Real parent_measure,
     int terminal_extra_depth,
+    std::optional<long double> evaluation_error,
     SayeHyperrectangleDiagnostics& diagnostics)
 {
     const auto samples = tetrahedronSamplePoints(tet);
-    bool has_negative = false;
-    bool has_positive = false;
-    Real min_signed = std::numeric_limits<Real>::infinity();
-    Real max_signed = -std::numeric_limits<Real>::infinity();
-    for (const auto& point : samples) {
-        const Real value = signedLevelSetValue(input, point);
-        min_signed = std::min(min_signed, value);
-        max_signed = std::max(max_signed, value);
-        has_negative = has_negative || value <= request.implicit_cut_root_tolerance;
-        has_positive = has_positive || value >= -request.implicit_cut_root_tolerance;
-    }
-
-    if (!has_negative || !has_positive) {
+    const auto signs = simplexSignSamples(
+        input, samples, 4, evaluation_error, request.implicit_cut_root_tolerance);
+    const bool has_negative = signs.minimum <= request.implicit_cut_root_tolerance;
+    const bool has_positive = signs.maximum >= -request.implicit_cut_root_tolerance;
+    if ((!has_negative || !has_positive) && !signs.possible_hidden_phase) {
         appendFullTetrahedronRegion(
             cut,
             request,
@@ -6426,8 +6549,8 @@ void appendTopologyAwareLinearizedTetrahedronCut(
             has_negative ? geometry::CutIntegrationSide::Negative
                          : geometry::CutIntegrationSide::Positive,
             parent_measure,
-            min_signed,
-            max_signed,
+            signs.minimum,
+            signs.maximum,
             diagnostics);
         return;
     }
@@ -6445,10 +6568,11 @@ void appendTopologyAwareLinearizedTetrahedronCut(
         tetrahedronEdgeRoots(input, request, tet, local_iterations);
     diagnostics.root_finder_iteration_count += local_iterations;
     const bool topology_mismatch =
-        !leaf_cut.hasActiveFragments() ||
+        signs.possible_hidden_phase || !leaf_cut.hasActiveFragments() ||
         sampled_edge_roots.size() != linearized_edge_root_count;
     if (topology_mismatch &&
-        terminal_extra_depth < kTerminalTopologyExtraSubdivisionDepth) {
+        terminal_extra_depth < (signs.possible_hidden_phase ? kCertifiedRangeExtraSubdivisionDepth
+                                                           : kTerminalTopologyExtraSubdivisionDepth)) {
         ++diagnostics.terminal_topology_refinement_count;
         diagnostics.max_terminal_topology_extra_depth =
             std::max(diagnostics.max_terminal_topology_extra_depth,
@@ -6479,11 +6603,15 @@ void appendTopologyAwareLinearizedTetrahedronCut(
                 child,
                 parent_measure,
                 terminal_extra_depth + 1,
+                evaluation_error,
                 diagnostics);
         }
         return;
     }
 
+    if (signs.possible_hidden_phase) {
+        throw std::invalid_argument("P2 tetrahedral cut could not exclude a hidden phase within the subdivision limit");
+    }
     appendLinearizedTetrahedronCutResult(cut,
                                          request,
                                          input,
@@ -6501,24 +6629,17 @@ void appendAdaptiveTetrahedronCut(
     Real parent_measure,
     int depth,
     int max_depth,
+    std::optional<long double> evaluation_error,
     SayeHyperrectangleDiagnostics& diagnostics)
 {
     diagnostics.max_depth_reached =
         std::max(diagnostics.max_depth_reached, depth);
     const auto samples = tetrahedronSamplePoints(tet);
-    bool has_negative = false;
-    bool has_positive = false;
-    Real min_signed = std::numeric_limits<Real>::infinity();
-    Real max_signed = -std::numeric_limits<Real>::infinity();
-    for (const auto& point : samples) {
-        const Real value = signedLevelSetValue(input, point);
-        min_signed = std::min(min_signed, value);
-        max_signed = std::max(max_signed, value);
-        has_negative = has_negative || value <= request.implicit_cut_root_tolerance;
-        has_positive = has_positive || value >= -request.implicit_cut_root_tolerance;
-    }
-
-    if (!has_negative || !has_positive) {
+    const auto signs = simplexSignSamples(
+        input, samples, 4, evaluation_error, request.implicit_cut_root_tolerance);
+    const bool has_negative = signs.minimum <= request.implicit_cut_root_tolerance;
+    const bool has_positive = signs.maximum >= -request.implicit_cut_root_tolerance;
+    if ((!has_negative || !has_positive) && !signs.possible_hidden_phase) {
         appendFullTetrahedronRegion(
             cut,
             request,
@@ -6527,13 +6648,18 @@ void appendAdaptiveTetrahedronCut(
             has_negative ? geometry::CutIntegrationSide::Negative
                          : geometry::CutIntegrationSide::Positive,
             parent_measure,
-            min_signed,
-            max_signed,
+            signs.minimum,
+            signs.maximum,
             diagnostics);
         return;
     }
 
-    if (depth >= max_depth) {
+    if (signs.possible_hidden_phase && depth - max_depth >= kCertifiedRangeExtraSubdivisionDepth) {
+        throw std::invalid_argument("P2 simplex cut could not exclude a hidden phase within the subdivision limit; samples=" +
+                                        formatPointList(samples) + "; min=" + formatReal(signs.minimum) +
+                                        "; max=" + formatReal(signs.maximum));
+    }
+    if (depth >= max_depth && !signs.possible_hidden_phase) {
         appendTopologyAwareLinearizedTetrahedronCut(
             cut,
             request,
@@ -6541,6 +6667,7 @@ void appendAdaptiveTetrahedronCut(
             tet,
             parent_measure,
             /*terminal_extra_depth=*/0,
+            evaluation_error,
             diagnostics);
         return;
     }
@@ -6571,6 +6698,7 @@ void appendAdaptiveTetrahedronCut(
             parent_measure,
             depth + 1,
             max_depth,
+            evaluation_error,
             diagnostics);
     }
 }
@@ -7321,6 +7449,7 @@ public:
         const int max_depth =
             std::max(0, request.implicit_cut_max_subdivision_depth);
         SayeHyperrectangleDiagnostics diagnostics;
+        const auto evaluation_error = quadraticSimplexEvaluationError(input);
         if (mesh_dimension == 2) {
             const Triangle2D root{
                 input.linearized_input.node_coordinates[0],
@@ -7334,6 +7463,7 @@ public:
                 triangleMeasure(root),
                 0,
                 max_depth,
+                evaluation_error,
                 diagnostics);
             if (request.resolvedInterfaceQuadratureOrder() > 1 &&
                 diagnostics.interface_fragment_count > 0 &&
@@ -7365,6 +7495,7 @@ public:
                 tetrahedronMeasure(root),
                 0,
                 max_depth,
+                evaluation_error,
                 diagnostics);
             if (request.resolvedInterfaceQuadratureOrder() > 1 &&
                 diagnostics.interface_fragment_count > 0 &&

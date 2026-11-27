@@ -103,6 +103,13 @@ bool LevelSetCellEvaluator::usesCompleteTensorLagrangeBasis(
            dynamic_cast<const basis::LagrangeBasis*>(&element.basis()) != nullptr;
 }
 
+bool LevelSetCellEvaluator::usesQuadraticSimplexLagrangeBasis(GlobalIndex cell_id) const noexcept
+{
+    const auto& element = space_->getElement(space_->element_type(), cell_id);
+    return interpolationOrder(cell_id) == 2 && basis::is_simplex(element.element_type()) &&
+           dynamic_cast<const basis::LagrangeBasis*>(&element.basis()) != nullptr;
+}
+
 bool LevelSetCellEvaluator::usesTensorSerendipityBasis(
     GlobalIndex cell_id) const noexcept
 {
