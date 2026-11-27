@@ -9,6 +9,7 @@
 #include "Spaces/TraceSpace.h"
 
 #include "Basis/BSplineBasis.h"
+#include "Basis/BernsteinBasis.h"
 #include "Basis/LagrangeBasis.h"
 #include "Basis/NURBSTensorBasis.h"
 #include "Basis/SerendipityBasis.h"
@@ -17,6 +18,7 @@
 #include "Basis/NodeOrderingConventions.h"
 #include "Core/FEException.h"
 #include "Elements/ElementTransform.h"
+#include "Elements/ElementFactory.h"
 #include "Elements/GeneralBasisElement.h"
 #include "Elements/LagrangeElement.h"
 #include "Elements/ReferenceElement.h"
@@ -817,6 +819,9 @@ ElementType embedding_element_type_for_vertices(std::size_t nverts) {
 }
 
 std::vector<Vec3> face_reference_nodes(const FacePrototypeSpec& spec) {
+    if (spec.basis_type == BasisType::Bernstein) {
+        return basis::BernsteinBasis(spec.element_type, spec.order).control_layout().points;
+    }
     std::vector<Vec3> nodes;
 
     if (spec.basis_type == BasisType::Serendipity) {
@@ -935,7 +940,16 @@ TraceSpace::TraceSpace(std::shared_ptr<FunctionSpace> volume_space,
         spec = infer_face_prototype(face_shape, num_face_dofs, volume_space_->polynomial_order());
         face_element_type_ = spec.element_type;
 
-        if (spec.basis_type == BasisType::Serendipity) {
+        if (volume_space_->element().basis().basis_type() == BasisType::Bernstein &&
+            face_shape != ElementType::Point1) {
+            spec.basis_type = BasisType::Bernstein;
+            elements::ElementRequest req;
+            req.basis_type = spec.basis_type;
+            req.element_type = spec.element_type;
+            req.order = spec.order;
+            req.continuity = trace_continuity_;
+            face_element_ = elements::ElementFactory::create(req);
+        } else if (spec.basis_type == BasisType::Serendipity) {
             auto face_basis =
                 std::make_shared<basis::SerendipityBasis>(spec.element_type, spec.order, false);
             const int qord =
@@ -955,6 +969,11 @@ TraceSpace::TraceSpace(std::shared_ptr<FunctionSpace> volume_space,
                  "TraceSpace: face element DOF count does not match FaceRestriction");
 
     if (tensor_spline_trace) {
+        return;
+    }
+    if (volume_space_->element().basis().basis_type() == BasisType::Bernstein &&
+        volume_space_->polynomial_order() == 0) {
+        face_to_volume_dof_ = {0};
         return;
     }
 

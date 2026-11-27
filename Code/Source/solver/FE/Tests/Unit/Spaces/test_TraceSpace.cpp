@@ -8,6 +8,7 @@
 #include "FE/Basis/NodeOrderingConventions.h"
 #include "FE/Basis/SerendipityBasis.h"
 #include "FE/Elements/ElementTransform.h"
+#include "FE/Elements/ReferenceElement.h"
 #include "FE/Spaces/HCurlSpace.h"
 #include "FE/Spaces/HDivSpace.h"
 #include "FE/Quadrature/QuadratureFactory.h"
@@ -36,6 +37,61 @@ FunctionSpace::Value normalized_direction(const FunctionSpace::Value& v) {
 }
 
 } // namespace
+
+TEST(TraceSpace, BernsteinEdgeRetainsItsControlCoefficient) {
+    auto volume = std::make_shared<H1Space>(ElementType::Quad4, 2, BasisType::Bernstein);
+    TraceSpace trace(volume, 0);
+    std::vector<Real> coefficients(9, 0);
+    coefficients[1] = 1; // Middle Bernstein control on the bottom edge.
+    const auto restricted = trace.restrict(coefficients);
+    EXPECT_EQ(trace.face_dof_indices(), (std::vector<int>{0, 1, 2}));
+    EXPECT_EQ(restricted, (std::vector<Real>{0, 1, 0}));
+    for (Real s : {-1., -0.25, 0., 0.5, 1.}) {
+        EXPECT_NEAR(trace.evaluate({s, 0, 0}, restricted)[0], (1 - s * s) / 2, 2e-14);
+    }
+}
+
+TEST(TraceSpace, EveryBernsteinFacetReproducesTheParentPolynomial) {
+    for (const auto type : {ElementType::Line2, ElementType::Triangle3, ElementType::Quad4, ElementType::Tetra4,
+                            ElementType::Hex8, ElementType::Wedge6}) {
+        auto volume = std::make_shared<H1Space>(type, 3, BasisType::Bernstein);
+        const auto faces = elements::ReferenceElement::shared(type).num_faces();
+        for (std::size_t face = 0; face < faces; ++face) {
+            TraceSpace trace(volume, static_cast<int>(face));
+            const FunctionSpace::Value point{0.19, 0.31, 0};
+            const auto embedded = trace.embed_face_point(point);
+            std::vector<Real> unit(volume->dofs_per_element(), 0);
+            for (std::size_t i = 0; i < unit.size(); ++i) {
+                unit[i] = 1;
+                EXPECT_NEAR(trace.evaluate(point, trace.restrict(unit))[0],
+                            volume->evaluate(embedded, unit)[0], 1e-13)
+                    << "cell " << static_cast<int>(type) << ", face " << face << ", coefficient " << i;
+                unit[i] = 0;
+            }
+        }
+    }
+}
+
+TEST(TraceSpace, ConstantBernsteinCoefficientReachesEveryFace) {
+    for (const auto type : {ElementType::Line2, ElementType::Triangle3, ElementType::Hex8, ElementType::Pyramid5}) {
+        auto volume = std::make_shared<H1Space>(type, 0, BasisType::Bernstein);
+        for (std::size_t face = 0; face < elements::ReferenceElement::shared(type).num_faces(); ++face) {
+            TraceSpace trace(volume, static_cast<int>(face));
+            EXPECT_EQ(trace.restrict({7}), (std::vector<Real>{7}));
+            EXPECT_DOUBLE_EQ(trace.evaluate({0.25, 0.25, 0}, {7})[0], 7);
+        }
+    }
+}
+
+TEST(TraceSpace, CollapsedPyramidWithDirectionDependentApexRequiresTraceConstraints) {
+    auto volume = std::make_shared<H1Space>(ElementType::Pyramid5, 1, BasisType::Bernstein);
+    std::vector<Real> control(8, 0);
+    control[4] = 1;
+    constexpr Real h = 1e-6;
+    EXPECT_GT(volume->evaluate({-h, -h, 1-h}, control)[0], 0.99);
+    EXPECT_NEAR(volume->evaluate({h, h, 1-h}, control)[0], 0, 1e-12);
+    EXPECT_THROW(TraceSpace(volume, 1), FEException);
+}
 
 TEST(TraceSpace, FaceDofIndicesAndRestrictScatterRoundTrip) {
     auto h1 = std::make_shared<H1Space>(ElementType::Quad4, 2);

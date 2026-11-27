@@ -7,6 +7,7 @@
  */
 
 #include "Spaces/FaceRestriction.h"
+#include "Basis/BernsteinBasis.h"
 #include "Core/FEException.h"
 #include "Basis/LagrangeBasis.h"
 #include "Basis/NURBSTensorBasis.h"
@@ -112,6 +113,9 @@ std::vector<Vec3> build_dof_nodes(ElementType elem_type,
                                   BasisType basis_type) {
     FE_CHECK_ARG(!is_tensor_spline_basis_type(basis_type),
                  "FaceRestriction: spline/NURBS restriction requires construction from a concrete FunctionSpace");
+    if (basis_type == BasisType::Bernstein) {
+        return basis::BernsteinBasis(elem_type, order).control_layout().points;
+    }
     if (uses_serendipity_nodes(elem_type, basis_type)) {
         basis::SerendipityBasis basis(elem_type, order, false);
         const auto& bnodes = basis.nodes();
@@ -294,6 +298,13 @@ void FaceRestriction::initialize_topology() {
 void FaceRestriction::compute_dof_maps() {
     const auto nodes = build_dof_nodes(elem_type_, order_, basis_type_);
     compute_dof_maps_from_nodes(nodes);
+    if (basis_type_ == BasisType::Bernstein && order_ == 0) {
+        // The single constant coefficient contributes to every boundary entity.
+        for (auto& ids : face_dof_maps_) ids = {0};
+        for (auto& ids : edge_dof_maps_) ids = {0};
+        for (auto& ids : vertex_dof_maps_) ids = {0};
+        interior_dof_map_.clear();
+    }
 }
 
 void FaceRestriction::compute_dof_maps_from_nodes(const std::vector<Vec3>& nodes) {

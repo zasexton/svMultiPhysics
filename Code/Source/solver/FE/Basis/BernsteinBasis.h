@@ -32,6 +32,14 @@ public:
     std::size_t size() const noexcept override { return size_; }
     bool cache_identity_is_structural() const noexcept override { return true; }
 
+    struct ControlLayout {
+        /// Reference control locations indexed by the native Bernstein coefficient.
+        std::vector<math::Vector<Real, 3>> points;
+        /// Corresponding slots in vertex, edge, face and cell order.
+        std::vector<std::size_t> entity_slots;
+    };
+    ControlLayout control_layout() const;
+
     void evaluate_values(const math::Vector<Real, 3>& xi,
                          std::vector<Real>& values) const override;
 

@@ -7,6 +7,7 @@
 
 #include "BernsteinBasis.h"
 #include "BasisTraits.h"
+#include "NodeOrderingConventions.h"
 #include "Math/IntegerMath.h"
 #include "Math/PyramidTensorCoordinates.h"
 #include <algorithm>
@@ -417,6 +418,49 @@ BernsteinBasis::BernsteinBasis(ElementType type, int order)
         throw BasisElementCompatibilityException("Unsupported element type for BernsteinBasis",
                                                  __FILE__, __LINE__, __func__);
     }
+}
+
+BernsteinBasis::ControlLayout BernsteinBasis::control_layout() const {
+    // The collapsed tensor pyramid has independent angular controls at its
+    // apex. An unrestricted field therefore has no single C0 vertex layout.
+    BASIS_CHECK_CONFIG(!is_pyramid(element_type_) || order_ == 0,
+                       "BernsteinBasis: positive-order collapsed pyramid has no conforming control lattice");
+    auto type = canonical_lagrange_type(element_type_);
+    if (is_quadrilateral(type)) type = ElementType::Quad4;
+    if (is_hexahedron(type)) type = ElementType::Hex8;
+    if (is_wedge(type)) type = ElementType::Wedge6;
+    if (is_pyramid(type)) type = ElementType::Pyramid5;
+    const auto nodes = ReferenceNodeLayout::get_lagrange_node_coords(type, order_);
+    BASIS_CHECK_CONFIG(nodes.size() == size_, "Bernstein control lattice size mismatch");
+    ControlLayout layout;
+    layout.points.resize(size_);
+    layout.entity_slots.resize(size_);
+    const auto n = static_cast<std::size_t>(order_ + 1);
+    const auto tensor_index = [this](Real xi) {
+        return static_cast<std::size_t>(std::lround((xi + 1) * order_ / 2));
+    };
+    for (std::size_t entity = 0; entity < nodes.size(); ++entity) {
+        const auto& x = nodes[entity];
+        std::size_t slot = 0;
+        if (!simplex_indices_.empty()) {
+            const int j = static_cast<int>(std::lround(order_ * x[0]));
+            const int k = static_cast<int>(std::lround(order_ * x[1]));
+            const int l = is_tetrahedron(type) ? static_cast<int>(std::lround(order_ * x[2])) : 0;
+            const std::array<int, 4> exponents{order_ - j - k - l, j, k, l};
+            const auto it = std::lower_bound(simplex_indices_.begin(), simplex_indices_.end(), exponents);
+            BASIS_CHECK_CONFIG(it != simplex_indices_.end() && *it == exponents,
+                               "Bernstein control exponents missing from simplex basis");
+            slot = static_cast<std::size_t>(it - simplex_indices_.begin());
+            if (is_wedge(type)) slot += tensor_index(x[2]) * simplex_indices_.size();
+        } else {
+            slot = tensor_index(x[0]);
+            if (dimension_ >= 2) slot += n * tensor_index(x[1]);
+            if (dimension_ == 3) slot += n * n * tensor_index(x[2]);
+        }
+        layout.points[slot] = x;
+        layout.entity_slots[slot] = entity;
+    }
+    return layout;
 }
 
 Real BernsteinBasis::binomial(int n, int k) const {
