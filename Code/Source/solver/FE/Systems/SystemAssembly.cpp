@@ -2430,9 +2430,9 @@ assembly::AssemblyResult assembleOperator(
 
     auto& assembler = *system.assembler_;
     assembler.setCurrentSolution(state.u);
-    // `createAssemblyView()` is non-const for historical reasons; treat this as read-only use.
+    // Coefficient DOFs on an owned cell can include entries in the vector halo.
     std::unique_ptr<assembly::GlobalSystemView> current_solution_view =
-        makeStateReadView(system, state.u_vector, state.u, /*ghosted=*/false, state.bordered_global_values);
+        makeStateReadView(system, state.u_vector, state.u, /*ghosted=*/true, state.bordered_global_values);
     assembler.setCurrentSolutionView(current_solution_view.get());
     {
         std::vector<assembly::FieldSolutionAccess> access;
@@ -2530,7 +2530,7 @@ assembly::AssemblyResult assembleOperator(
                                         ? state.u_history[static_cast<std::size_t>(k - 1)]
                                         : (k == 1 ? state.u_prev : state.u_prev2);
                 bordered_history_views.push_back(
-                    makeHistoryReadView(system, vector, values, k, /*ghosted=*/false));
+                    makeHistoryReadView(system, vector, values, k, /*ghosted=*/true));
                 assembler.setPreviousSolutionViewK(k, bordered_history_views.back().get());
             }
         } else {
@@ -2538,7 +2538,7 @@ assembly::AssemblyResult assembleOperator(
             if (required_history >= 1) {
                 if (state.u_prev_vector != nullptr) {
                     auto* vec = const_cast<backends::GenericVector*>(state.u_prev_vector);
-                    prev_solution_view = vec->createAssemblyView();
+                    prev_solution_view = vec->createGhostedReadView();
                     assembler.setPreviousSolutionView(prev_solution_view.get());
                 } else {
                     assembler.setPreviousSolutionView(nullptr);
@@ -2547,7 +2547,7 @@ assembly::AssemblyResult assembleOperator(
             if (required_history >= 2) {
                 if (state.u_prev2_vector != nullptr) {
                     auto* vec = const_cast<backends::GenericVector*>(state.u_prev2_vector);
-                    prev2_solution_view = vec->createAssemblyView();
+                    prev2_solution_view = vec->createGhostedReadView();
                     assembler.setPreviousSolution2View(prev2_solution_view.get());
                 } else {
                     assembler.setPreviousSolution2View(nullptr);

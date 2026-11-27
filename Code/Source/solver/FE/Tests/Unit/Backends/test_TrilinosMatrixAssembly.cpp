@@ -14,6 +14,11 @@
 #include <array>
 #include <vector>
 
+#if defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH
+#include "Backends/Trilinos/TrilinosVector.h"
+#include "Tests/Support/DistributedFieldCoefficients.h"
+#endif
+
 namespace svmp::FE::backends {
 namespace {
 
@@ -38,6 +43,16 @@ protected:
         return p;
     }
 };
+
+#if defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH
+TEST_F(TrilinosMatrixAssembly, AssemblesHistoryAndInitializesOwnedVertices)
+{
+    svmp::FE::test::checkDistributedFieldCoefficients(rank, ranks,
+        [](GlobalIndex first, GlobalIndex count, const std::vector<GlobalIndex>& ghosts) {
+            return std::make_unique<TrilinosVector>(first, count, 3, ghosts);
+        });
+}
+#endif
 
 TEST_F(TrilinosMatrixAssembly, MissingOwnedCoefficientsFailOnEveryRank)
 {

@@ -48,6 +48,8 @@ struct SystemStateView {
     // Optional backend vectors backing the spans above.
     // When provided, assemblers may use these to access global-indexed entries
     // even when the underlying local storage is not global-indexable (e.g., MPI layouts).
+    // Synchronize ghosts after changing these vectors before using the state
+    // for distributed assembly or local evaluation on cells with remote DOFs.
     const backends::GenericVector* u_vector{nullptr};
     const backends::GenericVector* u_prev_vector{nullptr};
     const backends::GenericVector* u_prev2_vector{nullptr};

@@ -21,8 +21,25 @@
 #include <limits>
 #include <utility>
 
+#if defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH
+#include "Tests/Support/DistributedFieldCoefficients.h"
+#endif
+
 namespace svmp::FE::backends {
 namespace {
+
+#if defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH
+TEST(PetscDistributedField, AssemblesHistoryAndInitializesOwnedVertices)
+{
+    int rank = 0, ranks = 1;
+    MPI_Comm_rank(PETSC_COMM_WORLD, &rank);
+    MPI_Comm_size(PETSC_COMM_WORLD, &ranks);
+    svmp::FE::test::checkDistributedFieldCoefficients(rank, ranks,
+        [](GlobalIndex, GlobalIndex count, const std::vector<GlobalIndex>& ghosts) {
+            return std::make_unique<PetscVector>(count, 3, ghosts);
+        });
+}
+#endif
 
 using sparsity::IndexRange;
 

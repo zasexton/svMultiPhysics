@@ -87,31 +87,25 @@ std::size_t initializeFieldFromMeshVertexField(
     const auto n_field_dofs = static_cast<std::size_t>(field_dofs.getNumDofs());
     std::vector<Real> coefficients(n_field_dofs, Real{0.0});
     std::vector<std::uint8_t> assigned(n_field_dofs, 0u);
-    const auto projection =
-        system.projectMeshVertexValuesToFieldCoefficients(
+    (void)system.projectMeshVertexValuesToFieldCoefficients(
             field_id,
             std::span<const Real>(source.values, source.entity_count * source.components),
             source.components,
             std::span<Real>(coefficients.data(), coefficients.size()),
             std::span<std::uint8_t>(assigned.data(), assigned.size()),
             message_prefix);
-    if (projection.unassigned_dofs != 0u) {
-        throw std::runtime_error(
-            message_prefix +
-            " could not safely project " +
-            std::to_string(projection.unassigned_dofs) +
-            " field coefficient(s) from mesh vertices for field '" +
-            rec.name + "'");
-    }
     std::vector<GlobalIndex> dofs;
     std::vector<Real> values;
-    dofs.reserve(n_field_dofs);
-    values.reserve(n_field_dofs);
-    for (std::size_t dof = 0; dof < coefficients.size(); ++dof) {
+    for (const auto row : u0.ownedGlobalRows()) {
+        const auto local = row - field_offset;
+        if (local < 0 || static_cast<std::size_t>(local) >= n_field_dofs) continue;
+        const auto dof = static_cast<std::size_t>(local);
         if (assigned[dof] == 0u) {
-            continue;
+            throw std::runtime_error(message_prefix + " could not project owned DOF " +
+                                     std::to_string(row) + " from mesh vertices for field '" +
+                                     rec.name + "'");
         }
-        dofs.push_back(field_offset + static_cast<GlobalIndex>(dof));
+        dofs.push_back(row);
         values.push_back(coefficients[dof]);
     }
     // Vector finalization can be collective even on ranks without local coefficients.
@@ -287,16 +281,32 @@ void writeVectorEntries(
     const std::string& no_entries_message,
     const std::string& no_view_message)
 {
-    if (dofs.empty()) {
+    if (dofs.size() != values.size()) {
+        throw std::invalid_argument("Vertex initialization DOF and value counts differ");
+    }
+    const auto owned = u0.ownedGlobalRows();
+    if (dofs.empty() && static_cast<GlobalIndex>(owned.size()) == u0.size() &&
+        !u0.ghostUpdateRequiresCollectiveParticipation()) {
         throw std::runtime_error(no_entries_message);
     }
 
+    std::vector<GlobalIndex> rows;
+    std::vector<Real> owned_values;
+    for (std::size_t i = 0; i < dofs.size(); ++i) {
+        if (dofs[i] < 0 || dofs[i] >= u0.size()) {
+            throw std::out_of_range("Vertex initialization DOF is outside the vector");
+        }
+        if (std::binary_search(owned.begin(), owned.end(), dofs[i])) {
+            rows.push_back(dofs[i]);
+            owned_values.push_back(values[i]);
+        }
+    }
     auto view = u0.createAssemblyView();
     if (!view) {
         throw std::runtime_error(no_view_message);
     }
     view->beginAssemblyPhase();
-    view->setVectorEntries(dofs, values);
+    view->setVectorEntries(rows, owned_values);
     view->endAssemblyPhase();
     view->finalizeAssembly();
 }

@@ -15173,7 +15173,7 @@ std::optional<std::array<Real, 3>> FESystem::evaluateFieldAtPoint(FieldId field,
     std::unique_ptr<assembly::GlobalSystemView> solution_view;
     if (!use_prescribed && state.u_vector != nullptr) {
         auto* vec = const_cast<backends::GenericVector*>(state.u_vector);
-        solution_view = vec->createAssemblyView();
+        solution_view = vec->createGhostedReadView();
     }
 
     const GlobalIndex offset = field_dof_offsets_[field_idx];
@@ -15288,7 +15288,7 @@ bool FESystem::evaluateFieldAtVertices(FieldId field,
     std::unique_ptr<assembly::GlobalSystemView> solution_view;
     if (!use_prescribed && state.u_vector != nullptr) {
         auto* vec = const_cast<backends::GenericVector*>(state.u_vector);
-        solution_view = vec->createAssemblyView();
+        solution_view = vec->createGhostedReadView();
     }
 
     auto read_coefficient = [&](GlobalIndex local_dof) -> double {
