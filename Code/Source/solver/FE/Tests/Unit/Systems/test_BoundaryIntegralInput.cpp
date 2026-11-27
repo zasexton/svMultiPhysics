@@ -535,6 +535,37 @@ TEST(BoundaryIntegralInput,
             }));
 }
 
+TEST(BoundaryIntegralInput, FunctionalGradientUsesItsStateClockAndRetainsSmallDerivatives)
+{
+    constexpr int marker = 5;
+    auto mesh = std::make_shared<svmp::FE::forms::test::SingleTetraOneBoundaryFaceMeshAccess>(marker);
+    auto space = std::make_shared<svmp::FE::spaces::H1Space>(ElementType::Tetra4, 1);
+    FESystem system(mesh);
+    const auto field = system.addField(FieldSpec{.name = "u", .space = space, .components = 1});
+    system.addOperator("op");
+    SetupInputs inputs;
+    inputs.topology_override = singleTetraTopology();
+    system.setup({}, inputs);
+    const auto u = FormExpr::trialFunction(*space, "u");
+    const auto clock = FormExpr::time() + 2.0 * FormExpr::timeStep();
+    std::vector<Real> solution(system.dofHandler().getNumDofs(), 1.0);
+    SystemStateView state;
+    state.u = solution;
+    for (double time : {3.0, 1.0}) {
+        state.time = time;
+        state.dt = 1.0 / (time + 1.0);
+        for (double scale : {1.0, 1e-16}) {
+            const auto gradient = system.assembleBoundaryGradient(field, scale * clock * u, marker, state);
+            // Each face vertex integrates to |face|/3, including when the
+            // dimensional derivative is much smaller than machine epsilon.
+            EXPECT_EQ(gradient.size(), 3u);
+            for (const auto& entry : gradient) {
+                EXPECT_NEAR(entry.value / scale, (state.time + 2.0 * state.dt) / 6.0, 1e-13);
+            }
+        }
+    }
+}
+
 TEST(BoundaryIntegralInput, FESystem_ConstantIntegrandOnOneFace)
 {
     // Constant integrand 1.0 on boundary face 0 of a unit tet.

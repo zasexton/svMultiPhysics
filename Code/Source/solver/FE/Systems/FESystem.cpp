@@ -24582,6 +24582,9 @@ FESystem::assembleBoundaryGradient(FieldId field,
     assembler_->setConstraints(restore_constraints);
     assembler_->setRowDofMap(fdh.getDofMap(), field_off);
     assembler_->setColDofMap(fdh.getDofMap(), field_off);
+    assembler_->setTime(static_cast<Real>(state.time));
+    assembler_->setTimeStep(static_cast<Real>(state.dt));
+    assembler_->setTimeIntegrationContext(state.time_integration);
 
     // Set the solution on the assembler so the gradient kernel can access
     // field values.  Use the GlobalSystemView from the cached solution vector
@@ -24811,7 +24814,7 @@ FESystem::assembleBoundaryGradient(FieldId field,
     std::vector<BoundaryReductionService::SensitivityEntry> result;
     result.reserve(accum.entries.size());
     for (const auto& [dof, val] : accum.entries) {
-        if (std::abs(val) > 1e-16) {
+        if (val != Real{0}) {
             result.push_back({dof, val});
         }
     }
