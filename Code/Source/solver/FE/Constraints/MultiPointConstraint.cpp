@@ -49,7 +49,7 @@ void MultiPointConstraint::apply(AffineConstraints& constraints) const {
                 constraints.addEntry(ec.slave_dof, master, weight);
             }
         }
-        if (std::abs(ec.inhomogeneity) > options_.coefficient_tolerance) {
+        if (ec.inhomogeneity != 0.0) {
             constraints.setInhomogeneity(ec.slave_dof, ec.inhomogeneity);
         }
     }
@@ -63,7 +63,7 @@ void MultiPointConstraint::apply(AffineConstraints& constraints) const {
                 constraints.addEntry(ec.slave_dof, master, weight);
             }
         }
-        if (std::abs(ec.inhomogeneity) > options_.coefficient_tolerance) {
+        if (ec.inhomogeneity != 0.0) {
             constraints.setInhomogeneity(ec.slave_dof, ec.inhomogeneity);
         }
     }
@@ -78,14 +78,14 @@ ConstraintInfo MultiPointConstraint::getInfo() const {
     info.is_homogeneous = true;  // Check if all inhomogeneities are zero
 
     for (const auto& ec : explicit_constraints_) {
-        if (std::abs(ec.inhomogeneity) > options_.coefficient_tolerance) {
+        if (ec.inhomogeneity != 0.0) {
             info.is_homogeneous = false;
             break;
         }
     }
     if (info.is_homogeneous) {
         for (const auto& eq : equations_) {
-            if (std::abs(eq.rhs) > options_.coefficient_tolerance) {
+            if (eq.rhs != 0.0) {
                 info.is_homogeneous = false;
                 break;
             }

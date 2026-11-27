@@ -136,7 +136,7 @@ ConstraintInfo DirichletBC::getInfo() const {
     // Check if all values are zero
     info.is_homogeneous = true;
     for (double v : values_) {
-        if (std::abs(v) > 1e-15) {
+        if (v != 0.0) {
             info.is_homogeneous = false;
             break;
         }

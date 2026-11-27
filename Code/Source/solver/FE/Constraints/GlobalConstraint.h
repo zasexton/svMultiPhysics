@@ -76,7 +76,7 @@ enum class GlobalConstraintType {
 struct GlobalConstraintOptions {
     GlobalConstraintStrategy strategy{GlobalConstraintStrategy::PinSingleDof};
     double pinned_value{0.0};                  ///< Value for pinned DOF
-    double tolerance{1e-14};                   ///< Tolerance for constraint satisfaction
+    double tolerance{0.0};                     ///< Absolute satisfaction tolerance in field units, in addition to relative roundoff
     bool prefer_boundary_dof{true};            ///< Prefer boundary DOFs for pinning
     GlobalIndex explicit_pin_dof{-1};          ///< Explicitly specify DOF to pin (-1 = auto)
 };

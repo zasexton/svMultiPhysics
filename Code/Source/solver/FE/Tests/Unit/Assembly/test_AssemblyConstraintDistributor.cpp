@@ -56,7 +56,7 @@ TEST_F(AssemblyConstraintDistributorTest, AssemblyConstraintOptionsDefaults) {
     EXPECT_DOUBLE_EQ(options.constrained_diagonal, 1.0);
     EXPECT_TRUE(options.apply_inhomogeneities);
     EXPECT_TRUE(options.skip_unconstrained);
-    EXPECT_DOUBLE_EQ(options.zero_tolerance, 1e-15);
+    EXPECT_DOUBLE_EQ(options.zero_tolerance, 0.0);
 }
 
 TEST_F(AssemblyConstraintDistributorTest, AssemblyConstraintOptionsCustom) {

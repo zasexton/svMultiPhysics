@@ -27,6 +27,39 @@ namespace test {
 // Basic tests
 // ============================================================================
 
+TEST(GlobalConstraintTest, WeightedMeanUsesRelativeMeasureAtEveryScale)
+{
+    const std::vector<GlobalIndex> dofs{0, 1};
+    const double target = 0x1p-80;
+    const auto pin = GlobalConstraint::pinDof(0, target);
+    EXPECT_DOUBLE_EQ(pin.getTargetValue(), target);
+    EXPECT_FALSE(pin.getInfo().is_homogeneous);
+    GlobalConstraintOptions opts;
+    opts.strategy = GlobalConstraintStrategy::WeightedMean;
+    for (double measure : {1.0, 0x1p-300, 0x1p-1022, 0x1p1022}) {
+        const std::vector<double> weights{measure, 3*measure};
+        const std::vector<double> values{5., 9.};
+        GlobalConstraint mean(dofs, weights, target, opts);
+        EXPECT_TRUE(mean.checkSatisfaction(std::vector<double>{target, target}));
+        EXPECT_FALSE(mean.checkSatisfaction(std::vector<double>{0., 0.}));
+        auto absolute = opts;
+        absolute.tolerance = 2*target;
+        EXPECT_TRUE(GlobalConstraint(dofs, weights, target, absolute).checkSatisfaction(std::vector<double>{0., 0.}));
+        EXPECT_FALSE(mean.getInfo().is_homogeneous);
+        EXPECT_DOUBLE_EQ(computeWeightedMean(values, dofs, weights), 8.);
+        EXPECT_DOUBLE_EQ(mean.getWeights()[0], 0.25);
+        EXPECT_DOUBLE_EQ(mean.getNullspaceVector()[1], 0.75);
+        AffineConstraints c;
+        ASSERT_NO_THROW(mean.apply(c));
+        c.close();
+        const auto line = c.getConstraint(0);
+        ASSERT_TRUE(line);
+        EXPECT_DOUBLE_EQ(line->inhomogeneity, 4*target);
+        ASSERT_EQ(line->entries.size(), 1u);
+        EXPECT_DOUBLE_EQ(line->entries[0].weight, -3.);
+    }
+}
+
 TEST(GlobalConstraintTest, DefaultConstruction) {
     GlobalConstraint gc;
 

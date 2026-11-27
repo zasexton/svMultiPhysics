@@ -89,17 +89,17 @@ void GlobalConstraint::apply(AffineConstraints& constraints) const {
             // w_0 * u_0 = target - sum_{i>0}(w_i * u_i)
             // u_0 = target/w_0 - sum_{i>0}(w_i/w_0 * u_i)
 
-            if (weights_.empty() || std::abs(weights_[0]) < 1e-15) {
+            if (weights_.empty() || weights_[0] == 0.0) {
                 CONSTRAINT_THROW("First weight must be non-zero for WeightedMean strategy");
             }
 
-            double w0_inv = 1.0 / weights_[0];
+            const double pivot = weights_[0];
 
             constraints.addLine(dofs_[0]);
-            constraints.setInhomogeneity(dofs_[0], target_value_ * w0_inv);
+            constraints.setInhomogeneity(dofs_[0], target_value_ / pivot);
 
             for (std::size_t i = 1; i < dofs_.size(); ++i) {
-                constraints.addEntry(dofs_[0], dofs_[i], -weights_[i] * w0_inv);
+                constraints.addEntry(dofs_[0], dofs_[i], -weights_[i] / pivot);
             }
 
             pinned_dof_ = dofs_[0];
@@ -125,7 +125,7 @@ ConstraintInfo GlobalConstraint::getInfo() const {
     info.num_constrained_dofs = (options_.strategy == GlobalConstraintStrategy::WeightedMean)
                                  ? 1 : (dofs_.empty() ? 0 : 1);
     info.is_time_dependent = false;
-    info.is_homogeneous = (std::abs(target_value_) < 1e-15);
+    info.is_homogeneous = (target_value_ == 0.0);
     return info;
 }
 
@@ -144,15 +144,7 @@ GlobalConstraintInfo GlobalConstraint::getGlobalInfo() const {
 // ============================================================================
 
 std::vector<double> GlobalConstraint::getNullspaceVector() const {
-    // Return weights normalized so that their sum equals 1
-    std::vector<double> nullvec = weights_;
-    double sum = std::accumulate(nullvec.begin(), nullvec.end(), 0.0);
-    if (std::abs(sum) > 1e-15) {
-        for (double& w : nullvec) {
-            w /= sum;
-        }
-    }
-    return nullvec;
+    return weights_;  // Normalized at construction.
 }
 
 void GlobalConstraint::projectToConstrainedSpace(std::span<double> vec) const {
@@ -175,7 +167,14 @@ void GlobalConstraint::projectToConstrainedSpace(std::span<double> vec) const {
 }
 
 bool GlobalConstraint::checkSatisfaction(std::span<const double> vec) const {
-    return std::abs(computeResidual(vec)) < options_.tolerance;
+    long double magnitude = std::abs(target_value_);
+    for (std::size_t i = 0; i < weights_.size(); ++i) {
+        const auto dof = dofs_[i];
+        if (dof >= 0 && static_cast<std::size_t>(dof) < vec.size()) {
+            magnitude += std::abs(static_cast<long double>(weights_[i]) * vec[dof]);
+        }
+    }
+    return std::abs(computeResidual(vec)) <= options_.tolerance + 1e-14L * magnitude;
 }
 
 double GlobalConstraint::computeResidual(std::span<const double> vec) const {
@@ -229,7 +228,9 @@ GlobalConstraint GlobalConstraint::pinDof(GlobalIndex dof, double value) {
     options.strategy = GlobalConstraintStrategy::PinSingleDof;
     options.explicit_pin_dof = dof;
     options.pinned_value = value;
-    return GlobalConstraint({dof}, GlobalConstraintType::NullspacePinning, options);
+    GlobalConstraint pin({dof}, {1.0}, value, options);
+    pin.global_type_ = GlobalConstraintType::NullspacePinning;
+    return pin;
 }
 
 // ============================================================================
@@ -258,11 +259,13 @@ GlobalIndex GlobalConstraint::selectDofToPin() const {
 }
 
 void GlobalConstraint::normalizeWeights() {
-    double sum = std::accumulate(weights_.begin(), weights_.end(), 0.0);
-    if (std::abs(sum) > 1e-15 && std::abs(sum - 1.0) > 1e-15) {
-        for (double& w : weights_) {
-            w /= sum;
-        }
+    long double scale = 0.0L;
+    for (double w : weights_) scale = std::max(scale, std::abs(static_cast<long double>(w)));
+    if (scale == 0.0L) return;
+    long double sum = 0.0L;
+    for (double w : weights_) sum += w / scale;
+    if (sum != 0.0L) {
+        for (double& w : weights_) w = static_cast<double>((w / scale) / sum);
     }
 }
 
@@ -291,18 +294,24 @@ double computeWeightedMean(std::span<const double> vec,
                             std::span<const double> weights) {
     if (dofs.empty() || dofs.size() != weights.size()) return 0.0;
 
-    double sum = 0.0;
-    double weight_sum = 0.0;
+    long double scale = 0.0L;
+    for (std::size_t i = 0; i < dofs.size(); ++i) {
+        if (dofs[i] >= 0 && static_cast<std::size_t>(dofs[i]) < vec.size())
+            scale = std::max(scale, std::abs(static_cast<long double>(weights[i])));
+    }
+    if (scale == 0.0L) return 0.0;
+    long double sum = 0.0L;
+    long double weight_sum = 0.0L;
 
     for (std::size_t i = 0; i < dofs.size(); ++i) {
         GlobalIndex dof = dofs[i];
         if (dof >= 0 && static_cast<std::size_t>(dof) < vec.size()) {
-            sum += weights[i] * vec[static_cast<std::size_t>(dof)];
-            weight_sum += weights[i];
+            sum += (weights[i] / scale) * vec[static_cast<std::size_t>(dof)];
+            weight_sum += weights[i] / scale;
         }
     }
 
-    return std::abs(weight_sum) > 1e-15 ? sum / weight_sum : 0.0;
+    return weight_sum != 0.0L ? static_cast<double>(sum / weight_sum) : 0.0;
 }
 
 void subtractMean(std::span<double> vec, std::span<const GlobalIndex> dofs) {

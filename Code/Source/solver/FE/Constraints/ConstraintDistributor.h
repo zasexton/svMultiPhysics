@@ -164,9 +164,9 @@ struct DistributorOptions {
     double constrained_diagonal{1.0};
 
     /**
-     * @brief Zero tolerance for skipping near-zero contributions
+     * @brief Absolute drop tolerance for constrained element contributions. Zero skips only exact zeros.
      */
-    double zero_tolerance{1e-15};
+    double zero_tolerance{0.0};
 
     /**
      * @brief Whether to apply inhomogeneity contributions to RHS
@@ -317,6 +317,15 @@ public:
      * @param col_dofs Global column DOF indices (size n_cols)
      */
     void distributeLocalToGlobal(
+        std::span<const double> cell_matrix,
+        std::span<const double> cell_rhs,
+        std::span<const GlobalIndex> row_dofs,
+        std::span<const GlobalIndex> col_dofs,
+        IMatrixOperations& matrix,
+        IVectorOperations& rhs) const;
+
+    /// Accumulate a rectangular block, leaving constrained rows for the caller to finalize.
+    void distributeBlockContributions(
         std::span<const double> cell_matrix,
         std::span<const double> cell_rhs,
         std::span<const GlobalIndex> row_dofs,
@@ -476,7 +485,8 @@ private:
         std::span<const GlobalIndex> row_dofs,
         std::span<const GlobalIndex> col_dofs,
         IMatrixOperations* matrix,
-        IVectorOperations* rhs) const;
+        IVectorOperations* rhs,
+        bool finalize_rows = true) const;
 
     /**
      * @brief Check if any DOF in the set is constrained

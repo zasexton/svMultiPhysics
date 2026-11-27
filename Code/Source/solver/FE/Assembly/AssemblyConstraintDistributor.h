@@ -189,9 +189,9 @@ struct AssemblyConstraintOptions {
     bool skip_unconstrained{true};
 
     /**
-     * @brief Zero tolerance for skipping small values
+     * @brief Absolute drop tolerance on projected entries. Zero skips only exact zeros.
      */
-    double zero_tolerance{1e-15};
+    double zero_tolerance{0.0};
 };
 
 // ============================================================================
@@ -464,17 +464,6 @@ private:
     // =========================================================================
 
     /**
-     * @brief Core distribution with adapters
-     */
-    void distributeCore(
-        std::span<const Real> cell_matrix,
-        std::span<const Real> cell_rhs,
-        std::span<const GlobalIndex> row_dofs,
-        std::span<const GlobalIndex> col_dofs,
-        GlobalSystemMatrixAdapter* matrix_adapter,
-        GlobalSystemVectorAdapter* rhs_adapter);
-
-    /**
      * @brief Direct distribution without constraint handling
      */
     void distributeDirectly(
@@ -495,12 +484,6 @@ private:
 
     // Underlying constraint distributor from Constraints module
     std::unique_ptr<constraints::ConstraintDistributor> distributor_;
-
-    // Thread-local scratch space (mutable for const methods)
-    mutable std::vector<GlobalIndex> scratch_rows_;
-    mutable std::vector<GlobalIndex> scratch_cols_;
-    mutable std::vector<Real> scratch_matrix_;
-    mutable std::vector<Real> scratch_rhs_;
 };
 
 // ============================================================================

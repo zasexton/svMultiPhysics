@@ -251,7 +251,7 @@ void AffineConstraints::addDirichlet(GlobalIndex dof, double value) {
 
     const double existing = line.inhomogeneity;
     const double tol = std::max(1e-12, 10.0 * options_.zero_tolerance);
-    const double scale = 1.0 + std::max(std::abs(existing), std::abs(value));
+    const double scale = std::max(std::abs(existing), std::abs(value));
     if (std::abs(existing - value) > tol * scale) {
         if (!options_.allow_overwrite) {
             std::ostringstream oss;
@@ -653,14 +653,14 @@ ConstraintStatistics AffineConstraints::getStatistics() const {
 
             if (n_entries == 0) {
                 ++stats.n_dirichlet;
-            } else if (n_entries == 1 &&
+            } else if (n_entries == 1 && inhomogeneities_[i] == 0.0 &&
                        std::abs(entries_[begin_offset].weight - 1.0) < 1e-15) {
                 ++stats.n_simple_periodic;
             } else if (n_entries > 1) {
                 ++stats.n_multipoint;
             }
 
-            if (std::abs(inhomogeneities_[i]) > 1e-15) {
+            if (inhomogeneities_[i] != 0.0) {
                 ++stats.n_inhomogeneous;
             }
         }

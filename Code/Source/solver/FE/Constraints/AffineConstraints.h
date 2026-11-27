@@ -94,7 +94,7 @@ struct ConstraintEntry {
 
     bool operator==(const ConstraintEntry& other) const noexcept {
         return master_dof == other.master_dof &&
-               std::abs(weight - other.weight) < 1e-15;
+               std::abs(weight - other.weight) <= 1e-15 * std::max(std::abs(weight), std::abs(other.weight));
     }
 
     bool operator<(const ConstraintEntry& other) const noexcept {
@@ -120,7 +120,7 @@ struct ConstraintLine {
      * @brief Check if this is a homogeneous constraint (b = 0)
      */
     [[nodiscard]] bool isHomogeneous() const noexcept {
-        return std::abs(inhomogeneity) < 1e-15;
+        return inhomogeneity == 0.0;
     }
 
     /**
@@ -249,7 +249,7 @@ public:
         }
 
         [[nodiscard]] bool isHomogeneous() const noexcept {
-            return std::abs(inhomogeneity) < 1e-15;
+            return inhomogeneity == 0.0;
         }
     };
 

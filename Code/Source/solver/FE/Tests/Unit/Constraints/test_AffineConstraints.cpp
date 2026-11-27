@@ -12,6 +12,8 @@
 
 #include <gtest/gtest.h>
 #include "Constraints/AffineConstraints.h"
+#include "Constraints/DirichletBC.h"
+#include "Constraints/MultiPointConstraint.h"
 
 #include <algorithm>
 #include <cmath>
@@ -29,6 +31,45 @@ namespace test {
 // ============================================================================
 // Basic construction tests
 // ============================================================================
+
+TEST(AffineConstraintsTest, PrescribedDataScaleDoesNotChangeConstraintSemantics)
+{
+    for (const double g : {1.0, 0x1p-80, -0x1p-80}) {
+        const ConstraintEntry weight{1, g}, half{1, 0.5*g}, adjacent{1, std::nextafter(g, 0.0)};
+        EXPECT_FALSE(weight == half);
+        EXPECT_TRUE(weight == adjacent);
+        EXPECT_FALSE(DirichletBC({0}, g).getInfo().is_homogeneous);
+        MultiPointConstraint mpc;
+        mpc.addConstraint(0, 1, 1.0, g);
+        MPCEquation equation;
+        equation.addTerm(2, 1.0);
+        equation.rhs = g;
+        mpc.addEquation(equation);
+        EXPECT_FALSE(mpc.getInfo().is_homogeneous);
+        AffineConstraints from_mpc;
+        mpc.apply(from_mpc);
+        from_mpc.close();
+        EXPECT_DOUBLE_EQ(from_mpc.getConstraint(0)->inhomogeneity, g);
+        EXPECT_DOUBLE_EQ(from_mpc.getConstraint(2)->inhomogeneity, g);
+        ConstraintLine line{.slave_dof = 0, .entries = {{1, 1.0}}, .inhomogeneity = g};
+        EXPECT_FALSE(line.isHomogeneous());
+        EXPECT_FALSE(line.isSimplePeriodic());
+        AffineConstraints c;
+        c.addPeriodic(0, 1);
+        c.setInhomogeneity(0, g);
+        c.addDirichlet(2, g);
+        EXPECT_NO_THROW(c.addDirichlet(2, std::nextafter(g, 0.0)));
+        EXPECT_THROW(c.addDirichlet(2, 0.5*g), ConstraintException);
+        for (bool closed : {false, true}) {
+            if (closed) c.close();
+            const auto stats = c.getStatistics();
+            EXPECT_EQ(stats.n_simple_periodic, 0);
+            EXPECT_EQ(stats.n_inhomogeneous, 2);
+        }
+        ASSERT_TRUE(c.getConstraint(0));
+        EXPECT_FALSE(c.getConstraint(0)->isHomogeneous());
+    }
+}
 
 TEST(AffineConstraintsTest, DefaultConstruction) {
     AffineConstraints constraints;
