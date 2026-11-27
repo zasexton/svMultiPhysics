@@ -76,7 +76,10 @@ TEST(OperatorRegistry, OperatorRegistry_Get_ReturnsCorrectDefinition)
     auto& def = reg.get("op");
     def.cells.push_back({/*test_field=*/FieldId{0}, /*trial_field=*/FieldId{0}, std::make_shared<MassKernel>(1.0)});
     def.boundary.push_back({/*marker=*/7, /*test_field=*/FieldId{0}, /*trial_field=*/FieldId{0}, std::make_shared<MassKernel>(2.0)});
-    def.interior.push_back({/*test_field=*/FieldId{0}, /*trial_field=*/FieldId{0}, std::make_shared<MassKernel>(3.0)});
+    auto& interior = def.interior.emplace_back();
+    interior.test_field = FieldId{0};
+    interior.trial_field = FieldId{0};
+    interior.kernel = std::make_shared<MassKernel>(3.0);
     def.global.push_back(std::make_shared<DummyGlobalKernel>());
 
     const auto& got = reg.get("op");

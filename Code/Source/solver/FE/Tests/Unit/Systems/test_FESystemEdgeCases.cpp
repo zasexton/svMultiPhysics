@@ -8,6 +8,7 @@
 #include "Systems/FESystem.h"
 #include "Constraints/SystemConstraints.h"
 #include "Systems/SystemsExceptions.h"
+#include "Dofs/EntityDofMap.h"
 
 #include "Assembly/AssemblyContext.h"
 #include "Assembly/AssemblyKernel.h"
@@ -532,14 +533,16 @@ TEST(FESystemEdgeCases, FESystem_EvaluateFieldAtPoint_VectorField_ReturnsAllComp
     ASSERT_NE(sys.searchAccess(), nullptr);
     sys.searchAccess()->build();
 
-    // ProductSpace stores coefficients as [comp0 block][comp1 block].
-    std::vector<Real> U = {
-        // comp0: x at vertices
-        0.0, 1.0, 1.0, 0.0,
-        // comp1: y at vertices
-        0.0, 0.0, 1.0, 1.0,
-    };
-    ASSERT_EQ(U.size(), static_cast<std::size_t>(sys.dofHandler().getNumDofs()));
+    const auto* entity_map = sys.fieldDofHandler(u).getEntityDofMap();
+    ASSERT_NE(entity_map, nullptr);
+    std::vector<Real> U(sys.dofHandler().getNumDofs());
+    for (GlobalIndex vertex = 0; vertex < static_cast<GlobalIndex>(mesh->n_vertices()); ++vertex) {
+        const auto dofs = entity_map->getVertexDofs(vertex);
+        ASSERT_EQ(dofs.size(), 2u);
+        const auto coordinates = sys.meshAccess().getNodeCoordinates(vertex);
+        U[dofs[0]] = coordinates[0];
+        U[dofs[1]] = coordinates[1];
+    }
 
     SystemStateView state;
     state.u = U;

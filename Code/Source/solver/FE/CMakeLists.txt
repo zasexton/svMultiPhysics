@@ -2420,6 +2420,7 @@ if(FE_BUILD_TESTS)
         Tests/Unit/Quadrature/test_QuadratureCache.cpp
         Tests/Unit/Quadrature/test_CompositeAdaptiveSingularSurface.cpp
         Tests/Unit/Quadrature/test_QuadratureFactory.cpp
+        Tests/Unit/Quadrature/test_QuadraturePointCounts.cpp
         Tests/Unit/Quadrature/test_PolynomialExactnessSweep.cpp
         Tests/Unit/Quadrature/test_SurfaceQuadraturePermutations.cpp
         Tests/Unit/Quadrature/test_ImplicitBoundaryIntersectionQuadrature.cpp
@@ -2625,6 +2626,7 @@ if(FE_BUILD_TESTS)
 		        Tests/Unit/Dofs/test_ConstrainedAssembly.cpp
 		        Tests/Unit/Dofs/test_DofGraph.cpp
 	        Tests/Unit/Dofs/test_BlockDofMap.cpp
+	        Tests/Unit/Dofs/test_SubspaceView.cpp
 		        Tests/Unit/Dofs/test_DofNumbering.cpp
 		        Tests/Unit/Dofs/test_DofTools.cpp
 		        Tests/Unit/Dofs/test_MeshTopologyBuilder.cpp
@@ -2805,13 +2807,13 @@ if(FE_BUILD_TESTS)
 	        endif()
 
 	        # Trilinos-specific backends tests (separate main for Tpetra init)
-	        if(FE_ENABLE_TRILINOS AND EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/Tests/Unit/Backends/test_trilinos_main.cpp)
-	            set(FE_TRILINOS_BACKENDS_TEST_SOURCES
+	        set(FE_TRILINOS_BACKENDS_TEST_SOURCES
 	                Tests/Unit/Backends/test_TrilinosBackend.cpp
 	                Tests/Unit/Backends/test_TrilinosMatrixAssembly.cpp
 	                Tests/Unit/Backends/test_LinearSolverConformance_Trilinos.cpp
 	                Tests/Unit/Backends/test_trilinos_main.cpp
 		            )
+	        if(FE_ENABLE_TRILINOS AND EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/Tests/Unit/Backends/test_trilinos_main.cpp)
 		            add_executable(test_fe_backends_trilinos ${FE_TRILINOS_BACKENDS_TEST_SOURCES})
 		            _svmp_fe_target_enable_warnings(test_fe_backends_trilinos)
 		            target_link_libraries(test_fe_backends_trilinos
@@ -2887,6 +2889,9 @@ if(FE_BUILD_TESTS)
 	            # Phase 1: CORE tests
 	            Tests/Unit/Assembly/test_GlobalSystemView.cpp
 	            Tests/Unit/Assembly/test_AssemblyKernel.cpp
+	            Tests/Unit/Assembly/test_AssemblyPerformance.cpp
+	            Tests/Unit/Assembly/test_TimeIntegrationContext.cpp
+	            Tests/Unit/Integration/test_StiffnessMatrix.cpp
 	            Tests/Unit/Assembly/test_AssemblyContext.cpp
             Tests/Unit/Assembly/test_JITKernelArgsPacking.cpp
             Tests/Unit/Assembly/test_StandardAssembler.cpp
@@ -3000,6 +3005,13 @@ if(FE_BUILD_TESTS)
 		                Tests/Unit/Systems/test_MaterialStateProvider.cpp
 		                Tests/Unit/Systems/test_FESystem.cpp
 		                Tests/Unit/Systems/test_FESystemAttachments.cpp
+		                Tests/Unit/Systems/test_FESystemEdgeCases.cpp
+		                Tests/Unit/Systems/test_GlobalKernelStateProvider.cpp
+		                Tests/Unit/Systems/test_OperatorRegistry.cpp
+		                Tests/Unit/Systems/test_SystemAssembly.cpp
+		                Tests/Unit/Systems/test_SystemsExceptions.cpp
+		                Tests/Unit/Systems/test_TimeIntegrator.cpp
+		                Tests/Unit/Systems/test_TransientSystem.cpp
 		                Tests/Unit/Systems/test_ExactAccumulator.cpp
 		                Tests/Unit/Systems/test_AcceptedStageRecords.cpp
 		                Tests/Unit/Systems/test_FunctionalFormEvaluator.cpp
@@ -3301,6 +3313,35 @@ if(FE_BUILD_TESTS)
 	            endif()
 	        endif()
 	    endif()
+    # Mesh, assembly and MPI together provide the complete unit-test inventory.
+    # The standalone configurations may build a subset of these modules.
+    if(FE_WITH_MESH AND FE_ENABLE_ASSEMBLY AND FE_ENABLE_MPI AND MPIEXEC_EXECUTABLE)
+        file(GLOB_RECURSE _fe_unregistered_tests CONFIGURE_DEPENDS
+            RELATIVE "${CMAKE_CURRENT_SOURCE_DIR}" "Tests/Unit/test_*.cpp")
+        if(NOT FE_BUILD_DOFS_TESTS)
+            list(FILTER _fe_unregistered_tests EXCLUDE REGEX "^Tests/Unit/Dofs/")
+        endif()
+        if(NOT TARGET test_fe_backends_trilinos)
+            list(REMOVE_ITEM _fe_unregistered_tests ${FE_TRILINOS_BACKENDS_TEST_SOURCES})
+        endif()
+        get_property(_fe_targets DIRECTORY PROPERTY BUILDSYSTEM_TARGETS)
+        foreach(_target IN LISTS _fe_targets)
+            if(_target MATCHES "^test_fe_")
+                get_target_property(_sources ${_target} SOURCES)
+                foreach(_source IN LISTS _sources)
+                    if(IS_ABSOLUTE "${_source}")
+                        file(RELATIVE_PATH _source "${CMAKE_CURRENT_SOURCE_DIR}" "${_source}")
+                    endif()
+                    list(REMOVE_ITEM _fe_unregistered_tests "${_source}")
+                endforeach()
+            endif()
+        endforeach()
+        if(_fe_unregistered_tests)
+            list(JOIN _fe_unregistered_tests "\n  " _fe_missing)
+            message(FATAL_ERROR "FE unit test sources missing from test targets:\n  ${_fe_missing}")
+        endif()
+    endif()
+
 	endif()
 
 #------------------------------------------------------------------------------

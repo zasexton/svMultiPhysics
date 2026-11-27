@@ -22,7 +22,7 @@
 #include "FE/Quadrature/QuadrilateralQuadrature.h"
 #include "FE/Quadrature/HexahedronQuadrature.h"
 #include "FE/Quadrature/PyramidQuadrature.h"
-#include "FE/Geometry/IsoparametricMapping.h"
+#include "FE/Geometry/MappingFactory.h"
 #include "FE/Math/Matrix.h"
 #include <cmath>
 #include <numeric>
@@ -145,8 +145,8 @@ std::vector<math::Vector<Real, 3>> create_unit_element_nodes(ElementType type) {
  */
 bool is_symmetric(const std::vector<Real>& K, std::size_t n, Real tol = 1e-10) {
     for (std::size_t i = 0; i < n; ++i) {
-        for (std::size_t j = i + 1; j < n; ++j) {
-            if (std::abs(K[i * n + j] - K[j * n + i]) > tol) {
+        for (std::size_t j = i; j < n; ++j) {
+            if (!(std::abs(K[i * n + j] - K[j * n + i]) <= tol)) {
                 return false;
             }
         }
@@ -165,11 +165,32 @@ bool has_null_space(const std::vector<Real>& K, std::size_t n, Real tol = 1e-10)
         for (std::size_t j = 0; j < n; ++j) {
             row_sum += K[i * n + j];
         }
-        if (std::abs(row_sum) > tol) {
+        if (!(std::abs(row_sum) <= tol)) {
             return false;
         }
     }
     return true;
+}
+
+// Coordinate fields have constant Cartesian gradients. Their stiffness products
+// therefore equal the cell measure on the diagonal and zero off the diagonal.
+void expect_coordinate_field_products(const std::vector<Real>& stiffness,
+                                      const std::vector<math::Vector<Real, 3>>& nodes,
+                                      int dim, Real measure)
+{
+    const auto n = nodes.size();
+    ASSERT_EQ(stiffness.size(), n * n);
+    for (int a = 0; a < dim; ++a) {
+        for (int b = 0; b < dim; ++b) {
+            Real product = 0;
+            for (std::size_t i = 0; i < n; ++i) {
+                for (std::size_t j = 0; j < n; ++j) {
+                    product += nodes[i][a] * stiffness[i * n + j] * nodes[j][b];
+                }
+            }
+            EXPECT_NEAR(product, a == b ? measure : 0, 2e-13 * measure);
+        }
+    }
 }
 
 } // anonymous namespace
@@ -183,9 +204,10 @@ TEST(StiffnessMatrix, Line2Symmetry) {
     basis::LagrangeBasis basis(ElementType::Line2, 1);
     quadrature::GaussQuadrature1D quad(2);
     auto nodes = create_unit_element_nodes(ElementType::Line2);
-    geometry::IsoparametricMapping mapping(ElementType::Line2, nodes);
+    const auto mapping = geometry::MappingFactory::create({.element_type = ElementType::Line2}, nodes);
 
-    auto K = compute_laplacian_stiffness(basis, quad, mapping);
+    auto K = compute_laplacian_stiffness(basis, quad, *mapping);
+    expect_coordinate_field_products(K, nodes, 1, 2);
     EXPECT_TRUE(is_symmetric(K, basis.size()));
 }
 
@@ -193,9 +215,9 @@ TEST(StiffnessMatrix, Line2NullSpace) {
     basis::LagrangeBasis basis(ElementType::Line2, 1);
     quadrature::GaussQuadrature1D quad(2);
     auto nodes = create_unit_element_nodes(ElementType::Line2);
-    geometry::IsoparametricMapping mapping(ElementType::Line2, nodes);
+    const auto mapping = geometry::MappingFactory::create({.element_type = ElementType::Line2}, nodes);
 
-    auto K = compute_laplacian_stiffness(basis, quad, mapping);
+    auto K = compute_laplacian_stiffness(basis, quad, *mapping);
     EXPECT_TRUE(has_null_space(K, basis.size()));
 }
 
@@ -205,9 +227,9 @@ TEST(StiffnessMatrix, Line2AnalyticalValue) {
     basis::LagrangeBasis basis(ElementType::Line2, 1);
     quadrature::GaussQuadrature1D quad(2);
     auto nodes = create_unit_element_nodes(ElementType::Line2);
-    geometry::IsoparametricMapping mapping(ElementType::Line2, nodes);
+    const auto mapping = geometry::MappingFactory::create({.element_type = ElementType::Line2}, nodes);
 
-    auto K = compute_laplacian_stiffness(basis, quad, mapping);
+    auto K = compute_laplacian_stiffness(basis, quad, *mapping);
 
     EXPECT_NEAR(K[0], Real(0.5), 1e-12);
     EXPECT_NEAR(K[1], Real(-0.5), 1e-12);
@@ -224,9 +246,10 @@ TEST(StiffnessMatrix, Quad4Symmetry) {
     basis::LagrangeBasis basis(ElementType::Quad4, 1);
     quadrature::QuadrilateralQuadrature quad(2);
     auto nodes = create_unit_element_nodes(ElementType::Quad4);
-    geometry::IsoparametricMapping mapping(ElementType::Quad4, nodes);
+    const auto mapping = geometry::MappingFactory::create({.element_type = ElementType::Quad4}, nodes);
 
-    auto K = compute_laplacian_stiffness(basis, quad, mapping);
+    auto K = compute_laplacian_stiffness(basis, quad, *mapping);
+    expect_coordinate_field_products(K, nodes, 2, 4);
     EXPECT_TRUE(is_symmetric(K, basis.size()));
 }
 
@@ -234,9 +257,9 @@ TEST(StiffnessMatrix, Quad4NullSpace) {
     basis::LagrangeBasis basis(ElementType::Quad4, 1);
     quadrature::QuadrilateralQuadrature quad(2);
     auto nodes = create_unit_element_nodes(ElementType::Quad4);
-    geometry::IsoparametricMapping mapping(ElementType::Quad4, nodes);
+    const auto mapping = geometry::MappingFactory::create({.element_type = ElementType::Quad4}, nodes);
 
-    auto K = compute_laplacian_stiffness(basis, quad, mapping);
+    auto K = compute_laplacian_stiffness(basis, quad, *mapping);
     EXPECT_TRUE(has_null_space(K, basis.size()));
 }
 
@@ -255,9 +278,10 @@ TEST(StiffnessMatrix, Quad8Symmetry) {
         {Real(0), Real(+1), Real(0)},
         {Real(-1), Real(0), Real(0)}
     };
-    geometry::IsoparametricMapping mapping(ElementType::Quad8, nodes);
+    const auto mapping = geometry::MappingFactory::create({.element_type = ElementType::Quad8}, nodes);
 
-    auto K = compute_laplacian_stiffness(basis, quad, mapping);
+    auto K = compute_laplacian_stiffness(basis, quad, *mapping);
+    expect_coordinate_field_products(K, nodes, 2, 4);
     EXPECT_TRUE(is_symmetric(K, basis.size()));
 }
 
@@ -270,9 +294,10 @@ TEST(StiffnessMatrix, Triangle3Symmetry) {
     basis::LagrangeBasis basis(ElementType::Triangle3, 1);
     quadrature::TriangleQuadrature quad(2);
     auto nodes = create_unit_element_nodes(ElementType::Triangle3);
-    geometry::IsoparametricMapping mapping(ElementType::Triangle3, nodes);
+    const auto mapping = geometry::MappingFactory::create({.element_type = ElementType::Triangle3}, nodes);
 
-    auto K = compute_laplacian_stiffness(basis, quad, mapping);
+    auto K = compute_laplacian_stiffness(basis, quad, *mapping);
+    expect_coordinate_field_products(K, nodes, 2, 0.5);
     EXPECT_TRUE(is_symmetric(K, basis.size()));
 }
 
@@ -280,9 +305,9 @@ TEST(StiffnessMatrix, Triangle3NullSpace) {
     basis::LagrangeBasis basis(ElementType::Triangle3, 1);
     quadrature::TriangleQuadrature quad(2);
     auto nodes = create_unit_element_nodes(ElementType::Triangle3);
-    geometry::IsoparametricMapping mapping(ElementType::Triangle3, nodes);
+    const auto mapping = geometry::MappingFactory::create({.element_type = ElementType::Triangle3}, nodes);
 
-    auto K = compute_laplacian_stiffness(basis, quad, mapping);
+    auto K = compute_laplacian_stiffness(basis, quad, *mapping);
     EXPECT_TRUE(has_null_space(K, basis.size()));
 }
 
@@ -295,9 +320,10 @@ TEST(StiffnessMatrix, Hex8Symmetry) {
     basis::LagrangeBasis basis(ElementType::Hex8, 1);
     quadrature::HexahedronQuadrature quad(2);
     auto nodes = create_unit_element_nodes(ElementType::Hex8);
-    geometry::IsoparametricMapping mapping(ElementType::Hex8, nodes);
+    const auto mapping = geometry::MappingFactory::create({.element_type = ElementType::Hex8}, nodes);
 
-    auto K = compute_laplacian_stiffness(basis, quad, mapping);
+    auto K = compute_laplacian_stiffness(basis, quad, *mapping);
+    expect_coordinate_field_products(K, nodes, 3, 8);
     EXPECT_TRUE(is_symmetric(K, basis.size()));
 }
 
@@ -305,9 +331,9 @@ TEST(StiffnessMatrix, Hex8NullSpace) {
     basis::LagrangeBasis basis(ElementType::Hex8, 1);
     quadrature::HexahedronQuadrature quad(2);
     auto nodes = create_unit_element_nodes(ElementType::Hex8);
-    geometry::IsoparametricMapping mapping(ElementType::Hex8, nodes);
+    const auto mapping = geometry::MappingFactory::create({.element_type = ElementType::Hex8}, nodes);
 
-    auto K = compute_laplacian_stiffness(basis, quad, mapping);
+    auto K = compute_laplacian_stiffness(basis, quad, *mapping);
     EXPECT_TRUE(has_null_space(K, basis.size()));
 }
 
@@ -342,9 +368,10 @@ TEST(StiffnessMatrix, Hex20Symmetry) {
         {Real(+1), Real(+1), Real(0)},
         {Real(-1), Real(+1), Real(0)}
     };
-    geometry::IsoparametricMapping mapping(ElementType::Hex20, nodes);
+    const auto mapping = geometry::MappingFactory::create({.element_type = ElementType::Hex20}, nodes);
 
-    auto K = compute_laplacian_stiffness(basis, quad, mapping);
+    auto K = compute_laplacian_stiffness(basis, quad, *mapping);
+    expect_coordinate_field_products(K, nodes, 3, 8);
     EXPECT_TRUE(is_symmetric(K, basis.size()));
 }
 
@@ -357,9 +384,10 @@ TEST(StiffnessMatrix, Tetra4Symmetry) {
     basis::LagrangeBasis basis(ElementType::Tetra4, 1);
     quadrature::TetrahedronQuadrature quad(2);
     auto nodes = create_unit_element_nodes(ElementType::Tetra4);
-    geometry::IsoparametricMapping mapping(ElementType::Tetra4, nodes);
+    const auto mapping = geometry::MappingFactory::create({.element_type = ElementType::Tetra4}, nodes);
 
-    auto K = compute_laplacian_stiffness(basis, quad, mapping);
+    auto K = compute_laplacian_stiffness(basis, quad, *mapping);
+    expect_coordinate_field_products(K, nodes, 3, 1.0 / 6);
     EXPECT_TRUE(is_symmetric(K, basis.size()));
 }
 
@@ -367,9 +395,9 @@ TEST(StiffnessMatrix, Tetra4NullSpace) {
     basis::LagrangeBasis basis(ElementType::Tetra4, 1);
     quadrature::TetrahedronQuadrature quad(2);
     auto nodes = create_unit_element_nodes(ElementType::Tetra4);
-    geometry::IsoparametricMapping mapping(ElementType::Tetra4, nodes);
+    const auto mapping = geometry::MappingFactory::create({.element_type = ElementType::Tetra4}, nodes);
 
-    auto K = compute_laplacian_stiffness(basis, quad, mapping);
+    auto K = compute_laplacian_stiffness(basis, quad, *mapping);
     EXPECT_TRUE(has_null_space(K, basis.size()));
 }
 
@@ -403,9 +431,10 @@ TEST(StiffnessMatrix, Pyramid13Symmetry) {
         {Real(+0.5), Real(+0.5), Real(0.5)},
         {Real(-0.5), Real(+0.5), Real(0.5)}
     };
-    geometry::IsoparametricMapping mapping(ElementType::Pyramid13, nodes);
+    const auto mapping = geometry::MappingFactory::create({.element_type = ElementType::Pyramid13}, nodes);
 
-    auto K = compute_laplacian_stiffness(basis, quad, mapping);
+    auto K = compute_laplacian_stiffness(basis, quad, *mapping);
+    expect_coordinate_field_products(K, nodes, 3, 4.0 / 3);
     EXPECT_TRUE(is_symmetric(K, basis.size()));
 }
 
@@ -428,9 +457,9 @@ TEST(StiffnessMatrix, Pyramid13NullSpace) {
         {Real(+0.5), Real(+0.5), Real(0.5)},
         {Real(-0.5), Real(+0.5), Real(0.5)}
     };
-    geometry::IsoparametricMapping mapping(ElementType::Pyramid13, nodes);
+    const auto mapping = geometry::MappingFactory::create({.element_type = ElementType::Pyramid13}, nodes);
 
-    auto K = compute_laplacian_stiffness(basis, quad, mapping);
+    auto K = compute_laplacian_stiffness(basis, quad, *mapping);
     EXPECT_TRUE(has_null_space(K, basis.size(), 1e-8));
 }
 
@@ -450,9 +479,10 @@ TEST(StiffnessMatrix, DistortedQuadSymmetry) {
         {Real(1.2), Real(1.0), Real(0)},
         {Real(-0.1), Real(0.9), Real(0)}
     };
-    geometry::IsoparametricMapping mapping(ElementType::Quad4, nodes);
+    const auto mapping = geometry::MappingFactory::create({.element_type = ElementType::Quad4}, nodes);
 
-    auto K = compute_laplacian_stiffness(basis, quad, mapping);
+    auto K = compute_laplacian_stiffness(basis, quad, *mapping);
+    expect_coordinate_field_products(K, nodes, 2, 1.03);
     EXPECT_TRUE(is_symmetric(K, basis.size()));
     EXPECT_TRUE(has_null_space(K, basis.size(), 1e-8));
 }
@@ -472,9 +502,10 @@ TEST(StiffnessMatrix, DistortedHexSymmetry) {
         {Real(+1.1), Real(+1.0), Real(+1.0)},
         {Real(-0.9), Real(+1.0), Real(+1.0)}
     };
-    geometry::IsoparametricMapping mapping(ElementType::Hex8, nodes);
+    const auto mapping = geometry::MappingFactory::create({.element_type = ElementType::Hex8}, nodes);
 
-    auto K = compute_laplacian_stiffness(basis, quad, mapping);
+    auto K = compute_laplacian_stiffness(basis, quad, *mapping);
+    expect_coordinate_field_products(K, nodes, 3, 4859.0 / 600);
     EXPECT_TRUE(is_symmetric(K, basis.size()));
     EXPECT_TRUE(has_null_space(K, basis.size(), 1e-8));
 }
@@ -489,10 +520,10 @@ TEST(StiffnessMatrix, BatchEvaluatorConsistency) {
     basis::LagrangeBasis basis(ElementType::Quad4, 1);
     quadrature::QuadrilateralQuadrature quad(2);
     auto nodes = create_unit_element_nodes(ElementType::Quad4);
-    geometry::IsoparametricMapping mapping(ElementType::Quad4, nodes);
+    const auto mapping = geometry::MappingFactory::create({.element_type = ElementType::Quad4}, nodes);
 
     // Point-by-point computation
-    auto K_ref = compute_laplacian_stiffness(basis, quad, mapping);
+    auto K_ref = compute_laplacian_stiffness(basis, quad, *mapping);
 
     // Batch computation
     basis::BatchEvaluator batch(basis, quad, true, false);
@@ -506,16 +537,17 @@ TEST(StiffnessMatrix, BatchEvaluatorConsistency) {
     // Compute weighted quadrature with Jacobian
     std::vector<Real> wts(quad.num_points());
     for (std::size_t q = 0; q < quad.num_points(); ++q) {
-        Real detJ = std::abs(mapping.jacobian_determinant(quad.point(q)));
+        Real detJ = std::abs(mapping->jacobian_determinant(quad.point(q)));
         wts[q] = quad.weight(q) * detJ;
     }
 
     assembly::assemble_stiffness_contribution(batch, D, wts.data(), K_batch.data());
 
-    // Compare (note: batch evaluator uses reference gradients, not physical)
-    // This test just verifies batch evaluator runs; full consistency needs
-    // the batch evaluator to transform gradients to physical space.
-    EXPECT_EQ(K_batch.size(), K_ref.size());
+    // The reference square has the identity map, so both implementations
+    // integrate the same physical bilinear form.
+    for (std::size_t i = 0; i < K_ref.size(); ++i) {
+        EXPECT_NEAR(K_batch[i], K_ref[i], 1e-13);
+    }
 }
 
 
@@ -527,13 +559,13 @@ TEST(StiffnessMatrix, QuadratureConvergence) {
     // For bilinear elements, 2x2 Gauss should be exact
     basis::LagrangeBasis basis(ElementType::Quad4, 1);
     auto nodes = create_unit_element_nodes(ElementType::Quad4);
-    geometry::IsoparametricMapping mapping(ElementType::Quad4, nodes);
+    const auto mapping = geometry::MappingFactory::create({.element_type = ElementType::Quad4}, nodes);
 
     quadrature::QuadrilateralQuadrature quad2(2);
     quadrature::QuadrilateralQuadrature quad4(4);
 
-    auto K2 = compute_laplacian_stiffness(basis, quad2, mapping);
-    auto K4 = compute_laplacian_stiffness(basis, quad4, mapping);
+    auto K2 = compute_laplacian_stiffness(basis, quad2, *mapping);
+    auto K4 = compute_laplacian_stiffness(basis, quad4, *mapping);
 
     // Should be identical for linear basis
     for (std::size_t i = 0; i < K2.size(); ++i) {
