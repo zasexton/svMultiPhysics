@@ -78,6 +78,7 @@
 #include <limits>
 #include <optional>
 #include <numeric>
+#include <set>
 #include <sstream>
 #include <stdexcept>
 #include <string_view>
@@ -4633,6 +4634,7 @@ void FESystem::setup(const SetupOptions& user_opts, const SetupInputs& inputs)
 #endif
 
         [[maybe_unused]] bool distributed_rigid_gauge = false;
+        std::set<std::pair<FieldId, int>> point_gauge_components;
 #if FE_HAS_MPI
         const auto& modes = gauge_registry_->resolvedModes();
         distributed_rigid_gauge = gauge_comm.isParallel() && std::any_of(modes.begin(), modes.end(), [](const auto& m) {
@@ -4659,6 +4661,20 @@ void FESystem::setup(const SetupOptions& user_opts, const SetupInputs& inputs)
                 dofs::DofPartition all_rows(owned, dofs::IndexSet(0, total).difference(owned));
                 all_rows.setGlobalSize(total);
                 constraints::ParallelConstraints(gauge_comm.native(), all_rows).synchronize(affine_constraints_);
+            }
+            // Eliminating a weighted mean couples all DOFs of its component.
+            // A local vector and its constraint rows must represent every
+            // master. Otherwise use a point gauge for that translation.
+            const auto& partition = dof_handler_.getPartition();
+            for (const auto& [field, components] : rigid_dofs) {
+                for (std::size_t c = 0; c < components.size(); ++c) {
+                    const auto& dofs = components[c];
+                    const auto local = std::count_if(dofs.begin(), dofs.end(),
+                        [&](auto d) { return partition.isRelevant(d); });
+                    if (collectiveAnyTrue(local != 0 && static_cast<std::size_t>(local) != dofs.size(), gauge_comm)) {
+                        point_gauge_components.emplace(field, static_cast<int>(c));
+                    }
+                }
             }
         }
 #endif
@@ -4745,7 +4761,8 @@ void FESystem::setup(const SetupOptions& user_opts, const SetupInputs& inputs)
             }
 #endif
             if (!has_unsupported_cells) {
-                mass_weight_provider = [vertex_mass, get_field_dofs](FieldId fid, int component) {
+                mass_weight_provider = [vertex_mass, get_field_dofs, &point_gauge_components](FieldId fid, int component) {
+                    if (point_gauge_components.contains({fid, component})) return std::vector<double>{};
                     const auto dofs = get_field_dofs(fid, component);
                     // Extract weights and validate: if any DOF has zero weight
                     // (unsupported cell type like Quad4), return empty to trigger

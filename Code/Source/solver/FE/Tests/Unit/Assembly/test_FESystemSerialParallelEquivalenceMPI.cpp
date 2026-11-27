@@ -507,23 +507,31 @@ TEST(FESystemSerialParallelEquivalenceMPI, CoupledNavierStokesLikeAssemblyMatche
     }
 }
 
-TEST(FESystemSerialParallelEquivalenceMPI, NaturalSymmetricGradientRemovesSixRigidMotions)
+static void checkNaturalRigidGauges(bool full_halo)
 {
     MPI_Comm comm = MPI_COMM_WORLD;
     const int rank = mpiRank(comm);
     const int size = mpiSize(comm);
-    // Consecutive tetrahedra share a face. No rank has the whole mesh.
+    // Consecutive tetrahedra share a face. The same global mesh is used with
+    // a thin subdomain and with all cells available in the local halo.
+    const int first = full_halo ? 0 : rank;
+    const int cells = full_halo ? size : 1;
     dofs::MeshTopologyInfo topo;
     topo.dim = 3;
-    topo.n_cells = 1;
-    topo.n_vertices = 4;
-    topo.cell2vertex_offsets = {0, 4};
-    topo.cell2vertex_data = {0, 1, 2, 3};
-    topo.cell_gids = {static_cast<dofs::gid_t>(rank)};
-    topo.cell_owner_ranks = {rank};
+    topo.n_cells = cells;
+    topo.n_vertices = cells + 3;
+    topo.cell2vertex_offsets = {0};
     topo.neighbor_ranks = neighborRanks(rank, size);
-    for (int v = rank; v < rank + 4; ++v) {
-        topo.vertex_gids.push_back(static_cast<dofs::gid_t>(v));
+    for (int cell = 0; cell < cells; ++cell) {
+        topo.cell2vertex_offsets.push_back(4 * (cell + 1));
+        topo.cell2vertex_data.insert(topo.cell2vertex_data.end(), {cell, cell+1, cell+2, cell+3});
+        topo.cell_gids.push_back(first + cell);
+        topo.cell_owner_ranks.push_back(first + cell);
+    }
+    for (int v = first; v < first + cells + 3; ++v) {
+        // The first global vertex is shared across ranks, so an eliminated
+        // mean pivot cannot disappear from the rank assembling its neighbor.
+        topo.vertex_gids.push_back(static_cast<dofs::gid_t>((v + size + 1) % (size + 3)));
         const Real s = v;
         topo.vertex_coords.insert(topo.vertex_coords.end(), {s, s*s, s*s*s});
     }
@@ -532,9 +540,15 @@ TEST(FESystemSerialParallelEquivalenceMPI, NaturalSymmetricGradientRemovesSixRig
     tet.family = svmp::CellFamily::Tetra;
     tet.order = 1;
     tet.num_corners = 4;
-    mesh_base->build_from_arrays(3, topo.vertex_coords, {0, 4}, {0, 1, 2, 3}, {tet});
+    mesh_base->build_from_arrays(3, topo.vertex_coords, topo.cell2vertex_offsets,
+        topo.cell2vertex_data, std::vector<svmp::CellShape>(cells, tet));
     mesh_base->finalize();
     auto mesh = svmp::create_mesh(mesh_base, svmp::MeshComm(comm));
+    for (int cell = 0; cell < cells; ++cell) {
+        const int owner = first + cell;
+        mesh->set_ownership(cell, svmp::EntityKind::Volume,
+            owner == rank ? svmp::Ownership::Owned : svmp::Ownership::Ghost, owner);
+    }
     for (auto numbering : {dofs::DofNumberingStrategy::Block, dofs::DofNumberingStrategy::Interleaved}) {
         systems::FESystem system(std::make_shared<MeshAccess>(*mesh));
         auto space = spaces::VectorSpace(spaces::SpaceType::H1, ElementType::Tetra4, 1, 3);
@@ -556,25 +570,29 @@ TEST(FESystemSerialParallelEquivalenceMPI, NaturalSymmetricGradientRemovesSixRig
         const auto n = static_cast<std::size_t>(handler.getNumDofs());
         ASSERT_EQ(n, 3u * (size + 3));
         std::vector<Real> modes(n * 6, Real(0));
-        const auto cell_dofs = handler.getCellDofs(0);
-        ASSERT_EQ(cell_dofs.size(), 12u);
-        for (int c = 0; c < 3; ++c) {
-            for (int i = 0; i < 4; ++i) {
-                const auto d = cell_dofs[4*c + i];
-                if (!handler.getPartition().isOwned(d)) continue;
-                const Real x = rank + i, y = x*x, z = x*y;
-                auto* row = modes.data() + 6*d;
-                row[c] = 1.;
-                row[3] = (c == 0 ? -y : (c == 1 ? x : 0.));
-                row[4] = (c == 1 ? -z : (c == 2 ? y : 0.));
-                row[5] = (c == 2 ? -x : (c == 0 ? z : 0.));
+        for (int cell = 0; cell < cells; ++cell) {
+            const auto cell_dofs = handler.getCellDofs(cell);
+            ASSERT_EQ(cell_dofs.size(), 12u);
+            for (int c = 0; c < 3; ++c) {
+                for (int i = 0; i < 4; ++i) {
+                    const auto d = cell_dofs[4*c + i];
+                    if (!handler.getPartition().isOwned(d)) continue;
+                    const Real x = first + cell + i, y = x*x, z = x*y;
+                    auto* row = modes.data() + 6*d;
+                    row[c] = 1.;
+                    row[3] = (c == 0 ? -y : (c == 1 ? x : 0.));
+                    row[4] = (c == 1 ? -z : (c == 2 ? y : 0.));
+                    row[5] = (c == 2 ? -x : (c == 0 ? z : 0.));
+                }
             }
         }
         modes = allreduceSum(modes, comm);
         std::vector<Real> restriction(n * 6, Real(0));
+        std::vector<Real> constrained(n, Real(0));
         int local_lines = 0, local_means = 0;
         system.constraints().forEach([&](const auto& line) {
             if (!handler.getPartition().isOwned(line.slave_dof)) return;
+            constrained[line.slave_dof] = 1.;
             ++local_lines;
             if (!line.entries.empty()) ++local_means;
             for (int k = 0; k < 6; ++k) {
@@ -587,8 +605,18 @@ TEST(FESystemSerialParallelEquivalenceMPI, NaturalSymmetricGradientRemovesSixRig
         int counts[2]{local_lines, local_means};
         MPI_Allreduce(MPI_IN_PLACE, counts, 2, MPI_INT, MPI_SUM, comm);
         EXPECT_EQ(counts[0], 6);
-        EXPECT_EQ(counts[1], 3); // same lumped-mean translation gauge as a single rank
+        EXPECT_EQ(counts[1], full_halo || size == 1 ? 3 : 0);
+        constrained = allreduceSum(constrained, comm);
+        for (auto d : handler.getCellDofs(rank - first)) {
+            if (constrained[d] != 0.) EXPECT_TRUE(system.constraints().isConstrained(d)) << d;
+        }
     }
+}
+
+TEST(FESystemSerialParallelEquivalenceMPI, NaturalSymmetricGradientRemovesSixRigidMotions)
+{
+    checkNaturalRigidGauges(false);
+    checkNaturalRigidGauges(true);
 }
 
 TEST(FESystemSerialParallelEquivalenceMPI,
