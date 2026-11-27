@@ -9,6 +9,8 @@
 #include "Dofs/EntityDofMap.h"
 #include "Forms/FormExpr.h"
 #include "Forms/JIT/JITKernelWrapper.h"
+#include "Interfaces/LevelSetInterfaceBuilder.h"
+#include "Assembly/CutIntegrationContext.h"
 #include "Interfaces/MaterialInterfaceTransportVelocity.h"
 #include "Spaces/SpaceFactory.h"
 #include "Sparsity/SparsityPattern.h"
@@ -34,6 +36,7 @@
 #include <functional>
 #include <map>
 #include <memory>
+#include <numeric>
 #include <optional>
 #include <span>
 #include <stdexcept>
@@ -3301,6 +3304,83 @@ TEST(LevelSetTransport, InterfaceKinematicAddsInterfaceResidual)
     EXPECT_TRUE(formulationRecordsContain(system, FormExprType::CellDiameter));
     EXPECT_TRUE(formulationRecordsContain(system, FormExprType::TimeDerivative));
     EXPECT_TRUE(formulationRecordsContain(system, FormExprType::Gradient));
+}
+
+TEST(LevelSetTransport, MaterialInterfaceResidualIsIndependentOfIsovalue)
+{
+    using TransportForm = level_set::LevelSetTransportForm;
+    const auto mesh = std::make_shared<SingleTetraMeshAccess>();
+    const auto scalar = scalarSpace(mesh);
+    const auto vector = vectorSpace(mesh);
+    constexpr double plane = 0.25;
+    constexpr int marker = 77;
+    const auto residualSum = [&](TransportForm form, double isovalue,
+                                 double normal_speed, bool penalize) {
+        FE::systems::FESystem system(mesh);
+        const auto phi = system.addField({.name = "phi", .space = scalar});
+        const auto velocity = system.addField(
+            {.name = "velocity", .space = vector, .components = 3});
+        level_set::LevelSetTransportOptions options;
+        options.level_set.field_name = "phi";
+        options.level_set.auto_register_field = false;
+        options.velocity.field_name = "velocity";
+        options.velocity.source = level_set::LevelSetVelocitySource::CoupledField;
+        options.transport_form = form;
+        options.interface_kinematic.enabled = penalize;
+        options.interface_kinematic.interface_marker = marker;
+        FE::systems::FormInstallOptions install;
+        install.compiler_options.jit.enable = false;
+        (void)level_set::installLevelSetTransport(system, scalar, options, install);
+
+        FE::interfaces::CutInterfaceDomainRequest request;
+        request.interface_marker = marker;
+        request.source = FE::interfaces::LevelSetInterfaceSource::fromField(phi, 0, 1);
+        request.isovalue = isovalue;
+        FE::interfaces::LevelSetInterfaceDomain domain(request);
+        FE::interfaces::LevelSetCellCutInput cell;
+        cell.parent_cell = 0;
+        cell.element_type = FE::ElementType::Tetra4;
+        mesh->getCellCoordinates(0, cell.node_coordinates);
+        for (const auto& point : cell.node_coordinates) {
+            cell.level_set_values.push_back(point[0] - plane + isovalue);
+        }
+        FE::interfaces::appendLinearLevelSetCellCut3D(domain, cell);
+        auto cut = std::make_shared<FE::assembly::CutIntegrationContext>();
+        cut->addGeneratedInterfaceDomain(domain);
+        system.setCutIntegrationContext(cut);
+        system.setup({}, makeSingleTetraSetupInputs());
+
+        std::vector<FE::Real> values(system.dofHandler().getNumDofs(), 0.0);
+        for (FE::GlobalIndex v = 0; v < 4; ++v) {
+            setScalarVertexValue(values, system, phi, v, cell.level_set_values[v]);
+            setFieldComponentValue(values, system, velocity, v, 0,
+                                   cell.node_coordinates[v][0] - plane + normal_speed);
+        }
+        FE::systems::SystemStateView state;
+        state.dt = state.dt_prev = 1.0;
+        state.u = state.u_prev = state.u_prev2 = values;
+        const auto time = FE::systems::BDF2Integrator().buildContext(1, state);
+        state.time_integration = &time;
+        const auto residual = assembleLevelSetResidual(system, state);
+        return std::accumulate(residual.begin(), residual.end(), 0.0);
+    };
+
+    // w_x = x - plane + speed has div(w) = 1. On every cut phi = c,
+    // motion is governed by speed alone. The conservative bulk still contains c.
+    constexpr double shift = 0.625;
+    for (const double speed : {0.0, 0.5}) {
+        const auto bulk = residualSum(TransportForm::ConservativeDivergence, 0.0, speed, false);
+        const auto shifted = residualSum(TransportForm::ConservativeDivergence, shift, speed, false);
+        EXPECT_NEAR(shifted - bulk, shift / 6.0, 1.e-12);
+        const auto advective = residualSum(TransportForm::Advective, shift, speed, true) -
+                               residualSum(TransportForm::Advective, shift, speed, false);
+        const double cut_area = 0.5 * (1.0 - plane) * (1.0 - plane);
+        EXPECT_NEAR(advective, speed * std::sqrt(2.0) * cut_area, 1.e-12);
+        EXPECT_NEAR(residualSum(TransportForm::ConservativeDivergence, 0.0, speed, true) - bulk,
+                    advective, 1.e-12);
+        EXPECT_NEAR(residualSum(TransportForm::ConservativeDivergence, shift, speed, true) - shifted,
+                    advective, 1.e-12);
+    }
 }
 
 TEST(LevelSetTransport, ValidatesSUPGOptions)

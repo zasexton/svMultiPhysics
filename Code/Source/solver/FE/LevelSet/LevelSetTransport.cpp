@@ -729,7 +729,7 @@ systems::CoupledResidualKernels installLevelSetTransport(
                    : dot(advecting_velocity, grad(phi));
     };
     auto residual = (time_residual * eta).dx();
-    FormExpr interface_spatial_residual;
+    FormExpr bulk_spatial_residual;
     if (material_interface_velocity) {
         const auto negative_spatial_residual =
             spatialResidual(negative_material_velocity);
@@ -744,11 +744,9 @@ systems::CoupledResidualKernels installLevelSetTransport(
                        .dCutVolume(
                            material_velocity_declaration->interface_marker,
                            CutVolumeSide::Positive);
-        interface_spatial_residual =
-            spatialResidual(material_interface_trace_velocity);
     } else {
-        interface_spatial_residual = spatialResidual(velocity);
-        residual = residual + (interface_spatial_residual * eta).dx();
+        bulk_spatial_residual = spatialResidual(velocity);
+        residual = residual + (bulk_spatial_residual * eta).dx();
     }
 
     const auto appendSupg = [&](const FormExpr& advecting_velocity,
@@ -795,15 +793,19 @@ systems::CoupledResidualKernels installLevelSetTransport(
             spatialResidual(positive_material_velocity),
             CutVolumeSide::Positive);
     } else {
-        appendSupg(velocity, interface_spatial_residual, std::nullopt);
+        appendSupg(velocity, bulk_spatial_residual, std::nullopt);
     }
     if (options.interface_kinematic.enabled) {
+        // The motion of phi = c satisfies the material derivative at every isovalue.
+        const auto& interface_velocity =
+            material_interface_velocity ? material_interface_trace_velocity : velocity;
+        const auto interface_advection = dot(interface_velocity, grad(phi));
         residual = residual +
                    (FormExpr::constant(options.interface_kinematic.weight_scale) *
                     h() * time_residual * eta)
                        .dI(options.interface_kinematic.interface_marker) +
                    (FormExpr::constant(options.interface_kinematic.weight_scale) *
-                    h() * interface_spatial_residual * eta)
+                    h() * interface_advection * eta)
                        .dI(options.interface_kinematic.interface_marker);
     }
 
