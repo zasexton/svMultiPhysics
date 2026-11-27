@@ -602,7 +602,6 @@ struct DualValue {
         case FormExprType::Divide:
             return evalBinaryScalarDual(node, ctx, ws, seeds, [](const Dual& a, const Dual& b, Dual out) { return div(a, b, out); });
         case FormExprType::Power: {
-            // Prefer constant exponent if RHS has no derivatives.
             const auto kids = node.childrenShared();
             if (kids.size() != 2u || !kids[0] || !kids[1]) {
                 throw std::invalid_argument("PointEvaluatorDual: power node must have exactly 2 children");
@@ -612,11 +611,6 @@ struct DualValue {
             const auto& a = requireScalar(av, "PointEvaluatorDual");
             const auto& b = requireScalar(bv, "PointEvaluatorDual");
             Dual out = makeDualConstant(0.0, ws.alloc());
-            const bool b_is_constant = std::all_of(b.deriv.begin(), b.deriv.end(),
-                                                  [](Real v) { return v == 0.0; });
-            if (b_is_constant) {
-                return scalar(pow(a, b.value, out));
-            }
             return scalar(pow(a, b, out));
         }
         case FormExprType::Minimum: {

@@ -60,6 +60,27 @@ TEST(SymbolicDifferentiationAuxiliaryOutputRef, DifferentiateWrtStableAuxiliaryO
     EXPECT_DOUBLE_EQ(evaluateScalarAt(deriv, ctx), 8.0);
 }
 
+TEST(SymbolicDifferentiationAuxiliaryOutputRef, PowerWithIndependentExponent)
+{
+    const auto base = FormExpr::auxiliaryOutputRef(0);
+    const auto exponent = FormExpr::auxiliaryOutputRef(1);
+    const auto f = pow(base, exponent);
+    const auto d_base = differentiateWrtAuxiliaryOutput(f, 0);
+    const auto d_exponent = differentiateWrtAuxiliaryOutput(f, 1);
+    PointEvalContext context;
+    std::array<Real, 2> values{-2.0, 2.0};
+    context.auxiliary_outputs = values;
+    EXPECT_DOUBLE_EQ(evaluateScalarAt(d_base, context), -4.0);
+    EXPECT_TRUE(std::isnan(evaluateScalarAt(d_exponent, context)));
+    values = {2.0, 2.0};
+    EXPECT_DOUBLE_EQ(evaluateScalarAt(d_exponent, context), 4.0 * std::log(2.0));
+    values = {0.0, 1.0};
+    EXPECT_DOUBLE_EQ(evaluateScalarAt(d_base, context), 1.0);
+    EXPECT_DOUBLE_EQ(evaluateScalarAt(d_exponent, context), 0.0);
+    values = {0.0, 0.0};
+    EXPECT_DOUBLE_EQ(evaluateScalarAt(d_base, context), 0.0);
+}
+
 void expectDenseNear(const assembly::DenseMatrixView& A,
                      const assembly::DenseMatrixView& B,
                      Real tol)
@@ -602,6 +623,42 @@ TEST(SymbolicNonlinearFormKernelTest, PowerExponentZeroMatchesAD)
 
     const std::vector<Real> U = {0.0, 0.0, 0.0, 0.0};
     compareADAndSymbolic(mesh, dof_map, space, space, residual, U);
+}
+
+TEST(SymbolicNonlinearFormKernelTest, NamedPowerAtNonpositiveBaseHasExactTangent)
+{
+    SingleTetraMeshAccess mesh;
+    auto dofs = makeSingleCellDofMap(1);
+    spaces::L2Space space(ElementType::Tetra4, 0);
+    const auto u = FormExpr::trialFunction(space, "u");
+    const auto v = FormExpr::testFunction(space, "v");
+    const auto residual = (pow(u, FormExpr::parameter("exponent")) * v).dx();
+    FormCompiler compiler;
+    NonlinearFormKernel ad(compiler.compileResidual(residual), ADMode::Forward);
+    SymbolicNonlinearFormKernel symbolic(compiler.compileResidual(residual), NonlinearKernelOutput::Both);
+    symbolic.resolveInlinableConstitutives();
+    assembly::StandardAssembler assembler;
+    assembler.setDofMap(dofs);
+    Real exponent{};
+    std::function<std::optional<Real>(std::string_view)> parameter =
+        [&](std::string_view name) -> std::optional<Real> {
+            return name == "exponent" ? std::optional<Real>(exponent) : std::nullopt;
+        };
+    assembler.setRealParameterGetter(&parameter);
+    for (const auto [base, power, slope] :
+         std::array<std::array<Real, 3>, 3>{{{-2, 2, -4}, {0, 1, 1}, {0, 0, 0}}}) {
+        SCOPED_TRACE(::testing::Message() << "base=" << base << " exponent=" << power);
+        exponent = power;
+        const std::vector<Real> state{base};
+        assembler.setCurrentSolution(state);
+        for (auto* kernel : std::array<assembly::AssemblyKernel*, 2>{&ad, &symbolic}) {
+            assembly::DenseMatrixView tangent(1);
+            assembly::DenseVectorView value(1);
+            (void)assembler.assembleBoth(mesh, space, space, *kernel, tangent, value);
+            EXPECT_NEAR(value.getVectorEntry(0), std::pow(base, power) / 6.0, 1e-13);
+            EXPECT_NEAR(tangent.getMatrixEntry(0, 0), slope / 6.0, 1e-13);
+        }
+    }
 }
 
 TEST(SymbolicNonlinearFormKernelTest, CurlJacobianMatchesAD)

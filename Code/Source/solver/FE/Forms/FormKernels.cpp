@@ -1737,6 +1737,59 @@ struct SpatialJet {
     bool has_hess{false};
 };
 
+template<typename Scalar>
+bool constantScalarJet(const SpatialJet<Scalar>& jet)
+{
+    if constexpr (std::is_same_v<Scalar, Dual>) {
+        for (Real derivative : jet.value.s.deriv) {
+            if (derivative != 0.0) return false;
+        }
+    }
+    const auto is_zero = [](const Scalar& value) {
+        if constexpr (std::is_same_v<Scalar, Dual>) return isZeroDual(value);
+        else return value == 0.0;
+    };
+    if (jet.has_grad) {
+        for (std::size_t i = 0; i < jet.grad.vectorSize(); ++i) {
+            if (!is_zero(jet.grad.vectorAt(i))) return false;
+        }
+    }
+    if (jet.has_hess) {
+        for (std::size_t i = 0; i < jet.hess.matrixRows(); ++i) {
+            for (std::size_t j = 0; j < jet.hess.matrixCols(); ++j) {
+                if (!is_zero(jet.hess.matrixAt(i, j))) return false;
+            }
+        }
+    }
+    return true;
+}
+
+template<typename Scalar, typename Env>
+void composeScalarJet(SpatialJet<Scalar>& result, const SpatialJet<Scalar>& argument,
+                      const Scalar& first, const Scalar& second, const Env& env)
+{
+    if (result.has_grad) {
+        const auto dim = argument.grad.vectorSize();
+        result.grad.kind = EvalValue<Scalar>::Kind::Vector;
+        result.grad.vector_size = dim;
+        for (std::size_t i = 0; i < dim; ++i) {
+            result.grad.v[i] = s_mul(first, argument.grad.vectorAt(i), env);
+        }
+    }
+    if (result.has_hess) {
+        const auto dim = argument.hess.matrixRows();
+        result.hess.kind = EvalValue<Scalar>::Kind::Matrix;
+        result.hess.matrix_rows = result.hess.matrix_cols = dim;
+        for (std::size_t i = 0; i < dim; ++i) {
+            for (std::size_t j = 0; j < dim; ++j) {
+                const auto grad_product = s_mul(argument.grad.vectorAt(i), argument.grad.vectorAt(j), env);
+                result.hess.m[i][j] = s_add(s_mul(first, argument.hess.matrixAt(i, j), env),
+                                            s_mul(second, grad_product, env), env);
+            }
+        }
+    }
+}
+
 template<typename Scalar, typename Env>
 EvalValue<Scalar> addSubValue(const EvalValue<Scalar>& a, const EvalValue<Scalar>& b, bool add, const Env& env)
 {
@@ -4131,6 +4184,19 @@ SpatialJet<Scalar> evalSpatialJet(const FormExprNode& node,
 	
 	            out.value.kind = EvalValue<Scalar>::Kind::Scalar;
 	            out.value.s = s_pow(a.value.s, b.value.s, env);
+
+            if ((out.has_grad || out.has_hess) && constantScalarJet(b)) {
+                const Real p = scalarNumericValue(b.value.s);
+                const auto zero = makeScalarConstant<Scalar>(0.0, env);
+                const auto power = [&](Real k) {
+                    return s_pow(a.value.s, makeScalarConstant<Scalar>(k, env), env);
+                };
+                const auto first = p == 0.0 ? zero : s_mul(p, power(p - 1.0), env);
+                const auto second = !out.has_hess || p == 0.0 || p == 1.0 ? zero :
+                    s_mul(p * (p - 1.0), power(p - 2.0), env);
+                composeScalarJet(out, a, first, second, env);
+                return out;
+            }
 	
 	            if (out.has_grad || out.has_hess) {
 	                const Scalar loga = s_log(a.value.s, env);
@@ -4709,57 +4775,22 @@ SpatialJet<Scalar> evalSpatialJet(const FormExprNode& node,
             else if (node.type() == FormExprType::Exp) out.value.s = s_exp(u.value.s, env);
             else out.value.s = s_log(u.value.s, env);
 
-            if (out.has_grad) {
-                out.grad.kind = EvalValue<Scalar>::Kind::Vector;
-                out.grad.vector_size = dim;
-
-                Scalar fp = makeScalarConstant<Scalar>(0.0, env);
+            if (out.has_grad || out.has_hess) {
+                Scalar first = out.value.s;
+                Scalar second = out.value.s;
                 if (node.type() == FormExprType::Sqrt) {
-                    fp = s_div(makeScalarConstant<Scalar>(0.5, env), out.value.s, env);
-                } else if (node.type() == FormExprType::Exp) {
-                    fp = out.value.s;
-                } else {
-                    fp = s_div(makeScalarConstant<Scalar>(1.0, env), u.value.s, env);
-                }
-
-                for (int d = 0; d < dim; ++d) {
-                    out.grad.v[static_cast<std::size_t>(d)] =
-                        s_mul(fp, u.grad.vectorAt(static_cast<std::size_t>(d)), env);
-                }
-            }
-
-            if (out.has_hess) {
-                out.hess.kind = EvalValue<Scalar>::Kind::Matrix;
-                out.hess.matrix_rows = dim;
-                out.hess.matrix_cols = dim;
-
-                Scalar fp = makeScalarConstant<Scalar>(0.0, env);
-                Scalar fpp = makeScalarConstant<Scalar>(0.0, env);
-                if (node.type() == FormExprType::Sqrt) {
-                    fp = s_div(makeScalarConstant<Scalar>(0.5, env), out.value.s, env);
-                    const Scalar denom = s_mul(s_mul(out.value.s, out.value.s, env), out.value.s, env);
-                    fpp = s_div(makeScalarConstant<Scalar>(-0.25, env), denom, env);
-                } else if (node.type() == FormExprType::Exp) {
-                    fp = out.value.s;
-                    fpp = out.value.s;
-                } else {
-                    fp = s_div(makeScalarConstant<Scalar>(1.0, env), u.value.s, env);
-                    const Scalar denom = s_mul(u.value.s, u.value.s, env);
-                    fpp = s_div(makeScalarConstant<Scalar>(-1.0, env), denom, env);
-                }
-
-                for (int i = 0; i < dim; ++i) {
-                    for (int j = 0; j < dim; ++j) {
-                        const Scalar term1 =
-                            s_mul(fp, u.hess.matrixAt(static_cast<std::size_t>(i), static_cast<std::size_t>(j)), env);
-                        const Scalar term2 =
-                            s_mul(fpp,
-                                  s_mul(u.grad.vectorAt(static_cast<std::size_t>(i)),
-                                        u.grad.vectorAt(static_cast<std::size_t>(j)), env),
-                                  env);
-                        out.hess.m[static_cast<std::size_t>(i)][static_cast<std::size_t>(j)] = s_add(term1, term2, env);
+                    first = s_div(makeScalarConstant<Scalar>(0.5, env), out.value.s, env);
+                    if (out.has_hess) {
+                        const auto cube = s_mul(s_mul(out.value.s, out.value.s, env), out.value.s, env);
+                        second = s_div(makeScalarConstant<Scalar>(-0.25, env), cube, env);
+                    }
+                } else if (node.type() == FormExprType::Log) {
+                    first = s_div(makeScalarConstant<Scalar>(1.0, env), u.value.s, env);
+                    if (out.has_hess) {
+                        second = s_neg(s_mul(first, first, env), env);
                     }
                 }
+                composeScalarJet(out, u, first, second, env);
             }
 
             return out;

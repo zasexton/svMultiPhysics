@@ -56,6 +56,31 @@ TEST(DualTest, NegationAndSubtraction)
     EXPECT_NEAR(z.deriv[0], 0.0, 0.0);
 }
 
+TEST(DualTest, PowerKeepsEachIndependentSeed)
+{
+    DualWorkspace ws;
+    ws.reset(2);
+    auto base = makeDualConstant(-2.0, ws.alloc());
+    auto exponent = makeDualConstant(2.0, ws.alloc());
+    base.deriv[0] = 1.0;
+    exponent.deriv[1] = 1.0;
+    auto out = makeDualConstant(0.0, ws.alloc());
+    auto result = pow(base, exponent, out);
+    EXPECT_DOUBLE_EQ(result.deriv[0], -4.0);
+    EXPECT_TRUE(std::isnan(result.deriv[1]));
+    base.value = 2.0;
+    result = pow(base, exponent, out);
+    EXPECT_DOUBLE_EQ(result.deriv[0], 4.0);
+    EXPECT_DOUBLE_EQ(result.deriv[1], 4.0 * std::log(2.0));
+    base.value = 0.0;
+    exponent.value = 1.0;
+    result = pow(base, exponent, out);
+    EXPECT_DOUBLE_EQ(result.deriv[0], 1.0);
+    EXPECT_DOUBLE_EQ(result.deriv[1], 0.0);
+    exponent.value = 0.0;
+    EXPECT_DOUBLE_EQ(pow(base, exponent, out).deriv[0], 0.0);
+}
+
 } // namespace test
 } // namespace forms
 } // namespace FE

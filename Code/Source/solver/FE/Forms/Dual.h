@@ -290,24 +290,6 @@ inline Dual log(const Dual& a, Dual out)
     return out;
 }
 
-inline Dual pow(const Dual& a, const Dual& b, Dual out)
-{
-    out.value = std::pow(a.value, b.value);
-    if (out.value == 0.0) {
-        std::fill(out.deriv.begin(), out.deriv.end(), 0.0);
-        return out;
-    }
-
-    const Real inv_a = 1.0 / a.value;
-    const Real log_a = std::log(a.value);
-    const std::size_t n = out.deriv.size();
-    SVMP_DUAL_VECTORIZE
-    for (std::size_t k = 0; k < n; ++k) {
-        out.deriv[k] = out.value * (b.deriv[k] * log_a + b.value * a.deriv[k] * inv_a);
-    }
-    return out;
-}
-
 inline Dual pow(const Dual& a, Real b, Dual out)
 {
     out.value = std::pow(a.value, b);
@@ -320,6 +302,22 @@ inline Dual pow(const Dual& a, Real b, Dual out)
     SVMP_DUAL_VECTORIZE
     for (std::size_t k = 0; k < n; ++k) {
         out.deriv[k] = scale * a.deriv[k];
+    }
+    return out;
+}
+
+inline Dual pow(const Dual& a, const Dual& b, Dual out)
+{
+    // Different seed directions can hold the exponent fixed independently.
+    if (std::all_of(b.deriv.begin(), b.deriv.end(), [](Real d) { return d == 0.0; })) {
+        return pow(a, b.value, out);
+    }
+    out.value = std::pow(a.value, b.value);
+    const Real base_slope = b.value == 0.0 ? 0.0 : b.value * std::pow(a.value, b.value - 1.0);
+    const Real exponent_slope = a.value == 0.0 && b.value > 0.0 ? 0.0 : out.value * std::log(a.value);
+    for (std::size_t k = 0; k < out.deriv.size(); ++k) {
+        const Real from_base = a.deriv[k] == 0.0 ? 0.0 : base_slope * a.deriv[k];
+        out.deriv[k] = b.deriv[k] == 0.0 ? from_base : from_base + exponent_slope * b.deriv[k];
     }
     return out;
 }

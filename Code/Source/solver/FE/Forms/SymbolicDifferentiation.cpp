@@ -263,6 +263,24 @@ template<class DerivativeOf>
     return true;
 }
 
+[[nodiscard]] FormExpr differentiatePower(const FormExpr& base, const FormExpr& exponent,
+                                          const FormExpr& d_base, const FormExpr& d_exponent)
+{
+    const auto zero = FormExpr::constant(0.0);
+    Real p = 0.0;
+    if (isConstantScalar(*exponent.node(), p)) {
+        return p == 0.0 ? zero : FormExpr::constant(p) * pow(base, FormExpr::constant(p - 1.0)) * d_base;
+    }
+    const auto base_term = isZeroLike(*d_base.node()) ? zero :
+        eq(exponent, zero).conditional(zero, exponent * pow(base, exponent - FormExpr::constant(1.0)) * d_base);
+    if (isZeroLike(*d_exponent.node())) return base_term;
+
+    // At zero base with positive exponent, varying only the exponent preserves zero.
+    const auto fixed_zero = eq(base, zero) * gt(exponent, zero);
+    const auto exponent_term = fixed_zero.conditional(zero, pow(base, exponent) * log(base) * d_exponent);
+    return base_term + eq(d_exponent, zero).conditional(zero, exponent_term);
+}
+
 [[nodiscard]] bool isDefinitelyScalarNode(const FormExprNode& node)
 {
     switch (node.type()) {
@@ -2132,22 +2150,7 @@ FormExpr differentiateResidualImpl(const FormExpr& residual_form,
                 const auto b = diff1(1);
                 out.primal = pow(a.primal, b.primal);
 
-                Real exp = 0.0;
-                if (b.primal.isValid() && b.primal.node() && isConstantScalar(*b.primal.node(), exp)) {
-                    if (exp == 0.0) {
-                        out.deriv = zeroOf(out.primal);
-                    } else {
-                        out.deriv = FormExpr::constant(exp) *
-                                    pow(a.primal, FormExpr::constant(exp - 1.0)) *
-                                    a.deriv;
-                    }
-                } else {
-                    // Match Dual::pow behavior: when pow(a,b) evaluates to 0, AD returns a zero derivative
-                    // without evaluating log(a) or 1/a (which would produce NaNs).
-                    const auto is_zero = eq(out.primal, FormExpr::constant(0.0)); // 0/1
-                    const auto safe_a = a.primal + is_zero; // shift to avoid log(0) and 1/0 in the masked case
-                    out.deriv = out.primal * (b.deriv * log(safe_a) + b.primal * (a.deriv / safe_a));
-                }
+                out.deriv = differentiatePower(a.primal, b.primal, a.deriv, b.deriv);
                 break;
             }
             case FormExprType::Minimum: {
@@ -3074,22 +3077,7 @@ FormExpr directionalDerivativeWrtField(const FormExpr& expr,
                 const auto b = diff1(1);
                 out.primal = pow(a.primal, b.primal);
 
-                Real exp = 0.0;
-                if (b.primal.isValid() && b.primal.node() && isConstantScalar(*b.primal.node(), exp)) {
-                    if (exp == 0.0) {
-                        out.deriv = zeroOf(out.primal);
-                    } else {
-                        out.deriv = FormExpr::constant(exp) *
-                                    pow(a.primal, FormExpr::constant(exp - 1.0)) *
-                                    a.deriv;
-                    }
-                } else {
-                    // Match Dual::pow behavior: when pow(a,b) evaluates to 0, AD returns a zero derivative
-                    // without evaluating log(a) or 1/a (which would produce NaNs).
-                    const auto is_zero = eq(out.primal, FormExpr::constant(0.0)); // 0/1
-                    const auto safe_a = a.primal + is_zero; // shift to avoid log(0) and 1/0 in the masked case
-                    out.deriv = out.primal * (b.deriv * log(safe_a) + b.primal * (a.deriv / safe_a));
-                }
+                out.deriv = differentiatePower(a.primal, b.primal, a.deriv, b.deriv);
                 break;
             }
 

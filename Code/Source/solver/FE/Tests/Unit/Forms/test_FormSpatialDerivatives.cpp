@@ -127,6 +127,27 @@ TEST(FormSpatialDerivativesTest, GradPowCompositeMatchesFiniteDifferences)
     EXPECT_LT(err_int, 1e-12);
 }
 
+TEST(FormSpatialDerivativesTest, PolynomialPowerGradientAndHessianOnNegativeBase)
+{
+    const auto two = FormExpr::constant(2.0);
+    const auto base = component(FormExpr::coordinate(), 0) - two;
+    const auto field = pow(base, two);
+    const auto grad_error = component(grad(field), 0) - two * base;
+    const auto hess_error = component(field.hessian(), 0, 0) - two;
+    EXPECT_NEAR(assembleErrorIntegral(grad_error * grad_error), 0.0, 1e-15);
+    EXPECT_NEAR(assembleErrorIntegral(hess_error * hess_error), 0.0, 1e-15);
+}
+
+TEST(FormSpatialDerivativesTest, VariableExponentRetainsItsSpatialDerivatives)
+{
+    const auto x = component(FormExpr::coordinate(), 0);
+    const auto field = pow(FormExpr::constant(2.0), x);
+    const auto log_two = FormExpr::constant(std::log(2.0));
+    const auto grad_error = component(grad(field), 0) - log_two * field;
+    const auto hess_error = component(field.hessian(), 0, 0) - log_two * log_two * field;
+    EXPECT_NEAR(assembleErrorIntegral(grad_error * grad_error + hess_error * hess_error), 0.0, 1e-15);
+}
+
 TEST(FormSpatialDerivativesTest, URISExponentialMollifierMatchesReference)
 {
     constexpr Real pi = 3.14159265358979323846;
