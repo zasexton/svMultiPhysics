@@ -2184,7 +2184,8 @@ public:
 /// generated state); the volume row stays C w' + w/R = f.
 GlobalRowRun runGlobalRow(timestepping::SchemeKind scheme, GlobalRowForm form, int max_iterations = 4,
                           std::vector<int> rejected_steps = {},
-                          MultiplierLowering lowering = MultiplierLowering::Auto)
+                          MultiplierLowering lowering = MultiplierLowering::Auto,
+                          bool refresh_within_solve = true)
 {
     GlobalRowRun out;
     auto h1 = quadSpace(1);
@@ -2263,7 +2264,7 @@ GlobalRowRun runGlobalRow(timestepping::SchemeKind scheme, GlobalRowForm form, i
     options.newton.rel_tolerance = 0.0;
     auto generated_state = std::make_shared<timestepping::GeneratedStateRegistry>(
         timestepping::GeneratedStatePolicy{.solve = timestepping::GeneratedStateSolve::Transient,
-                                           .refresh_within_solve = true});
+                                           .refresh_within_solve = refresh_within_solve});
     if (!shadowFields(sys).empty()) {
         generated_state->add(timestepping::makeShadowFieldParticipant(sys));
         generated_state->bind(options.newton);
@@ -2562,6 +2563,30 @@ TEST(GlobalBordered, AScalarOdeFollowsTheSchemeOfAVolumeField)
     }
 }
 
+TEST(GlobalTimeDerivative, GeneralizedAlphaPreviousFieldsHoldBothAcceptedValuesThroughRetries)
+{
+    std::vector<Real> in_matrix;
+    for (const auto lowering : {MultiplierLowering::InMatrix, MultiplierLowering::Bordered}) {
+        SCOPED_TRACE(lowering == MultiplierLowering::Bordered ? "bordered" : "in-matrix");
+        const auto run = runGlobalRow(timestepping::SchemeKind::GeneralizedAlpha, GlobalRowForm::Previous,
+                                      4, {3, 7}, lowering, /*refresh_within_solve=*/false);
+        ASSERT_EQ(run.rejections, 2);
+        ASSERT_EQ(run.x.size(), 12u);
+        ASSERT_EQ(run.previous.size(), run.x.size());
+        std::array<Real, 2> accepted{kInitialValue, kInitialValue};
+        for (std::size_t i = 0; i < run.x.size(); ++i) {
+            SCOPED_TRACE(i);
+            EXPECT_EQ(run.previous[i], accepted);
+            if (i != 2 && i != 7) accepted = {run.x[i], accepted[0]};
+        }
+        if (lowering == MultiplierLowering::InMatrix) {
+            in_matrix = run.x;
+        } else {
+            for (std::size_t i = 0; i < run.x.size(); ++i) EXPECT_NEAR(run.x[i], in_matrix[i], 1e-13);
+        }
+    }
+}
+
 TEST(GlobalBordered, PreviousLaggedAndARejectedStepKeepTheBorderedHistory)
 {
     // previous(X, k) and lagged(X) of a bordered X read the system's history
@@ -2588,14 +2613,8 @@ TEST(GlobalBordered, PreviousLaggedAndARejectedStepKeepTheBorderedHistory)
     }
     // Steps 3 and 7 are rejected once and retried with the same dt: the
     // bordered values, rates and history are those of the accepted steps.
-    // (Generalized alpha with previous(X) is left out: its first-rate
-    // initialization assembles the row before the shadows are refreshed,
-    // under either lowering.)
     for (const auto scheme : {timestepping::SchemeKind::BackwardEuler, timestepping::SchemeKind::GeneralizedAlpha}) {
         for (const auto form : {GlobalRowForm::TimeDerivative, GlobalRowForm::Previous}) {
-            if (scheme == timestepping::SchemeKind::GeneralizedAlpha && form == GlobalRowForm::Previous) {
-                continue;
-            }
             SCOPED_TRACE(std::string(scheme == timestepping::SchemeKind::BackwardEuler ? "backward Euler, "
                                                                                        : "generalized alpha, ") +
                          (form == GlobalRowForm::TimeDerivative ? "dt(X)" : "previous(X)"));

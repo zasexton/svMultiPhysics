@@ -13,6 +13,7 @@
 #include "Sparsity/DistributedSparsityPattern.h"
 #include "Sparsity/SparsityPattern.h"
 #include "Systems/ExactAccumulator.h"
+#include "Systems/FieldBinding.h"
 #include "Systems/SystemCollectives.h"
 #include "Systems/SystemsExceptions.h"
 #include "TimeStepping/GeneralizedAlpha.h"
@@ -1258,6 +1259,8 @@ TimeLoopReport TimeLoop::run(systems::TransientSystem& transient,
     // geometry. Those without one still participate in the endpoint decision.
     const bool has_endpoint_synchronization = candidateCallbackBitwiseOr(
         transient.system(), options_.newton.synchronize_state ? 1 : 0) != 0;
+    const bool has_attempt_history = has_endpoint_synchronization && candidateCallbackBitwiseOr(
+        transient.system(), systems::shadowFields(transient.system()).empty() ? 0 : 1) != 0;
     const bool candidate_stage_observer_enabled =
         static_cast<bool>(callbacks.on_candidate_stage);
     const bool candidate_acceptance_gate_enabled =
@@ -2710,6 +2713,19 @@ TimeLoopReport TimeLoop::run(systems::TransientSystem& transient,
 
             const double dt_prev_step = history.dtPrev();
 
+            if (has_attempt_history) {
+                std::exception_ptr failure;
+                try {
+                    if (options_.newton.synchronize_state) {
+                        options_.newton.synchronize_state(makeAcceptedTimeStepStateView(history, t),
+                            NewtonOptions::StateSynchronizationPoint::TimeStepAttemptHistory);
+                    }
+                } catch (...) {
+                    failure = std::current_exception();
+                }
+                (void)systems::agreeOnLocalPhase(transient.system(), failure, true,
+                                                 "attempt_history", "TimeLoop");
+            }
             const double solve_time = t + dt;
             if (callbacks.on_before_physics_solve) {
                 const bool moving_domain_ok = callbacks.on_before_physics_solve(history, solve_time, dt);

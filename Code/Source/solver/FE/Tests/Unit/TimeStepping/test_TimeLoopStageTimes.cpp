@@ -819,32 +819,12 @@ PreviousShadowRun runPreviousShadows(const PreviousShadowCase& item)
                 check(gs::generatedStateSyncPointName(sync.point));
             }}));
 
-    const auto view = [](gs::TimeHistory& h) {
-        svmp::FE::systems::SystemStateView state;
-        state.time = h.time();
-        state.dt = h.dt();
-        state.dt_prev = h.dtPrev();
-        state.u = h.uSpan();
-        state.u_prev = h.uPrevSpan();
-        state.u_prev2 = h.uPrev2Span();
-        state.u_vector = &h.u();
-        state.u_prev_vector = &h.uPrev();
-        state.u_prev2_vector = &h.uPrev2();
-        state.u_history = h.uHistorySpans();
-        state.dt_history = h.dtHistory();
-        return state;
-    };
     bool rejected = false;
     gs::TimeLoopCallbacks callbacks;
-    callbacks.on_before_physics_solve = [&](gs::TimeHistory& h, double, double) {
+    callbacks.on_step_start = [&](const gs::TimeHistory&) {
         ++run.attempts;
         expected1 = accepted[accepted.size() - 1];
         expected2 = accepted[accepted.size() - 2];
-        gs::GeneratedStateSync sync{};
-        sync.attempt_entry = true;
-        shadow_participant->synchronize(view(h), sync);
-        check("attempt_entry");
-        return true;
     };
     callbacks.on_before_step_accept = [&](gs::TimeHistory&, const gs::NewtonReport&) {
         // Reject the first attempt of the second step once.

@@ -294,10 +294,8 @@ struct GeneratedStateSync {
     /// Source value revisions of the generated geometry, by interface marker
     /// (written by the Geometry participants).
     std::map<int, std::uint64_t> evaluated_state_source_revisions{};
-    /// The owner's synchronization before the physics solve of an attempt
-    /// (or before the first step), from the accepted state: every history
-    /// slot of the state holds an accepted solution.  The registry never
-    /// sets it.
+    /// Reference synchronization at TimeStepAttemptHistory, or the owner's initial
+    /// reference snapshot. Every history slot holds a physical accepted solution.
     bool attempt_entry{false};
 };
 

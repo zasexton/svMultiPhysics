@@ -90,6 +90,8 @@ const char* generatedStateSyncPointName(
     return "restored_projected_time_step";
   case Point::FinalResidualAssembly:
     return "final_residual";
+  case Point::TimeStepAttemptHistory:
+    return "time_step_attempt_history";
   }
   return "unknown";
 }
@@ -327,6 +329,9 @@ bool GeneratedStateRegistry::synchronizes(
     NewtonOptions::StateSynchronizationPoint point) const noexcept
 {
   using Point = NewtonOptions::StateSynchronizationPoint;
+  if (point == Point::TimeStepAttemptHistory) {
+    return policy_.solve == GeneratedStateSolve::Transient;
+  }
   if (!policy_.outer_fixed_point) {
     return true;
   }
@@ -369,6 +374,18 @@ void GeneratedStateRegistry::synchronize(
   }
   GeneratedStateSync sync;
   sync.point = point;
+  if (point == Point::TimeStepAttemptHistory) {
+    // Scheme-specific stage views may replace the second solution slot with a rate.
+    // Reference fields freeze the physical accepted stencil for the entire attempt.
+    sync.attempt_entry = true;
+    for (const auto& participant : participants_) {
+      if (participant->role() == GeneratedStateRole::Reference) {
+        participant->prepare(sync);
+        participant->synchronize(state, sync);
+      }
+    }
+    return;
+  }
   sync.restoring_generated_state =
       point == Point::RestoredOuterFixedPointState ||
       point == Point::RestoredTimeStepState;

@@ -7608,17 +7608,12 @@ void ApplicationDriver::runTransient(SimulationComponents& sim, const Parameters
       semi_implicit_transports,
       /*transient_solve=*/true,
       use_transient_external_state_fixed_point);
-  // At an attempt entry (and before the first step): the view of the
-  // accepted history, before a scheme stores rates in its slots.
-  const auto refresh_shadow_fields =
-      [&](const svmp::FE::systems::SystemStateView& state) {
-        if (shadow_fields) {
-          svmp::FE::timestepping::GeneratedStateSync sync{};
-          sync.attempt_entry = true;
-          shadow_fields->synchronize(state, sync);
-        }
-      };
-  refresh_shadow_fields(stateViewForHistory(*sim.time_history));
+  // Initial observables can read a shadow before TimeLoop starts the first attempt.
+  if (shadow_fields) {
+    svmp::FE::timestepping::GeneratedStateSync sync{};
+    sync.attempt_entry = true;
+    shadow_fields->synchronize(stateViewForHistory(*sim.time_history), sync);
+  }
   if (semi_implicit_velocity) {
     svmp::FE::logRecord(
         svmp::FE::LogRecord("ApplicationDriver", "semi-implicit capillary term")
@@ -7997,7 +7992,6 @@ void ApplicationDriver::runTransient(SimulationComponents& sim, const Parameters
         // and checked the accepted topology baseline.
         (void)updateLevelSetAdvectionVelocities(
             sim, h, level_set_advection_velocity);
-        refresh_shadow_fields(stateViewForHistory(h));
         energy.recordInitialBaseline(h);
         return true;
       };

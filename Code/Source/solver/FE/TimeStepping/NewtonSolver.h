@@ -119,7 +119,9 @@ struct NewtonOptions {
         RestoredProjectedOuterFixedPointState,
         RestoredTimeStepState,
         RestoredProjectedTimeStepState,
-        FinalResidualAssembly
+        FinalResidualAssembly,
+        /// Capture reference fields from the physical accepted history before a scheme uses its stage slots.
+        TimeStepAttemptHistory
     };
 
     systems::OperatorTag residual_op{"residual"};

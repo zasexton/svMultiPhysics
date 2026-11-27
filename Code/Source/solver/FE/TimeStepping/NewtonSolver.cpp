@@ -4690,6 +4690,8 @@ const char* stateSynchronizationPointName(
         return "restored_projected_time_step_state";
     case Point::FinalResidualAssembly:
         return "final_residual";
+    case Point::TimeStepAttemptHistory:
+        return "time_step_attempt_history";
     }
     return "unknown";
 }
