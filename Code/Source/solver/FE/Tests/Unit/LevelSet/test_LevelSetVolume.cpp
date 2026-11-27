@@ -357,6 +357,19 @@ TEST(LevelSetVolume, CutCellVolumeSupportsLinearHexWedgeAndPyramidCuts)
             .total_volume = FE::Real{1.0},
             .negative_volume = FE::Real{0.5},
         },
+        // On [0,1]^3 the map z=t(1+r*s) gives det J=1+r*s.
+        Case{
+            .name = "warped hex",
+            .element_type = FE::ElementType::Hex8,
+            .family = svmp::CellFamily::Hex,
+            .coordinates = {
+                {{0, 0, 0}}, {{1, 0, 0}}, {{1, 1, 0}}, {{0, 1, 0}},
+                {{0, 0, 1}}, {{1, 0, 1}}, {{1, 1, 2}}, {{0, 1, 1}},
+            },
+            .level_set = [](const auto& x) { return x[0] - FE::Real{0.5}; },
+            .total_volume = 5.0 / 4.0,
+            .negative_volume = 9.0 / 16.0,
+        },
         Case{
             .name = "wedge",
             .element_type = FE::ElementType::Wedge6,
@@ -444,6 +457,49 @@ TEST(LevelSetVolume, CutCellVolumeSupportsLinearHexWedgeAndPyramidCuts)
         EXPECT_NEAR(result.positive_volume,
                     c.total_volume - c.negative_volume,
                     1.0e-12);
+    }
+#endif
+}
+
+TEST(LevelSetVolume, DirectAndGeneratedVolumesUseTheSameWarpedQuadMap)
+{
+#if !(defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH)
+    GTEST_SKIP() << "Requires FE built with Mesh integration.";
+#else
+    // x=r, y=(1+r)s on [0,1]^2, with phase r+s<1/2. Its area is
+    // integral_0^(1/2) (1+r)(1/2-r) dr = 7/48.
+    constexpr std::array<std::array<FE::Real, 3>, 4> coordinates{{
+        {0, 0, 0}, {1, 0, 0}, {1, 2, 0}, {0, 1, 0},
+    }};
+    FE::systems::FESystem system(
+        buildSingleCellMesh(2, coordinates, svmp::CellFamily::Quad));
+    const auto phi = system.addField({
+        .name = "phi",
+        .space = std::make_shared<FE::spaces::H1Space>(FE::ElementType::Quad4, 1),
+        .components = 1,
+    });
+    system.setup();
+    const auto& field = system.fieldDofHandler(phi);
+    const auto* map = field.getEntityDofMap();
+    ASSERT_NE(map, nullptr);
+    std::vector<FE::Real> values(static_cast<std::size_t>(field.getNumDofs()));
+    constexpr std::array<FE::Real, 4> corners{-0.5, 0.5, 1.5, 0.5};
+    for (std::size_t i = 0; i < corners.size(); ++i) {
+        const auto dof = map->getVertexDofs(static_cast<FE::GlobalIndex>(i)).front();
+        values.at(static_cast<std::size_t>(dof)) = corners[i];
+    }
+    for (const bool generated : {false, true}) {
+        SCOPED_TRACE(generated);
+        level_set::LevelSetVolumeOptions options;
+        options.level_set_field_name = "phi";
+        options.use_generated_interface_quadrature = generated;
+        options.allow_corner_linearized_geometry = true;
+        const auto volume = level_set::computeLevelSetCutCellVolume(
+            system, phi, options, values);
+        ASSERT_TRUE(volume.success) << volume.diagnostic;
+        EXPECT_NEAR(volume.total_volume, 1.5, 1.0e-13);
+        EXPECT_NEAR(volume.negative_volume, 7.0 / 48.0, 1.0e-13);
+        EXPECT_NEAR(volume.positive_volume, 1.5 - 7.0 / 48.0, 1.0e-13);
     }
 #endif
 }

@@ -1,7 +1,9 @@
 #include "LevelSet/LevelSetVolume.h"
 
+#include "Basis/NodeOrderingConventions.h"
 #include "Dofs/EntityDofMap.h"
-#include "Geometry/MappingFactory.h"
+#include "Geometry/CutQuadratureMapping.h"
+#include "Geometry/GeometryMapping.h"
 #include "Interfaces/LevelSetInterfaceBuilder.h"
 #include "Quadrature/QuadratureFactory.h"
 #include "Spaces/FunctionSpace.h"
@@ -240,38 +242,43 @@ tetrahedralCornerDecomposition(ElementType type)
     }
 }
 
-[[nodiscard]] Real parentMeasure(ElementType type,
-                                 const std::vector<std::array<Real, 3>>& x)
+using Point = std::array<Real, 3>;
+
+// Integrate the parent map on an affine simplex in parent coordinates. Cutting
+// in physical vertex coordinates would replace its mapped faces by chords.
+[[nodiscard]] Real mappedSimplexMeasure(
+    const geometry::GeometryMapping& mapping,
+    const quadrature::QuadratureRule& rule,
+    std::span<const Point> vertices)
 {
-    switch (type) {
-    case ElementType::Triangle3:
-    case ElementType::Triangle6:
-        return triangleArea(x[0], x[1], x[2]);
-    case ElementType::Quad4:
-    case ElementType::Quad8:
-    case ElementType::Quad9:
-        return triangleArea(x[0], x[1], x[2]) + triangleArea(x[0], x[2], x[3]);
-    case ElementType::Tetra4:
-    case ElementType::Tetra10:
-        return tetraVolume(x[0], x[1], x[2], x[3]);
-    case ElementType::Hex8:
-    case ElementType::Hex20:
-    case ElementType::Hex27:
-    case ElementType::Wedge6:
-    case ElementType::Wedge15:
-    case ElementType::Wedge18:
-    case ElementType::Pyramid5:
-    case ElementType::Pyramid13:
-    case ElementType::Pyramid14: {
-        Real volume = Real{0.0};
-        for (const auto& tet : tetrahedralCornerDecomposition(type)) {
-            volume += tetraVolume(x[tet[0]], x[tet[1]], x[tet[2]], x[tet[3]]);
+    const auto dimension = static_cast<std::size_t>(rule.dimension());
+    const auto& origin = vertices[0];
+    std::array<Point, 3> edges{};
+    for (std::size_t d = 0; d < dimension; ++d) {
+        edges[d] = sub(vertices[d + 1], origin);
+    }
+    const auto normal = cross(edges[0], edges[1]);
+    const Real reference_jacobian = dimension == 2
+        ? norm(normal)
+        : std::abs(dot(normal, edges[2]));
+    if (reference_jacobian == Real{0}) {
+        return Real{0};
+    }
+
+    Real integral{0};
+    for (std::size_t q = 0; q < rule.num_points(); ++q) {
+        Point parent = origin;
+        for (std::size_t d = 0; d < dimension; ++d) {
+            parent = add(parent, scale(edges[d], rule.point(q)[d]));
         }
-        return volume;
+        const auto jacobian = mapping.jacobian_determinant(
+            {parent[0], parent[1], parent[2]});
+        if (!std::isfinite(jacobian)) {
+            throw std::runtime_error("level-set volume found a non-finite mapped Jacobian");
+        }
+        integral += rule.weight(q) * std::abs(jacobian);
     }
-    default:
-        return Real{0.0};
-    }
+    return reference_jacobian * integral;
 }
 
 [[nodiscard]] Real coefficientAtVertex(const dofs::EntityDofMap& entity_map,
@@ -317,9 +324,19 @@ tetrahedralCornerDecomposition(ElementType type)
     GlobalIndex parent_cell,
     std::span<const std::array<Real, 3>, 4> coordinates,
     std::span<const Real, 4> signed_values,
-    Real tolerance)
+    Real tolerance,
+    const geometry::GeometryMapping* mapping,
+    const quadrature::QuadratureRule* quadrature_rule)
 {
-    const Real measure = tetraVolume(
+    const auto measure_tet = [&](const Point& a, const Point& b,
+                                 const Point& c, const Point& d) {
+        if (!mapping) {
+            return tetraVolume(a, b, c, d);
+        }
+        const std::array<Point, 4> vertices{a, b, c, d};
+        return mappedSimplexMeasure(*mapping, *quadrature_rule, vertices);
+    };
+    const Real measure = measure_tet(
         coordinates[0], coordinates[1], coordinates[2], coordinates[3]);
     const Real simple_fraction =
         negativeFractionFromValues(signed_values, tolerance);
@@ -370,7 +387,7 @@ tetrahedralCornerDecomposition(ElementType type)
             const auto p1 = interface_point(a, outside[1]);
             const auto p2 = interface_point(a, outside[2]);
             return clampVolume(
-                tetraVolume(coordinates[a], p0, p1, p2),
+                measure_tet(coordinates[a], p0, p1, p2),
                 measure);
         }
         if (inside_count == 3u) {
@@ -379,7 +396,7 @@ tetrahedralCornerDecomposition(ElementType type)
             const auto q1 = interface_point(inside[1], p);
             const auto q2 = interface_point(inside[2], p);
             return clampVolume(
-                measure - tetraVolume(coordinates[p], q0, q1, q2),
+                measure - measure_tet(coordinates[p], q0, q1, q2),
                 measure);
         }
 
@@ -392,11 +409,15 @@ tetrahedralCornerDecomposition(ElementType type)
         const auto p_bc = interface_point(b, c);
         const auto p_bd = interface_point(b, d);
         const Real volume =
-            tetraVolume(coordinates[a], coordinates[b], p_bd, p_bc) +
-            tetraVolume(coordinates[a], p_ac, p_bc, p_bd) +
-            tetraVolume(coordinates[a], p_ac, p_bd, p_ad);
+            measure_tet(coordinates[a], coordinates[b], p_bd, p_bc) +
+            measure_tet(coordinates[a], p_ac, p_bc, p_bd) +
+            measure_tet(coordinates[a], p_ac, p_bd, p_ad);
         return clampVolume(volume, measure);
     };
+
+    if (mapping) {
+        return clipped_volume();
+    }
 
     LevelSetCellCutInput input{};
     input.parent_cell = parent_cell;
@@ -487,29 +508,6 @@ void populateGeneratedVolumeDiagnostics(
         generated.linear_full_cell_fast_path_count;
     result.generated_backend_elapsed_seconds =
         generated.backend_elapsed_seconds;
-}
-
-[[nodiscard]] std::shared_ptr<geometry::GeometryMapping>
-makeGeneratedVolumeCellMapping(const assembly::IMeshAccess& mesh,
-                               GlobalIndex cell)
-{
-    std::vector<std::array<Real, 3>> coordinates;
-    mesh.getCellCoordinates(cell, coordinates);
-    if (coordinates.empty()) {
-        throw std::runtime_error(
-            "generated level-set volume found a cell with no geometry coordinates");
-    }
-    std::vector<math::Vector<Real, 3>> nodes;
-    nodes.reserve(coordinates.size());
-    for (const auto& coordinate : coordinates) {
-        nodes.push_back(math::Vector<Real, 3>{
-            coordinate[0], coordinate[1], coordinate[2]});
-    }
-    geometry::MappingRequest request;
-    request.element_type = mesh.getCellType(cell);
-    request.geometry_order = mesh.getCellGeometryOrder(cell);
-    request.use_affine = request.geometry_order <= 1;
-    return geometry::MappingFactory::create(request, nodes);
 }
 
 [[nodiscard]] bool isFullGeneratedVolumeRule(
@@ -652,7 +650,7 @@ makeGeneratedVolumeCellMapping(const assembly::IMeshAccess& mesh,
         auto [mapping, inserted] = mapping_by_cell.try_emplace(
             parent_cell, nullptr);
         if (inserted) {
-            mapping->second = makeGeneratedVolumeCellMapping(
+            mapping->second = geometry::makeCutCellGeometryMapping(
                 system.meshAccess(), parent_cell);
         }
         const Real physical_measure = physicalGeneratedVolumeRuleMeasure(
@@ -768,21 +766,54 @@ LevelSetVolumeResult computeLevelSetCutCellVolume(
                 options.isovalue);
         }
 
-        const auto measure = parentMeasure(type, cell_coordinates);
+        // Affine simplices have a constant metric. Tensor, wedge, pyramid,
+        // and curved parents need their own pointwise geometry map.
+        const int dimension = mesh.dimension();
+        const int geometry_order = std::max(1, mesh.getCellGeometryOrder(cell_id));
+        const bool affine_triangle = count == 3 && geometry_order == 1;
+        const bool affine_tetra = dimension == 3 && count == 4 && geometry_order == 1;
+        Real measure;
+        if (affine_triangle) {
+            measure = triangleArea(cell_coordinates[0], cell_coordinates[1], cell_coordinates[2]);
+        } else if (affine_tetra) {
+            measure = tetraVolume(cell_coordinates[0], cell_coordinates[1],
+                                  cell_coordinates[2], cell_coordinates[3]);
+        } else {
+            measure = geometry::physicalCellMeasureFromMapping(
+                mesh, cell_id, dimension * geometry_order);
+        }
         result.total_volume += measure;
         ++result.cells;
 
         const Real simple_fraction =
             negativeFractionFromValues(signed_values, options.tolerance);
-        Real negative_fraction = simple_fraction;
+        Real negative = simple_fraction * measure;
         if (simple_fraction < Real{0.0}) {
+            negative = Real{0};
+            const auto mapping = affine_triangle || affine_tetra
+                ? nullptr : geometry::makeCutCellGeometryMapping(mesh, cell_id);
+            const auto simplex_type = dimension == 2 ? ElementType::Triangle3 : ElementType::Tetra4;
+            // On a simplex subregion a tensor-product determinant can attain
+            // total degree d*(d*p-1). On a simplex parent it is d*(p-1).
+            const int mapped_order = count == static_cast<std::size_t>(dimension + 1)
+                ? dimension * (geometry_order - 1)
+                : dimension * (dimension * geometry_order - 1);
+            const auto simplex_rule = mapping
+                ? quadrature::QuadratureFactory::create_pinned(simplex_type, mapped_order)
+                : nullptr;
+            std::vector<Point> reference_corners;
+            if (!affine_tetra) {
+                reference_corners.reserve(count);
+                for (std::size_t i = 0; i < count; ++i) {
+                    const auto xi = basis::ReferenceNodeLayout::get_node_coords(type, i);
+                    reference_corners.push_back({xi[0], xi[1], xi[2]});
+                }
+            }
             if (mesh.dimension() == 2) {
                 LevelSetCellCutInput input{};
                 input.parent_cell = cell_id;
                 input.element_type = type;
-                input.node_coordinates.assign(
-                    cell_coordinates.begin(),
-                    cell_coordinates.begin() + static_cast<std::ptrdiff_t>(count));
+                input.node_coordinates = reference_corners;
                 input.level_set_values.reserve(count);
                 for (const auto value : signed_values) {
                     input.level_set_values.push_back(value + options.isovalue);
@@ -793,22 +824,18 @@ LevelSetVolumeResult computeLevelSetCutCellVolume(
                     throw std::invalid_argument("level-set volume in cell " + std::to_string(cell_id) +
                                                 ": " + cut_result.diagnostic);
                 }
-                auto active = std::find_if(
-                    cut_result.fragments.begin(),
-                    cut_result.fragments.end(),
-                    [](const auto& fragment) { return fragment.active(); });
-                if (active != cut_result.fragments.end()) {
-                    negative_fraction = active->negative_volume_fraction;
-                } else {
-                    // Roots closer than the cutter tolerances collapse onto
-                    // one phase, which the cutter returns as a full-cell
-                    // region without a fragment.
-                    negative_fraction = Real{0.0};
-                    for (const auto& region : cut_result.volume_regions) {
-                        if (region.active() &&
-                            region.side == geometry::CutIntegrationSide::Negative) {
-                            negative_fraction += region.volume_fraction;
-                        }
+                for (const auto& region : cut_result.volume_regions) {
+                    if (!region.active() || region.side != geometry::CutIntegrationSide::Negative) {
+                        continue;
+                    }
+                    if (!mapping || region.full_cell_equivalent) {
+                        negative += measure * region.volume_fraction;
+                        continue;
+                    }
+                    for (const auto& triangle : region.reference_subcells) {
+                        negative += triangle.measure_scale *
+                            mappedSimplexMeasure(*mapping, *simplex_rule,
+                                std::span(triangle.vertices).first(triangle.vertex_count));
                     }
                 }
                 ++result.cut_cells;
@@ -818,13 +845,13 @@ LevelSetVolumeResult computeLevelSetCutCellVolume(
                     throw std::invalid_argument(
                         "level-set volume calculation encountered an unsupported 3D element type");
                 }
-                Real negative_volume = Real{0.0};
+                const auto& corners = affine_tetra ? cell_coordinates : reference_corners;
                 for (const auto& tet : tets) {
                     const std::array<std::array<Real, 3>, 4> tet_coordinates{{
-                        cell_coordinates[tet[0]],
-                        cell_coordinates[tet[1]],
-                        cell_coordinates[tet[2]],
-                        cell_coordinates[tet[3]],
+                        corners[tet[0]],
+                        corners[tet[1]],
+                        corners[tet[2]],
+                        corners[tet[3]],
                     }};
                     const std::array<Real, 4> tet_values{{
                         signed_values[tet[0]],
@@ -832,29 +859,24 @@ LevelSetVolumeResult computeLevelSetCutCellVolume(
                         signed_values[tet[2]],
                         signed_values[tet[3]],
                     }};
-                    negative_volume += negativeVolumeForLinearTetra(
+                    negative += negativeVolumeForLinearTetra(
                         request,
                         cell_id,
-                        std::span<const std::array<Real, 3>, 4>(
-                            tet_coordinates.data(), tet_coordinates.size()),
-                        std::span<const Real, 4>(
-                            tet_values.data(), tet_values.size()),
-                        options.tolerance);
+                        tet_coordinates,
+                        tet_values,
+                        options.tolerance, mapping.get(), simplex_rule.get());
                 }
-                negative_fraction =
-                    measure > Real{0.0} ? negative_volume / measure : Real{0.0};
                 ++result.cut_cells;
             } else {
                 throw std::invalid_argument(
                     "level-set volume calculation requires a 2D or 3D mesh");
             }
-        } else if (negative_fraction >= Real{1.0}) {
+        } else if (simple_fraction >= Real{1.0}) {
             ++result.full_negative_cells;
         } else {
             ++result.full_positive_cells;
         }
 
-        const Real negative = negative_fraction * measure;
         result.negative_volume += negative;
         result.positive_volume += measure - negative;
     };
