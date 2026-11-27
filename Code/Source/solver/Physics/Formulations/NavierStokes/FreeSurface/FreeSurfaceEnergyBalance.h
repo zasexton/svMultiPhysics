@@ -24,12 +24,14 @@
  * (FE/LevelSet/Maintenance/LevelSetMaintenanceWorkLedger.h).
  */
 
+#include "Physics/Formulations/NavierStokes/FreeSurface/FunctionalRecords.h"
 #include "FE/Constraints/SmallCutAggregationConstraint.h"
 #include "FE/Core/Types.h"
 #include "FE/Interfaces/LevelSetGeometrySnapshot.h"
 #include "FE/LevelSet/Maintenance/LevelSetMaintenanceWorkLedger.h"
 #include "FE/Systems/EnergyBalanceLedger.h"
 #include "FE/Systems/FESystem.h"
+#include "Physics/Formulations/NavierStokes/FreeSurface/FreeSurfaceRecordTypes.h"
 #include "FE/TimeStepping/StepController.h"
 
 #include <cstddef>
@@ -187,8 +189,7 @@ struct FreeSurfaceAggregationEnergyClassification {
 };
 
 FreeSurfaceAcceptedEnergyGroup summarizeAcceptedFreeSurfaceEnergyGroup(
-    std::span<const svmp::FE::systems::
-                  FreeSurfaceDiscreteFunctionalHistoryRecord> records);
+    std::span<const svmp::Physics::formulations::navier_stokes::free_surface::FreeSurfaceDiscreteFunctionalHistoryRecord> records);
 
 FreeSurfaceCompleteEnergyBuildResult
 buildFixedTopologyOnePhaseEnergyCandidate(
@@ -199,11 +200,9 @@ buildFixedTopologyOnePhaseEnergyCandidate(
     const FreeSurfaceAcceptedEnergyGroup& after,
     std::uint64_t residual_work_state_revision,
     const FreeSurfaceResidualWorkChannels& residual_work,
-    std::span<const svmp::FE::systems::
-                  FreeSurfaceResidualWorkDeclaration>
+    std::span<const svmp::Physics::formulations::navier_stokes::free_surface::FreeSurfaceResidualWorkDeclaration>
         residual_declarations,
-    const std::optional<svmp::FE::systems::
-              FreeSurfaceExternalBoundaryEnergyDeclaration>&
+    const std::optional<svmp::Physics::formulations::navier_stokes::free_surface::FreeSurfaceExternalBoundaryEnergyDeclaration>&
         boundary_energy,
     bool numerical_maintenance_absent,
     bool aggregation_present,

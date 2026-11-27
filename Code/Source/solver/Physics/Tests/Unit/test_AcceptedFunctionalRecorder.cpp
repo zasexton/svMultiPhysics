@@ -7,16 +7,16 @@
 
 #include <gtest/gtest.h>
 
-#include "LevelSet/AcceptedFunctionalRecorder.h"
+#include "Physics/Formulations/NavierStokes/FreeSurface/AcceptedFunctionalRecorder.h"
 
 #include <cstdint>
 #include <set>
 
 namespace {
 
-using svmp::FE::level_set::acceptedFunctionalDeclarationContentKey;
-using svmp::FE::systems::FreeSurfaceCapillaryBalanceMethod;
-using svmp::FE::systems::FreeSurfaceDiscreteFunctionalDeclaration;
+using svmp::Physics::formulations::navier_stokes::free_surface::acceptedFunctionalDeclarationContentKey;
+using svmp::Physics::formulations::navier_stokes::free_surface::FreeSurfaceCapillaryBalanceMethod;
+using svmp::Physics::formulations::navier_stokes::free_surface::FreeSurfaceDiscreteFunctionalDeclaration;
 
 FreeSurfaceDiscreteFunctionalDeclaration declaration()
 {

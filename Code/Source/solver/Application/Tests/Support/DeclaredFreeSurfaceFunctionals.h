@@ -19,7 +19,7 @@
 #include "FE/Spaces/FunctionSpace.h"
 #include "FE/Systems/FESystem.h"
 #include "FE/Systems/FunctionalForms.h"
-#include "FE/Systems/FunctionalRecords.h"
+#include "Physics/Formulations/NavierStokes/FreeSurface/FunctionalRecords.h"
 #include "Physics/Formulations/NavierStokes/NavierStokesPostProcessing.h"
 
 #include <string>
@@ -35,7 +35,7 @@ namespace application_test::declared_free_surface_functionals {
 /// forms).  Call before the system is set up.
 inline void declareFreeSurfaceFunctionalWithForms(
     svmp::FE::systems::FESystem& system,
-    svmp::FE::systems::FreeSurfaceDiscreteFunctionalDeclaration declaration,
+    svmp::Physics::formulations::navier_stokes::free_surface::FreeSurfaceDiscreteFunctionalDeclaration declaration,
     const svmp::FE::spaces::FunctionSpace* velocity_space,
     int dimension)
 {
@@ -49,7 +49,7 @@ inline void declareFreeSurfaceFunctionalWithForms(
                               : svmp::FE::forms::CutVolumeSide::Negative;
         const auto gamma = declaration.parameters.surface_tension;
         const std::string owner = "IncompressibleNavierStokesVMSModule.FreeSurfaceBoundary";
-        svmp::FE::systems::functionalRecords(system).declareFunctional(std::move(declaration));
+        svmp::Physics::formulations::navier_stokes::free_surface::functionalRecords(system).declareFunctional(std::move(declaration));
         const auto one = FormExpr::constant(1.0);
         svmp::FE::systems::declareFunctionalForm(
             system, {.name = post::freeSurfaceFunctionalName(m, "liquid_volume"), .kind = Kind::Measure,
@@ -85,7 +85,7 @@ inline void declareFreeSurfaceFunctionalWithForms(
         statement.external_pressure = declaration.external_pressure_power_parameters->external_pressure;
     }
     statement.endpoint_functional_power = declaration.endpoint_functional_power_enabled;
-    svmp::FE::systems::functionalRecords(system).declareFunctional(std::move(declaration));
+    svmp::Physics::formulations::navier_stokes::free_surface::functionalRecords(system).declareFunctional(std::move(declaration));
     for (auto& functional : post::freeSurfaceEnergyFunctionals(statement)) {
         svmp::FE::systems::declareFunctionalForm(system, std::move(functional));
     }

@@ -8,32 +8,29 @@
 #pragma once
 
 /**
- * @file LevelSetContactStageParticipant.h
+ * @file ContactStageParticipant.h
  * @ingroup fe_level_set
  * @brief Step participant of the accepted contact stages of level-set
  *        interfaces with a dynamic contact law: the generalized-alpha
  *        operator-stage observation of each solve attempt
- *        (TimeStepping/OperatorStageCapture.h), the collective contact-stage
+ *        (ContactOperatorStageCapture.h), the collective contact-stage
  *        temporal coordinates, the pending accepted contact stages of a
- *        candidate (Interfaces/ContactLineStageObservables.h) and their
+ *        candidate (ContactLineStageObservables.h) and their
  *        binding to the accepted endpoint.
  *
  * The contact-stage candidate is built by the application inside its
  * level-set geometry transaction and stored in the pending members below.
- * Moved from Physics/Formulations/NavierStokes/FreeSurface/
- * FreeSurfaceContactStageParticipant with bodies, messages and collective
- * order unchanged.
  */
 
-#include "Core/Types.h"
-#include "LevelSet/LevelSetWallContactConstraint.h"
-#include "Systems/FreeSurfaceRecordTypes.h"
-#include "Systems/SystemCollectives.h"
-#include "TimeStepping/OperatorStageCapture.h"
-#include "TimeStepping/StepContext.h"
-#include "TimeStepping/StepParticipants.h"
-#include "TimeStepping/TimeHistory.h"
-#include "TimeStepping/TimeLoop.h"
+#include "FE/Core/Types.h"
+#include "FE/LevelSet/LevelSetWallContactConstraint.h"
+#include "Physics/Formulations/NavierStokes/FreeSurface/FreeSurfaceRecordTypes.h"
+#include "FE/Systems/SystemCollectives.h"
+#include "Physics/Formulations/NavierStokes/FreeSurface/ContactOperatorStageCapture.h"
+#include "FE/TimeStepping/StepContext.h"
+#include "FE/TimeStepping/StepParticipants.h"
+#include "FE/TimeStepping/TimeHistory.h"
+#include "FE/TimeStepping/TimeLoop.h"
 
 #include <cstdint>
 #include <optional>
@@ -41,17 +38,15 @@
 #include <string_view>
 #include <vector>
 
-namespace svmp {
-namespace FE {
-namespace level_set {
+namespace svmp::Physics::formulations::navier_stokes::free_surface {
 
 /// Requires @p endpoint_solution to have the algebraic revision
 /// @p expected_endpoint_algebraic_revision (nonzero) used to reconstruct the
 /// accepted contact stages.  Collective.
 void assertAcceptedFreeSurfaceContactStageEndpointUnchanged(
     std::uint64_t expected_endpoint_algebraic_revision,
-    std::span<const Real> endpoint_solution,
-    const systems::CollectiveCommunicator& comm);
+    std::span<const FE::Real> endpoint_solution,
+    const FE::systems::CollectiveCommunicator& comm);
 
 #if defined(SVMP_FE_WITH_MESH) && SVMP_FE_WITH_MESH
 class ContactStageParticipant final
@@ -66,7 +61,7 @@ public:
   ContactStageParticipant(
       const svmp::FE::timestepping::StepContext& context,
       bool has_dynamic_contact_stage,
-      std::span<const svmp::FE::systems::FreeSurfaceDiscreteFunctionalDeclaration>
+      std::span<const FreeSurfaceDiscreteFunctionalDeclaration>
           free_surface_declarations,
       svmp::FE::GlobalIndex fitted_ale_operator_stage_state_size);
 
@@ -85,7 +80,7 @@ public:
 
   /// Contact-stage temporal coordinates of @p history, validated and agreed
   /// on the active FE communicator (collective).
-  [[nodiscard]] svmp::FE::timestepping::FreeSurfaceContactStageTemporalCoordinates
+  [[nodiscard]] FreeSurfaceContactStageTemporalCoordinates
   resolveTemporalCoordinatesCollectively(
       const svmp::FE::timestepping::TimeHistory& history,
       int expected_attempt_index,
@@ -102,16 +97,16 @@ public:
       std::uint64_t pending_pre_maintenance_endpoint_state_revision);
 
   bool has_dynamic_contact_stage{false};
-  std::span<const svmp::FE::systems::FreeSurfaceDiscreteFunctionalDeclaration>
+  std::span<const FreeSurfaceDiscreteFunctionalDeclaration>
       free_surface_declarations{};
   svmp::FE::GlobalIndex fitted_ale_operator_stage_state_size{0};
   bool capture_dynamic_contact_generalized_alpha{false};
   std::optional<
-      svmp::FE::timestepping::DynamicContactFirstOrderGeneralizedAlphaObservation>
+      DynamicContactFirstOrderGeneralizedAlphaObservation>
       pending_dynamic_contact_generalized_alpha_observation;
   std::optional<int> dynamic_contact_solve_attempt_step;
   int dynamic_contact_solve_attempt_index{-1};
-  std::vector<svmp::FE::systems::FreeSurfaceAcceptedContactStageState>
+  std::vector<FreeSurfaceAcceptedContactStageState>
       pending_contact_stages;
   std::vector<svmp::FE::level_set::LevelSetWallContactConstraint>
       pending_contact_stage_constraints;
@@ -121,6 +116,4 @@ public:
 };
 #endif
 
-} // namespace level_set
-} // namespace FE
-} // namespace svmp
+} // namespace svmp::Physics::formulations::navier_stokes::free_surface

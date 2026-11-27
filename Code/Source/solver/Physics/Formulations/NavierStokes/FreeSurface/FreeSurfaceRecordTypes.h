@@ -5,8 +5,8 @@
  * See Copyright-SimVascular.txt for additional details.
  */
 
-#ifndef SVMP_FE_SYSTEMS_FREE_SURFACE_RECORD_TYPES_H
-#define SVMP_FE_SYSTEMS_FREE_SURFACE_RECORD_TYPES_H
+#ifndef SVMP_PHYSICS_FREE_SURFACE_FREE_SURFACE_RECORD_TYPES_H
+#define SVMP_PHYSICS_FREE_SURFACE_FREE_SURFACE_RECORD_TYPES_H
 
 /**
  * @file FreeSurfaceRecordTypes.h
@@ -14,16 +14,12 @@
  *        residual-work and exterior-boundary energy declarations, accepted
  *        functional states, contact stages and history records.
  *
- * This header is a staging point.  The records and their logic belong to
- * the Navier-Stokes free-surface physics (Physics/Formulations/NavierStokes/
- * FreeSurface); these plain data types left FESystem.h first and keep their
- * namespace for now.  The accepted contact-stage state and its
- * generalized-alpha provenance are also read by FE/LevelSet.
+ * The Navier–Stokes formulation declares these records and publishes them on step acceptance.
  */
 
-#include "Core/Types.h"
-#include "Interfaces/LevelSetGeometrySnapshot.h"
-#include "Systems/OperatorRegistry.h"
+#include "FE/Core/Types.h"
+#include "FE/Interfaces/LevelSetGeometrySnapshot.h"
+#include "FE/Systems/OperatorRegistry.h"
 
 #include <array>
 #include <cstdint>
@@ -32,9 +28,7 @@
 #include <utility>
 #include <vector>
 
-namespace svmp {
-namespace FE {
-namespace systems {
+namespace svmp::Physics::formulations::navier_stokes::free_surface {
 
 /** Static one-phase capillary-balance construction selected by the owner. */
 enum class FreeSurfaceCapillaryBalanceMethod : std::uint8_t {
@@ -95,7 +89,7 @@ struct FreeSurfaceResidualWorkDeclaration {
         FreeSurfaceResidualWorkChannel::Convection};
     FreeSurfaceResidualWorkApplicability applicability{
         FreeSurfaceResidualWorkApplicability::NotApplicable};
-    OperatorTag operator_tag{};
+    FE::systems::OperatorTag operator_tag{};
     std::string owner_component{};
 
     friend bool operator==(
@@ -134,11 +128,11 @@ struct FreeSurfaceExternalBoundaryEnergyDeclaration {
 
 struct FreeSurfaceDiscreteFunctionalDeclaration {
     int interface_marker{-1};
-    FieldId level_set_field{INVALID_FIELD_ID};
-    FieldId velocity_field{INVALID_FIELD_ID};
+    FE::FieldId level_set_field{FE::INVALID_FIELD_ID};
+    FE::FieldId velocity_field{FE::INVALID_FIELD_ID};
     std::string geometry_domain_id{};
-    interfaces::FreeSurfaceDiscreteFunctionalParameters parameters{};
-    std::optional<interfaces::FreeSurfaceActiveVolumeEnergyParameters>
+    FE::interfaces::FreeSurfaceDiscreteFunctionalParameters parameters{};
+    std::optional<FE::interfaces::FreeSurfaceActiveVolumeEnergyParameters>
         active_volume_energy_parameters{};
     /**
      * The active-volume gravitational acceleration is the complete
@@ -148,10 +142,10 @@ struct FreeSurfaceDiscreteFunctionalDeclaration {
      */
     bool static_conservative_body_force_complete{false};
     std::optional<
-        interfaces::FreeSurfaceActiveVolumeDissipationParameters>
+        FE::interfaces::FreeSurfaceActiveVolumeDissipationParameters>
         active_volume_dissipation_parameters{};
     std::optional<
-        interfaces::FreeSurfaceExternalPressurePowerParameters>
+        FE::interfaces::FreeSurfaceExternalPressurePowerParameters>
         external_pressure_power_parameters{};
     bool endpoint_functional_power_enabled{false};
     FreeSurfaceCapillaryBalanceMethod capillary_balance_method{
@@ -169,10 +163,10 @@ struct FreeSurfaceDiscreteFunctionalDeclaration {
  * and alpha_m == 2*alpha_f - 0.5 in [0.5, 1.5].
  */
 struct FreeSurfaceFirstOrderGeneralizedAlphaProvenance {
-    Real alpha_m{1.0};
-    Real alpha_f{1.0};
-    Real gamma{1.0};
-    Real dt{0.0};
+    FE::Real alpha_m{1.0};
+    FE::Real alpha_f{1.0};
+    FE::Real gamma{1.0};
+    FE::Real dt{0.0};
 
     [[nodiscard]] friend bool operator==(
         const FreeSurfaceFirstOrderGeneralizedAlphaProvenance&,
@@ -180,8 +174,8 @@ struct FreeSurfaceFirstOrderGeneralizedAlphaProvenance {
 };
 
 struct FreeSurfaceAcceptedContactStageState {
-    Real stage_time{0.0};
-    Real stage_alpha_f{1.0};
+    FE::Real stage_time{0.0};
+    FE::Real stage_alpha_f{1.0};
     std::optional<FreeSurfaceFirstOrderGeneralizedAlphaProvenance>
         first_order_generalized_alpha{};
     // Communicator-consistent fingerprints of FE-ordered algebraic content.
@@ -190,11 +184,11 @@ struct FreeSurfaceAcceptedContactStageState {
     // Composite fingerprint over the previous/endpoint content, accepted
     // snapshot, stage time/parameters, and stage solution.
     std::uint64_t stage_state_revision{0};
-    interfaces::LevelSetGeometryRevision geometry_revision{};
-    interfaces::FreeSurfaceDynamicContactState state{};
+    FE::interfaces::LevelSetGeometryRevision geometry_revision{};
+    FE::interfaces::FreeSurfaceDynamicContactState state{};
     // The absolute mass sums |w f| of the declared wall functionals evaluated
     // on the stage (name, mass), for the record's absolute-mass line.
-    std::vector<std::pair<std::string, Real>> declared_functional_masses{};
+    std::vector<std::pair<std::string, FE::Real>> declared_functional_masses{};
 };
 
 /**
@@ -210,42 +204,42 @@ struct FreeSurfaceAcceptedContactStageState {
 struct FreeSurfaceAcceptedContactLineKinematics {
     int boundary_marker{-1};
     std::uint64_t previous_accepted_step{0};
-    Real previous_accepted_time{0.0};
-    Real previous_stage_time{0.0};
+    FE::Real previous_accepted_time{0.0};
+    FE::Real previous_stage_time{0.0};
     std::uint64_t previous_stage_state_revision{0};
     std::uint64_t previous_snapshot_revision_key{0};
-    Real stage_time_interval{0.0};
-    std::array<Real, 3> previous_mean_contact_position{
+    FE::Real stage_time_interval{0.0};
+    std::array<FE::Real, 3> previous_mean_contact_position{
         {0.0, 0.0, 0.0}};
-    std::array<Real, 3> projection_direction{{0.0, 0.0, 0.0}};
-    Real projected_contact_centroid_speed{0.0};
-    Real mean_fluid_contact_speed{0.0};
-    Real fluid_minus_geometric_contact_speed{0.0};
+    std::array<FE::Real, 3> projection_direction{{0.0, 0.0, 0.0}};
+    FE::Real projected_contact_centroid_speed{0.0};
+    FE::Real mean_fluid_contact_speed{0.0};
+    FE::Real fluid_minus_geometric_contact_speed{0.0};
 };
 
 struct AcceptedFreeSurfaceDiscreteFunctionalState {
     int interface_marker{-1};
-    interfaces::LevelSetGeometryRevision geometry_revision{};
+    FE::interfaces::LevelSetGeometryRevision geometry_revision{};
     // Communicator-consistent topology-only fingerprint for the exact
     // authoritative snapshot rules used by this state.
     std::uint64_t cut_topology_revision{0};
     // Communicator-wide truth value for any pruning in the authoritative
     // snapshot. False is the proof required to mark pruning work inapplicable.
     bool geometry_pruning_occurred{false};
-    interfaces::FreeSurfaceDiscreteFunctionalState state{};
+    FE::interfaces::FreeSurfaceDiscreteFunctionalState state{};
     std::optional<
-        interfaces::FreeSurfaceDiscreteFunctionalVariationState>
+        FE::interfaces::FreeSurfaceDiscreteFunctionalVariationState>
         endpoint_functional_power{};
-    std::optional<interfaces::FreeSurfaceActiveVolumeEnergyState>
+    std::optional<FE::interfaces::FreeSurfaceActiveVolumeEnergyState>
         active_volume_energy{};
     std::optional<
-        interfaces::FreeSurfaceActiveVolumeDissipationState>
+        FE::interfaces::FreeSurfaceActiveVolumeDissipationState>
         active_volume_dissipation{};
     std::optional<
-        interfaces::FreeSurfaceExternalPressurePowerState>
+        FE::interfaces::FreeSurfaceExternalPressurePowerState>
         external_pressure_power{};
     std::optional<
-        interfaces::FreeSurfaceBackwardEulerKineticWorkState>
+        FE::interfaces::FreeSurfaceBackwardEulerKineticWorkState>
         backward_euler_kinetic_work{};
     std::optional<FreeSurfaceAcceptedContactStageState> contact_stage{};
     std::vector<FreeSurfaceAcceptedContactLineKinematics>
@@ -254,30 +248,30 @@ struct AcceptedFreeSurfaceDiscreteFunctionalState {
 
 struct FreeSurfaceDiscreteFunctionalHistoryRecord {
     std::uint64_t accepted_step{0};
-    Real accepted_time{0.0};
-    Real dt{0.0};
+    FE::Real accepted_time{0.0};
+    FE::Real dt{0.0};
     // Communicator-consistent fingerprints before and after maintenance.
     std::uint64_t pre_maintenance_endpoint_state_revision{0};
     std::uint64_t state_revision{0};
     std::optional<std::uint64_t> extension_map_revision{};
     FreeSurfaceDiscreteFunctionalDeclaration declaration{};
-    interfaces::LevelSetGeometryRevision geometry_revision{};
+    FE::interfaces::LevelSetGeometryRevision geometry_revision{};
     std::uint64_t cut_topology_revision{0};
     bool geometry_pruning_occurred{false};
-    interfaces::FreeSurfaceDiscreteFunctionalState state{};
+    FE::interfaces::FreeSurfaceDiscreteFunctionalState state{};
     std::optional<
-        interfaces::FreeSurfaceDiscreteFunctionalVariationState>
+        FE::interfaces::FreeSurfaceDiscreteFunctionalVariationState>
         endpoint_functional_power{};
-    std::optional<interfaces::FreeSurfaceActiveVolumeEnergyState>
+    std::optional<FE::interfaces::FreeSurfaceActiveVolumeEnergyState>
         active_volume_energy{};
     std::optional<
-        interfaces::FreeSurfaceActiveVolumeDissipationState>
+        FE::interfaces::FreeSurfaceActiveVolumeDissipationState>
         active_volume_dissipation{};
     std::optional<
-        interfaces::FreeSurfaceExternalPressurePowerState>
+        FE::interfaces::FreeSurfaceExternalPressurePowerState>
         external_pressure_power{};
     std::optional<
-        interfaces::FreeSurfaceBackwardEulerKineticWorkState>
+        FE::interfaces::FreeSurfaceBackwardEulerKineticWorkState>
         backward_euler_kinetic_work{};
     std::optional<FreeSurfaceAcceptedContactStageState> contact_stage{};
     std::vector<FreeSurfaceAcceptedContactLineKinematics>
@@ -285,8 +279,6 @@ struct FreeSurfaceDiscreteFunctionalHistoryRecord {
 };
 
 
-} // namespace systems
-} // namespace FE
-} // namespace svmp
+} // namespace svmp::Physics::formulations::navier_stokes::free_surface
 
-#endif // SVMP_FE_SYSTEMS_FREE_SURFACE_RECORD_TYPES_H
+#endif // SVMP_PHYSICS_FREE_SURFACE_FREE_SURFACE_RECORD_TYPES_H

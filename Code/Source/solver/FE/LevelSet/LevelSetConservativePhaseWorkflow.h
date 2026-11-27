@@ -183,13 +183,7 @@ struct ConservativePhaseWorkflowHost {
     /// resolved against the accepted contact stages (S9: wall-aware
     /// maintenance context; the contact data are a Physics input).
     std::function<std::vector<LevelSetWallContactConstraint>(
-        timestepping::TimeHistory& history,
-        FieldId level_set_field,
-        Real endpoint_time,
-        std::span<const systems::FreeSurfaceAcceptedContactStageState>
-            accepted_contact_stages,
-        std::span<const LevelSetWallContactConstraint>
-            accepted_contact_stage_constraints)>
+        timestepping::TimeHistory& history, FieldId level_set_field, Real endpoint_time)>
         wall_contact_constraints{};
 
     /// Values of @p field at the vertices of the primary mesh, vertex-major
@@ -218,24 +212,10 @@ struct ConservativePhaseWorkflowHost {
 // Candidate records
 // ---------------------------------------------------------------------------
 
-/// Contact stages of a staged candidate and the solution they were taken at.
-// Moved from Application/Core/ApplicationDriver.cpp (lines 23770-23776 at 7d9ddc8a)
-// with bodies, messages and collective order unchanged.
-struct ConservativePhaseContactStageCandidate {
-  std::vector<svmp::FE::systems::FreeSurfaceAcceptedContactStageState>
-      stages{};
-  std::vector<svmp::FE::level_set::LevelSetWallContactConstraint>
-      constraints{};
-  std::vector<svmp::FE::Real> stage_solution{};
-};
-
-/// Builds the contact stages of a staged candidate solution, refreshing the
-/// geometry through the given transaction (Physics: the free-surface contact
-/// stage).  Called once per candidate, before the post-transport geometry
-/// refresh.
-using ConservativePhaseContactStageCallback =
-    std::function<ConservativePhaseContactStageCandidate(
-        std::span<const Real>, ConservativePhaseGeometryTransaction*)>;
+/// Prepare any formulation-owned boundary data for this candidate before
+/// resolving its geometric boundary constraints.
+using ConservativePhaseContactStageCallback = std::function<void(
+    std::span<const Real>, ConservativePhaseGeometryTransaction*)>;
 
 // Accepted-graph bindings, the staged endpoint-velocity snapshot, the
 // per-request maintenance ledger and the candidate result.
@@ -314,7 +294,6 @@ struct ConservativePhaseCandidateResult {
   bool accept_step{true};
   bool changed{false};
   std::vector<svmp::FE::Real> original_solution{};
-  ConservativePhaseContactStageCandidate contact_stage{};
   std::vector<ConservativePhaseMaintenanceStageLedger>
       maintenance_ledgers{};
   std::unique_ptr<ConservativePhaseGeometryTransaction>

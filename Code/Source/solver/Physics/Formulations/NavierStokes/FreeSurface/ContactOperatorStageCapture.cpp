@@ -5,13 +5,13 @@
  * See Copyright-SimVascular.txt for additional details.
  */
 
-#include "TimeStepping/OperatorStageCapture.h"
+#include "Physics/Formulations/NavierStokes/FreeSurface/ContactOperatorStageCapture.h"
 
-#include "Assembly/GlobalSystemView.h"
-#include "Assembly/Assembler.h"
-#include "Backends/Interfaces/GenericVector.h"
-#include "Interfaces/ContactLineStageObservables.h"
-#include "Systems/FESystem.h"
+#include "FE/Assembly/GlobalSystemView.h"
+#include "FE/Assembly/Assembler.h"
+#include "FE/Backends/Interfaces/GenericVector.h"
+#include "Physics/Formulations/NavierStokes/FreeSurface/ContactLineStageObservables.h"
+#include "FE/Systems/FESystem.h"
 
 #include <algorithm>
 #include <array>
@@ -30,14 +30,14 @@
 #include <mpi.h>
 #endif
 
-namespace svmp {
-namespace FE {
-namespace timestepping {
+namespace svmp::Physics::formulations::navier_stokes::free_surface {
+
+using namespace svmp::FE;
+using namespace svmp::FE::timestepping;
+
 
 namespace {
 
-using svmp::FE::interfaces::contactStageRealValuesMatch;
-using svmp::FE::interfaces::firstOrderGeneralizedAlphaContactProvenanceValid;
 using svmp::FE::systems::collectiveMinMaxUint64;
 using svmp::FE::systems::requireCollectivePhasePreparation;
 
@@ -54,9 +54,6 @@ void mixStageHash(std::uint64_t& h, std::uint64_t value) noexcept
 
 } // namespace
 
-// Moved from Physics/Formulations/NavierStokes/FreeSurface/
-// FreeSurfaceContactStages.cpp with bodies, messages and collective order
-// unchanged.
 
 bool dynamicContactStageMeshRevisionMatches(
     const svmp::FE::timestepping::CandidateStageMeshRevision& captured,
@@ -82,8 +79,7 @@ bool dynamicContactStageMeshRevisionMatches(
 
 std::uint64_t dynamicContactWallBoundaryFingerprint(
     const svmp::FE::assembly::IMeshAccess& mesh,
-    std::span<const svmp::FE::systems::
-                        FreeSurfaceDiscreteFunctionalDeclaration>
+    std::span<const FreeSurfaceDiscreteFunctionalDeclaration>
         declarations)
 {
   std::vector<int> wall_markers;
@@ -150,8 +146,7 @@ std::uint64_t dynamicContactWallBoundaryFingerprint(
 bool dynamicContactStageProvenanceMatches(
     const DynamicContactFirstOrderGeneralizedAlphaObservation& captured,
     const svmp::FE::assembly::IMeshAccess& live_mesh,
-    std::span<const svmp::FE::systems::
-                        FreeSurfaceDiscreteFunctionalDeclaration>
+    std::span<const FreeSurfaceDiscreteFunctionalDeclaration>
         declarations)
 {
   return captured.contact_wall_boundary_fingerprint != 0u &&
@@ -270,8 +265,7 @@ std::uint64_t dynamicContactFirstOrderGeneralizedAlphaObservationRevision(
 std::vector<DynamicContactOperatorStageFieldSlice>
 canonicalDynamicContactOperatorStageFieldSlices(
     const svmp::FE::systems::FESystem& system,
-    std::span<const svmp::FE::systems::
-                        FreeSurfaceDiscreteFunctionalDeclaration>
+    std::span<const FreeSurfaceDiscreteFunctionalDeclaration>
         declarations,
     svmp::FE::GlobalIndex full_state_size)
 {
@@ -362,8 +356,7 @@ std::uint64_t dynamicContactOperatorStageLayoutRevision(
 
 DynamicContactOperatorStageState captureDynamicContactOperatorStageState(
     const svmp::FE::systems::FESystem& system,
-    std::span<const svmp::FE::systems::
-                        FreeSurfaceDiscreteFunctionalDeclaration>
+    std::span<const FreeSurfaceDiscreteFunctionalDeclaration>
         declarations,
     const svmp::FE::backends::GenericVector& state,
     const svmp::FE::systems::CollectiveCommunicator& comm)
@@ -598,8 +591,7 @@ DynamicContactOperatorStageState captureDynamicContactOperatorStageState(
 
 void overlayDynamicContactOperatorStageState(
     const svmp::FE::systems::FESystem& system,
-    std::span<const svmp::FE::systems::
-                        FreeSurfaceDiscreteFunctionalDeclaration>
+    std::span<const FreeSurfaceDiscreteFunctionalDeclaration>
         declarations,
     const DynamicContactOperatorStageState& exact_state,
     std::span<svmp::FE::Real> stage_solution)
@@ -816,6 +808,4 @@ resolveFreeSurfaceContactStageTemporalCoordinates(
   };
 }
 
-} // namespace timestepping
-} // namespace FE
-} // namespace svmp
+} // namespace svmp::Physics::formulations::navier_stokes::free_surface

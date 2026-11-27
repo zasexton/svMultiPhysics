@@ -5,33 +5,33 @@
  * See Copyright-SimVascular.txt for additional details.
  */
 
-#include "LevelSet/AcceptedFunctionalRecorder.h"
+#include "Physics/Formulations/NavierStokes/FreeSurface/AcceptedFunctionalRecorder.h"
 
-#include "Assembly/Assembler.h"
-#include "Assembly/CutIntegrationContext.h"
-#include "Basis/BasisFunction.h"
-#include "Core/LogRecord.h"
-#include "Core/Logger.h"
-#include "Core/RankLog.h"
-#include "Elements/Element.h"
-#include "Geometry/CutQuadratureMapping.h"
-#include "Geometry/GeometryMapping.h"
-#include "Geometry/LinearMapping.h"
-#include "Interfaces/ContactLineStageObservables.h"
-#include "Interfaces/LevelSetGeometrySnapshot.h"
-#include "LevelSet/LevelSetCutTopology.h"
-#include "LevelSet/Maintenance/LevelSetMaintenanceRequestSchedule.h"
-#include "Math/Matrix.h"
-#include "Math/Vector.h"
-#include "Spaces/FunctionSpace.h"
-#include "Spaces/H1Space.h"
-#include "Spaces/ProductSpace.h"
-#include "Systems/FESystemHandle.h"
-#include "Systems/SystemCollectives.h"
-#include "Systems/FunctionalFormEvaluator.h"
-#include "Systems/FunctionalForms.h"
-#include "Systems/FunctionalRecords.h"
-#include "Systems/SystemState.h"
+#include "FE/Assembly/Assembler.h"
+#include "FE/Assembly/CutIntegrationContext.h"
+#include "FE/Basis/BasisFunction.h"
+#include "FE/Core/LogRecord.h"
+#include "FE/Core/Logger.h"
+#include "FE/Core/RankLog.h"
+#include "FE/Elements/Element.h"
+#include "FE/Geometry/CutQuadratureMapping.h"
+#include "FE/Geometry/GeometryMapping.h"
+#include "FE/Geometry/LinearMapping.h"
+#include "Physics/Formulations/NavierStokes/FreeSurface/ContactLineStageObservables.h"
+#include "FE/Interfaces/LevelSetGeometrySnapshot.h"
+#include "FE/LevelSet/LevelSetCutTopology.h"
+#include "FE/LevelSet/Maintenance/LevelSetMaintenanceRequestSchedule.h"
+#include "FE/Math/Matrix.h"
+#include "FE/Math/Vector.h"
+#include "FE/Spaces/FunctionSpace.h"
+#include "FE/Spaces/H1Space.h"
+#include "FE/Spaces/ProductSpace.h"
+#include "FE/Systems/FESystemHandle.h"
+#include "FE/Systems/SystemCollectives.h"
+#include "FE/Systems/FunctionalFormEvaluator.h"
+#include "FE/Systems/FunctionalForms.h"
+#include "Physics/Formulations/NavierStokes/FreeSurface/FunctionalRecords.h"
+#include "FE/Systems/SystemState.h"
 
 #include <algorithm>
 #include <array>
@@ -50,9 +50,11 @@
 #include <string_view>
 #include <utility>
 
-namespace svmp {
-namespace FE {
-namespace level_set {
+namespace svmp::Physics::formulations::navier_stokes::free_surface {
+
+using namespace svmp::FE;
+using namespace svmp::FE::level_set;
+
 
 using svmp::FE::systems::FESystemHandle;
 using svmp::FE::systems::activeMeshCommunicator;
@@ -62,7 +64,7 @@ using svmp::FE::systems::collectiveMinMaxUint64;
 using svmp::FE::systems::collectiveSumSize;
 
 std::uint64_t acceptedFunctionalDeclarationContentKey(
-    const svmp::FE::systems::FreeSurfaceDiscreteFunctionalDeclaration&
+    const FreeSurfaceDiscreteFunctionalDeclaration&
         declaration) noexcept
 {
   std::uint64_t key = kCutContextHashOffset;
@@ -151,12 +153,12 @@ std::uint64_t acceptedFunctionalDeclarationContentKey(
   return key == 0u ? 1u : key;
 }
 
-std::vector<svmp::FE::systems::AcceptedFreeSurfaceDiscreteFunctionalState>
+std::vector<AcceptedFreeSurfaceDiscreteFunctionalState>
 currentAcceptedFunctionalLayouts(
     const FESystemHandle& sim)
 {
   const auto declarations =
-      systems::functionalRecords(*sim.fe_system).functionalDeclarations();
+      functionalRecords(*sim.fe_system).functionalDeclarations();
   const auto comm = activeMeshCommunicator(*sim.fe_system);
   const auto local_declaration_count =
       static_cast<double>(declarations.size());
@@ -175,7 +177,7 @@ currentAcceptedFunctionalLayouts(
         "[svMultiPhysics::Application] Free-surface functional evaluation requires an authoritative cut-integration context on every rank.");
   }
 
-  std::vector<svmp::FE::systems::AcceptedFreeSurfaceDiscreteFunctionalState>
+  std::vector<AcceptedFreeSurfaceDiscreteFunctionalState>
       states;
   states.reserve(declarations.size());
   for (const auto& declaration : declarations) {
@@ -357,7 +359,7 @@ currentAcceptedFunctionalLayouts(
 
     // The values are the declared functionals (applyDeclaredFunctionalForms).
     states.push_back(
-        svmp::FE::systems::AcceptedFreeSurfaceDiscreteFunctionalState{
+        AcceptedFreeSurfaceDiscreteFunctionalState{
             .interface_marker = declaration.interface_marker,
             .geometry_revision = snapshot.revision(),
             .geometry_pruning_occurred =
@@ -384,11 +386,11 @@ void attachAcceptedFreeSurfaceEndpointFunctionalPowers(
     const FESystemHandle& sim,
     std::span<const svmp::FE::Real> accepted_solution,
     std::span<
-        svmp::FE::systems::AcceptedFreeSurfaceDiscreteFunctionalState>
+        AcceptedFreeSurfaceDiscreteFunctionalState>
         accepted_states)
 {
   const auto declarations =
-      systems::functionalRecords(*sim.fe_system).functionalDeclarations();
+      functionalRecords(*sim.fe_system).functionalDeclarations();
   const auto comm = activeMeshCommunicator(*sim.fe_system);
   const auto declared_count = std::count_if(
       declarations.begin(), declarations.end(), [](const auto& declaration) {
@@ -477,11 +479,11 @@ void attachAcceptedActiveVolumeEnergies(
     const FESystemHandle& sim,
     std::span<const svmp::FE::Real> accepted_solution,
     std::span<
-        svmp::FE::systems::AcceptedFreeSurfaceDiscreteFunctionalState>
+        AcceptedFreeSurfaceDiscreteFunctionalState>
         accepted_states)
 {
   const auto declarations =
-      systems::functionalRecords(*sim.fe_system).functionalDeclarations();
+      functionalRecords(*sim.fe_system).functionalDeclarations();
   const auto comm = activeMeshCommunicator(*sim.fe_system);
   const auto local_state_coverage =
       accepted_states.size() == declarations.size() ? 1.0 : 0.0;
@@ -636,11 +638,11 @@ void attachAcceptedFreeSurfaceActiveVolumeDissipation(
     const FESystemHandle& sim,
     std::span<const svmp::FE::Real> accepted_solution,
     std::span<
-        svmp::FE::systems::AcceptedFreeSurfaceDiscreteFunctionalState>
+        AcceptedFreeSurfaceDiscreteFunctionalState>
         accepted_states)
 {
   const auto declarations =
-      systems::functionalRecords(*sim.fe_system).functionalDeclarations();
+      functionalRecords(*sim.fe_system).functionalDeclarations();
   const auto comm = activeMeshCommunicator(*sim.fe_system);
   const auto declared_count = std::count_if(
       declarations.begin(), declarations.end(), [](const auto& declaration) {
@@ -738,11 +740,11 @@ void attachAcceptedFreeSurfaceExternalPressurePowers(
     const FESystemHandle& sim,
     std::span<const svmp::FE::Real> accepted_solution,
     std::span<
-        svmp::FE::systems::AcceptedFreeSurfaceDiscreteFunctionalState>
+        AcceptedFreeSurfaceDiscreteFunctionalState>
         accepted_states)
 {
   const auto declarations =
-      systems::functionalRecords(*sim.fe_system).functionalDeclarations();
+      functionalRecords(*sim.fe_system).functionalDeclarations();
   const auto comm = activeMeshCommunicator(*sim.fe_system);
   const auto declared_count = std::count_if(
       declarations.begin(), declarations.end(), [](const auto& declaration) {
@@ -874,11 +876,11 @@ void attachAcceptedFreeSurfaceBackwardEulerKineticWork(
     std::span<const svmp::FE::Real> previous_solution,
     std::span<const svmp::FE::Real> accepted_solution,
     std::span<
-        svmp::FE::systems::AcceptedFreeSurfaceDiscreteFunctionalState>
+        AcceptedFreeSurfaceDiscreteFunctionalState>
         accepted_states)
 {
   const auto declarations =
-      systems::functionalRecords(*sim.fe_system).functionalDeclarations();
+      functionalRecords(*sim.fe_system).functionalDeclarations();
   const auto comm = activeMeshCommunicator(*sim.fe_system);
   const auto local_previous_present =
       previous_solution.empty() ? 0.0 : 1.0;
@@ -1211,7 +1213,7 @@ struct WallFunctionalForms {
 
 [[nodiscard]] WallFunctionalForms wallFunctionalForms(
     const interfaces::LevelSetGeometrySnapshot& snapshot,
-    const systems::FreeSurfaceDiscreteFunctionalDeclaration& declaration,
+    const FreeSurfaceDiscreteFunctionalDeclaration& declaration,
     int boundary_marker,
     std::optional<svmp::FE::Real> equilibrium_contact_angle_radians)
 {
@@ -1278,7 +1280,7 @@ struct WallFunctionalForms {
 /// Writes the value of one declared quantity into its record field(s);
 /// false when the record has no such field.
 bool replaceDeclaredChannel(
-    svmp::FE::systems::AcceptedFreeSurfaceDiscreteFunctionalState& accepted,
+    AcceptedFreeSurfaceDiscreteFunctionalState& accepted,
     std::string_view quantity,
     svmp::FE::Real value,
     ReplacedChannels& replaced)
@@ -1411,7 +1413,7 @@ bool replaceDeclaredChannel(
 /// The totals of a record whose channels were replaced: sums of channels, in
 /// the order the pointwise evaluators form them.
 void recomputeTotals(
-    svmp::FE::systems::AcceptedFreeSurfaceDiscreteFunctionalState& accepted,
+    AcceptedFreeSurfaceDiscreteFunctionalState& accepted,
     const ReplacedChannels& replaced)
 {
   auto& state = accepted.state;
@@ -1490,7 +1492,7 @@ std::vector<DeclaredFunctionalMasses> applyDeclaredFunctionalForms(
     const FESystemHandle& sim,
     std::span<const svmp::FE::Real> solution,
     std::span<const svmp::FE::Real> previous_solution,
-    std::span<svmp::FE::systems::AcceptedFreeSurfaceDiscreteFunctionalState> states,
+    std::span<AcceptedFreeSurfaceDiscreteFunctionalState> states,
     svmp::FE::Real time,
     svmp::FE::Real dt)
 {
@@ -1502,7 +1504,7 @@ std::vector<DeclaredFunctionalMasses> applyDeclaredFunctionalForms(
   const auto& system = *sim.fe_system;
   const systems::CollectiveCommunicator comm(activeMeshCommunicator(system));
   const auto record_declarations =
-      systems::functionalRecords(*sim.fe_system).functionalDeclarations();
+      functionalRecords(*sim.fe_system).functionalDeclarations();
   const auto* context = system.cutIntegrationContext();
   for (auto& accepted : states) {
     const std::string prefix = "free_surface." + std::to_string(accepted.interface_marker) + ".";
@@ -1602,7 +1604,7 @@ std::vector<DeclaredFunctionalMasses> applyDeclaredFunctionalForms(
           power_walls.push_back(wall.boundary_marker);
         }
         constexpr std::array<std::string_view, 2> wall_rates{"wetted_area_rate", "young_energy_rate"};
-        for (auto& declared_wall : interfaces::declaredWallFunctionalForms(
+        for (auto& declared_wall : FE::systems::declaredWallFunctionalForms(
                  system, prefix, *snapshot, power_walls, record_declaration->parameters.active_side,
                  wall_rates)) {
           names.push_back(std::move(declared_wall.name));
@@ -1715,7 +1717,7 @@ std::optional<svmp::FE::forms::FormExpr> freeSurfaceFunctionalForm(
   }
   // The wall quantities: the recorder states them on the current snapshot
   // with the coefficients of the discrete-functional declaration.
-  const auto record_declarations = systems::functionalRecords(system).functionalDeclarations();
+  const auto record_declarations = functionalRecords(system).functionalDeclarations();
   const auto record = std::find_if(
       record_declarations.begin(), record_declarations.end(), [&](const auto& declaration) {
         return declaration.interface_marker == interface_marker;
@@ -1831,7 +1833,7 @@ std::optional<std::vector<svmp::FE::Real>> evaluateDeclaredFreeSurfaceFunctional
   return out;
 }
 
-std::vector<svmp::FE::systems::AcceptedFreeSurfaceDiscreteFunctionalState>
+std::vector<AcceptedFreeSurfaceDiscreteFunctionalState>
 evaluateDeclaredAcceptedFunctionals(
     const FESystemHandle& sim,
     std::span<const svmp::FE::Real> solution)
@@ -1853,8 +1855,7 @@ evaluateDeclaredAcceptedFunctionals(
 std::vector<svmp::FE::level_set::LevelSetAuthoritativeFunctionalValue>
 levelSetMaintenanceFunctionalValues(
     const FESystemHandle& sim,
-    std::span<const svmp::FE::systems::
-                        AcceptedFreeSurfaceDiscreteFunctionalState> states,
+    std::span<const AcceptedFreeSurfaceDiscreteFunctionalState> states,
     std::span<const svmp::FE::Real> solution)
 {
   std::vector<svmp::FE::level_set::LevelSetAuthoritativeFunctionalValue>
@@ -1882,10 +1883,10 @@ levelSetMaintenanceFunctionalValues(
         "[svMultiPhysics::Application] Level-set maintenance work provenance requires an authoritative cut-integration context.");
   }
   std::vector<
-      svmp::FE::systems::AcceptedFreeSurfaceDiscreteFunctionalState>
+      AcceptedFreeSurfaceDiscreteFunctionalState>
       enriched_states(states.begin(), states.end());
   const auto declarations =
-      systems::functionalRecords(*sim.fe_system).functionalDeclarations();
+      functionalRecords(*sim.fe_system).functionalDeclarations();
   const bool solution_channel_declared = std::any_of(
       declarations.begin(),
       declarations.end(),
@@ -2045,7 +2046,7 @@ levelSetMaintenanceFunctionalValues(
 AcceptedFunctionalCoverage
 requireCommunicatorConsistentAcceptedFunctionalCoverage(
     std::span<
-        const svmp::FE::systems::FreeSurfaceDiscreteFunctionalDeclaration>
+        const FreeSurfaceDiscreteFunctionalDeclaration>
         declarations,
     const svmp::MeshComm& comm)
 {
@@ -2099,7 +2100,7 @@ requireCommunicatorConsistentAcceptedFunctionalCoverage(
 }
 
 std::vector<
-    svmp::FE::systems::AcceptedFreeSurfaceDiscreteFunctionalState>
+    AcceptedFreeSurfaceDiscreteFunctionalState>
 recordAcceptedFunctionals(
     const FESystemHandle& sim,
     std::uint64_t accepted_step,
@@ -2107,7 +2108,7 @@ recordAcceptedFunctionals(
     svmp::FE::Real dt,
     std::uint64_t pre_maintenance_endpoint_state_revision,
     std::uint64_t state_revision,
-    std::span<const svmp::FE::systems::FreeSurfaceAcceptedContactStageState>
+    std::span<const FreeSurfaceAcceptedContactStageState>
         contact_stages,
     std::span<const svmp::FE::Real> accepted_solution,
     std::span<const svmp::FE::Real>
@@ -2120,7 +2121,7 @@ recordAcceptedFunctionals(
     *backward_euler_kinetic_work_bound = true;
   }
   const auto declarations =
-      systems::functionalRecords(*sim.fe_system).functionalDeclarations();
+      functionalRecords(*sim.fe_system).functionalDeclarations();
   const auto comm = activeMeshCommunicator(*sim.fe_system);
   const auto coverage =
       requireCommunicatorConsistentAcceptedFunctionalCoverage(
@@ -2158,7 +2159,7 @@ recordAcceptedFunctionals(
   }
   std::map<
       int,
-      const svmp::FE::systems::FreeSurfaceAcceptedContactStageState*>
+      const FreeSurfaceAcceptedContactStageState*>
       contact_stage_by_marker;
   bool local_contact_stages_valid = true;
   for (const auto& stage : contact_stages) {
@@ -2193,7 +2194,7 @@ recordAcceptedFunctionals(
   attachAcceptedFreeSurfaceExternalPressurePowers(
       sim, accepted_solution, accepted_states);
   const auto existing_history =
-      systems::functionalRecords(*sim.fe_system).acceptedFunctionalHistory();
+      functionalRecords(*sim.fe_system).acceptedFunctionalHistory();
   attachAcceptedFreeSurfaceBackwardEulerKineticWork(
       sim,
       backward_euler_previous_solution,
@@ -2436,7 +2437,7 @@ recordAcceptedFunctionals(
             previous.contact_line_kinematics;
       } else if (accepted_step > latest.accepted_step) {
         accepted.contact_line_kinematics =
-            systems::deriveAcceptedContactLineKinematics(
+            deriveAcceptedContactLineKinematics(
                 previous,
                 accepted_step,
                 *accepted.contact_stage);
@@ -2444,7 +2445,7 @@ recordAcceptedFunctionals(
     }
   }
 
-  systems::functionalRecords(*sim.fe_system).recordAcceptedFunctionals(
+  functionalRecords(*sim.fe_system).recordAcceptedFunctionals(
       accepted_step,
       accepted_time,
       dt,
@@ -2514,9 +2515,9 @@ void recordInitialAcceptedFunctionalBaseline(
           initial_solution,
           activeMeshCommunicator(*sim.fe_system));
   const auto initial_contact_stages =
-      svmp::FE::interfaces::evaluateAcceptedFreeSurfaceContactStages(
+      evaluateAcceptedFreeSurfaceContactStages(
           *sim.fe_system,
-          systems::functionalRecords(*sim.fe_system).functionalDeclarations(),
+          functionalRecords(*sim.fe_system).functionalDeclarations(),
           initial_time,
           svmp::FE::Real{1.0},
           initial_state_revision,
@@ -2537,6 +2538,4 @@ void recordInitialAcceptedFunctionalBaseline(
       initial_extension_map_revision);
 }
 
-} // namespace level_set
-} // namespace FE
-} // namespace svmp
+} // namespace svmp::Physics::formulations::navier_stokes::free_surface

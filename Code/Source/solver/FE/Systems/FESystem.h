@@ -17,7 +17,6 @@
 #include "Auxiliary/AuxiliaryInputRegistry.h"
 #include "Auxiliary/AuxiliaryStateTypes.h"
 #include "Systems/FEQuantityRegistry.h"
-#include "Systems/FreeSurfaceRecordTypes.h"
 #include "Systems/OperatorStageMetadata.h"
 #include "Systems/BoundaryReductionService.h"
 #include "Systems/FieldRegistry.h"

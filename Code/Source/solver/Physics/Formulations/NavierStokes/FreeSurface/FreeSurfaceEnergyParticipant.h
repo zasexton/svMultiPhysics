@@ -20,10 +20,10 @@
  *        the complete energy ledger with its accepted and rejected records.
  */
 
-#include "FE/LevelSet/AcceptedFunctionalRecorder.h"
+#include "Physics/Formulations/NavierStokes/FreeSurface/AcceptedFunctionalRecorder.h"
 
 #include "FE/Backends/Interfaces/GenericVector.h"
-#include "FE/LevelSet/LevelSetContactStageParticipant.h"
+#include "Physics/Formulations/NavierStokes/FreeSurface/ContactStageParticipant.h"
 #include "Physics/Formulations/NavierStokes/FreeSurface/FreeSurfaceEnergyBalance.h"
 #include "FE/Systems/FESystem.h"
 #include "FE/TimeStepping/StepContext.h"
@@ -101,7 +101,7 @@ public:
   /// binds the pending contact stages to it (collective).
   void bindAcceptedEndpoint(
       svmp::FE::timestepping::TimeHistory& h,
-      svmp::FE::level_set::ContactStageParticipant& contact_stage);
+      svmp::Physics::formulations::navier_stokes::free_surface::ContactStageParticipant& contact_stage);
 
   /// Aggregates the accepted-step maintenance energy account from the
   /// maintenance work ledger and evaluates its physical-endpoint channels.
@@ -117,7 +117,7 @@ public:
   /// energy record and the accepted residual work (collective).
   void publishAcceptedEnergy(
       svmp::FE::timestepping::TimeHistory& h,
-      std::span<const svmp::FE::systems::FreeSurfaceAcceptedContactStageState>
+      std::span<const svmp::Physics::formulations::navier_stokes::free_surface::FreeSurfaceAcceptedContactStageState>
           pending_contact_stages);
 
   /// Records a rejected energy attempt of the step after @p h.
@@ -135,16 +135,16 @@ public:
   std::uint64_t free_surface_energy_attempt{0u};
   std::optional<int> free_surface_energy_attempt_step{};
 
-  std::span<const svmp::FE::systems::FreeSurfaceDiscreteFunctionalDeclaration>
+  std::span<const svmp::Physics::formulations::navier_stokes::free_surface::FreeSurfaceDiscreteFunctionalDeclaration>
       free_surface_declarations{};
-  svmp::FE::level_set::AcceptedFunctionalCoverage
+  svmp::Physics::formulations::navier_stokes::free_surface::AcceptedFunctionalCoverage
       free_surface_acceptance_coverage{};
   bool has_free_surface_functional{false};
   bool has_dynamic_contact_stage{false};
-  std::span<const svmp::FE::systems::FreeSurfaceResidualWorkDeclaration>
+  std::span<const svmp::Physics::formulations::navier_stokes::free_surface::FreeSurfaceResidualWorkDeclaration>
       free_surface_residual_work_declarations{};
   const std::optional<
-      svmp::FE::systems::FreeSurfaceExternalBoundaryEnergyDeclaration>&
+      svmp::Physics::formulations::navier_stokes::free_surface::FreeSurfaceExternalBoundaryEnergyDeclaration>&
       free_surface_boundary_energy_declaration;
   bool evaluate_free_surface_residual_work{false};
   bool complete_free_surface_energy_connector_available{false};

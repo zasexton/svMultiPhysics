@@ -119,28 +119,6 @@ namespace svmp {
 namespace FE {
 namespace systems {
 
-const char* freeSurfaceResidualWorkChannelName(
-    FreeSurfaceResidualWorkChannel channel) noexcept
-{
-    switch (channel) {
-    case FreeSurfaceResidualWorkChannel::Convection:
-        return "convection";
-    case FreeSurfaceResidualWorkChannel::PressureContinuity:
-        return "pressure_continuity";
-    case FreeSurfaceResidualWorkChannel::NonconservativeBodyForce:
-        return "nonconservative_body_force";
-    case FreeSurfaceResidualWorkChannel::WeakBoundary:
-        return "weak_boundary";
-    case FreeSurfaceResidualWorkChannel::VmsPspg:
-        return "vms_pspg";
-    case FreeSurfaceResidualWorkChannel::CutStabilization:
-        return "cut_stabilization";
-    case FreeSurfaceResidualWorkChannel::GhostPenalty:
-        return "ghost_penalty";
-    }
-    return "unknown";
-}
-
 namespace {
 
 void coordinateFinalizedReportLocalFailure(

@@ -61,7 +61,7 @@
 #include <utility>
 #include <vector>
 #include "FE/Constraints/SmallCutAggregationConstraint.h"
-#include "FE/Systems/FunctionalRecords.h"
+#include "Physics/Formulations/NavierStokes/FreeSurface/FunctionalRecords.h"
 #include "../Support/DeclaredFreeSurfaceFunctionals.h"
 #include "FE/Systems/FunctionalFormEvaluator.h"
 #include "FE/Systems/FunctionalForms.h"
@@ -2864,7 +2864,7 @@ TEST(ApplicationDriverLevelSetWorkflows,
       (void)makeDynamicContactFirstOrderGeneralizedAlphaObservation(
           invalid_observation),
       std::invalid_argument);
-  const svmp::FE::systems::FreeSurfaceFirstOrderGeneralizedAlphaProvenance
+  const svmp::Physics::formulations::navier_stokes::free_surface::FreeSurfaceFirstOrderGeneralizedAlphaProvenance
       unsupported_custom_parameters{
           .alpha_m = 0.75,
           .alpha_f = 0.75,
@@ -2878,8 +2878,7 @@ TEST(ApplicationDriverLevelSetWorkflows,
         svmp::FE::timestepping::utils::
             generalizedAlphaFirstOrderFromRhoInf(supported_rho);
     EXPECT_TRUE(firstOrderGeneralizedAlphaContactProvenanceValid(
-        svmp::FE::systems::
-            FreeSurfaceFirstOrderGeneralizedAlphaProvenance{
+        svmp::Physics::formulations::navier_stokes::free_surface::FreeSurfaceFirstOrderGeneralizedAlphaProvenance{
                 .alpha_m = supported.alpha_m,
                 .alpha_f = supported.alpha_f,
                 .gamma = supported.gamma,
@@ -2931,7 +2930,7 @@ TEST(ApplicationDriverLevelSetWorkflows,
       .coordinate_configuration_key =
           live_mesh.coordinateConfigurationKey(),
   };
-  svmp::FE::systems::FreeSurfaceDiscreteFunctionalDeclaration declaration;
+  svmp::Physics::formulations::navier_stokes::free_surface::FreeSurfaceDiscreteFunctionalDeclaration declaration;
   declaration.parameters.dynamic_contact_coefficients.push_back({
       .boundary_marker = contact_wall_marker,
       .equilibrium_contact_angle_radians = svmp::FE::Real{1.0},
@@ -2940,7 +2939,7 @@ TEST(ApplicationDriverLevelSetWorkflows,
       .dynamic_viscosity = svmp::FE::Real{1.0},
   });
   const std::vector<
-      svmp::FE::systems::FreeSurfaceDiscreteFunctionalDeclaration>
+      svmp::Physics::formulations::navier_stokes::free_surface::FreeSurfaceDiscreteFunctionalDeclaration>
       declarations{declaration};
   DynamicContactFirstOrderGeneralizedAlphaObservation observation{
       .mesh_revision = captured,
@@ -5849,8 +5848,8 @@ TEST(ApplicationDriverLevelSetWorkflows,
   parameters.active_side =
       svmp::FE::geometry::CutIntegrationSide::Negative;
   parameters.surface_tension = gamma;
-  svmp::FE::systems::functionalRecords(*system).declareFunctional(
-      svmp::FE::systems::FreeSurfaceDiscreteFunctionalDeclaration{
+  svmp::Physics::formulations::navier_stokes::free_surface::functionalRecords(*system).declareFunctional(
+      svmp::Physics::formulations::navier_stokes::free_surface::FreeSurfaceDiscreteFunctionalDeclaration{
           .interface_marker = interface_marker,
           .level_set_field = phi,
           .velocity_field = velocity,
@@ -5887,12 +5886,10 @@ TEST(ApplicationDriverLevelSetWorkflows,
                   },
           .endpoint_functional_power_enabled = true,
           .capillary_balance_method =
-              svmp::FE::systems::
-                  FreeSurfaceCapillaryBalanceMethod::
+              svmp::Physics::formulations::navier_stokes::free_surface::FreeSurfaceCapillaryBalanceMethod::
                       DiscreteEnergyVolumeStationarity,
           .capillary_balance_qualification =
-              svmp::FE::systems::
-                  FreeSurfaceCapillaryBalanceQualification::
+              svmp::Physics::formulations::navier_stokes::free_surface::FreeSurfaceCapillaryBalanceQualification::
                       PrerequisiteOnly,
           .owner_component =
               "ApplicationDriverLevelSetWorkflows.FunctionalFixture",
@@ -6025,7 +6022,7 @@ TEST(ApplicationDriverLevelSetWorkflows,
       std::span<const svmp::FE::Real>(
           previous_solution.data(), previous_solution.size())));
   const auto history =
-      svmp::FE::systems::functionalRecords(*sim.fe_system).acceptedFunctionalHistory();
+      svmp::Physics::formulations::navier_stokes::free_surface::functionalRecords(*sim.fe_system).acceptedFunctionalHistory();
   ASSERT_EQ(history.size(), 2u);
   ASSERT_TRUE(history.front().active_volume_energy.has_value());
   EXPECT_DOUBLE_EQ(
@@ -6079,8 +6076,8 @@ TEST(ApplicationDriverLevelSetWorkflows,
   parameters.active_side =
       svmp::FE::geometry::CutIntegrationSide::Negative;
   parameters.surface_tension = gamma;
-  svmp::FE::systems::functionalRecords(*system).declareFunctional(
-      svmp::FE::systems::FreeSurfaceDiscreteFunctionalDeclaration{
+  svmp::Physics::formulations::navier_stokes::free_surface::functionalRecords(*system).declareFunctional(
+      svmp::Physics::formulations::navier_stokes::free_surface::FreeSurfaceDiscreteFunctionalDeclaration{
           .interface_marker = interface_marker,
           .level_set_field = phi,
           .velocity_field = velocity,
@@ -6117,12 +6114,10 @@ TEST(ApplicationDriverLevelSetWorkflows,
                   },
           .endpoint_functional_power_enabled = true,
           .capillary_balance_method =
-              svmp::FE::systems::
-                  FreeSurfaceCapillaryBalanceMethod::
+              svmp::Physics::formulations::navier_stokes::free_surface::FreeSurfaceCapillaryBalanceMethod::
                       DiscreteEnergyVolumeStationarity,
           .capillary_balance_qualification =
-              svmp::FE::systems::
-                  FreeSurfaceCapillaryBalanceQualification::
+              svmp::Physics::formulations::navier_stokes::free_surface::FreeSurfaceCapillaryBalanceQualification::
                       PrerequisiteOnly,
           .owner_component =
               "ApplicationDriverLevelSetWorkflows.FunctionalFixture",
@@ -6321,7 +6316,7 @@ TEST(ApplicationDriverLevelSetWorkflows,
           previous_solution.data(), previous_solution.size()),
       /*record_backward_euler_kinetic_baseline=*/true));
   const auto baseline_history =
-      svmp::FE::systems::functionalRecords(*sim.fe_system).acceptedFunctionalHistory();
+      svmp::Physics::formulations::navier_stokes::free_surface::functionalRecords(*sim.fe_system).acceptedFunctionalHistory();
   ASSERT_EQ(baseline_history.size(), 1u);
   const auto& baseline = baseline_history.front();
   EXPECT_EQ(baseline.accepted_step, 0u);
@@ -6408,7 +6403,7 @@ TEST(ApplicationDriverLevelSetWorkflows,
       &backward_euler_kinetic_work_bound));
   EXPECT_TRUE(backward_euler_kinetic_work_bound);
 
-  const auto history = svmp::FE::systems::functionalRecords(*sim.fe_system).acceptedFunctionalHistory();
+  const auto history = svmp::Physics::formulations::navier_stokes::free_surface::functionalRecords(*sim.fe_system).acceptedFunctionalHistory();
   ASSERT_EQ(history.size(), 2u);
   const auto& record = history.back();
   EXPECT_EQ(record.accepted_step, 3u);
@@ -6609,7 +6604,7 @@ TEST(ApplicationDriverLevelSetWorkflows,
           solution.data(), solution.size()),
       std::span<const svmp::FE::Real>(
           previous_solution.data(), previous_solution.size())));
-  EXPECT_EQ(svmp::FE::systems::functionalRecords(*sim.fe_system).acceptedFunctionalHistory().size(), 2u);
+  EXPECT_EQ(svmp::Physics::formulations::navier_stokes::free_surface::functionalRecords(*sim.fe_system).acceptedFunctionalHistory().size(), 2u);
 
   // The kinetic-work pairing is energy-ledger bookkeeping: a step whose
   // previous velocity is not the recorded endpoint (as after a cut-topology
@@ -6632,7 +6627,7 @@ TEST(ApplicationDriverLevelSetWorkflows,
       &backward_euler_kinetic_work_bound));
   EXPECT_FALSE(backward_euler_kinetic_work_bound);
   const auto unbound_history =
-      svmp::FE::systems::functionalRecords(*sim.fe_system).acceptedFunctionalHistory();
+      svmp::Physics::formulations::navier_stokes::free_surface::functionalRecords(*sim.fe_system).acceptedFunctionalHistory();
   ASSERT_EQ(unbound_history.size(), 3u);
   EXPECT_EQ(unbound_history.back().accepted_step, 4u);
   ASSERT_TRUE(unbound_history.back().backward_euler_kinetic_work.has_value());
@@ -6914,7 +6909,7 @@ TEST(ApplicationDriverLevelSetWorkflows,
   functional_parameters.surface_tension = 1.0;
   application_test::declared_free_surface_functionals::declareFreeSurfaceFunctionalWithForms(
       *system,
-      svmp::FE::systems::FreeSurfaceDiscreteFunctionalDeclaration{
+      svmp::Physics::formulations::navier_stokes::free_surface::FreeSurfaceDiscreteFunctionalDeclaration{
           .interface_marker = interface_marker,
           .level_set_field = phi,
           .velocity_field = velocity,
@@ -6937,12 +6932,10 @@ TEST(ApplicationDriverLevelSetWorkflows,
                   },
           .static_conservative_body_force_complete = true,
           .capillary_balance_method =
-              svmp::FE::systems::
-                  FreeSurfaceCapillaryBalanceMethod::
+              svmp::Physics::formulations::navier_stokes::free_surface::FreeSurfaceCapillaryBalanceMethod::
                       DiscreteEnergyVolumeStationarity,
           .capillary_balance_qualification =
-              svmp::FE::systems::
-                  FreeSurfaceCapillaryBalanceQualification::
+              svmp::Physics::formulations::navier_stokes::free_surface::FreeSurfaceCapillaryBalanceQualification::
                       PrerequisiteOnly,
           .owner_component =
               "ApplicationDriverLevelSetWorkflows.StaticCapillaryRollback",
@@ -7099,10 +7092,10 @@ TEST(ApplicationDriverLevelSetWorkflows,
   // transaction, then restore this synthetic declaration so the original
   // diagnostic rollback case below retains its exact purpose.
   auto declarations =
-      svmp::FE::systems::functionalRecords(*sim.fe_system).functionalDeclarations();
+      svmp::Physics::formulations::navier_stokes::free_surface::functionalRecords(*sim.fe_system).functionalDeclarations();
   ASSERT_EQ(declarations.size(), 1u);
   auto& mutable_declaration = const_cast<
-      svmp::FE::systems::FreeSurfaceDiscreteFunctionalDeclaration&>(
+      svmp::Physics::formulations::navier_stokes::free_surface::FreeSurfaceDiscreteFunctionalDeclaration&>(
       declarations.front());
   const bool saved_body_force_contract =
       mutable_declaration.static_conservative_body_force_complete;
@@ -7111,7 +7104,7 @@ TEST(ApplicationDriverLevelSetWorkflows,
   const auto target_volume_before_body_force_rejection =
       effectiveStaticCapillaryEquilibriumOptions(requests.front()).target_active_measure;
   const auto functional_history_size_before_body_force_rejection =
-      svmp::FE::systems::functionalRecords(*sim.fe_system).acceptedFunctionalHistory().size();
+      svmp::Physics::formulations::navier_stokes::free_surface::functionalRecords(*sim.fe_system).acceptedFunctionalHistory().size();
   std::string body_force_failure;
   try {
     (void)initializeDiscreteStaticCapillaryEquilibrium(
@@ -7134,7 +7127,7 @@ TEST(ApplicationDriverLevelSetWorkflows,
       effectiveStaticCapillaryEquilibriumOptions(requests.front()).target_active_measure,
       target_volume_before_body_force_rejection);
   EXPECT_EQ(
-      svmp::FE::systems::functionalRecords(*sim.fe_system).acceptedFunctionalHistory().size(),
+      svmp::Physics::formulations::navier_stokes::free_surface::functionalRecords(*sim.fe_system).acceptedFunctionalHistory().size(),
       functional_history_size_before_body_force_rejection);
   EXPECT_EQ(gatherFeOrderedSolution(sim.time_history->u()), current);
   EXPECT_EQ(gatherFeOrderedSolution(sim.time_history->uPrev()), previous);
@@ -7182,7 +7175,7 @@ TEST(ApplicationDriverLevelSetWorkflows,
                 .target_active_measure,
             target_volume_before_body_force_rejection);
         EXPECT_EQ(
-            svmp::FE::systems::functionalRecords(*sim.fe_system).acceptedFunctionalHistory().size(),
+            svmp::Physics::formulations::navier_stokes::free_surface::functionalRecords(*sim.fe_system).acceptedFunctionalHistory().size(),
             functional_history_size_before_body_force_rejection);
         EXPECT_EQ(gatherFeOrderedSolution(sim.time_history->u()), current);
         EXPECT_EQ(
@@ -7370,7 +7363,7 @@ TEST(ApplicationDriverLevelSetWorkflows,
   functional_parameters.surface_tension = 1.0;
   application_test::declared_free_surface_functionals::declareFreeSurfaceFunctionalWithForms(
       *system,
-      svmp::FE::systems::FreeSurfaceDiscreteFunctionalDeclaration{
+      svmp::Physics::formulations::navier_stokes::free_surface::FreeSurfaceDiscreteFunctionalDeclaration{
           .interface_marker = interface_marker,
           .level_set_field = phi,
           .velocity_field = velocity,
@@ -7393,12 +7386,10 @@ TEST(ApplicationDriverLevelSetWorkflows,
                   },
           .static_conservative_body_force_complete = true,
           .capillary_balance_method =
-              svmp::FE::systems::
-                  FreeSurfaceCapillaryBalanceMethod::
+              svmp::Physics::formulations::navier_stokes::free_surface::FreeSurfaceCapillaryBalanceMethod::
                       DiscreteEnergyVolumeStationarity,
           .capillary_balance_qualification =
-              svmp::FE::systems::
-                  FreeSurfaceCapillaryBalanceQualification::
+              svmp::Physics::formulations::navier_stokes::free_surface::FreeSurfaceCapillaryBalanceQualification::
                       PrerequisiteOnly,
           .owner_component =
               "ApplicationDriverLevelSetWorkflows.StaticCapillaryPublication",
@@ -7571,7 +7562,7 @@ TEST(ApplicationDriverLevelSetWorkflows,
   const auto target_volume_before_velocity_rejection =
       effectiveStaticCapillaryEquilibriumOptions(requests.front()).target_active_measure;
   const auto functional_history_size_before_velocity_rejection =
-      svmp::FE::systems::functionalRecords(*sim.fe_system).acceptedFunctionalHistory().size();
+      svmp::Physics::formulations::navier_stokes::free_surface::functionalRecords(*sim.fe_system).acceptedFunctionalHistory().size();
   std::string velocity_failure;
   try {
     (void)initializeDiscreteStaticCapillaryEquilibrium(
@@ -7594,7 +7585,7 @@ TEST(ApplicationDriverLevelSetWorkflows,
       effectiveStaticCapillaryEquilibriumOptions(requests.front()).target_active_measure,
       target_volume_before_velocity_rejection);
   EXPECT_EQ(
-      svmp::FE::systems::functionalRecords(*sim.fe_system).acceptedFunctionalHistory().size(),
+      svmp::Physics::formulations::navier_stokes::free_surface::functionalRecords(*sim.fe_system).acceptedFunctionalHistory().size(),
       functional_history_size_before_velocity_rejection);
   EXPECT_EQ(gatherFeOrderedSolution(sim.time_history->u()), current);
   EXPECT_EQ(gatherFeOrderedSolution(sim.time_history->uPrev()), previous);
@@ -8967,7 +8958,7 @@ TEST(ApplicationDriverLevelSetWorkflows,
       });
   application_test::declared_free_surface_functionals::declareFreeSurfaceFunctionalWithForms(
       *system,
-      svmp::FE::systems::FreeSurfaceDiscreteFunctionalDeclaration{
+      svmp::Physics::formulations::navier_stokes::free_surface::FreeSurfaceDiscreteFunctionalDeclaration{
           .interface_marker = interface_marker,
           .level_set_field = phi,
           .velocity_field = velocity,
@@ -9178,8 +9169,7 @@ TEST(ApplicationDriverLevelSetWorkflows,
       collectiveLevelSetMaintenanceAlgebraicRevision(
           finalized_endpoint_solution,
           activeFESystemCommunicator(*sim.fe_system));
-  const svmp::FE::systems::
-      FreeSurfaceFirstOrderGeneralizedAlphaProvenance
+  const svmp::Physics::formulations::navier_stokes::free_surface::FreeSurfaceFirstOrderGeneralizedAlphaProvenance
           generalized_alpha_provenance{
               .alpha_m = svmp::FE::Real{0.5},
               .alpha_f = svmp::FE::Real{0.5},
@@ -9213,7 +9203,7 @@ TEST(ApplicationDriverLevelSetWorkflows,
   exact_operator_stage_solution[velocity_offset + 1u] =
       svmp::FE::Real{-0.0};
   const auto contact_stage_declarations =
-      svmp::FE::systems::functionalRecords(*sim.fe_system).functionalDeclarations();
+      svmp::Physics::formulations::navier_stokes::free_surface::functionalRecords(*sim.fe_system).functionalDeclarations();
   DynamicContactFirstOrderGeneralizedAlphaObservation
       exact_operator_stage_observation{
           .step_index = 2,
@@ -9425,7 +9415,7 @@ TEST(ApplicationDriverLevelSetWorkflows,
   const auto endpoint_contact_stages =
       evaluateAcceptedFreeSurfaceContactStages(
           *sim.fe_system,
-          svmp::FE::systems::functionalRecords(*sim.fe_system).functionalDeclarations(),
+          svmp::Physics::formulations::navier_stokes::free_surface::functionalRecords(*sim.fe_system).functionalDeclarations(),
           svmp::FE::Real{0.10},
           svmp::FE::Real{1.0},
           previous_state_revision,
@@ -9521,7 +9511,7 @@ TEST(ApplicationDriverLevelSetWorkflows,
       accepted_state_revision,
       endpoint_maintenance_stages));
   const auto history =
-      svmp::FE::systems::functionalRecords(*sim.fe_system).acceptedFunctionalHistory();
+      svmp::Physics::formulations::navier_stokes::free_surface::functionalRecords(*sim.fe_system).acceptedFunctionalHistory();
   ASSERT_EQ(history.size(), 1u);
   EXPECT_EQ(
       history.front().pre_maintenance_endpoint_state_revision,
@@ -9574,7 +9564,7 @@ TEST(ApplicationDriverLevelSetWorkflows,
   const auto next_contact_stages =
       evaluateAcceptedFreeSurfaceContactStages(
           *sim.fe_system,
-          svmp::FE::systems::functionalRecords(*sim.fe_system).functionalDeclarations(),
+          svmp::Physics::formulations::navier_stokes::free_surface::functionalRecords(*sim.fe_system).functionalDeclarations(),
           svmp::FE::Real{0.15},
           svmp::FE::Real{1.0},
           accepted_state_revision,
@@ -9614,7 +9604,7 @@ TEST(ApplicationDriverLevelSetWorkflows,
       std::string::npos);
 
   const auto kinematics_history =
-      svmp::FE::systems::functionalRecords(*sim.fe_system).acceptedFunctionalHistory();
+      svmp::Physics::formulations::navier_stokes::free_surface::functionalRecords(*sim.fe_system).acceptedFunctionalHistory();
   ASSERT_EQ(kinematics_history.size(), 2u);
   EXPECT_TRUE(
       kinematics_history.front().contact_line_kinematics.empty());
@@ -9686,7 +9676,7 @@ TEST(ApplicationDriverLevelSetWorkflows,
       next_state_revision,
       next_contact_stages));
   EXPECT_EQ(
-      svmp::FE::systems::functionalRecords(*sim.fe_system).acceptedFunctionalHistory().size(), 2u);
+      svmp::Physics::formulations::navier_stokes::free_surface::functionalRecords(*sim.fe_system).acceptedFunctionalHistory().size(), 2u);
 #endif
 }
 
@@ -9805,7 +9795,7 @@ TEST(ApplicationDriverLevelSetWorkflows,
       });
   application_test::declared_free_surface_functionals::declareFreeSurfaceFunctionalWithForms(
       *system,
-      svmp::FE::systems::FreeSurfaceDiscreteFunctionalDeclaration{
+      svmp::Physics::formulations::navier_stokes::free_surface::FreeSurfaceDiscreteFunctionalDeclaration{
           .interface_marker = interface_marker,
           .level_set_field = phi,
           .geometry_domain_id = "prescribed_wall_maintenance",
@@ -12139,13 +12129,12 @@ makeCompleteEnergyEndpoint(bool endpoint)
   return group;
 }
 
-std::vector<svmp::FE::systems::FreeSurfaceResidualWorkDeclaration>
+std::vector<svmp::Physics::formulations::navier_stokes::free_surface::FreeSurfaceResidualWorkDeclaration>
 makeCompleteEnergyResidualDeclarations()
 {
-  using Applicability = svmp::FE::systems::
-      FreeSurfaceResidualWorkApplicability;
+  using Applicability = svmp::Physics::formulations::navier_stokes::free_surface::FreeSurfaceResidualWorkApplicability;
   using Channel =
-      svmp::FE::systems::FreeSurfaceResidualWorkChannel;
+      svmp::Physics::formulations::navier_stokes::free_surface::FreeSurfaceResidualWorkChannel;
   return {
       {.channel = Channel::Convection,
        .applicability = Applicability::Produced,
@@ -12192,14 +12181,11 @@ makeCompleteEnergyResidualWork()
   };
 }
 
-std::optional<svmp::FE::systems::
-                  FreeSurfaceExternalBoundaryEnergyDeclaration>
+std::optional<svmp::Physics::formulations::navier_stokes::free_surface::FreeSurfaceExternalBoundaryEnergyDeclaration>
 makeClosedCompleteEnergyBoundary()
 {
-  using Applicability = svmp::FE::systems::
-      FreeSurfaceExternalBoundaryEnergyApplicability;
-  return svmp::FE::systems::
-      FreeSurfaceExternalBoundaryEnergyDeclaration{
+  using Applicability = svmp::Physics::formulations::navier_stokes::free_surface::FreeSurfaceExternalBoundaryEnergyApplicability;
+  return svmp::Physics::formulations::navier_stokes::free_surface::FreeSurfaceExternalBoundaryEnergyDeclaration{
           .imposed_traction = Applicability::NotApplicable,
           .open_boundary_flux = Applicability::NotApplicable,
           .homogeneous_velocity_data = true,
@@ -12423,10 +12409,8 @@ TEST(ApplicationDriverLevelSetWorkflows,
   residual_work.ghost_penalty.reset();
   auto boundary = makeClosedCompleteEnergyBoundary();
   ASSERT_TRUE(boundary.has_value());
-  boundary->imposed_traction = svmp::FE::systems::
-      FreeSurfaceExternalBoundaryEnergyApplicability::Unresolved;
-  boundary->open_boundary_flux = svmp::FE::systems::
-      FreeSurfaceExternalBoundaryEnergyApplicability::Unresolved;
+  boundary->imposed_traction = svmp::Physics::formulations::navier_stokes::free_surface::FreeSurfaceExternalBoundaryEnergyApplicability::Unresolved;
+  boundary->open_boundary_flux = svmp::Physics::formulations::navier_stokes::free_surface::FreeSurfaceExternalBoundaryEnergyApplicability::Unresolved;
   boundary->homogeneous_velocity_data = false;
   boundary->pressure_dirichlet_absent = false;
 

@@ -60,7 +60,7 @@
 #endif
 #include "FE/Constraints/SmallCutAggregationConstraint.h"
 #include "FE/Dofs/EntityDofMap.h"
-#include "FE/Systems/FunctionalRecords.h"
+#include "Physics/Formulations/NavierStokes/FreeSurface/FunctionalRecords.h"
 
 namespace {
 // Every small-cut aggregation prolongation report requested in this test
@@ -3299,7 +3299,7 @@ TEST(NavierStokesLegacyBCs,
         system, active_wall_marker));
 
     const auto declarations =
-        svmp::FE::systems::functionalRecords(system).functionalDeclarations();
+        svmp::Physics::formulations::navier_stokes::free_surface::functionalRecords(system).functionalDeclarations();
     ASSERT_EQ(declarations.size(), 1u);
     ASSERT_EQ(
         declarations.front().parameters.dynamic_contact_coefficients.size(),

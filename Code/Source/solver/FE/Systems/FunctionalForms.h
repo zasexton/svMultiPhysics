@@ -44,6 +44,8 @@
 
 namespace svmp {
 namespace FE {
+namespace interfaces { class LevelSetGeometrySnapshot; }
+namespace geometry { enum class CutIntegrationSide : std::uint8_t; }
 namespace systems {
 
 class FESystem;
@@ -206,6 +208,34 @@ void declareWallFunctionalForm(FESystem& system, WallFunctionalFormDeclaration d
                                                  int wall,
                                                  std::span<const forms::ContactLineDomain> contact_lines,
                                                  std::span<const forms::BoundaryDomain> wetted_parts);
+
+/// One declared wall functional of one wall as a measured 0-form.
+struct DeclaredWallFunctionalForm {
+    int wall{-1};
+    std::string quantity{};
+    std::string name{};   ///< "<prefix>wall.<wall>.<quantity>"
+    forms::FormExpr form{};
+};
+
+/**
+ * @brief The declared wall functionals of one interface on a snapshot.
+ *
+ * The wall functionals declared on @p system (Systems/FunctionalForms.h)
+ * under @p prefix whose quantity is one of @p quantities, as measured
+ * 0-forms of each wall of @p walls over its domains in @p snapshot: the
+ * interface's contact lines with the wall and the wall's parts on
+ * @p active_side.  Named "<prefix>wall.<b>.<quantity>", by wall in the order
+ * of @p walls and then in declaration order; a wall without an integrand or
+ * without a domain of that kind has none.  Not collective: the snapshot
+ * lists the same wall domains on every rank.
+ */
+[[nodiscard]] std::vector<DeclaredWallFunctionalForm> declaredWallFunctionalForms(
+    const FESystem& system,
+    std::string_view prefix,
+    const interfaces::LevelSetGeometrySnapshot& snapshot,
+    std::span<const int> walls,
+    geometry::CutIntegrationSide active_side,
+    std::span<const std::string_view> quantities);
 
 } // namespace systems
 } // namespace FE

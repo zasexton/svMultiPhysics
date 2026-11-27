@@ -308,8 +308,7 @@ void logLevelSetMaintenancePhysicalEndpointChannels(
 }
 
 FreeSurfaceAcceptedEnergyGroup summarizeAcceptedFreeSurfaceEnergyGroup(
-    std::span<const svmp::FE::systems::
-                  FreeSurfaceDiscreteFunctionalHistoryRecord> records)
+    std::span<const svmp::Physics::formulations::navier_stokes::free_surface::FreeSurfaceDiscreteFunctionalHistoryRecord> records)
 {
   if (records.empty()) {
     throw std::invalid_argument(
@@ -516,11 +515,9 @@ buildFixedTopologyOnePhaseEnergyCandidate(
     const FreeSurfaceAcceptedEnergyGroup& after,
     std::uint64_t residual_work_state_revision,
     const FreeSurfaceResidualWorkChannels& residual_work,
-    std::span<const svmp::FE::systems::
-                  FreeSurfaceResidualWorkDeclaration>
+    std::span<const svmp::Physics::formulations::navier_stokes::free_surface::FreeSurfaceResidualWorkDeclaration>
         residual_declarations,
-    const std::optional<svmp::FE::systems::
-              FreeSurfaceExternalBoundaryEnergyDeclaration>&
+    const std::optional<svmp::Physics::formulations::navier_stokes::free_surface::FreeSurfaceExternalBoundaryEnergyDeclaration>&
         boundary_energy,
     bool numerical_maintenance_absent,
     bool aggregation_present,
@@ -600,14 +597,12 @@ buildFixedTopologyOnePhaseEnergyCandidate(
   if (boundary_energy.has_value()) {
     require(
         boundary_energy->imposed_traction ==
-            svmp::FE::systems::
-                FreeSurfaceExternalBoundaryEnergyApplicability::
+            svmp::Physics::formulations::navier_stokes::free_surface::FreeSurfaceExternalBoundaryEnergyApplicability::
                     NotApplicable,
         "imposed_traction_work_producer");
     require(
         boundary_energy->open_boundary_flux ==
-            svmp::FE::systems::
-                FreeSurfaceExternalBoundaryEnergyApplicability::
+            svmp::Physics::formulations::navier_stokes::free_surface::FreeSurfaceExternalBoundaryEnergyApplicability::
                     NotApplicable,
         "open_boundary_energy_flux_producer");
     require(boundary_energy->homogeneous_velocity_data,
@@ -649,24 +644,23 @@ buildFixedTopologyOnePhaseEnergyCandidate(
         });
   };
   for (const auto channel : {
-           svmp::FE::systems::FreeSurfaceResidualWorkChannel::
+           svmp::Physics::formulations::navier_stokes::free_surface::FreeSurfaceResidualWorkChannel::
                Convection,
-           svmp::FE::systems::FreeSurfaceResidualWorkChannel::
+           svmp::Physics::formulations::navier_stokes::free_surface::FreeSurfaceResidualWorkChannel::
                PressureContinuity,
-           svmp::FE::systems::FreeSurfaceResidualWorkChannel::
+           svmp::Physics::formulations::navier_stokes::free_surface::FreeSurfaceResidualWorkChannel::
                NonconservativeBodyForce,
-           svmp::FE::systems::FreeSurfaceResidualWorkChannel::
+           svmp::Physics::formulations::navier_stokes::free_surface::FreeSurfaceResidualWorkChannel::
                WeakBoundary,
-           svmp::FE::systems::FreeSurfaceResidualWorkChannel::
+           svmp::Physics::formulations::navier_stokes::free_surface::FreeSurfaceResidualWorkChannel::
                VmsPspg,
-           svmp::FE::systems::FreeSurfaceResidualWorkChannel::
+           svmp::Physics::formulations::navier_stokes::free_surface::FreeSurfaceResidualWorkChannel::
                CutStabilization,
-           svmp::FE::systems::FreeSurfaceResidualWorkChannel::
+           svmp::Physics::formulations::navier_stokes::free_surface::FreeSurfaceResidualWorkChannel::
                GhostPenalty}) {
     require(find_residual(channel) != residual_declarations.end(),
             std::string("residual_owner_") +
-                svmp::FE::systems::
-                    freeSurfaceResidualWorkChannelName(channel));
+                svmp::Physics::formulations::navier_stokes::free_surface::freeSurfaceResidualWorkChannelName(channel));
   }
   if (!result.missing_requirements.empty()) {
     std::sort(
@@ -701,8 +695,7 @@ buildFixedTopologyOnePhaseEnergyCandidate(
     const auto declaration = find_residual(channel);
     return source(
         declaration->applicability ==
-                svmp::FE::systems::
-                    FreeSurfaceResidualWorkApplicability::Produced
+                svmp::Physics::formulations::navier_stokes::free_surface::FreeSurfaceResidualWorkApplicability::Produced
             ? EnergyChannelApplicability::Produced
             : EnergyChannelApplicability::NotApplicable,
         declaration->owner_component);
@@ -843,7 +836,7 @@ buildFixedTopologyOnePhaseEnergyCandidate(
       "body_force",
       *residual_work.nonconservative_body_force,
       residual_source(
-          svmp::FE::systems::FreeSurfaceResidualWorkChannel::
+          svmp::Physics::formulations::navier_stokes::free_surface::FreeSurfaceResidualWorkChannel::
               NonconservativeBodyForce));
   set(ExternalWork,
       "imposed_traction",
@@ -870,12 +863,11 @@ buildFixedTopologyOnePhaseEnergyCandidate(
   set(NumericalWork,
       "convection",
       *residual_work.convection,
-      residual_source(svmp::FE::systems::
-                          FreeSurfaceResidualWorkChannel::Convection));
+      residual_source(svmp::Physics::formulations::navier_stokes::free_surface::FreeSurfaceResidualWorkChannel::Convection));
   set(NumericalWork,
       "pressure_continuity",
       *residual_work.pressure_continuity,
-      residual_source(svmp::FE::systems::FreeSurfaceResidualWorkChannel::
+      residual_source(svmp::Physics::formulations::navier_stokes::free_surface::FreeSurfaceResidualWorkChannel::
                           PressureContinuity));
   set(NumericalWork,
       "surface_transport_coupling",
@@ -884,22 +876,21 @@ buildFixedTopologyOnePhaseEnergyCandidate(
   set(NumericalWork,
       "weak_boundary",
       *residual_work.weak_boundary,
-      residual_source(svmp::FE::systems::FreeSurfaceResidualWorkChannel::
+      residual_source(svmp::Physics::formulations::navier_stokes::free_surface::FreeSurfaceResidualWorkChannel::
                           WeakBoundary));
   set(NumericalWork,
       "vms_pspg",
       *residual_work.vms_pspg,
-      residual_source(svmp::FE::systems::
-                          FreeSurfaceResidualWorkChannel::VmsPspg));
+      residual_source(svmp::Physics::formulations::navier_stokes::free_surface::FreeSurfaceResidualWorkChannel::VmsPspg));
   set(NumericalWork,
       "cut_stabilization",
       *residual_work.cut_stabilization,
-      residual_source(svmp::FE::systems::FreeSurfaceResidualWorkChannel::
+      residual_source(svmp::Physics::formulations::navier_stokes::free_surface::FreeSurfaceResidualWorkChannel::
                           CutStabilization));
   set(NumericalWork,
       "ghost_penalty",
       *residual_work.ghost_penalty,
-      residual_source(svmp::FE::systems::FreeSurfaceResidualWorkChannel::
+      residual_source(svmp::Physics::formulations::navier_stokes::free_surface::FreeSurfaceResidualWorkChannel::
                           GhostPenalty));
   set(NumericalWork,
       "aggregation",

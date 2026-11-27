@@ -37,7 +37,7 @@
 #include "FE/Systems/FormsInstaller.h"
 #include "FE/Systems/FormulationBuilder.h"
 #include "FE/Systems/FunctionalForms.h"
-#include "FE/Systems/FunctionalRecords.h"
+#include "Physics/Formulations/NavierStokes/FreeSurface/FunctionalRecords.h"
 
 #include <algorithm>
 #include <array>
@@ -142,13 +142,13 @@ inline void validateFreeSurfaceDiscreteFunctionalPreflight(
     if (!has_pending_declaration) {
         return;
     }
-    if (!svmp::FE::systems::functionalRecords(system).acceptedFunctionalHistory().empty()) {
+    if (!svmp::Physics::formulations::navier_stokes::free_surface::functionalRecords(system).acceptedFunctionalHistory().empty()) {
         throw std::invalid_argument(
             "IncompressibleNavierStokesVMSModule: free-surface discrete-functional declarations cannot be installed after accepted history has begun");
     }
 
     const auto existing =
-        svmp::FE::systems::functionalRecords(system).functionalDeclarations();
+        svmp::Physics::formulations::navier_stokes::free_surface::functionalRecords(system).functionalDeclarations();
     for (const auto& boundary : free_surfaces) {
         if (!shouldDeclareFreeSurfaceDiscreteFunctional(boundary)) {
             continue;
@@ -270,8 +270,8 @@ inline void declareFreeSurfaceDiscreteFunctionals(
                         .external_pressure = *external_pressure,
                     };
         }
-        svmp::FE::systems::functionalRecords(system).declareFunctional(
-            FE::systems::FreeSurfaceDiscreteFunctionalDeclaration{
+        svmp::Physics::formulations::navier_stokes::free_surface::functionalRecords(system).declareFunctional(
+            svmp::Physics::formulations::navier_stokes::free_surface::FreeSurfaceDiscreteFunctionalDeclaration{
                 .interface_marker = bc.interface_marker,
                 .level_set_field = identities[index].geometry.value().levelSetField(),
                 .velocity_field = velocity_field,
@@ -302,10 +302,10 @@ inline void declareFreeSurfaceDiscreteFunctionals(
                     external_pressure_power_parameters,
                 .endpoint_functional_power_enabled = true,
                 .capillary_balance_method =
-                    FE::systems::FreeSurfaceCapillaryBalanceMethod::
+                    svmp::Physics::formulations::navier_stokes::free_surface::FreeSurfaceCapillaryBalanceMethod::
                         DiscreteEnergyVolumeStationarity,
                 .capillary_balance_qualification =
-                    FE::systems::FreeSurfaceCapillaryBalanceQualification::
+                    svmp::Physics::formulations::navier_stokes::free_surface::FreeSurfaceCapillaryBalanceQualification::
                         PrerequisiteOnly,
                 .owner_component =
                     "IncompressibleNavierStokesVMSModule.FreeSurfaceBoundary",
@@ -347,24 +347,19 @@ inline void declareFreeSurfaceExternalBoundaryEnergy(
         options.pressure_outflow.empty() &&
         options.coupled_outflow_rcr.empty() &&
         options.coupled_outflow_rcrcr.empty();
-    svmp::FE::systems::functionalRecords(system).declareExternalBoundaryEnergy(
-        FE::systems::
-            FreeSurfaceExternalBoundaryEnergyDeclaration{
+    svmp::Physics::formulations::navier_stokes::free_surface::functionalRecords(system).declareExternalBoundaryEnergy(
+        svmp::Physics::formulations::navier_stokes::free_surface::FreeSurfaceExternalBoundaryEnergyDeclaration{
                 .imposed_traction =
                     imposed_traction_absent
-                        ? FE::systems::
-                              FreeSurfaceExternalBoundaryEnergyApplicability::
+                        ? svmp::Physics::formulations::navier_stokes::free_surface::FreeSurfaceExternalBoundaryEnergyApplicability::
                                   NotApplicable
-                        : FE::systems::
-                              FreeSurfaceExternalBoundaryEnergyApplicability::
+                        : svmp::Physics::formulations::navier_stokes::free_surface::FreeSurfaceExternalBoundaryEnergyApplicability::
                                   Unresolved,
                 .open_boundary_flux =
                     open_boundary_flux_absent
-                        ? FE::systems::
-                              FreeSurfaceExternalBoundaryEnergyApplicability::
+                        ? svmp::Physics::formulations::navier_stokes::free_surface::FreeSurfaceExternalBoundaryEnergyApplicability::
                                   NotApplicable
-                        : FE::systems::
-                              FreeSurfaceExternalBoundaryEnergyApplicability::
+                        : svmp::Physics::formulations::navier_stokes::free_surface::FreeSurfaceExternalBoundaryEnergyApplicability::
                                   Unresolved,
                 .homogeneous_velocity_data =
                     homogeneous_velocity_data,
@@ -426,18 +421,18 @@ inline void installResidualWork(FE::systems::FormulationBuilder& F,
                                 const FreeSurfaceResidualWorkApplicability& applicability)
 {
     namespace fs = FE::systems;
-    using Channel = fs::FreeSurfaceResidualWorkChannel;
+    using Channel = free_surface::FreeSurfaceResidualWorkChannel;
     using Suffix = FreeSurfaceResidualWorkOperatorSuffixes;
     using FE::forms::FormExpr;
     const auto declare = [&](Channel channel, fs::OperatorTag operator_tag) {
         const bool produced = !operator_tag.empty();
-        fs::functionalRecords(F.system()).declareWorkChannel(fs::FreeSurfaceResidualWorkDeclaration{
+        free_surface::functionalRecords(F.system()).declareWorkChannel(free_surface::FreeSurfaceResidualWorkDeclaration{
             .channel = channel,
-            .applicability = produced ? fs::FreeSurfaceResidualWorkApplicability::Produced
-                                      : fs::FreeSurfaceResidualWorkApplicability::NotApplicable,
+            .applicability = produced ? free_surface::FreeSurfaceResidualWorkApplicability::Produced
+                                      : free_surface::FreeSurfaceResidualWorkApplicability::NotApplicable,
             .operator_tag = std::move(operator_tag),
             .owner_component = "IncompressibleNavierStokesVMSModule." +
-                               std::string(fs::freeSurfaceResidualWorkChannelName(channel)),
+                               std::string(free_surface::freeSurfaceResidualWorkChannelName(channel)),
         });
     };
     const auto produce = [&](Channel channel, std::string_view suffix, const FormExpr& momentum,
@@ -935,7 +930,7 @@ struct FreeSurfaceEnergyStatement {
 /// record declaration of declareFreeSurfaceDiscreteFunctionals), with the
 /// velocity space of its velocity field.
 [[nodiscard]] inline FreeSurfaceEnergyStatement freeSurfaceEnergyStatement(
-    const FE::systems::FreeSurfaceDiscreteFunctionalDeclaration& declaration,
+    const svmp::Physics::formulations::navier_stokes::free_surface::FreeSurfaceDiscreteFunctionalDeclaration& declaration,
     const FE::spaces::FunctionSpace& velocity_space,
     int dimension)
 {
@@ -1080,8 +1075,8 @@ inline void declareFreeSurfaceEnergyFunctionals(FE::systems::FormulationBuilder&
                                                 int dimension)
 {
     const auto records =
-        FE::systems::functionalRecords(std::as_const(F.system())).functionalDeclarations();
-    std::vector<const FE::systems::FreeSurfaceDiscreteFunctionalDeclaration*> selected;
+        svmp::Physics::formulations::navier_stokes::free_surface::functionalRecords(std::as_const(F.system())).functionalDeclarations();
+    std::vector<const svmp::Physics::formulations::navier_stokes::free_surface::FreeSurfaceDiscreteFunctionalDeclaration*> selected;
     for (const auto& bc : free_surfaces) {
         if (!shouldDeclareFreeSurfaceDiscreteFunctional(bc)) {
             continue;

@@ -13,9 +13,9 @@
 #include "FE/LevelSet/Maintenance/LevelSetMaintenanceRequestSchedule.h"
 #include "FE/Systems/SystemCollectives.h"
 #include "FE/Systems/SystemState.h"
-#include "FE/TimeStepping/OperatorStageCapture.h"
+#include "Physics/Formulations/NavierStokes/FreeSurface/ContactOperatorStageCapture.h"
 #include "FE/TimeStepping/StepController.h"
-#include "FE/Systems/FunctionalRecords.h"
+#include "Physics/Formulations/NavierStokes/FreeSurface/FunctionalRecords.h"
 
 #include <algorithm>
 #include <array>
@@ -37,7 +37,7 @@ using svmp::FE::logRecord;
 
 using svmp::FE::rank_log::oopCout;
 using svmp::FE::systems::captureFeOrderedVectorCollectively;
-using svmp::FE::timestepping::dynamicContactStageMeshRevisionMatches;
+using svmp::Physics::formulations::navier_stokes::free_surface::dynamicContactStageMeshRevisionMatches;
 using svmp::FE::systems::collectiveAnyTrue;
 using svmp::FE::systems::collectiveMaxDouble;
 using svmp::FE::systems::collectiveMinDouble;
@@ -116,11 +116,11 @@ void keepConsolePrecision()
 EnergyParticipant::EnergyParticipant(const svmp::FE::timestepping::StepContext& context)
     : svmp::FE::timestepping::StepContext(context),
       free_surface_boundary_energy_declaration(
-          svmp::FE::systems::functionalRecords(*context.sim.fe_system)
+          svmp::Physics::formulations::navier_stokes::free_surface::functionalRecords(*context.sim.fe_system)
               .externalBoundaryEnergyDeclaration())
 {
   free_surface_declarations =
-      svmp::FE::systems::functionalRecords(*sim.fe_system).functionalDeclarations();
+      svmp::Physics::formulations::navier_stokes::free_surface::functionalRecords(*sim.fe_system).functionalDeclarations();
   free_surface_acceptance_coverage =
       requireCommunicatorConsistentAcceptedFunctionalCoverage(
           free_surface_declarations,
@@ -130,7 +130,7 @@ EnergyParticipant::EnergyParticipant(const svmp::FE::timestepping::StepContext& 
   has_dynamic_contact_stage =
       free_surface_acceptance_coverage.has_dynamic_contact;
   free_surface_residual_work_declarations =
-      svmp::FE::systems::functionalRecords(*sim.fe_system).workChannelDeclarations();
+      svmp::Physics::formulations::navier_stokes::free_surface::functionalRecords(*sim.fe_system).workChannelDeclarations();
   const auto [minimum_residual_work_declaration_count,
               maximum_residual_work_declaration_count] =
       collectiveMinMaxUint64(
@@ -322,8 +322,7 @@ void EnergyParticipant::onCandidateStage(
        free_surface_residual_work_declarations) {
     const bool produced =
         declaration.applicability ==
-        svmp::FE::systems::
-            FreeSurfaceResidualWorkApplicability::Produced;
+        svmp::Physics::formulations::navier_stokes::free_surface::FreeSurfaceResidualWorkApplicability::Produced;
     double residual_state_pairing = 0.0;
     if (produced) {
       std::exception_ptr local_assembly_failure;
@@ -405,8 +404,7 @@ void EnergyParticipant::onCandidateStage(
     }
     pairings.push_back(
         svmp::FE::systems::ResidualWorkPairing{
-                .channel = svmp::FE::systems::
-                    freeSurfaceResidualWorkChannelName(
+                .channel = svmp::Physics::formulations::navier_stokes::free_surface::freeSurfaceResidualWorkChannelName(
                         declaration.channel),
                 .produced = produced,
                 .owner_component =
@@ -633,7 +631,7 @@ void EnergyParticipant::requireAcceptedResidualWorkStage(
 
 void EnergyParticipant::bindAcceptedEndpoint(
     svmp::FE::timestepping::TimeHistory& h,
-    svmp::FE::level_set::ContactStageParticipant& contact_stage)
+    svmp::Physics::formulations::navier_stokes::free_surface::ContactStageParticipant& contact_stage)
 {
   if (has_free_surface_functional) {
     const auto endpoint_solution =
@@ -695,7 +693,7 @@ void EnergyParticipant::recordAcceptedStepMaintenanceAccount(
           account);
       if (account.post_transport.has_value()) {
         const auto history =
-            svmp::FE::systems::functionalRecords(*sim.fe_system)
+            svmp::Physics::formulations::navier_stokes::free_surface::functionalRecords(*sim.fe_system)
                 .acceptedFunctionalHistory();
         const auto declaration_count =
             free_surface_declarations.size();
@@ -903,7 +901,7 @@ void EnergyParticipant::recordAcceptedStepMaintenanceAccount(
 
 void EnergyParticipant::publishAcceptedEnergy(
     svmp::FE::timestepping::TimeHistory& h,
-    std::span<const svmp::FE::systems::FreeSurfaceAcceptedContactStageState>
+    std::span<const svmp::Physics::formulations::navier_stokes::free_surface::FreeSurfaceAcceptedContactStageState>
         pending_contact_stages)
 {
   bool accepted_complete_energy_record_connected = false;
@@ -1227,7 +1225,7 @@ void EnergyParticipant::publishAcceptedEnergy(
     FreeSurfaceAggregationEnergyClassification
         aggregation_energy;
     const auto functional_history =
-        svmp::FE::systems::functionalRecords(*sim.fe_system).acceptedFunctionalHistory();
+        svmp::Physics::formulations::navier_stokes::free_surface::functionalRecords(*sim.fe_system).acceptedFunctionalHistory();
     const auto declaration_count =
         free_surface_declarations.size();
     const bool functional_history_aligned =
@@ -1520,7 +1518,7 @@ void EnergyParticipant::recordRejectedAttempt(
   if (complete_free_surface_energy_connector_available &&
       free_surface_energy_history_contiguous) {
     const auto functional_history =
-        svmp::FE::systems::functionalRecords(*sim.fe_system).acceptedFunctionalHistory();
+        svmp::Physics::formulations::navier_stokes::free_surface::functionalRecords(*sim.fe_system).acceptedFunctionalHistory();
     const auto declaration_count =
         free_surface_declarations.size();
     if (h.stepIndex() < 0 || declaration_count == 0u ||

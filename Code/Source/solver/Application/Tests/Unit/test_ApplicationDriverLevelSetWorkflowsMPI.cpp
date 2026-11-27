@@ -64,7 +64,7 @@
 #include <utility>
 #include <vector>
 #include "FE/Constraints/SmallCutAggregationConstraint.h"
-#include "FE/Systems/FunctionalRecords.h"
+#include "Physics/Formulations/NavierStokes/FreeSurface/FunctionalRecords.h"
 #include "../Support/DeclaredFreeSurfaceFunctionals.h"
 
 // The known set of the level-set velocity extension is an FE service
@@ -1761,7 +1761,7 @@ TEST(ApplicationDriverLevelSetWorkflowsMPI,
   functional_parameters.surface_tension = 1.0;
   application_test::declared_free_surface_functionals::declareFreeSurfaceFunctionalWithForms(
       *system,
-      svmp::FE::systems::FreeSurfaceDiscreteFunctionalDeclaration{
+      svmp::Physics::formulations::navier_stokes::free_surface::FreeSurfaceDiscreteFunctionalDeclaration{
           .interface_marker = interface_marker,
           .level_set_field = phi,
           .velocity_field = velocity,
@@ -1781,12 +1781,10 @@ TEST(ApplicationDriverLevelSetWorkflowsMPI,
                   },
           .static_conservative_body_force_complete = true,
           .capillary_balance_method =
-              svmp::FE::systems::
-                  FreeSurfaceCapillaryBalanceMethod::
+              svmp::Physics::formulations::navier_stokes::free_surface::FreeSurfaceCapillaryBalanceMethod::
                       DiscreteEnergyVolumeStationarity,
           .capillary_balance_qualification =
-              svmp::FE::systems::
-                  FreeSurfaceCapillaryBalanceQualification::
+              svmp::Physics::formulations::navier_stokes::free_surface::FreeSurfaceCapillaryBalanceQualification::
                       PrerequisiteOnly,
           .owner_component =
               "ApplicationDriverLevelSetWorkflowsMPI.StaticCapillaryPublication",
@@ -4845,7 +4843,7 @@ TEST(ApplicationDriverLevelSetWorkflowsMPI,
   }
   application_test::declared_free_surface_functionals::declareFreeSurfaceFunctionalWithForms(
       *system,
-      svmp::FE::systems::FreeSurfaceDiscreteFunctionalDeclaration{
+      svmp::Physics::formulations::navier_stokes::free_surface::FreeSurfaceDiscreteFunctionalDeclaration{
           .interface_marker = 721,
           .level_set_field = phi,
           .velocity_field = velocity,
@@ -5309,7 +5307,7 @@ TEST(ApplicationDriverLevelSetWorkflowsMPI,
           activeFESystemCommunicator(*sim.fe_system));
   auto contact_stages = evaluateAcceptedFreeSurfaceContactStages(
       *sim.fe_system,
-      svmp::FE::systems::functionalRecords(*sim.fe_system).functionalDeclarations(),
+      svmp::Physics::formulations::navier_stokes::free_surface::functionalRecords(*sim.fe_system).functionalDeclarations(),
       svmp::FE::Real{0.10},
       svmp::FE::Real{1.0},
       previous_state_revision,
@@ -5319,7 +5317,7 @@ TEST(ApplicationDriverLevelSetWorkflowsMPI,
   const auto contact_stage_constraints =
       captureAcceptedContactStageWallConstraints(
           *sim.fe_system,
-          svmp::FE::systems::functionalRecords(*sim.fe_system).functionalDeclarations(),
+          svmp::Physics::formulations::navier_stokes::free_surface::functionalRecords(*sim.fe_system).functionalDeclarations(),
           contact_stages);
   application::core::ResolvedLevelSetMaintenanceCompatibilityConfiguration contact_protection_request_configuration;
   contact_protection_request_configuration.transport.conservative_phase.phase_indicator.field_name =
@@ -5425,7 +5423,7 @@ TEST(ApplicationDriverLevelSetWorkflowsMPI,
       accepted_state_revision,
       contact_stages));
   const auto functional_history =
-      svmp::FE::systems::functionalRecords(*sim.fe_system).acceptedFunctionalHistory();
+      svmp::Physics::formulations::navier_stokes::free_surface::functionalRecords(*sim.fe_system).acceptedFunctionalHistory();
   ASSERT_EQ(functional_history.size(), 1u);
   const auto& functional_record = functional_history.front();
   EXPECT_EQ(functional_record.accepted_step, 2u);
@@ -6536,7 +6534,7 @@ TEST(ApplicationDriverLevelSetWorkflowsMPI,
     GTEST_SKIP() << "This collective provenance fixture requires two ranks.";
   }
 
-  svmp::FE::systems::FreeSurfaceDiscreteFunctionalDeclaration
+  svmp::Physics::formulations::navier_stokes::free_surface::FreeSurfaceDiscreteFunctionalDeclaration
       inconsistent_declaration;
   if (rank == 0) {
     inconsistent_declaration.parameters.dynamic_contact_coefficients
@@ -6545,7 +6543,7 @@ TEST(ApplicationDriverLevelSetWorkflowsMPI,
                 FreeSurfaceDynamicContactCoefficient{});
   }
   const std::array<
-      svmp::FE::systems::FreeSurfaceDiscreteFunctionalDeclaration,
+      svmp::Physics::formulations::navier_stokes::free_surface::FreeSurfaceDiscreteFunctionalDeclaration,
       1u>
       inconsistent_declarations{{inconsistent_declaration}};
   bool local_declaration_mismatch_rejected = false;
@@ -6566,19 +6564,19 @@ TEST(ApplicationDriverLevelSetWorkflowsMPI,
                 MPI_COMM_WORLD);
   EXPECT_EQ(communicator_declaration_rejection, 1);
 
-  svmp::FE::systems::FreeSurfaceDiscreteFunctionalDeclaration
+  svmp::Physics::formulations::navier_stokes::free_surface::FreeSurfaceDiscreteFunctionalDeclaration
       inconsistent_method_declaration;
   inconsistent_method_declaration.interface_marker = 701;
   if (rank == 0) {
     inconsistent_method_declaration.capillary_balance_method =
-        svmp::FE::systems::FreeSurfaceCapillaryBalanceMethod::
+        svmp::Physics::formulations::navier_stokes::free_surface::FreeSurfaceCapillaryBalanceMethod::
             DiscreteEnergyVolumeStationarity;
     inconsistent_method_declaration.capillary_balance_qualification =
-        svmp::FE::systems::FreeSurfaceCapillaryBalanceQualification::
+        svmp::Physics::formulations::navier_stokes::free_surface::FreeSurfaceCapillaryBalanceQualification::
             PrerequisiteOnly;
   }
   const std::array<
-      svmp::FE::systems::FreeSurfaceDiscreteFunctionalDeclaration,
+      svmp::Physics::formulations::navier_stokes::free_surface::FreeSurfaceDiscreteFunctionalDeclaration,
       1u>
       inconsistent_method_declarations{{
           inconsistent_method_declaration}};
@@ -6724,12 +6722,11 @@ TEST(ApplicationDriverLevelSetWorkflowsMPI,
                 MPI_COMM_WORLD);
   EXPECT_EQ(communicator_signed_zero_rejection, 1);
 
-  svmp::FE::systems::FreeSurfaceAcceptedContactStageState stage;
+  svmp::Physics::formulations::navier_stokes::free_surface::FreeSurfaceAcceptedContactStageState stage;
   stage.stage_time = svmp::FE::Real{0.075};
   stage.stage_alpha_f = svmp::FE::Real{0.5};
   stage.first_order_generalized_alpha =
-      svmp::FE::systems::
-          FreeSurfaceFirstOrderGeneralizedAlphaProvenance{
+      svmp::Physics::formulations::navier_stokes::free_surface::FreeSurfaceFirstOrderGeneralizedAlphaProvenance{
               .alpha_m = svmp::FE::Real{0.5},
               .alpha_f = svmp::FE::Real{0.5},
               .gamma = svmp::FE::Real{0.5},
@@ -6739,7 +6736,7 @@ TEST(ApplicationDriverLevelSetWorkflowsMPI,
   stage.endpoint_state_revision = 17u;
   stage.stage_state_revision = 19u;
   stage.geometry_revision.snapshot_revision_key = 23u;
-  std::vector<svmp::FE::systems::FreeSurfaceAcceptedContactStageState>
+  std::vector<svmp::Physics::formulations::navier_stokes::free_surface::FreeSurfaceAcceptedContactStageState>
       stages{stage};
   const auto endpoint_revision_before_rejected_bind =
       stages.front().endpoint_state_revision;
@@ -6788,8 +6785,7 @@ TEST(ApplicationDriverLevelSetWorkflowsMPI,
             generalizedAlphaFirstOrderFromRhoInf(0.2);
     rank_inconsistent_provenance_stages.front()
         .first_order_generalized_alpha =
-        svmp::FE::systems::
-            FreeSurfaceFirstOrderGeneralizedAlphaProvenance{
+        svmp::Physics::formulations::navier_stokes::free_surface::FreeSurfaceFirstOrderGeneralizedAlphaProvenance{
                 .alpha_m = rank_zero_parameters.alpha_m,
                 .alpha_f = rank_zero_parameters.alpha_f,
                 .gamma = rank_zero_parameters.gamma,

@@ -59,10 +59,8 @@ enum class LevelSetMaintenanceDeclaredStage : std::uint8_t {
  * @brief The functionals of one maintained interface at a maintenance
  *        endpoint, evaluated on the authoritative snapshot of that state.
  *
- * These are the snapshot functionals of FE/Interfaces
- * (LevelSetGeometrySnapshot) and of the accepted functional records of
- * FE/Systems (FreeSurfaceRecordTypes.h): the caller evaluates them and the
- * ledger checks their identities, records their change and sums them.
+ * The caller evaluates the declared functionals on the accepted geometry.
+ * The ledger checks their identities, records their changes and sums them.
  */
 struct LevelSetAuthoritativeFunctionalValue {
   int interface_marker{-1};

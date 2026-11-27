@@ -15,7 +15,7 @@
 #include "Physics/Options/FreeSurfaceProfiles.h"
 #include "Physics/Options/NavierStokesOptionSchema.h"
 #include "Physics/Options/NavierStokesRegistration.h"
-#include "FE/Systems/FunctionalRecords.h"
+#include "Physics/Formulations/NavierStokes/FreeSurface/FunctionalRecords.h"
 #include "Physics/Formulations/NavierStokes/TwoFluid/TwoFluidStageRecords.h"
 
 #include <algorithm>
@@ -842,8 +842,8 @@ TEST(EquationTranslatorFreeSurface,
   EXPECT_TRUE(system.meshTangentialBoundaryPolicies().empty());
   EXPECT_TRUE(system.meshTangentialBoundaryPolicyHistory().empty());
   EXPECT_TRUE(
-      svmp::FE::systems::functionalRecords(system).functionalDeclarations().empty());
-  EXPECT_TRUE(svmp::FE::systems::functionalRecords(system).acceptedFunctionalHistory().empty());
+      svmp::Physics::formulations::navier_stokes::free_surface::functionalRecords(system).functionalDeclarations().empty());
+  EXPECT_TRUE(svmp::Physics::formulations::navier_stokes::free_surface::functionalRecords(system).acceptedFunctionalHistory().empty());
 
   EXPECT_FALSE(system.hasGaugeRegistry());
   EXPECT_EQ(system.gaugeRegistryIfPresent(), nullptr);

@@ -5,15 +5,15 @@
  * See Copyright-SimVascular.txt for additional details.
  */
 
-#ifndef SVMP_FE_LEVELSET_ACCEPTED_FUNCTIONAL_RECORDER_H
-#define SVMP_FE_LEVELSET_ACCEPTED_FUNCTIONAL_RECORDER_H
+#ifndef SVMP_PHYSICS_FREE_SURFACE_ACCEPTED_FUNCTIONAL_RECORDER_H
+#define SVMP_PHYSICS_FREE_SURFACE_ACCEPTED_FUNCTIONAL_RECORDER_H
 
 /**
  * @file AcceptedFunctionalRecorder.h
  * @brief Evaluation and recording of the declared discrete functionals of
  *        an FE system on its authoritative level-set geometry snapshot.
  *
- * The declared functionals (FE/Systems/FunctionalRecords) are evaluated on
+ * The declared functionals (FunctionalRecords) are evaluated on
  * the snapshot of the system's cut-integration context at an accepted
  * endpoint: the stored functionals, endpoint powers, active-volume energies
  * and dissipation, exterior-pressure powers and backward-Euler kinetic
@@ -27,12 +27,12 @@
  * active communicator and must be called on every rank in the same order.
  */
 
-#include "Core/Types.h"
-#include "Forms/FormExpr.h"
-#include "LevelSet/Maintenance/LevelSetMaintenanceWorkLedger.h"
-#include "Systems/FESystem.h"
-#include "Systems/FESystemHandle.h"
-#include "Systems/FreeSurfaceRecordTypes.h"
+#include "FE/Core/Types.h"
+#include "FE/Forms/FormExpr.h"
+#include "FE/LevelSet/Maintenance/LevelSetMaintenanceWorkLedger.h"
+#include "FE/Systems/FESystem.h"
+#include "FE/Systems/FESystemHandle.h"
+#include "Physics/Formulations/NavierStokes/FreeSurface/FreeSurfaceRecordTypes.h"
 #include "Mesh/Core/MeshComm.h"
 
 #include <cstdint>
@@ -41,13 +41,11 @@
 #include <string_view>
 #include <vector>
 
-namespace svmp {
-namespace FE {
-namespace level_set {
+namespace svmp::Physics::formulations::navier_stokes::free_surface {
 
 /// A content key of one functional declaration (stable across ranks).
 std::uint64_t acceptedFunctionalDeclarationContentKey(
-    const systems::FreeSurfaceDiscreteFunctionalDeclaration&
+    const FreeSurfaceDiscreteFunctionalDeclaration&
         declaration) noexcept;
 
 /**
@@ -60,8 +58,8 @@ std::uint64_t acceptedFunctionalDeclarationContentKey(
  * the values are the declared functionals (evaluateDeclaredAcceptedFunctionals,
  * recordAcceptedFunctionals, levelSetMaintenanceFunctionalValues).
  */
-std::vector<systems::AcceptedFreeSurfaceDiscreteFunctionalState>
-currentAcceptedFunctionalLayouts(const systems::FESystemHandle& sim);
+std::vector<AcceptedFreeSurfaceDiscreteFunctionalState>
+currentAcceptedFunctionalLayouts(const FE::systems::FESystemHandle& sim);
 
 /**
  * @brief The accepted-functional states of the current geometry with the
@@ -73,10 +71,10 @@ currentAcceptedFunctionalLayouts(const systems::FESystemHandle& sim);
  * formulation declares, with the exact reduction.  Throws when a recorded
  * quantity has no declared functional.
  */
-std::vector<systems::AcceptedFreeSurfaceDiscreteFunctionalState>
+std::vector<AcceptedFreeSurfaceDiscreteFunctionalState>
 evaluateDeclaredAcceptedFunctionals(
-    const systems::FESystemHandle& sim,
-    std::span<const Real> solution);
+    const FE::systems::FESystemHandle& sim,
+    std::span<const FE::Real> solution);
 
 /**
  * @brief One free-surface functional of an interface as a measured 0-form
@@ -93,8 +91,8 @@ evaluateDeclaredAcceptedFunctionals(
  * snapshot has no wall domain).  Empty when the quantity is not declared.
  * Not collective; every rank states the same form.
  */
-std::optional<forms::FormExpr> freeSurfaceFunctionalForm(
-    const systems::FESystemHandle& sim,
+std::optional<FE::forms::FormExpr> freeSurfaceFunctionalForm(
+    const FE::systems::FESystemHandle& sim,
     int interface_marker,
     std::string_view quantity);
 
@@ -108,27 +106,27 @@ std::optional<forms::FormExpr> freeSurfaceFunctionalForm(
  * count.  Empty on every rank when a quantity is not declared on some rank.
  * An empty @p solution suffices for forms that read no field.
  */
-std::optional<std::vector<Real>> evaluateDeclaredFreeSurfaceFunctionals(
-    const systems::FESystemHandle& sim,
+std::optional<std::vector<FE::Real>> evaluateDeclaredFreeSurfaceFunctionals(
+    const FE::systems::FESystemHandle& sim,
     int interface_marker,
     std::span<const std::vector<std::string_view>> sums,
-    std::span<const Real> solution);
+    std::span<const FE::Real> solution);
 
 /// A communicator-consistent revision of one field's values.
 std::uint64_t collectiveFieldRevision(
-    const systems::FESystem& system,
-    FieldId field,
-    std::span<const Real> solution,
+    const FE::systems::FESystem& system,
+    FE::FieldId field,
+    std::span<const FE::Real> solution,
     const svmp::MeshComm& comm,
     std::string_view diagnostic_context);
 
 /// The functional values that the level-set maintenance ledger reads.
-std::vector<LevelSetAuthoritativeFunctionalValue>
+std::vector<FE::level_set::LevelSetAuthoritativeFunctionalValue>
 levelSetMaintenanceFunctionalValues(
-    const systems::FESystemHandle& sim,
-    std::span<const systems::AcceptedFreeSurfaceDiscreteFunctionalState>
+    const FE::systems::FESystemHandle& sim,
+    std::span<const AcceptedFreeSurfaceDiscreteFunctionalState>
         states,
-    std::span<const Real> solution);
+    std::span<const FE::Real> solution);
 
 /// Which accepted functionals the declarations require on every rank.
 struct AcceptedFunctionalCoverage {
@@ -139,7 +137,7 @@ struct AcceptedFunctionalCoverage {
 /// The coverage of @p declarations, required equal on every rank.
 AcceptedFunctionalCoverage
 requireCommunicatorConsistentAcceptedFunctionalCoverage(
-    std::span<const systems::FreeSurfaceDiscreteFunctionalDeclaration>
+    std::span<const FreeSurfaceDiscreteFunctionalDeclaration>
         declarations,
     const svmp::MeshComm& comm);
 
@@ -149,18 +147,18 @@ requireCommunicatorConsistentAcceptedFunctionalCoverage(
  *
  * @return the recorded states, in declaration order
  */
-std::vector<systems::AcceptedFreeSurfaceDiscreteFunctionalState>
+std::vector<AcceptedFreeSurfaceDiscreteFunctionalState>
 recordAcceptedFunctionals(
-    const systems::FESystemHandle& sim,
+    const FE::systems::FESystemHandle& sim,
     std::uint64_t accepted_step,
-    Real accepted_time,
-    Real dt,
+    FE::Real accepted_time,
+    FE::Real dt,
     std::uint64_t pre_maintenance_endpoint_state_revision,
     std::uint64_t state_revision,
-    std::span<const systems::FreeSurfaceAcceptedContactStageState>
+    std::span<const FreeSurfaceAcceptedContactStageState>
         contact_stages = {},
-    std::span<const Real> accepted_solution = {},
-    std::span<const Real> backward_euler_previous_solution = {},
+    std::span<const FE::Real> accepted_solution = {},
+    std::span<const FE::Real> backward_euler_previous_solution = {},
     std::optional<std::uint64_t> accepted_extension_map_revision =
         std::nullopt,
     bool* backward_euler_kinetic_work_bound = nullptr);
@@ -171,16 +169,14 @@ recordAcceptedFunctionals(
  *        (Interfaces/ContactLineStageObservables).
  */
 void recordInitialAcceptedFunctionalBaseline(
-    const systems::FESystemHandle& sim,
+    const FE::systems::FESystemHandle& sim,
     std::uint64_t initial_step,
-    Real initial_time,
-    std::span<const Real> initial_solution,
+    FE::Real initial_time,
+    std::span<const FE::Real> initial_solution,
     bool record_backward_euler_kinetic_baseline = false,
     std::optional<std::uint64_t> initial_extension_map_revision =
         std::nullopt);
 
-} // namespace level_set
-} // namespace FE
-} // namespace svmp
+} // namespace svmp::Physics::formulations::navier_stokes::free_surface
 
-#endif // SVMP_FE_LEVELSET_ACCEPTED_FUNCTIONAL_RECORDER_H
+#endif // SVMP_PHYSICS_FREE_SURFACE_ACCEPTED_FUNCTIONAL_RECORDER_H

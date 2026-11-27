@@ -5,8 +5,8 @@
  * See Copyright-SimVascular.txt for additional details.
  */
 
-#ifndef SVMP_FE_SYSTEMS_FUNCTIONAL_RECORDS_H
-#define SVMP_FE_SYSTEMS_FUNCTIONAL_RECORDS_H
+#ifndef SVMP_PHYSICS_FREE_SURFACE_FUNCTIONAL_RECORDS_H
+#define SVMP_PHYSICS_FREE_SURFACE_FUNCTIONAL_RECORDS_H
 
 /**
  * @file FunctionalRecords.h
@@ -19,29 +19,27 @@
  * live as long as the system.  The declared functionals and their accepted
  * history are an AcceptedStageRecordStore; a formulation declares its
  * functionals, work channels and boundary-energy proof before setup, and
- * the accepted-functional recorder (FE/LevelSet/AcceptedFunctionalRecorder)
+ * the accepted-functional recorder (AcceptedFunctionalRecorder)
  * records one declaration-aligned group after each accepted step.  The
  * record data types are in FreeSurfaceRecordTypes.h.
  */
 
-#include "Assembly/Assembler.h"
-#include "Core/Types.h"
-#include "Systems/AcceptedStageRecords.h"
-#include "Systems/FESystem.h"
-#include "Systems/FreeSurfaceRecordTypes.h"
+#include "FE/Assembly/Assembler.h"
+#include "FE/Core/Types.h"
+#include "FE/Systems/AcceptedStageRecords.h"
+#include "FE/Systems/FESystem.h"
+#include "Physics/Formulations/NavierStokes/FreeSurface/FreeSurfaceRecordTypes.h"
 
 #include <cstdint>
 #include <optional>
 #include <span>
 #include <vector>
 
-namespace svmp {
-namespace FE {
-namespace systems {
+namespace svmp::Physics::formulations::navier_stokes::free_surface {
 
 /// The declared functionals and their accepted history.
 using FunctionalHistoryStore =
-    AcceptedStageRecordStore<FreeSurfaceDiscreteFunctionalDeclaration,
+    FE::systems::AcceptedStageRecordStore<FreeSurfaceDiscreteFunctionalDeclaration,
                              FreeSurfaceDiscreteFunctionalHistoryRecord>;
 
 /// The functional records of one FE system (its attachment).
@@ -61,7 +59,7 @@ struct FunctionalRecordStore {
  */
 class FunctionalRecords {
 public:
-    explicit FunctionalRecords(FESystem& system);
+    explicit FunctionalRecords(FE::systems::FESystem& system);
 
     /// Declare one discrete functional (kept sorted by interface marker).
     void declareFunctional(FreeSurfaceDiscreteFunctionalDeclaration declaration);
@@ -91,8 +89,8 @@ public:
     /// Record one accepted, declaration-aligned functional group.
     void recordAcceptedFunctionals(
         std::uint64_t accepted_step,
-        Real accepted_time,
-        Real dt,
+        FE::Real accepted_time,
+        FE::Real dt,
         std::uint64_t pre_maintenance_endpoint_state_revision,
         std::uint64_t state_revision,
         std::span<const AcceptedFreeSurfaceDiscreteFunctionalState> states,
@@ -105,43 +103,43 @@ public:
 
 private:
     // The FE system state that the record code reads, under the names it had
-    // as FESystem members.
+    // as FE::systems::FESystem members.
     struct FieldRegistryAccess {
-        const FESystem* system;
-        [[nodiscard]] const FieldRecord& get(FieldId field) const
+        const FE::systems::FESystem* system;
+        [[nodiscard]] const FE::systems::FieldRecord& get(FE::FieldId field) const
         {
             return system->fieldRecord(field);
         }
-        [[nodiscard]] bool has(FieldId field) const noexcept
+        [[nodiscard]] bool has(FE::FieldId field) const noexcept
         {
             return system->hasField(field);
         }
     };
     struct MeshAccessPointer {
-        const FESystem* system;
+        const FE::systems::FESystem* system;
         explicit operator bool() const noexcept
         {
             return system->hasMeshAccess();
         }
-        const assembly::IMeshAccess* operator->() const
+        const FE::assembly::IMeshAccess* operator->() const
         {
             return &system->meshAccess();
         }
     };
 
     [[nodiscard]] bool isSetup() const noexcept { return system_->isSetup(); }
-    [[nodiscard]] bool hasOperator(const OperatorTag& op) const noexcept
+    [[nodiscard]] bool hasOperator(const FE::systems::OperatorTag& op) const noexcept
     {
         return system_->hasOperator(op);
     }
-    [[nodiscard]] bool fieldParticipatesInUnknownVector(FieldId field) const
+    [[nodiscard]] bool fieldParticipatesInUnknownVector(FE::FieldId field) const
     {
         return system_->fieldParticipatesInUnknownVector(field);
     }
     void invalidateSetup() noexcept { system_->invalidateSetup(); }
 
-    FESystem* system_;
-    AcceptedStageRecords<FunctionalHistoryStore> functionals_;
+    FE::systems::FESystem* system_;
+    FE::systems::AcceptedStageRecords<FunctionalHistoryStore> functionals_;
     std::vector<FreeSurfaceDiscreteFunctionalDeclaration>&
         functional_declarations_;
     std::vector<FreeSurfaceResidualWorkDeclaration>& work_channel_declarations_;
@@ -155,7 +153,7 @@ private:
 /// Read-only functional records of an FE system; empty without records.
 class ConstFunctionalRecords {
 public:
-    explicit ConstFunctionalRecords(const FESystem& system) noexcept;
+    explicit ConstFunctionalRecords(const FE::systems::FESystem& system) noexcept;
 
     [[nodiscard]] std::span<const FreeSurfaceDiscreteFunctionalDeclaration>
     functionalDeclarations() const noexcept;
@@ -172,11 +170,11 @@ private:
 };
 
 /// The functional records of @p system (created on first use).
-[[nodiscard]] FunctionalRecords functionalRecords(FESystem& system);
+[[nodiscard]] FunctionalRecords functionalRecords(FE::systems::FESystem& system);
 
 /// The functional records of @p system, read-only.
 [[nodiscard]] ConstFunctionalRecords functionalRecords(
-    const FESystem& system) noexcept;
+    const FE::systems::FESystem& system) noexcept;
 
 /// Accepted-stage contact-centroid kinematics from two consecutive history
 /// records (see FreeSurfaceAcceptedContactLineKinematics).
@@ -186,8 +184,6 @@ deriveAcceptedContactLineKinematics(
     std::uint64_t accepted_step,
     const FreeSurfaceAcceptedContactStageState& current);
 
-} // namespace systems
-} // namespace FE
-} // namespace svmp
+} // namespace svmp::Physics::formulations::navier_stokes::free_surface
 
-#endif // SVMP_FE_SYSTEMS_FUNCTIONAL_RECORDS_H
+#endif // SVMP_PHYSICS_FREE_SURFACE_FUNCTIONAL_RECORDS_H

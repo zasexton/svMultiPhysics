@@ -2746,8 +2746,7 @@ ConservativePhaseCandidateResult applyConservativePhaseCandidates(
     }
 
     if (contact_stage_builder) {
-      result.contact_stage =
-          contact_stage_builder(candidate, transaction.get());
+      contact_stage_builder(candidate, transaction.get());
     }
 
     for (std::size_t request_index = 0u;
@@ -2766,9 +2765,7 @@ ConservativePhaseCandidateResult applyConservativePhaseCandidates(
       const auto wall_contact_constraints = host.wall_contact_constraints(
           history,
           field,
-          static_cast<svmp::FE::Real>(history.time() + history.dt()),
-          result.contact_stage.stages,
-          result.contact_stage.constraints);
+          static_cast<svmp::FE::Real>(history.time() + history.dt()));
       auto& graph = requireCurrentConservativePhaseGraph(
           system, request, /*allow_graph_rebuild=*/false);
       contact_protected_nodes[request_index] =

@@ -12,7 +12,6 @@
 #include "Dofs/EntityDofMap.h"
 #include "Forms/FormExpr.h"
 #include "Forms/IntegrationDomain.h"
-#include "Interfaces/ContactLineStageObservables.h"
 #include "Interfaces/LevelSetGeometrySnapshot.h"
 #include "Spaces/H1Space.h"
 #include "Systems/FESystem.h"
@@ -273,7 +272,7 @@ TEST(FunctionalFormEvaluator, EvaluatesTheDeclaredFunctionalsOfASystemInOrder)
     ASSERT_EQ(snapshots.size(), 1u);
     const std::vector<int> walls{fixture::kWallMarker};
     const std::vector<std::string_view> quantities{"contact_u", "wetted_x"};
-    const auto declared_walls = svmp::FE::interfaces::declaredWallFunctionalForms(
+    const auto declared_walls = svmp::FE::systems::declaredWallFunctionalForms(
         sys, "t.", *snapshots.front(), walls, svmp::FE::geometry::CutIntegrationSide::Negative, quantities);
     ASSERT_EQ(declared_walls.size(), 2u);
     EXPECT_EQ(declared_walls[0].name, "t.wall." + std::to_string(fixture::kWallMarker) + ".contact_u");
@@ -285,7 +284,7 @@ TEST(FunctionalFormEvaluator, EvaluatesTheDeclaredFunctionalsOfASystemInOrder)
     EXPECT_NEAR(wall_values[1].value, Real{0.5} * kInterfaceX * kInterfaceX, Real{1.0e-12});
     // Another wall has no domain in the snapshot: no form.
     const std::vector<int> other_wall{fixture::kWallMarker + 1000};
-    EXPECT_TRUE(svmp::FE::interfaces::declaredWallFunctionalForms(
+    EXPECT_TRUE(svmp::FE::systems::declaredWallFunctionalForms(
                     sys, "t.", *snapshots.front(), other_wall, svmp::FE::geometry::CutIntegrationSide::Negative,
                     quantities)
                     .empty());

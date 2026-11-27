@@ -5,42 +5,31 @@
  * See Copyright-SimVascular.txt for additional details.
  */
 
-#include "LevelSet/LevelSetContactStageParticipant.h"
+#include "Physics/Formulations/NavierStokes/FreeSurface/ContactStageParticipant.h"
 
-#include "Interfaces/ContactLineStageObservables.h"
-#include "LevelSet/Maintenance/LevelSetMaintenanceRequestSchedule.h"
-#include "Systems/FESystem.h"
+#include "Physics/Formulations/NavierStokes/FreeSurface/ContactLineStageObservables.h"
+#include "FE/LevelSet/Maintenance/LevelSetMaintenanceRequestSchedule.h"
+#include "FE/Systems/FESystem.h"
 
 #include <exception>
 #include <stdexcept>
 #include <utility>
 
-namespace svmp {
-namespace FE {
-namespace level_set {
+namespace svmp::Physics::formulations::navier_stokes::free_surface {
+
+using namespace svmp::FE;
+using namespace svmp::FE::level_set;
+
 
 namespace {
 
-using svmp::FE::interfaces::bindAcceptedFreeSurfaceContactStagesToEndpointRevision;
 using svmp::FE::systems::collectiveMaxDouble;
 using svmp::FE::systems::collectiveMinDouble;
 using svmp::FE::systems::collectiveMinMaxUint64;
 using svmp::FE::systems::requireCollectivePhasePreparation;
-using svmp::FE::timestepping::DynamicContactFirstOrderGeneralizedAlphaObservation;
-using svmp::FE::timestepping::FreeSurfaceContactStageTemporalCoordinates;
-using svmp::FE::timestepping::captureDynamicContactOperatorStageState;
-using svmp::FE::timestepping::dynamicContactStageMeshRevisionMatches;
-using svmp::FE::timestepping::dynamicContactStageProvenanceMatches;
-using svmp::FE::timestepping::dynamicContactWallBoundaryFingerprint;
-using svmp::FE::timestepping::makeDynamicContactFirstOrderGeneralizedAlphaObservation;
-using svmp::FE::timestepping::requireDynamicContactOperatorStageObservationConsensus;
-using svmp::FE::timestepping::resolveFreeSurfaceContactStageTemporalCoordinates;
 
 } // namespace
 
-// Moved from Physics/Formulations/NavierStokes/FreeSurface/
-// FreeSurfaceContactStages.cpp and FreeSurfaceContactStageParticipant.cpp
-// with bodies, messages and collective order unchanged.
 
 void assertAcceptedFreeSurfaceContactStageEndpointUnchanged(
     std::uint64_t expected_endpoint_algebraic_revision,
@@ -63,7 +52,7 @@ void assertAcceptedFreeSurfaceContactStageEndpointUnchanged(
 ContactStageParticipant::ContactStageParticipant(
     const svmp::FE::timestepping::StepContext& context,
     bool has_dynamic_contact_stage,
-    std::span<const svmp::FE::systems::FreeSurfaceDiscreteFunctionalDeclaration>
+    std::span<const FreeSurfaceDiscreteFunctionalDeclaration>
         free_surface_declarations,
     svmp::FE::GlobalIndex fitted_ale_operator_stage_state_size)
     : svmp::FE::timestepping::StepContext(context),
@@ -300,6 +289,4 @@ void ContactStageParticipant::bindAcceptedStagesToEndpoint(
 
 #endif
 
-} // namespace level_set
-} // namespace FE
-} // namespace svmp
+} // namespace svmp::Physics::formulations::navier_stokes::free_surface

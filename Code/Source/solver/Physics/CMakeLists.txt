@@ -195,6 +195,8 @@ list(FILTER PHYSICS_FORMULATION_HEADERS EXCLUDE REGEX ".*/(Tests|Examples)/.*")
 list(FILTER PHYSICS_FORMULATION_SOURCES EXCLUDE REGEX ".*/(Tests|Examples)/.*")
 if(NOT FE_WITH_MESH)
     list(REMOVE_ITEM PHYSICS_FORMULATION_SOURCES
+        "${CMAKE_CURRENT_SOURCE_DIR}/Formulations/NavierStokes/FreeSurface/AcceptedFunctionalRecorder.cpp"
+        "${CMAKE_CURRENT_SOURCE_DIR}/Formulations/NavierStokes/FreeSurface/ContactStageParticipant.cpp"
         "${CMAKE_CURRENT_SOURCE_DIR}/Formulations/NavierStokes/FreeSurface/FreeSurfaceEnergyParticipant.cpp"
         "${CMAKE_CURRENT_SOURCE_DIR}/Formulations/NavierStokes/TwoFluid/TwoFluidAcceptedStage.cpp"
         "${CMAKE_CURRENT_SOURCE_DIR}/Formulations/NavierStokes/TwoFluid/TwoFluidStageParticipant.cpp")
@@ -298,6 +300,8 @@ if(PHYSICS_BUILD_TESTS)
         Tests/Unit/test_NavierStokesOutletFactory.cpp
         Tests/Unit/test_IncompressibleTwoFluidInterface.cpp
         Tests/Unit/test_TwoFluidStageRecords.cpp
+        Tests/Unit/test_FunctionalRecords.cpp
+        Tests/Unit/test_OperatorStageCapture.cpp
         Tests/Unit/test_MovingDomainPhysics.cpp
         Tests/Unit/test_FittedFreeSurfaceALE.cpp
         Tests/Unit/test_SharpBoundaryOperatorMPI.cpp
@@ -308,6 +312,9 @@ if(PHYSICS_BUILD_TESTS)
         Tests/Unit/test_VtpMeshSupport.cpp
         Tests/Unit/test_FSIInterfaceForms.cpp
     )
+    if(FE_WITH_MESH)
+        list(APPEND PHYSICS_TEST_SOURCES Tests/Unit/test_AcceptedFunctionalRecorder.cpp)
+    endif()
     if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/Tests/Unit/test_UstructModule.cpp")
         list(APPEND PHYSICS_TEST_SOURCES Tests/Unit/test_UstructModule.cpp)
     endif()

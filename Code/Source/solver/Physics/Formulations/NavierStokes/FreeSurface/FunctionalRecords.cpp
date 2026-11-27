@@ -5,13 +5,13 @@
  * See Copyright-SimVascular.txt for additional details.
  */
 
-#include "Systems/FunctionalRecords.h"
+#include "Physics/Formulations/NavierStokes/FreeSurface/FunctionalRecords.h"
 
-#include "Core/FEException.h"
-#include "Core/LogRecord.h"
-#include "Core/Logger.h"
-#include "Spaces/FunctionSpace.h"
-#include "Systems/FreeSurfaceFunctionalRounding.h"
+#include "FE/Core/FEException.h"
+#include "FE/Core/LogRecord.h"
+#include "FE/Core/Logger.h"
+#include "FE/Spaces/FunctionSpace.h"
+#include "FE/Systems/FreeSurfaceFunctionalRounding.h"
 
 #include <algorithm>
 #include <array>
@@ -23,9 +23,33 @@
 #include <string_view>
 #include <utility>
 
-namespace svmp {
-namespace FE {
-namespace systems {
+namespace svmp::Physics::formulations::navier_stokes::free_surface {
+
+using namespace svmp::FE;
+using namespace svmp::FE::systems;
+
+
+const char* freeSurfaceResidualWorkChannelName(
+    FreeSurfaceResidualWorkChannel channel) noexcept
+{
+    switch (channel) {
+    case FreeSurfaceResidualWorkChannel::Convection:
+        return "convection";
+    case FreeSurfaceResidualWorkChannel::PressureContinuity:
+        return "pressure_continuity";
+    case FreeSurfaceResidualWorkChannel::NonconservativeBodyForce:
+        return "nonconservative_body_force";
+    case FreeSurfaceResidualWorkChannel::WeakBoundary:
+        return "weak_boundary";
+    case FreeSurfaceResidualWorkChannel::VmsPspg:
+        return "vms_pspg";
+    case FreeSurfaceResidualWorkChannel::CutStabilization:
+        return "cut_stabilization";
+    case FreeSurfaceResidualWorkChannel::GhostPenalty:
+        return "ghost_penalty";
+    }
+    return "unknown";
+}
 
 namespace {
 
@@ -2768,6 +2792,4 @@ void FunctionalRecords::recordAcceptedFunctionals(
 }
 
 
-} // namespace systems
-} // namespace FE
-} // namespace svmp
+} // namespace svmp::Physics::formulations::navier_stokes::free_surface

@@ -65,7 +65,7 @@
 #include <variant>
 #include <vector>
 #include "FE/Constraints/SmallCutAggregationConstraint.h"
-#include "FE/Systems/FunctionalRecords.h"
+#include "Physics/Formulations/NavierStokes/FreeSurface/FunctionalRecords.h"
 
 using svmp::FE::systems::meshNormalConstraintStageMeasurements;
 
@@ -1536,7 +1536,7 @@ void expectInvalidPreinstalledContactGeometryRejectedBeforeMutation(
     const auto field_count = system.fieldMap().numFields();
     const auto formulation_count = system.formulationRecords().size();
     const auto functional_count =
-        svmp::FE::systems::functionalRecords(system).functionalDeclarations().size();
+        svmp::Physics::formulations::navier_stokes::free_surface::functionalRecords(system).functionalDeclarations().size();
     const auto policy_count =
         system.meshTangentialBoundaryPolicies().size();
     ASSERT_FALSE(
@@ -1561,7 +1561,7 @@ void expectInvalidPreinstalledContactGeometryRejectedBeforeMutation(
     EXPECT_EQ(system.findFieldByName("u"), FE::INVALID_FIELD_ID);
     EXPECT_EQ(system.findFieldByName("p"), FE::INVALID_FIELD_ID);
     EXPECT_EQ(system.formulationRecords().size(), formulation_count);
-    EXPECT_EQ(svmp::FE::systems::functionalRecords(system).functionalDeclarations().size(),
+    EXPECT_EQ(svmp::Physics::formulations::navier_stokes::free_surface::functionalRecords(system).functionalDeclarations().size(),
               functional_count);
     EXPECT_EQ(system.meshTangentialBoundaryPolicies().size(), policy_count);
     EXPECT_FALSE(
@@ -1640,7 +1640,7 @@ struct DynamicContactAngleAssembly {
     std::vector<FE::Real> conservative_balance_residual{};
     std::vector<FE::Real> pressure_representability_pair_jacobian{};
     std::vector<FE::Real> jacobian{};
-    std::vector<FE::systems::FreeSurfaceDiscreteFunctionalDeclaration>
+    std::vector<svmp::Physics::formulations::navier_stokes::free_surface::FreeSurfaceDiscreteFunctionalDeclaration>
         discrete_functional_declarations{};
 };
 
@@ -1769,8 +1769,8 @@ DynamicContactAngleAssembly assembleDynamicContactAngleCase(
         out.pressure_field = pressure;
         out.level_set_field = phi;
         out.discrete_functional_declarations.assign(
-            svmp::FE::systems::functionalRecords(system).functionalDeclarations().begin(),
-            svmp::FE::systems::functionalRecords(system).functionalDeclarations().end());
+            svmp::Physics::formulations::navier_stokes::free_surface::functionalRecords(system).functionalDeclarations().begin(),
+            svmp::Physics::formulations::navier_stokes::free_surface::functionalRecords(system).functionalDeclarations().end());
         return out;
     }
     const int contact_marker =
@@ -1837,8 +1837,8 @@ DynamicContactAngleAssembly assembleDynamicContactAngleCase(
     out.pressure_offset = system.fieldDofOffset(pressure);
     out.pressure_dofs = system.fieldDofHandler(pressure).getNumDofs();
     out.discrete_functional_declarations.assign(
-        svmp::FE::systems::functionalRecords(system).functionalDeclarations().begin(),
-        svmp::FE::systems::functionalRecords(system).functionalDeclarations().end());
+        svmp::Physics::formulations::navier_stokes::free_surface::functionalRecords(system).functionalDeclarations().begin(),
+        svmp::Physics::formulations::navier_stokes::free_surface::functionalRecords(system).functionalDeclarations().end());
     out.solution.assign(static_cast<std::size_t>(out.total_dofs), 0.0);
 
     const std::array<FE::Real, 3> scaled_level_set_gradient{
@@ -5203,7 +5203,7 @@ TEST(MovingDomainPhysics,
         .components = 3,
     });
 
-    FE::systems::FreeSurfaceDiscreteFunctionalDeclaration first;
+    svmp::Physics::formulations::navier_stokes::free_surface::FreeSurfaceDiscreteFunctionalDeclaration first;
     first.interface_marker = 191;
     first.level_set_field = phi_first;
     first.velocity_field = velocity;
@@ -5217,11 +5217,11 @@ TEST(MovingDomainPhysics,
     first.owner_component =
         "MovingDomainPhysics.FirstBulkOwnerFixture";
     ASSERT_NO_THROW(
-        svmp::FE::systems::functionalRecords(system).declareFunctional(std::move(first)));
+        svmp::Physics::formulations::navier_stokes::free_surface::functionalRecords(system).declareFunctional(std::move(first)));
     ASSERT_EQ(
-        svmp::FE::systems::functionalRecords(system).functionalDeclarations().size(), 1u);
+        svmp::Physics::formulations::navier_stokes::free_surface::functionalRecords(system).functionalDeclarations().size(), 1u);
 
-    FE::systems::FreeSurfaceDiscreteFunctionalDeclaration duplicate;
+    svmp::Physics::formulations::navier_stokes::free_surface::FreeSurfaceDiscreteFunctionalDeclaration duplicate;
     duplicate.interface_marker = 192;
     duplicate.level_set_field = phi_second;
     duplicate.velocity_field = velocity;
@@ -5235,7 +5235,7 @@ TEST(MovingDomainPhysics,
     duplicate.owner_component =
         "MovingDomainPhysics.SecondBulkOwnerFixture";
     try {
-        svmp::FE::systems::functionalRecords(system).declareFunctional(
+        svmp::Physics::formulations::navier_stokes::free_surface::functionalRecords(system).declareFunctional(
             std::move(duplicate));
         FAIL() << "Expected duplicate active-volume ownership to fail";
     } catch (const FE::InvalidArgumentException& error) {
@@ -5246,25 +5246,25 @@ TEST(MovingDomainPhysics,
             << error.what();
     }
     ASSERT_EQ(
-        svmp::FE::systems::functionalRecords(system).functionalDeclarations().size(), 1u);
+        svmp::Physics::formulations::navier_stokes::free_surface::functionalRecords(system).functionalDeclarations().size(), 1u);
     EXPECT_EQ(
-        svmp::FE::systems::functionalRecords(system).functionalDeclarations()
+        svmp::Physics::formulations::navier_stokes::free_surface::functionalRecords(system).functionalDeclarations()
             .front()
             .interface_marker,
         191);
 
-    FE::systems::FreeSurfaceDiscreteFunctionalDeclaration surface_only;
+    svmp::Physics::formulations::navier_stokes::free_surface::FreeSurfaceDiscreteFunctionalDeclaration surface_only;
     surface_only.interface_marker = 193;
     surface_only.level_set_field = phi_second;
     surface_only.geometry_domain_id = "surface_only_domain";
     surface_only.owner_component =
         "MovingDomainPhysics.SurfaceOnlyFixture";
-    ASSERT_NO_THROW(svmp::FE::systems::functionalRecords(system).declareFunctional(
+    ASSERT_NO_THROW(svmp::Physics::formulations::navier_stokes::free_surface::functionalRecords(system).declareFunctional(
         std::move(surface_only)));
     ASSERT_EQ(
-        svmp::FE::systems::functionalRecords(system).functionalDeclarations().size(), 2u);
+        svmp::Physics::formulations::navier_stokes::free_surface::functionalRecords(system).functionalDeclarations().size(), 2u);
     EXPECT_EQ(
-        svmp::FE::systems::functionalRecords(system).functionalDeclarations()[1]
+        svmp::Physics::formulations::navier_stokes::free_surface::functionalRecords(system).functionalDeclarations()[1]
             .interface_marker,
         193);
 }
@@ -5313,37 +5313,37 @@ TEST(MovingDomainPhysics,
             .boundary_marker = wall_marker,
             .equilibrium_contact_angle_radians = theta,
         });
-    const FE::systems::FreeSurfaceDiscreteFunctionalDeclaration declaration{
+    const svmp::Physics::formulations::navier_stokes::free_surface::FreeSurfaceDiscreteFunctionalDeclaration declaration{
         .interface_marker = interface_marker,
         .level_set_field = phi,
         .geometry_domain_id = "history_surface",
         .parameters = parameters,
         .capillary_balance_method =
-            FE::systems::FreeSurfaceCapillaryBalanceMethod::
+            svmp::Physics::formulations::navier_stokes::free_surface::FreeSurfaceCapillaryBalanceMethod::
                 DiscreteEnergyVolumeStationarity,
         .capillary_balance_qualification =
-            FE::systems::FreeSurfaceCapillaryBalanceQualification::
+            svmp::Physics::formulations::navier_stokes::free_surface::FreeSurfaceCapillaryBalanceQualification::
                 PrerequisiteOnly,
         .owner_component = "MovingDomainPhysics.FunctionalHistoryFixture",
     };
     auto mismatched_balance_declaration = declaration;
     mismatched_balance_declaration.capillary_balance_qualification =
-        FE::systems::FreeSurfaceCapillaryBalanceQualification::
+        svmp::Physics::formulations::navier_stokes::free_surface::FreeSurfaceCapillaryBalanceQualification::
             Unselected;
     EXPECT_THROW(
-        svmp::FE::systems::functionalRecords(system).declareFunctional(
+        svmp::Physics::formulations::navier_stokes::free_surface::functionalRecords(system).declareFunctional(
             std::move(mismatched_balance_declaration)),
         FE::InvalidArgumentException);
     auto premature_balance_declaration = declaration;
     premature_balance_declaration.capillary_balance_qualification =
-        FE::systems::FreeSurfaceCapillaryBalanceQualification::Qualified;
+        svmp::Physics::formulations::navier_stokes::free_surface::FreeSurfaceCapillaryBalanceQualification::Qualified;
     EXPECT_THROW(
-        svmp::FE::systems::functionalRecords(system).declareFunctional(
+        svmp::Physics::formulations::navier_stokes::free_surface::functionalRecords(system).declareFunctional(
             std::move(premature_balance_declaration)),
         FE::InvalidArgumentException);
     EXPECT_TRUE(
-        svmp::FE::systems::functionalRecords(system).functionalDeclarations().empty());
-    ASSERT_NO_THROW(svmp::FE::systems::functionalRecords(system).declareFunctional(declaration));
+        svmp::Physics::formulations::navier_stokes::free_surface::functionalRecords(system).functionalDeclarations().empty());
+    ASSERT_NO_THROW(svmp::Physics::formulations::navier_stokes::free_surface::functionalRecords(system).declareFunctional(declaration));
     ASSERT_NO_THROW(system.setup({}, makeSingleTetraSetupInputs()));
 
     constexpr FE::Real active_measure = FE::Real{0.25};
@@ -5390,23 +5390,23 @@ TEST(MovingDomainPhysics,
         .volume_constraint_potential = FE::Real{0.0},
         .total_potential = total_potential,
     };
-    std::vector<FE::systems::AcceptedFreeSurfaceDiscreteFunctionalState>
+    std::vector<svmp::Physics::formulations::navier_stokes::free_surface::AcceptedFreeSurfaceDiscreteFunctionalState>
         accepted_states{
-            FE::systems::AcceptedFreeSurfaceDiscreteFunctionalState{
+            svmp::Physics::formulations::navier_stokes::free_surface::AcceptedFreeSurfaceDiscreteFunctionalState{
                 .interface_marker = interface_marker,
                 .geometry_revision = geometry_revision,
                 .cut_topology_revision = 102u,
                 .state = functional_state,
             }};
 
-    ASSERT_NO_THROW(svmp::FE::systems::functionalRecords(system).recordAcceptedFunctionals(
+    ASSERT_NO_THROW(svmp::Physics::formulations::navier_stokes::free_surface::functionalRecords(system).recordAcceptedFunctionals(
         7u,
         FE::Real{0.35},
         FE::Real{0.05},
         13u,
         13u,
         accepted_states));
-    auto history = svmp::FE::systems::functionalRecords(system).acceptedFunctionalHistory();
+    auto history = svmp::Physics::formulations::navier_stokes::free_surface::functionalRecords(system).acceptedFunctionalHistory();
     ASSERT_EQ(history.size(), 1u);
     EXPECT_EQ(history.front().accepted_step, 7u);
     EXPECT_DOUBLE_EQ(history.front().accepted_time, FE::Real{0.35});
@@ -5421,23 +5421,23 @@ TEST(MovingDomainPhysics,
     EXPECT_DOUBLE_EQ(history.front().state.total_potential, total_potential);
     EXPECT_EQ(
         history.front().declaration.capillary_balance_method,
-        FE::systems::FreeSurfaceCapillaryBalanceMethod::
+        svmp::Physics::formulations::navier_stokes::free_surface::FreeSurfaceCapillaryBalanceMethod::
             DiscreteEnergyVolumeStationarity);
     EXPECT_EQ(
         history.front().declaration.capillary_balance_qualification,
-        FE::systems::FreeSurfaceCapillaryBalanceQualification::
+        svmp::Physics::formulations::navier_stokes::free_surface::FreeSurfaceCapillaryBalanceQualification::
             PrerequisiteOnly);
 
-    ASSERT_NO_THROW(svmp::FE::systems::functionalRecords(system).recordAcceptedFunctionals(
+    ASSERT_NO_THROW(svmp::Physics::formulations::navier_stokes::free_surface::functionalRecords(system).recordAcceptedFunctionals(
         7u,
         FE::Real{0.35},
         FE::Real{0.05},
         13u,
         13u,
         accepted_states));
-    EXPECT_EQ(svmp::FE::systems::functionalRecords(system).acceptedFunctionalHistory().size(), 1u);
+    EXPECT_EQ(svmp::Physics::formulations::navier_stokes::free_surface::functionalRecords(system).acceptedFunctionalHistory().size(), 1u);
     EXPECT_THROW(
-        svmp::FE::systems::functionalRecords(system).recordAcceptedFunctionals(
+        svmp::Physics::formulations::navier_stokes::free_surface::functionalRecords(system).recordAcceptedFunctionals(
             7u,
             FE::Real{0.35},
             FE::Real{0.05},
@@ -5449,7 +5449,7 @@ TEST(MovingDomainPhysics,
     auto mismatched_snapshot_states = accepted_states;
     mismatched_snapshot_states.front().state.snapshot_revision_key = 102u;
     EXPECT_THROW(
-        svmp::FE::systems::functionalRecords(system).recordAcceptedFunctionals(
+        svmp::Physics::formulations::navier_stokes::free_surface::functionalRecords(system).recordAcceptedFunctionals(
             7u,
             FE::Real{0.35},
             FE::Real{0.05},
@@ -5457,12 +5457,12 @@ TEST(MovingDomainPhysics,
             13u,
             mismatched_snapshot_states),
         FE::InvalidArgumentException);
-    EXPECT_EQ(svmp::FE::systems::functionalRecords(system).acceptedFunctionalHistory().size(), 1u);
+    EXPECT_EQ(svmp::Physics::formulations::navier_stokes::free_surface::functionalRecords(system).acceptedFunctionalHistory().size(), 1u);
     RecordProperty("functional_snapshot_mismatch_rejected", 1);
     auto conflicting_states = accepted_states;
     conflicting_states.front().geometry_revision.source_value_revision = 10u;
     EXPECT_THROW(
-        svmp::FE::systems::functionalRecords(system).recordAcceptedFunctionals(
+        svmp::Physics::formulations::navier_stokes::free_surface::functionalRecords(system).recordAcceptedFunctionals(
             7u,
             FE::Real{0.35},
             FE::Real{0.05},
@@ -5470,7 +5470,7 @@ TEST(MovingDomainPhysics,
             13u,
             conflicting_states),
         FE::InvalidArgumentException);
-    ASSERT_NO_THROW(svmp::FE::systems::functionalRecords(system).recordAcceptedFunctionals(
+    ASSERT_NO_THROW(svmp::Physics::formulations::navier_stokes::free_surface::functionalRecords(system).recordAcceptedFunctionals(
         8u,
         FE::Real{0.40},
         FE::Real{0.05},
@@ -5478,18 +5478,18 @@ TEST(MovingDomainPhysics,
         14u,
         accepted_states,
         103u));
-    EXPECT_EQ(svmp::FE::systems::functionalRecords(system).acceptedFunctionalHistory().size(), 2u);
+    EXPECT_EQ(svmp::Physics::formulations::navier_stokes::free_surface::functionalRecords(system).acceptedFunctionalHistory().size(), 2u);
     ASSERT_TRUE(
-        svmp::FE::systems::functionalRecords(system).acceptedFunctionalHistory()
+        svmp::Physics::formulations::navier_stokes::free_surface::functionalRecords(system).acceptedFunctionalHistory()
             .back()
             .extension_map_revision.has_value());
     EXPECT_EQ(
-        *svmp::FE::systems::functionalRecords(system).acceptedFunctionalHistory()
+        *svmp::Physics::formulations::navier_stokes::free_surface::functionalRecords(system).acceptedFunctionalHistory()
              .back()
              .extension_map_revision,
         103u);
     EXPECT_THROW(
-        svmp::FE::systems::functionalRecords(system).recordAcceptedFunctionals(
+        svmp::Physics::formulations::navier_stokes::free_surface::functionalRecords(system).recordAcceptedFunctionals(
             6u,
             FE::Real{0.30},
             FE::Real{0.05},
@@ -5498,7 +5498,7 @@ TEST(MovingDomainPhysics,
             accepted_states),
         FE::InvalidArgumentException);
     EXPECT_THROW(
-        svmp::FE::systems::functionalRecords(system).declareFunctional(declaration),
+        svmp::Physics::formulations::navier_stokes::free_surface::functionalRecords(system).declareFunctional(declaration),
         FE::InvalidArgumentException);
 }
 
@@ -5564,8 +5564,8 @@ TEST(MovingDomainPhysics,
     auto incomplete_parameters = parameters;
     incomplete_parameters.young_wall_coefficients.clear();
     EXPECT_THROW(
-        svmp::FE::systems::functionalRecords(system).declareFunctional(
-            FE::systems::FreeSurfaceDiscreteFunctionalDeclaration{
+        svmp::Physics::formulations::navier_stokes::free_surface::functionalRecords(system).declareFunctional(
+            svmp::Physics::formulations::navier_stokes::free_surface::FreeSurfaceDiscreteFunctionalDeclaration{
                 .interface_marker = interface_marker,
                 .level_set_field = phi,
                 .velocity_field = velocity,
@@ -5577,8 +5577,8 @@ TEST(MovingDomainPhysics,
             }),
         FE::InvalidArgumentException);
     EXPECT_THROW(
-        svmp::FE::systems::functionalRecords(system).declareFunctional(
-            FE::systems::FreeSurfaceDiscreteFunctionalDeclaration{
+        svmp::Physics::formulations::navier_stokes::free_surface::functionalRecords(system).declareFunctional(
+            svmp::Physics::formulations::navier_stokes::free_surface::FreeSurfaceDiscreteFunctionalDeclaration{
                 .interface_marker = interface_marker,
                 .level_set_field = phi,
                 .geometry_domain_id =
@@ -5588,8 +5588,8 @@ TEST(MovingDomainPhysics,
                     "MovingDomainPhysics.MissingVelocityFixture",
             }),
         FE::InvalidArgumentException);
-    ASSERT_NO_THROW(svmp::FE::systems::functionalRecords(system).declareFunctional(
-        FE::systems::FreeSurfaceDiscreteFunctionalDeclaration{
+    ASSERT_NO_THROW(svmp::Physics::formulations::navier_stokes::free_surface::functionalRecords(system).declareFunctional(
+        svmp::Physics::formulations::navier_stokes::free_surface::FreeSurfaceDiscreteFunctionalDeclaration{
             .interface_marker = interface_marker,
             .level_set_field = phi,
             .velocity_field = velocity,
@@ -5677,20 +5677,19 @@ TEST(MovingDomainPhysics,
         });
     FE::interfaces::finalizeFreeSurfaceDynamicContactState(contact_state);
 
-    std::vector<FE::systems::AcceptedFreeSurfaceDiscreteFunctionalState>
+    std::vector<svmp::Physics::formulations::navier_stokes::free_surface::AcceptedFreeSurfaceDiscreteFunctionalState>
         accepted_states{
-            FE::systems::AcceptedFreeSurfaceDiscreteFunctionalState{
+            svmp::Physics::formulations::navier_stokes::free_surface::AcceptedFreeSurfaceDiscreteFunctionalState{
                 .interface_marker = interface_marker,
                 .geometry_revision = geometry_revision,
                 .cut_topology_revision = 102u,
                 .state = functional_state,
                 .contact_stage =
-                    FE::systems::FreeSurfaceAcceptedContactStageState{
+                    svmp::Physics::formulations::navier_stokes::free_surface::FreeSurfaceAcceptedContactStageState{
                         .stage_time = FE::Real{0.325},
                         .stage_alpha_f = FE::Real{0.5},
                         .first_order_generalized_alpha =
-                            FE::systems::
-                                FreeSurfaceFirstOrderGeneralizedAlphaProvenance{
+                            svmp::Physics::formulations::navier_stokes::free_surface::FreeSurfaceFirstOrderGeneralizedAlphaProvenance{
                                     .alpha_m = FE::Real{0.5},
                                     .alpha_f = FE::Real{0.5},
                                     .gamma = FE::Real{0.5},
@@ -5703,14 +5702,14 @@ TEST(MovingDomainPhysics,
                         .state = contact_state,
                     },
             }};
-    ASSERT_NO_THROW(svmp::FE::systems::functionalRecords(system).recordAcceptedFunctionals(
+    ASSERT_NO_THROW(svmp::Physics::formulations::navier_stokes::free_surface::functionalRecords(system).recordAcceptedFunctionals(
         7u,
         FE::Real{0.35},
         FE::Real{0.05},
         13u,
         13u,
         accepted_states));
-    const auto history = svmp::FE::systems::functionalRecords(system).acceptedFunctionalHistory();
+    const auto history = svmp::Physics::formulations::navier_stokes::free_surface::functionalRecords(system).acceptedFunctionalHistory();
     ASSERT_EQ(history.size(), 1u);
     EXPECT_EQ(
         history.front().pre_maintenance_endpoint_state_revision, 13u);
@@ -5757,7 +5756,7 @@ TEST(MovingDomainPhysics,
         stage.state.walls.front().mean_contact_line_tangent[1],
         FE::Real{-1.0},
         1.0e-14);
-    ASSERT_NO_THROW(svmp::FE::systems::functionalRecords(system).recordAcceptedFunctionals(
+    ASSERT_NO_THROW(svmp::Physics::formulations::navier_stokes::free_surface::functionalRecords(system).recordAcceptedFunctionals(
         7u,
         FE::Real{0.35},
         FE::Real{0.05},
@@ -5770,7 +5769,7 @@ TEST(MovingDomainPhysics,
         .contact_stage->first_order_generalized_alpha->dt = std::nextafter(
             FE::Real{0.05}, FE::Real{0.10});
     EXPECT_THROW(
-        svmp::FE::systems::functionalRecords(system).recordAcceptedFunctionals(
+        svmp::Physics::formulations::navier_stokes::free_surface::functionalRecords(system).recordAcceptedFunctionals(
             7u,
             FE::Real{0.35},
             FE::Real{0.05},
@@ -5778,13 +5777,13 @@ TEST(MovingDomainPhysics,
             13u,
             generalized_alpha_replay_mismatch),
         FE::InvalidArgumentException);
-    EXPECT_EQ(svmp::FE::systems::functionalRecords(system).acceptedFunctionalHistory().size(), 1u);
+    EXPECT_EQ(svmp::Physics::formulations::navier_stokes::free_surface::functionalRecords(system).acceptedFunctionalHistory().size(), 1u);
 
     auto generalized_alpha_replay_drop = accepted_states;
     generalized_alpha_replay_drop.front()
         .contact_stage->first_order_generalized_alpha.reset();
     EXPECT_THROW(
-        svmp::FE::systems::functionalRecords(system).recordAcceptedFunctionals(
+        svmp::Physics::formulations::navier_stokes::free_surface::functionalRecords(system).recordAcceptedFunctionals(
             7u,
             FE::Real{0.35},
             FE::Real{0.05},
@@ -5792,10 +5791,10 @@ TEST(MovingDomainPhysics,
             13u,
             generalized_alpha_replay_drop),
         FE::InvalidArgumentException);
-    EXPECT_EQ(svmp::FE::systems::functionalRecords(system).acceptedFunctionalHistory().size(), 1u);
+    EXPECT_EQ(svmp::Physics::formulations::navier_stokes::free_surface::functionalRecords(system).acceptedFunctionalHistory().size(), 1u);
 
     EXPECT_THROW(
-        svmp::FE::systems::functionalRecords(system).recordAcceptedFunctionals(
+        svmp::Physics::formulations::navier_stokes::free_surface::functionalRecords(system).recordAcceptedFunctionals(
             7u,
             FE::Real{0.35},
             FE::Real{0.05},
@@ -5803,12 +5802,12 @@ TEST(MovingDomainPhysics,
             13u,
             accepted_states),
         FE::InvalidArgumentException);
-    EXPECT_EQ(svmp::FE::systems::functionalRecords(system).acceptedFunctionalHistory().size(), 1u);
+    EXPECT_EQ(svmp::Physics::formulations::navier_stokes::free_surface::functionalRecords(system).acceptedFunctionalHistory().size(), 1u);
 
     auto endpoint_mismatch = accepted_states;
     endpoint_mismatch.front().contact_stage->endpoint_state_revision = 14u;
     EXPECT_THROW(
-        svmp::FE::systems::functionalRecords(system).recordAcceptedFunctionals(
+        svmp::Physics::formulations::navier_stokes::free_surface::functionalRecords(system).recordAcceptedFunctionals(
             7u,
             FE::Real{0.35},
             FE::Real{0.05},
@@ -5816,13 +5815,13 @@ TEST(MovingDomainPhysics,
             13u,
             endpoint_mismatch),
         FE::InvalidArgumentException);
-    EXPECT_EQ(svmp::FE::systems::functionalRecords(system).acceptedFunctionalHistory().size(), 1u);
+    EXPECT_EQ(svmp::Physics::formulations::navier_stokes::free_surface::functionalRecords(system).acceptedFunctionalHistory().size(), 1u);
 
     auto conflicting_replay = accepted_states;
     conflicting_replay.front().contact_stage->endpoint_state_revision =
         14u;
     EXPECT_THROW(
-        svmp::FE::systems::functionalRecords(system).recordAcceptedFunctionals(
+        svmp::Physics::formulations::navier_stokes::free_surface::functionalRecords(system).recordAcceptedFunctionals(
             7u,
             FE::Real{0.35},
             FE::Real{0.05},
@@ -5830,12 +5829,12 @@ TEST(MovingDomainPhysics,
             13u,
             conflicting_replay),
         FE::InvalidArgumentException);
-    EXPECT_EQ(svmp::FE::systems::functionalRecords(system).acceptedFunctionalHistory().size(), 1u);
+    EXPECT_EQ(svmp::Physics::formulations::navier_stokes::free_surface::functionalRecords(system).acceptedFunctionalHistory().size(), 1u);
 
     auto invalid = accepted_states;
     invalid.front().contact_stage->state.snapshot_revision_key = 103u;
     EXPECT_THROW(
-        svmp::FE::systems::functionalRecords(system).recordAcceptedFunctionals(
+        svmp::Physics::formulations::navier_stokes::free_surface::functionalRecords(system).recordAcceptedFunctionals(
             7u,
             FE::Real{0.35},
             FE::Real{0.05},
@@ -5843,12 +5842,12 @@ TEST(MovingDomainPhysics,
             13u,
             invalid),
         FE::InvalidArgumentException);
-    EXPECT_EQ(svmp::FE::systems::functionalRecords(system).acceptedFunctionalHistory().size(), 1u);
+    EXPECT_EQ(svmp::Physics::formulations::navier_stokes::free_surface::functionalRecords(system).acceptedFunctionalHistory().size(), 1u);
     RecordProperty("contact_snapshot_mismatch_rejected", 1);
     invalid = accepted_states;
     invalid.front().contact_stage.reset();
     EXPECT_THROW(
-        svmp::FE::systems::functionalRecords(system).recordAcceptedFunctionals(
+        svmp::Physics::formulations::navier_stokes::free_surface::functionalRecords(system).recordAcceptedFunctionals(
             7u,
             FE::Real{0.35},
             FE::Real{0.05},
@@ -5861,7 +5860,7 @@ TEST(MovingDomainPhysics,
         .contact_stage->state.walls.front()
         .constitutive_residual_integral = FE::Real{0.01};
     EXPECT_THROW(
-        svmp::FE::systems::functionalRecords(system).recordAcceptedFunctionals(
+        svmp::Physics::formulations::navier_stokes::free_surface::functionalRecords(system).recordAcceptedFunctionals(
             7u,
             FE::Real{0.35},
             FE::Real{0.05},
@@ -5874,7 +5873,7 @@ TEST(MovingDomainPhysics,
         .contact_stage->state.walls.front()
         .mean_contact_speed.reset();
     EXPECT_THROW(
-        svmp::FE::systems::functionalRecords(system).recordAcceptedFunctionals(
+        svmp::Physics::formulations::navier_stokes::free_surface::functionalRecords(system).recordAcceptedFunctionals(
             7u,
             FE::Real{0.35},
             FE::Real{0.05},
@@ -5889,7 +5888,7 @@ TEST(MovingDomainPhysics,
     invalid.front().contact_stage->state.line_friction_dissipation =
         FE::Real{0.01};
     EXPECT_THROW(
-        svmp::FE::systems::functionalRecords(system).recordAcceptedFunctionals(
+        svmp::Physics::formulations::navier_stokes::free_surface::functionalRecords(system).recordAcceptedFunctionals(
             7u,
             FE::Real{0.35},
             FE::Real{0.05},
@@ -5906,7 +5905,7 @@ TEST(MovingDomainPhysics,
     invalid.front().contact_stage->state.total_dissipation =
         FE::Real{0.01};
     EXPECT_THROW(
-        svmp::FE::systems::functionalRecords(system).recordAcceptedFunctionals(
+        svmp::Physics::formulations::navier_stokes::free_surface::functionalRecords(system).recordAcceptedFunctionals(
             7u,
             FE::Real{0.35},
             FE::Real{0.05},
@@ -7239,20 +7238,18 @@ TEST(MovingDomainPhysics, NavierStokesUnfittedFreeSurfaceAddsCutCellStabilizatio
     EXPECT_TRUE(formulationRecordsContain(system, FormExprType::Average));
     EXPECT_FALSE(formulationRecordsContain(system, FormExprType::ParameterRef));
     const auto residual_work =
-        svmp::FE::systems::functionalRecords(system).workChannelDeclarations();
+        svmp::Physics::formulations::navier_stokes::free_surface::functionalRecords(system).workChannelDeclarations();
     ASSERT_EQ(residual_work.size(), 7u);
     const auto& boundary_energy =
-        svmp::FE::systems::functionalRecords(system).externalBoundaryEnergyDeclaration();
+        svmp::Physics::formulations::navier_stokes::free_surface::functionalRecords(system).externalBoundaryEnergyDeclaration();
     ASSERT_TRUE(boundary_energy.has_value());
     EXPECT_EQ(
         boundary_energy->imposed_traction,
-        FE::systems::
-            FreeSurfaceExternalBoundaryEnergyApplicability::
+        svmp::Physics::formulations::navier_stokes::free_surface::FreeSurfaceExternalBoundaryEnergyApplicability::
                 NotApplicable);
     EXPECT_EQ(
         boundary_energy->open_boundary_flux,
-        FE::systems::
-            FreeSurfaceExternalBoundaryEnergyApplicability::
+        svmp::Physics::formulations::navier_stokes::free_surface::FreeSurfaceExternalBoundaryEnergyApplicability::
                 NotApplicable);
     EXPECT_TRUE(boundary_energy->homogeneous_velocity_data);
     EXPECT_TRUE(boundary_energy->pressure_dirichlet_absent);
@@ -7260,7 +7257,7 @@ TEST(MovingDomainPhysics, NavierStokesUnfittedFreeSurfaceAddsCutCellStabilizatio
         boundary_energy->owner_component,
         "IncompressibleNavierStokesVMSModule.boundary_energy_coverage");
     const auto find_residual_work =
-        [&](FE::systems::FreeSurfaceResidualWorkChannel channel) {
+        [&](svmp::Physics::formulations::navier_stokes::free_surface::FreeSurfaceResidualWorkChannel channel) {
             return std::find_if(
                 residual_work.begin(),
                 residual_work.end(),
@@ -7269,23 +7266,23 @@ TEST(MovingDomainPhysics, NavierStokesUnfittedFreeSurfaceAddsCutCellStabilizatio
                 });
         };
     const auto weak_boundary_work = find_residual_work(
-        FE::systems::FreeSurfaceResidualWorkChannel::WeakBoundary);
+        svmp::Physics::formulations::navier_stokes::free_surface::FreeSurfaceResidualWorkChannel::WeakBoundary);
     const auto cut_stabilization_work = find_residual_work(
-        FE::systems::FreeSurfaceResidualWorkChannel::CutStabilization);
+        svmp::Physics::formulations::navier_stokes::free_surface::FreeSurfaceResidualWorkChannel::CutStabilization);
     const auto ghost_penalty_work = find_residual_work(
-        FE::systems::FreeSurfaceResidualWorkChannel::GhostPenalty);
+        svmp::Physics::formulations::navier_stokes::free_surface::FreeSurfaceResidualWorkChannel::GhostPenalty);
     ASSERT_NE(weak_boundary_work, residual_work.end());
     ASSERT_NE(cut_stabilization_work, residual_work.end());
     ASSERT_NE(ghost_penalty_work, residual_work.end());
     EXPECT_EQ(
         weak_boundary_work->applicability,
-        FE::systems::FreeSurfaceResidualWorkApplicability::NotApplicable);
+        svmp::Physics::formulations::navier_stokes::free_surface::FreeSurfaceResidualWorkApplicability::NotApplicable);
     EXPECT_EQ(
         cut_stabilization_work->applicability,
-        FE::systems::FreeSurfaceResidualWorkApplicability::NotApplicable);
+        svmp::Physics::formulations::navier_stokes::free_surface::FreeSurfaceResidualWorkApplicability::NotApplicable);
     EXPECT_EQ(
         ghost_penalty_work->applicability,
-        FE::systems::FreeSurfaceResidualWorkApplicability::Produced);
+        svmp::Physics::formulations::navier_stokes::free_surface::FreeSurfaceResidualWorkApplicability::Produced);
     ASSERT_FALSE(ghost_penalty_work->operator_tag.empty());
     EXPECT_TRUE(system.hasOperator(ghost_penalty_work->operator_tag));
     const auto ghost_penalty_formulation = std::find_if(
@@ -7654,29 +7651,26 @@ TEST(MovingDomainPhysics,
 {
     FE::systems::FESystem system(makeMesh());
     EXPECT_THROW(
-        svmp::FE::systems::functionalRecords(system).declareWorkChannel(
-            FE::systems::FreeSurfaceResidualWorkDeclaration{
+        svmp::Physics::formulations::navier_stokes::free_surface::functionalRecords(system).declareWorkChannel(
+            svmp::Physics::formulations::navier_stokes::free_surface::FreeSurfaceResidualWorkDeclaration{
                 .channel = static_cast<
-                    FE::systems::FreeSurfaceResidualWorkChannel>(255),
-                .applicability = FE::systems::
-                    FreeSurfaceResidualWorkApplicability::NotApplicable,
+                    svmp::Physics::formulations::navier_stokes::free_surface::FreeSurfaceResidualWorkChannel>(255),
+                .applicability = svmp::Physics::formulations::navier_stokes::free_surface::FreeSurfaceResidualWorkApplicability::NotApplicable,
                 .operator_tag = {},
                 .owner_component = "invalid.channel.fixture",
             }),
         FE::InvalidArgumentException);
-    EXPECT_TRUE(svmp::FE::systems::functionalRecords(system).workChannelDeclarations().empty());
+    EXPECT_TRUE(svmp::Physics::formulations::navier_stokes::free_surface::functionalRecords(system).workChannelDeclarations().empty());
 }
 
 TEST(MovingDomainPhysics,
      FreeSurfaceExternalBoundaryEnergyRequiresOneValidOwner)
 {
     FE::systems::FESystem system(makeMesh());
-    using Applicability = FE::systems::
-        FreeSurfaceExternalBoundaryEnergyApplicability;
-    using Declaration = FE::systems::
-        FreeSurfaceExternalBoundaryEnergyDeclaration;
+    using Applicability = svmp::Physics::formulations::navier_stokes::free_surface::FreeSurfaceExternalBoundaryEnergyApplicability;
+    using Declaration = svmp::Physics::formulations::navier_stokes::free_surface::FreeSurfaceExternalBoundaryEnergyDeclaration;
     EXPECT_THROW(
-        svmp::FE::systems::functionalRecords(system).declareExternalBoundaryEnergy(
+        svmp::Physics::formulations::navier_stokes::free_surface::functionalRecords(system).declareExternalBoundaryEnergy(
             Declaration{
                 .imposed_traction =
                     static_cast<Applicability>(255),
@@ -7688,10 +7682,10 @@ TEST(MovingDomainPhysics,
             }),
         FE::InvalidArgumentException);
     EXPECT_FALSE(
-        svmp::FE::systems::functionalRecords(system).externalBoundaryEnergyDeclaration()
+        svmp::Physics::formulations::navier_stokes::free_surface::functionalRecords(system).externalBoundaryEnergyDeclaration()
             .has_value());
 
-    svmp::FE::systems::functionalRecords(system).declareExternalBoundaryEnergy(
+    svmp::Physics::formulations::navier_stokes::free_surface::functionalRecords(system).declareExternalBoundaryEnergy(
         Declaration{
             .imposed_traction = Applicability::NotApplicable,
             .open_boundary_flux = Applicability::Unresolved,
@@ -7700,10 +7694,10 @@ TEST(MovingDomainPhysics,
             .owner_component = "boundary.energy.fixture",
         });
     ASSERT_TRUE(
-        svmp::FE::systems::functionalRecords(system).externalBoundaryEnergyDeclaration()
+        svmp::Physics::formulations::navier_stokes::free_surface::functionalRecords(system).externalBoundaryEnergyDeclaration()
             .has_value());
     EXPECT_THROW(
-        svmp::FE::systems::functionalRecords(system).declareExternalBoundaryEnergy(
+        svmp::Physics::formulations::navier_stokes::free_surface::functionalRecords(system).declareExternalBoundaryEnergy(
             Declaration{
                 .imposed_traction = Applicability::NotApplicable,
                 .open_boundary_flux =
@@ -7770,17 +7764,15 @@ TEST(MovingDomainPhysics,
     module.registerOn(system);
 
     const auto& declaration =
-        svmp::FE::systems::functionalRecords(system).externalBoundaryEnergyDeclaration();
+        svmp::Physics::formulations::navier_stokes::free_surface::functionalRecords(system).externalBoundaryEnergyDeclaration();
     ASSERT_TRUE(declaration.has_value());
     EXPECT_EQ(
         declaration->imposed_traction,
-        FE::systems::
-            FreeSurfaceExternalBoundaryEnergyApplicability::
+        svmp::Physics::formulations::navier_stokes::free_surface::FreeSurfaceExternalBoundaryEnergyApplicability::
                 Unresolved);
     EXPECT_EQ(
         declaration->open_boundary_flux,
-        FE::systems::
-            FreeSurfaceExternalBoundaryEnergyApplicability::
+        svmp::Physics::formulations::navier_stokes::free_surface::FreeSurfaceExternalBoundaryEnergyApplicability::
                 Unresolved);
     EXPECT_FALSE(declaration->homogeneous_velocity_data);
     EXPECT_FALSE(declaration->pressure_dirichlet_absent);
@@ -8210,7 +8202,7 @@ TEST(MovingDomainPhysics, NavierStokesUnfittedFreeSurfaceRejectsUnknownLevelSet)
         FE::systems::FESystem system(mesh);
         const auto field_count = system.registeredFieldCount();
         const auto formulation_count = system.formulationRecords().size();
-        const auto functional_count = FE::systems::functionalRecords(system)
+        const auto functional_count = svmp::Physics::formulations::navier_stokes::free_surface::functionalRecords(system)
                                           .functionalDeclarations().size();
         ns::IncompressibleNavierStokesVMSModule module(u_space, p_space, opts);
         try {
@@ -8223,7 +8215,7 @@ TEST(MovingDomainPhysics, NavierStokesUnfittedFreeSurfaceRejectsUnknownLevelSet)
         EXPECT_EQ(system.findFieldByName(opts.velocity_field_name), FE::INVALID_FIELD_ID);
         EXPECT_EQ(system.findFieldByName(opts.pressure_field_name), FE::INVALID_FIELD_ID);
         EXPECT_EQ(system.formulationRecords().size(), formulation_count);
-        EXPECT_EQ(FE::systems::functionalRecords(system).functionalDeclarations().size(),
+        EXPECT_EQ(svmp::Physics::formulations::navier_stokes::free_surface::functionalRecords(system).functionalDeclarations().size(),
                   functional_count);
         EXPECT_TRUE(system.meshNormalBoundaryConstraints().empty());
         EXPECT_TRUE(system.meshTangentialBoundaryPolicies().empty());
@@ -8327,7 +8319,7 @@ TEST(MovingDomainPhysics,
     module.registerOn(system);
 
     const auto declarations =
-        svmp::FE::systems::functionalRecords(system).functionalDeclarations();
+        svmp::Physics::formulations::navier_stokes::free_surface::functionalRecords(system).functionalDeclarations();
     ASSERT_EQ(declarations.size(), 1u);
     EXPECT_EQ(declarations.front().interface_marker, interface_marker);
     EXPECT_EQ(declarations.front().level_set_field, phi);
@@ -8365,10 +8357,10 @@ TEST(MovingDomainPhysics,
     EXPECT_TRUE(
         declarations.front().endpoint_functional_power_enabled);
     const auto residual_work =
-        svmp::FE::systems::functionalRecords(system).workChannelDeclarations();
+        svmp::Physics::formulations::navier_stokes::free_surface::functionalRecords(system).workChannelDeclarations();
     ASSERT_EQ(residual_work.size(), 7u);
     const auto find_residual_work =
-        [&](FE::systems::FreeSurfaceResidualWorkChannel channel) {
+        [&](svmp::Physics::formulations::navier_stokes::free_surface::FreeSurfaceResidualWorkChannel channel) {
             return std::find_if(
                 residual_work.begin(),
                 residual_work.end(),
@@ -8377,21 +8369,21 @@ TEST(MovingDomainPhysics,
                 });
         };
     const auto convection_work = find_residual_work(
-        FE::systems::FreeSurfaceResidualWorkChannel::Convection);
+        svmp::Physics::formulations::navier_stokes::free_surface::FreeSurfaceResidualWorkChannel::Convection);
     const auto pressure_work = find_residual_work(
-        FE::systems::FreeSurfaceResidualWorkChannel::
+        svmp::Physics::formulations::navier_stokes::free_surface::FreeSurfaceResidualWorkChannel::
             PressureContinuity);
     const auto body_force_work = find_residual_work(
-        FE::systems::FreeSurfaceResidualWorkChannel::
+        svmp::Physics::formulations::navier_stokes::free_surface::FreeSurfaceResidualWorkChannel::
             NonconservativeBodyForce);
     const auto weak_boundary_work = find_residual_work(
-        FE::systems::FreeSurfaceResidualWorkChannel::WeakBoundary);
+        svmp::Physics::formulations::navier_stokes::free_surface::FreeSurfaceResidualWorkChannel::WeakBoundary);
     const auto stabilization_work = find_residual_work(
-        FE::systems::FreeSurfaceResidualWorkChannel::VmsPspg);
+        svmp::Physics::formulations::navier_stokes::free_surface::FreeSurfaceResidualWorkChannel::VmsPspg);
     const auto cut_stabilization_work = find_residual_work(
-        FE::systems::FreeSurfaceResidualWorkChannel::CutStabilization);
+        svmp::Physics::formulations::navier_stokes::free_surface::FreeSurfaceResidualWorkChannel::CutStabilization);
     const auto ghost_penalty_work = find_residual_work(
-        FE::systems::FreeSurfaceResidualWorkChannel::GhostPenalty);
+        svmp::Physics::formulations::navier_stokes::free_surface::FreeSurfaceResidualWorkChannel::GhostPenalty);
     ASSERT_NE(convection_work, residual_work.end());
     ASSERT_NE(pressure_work, residual_work.end());
     ASSERT_NE(body_force_work, residual_work.end());
@@ -8401,37 +8393,37 @@ TEST(MovingDomainPhysics,
     ASSERT_NE(ghost_penalty_work, residual_work.end());
     EXPECT_EQ(
         convection_work->applicability,
-        FE::systems::FreeSurfaceResidualWorkApplicability::
+        svmp::Physics::formulations::navier_stokes::free_surface::FreeSurfaceResidualWorkApplicability::
             NotApplicable);
     EXPECT_TRUE(convection_work->operator_tag.empty());
     EXPECT_EQ(
         pressure_work->applicability,
-        FE::systems::FreeSurfaceResidualWorkApplicability::Produced);
+        svmp::Physics::formulations::navier_stokes::free_surface::FreeSurfaceResidualWorkApplicability::Produced);
     EXPECT_FALSE(pressure_work->operator_tag.empty());
     EXPECT_TRUE(system.hasOperator(pressure_work->operator_tag));
     EXPECT_EQ(
         body_force_work->applicability,
-        FE::systems::FreeSurfaceResidualWorkApplicability::
+        svmp::Physics::formulations::navier_stokes::free_surface::FreeSurfaceResidualWorkApplicability::
             NotApplicable);
     EXPECT_TRUE(body_force_work->operator_tag.empty());
     EXPECT_EQ(
         weak_boundary_work->applicability,
-        FE::systems::FreeSurfaceResidualWorkApplicability::
+        svmp::Physics::formulations::navier_stokes::free_surface::FreeSurfaceResidualWorkApplicability::
             NotApplicable);
     EXPECT_TRUE(weak_boundary_work->operator_tag.empty());
     EXPECT_EQ(
         stabilization_work->applicability,
-        FE::systems::FreeSurfaceResidualWorkApplicability::
+        svmp::Physics::formulations::navier_stokes::free_surface::FreeSurfaceResidualWorkApplicability::
             NotApplicable);
     EXPECT_TRUE(stabilization_work->operator_tag.empty());
     EXPECT_EQ(
         cut_stabilization_work->applicability,
-        FE::systems::FreeSurfaceResidualWorkApplicability::
+        svmp::Physics::formulations::navier_stokes::free_surface::FreeSurfaceResidualWorkApplicability::
             NotApplicable);
     EXPECT_TRUE(cut_stabilization_work->operator_tag.empty());
     EXPECT_EQ(
         ghost_penalty_work->applicability,
-        FE::systems::FreeSurfaceResidualWorkApplicability::
+        svmp::Physics::formulations::navier_stokes::free_surface::FreeSurfaceResidualWorkApplicability::
             NotApplicable);
     EXPECT_TRUE(ghost_penalty_work->operator_tag.empty());
     ASSERT_EQ(
@@ -8535,8 +8527,8 @@ TEST(MovingDomainPhysics,
             .boundary_marker = wall_marker,
             .equilibrium_contact_angle_radians = angle,
         });
-    svmp::FE::systems::functionalRecords(system).declareFunctional(
-        FE::systems::FreeSurfaceDiscreteFunctionalDeclaration{
+    svmp::Physics::formulations::navier_stokes::free_surface::functionalRecords(system).declareFunctional(
+        svmp::Physics::formulations::navier_stokes::free_surface::FreeSurfaceDiscreteFunctionalDeclaration{
             .interface_marker = interface_marker,
             .level_set_field = phi,
             .geometry_domain_id = "existing_functional",
@@ -8564,8 +8556,8 @@ TEST(MovingDomainPhysics,
     EXPECT_EQ(system.findFieldByName("u"), FE::INVALID_FIELD_ID);
     EXPECT_EQ(system.findFieldByName("p"), FE::INVALID_FIELD_ID);
     EXPECT_EQ(system.formulationRecords().size(), formulation_count);
-    ASSERT_EQ(svmp::FE::systems::functionalRecords(system).functionalDeclarations().size(), 1u);
-    EXPECT_EQ(svmp::FE::systems::functionalRecords(system).functionalDeclarations()
+    ASSERT_EQ(svmp::Physics::formulations::navier_stokes::free_surface::functionalRecords(system).functionalDeclarations().size(), 1u);
+    EXPECT_EQ(svmp::Physics::formulations::navier_stokes::free_surface::functionalRecords(system).functionalDeclarations()
                   .front()
                   .owner_component,
               "existing_functional_owner");
@@ -9603,11 +9595,11 @@ TEST(MovingDomainPhysics,
             0.01);
         EXPECT_EQ(
             declaration.capillary_balance_method,
-            FE::systems::FreeSurfaceCapillaryBalanceMethod::
+            svmp::Physics::formulations::navier_stokes::free_surface::FreeSurfaceCapillaryBalanceMethod::
                 DiscreteEnergyVolumeStationarity);
         EXPECT_EQ(
             declaration.capillary_balance_qualification,
-            FE::systems::FreeSurfaceCapillaryBalanceQualification::
+            svmp::Physics::formulations::navier_stokes::free_surface::FreeSurfaceCapillaryBalanceQualification::
                 PrerequisiteOnly);
         EXPECT_FALSE(declaration.owner_component.empty());
     }
@@ -10829,7 +10821,7 @@ TEST(MovingDomainPhysics,
             phi, interface_marker, wall_marker);
         const auto field_count = system.registeredFieldCount();
         const auto formulation_count = system.formulationRecords().size();
-        const auto functional_count = FE::systems::functionalRecords(system)
+        const auto functional_count = svmp::Physics::formulations::navier_stokes::free_surface::functionalRecords(system)
                                           .functionalDeclarations().size();
         ns::IncompressibleNavierStokesVMSModule module(u_space, p_space, opts);
         try {
@@ -10843,7 +10835,7 @@ TEST(MovingDomainPhysics,
         EXPECT_EQ(system.findFieldByName(opts.velocity_field_name), FE::INVALID_FIELD_ID);
         EXPECT_EQ(system.findFieldByName(opts.pressure_field_name), FE::INVALID_FIELD_ID);
         EXPECT_EQ(system.formulationRecords().size(), formulation_count);
-        EXPECT_EQ(FE::systems::functionalRecords(system).functionalDeclarations().size(),
+        EXPECT_EQ(svmp::Physics::formulations::navier_stokes::free_surface::functionalRecords(system).functionalDeclarations().size(),
                   functional_count);
         EXPECT_TRUE(system.meshNormalBoundaryConstraints().empty());
         EXPECT_TRUE(system.meshTangentialBoundaryPolicies().empty());
@@ -11374,19 +11366,19 @@ TEST(MovingDomainPhysics,
         system.findFieldByName("u");
     ASSERT_NE(velocity, FE::INVALID_FIELD_ID);
     const auto residual_work =
-        svmp::FE::systems::functionalRecords(system).workChannelDeclarations();
+        svmp::Physics::formulations::navier_stokes::free_surface::functionalRecords(system).workChannelDeclarations();
     ASSERT_EQ(residual_work.size(), 7u);
     const auto weak_boundary_work = std::find_if(
         residual_work.begin(),
         residual_work.end(),
         [](const auto& declaration) {
             return declaration.channel ==
-                FE::systems::FreeSurfaceResidualWorkChannel::WeakBoundary;
+                svmp::Physics::formulations::navier_stokes::free_surface::FreeSurfaceResidualWorkChannel::WeakBoundary;
         });
     ASSERT_NE(weak_boundary_work, residual_work.end());
     EXPECT_EQ(
         weak_boundary_work->applicability,
-        FE::systems::FreeSurfaceResidualWorkApplicability::Produced);
+        svmp::Physics::formulations::navier_stokes::free_surface::FreeSurfaceResidualWorkApplicability::Produced);
     ASSERT_FALSE(weak_boundary_work->operator_tag.empty());
     EXPECT_TRUE(system.hasOperator(weak_boundary_work->operator_tag));
     const auto policies =

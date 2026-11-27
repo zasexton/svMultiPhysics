@@ -25,7 +25,7 @@
 #include "FE/Dofs/EntityDofMap.h"
 #include "FE/Spaces/SpaceFactory.h"
 #include "FE/Systems/FESystem.h"
-#include "FE/Systems/FunctionalRecords.h"
+#include "Physics/Formulations/NavierStokes/FreeSurface/FunctionalRecords.h"
 #include "FE/Systems/TimeIntegrator.h"
 #include "FE/TimeStepping/GeneralizedAlpha.h"
 #include "Interfaces/LevelSetInterfaceDomain.h"
@@ -854,7 +854,7 @@ TEST(FreeSurfaceSemiImplicitSurfaceTension,
             velocity_space, pressure_space, navierStokesOptions(std::move(boundary)));
         const auto field_count = system.registeredFieldCount();
         const auto formulation_count = system.formulationRecords().size();
-        const auto functional_count = FE::systems::functionalRecords(system)
+        const auto functional_count = svmp::Physics::formulations::navier_stokes::free_surface::functionalRecords(system)
                                           .functionalDeclarations().size();
         const auto expected = source == FE::systems::FieldSourceKind::Unknown
             ? "IncompressibleNavierStokesVMSModule::registerOn semi-implicit reference velocity: existing field '" +
@@ -872,7 +872,7 @@ TEST(FreeSurfaceSemiImplicitSurfaceTension,
         EXPECT_EQ(system.findFieldByName("u"), FE::INVALID_FIELD_ID);
         EXPECT_EQ(system.findFieldByName("p"), FE::INVALID_FIELD_ID);
         EXPECT_EQ(system.formulationRecords().size(), formulation_count);
-        EXPECT_EQ(FE::systems::functionalRecords(system).functionalDeclarations().size(),
+        EXPECT_EQ(svmp::Physics::formulations::navier_stokes::free_surface::functionalRecords(system).functionalDeclarations().size(),
                   functional_count);
         EXPECT_TRUE(system.meshNormalBoundaryConstraints().empty());
         EXPECT_TRUE(system.meshTangentialBoundaryPolicies().empty());

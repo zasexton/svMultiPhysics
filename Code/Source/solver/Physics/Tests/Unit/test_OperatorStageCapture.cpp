@@ -5,12 +5,12 @@
  * See Copyright-SimVascular.txt for additional details.
  */
 
-#include "Interfaces/ContactLineStageObservables.h"
-#include "TimeStepping/OperatorStageCapture.h"
+#include "Physics/Formulations/NavierStokes/FreeSurface/ContactLineStageObservables.h"
+#include "Physics/Formulations/NavierStokes/FreeSurface/ContactOperatorStageCapture.h"
 
-#include "Backends/Interfaces/BackendFactory.h"
-#include "Backends/Interfaces/GenericVector.h"
-#include "Tests/Unit/TimeStepping/TimeSteppingTestHelpers.h"
+#include "FE/Backends/Interfaces/BackendFactory.h"
+#include "FE/Backends/Interfaces/GenericVector.h"
+#include "FE/Tests/Unit/TimeStepping/TimeSteppingTestHelpers.h"
 
 #include <gtest/gtest.h>
 
@@ -24,7 +24,7 @@ namespace ts = svmp::FE::timestepping;
 namespace interfaces = svmp::FE::interfaces;
 using svmp::FE::Real;
 using Provenance =
-    svmp::FE::systems::FreeSurfaceFirstOrderGeneralizedAlphaProvenance;
+    svmp::Physics::formulations::navier_stokes::free_surface::FreeSurfaceFirstOrderGeneralizedAlphaProvenance;
 
 namespace {
 
@@ -77,23 +77,23 @@ ts::CandidateStageObservation generalizedAlphaStage(
 TEST(OperatorStageCapture, GeneralizedAlphaProvenanceIsTheRhoInfinityFamily)
 {
     const auto valid = rhoInfinityHalf(0.1);
-    EXPECT_TRUE(interfaces::firstOrderGeneralizedAlphaContactProvenanceValid(valid));
+    EXPECT_TRUE(svmp::Physics::formulations::navier_stokes::free_surface::firstOrderGeneralizedAlphaContactProvenanceValid(valid));
 
     auto other_alpha_m = valid;
     other_alpha_m.alpha_m += Real{1.0e-6};
     EXPECT_FALSE(
-        interfaces::firstOrderGeneralizedAlphaContactProvenanceValid(other_alpha_m));
+        svmp::Physics::formulations::navier_stokes::free_surface::firstOrderGeneralizedAlphaContactProvenanceValid(other_alpha_m));
     auto small_alpha_f = valid;
     small_alpha_f.alpha_f = Real{0.4};
     EXPECT_FALSE(
-        interfaces::firstOrderGeneralizedAlphaContactProvenanceValid(small_alpha_f));
+        svmp::Physics::formulations::navier_stokes::free_surface::firstOrderGeneralizedAlphaContactProvenanceValid(small_alpha_f));
     auto no_step = valid;
     no_step.dt = Real{0.0};
-    EXPECT_FALSE(interfaces::firstOrderGeneralizedAlphaContactProvenanceValid(no_step));
+    EXPECT_FALSE(svmp::Physics::formulations::navier_stokes::free_surface::firstOrderGeneralizedAlphaContactProvenanceValid(no_step));
 
-    EXPECT_TRUE(interfaces::contactStageRealValuesMatch(1.0, 1.0 + 1.0e-14));
-    EXPECT_FALSE(interfaces::contactStageRealValuesMatch(1.0, 1.0 + 1.0e-12));
-    EXPECT_FALSE(interfaces::contactStageRealValuesMatch(
+    EXPECT_TRUE(svmp::Physics::formulations::navier_stokes::free_surface::contactStageRealValuesMatch(1.0, 1.0 + 1.0e-14));
+    EXPECT_FALSE(svmp::Physics::formulations::navier_stokes::free_surface::contactStageRealValuesMatch(1.0, 1.0 + 1.0e-12));
+    EXPECT_FALSE(svmp::Physics::formulations::navier_stokes::free_surface::contactStageRealValuesMatch(
         1.0, std::numeric_limits<Real>::quiet_NaN()));
 }
 
@@ -101,16 +101,16 @@ TEST(OperatorStageCapture, AcceptedStageRevisionCoversItsInputsAndNotTheSignOfZe
 {
     const std::vector<Real> solution{0.0, 1.5, -2.0};
     const std::vector<Real> negative_zero{-0.0, 1.5, -2.0};
-    const auto base = interfaces::acceptedContactStageRevision(
+    const auto base = svmp::Physics::formulations::navier_stokes::free_surface::acceptedContactStageRevision(
         3u, 5u, 7u, 0.25, 1.0, solution);
     EXPECT_NE(base, 0u);
-    EXPECT_EQ(base, interfaces::acceptedContactStageRevision(
+    EXPECT_EQ(base, svmp::Physics::formulations::navier_stokes::free_surface::acceptedContactStageRevision(
                         3u, 5u, 7u, 0.25, 1.0, negative_zero));
-    EXPECT_NE(base, interfaces::acceptedContactStageRevision(
+    EXPECT_NE(base, svmp::Physics::formulations::navier_stokes::free_surface::acceptedContactStageRevision(
                         3u, 6u, 7u, 0.25, 1.0, solution));
-    EXPECT_NE(base, interfaces::acceptedContactStageRevision(
+    EXPECT_NE(base, svmp::Physics::formulations::navier_stokes::free_surface::acceptedContactStageRevision(
                         3u, 5u, 7u, 0.5, 1.0, solution));
-    EXPECT_NE(base, interfaces::acceptedContactStageRevision(
+    EXPECT_NE(base, svmp::Physics::formulations::navier_stokes::free_surface::acceptedContactStageRevision(
                         3u, 5u, 7u, 0.25, 1.0, solution, rhoInfinityHalf(0.1)));
 }
 
@@ -125,7 +125,7 @@ TEST(OperatorStageCapture, ObservesACompleteFirstOrderGeneralizedAlphaStage)
     const auto observation = generalizedAlphaStage(state.get(), rate.get());
 
     const auto captured =
-        ts::makeDynamicContactFirstOrderGeneralizedAlphaObservation(observation);
+        svmp::Physics::formulations::navier_stokes::free_surface::makeDynamicContactFirstOrderGeneralizedAlphaObservation(observation);
     EXPECT_EQ(captured.step_index, 3);
     EXPECT_EQ(captured.attempt_index, 1);
     EXPECT_EQ(captured.mesh_revision, *observation.mesh_revision);
@@ -137,18 +137,18 @@ TEST(OperatorStageCapture, ObservesACompleteFirstOrderGeneralizedAlphaStage)
     auto stale_time = observation;
     stale_time.state_time += 1.0e-3;
     EXPECT_THROW(
-        (void)ts::makeDynamicContactFirstOrderGeneralizedAlphaObservation(stale_time),
+        (void)svmp::Physics::formulations::navier_stokes::free_surface::makeDynamicContactFirstOrderGeneralizedAlphaObservation(stale_time),
         std::invalid_argument);
     auto endpoint_scheme = observation;
     endpoint_scheme.scheme = ts::SchemeKind::BackwardEuler;
     EXPECT_THROW(
-        (void)ts::makeDynamicContactFirstOrderGeneralizedAlphaObservation(
+        (void)svmp::Physics::formulations::navier_stokes::free_surface::makeDynamicContactFirstOrderGeneralizedAlphaObservation(
             endpoint_scheme),
         std::invalid_argument);
     auto no_state = observation;
     no_state.state_vector = nullptr;
     EXPECT_THROW(
-        (void)ts::makeDynamicContactFirstOrderGeneralizedAlphaObservation(no_state),
+        (void)svmp::Physics::formulations::navier_stokes::free_surface::makeDynamicContactFirstOrderGeneralizedAlphaObservation(no_state),
         std::invalid_argument);
 }
 
@@ -159,7 +159,7 @@ TEST(OperatorStageCapture, ResolvesEndpointAndAuthenticGeneralizedAlphaStages)
     history.setDt(0.1);
     history.setStepIndex(2);
 
-    const auto endpoint = ts::resolveFreeSurfaceContactStageTemporalCoordinates(
+    const auto endpoint = svmp::Physics::formulations::navier_stokes::free_surface::resolveFreeSurfaceContactStageTemporalCoordinates(
         ts::SchemeKind::BDF2, history, 0, std::nullopt);
     EXPECT_DOUBLE_EQ(endpoint.stage_time, 0.2 + 0.1);
     EXPECT_DOUBLE_EQ(endpoint.stage_alpha_f, 1.0);
@@ -172,9 +172,9 @@ TEST(OperatorStageCapture, ResolvesEndpointAndAuthenticGeneralizedAlphaStages)
     const auto state = factory->createVector(4);
     const auto rate = factory->createVector(4);
     const auto observation =
-        ts::makeDynamicContactFirstOrderGeneralizedAlphaObservation(
+        svmp::Physics::formulations::navier_stokes::free_surface::makeDynamicContactFirstOrderGeneralizedAlphaObservation(
             generalizedAlphaStage(state.get(), rate.get()));
-    const auto stage = ts::resolveFreeSurfaceContactStageTemporalCoordinates(
+    const auto stage = svmp::Physics::formulations::navier_stokes::free_surface::resolveFreeSurfaceContactStageTemporalCoordinates(
         ts::SchemeKind::GeneralizedAlpha, history, 1, observation);
     EXPECT_DOUBLE_EQ(stage.stage_time, observation.state_time);
     EXPECT_DOUBLE_EQ(stage.stage_alpha_f, observation.provenance.alpha_f);
@@ -185,15 +185,15 @@ TEST(OperatorStageCapture, ResolvesEndpointAndAuthenticGeneralizedAlphaStages)
     // Another attempt, a missing observation, or an endpoint scheme with
     // generalized-alpha provenance are rejected.
     EXPECT_THROW(
-        (void)ts::resolveFreeSurfaceContactStageTemporalCoordinates(
+        (void)svmp::Physics::formulations::navier_stokes::free_surface::resolveFreeSurfaceContactStageTemporalCoordinates(
             ts::SchemeKind::GeneralizedAlpha, history, 2, observation),
         std::logic_error);
     EXPECT_THROW(
-        (void)ts::resolveFreeSurfaceContactStageTemporalCoordinates(
+        (void)svmp::Physics::formulations::navier_stokes::free_surface::resolveFreeSurfaceContactStageTemporalCoordinates(
             ts::SchemeKind::GeneralizedAlpha, history, 1, std::nullopt),
         std::logic_error);
     EXPECT_THROW(
-        (void)ts::resolveFreeSurfaceContactStageTemporalCoordinates(
+        (void)svmp::Physics::formulations::navier_stokes::free_surface::resolveFreeSurfaceContactStageTemporalCoordinates(
             ts::SchemeKind::BackwardEuler, history, 1, observation),
         std::logic_error);
 }

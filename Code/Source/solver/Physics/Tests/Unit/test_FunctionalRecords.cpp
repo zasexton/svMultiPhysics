@@ -11,13 +11,13 @@
 
 #include <gtest/gtest.h>
 
-#include "Systems/FunctionalRecords.h"
+#include "Physics/Formulations/NavierStokes/FreeSurface/FunctionalRecords.h"
 
-#include "Core/FEException.h"
-#include "Spaces/H1Space.h"
-#include "Spaces/ProductSpace.h"
-#include "Systems/FESystem.h"
-#include "Systems/FreeSurfaceFunctionalRounding.h"
+#include "FE/Core/FEException.h"
+#include "FE/Spaces/H1Space.h"
+#include "FE/Spaces/ProductSpace.h"
+#include "FE/Systems/FESystem.h"
+#include "FE/Systems/FreeSurfaceFunctionalRounding.h"
 #include "Mesh/Core/MeshBase.h"
 #include "Mesh/Mesh.h"
 #include "Mesh/Topology/CellShape.h"
@@ -29,7 +29,7 @@
 #include <string>
 #include <vector>
 
-using svmp::FE::systems::functionalRecords;
+using svmp::Physics::formulations::navier_stokes::free_surface::functionalRecords;
 
 using svmp::CellFamily;
 using svmp::CellShape;
@@ -148,7 +148,7 @@ TEST(FunctionalRecords,
                   .space = velocity_space,
                   .components = 2});
 
-    svmp::FE::systems::FreeSurfaceDiscreteFunctionalDeclaration declaration{
+    svmp::Physics::formulations::navier_stokes::free_surface::FreeSurfaceDiscreteFunctionalDeclaration declaration{
         .interface_marker = 91,
         .level_set_field = phi,
         .velocity_field = velocity,
@@ -200,7 +200,7 @@ TEST(FunctionalRecords,
     const auto velocity = system.addField(systems::FieldSpec{
         .name = "u_rounding_bound", .space = velocity_space, .components = 2});
     ASSERT_NO_THROW(functionalRecords(system).declareFunctional(
-        systems::FreeSurfaceDiscreteFunctionalDeclaration{
+        svmp::Physics::formulations::navier_stokes::free_surface::FreeSurfaceDiscreteFunctionalDeclaration{
             .interface_marker = 91,
             .level_set_field = phi,
             .velocity_field = velocity,
@@ -273,8 +273,8 @@ TEST(FunctionalRecords,
             .owned_quadrature_point_count = point_count,
             .owned_liquid_volume = energy_volume,
         };
-        return std::vector<systems::AcceptedFreeSurfaceDiscreteFunctionalState>{
-            systems::AcceptedFreeSurfaceDiscreteFunctionalState{
+        return std::vector<svmp::Physics::formulations::navier_stokes::free_surface::AcceptedFreeSurfaceDiscreteFunctionalState>{
+            svmp::Physics::formulations::navier_stokes::free_surface::AcceptedFreeSurfaceDiscreteFunctionalState{
                 .interface_marker = 91,
                 .geometry_revision = revision,
                 .cut_topology_revision = 102u,
